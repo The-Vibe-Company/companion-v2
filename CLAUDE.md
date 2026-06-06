@@ -86,6 +86,9 @@ docs/         # vision / product / design / PRD
   admin-approved and digest-pinned.
 - **Multi-tenancy:** every row carries `org_id`; add Postgres row-level security as defense-in-depth.
   Any new query must be scoped to the tenant.
+- **Frontend must follow [`DESIGN.md`](DESIGN.md).** Any UI, styling, copy, component, layout, or
+  interaction change must respect the root `DESIGN.md` visual contract and keep design tokens, product
+  tone, accessibility, and absolute bans intact.
 
 ## Development workflow (planned)
 
