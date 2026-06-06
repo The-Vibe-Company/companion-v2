@@ -86,6 +86,9 @@ docs/         # vision / product / design / PRD
   admin-approved and digest-pinned.
 - **Multi-tenancy:** every row carries `org_id`; add Postgres row-level security as defense-in-depth.
   Any new query must be scoped to the tenant.
+- **Frontend must follow [`DESIGN.md`](DESIGN.md).** Any UI, styling, copy, component, layout, or
+  interaction change must respect the root `DESIGN.md` visual contract and keep design tokens, product
+  tone, accessibility, and absolute bans intact.
 
 ## Development workflow (planned)
 
@@ -102,6 +105,9 @@ pnpm dev                    # run web + worker in watch mode
 
 - **RBAC is table-driven and exhaustive.** Add cases to the role × scope × action matrix whenever you
   touch authorization; assert cross-tenant access is denied.
+- **`DESIGN.md` follows the Google Design.md format.** Any change to the root `DESIGN.md` must pass
+  `npx --yes @google/design.md@0.2.0 lint DESIGN.md --format json`; CI runs this automatically when
+  `DESIGN.md` changes.
 - **Provider conformance suite.** Every provider adapter must pass the same contract tests; verify the
   `capabilities()` declaration matches real behavior (e.g., exec, persistent volumes, scale-to-zero).
 - **Reconcile idempotency.** Re-applying a deployment must not create duplicates; destroy must be
