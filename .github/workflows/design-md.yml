@@ -1,0 +1,31 @@
+name: DESIGN.md
+
+on:
+  pull_request:
+    paths:
+      - DESIGN.md
+      - .github/workflows/design-md.yml
+  push:
+    paths:
+      - DESIGN.md
+      - .github/workflows/design-md.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint DESIGN.md
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Validate DESIGN.md
+        run: npx --yes @google/design.md@0.2.0 lint DESIGN.md --format json

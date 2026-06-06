@@ -102,6 +102,9 @@ pnpm dev                    # run web + worker in watch mode
 
 - **RBAC is table-driven and exhaustive.** Add cases to the role × scope × action matrix whenever you
   touch authorization; assert cross-tenant access is denied.
+- **`DESIGN.md` follows the Google Design.md format.** Any change to the root `DESIGN.md` must pass
+  `npx --yes @google/design.md@0.2.0 lint DESIGN.md --format json`; CI runs this automatically when
+  `DESIGN.md` changes.
 - **Provider conformance suite.** Every provider adapter must pass the same contract tests; verify the
   `capabilities()` declaration matches real behavior (e.g., exec, persistent volumes, scale-to-zero).
 - **Reconcile idempotency.** Re-applying a deployment must not create duplicates; destroy must be
