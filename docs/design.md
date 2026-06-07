@@ -77,7 +77,7 @@ columns separate concerns: `owner_id` (principal it is for) · `scope`/`team_id`
   param) and enforces the guards: never demote/remove the **last owner** or **last team admin**; only an
   owner may grant/modify another owner; a team admin manages their own team. Identity tables keep
   **SELECT-only RLS** — all writes flow through these RPCs. Mirrored as pure helpers in
-  `packages/core/authz.ts` (`canManageOrg` / `canTouchOwner` / `canManageTeam` / `isLastOwner` /
+  `packages/core/src/authz.ts` (`canManageOrg` / `canTouchOwner` / `canManageTeam` / `isLastOwner` /
   `isLastTeamAdmin`) for the table-driven tests.
 - **Current org:** multi-org via a `companion_org` cookie (set by `app/api/org`, read by server
   components); the Skills Hub list + the upload/publish path target the active org (`p_org`).

@@ -8,6 +8,9 @@ import type { OrgCtx, OrgFull } from "./model";
 const ROW: CSSProperties = { gridTemplateColumns: "180px 1fr" };
 const LABEL: CSSProperties = { color: "var(--color-muted)" };
 
+// Display host for the workspace URL — configurable per deployment, falls back to the brand domain.
+const SITE_HOST = (process.env.NEXT_PUBLIC_SITE_URL ?? "https://companion.dev").replace(/^https?:\/\//, "").replace(/\/$/, "");
+
 export function GeneralPane({ org, ctx }: { org: OrgFull; ctx: OrgCtx }) {
   return (
     <div className="og-pane__inner">
@@ -22,7 +25,7 @@ export function GeneralPane({ org, ctx }: { org: OrgFull; ctx: OrgCtx }) {
         </div>
         <div className="og-mrow" style={ROW}>
           <span className="og-memail" style={LABEL}>URL</span>
-          <span className="og-memail">companion.dev/{org.slug}</span>
+          <span className="og-memail">{SITE_HOST}/{org.slug}</span>
         </div>
         <div className="og-mrow" style={ROW}>
           <span className="og-memail" style={LABEL}>Plan</span>

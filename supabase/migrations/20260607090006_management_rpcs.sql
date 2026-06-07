@@ -94,6 +94,10 @@ begin
     select 1 from memberships m join profiles p on p.id = m.user_id
     where m.org_id = p_org and p.email = p_email
   ) then raise exception 'already a member' using errcode = '23505'; end if;
+  -- Expire any stale pending invite first so re-inviting after expiry isn't blocked forever
+  -- (nothing else flips an unredeemed invite to 'expired').
+  update invitations set status = 'expired'
+    where org_id = p_org and email = p_email and status = 'pending' and expires_at <= now();
   if exists (select 1 from invitations where org_id = p_org and email = p_email and status = 'pending') then
     raise exception 'invite already pending' using errcode = '23505';
   end if;
@@ -174,6 +178,9 @@ declare v_target org_role; v_mem memberships%rowtype;
 begin
   if auth.uid() is null then raise exception 'not authenticated' using errcode = '28000'; end if;
   if not app_is_org_admin(p_org) then raise exception 'insufficient role' using errcode = '42501'; end if;
+  -- Lock the org's owner rows so concurrent demotions/removals can't both pass the
+  -- last-owner count check (TOCTOU) and orphan the org.
+  perform 1 from memberships where org_id = p_org and org_role = 'owner' for update;
   select org_role into v_target from memberships where org_id = p_org and user_id = p_user;
   if v_target is null then raise exception 'not a member' using errcode = '42704'; end if;
   -- Only an owner may grant or modify the owner role.
@@ -197,6 +204,7 @@ declare v_target org_role; v_self boolean := (p_user = auth.uid());
 begin
   if auth.uid() is null then raise exception 'not authenticated' using errcode = '28000'; end if;
   if not (app_is_org_admin(p_org) or v_self) then raise exception 'insufficient role' using errcode = '42501'; end if;
+  perform 1 from memberships where org_id = p_org and org_role = 'owner' for update;  -- serialize last-owner guard
   select org_role into v_target from memberships where org_id = p_org and user_id = p_user;
   if v_target is null then raise exception 'not a member' using errcode = '42704'; end if;
   if v_target = 'owner' and not v_self and not app_is_org_owner(p_org) then
@@ -309,6 +317,7 @@ begin
   select org_id into v_org from teams where id = p_team;
   if v_org is null then raise exception 'team not found' using errcode = '42704'; end if;
   if not (app_is_org_admin(v_org) or app_is_team_admin(p_team)) then raise exception 'insufficient role' using errcode = '42501'; end if;
+  perform 1 from team_memberships where team_id = p_team and team_role = 'admin' for update;  -- serialize last-admin guard
   select team_role into v_target from team_memberships where team_id = p_team and user_id = p_user;
   if v_target is null then raise exception 'not a team member' using errcode = '42704'; end if;
   if v_target = 'admin' and p_role <> 'admin'
@@ -329,6 +338,7 @@ begin
   select org_id into v_org from teams where id = p_team;
   if v_org is null then raise exception 'team not found' using errcode = '42704'; end if;
   if not (app_is_org_admin(v_org) or app_is_team_admin(p_team) or v_self) then raise exception 'insufficient role' using errcode = '42501'; end if;
+  perform 1 from team_memberships where team_id = p_team and team_role = 'admin' for update;  -- serialize last-admin guard
   select team_role into v_target from team_memberships where team_id = p_team and user_id = p_user;
   if v_target is null then raise exception 'not a team member' using errcode = '42704'; end if;
   if v_target = 'admin' and (select count(*) from team_memberships where team_id = p_team and team_role = 'admin') <= 1 then

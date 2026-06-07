@@ -29,14 +29,16 @@ export function MembersSection({ org, ctx, onInvite }: { org: OrgFull; ctx: OrgC
     }
   };
 
-  const Row = ({ m, u }: { m: OrgMember; u: SeedUser }) => {
+  // A plain render function (not a nested component) so the rows aren't unmounted/remounted
+  // on every parent state change (search keystrokes, copy feedback).
+  const renderRow = (m: OrgMember, u: SeedUser) => {
     const isMe = m.userId === ctx.myId;
     const lastOwner = m.role === "owner" && owners <= 1;
     const targetOwner = m.role === "owner";
     const canEdit = !m.pending && ctx.canManage && (!targetOwner || ctx.isOwner) && !lastOwner;
     const assignOrder = ctx.isOwner ? ORG_ROLE_ORDER : ORG_ROLE_ORDER.filter((r) => r !== "owner");
     return (
-      <div className={"og-mrow" + (m.pending ? " og-mrow--pending" : "")}>
+      <div key={m.userId} className={"og-mrow" + (m.pending ? " og-mrow--pending" : "")}>
         <div className="og-mwho">
           <Avatar u={u} />
           <div className="og-mmeta">
@@ -122,7 +124,7 @@ export function MembersSection({ org, ctx, onInvite }: { org: OrgFull; ctx: OrgC
           <span>Joined</span>
           <span></span>
         </div>
-        {active.map(({ m, u }) => <Row key={m.userId} m={m} u={u} />)}
+        {active.map(({ m, u }) => renderRow(m, u))}
       </div>
 
       {pending.length > 0 && (
@@ -130,7 +132,7 @@ export function MembersSection({ org, ctx, onInvite }: { org: OrgFull; ctx: OrgC
           <p className="og-seclabel">
             Pending invites <span className="og-seclabel__n">{pending.length}</span>
           </p>
-          <div className="og-mlist">{pending.map(({ m, u }) => <Row key={m.userId} m={m} u={u} />)}</div>
+          <div className="og-mlist">{pending.map(({ m, u }) => renderRow(m, u))}</div>
         </>
       )}
     </div>
