@@ -28,6 +28,7 @@ supabase/.temp/
 
 # Conductor workspace context
 .context/
+.conductor/settings.local.toml
 
 # OS / editor
 .DS_Store
