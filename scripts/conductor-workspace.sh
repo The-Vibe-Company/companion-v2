@@ -93,6 +93,15 @@ compose() {
   docker compose -p "$COMPOSE_PROJECT_NAME" "$@"
 }
 
+compose_projects_for_workspace() {
+  {
+    printf '%s\n' "$COMPOSE_PROJECT_NAME"
+    docker ps -a \
+      --filter "label=com.docker.compose.project.working_dir=${WORKSPACE_ROOT}" \
+      --format '{{.Label "com.docker.compose.project"}}'
+  } | sed '/^$/d' | sort -u
+}
+
 stop_port_listeners() {
   local port="$1"
   local pids
@@ -200,9 +209,19 @@ stop_published_port_containers() {
   local containers
   local names
 
-  containers="$(docker ps --filter "publish=${port}" --filter "label=com.docker.compose.project=${COMPOSE_PROJECT_NAME}" --format '{{.ID}}' | sort -u || true)"
+  containers="$(
+    docker ps \
+      --filter "publish=${port}" \
+      --filter "label=com.docker.compose.project.working_dir=${WORKSPACE_ROOT}" \
+      --format '{{.ID}}' | sort -u || true
+  )"
   if [ -n "$containers" ]; then
-    names="$(docker ps --filter "publish=${port}" --filter "label=com.docker.compose.project=${COMPOSE_PROJECT_NAME}" --format '{{.Names}}' | sort -u | tr '\n' ' ')"
+    names="$(
+      docker ps \
+        --filter "publish=${port}" \
+        --filter "label=com.docker.compose.project.working_dir=${WORKSPACE_ROOT}" \
+        --format '{{.Names}}' | sort -u | tr '\n' ' '
+    )"
     log "Stopping workspace Docker container(s) publishing port ${port}: ${names}"
     docker stop $containers >/dev/null
   fi
@@ -263,9 +282,12 @@ run_dev() {
 archive() {
   configure_workspace_env
   require_command docker
+  local project
 
-  log "Removing isolated Docker Compose project ${COMPOSE_PROJECT_NAME}"
-  compose down -v
+  while IFS= read -r project; do
+    log "Removing isolated Docker Compose project ${project}"
+    docker compose -p "$project" down -v --remove-orphans
+  done < <(compose_projects_for_workspace)
 }
 
 case "${1:-run}" in
