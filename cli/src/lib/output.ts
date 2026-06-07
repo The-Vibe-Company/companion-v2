@@ -3,6 +3,7 @@ import type { ValidationResult } from "@companion/contracts";
 
 export interface GlobalOpts {
   profile: string;
+  org?: string;
   json: boolean;
 }
 

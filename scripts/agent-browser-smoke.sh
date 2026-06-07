@@ -7,6 +7,7 @@ DEFAULT_SMOKE_EMAIL="admin@tvc.dev"
 DEFAULT_SMOKE_PASSWORD="adminadmin"
 SMOKE_EMAIL="${BROWSER_SMOKE_EMAIL:-$DEFAULT_SMOKE_EMAIL}"
 SMOKE_PASSWORD="${BROWSER_SMOKE_PASSWORD:-$DEFAULT_SMOKE_PASSWORD}"
+SMOKE_SKILL="incident-summary"
 
 log() {
   printf '[agent-browser-smoke] %s\n' "$*"
@@ -86,6 +87,50 @@ assert_no_browser_errors() {
   fi
 }
 
+api_url() {
+  if [ -n "${COMPANION_API_URL:-}" ]; then
+    printf '%s\n' "${COMPANION_API_URL%/}"
+    return
+  fi
+
+  case "$APP_URL" in
+    http://127.0.0.1:*|http://localhost:*)
+      local port
+      port="${APP_URL##*:}"
+      port="${port%%/*}"
+      printf 'http://127.0.0.1:%s\n' "$((port + 1))"
+      ;;
+    *)
+      printf '[agent-browser-smoke] COMPANION_API_URL is required when APP_URL is not localhost with an explicit port.\n' >&2
+      exit 1
+      ;;
+  esac
+}
+
+prepare_fixtures() {
+  local api profile
+  api="$(api_url)"
+  profile="browser-smoke-${APP_URL##*:}"
+  profile="${profile%%/*}"
+
+  log "Preparing smoke account and skill fixture against $api"
+  pnpm --filter @companion/cli dev login \
+    --url "$api" \
+    --email "$SMOKE_EMAIL" \
+    --password "$SMOKE_PASSWORD" \
+    --profile "$profile" >/dev/null 2>&1 || \
+  pnpm --filter @companion/cli dev login \
+    --url "$api" \
+    --email "$SMOKE_EMAIL" \
+    --password "$SMOKE_PASSWORD" \
+    --signup \
+    --profile "$profile" >/dev/null
+
+  pnpm --filter @companion/cli dev skills push "$PWD/examples/skills/incident-summary" \
+    --scope private \
+    --profile "$profile" >/dev/null 2>&1 || true
+}
+
 require_command agent-browser
 trap 'agent-browser close >/dev/null 2>&1 || true' EXIT
 
@@ -96,6 +141,8 @@ if ! is_loopback_url; then
     exit 1
   fi
 fi
+
+prepare_fixtures
 
 log "Opening $APP_URL"
 agent-browser close >/dev/null 2>&1 || true
@@ -112,7 +159,7 @@ agent-browser find label "Email" fill "$SMOKE_EMAIL"
 agent-browser find label "Password" fill "$SMOKE_PASSWORD"
 agent-browser find role button click --name "Sign in"
 wait_for_skills
-assert_body_contains "pdf-extract"
+assert_body_contains "$SMOKE_SKILL"
 assert_body_contains "Upload skill"
 
 log "Checking filter menu"
@@ -123,9 +170,9 @@ assert_body_contains "public"
 agent-browser press Escape
 
 log "Checking detail view"
-agent-browser find role button click --name "Open skill repo-review"
+agent-browser find role button click --name "Open skill $SMOKE_SKILL"
 agent-browser wait 1000
-assert_body_contains "repo-review"
+assert_body_contains "$SMOKE_SKILL"
 assert_body_contains "Install skill"
 agent-browser find role button click --name "Skills"
 wait_for_skills
@@ -141,7 +188,7 @@ agent-browser set device "iPhone 14"
 agent-browser open "$APP_URL/skills"
 wait_for_skills
 assert_body_contains "Upload skill"
-assert_body_contains "pdf-extract"
+assert_body_contains "$SMOKE_SKILL"
 
 assert_no_browser_errors
 log "OK"

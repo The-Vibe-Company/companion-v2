@@ -1,5 +1,4 @@
 import { isCancel, password as passwordPrompt, text } from "@clack/prompts";
-import { createClient } from "@supabase/supabase-js";
 import { getProfileConfig, saveProfileConfig } from "../lib/config";
 import { clearSession, saveSession } from "../lib/session";
 import { getClient } from "../lib/client";
@@ -19,73 +18,72 @@ async function promptPassword(message: string): Promise<string> {
 
 export interface LoginOpts {
   url?: string;
-  anonKey?: string;
   email?: string;
   password?: string;
+  signup?: boolean;
 }
 
 export async function login(opts: LoginOpts, g: GlobalOpts): Promise<void> {
-  let url = opts.url ?? process.env.COMPANION_SUPABASE_URL ?? process.env.NEXT_PUBLIC_SUPABASE_URL;
-  let anonKey =
-    opts.anonKey ??
-    process.env.COMPANION_SUPABASE_ANON_KEY ??
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-  if (!url || !anonKey) {
-    try {
-      const existing = await getProfileConfig(g.profile);
-      url = url ?? existing.url;
-      anonKey = anonKey ?? existing.anonKey;
-    } catch {
-      // no existing config
-    }
-  }
-  if (!url || !anonKey) {
-    throw new CliError("provide --url and --anon-key (from `supabase start`) on first login", 2);
-  }
-  await saveProfileConfig(g.profile, { url, anonKey });
+  const existing = await getProfileConfig(g.profile).catch(() => ({ url: "", orgId: undefined }));
+  const url = (opts.url ?? existing.url ?? process.env.COMPANION_API_URL ?? "http://127.0.0.1:3001").replace(/\/$/, "");
+  const selectedOrgId = g.org ?? process.env.COMPANION_ORG_ID ?? existing.orgId;
+  await saveProfileConfig(g.profile, { url, orgId: selectedOrgId });
 
   const email = opts.email ?? (await promptText("Email"));
   const pw = opts.password ?? (await promptPassword("Password"));
 
-  const supabase = createClient(url, anonKey, {
-    auth: { persistSession: false, autoRefreshToken: false },
+  const res = await fetch(`${url}${opts.signup ? "/v1/auth/signup" : "/v1/auth/login"}`, {
+    method: "POST",
+    headers: { "content-type": "application/json", origin: url },
+    body: JSON.stringify({ email, password: pw, name: email.split("@")[0] ?? email }),
   });
-  const { data, error } = await supabase.auth.signInWithPassword({ email, password: pw });
-  if (error || !data.session || !data.user) {
-    throw new CliError(`login failed: ${error?.message ?? "unknown error"}`, 3);
+  if (!res.ok) {
+    const json = (await res.json().catch(() => ({}))) as { message?: string; error?: { message?: string } };
+    throw new CliError(`login failed: ${json.error?.message ?? json.message ?? res.statusText}`, 3);
   }
-  await saveSession(g.profile, {
-    access_token: data.session.access_token,
-    refresh_token: data.session.refresh_token,
-    expires_at: data.session.expires_at,
-    user: { id: data.user.id, email: data.user.email ?? email },
+  const cookie = res.headers.get("set-cookie");
+  if (!cookie) throw new CliError("login failed: auth server did not return a session cookie", 3);
+  const whoami = await fetch(`${url}/v1/auth/whoami`, {
+    headers: { cookie, ...(selectedOrgId ? { "x-companion-org": selectedOrgId } : {}) },
   });
+  const me = (await whoami.json().catch(() => ({}))) as {
+    userId: string;
+    email: string;
+    error?: string;
+    org?: { org_id?: string } | null;
+  };
+  if (!whoami.ok) throw new CliError(`login failed: ${me.error ?? "could not resolve current user"}`, 3);
+  await saveSession(g.profile, { cookie, orgId: selectedOrgId ?? me.org?.org_id, user: { id: me.userId, email: me.email } });
 
-  if (g.json) emitJson({ ok: true, user: { id: data.user.id, email: data.user.email } });
-  else out(`logged in as ${data.user.email}`);
+  if (g.json) emitJson({ ok: true, user: { id: me.userId, email: me.email } });
+  else out(`logged in as ${me.email}`);
 }
 
 export async function logout(g: GlobalOpts): Promise<void> {
+  const cfg = await getProfileConfig(g.profile).catch(() => null);
+  const session = await import("../lib/session").then((m) => m.loadSession(g.profile));
+  if (cfg && session?.cookie) {
+    await fetch(`${cfg.url}/v1/auth/logout`, {
+      method: "POST",
+      headers: { cookie: session.cookie, origin: cfg.url },
+    }).catch(() => null);
+  }
   await clearSession(g.profile);
   if (g.json) emitJson({ ok: true });
   else out("logged out");
 }
 
 export async function whoami(g: GlobalOpts): Promise<void> {
-  const { supabase, email, userId } = await getClient(g.profile);
-  const { data: mem } = await supabase
-    .from("memberships")
-    .select("org_role, organizations(name, slug)")
-    .limit(1)
-    .maybeSingle();
-  const org = (mem?.organizations ?? null) as { name?: string; slug?: string } | null;
-  const role = (mem as { org_role?: string } | null)?.org_role ?? null;
+  const client = await getClient(g.profile, g.org);
+  const me = await client.request<{ userId: string; email: string; org?: { slug?: string; name?: string }; role?: string }>(
+    "/v1/auth/whoami",
+  );
   if (g.json) {
-    emitJson({ userId, email, org, role });
+    emitJson(me);
   } else {
-    out(`user   ${email}`);
-    out(`id     ${userId}`);
-    out(`org    ${org?.slug ?? "-"} (${org?.name ?? "-"})`);
-    out(`role   ${role ?? "-"}`);
+    out(`user   ${me.email}`);
+    out(`id     ${me.userId}`);
+    out(`org    ${me.org?.slug ?? "-"} (${me.org?.name ?? "-"})`);
+    out(`role   ${me.role ?? "-"}`);
   }
 }

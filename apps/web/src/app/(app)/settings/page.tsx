@@ -1,10 +1,9 @@
 import { redirect } from "next/navigation";
-import type { OrgRole, TeamRole } from "@companion/contracts";
-import { getServerSupabase } from "@/lib/supabase/server";
 import { loadOrgContext } from "@/lib/currentOrg";
+import { serverApiFetch } from "@/lib/apiServer";
 import { formatDate } from "@/lib/format";
 import { SettingsApp, type SettingsAppData } from "@/components/org/SettingsApp";
-import type { OrgFull, OrgMember, OrgTeam, SeedUser, SettingsDialog, SettingsTab } from "@/components/org/model";
+import type { OrgFull, SeedUser, SettingsDialog, SettingsTab } from "@/components/org/model";
 import type { MeVM } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -14,87 +13,72 @@ function initialsOf(name: string): string {
   return ((p[0]?.[0] ?? "?") + (p[1]?.[0] ?? "")).toUpperCase();
 }
 
+interface OrgSettingsResponse {
+  members: Array<{
+    userId: string;
+    role: OrgFull["members"][number]["role"];
+    joined: string;
+    pending: boolean;
+    inviteId?: string;
+    inviteToken?: string;
+    name: string;
+    email: string;
+    initials: string;
+  }>;
+  teams: Array<{
+    id: string;
+    slug: string;
+    name: string;
+    members: Array<{
+      userId: string;
+      role: OrgFull["teams"][number]["members"][number]["role"];
+      name: string;
+      email: string;
+      initials: string;
+    }>;
+  }>;
+}
+
 export default async function SettingsPage({
   searchParams,
 }: {
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
-  const supabase = await getServerSupabase();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user) redirect("/login");
+  const whoami = await serverApiFetch<{ userId: string; email: string; name: string }>("/v1/auth/whoami").catch(() => null);
+  if (!whoami) redirect("/login");
 
-  const { orgs, current } = await loadOrgContext(supabase);
+  const { orgs, current } = await loadOrgContext();
   if (!current) redirect("/skills");
+  const orgHeaders = { "x-companion-org": current.id };
 
-  const { data: profile } = await supabase.from("profiles").select("name, initials").eq("id", user.id).maybeSingle();
   const me: MeVM = {
-    id: user.id,
-    name: (profile?.name as string | undefined) || user.email || "You",
-    initials: (profile?.initials as string | undefined) || "?",
+    id: whoami.userId,
+    name: whoami.name || whoami.email || "You",
+    initials: initialsOf(whoami.name || whoami.email || "You"),
   };
 
-  const users: Record<string, SeedUser> = {};
-  const addUser = (id: string, name: string, email: string, initials?: string) => {
-    if (!users[id]) {
-      const display = name || email || id;
-      users[id] = { id, name: display, email: email || "", initials: initials || initialsOf(display) };
+  const users: Record<string, SeedUser> = {
+    [me.id]: { id: me.id, name: me.name, email: whoami.email, initials: me.initials },
+  };
+
+  const settings = await serverApiFetch<OrgSettingsResponse>("/v1/orgs/current/settings", { headers: orgHeaders });
+  for (const member of settings.members) {
+    users[member.userId] = {
+      id: member.userId,
+      name: member.name,
+      email: member.email,
+      initials: member.initials || initialsOf(member.name || member.email || member.userId),
+    };
+  }
+  for (const team of settings.teams) {
+    for (const member of team.members) {
+      users[member.userId] = {
+        id: member.userId,
+        name: member.name,
+        email: member.email,
+        initials: member.initials || initialsOf(member.name || member.email || member.userId),
+      };
     }
-  };
-  addUser(user.id, me.name, user.email ?? "", me.initials);
-
-  // Active members.
-  const { data: memRows } = await supabase
-    .from("memberships")
-    .select("user_id, org_role, created_at, profiles(name, email, initials)")
-    .eq("org_id", current.id)
-    .order("created_at", { ascending: true });
-  const members: OrgMember[] = [];
-  for (const r of (memRows ?? []) as Record<string, unknown>[]) {
-    const uid = String(r.user_id);
-    const p = r.profiles as { name?: string; email?: string; initials?: string } | null;
-    addUser(uid, p?.name ?? "", p?.email ?? "", p?.initials);
-    members.push({ userId: uid, role: r.org_role as OrgRole, joined: formatDate(String(r.created_at)), pending: false });
-  }
-
-  // Pending invites (RLS-gated to org admins of this org).
-  const { data: invRows } = await supabase
-    .from("invitations")
-    .select("id, email, org_role, token, created_at")
-    .eq("org_id", current.id)
-    .eq("status", "pending")
-    .order("created_at", { ascending: true });
-  for (const r of (invRows ?? []) as Record<string, unknown>[]) {
-    const synthetic = "invite:" + String(r.id);
-    const email = String(r.email);
-    addUser(synthetic, email.split("@")[0] ?? email, email);
-    members.push({
-      userId: synthetic,
-      role: r.org_role as OrgRole,
-      joined: "—",
-      pending: true,
-      inviteId: String(r.id),
-      inviteToken: String(r.token),
-    });
-  }
-
-  // Teams + their members.
-  const { data: teamRows } = await supabase
-    .from("teams")
-    .select("id, slug, name, team_memberships(user_id, team_role, profiles(name, email, initials))")
-    .eq("org_id", current.id)
-    .order("created_at", { ascending: true });
-  const teams: OrgTeam[] = [];
-  for (const t of (teamRows ?? []) as Record<string, unknown>[]) {
-    const tms = (t.team_memberships ?? []) as Record<string, unknown>[];
-    const tmembers = tms.map((tm) => {
-      const uid = String(tm.user_id);
-      const p = tm.profiles as { name?: string; email?: string; initials?: string } | null;
-      addUser(uid, p?.name ?? "", p?.email ?? "", p?.initials);
-      return { userId: uid, role: tm.team_role as TeamRole };
-    });
-    teams.push({ id: String(t.id), slug: String(t.slug), name: String(t.name), members: tmembers });
   }
 
   const currentFull: OrgFull = {
@@ -104,20 +88,28 @@ export default async function SettingsPage({
     kind: current.kind,
     plan: current.plan,
     myRole: current.myRole,
-    members,
-    teams,
+    members: settings.members.map((member) => ({
+      userId: member.userId,
+      role: member.role,
+      joined: member.pending ? "pending" : formatDate(member.joined),
+      pending: member.pending,
+      inviteId: member.inviteId,
+      inviteToken: member.inviteToken,
+    })),
+    teams: settings.teams.map((t) => ({
+      id: t.id,
+      slug: t.slug,
+      name: t.name,
+      members: t.members.map((member) => ({ userId: member.userId, role: member.role })),
+    })),
   };
 
-  // Sidebar skill counts for the current org (the team list is derived client-side from the
-  // live membership graph in SettingsApp).
-  const { data: skillRows } = await supabase.from("skill_list_v").select("owner_id, team_slug").eq("org_id", current.id);
-  const sr = (skillRows ?? []) as Record<string, unknown>[];
-  const totalCount = sr.length;
-  const myCount = sr.filter((s) => String(s.owner_id) === user.id).length;
+  const skillRows = await serverApiFetch<Array<{ owner_id: string; team_slug: string | null }>>("/v1/skills").catch(
+    () => [],
+  );
   const teamCounts: Record<string, number> = {};
-  for (const s of sr) {
-    const ts = s.team_slug ? String(s.team_slug) : null;
-    if (ts) teamCounts[ts] = (teamCounts[ts] ?? 0) + 1;
+  for (const s of skillRows) {
+    if (s.team_slug) teamCounts[s.team_slug] = (teamCounts[s.team_slug] ?? 0) + 1;
   }
 
   const sp = await searchParams;
@@ -126,6 +118,14 @@ export default async function SettingsPage({
   const dialogRaw = typeof sp.dialog === "string" ? sp.dialog : undefined;
   const dialog: SettingsDialog = dialogRaw === "invite" || dialogRaw === "team" ? dialogRaw : null;
 
-  const data: SettingsAppData = { me, orgs, current: currentFull, users, teamCounts, totalCount, myCount };
+  const data: SettingsAppData = {
+    me,
+    orgs,
+    current: currentFull,
+    users,
+    teamCounts,
+    totalCount: skillRows.length,
+    myCount: skillRows.filter((s) => s.owner_id === me.id).length,
+  };
   return <SettingsApp data={data} initialTab={tab} initialDialog={dialog} />;
 }

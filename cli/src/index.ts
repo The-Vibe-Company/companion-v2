@@ -8,12 +8,13 @@ import * as skills from "./commands/skills";
 function addGlobalOpts(cmd: Command): Command {
   return cmd
     .option("--profile <name>", "config profile", "default")
+    .option("--org <org-id>", "organization id for tenant-scoped requests")
     .option("--json", "machine-readable output", false);
 }
 
 function globalsFrom(cmd: Command): GlobalOpts {
   const o = cmd.optsWithGlobals();
-  return { profile: (o.profile as string) ?? "default", json: Boolean(o.json) };
+  return { profile: (o.profile as string) ?? "default", org: o.org as string | undefined, json: Boolean(o.json) };
 }
 
 async function runAction(cmd: Command, thunk: (g: GlobalOpts) => Promise<void>): Promise<void> {
@@ -31,7 +32,7 @@ async function runAction(cmd: Command, thunk: (g: GlobalOpts) => Promise<void>):
 const program = new Command();
 program
   .name("companion")
-  .description("Companion — manage SKILL.md packages against a Supabase-backed registry")
+  .description("Companion - manage SKILL.md packages against a Companion API registry")
   .version("0.0.0");
 addGlobalOpts(program);
 
@@ -40,14 +41,14 @@ addGlobalOpts(
   program
     .command("login")
     .description("sign in to a Companion registry")
-    .option("--url <url>", "Supabase URL (first login)")
-    .option("--anon-key <key>", "Supabase anon key (first login)")
+    .option("--url <url>", "Companion API URL (first login)")
     .option("--email <email>", "account email")
-    .option("--password <password>", "account password (prompted if omitted)"),
+    .option("--password <password>", "account password (prompted if omitted)")
+    .option("--signup", "create the account before signing in", false),
 ).action((opts, cmd: Command) =>
   runAction(cmd, (g) =>
     auth.login(
-      { url: opts.url, anonKey: opts.anonKey, email: opts.email, password: opts.password },
+      { url: opts.url, email: opts.email, password: opts.password, signup: opts.signup },
       g,
     ),
   ),

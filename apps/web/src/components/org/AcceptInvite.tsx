@@ -47,7 +47,7 @@ export function AcceptInvite({ token }: { token: string }) {
         {error ? <div className="autherr">{error}</div> : null}
         <button className="btn-primary" disabled={busy || done} onClick={accept}>
           <Icon name="log-in" size={14} />
-          {busy ? "Joining…" : done ? "Joined" : "Accept invite"}
+          {busy ? "Joining..." : done ? "Joined" : "Accept invite"}
         </button>
       </div>
     </div>

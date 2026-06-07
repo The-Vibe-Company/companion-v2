@@ -1,0 +1,41 @@
+{
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1780843699500,
+      "tag": "0000_rapid_mephisto",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1780845578283,
+      "tag": "0001_sparkling_squadron_sinister",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1780845605411,
+      "tag": "0002_colorful_trauma",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1780855200000,
+      "tag": "0003_narrow_pending_invitations",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1780855500000,
+      "tag": "0004_lightweight_tenant_rls",
+      "breakpoints": true
+    }
+  ]
+}

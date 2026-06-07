@@ -2,10 +2,9 @@ import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { COMPANION_HOME, sessionPath } from "./paths";
 
 export interface Session {
-  access_token: string;
-  refresh_token: string;
-  expires_at?: number;
-  user: { id: string; email: string };
+  cookie: string;
+  orgId?: string;
+  user?: { id: string; email: string };
 }
 
 export async function loadSession(profile: string): Promise<Session | null> {
@@ -22,7 +21,7 @@ export async function saveSession(profile: string, s: Session): Promise<void> {
   try {
     await chmod(sessionPath(profile), 0o600);
   } catch {
-    // best-effort on platforms without POSIX modes
+    // best effort
   }
 }
 

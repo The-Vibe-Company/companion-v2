@@ -1,9 +1,9 @@
 "$schema" = "https://conductor.build/schemas/settings.repo.schema.json"
 
-spotlight_testing = true
+spotlight_testing = false
 
 [scripts]
-setup = "cd \"${CONDUCTOR_ROOT_PATH:-$PWD}\" && corepack enable && pnpm install"
-run = "bash scripts/conductor-spotlight.sh run"
-archive = "bash scripts/conductor-spotlight.sh archive"
-run_mode = "nonconcurrent"
+setup = "corepack enable && pnpm install"
+run = "bash scripts/conductor-workspace.sh run"
+archive = "bash scripts/conductor-workspace.sh archive"
+run_mode = "concurrent"

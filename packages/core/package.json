@@ -4,14 +4,18 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./services": "./src/services.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },
   "dependencies": {
-    "@companion/contracts": "workspace:*"
+    "@companion/contracts": "workspace:*",
+    "@companion/db": "workspace:*",
+    "@companion/skills": "workspace:*",
+    "drizzle-orm": "^0.38.4"
   },
   "devDependencies": {
     "typescript": "^5.7.2",

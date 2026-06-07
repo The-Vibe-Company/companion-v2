@@ -45,6 +45,9 @@ export function SettingsApp({
 
   const [current, setCurrent] = useState<OrgFull>(data.current);
   useEffect(() => setCurrent(data.current), [data.current]);
+  useEffect(() => {
+    document.cookie = `companion_org=${encodeURIComponent(data.current.id)}; path=/; SameSite=Lax`;
+  }, [data.current.id]);
   const [busy, setBusy] = useState(false);
 
   // The sidebar "Your teams" must reflect live membership changes, so derive it from

@@ -1,124 +1,80 @@
-# Design — Companion v2 (authoritative architecture)
+# Design - Companion v2
 
-> **Status:** the **Skills Hub (Pillar 3)** vertical slice is implemented. Agents and the
-> Container Catalog are stubbed. This document is the source of truth for the slice that exists;
-> keep it in sync with the code (CLAUDE.md invariant).
+> **Status:** greenfield self-host slice. The Skills Hub is implemented around the target
+> stack: Postgres + Drizzle, Better Auth, MinIO/S3, Hono API, Next.js web, and CLI. Agents,
+> the Container Catalog, and Temporal workflows are prepared conceptually but not implemented.
 
-## V0 stack deviation (decided, deliberate)
+## Stack
 
-CLAUDE.md describes the *target* stack: Drizzle ORM, tRPC + a REST/OpenAPI gateway, Auth.js,
-BullMQ on Redis, and S3-compatible storage (MinIO). For this first slice the backend is
-**Supabase** (Postgres + RLS, Auth, Storage), chosen explicitly for the frontend. The schema is
-plain SQL migrations under `supabase/migrations`, so it stays portable to the canonical stack later
-(the same tables a Drizzle schema would introspect). When the full monorepo lands, Supabase becomes
-the concrete V0 implementation of the data + auth + storage layer behind the same contracts.
+- **Data:** Postgres with Drizzle schema and migrations in `packages/db`.
+- **Auth:** Better Auth in `packages/auth`, mounted by `apps/api` under `/auth/*`.
+- **API:** Hono in `apps/api`; REST endpoints under `/v1/*`, tRPC mounted under `/trpc/*`.
+- **Storage:** `packages/storage` wraps S3-compatible storage. MinIO is the local default.
+- **Email:** `packages/email` supports local log/Mailpit mode and Resend for production.
+- **Web:** Next.js App Router in `apps/web`; it calls the API, not Postgres or MinIO directly.
+- **CLI:** `cli` stores an API URL plus Better Auth session cookie and uses REST endpoints.
 
-What this changes vs the target doc:
-- **RLS is promoted from defense-in-depth to the enforced visibility gate** (the browser/CLI can reach
-  Postgres directly). The capability gate still lives in a framework-free service layer
-  (`packages/core`) **and** in `SECURITY DEFINER` write RPCs — never only in client code.
-- **No separate `apps/api`/worker yet.** Web writes go through Next.js route handlers (the service
-  layer); the CLI calls the same Postgres RPCs. One authorization path for both clients.
+Redis/BullMQ are intentionally excluded. Temporal is the intended future workflow engine for
+deployments, reconcile loops, retries, compensation, and schedules.
 
-## Repository layout (as built)
+## Local And Conductor Runtime
+
+Manual local development can use `pnpm compose:up`, `pnpm db:migrate`, `pnpm db:seed`, and
+`pnpm dev` with the defaults from `.env.example`.
+
+Conductor workspaces use `scripts/conductor-workspace.sh` instead of a shared root stack. The
+script runs from the current worktree, derives a Docker Compose project name from the workspace,
+and allocates all local services from `CONDUCTOR_PORT`: web `+0`, API `+1`, Postgres `+2`,
+MinIO API `+3`, MinIO console `+4`, Mailpit SMTP `+5`, and Mailpit UI `+6`. It injects
+workspace-specific `DATABASE_URL`, API URLs, S3 endpoint, Mailpit ports, and Better Auth cookie
+prefix without mutating `.env`. Archiving a workspace runs Compose `down -v` for that project.
+
+## Repository Layout
 
 ```
-apps/web/            # Next.js 15 App Router — the Skills Hub
-packages/contracts/  # Zod schemas + types (scope, frontmatter, skill, lockfile) — framework-free
-packages/skills/     # SKILL.md parse / validate / pack / checksum / unpack — framework-free, tested
-packages/core/       # authz capability matrix (role × scope × action) — framework-free, tested
-cli/                 # `companion` CLI (TypeScript) — login + skills push/pull/status/sync/...
-supabase/            # migrations + seed (schema, RLS, storage, RPCs, triggers)
-examples/skills/     # a sample SKILL.md package to push
+apps/
+  api/        # Hono backend, Better Auth, REST + tRPC
+  web/        # Next.js portal
+packages/
+  db/         # Drizzle schema, migrations, seeds
+  auth/       # Better Auth config
+  core/       # framework-free services, RBAC, scoping
+  storage/    # S3/MinIO wrapper
+  email/      # Mailpit/log/Resend providers
+  contracts/  # shared Zod schemas and types
+  skills/     # SKILL.md validation, packing, unpacking
+cli/          # companion CLI
 ```
 
-`packages/contracts|skills|core` are imported by **both** `apps/web` and `cli` — one source of truth
-for shapes, validation, and rules.
+## Data Model
 
-## Data model (`supabase/migrations`)
+Better Auth owns the core `user`, `session`, `account`, and `verification` tables. Companion
+adds `profiles`, `organizations`, `memberships`, `teams`, `team_memberships`, `invitations`,
+`skills`, `skill_versions`, `skill_stars`, `skill_comments`, and `audit_log`.
 
-Scope is **team-centric**: the only visibility tiers are `private` (owner), `team` (team members),
-and `public` (anyone). There is no org-wide tier and no agents/attachments concept (deferred). Three
-columns separate concerns: `owner_id` (principal it is for) · `scope`/`team_id` (visibility) ·
-`creator_id` (who acted).
+Every tenant-owned table carries `org_id`. Skills keep ownership, visibility, and provenance
+separate: `owner_id`, `scope`, `team_id`, and `creator_id`. Valid scopes are `private`, `team`,
+and `public`.
 
-- **Identity:** `organizations` (`name, slug, kind ∈ {personal,team}, plan ∈ {free,team}`),
-  `profiles` (1:1 with `auth.users`, generated `initials`), `memberships`
-  (`org_role ∈ {owner, admin, developer}`), `teams`, `team_memberships`
-  (`team_role ∈ {admin, editor, reader}`).
-- **`invitations`** — copy-link membership invites (`org_id, email, org_role (≠owner), token,
-  status ∈ {pending,accepted,revoked,expired}, expires_at`), one active invite per `(org_id, email)`.
-- **`skills`** — mutable current-state row (`org_id, slug, owner_id, scope, team_id, creator_id,
-  current_version_id, validation, …`), `unique(org_id, slug)`, index `(org_id, scope, team_id)`,
-  `check ((scope='team') = (team_id is not null))`.
-- **`skill_versions`** — immutable, checksummed history; a trigger forbids UPDATE/DELETE; written only
-  by the publish RPC. `unique(skill_id, version)`, `check (checksum ~ '^sha256:…$')`.
-- **`skill_stars`** (per-user star), **`skill_comments`** (per-skill thread).
-- **`audit_log`** — append-only, written only by `SECURITY DEFINER` triggers.
-- **`skill_list_v`** — `security_invoker` read view (skills ⨝ owner ⨝ team ⨝ current version +
-  `star_count`/`starred`/`team_slug`) consumed by the web list and the CLI.
+## Authorization
 
-### Authorization
+The service layer in `packages/core` is the primary enforcement point. It applies:
 
-- **Visibility gate = RLS (strict, team-centric).** A user sees a skill iff
-  `scope=public` ∨ `owner_id=auth.uid()` ∨ (`scope=team` ∧ `app_member_of_team(team_id)`). **No
-  org-wide tier and no org-admin override** — a user never sees the whole org, only public + their
-  teams + their own. Verified by `apps/web/test/teams.rls.test.ts`: each member (incl. the org owner)
-  sees only their own team's `team` skills, plus public, plus their own private.
-- **Capability gate = `packages/core` + RPCs.** `publish_skill_version(...)` (SECURITY DEFINER, one
-  transaction): re-checks role/scope, enforces a **monotonic** semver, writes the immutable version,
-  flips `current_version_id`. `toggle_star` / `add_comment` / `set_skill_scope` are the other
-  SECURITY DEFINER write RPCs. Verified: duplicate version + downgrade are rejected; scope/role gates hold.
-- **Org/team/membership management = SECURITY DEFINER RPCs** (`supabase/migrations/…_management_rpcs.sql`):
-  `create_org`, `my_orgs`, `create_team` / `rename_team` / `delete_team`, `invite_member` /
-  `revoke_invite` / `accept_invite` (copy-link token, validates status/expiry/email-match),
-  `set_member_role` / `remove_member` / `leave_org`, `add_team_member` / `set_team_member_role` /
-  `remove_team_member`. Each re-derives the caller's role for the *target* org/team (never trusts a
-  param) and enforces the guards: never demote/remove the **last owner** or **last team admin**; only an
-  owner may grant/modify another owner; a team admin manages their own team. Identity tables keep
-  **SELECT-only RLS** — all writes flow through these RPCs. Mirrored as pure helpers in
-  `packages/core/src/authz.ts` (`canManageOrg` / `canTouchOwner` / `canManageTeam` / `isLastOwner` /
-  `isLastTeamAdmin`) for the table-driven tests.
-- **Current org:** multi-org via a `companion_org` cookie (set by `app/api/org`, read by server
-  components); the Skills Hub list + the upload/publish path target the active org (`p_org`).
-- **Bootstrap:** the first signup with no existing owner becomes Org Owner; later users join as
-  developers. Invitations are copy-link (`invite_member` mints a token; the admin shares
-  `/join/{token}`; `accept_invite` redeems it) — no email is sent.
-- **Storage:** private `skill-archives` bucket, key `{org_id}/{slug}/{version}.tar.gz`, policies gated
-  on the tenant path segment; downloads via short-lived signed URLs minted server-side.
+- visibility gate: private owner, team member, or public inside the selected org;
+- capability gate: org/team role, owner checks, and scope-specific action checks;
+- tenant gate: all service queries are scoped to the selected `org_id`.
 
-## Validation boundary (`packages/skills`)
+Postgres RLS may be added later as defense-in-depth, but browser and CLI clients never connect
+directly to Postgres.
 
-Metadata-only — **the control plane never executes archive scripts.** `validateSkillArchive` /
-`validateSkillDir` run five checks (frontmatter parse + Zod, semver, in-memory traversal/symlink/
-zip-bomb rejection, size cap, declared tools). `packDir` produces a deterministic tar (stable order,
-normalized headers) → a stable `sha256` over the canonical tar, the version identity. `unpackTo`
-re-applies the guards on extraction. The web upload route and the CLI run the **same** code.
+## Public API
 
-## Web (`apps/web`)
+- Auth: `/auth/*` Better Auth endpoints, plus `/v1/auth/login`, `/v1/auth/logout`,
+  `/v1/auth/whoami` for CLI ergonomics.
+- Skills: `/v1/skills`, `/v1/skills/:slug`, `/v1/skills/:slug/versions`,
+  `/v1/skills/:slug/download`, `/v1/skills/:slug/scope`.
+- Orgs: `/v1/orgs`, `/v1/orgs/current`, `/v1/teams`, `/v1/invitations`.
 
-Next.js App Router. Server components fetch `skill_list_v` under RLS; the dense table, scope filter,
-search, the right slide-over **detail drawer**, and the **upload drawer** are client components. Writes
-go through `app/api/skills/upload` (validate → Storage → `publish_skill_version` RPC). The
-**Settings** surface (`app/(app)/settings`, components in `components/org/`) renders General / Members /
-Teams with role menus, invite (copy-link) + revoke, team create + per-team member/role management, the
-sidebar **org switcher**, and the **onboarding** (create / join) flow; `/join/[token]` redeems an
-invite. Tokens live in
-`src/styles/tokens.css` (the design contract); the accent default is the prototype's **signal yellow**
-(`oklch(0.81 0.166 88)`) — the canonical cloud-blue stays in the root `DESIGN.md` (so its lint stays
-green) and is available via `[data-accent="cloud"]`.
-
-## CLI (`cli`, `companion`)
-
-`login/logout/whoami` (Supabase email+password, session in `~/.companion`), `skills
-list/info/versions/validate/push/pull/status/sync`. A committed `companion.lock` tracks each skill
-(pin, resolved version, checksum). `status`/`sync` classify drift by comparing the local working-tree
-checksum, the lock baseline, and the registry target (`up-to-date / outdated / modified / conflict /
-pinned / …`); `sync` fast-forwards clean outdated skills and never clobbers modified ones. The CLI
-talks directly to Supabase (anon key + user session + RLS) and calls the same publish RPC; the
-service-role key never ships.
-
-## Deferred
-
-Email delivery for invites (currently copy-link only), agents + Container Catalog pillars, realtime
-pill, zip (vs tar.gz) upload, OS-keychain token storage, the canonical Drizzle/tRPC/worker stack.
+Skill archives are uploaded through the API and stored under
+`{org_id}/{slug}/{version}.tar.gz` in the `skill-archives` bucket. Clients never receive S3
+admin credentials.
