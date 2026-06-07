@@ -1,7 +1,9 @@
+import { SettingsOnlySidebar } from "@/components/org/SettingsOnlySidebar";
+
 export default function Loading() {
   return (
     <div className="app">
-      <aside className="side" />
+      <SettingsOnlySidebar />
       <div className="main">
         <div className="og-set">
           <div className="og-set__top">
