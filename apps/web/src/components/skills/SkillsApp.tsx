@@ -87,7 +87,7 @@ export function SkillsApp({
         return s;
       }),
     );
-    setSkillScope(id, newScope, null).catch(() => {
+    setSkillScope(id, newScope, null, currentOrg.id).catch(() => {
       if (prev) setSkills((arr) => arr.map((s) => (s.id === id ? { ...s, scope: prev as Scope } : s)));
     });
     // Keep the open skill visible if an active scope filter would now hide it.
@@ -100,7 +100,7 @@ export function SkillsApp({
         return fs;
       });
     }
-  }, []);
+  }, [currentOrg.id]);
 
   // --- Derived ---------------------------------------------------------------
   const owners = useMemo(() => [...new Set(skills.map((s) => s.owner.name))].sort(), [skills]);

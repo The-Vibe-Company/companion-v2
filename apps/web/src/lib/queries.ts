@@ -69,17 +69,19 @@ export async function addComment(slug: string, body: string): Promise<SkillComme
   };
 }
 
-/** Change a skill's visibility scope (owner/admin only). */
+/** Change a skill's visibility scope (owner/admin only), in the given (active) org. */
 export async function setSkillScope(
   slug: string,
   scope: string,
   teamSlug: string | null = null,
+  orgId: string | null = null,
 ): Promise<void> {
   const supabase = getBrowserSupabase();
   const { error } = await supabase.rpc("set_skill_scope", {
     p_slug: slug,
     p_scope: scope,
     p_team_slug: teamSlug,
+    p_org: orgId,
   });
   if (error) throw new Error(error.message);
 }

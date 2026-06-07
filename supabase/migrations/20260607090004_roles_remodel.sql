@@ -206,14 +206,16 @@ begin
 
   if p_scope = 'team' then
     if p_team_slug is not null then
+      -- An explicit team that doesn't exist is an error, not a silent fallback to another team.
       select id into v_team from teams where org_id = v_org and slug = p_team_slug;
+      if v_team is null then raise exception 'unknown team: %', p_team_slug using errcode = '42704'; end if;
     else
       v_team := v_skill.team_id;
+      if v_team is null then
+        select team_id into v_team from team_memberships where user_id = v_uid and org_id = v_org limit 1;
+      end if;
+      if v_team is null then raise exception 'no team available for team scope' using errcode = '22023'; end if;
     end if;
-    if v_team is null then
-      select team_id into v_team from team_memberships where user_id = v_uid and org_id = v_org limit 1;
-    end if;
-    if v_team is null then raise exception 'no team available for team scope' using errcode = '22023'; end if;
     if not (v_admin or app_member_of_team(v_team)) then raise exception 'not a member of that team' using errcode = '42501'; end if;
   else
     v_team := null;

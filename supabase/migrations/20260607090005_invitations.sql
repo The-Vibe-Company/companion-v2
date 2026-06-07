@@ -19,8 +19,8 @@ create table invitations (
 
 -- At most ONE active (pending) invite per (org, email); historical rows can coexist.
 create unique index invitations_active_uniq on invitations (org_id, email) where status = 'pending';
-create index invitations_org_idx   on invitations (org_id, created_at desc);
-create index invitations_token_idx on invitations (token);
+create index invitations_org_idx on invitations (org_id, created_at desc);
+-- token already has an implicit unique index from `token text not null unique`.
 
 alter table invitations enable row level security;
 
