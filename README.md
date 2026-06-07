@@ -52,24 +52,36 @@ Every agent, container, and skill carries a **visibility scope** — `private` (
 
 ## Status
 
-> 🚧 **Early / pre-MVP.** This repository currently holds the launch documents. The codebase is
-> being scaffolded. Star and watch to follow along — and read the [PRD](docs/PRD.md) for the
-> roadmap.
+> 🚧 **Early.** The **Skills Hub (Pillar 3)** is implemented end-to-end — a Supabase-backed registry
+> (Postgres + RLS, Auth, Storage), a Next.js portal, and the `companion` CLI to upload, download, and
+> keep skills up to date. Agents and the Container Catalog are stubbed. See
+> [Architecture](docs/design.md) for what exists and [PRD](docs/PRD.md) for the roadmap.
 
-## Quickstart (planned)
-
-The MVP ships as a single self-host bundle:
+## Quickstart — Skills Hub (local)
 
 ```bash
-git clone https://github.com/The-Vibe-Company/companion-v2
-cd companion-v2
-docker compose up
-# → open http://localhost:3000, the first user becomes Org Owner
+pnpm install
+pnpm test                                   # shared packages: validation + authz matrix
+
+# 1) Backend: Supabase (Postgres + Auth + Storage). Needs Docker.
+supabase start                              # prints API URL + anon key + service_role key
+supabase db reset                           # applies migrations/ and seeds a sample registry
+
+# 2) Web portal
+cp .env.example apps/web/.env.local         # fill in the URL + keys printed above
+pnpm --filter @companion/web dev            # → http://localhost:3000 (first sign-up = Org Owner)
+
+# 3) CLI
+pnpm --filter @companion/cli build
+node cli/dist/index.js login --url <API_URL> --anon-key <ANON_KEY> --email you@example.com
+node cli/dist/index.js skills push examples/skills/incident-summary --scope team --team platform
+node cli/dist/index.js skills list
+node cli/dist/index.js skills pull pdf-extract
+node cli/dist/index.js skills status        # diff local copies vs the registry
 ```
 
-This brings up Postgres, Redis, object storage (MinIO), the web portal, and the reconcile worker.
-Configure a deployment provider (local Docker by default) and a model provider (OpenRouter), then
-deploy your first agent. See the [PRD](docs/PRD.md) for the exact MVP scope.
+`supabase/README.md` covers the backend; `cli/README.md` has the full command + exit-code reference.
+The eventual self-host target is a single `docker compose up` bundle (see the [PRD](docs/PRD.md)).
 
 ## How it relates to Companion v1
 
