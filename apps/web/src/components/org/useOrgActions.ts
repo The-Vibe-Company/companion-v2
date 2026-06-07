@@ -42,9 +42,9 @@ export function useOrgActions() {
   };
 
   const joinOrg = async (codeOrLink: string) => {
-    const token = codeOrLink.includes("/join/")
-      ? (codeOrLink.split("/join/").pop() ?? "").trim()
-      : codeOrLink.trim();
+    const raw = codeOrLink.includes("/join/") ? (codeOrLink.split("/join/").pop() ?? "") : codeOrLink;
+    // Drop a trailing slash / query / hash so a pasted ".../join/<token>/" still resolves.
+    const token = raw.trim().replace(/[/?#].*$/, "");
     setError(null);
     setBusy(true);
     try {

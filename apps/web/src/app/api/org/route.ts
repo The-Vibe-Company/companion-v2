@@ -30,6 +30,7 @@ export async function POST(req: NextRequest) {
   res.cookies.set(CURRENT_ORG_COOKIE, orgId, {
     httpOnly: true,
     sameSite: "lax",
+    secure: process.env.NODE_ENV === "production", // HTTPS-only in prod; allow http for local dev
     path: "/",
     maxAge: 60 * 60 * 24 * 365,
   });

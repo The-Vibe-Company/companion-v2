@@ -97,6 +97,28 @@ describe.skipIf(!reachable)("org management RPC guards (live supabase)", () => {
     expect(error?.message ?? "").toMatch(/different email/i);
   });
 
+  it("add_team_member does not silently demote an existing (sole) team admin", async () => {
+    // priya is the sole admin of the Data team; re-adding her as reader must NOT change her
+    // role (that would bypass the last-team-admin guard) — add only adds new members.
+    const DATA_TEAM = "22222222-2222-2222-2222-222222222222";
+    const PRIYA = "33333333-3333-3333-3333-333333333333";
+    const sb = await signIn("admin@tvc.dev", "adminadmin");
+    const { error } = await sb.rpc("add_team_member", {
+      p_org: ACME,
+      p_team: DATA_TEAM,
+      p_user: PRIYA,
+      p_role: "reader",
+    });
+    expect(error).toBeFalsy();
+    const { data } = await sb
+      .from("team_memberships")
+      .select("team_role")
+      .eq("team_id", DATA_TEAM)
+      .eq("user_id", PRIYA)
+      .maybeSingle();
+    expect((data as { team_role?: string } | null)?.team_role).toBe("admin");
+  });
+
   it("an owner can create a team and becomes its admin", async () => {
     const sb = await signIn("admin@tvc.dev", "adminadmin");
     const { data, error } = await sb.rpc("create_team", { p_org: ACME, p_name: "RLS Probe Team" });

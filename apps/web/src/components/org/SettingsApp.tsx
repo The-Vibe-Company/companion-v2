@@ -25,7 +25,6 @@ export interface SettingsAppData {
   orgs: OrgVM[];
   current: OrgFull;
   users: Record<string, SeedUser>;
-  sidebarTeams: TeamVM[];
   teamCounts: Record<string, number>;
   totalCount: number;
   myCount: number;
@@ -42,11 +41,18 @@ export function SettingsApp({
 }) {
   const router = useRouter();
   const actions = useOrgActions();
-  const { me, orgs, users, sidebarTeams, teamCounts, totalCount, myCount } = data;
+  const { me, orgs, users, teamCounts, totalCount, myCount } = data;
 
   const [current, setCurrent] = useState<OrgFull>(data.current);
   useEffect(() => setCurrent(data.current), [data.current]);
   const [busy, setBusy] = useState(false);
+
+  // The sidebar "Your teams" must reflect live membership changes, so derive it from
+  // `current` (not the initial props) — adding/removing yourself from a team updates it.
+  const sidebarTeams: TeamVM[] = current.teams
+    .filter((t) => t.members.some((m) => m.userId === me.id))
+    .map((t) => ({ id: t.slug, name: t.name, initial: (t.name[0] ?? "T").toUpperCase() }))
+    .sort((a, b) => (a.name < b.name ? -1 : 1));
 
   const [tab, setTab] = useState<SettingsTab>(initialTab);
   const [dialog, setDialog] = useState<SettingsDialog>(initialDialog);

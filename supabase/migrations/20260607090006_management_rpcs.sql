@@ -289,8 +289,13 @@ begin
   end if;
   insert into team_memberships (org_id, team_id, user_id, team_role)
   values (p_org, p_team, p_user, p_role)
-  on conflict (team_id, user_id) do update set team_role = excluded.team_role
+  on conflict (team_id, user_id) do nothing
   returning * into v_tm;
+  -- Already on the team: do NOT silently change their role here (that would bypass the
+  -- last-team-admin guard). Role changes go through set_team_member_role. Return the existing row.
+  if v_tm.id is null then
+    select * into v_tm from team_memberships where team_id = p_team and user_id = p_user;
+  end if;
   return v_tm;
 end;
 $$;

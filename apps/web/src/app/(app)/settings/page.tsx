@@ -5,7 +5,7 @@ import { loadOrgContext } from "@/lib/currentOrg";
 import { formatDate } from "@/lib/format";
 import { SettingsApp, type SettingsAppData } from "@/components/org/SettingsApp";
 import type { OrgFull, OrgMember, OrgTeam, SeedUser, SettingsDialog, SettingsTab } from "@/components/org/model";
-import type { MeVM, TeamVM } from "@/lib/types";
+import type { MeVM } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
@@ -108,11 +108,8 @@ export default async function SettingsPage({
     teams,
   };
 
-  // Sidebar: the user's teams + skill counts for the current org.
-  const sidebarTeams: TeamVM[] = teams
-    .filter((t) => t.members.some((m) => m.userId === user.id))
-    .map((t) => ({ id: t.slug, name: t.name, initial: (t.name[0] ?? "T").toUpperCase() }))
-    .sort((a, b) => (a.name < b.name ? -1 : 1));
+  // Sidebar skill counts for the current org (the team list is derived client-side from the
+  // live membership graph in SettingsApp).
   const { data: skillRows } = await supabase.from("skill_list_v").select("owner_id, team_slug").eq("org_id", current.id);
   const sr = (skillRows ?? []) as Record<string, unknown>[];
   const totalCount = sr.length;
@@ -129,6 +126,6 @@ export default async function SettingsPage({
   const dialogRaw = typeof sp.dialog === "string" ? sp.dialog : undefined;
   const dialog: SettingsDialog = dialogRaw === "invite" || dialogRaw === "team" ? dialogRaw : null;
 
-  const data: SettingsAppData = { me, orgs, current: currentFull, users, sidebarTeams, teamCounts, totalCount, myCount };
+  const data: SettingsAppData = { me, orgs, current: currentFull, users, teamCounts, totalCount, myCount };
   return <SettingsApp data={data} initialTab={tab} initialDialog={dialog} />;
 }
