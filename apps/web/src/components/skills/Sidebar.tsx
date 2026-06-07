@@ -2,11 +2,17 @@
 
 import { useState } from "react";
 import { Icon } from "../Icon";
-import type { MeVM, TeamVM } from "@/lib/types";
+import { OrgSwitcher } from "../org/OrgSwitcher";
+import { orgRole } from "../org/roles";
+import type { SettingsIntent } from "../org/model";
+import type { OrgVM, TeamVM } from "@/lib/types";
 
 export function Sidebar({
-  workspace,
-  me,
+  orgs,
+  currentOrg,
+  onSwitchOrg,
+  onOnboard,
+  onOpenSettings,
   teams,
   totalCount,
   myCount,
@@ -19,8 +25,11 @@ export function Sidebar({
   onSelectAll,
   onSelectTeam,
 }: {
-  workspace: string;
-  me: MeVM;
+  orgs: OrgVM[];
+  currentOrg: OrgVM;
+  onSwitchOrg: (id: string) => void;
+  onOnboard: (mode: "create" | "join") => void;
+  onOpenSettings: (intent?: SettingsIntent) => void;
   teams: TeamVM[];
   totalCount: number;
   myCount: number;
@@ -45,11 +54,7 @@ export function Sidebar({
   return (
     <aside className="side">
       <div className="side__brand">
-        <span className="brandmark">C</span>
-        <div style={{ minWidth: 0 }}>
-          <div className="brandname">Companion</div>
-          <div className="brandsub">{workspace}</div>
-        </div>
+        <OrgSwitcher orgs={orgs} current={currentOrg} onSwitch={onSwitchOrg} onOnboard={onOnboard} />
         <button className="side__search" onClick={onOpenPalette} title="Search (⌘K)" aria-label="Search">
           <Icon name="search" size={14} />
           <span className="kbd">⌘K</span>
@@ -91,19 +96,40 @@ export function Sidebar({
         {teams.length > 0 && (
           <div className="side__grouplabel side__grouplabel--row">
             Your teams<span className="n">{teams.length}</span>
+            <button
+              className="side__addteam"
+              title="New team"
+              aria-label="New team"
+              onClick={() => onOpenSettings({ tab: "teams", dialog: "team" })}
+            >
+              <Icon name="plus" size={14} />
+            </button>
           </div>
         )}
         {teams.map((tm) => {
           const open = expanded.has(tm.id);
           return (
             <div className="teamblock" key={tm.id}>
-              <button className="teamitem" onClick={() => toggle(tm.id)} aria-expanded={open}>
-                <span className={"teamitem__chev" + (open ? " is-open" : "")}>
-                  <Icon name="chevron-right" size={13} />
-                </span>
-                <span className="teamavatar">{tm.initial}</span>
-                <span className="teamitem__name">{tm.name}</span>
-              </button>
+              <div className="teamitem">
+                <button className="teamitem__main" onClick={() => toggle(tm.id)} aria-expanded={open}>
+                  <span className={"teamitem__chev" + (open ? " is-open" : "")}>
+                    <Icon name="chevron-right" size={13} />
+                  </span>
+                  <span className="teamavatar">{tm.initial}</span>
+                  <span className="teamitem__name">{tm.name}</span>
+                </button>
+                <button
+                  className="teamitem__gear"
+                  title={tm.name + " settings"}
+                  aria-label={tm.name + " settings"}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onOpenSettings({ tab: "teams" });
+                  }}
+                >
+                  <Icon name="settings" size={14} />
+                </button>
+              </div>
               {open && (
                 <div className="teamsub">
                   <button
@@ -130,9 +156,10 @@ export function Sidebar({
           );
         })}
       </nav>
-      <div className="side__foot">
-        <Icon name="user" size={13} /> {me.name} · {teams.length} {teams.length === 1 ? "team" : "teams"}
-      </div>
+      <button className="side__foot side__foot--btn" onClick={() => onOpenSettings()}>
+        <Icon name="settings" size={14} /> Settings
+        <span className="side__foot__role">{orgRole(currentOrg.myRole).label.toLowerCase()}</span>
+      </button>
     </aside>
   );
 }

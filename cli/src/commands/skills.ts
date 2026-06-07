@@ -200,6 +200,7 @@ export async function push(dir: string, opts: PushOpts, g: GlobalOpts): Promise<
     p_tools: fm.tools,
     p_license: fm.license ?? null,
     p_note: opts.message ?? "",
+    p_org: orgId,
   });
   if (error) throw new CliError(error.message, /already exists/.test(error.message) ? 6 : 8);
 

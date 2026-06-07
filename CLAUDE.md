@@ -31,8 +31,8 @@ Read these before making non-trivial changes:
 
 Canonical terms — **do not invent synonyms**:
 - Hierarchy: **Organization → Team → User**.
-- Org roles: **Owner, Admin, Member, Guest**. Team roles: **Admin, Member**.
-- Visibility **scope**: **`private` (user) / `team` / `org`** on every resource.
+- Org roles: **Owner, Admin, Developer**. Team roles: **Admin, Editor, Reader**.
+- Visibility **scope**: **`private` (user) / `team` / `public`** on every resource.
 - Deploy targets are **providers**: **Docker (local), Fly, Kubernetes, Modal**.
 
 ## Target repository layout

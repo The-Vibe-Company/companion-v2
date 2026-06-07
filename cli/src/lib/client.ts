@@ -35,9 +35,24 @@ export async function getClient(profile: string): Promise<AuthedClient> {
   return { supabase, userId: data.user.id, email: data.user.email ?? "", url };
 }
 
-/** The acting user's organization id (the registry tenant). */
+/**
+ * The acting user's organization id (the registry tenant) — the EARLIEST membership, scoped
+ * to the user's own rows. Mirrors the `publish_skill_version` server-side fallback
+ * (`order by created_at asc limit 1`) so the storage-path tenant prefix and the row's `org_id`
+ * always agree. The `.eq(user_id)` matters because an org admin's RLS view includes other
+ * members' membership rows, which an unfiltered `.limit(1)` could return.
+ */
 export async function getOrgId(supabase: SupabaseClient): Promise<string> {
-  const { data } = await supabase.from("memberships").select("org_id").limit(1).maybeSingle();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  const { data } = await supabase
+    .from("memberships")
+    .select("org_id")
+    .eq("user_id", user?.id ?? "")
+    .order("created_at", { ascending: true })
+    .limit(1)
+    .maybeSingle();
   const orgId = (data as { org_id?: string } | null)?.org_id;
   if (!orgId) throw new CliError("no organization membership", 7);
   return orgId;

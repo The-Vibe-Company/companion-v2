@@ -1,4 +1,4 @@
-import type { Scope, SkillListRow, ValidationState } from "@companion/contracts";
+import type { OrgRole, Scope, SkillListRow, TeamRole, ValidationState } from "@companion/contracts";
 import { formatBytes, formatDate, relativeTime } from "./format";
 
 export interface SkillOwnerVM {
@@ -69,4 +69,58 @@ export interface MeVM {
   id: string;
   name: string;
   initials: string;
+}
+
+/* ---- Org / membership view-models (settings surface + switcher) ----------- */
+
+/** One workspace the current user belongs to (the org switcher + General pane). */
+export interface OrgVM {
+  id: string; // organizations.id (the explicit current-org id the RPCs accept)
+  name: string;
+  slug: string;
+  kind: "personal" | "team";
+  plan: "free" | "team";
+  myRole: OrgRole; // this user's role in THIS org
+}
+
+/** A row in the Members table — an active member, or a pending invite. */
+export interface MemberVM {
+  userId: string; // profiles.id for active members; invite id for pending
+  name: string;
+  email: string;
+  initials: string;
+  role: OrgRole;
+  joined: string; // formatted date, or "—" / "pending"
+  pending: boolean; // true => from invitations, not memberships
+  inviteId?: string; // invitations.id (pending rows only)
+  inviteToken?: string; // shareable join token (pending rows only)
+  isMe: boolean;
+}
+
+export interface TeamMemberVM {
+  userId: string;
+  name: string;
+  email: string;
+  initials: string;
+  role: TeamRole;
+  isMe: boolean;
+}
+
+/** A team with its members (the Teams tab). */
+export interface TeamWithMembersVM {
+  id: string; // teams.id (for mutations)
+  slug: string;
+  name: string;
+  initial: string;
+  members: TeamMemberVM[];
+  myRole: TeamRole | null;
+}
+
+/** Everything the /settings route renders, computed server-side for the current org. */
+export interface OrgSettingsData {
+  me: MeVM;
+  orgs: OrgVM[]; // for the switcher
+  current: OrgVM; // resolved active org
+  members: MemberVM[]; // active (memberships) + pending (invitations)
+  teams: TeamWithMembersVM[];
 }
