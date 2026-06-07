@@ -136,8 +136,31 @@ stop_port_listeners() {
     fi
   done
 
-  log "Force stopping process(es) still listening on port ${port}: ${pids}"
+  workspace_pids=""
+  foreign_pids=""
+  for pid in $pids; do
+    if is_workspace_pid "$pid"; then
+      workspace_pids="${workspace_pids} ${pid}"
+    else
+      foreign_pids="${foreign_pids} ${pid}"
+    fi
+  done
+
+  if [ -n "$foreign_pids" ]; then
+    log "Port ${port} is still used by non-workspace process(es):${foreign_pids}"
+    log "Stop those process(es) or choose a different CONDUCTOR_PORT."
+    exit 1
+  fi
+
+  log "Force stopping workspace process(es) still listening on port ${port}:${workspace_pids}"
   kill -9 $workspace_pids 2>/dev/null || true
+
+  sleep 0.1
+  pids="$(lsof -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null | sort -u || true)"
+  if [ -n "$pids" ]; then
+    log "Port ${port} is still in use after cleanup: ${pids}"
+    exit 1
+  fi
 }
 
 stop_dev_servers() {

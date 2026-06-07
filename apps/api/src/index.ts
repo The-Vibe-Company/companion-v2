@@ -120,7 +120,24 @@ app.post("/v1/auth/logout", (c) => authForward(c, "/auth/sign-out"));
 
 function safeAuthNext(value: unknown): string {
   const next = typeof value === "string" ? value : "";
-  return next.startsWith("/") && !next.startsWith("//") ? next : "/skills";
+  const normalized = next.toLowerCase();
+  if (
+    !next.startsWith("/") ||
+    next.startsWith("//") ||
+    next.includes("\\") ||
+    normalized.includes("%5c") ||
+    normalized.includes("%2f")
+  ) {
+    return "/skills";
+  }
+
+  try {
+    const parsed = new URL(next, "http://companion.local");
+    if (parsed.origin !== "http://companion.local") return "/skills";
+    return `${parsed.pathname}${parsed.search}${parsed.hash}`;
+  } catch {
+    return "/skills";
+  }
 }
 
 function authLoginUrl(next: string, mode: string, error: string): string {
