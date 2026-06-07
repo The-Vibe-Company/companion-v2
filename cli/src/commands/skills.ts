@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { mkdir, readFile } from "node:fs/promises";
+import { mkdir, readFile, rm } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
 import pc from "picocolors";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -230,6 +230,13 @@ export async function push(dir: string, opts: PushOpts, g: GlobalOpts): Promise<
 // Pull / sync
 // --------------------------------------------------------------------------
 
+/** Clean-replace an install dir so files removed in the new version don't linger. */
+async function installVersion(buffer: Buffer, target: string): Promise<void> {
+  await rm(target, { recursive: true, force: true });
+  await mkdir(target, { recursive: true });
+  await unpackTo(buffer, target);
+}
+
 async function downloadVersion(
   supabase: SupabaseClient,
   skillId: string,
@@ -288,8 +295,7 @@ export async function pull(
   }
 
   const { buffer, checksum } = await downloadVersion(supabase, s.id, version);
-  await mkdir(target, { recursive: true });
-  await unpackTo(buffer, target);
+  await installVersion(buffer, target);
 
   if (!lock.registry.url) lock.registry = { url, orgId: lock.registry.orgId };
   upsertLockedSkill(lock, {
@@ -379,19 +385,32 @@ export async function sync(
   const changes: string[] = [];
 
   for (const r of rows) {
-    if (r.state === "outdated" && r.target && r.reg.id) {
+    const target = r.target;
+    const regId = r.reg.id;
+    const updatable = !!(target && regId);
+    const isModified = r.state === "modified" || r.state === "conflict";
+
+    if (r.state === "outdated" && updatable) {
       if (opts.dryRun) {
-        changes.push(`${r.name} ${r.resolved} -> ${r.target} (would update)`);
+        changes.push(`${r.name} ${r.resolved} -> ${target} (would update)`);
         continue;
       }
-      const { buffer, checksum } = await downloadVersion(supabase, r.reg.id, r.target);
-      const target = resolve(lockDir, r.locked.installPath);
-      await mkdir(target, { recursive: true });
-      await unpackTo(buffer, target);
-      upsertLockedSkill(lock, { ...r.locked, resolved: r.target, checksum, size: buffer.length, updatedAt: nowIso() });
-      changes.push(`${r.name} ${r.resolved} -> ${r.target}`);
-    } else if (r.state === "modified" || r.state === "conflict") {
-      changes.push(`${r.name} ${pc.yellow(r.state)}, skipped`);
+      const { buffer, checksum } = await downloadVersion(supabase, regId as string, target as string);
+      await installVersion(buffer, resolve(lockDir, r.locked.installPath));
+      upsertLockedSkill(lock, { ...r.locked, resolved: target as string, checksum, size: buffer.length, updatedAt: nowIso() });
+      changes.push(`${r.name} ${r.resolved} -> ${target}`);
+    } else if (isModified && opts.force && updatable) {
+      // --force discards local changes and restores the registry version.
+      if (opts.dryRun) {
+        changes.push(`${r.name} ${r.state} -> ${target} (would force-overwrite)`);
+        continue;
+      }
+      const { buffer, checksum } = await downloadVersion(supabase, regId as string, target as string);
+      await installVersion(buffer, resolve(lockDir, r.locked.installPath));
+      upsertLockedSkill(lock, { ...r.locked, resolved: target as string, checksum, size: buffer.length, updatedAt: nowIso() });
+      changes.push(`${r.name} ${pc.yellow(r.state)} -> ${target} (forced)`);
+    } else if (isModified) {
+      changes.push(`${r.name} ${pc.yellow(r.state)}, skipped (use --force to overwrite)`);
     } else if (r.state === "pinned") {
       changes.push(`${r.name} pinned ${r.resolved}${r.reg.currentVersion && r.reg.currentVersion !== r.resolved ? ` (${r.reg.currentVersion} available)` : ""}`);
     }
