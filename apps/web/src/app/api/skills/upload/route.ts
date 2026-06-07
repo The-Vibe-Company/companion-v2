@@ -7,6 +7,7 @@ import {
   validateSkillArchive,
 } from "@companion/skills";
 import { getServerSupabase } from "@/lib/supabase/server";
+import { loadOrgContext } from "@/lib/currentOrg";
 
 export const runtime = "nodejs";
 
@@ -52,10 +53,10 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "team scope requires a team slug" }, { status: 400 });
   }
 
-  // Derive the tenant for the storage path.
-  const { data: mem } = await supabase.from("memberships").select("org_id").limit(1).maybeSingle();
-  const orgId = mem?.org_id as string | undefined;
-  if (!orgId) return NextResponse.json({ error: "No organization membership" }, { status: 403 });
+  // Publish into the active workspace (the current-org cookie), not just the earliest one.
+  const { current } = await loadOrgContext(supabase);
+  if (!current) return NextResponse.json({ error: "No organization membership" }, { status: 403 });
+  const orgId = current.id;
 
   // Canonical checksum + the raw frontmatter to freeze on the version.
   let tar: Buffer;
@@ -89,6 +90,7 @@ export async function POST(req: Request) {
     p_tools: fm.tools,
     p_license: fm.license ?? null,
     p_note: "Uploaded via web",
+    p_org: orgId,
   });
   if (rpcError) {
     return NextResponse.json({ error: rpcError.message }, { status: 400 });

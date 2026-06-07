@@ -4,12 +4,15 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import type { Scope } from "@companion/contracts";
 import { setSkillScope, toggleStar as toggleStarRpc } from "@/lib/queries";
-import type { MeVM, SkillVM, TeamVM } from "@/lib/types";
+import type { MeVM, OrgVM, SkillVM, TeamVM } from "@/lib/types";
 import { Sidebar } from "./Sidebar";
 import { ListView } from "./ListView";
 import { DetailView } from "./DetailView";
 import { CommandPalette } from "./CommandPalette";
 import { UploadDrawer } from "./UploadDrawer";
+import { Onboarding } from "../org/Onboarding";
+import { useOrgActions } from "../org/useOrgActions";
+import type { SettingsIntent } from "../org/model";
 import {
   BUILTIN_VIEWS,
   chipParts,
@@ -23,14 +26,27 @@ export function SkillsApp({
   initialSkills,
   me,
   teams,
-  workspace,
+  orgs,
+  currentOrg,
 }: {
   initialSkills: SkillVM[];
   me: MeVM;
   teams: TeamVM[];
-  workspace: string;
+  orgs: OrgVM[];
+  currentOrg: OrgVM;
 }) {
   const router = useRouter();
+  const orgActions = useOrgActions();
+  const openSettings = useCallback(
+    (intent?: SettingsIntent) => {
+      const qs = new URLSearchParams();
+      if (intent?.tab) qs.set("tab", intent.tab);
+      if (intent?.dialog) qs.set("dialog", intent.dialog);
+      const s = qs.toString();
+      router.push("/settings" + (s ? `?${s}` : ""));
+    },
+    [router],
+  );
   const [skills, setSkills] = useState<SkillVM[]>(initialSkills);
   useEffect(() => setSkills(initialSkills), [initialSkills]);
 
@@ -228,8 +244,11 @@ export function SkillsApp({
   return (
     <div className="app">
       <Sidebar
-        workspace={workspace}
-        me={me}
+        orgs={orgs}
+        currentOrg={currentOrg}
+        onSwitchOrg={orgActions.switchOrg}
+        onOnboard={(m) => orgActions.setOnboarding(m)}
+        onOpenSettings={openSettings}
         teams={teams}
         totalCount={skills.length}
         myCount={myCount}
@@ -295,6 +314,20 @@ export function SkillsApp({
             router.refresh();
           }}
         />
+      )}
+      {orgActions.onboarding && (
+        <Onboarding
+          mode={orgActions.onboarding}
+          onMode={orgActions.setOnboarding}
+          onCreate={orgActions.createOrg}
+          onJoin={orgActions.joinOrg}
+          busy={orgActions.busy}
+        />
+      )}
+      {orgActions.error && (
+        <div className="og-toast" role="alert" onClick={() => orgActions.setError(null)}>
+          {orgActions.error}
+        </div>
       )}
     </div>
   );

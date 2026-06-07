@@ -56,18 +56,33 @@ body { background: var(--color-canvas); color: var(--color-fg); font-family: var
 .navitem__count--unread { color: var(--color-accent-fg); background: var(--color-accent); border-radius: var(--radius-full); padding: 0 6px; font-weight: 600; min-width: 18px; text-align: center; }
 .navitem__soon { margin-left: auto; font-size: 9px; text-transform: uppercase; letter-spacing: var(--tracking-wide); color: var(--color-faint); border: 1px solid var(--color-line); border-radius: var(--radius-sm); padding: 1px 5px; }
 .side__foot { padding: 12px 16px; border-top: 1px solid var(--color-line); font-size: 11px; color: var(--color-faint); display: flex; align-items: center; gap: 6px; font-family: var(--font-mono); }
+.side__foot--btn { width: 100%; border: none; background: none; cursor: pointer; font-family: var(--font-ui); font-size: var(--text-sm); color: var(--color-muted);
+  transition: background-color var(--duration-fast) var(--ease-out-quint), color var(--duration-fast) var(--ease-out-quint); }
+.side__foot--btn:hover { background: var(--color-surface-raised); color: var(--color-fg); }
+.side__foot--btn i { color: var(--color-faint); display: inline-flex; }
+.side__foot--btn:hover i { color: var(--color-fg); }
+.side__foot__role { margin-left: auto; font-family: var(--font-mono); font-size: 11px; color: var(--color-faint); text-transform: capitalize; }
 
 /* --- Your teams (sidebar) ------------------------------------------------ */
 .side__grouplabel--row { display: flex; align-items: center; }
-.side__grouplabel--row .n { margin-left: auto; font-family: var(--font-mono); color: var(--color-faint); text-transform: none; letter-spacing: 0; }
+.side__grouplabel--row .n { margin-left: 6px; font-family: var(--font-mono); color: var(--color-faint); text-transform: none; letter-spacing: 0; }
+.side__addteam { margin-left: auto; width: 18px; height: 18px; display: grid; place-items: center; border: none; background: none; cursor: pointer;
+  color: var(--color-faint); border-radius: 4px; opacity: 0; transition: opacity var(--duration-fast) var(--ease-out-quint), background-color var(--duration-fast) var(--ease-out-quint), color var(--duration-fast) var(--ease-out-quint); }
+.side__grouplabel--row:hover .side__addteam, .side__addteam:focus-visible { opacity: 1; }
+.side__addteam:hover { background: var(--color-surface-raised); color: var(--color-fg); }
 .teamblock { display: flex; flex-direction: column; }
-.teamitem { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; padding: 7px 8px; border: none; background: transparent; border-radius: var(--radius-md); cursor: pointer;
-  color: var(--color-fg); font-family: var(--font-ui); font-size: var(--text-sm); transition: background-color var(--duration-fast) var(--ease-out-quint); }
+.teamitem { display: flex; align-items: center; border-radius: var(--radius-md); transition: background-color var(--duration-fast) var(--ease-out-quint); }
 .teamitem:hover { background: var(--color-surface-raised); }
+.teamitem__main { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; padding: 7px 8px; border: none; background: none; cursor: pointer;
+  color: var(--color-fg); font-family: var(--font-ui); font-size: var(--text-sm); text-align: left; }
 .teamitem__chev { display: inline-flex; color: var(--color-faint); transition: transform var(--duration-fast) var(--ease-out-quint); flex: none; }
 .teamitem__chev.is-open { transform: rotate(90deg); }
 .teamavatar { width: 20px; height: 20px; border-radius: var(--radius-sm); display: grid; place-items: center; font-size: 10px; font-weight: 600; flex: none; color: var(--color-fg); background: var(--color-surface-raised); border: 1px solid var(--color-line); }
-.teamitem__name { font-weight: 500; }
+.teamitem__name { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.teamitem__gear { width: 24px; height: 24px; margin-right: 5px; display: grid; place-items: center; border: none; background: none; cursor: pointer;
+  color: var(--color-faint); border-radius: 4px; opacity: 0; flex: none; transition: opacity var(--duration-fast) var(--ease-out-quint), background-color var(--duration-fast) var(--ease-out-quint), color var(--duration-fast) var(--ease-out-quint); }
+.teamitem:hover .teamitem__gear, .teamitem__gear:focus-visible { opacity: 1; }
+.teamitem__gear:hover { background: var(--color-surface-sunken); color: var(--color-fg); }
 .teamsub { display: flex; flex-direction: column; gap: 2px; padding-left: 12px; margin: 2px 0 2px 17px; border-left: 1px solid var(--color-line); }
 .navitem--sub { padding: 7px 10px; }
 

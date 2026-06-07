@@ -31,6 +31,7 @@
   --color-accent-ring: oklch(0.66 0.166 88 / 0.55);
   --color-accent-tint: oklch(0.955 0.05 88);
   --color-accent-line: oklch(0.66 0.166 88 / 0.30);
+  --color-accent-edge: oklch(0.66 0.166 88);
 
   /* Semantic status (calm, label-paired) */
   --color-ok: oklch(0.55 0.13 156);
