@@ -1,0 +1,24 @@
+{
+  "name": "companion-v2",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Companion v2 — self-hostable portal to deploy, govern, and share AI agents, containers, and skills.",
+  "license": "MIT",
+  "packageManager": "pnpm@9.12.0",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "turbo run dev",
+    "lint": "turbo run lint",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test",
+    "cli": "pnpm --filter @companion/cli exec companion",
+    "design:lint": "npx --yes @google/design.md@0.2.0 lint DESIGN.md --format json"
+  },
+  "devDependencies": {
+    "turbo": "^2.3.3",
+    "typescript": "^5.7.2"
+  }
+}

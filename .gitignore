@@ -1,0 +1,31 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build output
+dist/
+.next/
+out/
+*.tsbuildinfo
+
+# Turborepo
+.turbo/
+
+# Test coverage
+coverage/
+
+# Env
+.env
+.env.local
+.env*.local
+
+# Supabase local
+supabase/.branches/
+supabase/.temp/
+
+# CLI local state (when run inside the repo)
+.companion/
+
+# OS / editor
+.DS_Store
+*.log
