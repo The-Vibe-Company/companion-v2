@@ -45,7 +45,7 @@ body { background: var(--color-canvas); color: var(--color-fg); font-family: var
 .side__grouplabel { font-size: 10px; text-transform: uppercase; letter-spacing: var(--tracking-wide); color: var(--color-faint); padding: 12px 8px 4px; }
 .navitem { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; padding: 8px 10px; border: none;
   background: transparent; border-radius: var(--radius-md); font-family: var(--font-ui); font-size: var(--text-sm);
-  color: var(--color-muted); cursor: pointer; transition: background-color var(--duration-fast) var(--ease-out-quint), color var(--duration-fast) var(--ease-out-quint); }
+  color: var(--color-muted); cursor: pointer; text-decoration: none; transition: background-color var(--duration-fast) var(--ease-out-quint), color var(--duration-fast) var(--ease-out-quint); }
 .navitem:hover { background: var(--color-surface-raised); color: var(--color-fg); }
 .navitem--active { background: var(--color-surface-raised); color: var(--color-fg); font-weight: 500; }
 .navitem--muted { color: var(--color-faint); cursor: default; }

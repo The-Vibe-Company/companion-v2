@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import type { OrgRole, TeamRole } from "@companion/contracts";
-import type { MeVM, OrgVM, TeamVM } from "@/lib/types";
+import type { MeVM } from "@/lib/types";
 import {
   addTeamMember as addTeamMemberRpc,
   createTeam as createTeamRpc,
@@ -14,20 +14,16 @@ import {
   setMemberRole as setMemberRoleRpc,
   setTeamMemberRole as setTeamMemberRoleRpc,
 } from "@/lib/org";
-import { Sidebar } from "../skills/Sidebar";
 import { Onboarding } from "./Onboarding";
+import { SettingsOnlySidebar } from "./SettingsOnlySidebar";
 import { SettingsView } from "./SettingsView";
 import { useOrgActions } from "./useOrgActions";
-import type { OrgCtx, OrgFull, SeedUser, SettingsDialog, SettingsIntent, SettingsTab } from "./model";
+import type { OrgCtx, OrgFull, SeedUser, SettingsDialog, SettingsTab } from "./model";
 
 export interface SettingsAppData {
   me: MeVM;
-  orgs: OrgVM[];
   current: OrgFull;
   users: Record<string, SeedUser>;
-  teamCounts: Record<string, number>;
-  totalCount: number;
-  myCount: number;
 }
 
 export function SettingsApp({
@@ -41,7 +37,7 @@ export function SettingsApp({
 }) {
   const router = useRouter();
   const actions = useOrgActions();
-  const { me, orgs, users, teamCounts, totalCount, myCount } = data;
+  const { me, users } = data;
 
   const [current, setCurrent] = useState<OrgFull>(data.current);
   useEffect(() => setCurrent(data.current), [data.current]);
@@ -49,13 +45,6 @@ export function SettingsApp({
     document.cookie = `companion_org=${encodeURIComponent(data.current.id)}; path=/; SameSite=Lax`;
   }, [data.current.id]);
   const [busy, setBusy] = useState(false);
-
-  // The sidebar "Your teams" must reflect live membership changes, so derive it from
-  // `current` (not the initial props) — adding/removing yourself from a team updates it.
-  const sidebarTeams: TeamVM[] = current.teams
-    .filter((t) => t.members.some((m) => m.userId === me.id))
-    .map((t) => ({ id: t.slug, name: t.name, initial: (t.name[0] ?? "T").toUpperCase() }))
-    .sort((a, b) => (a.name < b.name ? -1 : 1));
 
   const [tab, setTab] = useState<SettingsTab>(initialTab);
   const [dialog, setDialog] = useState<SettingsDialog>(initialDialog);
@@ -163,15 +152,6 @@ export function SettingsApp({
     busy: busy || actions.busy,
   };
 
-  const currentVM: OrgVM = {
-    id: current.id,
-    name: current.name,
-    slug: current.slug,
-    kind: current.kind,
-    plan: current.plan,
-    myRole: current.myRole,
-  };
-
   const pushUrl = (t: SettingsTab, d: SettingsDialog) => {
     const qs = new URLSearchParams();
     qs.set("tab", t);
@@ -180,36 +160,12 @@ export function SettingsApp({
   };
   const onTab = (t: SettingsTab) => { setTab(t); setDialog(null); pushUrl(t, null); };
   const onDialog = (d: SettingsDialog) => { setDialog(d); pushUrl(tab, d); };
-  const openSettings = (intent?: SettingsIntent) => {
-    const t = intent?.tab ?? tab;
-    const d: SettingsDialog = intent?.dialog ?? null;
-    setTab(t);
-    setDialog(d);
-    pushUrl(t, d);
-  };
 
   const toSkills = () => router.push("/skills");
 
   return (
     <div className="app">
-      <Sidebar
-        orgs={orgs}
-        currentOrg={currentVM}
-        onSwitchOrg={actions.switchOrg}
-        onOnboard={(m) => actions.setOnboarding(m)}
-        onOpenSettings={openSettings}
-        teams={sidebarTeams}
-        totalCount={totalCount}
-        myCount={myCount}
-        teamCounts={teamCounts}
-        activeTeam={null}
-        isMine={false}
-        workspaceActive={false}
-        onOpenPalette={toSkills}
-        onSelectMine={toSkills}
-        onSelectAll={toSkills}
-        onSelectTeam={toSkills}
-      />
+      <SettingsOnlySidebar />
       <div className="main">
         <SettingsView ctx={ctx} tab={tab} dialog={dialog} onTab={onTab} onDialog={onDialog} onClose={toSkills} />
       </div>

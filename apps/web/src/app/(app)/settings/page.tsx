@@ -47,7 +47,7 @@ export default async function SettingsPage({
   const whoami = await serverApiFetch<{ userId: string; email: string; name: string }>("/v1/auth/whoami").catch(() => null);
   if (!whoami) redirect("/login");
 
-  const { orgs, current } = await loadOrgContext();
+  const { current } = await loadOrgContext();
   if (!current) redirect("/skills");
   const orgHeaders = { "x-companion-org": current.id };
 
@@ -104,14 +104,6 @@ export default async function SettingsPage({
     })),
   };
 
-  const skillRows = await serverApiFetch<Array<{ owner_id: string; team_slug: string | null }>>("/v1/skills").catch(
-    () => [],
-  );
-  const teamCounts: Record<string, number> = {};
-  for (const s of skillRows) {
-    if (s.team_slug) teamCounts[s.team_slug] = (teamCounts[s.team_slug] ?? 0) + 1;
-  }
-
   const sp = await searchParams;
   const tabRaw = typeof sp.tab === "string" ? sp.tab : undefined;
   const tab: SettingsTab = tabRaw === "general" || tabRaw === "teams" ? tabRaw : "members";
@@ -120,12 +112,8 @@ export default async function SettingsPage({
 
   const data: SettingsAppData = {
     me,
-    orgs,
     current: currentFull,
     users,
-    teamCounts,
-    totalCount: skillRows.length,
-    myCount: skillRows.filter((s) => s.owner_id === me.id).length,
   };
   return <SettingsApp data={data} initialTab={tab} initialDialog={dialog} />;
 }
