@@ -15,6 +15,8 @@ function trustedOrigins(): string[] {
   const webUrl = process.env.COMPANION_WEB_URL;
   const authUrl = process.env.BETTER_AUTH_URL;
   const apiUrl = process.env.COMPANION_API_URL;
+  const devLoopbackOrigins =
+    process.env.NODE_ENV === "production" ? [] : ["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*"];
 
   return Array.from(
     new Set(
@@ -31,6 +33,7 @@ function trustedOrigins(): string[] {
         "http://localhost:3001",
         "http://127.0.0.1:3010",
         "http://localhost:3010",
+        ...devLoopbackOrigins,
       ].filter((origin): origin is string => Boolean(origin)),
     ),
   );
