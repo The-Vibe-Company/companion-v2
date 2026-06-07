@@ -1,0 +1,8 @@
+{
+  "scripts": {
+    "setup": "bash scripts/conductor.sh setup",
+    "run": "bash scripts/conductor.sh run",
+    "archive": "bash scripts/conductor.sh archive"
+  },
+  "runScriptMode": "concurrent"
+}
