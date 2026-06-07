@@ -7,6 +7,7 @@ import { scopeSchema, validationStateSchema } from "./scope";
  */
 export const skillListRowSchema = z.object({
   id: z.string(),
+  org_id: z.string(),
   slug: z.string(),
   description: z.string(),
   scope: scopeSchema,
