@@ -26,6 +26,9 @@ supabase/.temp/
 # CLI local state (when run inside the repo)
 .companion/
 
+# Conductor workspace context
+.context/
+
 # OS / editor
 .DS_Store
 *.log

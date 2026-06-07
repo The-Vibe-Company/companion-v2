@@ -105,6 +105,10 @@ pnpm dev                    # run web + worker in watch mode
 
 - **RBAC is table-driven and exhaustive.** Add cases to the role × scope × action matrix whenever you
   touch authorization; assert cross-tenant access is denied.
+- **Frontend browser validation is required after frontend changes.** After any UI, route, auth, style,
+  component, or browser-facing behavior change, run the app and validate it with `agent-browser` before
+  finishing. Use the automated shortcut `APP_URL=http://127.0.0.1:<port> pnpm browser:smoke` for the
+  core flow, and add manual `agent-browser` checks for any changed or risky path.
 - **`DESIGN.md` follows the Google Design.md format.** Any change to the root `DESIGN.md` must pass
   `npx --yes @google/design.md@0.2.0 lint DESIGN.md --format json`; CI runs this automatically when
   `DESIGN.md` changes.
@@ -118,5 +122,9 @@ pnpm dev                    # run web + worker in watch mode
 - If you changed architecture, the data model, RBAC, the provider seam, or a runtime integration,
   **update [`docs/design.md`](docs/design.md)** (and this file's anchors if paths moved). Keep the docs
   and the code in agreement.
+- If you changed frontend behavior, include the `agent-browser` validation result in your handoff. The
+  minimum smoke path is: signed-out redirect, login, Skills list, filters, detail view, upload drawer,
+  mobile viewport, and browser errors.
 - Match the surrounding code's style; keep `packages/core`/`providers` framework-free.
 - Prefer extending existing contracts in `packages/contracts` over introducing parallel ones.
+- PR titles should use Commitizen style, for example `feat(conductor): add isolated supabase workflows`.
