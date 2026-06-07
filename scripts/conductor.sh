@@ -222,10 +222,12 @@ port_conflict_message() {
     return 0
   done < <(docker ps --format '{{.Names}}\t{{.Ports}}')
 
-  lsof_owner="$(lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | awk 'NR == 2 { print $1 " pid " $2 }')"
-  if [ -n "$lsof_owner" ]; then
-    printf '%s port %s is already used by %s\n' "$label" "$port" "$lsof_owner"
-    return 0
+  if command -v lsof >/dev/null 2>&1; then
+    lsof_owner="$(lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | awk 'NR == 2 { print $1 " pid " $2 }')"
+    if [ -n "$lsof_owner" ]; then
+      printf '%s port %s is already used by %s\n' "$label" "$port" "$lsof_owner"
+      return 0
+    fi
   fi
 
   return 1
