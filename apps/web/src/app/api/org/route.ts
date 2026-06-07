@@ -18,12 +18,13 @@ export async function POST(req: NextRequest) {
   }
   if (!orgId) return NextResponse.json({ error: "orgId required" }, { status: 400 });
 
-  const { data: mem } = await supabase
+  const { data: mem, error: memErr } = await supabase
     .from("memberships")
     .select("org_id")
     .eq("user_id", user.id)
     .eq("org_id", orgId)
     .maybeSingle();
+  if (memErr) return NextResponse.json({ error: "membership check failed" }, { status: 500 });
   if (!mem) return NextResponse.json({ error: "not a member" }, { status: 403 });
 
   const res = NextResponse.json({ ok: true });

@@ -87,7 +87,10 @@ declare
   v_inv invitations%rowtype;
 begin
   if v_uid is null then raise exception 'not authenticated' using errcode = '28000'; end if;
-  if length(trim(coalesce(p_email::text, ''))) = 0 then raise exception 'email required' using errcode = '22023'; end if;
+  -- Normalize the email (citext is already case-insensitive; strip surrounding whitespace) so
+  -- the member/duplicate checks and the eventual email-match on accept all line up.
+  p_email := nullif(btrim(p_email::text), '')::citext;
+  if p_email is null then raise exception 'email required' using errcode = '22023'; end if;
   if not app_is_org_admin(p_org) then raise exception 'insufficient role' using errcode = '42501'; end if;
   if p_role = 'owner' then raise exception 'cannot invite as owner' using errcode = '42501'; end if;
   if exists (
