@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import type { Scope, SkillCommentRow, SkillVersionRow } from "@companion/contracts";
 import { Icon } from "../Icon";
-import { addComment as addCommentRpc, fetchSkillDetail } from "@/lib/queries";
+import { addComment as addCommentRpc, fetchSkillDetail, fetchSkillDownloadUrl } from "@/lib/queries";
 import type { MeVM, SkillVM } from "@/lib/types";
 import { ScopeChip, StarButton, SkillBody, ValidBadge, Frontmatter } from "./blocks";
 import { Activity, Comments, PropList } from "./detailParts";
@@ -36,7 +36,7 @@ export function DetailView({
 
   useEffect(() => {
     let active = true;
-    fetchSkillDetail(skill.uuid, skill.version)
+    fetchSkillDetail(skill.id, skill.version)
       .then((d) => {
         if (!active) return;
         setVersions(d.versions);
@@ -47,10 +47,11 @@ export function DetailView({
     return () => {
       active = false;
     };
-  }, [skill.uuid, skill.version]);
+  }, [skill.id, skill.version]);
 
-  const download = () => {
-    window.location.href = `/api/skills/${skill.uuid}/download`;
+  const download = async () => {
+    const url = await fetchSkillDownloadUrl(skill.id, skill.version);
+    window.location.href = url;
   };
 
   const onAddComment = (text: string) => {

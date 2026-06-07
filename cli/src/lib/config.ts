@@ -4,7 +4,7 @@ import { CliError } from "./errors";
 
 export interface ProfileConfig {
   url: string;
-  anonKey: string;
+  orgId?: string;
 }
 type ConfigFile = Record<string, ProfileConfig>;
 
@@ -16,29 +16,16 @@ async function loadConfig(): Promise<ConfigFile> {
   }
 }
 
-/** Resolve the Supabase URL + anon key for a profile (config file, then env). */
 export async function getProfileConfig(profile: string): Promise<ProfileConfig> {
   const cfg = await loadConfig();
-  const p = cfg[profile];
-  const url =
-    p?.url ?? process.env.COMPANION_SUPABASE_URL ?? process.env.NEXT_PUBLIC_SUPABASE_URL ?? "";
-  const anonKey =
-    p?.anonKey ??
-    process.env.COMPANION_SUPABASE_ANON_KEY ??
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ??
-    "";
-  if (!url || !anonKey) {
-    throw new CliError(
-      "no Supabase URL/anon key configured. Run: companion login --url <url> --anon-key <key>",
-      2,
-    );
-  }
-  return { url, anonKey };
+  const url = cfg[profile]?.url ?? process.env.COMPANION_API_URL ?? "http://127.0.0.1:3001";
+  if (!url) throw new CliError("no Companion API URL configured. Run: companion login --url <url>", 2);
+  return { url: url.replace(/\/$/, ""), orgId: cfg[profile]?.orgId };
 }
 
 export async function saveProfileConfig(profile: string, cfg: ProfileConfig): Promise<void> {
   const all = await loadConfig();
-  all[profile] = cfg;
+  all[profile] = { url: cfg.url.replace(/\/$/, ""), orgId: cfg.orgId };
   await mkdir(COMPANION_HOME, { recursive: true });
   await writeFile(configPath(), JSON.stringify(all, null, 2));
 }

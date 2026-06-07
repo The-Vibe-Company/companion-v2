@@ -1,11 +1,8 @@
 import { redirect } from "next/navigation";
-import { getServerSupabase } from "@/lib/supabase/server";
+import { serverApiFetch } from "@/lib/apiServer";
 
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
-  const supabase = await getServerSupabase();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+  const user = await serverApiFetch("/v1/auth/whoami").catch(() => null);
   if (!user) redirect("/login");
   return <>{children}</>;
 }

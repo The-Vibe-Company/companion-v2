@@ -53,7 +53,7 @@ export interface SettingsIntent {
 /**
  * The bridge object the ported design settings components consume — same shape as the
  * prototype's useOrg() return (minus the switcher/onboarding bits, which the shell owns),
- * backed by real Supabase state + RPCs (built in SettingsApp).
+ * backed by the Companion API (built in SettingsApp).
  */
 export interface OrgCtx {
   user: (id: string) => SeedUser;

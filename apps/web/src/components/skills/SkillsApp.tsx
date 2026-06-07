@@ -49,6 +49,9 @@ export function SkillsApp({
   );
   const [skills, setSkills] = useState<SkillVM[]>(initialSkills);
   useEffect(() => setSkills(initialSkills), [initialSkills]);
+  useEffect(() => {
+    document.cookie = `companion_org=${encodeURIComponent(currentOrg.id)}; path=/; SameSite=Lax`;
+  }, [currentOrg.id]);
 
   const [filters, setFilters] = useState<Filter[]>([]);
   const [customViews, setCustomViews] = useState<ViewDef[]>([]);
@@ -58,6 +61,16 @@ export function SkillsApp({
   const [lastId, setLastId] = useState<string | null>(null);
   const viewSeq = useRef(0);
   const openIdRef = useRef<string | null>(null);
+  const uploadReturnRef = useRef<HTMLElement | null>(null);
+
+  const openUpload = useCallback(() => {
+    uploadReturnRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    setUploadOpen(true);
+  }, []);
+  const closeUpload = useCallback(() => {
+    setUploadOpen(false);
+    queueMicrotask(() => uploadReturnRef.current?.focus());
+  }, []);
 
   // --- Optimistic mutations --------------------------------------------------
   const toggleStar = useCallback((id: string) => {
@@ -278,7 +291,7 @@ export function SkillsApp({
           <ListView
             skills={filtered}
             onOpen={open}
-            onUpload={() => setUploadOpen(true)}
+            onUpload={openUpload}
             lastId={lastId}
             views={views}
             activeViewId={activeViewId}
@@ -303,14 +316,15 @@ export function SkillsApp({
             setPaletteOpen(false);
           }}
           onClose={() => setPaletteOpen(false)}
-          onUpload={() => setUploadOpen(true)}
+          onUpload={openUpload}
         />
       )}
       {uploadOpen && (
         <UploadDrawer
-          onClose={() => setUploadOpen(false)}
+          teams={teams}
+          onClose={closeUpload}
           onUploaded={() => {
-            setUploadOpen(false);
+            closeUpload();
             router.refresh();
           }}
         />

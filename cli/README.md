@@ -1,6 +1,6 @@
 # `companion` CLI
 
-Upload, download, and keep your `SKILL.md` packages up to date against a Supabase-backed registry.
+Upload, download, and keep your `SKILL.md` packages up to date against a Companion API registry.
 TypeScript/Node; shares the exact validation + packaging code (`@companion/skills`) with the web portal.
 
 ## Install / run
@@ -14,20 +14,20 @@ node cli/dist/index.js --help          # or: pnpm --filter @companion/cli dev --
 ## Auth
 
 ```bash
-companion login --url <SUPABASE_URL> --anon-key <ANON_KEY> --email you@example.com
+companion login --url http://127.0.0.1:3001 --email you@example.com
 # password is prompted (or pass --password). The session is stored in ~/.companion (mode 600).
 companion whoami
 companion logout
 ```
 
 Config + session live in `~/.companion/`. `--profile <name>` keeps multiple instances/orgs separate.
-The CLI holds only your user session and the public anon key — never the service-role key.
+The CLI holds only your user session cookie and API URL. It never receives Postgres, MinIO, or email provider credentials.
 
 ## Commands
 
 | Command | What it does |
 |---|---|
-| `skills list [--scope s] [--mine]` | List registry skills you can see (RLS-filtered) |
+| `skills list [--scope s] [--mine]` | List registry skills you can see |
 | `skills info <name>` | Show a skill's metadata |
 | `skills versions <name>` | Immutable version history |
 | `skills validate <dir>` | Validate a local package — offline, no network |

@@ -1,0 +1,35 @@
+{
+  "name": "@companion/api",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsup",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@better-auth/drizzle-adapter": "^1.6.4",
+    "@companion/auth": "workspace:*",
+    "@companion/contracts": "workspace:*",
+    "@companion/core": "workspace:*",
+    "@companion/db": "workspace:*",
+    "@companion/email": "workspace:*",
+    "@companion/skills": "workspace:*",
+    "@companion/storage": "workspace:*",
+    "@hono/node-server": "^1.18.2",
+    "@trpc/server": "^10.45.2",
+    "better-auth": "^1.6.4",
+    "hono": "^4.10.3",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "tsup": "^8.3.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

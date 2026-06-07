@@ -39,7 +39,7 @@ Canonical terms — **do not invent synonyms**:
 
 ```
 apps/
-  web/        # Next.js App Router — UI, tRPC client, Auth.js
+  web/        # Next.js App Router — UI, tRPC/API client
   api/        # tRPC routers + REST/OpenAPI gateway (service layer entrypoints)
   worker/     # reconcile loop + job runner (no HTTP surface)
 packages/
@@ -50,7 +50,7 @@ packages/
   granite/    # vault provisioning + mount/share
   skills/     # SKILL.md parse / validate / version / package
   contracts/  # shared Zod schemas + tRPC types (consumed by web, api, worker, cli)
-  auth/       # Auth.js config + RBAC policy engine
+  auth/       # Better Auth config
 cli/          # `companion` CLI — talks REST/OpenAPI
 deploy/       # docker-compose.yaml (self-host) + helm/ chart
 docs/         # vision / product / design / PRD
@@ -66,8 +66,10 @@ docs/         # vision / product / design / PRD
 ## Conventions & invariants
 
 - **Stack:** TypeScript everywhere, pnpm workspaces + Turborepo, **Drizzle ORM** (not Prisma),
-  **tRPC** internally with a thin REST/OpenAPI gateway for the CLI and integrations, Auth.js for auth,
-  BullMQ on Redis for jobs, S3-compatible object storage (MinIO in compose).
+  **tRPC** internally with a thin REST/OpenAPI gateway for the CLI and integrations, **Better Auth**
+  for auth, S3-compatible object storage (MinIO in compose), and Resend for production email.
+  Redis/BullMQ are intentionally excluded; Temporal is the future workflow engine for long-running
+  deployments, reconcile loops, retries, and schedules.
 - **`packages/core` and `packages/providers` must not depend on Next.js** — the worker and CLI import
   them directly.
 - **One source of truth for types:** entities live in `packages/db`; shared contracts in
@@ -93,13 +95,18 @@ docs/         # vision / product / design / PRD
 ## Development workflow (planned)
 
 ```bash
-docker compose up           # postgres + redis + minio + web + worker
+pnpm compose:up             # postgres + minio + mailpit for manual local dev
 pnpm db:migrate             # apply Drizzle migrations
 pnpm db:seed                # seed an org/team/user for local dev
-pnpm dev                    # run web + worker in watch mode
+pnpm dev                    # run API + web in watch mode
 ```
 
-(Exact scripts land with the scaffold; update this section when they do.)
+For Conductor, use the checked-in `.conductor/settings.toml`: setup runs `corepack enable && pnpm install`,
+run executes `bash scripts/conductor-workspace.sh run`, and archive executes
+`bash scripts/conductor-workspace.sh archive`. Each workspace gets its own Docker Compose project,
+Postgres/MinIO volumes, Better Auth cookie prefix, and ports derived from `CONDUCTOR_PORT`:
+web `+0`, API `+1`, Postgres `+2`, MinIO API `+3`, MinIO console `+4`, Mailpit SMTP `+5`, Mailpit UI `+6`.
+Archive intentionally deletes that workspace's local Compose volumes.
 
 ## Tests & quality gates
 
@@ -127,4 +134,4 @@ pnpm dev                    # run web + worker in watch mode
   mobile viewport, and browser errors.
 - Match the surrounding code's style; keep `packages/core`/`providers` framework-free.
 - Prefer extending existing contracts in `packages/contracts` over introducing parallel ones.
-- PR titles should use Commitizen style, for example `feat(conductor): add isolated supabase workflows`.
+- PR titles should use Commitizen style, for example `feat(conductor): add isolated local workflows`.

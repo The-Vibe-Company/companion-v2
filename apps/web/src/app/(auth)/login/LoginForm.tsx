@@ -1,11 +1,9 @@
 "use client";
 
-import { useMemo, useState } from "react";
-import { getBrowserSupabase } from "@/lib/supabase/client";
+import { useState } from "react";
 import { Button } from "@/components/cds";
 
-export function LoginForm() {
-  const supabase = useMemo(() => getBrowserSupabase(), []);
+export function LoginForm({ next = "/skills" }: { next?: string }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [mode, setMode] = useState<"signin" | "signup">("signin");
@@ -16,16 +14,27 @@ export function LoginForm() {
     e.preventDefault();
     setBusy(true);
     setError(null);
-    const { error } =
-      mode === "signin"
-        ? await supabase.auth.signInWithPassword({ email, password })
-        : await supabase.auth.signUp({ email, password });
-    setBusy(false);
-    if (error) {
-      setError(error.message);
-      return;
+    try {
+      const res = await fetch(mode === "signin" ? "/auth/sign-in/email" : "/auth/sign-up/email", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          email,
+          password,
+          name: email.split("@")[0] ?? email,
+        }),
+      });
+      if (!res.ok) {
+        const json = (await res.json().catch(() => ({}))) as { message?: string; error?: { message?: string } };
+        setError(json.error?.message ?? json.message ?? "Authentication failed");
+        return;
+      }
+      window.location.replace(next);
+    } catch {
+      setError("Could not reach the authentication server");
+    } finally {
+      setBusy(false);
     }
-    window.location.replace("/skills");
   }
 
   return (
@@ -73,11 +82,11 @@ export function LoginForm() {
               autoComplete={mode === "signin" ? "current-password" : "new-password"}
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              minLength={6}
+              minLength={8}
               required
             />
           </div>
-          {error ? <div className="autherr">{error}</div> : null}
+          {error ? <div className="autherr" role="alert">{error}</div> : null}
           <Button type="submit" variant="primary" disabled={busy}>
             {busy ? "Working..." : mode === "signin" ? "Sign in" : "Create account"}
           </Button>

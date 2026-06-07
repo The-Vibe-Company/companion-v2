@@ -52,7 +52,7 @@ one person. There is no open, self-hostable answer for a **team**.
 
 | Area | Included |
 |---|---|
-| **Install** | Single `docker compose up` bundle: Postgres, Redis, object storage (MinIO), web portal, reconcile worker. First user becomes Org Owner. |
+| **Install** | Single `docker compose up` bundle: Postgres, object storage (MinIO), Mailpit for local email, web portal, and API. First user becomes Org Owner. Temporal is prepared but deferred. |
 | **Identity & access** | Organization → Team → User; email invitations; RBAC roles (Org Owner/Admin/Member/Guest, Team Admin/Member); visibility scopes (user/team/org) on every resource; "deploy **for** user/team/org" semantics. |
 | **Providers** | **Local Docker** provider behind the pluggable interface; **Fly.io Machines** as fast-follow. (Kubernetes & Modal deferred to V1.) |
 | **Pillar 1 — Agents** | Deploy ≥1 Hermès agent template; choose model via OpenRouter; attach skills; attach a Granite vault; chat surface. |

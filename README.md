@@ -52,9 +52,9 @@ Every agent, container, and skill carries a **visibility scope** — `private` (
 
 ## Status
 
-> 🚧 **Early.** The **Skills Hub (Pillar 3)** is implemented end-to-end — a Supabase-backed registry
-> (Postgres + RLS, Auth, Storage), a Next.js portal, and the `companion` CLI to upload, download, and
-> keep skills up to date. Agents and the Container Catalog are stubbed. See
+> 🚧 **Early.** The **Skills Hub (Pillar 3)** is implemented as a greenfield self-host slice:
+> Postgres + Drizzle, Better Auth, MinIO/S3 storage, a Hono API, a Next.js portal, and the
+> `companion` CLI to upload, download, and keep skills up to date. Agents and the Container Catalog are stubbed. See
 > [Architecture](docs/design.md) for what exists and [PRD](docs/PRD.md) for the roadmap.
 
 ## Quickstart — Skills Hub (local)
@@ -63,25 +63,46 @@ Every agent, container, and skill carries a **visibility scope** — `private` (
 pnpm install
 pnpm test                                   # shared packages: validation + authz matrix
 
-# 1) Backend: Supabase (Postgres + Auth + Storage). Needs Docker.
-supabase start                              # prints API URL + anon key + service_role key
-supabase db reset                           # applies migrations/ and seeds a sample registry
+# 1) Local infra: Postgres + MinIO + Mailpit. Needs Docker.
+cp .env.example .env
+pnpm compose:up
+pnpm db:migrate
+pnpm db:seed
 
-# 2) Web portal
-cp .env.example apps/web/.env.local         # fill in the URL + keys printed above
-pnpm --filter @companion/web dev            # → http://localhost:3000 (first sign-up = Org Owner)
+# 2) API + web portal
+pnpm dev                                    # API :3001, web :3000
 
 # 3) CLI
 pnpm --filter @companion/cli build
-node cli/dist/index.js login --url <API_URL> --anon-key <ANON_KEY> --email you@example.com
+node cli/dist/index.js login --url http://127.0.0.1:3001 --signup --email you@example.com
 node cli/dist/index.js skills push examples/skills/incident-summary --scope team --team platform
 node cli/dist/index.js skills list
 node cli/dist/index.js skills pull pdf-extract
 node cli/dist/index.js skills status        # diff local copies vs the registry
 ```
 
-`supabase/README.md` covers the backend; `cli/README.md` has the full command + exit-code reference.
-The eventual self-host target is a single `docker compose up` bundle (see the [PRD](docs/PRD.md)).
+`cli/README.md` has the full command + exit-code reference. The self-host target is a single
+Docker Compose bundle plus the API, web, worker, and provider services (see the [PRD](docs/PRD.md)).
+
+### Conductor workspaces
+
+Conductor runs each workspace as its own local stack. The Run button executes
+`bash scripts/conductor-workspace.sh run`, derives all ports from `CONDUCTOR_PORT`, and uses a
+workspace-specific Docker Compose project name so Postgres and MinIO volumes do not leak between
+workspaces. The allocated ports are:
+
+| Service | Port |
+|---|---|
+| Web | `CONDUCTOR_PORT` |
+| API | `CONDUCTOR_PORT + 1` |
+| Postgres | `CONDUCTOR_PORT + 2` |
+| MinIO API | `CONDUCTOR_PORT + 3` |
+| MinIO console | `CONDUCTOR_PORT + 4` |
+| Mailpit SMTP | `CONDUCTOR_PORT + 5` |
+| Mailpit UI | `CONDUCTOR_PORT + 6` |
+
+Archiving a workspace runs `bash scripts/conductor-workspace.sh archive`, which removes that
+workspace's Compose project and volumes.
 
 ## How it relates to Companion v1
 
