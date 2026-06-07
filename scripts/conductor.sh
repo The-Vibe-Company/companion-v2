@@ -171,8 +171,148 @@ supabase_project_id() {
   project_id
 }
 
+supabase_container_project_id() {
+  local name="$1"
+
+  case "$name" in
+    supabase_analytics_*) printf '%s' "${name#supabase_analytics_}" ;;
+    supabase_edge_runtime_*) printf '%s' "${name#supabase_edge_runtime_}" ;;
+    supabase_pg_meta_*) printf '%s' "${name#supabase_pg_meta_}" ;;
+    supabase_realtime_*) printf '%s' "${name#supabase_realtime_}" ;;
+    supabase_inbucket_*) printf '%s' "${name#supabase_inbucket_}" ;;
+    supabase_storage_*) printf '%s' "${name#supabase_storage_}" ;;
+    supabase_studio_*) printf '%s' "${name#supabase_studio_}" ;;
+    supabase_vector_*) printf '%s' "${name#supabase_vector_}" ;;
+    supabase_auth_*) printf '%s' "${name#supabase_auth_}" ;;
+    supabase_kong_*) printf '%s' "${name#supabase_kong_}" ;;
+    supabase_rest_*) printf '%s' "${name#supabase_rest_}" ;;
+    supabase_db_*) printf '%s' "${name#supabase_db_}" ;;
+    *) return 1 ;;
+  esac
+}
+
+docker_port_match() {
+  local ports="$1"
+  local port="$2"
+
+  printf '%s' "$ports" | grep -Eq "(^|[ ,])([^ ]+:)?${port}->"
+}
+
+port_conflict_message() {
+  local label="$1"
+  local port="$2"
+  local current_project="$3"
+  local name ports project lsof_owner
+
+  while IFS=$'\t' read -r name ports; do
+    if ! docker_port_match "$ports" "$port"; then
+      continue
+    fi
+
+    if project="$(supabase_container_project_id "$name")"; then
+      if [ "$project" = "$current_project" ]; then
+        return 1
+      fi
+
+      printf '%s port %s is already used by Supabase project %s (%s)\n' "$label" "$port" "$project" "$name"
+      return 0
+    fi
+
+    printf '%s port %s is already used by Docker container %s\n' "$label" "$port" "$name"
+    return 0
+  done < <(docker ps --format '{{.Names}}\t{{.Ports}}')
+
+  lsof_owner="$(lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | awk 'NR == 2 { print $1 " pid " $2 }')"
+  if [ -n "$lsof_owner" ]; then
+    printf '%s port %s is already used by %s\n' "$label" "$port" "$lsof_owner"
+    return 0
+  fi
+
+  return 1
+}
+
+blocking_supabase_projects() {
+  sed -nE 's/.*Supabase project ([^ ]+).*/\1/p' | sort -u
+}
+
+ensure_conductor_ports_available() {
+  local id conflicts entry label message port projects
+  id="$(supabase_project_id)"
+  conflicts=""
+
+  for entry in \
+    "api:${API_PORT}" \
+    "db:${DB_PORT}" \
+    "shadow db:${SHADOW_DB_PORT}" \
+    "studio:${STUDIO_PORT}" \
+    "inbucket:${INBUCKET_PORT}" \
+    "edge inspector:${EDGE_INSPECTOR_PORT}" \
+    "analytics:${ANALYTICS_PORT}"; do
+    label="${entry%:*}"
+    port="${entry##*:}"
+    if message="$(port_conflict_message "$label" "$port" "$id")"; then
+      conflicts="${conflicts}${message}"$'\n'
+    fi
+  done
+
+  if [ -z "$conflicts" ]; then
+    return 0
+  fi
+
+  printf '[conductor] Cannot start isolated Supabase project %s because Conductor ports are already in use:\n' "$id" >&2
+  printf '%s' "$conflicts" | sed 's/^/[conductor] - /' >&2
+
+  projects="$(printf '%s' "$conflicts" | blocking_supabase_projects)"
+  if [ -n "$projects" ]; then
+    printf '[conductor] Stop the blocking Supabase project(s), then run setup again:\n' >&2
+    while IFS= read -r project; do
+      printf '[conductor]   supabase stop --project-id %s --no-backup\n' "$project" >&2
+    done <<<"$projects"
+  else
+    printf '[conductor] Free the listed port(s), then run setup again.\n' >&2
+  fi
+
+  exit 1
+}
+
+ensure_web_port_available() {
+  local message
+
+  if message="$(port_conflict_message "web" "$WEB_PORT" "$(supabase_project_id)")"; then
+    printf '[conductor] Cannot start web server because the Conductor web port is already in use:\n' >&2
+    printf '[conductor] - %s\n' "$message" >&2
+    printf '[conductor] Stop the process using port %s, then run again.\n' "$WEB_PORT" >&2
+    exit 1
+  fi
+}
+
+ensure_supabase_running() {
+  local id api_url status
+  id="$(supabase_project_id)"
+
+  if ! docker ps --format '{{.Names}}' | grep -Eq "^supabase_.*_${id}$"; then
+    printf '[conductor] Supabase project %s is not running for this workspace.\n' "$id" >&2
+    printf '[conductor] Run setup first for this workspace, then run again.\n' >&2
+    exit 1
+  fi
+
+  if ! status="$(status_json 2>/dev/null)"; then
+    printf '[conductor] Supabase project %s is running, but status is not readable.\n' "$id" >&2
+    printf '[conductor] Run setup first for this workspace, then run again.\n' >&2
+    exit 1
+  fi
+
+  api_url="$(printf '%s' "$status" | json_value API_URL)"
+  if [ -z "$api_url" ]; then
+    printf '[conductor] Supabase project %s did not report an API URL.\n' "$id" >&2
+    printf '[conductor] Run setup first for this workspace, then run again.\n' >&2
+    exit 1
+  fi
+}
+
 start_supabase() {
   prepare_supabase_workdir
+  ensure_conductor_ports_available
   log "Using isolated Supabase project $(supabase_project_id)"
   log "Starting isolated Supabase stack on ports ${API_PORT}-${ANALYTICS_PORT}"
   supabase start --workdir "$SUPABASE_WORKDIR"
@@ -327,14 +467,16 @@ setup() {
   enable_corepack
   install_dependencies
   start_supabase
-  reset_supabase_db
   write_env_files
 }
 
 run() {
   ensure_tooling
   enable_corepack
-  start_supabase
+  prepare_supabase_workdir
+  ensure_supabase_running
+  ensure_web_port_available
+  reset_supabase_db
   write_env_files
   run_web
 }
