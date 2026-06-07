@@ -13,8 +13,14 @@ describe("semver", () => {
     expect(compareSemver("1.0.0", "1.0.1")).toBe(-1);
     expect(compareSemver("2.0.0", "1.9.9")).toBe(1);
     expect(compareSemver("1.0.0", "1.0.0")).toBe(0);
-    expect(compareSemver("1.0.0-rc.1", "1.0.0")).toBe(-1);
+    expect(compareSemver("1.0.0-rc.1", "1.0.0")).toBe(-1); // prerelease < release
     expect(gtSemver("1.4.0", "1.3.9")).toBe(true);
+  });
+
+  it("accepts and ignores build metadata", () => {
+    expect(isValidSemver("1.2.3+build.1")).toBe(true);
+    expect(compareSemver("1.2.3+build.1", "1.2.3")).toBe(0); // build metadata ignored
+    expect(compareSemver("1.2.3+a", "1.2.4")).toBe(-1);
   });
 
   it("bumps", () => {

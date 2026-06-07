@@ -99,6 +99,14 @@ describe.skipIf(!reachable)("team RLS visibility (live supabase)", () => {
     const sb = await signIn("admin@tvc.dev", "adminadmin");
     expect(await teamScopedSkills(sb)).toEqual(PLATFORM_TEAM_SKILLS);
   });
+
+  it("cannot star a skill from a team you are not on (SECURITY DEFINER resolver respects RLS)", async () => {
+    // priya is on Data, granite-recall is a Platform team skill she cannot see.
+    const sb = await signIn("priya@acme.test", "password");
+    const { error } = await sb.rpc("toggle_star", { p_slug: "granite-recall" });
+    expect(error).toBeTruthy();
+    expect(error?.message ?? "").toMatch(/not found/i);
+  });
 });
 
 describe.skipIf(reachable)("team RLS visibility (skipped — no local supabase)", () => {

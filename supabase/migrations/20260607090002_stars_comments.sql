@@ -86,11 +86,18 @@ left join skill_versions cv on cv.id = s.current_version_id;
 grant select on skill_list_v to authenticated;
 
 -- --- RPCs -------------------------------------------------------------------
--- Resolve a skill by slug, preferring the caller's own org.
+-- Resolve a skill by slug to one the caller can SEE. SECURITY DEFINER bypasses RLS, so the
+-- visibility gate is replicated here explicitly (public OR own OR member of its team) — the
+-- star/comment RPCs must not act on skills the caller cannot see.
 create or replace function app_resolve_skill(p_slug text)
   returns skills language sql stable security definer set search_path = public as $$
   select * from skills
   where slug = p_slug
+    and (
+      scope = 'public'
+      or owner_id = auth.uid()
+      or (scope = 'team' and app_member_of_team(team_id))
+    )
   order by case when org_id = (select org_id from memberships where user_id = auth.uid() limit 1) then 0 else 1 end
   limit 1;
 $$;

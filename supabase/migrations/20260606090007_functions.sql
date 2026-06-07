@@ -1,16 +1,22 @@
 -- Write path: the atomic, immutable publish RPC + attach RPC + immutability/audit
 -- triggers + the auth bootstrap (first user becomes Org Owner).
 
--- Coarse semver key for monotonicity checks (major.minor.patch; prerelease ignored).
+-- Comparable semver key for monotonicity checks. Strips build metadata (`+...`) before the
+-- int cast, and adds a 4th element so a release outranks a prerelease at the same core
+-- (`1.0.0` > `1.0.0-beta`), preventing a prerelease from downgrading a stable current version.
+-- `core` is the version with build + prerelease removed.
 create or replace function app_semver_key(v text)
   returns int[] language sql immutable as $$
+  with parts as (select split_part(v, '+', 1) as no_build),
+       core as (select split_part(no_build, '-', 1) as c, (no_build ~ '-') as is_pre from parts)
   select case
-    when v ~ '^[0-9]+\.[0-9]+\.[0-9]+' then array[
-      split_part(split_part(v, '-', 1), '.', 1)::int,
-      split_part(split_part(v, '-', 1), '.', 2)::int,
-      split_part(split_part(v, '-', 1), '.', 3)::int
+    when (select c from core) ~ '^[0-9]+\.[0-9]+\.[0-9]+$' then array[
+      split_part((select c from core), '.', 1)::int,
+      split_part((select c from core), '.', 2)::int,
+      split_part((select c from core), '.', 3)::int,
+      case when (select is_pre from core) then 0 else 1 end
     ]
-    else array[-1, -1, -1]
+    else array[-1, -1, -1, -1]
   end;
 $$;
 
@@ -94,7 +100,7 @@ begin
   end if;
 
   if p_checksum !~ '^sha256:[0-9a-f]{64}$' then raise exception 'invalid checksum format' using errcode = '22023'; end if;
-  if app_semver_key(p_version) = array[-1, -1, -1] then raise exception 'invalid version: %', p_version using errcode = '22023'; end if;
+  if app_semver_key(p_version) = array[-1, -1, -1, -1] then raise exception 'invalid version: %', p_version using errcode = '22023'; end if;
 
   select * into v_skill from skills where org_id = v_org and slug = p_slug;
   if found then

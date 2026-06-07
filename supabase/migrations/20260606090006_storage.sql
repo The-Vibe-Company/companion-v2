@@ -5,10 +5,16 @@ insert into storage.buckets (id, name, public)
 values ('skill-archives', 'skill-archives', false)
 on conflict (id) do nothing;
 
--- READ: org members may read their own tenant's prefix.
+-- Backs the read policy's storage_path -> skill_version lookup.
+create index if not exists skill_versions_storage_path_idx on public.skill_versions (storage_path);
+
+-- READ: tie object readability to SKILL visibility, not just org membership. An object is
+-- readable iff its `skill_versions.storage_path` row is visible to the caller (skill_versions
+-- RLS mirrors the skills visibility gate), so a same-org user cannot guess a private/team
+-- archive path and bypass RLS.
 create policy "skill archives read" on storage.objects for select to authenticated using (
   bucket_id = 'skill-archives'
-  and app_member_of_org(((storage.foldername(name))[1])::uuid)
+  and exists (select 1 from public.skill_versions sv where sv.storage_path = name)
 );
 
 -- WRITE: org members may upload into their tenant prefix. (Capability nuance -- who may
