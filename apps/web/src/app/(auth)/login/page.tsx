@@ -4,20 +4,15 @@ import { serverApiFetch } from "@/lib/apiServer";
 
 function safeNext(value: string | string[] | undefined): string {
   const next = typeof value === "string" ? value : "";
-  const normalized = next.toLowerCase();
-  if (
-    !next.startsWith("/") ||
-    next.startsWith("//") ||
-    next.includes("\\") ||
-    normalized.includes("%5c") ||
-    normalized.includes("%2f")
-  ) {
+  if (!next.startsWith("/") || next.startsWith("//") || next.includes("\\")) {
     return "/skills";
   }
 
   try {
     const parsed = new URL(next, "http://companion.local");
     if (parsed.origin !== "http://companion.local") return "/skills";
+    const pathname = parsed.pathname.toLowerCase();
+    if (pathname.startsWith("/%2f") || pathname.startsWith("/%5c")) return "/skills";
     return `${parsed.pathname}${parsed.search}${parsed.hash}`;
   } catch {
     return "/skills";
