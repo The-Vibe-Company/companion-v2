@@ -21,7 +21,13 @@ function toOrgVM(s: OrgSummary): OrgVM {
 export async function loadOrgContext(
   supabase: ServerSupabase,
 ): Promise<{ orgs: OrgVM[]; current: OrgVM | null }> {
-  const { data } = await supabase.rpc("my_orgs");
+  const { data, error } = await supabase.rpc("my_orgs");
+  if (error) {
+    // Surface the failure instead of silently returning "no orgs" (which would wrongly send
+    // an existing member to first-run onboarding and risk a duplicate workspace).
+    console.error("[loadOrgContext] my_orgs failed:", error.message);
+    throw new Error(`Failed to load workspaces: ${error.message}`);
+  }
   const orgs = ((data ?? []) as OrgSummary[]).map(toOrgVM);
   if (orgs.length === 0) return { orgs, current: null };
   const wanted = (await cookies()).get(CURRENT_ORG_COOKIE)?.value ?? null;

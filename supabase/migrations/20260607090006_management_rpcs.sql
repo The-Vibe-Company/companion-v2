@@ -114,7 +114,7 @@ create or replace function revoke_invite(p_invite uuid)
 declare v_inv invitations%rowtype;
 begin
   if auth.uid() is null then raise exception 'not authenticated' using errcode = '28000'; end if;
-  select * into v_inv from invitations where id = p_invite;
+  select * into v_inv from invitations where id = p_invite for update;  -- lock vs concurrent accept
   if not found then raise exception 'invite not found' using errcode = '42704'; end if;
   if not app_is_org_admin(v_inv.org_id) then raise exception 'insufficient role' using errcode = '42501'; end if;
   if v_inv.status <> 'pending' then raise exception 'invite is not pending' using errcode = '22023'; end if;
@@ -136,7 +136,8 @@ declare
   v_mem   memberships%rowtype;
 begin
   if v_uid is null then raise exception 'not authenticated' using errcode = '28000'; end if;
-  select * into v_inv from invitations where token = p_token;
+  -- Lock the invite row so a concurrent revoke_invite can't be silently overwritten (TOCTOU).
+  select * into v_inv from invitations where token = p_token for update;
   if not found then raise exception 'invalid invite' using errcode = '42704'; end if;
   if v_inv.status <> 'pending' then raise exception 'invite is no longer valid' using errcode = '22023'; end if;
   if v_inv.expires_at <= now() then

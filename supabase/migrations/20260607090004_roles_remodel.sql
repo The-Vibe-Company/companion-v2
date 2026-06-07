@@ -126,7 +126,9 @@ begin
       raise exception 'not a member of team: %', p_team_slug using errcode = '42501';
     end if;
   elsif p_scope = 'org' then
-    if not v_admin then raise exception 'only org admins can publish at org scope' using errcode = '42501'; end if;
+    -- The org-wide tier was removed; scope is private/team/public. Reject the legacy value
+    -- (a direct RPC caller could still pass it; the app/contracts never do).
+    raise exception 'org scope is no longer supported' using errcode = '22023';
   end if;
 
   if p_checksum !~ '^sha256:[0-9a-f]{64}$' then raise exception 'invalid checksum format' using errcode = '22023'; end if;
@@ -215,7 +217,7 @@ begin
     if not (v_admin or app_member_of_team(v_team)) then raise exception 'not a member of that team' using errcode = '42501'; end if;
   else
     v_team := null;
-    if p_scope = 'org' and not v_admin then raise exception 'only org admins can set org scope' using errcode = '42501'; end if;
+    if p_scope = 'org' then raise exception 'org scope is no longer supported' using errcode = '22023'; end if;
   end if;
 
   update skills set scope = p_scope, team_id = v_team, updated_at = now() where id = v_skill.id returning * into v_skill;

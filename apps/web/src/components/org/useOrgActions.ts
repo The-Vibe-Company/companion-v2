@@ -13,6 +13,7 @@ export function useOrgActions() {
   const [error, setError] = useState<string | null>(null);
 
   const switchOrg = async (id: string) => {
+    setError(null);
     setBusy(true);
     try {
       await setCurrentOrg(id);
@@ -25,6 +26,7 @@ export function useOrgActions() {
   };
 
   const createOrg = async (name: string, kind: "personal" | "team") => {
+    setError(null);
     setBusy(true);
     try {
       const { id } = await createOrgRpc(name, kind);
@@ -43,6 +45,7 @@ export function useOrgActions() {
     const token = codeOrLink.includes("/join/")
       ? (codeOrLink.split("/join/").pop() ?? "").trim()
       : codeOrLink.trim();
+    setError(null);
     setBusy(true);
     try {
       const { orgId } = await acceptInvite(token);

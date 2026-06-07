@@ -24,10 +24,10 @@ create index invitations_token_idx on invitations (token);
 
 alter table invitations enable row level security;
 
--- Org admins see their org's invites; an invitee can see a pending invite addressed to them.
+-- Org admins see their org's invites; an invitee can see a PENDING invite addressed to them.
 create policy invitations_select on invitations for select using (
   app_is_org_admin(org_id)
-  or email = (select email from profiles where id = auth.uid())
+  or (status = 'pending' and email = (select email from profiles where id = auth.uid()))
 );
 -- No insert/update/delete policies: all writes go through SECURITY DEFINER RPCs.
 

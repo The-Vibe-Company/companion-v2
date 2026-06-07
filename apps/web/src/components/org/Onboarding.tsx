@@ -76,7 +76,7 @@ function CreateOrgFlow({
   const [name, setName] = useState("");
   const [kind, setKind] = useState<"personal" | "team">("personal");
   const valid = name.trim().length >= 2;
-  const submit = () => { if (valid) onCreate(name.trim(), kind); };
+  const submit = () => { if (valid && !busy) onCreate(name.trim(), kind); };
   return (
     <Dialog
       icon="plus"
@@ -136,7 +136,7 @@ function JoinOrgFlow({
 }) {
   const [code, setCode] = useState("");
   const valid = code.trim().length >= 4;
-  const submit = () => { if (valid) onJoin(code.trim()); };
+  const submit = () => { if (valid && !busy) onJoin(code.trim()); };
   return (
     <Dialog
       icon="log-in"

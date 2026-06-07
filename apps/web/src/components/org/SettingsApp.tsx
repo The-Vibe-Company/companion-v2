@@ -53,16 +53,17 @@ export function SettingsApp({
 
   const setErr = actions.setError;
 
-  // Optimistic mutate: apply locally, call the RPC, revert + surface error on failure.
+  // Optimistic mutate: apply locally, call the RPC. On failure, resync from the server
+  // (router.refresh) rather than restoring a captured snapshot — a stale snapshot could
+  // clobber a newer in-flight mutation's successful result.
   const optimistic = (next: OrgFull, call: () => Promise<unknown>, after?: () => void) => {
-    const prev = current;
     setCurrent(next);
     setBusy(true);
     call()
       .then(() => after?.())
       .catch((e: Error) => {
-        setCurrent(prev);
         setErr(e.message);
+        router.refresh();
       })
       .finally(() => setBusy(false));
   };
