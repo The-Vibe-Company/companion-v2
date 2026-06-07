@@ -60,7 +60,7 @@ workspace_hash() {
 }
 
 sanitize_workspace_name() {
-  printf '%s' "$WORKSPACE_NAME" \
+  basename "$WORKSPACE_PATH" \
     | tr '[:upper:]' '[:lower:]' \
     | sed -E 's/[^a-z0-9]+/-/g; s/-+/-/g; s/^-//; s/-$//'
 }
@@ -325,8 +325,33 @@ ensure_supabase_running() {
   fi
 }
 
+current_supabase_running() {
+  local id api_url names service status
+  id="$(supabase_project_id)"
+  names="$(docker ps --format '{{.Names}}')"
+
+  for service in analytics edge_runtime pg_meta realtime inbucket storage studio vector auth kong rest db; do
+    if ! printf '%s\n' "$names" | grep -Fxq "supabase_${service}_${id}"; then
+      return 1
+    fi
+  done
+
+  if ! status="$(status_json 2>/dev/null)"; then
+    return 1
+  fi
+
+  api_url="$(printf '%s' "$status" | json_value API_URL)"
+  [ -n "$api_url" ]
+}
+
 start_supabase() {
   prepare_supabase_workdir
+  if current_supabase_running; then
+    log "Using existing isolated Supabase project $(supabase_project_id)"
+    ensure_storage_gateway
+    return 0
+  fi
+
   ensure_conductor_ports_available
   log "Using isolated Supabase project $(supabase_project_id)"
   log "Starting isolated Supabase stack on ports ${API_PORT}-${ANALYTICS_PORT}"
