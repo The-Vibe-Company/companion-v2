@@ -230,6 +230,19 @@ port_conflict_message() {
     fi
   fi
 
+  if python3 - "$port" <<'PY'
+import socket
+import sys
+
+with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+    sock.settimeout(0.2)
+    raise SystemExit(0 if sock.connect_ex(("127.0.0.1", int(sys.argv[1]))) == 0 else 1)
+PY
+  then
+    printf '%s port %s is already accepting TCP connections\n' "$label" "$port"
+    return 0
+  fi
+
   return 1
 }
 
