@@ -1,0 +1,155 @@
+/* ============================================================================
+   Companion design system component layer (cds-). Ported 1:1 from the design
+   system's components.css; consumes only tokens. The React cds/* primitives are
+   thin wrappers over these classes so :hover/:focus states are real CSS.
+   ============================================================================ */
+
+/* --- Button --------------------------------------------------------------- */
+.cds-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  font-family: var(--font-ui);
+  font-weight: var(--weight-medium);
+  line-height: 1;
+  white-space: nowrap;
+  border: var(--border-width) solid transparent;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: background-color var(--duration-fast) var(--ease-out-quint),
+    border-color var(--duration-fast) var(--ease-out-quint),
+    color var(--duration-fast) var(--ease-out-quint);
+}
+.cds-btn--sm { height: 28px; padding: 0 var(--space-3); font-size: var(--text-xs); }
+.cds-btn--md { height: 36px; padding: 0 var(--space-4); font-size: var(--text-sm); }
+.cds-btn--primary { background: var(--color-accent); color: var(--color-accent-fg); }
+.cds-btn--primary:hover { background: var(--color-accent-hover); }
+.cds-btn--secondary { background: var(--color-surface); border-color: var(--color-line); color: var(--color-fg); }
+.cds-btn--secondary:hover { background: var(--color-surface-raised); border-color: var(--color-line-strong); }
+.cds-btn--ghost { background: transparent; color: var(--color-muted); }
+.cds-btn--ghost:hover { background: var(--color-surface-raised); color: var(--color-fg); }
+.cds-btn--danger { background: var(--color-danger); color: oklch(0.99 0.01 25); }
+.cds-btn--danger:hover { filter: brightness(0.94); }
+.cds-btn:disabled,
+.cds-btn[aria-disabled="true"] { opacity: 0.5; cursor: not-allowed; }
+.cds-btn__icon { display: inline-flex; }
+.cds-btn__icon svg { display: block; width: 16px; height: 16px; }
+
+/* --- Icon button ---------------------------------------------------------- */
+.cds-iconbtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: var(--border-width) solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-faint);
+  cursor: pointer;
+  transition: background-color var(--duration-fast) var(--ease-out-quint),
+    color var(--duration-fast) var(--ease-out-quint);
+}
+.cds-iconbtn:hover { background: var(--color-surface-raised); color: var(--color-fg); }
+.cds-iconbtn:disabled { opacity: 0.5; cursor: not-allowed; }
+.cds-iconbtn--sm { width: 24px; height: 24px; }
+.cds-iconbtn--md { width: 32px; height: 32px; }
+.cds-iconbtn svg { display: block; width: 16px; height: 16px; }
+
+/* --- Badge ---------------------------------------------------------------- */
+.cds-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+  font-family: var(--font-ui);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  line-height: 1.4;
+  padding: 3px 8px;
+  border: var(--border-width) solid;
+  border-radius: var(--radius-sm);
+}
+.cds-badge--mono { font-family: var(--font-mono); text-transform: uppercase; letter-spacing: 0.02em; }
+.cds-badge__dot { width: 6px; height: 6px; border-radius: var(--radius-full); flex: none; }
+.cds-badge--neutral { color: var(--color-muted); background: var(--color-surface-raised); border-color: var(--color-line); }
+.cds-badge--neutral .cds-badge__dot { background: var(--color-faint); }
+.cds-badge--accent { color: var(--color-accent); background: var(--color-accent-tint); border-color: var(--color-accent-line); }
+.cds-badge--accent .cds-badge__dot { background: var(--color-accent); }
+.cds-badge--ok { color: var(--color-ok); background: var(--color-ok-tint); border-color: var(--color-ok-line); }
+.cds-badge--ok .cds-badge__dot { background: var(--color-ok); }
+.cds-badge--warn { color: var(--color-warn); background: var(--color-warn-tint); border-color: var(--color-warn-line); }
+.cds-badge--warn .cds-badge__dot { background: var(--color-warn); }
+.cds-badge--danger { color: var(--color-danger); background: var(--color-danger-tint); border-color: var(--color-danger-line); }
+.cds-badge--danger .cds-badge__dot { background: var(--color-danger); }
+
+/* --- Status dot + label --------------------------------------------------- */
+.cds-status { display: inline-flex; align-items: center; gap: var(--space-2); font-size: var(--text-sm); color: var(--color-fg); }
+.cds-status__dot { width: 8px; height: 8px; border-radius: var(--radius-full); flex: none; }
+.cds-status--ok .cds-status__dot { background: var(--color-ok); }
+.cds-status--warn .cds-status__dot { background: var(--color-warn); }
+.cds-status--down .cds-status__dot { background: var(--color-danger); }
+.cds-status--unknown .cds-status__dot { background: var(--color-unknown); }
+
+/* --- Card ----------------------------------------------------------------- */
+.cds-card { background: var(--color-surface); border: var(--border-width) solid var(--color-line); border-radius: var(--radius-md); }
+.cds-card__body { padding: var(--space-4); }
+.cds-card__body--bare { padding: 0; }
+
+/* --- Field (text / select shared) ----------------------------------------- */
+.cds-field { display: flex; flex-direction: column; gap: 6px; }
+.cds-field__label { display: inline-flex; align-items: center; gap: 4px; font-size: var(--text-xs); font-weight: var(--weight-medium); color: var(--color-muted); }
+.cds-field__control {
+  height: 36px;
+  width: 100%;
+  font-family: var(--font-ui);
+  font-size: var(--text-sm);
+  color: var(--color-fg);
+  background: var(--color-surface);
+  border: var(--border-width) solid var(--color-line);
+  border-radius: var(--radius-md);
+  padding: 0 var(--space-3);
+  transition: border-color var(--duration-fast) var(--ease-out-quint), box-shadow var(--duration-fast) var(--ease-out-quint);
+}
+.cds-field__control:hover { border-color: var(--color-line-strong); }
+.cds-field__control:focus { outline: none; border-color: var(--color-accent); box-shadow: 0 0 0 3px var(--color-accent-ring); }
+select.cds-field__control {
+  appearance: none;
+  cursor: pointer;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%236b7280' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  padding-right: 30px;
+}
+.cds-field__hint { font-size: var(--text-xs); color: var(--color-faint); }
+
+/* --- Empty state ---------------------------------------------------------- */
+.cds-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3);
+  text-align: center;
+  padding: var(--space-7) var(--space-5);
+  border: var(--border-width) dashed var(--color-line-strong);
+  border-radius: var(--radius-md);
+}
+.cds-empty__icon { color: var(--color-faint); display: inline-flex; }
+.cds-empty__title { font-size: var(--text-sm); font-weight: var(--weight-medium); color: var(--color-fg); }
+.cds-empty__desc { font-size: var(--text-xs); color: var(--color-muted); max-width: 38ch; margin-top: 4px; }
+
+/* --- Spinner -------------------------------------------------------------- */
+.cds-spinner {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--color-line-strong);
+  border-top-color: var(--color-accent);
+  border-radius: var(--radius-full);
+  animation: cds-spin 0.7s linear infinite;
+}
+@keyframes cds-spin { to { transform: rotate(360deg); } }
+
+/* --- Inline link ---------------------------------------------------------- */
+.cds-link { color: var(--color-accent); text-decoration: none; text-underline-offset: 2px; }
+.cds-link:hover { text-decoration: underline; }

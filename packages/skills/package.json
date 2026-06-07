@@ -1,0 +1,24 @@
+{
+  "name": "@companion/skills",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@companion/contracts": "workspace:*",
+    "tar-stream": "^3.1.7",
+    "yaml": "^2.6.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/tar-stream": "^3.1.3",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}
