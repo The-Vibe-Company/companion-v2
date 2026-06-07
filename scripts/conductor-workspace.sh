@@ -93,6 +93,131 @@ compose() {
   docker compose -p "$COMPOSE_PROJECT_NAME" "$@"
 }
 
+stop_port_listeners() {
+  local port="$1"
+  local pids
+  local workspace_pids=""
+  local foreign_pids=""
+
+  assert_no_published_port_containers "$port"
+
+  if ! command -v lsof >/dev/null 2>&1; then
+    log "lsof is unavailable; skipping cleanup for port ${port}"
+    return
+  fi
+
+  pids="$(lsof -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null | sort -u || true)"
+  if [ -z "$pids" ]; then
+    return
+  fi
+
+  for pid in $pids; do
+    if is_workspace_pid "$pid"; then
+      workspace_pids="${workspace_pids} ${pid}"
+    else
+      foreign_pids="${foreign_pids} ${pid}"
+    fi
+  done
+
+  if [ -n "$foreign_pids" ]; then
+    log "Port ${port} is already used by non-workspace process(es):${foreign_pids}"
+    log "Stop those process(es) or choose a different CONDUCTOR_PORT."
+    exit 1
+  fi
+
+  log "Stopping existing workspace process(es) listening on port ${port}:${workspace_pids}"
+  kill $workspace_pids 2>/dev/null || true
+
+  for _ in $(seq 1 20); do
+    sleep 0.1
+    pids="$(lsof -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null | sort -u || true)"
+    if [ -z "$pids" ]; then
+      return
+    fi
+  done
+
+  workspace_pids=""
+  foreign_pids=""
+  for pid in $pids; do
+    if is_workspace_pid "$pid"; then
+      workspace_pids="${workspace_pids} ${pid}"
+    else
+      foreign_pids="${foreign_pids} ${pid}"
+    fi
+  done
+
+  if [ -n "$foreign_pids" ]; then
+    log "Port ${port} is still used by non-workspace process(es):${foreign_pids}"
+    log "Stop those process(es) or choose a different CONDUCTOR_PORT."
+    exit 1
+  fi
+
+  log "Force stopping workspace process(es) still listening on port ${port}:${workspace_pids}"
+  kill -9 $workspace_pids 2>/dev/null || true
+
+  sleep 0.1
+  pids="$(lsof -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null | sort -u || true)"
+  if [ -n "$pids" ]; then
+    log "Port ${port} is still in use after cleanup: ${pids}"
+    exit 1
+  fi
+}
+
+stop_dev_servers() {
+  stop_port_listeners "$WEB_PORT"
+  stop_port_listeners "$API_PORT"
+}
+
+is_workspace_pid() {
+  local pid="$1"
+  local cwd
+
+  cwd="$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1 || true)"
+  case "$cwd" in
+    "$WORKSPACE_ROOT"|"$WORKSPACE_ROOT"/*)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+assert_no_published_port_containers() {
+  local port="$1"
+  local names
+
+  names="$(docker ps --filter "publish=${port}" --format '{{.Names}}' | sort -u | tr '\n' ' ' || true)"
+  if [ -n "$names" ]; then
+    log "Port ${port} is already published by non-workspace Docker container(s): ${names}"
+    log "Stop those container(s) or choose a different CONDUCTOR_PORT."
+    exit 1
+  fi
+}
+
+stop_published_port_containers() {
+  local port="$1"
+  local containers
+  local names
+
+  containers="$(docker ps --filter "publish=${port}" --filter "label=com.docker.compose.project=${COMPOSE_PROJECT_NAME}" --format '{{.ID}}' | sort -u || true)"
+  if [ -n "$containers" ]; then
+    names="$(docker ps --filter "publish=${port}" --filter "label=com.docker.compose.project=${COMPOSE_PROJECT_NAME}" --format '{{.Names}}' | sort -u | tr '\n' ' ')"
+    log "Stopping workspace Docker container(s) publishing port ${port}: ${names}"
+    docker stop $containers >/dev/null
+  fi
+
+  assert_no_published_port_containers "$port"
+}
+
+stop_infra_port_containers() {
+  stop_published_port_containers "$POSTGRES_PORT"
+  stop_published_port_containers "$MINIO_PORT"
+  stop_published_port_containers "$MINIO_CONSOLE_PORT"
+  stop_published_port_containers "$MAILPIT_SMTP_PORT"
+  stop_published_port_containers "$MAILPIT_WEB_PORT"
+}
+
 print_urls() {
   log "Workspace: ${CONDUCTOR_WORKSPACE_NAME:-$(basename "$WORKSPACE_ROOT")}"
   log "Compose project: ${COMPOSE_PROJECT_NAME}"
@@ -104,7 +229,9 @@ print_urls() {
 }
 
 start_infra() {
-  log "Starting isolated Postgres, MinIO, and Mailpit"
+  log "Restarting isolated Postgres, MinIO, and Mailpit"
+  compose down --remove-orphans
+  stop_infra_port_containers
   compose up -d postgres minio mailpit minio-init
 }
 
@@ -112,10 +239,20 @@ run_dev() {
   configure_workspace_env
   ensure_tooling
   print_urls
+  stop_dev_servers
   start_infra
 
   log "Applying Drizzle migrations"
   pnpm db:migrate
+
+  log "Seeding local test user"
+  pnpm --filter @companion/api seed:test-user
+  if [ -n "${COMPANION_SEED_PASSWORD:-}" ]; then
+    log "Local test user: ${COMPANION_SEED_EMAIL:-admin@tvc.dev} / [COMPANION_SEED_PASSWORD]"
+  else
+    log "Local development credentials for a new workspace: ${COMPANION_SEED_EMAIL:-admin@tvc.dev} / adminadmin"
+  fi
+  log "Existing local users keep their current password."
 
   log "Starting API and web"
   pnpm exec concurrently -k -n api,web \

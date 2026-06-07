@@ -118,6 +118,101 @@ app.post("/v1/auth/login", (c) => authForward(c, "/auth/sign-in/email"));
 app.post("/v1/auth/signup", (c) => authForward(c, "/auth/sign-up/email"));
 app.post("/v1/auth/logout", (c) => authForward(c, "/auth/sign-out"));
 
+function safeAuthNext(value: unknown): string {
+  const next = typeof value === "string" ? value : "";
+  if (!next.startsWith("/") || next.startsWith("//") || next.includes("\\")) {
+    return "/skills";
+  }
+
+  try {
+    const parsed = new URL(next, "http://companion.local");
+    if (parsed.origin !== "http://companion.local") return "/skills";
+    const pathname = parsed.pathname.toLowerCase();
+    if (pathname.startsWith("/%2f") || pathname.startsWith("/%5c")) return "/skills";
+    return `${parsed.pathname}${parsed.search}${parsed.hash}`;
+  } catch {
+    return "/skills";
+  }
+}
+
+function authLoginUrl(next: string, mode: string, error: string): string {
+  const params = new URLSearchParams({ next, mode, error });
+  return `/login?${params.toString()}`;
+}
+
+function isAllowedAuthRedirectOrigin(value: string): boolean {
+  try {
+    const url = new URL(value);
+    const configuredWebUrl = process.env.COMPANION_WEB_URL ? new URL(process.env.COMPANION_WEB_URL).origin : null;
+    if (configuredWebUrl && url.origin === configuredWebUrl) return true;
+    if (process.env.NODE_ENV !== "production") {
+      return ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname);
+    }
+  } catch {
+    return false;
+  }
+  return false;
+}
+
+function authRedirectTarget(c: Context<{ Variables: ApiVariables }>, path: string): string {
+  const origin = c.req.header("origin");
+  if (origin && isAllowedAuthRedirectOrigin(origin)) {
+    return new URL(path, origin).toString();
+  }
+
+  const referer = c.req.header("referer");
+  if (referer && isAllowedAuthRedirectOrigin(referer)) {
+    return new URL(path, new URL(referer).origin).toString();
+  }
+
+  return path;
+}
+
+function responseSetCookies(response: Response): string[] {
+  const headers = response.headers as Headers & { getSetCookie?: () => string[] };
+  const cookies = headers.getSetCookie?.();
+  if (cookies?.length) return cookies;
+  const cookie = response.headers.get("set-cookie");
+  return cookie ? [cookie] : [];
+}
+
+app.post("/v1/auth/login-redirect", async (c) => {
+  const form = await c.req.formData();
+  const mode = form.get("mode") === "signup" ? "signup" : "signin";
+  const next = safeAuthNext(form.get("next"));
+  const email = String(form.get("email") ?? "");
+  const password = String(form.get("password") ?? "");
+  const name = String(form.get("name") || email.split("@")[0] || email);
+
+  const url = new URL(c.req.url);
+  url.pathname = mode === "signup" ? "/auth/sign-up/email" : "/auth/sign-in/email";
+  const response = await auth.handler(
+    new Request(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        origin: c.req.header("origin") ?? process.env.COMPANION_WEB_URL ?? process.env.COMPANION_API_URL ?? url.origin,
+      },
+      body: JSON.stringify({ email, password, name }),
+      redirect: "manual",
+    }),
+  );
+
+  if (!response.ok) {
+    const json = (await response.json().catch(() => ({}))) as { message?: string; error?: { message?: string } };
+    return c.redirect(
+      authRedirectTarget(c, authLoginUrl(next, mode, json.error?.message ?? json.message ?? "Authentication failed")),
+      303,
+    );
+  }
+
+  const redirect = c.redirect(authRedirectTarget(c, next), 303);
+  for (const cookie of responseSetCookies(response)) {
+    redirect.headers.append("set-cookie", cookie);
+  }
+  return redirect;
+});
+
 app.get("/v1/auth/whoami", async (c) => {
   try {
     const actor = actorFromContext(c);
