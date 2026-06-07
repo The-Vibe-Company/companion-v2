@@ -42,8 +42,12 @@ and `public` (anyone). There is no org-wide tier and no agents/attachments conce
 columns separate concerns: `owner_id` (principal it is for) · `scope`/`team_id` (visibility) ·
 `creator_id` (who acted).
 
-- **Identity:** `organizations`, `profiles` (1:1 with `auth.users`, generated `initials`),
-  `memberships` (org_role), `teams`, `team_memberships` (team_role).
+- **Identity:** `organizations` (`name, slug, kind ∈ {personal,team}, plan ∈ {free,team}`),
+  `profiles` (1:1 with `auth.users`, generated `initials`), `memberships`
+  (`org_role ∈ {owner, admin, developer}`), `teams`, `team_memberships`
+  (`team_role ∈ {admin, editor, reader}`).
+- **`invitations`** — copy-link membership invites (`org_id, email, org_role (≠owner), token,
+  status ∈ {pending,accepted,revoked,expired}, expires_at`), one active invite per `(org_id, email)`.
 - **`skills`** — mutable current-state row (`org_id, slug, owner_id, scope, team_id, creator_id,
   current_version_id, validation, …`), `unique(org_id, slug)`, index `(org_id, scope, team_id)`,
   `check ((scope='team') = (team_id is not null))`.
@@ -65,8 +69,21 @@ columns separate concerns: `owner_id` (principal it is for) · `scope`/`team_id`
   transaction): re-checks role/scope, enforces a **monotonic** semver, writes the immutable version,
   flips `current_version_id`. `toggle_star` / `add_comment` / `set_skill_scope` are the other
   SECURITY DEFINER write RPCs. Verified: duplicate version + downgrade are rejected; scope/role gates hold.
+- **Org/team/membership management = SECURITY DEFINER RPCs** (`supabase/migrations/…_management_rpcs.sql`):
+  `create_org`, `my_orgs`, `create_team` / `rename_team` / `delete_team`, `invite_member` /
+  `revoke_invite` / `accept_invite` (copy-link token, validates status/expiry/email-match),
+  `set_member_role` / `remove_member` / `leave_org`, `add_team_member` / `set_team_member_role` /
+  `remove_team_member`. Each re-derives the caller's role for the *target* org/team (never trusts a
+  param) and enforces the guards: never demote/remove the **last owner** or **last team admin**; only an
+  owner may grant/modify another owner; a team admin manages their own team. Identity tables keep
+  **SELECT-only RLS** — all writes flow through these RPCs. Mirrored as pure helpers in
+  `packages/core/authz.ts` (`canManageOrg` / `canTouchOwner` / `canManageTeam` / `isLastOwner` /
+  `isLastTeamAdmin`) for the table-driven tests.
+- **Current org:** multi-org via a `companion_org` cookie (set by `app/api/org`, read by server
+  components); the Skills Hub list + the upload/publish path target the active org (`p_org`).
 - **Bootstrap:** the first signup with no existing owner becomes Org Owner; later users join as
-  members (invitations are a fast-follow).
+  developers. Invitations are copy-link (`invite_member` mints a token; the admin shares
+  `/join/{token}`; `accept_invite` redeems it) — no email is sent.
 - **Storage:** private `skill-archives` bucket, key `{org_id}/{slug}/{version}.tar.gz`, policies gated
   on the tenant path segment; downloads via short-lived signed URLs minted server-side.
 
@@ -82,7 +99,11 @@ re-applies the guards on extraction. The web upload route and the CLI run the **
 
 Next.js App Router. Server components fetch `skill_list_v` under RLS; the dense table, scope filter,
 search, the right slide-over **detail drawer**, and the **upload drawer** are client components. Writes
-go through `app/api/skills/upload` (validate → Storage → `publish_skill_version` RPC). Tokens live in
+go through `app/api/skills/upload` (validate → Storage → `publish_skill_version` RPC). The
+**Settings** surface (`app/(app)/settings`, components in `components/org/`) renders General / Members /
+Teams with role menus, invite (copy-link) + revoke, team create + per-team member/role management, the
+sidebar **org switcher**, and the **onboarding** (create / join) flow; `/join/[token]` redeems an
+invite. Tokens live in
 `src/styles/tokens.css` (the design contract); the accent default is the prototype's **signal yellow**
 (`oklch(0.81 0.166 88)`) — the canonical cloud-blue stays in the root `DESIGN.md` (so its lint stays
 green) and is available via `[data-accent="cloud"]`.
@@ -99,5 +120,5 @@ service-role key never ships.
 
 ## Deferred
 
-Invitations/role management UI, agents + Container Catalog pillars, realtime pill, zip (vs tar.gz)
-upload, OS-keychain token storage, the canonical Drizzle/tRPC/worker stack.
+Email delivery for invites (currently copy-link only), agents + Container Catalog pillars, realtime
+pill, zip (vs tar.gz) upload, OS-keychain token storage, the canonical Drizzle/tRPC/worker stack.
