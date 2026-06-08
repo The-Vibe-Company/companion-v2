@@ -61,7 +61,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     redirect: "manual",
     headers: {
       "content-type": "application/json",
-      origin: request.nextUrl.origin,
+      origin: request.headers.get("origin") ?? process.env.COMPANION_WEB_URL ?? request.nextUrl.origin,
     },
     body: JSON.stringify({ email, password, name }),
   });
