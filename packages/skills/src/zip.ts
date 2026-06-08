@@ -74,10 +74,10 @@ export async function zipToTar(input: Buffer): Promise<Buffer> {
   return Buffer.concat(chunks);
 }
 
-/** Resolve a zip entry name under `base`, or null if it would escape. */
+/** Resolve a zip entry name under `base`, or null if it escapes or names the root itself. */
 function safeJoin(base: string, name: string): string | null {
   const norm = normalizePosix(name);
-  if (norm.violation) return null;
+  if (norm.violation || !norm.path) return null; // empty path would write to `base` itself
   const dest = resolve(base, norm.path);
   if (dest !== base && !dest.startsWith(base + sep)) return null;
   return dest;

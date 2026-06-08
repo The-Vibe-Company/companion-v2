@@ -113,6 +113,16 @@ describe("zip support", () => {
     expect(result.ok).toBe(false);
   });
 
+  it("rejects a zip entry whose name normalizes to an empty path", async () => {
+    const zip = buildZip({ "SKILL.md": SKILL_MD, ".": "x" });
+    const dir = await mkdtemp(join(tmpdir(), "zip-test-"));
+    try {
+      await expect(unzipToDir(zip, dir)).rejects.toThrow(/traversal/);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("rejects a zip exceeding the entry-count cap", async () => {
     const entries: Record<string, Uint8Array> = {};
     for (let i = 0; i < 2001; i++) entries[`f${i}.txt`] = new Uint8Array(0); // > MAX_ENTRY_COUNT (2000)

@@ -852,7 +852,7 @@ export function UploadDialog({
           .replace(/^-+|-+$/g, "") || "new-skill"
       : "new-skill";
   const canZip = !!file;
-  const canCreate = form.id.trim() && form.description.trim();
+  const canCreate = !!(form.id.trim() && form.description.trim() && form.body.trim());
 
   const finishPublish = (outcome: PublishOutcome) => {
     setResult(outcome);

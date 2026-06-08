@@ -17,12 +17,29 @@ ALTER TABLE "api_tokens" ADD CONSTRAINT "api_tokens_org_id_organizations_id_fk" 
 ALTER TABLE "api_tokens" ADD CONSTRAINT "api_tokens_user_id_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 CREATE INDEX "api_tokens_org_user_idx" ON "api_tokens" USING btree ("org_id","user_id");--> statement-breakpoint
 ALTER TABLE "api_tokens" ENABLE ROW LEVEL SECURITY;--> statement-breakpoint
+-- A personal token is visible to its owner, or to an org owner/admin (who can revoke it).
 CREATE POLICY "api_tokens_tenant_rls" ON "api_tokens"
   USING (
     "org_id" = NULLIF(current_setting('app.org_id', true), '')::uuid
-    AND "user_id" = NULLIF(current_setting('app.user_id', true), '')
+    AND (
+      "user_id" = NULLIF(current_setting('app.user_id', true), '')
+      OR EXISTS (
+        SELECT 1 FROM "memberships" m
+        WHERE m."org_id" = "api_tokens"."org_id"
+          AND m."user_id" = NULLIF(current_setting('app.user_id', true), '')
+          AND m."org_role" IN ('owner', 'admin')
+      )
+    )
   )
   WITH CHECK (
     "org_id" = NULLIF(current_setting('app.org_id', true), '')::uuid
-    AND "user_id" = NULLIF(current_setting('app.user_id', true), '')
+    AND (
+      "user_id" = NULLIF(current_setting('app.user_id', true), '')
+      OR EXISTS (
+        SELECT 1 FROM "memberships" m
+        WHERE m."org_id" = "api_tokens"."org_id"
+          AND m."user_id" = NULLIF(current_setting('app.user_id', true), '')
+          AND m."org_role" IN ('owner', 'admin')
+      )
+    )
   );
