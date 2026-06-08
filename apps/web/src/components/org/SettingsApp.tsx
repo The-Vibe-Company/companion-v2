@@ -3,7 +3,6 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import type { OrgRole, TeamRole } from "@companion/contracts";
-import type { MeVM } from "@/lib/types";
 import {
   addTeamMember as addTeamMemberRpc,
   createTeam as createTeamRpc,
@@ -17,22 +16,18 @@ import {
 import { Onboarding } from "./Onboarding";
 import { SettingsView } from "./SettingsView";
 import { useOrgActions } from "./useOrgActions";
-import type { OrgCtx, OrgFull, SeedUser, SettingsDialog, SettingsTab } from "./model";
+import type { OrgCtx, OrgFull, SettingsAppData, SettingsDialog, SettingsTab } from "./model";
 
-export interface SettingsAppData {
-  me: MeVM;
-  current: OrgFull;
-  users: Record<string, SeedUser>;
-}
-
-export function SettingsApp({
+export function SettingsController({
   data,
   initialTab,
   initialDialog,
+  onClose,
 }: {
   data: SettingsAppData;
   initialTab: SettingsTab;
   initialDialog: SettingsDialog;
+  onClose: () => void;
 }) {
   const router = useRouter();
   const actions = useOrgActions();
@@ -50,6 +45,8 @@ export function SettingsApp({
 
   const [tab, setTab] = useState<SettingsTab>(initialTab);
   const [dialog, setDialog] = useState<SettingsDialog>(initialDialog);
+  useEffect(() => setTab(initialTab), [initialTab]);
+  useEffect(() => setDialog(initialDialog), [initialDialog]);
 
   const setErr = actions.setError;
 
@@ -163,13 +160,9 @@ export function SettingsApp({
   const onTab = (t: SettingsTab) => { setTab(t); setDialog(null); pushUrl(t, null); };
   const onDialog = (d: SettingsDialog) => { setDialog(d); pushUrl(tab, d); };
 
-  const toSkills = () => router.push("/skills");
-
   return (
-    <div className="app">
-      <div className="main">
-        <SettingsView ctx={ctx} tab={tab} dialog={dialog} onTab={onTab} onDialog={onDialog} onClose={toSkills} />
-      </div>
+    <>
+      <SettingsView ctx={ctx} tab={tab} dialog={dialog} onTab={onTab} onDialog={onDialog} onClose={onClose} />
       {actions.onboarding && (
         <Onboarding
           mode={actions.onboarding}
@@ -179,6 +172,30 @@ export function SettingsApp({
           busy={actions.busy}
         />
       )}
+    </>
+  );
+}
+
+export function SettingsApp({
+  data,
+  initialTab,
+  initialDialog,
+}: {
+  data: SettingsAppData;
+  initialTab: SettingsTab;
+  initialDialog: SettingsDialog;
+}) {
+  const router = useRouter();
+  return (
+    <div className="app">
+      <div className="main">
+        <SettingsController
+          data={data}
+          initialTab={initialTab}
+          initialDialog={initialDialog}
+          onClose={() => router.push("/skills")}
+        />
+      </div>
     </div>
   );
 }

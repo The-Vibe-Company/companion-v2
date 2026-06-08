@@ -1,4 +1,5 @@
 import type { OrgRole, TeamRole } from "@companion/contracts";
+import type { MeVM } from "@/lib/types";
 
 /** Display fields for any user referenced by a membership. */
 export interface SeedUser {
@@ -40,6 +41,12 @@ export interface OrgFull {
   myRole: OrgRole;
   members: OrgMember[];
   teams: OrgTeam[];
+}
+
+export interface SettingsAppData {
+  me: MeVM;
+  current: OrgFull;
+  users: Record<string, SeedUser>;
 }
 
 export type SettingsTab = "general" | "members" | "teams";

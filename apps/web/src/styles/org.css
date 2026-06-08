@@ -198,3 +198,38 @@
 .og-toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); z-index: 90; max-width: min(440px, 92vw); padding: 10px 14px;
   border-radius: var(--radius-md); border: 1px solid var(--color-danger-line); background: var(--color-danger-tint); color: var(--color-danger);
   font-size: var(--text-sm); box-shadow: var(--shadow-lg); cursor: pointer; }
+
+/* ---- Settings drawer --------------------------------------------------- */
+.settings-drawer { position: fixed; inset: 0; z-index: 65; display: flex; justify-content: flex-end; background: oklch(0.27 0.02 265 / 0.16); }
+.settings-drawer__panel { width: min(920px, calc(100vw - var(--sidebar-w) - 24px)); height: 100vh; min-width: 0; outline: none;
+  border-left: 1px solid var(--color-line); background: var(--color-surface); box-shadow: -16px 0 36px oklch(0.27 0.02 265 / 0.12);
+  display: flex; flex-direction: column; overflow: hidden; }
+.settings-drawer__panel .og-set { height: 100%; }
+.settings-drawer--loading { pointer-events: none; }
+.skel--settings-back { width: 104px; height: 28px; }
+.skel--settings-crumb { width: 178px; height: 12px; }
+.skel--settings-nav { width: 72px; height: 11px; }
+.skel--settings-icon { width: 18px; height: 18px; border-radius: 4px; }
+.skel--settings-title { width: 120px; height: 18px; display: block; }
+.skel--settings-desc { width: min(360px, 75%); height: 12px; display: block; margin-top: 9px; }
+
+@media (prefers-reduced-motion: no-preference) {
+  .settings-drawer { animation: settingsScrimIn var(--duration-fast) var(--ease-out-quint); }
+  .settings-drawer__panel { animation: settingsPanelIn var(--duration-base) var(--ease-out-quint); }
+  @keyframes settingsScrimIn { from { background: transparent; } to { background: oklch(0.27 0.02 265 / 0.16); } }
+  @keyframes settingsPanelIn { from { transform: translateX(18px); opacity: 0.96; } to { transform: none; opacity: 1; } }
+}
+
+@media (max-width: 820px) {
+  .settings-drawer__panel { width: 100vw; border-left: none; box-shadow: none; }
+  .settings-drawer .og-set__body { grid-template-columns: 1fr; }
+  .settings-drawer .og-snav { flex-direction: row; overflow-x: auto; border-right: none; border-bottom: 1px solid var(--color-line); padding: 8px 10px; }
+  .settings-drawer .og-snav__label { display: none; }
+  .settings-drawer .og-snav__item { width: auto; flex: none; }
+  .settings-drawer .og-pane { padding: 22px 16px; }
+  .settings-drawer .og-toolbar { flex-wrap: wrap; }
+  .settings-drawer .og-mlist { overflow: visible; }
+  .settings-drawer .og-mrow { grid-template-columns: minmax(0, 1fr) auto; row-gap: 5px; padding: 10px 12px; }
+  .settings-drawer .og-mrow--head { display: none; }
+  .settings-drawer .og-mjoined { justify-self: start; }
+}
