@@ -67,7 +67,9 @@ configure_local_env() {
   local better_auth_url_explicit="${BETTER_AUTH_URL+x}"
   local s3_endpoint_explicit="${S3_ENDPOINT+x}"
 
-  load_env_file "$REPO_ROOT/.env"
+  if [ "${COMPANION_DEV_SKIP_ENV_FILE:-0}" != "1" ]; then
+    load_env_file "$REPO_ROOT/.env"
+  fi
 
   export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-companion-main}"
   export COMPOSE_BIND_HOST="${COMPOSE_BIND_HOST:-127.0.0.1}"

@@ -41,6 +41,7 @@ env_output="$(
   COMPANION_API_PORT=13001 \
   COMPANION_WEB_PORT=13000 \
   MINIO_PORT=19000 \
+  COMPANION_DEV_SKIP_ENV_FILE=1 \
   bash scripts/dev-stack.sh print-env
 )"
 
