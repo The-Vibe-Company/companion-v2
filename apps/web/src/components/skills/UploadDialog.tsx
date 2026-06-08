@@ -729,11 +729,14 @@ function CreatePanel({
             value={form.body}
             onChange={set("body")}
             spellCheck={false}
+            placeholder={
+              locked ? "Write the new SKILL.md body. This replaces the current content on publish." : undefined
+            }
           />
           <span className="up-field__hint">
-            Companion writes the standard frontmatter (<span className="inline-code">name</span>,{" "}
-            <span className="inline-code">description</span>) for you. Visibility is applied on publish,
-            never stored in the skill.
+            {locked
+              ? "This body replaces the published SKILL.md on the new version."
+              : "Companion writes the standard frontmatter for you. Visibility is applied on publish, never stored in the skill."}
           </span>
         </div>
       </div>
@@ -816,7 +819,7 @@ export function UploadDialog({
   const [file, setFile] = useState<File | null>(null);
   const [form, setForm] = useState<CreateForm>(
     isUpdate
-      ? { id: skill!.id, description: skill!.description, body: CREATE_BODY_TEMPLATE }
+      ? { id: skill!.id, description: skill!.description, body: "" }
       : { id: "", description: "", body: CREATE_BODY_TEMPLATE },
   );
   const [result, setResult] = useState<PublishOutcome | null>(null);
@@ -868,7 +871,7 @@ export function UploadDialog({
         expectSlug: isUpdate ? skill!.id : undefined,
       });
       finishPublish({
-        id: idFromZip,
+        id: res.slug || idFromZip,
         version: res.version,
         scope,
         team,
@@ -895,7 +898,7 @@ export function UploadDialog({
         team: scope === "team" ? team : null,
       });
       finishPublish({
-        id,
+        id: res.slug || id,
         version: res.version,
         scope,
         team,

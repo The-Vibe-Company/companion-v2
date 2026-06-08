@@ -1041,6 +1041,9 @@ export async function resolveApiToken(
   });
   if (!row || row.revokedAt) return null;
   if (row.expiresAt.getTime() <= Date.now()) return null;
+  // The owner must still belong to the token's org — a removed member's token stops working.
+  const role = await getOrgRole(row.orgId, row.userId, database);
+  if (!role) return null;
   const profile = await database.query.profiles.findFirst({
     where: eq(schema.profiles.id, row.userId),
   });

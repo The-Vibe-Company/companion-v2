@@ -89,7 +89,7 @@ export type PublishSkillInput = z.infer<typeof publishSkillInputSchema>;
 export const createSkillInputSchema = z.object({
   id: z.string().regex(SKILL_NAME_RE, "id must be kebab-case (lowercase letters, digits, hyphens)"),
   description: z.string().min(1, "description is required").max(1024),
-  body: z.string().default(""),
+  body: z.string().max(1024 * 1024, "body is too large").default(""),
   scope: scopeSchema.default("private"),
   team: z.string().nullable().optional(),
 });

@@ -85,13 +85,10 @@ export async function validateSkillArchive(input: Buffer): Promise<ValidationRes
   let tar: Buffer;
   try {
     tar = isZip(input) ? await zipToTar(input) : toTar(input);
-  } catch (err) {
-    const detail = `archive could not be read: ${(err as Error).message}`;
-    return {
-      ok: false,
-      checks: [{ id: "frontmatter", label: VALIDATION_CHECK_LABELS.frontmatter, status: "fail", detail }],
-      error: detail,
-    };
+  } catch {
+    // Unreadable / over-cap archive (e.g. a zip-bomb tripping the decompression caps):
+    // keep the full 5-check result shape so callers (CLI, API) render a consistent checklist.
+    return buildResult({ skillMd: null, totalBytes: input.length, fileCount: 0, violations: [], oversize: true });
   }
   let finding: ArchiveFinding;
   try {

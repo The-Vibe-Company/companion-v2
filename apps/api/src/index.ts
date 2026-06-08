@@ -111,7 +111,7 @@ async function publishCanonical(input: {
   teamSlug: string | null;
   version: string;
   note: string;
-}): Promise<{ id: string; version: string; checksum: string }> {
+}): Promise<{ id: string; slug: string; version: string; checksum: string }> {
   const { actor, orgId, canonical, fm, scope, teamSlug, version, note } = input;
   if (!isValidSemver(version)) throw new Error(`invalid semver: ${version}`);
   const key = skillArchiveKey({ orgId, slug: fm.name, version });
@@ -137,7 +137,7 @@ async function publishCanonical(input: {
     const published = await withTenantContext({ orgId, userId: actor.id }, (database) =>
       publishSkillVersion({ actor, orgId, payload, archiveKey: key, database }),
     );
-    return { ...published, checksum: canonical.checksum };
+    return { ...published, slug: fm.name, checksum: canonical.checksum };
   } catch (error) {
     await deleteSkillArchive({ key }).catch((cleanupError) => {
       console.error(`failed to delete orphaned skill archive ${key}`, cleanupError);
@@ -649,7 +649,7 @@ app.post("/v1/skills", bodyLimit({ maxSize: 32 * 1024 * 1024, onError: (c) => js
 });
 
 /** Author a SKILL.md inline ("Create in the browser") — new skill → 1.0.0, existing → patch-bump. */
-app.post("/v1/skills/create", async (c) => {
+app.post("/v1/skills/create", bodyLimit({ maxSize: 2 * 1024 * 1024, onError: (c) => jsonError(c, "request exceeds the 2 MB limit", 413) }), async (c) => {
   try {
     const actor = actorFromContext(c);
     requireScope(c, "skills:write");

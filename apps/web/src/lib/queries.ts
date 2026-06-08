@@ -6,6 +6,7 @@ import { apiFetch } from "./apiClient";
 export interface PublishResult {
   ok: boolean;
   id: string;
+  slug: string;
   version: string;
   checksum: string;
 }
