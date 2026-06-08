@@ -19,8 +19,11 @@ deployments, reconcile loops, retries, compensation, and schedules.
 
 ## Local And Conductor Runtime
 
-Manual local development can use `pnpm compose:up`, `pnpm db:migrate`, `pnpm db:seed`, and
-`pnpm dev` with the defaults from `.env.example`.
+Manual local development uses `pnpm dev` as the idempotent full-stack entrypoint. The script starts
+Postgres, MinIO, and Mailpit with the defaults from `.env.example`, applies Drizzle migrations, seeds
+the local test user, and starts only the long-running API and web processes. Local Docker ports bind
+to `COMPOSE_BIND_HOST`, which defaults to `127.0.0.1`. `pnpm dev:app` is the app-only loop when infra
+is already prepared.
 
 Conductor workspaces use `scripts/conductor-workspace.sh` instead of a shared root stack. The
 script runs from the current worktree, derives a Docker Compose project name from the workspace,

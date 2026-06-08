@@ -63,16 +63,10 @@ Every agent, container, and skill carries a **visibility scope** — `private` (
 pnpm install
 pnpm test                                   # shared packages: validation + authz matrix
 
-# 1) Local infra: Postgres + MinIO + Mailpit. Needs Docker.
-cp .env.example .env
-pnpm compose:up
-pnpm db:migrate
-pnpm db:seed
+# 1) Full local stack. Needs Docker.
+pnpm dev                                    # infra + migrations + seed + API :3001 + web :3000
 
-# 2) API + web portal
-pnpm dev                                    # API :3001, web :3000
-
-# 3) CLI
+# 2) CLI
 pnpm --filter @companion/cli build
 node cli/dist/index.js login --url http://127.0.0.1:3001 --signup --email you@example.com
 node cli/dist/index.js skills push examples/skills/incident-summary --scope team --team platform
@@ -83,6 +77,8 @@ node cli/dist/index.js skills status        # diff local copies vs the registry
 
 `cli/README.md` has the full command + exit-code reference. The self-host target is a single
 Docker Compose bundle plus the API, web, worker, and provider services (see the [PRD](docs/PRD.md)).
+For a manual split loop, `pnpm compose:up`, `pnpm db:migrate`, `pnpm db:seed`, and `pnpm dev:app`
+remain available.
 
 ### Conductor workspaces
 
