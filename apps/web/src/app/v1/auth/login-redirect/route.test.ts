@@ -76,6 +76,31 @@ describe("login redirect route", () => {
     );
   });
 
+  it("sends new signups to /onboarding regardless of next", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(null, { status: 200, headers: { "set-cookie": "session=value; Path=/; HttpOnly" } })),
+    );
+
+    const response = await POST(
+      formRequest({
+        mode: "signup",
+        next: "/skills",
+        name: "Alex Rivera",
+        email: "alex@acme.com",
+        password: "supersecret",
+      }),
+    );
+
+    expect(response.status).toBe(303);
+    expect(response.headers.get("location")).toBe("/onboarding");
+    expect(response.headers.get("set-cookie")).toBe("session=value; Path=/; HttpOnly");
+    expect(fetch).toHaveBeenCalledWith(
+      expect.stringContaining("/auth/sign-up/email"),
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
   it("falls back to /skills for unsafe next values", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 200 })));
 

@@ -69,6 +69,32 @@ Only the `sha256` `token_hash` is stored (the plaintext `cmp_pat_…` is shown o
 The row is keyed by `(org_id, user_id)` and contains `active_filters` plus `custom_views` JSONB.
 It is personal UI state, not a shared organization resource.
 
+Onboarding adds a few columns: `organizations.domain` + `organizations.domain_auto_join` (a verified
+email domain that grants membership, and whether matching signups join automatically), plus cosmetic
+`organizations.color`/`logo_url` and `teams.color`/`teams.icon`. `profiles.onboarded_at` records that a
+user has finished onboarding. A partial unique index on `lower(organizations.domain)` enforces one org
+per verified domain.
+
+## Onboarding & bootstrap
+
+New users complete a domain-driven onboarding immediately after signup (the web app routes signups to
+`/onboarding`, and `whoami.needsOnboarding` gates the app shells). The signed-in, verified email domain
+drives the flow:
+
+- A **free/consumer** domain (e.g. `gmail.com`) — classified via the maintained `free-email-domains`
+  blocklist in `packages/core/email-domains.ts` — has no inferable org, so the user creates one.
+- A **corporate** domain that matches an existing `domain_auto_join` org → the user is offered to join it
+  (the org is re-derived server-side from the verified email; the client never supplies an org id).
+- Otherwise the user creates an org (name, optional website + best-effort logo/brand color, a first team
+  with a color + emoji icon, and teammate invites).
+
+`completeOnboarding` writes the org, first team, invitations, and `onboarded_at` in one transaction;
+`joinOrgByDomain` adds the membership and stamps `onboarded_at`; `acceptInvitation` stamps it too.
+Domain claiming and auto-join are only honored for the actor's **own** corporate domain, and joining (or
+enabling auto-join) requires a verified email when `COMPANION_REQUIRE_VERIFIED_DOMAIN_JOIN` is on
+(default: production). `ensureUserBootstrap` now only upserts the `profiles` row — the legacy
+"first user owns the seeded Acme org" auto-bootstrap was removed in favor of this flow.
+
 ## Authorization
 
 The service layer in `packages/core` is the primary enforcement point. It applies:
@@ -83,7 +109,10 @@ directly to Postgres.
 ## Public API
 
 - Auth: `/auth/*` Better Auth endpoints, plus `/v1/auth/login`, `/v1/auth/logout`,
-  `/v1/auth/whoami` for CLI ergonomics.
+  `/v1/auth/whoami` for CLI ergonomics. `whoami` also returns `onboarded` / `needsOnboarding`.
+- Onboarding: `GET /v1/onboarding/context` (email-domain classification + any auto-join org, no org id),
+  `POST /v1/onboarding/join` (join the auto-join org for the verified domain),
+  `POST /v1/onboarding/create` (create org + first team + invites, finish onboarding).
 - Tokens: `POST /v1/tokens` (issue a scoped `cmp_pat_…`, plaintext returned once),
   `DELETE /v1/tokens/:id`. Session-authenticated only — a token cannot mint another.
 - Skills: `/v1/skills`, `/v1/skills/:slug`, `/v1/skills/:slug/versions`,

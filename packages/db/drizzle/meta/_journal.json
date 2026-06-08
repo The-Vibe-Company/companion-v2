@@ -50,6 +50,13 @@
       "when": 1780939530674,
       "tag": "0006_first_gambit",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1780939600000,
+      "tag": "0007_onboarding",
+      "breakpoints": true
     }
   ]
 }

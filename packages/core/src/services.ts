@@ -29,6 +29,11 @@ import {
   isLastTeamAdmin,
 } from "./authz";
 
+// Domain-driven onboarding services (create/join/context). Re-exported so callers keep importing
+// everything from `@companion/core/services`. `onboarding.ts` only imports `uniqueSlug` (a hoisted
+// function declaration) and the `ActorContext` type from here, so the cycle is load-order safe.
+export * from "./onboarding";
+
 export interface ActorContext {
   id: string;
   email: string;
@@ -70,10 +75,15 @@ export interface OrgSettingsTeam {
   }>;
 }
 
-function uniqueSlug(base: string, suffix: string): string {
+export function uniqueSlug(base: string, suffix: string): string {
   return `${slugify(base)}-${suffix.slice(0, 8).toLowerCase()}`;
 }
 
+/**
+ * Ensure the user has a `profiles` row. Membership is NOT created here: brand-new users have no
+ * org and complete the domain-driven onboarding flow (create or join) instead — see `onboarding.ts`.
+ * (The legacy "first user owns the seeded Acme org" bootstrap was removed in favor of onboarding.)
+ */
 export async function ensureUserBootstrap(actor: ActorContext, database: Db = db): Promise<void> {
   await database
     .insert(schema.profiles)
@@ -85,40 +95,6 @@ export async function ensureUserBootstrap(actor: ActorContext, database: Db = db
       handle: actor.email.split("@")[0] ?? null,
     })
     .onConflictDoNothing();
-
-  await database.transaction(async (tx) => {
-    await tx.execute(sql`select pg_advisory_xact_lock(hashtext('companion:first-owner-bootstrap'))`);
-
-    const userMembership = await tx.query.memberships.findFirst({
-      where: eq(schema.memberships.userId, actor.id),
-    });
-    if (userMembership) return;
-
-    const [membershipCountRow] = await tx.select({ value: count() }).from(schema.memberships);
-    const membershipCount = membershipCountRow?.value ?? 0;
-    if (membershipCount > 0) return;
-
-    const existingOrg = await tx.query.organizations.findFirst({
-      orderBy: asc(schema.organizations.createdAt),
-    });
-    const [org] = existingOrg
-      ? [existingOrg]
-      : await tx
-          .insert(schema.organizations)
-          .values({
-            name: "Acme",
-            slug: "acme",
-            kind: "team",
-            plan: "free",
-          })
-          .returning();
-    if (!org) throw new Error("could not create bootstrap organization");
-
-    await tx
-      .insert(schema.memberships)
-      .values({ orgId: org.id, userId: actor.id, orgRole: "owner" })
-      .onConflictDoNothing();
-  });
 }
 
 export async function listOrgs(actor: ActorContext, database: Db = db): Promise<OrgSummary[]> {
@@ -1002,6 +978,11 @@ export async function acceptInvitation(input: {
       .values({ orgId: invite.orgId, userId: input.actor.id, orgRole: invite.orgRole })
       .onConflictDoNothing();
     await tx.update(schema.invitations).set({ status: "accepted" }).where(eq(schema.invitations.id, invite.id));
+    // Accepting an invite means the user has joined an org — they skip the onboarding flow.
+    await tx
+      .update(schema.profiles)
+      .set({ onboardedAt: new Date() })
+      .where(and(eq(schema.profiles.id, input.actor.id), isNull(schema.profiles.onboardedAt)));
   });
   return { orgId: invite.orgId };
 }
