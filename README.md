@@ -80,6 +80,9 @@ Docker Compose bundle plus the API, web, worker, and provider services (see the 
 For a manual split loop, `pnpm compose:up`, `pnpm db:migrate`, `pnpm db:seed`, and `pnpm dev:app`
 remain available.
 
+In production, the API start script applies pending Drizzle migrations before the server listens.
+If migrations fail, startup fails rather than serving newer code against an older database schema.
+
 ### Conductor workspaces
 
 Conductor uses the same full-stack entrypoint as local development: `pnpm dev`. The Run button still
