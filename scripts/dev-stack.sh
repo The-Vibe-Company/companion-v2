@@ -148,27 +148,33 @@ is_repo_pid() {
   esac
 }
 
-repo_process_tree_for_pid() {
+repo_stop_target_for_pid() {
   local pid="$1"
-  local current="$pid"
-  local ppid
+  local pgid
+  local current_pgid
 
-  while [ -n "$current" ] && [ "$current" != "1" ]; do
-    if [ "$current" = "$$" ] || [ "$current" = "${PPID:-}" ]; then
-      break
-    fi
+  pgid="$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ' || true)"
+  current_pgid="$(ps -o pgid= -p "$$" 2>/dev/null | tr -d ' ' || true)"
+  if [ -n "$pgid" ] && [ "$pgid" != "$current_pgid" ] && is_dev_process_group "$pgid"; then
+    printf -- '-%s\n' "$pgid"
+  else
+    printf '%s\n' "$pid"
+  fi
+}
 
-    if ! is_repo_pid "$current"; then
-      break
-    fi
+is_dev_process_group() {
+  local pgid="$1"
+  local command
 
-    printf '%s\n' "$current"
-    ppid="$(ps -o ppid= -p "$current" 2>/dev/null | tr -d ' ' || true)"
-    if [ -z "$ppid" ] || [ "$ppid" = "$current" ]; then
-      break
-    fi
-    current="$ppid"
-  done
+  command="$(ps -o command= -p "$pgid" 2>/dev/null || true)"
+  case "$command" in
+    *"pnpm"*"dev"*|*"pnpm"*"dev:app"*|*"concurrently"*)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
 }
 
 stop_port_listeners() {
@@ -190,7 +196,7 @@ stop_port_listeners() {
 
   for pid in $pids; do
     if is_repo_pid "$pid"; then
-      repo_pids="${repo_pids} $(repo_process_tree_for_pid "$pid" | tr '\n' ' ')"
+      repo_pids="${repo_pids} $(repo_stop_target_for_pid "$pid" | tr '\n' ' ')"
     else
       foreign_pids="${foreign_pids} ${pid}"
     fi
@@ -202,9 +208,9 @@ stop_port_listeners() {
     exit 1
   fi
 
-  repo_pids="$(printf '%s\n' $repo_pids | sort -urn | tr '\n' ' ')"
-  log "Stopping existing repo process tree for port ${port}: ${repo_pids}"
-  kill $repo_pids 2>/dev/null || true
+  repo_pids="$(printf '%s\n' $repo_pids | sort -u | tr '\n' ' ')"
+  log "Stopping existing repo process group for port ${port}: ${repo_pids}"
+  kill -TERM -- $repo_pids 2>/dev/null || true
 
   for _ in $(seq 1 20); do
     sleep 0.1
@@ -218,7 +224,7 @@ stop_port_listeners() {
   foreign_pids=""
   for pid in $pids; do
     if is_repo_pid "$pid"; then
-      repo_pids="${repo_pids} $(repo_process_tree_for_pid "$pid" | tr '\n' ' ')"
+      repo_pids="${repo_pids} $(repo_stop_target_for_pid "$pid" | tr '\n' ' ')"
     else
       foreign_pids="${foreign_pids} ${pid}"
     fi
@@ -230,9 +236,16 @@ stop_port_listeners() {
     exit 1
   fi
 
-  repo_pids="$(printf '%s\n' $repo_pids | sort -urn | tr '\n' ' ')"
-  log "Force stopping repo process tree still listening on port ${port}: ${repo_pids}"
-  kill -9 $repo_pids 2>/dev/null || true
+  repo_pids="$(printf '%s\n' $repo_pids | sort -u | tr '\n' ' ')"
+  log "Force stopping repo process group still listening on port ${port}: ${repo_pids}"
+  kill -KILL -- $repo_pids 2>/dev/null || true
+
+  sleep 0.1
+  pids="$(listener_pids_for_port "$port" "$host")"
+  if [ -n "$pids" ]; then
+    log "Port ${port} is still in use after cleanup: ${pids}"
+    exit 1
+  fi
 }
 
 listener_pids_for_port() {
