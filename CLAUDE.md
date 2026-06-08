@@ -103,7 +103,8 @@ pnpm dev                    # run API + web in watch mode
 
 For Conductor, use the checked-in `.conductor/settings.toml`: setup runs `corepack enable && pnpm install`,
 run executes `bash scripts/conductor-workspace.sh run`, and archive executes
-`bash scripts/conductor-workspace.sh archive`. Each workspace gets its own Docker Compose project,
+`bash scripts/conductor-workspace.sh archive`. The run script delegates to `pnpm dev`; when
+`CONDUCTOR_PORT` is set, `scripts/dev-stack.sh` gives each workspace its own Docker Compose project,
 Postgres/MinIO volumes, Better Auth cookie prefix, and ports derived from `CONDUCTOR_PORT`:
 web `+0`, API `+1`, Postgres `+2`, MinIO API `+3`, MinIO console `+4`, Mailpit SMTP `+5`, Mailpit UI `+6`.
 Archive intentionally deletes that workspace's local Compose volumes.
