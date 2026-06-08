@@ -80,6 +80,24 @@ export async function deleteSkillArchive(input: {
   );
 }
 
+export async function getSkillArchive(input: {
+  key: string;
+  client?: S3Client;
+  config?: StorageConfig;
+}): Promise<Buffer> {
+  const config = input.config ?? getStorageConfig();
+  const client = input.client ?? createStorageClient(config);
+  const res = await client.send(
+    new GetObjectCommand({
+      Bucket: config.bucket,
+      Key: input.key,
+    }),
+  );
+  if (!res.Body) throw new Error(`object not found: ${input.key}`);
+  const bytes = await res.Body.transformToByteArray();
+  return Buffer.from(bytes);
+}
+
 export async function signedSkillArchiveUrl(input: {
   key: string;
   expiresIn?: number;

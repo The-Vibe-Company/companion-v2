@@ -1,9 +1,10 @@
 import { serve } from "@hono/node-server";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fetchRequestHandler } from "@trpc/server/adapters/fetch";
 import { Hono, type Context } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { cors } from "hono/cors";
 import { setCookie } from "hono/cookie";
 import {
@@ -15,6 +16,7 @@ import {
   createTeam,
   getOrgSettings,
   getDownloadVersion,
+  issueApiToken,
   listOrgs,
   listSkillComments,
   listSkills,
@@ -24,19 +26,49 @@ import {
   assertCanPublishSkillVersion,
   removeMember,
   removeTeamMember,
+  revokeApiToken,
   revokeInvitation,
   setMemberRole,
   setSkillScope,
   setTeamMemberRole,
   toggleStar,
 } from "@companion/core/services";
-import { publishSkillInputSchema, scopeSchema } from "@companion/contracts";
-import { deleteSkillArchive, skillArchiveKey, putSkillArchive, signedSkillArchiveUrl } from "@companion/storage";
-import { isValidSemver, packDir, unpackTo, validateSkillArchive } from "@companion/skills";
+import {
+  createSkillInputSchema,
+  issueTokenInputSchema,
+  publishSkillInputSchema,
+  scopeSchema,
+  type Scope,
+  type SkillFrontmatter,
+} from "@companion/contracts";
+import {
+  deleteSkillArchive,
+  getSkillArchive,
+  skillArchiveKey,
+  putSkillArchive,
+  signedSkillArchiveUrl,
+} from "@companion/storage";
+import {
+  bumpSemver,
+  compareSemver,
+  isValidSemver,
+  packDir,
+  tarGzToZip,
+  unpackAnyTo,
+  validateSkillArchive,
+} from "@companion/skills";
 import { withTenantContext, type Db } from "@companion/db";
 import { auth } from "@companion/auth";
 import { inviteEmail, sendTransactionalEmail } from "@companion/email";
-import { actorFromContext, attachSession, jsonError, orgIdFromContext, type ApiVariables } from "./context";
+import {
+  actorFromContext,
+  attachSession,
+  isTokenRequest,
+  jsonError,
+  orgIdFromContext,
+  requireScope,
+  type ApiVariables,
+} from "./context";
 import { appRouter } from "./trpc";
 
 const app = new Hono<{ Variables: ApiVariables }>();
@@ -53,10 +85,64 @@ async function withTenant<T>(
 async function canonicalizeSkillArchive(archive: Buffer) {
   const dir = await mkdtemp(join(tmpdir(), "companion-skill-"));
   try {
-    await unpackTo(archive, dir);
+    await unpackAnyTo(archive, dir);
     return await packDir(dir);
   } finally {
     await rm(dir, { recursive: true, force: true });
+  }
+}
+
+/** Assemble a standard SKILL.md from inline fields. The registry sets the version, not the author. */
+function buildSkillMd(id: string, version: string, description: string, body: string): string {
+  const front = ["---", `name: ${id}`, `version: ${version}`, `description: ${JSON.stringify(description)}`, "---"].join("\n");
+  return `${front}\n\n${body.trim()}\n`;
+}
+
+/**
+ * Shared publish tail: store the canonical archive (idempotently) and write a new
+ * skill_versions row, authorizing first and cleaning up the blob on failure.
+ */
+async function publishCanonical(input: {
+  actor: ReturnType<typeof actorFromContext>;
+  orgId: string;
+  canonical: Awaited<ReturnType<typeof packDir>>;
+  fm: SkillFrontmatter;
+  scope: Scope;
+  teamSlug: string | null;
+  version: string;
+  note: string;
+}): Promise<{ id: string; version: string; checksum: string }> {
+  const { actor, orgId, canonical, fm, scope, teamSlug, version, note } = input;
+  if (!isValidSemver(version)) throw new Error(`invalid semver: ${version}`);
+  const key = skillArchiveKey({ orgId, slug: fm.name, version });
+  const payload = publishSkillInputSchema.parse({
+    slug: fm.name,
+    scope,
+    team_slug: teamSlug,
+    version,
+    description: fm.description,
+    checksum: canonical.checksum,
+    storage_path: key,
+    size_bytes: canonical.sizeBytes,
+    frontmatter: JSON.stringify(fm, null, 2),
+    tools: fm.tools,
+    license: fm.license ?? null,
+    note,
+  });
+  await withTenantContext({ orgId, userId: actor.id }, (database) =>
+    assertCanPublishSkillVersion({ actor, orgId, payload, database }),
+  );
+  await putSkillArchive({ key, body: canonical.archive, preventOverwrite: true });
+  try {
+    const published = await withTenantContext({ orgId, userId: actor.id }, (database) =>
+      publishSkillVersion({ actor, orgId, payload, archiveKey: key, database }),
+    );
+    return { ...published, checksum: canonical.checksum };
+  } catch (error) {
+    await deleteSkillArchive({ key }).catch((cleanupError) => {
+      console.error(`failed to delete orphaned skill archive ${key}`, cleanupError);
+    });
+    throw error;
   }
 }
 
@@ -479,55 +565,125 @@ app.put("/v1/skills/:slug/scope", async (c) => {
   }
 });
 
-app.post("/v1/skills", async (c) => {
+/**
+ * Publish a packaged skill. Two body shapes:
+ *  - multipart/form-data (browser dropzone / CLI): `file` + `action`/`scope`/`team`/`version`/`message`.
+ *  - raw `application/zip` or `application/gzip` (guided-prompt curl + Bearer token): the body IS the
+ *    archive; `visibility`/`team`/`version`/`message` come from query params.
+ * Accepts `.zip` or `.tar.gz`. Requires the `skills:write` scope for token-authed requests.
+ * Bodies above 32 MB are rejected with 413 before buffering (just over the 25 MB archive cap).
+ */
+app.post("/v1/skills", bodyLimit({ maxSize: 32 * 1024 * 1024, onError: (c) => jsonError(c, "package exceeds the 32 MB upload limit", 413) }), async (c) => {
   try {
     const actor = actorFromContext(c);
+    requireScope(c, "skills:write");
     const orgId = await orgIdFromContext(c);
-    const form = await c.req.formData();
-    const file = form.get("file");
-    if (!(file instanceof File)) throw new Error("file is required");
-    const archive = Buffer.from(await file.arrayBuffer());
-    const result = await validateSkillArchive(archive);
-    if (form.get("action") === "validate") return c.json({ result });
-    if (!result.ok || !result.frontmatter) return c.json({ result, error: result.error ?? "validation failed" }, 422);
-    const canonical = await canonicalizeSkillArchive(archive);
-    const checksum = canonical.checksum;
-    const fm = result.frontmatter;
-    const scope = scopeSchema.parse(String(form.get("scope") ?? fm.scope ?? "private"));
-    const teamSlug = scope === "team" ? String(form.get("team") ?? "") : null;
-    const version = String(form.get("version") ?? fm.version);
-    if (!isValidSemver(version)) throw new Error(`invalid semver: ${version}`);
-    const key = skillArchiveKey({ orgId, slug: fm.name, version });
-    const payload = publishSkillInputSchema.parse({
-      slug: fm.name,
-      scope,
-      team_slug: teamSlug,
-      version,
-      description: fm.description,
-      checksum,
-      storage_path: key,
-      size_bytes: canonical.sizeBytes,
-      frontmatter: JSON.stringify(fm, null, 2),
-      tools: fm.tools,
-      license: fm.license ?? null,
-      note: String(form.get("message") ?? ""),
-    });
-    await withTenantContext({ orgId, userId: actor.id }, (database) =>
-      assertCanPublishSkillVersion({ actor, orgId, payload, database }),
-    );
-    await putSkillArchive({ key, body: canonical.archive, preventOverwrite: true });
-    let published: Awaited<ReturnType<typeof publishSkillVersion>>;
-    try {
-      published = await withTenantContext({ orgId, userId: actor.id }, (database) =>
-        publishSkillVersion({ actor, orgId, payload, archiveKey: key, database }),
-      );
-    } catch (error) {
-      await deleteSkillArchive({ key }).catch((cleanupError) => {
-        console.error(`failed to delete orphaned skill archive ${key}`, cleanupError);
-      });
-      throw error;
+    const contentType = c.req.header("content-type") ?? "";
+
+    let archive: Buffer;
+    let action: string;
+    let scopeRaw: string | undefined;
+    let teamRaw: string | undefined;
+    let versionRaw: string | undefined;
+    let messageRaw: string | undefined;
+    let expectSlug: string | undefined;
+
+    if (contentType.includes("multipart/form-data")) {
+      const form = await c.req.formData();
+      const file = form.get("file");
+      if (!(file instanceof File)) throw new Error("file is required");
+      archive = Buffer.from(await file.arrayBuffer());
+      const field = (k: string) => {
+        const v = form.get(k);
+        return v != null && String(v) !== "" ? String(v) : undefined;
+      };
+      action = field("action") ?? "publish";
+      scopeRaw = field("scope") ?? field("visibility");
+      teamRaw = field("team");
+      versionRaw = field("version");
+      messageRaw = field("message");
+      expectSlug = field("expect_slug");
+    } else {
+      archive = Buffer.from(await c.req.arrayBuffer());
+      if (!archive.length) throw new Error("request body is empty");
+      action = c.req.query("action") ?? "publish";
+      scopeRaw = c.req.query("visibility") ?? c.req.query("scope");
+      teamRaw = c.req.query("team");
+      versionRaw = c.req.query("version");
+      messageRaw = c.req.query("message");
+      expectSlug = c.req.query("expect_slug");
     }
-    return c.json({ ok: true, ...published, checksum });
+
+    const result = await validateSkillArchive(archive);
+    if (action === "validate") return c.json({ result });
+    if (!result.ok || !result.frontmatter) {
+      return c.json({ result, error: result.error ?? "validation failed" }, 422);
+    }
+    const fm = result.frontmatter;
+    // When updating a known skill, the uploaded package must be that skill (its frontmatter
+    // `name` is the slug the server publishes), so an upload can never silently target another id.
+    if (expectSlug && fm.name !== expectSlug) {
+      return c.json(
+        { error: `package name "${fm.name}" does not match the skill you are updating ("${expectSlug}")` },
+        422,
+      );
+    }
+    const canonical = await canonicalizeSkillArchive(archive);
+    const scope = scopeSchema.parse(scopeRaw ?? fm.scope ?? "private");
+    const teamSlug = scope === "team" ? String(teamRaw ?? "") : null;
+    const version = versionRaw ?? fm.version;
+    const published = await publishCanonical({
+      actor,
+      orgId,
+      canonical,
+      fm,
+      scope,
+      teamSlug,
+      version,
+      note: messageRaw ?? "",
+    });
+    return c.json({ ok: true, ...published });
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
+/** Author a SKILL.md inline ("Create in the browser") — new skill → 1.0.0, existing → patch-bump. */
+app.post("/v1/skills/create", async (c) => {
+  try {
+    const actor = actorFromContext(c);
+    requireScope(c, "skills:write");
+    const orgId = await orgIdFromContext(c);
+    const input = createSkillInputSchema.parse(await c.req.json());
+    const version = await withTenantContext({ orgId, userId: actor.id }, async (database) => {
+      const existing = await listSkillVersions({ actor, orgId, slug: input.id, database }).catch(() => []);
+      // Bump from the highest existing version by semver (not row order).
+      const latest = existing.map((v) => v.version).sort((a, b) => compareSemver(b, a))[0];
+      return latest ? bumpSemver(latest, "patch") : "1.0.0";
+    });
+    const dir = await mkdtemp(join(tmpdir(), "companion-skill-"));
+    try {
+      await writeFile(join(dir, "SKILL.md"), buildSkillMd(input.id, version, input.description, input.body), "utf8");
+      const canonical = await packDir(dir);
+      const result = await validateSkillArchive(canonical.archive);
+      if (!result.ok || !result.frontmatter) {
+        return c.json({ result, error: result.error ?? "validation failed" }, 422);
+      }
+      const teamSlug = input.scope === "team" ? String(input.team ?? "") : null;
+      const published = await publishCanonical({
+        actor,
+        orgId,
+        canonical,
+        fm: result.frontmatter,
+        scope: input.scope,
+        teamSlug,
+        version,
+        note: "",
+      });
+      return c.json({ ok: true, ...published });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   } catch (error) {
     return jsonError(c, error);
   }
@@ -535,12 +691,75 @@ app.post("/v1/skills", async (c) => {
 
 app.get("/v1/skills/:slug/download", async (c) => {
   try {
+    actorFromContext(c);
+    requireScope(c, "skills:read");
     const version = c.req.query("version") ?? null;
     const found = await withTenant(c, ({ actor, orgId, database }) =>
       getDownloadVersion({ actor, orgId, slug: c.req.param("slug"), version, database }),
     );
     const url = await signedSkillArchiveUrl({ key: found.storagePath });
     return c.json({ ...found, url });
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
+/**
+ * Download a specific version as a `.zip` (the install flow's `curl … -o <id>.zip` + "Download
+ * package" button). Visibility-gated; requires `skills:read` for token-authed callers.
+ */
+app.get("/v1/skills/:slug/versions/:version/package", async (c) => {
+  try {
+    actorFromContext(c);
+    requireScope(c, "skills:read");
+    const slug = c.req.param("slug");
+    const found = await withTenant(c, ({ actor, orgId, database }) =>
+      getDownloadVersion({ actor, orgId, slug, version: c.req.param("version"), database }),
+    );
+    const tarGz = await getSkillArchive({ key: found.storagePath });
+    const zip = await tarGzToZip(tarGz);
+    return new Response(new Uint8Array(zip), {
+      headers: {
+        "content-type": "application/zip",
+        "content-disposition": `attachment; filename="${slug}.zip"`,
+        "content-length": String(zip.length),
+      },
+    });
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
+/**
+ * Issue a short-lived scoped personal access token for the guided-prompt / install flows.
+ * Cookie session only — a token cannot mint another token. The plaintext is returned once.
+ */
+app.post("/v1/tokens", async (c) => {
+  try {
+    if (isTokenRequest(c)) throw new Error("personal access tokens cannot issue tokens");
+    const input = issueTokenInputSchema.parse(await c.req.json());
+    const issued = await withTenant(c, ({ actor, orgId, database }) =>
+      issueApiToken({ actor, orgId, scopes: input.scopes, name: input.name, database }),
+    );
+    return c.json({
+      id: issued.id,
+      token: issued.token,
+      prefix: issued.prefix,
+      scopes: issued.scopes,
+      expires_at: issued.expiresAt.toISOString(),
+    });
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
+app.delete("/v1/tokens/:id", async (c) => {
+  try {
+    if (isTokenRequest(c)) throw new Error("personal access tokens cannot revoke tokens");
+    await withTenant(c, ({ actor, orgId, database }) =>
+      revokeApiToken({ actor, orgId, tokenId: c.req.param("id"), database }),
+    );
+    return c.json({ ok: true });
   } catch (error) {
     return jsonError(c, error);
   }

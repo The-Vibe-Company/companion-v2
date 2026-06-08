@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { scopeSchema, validationStateSchema } from "./scope";
+import { SKILL_NAME_RE } from "./frontmatter";
 
 /**
  * One row of the `skill_list_v` view — the denormalized read shape the web table
@@ -79,3 +80,17 @@ export const publishSkillInputSchema = z.object({
   note: z.string().default(""),
 });
 export type PublishSkillInput = z.infer<typeof publishSkillInputSchema>;
+
+/**
+ * Body of `POST /v1/skills/create` — author a SKILL.md inline ("Create in the browser").
+ * The server assembles the standard frontmatter (`name` + `description`) and the body, packs
+ * it, and publishes a new version. Visibility is applied on the request, never in the skill.
+ */
+export const createSkillInputSchema = z.object({
+  id: z.string().regex(SKILL_NAME_RE, "id must be kebab-case (lowercase letters, digits, hyphens)"),
+  description: z.string().min(1, "description is required").max(1024),
+  body: z.string().default(""),
+  scope: scopeSchema.default("private"),
+  team: z.string().nullable().optional(),
+});
+export type CreateSkillInput = z.infer<typeof createSkillInputSchema>;
