@@ -9,7 +9,7 @@ import { Sidebar } from "./Sidebar";
 import { ListView } from "./ListView";
 import { DetailView } from "./DetailView";
 import { CommandPalette } from "./CommandPalette";
-import { UploadDrawer } from "./UploadDrawer";
+import { UploadDialog, InstallDialog } from "./UploadDialog";
 import { Onboarding } from "../org/Onboarding";
 import { useOrgActions } from "../org/useOrgActions";
 import type { SettingsIntent } from "../org/model";
@@ -57,6 +57,8 @@ export function SkillsApp({
   const [customViews, setCustomViews] = useState<ViewDef[]>([]);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [uploadOpen, setUploadOpen] = useState(false);
+  const [updateSkill, setUpdateSkill] = useState<SkillVM | null>(null);
+  const [installSkill, setInstallSkill] = useState<SkillVM | null>(null);
   const [openId, setOpenId] = useState<string | null>(null);
   const [lastId, setLastId] = useState<string | null>(null);
   const viewSeq = useRef(0);
@@ -230,6 +232,8 @@ export function SkillsApp({
   // Keyboard: ⌘K toggles palette; Esc back to list; ↑/↓ move between skills.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      // Modal dialogs own the keyboard while open (their own Esc closes them).
+      if (uploadOpen || updateSkill || installSkill) return;
       if ((e.metaKey || e.ctrlKey) && (e.key === "k" || e.key === "K")) {
         e.preventDefault();
         setPaletteOpen((o) => !o);
@@ -252,7 +256,7 @@ export function SkillsApp({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [openId, paletteOpen, back, go]);
+  }, [openId, paletteOpen, uploadOpen, updateSkill, installSkill, back, go]);
 
   return (
     <div className="app">
@@ -286,6 +290,8 @@ export function SkillsApp({
             onNext={() => go(1)}
             onToggleStar={() => toggleStar(skill.id)}
             onChangeVisibility={(sc) => changeVisibility(skill.id, sc)}
+            onInstall={() => setInstallSkill(skill)}
+            onUpdate={() => setUpdateSkill(skill)}
           />
         ) : (
           <ListView
@@ -320,14 +326,24 @@ export function SkillsApp({
         />
       )}
       {uploadOpen && (
-        <UploadDrawer
+        <UploadDialog
+          mode="create"
           teams={teams}
           onClose={closeUpload}
-          onUploaded={() => {
-            closeUpload();
-            router.refresh();
-          }}
+          onPublished={() => router.refresh()}
         />
+      )}
+      {updateSkill && (
+        <UploadDialog
+          mode="update"
+          skill={updateSkill}
+          teams={teams}
+          onClose={() => setUpdateSkill(null)}
+          onPublished={() => router.refresh()}
+        />
+      )}
+      {installSkill && (
+        <InstallDialog skill={installSkill} onClose={() => setInstallSkill(null)} />
       )}
       {orgActions.onboarding && (
         <Onboarding

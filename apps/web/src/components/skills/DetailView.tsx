@@ -18,6 +18,8 @@ export function DetailView({
   onNext,
   onToggleStar,
   onChangeVisibility,
+  onInstall,
+  onUpdate,
 }: {
   skill: SkillVM;
   index: number;
@@ -28,6 +30,8 @@ export function DetailView({
   onNext: () => void;
   onToggleStar: () => void;
   onChangeVisibility: (s: Scope) => void;
+  onInstall: () => void;
+  onUpdate: () => void;
 }) {
   const invalid = skill.validation === "invalid";
   const [versions, setVersions] = useState<SkillVersionRow[]>([]);
@@ -104,11 +108,21 @@ export function DetailView({
           {index + 1} / {total}
         </span>
         <StarButton starred={skill.starred} count={skill.stars} onToggle={onToggleStar} />
+        <button className="dsecbtn" onClick={onUpdate} title="Publish a new version">
+          <Icon name="git-commit" size={14} />
+          Update
+        </button>
         <button
           className="btn-primary"
-          disabled={invalid}
-          onClick={download}
-          title={invalid ? "Resolve validation errors first" : "Install skill"}
+          disabled={invalid || !skill.version}
+          onClick={onInstall}
+          title={
+            invalid
+              ? "Resolve validation errors first"
+              : !skill.version
+                ? "No published version yet"
+                : "Install skill"
+          }
         >
           <Icon name="download" size={14} />
           Install skill
