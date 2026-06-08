@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { SkillVM } from "@/lib/types";
-import { BUILTIN_VIEWS, filtersKey, matchFilters, type Filter } from "./filters";
+import { BUILTIN_VIEWS, filtersKey, makeFilter, matchFilters, type Filter } from "./filters";
 
 function mk(p: Partial<SkillVM> & { id: string }): SkillVM {
   return {
@@ -106,5 +106,17 @@ describe("built-in views", () => {
         { type: "scope", value: "public" },
       ]),
     );
+  });
+});
+
+describe("makeFilter", () => {
+  it("returns typed filters for valid pairs", () => {
+    expect(makeFilter("scope", "public")).toEqual({ type: "scope", value: "public" });
+    expect(makeFilter("starred", "true")).toEqual({ type: "starred", value: "true" });
+  });
+
+  it("rejects invalid type/value pairs", () => {
+    expect(makeFilter("scope", "org")).toBeNull();
+    expect(makeFilter("starred", "false")).toBeNull();
   });
 });
