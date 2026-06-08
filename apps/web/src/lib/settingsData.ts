@@ -1,5 +1,6 @@
 import "server-only";
 
+import { orgSettingsResponseSchema, type OrgSettingsResponse } from "@companion/contracts";
 import { redirect } from "next/navigation";
 import { loadOrgContext } from "@/lib/currentOrg";
 import { serverApiFetch } from "@/lib/apiServer";
@@ -9,35 +10,22 @@ import type { MeVM } from "@/lib/types";
 
 export type SettingsSearchParams = Promise<Record<string, string | string[] | undefined>>;
 
-interface OrgSettingsResponse {
-  members: Array<{
-    userId: string;
-    role: OrgFull["members"][number]["role"];
-    joined: string;
-    pending: boolean;
-    inviteId?: string;
-    inviteToken?: string;
-    name: string;
-    email: string;
-    initials: string;
-  }>;
-  teams: Array<{
-    id: string;
-    slug: string;
-    name: string;
-    members: Array<{
-      userId: string;
-      role: OrgFull["teams"][number]["members"][number]["role"];
-      name: string;
-      email: string;
-      initials: string;
-    }>;
-  }>;
-}
-
 function initialsOf(name: string): string {
   const p = name.trim().split(/[.\s@]+/).filter(Boolean);
   return ((p[0]?.[0] ?? "?") + (p[1]?.[0] ?? "")).toUpperCase();
+}
+
+export function parseOrgSettingsResponse(raw: unknown): OrgSettingsResponse | null {
+  const result = orgSettingsResponseSchema.safeParse(raw);
+  if (result.success) return result.data;
+  console.error(
+    "Invalid org settings response",
+    result.error.issues.slice(0, 5).map((issue) => ({
+      path: issue.path.join(".") || "<root>",
+      message: issue.message,
+    })),
+  );
+  return null;
 }
 
 function parseSettingsState(sp: Record<string, string | string[] | undefined>): {
@@ -78,9 +66,11 @@ export async function loadSettingsPageData(searchParams: SettingsSearchParams): 
     [me.id]: { id: me.id, name: me.name, email: whoami.email, initials: me.initials },
   };
 
-  const settings = await serverApiFetch<OrgSettingsResponse>("/v1/orgs/current/settings", {
+  const settingsRaw = await serverApiFetch<unknown>("/v1/orgs/current/settings", {
     headers: orgHeaders,
   }).catch(() => null);
+  if (settingsRaw === null) return null;
+  const settings = parseOrgSettingsResponse(settingsRaw);
   if (!settings) return null;
   for (const member of settings.members) {
     users[member.userId] = {

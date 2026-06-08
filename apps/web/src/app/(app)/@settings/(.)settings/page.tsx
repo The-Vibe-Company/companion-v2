@@ -12,7 +12,7 @@ export default async function InterceptedSettingsPage({
   if (!props) {
     return (
       <div className="settings-drawer">
-        <div className="settings-drawer__panel">
+        <div className="settings-drawer__panel" role="dialog" aria-modal="true" aria-label="Settings" tabIndex={-1}>
           <div className="og-set">
             <div className="og-set__top">
               <a className="og-set__back" href="/skills">

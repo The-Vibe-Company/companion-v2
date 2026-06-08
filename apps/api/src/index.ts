@@ -43,6 +43,7 @@ import {
   completeOnboardingInputSchema,
   createSkillInputSchema,
   issueTokenInputSchema,
+  orgSettingsResponseSchema,
   publishSkillInputSchema,
   scopeSchema,
   skillFilterPreferencesSchema,
@@ -405,7 +406,19 @@ app.get("/v1/orgs", async (c) => {
 
 app.get("/v1/orgs/current/settings", async (c) => {
   try {
-    return c.json(await withTenant(c, ({ actor, orgId, database }) => getOrgSettings({ actor, orgId, database })));
+    const settings = await withTenant(c, ({ actor, orgId, database }) => getOrgSettings({ actor, orgId, database }));
+    const parsed = orgSettingsResponseSchema.safeParse(settings);
+    if (!parsed.success) {
+      console.error(
+        "Invalid org settings response",
+        parsed.error.issues.slice(0, 5).map((issue) => ({
+          path: issue.path.join(".") || "<root>",
+          message: issue.message,
+        })),
+      );
+      return jsonError(c, "Companion API produced an invalid settings response.", 500);
+    }
+    return c.json(parsed.data);
   } catch (error) {
     return jsonError(c, error, 401);
   }
