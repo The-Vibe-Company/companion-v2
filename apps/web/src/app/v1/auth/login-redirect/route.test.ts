@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { POST } from "./route";
 
-function formRequest(body: Record<string, string>) {
+function formRequest(body: Record<string, string>, headers: Record<string, string> = {}) {
   const url = "http://127.0.0.1:55030/v1/auth/login-redirect";
   const request = new Request(url, {
     method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
+    headers: { "content-type": "application/x-www-form-urlencoded", ...headers },
     body: new URLSearchParams(body),
   });
   return Object.assign(request, { nextUrl: new URL(url) }) as never;
@@ -44,6 +44,33 @@ describe("login redirect route", () => {
         headers: {
           "content-type": "application/json",
           origin: "http://127.0.0.1:55030",
+        },
+      }),
+    );
+  });
+
+  it("forwards the browser origin to Better Auth when behind a proxy", async () => {
+    vi.stubEnv("COMPANION_API_URL", "http://127.0.0.1:55031");
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 200 })));
+
+    await POST(
+      formRequest(
+        {
+          mode: "signin",
+          next: "/skills",
+          email: "admin@tvc.dev",
+          password: "adminadmin",
+        },
+        { origin: "https://web-production-cb51e.up.railway.app" },
+      ),
+    );
+
+    expect(fetch).toHaveBeenCalledWith(
+      "http://127.0.0.1:55031/auth/sign-in/email",
+      expect.objectContaining({
+        headers: {
+          "content-type": "application/json",
+          origin: "https://web-production-cb51e.up.railway.app",
         },
       }),
     );
