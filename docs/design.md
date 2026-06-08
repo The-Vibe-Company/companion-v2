@@ -85,11 +85,14 @@ directly to Postgres.
   SKILL.md inline), and `GET /v1/skills/:slug/versions/:version/package` (download a version as `.zip`).
 - Orgs: `/v1/orgs`, `/v1/orgs/current`, `/v1/teams`, `/v1/invitations`.
 
-Requests authenticate by Better Auth cookie session **or** an `Authorization: Bearer cmp_pat_…`
-token. Token requests are gated by scope (`skills:write` to publish, `skills:read` to download).
-`POST /v1/skills` accepts a multipart `file` (browser/CLI) or a raw `application/zip` /
-`application/gzip` body with `visibility`/`team`/`version` query params (the guided-prompt curl).
-Uploads accept `.zip` or `.tar.gz`; the canonical stored, checksummed format is `.tar.gz`.
+Requests authenticate by Better Auth cookie session. An `Authorization: Bearer cmp_pat_…` token is
+accepted **only** on the PAT-enabled skills endpoints (`POST /v1/skills`, `POST /v1/skills/create`,
+`GET /v1/skills/:slug/download`, `GET /v1/skills/:slug/versions/:version/package`); every other
+endpoint rejects tokens. Token requests are scope-gated (`skills:write` to publish/create,
+`skills:read` to download). `POST /v1/skills` accepts a multipart `file` (browser/CLI) or a raw
+`application/zip` / `application/gzip` body with `visibility`/`team`/`version` query params (the
+guided-prompt curl). Uploads accept `.zip` or `.tar.gz`; the canonical stored, checksummed format
+is `.tar.gz`.
 
 Skill archives are stored under `{org_id}/{slug}/{version}.tar.gz` in the `skill-archives` bucket;
 the per-version package endpoint repackages them as `.zip` on the fly. Clients never receive S3

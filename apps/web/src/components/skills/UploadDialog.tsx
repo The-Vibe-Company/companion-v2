@@ -1209,6 +1209,7 @@ export function InstallDialog({ skill, onClose }: { skill: SkillVM; onClose: () 
     path: string;
     via: string;
   } | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
 
   const ensureToken = useCallback(async () => {
@@ -1243,10 +1244,28 @@ wherever you keep skills) and install it there.
   const cli = `companion skill install ${id}@${version}`;
   const unzip = `unzip ${id}.zip -d ${path}`;
 
-  const download = () => {
+  const download = async () => {
     if (!skill.version) return;
-    window.location.href = versionPackageUrl(id, skill.version);
-    setResult({ id, version, target, path, via: "Downloaded the package" });
+    setError(null);
+    try {
+      const res = await fetch(versionPackageUrl(id, skill.version));
+      if (!res.ok) {
+        const j = (await res.json().catch(() => ({}))) as { error?: string };
+        throw new Error(j.error || `Download failed (${res.status})`);
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${id}.zip`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      setResult({ id, version, target, path, via: "Downloaded the package" });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Download failed");
+    }
   };
 
   type Foot = {
@@ -1397,6 +1416,11 @@ wherever you keep skills) and install it there.
                       </p>
                     </div>
                   </>
+                )}
+                {error && (
+                  <div className="up-errblock" role="alert" style={{ marginTop: 14 }}>
+                    {error}
+                  </div>
                 )}
               </div>
             </div>

@@ -38,6 +38,15 @@ function readZipEntries(input: Buffer): Record<string, Uint8Array> {
       return true;
     },
   });
+  // Defense-in-depth: re-check the ACTUAL decompressed sizes, not just the header-declared
+  // `originalSize`, in case an archive understates its sizes.
+  let actual = 0;
+  for (const name of Object.keys(raw)) {
+    const len = raw[name]!.length;
+    if (len > MAX_FILE_BYTES) throw new Error(`archive entry exceeds size limit: ${name}`);
+    actual += len;
+    if (actual > MAX_ARCHIVE_BYTES) throw new Error("archive exceeds size limit");
+  }
   return raw;
 }
 
@@ -105,6 +114,7 @@ export async function unpackAnyTo(input: Buffer, targetDir: string): Promise<str
 export async function tarGzToZip(archive: Buffer): Promise<Buffer> {
   const tar = toTar(archive);
   const entries: Record<string, Uint8Array> = {};
+  let total = 0;
   await new Promise<void>((resolvePromise, reject) => {
     const ex = tarExtract();
     ex.on("entry", (header, stream, next) => {
@@ -121,7 +131,17 @@ export async function tarGzToZip(archive: Buffer): Promise<Buffer> {
         return;
       }
       const chunks: Buffer[] = [];
-      stream.on("data", (c: Buffer) => chunks.push(c));
+      let read = 0;
+      stream.on("data", (c: Buffer) => {
+        read += c.length;
+        total += c.length;
+        // Guardrail even though the stored archive was size-validated on upload.
+        if (read > MAX_FILE_BYTES || total > MAX_ARCHIVE_BYTES) {
+          reject(new Error("archive exceeds size limit"));
+          return;
+        }
+        chunks.push(c);
+      });
       stream.on("end", () => {
         entries[norm.path] = Buffer.concat(chunks);
         next();
