@@ -53,11 +53,15 @@ cli/          # companion CLI
 
 Better Auth owns the core `user`, `session`, `account`, and `verification` tables. Companion
 adds `profiles`, `organizations`, `memberships`, `teams`, `team_memberships`, `invitations`,
-`skills`, `skill_versions`, `skill_stars`, `skill_comments`, and `audit_log`.
+`skills`, `skill_versions`, `skill_stars`, `skill_comments`, `api_tokens`, and `audit_log`.
 
 Every tenant-owned table carries `org_id`. Skills keep ownership, visibility, and provenance
 separate: `owner_id`, `scope`, `team_id`, and `creator_id`. Valid scopes are `private`, `team`,
 and `public`.
+
+`api_tokens` holds short-lived, scoped personal access tokens for programmatic publish/install.
+Only the `sha256` `token_hash` is stored (the plaintext `cmp_pat_…` is shown once); each row carries
+`scopes` (`skills:read` / `skills:write`), an `expires_at` (24h default), and `revoked_at`.
 
 ## Authorization
 
@@ -74,10 +78,19 @@ directly to Postgres.
 
 - Auth: `/auth/*` Better Auth endpoints, plus `/v1/auth/login`, `/v1/auth/logout`,
   `/v1/auth/whoami` for CLI ergonomics.
+- Tokens: `POST /v1/tokens` (issue a scoped `cmp_pat_…`, plaintext returned once),
+  `DELETE /v1/tokens/:id`. Session-authenticated only — a token cannot mint another.
 - Skills: `/v1/skills`, `/v1/skills/:slug`, `/v1/skills/:slug/versions`,
-  `/v1/skills/:slug/download`, `/v1/skills/:slug/scope`.
+  `/v1/skills/:slug/download`, `/v1/skills/:slug/scope`, `POST /v1/skills/create` (author a
+  SKILL.md inline), and `GET /v1/skills/:slug/versions/:version/package` (download a version as `.zip`).
 - Orgs: `/v1/orgs`, `/v1/orgs/current`, `/v1/teams`, `/v1/invitations`.
 
-Skill archives are uploaded through the API and stored under
-`{org_id}/{slug}/{version}.tar.gz` in the `skill-archives` bucket. Clients never receive S3
+Requests authenticate by Better Auth cookie session **or** an `Authorization: Bearer cmp_pat_…`
+token. Token requests are gated by scope (`skills:write` to publish, `skills:read` to download).
+`POST /v1/skills` accepts a multipart `file` (browser/CLI) or a raw `application/zip` /
+`application/gzip` body with `visibility`/`team`/`version` query params (the guided-prompt curl).
+Uploads accept `.zip` or `.tar.gz`; the canonical stored, checksummed format is `.tar.gz`.
+
+Skill archives are stored under `{org_id}/{slug}/{version}.tar.gz` in the `skill-archives` bucket;
+the per-version package endpoint repackages them as `.zip` on the fly. Clients never receive S3
 admin credentials.
