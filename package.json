@@ -22,6 +22,7 @@
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",
     "browser:smoke": "bash scripts/agent-browser-smoke.sh",
+    "smoke:rsc": "bash scripts/ci-rsc-smoke.sh",
     "cli": "pnpm --filter @companion/cli exec companion",
     "design:lint": "npx --yes @google/design.md@0.2.0 lint DESIGN.md --format json"
   },
