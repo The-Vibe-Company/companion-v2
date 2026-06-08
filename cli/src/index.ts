@@ -37,33 +37,39 @@ program
 addGlobalOpts(program);
 
 // --- auth ---
-addGlobalOpts(
-  program
-    .command("login")
-    .description("sign in to a Companion registry")
-    .option("--url <url>", "Companion API URL (first login)")
-    .option("--email <email>", "account email")
-    .option("--password <password>", "account password (prompted if omitted)")
-    .option("--signup", "create the account before signing in", false),
-).action((opts, cmd: Command) =>
-  runAction(cmd, (g) =>
-    auth.login(
-      { url: opts.url, email: opts.email, password: opts.password, signup: opts.signup },
-      g,
+function addAuthCommands(target: Command): void {
+  addGlobalOpts(
+    target
+      .command("login")
+      .description("sign in to a Companion registry")
+      .option("--url <url>", "Companion API URL (first login)")
+      .option("--email <email>", "account email")
+      .option("--password <password>", "account password (prompted if omitted)")
+      .option("--signup", "create the account before signing in", false),
+  ).action((opts, cmd: Command) =>
+    runAction(cmd, (g) =>
+      auth.login(
+        { url: opts.url, email: opts.email, password: opts.password, signup: opts.signup },
+        g,
+      ),
     ),
-  ),
-);
+  );
 
-addGlobalOpts(program.command("logout").description("clear the stored session")).action(
-  (_opts, cmd: Command) => runAction(cmd, (g) => auth.logout(g)),
-);
+  addGlobalOpts(target.command("logout").description("clear the stored session")).action(
+    (_opts, cmd: Command) => runAction(cmd, (g) => auth.logout(g)),
+  );
 
-addGlobalOpts(program.command("whoami").description("show the current user, org, and role")).action(
-  (_opts, cmd: Command) => runAction(cmd, (g) => auth.whoami(g)),
-);
+  addGlobalOpts(target.command("whoami").description("show the current user, org, and role")).action(
+    (_opts, cmd: Command) => runAction(cmd, (g) => auth.whoami(g)),
+  );
+}
 
-// --- skills ---
-const skillsCmd = program.command("skills").description("manage skills");
+// Top-level `companion login/logout/whoami` plus a grouped `companion auth …` (matches dashboard copy).
+addAuthCommands(program);
+addAuthCommands(addGlobalOpts(program.command("auth").description("authenticate against a Companion registry")));
+
+// --- skills ---  (also reachable as the singular `companion skill …` per the dashboard copy)
+const skillsCmd = program.command("skills").alias("skill").description("manage skills");
 
 addGlobalOpts(
   skillsCmd
@@ -92,6 +98,7 @@ addGlobalOpts(
     .command("push <dir>")
     .description("validate, package, and publish a new version")
     .option("--scope <scope>", "visibility scope (private|team|public)")
+    .option("--visibility <scope>", "alias for --scope (private|team|public)")
     .option("--team <slug>", "team slug (required for team scope)")
     .option("--bump <kind>", "bump from the registry's current version (patch|minor|major)")
     .option("--set-version <semver>", "publish an explicit version")
@@ -102,7 +109,7 @@ addGlobalOpts(
     skills.push(
       dir,
       {
-        scope: opts.scope,
+        scope: opts.scope ?? opts.visibility,
         team: opts.team,
         bump: opts.bump,
         setVersion: opts.setVersion,
@@ -117,6 +124,7 @@ addGlobalOpts(
 addGlobalOpts(
   skillsCmd
     .command("pull <spec>")
+    .alias("install")
     .description("download a skill (name[@version]) into a working dir")
     .option("--dir <path>", "install dir (default ./skills)")
     .option("--force", "overwrite a locally-modified copy", false),
