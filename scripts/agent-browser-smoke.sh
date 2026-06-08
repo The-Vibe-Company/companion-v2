@@ -177,10 +177,12 @@ assert_body_contains "Install skill"
 agent-browser find role button click --name "Skills"
 wait_for_skills
 
-log "Checking upload drawer opens"
+log "Checking upload dialog opens"
 agent-browser find role button click --name "Upload skill"
 agent-browser wait 500
-assert_body_contains "Drop a SKILL.md package"
+assert_body_contains "Upload a skill"
+assert_body_contains "Guided prompt"
+assert_body_contains "Create in the browser"
 agent-browser find role button click --name "Cancel"
 
 log "Checking mobile viewport"

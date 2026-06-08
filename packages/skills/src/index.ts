@@ -5,4 +5,5 @@ export * from "./frontmatter";
 export * from "./archive";
 export * from "./pack";
 export * from "./unpack";
+export * from "./zip";
 export * from "./validateSkill";

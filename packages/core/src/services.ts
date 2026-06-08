@@ -1,3 +1,4 @@
+import { createHash, randomBytes } from "node:crypto";
 import { and, asc, count, desc, eq, exists, gt, inArray, isNull, or, sql } from "drizzle-orm";
 import type {
   OrgRole,
@@ -6,8 +7,9 @@ import type {
   SkillListRow,
   SkillVersionRow,
   TeamRole,
+  TokenScope,
 } from "@companion/contracts";
-import { publishSkillInputSchema, type PublishSkillInput } from "@companion/contracts";
+import { API_TOKEN_PREFIX, publishSkillInputSchema, type PublishSkillInput } from "@companion/contracts";
 import { compareSemver } from "@companion/skills";
 import { db, schema, type Db } from "@companion/db";
 import { initialsFor, slugify } from "@companion/db/ids";
@@ -971,4 +973,114 @@ export async function getDownloadVersion(input: {
     scope: visible.scope,
     teamSlug: visible.team_slug,
   };
+}
+
+/* ---- Personal access tokens (programmatic publish / install) --------------- */
+
+/** Default lifetime of an issued token (24h), unless overridden by the caller. */
+export const API_TOKEN_TTL_MS = 1000 * 60 * 60 * 24;
+
+function hashApiToken(raw: string): string {
+  return createHash("sha256").update(raw).digest("hex");
+}
+
+function defaultTokenName(scopes: TokenScope[]): string {
+  if (scopes.includes("skills:write")) return "skill publish token";
+  if (scopes.includes("skills:read")) return "skill install token";
+  return "api token";
+}
+
+/**
+ * Mint a scoped personal access token. The plaintext `token` is returned exactly once;
+ * only its sha256 hash is persisted. Requires the actor to be a member of `orgId`.
+ */
+export async function issueApiToken(input: {
+  actor: ActorContext;
+  orgId: string;
+  scopes: TokenScope[];
+  name?: string;
+  ttlMs?: number;
+  database?: Db;
+}): Promise<{ id: string; token: string; prefix: string; scopes: TokenScope[]; expiresAt: Date }> {
+  const database = input.database ?? db;
+  if (!input.scopes.length) throw new Error("at least one scope is required");
+  const role = await getOrgRole(input.orgId, input.actor.id, database);
+  if (!role) throw new Error("not a member of this organization");
+  const secret = randomBytes(24).toString("hex");
+  const token = `${API_TOKEN_PREFIX}${secret}`;
+  const prefix = token.slice(0, API_TOKEN_PREFIX.length + 6);
+  const expiresAt = new Date(Date.now() + (input.ttlMs ?? API_TOKEN_TTL_MS));
+  const [row] = await database
+    .insert(schema.apiTokens)
+    .values({
+      orgId: input.orgId,
+      userId: input.actor.id,
+      name: input.name?.trim() || defaultTokenName(input.scopes),
+      tokenPrefix: prefix,
+      tokenHash: hashApiToken(token),
+      scopes: input.scopes,
+      expiresAt,
+    })
+    .returning({ id: schema.apiTokens.id });
+  if (!row) throw new Error("could not issue token");
+  return { id: row.id, token, prefix, scopes: input.scopes, expiresAt };
+}
+
+/**
+ * Resolve a raw `cmp_pat_…` token to an actor + org + scopes, or null if it is unknown,
+ * revoked, or expired. Runs on the privileged app connection (the token itself identifies
+ * the tenant, so this lookup is intentionally not org-scoped). Best-effort bumps last_used_at.
+ */
+export async function resolveApiToken(
+  rawToken: string,
+  database: Db = db,
+): Promise<{ actor: ActorContext; orgId: string; scopes: TokenScope[] } | null> {
+  if (!rawToken.startsWith(API_TOKEN_PREFIX)) return null;
+  const row = await database.query.apiTokens.findFirst({
+    where: eq(schema.apiTokens.tokenHash, hashApiToken(rawToken)),
+  });
+  if (!row || row.revokedAt) return null;
+  if (row.expiresAt.getTime() <= Date.now()) return null;
+  // The owner must still belong to the token's org — a removed member's token stops working.
+  const role = await getOrgRole(row.orgId, row.userId, database);
+  if (!role) return null;
+  const profile = await database.query.profiles.findFirst({
+    where: eq(schema.profiles.id, row.userId),
+  });
+  await database
+    .update(schema.apiTokens)
+    .set({ lastUsedAt: new Date() })
+    .where(eq(schema.apiTokens.id, row.id))
+    .catch(() => {});
+  return {
+    actor: {
+      id: row.userId,
+      email: profile?.email ?? "",
+      name: profile?.name || profile?.email || row.userId,
+    },
+    orgId: row.orgId,
+    scopes: (row.scopes ?? []) as TokenScope[],
+  };
+}
+
+/** Revoke a token. The owner can revoke their own; org owners/admins can revoke any. */
+export async function revokeApiToken(input: {
+  actor: ActorContext;
+  orgId: string;
+  tokenId: string;
+  database?: Db;
+}): Promise<void> {
+  const database = input.database ?? db;
+  const row = await database.query.apiTokens.findFirst({
+    where: and(eq(schema.apiTokens.id, input.tokenId), eq(schema.apiTokens.orgId, input.orgId)),
+  });
+  if (!row) throw new Error("token not found");
+  if (row.userId !== input.actor.id) {
+    const role = await getOrgRole(input.orgId, input.actor.id, database);
+    if (!role || !canManageOrg(role)) throw new Error("not allowed to revoke this token");
+  }
+  await database
+    .update(schema.apiTokens)
+    .set({ revokedAt: new Date() })
+    .where(eq(schema.apiTokens.id, input.tokenId));
 }

@@ -6,6 +6,7 @@ import {
 import { parseFrontmatter } from "./frontmatter";
 import { isValidSemver } from "./semver";
 import { inspectTar, scanDir, toTar, type ArchiveFinding } from "./archive";
+import { isZip, zipToTar } from "./zip";
 import { MAX_ARCHIVE_BYTES, TOOL_NAME_RE } from "./constants";
 
 interface RawFindings {
@@ -79,12 +80,14 @@ function buildResult(f: RawFindings): ValidationResult {
   };
 }
 
-/** Validate a packed archive buffer (tar or tar.gz). Metadata-only; never executes scripts. */
+/** Validate a packed archive buffer (zip, tar, or tar.gz). Metadata-only; never executes scripts. */
 export async function validateSkillArchive(input: Buffer): Promise<ValidationResult> {
   let tar: Buffer;
   try {
-    tar = toTar(input);
+    tar = isZip(input) ? await zipToTar(input) : toTar(input);
   } catch {
+    // Unreadable / over-cap archive (e.g. a zip-bomb tripping the decompression caps):
+    // keep the full 5-check result shape so callers (CLI, API) render a consistent checklist.
     return buildResult({ skillMd: null, totalBytes: input.length, fileCount: 0, violations: [], oversize: true });
   }
   let finding: ArchiveFinding;

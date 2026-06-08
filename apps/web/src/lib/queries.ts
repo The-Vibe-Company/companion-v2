@@ -1,7 +1,66 @@
 "use client";
 
-import type { SkillCommentRow, SkillVersionRow } from "@companion/contracts";
+import type { IssuedToken, Scope, SkillCommentRow, SkillVersionRow, TokenScope } from "@companion/contracts";
 import { apiFetch } from "./apiClient";
+
+export interface PublishResult {
+  ok: boolean;
+  id: string;
+  slug: string;
+  version: string;
+  checksum: string;
+}
+
+/** Public API base used in the copy-paste curl prompts (an external agent hits it directly). */
+export function apiBase(): string {
+  const env = process.env.NEXT_PUBLIC_COMPANION_API_BASE;
+  if (env) return env.replace(/\/$/, "");
+  if (typeof window !== "undefined") return `${window.location.origin}/v1`;
+  return "/v1";
+}
+
+/** Mint a short-lived scoped personal access token (used by the guided-prompt methods). */
+export async function issueToken(scopes: TokenScope[], name?: string): Promise<IssuedToken> {
+  return apiFetch<IssuedToken>("/v1/tokens", {
+    method: "POST",
+    body: JSON.stringify({ scopes, name }),
+  });
+}
+
+/** Publish a packaged skill (.zip or .tar.gz) via the multipart upload path. */
+export async function publishSkillPackage(
+  file: File,
+  opts: { scope: Scope; team: string | null; version?: string; expectSlug?: string },
+): Promise<PublishResult> {
+  const fd = new FormData();
+  fd.append("file", file);
+  fd.append("action", "publish");
+  fd.append("scope", opts.scope);
+  if (opts.scope === "team" && opts.team) fd.append("team", opts.team);
+  if (opts.version) fd.append("version", opts.version);
+  // In update mode, bind the upload to the skill being updated (server rejects a mismatch).
+  if (opts.expectSlug) fd.append("expect_slug", opts.expectSlug);
+  return apiFetch<PublishResult>("/v1/skills", { method: "POST", body: fd });
+}
+
+/** Author a SKILL.md inline ("Create in the browser") and publish it. */
+export async function createSkillInline(input: {
+  id: string;
+  description: string;
+  body: string;
+  scope: Scope;
+  team: string | null;
+}): Promise<PublishResult> {
+  return apiFetch<PublishResult>("/v1/skills/create", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+/** Direct URL for a specific version packaged as a `.zip` (the install download button). */
+export function versionPackageUrl(slug: string, version: string): string {
+  return `/v1/skills/${encodeURIComponent(slug)}/versions/${encodeURIComponent(version)}/package`;
+}
 
 export interface SkillDetailData {
   versions: SkillVersionRow[];
