@@ -88,6 +88,44 @@ body { background: var(--color-canvas); color: var(--color-fg); font-family: var
 
 .main { flex: 1; min-width: 0; display: flex; flex-direction: column; overflow: hidden; background: var(--color-surface); }
 
+/* Loading skeletons ------------------------------------------------------- */
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+.skel-shell { cursor: default; }
+.skel-shell .navitem, .skel-shell .pill, .skel-shell .sh__iconbtn { cursor: default; pointer-events: none; }
+.skel { display: inline-block; height: 12px; border-radius: 4px; background: linear-gradient(90deg, var(--color-surface-raised), var(--color-surface-sunken), var(--color-surface-raised)); background-size: 200% 100%; animation: skel-shimmer 1.4s var(--ease-out-quint) infinite; }
+.skel__brandmark { opacity: 0.65; }
+.skel__brandmeta { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.skel__iconbtn { width: 30px; flex: none; color: var(--color-faint); pointer-events: none; }
+.skel__foot { pointer-events: none; }
+.skel__upload { pointer-events: none; min-width: 104px; }
+.skel__row { cursor: default; pointer-events: none; }
+.skel__row:hover { background: transparent; }
+.skel--brandname { width: 78px; height: 13px; }
+.skel--brandsub { width: 44px; height: 10px; }
+.skel--navlabel { width: 72px; }
+.skel--short { width: 46px; }
+.skel--count { width: 14px; height: 11px; padding: 0; border: none; }
+.skel--role { width: 42px; height: 11px; }
+.skel--button { width: 66px; background: color-mix(in oklab, var(--color-accent-fg) 20%, transparent); }
+.skel--pill { width: 58px; height: 10px; }
+.skel--wide { width: 82px; }
+.skel--scope { width: 52px; height: 10px; }
+.skel--version { width: 42px; height: 10px; }
+.skel--stars { width: 20px; height: 10px; }
+.skel--updated { width: 54px; height: 10px; }
+
+@keyframes skel-shimmer {
+  0% { background-position: 100% 0; }
+  100% { background-position: -100% 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skel {
+    animation: none;
+    background: var(--color-surface-raised);
+  }
+}
+
 /* ========================================================================== */
 /* List view (compact command list)                                          */
 /* ========================================================================== */
