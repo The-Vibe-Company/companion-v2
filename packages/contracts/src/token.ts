@@ -19,9 +19,9 @@ export type IssueTokenInput = z.infer<typeof issueTokenInputSchema>;
 /** Response of `POST /v1/tokens` — the plaintext `token` is returned exactly once. */
 export const issuedTokenSchema = z.object({
   id: z.string(),
-  token: z.string(),
-  prefix: z.string(),
-  scopes: z.array(tokenScopeSchema),
+  token: z.string().startsWith(API_TOKEN_PREFIX),
+  prefix: z.string().startsWith(API_TOKEN_PREFIX),
+  scopes: z.array(tokenScopeSchema).min(1),
   expires_at: z.string(),
 });
 export type IssuedToken = z.infer<typeof issuedTokenSchema>;
@@ -32,8 +32,8 @@ export const apiTokenRowSchema = z.object({
   org_id: z.string(),
   user_id: z.string(),
   name: z.string(),
-  prefix: z.string(),
-  scopes: z.array(tokenScopeSchema),
+  prefix: z.string().startsWith(API_TOKEN_PREFIX),
+  scopes: z.array(tokenScopeSchema).min(1),
   expires_at: z.string(),
   last_used_at: z.string().nullable(),
   revoked_at: z.string().nullable(),

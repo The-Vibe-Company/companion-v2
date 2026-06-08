@@ -53,11 +53,22 @@ export async function attachSession(c: Context<{ Variables: ApiVariables }>, nex
   await next();
 }
 
-export function actorFromContext(c: Context<{ Variables: ApiVariables }>): ActorContext {
+/**
+ * Resolve the actor. Personal access tokens are opt-in (`allowToken`): by default a token-authed
+ * request is rejected, so a scoped PAT can only reach the few endpoints that explicitly allow it
+ * (the skills read/write surfaces) and never the org/team/member management endpoints.
+ */
+export function actorFromContext(
+  c: Context<{ Variables: ApiVariables }>,
+  allowToken = false,
+): ActorContext {
   const user = c.get("user");
   if (user) return { id: user.id, email: user.email, name: user.name || user.email };
   const tokenActor = c.get("tokenActor");
-  if (tokenActor) return tokenActor;
+  if (tokenActor) {
+    if (!allowToken) throw new Error("personal access tokens are not allowed on this endpoint");
+    return tokenActor;
+  }
   throw new Error("not authenticated");
 }
 

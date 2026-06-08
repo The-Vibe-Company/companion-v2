@@ -76,8 +76,9 @@ const app = new Hono<{ Variables: ApiVariables }>();
 async function withTenant<T>(
   c: Context<{ Variables: ApiVariables }>,
   fn: (input: { actor: ReturnType<typeof actorFromContext>; orgId: string; database: Db }) => Promise<T>,
+  allowToken = false,
 ): Promise<T> {
-  const actor = actorFromContext(c);
+  const actor = actorFromContext(c, allowToken);
   const orgId = await orgIdFromContext(c);
   return withTenantContext({ orgId, userId: actor.id }, (database) => fn({ actor, orgId, database }));
 }
@@ -575,7 +576,7 @@ app.put("/v1/skills/:slug/scope", async (c) => {
  */
 app.post("/v1/skills", bodyLimit({ maxSize: 32 * 1024 * 1024, onError: (c) => jsonError(c, "package exceeds the 32 MB upload limit", 413) }), async (c) => {
   try {
-    const actor = actorFromContext(c);
+    const actor = actorFromContext(c, true);
     requireScope(c, "skills:write");
     const orgId = await orgIdFromContext(c);
     const contentType = c.req.header("content-type") ?? "";
@@ -651,7 +652,7 @@ app.post("/v1/skills", bodyLimit({ maxSize: 32 * 1024 * 1024, onError: (c) => js
 /** Author a SKILL.md inline ("Create in the browser") — new skill → 1.0.0, existing → patch-bump. */
 app.post("/v1/skills/create", bodyLimit({ maxSize: 2 * 1024 * 1024, onError: (c) => jsonError(c, "request exceeds the 2 MB limit", 413) }), async (c) => {
   try {
-    const actor = actorFromContext(c);
+    const actor = actorFromContext(c, true);
     requireScope(c, "skills:write");
     const orgId = await orgIdFromContext(c);
     const input = createSkillInputSchema.parse(await c.req.json());
@@ -691,11 +692,14 @@ app.post("/v1/skills/create", bodyLimit({ maxSize: 2 * 1024 * 1024, onError: (c)
 
 app.get("/v1/skills/:slug/download", async (c) => {
   try {
-    actorFromContext(c);
+    actorFromContext(c, true);
     requireScope(c, "skills:read");
     const version = c.req.query("version") ?? null;
-    const found = await withTenant(c, ({ actor, orgId, database }) =>
-      getDownloadVersion({ actor, orgId, slug: c.req.param("slug"), version, database }),
+    const found = await withTenant(
+      c,
+      ({ actor, orgId, database }) =>
+        getDownloadVersion({ actor, orgId, slug: c.req.param("slug"), version, database }),
+      true,
     );
     const url = await signedSkillArchiveUrl({ key: found.storagePath });
     return c.json({ ...found, url });
@@ -710,11 +714,14 @@ app.get("/v1/skills/:slug/download", async (c) => {
  */
 app.get("/v1/skills/:slug/versions/:version/package", async (c) => {
   try {
-    actorFromContext(c);
+    actorFromContext(c, true);
     requireScope(c, "skills:read");
     const slug = c.req.param("slug");
-    const found = await withTenant(c, ({ actor, orgId, database }) =>
-      getDownloadVersion({ actor, orgId, slug, version: c.req.param("version"), database }),
+    const found = await withTenant(
+      c,
+      ({ actor, orgId, database }) =>
+        getDownloadVersion({ actor, orgId, slug, version: c.req.param("version"), database }),
+      true,
     );
     const tarGz = await getSkillArchive({ key: found.storagePath });
     const zip = await tarGzToZip(tarGz);
