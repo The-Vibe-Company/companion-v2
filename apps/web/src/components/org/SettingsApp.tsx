@@ -39,6 +39,9 @@ export function SettingsApp({
   const { me, users } = data;
 
   const [current, setCurrent] = useState<OrgFull>(data.current);
+  useEffect(() => {
+    router.prefetch("/skills");
+  }, [router]);
   useEffect(() => setCurrent(data.current), [data.current]);
   useEffect(() => {
     document.cookie = `companion_org=${encodeURIComponent(data.current.id)}; path=/; SameSite=Lax`;

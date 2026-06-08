@@ -5,3 +5,4 @@ export * from "./skill";
 export * from "./token";
 export * from "./lockfile";
 export * from "./onboarding";
+export * from "./preferences";

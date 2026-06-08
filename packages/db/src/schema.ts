@@ -288,6 +288,25 @@ export const skillStars = pgTable(
   }),
 );
 
+export const skillFilterPreferences = pgTable(
+  "skill_filter_preferences",
+  {
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    activeFilters: jsonb("active_filters").$type<unknown[]>().notNull().default([]),
+    customViews: jsonb("custom_views").$type<unknown[]>().notNull().default([]),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.orgId, t.userId] }),
+  }),
+);
+
 export const skillComments = pgTable(
   "skill_comments",
   {

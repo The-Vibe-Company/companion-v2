@@ -20,6 +20,8 @@ export function ListView({
   canSaveView,
   onSaveView,
   onClearFilters,
+  preferenceStatus,
+  onRetryPreferences,
   owners,
   teams,
   viewCounts,
@@ -37,6 +39,8 @@ export function ListView({
   canSaveView: boolean;
   onSaveView: () => void;
   onClearFilters: () => void;
+  preferenceStatus: "idle" | "saving" | "saved" | "error";
+  onRetryPreferences: () => void;
   owners: string[];
   teams: TeamVM[];
   viewCounts: Record<string, number>;
@@ -101,6 +105,20 @@ export function ListView({
             <Icon name="bookmark-plus" size={13} />
             Save view
           </button>
+        )}
+        {preferenceStatus !== "idle" && (
+          <span className={"prefstatus prefstatus--" + preferenceStatus} role="status" aria-live="polite">
+            {preferenceStatus === "saving" && "Saving"}
+            {preferenceStatus === "saved" && "Saved"}
+            {preferenceStatus === "error" && (
+              <>
+                Not saved
+                <button className="prefstatus__retry" onClick={onRetryPreferences}>
+                  Retry
+                </button>
+              </>
+            )}
+          </span>
         )}
       </div>
 

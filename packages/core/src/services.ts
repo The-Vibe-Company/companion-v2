@@ -4,12 +4,18 @@ import type {
   OrgRole,
   Scope,
   SkillCommentRow,
+  SkillFilterPreferences,
   SkillListRow,
   SkillVersionRow,
   TeamRole,
   TokenScope,
 } from "@companion/contracts";
-import { API_TOKEN_PREFIX, publishSkillInputSchema, type PublishSkillInput } from "@companion/contracts";
+import {
+  API_TOKEN_PREFIX,
+  publishSkillInputSchema,
+  skillFilterPreferencesSchema,
+  type PublishSkillInput,
+} from "@companion/contracts";
 import { compareSemver } from "@companion/skills";
 import { db, schema, type Db } from "@companion/db";
 import { initialsFor, slugify } from "@companion/db/ids";
@@ -541,6 +547,61 @@ export async function listSkills(input: {
     created_at: r.created_at.toISOString(),
     updated_at: r.updated_at.toISOString(),
   })) as SkillListRow[];
+}
+
+const EMPTY_SKILL_FILTER_PREFERENCES: SkillFilterPreferences = {
+  active_filters: [],
+  custom_views: [],
+};
+
+export async function getSkillFilterPreferences(input: {
+  actor: ActorContext;
+  orgId: string;
+  database?: Db;
+}): Promise<SkillFilterPreferences> {
+  const database = input.database ?? db;
+  const orgRole = await getOrgRole(input.orgId, input.actor.id, database);
+  if (!orgRole) throw new Error("not a member of this organization");
+  const row = await database.query.skillFilterPreferences.findFirst({
+    where: and(
+      eq(schema.skillFilterPreferences.orgId, input.orgId),
+      eq(schema.skillFilterPreferences.userId, input.actor.id),
+    ),
+  });
+  if (!row) return EMPTY_SKILL_FILTER_PREFERENCES;
+  return skillFilterPreferencesSchema.parse({
+    active_filters: row.activeFilters,
+    custom_views: row.customViews,
+  });
+}
+
+export async function setSkillFilterPreferences(input: {
+  actor: ActorContext;
+  orgId: string;
+  preferences: SkillFilterPreferences;
+  database?: Db;
+}): Promise<SkillFilterPreferences> {
+  const database = input.database ?? db;
+  const orgRole = await getOrgRole(input.orgId, input.actor.id, database);
+  if (!orgRole) throw new Error("not a member of this organization");
+  const preferences = skillFilterPreferencesSchema.parse(input.preferences);
+  await database
+    .insert(schema.skillFilterPreferences)
+    .values({
+      orgId: input.orgId,
+      userId: input.actor.id,
+      activeFilters: preferences.active_filters,
+      customViews: preferences.custom_views,
+    })
+    .onConflictDoUpdate({
+      target: [schema.skillFilterPreferences.orgId, schema.skillFilterPreferences.userId],
+      set: {
+        activeFilters: preferences.active_filters,
+        customViews: preferences.custom_views,
+        updatedAt: new Date(),
+      },
+    });
+  return preferences;
 }
 
 export async function getSkillBySlug(input: {

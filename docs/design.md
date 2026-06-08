@@ -53,7 +53,8 @@ cli/          # companion CLI
 
 Better Auth owns the core `user`, `session`, `account`, and `verification` tables. Companion
 adds `profiles`, `organizations`, `memberships`, `teams`, `team_memberships`, `invitations`,
-`skills`, `skill_versions`, `skill_stars`, `skill_comments`, `api_tokens`, and `audit_log`.
+`skills`, `skill_versions`, `skill_stars`, `skill_filter_preferences`, `skill_comments`,
+`api_tokens`, and `audit_log`.
 
 Every tenant-owned table carries `org_id`. Skills keep ownership, visibility, and provenance
 separate: `owner_id`, `scope`, `team_id`, and `creator_id`. Valid scopes are `private`, `team`,
@@ -62,6 +63,10 @@ and `public`.
 `api_tokens` holds short-lived, scoped personal access tokens for programmatic publish/install.
 Only the `sha256` `token_hash` is stored (the plaintext `cmp_pat_…` is shown once); each row carries
 `scopes` (`skills:read` / `skills:write`), an `expires_at` (24h default), and `revoked_at`.
+
+`skill_filter_preferences` stores the current user's Skills Hub filter state for one organization.
+The row is keyed by `(org_id, user_id)` and contains `active_filters` plus `custom_views` JSONB.
+It is personal UI state, not a shared organization resource.
 
 Onboarding adds a few columns: `organizations.domain` + `organizations.domain_auto_join` (a verified
 email domain that grants membership, and whether matching signups join automatically), plus cosmetic
@@ -110,8 +115,9 @@ directly to Postgres.
 - Tokens: `POST /v1/tokens` (issue a scoped `cmp_pat_…`, plaintext returned once),
   `DELETE /v1/tokens/:id`. Session-authenticated only — a token cannot mint another.
 - Skills: `/v1/skills`, `/v1/skills/:slug`, `/v1/skills/:slug/versions`,
-  `/v1/skills/:slug/download`, `/v1/skills/:slug/scope`, `POST /v1/skills/create` (author a
-  SKILL.md inline), and `GET /v1/skills/:slug/versions/:version/package` (download a version as `.zip`).
+  `/v1/skills/:slug/download`, `/v1/skills/:slug/scope`, `/v1/skill-filter-preferences`,
+  `POST /v1/skills/create` (author a SKILL.md inline), and
+  `GET /v1/skills/:slug/versions/:version/package` (download a version as `.zip`).
 - Orgs: `/v1/orgs`, `/v1/orgs/current`, `/v1/teams`, `/v1/invitations`.
 
 Requests authenticate by Better Auth cookie session. An `Authorization: Bearer cmp_pat_…` token is

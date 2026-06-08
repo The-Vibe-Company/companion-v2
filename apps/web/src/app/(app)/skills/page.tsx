@@ -1,5 +1,5 @@
 import { redirect } from "next/navigation";
-import type { SkillListRow } from "@companion/contracts";
+import type { SkillFilterPreferences, SkillListRow } from "@companion/contracts";
 import { loadOrgContext } from "@/lib/currentOrg";
 import { serverApiFetch } from "@/lib/apiServer";
 import { SkillsApp } from "@/components/skills/SkillsApp";
@@ -20,6 +20,9 @@ export default async function SkillsPage() {
   const orgHeaders = { "x-companion-org": current.id };
 
   const skills = (await serverApiFetch<SkillListRow[]>("/v1/skills", { headers: orgHeaders })).map(mapSkill);
+  const filterPreferences = await serverApiFetch<SkillFilterPreferences>("/v1/skill-filter-preferences", {
+    headers: orgHeaders,
+  });
 
   const me: MeVM = {
     id: whoami.userId,
@@ -33,5 +36,14 @@ export default async function SkillsPage() {
     initial: (t.name[0] ?? "T").toUpperCase(),
   }));
 
-  return <SkillsApp initialSkills={skills} me={me} teams={teams} orgs={orgs} currentOrg={current} />;
+  return (
+    <SkillsApp
+      initialSkills={skills}
+      initialFilterPreferences={filterPreferences}
+      me={me}
+      teams={teams}
+      orgs={orgs}
+      currentOrg={current}
+    />
+  );
 }

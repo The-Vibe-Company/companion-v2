@@ -1,31 +1,107 @@
+import { Icon } from "@/components/Icon";
+
+const ROW_WIDTHS = ["84%", "62%", "74%", "51%", "68%", "79%", "57%", "70%"];
+
 export default function Loading() {
   return (
-    <div className="page">
-      <div className="pagehead">
-        <div>
-          <h1 className="pagehead__title">Skills</h1>
-          <p className="pagehead__desc">Waiting for first poll…</p>
+    <div className="app skel-shell" role="status" aria-live="polite" aria-busy="true">
+      <span className="sr-only">Loading skills...</span>
+      <aside className="side" aria-hidden="true">
+        <div className="side__brand">
+          <div className="brandmark skel__brandmark" />
+          <div className="skel__brandmeta">
+            <div className="skel skel--brandname" />
+            <div className="skel skel--brandsub" />
+          </div>
+          <div className="side__search skel__iconbtn">
+            <Icon name="search" size={14} />
+          </div>
         </div>
-      </div>
-      <div className="cds-card cds-card__body--bare">
-        <table className="tbl">
-          <tbody>
-            {Array.from({ length: 8 }).map((_, i) => (
-              <tr key={i}>
-                <td colSpan={6}>
-                  <div
-                    style={{
-                      height: 16,
-                      borderRadius: 4,
-                      background: "var(--color-surface-raised)",
-                      width: `${60 + ((i * 7) % 35)}%`,
-                    }}
-                  />
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <nav className="side__nav" aria-label="Primary">
+          <div className="navitem">
+            <span className="navitem__ico">
+              <Icon name="user" />
+            </span>
+            <span className="skel skel--navlabel" />
+            <span className="navitem__count skel skel--count" />
+          </div>
+          <div className="side__grouplabel">Workspace</div>
+          <div className="navitem navitem--active">
+            <span className="navitem__ico">
+              <Icon name="package" />
+            </span>
+            <span className="skel skel--navlabel" />
+            <span className="navitem__count skel skel--count" />
+          </div>
+          <div className="navitem navitem--muted">
+            <span className="navitem__ico">
+              <Icon name="square-stack" />
+            </span>
+            <span className="skel skel--navlabel skel--short" />
+            <span className="navitem__soon">soon</span>
+          </div>
+        </nav>
+        <div className="side__foot side__foot--btn skel__foot">
+          <Icon name="settings" size={14} />
+          <span className="skel skel--navlabel" />
+          <span className="side__foot__role skel skel--role" />
+        </div>
+      </aside>
+      <div className="main" aria-hidden="true">
+        <div className="sh">
+          <h2 className="sh__title">Skills</h2>
+          <span className="sh__count tnum">0</span>
+          <span className="sh__spacer" />
+          <div className="btn-primary skel__upload">
+            <Icon name="upload" size={14} />
+            <span className="skel skel--button" />
+          </div>
+        </div>
+        <div className="cmdbar">
+          <div className="pillset">
+            <div className="pill is-on">
+              <span className="skel skel--pill" />
+            </div>
+            <div className="pill">
+              <span className="skel skel--pill skel--short" />
+            </div>
+            <div className="pill">
+              <span className="skel skel--pill" />
+            </div>
+            <div className="pill">
+              <span className="skel skel--pill skel--wide" />
+            </div>
+          </div>
+          <span className="sh__spacer" />
+          <div className="sh__iconbtn">
+            <Icon name="filter" size={14} />
+          </div>
+        </div>
+        <div className="clist">
+          <div className="chead">
+            <span />
+            <span>Skill</span>
+            <span>Scope</span>
+            <span>Version</span>
+            <span className="r">Stars</span>
+            <span className="r">Updated</span>
+          </div>
+          {ROW_WIDTHS.map((width, i) => (
+            <div className="crow skel__row" key={width}>
+              <span className="vdot vdot--unknown" />
+              <span className="crow__name">
+                <span className="skel" style={{ width }} />
+              </span>
+              <span className="crow__scope">
+                <Icon name={i % 3 === 0 ? "globe" : i % 3 === 1 ? "users" : "lock"} size={13} />
+                <span className="skel skel--scope" />
+              </span>
+              <span className="ver skel skel--version" />
+              <span className="r skel skel--stars" />
+              <span className="r skel skel--updated" />
+            </div>
+          ))}
+        </div>
       </div>
     </div>
   );

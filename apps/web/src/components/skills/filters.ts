@@ -1,18 +1,18 @@
+import { skillFilterSchema, type SkillFilter, type SkillSavedView } from "@companion/contracts";
 import type { SkillVM } from "@/lib/types";
 import { SCOPE_ICON } from "./blocks";
 
-export interface Filter {
-  type: "scope" | "status" | "starred" | "owner" | "team";
-  value: string;
-}
+export type Filter = SkillFilter;
 
 export interface ViewDef {
   id: string;
   name: string;
   icon: string;
   filters: Filter[];
-  custom?: boolean;
+  custom?: true;
 }
+
+export type SavedViewDef = SkillSavedView;
 
 export const BUILTIN_VIEWS: ViewDef[] = [
   { id: "all", name: "All", icon: "layers", filters: [] },
@@ -62,5 +62,10 @@ export function chipParts(f: Filter): { icon: string; key: string; val: string }
   if (f.type === "starred") return { icon: "star", key: "", val: "starred" };
   if (f.type === "owner") return { icon: "user", key: "owner", val: f.value };
   if (f.type === "team") return { icon: "users", key: "team", val: f.value };
-  return { icon: "filter", key: f.type, val: f.value };
+  return { icon: "filter", key: "", val: "" };
+}
+
+export function makeFilter(type: Filter["type"], value: string): Filter | null {
+  const parsed = skillFilterSchema.safeParse({ type, value });
+  return parsed.success ? parsed.data : null;
 }
