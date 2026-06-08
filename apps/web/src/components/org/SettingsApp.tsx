@@ -18,6 +18,17 @@ import { SettingsView } from "./SettingsView";
 import { useOrgActions } from "./useOrgActions";
 import type { OrgCtx, OrgFull, SettingsAppData, SettingsDialog, SettingsTab } from "./model";
 
+function normalizeOrgFull(org: OrgFull): OrgFull {
+  const members = Array.isArray(org.members) ? org.members : [];
+  const teams = Array.isArray(org.teams)
+    ? org.teams.map((team) => ({
+        ...team,
+        members: Array.isArray(team.members) ? team.members : [],
+      }))
+    : [];
+  return { ...org, members, teams };
+}
+
 export function SettingsController({
   data,
   initialTab,
@@ -33,11 +44,11 @@ export function SettingsController({
   const actions = useOrgActions();
   const { me, users } = data;
 
-  const [current, setCurrent] = useState<OrgFull>(data.current);
+  const [current, setCurrent] = useState<OrgFull>(() => normalizeOrgFull(data.current));
   useEffect(() => {
     router.prefetch("/skills");
   }, [router]);
-  useEffect(() => setCurrent(data.current), [data.current]);
+  useEffect(() => setCurrent(normalizeOrgFull(data.current)), [data.current]);
   useEffect(() => {
     document.cookie = `companion_org=${encodeURIComponent(data.current.id)}; path=/; SameSite=Lax`;
   }, [data.current.id]);
