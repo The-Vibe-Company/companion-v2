@@ -71,5 +71,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return redirectWithCookies(loginPath(next, mode, json.error?.message ?? json.message ?? "Authentication failed"));
   }
 
-  return redirectWithCookies(next, responseSetCookies(response));
+  // New accounts go through onboarding (create or join an org) before landing in the app.
+  const destination = mode === "signup" ? "/onboarding" : next;
+  return redirectWithCookies(destination, responseSetCookies(response));
 }

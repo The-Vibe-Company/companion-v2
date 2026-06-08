@@ -11,12 +11,16 @@ import {
   acceptInvitation,
   addComment,
   addTeamMember,
+  completeOnboarding,
   createInvitation,
   createOrg,
   createTeam,
+  getOnboardingContext,
+  getOnboardingState,
   getOrgSettings,
   getDownloadVersion,
   issueApiToken,
+  joinOrgByDomain,
   listOrgs,
   listSkillComments,
   listSkills,
@@ -34,6 +38,7 @@ import {
   toggleStar,
 } from "@companion/core/services";
 import {
+  completeOnboardingInputSchema,
   createSkillInputSchema,
   issueTokenInputSchema,
   publishSkillInputSchema,
@@ -72,6 +77,16 @@ import {
 import { appRouter } from "./trpc";
 
 const app = new Hono<{ Variables: ApiVariables }>();
+
+/** Set the `companion_org` selection cookie (readable client-side, so not httpOnly). */
+function setOrgCookie(c: Context<{ Variables: ApiVariables }>, orgId: string): void {
+  setCookie(c, "companion_org", orgId, {
+    path: "/",
+    sameSite: "Lax",
+    secure: process.env.NODE_ENV === "production",
+    httpOnly: false,
+  });
+}
 
 async function withTenant<T>(
   c: Context<{ Variables: ApiVariables }>,
@@ -306,9 +321,73 @@ app.get("/v1/auth/whoami", async (c) => {
     const orgs = await listOrgs(actor);
     const orgId = await orgIdFromContext(c).catch(() => null);
     const org = orgs.find((o) => o.org_id === orgId) ?? orgs[0] ?? null;
-    return c.json({ userId: actor.id, email: actor.email, name: actor.name, org, role: org?.org_role ?? null });
+    const { onboarded } = await getOnboardingState(actor);
+    return c.json({
+      userId: actor.id,
+      email: actor.email,
+      name: actor.name,
+      org,
+      role: org?.org_role ?? null,
+      onboarded,
+      needsOnboarding: !onboarded,
+    });
   } catch (error) {
     return jsonError(c, error, 401);
+  }
+});
+
+app.get("/v1/onboarding/context", async (c) => {
+  try {
+    const actor = actorFromContext(c);
+    const ctx = await getOnboardingContext(actor);
+    return c.json({
+      email: ctx.email,
+      domain: ctx.domain,
+      is_personal: ctx.isPersonal,
+      matched_org: ctx.matchedOrg
+        ? {
+            name: ctx.matchedOrg.name,
+            domain: ctx.matchedOrg.domain,
+            member_count: ctx.matchedOrg.memberCount,
+            team_count: ctx.matchedOrg.teamCount,
+          }
+        : null,
+    });
+  } catch (error) {
+    return jsonError(c, error, 401);
+  }
+});
+
+app.post("/v1/onboarding/join", async (c) => {
+  try {
+    const actor = actorFromContext(c);
+    const { orgId } = await joinOrgByDomain(actor);
+    setOrgCookie(c, orgId);
+    return c.json({ ok: true, orgId });
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
+app.post("/v1/onboarding/create", async (c) => {
+  try {
+    const actor = actorFromContext(c);
+    const input = completeOnboardingInputSchema.parse(await c.req.json());
+    const { orgId, inviteTokens } = await completeOnboarding(actor, input);
+    setOrgCookie(c, orgId);
+    // Best-effort invite emails: a bounced address must NOT undo the org/team the user just created
+    // (this intentionally diverges from /v1/invitations, which rolls a single invite back on failure).
+    const base = process.env.COMPANION_WEB_URL ?? "http://127.0.0.1:3000";
+    for (const { email, token } of inviteTokens) {
+      await sendTransactionalEmail(
+        inviteEmail({ to: email, orgName: input.org.name, inviteUrl: `${base}/join/${token}` }),
+      ).catch((emailError) => {
+        console.error(`onboarding invite email to ${email} failed`, emailError);
+      });
+    }
+    return c.json({ ok: true, orgId, invited: inviteTokens.map((t) => t.email) });
+  } catch (error) {
+    return jsonError(c, error);
   }
 });
 
@@ -347,12 +426,7 @@ app.post("/v1/orgs/current", async (c) => {
     if (!orgs.some((org) => org.org_id === body.orgId)) {
       return jsonError(c, "selected organization is not available to the current user", 403);
     }
-    setCookie(c, "companion_org", body.orgId, {
-      path: "/",
-      sameSite: "Lax",
-      secure: process.env.NODE_ENV === "production",
-      httpOnly: false,
-    });
+    setOrgCookie(c, body.orgId);
     return c.json({ ok: true });
   } catch (error) {
     return jsonError(c, error);

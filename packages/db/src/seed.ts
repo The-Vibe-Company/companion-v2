@@ -13,6 +13,10 @@ async function main(): Promise<void> {
     slug: "acme",
     kind: "team",
     plan: "free",
+    // Domain auto-join so a local signup with `@acme.com` exercises the onboarding "join" path
+    // (`@gmail.com` → personal/create, any other corporate domain → create).
+    domain: "acme.com",
+    domainAutoJoin: true,
   });
 
   console.log("Seeded Acme workspace placeholder. Create the first user through the UI or CLI.");
