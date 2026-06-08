@@ -15,7 +15,6 @@ import {
   setTeamMemberRole as setTeamMemberRoleRpc,
 } from "@/lib/org";
 import { Onboarding } from "./Onboarding";
-import { SettingsOnlySidebar } from "./SettingsOnlySidebar";
 import { SettingsView } from "./SettingsView";
 import { useOrgActions } from "./useOrgActions";
 import type { OrgCtx, OrgFull, SeedUser, SettingsDialog, SettingsTab } from "./model";
@@ -165,7 +164,6 @@ export function SettingsApp({
 
   return (
     <div className="app">
-      <SettingsOnlySidebar />
       <div className="main">
         <SettingsView ctx={ctx} tab={tab} dialog={dialog} onTab={onTab} onDialog={onDialog} onClose={toSkills} />
       </div>

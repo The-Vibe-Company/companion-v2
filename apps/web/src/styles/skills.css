@@ -48,7 +48,6 @@ body { background: var(--color-canvas); color: var(--color-fg); font-family: var
   color: var(--color-muted); cursor: pointer; text-decoration: none; transition: background-color var(--duration-fast) var(--ease-out-quint), color var(--duration-fast) var(--ease-out-quint); }
 .navitem:hover { background: var(--color-surface-raised); color: var(--color-fg); }
 .navitem--active { background: var(--color-surface-raised); color: var(--color-fg); font-weight: 500; }
-.navitem--static { cursor: default; }
 .navitem--muted { color: var(--color-faint); cursor: default; }
 .navitem--muted:hover { background: transparent; color: var(--color-faint); }
 .navitem__ico { color: var(--color-faint); display: inline-flex; }
