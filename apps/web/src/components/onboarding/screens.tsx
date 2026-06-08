@@ -9,7 +9,13 @@ import {
   type SetStateAction,
 } from "react";
 import { Icon } from "@/components/Icon";
-import { faviconUrl, type OnboardingMatchedOrg } from "@/lib/onboarding";
+import {
+  brandIconCandidates,
+  firstLoadableBrandIconCandidate,
+  normalizeWebsiteDomain,
+  type BrandIconCandidate,
+  type OnboardingMatchedOrg,
+} from "@/lib/onboarding";
 
 /* --------------------------------------------------------------- palettes */
 export const LOGO_COLORS = [
@@ -354,13 +360,23 @@ export function ScreenCreateOrg({
 }) {
   const [fetchState, setFetchState] = useState<"idle" | "loading" | "done">("idle");
   const fetchToken = useRef(0);
+  const mounted = useRef(true);
   const valid = org.name.trim().length >= 2;
+  const hasFetchedLogo = org.candidates.some((c) => c.src);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
 
   const startFetch = useCallback(
     (site: string) => {
-      const clean = site.replace(/^https?:\/\//, "").replace(/\/.*$/, "").trim().toLowerCase();
+      const clean = normalizeWebsiteDomain(site);
       const token = ++fetchToken.current;
       if (clean.length < 4 || !clean.includes(".")) {
+        setOrg((o) => ({ ...o, candidates: [], logo: null, fetchedFrom: "" }));
         setFetchState("idle");
         return;
       }
@@ -372,30 +388,40 @@ export function ScreenCreateOrg({
         { id: "c2", color: LOGO_COLORS[(base.length + 2) % LOGO_COLORS.length]!, initial: base.slice(0, 2).toUpperCase() },
       ];
 
-      const finish = (faviconOk: boolean) => {
-        if (token !== fetchToken.current) return; // a newer fetch superseded this one
-        const cands: LogoCandidate[] = faviconOk
-          ? [{ id: "fav", color: colorCands[0]!.color, initial: colorCands[0]!.initial, src: faviconUrl(clean) }, ...colorCands]
+      const finish = (fetchedIcon: BrandIconCandidate | null) => {
+        if (!mounted.current || token !== fetchToken.current) return; // a newer fetch superseded this one
+        const cands: LogoCandidate[] = fetchedIcon
+          ? [{ id: `fav-${fetchedIcon.domain}`, color: colorCands[0]!.color, initial: colorCands[0]!.initial, src: fetchedIcon.url }, ...colorCands]
           : colorCands;
-        setOrg((o) => ({ ...o, candidates: cands, logo: cands[0]!, fetchedFrom: clean }));
+        setOrg((o) => ({ ...o, candidates: cands, logo: cands[0]!, fetchedFrom: fetchedIcon?.domain ?? clean }));
         setFetchState("done");
       };
 
       // Real favicon fetch (best-effort). Falls back to derived color tiles if it errors/times out.
       if (typeof window !== "undefined") {
-        const img = new window.Image();
-        let settled = false;
-        const done = (ok: boolean) => {
-          if (settled) return;
-          settled = true;
-          finish(ok);
-        };
-        img.onload = () => done(true);
-        img.onerror = () => done(false);
-        img.src = faviconUrl(clean);
-        window.setTimeout(() => done(false), 2500);
+        const iconCandidates = brandIconCandidates(clean);
+        firstLoadableBrandIconCandidate(iconCandidates, async (icon) => {
+          const controller = new AbortController();
+          let timeout: number | null = null;
+          try {
+            const request = fetch(icon.url, { signal: controller.signal })
+              .then((response) => response.ok)
+              .catch(() => false);
+            const deadline = new Promise<boolean>((resolve) => {
+              timeout = window.setTimeout(() => {
+                controller.abort();
+                resolve(false);
+              }, 2500);
+            });
+            return await Promise.race([request, deadline]);
+          } catch {
+            return false;
+          } finally {
+            if (timeout) window.clearTimeout(timeout);
+          }
+        }).then(finish);
       } else {
-        finish(false);
+        finish(null);
       }
     },
     [setOrg],
@@ -455,24 +481,37 @@ export function ScreenCreateOrg({
                 <span className="ob-avatar ob-avatar--md" style={{ background: "var(--color-surface-raised)" }}>
                   <span className="cds-spinner" />
                 </span>
-                <div className="ob-logofetch__status">
+                <div className="ob-logofetch__status" role="status" aria-live="polite" aria-busy="true">
                   <div className="ob-logofetch__line">Fetching brand assets…</div>
                   <div className="ob-logofetch__sub">reading {org.website.replace(/^https?:\/\//, "") || "site"}/favicon</div>
                 </div>
               </>
             ) : (
               <>
-                <div className="ob-logofetch__status">
+                <div className="ob-logofetch__status" role="status" aria-live="polite" aria-busy="false">
                   <div className="ob-logofetch__line">
-                    <Icon name="check" size={14} style={{ color: "var(--color-ok)" }} /> Found a logo on {org.fetchedFrom}
+                    {hasFetchedLogo ? (
+                      <>
+                        <Icon name="check" size={14} style={{ color: "var(--color-ok)" }} /> Found a logo on{" "}
+                        <span className="ob-logofetch__host">{org.fetchedFrom}</span>
+                      </>
+                    ) : (
+                      <>
+                        <Icon name="info" size={14} style={{ color: "var(--color-faint)" }} /> Generated logo options for{" "}
+                        <span className="ob-logofetch__host">{org.fetchedFrom}</span>
+                      </>
+                    )}
                   </div>
-                  <div className="ob-logofetch__sub">pick one, or upload your own</div>
+                  <div className="ob-logofetch__sub">{hasFetchedLogo ? "pick one, or use initials" : "no site logo found; pick one, or use initials"}</div>
                 </div>
                 <div className="ob-logo-opts">
                   {org.candidates.map((c) => (
                     <button
                       key={c.id}
+                      type="button"
                       className={`ob-logo-opt${org.logo && org.logo.id === c.id ? " is-sel" : ""}`}
+                      aria-label={c.src ? `Use logo from ${org.fetchedFrom}` : `Use ${c.initial} generated logo`}
+                      aria-pressed={org.logo?.id === c.id}
                       onClick={() => setOrg((o) => ({ ...o, logo: c }))}
                     >
                       <Avatar size="md" color={c.color} initial={c.initial} src={c.src} />
@@ -482,8 +521,10 @@ export function ScreenCreateOrg({
                     </button>
                   ))}
                   <button
+                    type="button"
                     className="ob-logo-upload"
-                    title="Upload a logo"
+                    title="Use initials"
+                    aria-label="Use initials"
                     onClick={() =>
                       setOrg((o) => ({
                         ...o,
@@ -491,7 +532,7 @@ export function ScreenCreateOrg({
                       }))
                     }
                   >
-                    <Icon name="upload" size={15} />
+                    <Icon name="hash" size={15} />
                   </button>
                 </div>
               </>
@@ -801,4 +842,3 @@ export function ScreenWelcome({
     </div>
   );
 }
-

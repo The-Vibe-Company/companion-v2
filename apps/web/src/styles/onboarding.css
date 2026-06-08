@@ -246,11 +246,12 @@ body:has(.ob) { overflow: hidden; }
 .ob-note b { font-weight: 600; }
 
 /* ---- Logo fetch (create org) -------------------------------------------- */
-.ob-logofetch { display: flex; align-items: center; gap: 14px; padding: 14px; border: 1px solid var(--color-line); border-radius: var(--radius-md); background: var(--color-surface-sunken); }
+.ob-logofetch { display: flex; align-items: center; flex-wrap: wrap; gap: 14px; padding: 14px; border: 1px solid var(--color-line); border-radius: var(--radius-md); background: var(--color-surface-sunken); }
 .ob-logofetch__status { flex: 1; min-width: 0; }
-.ob-logofetch__line { font-size: var(--text-sm); color: var(--color-fg); font-weight: 500; display: flex; align-items: center; gap: 8px; }
+.ob-logofetch__line { min-width: 0; font-size: var(--text-sm); color: var(--color-fg); font-weight: 500; display: flex; align-items: center; gap: 8px; }
+.ob-logofetch__host { min-width: 0; overflow-wrap: anywhere; }
 .ob-logofetch__sub { font-size: var(--text-xs); color: var(--color-faint); margin-top: 3px; font-family: var(--font-mono); }
-.ob-logo-opts { display: flex; align-items: center; gap: 9px; }
+.ob-logo-opts { display: flex; align-items: center; flex-wrap: wrap; gap: 9px; }
 .ob-logo-opt { position: relative; border: none; background: none; padding: 0; cursor: pointer; border-radius: 11px; }
 .ob-logo-opt .ob-avatar { transition: box-shadow var(--duration-fast) var(--ease-out-quint); }
 .ob-logo-opt.is-sel .ob-avatar { box-shadow: 0 0 0 2px var(--color-surface), 0 0 0 4px var(--color-accent); }
