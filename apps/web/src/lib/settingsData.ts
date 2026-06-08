@@ -55,14 +55,16 @@ export async function loadSettingsPageData(searchParams: SettingsSearchParams): 
   data: SettingsAppData;
   initialTab: SettingsTab;
   initialDialog: SettingsDialog;
-}> {
+} | null> {
   const whoami = await serverApiFetch<{ userId: string; email: string; name: string; needsOnboarding?: boolean }>(
     "/v1/auth/whoami",
   ).catch(() => null);
   if (!whoami) redirect("/login");
   if (whoami.needsOnboarding) redirect("/onboarding");
 
-  const { current } = await loadOrgContext();
+  const orgContext = await loadOrgContext().catch(() => null);
+  if (!orgContext) return null;
+  const { current } = orgContext;
   if (!current) redirect("/onboarding");
   const orgHeaders = { "x-companion-org": current.id };
 
@@ -76,7 +78,10 @@ export async function loadSettingsPageData(searchParams: SettingsSearchParams): 
     [me.id]: { id: me.id, name: me.name, email: whoami.email, initials: me.initials },
   };
 
-  const settings = await serverApiFetch<OrgSettingsResponse>("/v1/orgs/current/settings", { headers: orgHeaders });
+  const settings = await serverApiFetch<OrgSettingsResponse>("/v1/orgs/current/settings", {
+    headers: orgHeaders,
+  }).catch(() => null);
+  if (!settings) return null;
   for (const member of settings.members) {
     users[member.userId] = {
       id: member.userId,

@@ -39,11 +39,21 @@ jobs:
       - name: Test
         run: pnpm -r test
 
+      - name: Build API
+        run: pnpm --filter @companion/api build
+
       - name: Build web
         run: pnpm --filter @companion/web build
         env:
+          COMPANION_API_URL: http://127.0.0.1:13301
+          COMPANION_WEB_URL: http://127.0.0.1:13300
+          BETTER_AUTH_URL: http://127.0.0.1:13301
+          NEXT_PUBLIC_COMPANION_API_URL: http://127.0.0.1:13301
           NEXT_PUBLIC_SUPABASE_URL: http://127.0.0.1:54321
           NEXT_PUBLIC_SUPABASE_ANON_KEY: ci-placeholder-anon-key
+
+      - name: RSC smoke
+        run: pnpm smoke:rsc
 
       - name: Build CLI
         run: pnpm --filter @companion/cli build
