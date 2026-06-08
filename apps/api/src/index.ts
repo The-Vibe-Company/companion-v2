@@ -547,6 +547,7 @@ app.get("/v1/skills/:slug/download", async (c) => {
 });
 
 const port = Number(process.env.COMPANION_API_PORT ?? process.env.PORT ?? 3001);
-serve({ fetch: app.fetch, port }, (info) => {
-  console.log(`Companion API listening on http://127.0.0.1:${info.port}`);
+const hostname = process.env.COMPANION_API_HOST;
+serve({ fetch: app.fetch, port, ...(hostname ? { hostname } : {}) }, (info) => {
+  console.log(`Companion API listening on ${hostname ? `http://${hostname}:${info.port}` : `port ${info.port}`}`);
 });
