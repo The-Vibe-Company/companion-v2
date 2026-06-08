@@ -3,6 +3,7 @@ import { loadOrgContext } from "@/lib/currentOrg";
 import { serverApiFetch } from "@/lib/apiServer";
 import { formatDate } from "@/lib/format";
 import { SettingsApp, type SettingsAppData } from "@/components/org/SettingsApp";
+import { WorkspaceLoadError } from "@/components/org/WorkspaceLoadError";
 import type { OrgFull, SeedUser, SettingsDialog, SettingsTab } from "@/components/org/model";
 import type { MeVM } from "@/lib/types";
 
@@ -50,7 +51,9 @@ export default async function SettingsPage({
   if (!whoami) redirect("/login");
   if (whoami.needsOnboarding) redirect("/onboarding");
 
-  const { current } = await loadOrgContext();
+  const orgContext = await loadOrgContext().catch(() => null);
+  if (!orgContext) return <WorkspaceLoadError />;
+  const { current } = orgContext;
   if (!current) redirect("/onboarding");
   const orgHeaders = { "x-companion-org": current.id };
 
@@ -64,7 +67,8 @@ export default async function SettingsPage({
     [me.id]: { id: me.id, name: me.name, email: whoami.email, initials: me.initials },
   };
 
-  const settings = await serverApiFetch<OrgSettingsResponse>("/v1/orgs/current/settings", { headers: orgHeaders });
+  const settings = await serverApiFetch<OrgSettingsResponse>("/v1/orgs/current/settings", { headers: orgHeaders }).catch(() => null);
+  if (!settings) return <WorkspaceLoadError />;
   for (const member of settings.members) {
     users[member.userId] = {
       id: member.userId,
