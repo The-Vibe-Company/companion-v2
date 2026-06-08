@@ -82,10 +82,11 @@ remain available.
 
 ### Conductor workspaces
 
-Conductor runs each workspace as its own local stack. The Run button executes
-`bash scripts/conductor-workspace.sh run`, derives all ports from `CONDUCTOR_PORT`, and uses a
-workspace-specific Docker Compose project name so Postgres and MinIO volumes do not leak between
-workspaces. The allocated ports are:
+Conductor uses the same full-stack entrypoint as local development: `pnpm dev`. The Run button still
+calls `bash scripts/conductor-workspace.sh run`, but that script only delegates to `pnpm dev`.
+When `CONDUCTOR_PORT` is present, `scripts/dev-stack.sh` switches into Conductor mode, derives all
+ports from that base port, and uses a workspace-specific Docker Compose project name so Postgres and
+MinIO volumes do not leak between workspaces. The allocated ports are:
 
 | Service | Port |
 |---|---|
@@ -97,7 +98,7 @@ workspaces. The allocated ports are:
 | Mailpit SMTP | `CONDUCTOR_PORT + 5` |
 | Mailpit UI | `CONDUCTOR_PORT + 6` |
 
-Archiving a workspace runs `bash scripts/conductor-workspace.sh archive`, which removes that
+Archiving a workspace runs `bash scripts/conductor-workspace.sh archive`, which removes only that
 workspace's Compose project and volumes.
 
 ## How it relates to Companion v1

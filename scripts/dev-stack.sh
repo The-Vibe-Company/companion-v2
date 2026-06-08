@@ -59,6 +59,70 @@ port_from_url() {
   fi
 }
 
+sanitize_project_name() {
+  local raw="${CONDUCTOR_WORKSPACE_NAME:-$(basename "$REPO_ROOT")}"
+  local cleaned
+
+  cleaned="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9_-]+/-/g; s/^-+//; s/-+$//')"
+  if [ -z "$cleaned" ]; then
+    cleaned="workspace"
+  fi
+  if ! printf '%s' "$cleaned" | grep -Eq '^[a-z0-9]'; then
+    cleaned="w-${cleaned}"
+  fi
+
+  printf 'companion-%s' "$cleaned"
+}
+
+port_at() {
+  local base_port="$1"
+  local offset="$2"
+
+  printf '%s' "$((base_port + offset))"
+}
+
+configure_conductor_env() {
+  local base_port="$CONDUCTOR_PORT"
+
+  if ! printf '%s' "$base_port" | grep -Eq '^[0-9]+$'; then
+    printf '[dev] CONDUCTOR_PORT must be numeric, got: %s\n' "$base_port" >&2
+    exit 1
+  fi
+
+  WEB_PORT="$(port_at "$base_port" 0)"
+  API_PORT="$(port_at "$base_port" 1)"
+
+  export COMPOSE_PROJECT_NAME="$(sanitize_project_name)"
+  export COMPOSE_BIND_HOST="127.0.0.1"
+  export COMPANION_WEB_PORT="$WEB_PORT"
+  export COMPANION_WEB_HOST="127.0.0.1"
+  export COMPANION_API_PORT="$API_PORT"
+  export COMPANION_API_HOST="127.0.0.1"
+  export POSTGRES_PORT="$(port_at "$base_port" 2)"
+  export MINIO_PORT="$(port_at "$base_port" 3)"
+  export MINIO_CONSOLE_PORT="$(port_at "$base_port" 4)"
+  export MAILPIT_SMTP_PORT="$(port_at "$base_port" 5)"
+  export MAILPIT_WEB_PORT="$(port_at "$base_port" 6)"
+
+  export DATABASE_URL="postgres://companion:companion@127.0.0.1:${POSTGRES_PORT}/companion"
+  export COMPANION_API_URL="http://${COMPANION_API_HOST}:${API_PORT}"
+  export COMPANION_WEB_URL="http://${COMPANION_WEB_HOST}:${WEB_PORT}"
+  export NEXT_PUBLIC_COMPANION_API_URL="$COMPANION_API_URL"
+  export BETTER_AUTH_URL="$COMPANION_API_URL"
+  export BETTER_AUTH_COOKIE_PREFIX="$COMPOSE_PROJECT_NAME"
+
+  export S3_ENDPOINT="http://127.0.0.1:${MINIO_PORT}"
+  export S3_REGION="${S3_REGION:-us-east-1}"
+  export S3_ACCESS_KEY_ID="${S3_ACCESS_KEY_ID:-companion}"
+  export S3_SECRET_ACCESS_KEY="${S3_SECRET_ACCESS_KEY:-companion-secret}"
+  export S3_BUCKET_SKILL_ARCHIVES="${S3_BUCKET_SKILL_ARCHIVES:-skill-archives}"
+  export S3_FORCE_PATH_STYLE="${S3_FORCE_PATH_STYLE:-true}"
+
+  export EMAIL_PROVIDER="${EMAIL_PROVIDER:-mailpit}"
+  export EMAIL_FROM="${EMAIL_FROM:-Companion <noreply@companion.local>}"
+  export MAILPIT_SMTP_HOST="${MAILPIT_SMTP_HOST:-127.0.0.1}"
+}
+
 configure_local_env() {
   local database_url_explicit="${DATABASE_URL+x}"
   local companion_api_url_explicit="${COMPANION_API_URL+x}"
@@ -66,6 +130,11 @@ configure_local_env() {
   local next_public_api_url_explicit="${NEXT_PUBLIC_COMPANION_API_URL+x}"
   local better_auth_url_explicit="${BETTER_AUTH_URL+x}"
   local s3_endpoint_explicit="${S3_ENDPOINT+x}"
+
+  if [ -n "${CONDUCTOR_PORT:-}" ]; then
+    configure_conductor_env
+    return
+  fi
 
   if [ "${COMPANION_DEV_SKIP_ENV_FILE:-0}" != "1" ]; then
     load_env_file "$REPO_ROOT/.env"
@@ -337,8 +406,14 @@ print_urls() {
 }
 
 start_infra() {
-  log "Starting local Postgres, MinIO, and Mailpit"
-  assert_infra_ports_available
+  if [ -n "${CONDUCTOR_PORT:-}" ]; then
+    log "Restarting Conductor Postgres, MinIO, and Mailpit"
+    docker compose -p "$COMPOSE_PROJECT_NAME" down --remove-orphans
+  else
+    log "Starting local Postgres, MinIO, and Mailpit"
+    assert_infra_ports_available
+  fi
+
   docker compose -p "$COMPOSE_PROJECT_NAME" up -d --wait postgres minio mailpit
   docker compose -p "$COMPOSE_PROJECT_NAME" up -d minio-init
 }
@@ -370,12 +445,18 @@ run_dev() {
 
 print_env() {
   configure_local_env
+  printf 'COMPOSE_PROJECT_NAME=%s\n' "$COMPOSE_PROJECT_NAME"
   printf 'DATABASE_URL=%s\n' "$DATABASE_URL"
   printf 'COMPANION_API_URL=%s\n' "$COMPANION_API_URL"
   printf 'COMPANION_WEB_URL=%s\n' "$COMPANION_WEB_URL"
   printf 'NEXT_PUBLIC_COMPANION_API_URL=%s\n' "$NEXT_PUBLIC_COMPANION_API_URL"
   printf 'BETTER_AUTH_URL=%s\n' "$BETTER_AUTH_URL"
   printf 'S3_ENDPOINT=%s\n' "$S3_ENDPOINT"
+  printf 'POSTGRES_PORT=%s\n' "$POSTGRES_PORT"
+  printf 'MINIO_PORT=%s\n' "$MINIO_PORT"
+  printf 'MINIO_CONSOLE_PORT=%s\n' "$MINIO_CONSOLE_PORT"
+  printf 'MAILPIT_SMTP_PORT=%s\n' "$MAILPIT_SMTP_PORT"
+  printf 'MAILPIT_WEB_PORT=%s\n' "$MAILPIT_WEB_PORT"
 }
 
 case "${1:-run}" in

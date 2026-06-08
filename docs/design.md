@@ -25,12 +25,13 @@ the local test user, and starts only the long-running API and web processes. Loc
 to `COMPOSE_BIND_HOST`, which defaults to `127.0.0.1`. `pnpm dev:app` is the app-only loop when infra
 is already prepared.
 
-Conductor workspaces use `scripts/conductor-workspace.sh` instead of a shared root stack. The
-script runs from the current worktree, derives a Docker Compose project name from the workspace,
-and allocates all local services from `CONDUCTOR_PORT`: web `+0`, API `+1`, Postgres `+2`,
-MinIO API `+3`, MinIO console `+4`, Mailpit SMTP `+5`, and Mailpit UI `+6`. It injects
-workspace-specific `DATABASE_URL`, API URLs, S3 endpoint, Mailpit ports, and Better Auth cookie
-prefix without mutating `.env`. Archiving a workspace runs Compose `down -v` for that project.
+Conductor workspaces use the same `pnpm dev` entrypoint as local development. The
+`scripts/conductor-workspace.sh` run command delegates to `pnpm dev`; when `CONDUCTOR_PORT` is set,
+`scripts/dev-stack.sh` derives a Docker Compose project name from the workspace and allocates all
+local services from `CONDUCTOR_PORT`: web `+0`, API `+1`, Postgres `+2`, MinIO API `+3`, MinIO
+console `+4`, Mailpit SMTP `+5`, and Mailpit UI `+6`. It injects workspace-specific `DATABASE_URL`,
+API URLs, S3 endpoint, Mailpit ports, and Better Auth cookie prefix without mutating `.env`.
+Archiving a workspace runs Compose `down -v` for that project.
 
 ## Repository Layout
 
