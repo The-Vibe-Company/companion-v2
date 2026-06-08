@@ -25,6 +25,7 @@ supabase/.temp/
 
 # CLI local state (when run inside the repo)
 .companion/
+companion.lock
 
 # Conductor workspace context
 .context/
