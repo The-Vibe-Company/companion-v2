@@ -2,8 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import type { Scope } from "@companion/contracts";
-import { setSkillScope, toggleStar as toggleStarRpc } from "@/lib/queries";
+import type { Scope, SkillFilterPreferences } from "@companion/contracts";
+import { saveSkillFilterPreferences, setSkillScope, toggleStar as toggleStarRpc } from "@/lib/queries";
 import type { MeVM, OrgVM, SkillVM, TeamVM } from "@/lib/types";
 import { Sidebar } from "./Sidebar";
 import { ListView } from "./ListView";
@@ -17,6 +17,7 @@ import {
   BUILTIN_VIEWS,
   chipParts,
   filtersKey,
+  makeFilter,
   matchFilters,
   type Filter,
   type ViewDef,
@@ -24,12 +25,14 @@ import {
 
 export function SkillsApp({
   initialSkills,
+  initialFilterPreferences,
   me,
   teams,
   orgs,
   currentOrg,
 }: {
   initialSkills: SkillVM[];
+  initialFilterPreferences: SkillFilterPreferences;
   me: MeVM;
   teams: TeamVM[];
   orgs: OrgVM[];
@@ -53,17 +56,87 @@ export function SkillsApp({
     document.cookie = `companion_org=${encodeURIComponent(currentOrg.id)}; path=/; SameSite=Lax`;
   }, [currentOrg.id]);
 
-  const [filters, setFilters] = useState<Filter[]>([]);
-  const [customViews, setCustomViews] = useState<ViewDef[]>([]);
+  const [filters, setFilters] = useState<Filter[]>(() => initialFilterPreferences.active_filters);
+  const [customViews, setCustomViews] = useState<ViewDef[]>(() =>
+    initialFilterPreferences.custom_views.map((v) => ({ ...v, custom: true })),
+  );
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [uploadOpen, setUploadOpen] = useState(false);
   const [updateSkill, setUpdateSkill] = useState<SkillVM | null>(null);
   const [installSkill, setInstallSkill] = useState<SkillVM | null>(null);
   const [openId, setOpenId] = useState<string | null>(null);
   const [lastId, setLastId] = useState<string | null>(null);
+  const [preferenceStatus, setPreferenceStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const viewSeq = useRef(0);
   const openIdRef = useRef<string | null>(null);
   const uploadReturnRef = useRef<HTMLElement | null>(null);
+  const didInitializePersistenceRef = useRef(false);
+  const persistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const persistInFlightRef = useRef(false);
+  const queuedPreferencesRef = useRef<SkillFilterPreferences | null>(null);
+  const skipNextDebouncedPersistRef = useRef(false);
+  const preferenceKey = JSON.stringify(initialFilterPreferences);
+
+  useEffect(() => {
+    setFilters(initialFilterPreferences.active_filters);
+    setCustomViews(initialFilterPreferences.custom_views.map((v) => ({ ...v, custom: true })));
+    didInitializePersistenceRef.current = false;
+    setPreferenceStatus("idle");
+    setOpenId(null);
+  }, [currentOrg.id, preferenceKey, initialFilterPreferences]);
+
+  const flushPreferenceQueue = useCallback(async () => {
+    if (persistInFlightRef.current) return;
+    persistInFlightRef.current = true;
+    try {
+      while (queuedPreferencesRef.current) {
+        const next = queuedPreferencesRef.current;
+        queuedPreferencesRef.current = null;
+        try {
+          setPreferenceStatus("saving");
+          await saveSkillFilterPreferences(next);
+          if (!queuedPreferencesRef.current) setPreferenceStatus("saved");
+        } catch (error) {
+          queuedPreferencesRef.current = next;
+          setPreferenceStatus("error");
+          console.error("Could not save skill filter preferences", error);
+          break;
+        }
+      }
+    } finally {
+      persistInFlightRef.current = false;
+    }
+  }, []);
+
+  const persistPreferences = useCallback((activeFilters: Filter[], savedViews: ViewDef[]) => {
+    queuedPreferencesRef.current = {
+      active_filters: activeFilters.map((f) => ({ ...f })),
+      custom_views: savedViews.map((v) => ({
+        id: v.id,
+        name: v.name,
+        icon: v.icon,
+        filters: v.filters.map((f) => ({ ...f })),
+        custom: true,
+      })),
+    };
+    void flushPreferenceQueue();
+  }, [flushPreferenceQueue]);
+
+  useEffect(() => {
+    if (!didInitializePersistenceRef.current) {
+      didInitializePersistenceRef.current = true;
+      return;
+    }
+    if (skipNextDebouncedPersistRef.current) {
+      skipNextDebouncedPersistRef.current = false;
+      return;
+    }
+    if (persistTimerRef.current) clearTimeout(persistTimerRef.current);
+    persistTimerRef.current = setTimeout(() => persistPreferences(filters, customViews), 350);
+    return () => {
+      if (persistTimerRef.current) clearTimeout(persistTimerRef.current);
+    };
+  }, [filters, customViews, persistPreferences]);
 
   const openUpload = useCallback(() => {
     uploadReturnRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -161,7 +234,10 @@ export function SkillsApp({
     setFilters((fs) =>
       fs.some((f) => f.type === type && f.value === value)
         ? fs.filter((f) => !(f.type === type && f.value === value))
-        : [...fs, { type, value }],
+        : (() => {
+            const next = makeFilter(type, value);
+            return next ? [...fs, next] : fs;
+          })(),
     );
   }, []);
   const removeFilter = useCallback(
@@ -170,21 +246,28 @@ export function SkillsApp({
   );
   const clearFilters = useCallback(() => setFilters([]), []);
   const saveView = useCallback(() => {
-    setFilters((fs) => {
-      const name =
-        fs
-          .map((f) => chipParts(f).val)
-          .map((v) => v[0]?.toUpperCase() + v.slice(1))
-          .join(" · ") || "View";
-      viewSeq.current += 1;
-      const id = "view-" + viewSeq.current;
-      setCustomViews((cv) => [
-        ...cv,
-        { id, name, icon: "bookmark", custom: true, filters: fs.map((f) => ({ ...f })) },
-      ]);
-      return fs;
-    });
-  }, []);
+    const name =
+      filters
+        .map((f) => chipParts(f).val)
+        .map((v) => v[0]?.toUpperCase() + v.slice(1))
+        .join(" · ") || "View";
+    viewSeq.current += 1;
+    const view = {
+      id: `view-${Date.now()}-${viewSeq.current}`,
+      name,
+      icon: "bookmark",
+      custom: true,
+      filters: filters.map((f) => ({ ...f })),
+    } satisfies ViewDef;
+    const nextCustomViews = [...customViews, view];
+    skipNextDebouncedPersistRef.current = true;
+    setCustomViews(nextCustomViews);
+    persistPreferences(filters, nextCustomViews);
+  }, [customViews, filters, persistPreferences]);
+  const retryPreferenceSave = useCallback(() => {
+    if (!queuedPreferencesRef.current) persistPreferences(filters, customViews);
+    else void flushPreferenceQueue();
+  }, [customViews, filters, flushPreferenceQueue, persistPreferences]);
   const selectTeam = useCallback((teamId: string) => {
     setFilters([{ type: "team", value: teamId }]);
     setOpenId(null);
@@ -308,6 +391,8 @@ export function SkillsApp({
             canSaveView={canSaveView}
             onSaveView={saveView}
             onClearFilters={clearFilters}
+            preferenceStatus={preferenceStatus}
+            onRetryPreferences={retryPreferenceSave}
             owners={owners}
             teams={teams}
             viewCounts={viewCounts}

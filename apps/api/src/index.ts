@@ -14,6 +14,7 @@ import {
   createInvitation,
   createOrg,
   createTeam,
+  getSkillFilterPreferences,
   getOrgSettings,
   getDownloadVersion,
   issueApiToken,
@@ -29,6 +30,7 @@ import {
   revokeApiToken,
   revokeInvitation,
   setMemberRole,
+  setSkillFilterPreferences,
   setSkillScope,
   setTeamMemberRole,
   toggleStar,
@@ -38,6 +40,7 @@ import {
   issueTokenInputSchema,
   publishSkillInputSchema,
   scopeSchema,
+  skillFilterPreferencesSchema,
   type Scope,
   type SkillFrontmatter,
 } from "@companion/contracts";
@@ -497,6 +500,32 @@ app.get("/v1/skills", async (c) => {
     const scope = scopeRaw ? scopeSchema.parse(scopeRaw) : undefined;
     const mine = c.req.query("mine") === "true";
     return c.json(await withTenant(c, ({ actor, orgId, database }) => listSkills({ actor, orgId, scope, mine, database })));
+  } catch (error) {
+    return jsonError(c, error, 401);
+  }
+});
+
+app.get("/v1/skill-filter-preferences", async (c) => {
+  try {
+    return c.json(await withTenant(c, ({ actor, orgId, database }) => getSkillFilterPreferences({ actor, orgId, database })));
+  } catch (error) {
+    return jsonError(c, error, 401);
+  }
+});
+
+app.put("/v1/skill-filter-preferences", async (c) => {
+  let body: ReturnType<typeof skillFilterPreferencesSchema.parse>;
+  try {
+    body = skillFilterPreferencesSchema.parse(await c.req.json());
+  } catch (error) {
+    return jsonError(c, error);
+  }
+  try {
+    return c.json(
+      await withTenant(c, ({ actor, orgId, database }) =>
+        setSkillFilterPreferences({ actor, orgId, preferences: body, database }),
+      ),
+    );
   } catch (error) {
     return jsonError(c, error, 401);
   }

@@ -1,6 +1,13 @@
 "use client";
 
-import type { IssuedToken, Scope, SkillCommentRow, SkillVersionRow, TokenScope } from "@companion/contracts";
+import type {
+  IssuedToken,
+  Scope,
+  SkillCommentRow,
+  SkillFilterPreferences,
+  SkillVersionRow,
+  TokenScope,
+} from "@companion/contracts";
 import { apiFetch } from "./apiClient";
 
 export interface PublishResult {
@@ -107,5 +114,14 @@ export async function setSkillScope(
   await apiFetch(`/v1/skills/${slug}/scope`, {
     method: "PUT",
     body: JSON.stringify({ scope, teamSlug }),
+  });
+}
+
+export async function saveSkillFilterPreferences(
+  preferences: SkillFilterPreferences,
+): Promise<SkillFilterPreferences> {
+  return apiFetch<SkillFilterPreferences>("/v1/skill-filter-preferences", {
+    method: "PUT",
+    body: JSON.stringify(preferences),
   });
 }
