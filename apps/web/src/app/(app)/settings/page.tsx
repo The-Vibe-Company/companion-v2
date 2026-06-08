@@ -45,13 +45,16 @@ export default async function SettingsPage({
 }: {
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
-  const whoami = await serverApiFetch<{ userId: string; email: string; name: string }>("/v1/auth/whoami").catch(() => null);
+  const whoami = await serverApiFetch<{ userId: string; email: string; name: string; needsOnboarding?: boolean }>(
+    "/v1/auth/whoami",
+  ).catch(() => null);
   if (!whoami) redirect("/login");
+  if (whoami.needsOnboarding) redirect("/onboarding");
 
   const orgContext = await loadOrgContext().catch(() => null);
   if (!orgContext) return <WorkspaceLoadError />;
   const { current } = orgContext;
-  if (!current) redirect("/skills");
+  if (!current) redirect("/onboarding");
   const orgHeaders = { "x-companion-org": current.id };
 
   const me: MeVM = {

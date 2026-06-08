@@ -89,19 +89,38 @@ export const profiles = pgTable("profiles", {
   name: text("name").notNull(),
   initials: text("initials").notNull(),
   handle: text("handle"),
+  /** Set when the user finishes onboarding (creates/joins an org) or accepts an invite. Null = needs onboarding. */
+  onboardedAt: timestamp("onboarded_at", { withTimezone: true }),
   createdAt: now(),
   updatedAt: updatedAt(),
 });
 
-export const organizations = pgTable("organizations", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  name: text("name").notNull(),
-  slug: text("slug").notNull().unique(),
-  kind: orgKindEnum("kind").notNull().default("team"),
-  plan: orgPlanEnum("plan").notNull().default("free"),
-  createdAt: now(),
-  updatedAt: updatedAt(),
-});
+export const organizations = pgTable(
+  "organizations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: text("name").notNull(),
+    slug: text("slug").notNull().unique(),
+    kind: orgKindEnum("kind").notNull().default("team"),
+    plan: orgPlanEnum("plan").notNull().default("free"),
+    /** Verified email domain that grants membership (e.g. "acme.com"); null for personal/unclaimed orgs. */
+    domain: text("domain"),
+    /** When true, anyone signing up with a matching verified `domain` is auto-added as a member. */
+    domainAutoJoin: boolean("domain_auto_join").notNull().default(false),
+    /** Brand color (CSS color string) chosen during onboarding; cosmetic. */
+    color: text("color"),
+    /** Brand logo URL fetched/uploaded during onboarding; cosmetic. */
+    logoUrl: text("logo_url"),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    // One organization per verified domain (partial: only rows that declare a domain).
+    domainUq: uniqueIndex("organizations_domain_uq")
+      .on(sql`lower(${t.domain})`)
+      .where(sql`${t.domain} is not null`),
+  }),
+);
 
 export const memberships = pgTable(
   "memberships",
@@ -131,6 +150,10 @@ export const teams = pgTable(
       .references(() => organizations.id, { onDelete: "cascade" }),
     slug: text("slug").notNull(),
     name: text("name").notNull(),
+    /** Team color (CSS color string) chosen during onboarding; cosmetic. */
+    color: text("color"),
+    /** Team icon: a single emoji rendered monochrome and tinted with `color`; null = use initials. */
+    icon: text("icon"),
     createdAt: now(),
     updatedAt: updatedAt(),
   },

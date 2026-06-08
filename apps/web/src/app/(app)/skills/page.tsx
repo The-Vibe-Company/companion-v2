@@ -3,20 +3,23 @@ import type { SkillFilterPreferences, SkillListRow } from "@companion/contracts"
 import { loadOrgContext } from "@/lib/currentOrg";
 import { serverApiFetch } from "@/lib/apiServer";
 import { SkillsApp } from "@/components/skills/SkillsApp";
-import { FirstRun } from "@/components/org/FirstRun";
 import { WorkspaceLoadError } from "@/components/org/WorkspaceLoadError";
 import { mapSkill, type MeVM, type TeamVM } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
 export default async function SkillsPage() {
-  const whoami = await serverApiFetch<{ userId: string; email: string; name: string }>("/v1/auth/whoami").catch(() => null);
+  const whoami = await serverApiFetch<{ userId: string; email: string; name: string; needsOnboarding?: boolean }>(
+    "/v1/auth/whoami",
+  ).catch(() => null);
   if (!whoami) redirect("/login");
+  if (whoami.needsOnboarding) redirect("/onboarding");
 
   const orgContext = await loadOrgContext().catch(() => null);
   if (!orgContext) return <WorkspaceLoadError />;
   const { orgs, current } = orgContext;
-  if (!current) return <FirstRun />;
+  // A user who has finished onboarding always has an org; if not, send them (back) to onboarding.
+  if (!current) redirect("/onboarding");
   const orgHeaders = { "x-companion-org": current.id };
 
   const [skillsResult, filterPreferences, teamsResult] = await Promise.all([

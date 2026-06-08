@@ -1,4 +1,4 @@
-import { ensureUserBootstrap } from "@companion/core/services";
+import { createOrg, ensureUserBootstrap, listOrgs, markOnboarded } from "@companion/core/services";
 import { closeDb, db } from "@companion/db";
 
 const DEFAULT_EMAIL = "admin@tvc.dev";
@@ -88,11 +88,15 @@ async function main(): Promise<void> {
 
   if (!user) throw new Error(`could not create seed user ${email}`);
 
-  await ensureUserBootstrap({
-    id: user.id,
-    email: user.email,
-    name: user.name || name,
-  });
+  const actor = { id: user.id, email: user.email, name: user.name || name };
+  await ensureUserBootstrap(actor);
+  // The first-user auto-bootstrap was removed in favor of onboarding, so give the local test user a
+  // workspace and mark them onboarded — keeps `pnpm dev` / browser:smoke landing on /skills, not /onboarding.
+  const orgs = await listOrgs(actor);
+  if (orgs.length === 0) {
+    await createOrg({ actor, name: "Acme", kind: "team" });
+  }
+  await markOnboarded(actor);
 
   console.log(created ? createdMessage(email, password) : `Local test user ${email} already exists; leaving password unchanged`);
 }

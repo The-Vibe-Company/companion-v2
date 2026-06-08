@@ -15,7 +15,8 @@
     "@companion/contracts": "workspace:*",
     "@companion/db": "workspace:*",
     "@companion/skills": "workspace:*",
-    "drizzle-orm": "^0.38.4"
+    "drizzle-orm": "^0.38.4",
+    "free-email-domains": "^1.2.0"
   },
   "devDependencies": {
     "typescript": "^5.7.2",
