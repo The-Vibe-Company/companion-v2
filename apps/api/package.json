@@ -6,8 +6,9 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "seed:test-user": "tsx src/seed-test-user.ts",
-    "build": "tsup",
-    "start": "node dist/index.js",
+    "build": "tsup && node scripts/copy-migrations.cjs",
+    "migrate": "node dist/migrate.js",
+    "start": "node dist/migrate.js && node dist/index.js",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },
@@ -23,7 +24,9 @@
     "@hono/node-server": "^1.18.2",
     "@trpc/server": "^10.45.2",
     "better-auth": "^1.6.4",
+    "drizzle-orm": "^0.38.4",
     "hono": "^4.10.3",
+    "postgres": "^3.4.5",
     "zod": "^3.24.1"
   },
   "devDependencies": {

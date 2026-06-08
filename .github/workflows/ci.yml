@@ -15,8 +15,26 @@ concurrency:
 
 jobs:
   build:
-    name: Typecheck, test, build
+    name: Typecheck, test, build (Node ${{ matrix.node-version }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [20, 22]
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: companion
+          POSTGRES_PASSWORD: companion
+          POSTGRES_DB: companion
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U companion -d companion"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -27,7 +45,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: ${{ matrix.node-version }}
           cache: pnpm
 
       - name: Install dependencies
@@ -38,6 +56,24 @@ jobs:
 
       - name: Test
         run: pnpm -r test
+
+      - name: Build API
+        run: pnpm --filter @companion/api build
+
+      - name: Verify API production start
+        run: |
+          DATABASE_URL=postgres://companion:companion@127.0.0.1:5432/companion \
+          COMPANION_API_PORT=18081 \
+          pnpm --filter @companion/api start &
+          api_pid=$!
+          trap 'kill "$api_pid" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 20); do
+            if curl -fsS http://127.0.0.1:18081/health; then
+              exit 0
+            fi
+            sleep 1
+          done
+          exit 1
 
       - name: Build web
         run: pnpm --filter @companion/web build
