@@ -1,0 +1,176 @@
+/* ============================================================================
+   Companion — auth (sign in / sign up / verify / reset).
+   Ported from the Claude Design handoff (auth/Companion Auth.html). The signal
+   accent + neutral tokens come from tokens.css; this file only adds the
+   auth-specific layout. Flat, hairline-led, soft shadow, ease-out-only motion.
+   ============================================================================ */
+
+/* ---- Auth stage ----------------------------------------------------- */
+.authstage {
+  min-height: 100vh;
+  display: grid;
+  grid-template-rows: 1fr auto;
+  background: var(--color-canvas);
+}
+.authwrap {
+  display: grid;
+  place-items: center;
+  padding: var(--space-5);
+}
+.authcard {
+  position: relative;
+  width: min(404px, 100%);
+  background: var(--color-surface);
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  padding: 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  overflow: hidden;
+}
+
+/* Screen transition: subtle lift, ease-out only. Resting state is always
+   visible (opacity:1) so content can never be stuck hidden. */
+.screen { display: flex; flex-direction: column; gap: 20px; opacity: 1; }
+.screen .cds-btn { width: 100%; }
+.cds-btn .cds-spinner { border-color: currentColor; border-top-color: transparent; opacity: 0.7; }
+@media (prefers-reduced-motion: no-preference) {
+  .screen { animation: screen-in var(--duration-base) var(--ease-out-quint) both; }
+  @keyframes screen-in {
+    from { transform: translateY(5px); }
+    to   { transform: translateY(0); }
+  }
+}
+
+/* ---- Brand ---------------------------------------------------------- */
+.authbrand { display: flex; align-items: center; gap: 10px; }
+.brandmark {
+  display: grid; place-items: center;
+  width: 32px; height: 32px;
+  border-radius: var(--radius-md);
+  background: var(--color-accent);
+  color: var(--color-accent-fg);
+  font-weight: 600; font-size: 17px;
+  flex: none;
+}
+.brandname { font-size: var(--text-md); font-weight: 600; letter-spacing: var(--tracking-tight); line-height: 1.1; }
+.brandsub { font-size: var(--text-xs); color: var(--color-faint); margin-top: 1px; }
+
+.authhead { display: flex; flex-direction: column; gap: 4px; }
+.authtitle { margin: 0; font-size: var(--text-xl); font-weight: 600; letter-spacing: var(--tracking-tight); color: var(--color-fg); }
+.authdesc { margin: 0; font-size: var(--text-sm); color: var(--color-muted); line-height: var(--leading-normal); }
+
+/* ---- Google button -------------------------------------------------- */
+.gbtn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 10px;
+  width: 100%; height: 38px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-line-strong);
+  border-radius: var(--radius-md);
+  font-family: var(--font-ui); font-size: var(--text-sm); font-weight: 500;
+  color: var(--color-fg); cursor: pointer;
+  transition: background-color var(--duration-fast) var(--ease-out-quint),
+              border-color var(--duration-fast) var(--ease-out-quint);
+}
+.gbtn:hover { background: var(--color-surface-raised); border-color: var(--color-line-strong); }
+.gbtn svg { width: 17px; height: 17px; flex: none; }
+
+/* ---- Divider -------------------------------------------------------- */
+.authdiv { display: flex; align-items: center; gap: 12px; }
+.authdiv::before, .authdiv::after { content: ""; height: 1px; flex: 1; background: var(--color-line); }
+.authdiv span { font-size: var(--text-xs); color: var(--color-faint); white-space: nowrap; }
+
+/* ---- Form ----------------------------------------------------------- */
+.authform { display: flex; flex-direction: column; gap: 14px; }
+
+.pwwrap { position: relative; }
+.pwwrap .cds-field__control { padding-right: 38px; }
+.pwtoggle {
+  position: absolute; right: 4px; top: 50%; transform: translateY(-50%);
+  width: 30px; height: 30px; display: grid; place-items: center;
+  border: none; background: transparent; color: var(--color-faint);
+  cursor: pointer; border-radius: var(--radius-sm);
+}
+.pwtoggle:hover { color: var(--color-fg); }
+.pwtoggle svg { width: 16px; height: 16px; }
+
+.fieldfoot { display: flex; align-items: center; justify-content: space-between; margin-top: 6px; }
+.fieldfoot .cds-link { font-size: var(--text-xs); background: none; border: none; cursor: pointer; padding: 0; }
+
+/* Password requirement meter */
+.pwreq { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.pwbars { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; }
+.pwbar { height: 3px; border-radius: var(--radius-full); background: var(--color-line); transition: background-color var(--duration-base) var(--ease-out-quint); }
+.pwbar.on--weak { background: var(--color-danger); }
+.pwbar.on--ok { background: var(--color-warn); }
+.pwbar.on--strong { background: var(--color-ok); }
+.pwreqtext { font-size: var(--text-xs); color: var(--color-faint); }
+
+.autherr {
+  display: flex; align-items: flex-start; gap: 8px;
+  font-size: var(--text-xs); color: var(--color-danger);
+  background: var(--color-danger-tint); border: 1px solid var(--color-danger-line);
+  border-radius: var(--radius-md); padding: 9px 11px; line-height: var(--leading-normal);
+}
+.autherr svg { width: 15px; height: 15px; flex: none; margin-top: 1px; }
+
+.authnotice {
+  margin: 0;
+  font-size: var(--text-xs); color: var(--color-ok);
+  background: var(--color-ok-tint); border: 1px solid var(--color-ok-line);
+  border-radius: var(--radius-md); padding: 9px 11px; line-height: var(--leading-normal);
+}
+
+.authrow { display: flex; align-items: center; justify-content: center; gap: 6px; font-size: var(--text-sm); }
+.authrow .cds-link { background: none; border: none; cursor: pointer; padding: 0; font-size: var(--text-sm); }
+.authnote { color: var(--color-muted); }
+
+/* ---- OTP ------------------------------------------------------------ */
+.otpwrap { display: flex; flex-direction: column; gap: 14px; }
+.otpboxes { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; }
+.otpinput {
+  height: 52px; width: 100%; text-align: center;
+  font-family: var(--font-mono); font-size: 22px; font-weight: 500;
+  color: var(--color-fg); background: var(--color-surface);
+  border: 1px solid var(--color-line-strong); border-radius: var(--radius-md);
+  transition: border-color var(--duration-fast) var(--ease-out-quint), box-shadow var(--duration-fast) var(--ease-out-quint);
+  -moz-appearance: textfield;
+}
+.otpinput::-webkit-outer-spin-button, .otpinput::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.otpinput:focus { outline: none; border-color: var(--color-accent); box-shadow: 0 0 0 3px var(--color-accent-ring); }
+.otpinput.filled { border-color: var(--color-accent); }
+.otpboxes.err .otpinput { border-color: var(--color-danger-line); }
+
+.resend { display: flex; align-items: center; justify-content: center; gap: 5px; font-size: var(--text-xs); color: var(--color-muted); }
+.resend .cds-link { font-size: var(--text-xs); }
+.resend button.cds-link { background: none; border: none; cursor: pointer; padding: 0; }
+.resend button.cds-link:disabled { color: var(--color-faint); cursor: default; text-decoration: none; }
+.codeline { font-family: var(--font-mono); font-size: var(--text-xs); color: var(--color-faint); }
+
+.emailpill {
+  display: inline-flex; align-items: center; gap: 7px;
+  align-self: flex-start;
+  font-family: var(--font-mono); font-size: var(--text-xs); color: var(--color-fg);
+  background: var(--color-surface-sunken); border: 1px solid var(--color-line);
+  border-radius: var(--radius-full); padding: 4px 10px 4px 8px;
+}
+.emailpill svg { width: 13px; height: 13px; color: var(--color-faint); }
+
+.backlink { display: inline-flex; align-items: center; gap: 5px; font-size: var(--text-sm); color: var(--color-muted); background: none; border: none; cursor: pointer; padding: 0; align-self: flex-start; }
+.backlink:hover { color: var(--color-fg); }
+.backlink svg { width: 15px; height: 15px; }
+
+/* ---- Mail / reset mark ---------------------------------------------- */
+.successmark {
+  width: 46px; height: 46px; border-radius: var(--radius-full);
+  display: grid; place-items: center;
+  background: var(--color-ok-tint); border: 1px solid var(--color-ok-line);
+  color: var(--color-ok);
+}
+.successmark svg { width: 22px; height: 22px; }
+
+/* ---- Stage footer --------------------------------------------------- */
+.authfoot { display: flex; align-items: center; justify-content: center; gap: 8px; padding: 18px; font-size: var(--text-xs); color: var(--color-faint); }
+.authfoot .dot { width: 3px; height: 3px; border-radius: 50%; background: var(--color-line-strong); }

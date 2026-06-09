@@ -1,6 +1,8 @@
 import { betterAuth } from "better-auth";
+import { emailOTP } from "better-auth/plugins";
 import { drizzleAdapter } from "@better-auth/drizzle-adapter";
 import { db, schema } from "@companion/db";
+import { passwordResetCodeEmail, sendTransactionalEmail, verificationCodeEmail } from "@companion/email";
 
 export function getBetterAuthSecret(): string {
   const secret = process.env.BETTER_AUTH_SECRET;
@@ -9,6 +11,18 @@ export function getBetterAuthSecret(): string {
   }
   if (!secret) throw new Error("BETTER_AUTH_SECRET is required");
   return secret;
+}
+
+/**
+ * Google OAuth is opt-in: the "Continue with Google" button always renders, but the social provider is
+ * only wired when both credentials are present. Without them, the web `/v1/auth/google` route returns a
+ * friendly "unavailable" error instead of the config throwing at boot.
+ */
+function googleSocialProvider() {
+  const clientId = process.env.GOOGLE_CLIENT_ID;
+  const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
+  if (!clientId || !clientSecret) return {};
+  return { google: { clientId, clientSecret } };
 }
 
 function trustedOrigins(): string[] {
@@ -49,7 +63,33 @@ export const auth = betterAuth({
   }),
   emailAndPassword: {
     enabled: true,
+    // Email signups must confirm a 6-digit OTP (emailOTP plugin) before they get a session.
+    requireEmailVerification: true,
   },
+  emailVerification: {
+    // After /email-otp/verify-email succeeds, create the session so the user lands logged in.
+    autoSignInAfterVerification: true,
+    // An unverified sign-in re-sends a fresh OTP so the UI can route straight to the verify screen.
+    sendOnSignIn: true,
+  },
+  socialProviders: googleSocialProvider(),
+  plugins: [
+    emailOTP({
+      otpLength: 6,
+      expiresIn: 600, // seconds (10 minutes)
+      // Take over email verification so confirmation uses a 6-digit code (not a magic link).
+      overrideDefaultEmailVerification: true,
+      async sendVerificationOTP({ email, otp, type }) {
+        // `type` is "email-verification" (signup / verify / unverified sign-in) or
+        // "forget-password" (password reset). Both delivered via the shared email sender (Resend in prod).
+        const mail =
+          type === "forget-password"
+            ? passwordResetCodeEmail({ to: email, code: otp })
+            : verificationCodeEmail({ to: email, code: otp });
+        await sendTransactionalEmail(mail);
+      },
+    }),
+  ],
   advanced: {
     cookiePrefix: process.env.BETTER_AUTH_COOKIE_PREFIX ?? "better-auth",
     database: {

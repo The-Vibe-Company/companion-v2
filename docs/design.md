@@ -75,6 +75,34 @@ email domain that grants membership, and whether matching signups join automatic
 user has finished onboarding. A partial unique index on `lower(organizations.domain)` enforces one org
 per verified domain.
 
+## Authentication
+
+`packages/auth` configures Better Auth with email/password, **email verification**, and **Google OAuth**:
+
+- **Email verification (6-digit OTP).** `emailAndPassword.requireEmailVerification` is on, and the
+  `emailOTP` plugin (with `overrideDefaultEmailVerification`) replaces the default magic-link with a
+  6-digit code. Codes are delivered via `@companion/email` (`verificationCodeEmail` /
+  `passwordResetCodeEmail` → Resend in production, Mailpit/log locally). A signup creates the user but no
+  session; the OTP auto-sends. `autoSignInAfterVerification` makes `/auth/email-otp/verify-email` create
+  the session, so the user lands logged in and is routed to `/onboarding`. `sendOnSignIn` re-mails a code
+  when an unverified user signs in, so the UI can jump straight to the verify screen. Password reset uses
+  the same code aesthetic (`/auth/email-otp/request-password-reset` → `/auth/email-otp/reset-password`).
+- **Google OAuth** is conditional: wired only when `GOOGLE_CLIENT_ID` + `GOOGLE_CLIENT_SECRET` are set
+  (the button always renders; otherwise the web route returns a friendly error). New Google users go to
+  `/onboarding`, returning users to their `next` target.
+- **Web ↔ API glue.** The web app never uses the Better Auth client SDK. Next.js route handlers under
+  `apps/web/src/app/v1/auth/*` (`signin`, `signup`, `verify-email`, `verify-email/send`,
+  `forgot-password`, `reset-password`, `google`) forward to the API's `/auth/*` server-side and re-emit
+  the `Set-Cookie` on the **web origin**, keeping the session cookie same-origin (`shared lib/authProxy.ts`).
+  Google OAuth is the exception — the browser hits the API callback directly, which sets the cookie on the
+  API origin. The reused 6-digit OTP UI is a single client state machine in `(auth)/login/LoginForm.tsx`.
+
+Production requirements: set `BETTER_AUTH_URL` to the API's public origin (the Google redirect URI is
+derived as `${BETTER_AUTH_URL}/auth/callback/google` and must be registered in Google Cloud); keep web
+and API **same-site** (prefer a same-origin reverse proxy for `/auth/*`) so both the OAuth-callback cookie
+and the re-emitted email/password cookie reach the web app; do **not** enable `crossSubDomainCookies`
+(host-only cookies are what the re-emit pattern relies on); serve over HTTPS so `Secure` cookies survive.
+
 ## Onboarding & bootstrap
 
 New users complete a domain-driven onboarding immediately after signup (the web app routes signups to
@@ -108,7 +136,8 @@ directly to Postgres.
 
 ## Public API
 
-- Auth: `/auth/*` Better Auth endpoints, plus `/v1/auth/login`, `/v1/auth/logout`,
+- Auth: `/auth/*` Better Auth endpoints (email/password, `email-otp/*` verification + reset, and
+  `sign-in/social` + `callback/google`), plus `/v1/auth/login`, `/v1/auth/logout`,
   `/v1/auth/whoami` for CLI ergonomics. `whoami` also returns `onboarded` / `needsOnboarding`.
 - Onboarding: `GET /v1/onboarding/context` (email-domain classification + any auto-join org, no org id),
   `POST /v1/onboarding/join` (join the auto-join org for the verified domain),

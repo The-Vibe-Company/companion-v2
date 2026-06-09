@@ -39,10 +39,10 @@ export default async function LoginPage({
 
   return (
     <LoginForm
-      loginAction="/v1/auth/login-redirect"
       next={next}
       initialMode={safeMode(params.mode)}
       initialError={safeError(params.error)}
+      initialReset={params.reset === "1"}
     />
   );
 }

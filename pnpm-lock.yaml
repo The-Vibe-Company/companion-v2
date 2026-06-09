@@ -197,9 +197,15 @@ importers:
       '@companion/db':
         specifier: workspace:*
         version: link:../db
+      '@companion/email':
+        specifier: workspace:*
+        version: link:../email
       better-auth:
         specifier: ^1.6.4
         version: 1.6.14(drizzle-orm@0.38.4(@types/react@19.2.17)(kysely@0.29.2)(postgres@3.4.9)(react@19.0.0))(next@15.1.11(react-dom@19.0.0(react@19.0.0))(react@19.0.0))(react-dom@19.0.0(react@19.0.0))(react@19.0.0)(vitest@2.1.9(@types/node@22.19.20))
+      zod:
+        specifier: ^4.0.0
+        version: 4.4.3
     devDependencies:
       '@types/node':
         specifier: ^22.10.2

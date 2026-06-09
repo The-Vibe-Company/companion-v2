@@ -12,7 +12,9 @@
   "dependencies": {
     "@better-auth/drizzle-adapter": "^1.6.4",
     "@companion/db": "workspace:*",
-    "better-auth": "^1.6.4"
+    "@companion/email": "workspace:*",
+    "better-auth": "^1.6.4",
+    "zod": "^4.0.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

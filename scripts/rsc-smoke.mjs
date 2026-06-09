@@ -61,23 +61,17 @@ function assertContains(path, body, expected) {
 }
 
 async function login() {
-  const body = new URLSearchParams({
-    mode: "signin",
-    next: "/skills",
-    email,
-    password,
-  });
-  const response = await request("/v1/auth/login-redirect", {
+  const response = await request("/v1/auth/signin", {
     method: "POST",
     headers: {
-      "content-type": "application/x-www-form-urlencoded",
+      "content-type": "application/json",
       origin: appUrl,
     },
-    body,
+    body: JSON.stringify({ email, password, next: "/skills" }),
   });
-  if (response.status !== 303) {
-    const text = await response.text().catch(() => "");
-    fail(`login returned ${response.status}; body: ${text.slice(0, 400)}`);
+  const data = await response.json().catch(() => ({}));
+  if (response.status !== 200 || data?.ok !== true) {
+    fail(`login returned ${response.status}; body: ${JSON.stringify(data).slice(0, 400)}`);
   }
   if (!cookieHeader()) {
     fail("login did not return any auth cookies");
