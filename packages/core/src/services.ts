@@ -1150,6 +1150,7 @@ function canUseExistingSkillVisibilityTarget(input: {
     );
   }
   if (input.teamRole !== "admin" && input.teamRole !== "editor") return false;
+  if (input.existing.everyone) return false;
   if (input.target.everyone !== input.existing.everyone) return false;
 
   const editable = new Set(

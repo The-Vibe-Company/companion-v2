@@ -208,4 +208,26 @@ describe("listSkills visibility assembly", () => {
       }),
     ).rejects.toThrow("not allowed to publish at this visibility");
   });
+
+  it("prevents team editors from publishing someone else's everyone-visible skill through a team share", async () => {
+    await expect(
+      assertCanPublishSkillVersion({
+        actor,
+        orgId: ORG,
+        database: fakeDb({ sharedTeamRole: "editor" }),
+        payload: {
+          slug: "everyone-team-skill",
+          visibility: { everyone: true, teams: ["platform"] },
+          version: "1.1.0",
+          note: "",
+          description: "everyone-team-skill",
+          checksum: `sha256:${"a".repeat(64)}`,
+          storage_path: "skills/org/everyone-team-skill/1.1.0.zip",
+          size_bytes: 123,
+          frontmatter: "---\nname: everyone-team-skill\n---",
+          tools: [],
+        },
+      }),
+    ).rejects.toThrow("not allowed to publish at this visibility");
+  });
 });
