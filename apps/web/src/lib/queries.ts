@@ -4,11 +4,15 @@ import type {
   IssuedToken,
   Scope,
   SkillCommentRow,
+  SkillFile,
+  SkillFilesResponse,
   SkillFilterPreferences,
   SkillVersionRow,
   TokenScope,
 } from "@companion/contracts";
 import { apiFetch } from "./apiClient";
+
+export type { SkillFile };
 
 export interface PublishResult {
   ok: boolean;
@@ -92,10 +96,40 @@ export async function toggleStar(slug: string): Promise<boolean> {
   return data.starred;
 }
 
-export async function addComment(slug: string, body: string): Promise<SkillCommentRow> {
+/** Fetch every file inside a packaged skill version (eager: one fetch per slug+version). */
+export async function fetchSkillVersionFiles(
+  slug: string,
+  version: string,
+): Promise<SkillFilesResponse> {
+  return apiFetch<SkillFilesResponse>(
+    `/v1/skills/${slug}/versions/${encodeURIComponent(version)}/files`,
+  );
+}
+
+export async function addComment(
+  slug: string,
+  body: string,
+  opts?: { parentId?: string | null; versionId?: string | null },
+): Promise<SkillCommentRow> {
   return apiFetch<SkillCommentRow>(`/v1/skills/${slug}/comments`, {
     method: "POST",
-    body: JSON.stringify({ body }),
+    body: JSON.stringify({
+      body,
+      parent_id: opts?.parentId ?? null,
+      version_id: opts?.versionId ?? null,
+    }),
+  });
+}
+
+/** Deprecate (or restore) a comment thread; returns the updated row. */
+export async function setCommentDeprecated(
+  slug: string,
+  id: string,
+  deprecated: boolean,
+): Promise<SkillCommentRow> {
+  return apiFetch<SkillCommentRow>(`/v1/skills/${slug}/comments/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify({ deprecated }),
   });
 }
 

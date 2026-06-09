@@ -30,6 +30,7 @@ import {
   canTouchOwner,
   isLastOwner,
   isLastTeamAdmin,
+  isOrgAdmin,
 } from "./authz";
 
 // Domain-driven onboarding services (create/join/context). Re-exported so callers keep importing
@@ -894,12 +895,22 @@ export async function listSkillComments(input: {
       created_at: schema.skillComments.createdAt,
       author_name: schema.profiles.name,
       author_initials: schema.profiles.initials,
+      parent_id: schema.skillComments.parentId,
+      version_id: schema.skillComments.versionId,
+      version: schema.skillVersions.version,
+      deprecated: schema.skillComments.deprecated,
     })
     .from(schema.skillComments)
     .innerJoin(schema.profiles, eq(schema.profiles.id, schema.skillComments.authorId))
+    .leftJoin(schema.skillVersions, eq(schema.skillVersions.id, schema.skillComments.versionId))
     .where(and(eq(schema.skillComments.orgId, input.orgId), eq(schema.skillComments.skillId, skill.id)))
     .orderBy(asc(schema.skillComments.createdAt));
-  return rows.map((r) => ({ ...r, created_at: r.created_at.toISOString() }));
+  return rows.map((r) => ({
+    ...r,
+    created_at: r.created_at.toISOString(),
+    // A null version_id is always global; otherwise the leftJoin label (null if the version is gone).
+    version: r.version_id ? r.version : null,
+  }));
 }
 
 export async function toggleStar(input: {
@@ -939,14 +950,53 @@ export async function addComment(input: {
   orgId: string;
   slug: string;
   body: string;
+  parentId?: string | null;
+  versionId?: string | null;
   database?: Db;
 }): Promise<SkillCommentRow> {
   const database = input.database ?? db;
   const skill = await getSkillBySlug(input);
   if (!skill) throw new Error("skill not found");
+
+  // A reply inherits its thread's scope, so any caller-supplied versionId is ignored for replies.
+  let versionId = input.parentId ? null : input.versionId ?? null;
+  let versionLabel: string | null = null;
+
+  // Cross-skill / cross-tenant integrity is not FK-enforceable — validate it here.
+  if (versionId) {
+    const version = await database.query.skillVersions.findFirst({
+      where: and(
+        eq(schema.skillVersions.id, versionId),
+        eq(schema.skillVersions.orgId, input.orgId),
+        eq(schema.skillVersions.skillId, skill.id),
+      ),
+    });
+    if (!version) throw new Error("version does not belong to this skill");
+    versionLabel = version.version;
+  }
+
+  if (input.parentId) {
+    const parent = await database.query.skillComments.findFirst({
+      where: and(
+        eq(schema.skillComments.id, input.parentId),
+        eq(schema.skillComments.orgId, input.orgId),
+        eq(schema.skillComments.skillId, skill.id),
+      ),
+    });
+    // Single-level nesting only: a reply must target an existing same-skill root thread.
+    if (!parent || parent.parentId !== null) throw new Error("invalid parent comment");
+  }
+
   const [row] = await database
     .insert(schema.skillComments)
-    .values({ orgId: input.orgId, skillId: skill.id, authorId: input.actor.id, body: input.body })
+    .values({
+      orgId: input.orgId,
+      skillId: skill.id,
+      authorId: input.actor.id,
+      body: input.body,
+      parentId: input.parentId ?? null,
+      versionId,
+    })
     .returning();
   if (!row) throw new Error("could not add comment");
   return {
@@ -955,6 +1005,75 @@ export async function addComment(input: {
     author_id: row.authorId,
     body: row.body,
     created_at: row.createdAt.toISOString(),
+    parent_id: row.parentId,
+    version_id: row.versionId,
+    version: versionLabel,
+    deprecated: row.deprecated,
+  };
+}
+
+/**
+ * Deprecate (or restore) a comment thread. Threads are never deleted — a deprecated thread is
+ * greyed/struck-through. Allowed iff the actor authored the comment, is an org admin, or owns the
+ * skill. Returns the updated extended row (author display fields + version label re-joined).
+ */
+export async function setCommentDeprecated(input: {
+  actor: ActorContext;
+  orgId: string;
+  slug: string;
+  commentId: string;
+  deprecated: boolean;
+  database?: Db;
+}): Promise<SkillCommentRow> {
+  const database = input.database ?? db;
+  const skill = await getSkillBySlug(input);
+  if (!skill) throw new Error("skill not found");
+
+  const comment = await database.query.skillComments.findFirst({
+    where: and(
+      eq(schema.skillComments.id, input.commentId),
+      eq(schema.skillComments.orgId, input.orgId),
+      eq(schema.skillComments.skillId, skill.id),
+    ),
+  });
+  if (!comment) throw new Error("comment not found");
+
+  const orgRole = await getOrgRole(input.orgId, input.actor.id, database);
+  const allowed =
+    comment.authorId === input.actor.id ||
+    (orgRole ? isOrgAdmin(orgRole) : false) ||
+    skill.owner_id === input.actor.id;
+  if (!allowed) throw new Error("not allowed to change this comment");
+
+  const [updated] = await database
+    .update(schema.skillComments)
+    .set({ deprecated: input.deprecated })
+    .where(and(eq(schema.skillComments.id, comment.id), eq(schema.skillComments.orgId, input.orgId)))
+    .returning();
+  if (!updated) throw new Error("could not update comment");
+
+  const author = await database.query.profiles.findFirst({
+    where: eq(schema.profiles.id, updated.authorId),
+  });
+  let versionLabel: string | null = null;
+  if (updated.versionId) {
+    const version = await database.query.skillVersions.findFirst({
+      where: eq(schema.skillVersions.id, updated.versionId),
+    });
+    versionLabel = version?.version ?? null;
+  }
+  return {
+    id: updated.id,
+    skill_id: updated.skillId,
+    author_id: updated.authorId,
+    body: updated.body,
+    created_at: updated.createdAt.toISOString(),
+    author_name: author?.name ?? null,
+    author_initials: author?.initials ?? null,
+    parent_id: updated.parentId,
+    version_id: updated.versionId,
+    version: versionLabel,
+    deprecated: updated.deprecated,
   };
 }
 

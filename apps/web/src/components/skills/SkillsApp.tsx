@@ -533,6 +533,7 @@ export function SkillsApp({
             index={index}
             total={filtered.length}
             me={me}
+            myRole={currentOrg.myRole}
             onBack={back}
             onPrev={() => go(-1)}
             onNext={() => go(1)}

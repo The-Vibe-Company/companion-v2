@@ -42,8 +42,46 @@ export const skillCommentRowSchema = z.object({
   created_at: z.string(),
   author_name: z.string().nullable().optional(),
   author_initials: z.string().nullable().optional(),
+  /** `null` = a root thread; a non-null value points at the root comment it replies to. */
+  parent_id: z.string().nullable(),
+  /** `null` = global thread; else the linked `skill_versions.id`. */
+  version_id: z.string().nullable(),
+  /** Joined `X.Y.Z` label for the version chip (null when global or unknown). */
+  version: z.string().nullable(),
+  deprecated: z.boolean(),
 });
 export type SkillCommentRow = z.infer<typeof skillCommentRowSchema>;
+
+/** Body of `POST /v1/skills/:slug/comments` — add a comment (optionally a reply / version-linked). */
+export const addCommentInputSchema = z.object({
+  body: z.string().min(1),
+  parent_id: z.string().nullable().optional(),
+  version_id: z.string().nullable().optional(),
+});
+export type AddCommentInput = z.infer<typeof addCommentInputSchema>;
+
+/** Body of `PATCH /v1/skills/:slug/comments/:id` — deprecate or restore a comment thread. */
+export const setCommentDeprecatedInputSchema = z.object({
+  deprecated: z.boolean(),
+});
+export type SetCommentDeprecatedInput = z.infer<typeof setCommentDeprecatedInputSchema>;
+
+/** One file inside a skill package version (`content` is null for binary or over-cap files). */
+export const skillFileSchema = z.object({
+  path: z.string(),
+  size: z.number().int().nonnegative(),
+  content: z.string().nullable(),
+  binary: z.boolean(),
+  truncated: z.boolean(),
+});
+export type SkillFile = z.infer<typeof skillFileSchema>;
+
+/** Response of `GET /v1/skills/:slug/versions/:version/files`. */
+export const skillFilesResponseSchema = z.object({
+  version: z.string(),
+  files: z.array(skillFileSchema),
+});
+export type SkillFilesResponse = z.infer<typeof skillFilesResponseSchema>;
 
 /** Immutable `skill_versions` row. */
 export const skillVersionRowSchema = z.object({

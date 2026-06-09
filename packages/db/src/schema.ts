@@ -1,4 +1,5 @@
 import {
+  type AnyPgColumn,
   boolean,
   check,
   index,
@@ -322,10 +323,17 @@ export const skillComments = pgTable(
       .notNull()
       .references(() => user.id, { onDelete: "cascade" }),
     body: text("body").notNull(),
+    /** Null = root thread; non-null = a reply to that root comment. Single-level nesting only. */
+    parentId: uuid("parent_id").references((): AnyPgColumn => skillComments.id, { onDelete: "cascade" }),
+    /** Null = global thread; else the skill_versions row this thread is linked to. */
+    versionId: uuid("version_id").references(() => skillVersions.id, { onDelete: "set null" }),
+    /** Deprecated threads are greyed/struck-through, never deleted. */
+    deprecated: boolean("deprecated").notNull().default(false),
     createdAt: now(),
   },
   (t) => ({
     byOrg: index("skill_comments_org_idx").on(t.orgId),
+    bySkillParent: index("skill_comments_skill_parent_idx").on(t.skillId, t.parentId),
   }),
 );
 

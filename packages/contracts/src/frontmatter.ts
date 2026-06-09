@@ -12,7 +12,7 @@ export const SEMVER_RE =
  * The required + optional fields of a `SKILL.md` YAML frontmatter block.
  * Parsing is data-only — no archive scripts are ever executed.
  */
-export const skillFrontmatterSchema = z.object({
+const skillFrontmatterFields = z.object({
   name: z
     .string()
     .regex(SKILL_NAME_RE, "name must be kebab-case (lowercase letters, digits, hyphens)"),
@@ -22,4 +22,24 @@ export const skillFrontmatterSchema = z.object({
   tools: z.array(z.string()).default([]),
   scope: scopeSchema.optional(),
 });
+
+/**
+ * Companion's native field is `tools` (a YAML list). The Claude skill format declares the same
+ * thing under `allowed-tools` (a YAML list, or a comma-separated string), so accept it as an alias
+ * when `tools` is absent — normalized to an array before validation. Unknown keys (`argument-hint`,
+ * `user-invocable`, …) are dropped by the object schema.
+ */
+export const skillFrontmatterSchema = z.preprocess((value) => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const obj = value as Record<string, unknown>;
+  if (obj.tools === undefined && obj["allowed-tools"] !== undefined) {
+    const aliased = obj["allowed-tools"];
+    const tools =
+      typeof aliased === "string"
+        ? aliased.split(",").map((t) => t.trim()).filter(Boolean)
+        : aliased;
+    return { ...obj, tools };
+  }
+  return value;
+}, skillFrontmatterFields);
 export type SkillFrontmatter = z.infer<typeof skillFrontmatterSchema>;

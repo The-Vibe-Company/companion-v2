@@ -1,18 +1,36 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import type { Scope, SkillCommentRow, SkillVersionRow } from "@companion/contracts";
+import type {
+  OrgRole,
+  Scope,
+  SkillCommentRow,
+  SkillFile,
+  SkillVersionRow,
+} from "@companion/contracts";
 import { Icon } from "../Icon";
-import { addComment as addCommentRpc, fetchSkillDetail, fetchSkillDownloadUrl } from "@/lib/queries";
+import {
+  addComment as addCommentRpc,
+  fetchSkillDetail,
+  fetchSkillDownloadUrl,
+  fetchSkillVersionFiles,
+  setCommentDeprecated as setCommentDeprecatedRpc,
+} from "@/lib/queries";
 import type { MeVM, SkillVM } from "@/lib/types";
-import { ScopeChip, StarButton, SkillBody, ValidBadge, Frontmatter } from "./blocks";
-import { Activity, Comments, PropList } from "./detailParts";
+import { ScopeChip, StarButton, ValidBadge } from "./blocks";
+import { Activity, PropList } from "./detailParts";
+import { FileExplorer } from "./fileview";
+import { Discussion } from "./discussion";
+import { fmtBytes, iconForFile } from "./fileFormat";
+
+type Tab = "overview" | "files" | "activity";
 
 export function DetailView({
   skill,
   index,
   total,
   me,
+  myRole,
   onBack,
   onPrev,
   onNext,
@@ -25,6 +43,7 @@ export function DetailView({
   index: number;
   total: number;
   me: MeVM;
+  myRole: OrgRole;
   onBack: () => void;
   onPrev: () => void;
   onNext: () => void;
@@ -34,18 +53,43 @@ export function DetailView({
   onUpdate: () => void;
 }) {
   const invalid = skill.validation === "invalid";
+  const [tab, setTab] = useState<Tab>("overview");
+  const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [versions, setVersions] = useState<SkillVersionRow[]>([]);
   const [comments, setComments] = useState<SkillCommentRow[]>([]);
-  const [frontmatter, setFrontmatter] = useState<string | null>(null);
+  const [files, setFiles] = useState<SkillFile[]>([]);
 
   useEffect(() => {
     let active = true;
+    setTab("overview");
+    setSelectedPath(null);
+    setFiles([]);
+    // Clear the previous skill's discussion/versions so they don't flash under the new title.
+    setComments([]);
+    setVersions([]);
     fetchSkillDetail(skill.id, skill.version)
       .then((d) => {
         if (!active) return;
         setVersions(d.versions);
         setComments(d.comments);
-        setFrontmatter(d.frontmatter);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [skill.id, skill.version]);
+
+  // Eagerly load the package file list once per (slug, version); the archive has
+  // no random access, so one fetch beats lazily re-streaming per file.
+  useEffect(() => {
+    if (!skill.version) {
+      setFiles([]);
+      return;
+    }
+    let active = true;
+    fetchSkillVersionFiles(skill.id, skill.version)
+      .then((res) => {
+        if (active) setFiles(res.files);
       })
       .catch(() => {});
     return () => {
@@ -58,32 +102,78 @@ export function DetailView({
     window.location.href = url;
   };
 
-  const onAddComment = (text: string) => {
-    // optimistic
+  const openFile = (path: string) => {
+    setSelectedPath(path);
+    setTab("files");
+  };
+
+  const canDeprecate = (c: SkillCommentRow): boolean =>
+    // Hide the control on a still-optimistic row (a PATCH to a tmp id would 404).
+    !c.id.startsWith("tmp-") &&
+    (c.author_id === me.id ||
+      myRole === "admin" ||
+      myRole === "owner" ||
+      skill.ownerId === me.id);
+
+  const addComment = (
+    body: string,
+    opts: { parentId?: string | null; versionId?: string | null },
+  ) => {
+    const parentId = opts.parentId ?? null;
+    const versionId = opts.versionId ?? null;
+    const tmpId = `tmp-${Date.now()}`;
     const optimistic: SkillCommentRow = {
-      id: `tmp-${comments.length}`,
+      id: tmpId,
       skill_id: skill.uuid,
       author_id: me.id,
-      body: text,
+      body,
       created_at: new Date().toISOString(),
       author_name: me.name,
       author_initials: me.initials,
+      parent_id: parentId,
+      version_id: versionId,
+      version: versionId ? (versions.find((v) => v.id === versionId)?.version ?? null) : null,
+      deprecated: false,
     };
     setComments((c) => [...c, optimistic]);
-    addCommentRpc(skill.id, text)
+    addCommentRpc(skill.id, body, { parentId, versionId })
       .then((row) =>
         setComments((c) =>
           c.map((x) =>
-            x.id === optimistic.id
+            x.id === tmpId
               ? { ...row, author_name: me.name, author_initials: me.initials }
+              : // Re-point any optimistic reply that targeted this still-pending root.
+                x.parent_id === tmpId
+                ? { ...x, parent_id: row.id }
+                : x,
+          ),
+        ),
+      )
+      .catch(() => setComments((c) => c.filter((x) => x.id !== tmpId)));
+  };
+
+  const toggleDeprecated = (id: string, next: boolean) => {
+    setComments((c) => c.map((x) => (x.id === id ? { ...x, deprecated: next } : x)));
+    setCommentDeprecatedRpc(skill.id, id, next)
+      .then((row) =>
+        setComments((c) =>
+          c.map((x) =>
+            x.id === id
+              ? { ...row, author_name: x.author_name, author_initials: x.author_initials }
               : x,
           ),
         ),
       )
-      .catch(() => setComments((c) => c.filter((x) => x.id !== optimistic.id)));
+      .catch(() =>
+        setComments((c) => c.map((x) => (x.id === id ? { ...x, deprecated: !next } : x))),
+      );
   };
 
-  const fm = frontmatter ? frontmatter.replace(/scope: .*/, "scope: " + skill.scope) : null;
+  const TABS: { id: Tab; label: string; icon: string; n?: number }[] = [
+    { id: "overview", label: "Overview", icon: "file-text" },
+    { id: "files", label: "Files", icon: "package-open", n: files.length },
+    { id: "activity", label: "Activity", icon: "activity", n: versions.length },
+  ];
 
   return (
     <div className="dpage">
@@ -135,48 +225,122 @@ export function DetailView({
         </button>
       </div>
 
-      <div className="dbody">
-        <div className="dcontent">
-          <div className="dcontent__inner">
-            <h1 className="dtitle">{skill.id}</h1>
-            <div className="dchips">
-              <ScopeChip scope={skill.scope} />
-              <ValidBadge v={skill.validation} />
-              <span className="mono" style={{ fontSize: "var(--text-xs)", color: "var(--color-muted)" }}>
-                {skill.version ?? "—"}
-              </span>
-            </div>
-            <div className="dblocks">
-              {invalid && skill.error && (
-                <div>
-                  <p className="seclabel" style={{ color: "var(--color-danger)" }}>
-                    Validation error
-                  </p>
-                  <div className="errblock">{skill.error}</div>
-                </div>
-              )}
-              <SkillBody description={skill.description} />
-              {fm && (
-                <div>
-                  <p className="seclabel">SKILL.md frontmatter</p>
-                  <Frontmatter text={fm} />
-                </div>
-              )}
-              <div>
-                <p className="seclabel">
-                  Activity <span className="seclabel__n">{versions.length}</span>
-                </p>
-                <Activity versions={versions} ownerName={skill.owner.name} />
-              </div>
-              <Comments list={comments} me={me} onAdd={onAddComment} />
-            </div>
+      <div className="viewbar dtabs" role="tablist" aria-label="Skill detail sections">
+        {TABS.map((t) => (
+          <button
+            key={t.id}
+            role="tab"
+            id={`skilltab-${t.id}`}
+            aria-selected={tab === t.id}
+            aria-controls="skilltab-panel"
+            className={"vtab" + (tab === t.id ? " is-active" : "")}
+            onClick={() => setTab(t.id)}
+          >
+            <Icon name={t.icon} size={14} />
+            {t.label}
+            {t.n != null && <span className="vtab__count">{t.n}</span>}
+          </button>
+        ))}
+      </div>
+
+      {tab === "files" ? (
+        <div
+          className="dbody dbody--full"
+          role="tabpanel"
+          id="skilltab-panel"
+          aria-labelledby={`skilltab-${tab}`}
+        >
+          <div className="dcontent dcontent--flush">
+            <FileExplorer files={files} requestedPath={selectedPath} />
           </div>
         </div>
-        <aside className="dsidebar">
-          <p className="railhead">Properties</p>
-          <PropList skill={skill} onChangeVisibility={onChangeVisibility} />
-        </aside>
-      </div>
+      ) : (
+        <div
+          className="dbody"
+          role="tabpanel"
+          id="skilltab-panel"
+          aria-labelledby={`skilltab-${tab}`}
+        >
+          {tab === "overview" ? (
+            <div className="dcontent">
+              <div className="dcontent__inner">
+                <h1 className="dtitle">{skill.id}</h1>
+                <div className="dchips">
+                  <ScopeChip scope={skill.scope} />
+                  <ValidBadge v={skill.validation} />
+                  <span
+                    className="mono"
+                    style={{ fontSize: "var(--text-xs)", color: "var(--color-muted)" }}
+                  >
+                    {skill.version ?? "—"}
+                  </span>
+                </div>
+                <div className="ov">
+                  {invalid && skill.error && (
+                    <div>
+                      <p className="seclabel" style={{ color: "var(--color-danger)" }}>
+                        Validation error
+                      </p>
+                      <div className="errblock">{skill.error}</div>
+                    </div>
+                  )}
+                  <p className="ov__lead">{skill.description}</p>
+
+                  {files.length > 0 && (
+                    <div className="contents">
+                      <div className="contents__head">
+                        <Icon name="package-open" size={14} />
+                        <span className="contents__title">Package contents</span>
+                        <span className="contents__n">{files.length} files</span>
+                      </div>
+                      <div className="contents__grid">
+                        {files.map((f) => (
+                          <button
+                            className="contents__item"
+                            key={f.path}
+                            onClick={() => openFile(f.path)}
+                            title={"Open " + f.path}
+                          >
+                            <Icon name={iconForFile(f.path)} size={15} />
+                            <span className="contents__fname">{f.path}</span>
+                            <span className="contents__fsize">{fmtBytes(f.size)}</span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  <Discussion
+                    comments={comments}
+                    versions={versions}
+                    me={{ id: me.id, name: me.name, initials: me.initials }}
+                    canDeprecate={canDeprecate}
+                    onAdd={addComment}
+                    onToggleDeprecated={toggleDeprecated}
+                  />
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="dcontent">
+              <div className="dcontent__inner">
+                <div className="dblocks">
+                  <div>
+                    <p className="seclabel">
+                      Versions <span className="seclabel__n">{versions.length}</span>
+                    </p>
+                    <Activity versions={versions} ownerName={skill.owner.name} />
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+          <aside className="dsidebar">
+            <p className="railhead">Properties</p>
+            <PropList skill={skill} onChangeVisibility={onChangeVisibility} />
+          </aside>
+        </div>
+      )}
     </div>
   );
 }
