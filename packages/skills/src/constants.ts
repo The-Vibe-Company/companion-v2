@@ -24,8 +24,12 @@ export const EXCLUDE_PATTERNS: readonly RegExp[] = [
   /(^|\/)companion\.lock$/,
 ];
 
-/** A declared tool name must be a snake_case identifier. */
-export const TOOL_NAME_RE = /^[a-z][a-z0-9_]*$/;
+/**
+ * A declared tool name is an identifier (a letter then letters/digits/underscores). This admits
+ * both Companion's snake_case (`read_file`) and the Claude tool names skills declare via
+ * `allowed-tools` — built-ins (`Bash`, `WebFetch`, `Agent`) and MCP tools (`mcp__server__tool`).
+ */
+export const TOOL_NAME_RE = /^[A-Za-z][A-Za-z0-9_]*$/;
 
 /** Tar entry types we accept inside a package (everything else is rejected). */
 export const SAFE_ENTRY_TYPES = new Set(["file", "directory"]);

@@ -147,6 +147,179 @@ export async function inspectTar(tar: Buffer): Promise<ArchiveFinding> {
   return finding;
 }
 
+/** Max bytes of any single text file we buffer into memory for display. */
+const MAX_DISPLAY_BYTES = 256 * 1024; // 256 KB
+/** Bytes sniffed for a NUL byte to decide binary-ness. */
+const BINARY_SNIFF_BYTES = 8 * 1024; // 8 KB
+
+/**
+ * Extensions whose contents we are willing to UTF-8 decode for display. Anything
+ * outside this list is treated as binary (content: null). Matched case-insensitively.
+ */
+const TEXT_EXTENSIONS = new Set([
+  "md", "json", "py", "txt", "js", "jsx", "ts", "tsx", "sh", "bash", "yaml", "yml",
+  "toml", "cfg", "ini", "env", "csv", "xml", "html", "css", "sql", "rb", "go", "rs",
+  "java", "c", "h", "cpp", "gitignore", "dockerfile",
+]);
+
+/** Extensionless basenames we still treat as text. Matched case-insensitively. */
+const TEXT_BASENAMES = new Set(["license", "readme", "dockerfile", "makefile"]);
+
+/** Decide whether a posix relpath's basename is a text file by extension/name. */
+function isTextPath(relPath: string): boolean {
+  const base = (relPath.split("/").pop() ?? "").toLowerCase();
+  // lastIndexOf so "foo.tar.gz" keys on "gz"; >= 0 so leading-dot files like ".gitignore"
+  // (lastIndexOf === 0 -> ext "gitignore") and ".env" still resolve against the allowlist.
+  const dot = base.lastIndexOf(".");
+  if (dot >= 0) {
+    const ext = base.slice(dot + 1);
+    if (ext && TEXT_EXTENSIONS.has(ext)) return true;
+  }
+  // Extensionless names (LICENSE, README, Dockerfile, Makefile).
+  return TEXT_BASENAMES.has(base);
+}
+
+export interface ExtractedFile {
+  path: string;
+  size: number;
+  /** UTF-8 content for text files (capped); null for binary or oversize-skipped files. */
+  content: string | null;
+  binary: boolean;
+  /** True if the displayed content was sliced because the file exceeds the display cap. */
+  truncated: boolean;
+}
+
+export interface ExtractResult {
+  files: ExtractedFile[];
+  /** Exceeded a size or entry-count cap. */
+  oversize: boolean;
+  /** Traversal / symlink / special-entry messages. */
+  violations: string[];
+}
+
+/**
+ * Extract every (non-directory) file from a tar buffer into memory for browsing,
+ * WITHOUT writing to disk. Text files (by extension allowlist) are UTF-8 decoded up
+ * to a 256 KB display cap — content is sliced mid-stream rather than accumulated past
+ * the cap. Binary files (NUL byte in the first ~8 KB, or a non-allowlisted extension)
+ * are drained and counted but never decoded (content: null, binary: true).
+ *
+ * Rejects symlinks, hardlinks, special entries, absolute/traversal paths (recorded in
+ * `violations`). Re-enforces the per-file / total-size / entry-count caps (`oversize`).
+ * Results are sorted by path for deterministic tree rendering.
+ */
+export async function extractArchiveFiles(
+  tar: Buffer,
+  opts: { maxFileBytes?: number } = {},
+): Promise<ExtractResult> {
+  const displayCap = opts.maxFileBytes ?? MAX_DISPLAY_BYTES;
+  const files: ExtractedFile[] = [];
+  const violations: string[] = [];
+  let totalBytes = 0;
+  let fileCount = 0;
+  let oversize = false;
+  const ex = tarExtract();
+
+  await new Promise<void>((resolve, reject) => {
+    ex.on("entry", (header, stream, next) => {
+      const rawName = header.name ?? "";
+      const type = (header.type ?? "file") as string;
+
+      if (type === "symlink" || type === "link") {
+        violations.push(`symlink/hardlink rejected: ${rawName}`);
+        stream.on("end", next);
+        stream.resume();
+        return;
+      }
+      if (!SAFE_ENTRY_TYPES.has(type)) {
+        violations.push(`unsupported entry type '${type}': ${rawName}`);
+        stream.on("end", next);
+        stream.resume();
+        return;
+      }
+
+      const norm = normalizePosix(rawName);
+      if (norm.violation) {
+        violations.push(`${norm.violation}: ${rawName}`);
+        stream.on("end", next);
+        stream.resume();
+        return;
+      }
+
+      if (type === "directory") {
+        stream.on("end", next);
+        stream.resume();
+        return;
+      }
+
+      // Skip packaging junk (.git, .DS_Store, node_modules, __pycache__, *.pyc, …) the same
+      // way the packer excludes it — an uploaded macOS/IDE archive shouldn't clutter the explorer.
+      if (isExcluded(norm.path)) {
+        stream.on("end", next);
+        stream.resume();
+        return;
+      }
+
+      fileCount += 1;
+      const size = header.size ?? 0;
+      totalBytes += size;
+      if (
+        size > MAX_FILE_BYTES ||
+        totalBytes > MAX_ARCHIVE_BYTES ||
+        fileCount > MAX_ENTRY_COUNT
+      ) {
+        oversize = true;
+      }
+
+      if (isTextPath(norm.path)) {
+        const chunks: Buffer[] = [];
+        let read = 0;
+        let sniffedBinary = false;
+        let sniffed = 0;
+        stream.on("data", (c: Buffer) => {
+          // NUL-byte sniff over the first ~8 KB; a hit downgrades the file to binary.
+          if (!sniffedBinary && sniffed < BINARY_SNIFF_BYTES) {
+            const window = c.subarray(0, BINARY_SNIFF_BYTES - sniffed);
+            if (window.includes(0)) sniffedBinary = true;
+            sniffed += c.length;
+          }
+          read += c.length;
+          // Slice mid-stream exactly like the SKILL.md guard — never buffer past the cap.
+          if (read <= displayCap) chunks.push(c);
+          else if (read - c.length < displayCap) chunks.push(c.subarray(0, displayCap - (read - c.length)));
+        });
+        stream.on("end", () => {
+          files.push(
+            sniffedBinary
+              ? { path: norm.path, size, content: null, binary: true, truncated: false }
+              : {
+                  path: norm.path,
+                  size,
+                  content: Buffer.concat(chunks).toString("utf8"),
+                  binary: false,
+                  truncated: read > displayCap,
+                },
+          );
+          next();
+        });
+        stream.on("error", reject);
+        return;
+      }
+
+      // Binary by extension: drain the stream, count its size, never decode.
+      files.push({ path: norm.path, size, content: null, binary: true, truncated: false });
+      stream.on("end", next);
+      stream.resume();
+    });
+    ex.on("finish", () => resolve());
+    ex.on("error", reject);
+    ex.end(tar);
+  });
+
+  files.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  return { files, oversize, violations };
+}
+
 export interface DirFile {
   relPath: string;
   size: number;

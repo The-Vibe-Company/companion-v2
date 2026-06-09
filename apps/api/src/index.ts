@@ -33,6 +33,7 @@ import {
   removeTeamMember,
   revokeApiToken,
   revokeInvitation,
+  setCommentDeprecated,
   setMemberRole,
   setSkillFilterPreferences,
   setSkillScope,
@@ -40,12 +41,14 @@ import {
   toggleStar,
 } from "@companion/core/services";
 import {
+  addCommentInputSchema,
   completeOnboardingInputSchema,
   createSkillInputSchema,
   issueTokenInputSchema,
   orgSettingsResponseSchema,
   publishSkillInputSchema,
   scopeSchema,
+  setCommentDeprecatedInputSchema,
   skillFilterPreferencesSchema,
   type Scope,
   type SkillFrontmatter,
@@ -60,9 +63,11 @@ import {
 import {
   bumpSemver,
   compareSemver,
+  extractArchiveFiles,
   isValidSemver,
   packDir,
   tarGzToZip,
+  toTar,
   unpackAnyTo,
   validateSkillArchive,
 } from "@companion/skills";
@@ -648,8 +653,40 @@ app.get("/v1/skills/:slug/comments", async (c) => {
 
 app.post("/v1/skills/:slug/comments", async (c) => {
   try {
-    const body = await c.req.json<{ body: string }>();
-    return c.json(await withTenant(c, ({ actor, orgId, database }) => addComment({ actor, orgId, slug: c.req.param("slug"), body: body.body, database })));
+    const input = addCommentInputSchema.parse(await c.req.json());
+    return c.json(
+      await withTenant(c, ({ actor, orgId, database }) =>
+        addComment({
+          actor,
+          orgId,
+          slug: c.req.param("slug"),
+          body: input.body,
+          parentId: input.parent_id ?? null,
+          versionId: input.version_id ?? null,
+          database,
+        }),
+      ),
+    );
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
+app.patch("/v1/skills/:slug/comments/:id", async (c) => {
+  try {
+    const input = setCommentDeprecatedInputSchema.parse(await c.req.json());
+    return c.json(
+      await withTenant(c, ({ actor, orgId, database }) =>
+        setCommentDeprecated({
+          actor,
+          orgId,
+          slug: c.req.param("slug"),
+          commentId: c.req.param("id"),
+          deprecated: input.deprecated,
+          database,
+        }),
+      ),
+    );
   } catch (error) {
     return jsonError(c, error);
   }
@@ -848,6 +885,31 @@ app.get("/v1/skills/:slug/versions/:version/package", async (c) => {
         "content-length": String(zip.length),
       },
     });
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
+/**
+ * Read every (non-directory) file in a specific version's package into memory for the in-app
+ * file explorer. Visibility-gated like `/package`; requires `skills:read` for token-authed callers.
+ * Text files are returned UTF-8-decoded (capped); binaries/over-cap files carry `content: null`.
+ */
+app.get("/v1/skills/:slug/versions/:version/files", async (c) => {
+  try {
+    actorFromContext(c, true);
+    requireScope(c, "skills:read");
+    const slug = c.req.param("slug");
+    const found = await withTenant(
+      c,
+      ({ actor, orgId, database }) =>
+        getDownloadVersion({ actor, orgId, slug, version: c.req.param("version"), database }),
+      true,
+    );
+    const tarGz = await getSkillArchive({ key: found.storagePath });
+    const tar = toTar(tarGz);
+    const { files } = await extractArchiveFiles(tar);
+    return c.json({ version: found.version, files });
   } catch (error) {
     return jsonError(c, error);
   }
