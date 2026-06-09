@@ -91,7 +91,6 @@ function Brand() {
       <span className="brandmark">C</span>
       <div>
         <div className="brandname">Companion</div>
-        <div className="brandsub">skills hub</div>
       </div>
     </div>
   );
@@ -456,13 +455,6 @@ export function LoginForm({
             />
           )}
         </div>
-      </div>
-      <div className="authfoot">
-        <span>Self-hostable</span>
-        <span className="dot" />
-        <span>Runs on your tailnet</span>
-        <span className="dot" />
-        <span>Companion v2</span>
       </div>
     </div>
   );

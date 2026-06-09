@@ -170,7 +170,3 @@
   color: var(--color-ok);
 }
 .successmark svg { width: 22px; height: 22px; }
-
-/* ---- Stage footer --------------------------------------------------- */
-.authfoot { display: flex; align-items: center; justify-content: center; gap: 8px; padding: 18px; font-size: var(--text-xs); color: var(--color-faint); }
-.authfoot .dot { width: 3px; height: 3px; border-radius: 50%; background: var(--color-line-strong); }
