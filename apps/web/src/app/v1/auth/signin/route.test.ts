@@ -47,10 +47,31 @@ describe("signin route", () => {
   });
 
   it("routes unverified accounts to the verify screen instead of an error", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => Response.json({ message: "Email not verified", code: "EMAIL_NOT_VERIFIED" }, { status: 403 })),
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json({ message: "Email not verified", code: "EMAIL_NOT_VERIFIED" }, { status: 403 }))
+      .mockResolvedValueOnce(Response.json({ success: true }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const response = await POST(jsonRequest({ email: "new@acme.com", password: "secret123" }));
+
+    expect(await response.json()).toEqual({ ok: false, needsVerification: true, email: "new@acme.com" });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      "http://127.0.0.1:3001/auth/email-otp/send-verification-otp",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ email: "new@acme.com", type: "email-verification" }),
+      }),
     );
+  });
+
+  it("keeps routing to verification when the OTP resend is rate limited", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json({ message: "Email not verified", code: "EMAIL_NOT_VERIFIED" }, { status: 403 }))
+      .mockResolvedValueOnce(Response.json({ message: "rate limited" }, { status: 429 }));
+    vi.stubGlobal("fetch", fetchMock);
 
     const response = await POST(jsonRequest({ email: "new@acme.com", password: "secret123" }));
 

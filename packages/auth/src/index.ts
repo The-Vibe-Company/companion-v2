@@ -77,6 +77,7 @@ export const auth = betterAuth({
     emailOTP({
       otpLength: 6,
       expiresIn: 600, // seconds (10 minutes)
+      resendStrategy: "reuse",
       // Take over email verification so confirmation uses a 6-digit code (not a magic link).
       overrideDefaultEmailVerification: true,
       async sendVerificationOTP({ email, otp, type }) {
