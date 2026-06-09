@@ -182,6 +182,10 @@ export function SkillsApp({
         showLocalSettings(settingsStateFromSearch(window.location.search), false);
         return;
       }
+      // Closing the drawer drops the warmed snapshot so the next open re-fetches current server
+      // state (a hover re-warms it). Otherwise optimistic in-drawer mutations wouldn't survive a
+      // close/reopen until a full page refresh.
+      settingsWarmupRef.current = null;
       setLocalSettings(null);
     };
     window.addEventListener("popstate", onPopState);

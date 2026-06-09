@@ -100,11 +100,14 @@ export function buildSettingsAppData(input: {
   }
 
   const currentFull: OrgFull = {
-    id: current.id,
-    name: current.name,
-    slug: current.slug,
-    kind: current.kind,
-    plan: current.plan,
+    // Prefer the fresh settings.org payload for identity fields (name/slug/kind/plan); the
+    // `current` (OrgVM) prop can be stale in the in-app drawer after a rename/reslug. Role
+    // isn't part of settings.org, so it still comes from `current`.
+    id: settings.org.id,
+    name: settings.org.name,
+    slug: settings.org.slug,
+    kind: settings.org.kind,
+    plan: settings.org.plan,
     myRole: current.myRole,
     created: formatDate(settings.org.createdAt),
     members: settings.members.map((member) => ({
