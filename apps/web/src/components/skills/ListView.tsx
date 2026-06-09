@@ -10,6 +10,7 @@ import { ViewTab } from "./ViewTab";
 export function ListView({
   skills,
   onOpen,
+  onToggleStar,
   onUpload,
   lastId,
   views,
@@ -31,6 +32,7 @@ export function ListView({
 }: {
   skills: SkillVM[];
   onOpen: (id: string) => void;
+  onToggleStar: (id: string) => void;
   onUpload: () => void;
   lastId: string | null;
   views: ViewDef[];
@@ -161,10 +163,23 @@ export function ListView({
             </span>
             <span className="ver">{s.version ?? "—"}</span>
             <span className="r">
-              <span className={"stars" + (s.starred ? " is-on" : "")}>
+              <button
+                type="button"
+                className={"stars" + (s.starred ? " is-on" : "")}
+                title={s.starred ? "Unstar this skill" : "Star this skill"}
+                aria-pressed={s.starred}
+                aria-label={(s.starred ? "Unstar" : "Star") + " " + s.id}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onToggleStar(s.id);
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") e.stopPropagation();
+                }}
+              >
                 <Icon name="star" size={13} />
                 <span className="tnum">{s.stars}</span>
-              </span>
+              </button>
             </span>
             <span className="r when">{s.updated}</span>
           </div>

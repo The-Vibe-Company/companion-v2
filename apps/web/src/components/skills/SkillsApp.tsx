@@ -546,6 +546,7 @@ export function SkillsApp({
           <ListView
             skills={filtered}
             onOpen={open}
+            onToggleStar={toggleStar}
             onUpload={openUpload}
             lastId={lastId}
             views={views}

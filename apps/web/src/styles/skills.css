@@ -305,10 +305,14 @@ body { background: var(--color-canvas); color: var(--color-fg); font-family: var
 .composer .btn-primary { height: 28px; }
 
 /* --- Stars (list cell) --------------------------------------------------- */
-.stars { display: inline-flex; align-items: center; gap: 5px; font-family: var(--font-mono); font-size: var(--text-xs); color: var(--color-muted); }
+.stars { display: inline-flex; align-items: center; gap: 5px; font-family: var(--font-mono); font-size: var(--text-xs); color: var(--color-muted);
+  border: none; background: none; padding: 2px 4px; margin: -2px -4px; border-radius: var(--radius-sm); cursor: pointer;
+  transition: background-color var(--duration-fast) var(--ease-out-quint); }
+.stars:hover { background: var(--color-surface-raised); }
 .stars svg { color: var(--color-faint); }
 .stars.is-on { color: var(--color-fg); }
 .stars.is-on svg { fill: var(--color-accent); color: var(--color-accent); }
+.stars:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 1px; }
 
 /* --- Star button (detail topbar) ----------------------------------------- */
 .starbtn { display: inline-flex; align-items: center; gap: 7px; height: 30px; padding: 0 4px 0 11px; border-radius: var(--radius-md);
