@@ -9,7 +9,15 @@ mkdir -p "$LOG_DIR"
 
 export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-companion-ci-rsc}"
 export COMPOSE_BIND_HOST="${COMPOSE_BIND_HOST:-127.0.0.1}"
-export POSTGRES_PORT="${POSTGRES_PORT:-15432}"
+
+if [ -n "${CI_USE_GHA_POSTGRES:-}" ]; then
+  export POSTGRES_PORT="${POSTGRES_PORT:-5432}"
+  export DATABASE_URL="${DATABASE_URL:-postgres://companion:companion@127.0.0.1:${POSTGRES_PORT}/companion}"
+  COMPOSE_SERVICES="minio mailpit"
+else
+  export POSTGRES_PORT="${POSTGRES_PORT:-15432}"
+  COMPOSE_SERVICES="postgres minio mailpit"
+fi
 export MINIO_PORT="${MINIO_PORT:-19000}"
 export MINIO_CONSOLE_PORT="${MINIO_CONSOLE_PORT:-19001}"
 export MAILPIT_SMTP_PORT="${MAILPIT_SMTP_PORT:-11025}"
@@ -18,7 +26,9 @@ export COMPANION_WEB_PORT="${COMPANION_WEB_PORT:-13300}"
 export COMPANION_API_PORT="${COMPANION_API_PORT:-13301}"
 export COMPANION_API_HOST="${COMPANION_API_HOST:-127.0.0.1}"
 export COMPANION_WEB_HOST="${COMPANION_WEB_HOST:-127.0.0.1}"
-export DATABASE_URL="${DATABASE_URL:-postgres://companion:companion@127.0.0.1:${POSTGRES_PORT}/companion}"
+if [ -z "${CI_USE_GHA_POSTGRES:-}" ]; then
+  export DATABASE_URL="${DATABASE_URL:-postgres://companion:companion@127.0.0.1:${POSTGRES_PORT}/companion}"
+fi
 export COMPANION_API_URL="${COMPANION_API_URL:-http://127.0.0.1:${COMPANION_API_PORT}}"
 export COMPANION_WEB_URL="${COMPANION_WEB_URL:-http://127.0.0.1:${COMPANION_WEB_PORT}}"
 export NEXT_PUBLIC_COMPANION_API_URL="${NEXT_PUBLIC_COMPANION_API_URL:-$COMPANION_API_URL}"
@@ -75,9 +85,14 @@ wait_for_url() {
   exit 1
 }
 
-log "Starting isolated Docker services"
+if [ -n "${CI_USE_GHA_POSTGRES:-}" ]; then
+  log "Starting Docker services (minio, mailpit) — using external Postgres at $DATABASE_URL"
+else
+  log "Starting isolated Docker services (postgres, minio, mailpit)"
+fi
 docker compose -p "$COMPOSE_PROJECT_NAME" down -v --remove-orphans >/dev/null 2>&1 || true
-docker compose -p "$COMPOSE_PROJECT_NAME" up -d --wait postgres minio mailpit
+# shellcheck disable=SC2086
+docker compose -p "$COMPOSE_PROJECT_NAME" up -d --wait $COMPOSE_SERVICES
 docker compose -p "$COMPOSE_PROJECT_NAME" up -d minio-init
 
 log "Applying migrations and seeding test user"

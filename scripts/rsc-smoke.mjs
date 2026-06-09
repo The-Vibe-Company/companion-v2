@@ -60,6 +60,23 @@ function assertContains(path, body, expected) {
   }
 }
 
+async function checkUnauthenticatedRedirect() {
+  const saved = new Map(cookies);
+  cookies.clear();
+
+  const response = await request("/skills");
+  if (response.status < 300 || response.status >= 400) {
+    fail(`/skills without session expected redirect, got ${response.status}`);
+  }
+  const location = response.headers.get("location") ?? "";
+  if (!location.includes("/login")) {
+    fail(`/skills without session redirected to ${location || "(missing location)"}, expected /login`);
+  }
+
+  cookies.clear();
+  for (const [name, value] of saved) cookies.set(name, value);
+}
+
 async function login() {
   const response = await request("/v1/auth/signin", {
     method: "POST",
@@ -97,6 +114,7 @@ async function checkPage(path, expected) {
   assertContains(path, body, expected);
 }
 
+await checkUnauthenticatedRedirect();
 await login();
 await checkPage("/skills", ["Skills", "Upload skill"]);
 await checkPage("/settings", ["Settings", "Members"]);
