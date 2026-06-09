@@ -98,7 +98,9 @@ export async function updateMe(name: string): Promise<{ id: string; name: string
  * Rename and/or re-slug the current workspace. Mirrors `PUT /v1/orgs/current`.
  * Returns the server-normalized values so the caller can reconcile (the server slugifies).
  */
-export async function updateOrg(patch: { name?: string; slug?: string }): Promise<{ id: string; name: string; slug: string }> {
+export async function updateOrg(
+  patch: { name?: string; slug?: string; domainAutoJoin?: boolean },
+): Promise<{ id: string; name: string; slug: string; domain: string | null; domainAutoJoin: boolean }> {
   return apiFetch("/v1/orgs/current", {
     method: "PUT",
     body: JSON.stringify(patch),
@@ -111,8 +113,8 @@ export async function updateOrg(patch: { name?: string; slug?: string }): Promis
  */
 export async function updateTeam(
   id: string,
-  patch: { name?: string; slug?: string; description?: string },
-): Promise<{ id: string; name: string; slug: string; description: string | null }> {
+  patch: { name?: string; slug?: string; description?: string; color?: string | null; icon?: string | null },
+): Promise<{ id: string; name: string; slug: string; description: string | null; color: string | null; icon: string | null }> {
   return apiFetch(`/v1/teams/${id}`, {
     method: "PUT",
     body: JSON.stringify(patch),

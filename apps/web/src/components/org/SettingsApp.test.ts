@@ -28,6 +28,7 @@ describe("SettingsController", () => {
     const { SettingsController } = await import("./SettingsApp");
     const data = {
       me: { id: "user_1", name: "Admin", email: "admin@tvc.dev", initials: "A" },
+      domainJoin: { actorDomain: "tvc.dev", actorDomainIsPersonal: false },
       users: {
         user_1: { id: "user_1", name: "Admin", email: "admin@tvc.dev", initials: "A" },
       },
@@ -40,8 +41,11 @@ describe("SettingsController", () => {
         kind: "team",
         plan: "team",
         myRole: "owner",
+        created: "2025-01-12",
+        domain: null,
+        domainAutoJoin: false,
         members: {},
-        teams: [{ id: "team_1", slug: "platform", name: "Platform", description: "", members: {} }],
+        teams: [{ id: "team_1", slug: "platform", name: "Platform", description: "", color: null, icon: null, members: {} }],
       },
     } as unknown as SettingsAppData;
 

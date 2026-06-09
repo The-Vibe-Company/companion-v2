@@ -1,6 +1,7 @@
 import {
   apiTokenRowSchema,
   orgSettingsResponseSchema,
+  TEAM_BRAND_COLORS,
   type ApiTokenRow,
   type OrgSettingsResponse,
 } from "@companion/contracts";
@@ -8,19 +9,10 @@ import type { ApiKeyVM, Invite, OrgFull, SeedUser, SettingsAppData } from "@/com
 import { formatDate, relativeTime } from "./format";
 import type { MeVM, OrgVM } from "./types";
 
-const LOGO_COLORS = [
-  "oklch(0.56 0.13 250)",
-  "oklch(0.54 0.10 168)",
-  "oklch(0.55 0.13 300)",
-  "oklch(0.60 0.10 66)",
-  "oklch(0.55 0.13 24)",
-  "oklch(0.50 0.035 265)",
-];
-
 export function hashColor(str: string): string {
   let h = 0;
   for (let i = 0; i < str.length; i++) h = ((h * 31 + str.charCodeAt(i)) >>> 0);
-  return LOGO_COLORS[h % LOGO_COLORS.length]!;
+  return TEAM_BRAND_COLORS[h % TEAM_BRAND_COLORS.length]!;
 }
 
 export function initialsOf(name: string): string {
@@ -110,6 +102,8 @@ export function buildSettingsAppData(input: {
     plan: settings.org.plan,
     myRole: current.myRole,
     created: formatDate(settings.org.createdAt),
+    domain: settings.org.domain ?? null,
+    domainAutoJoin: settings.org.domainAutoJoin,
     members: settings.members.map((member) => ({
       userId: member.userId,
       role: member.role,
@@ -123,6 +117,8 @@ export function buildSettingsAppData(input: {
       slug: team.slug,
       name: team.name,
       description: team.description ?? "",
+      color: team.color ?? null,
+      icon: team.icon ?? null,
       members: team.members.map((member) => ({ userId: member.userId, role: member.role })),
     })),
   };
@@ -141,6 +137,10 @@ export function buildSettingsAppData(input: {
   return {
     me,
     current: currentFull,
+    domainJoin: {
+      actorDomain: settings.domainJoin.actorDomain,
+      actorDomainIsPersonal: settings.domainJoin.actorDomainIsPersonal,
+    },
     users,
     invites,
     apiKeys: tokens.map(mapApiKey),

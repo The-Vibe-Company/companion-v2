@@ -2,6 +2,8 @@
 
 import { useEffect, useState } from "react";
 import { Icon } from "../Icon";
+import { Avatar, EmojiPicker, LOGO_COLORS } from "@/components/branding";
+import { hashColor, initialsOf } from "@/lib/settingsViewModel";
 import { PaneHead, EditField } from "./paneKit";
 import { Dialog, RoleDot } from "./primitives";
 import { TEAM_ROLES } from "./roles";
@@ -17,11 +19,18 @@ export function teamManageable(ctx: OrgCtx, team: OrgTeam): boolean {
 /** Team › General — identity, description, details, and a real danger-zone delete. */
 export function TeamGeneralPane({ ctx, team }: { ctx: OrgCtx; team: OrgTeam }) {
   const [confirm, setConfirm] = useState(false);
+  const [picker, setPicker] = useState(false);
   const [desc, setDesc] = useState(team.description);
   useEffect(() => setDesc(team.description), [team.id, team.description]);
   const manage = teamManageable(ctx, team);
   const mine = team.members.find((m) => m.userId === ctx.myId);
   const descDirty = desc.trim() !== team.description;
+  const teamColor = team.color ?? hashColor(team.name);
+  const teamInitial = initialsOf(team.name);
+
+  const avatar = (
+    <Avatar size="lg" color={teamColor} initial={teamInitial} emoji={team.icon ?? undefined} ring={false} />
+  );
 
   return (
     <div className="sx-pane">
@@ -30,18 +39,35 @@ export function TeamGeneralPane({ ctx, team }: { ctx: OrgCtx; team: OrgTeam }) {
         desc="Team identity and configuration. Teams group members and scope which skills they can reach."
       />
 
-      <div className="sx-profile">
-        <span
-          className="sx-profile__av"
-          style={{
-            borderRadius: "var(--radius-md)",
-            background: "var(--color-surface-raised)",
-            color: "var(--color-fg)",
-            border: "1px solid var(--color-line)",
-          }}
-        >
-          {team.name[0]}
-        </span>
+      <div className="sx-profile sx-profile--team">
+        {manage ? (
+          <div className="sx-profile__pick">
+            <button
+              type="button"
+              className="ob-emoji-trigger"
+              onClick={() => setPicker((open) => !open)}
+              aria-label="Choose a team icon"
+              title="Choose an icon"
+            >
+              {avatar}
+              <span className="ob-emoji-edit">
+                <Icon name={team.icon ? "pencil" : "smile-plus"} size={12} />
+              </span>
+            </button>
+            {picker && (
+              <EmojiPicker
+                value={team.icon ?? undefined}
+                onPick={(icon) => {
+                  ctx.updateTeam(team.id, { icon });
+                  setPicker(false);
+                }}
+                onClose={() => setPicker(false)}
+              />
+            )}
+          </div>
+        ) : (
+          <span className="sx-profile__av sx-profile__av--team">{avatar}</span>
+        )}
         <div className="sx-profile__meta">
           <div className="sx-profile__name">{team.name}</div>
           <div className="sx-profile__email">
@@ -49,6 +75,26 @@ export function TeamGeneralPane({ ctx, team }: { ctx: OrgCtx; team: OrgTeam }) {
           </div>
         </div>
       </div>
+
+      {manage && (
+        <div className="sx-field sx-field--compact">
+          <label className="sx-field__label">Team color</label>
+          <div className="ob-swatches">
+            {LOGO_COLORS.map((color) => (
+              <button
+                key={color}
+                type="button"
+                className={"ob-swatch" + (teamColor === color ? " is-sel" : "")}
+                style={{ background: color }}
+                aria-label="Team color"
+                aria-pressed={teamColor === color}
+                onClick={() => ctx.updateTeam(team.id, { color })}
+              />
+            ))}
+          </div>
+          <span className="sx-field__hint">Tints the team icon and sidebar badge.</span>
+        </div>
+      )}
 
       {!manage && (
         <div className="og-lockbar">

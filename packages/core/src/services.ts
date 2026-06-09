@@ -3,6 +3,7 @@ import { and, asc, count, desc, eq, exists, gt, inArray, isNull, ne, or, sql } f
 import type {
   ApiTokenRow,
   OrgRole,
+  OrgSettingsDomainJoin,
   OrgSettingsInvitation,
   OrgSettingsOrg,
   Scope,
@@ -17,11 +18,13 @@ import {
   API_TOKEN_PREFIX,
   publishSkillInputSchema,
   skillFilterPreferencesSchema,
+  TEAM_BRAND_COLORS,
   type PublishSkillInput,
 } from "@companion/contracts";
 import { compareSemver } from "@companion/skills";
 import { db, schema, type Db } from "@companion/db";
 import { initialsFor, slugify } from "@companion/db/ids";
+import { classifyEmailDomain } from "./email-domains";
 import {
   canActAtScope,
   canManageOrg,
@@ -73,6 +76,8 @@ export interface OrgSettingsTeam {
   slug: string;
   name: string;
   description: string | null;
+  color: string | null;
+  icon: string | null;
   members: Array<{
     userId: string;
     role: TeamRole;
@@ -189,23 +194,50 @@ export async function createOrg(input: {
   return { id: org.id, slug: org.slug };
 }
 
+function requireVerifiedForDomainJoin(): boolean {
+  const flag = process.env.COMPANION_REQUIRE_VERIFIED_DOMAIN_JOIN;
+  if (flag === "true") return true;
+  if (flag === "false") return false;
+  return process.env.NODE_ENV === "production";
+}
+
+async function isActorEmailVerified(actorId: string, database: Db): Promise<boolean> {
+  const row = await database.query.user.findFirst({
+    where: eq(schema.user.id, actorId),
+    columns: { emailVerified: true },
+  });
+  return row?.emailVerified === true;
+}
+
 /**
- * Rename and/or re-slug the current organization. Requires an org admin (`canManageOrg`). The slug is
- * normalized via `slugify` and must be globally unique (org slugs are unique org-wide); we check first
- * (excluding self) for a friendly message and still catch the unique-violation as a backstop on races.
+ * Rename and/or re-slug the current organization, and/or toggle domain auto-join. Requires an org
+ * admin (`canManageOrg`). Domain auto-join may only be enabled for the actor's own corporate email
+ * domain (same rule as onboarding).
  */
 export async function updateOrg(input: {
   actor: ActorContext;
   orgId: string;
   name?: string;
   slug?: string;
+  domainAutoJoin?: boolean;
   database?: Db;
-}): Promise<{ id: string; name: string; slug: string }> {
+}): Promise<{ id: string; name: string; slug: string; domain: string | null; domainAutoJoin: boolean }> {
   const database = input.database ?? db;
   const role = await getOrgRole(input.orgId, input.actor.id, database);
   if (!role || !canManageOrg(role)) throw new Error("not allowed to update this organization");
 
-  const patch: { name?: string; slug?: string; updatedAt: Date } = { updatedAt: new Date() };
+  const orgRow = await database.query.organizations.findFirst({
+    where: eq(schema.organizations.id, input.orgId),
+  });
+  if (!orgRow) throw new Error("organization not found");
+
+  const patch: {
+    name?: string;
+    slug?: string;
+    domain?: string | null;
+    domainAutoJoin?: boolean;
+    updatedAt: Date;
+  } = { updatedAt: new Date() };
   if (input.name !== undefined) {
     const name = input.name.trim();
     if (!name) throw new Error("name is required");
@@ -219,20 +251,71 @@ export async function updateOrg(input: {
     if (conflict) throw new Error("that workspace URL is already taken");
     patch.slug = slug;
   }
-  if (patch.name === undefined && patch.slug === undefined) throw new Error("nothing to update");
+  if (input.domainAutoJoin !== undefined) {
+    const { domain: actorDomain, isPersonal } = classifyEmailDomain(input.actor.email);
+    if (input.domainAutoJoin) {
+      if (orgRow.kind !== "team") {
+        throw new Error("domain auto-join is only available for team workspaces");
+      }
+      const domain = orgRow.domain ?? (actorDomain && !isPersonal ? actorDomain : null);
+      if (!domain || isPersonal || domain !== actorDomain) {
+        throw new Error("domain auto-join requires a matching corporate email domain on your account");
+      }
+      if (requireVerifiedForDomainJoin() && !(await isActorEmailVerified(input.actor.id, database))) {
+        throw new Error("verify your email to enable domain auto-join");
+      }
+      patch.domain = domain;
+      patch.domainAutoJoin = true;
+    } else {
+      patch.domainAutoJoin = false;
+    }
+  }
+  if (
+    patch.name === undefined &&
+    patch.slug === undefined &&
+    patch.domain === undefined &&
+    patch.domainAutoJoin === undefined
+  ) {
+    throw new Error("nothing to update");
+  }
+
+  const domainToClaim = patch.domain && patch.domain !== orgRow.domain ? patch.domain : null;
 
   let row;
   try {
-    [row] = await database
-      .update(schema.organizations)
-      .set(patch)
-      .where(eq(schema.organizations.id, input.orgId))
-      .returning({
-        id: schema.organizations.id,
-        name: schema.organizations.name,
-        slug: schema.organizations.slug,
+    if (domainToClaim) {
+      [row] = await database.transaction(async (tx) => {
+        await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`companion:org-domain:${domainToClaim}`}))`);
+        return tx
+          .update(schema.organizations)
+          .set(patch)
+          .where(eq(schema.organizations.id, input.orgId))
+          .returning({
+            id: schema.organizations.id,
+            name: schema.organizations.name,
+            slug: schema.organizations.slug,
+            domain: schema.organizations.domain,
+            domainAutoJoin: schema.organizations.domainAutoJoin,
+          });
       });
+    } else {
+      [row] = await database
+        .update(schema.organizations)
+        .set(patch)
+        .where(eq(schema.organizations.id, input.orgId))
+        .returning({
+          id: schema.organizations.id,
+          name: schema.organizations.name,
+          slug: schema.organizations.slug,
+          domain: schema.organizations.domain,
+          domainAutoJoin: schema.organizations.domainAutoJoin,
+        });
+    }
   } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.includes("organizations_domain_uq")) {
+      throw new Error("an organization already exists for this domain");
+    }
     if (isUniqueViolation(error)) throw new Error("that workspace URL is already taken");
     throw error;
   }
@@ -261,6 +344,7 @@ export async function getOrgSettings(input: {
   database?: Db;
 }): Promise<{
   org: OrgSettingsOrg;
+  domainJoin: OrgSettingsDomainJoin;
   members: OrgSettingsMember[];
   teams: OrgSettingsTeam[];
   invitations: OrgSettingsInvitation[];
@@ -268,6 +352,9 @@ export async function getOrgSettings(input: {
   const database = input.database ?? db;
   const orgRole = await getOrgRole(input.orgId, input.actor.id, database);
   if (!orgRole) throw new Error("not a member of this organization");
+
+  const { domain: actorDomain, isPersonal: actorDomainIsPersonal } = classifyEmailDomain(input.actor.email);
+  const domainJoin: OrgSettingsDomainJoin = { actorDomain, actorDomainIsPersonal };
 
   const orgRow = await database.query.organizations.findFirst({
     where: eq(schema.organizations.id, input.orgId),
@@ -280,6 +367,8 @@ export async function getOrgSettings(input: {
     kind: orgRow.kind,
     plan: orgRow.plan,
     createdAt: orgRow.createdAt.toISOString(),
+    domain: orgRow.domain,
+    domainAutoJoin: orgRow.domainAutoJoin,
   };
 
   const memberRows = await database
@@ -354,6 +443,8 @@ export async function getOrgSettings(input: {
       slug: schema.teams.slug,
       name: schema.teams.name,
       description: schema.teams.description,
+      color: schema.teams.color,
+      icon: schema.teams.icon,
     })
     .from(schema.teams)
     .where(eq(schema.teams.orgId, input.orgId))
@@ -378,6 +469,8 @@ export async function getOrgSettings(input: {
       slug: team.slug,
       name: team.name,
       description: team.description,
+      color: team.color,
+      icon: team.icon,
       members: teamMembers.map((m) => ({
         userId: m.userId,
         role: m.role as TeamRole,
@@ -388,7 +481,7 @@ export async function getOrgSettings(input: {
     });
   }
 
-  return { org, members, teams, invitations };
+  return { org, domainJoin, members, teams, invitations };
 }
 
 export async function createTeam(input: {
@@ -427,12 +520,21 @@ export async function updateTeam(input: {
   name?: string;
   slug?: string;
   description?: string | null;
+  color?: string | null;
+  icon?: string | null;
   database?: Db;
-}): Promise<{ id: string; name: string; slug: string; description: string | null }> {
+}): Promise<{ id: string; name: string; slug: string; description: string | null; color: string | null; icon: string | null }> {
   const database = input.database ?? db;
   await assertCanManageTeam({ actor: input.actor, orgId: input.orgId, teamId: input.teamId, database });
 
-  const patch: { name?: string; slug?: string; description?: string | null; updatedAt: Date } = {
+  const patch: {
+    name?: string;
+    slug?: string;
+    description?: string | null;
+    color?: string | null;
+    icon?: string | null;
+    updatedAt: Date;
+  } = {
     updatedAt: new Date(),
   };
   if (input.name !== undefined) {
@@ -456,7 +558,24 @@ export async function updateTeam(input: {
     const description = input.description?.trim() ?? "";
     patch.description = description ? description : null;
   }
-  if (patch.name === undefined && patch.slug === undefined && patch.description === undefined) {
+  if (input.color !== undefined) {
+    const color = input.color?.trim() ?? "";
+    if (color && !(TEAM_BRAND_COLORS as readonly string[]).includes(color)) {
+      throw new Error("invalid team color");
+    }
+    patch.color = color ? color : null;
+  }
+  if (input.icon !== undefined) {
+    const icon = input.icon?.trim() ?? "";
+    patch.icon = icon ? icon : null;
+  }
+  if (
+    patch.name === undefined &&
+    patch.slug === undefined &&
+    patch.description === undefined &&
+    patch.color === undefined &&
+    patch.icon === undefined
+  ) {
     throw new Error("nothing to update");
   }
 
@@ -471,6 +590,8 @@ export async function updateTeam(input: {
         name: schema.teams.name,
         slug: schema.teams.slug,
         description: schema.teams.description,
+        color: schema.teams.color,
+        icon: schema.teams.icon,
       });
   } catch (error) {
     if (isUniqueViolation(error)) throw new Error("that team URL is already taken");

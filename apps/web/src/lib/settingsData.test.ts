@@ -66,6 +66,12 @@ describe("parseOrgSettingsResponse", () => {
           kind: "team",
           plan: "team",
           createdAt: "2025-01-12T00:00:00.000Z",
+          domain: "tvc.dev",
+          domainAutoJoin: true,
+        },
+        domainJoin: {
+          actorDomain: "tvc.dev",
+          actorDomainIsPersonal: false,
         },
         members: [
           {
@@ -84,6 +90,8 @@ describe("parseOrgSettingsResponse", () => {
             slug: "platform",
             name: "Platform",
             description: "Owns the deploy plane.",
+            color: null,
+            icon: null,
             members: [
               {
                 userId: "user_1",
@@ -124,6 +132,9 @@ describe("parseOrgSettingsResponse", () => {
     });
 
     expect(data.current.created).toBe("2025-01-12");
+    expect(data.current.domain).toBe("tvc.dev");
+    expect(data.current.domainAutoJoin).toBe(true);
+    expect(data.domainJoin).toEqual({ actorDomain: "tvc.dev", actorDomainIsPersonal: false });
     expect(data.current.members).toEqual([
       expect.objectContaining({ userId: "user_1", role: "owner", joined: "2026-06-09" }),
     ]);

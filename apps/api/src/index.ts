@@ -488,7 +488,7 @@ app.put("/v1/orgs/current", async (c) => {
     const input = updateOrgInputSchema.parse(await c.req.json());
     return c.json(
       await withTenant(c, ({ actor, orgId, database }) =>
-        updateOrg({ actor, orgId, name: input.name, slug: input.slug, database }),
+        updateOrg({ actor, orgId, name: input.name, slug: input.slug, domainAutoJoin: input.domainAutoJoin, database }),
       ),
     );
   } catch (error) {
@@ -526,6 +526,8 @@ app.put("/v1/teams/:teamId", async (c) => {
           name: input.name,
           slug: input.slug,
           description: input.description,
+          color: input.color,
+          icon: input.icon,
           database,
         }),
       ),

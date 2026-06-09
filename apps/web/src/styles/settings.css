@@ -146,13 +146,18 @@
   border: 1px solid var(--color-line); background: var(--color-surface-raised); color: var(--color-muted); }
 .badge--warn { color: var(--color-warn); border-color: var(--color-warn-line); background: var(--color-warn-tint); }
 .badge--ok { color: var(--color-ok); border-color: var(--color-ok-line); background: var(--color-ok-tint); }
-.badge--accent { color: var(--color-accent-fg); border-color: var(--color-accent-line); background: var(--color-accent-tint); }
+.badge--accent { color: var(--color-accent-edge); border-color: var(--color-accent-line); background: var(--color-accent-tint); }
 :root[data-theme="dark"] .badge--accent { color: var(--color-accent); }
 
 /* ========================================================================== */
 /* Profile pane                                                               */
 /* ========================================================================== */
 .sx-profile { display: flex; align-items: center; gap: 18px; margin-bottom: 30px; }
+.sx-profile--team { margin-bottom: 18px; }
+.sx-profile__pick { position: relative; flex: none; }
+.sx-profile__av--team { width: auto; height: auto; padding: 0; background: none; border: none; border-radius: 0; }
+.sx-profile__av--team .ob-avatar { width: 64px; height: 64px; font-size: 22px; border-radius: var(--radius-md); }
+.sx-field--compact { margin-top: -6px; margin-bottom: 26px; }
 .sx-profile__av { width: 64px; height: 64px; border-radius: var(--radius-full); display: grid; place-items: center; font-size: 24px; font-weight: 600;
   background: var(--color-accent); color: var(--color-accent-fg); flex: none; }
 .sx-profile__meta { min-width: 0; }

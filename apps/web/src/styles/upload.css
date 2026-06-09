@@ -33,7 +33,7 @@
 .method.is-sel { background: var(--color-accent-tint); border-color: var(--color-accent-line); }
 .method__ico { width: 26px; height: 26px; display: grid; place-items: center; border-radius: var(--radius-sm);
   border: 1px solid var(--color-line); background: var(--color-surface); color: var(--color-muted); }
-.method.is-sel .method__ico { border-color: var(--color-accent-line); color: var(--color-accent-fg); background: var(--color-surface); }
+.method.is-sel .method__ico { border-color: var(--color-accent-line); color: var(--color-accent-edge); background: var(--color-surface); }
 .method__txt { min-width: 0; }
 .method__name { display: flex; align-items: center; gap: 6px; font-size: var(--text-sm); font-weight: 500; color: var(--color-fg); }
 .method__name .tag { font-family: var(--font-mono); font-size: 9px; text-transform: uppercase; letter-spacing: var(--tracking-wide);
@@ -59,7 +59,7 @@
 .up-seg button:hover { color: var(--color-fg); }
 .up-seg button.is-on { background: var(--color-surface); color: var(--color-fg); box-shadow: 0 0 0 1px var(--color-line); }
 .up-seg button svg { color: var(--color-faint); }
-.up-seg button.is-on svg { color: var(--color-accent-fg); }
+.up-seg button.is-on svg { color: var(--color-accent-edge); }
 .up-seg-note { font-size: 11.5px; color: var(--color-faint); }
 .up-seg-note .mono { color: var(--color-muted); }
 
