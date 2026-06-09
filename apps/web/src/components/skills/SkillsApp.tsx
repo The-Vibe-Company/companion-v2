@@ -40,9 +40,6 @@ export function SkillsApp({
 }) {
   const router = useRouter();
   const orgActions = useOrgActions();
-  useEffect(() => {
-    router.prefetch("/settings");
-  }, [router]);
   const openSettings = useCallback(
     (intent?: SettingsIntent) => {
       const qs = new URLSearchParams();

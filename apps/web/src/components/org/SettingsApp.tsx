@@ -29,6 +29,13 @@ function normalizeOrgFull(org: OrgFull): OrgFull {
   return { ...org, members, teams };
 }
 
+export function settingsHref(tab: SettingsTab, dialog: SettingsDialog): string {
+  const qs = new URLSearchParams();
+  qs.set("tab", tab);
+  if (dialog) qs.set("dialog", dialog);
+  return `/settings?${qs.toString()}`;
+}
+
 export function SettingsController({
   data,
   initialTab,
@@ -162,14 +169,11 @@ export function SettingsController({
     busy: busy || actions.busy,
   };
 
-  const pushUrl = (t: SettingsTab, d: SettingsDialog) => {
-    const qs = new URLSearchParams();
-    qs.set("tab", t);
-    if (d) qs.set("dialog", d);
-    router.replace(`/settings?${qs.toString()}`, { scroll: false });
+  const replaceUrl = (t: SettingsTab, d: SettingsDialog) => {
+    window.history.replaceState(window.history.state, "", settingsHref(t, d));
   };
-  const onTab = (t: SettingsTab) => { setTab(t); setDialog(null); pushUrl(t, null); };
-  const onDialog = (d: SettingsDialog) => { setDialog(d); pushUrl(tab, d); };
+  const onTab = (t: SettingsTab) => { setTab(t); setDialog(null); replaceUrl(t, null); };
+  const onDialog = (d: SettingsDialog) => { setDialog(d); replaceUrl(tab, d); };
 
   return (
     <>
