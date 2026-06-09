@@ -6,7 +6,6 @@ license: MIT
 tools:
   - read_file
   - run_python
-scope: team
 ---
 
 # incident-summary

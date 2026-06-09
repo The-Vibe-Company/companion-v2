@@ -1,5 +1,4 @@
 import { z } from "zod";
-import { scopeSchema } from "./scope";
 
 /** Skill id / name: kebab-case (lowercase, digits, single hyphens). */
 export const SKILL_NAME_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
@@ -20,8 +19,20 @@ const skillFrontmatterFields = z.object({
   description: z.string().min(1, "description is required").max(1024),
   license: z.string().min(1).optional(),
   tools: z.array(z.string()).default([]),
-  scope: scopeSchema.optional(),
-});
+}).passthrough().superRefine((obj, ctx) => {
+  if ("scope" in obj || "visibility" in obj) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "skill frontmatter must not declare visibility; use upload visibility instead",
+    });
+  }
+}).transform(({ name, version, description, license, tools }) => ({
+  name,
+  version,
+  description,
+  tools,
+  ...(license ? { license } : {}),
+}));
 
 /**
  * Companion's native field is `tools` (a YAML list). The Claude skill format declares the same

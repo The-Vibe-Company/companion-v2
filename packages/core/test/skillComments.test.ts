@@ -60,10 +60,7 @@ function fakeDb(opts: FakeOptions = {}) {
             org_id: ORG,
             slug: "demo-skill",
             description: "",
-            scope: "public",
-            team_id: null,
-            team_name: null,
-            team_slug: null,
+            everyone: true,
             validation: "valid",
             validation_error: null,
             owner_id: opts.skillOwnerId ?? owner.id,
@@ -161,8 +158,8 @@ describe("setCommentDeprecated — RBAC matrix (author / admin / skill-owner all
     ).rejects.toThrow("not allowed to change this comment");
   });
 
-  it("denies a cross-tenant actor (not a member: the skill is not visible)", async () => {
-    // orgRole null → listSkills returns no visible skill → resolves to "skill not found".
+  it("denies a cross-tenant actor before skill visibility is evaluated", async () => {
+    // orgRole null fails closed before workspace-local Everyone/team visibility is considered.
     const { database } = fakeDb({ orgRole: null, comment: targetComment });
     await expect(
       setCommentDeprecated({
@@ -173,7 +170,7 @@ describe("setCommentDeprecated — RBAC matrix (author / admin / skill-owner all
         deprecated: true,
         database,
       }),
-    ).rejects.toThrow("skill not found");
+    ).rejects.toThrow("not a member of this organization");
   });
 
   it("throws when the comment does not exist under this org+skill", async () => {
@@ -238,7 +235,7 @@ describe("addComment — cross-skill version_id rejection", () => {
     expect(row.deprecated).toBe(false);
   });
 
-  it("forces version_id to null on a reply (scope inherited from the thread)", async () => {
+  it("forces version_id to null on a reply (context inherited from the thread)", async () => {
     const parent = { id: "root-1", orgId: ORG, skillId: SKILL_ID, parentId: null };
     const inserted = {
       id: "reply-1",

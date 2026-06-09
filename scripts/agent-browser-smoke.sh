@@ -127,7 +127,7 @@ prepare_fixtures() {
     --profile "$profile" >/dev/null
 
   pnpm --filter @companion/cli dev skills push "$PWD/examples/skills/incident-summary" \
-    --scope private \
+    --everyone \
     --profile "$profile" >/dev/null 2>&1 || true
 }
 
@@ -159,6 +159,8 @@ agent-browser find label "Email" fill "$SMOKE_EMAIL"
 agent-browser find label "Password" fill "$SMOKE_PASSWORD"
 agent-browser find role button click --name "Sign in"
 wait_for_skills
+agent-browser eval "for (const b of Array.from(document.querySelectorAll('button'))) { if (b.textContent && b.textContent.trim() === 'Clear') b.click(); }" >/dev/null
+agent-browser wait 300
 assert_body_contains "$SMOKE_SKILL"
 assert_body_contains "Upload skill"
 
@@ -166,7 +168,8 @@ log "Checking filter menu"
 agent-browser find role button click --name "Filter"
 agent-browser wait 300
 assert_body_contains "Visibility"
-assert_body_contains "public"
+assert_body_contains "Everyone"
+assert_body_contains "Team shares"
 agent-browser press Escape
 
 log "Checking detail view"

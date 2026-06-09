@@ -11,7 +11,6 @@ license: MIT
 tools:
   - read_file
   - run_python
-scope: public
 ---
 
 # pdf-extract

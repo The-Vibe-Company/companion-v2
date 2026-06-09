@@ -62,8 +62,10 @@ adds `profiles`, `organizations`, `memberships`, `teams`, `team_memberships`, `i
 `api_tokens`, and `audit_log`.
 
 Every tenant-owned table carries `org_id`. Skills keep ownership, visibility, and provenance
-separate: `owner_id`, `scope`, `team_id`, and `creator_id`. Valid scopes are `private`, `team`,
-and `public`. A version's declared tools (`skill_versions.tools`) come from the `SKILL.md`
+separate: `owner_id`, `everyone`, `skill_team_shares`, and `creator_id`. `everyone=true` means
+every member of the current workspace can see the skill. Team visibility is zero or more rows in
+`skill_team_shares`; private is derived from `everyone=false` and no team shares. A version's
+declared tools (`skill_versions.tools`) come from the `SKILL.md`
 frontmatter — Companion's native `tools` list, or the Claude skill-format `allowed-tools` (a YAML
 list or comma-separated string) accepted as an alias; tool names may be identifiers in any case
 (`Bash`, `read_file`, `mcp__server__tool`).
@@ -79,9 +81,9 @@ It is personal UI state, not a shared organization resource.
 `skill_comments` powers the threaded **Discussion** on a skill's detail page. Beyond `body`/`author_id`
 it carries `parent_id` (a self-FK — `null` is a root thread, non-null is a reply; single-level nesting),
 `version_id` (FK → `skill_versions`, `on delete set null`; `null` = a *global* thread, otherwise the
-thread is scoped to that version), and `deprecated` (threads are greyed/struck-through, never deleted).
+thread is linked to that version), and `deprecated` (threads are greyed/struck-through, never deleted).
 Cross-skill integrity for `parent_id`/`version_id` is not FK-enforceable and is validated in the service
-layer; a reply inherits its thread's scope (its `version_id` is forced `null`). Marking a thread
+layer; a reply inherits its thread context (its `version_id` is forced `null`). Marking a thread
 deprecated is allowed for the comment author, an org admin, or the skill owner.
 
 Onboarding adds a few columns: `organizations.domain` + `organizations.domain_auto_join` (a verified
@@ -143,8 +145,8 @@ enabling auto-join) requires a verified email when `COMPANION_REQUIRE_VERIFIED_D
 
 The service layer in `packages/core` is the primary enforcement point. It applies:
 
-- visibility gate: private owner, team member, or public inside the selected org;
-- capability gate: org/team role, owner checks, and scope-specific action checks;
+- visibility gate: owner, org admin, `everyone=true`, or membership in any shared team;
+- capability gate: org/team role, owner checks, and visibility-target action checks;
 - tenant gate: all service queries are scoped to the selected `org_id`.
 
 Postgres RLS may be added later as defense-in-depth, but browser and CLI clients never connect
@@ -163,18 +165,19 @@ directly to Postgres.
   plaintext returned once), `DELETE /v1/tokens/:id` (an org admin may revoke any token by id).
   Session-authenticated only — a token cannot mint another.
 - Skills: `/v1/skills`, `/v1/skills/:slug`, `/v1/skills/:slug/versions`,
-  `/v1/skills/:slug/download`, `/v1/skills/:slug/scope`, `/v1/skill-filter-preferences`,
+  `/v1/skills/:slug/download`, `/v1/skills/:slug/visibility`, `/v1/skill-filter-preferences`,
   `POST /v1/skills/create` (author a SKILL.md inline),
   `GET /v1/skills/:slug/versions/:version/package` (download a version as `.zip`), and
   `GET /v1/skills/:slug/versions/:version/files` (read a version's package contents for the in-app
   file explorer — text files are returned UTF-8-decoded and capped, binaries carry `content: null`).
   Threaded discussion: `GET`/`POST /v1/skills/:slug/comments` (a `POST` may carry `parent_id` for a
-  reply and `version_id` to scope the thread to a version) and
+  reply and `version_id` to link the thread to a version) and
   `PATCH /v1/skills/:slug/comments/:id` (deprecate / restore a thread).
 - Orgs & settings: `/v1/orgs`, `GET`/`POST`/`PUT /v1/orgs/current` (read/select/rename+reslug the org,
   admin only for `PUT`), `GET /v1/orgs/current/settings` (members, invitations, teams + descriptions),
   `PUT /v1/users/me` (update display name), `/v1/teams` + `PUT`/`DELETE /v1/teams/:id` (rename/describe,
-  or delete a team — org admin, re-scoping the team's skills to private), and `/v1/invitations`.
+  or delete a team — org admin; deleting a team cascades only that team's skill-share rows), and
+  `/v1/invitations`.
 
 Requests authenticate by Better Auth cookie session. An `Authorization: Bearer cmp_pat_…` token is
 accepted **only** on the PAT-enabled skills endpoints (`POST /v1/skills`, `POST /v1/skills/create`,
@@ -182,7 +185,7 @@ accepted **only** on the PAT-enabled skills endpoints (`POST /v1/skills`, `POST 
 `GET /v1/skills/:slug/versions/:version/files`); every other
 endpoint rejects tokens. Token requests are scope-gated (`skills:write` to publish/create,
 `skills:read` to download). `POST /v1/skills` accepts a multipart `file` (browser/CLI) or a raw
-`application/zip` / `application/gzip` body with `visibility`/`team`/`version` query params (the
+`application/zip` / `application/gzip` body with `everyone`/`team`/`version` query params (the
 guided-prompt curl). Uploads accept `.zip` or `.tar.gz`; the canonical stored, checksummed format
 is `.tar.gz`.
 

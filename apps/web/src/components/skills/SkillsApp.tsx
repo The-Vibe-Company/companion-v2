@@ -2,8 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import type { Scope, SkillFilterPreferences } from "@companion/contracts";
-import { saveSkillFilterPreferences, setSkillScope, toggleStar as toggleStarRpc } from "@/lib/queries";
+import type { SkillFilterPreferences, SkillVisibilityInput } from "@companion/contracts";
+import { saveSkillFilterPreferences, setSkillVisibility, toggleStar as toggleStarRpc } from "@/lib/queries";
 import { fetchSettingsAppData } from "@/lib/settingsClient";
 import type { MeVM, OrgVM, SkillVM, TeamVM } from "@/lib/types";
 import { Sidebar } from "./Sidebar";
@@ -300,38 +300,49 @@ export function SkillsApp({
     });
   }, []);
 
-  const changeVisibility = useCallback((id: string, newScope: Scope) => {
-    let prev: Scope | null = null;
+  const changeVisibility = useCallback((id: string, visibility: SkillVisibilityInput) => {
+    let prev: SkillVM["visibility"] | null = null;
     setSkills((arr) =>
       arr.map((s) => {
         if (s.id === id) {
-          prev = s.scope;
-          return { ...s, scope: newScope };
+          prev = s.visibility;
+          const nextTeams = visibility.teams.map((slug) => {
+            const existing = s.teams.find((team) => team.slug === slug);
+            const team = teams.find((t) => t.id === slug);
+            return existing ?? { id: slug, slug, name: team?.name ?? slug };
+          });
+          return { ...s, visibility: { everyone: visibility.everyone, teams: nextTeams }, teams: nextTeams, teamSlugs: nextTeams.map((team) => team.slug) };
         }
         return s;
       }),
     );
-    setSkillScope(id, newScope, null, currentOrg.id).catch(() => {
-      if (prev) setSkills((arr) => arr.map((s) => (s.id === id ? { ...s, scope: prev as Scope } : s)));
+    setSkillVisibility(id, visibility, currentOrg.id).catch(() => {
+      if (prev) {
+        setSkills((arr) => arr.map((s) => (s.id === id ? { ...s, visibility: prev!, teams: prev!.teams, teamSlugs: prev!.teams.map((team) => team.slug) } : s)));
+      }
     });
-    // Keep the open skill visible if an active scope filter would now hide it.
+    // Keep the open skill visible if an active visibility filter would now hide it.
     if (id === openIdRef.current) {
       setFilters((fs) => {
-        const hasScope = fs.some((f) => f.type === "scope");
-        if (hasScope && !fs.some((f) => f.type === "scope" && f.value === newScope)) {
-          return fs.filter((f) => f.type !== "scope");
+        const nextVisibility = new Set<string>();
+        if (visibility.everyone) nextVisibility.add("everyone");
+        if (visibility.teams.length) nextVisibility.add("team");
+        if (!visibility.everyone && visibility.teams.length === 0) nextVisibility.add("private");
+        const hasVisibility = fs.some((f) => f.type === "visibility");
+        if (hasVisibility && !fs.some((f) => f.type === "visibility" && nextVisibility.has(f.value))) {
+          return fs.filter((f) => f.type !== "visibility");
         }
         return fs;
       });
     }
-  }, [currentOrg.id]);
+  }, [currentOrg.id, teams]);
 
   // --- Derived ---------------------------------------------------------------
   const owners = useMemo(() => [...new Set(skills.map((s) => s.owner.name))].sort(), [skills]);
   const teamCounts = useMemo(() => {
     const c: Record<string, number> = {};
     skills.forEach((s) => {
-      if (s.teamSlug) c[s.teamSlug] = (c[s.teamSlug] || 0) + 1;
+      for (const slug of s.teamSlugs) c[slug] = (c[slug] || 0) + 1;
     });
     return c;
   }, [skills]);
@@ -534,6 +545,7 @@ export function SkillsApp({
             total={filtered.length}
             me={me}
             myRole={currentOrg.myRole}
+            teams={teams}
             onBack={back}
             onPrev={() => go(-1)}
             onNext={() => go(1)}

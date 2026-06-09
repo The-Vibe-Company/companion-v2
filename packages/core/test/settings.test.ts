@@ -173,7 +173,7 @@ function fakeDb(options: FakeDbOptions = {}) {
   });
 
   // The transaction handle records an ordered marker sequence so the deleteTeam test can assert the
-  // skills re-scope (update) runs strictly BEFORE the team delete.
+  // operation only deletes the team. Skill visibility shares cascade through `skill_team_shares`.
   const txUpdate = vi.fn(() => {
     calls.txSequence.push("update");
     const api = {
@@ -449,7 +449,7 @@ describe("deleteTeam", () => {
   it("allows an org admin", async () => {
     const { database, txHandle } = fakeDb({ role: "admin", team: { id: TEAM_1, orgId: ORG_A }, teamCount: 2 });
     await expect(deleteTeam({ actor: admin, orgId: ORG_A, teamId: TEAM_1, database })).resolves.toBeUndefined();
-    expect(txHandle.update).toHaveBeenCalled();
+    expect(txHandle.update).not.toHaveBeenCalled();
     expect(txHandle.delete).toHaveBeenCalled();
   });
 
@@ -475,15 +475,13 @@ describe("deleteTeam", () => {
     expect(txHandle.delete).not.toHaveBeenCalled();
   });
 
-  it("re-scopes team skills to private BEFORE deleting the team", async () => {
+  it("deletes the team without rewriting skills", async () => {
     const { database, calls } = fakeDb({ role: "owner", team: { id: TEAM_1, orgId: ORG_A }, teamCount: 3 });
 
     await deleteTeam({ actor: owner, orgId: ORG_A, teamId: TEAM_1, database });
 
-    // The skills update must happen strictly before the teams delete inside the transaction...
-    expect(calls.txSequence).toEqual(["update", "delete"]);
-    // ...and it must flip this team's skills to private + detach the team_id (the scope/team_id CHECK).
-    expect(calls.txPatch).toMatchObject({ scope: "private", teamId: null });
+    expect(calls.txSequence).toEqual(["delete"]);
+    expect(calls.txPatch).toBeUndefined();
   });
 
   it("throws when the team is not found", async () => {

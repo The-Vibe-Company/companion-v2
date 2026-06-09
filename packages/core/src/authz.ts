@@ -1,4 +1,4 @@
-import { type OrgRole, type Scope, type TeamRole } from "@companion/contracts";
+import { type OrgRole, type TeamRole } from "@companion/contracts";
 
 /**
  * The CAPABILITY gate (the "can the actor DO it?" half of authorization). The
@@ -21,16 +21,19 @@ export type SkillAction =
 
 export interface Actor {
   orgRole: OrgRole;
-  /** The actor's role on the resource's team, if any. */
   teamRole?: TeamRole | null;
-  /** Is the actor a member of the resource's team? */
-  memberOfResourceTeam?: boolean;
 }
 
 export interface ResourceCtx {
-  scope: Scope;
   /** Does the actor own this resource (owner_id === actor)? */
   isOwner: boolean;
+}
+
+export interface VisibilityTarget {
+  everyone: boolean;
+  teamCount: number;
+  /** True when the actor belongs to every targeted team. */
+  memberOfAllTargetTeams?: boolean;
 }
 
 const ORG_ADMINS: ReadonlySet<OrgRole> = new Set<OrgRole>(["owner", "admin"]);
@@ -40,22 +43,21 @@ export function isOrgAdmin(role: OrgRole): boolean {
 }
 
 /**
- * Who may CREATE or PUBLISH a resource at a given visibility scope.
- * - org admins (owner/admin): any scope.
- * - developer: private always; public always (their choice to share broadly); team only
- *   within their own team.
+ * Who may CREATE or PUBLISH a resource at a given visibility target.
+ * - org admins (owner/admin): any visibility.
+ * - developers: private always, everyone always, team shares only for teams they belong to.
  */
-export function canActAtScope(actor: Actor, scope: Scope): boolean {
+export function canActAtVisibility(actor: Actor, target: VisibilityTarget): boolean {
   if (isOrgAdmin(actor.orgRole)) return true;
-  // developer
-  if (scope === "private" || scope === "public") return true;
-  return actor.memberOfResourceTeam === true; // team scope
+  if (target.teamCount === 0) return true;
+  return target.memberOfAllTargetTeams === true;
 }
 
 /** Who may MODIFY (update/delete/publish a new version of) an existing resource. */
 export function canModify(actor: Actor, res: ResourceCtx): boolean {
   if (isOrgAdmin(actor.orgRole)) return true;
-  return res.isOwner; // developers may modify what they own
+  if (res.isOwner) return true;
+  return actor.teamRole === "admin" || actor.teamRole === "editor";
 }
 
 /* ---- Management capability gates (mirror the SQL RPC guards) ---------------- */
@@ -94,10 +96,9 @@ export function canPerform(actor: Actor, action: SkillAction, res: ResourceCtx):
     case "skill.read":
       return true; // visibility gate (RLS) decides what is readable
     case "skill.create":
-      return canActAtScope(actor, res.scope);
+      return canActAtVisibility(actor, { everyone: false, teamCount: 0 });
     case "skill.publish":
-      // publishing a new version: modify rights + still allowed at the target scope
-      return canModify(actor, res) && canActAtScope(actor, res.scope);
+      return canModify(actor, res);
     case "skill.update":
     case "skill.delete":
       return canModify(actor, res);

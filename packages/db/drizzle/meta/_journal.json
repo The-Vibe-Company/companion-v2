@@ -78,6 +78,13 @@
       "when": 1780939900000,
       "tag": "0010_skill_comment_threads",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1781050000000,
+      "tag": "0011_everyone_skill_visibility",
+      "breakpoints": true
     }
   ]
 }

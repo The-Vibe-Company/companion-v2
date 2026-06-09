@@ -102,7 +102,7 @@ body { background: var(--color-canvas); color: var(--color-fg); font-family: var
 .skel--button { width: 66px; background: color-mix(in oklab, var(--color-accent-fg) 20%, transparent); }
 .skel--pill { width: 58px; height: 10px; }
 .skel--wide { width: 82px; }
-.skel--scope { width: 52px; height: 10px; }
+.skel--visibility { width: 52px; height: 10px; }
 .skel--version { width: 42px; height: 10px; }
 .skel--stars { width: 20px; height: 10px; }
 .skel--updated { width: 54px; height: 10px; }
@@ -169,8 +169,9 @@ body { background: var(--color-canvas); color: var(--color-fg); font-family: var
 .crow .stars { pointer-events: auto; }
 .crow__name { font-family: var(--font-mono); font-size: var(--text-sm); font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--color-fg); display: flex; align-items: center; gap: 8px; }
 .crow__name .invalid { font-size: 10px; }
-.crow__scope { display: inline-flex; align-items: center; gap: 5px; font-family: var(--font-mono); font-size: var(--text-xs); color: var(--color-muted); }
-.crow__scope i { color: var(--color-faint); }
+.crow__scope { display: inline-flex; align-items: center; gap: 5px; min-width: 0; overflow: hidden; font-family: var(--font-mono); font-size: var(--text-xs); color: var(--color-muted); }
+.crow__scope i { flex: 0 0 auto; color: var(--color-faint); }
+.crow__scopeText { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ver { font-family: var(--font-mono); font-size: var(--text-xs); color: var(--color-muted); }
 .when { font-family: var(--font-mono); font-size: var(--text-xs); color: var(--color-faint); white-space: nowrap; }
 .attach { display: inline-flex; align-items: center; gap: 5px; color: var(--color-muted); font-size: var(--text-xs); }
@@ -229,7 +230,7 @@ body { background: var(--color-canvas); color: var(--color-fg); font-family: var
 .prop__label i { color: var(--color-faint); }
 .prop__value { display: flex; align-items: center; gap: 7px; font-size: var(--text-sm); color: var(--color-fg); min-width: 0; white-space: nowrap; }
 .prop__value .chips { flex-wrap: wrap; white-space: normal; }
-.prop__value .mono { font-size: var(--text-xs); }
+.prop__value .mono { font-size: var(--text-xs); white-space: normal; overflow-wrap: anywhere; }
 .divider { height: 1px; background: var(--color-line); margin: 10px 0; }
 
 /* chips + badges */

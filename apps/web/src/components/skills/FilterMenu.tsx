@@ -3,8 +3,14 @@
 import { useEffect, useRef, useState } from "react";
 import { Icon } from "../Icon";
 import type { TeamVM } from "@/lib/types";
-import { SCOPE_ICON, SCOPE_ORDER } from "./blocks";
+import { VISIBILITY_ICON, VISIBILITY_ORDER } from "./blocks";
 import type { Filter } from "./filters";
+
+const VISIBILITY_LABEL: Record<string, string> = {
+  everyone: "Everyone",
+  team: "Team shares",
+  private: "Private",
+};
 
 function FilterMenuPopover({
   owners,
@@ -64,8 +70,14 @@ function FilterMenuPopover({
   return (
     <div className="fmenu" ref={ref} role="menu">
       <div className="fmenu__grouphead">Visibility</div>
-      {SCOPE_ORDER.map((v) => (
-        <Item key={v} type="scope" value={v} icon={SCOPE_ICON[v] ?? "circle"} label={v} />
+      {VISIBILITY_ORDER.map((v) => (
+        <Item
+          key={v}
+          type="visibility"
+          value={v}
+          icon={VISIBILITY_ICON[v] ?? "circle"}
+          label={VISIBILITY_LABEL[v] ?? v}
+        />
       ))}
       <div className="fmenu__divider" />
       <div className="fmenu__grouphead">Status</div>
@@ -78,9 +90,9 @@ function FilterMenuPopover({
       {teams.length > 0 && (
         <>
           <div className="fmenu__divider" />
-          <div className="fmenu__grouphead">Team</div>
+          <div className="fmenu__grouphead">Teams</div>
           {teams.map((tm) => (
-            <Item key={tm.id} type="team" value={tm.id} icon="users" label={tm.id} />
+            <Item key={tm.id} type="team" value={tm.id} icon="users" label={tm.name} />
           ))}
         </>
       )}

@@ -2,7 +2,7 @@
 
 import { Icon } from "../Icon";
 import type { SkillVM, TeamVM } from "@/lib/types";
-import { scopeMeta, vdot } from "./blocks";
+import { visibilityMeta, vdot } from "./blocks";
 import { chipParts, type Filter, type ViewDef } from "./filters";
 import { FilterAdd } from "./FilterMenu";
 import { ViewTab } from "./ViewTab";
@@ -127,7 +127,7 @@ export function ListView({
         <div className="chead">
           <span></span>
           <span>Skill</span>
-          <span>Scope</span>
+          <span>Visibility</span>
           <span>Version</span>
           <span className="r">Stars</span>
           <span className="r">Updated</span>
@@ -150,9 +150,9 @@ export function ListView({
                 </span>
               )}
             </span>
-            <span className="crow__scope" title={s.scope}>
-              <Icon name={scopeMeta(s).icon} size={11} />
-              {scopeMeta(s).label}
+            <span className="crow__scope" title={visibilityMeta(s).label}>
+              <Icon name={visibilityMeta(s).icon} size={11} />
+              <span className="crow__scopeText">{visibilityMeta(s).label}</span>
             </span>
             <span className="ver">{s.version ?? "—"}</span>
             <span className="r">

@@ -1,0 +1,96 @@
+import { describe, expect, it } from "vitest";
+import {
+  createSkillInputSchema,
+  publishSkillInputSchema,
+  skillFilterSchema,
+  skillFrontmatterSchema,
+  skillListRowSchema,
+  skillVisibilityInputSchema,
+  visibilityFilterSchema,
+} from "../src";
+
+const visibility = {
+  everyone: true,
+  teams: [{ id: "team_1", slug: "platform", name: "Platform" }],
+};
+
+describe("skill visibility contracts", () => {
+  it("parses the read shape as everyone plus team shares", () => {
+    const row = skillListRowSchema.parse({
+      id: "skill_1",
+      org_id: "org_1",
+      slug: "incident-summary",
+      description: "Summarize incidents.",
+      visibility,
+      validation: "valid",
+      validation_error: null,
+      owner_id: "user_1",
+      owner_name: "Stan",
+      owner_handle: null,
+      owner_initials: "SG",
+      current_version: "1.0.0",
+      license: null,
+      checksum: null,
+      size_bytes: 123,
+      tools: [],
+      star_count: 0,
+      starred: false,
+      created_at: "2026-06-09T12:00:00.000Z",
+      updated_at: "2026-06-09T12:00:00.000Z",
+    });
+
+    expect(row.visibility).toEqual(visibility);
+    expect(() => skillListRowSchema.parse({ ...row, scope: "public", visibility: undefined })).toThrow();
+  });
+
+  it("parses create and publish inputs with visibility only", () => {
+    expect(skillVisibilityInputSchema.parse({})).toEqual({ everyone: false, teams: [] });
+    expect(createSkillInputSchema.parse({
+      id: "incident-summary",
+      description: "Summarize incidents.",
+      body: "",
+      visibility: { everyone: false, teams: ["platform", "data"] },
+    }).visibility).toEqual({ everyone: false, teams: ["platform", "data"] });
+
+    expect(publishSkillInputSchema.parse({
+      slug: "incident-summary",
+      visibility: { everyone: true, teams: ["platform"] },
+      version: "1.0.0",
+      description: "Summarize incidents.",
+      checksum: `sha256:${"a".repeat(64)}`,
+      storage_path: "skills/org/incident-summary/1.0.0.zip",
+      size_bytes: 123,
+      frontmatter: "---\nname: incident-summary\n---",
+      tools: [],
+    }).visibility).toEqual({ everyone: true, teams: ["platform"] });
+  });
+
+  it("rejects visibility fields in SKILL.md frontmatter", () => {
+    expect(() =>
+      skillFrontmatterSchema.parse({
+        name: "incident-summary",
+        version: "1.0.0",
+        description: "Summarize incidents.",
+        scope: "public",
+      }),
+    ).toThrow(/must not declare visibility/);
+    expect(() =>
+      skillFrontmatterSchema.parse({
+        name: "incident-summary",
+        version: "1.0.0",
+        description: "Summarize incidents.",
+        visibility: "public",
+      }),
+    ).toThrow(/must not declare visibility/);
+  });
+
+  it("accepts derived visibility filters and rejects the old public scope", () => {
+    expect(visibilityFilterSchema.options).toEqual(["private", "team", "everyone"]);
+    expect(skillFilterSchema.parse({ type: "visibility", value: "everyone" })).toEqual({
+      type: "visibility",
+      value: "everyone",
+    });
+    expect(() => skillFilterSchema.parse({ type: "visibility", value: "public" })).toThrow();
+    expect(() => skillFilterSchema.parse({ type: "scope", value: "public" })).toThrow();
+  });
+});

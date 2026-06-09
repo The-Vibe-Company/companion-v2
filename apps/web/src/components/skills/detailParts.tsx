@@ -1,24 +1,32 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import type { Scope, SkillCommentRow, SkillVersionRow } from "@companion/contracts";
+import type { SkillCommentRow, SkillVisibilityInput, SkillVersionRow } from "@companion/contracts";
 import { Icon } from "../Icon";
 import { relativeTime } from "@/lib/format";
-import type { MeVM, SkillVM } from "@/lib/types";
-import { Avatar, SCOPE_DESC, SCOPE_ICON, ValidBadge } from "./blocks";
+import type { MeVM, SkillVM, TeamVM } from "@/lib/types";
+import { Avatar, ValidBadge, visibilityMeta } from "./blocks";
 
-const VIS_ORDER: Scope[] = ["private", "team", "public"];
-
-/** Editable visibility property — click to change scope, incl. make public. */
 export function VisibilityControl({
-  scope,
+  skill,
+  teams,
   onChange,
 }: {
-  scope: Scope;
-  onChange: (s: Scope) => void;
+  skill: SkillVM;
+  teams: TeamVM[];
+  onChange: (visibility: SkillVisibilityInput) => void;
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLSpanElement>(null);
+  const meta = visibilityMeta(skill);
+  const selected = new Set(skill.teamSlugs);
+  const commit = (everyone: boolean, nextTeams: string[]) => onChange({ everyone, teams: nextTeams });
+  const toggleTeam = (slug: string) => {
+    const next = new Set(selected);
+    if (next.has(slug)) next.delete(slug);
+    else next.add(slug);
+    commit(skill.visibility.everyone, [...next]);
+  };
   useEffect(() => {
     const h = (e: MouseEvent) => {
       if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
@@ -42,9 +50,9 @@ export function VisibilityControl({
         aria-expanded={open}
       >
         <span className="lead">
-          <Icon name={SCOPE_ICON[scope] ?? "circle"} size={11} />
+          <Icon name={meta.icon} size={11} />
         </span>
-        {scope}
+        {meta.label}
         <span className="caret">
           <Icon name="chevron-down" size={12} />
         </span>
@@ -52,23 +60,38 @@ export function VisibilityControl({
       {open && (
         <div className="menu" role="menu">
           <div className="menu__head">Visibility</div>
-          {VIS_ORDER.map((o) => (
+          <button
+            role="menuitemcheckbox"
+            aria-checked={skill.visibility.everyone}
+            className={"menu__item" + (skill.visibility.everyone ? " is-sel" : "")}
+            onClick={() => commit(!skill.visibility.everyone, skill.teamSlugs)}
+          >
+            <span className="ico">
+              <Icon name="building-2" size={14} />
+            </span>
+            <span className="menu__label">Everyone</span>
+            <span className="menu__desc">whole workspace</span>
+            {skill.visibility.everyone && (
+              <span className="menu__check">
+                <Icon name="check" size={13} />
+              </span>
+            )}
+          </button>
+          {teams.length > 0 && <div className="menu__head">Teams</div>}
+          {teams.map((team) => (
             <button
-              key={o}
-              role="menuitemradio"
-              aria-checked={o === scope}
-              className={"menu__item" + (o === scope ? " is-sel" : "")}
-              onClick={() => {
-                onChange(o);
-                setOpen(false);
-              }}
+              key={team.id}
+              role="menuitemcheckbox"
+              aria-checked={selected.has(team.id)}
+              className={"menu__item" + (selected.has(team.id) ? " is-sel" : "")}
+              onClick={() => toggleTeam(team.id)}
             >
               <span className="ico">
-                <Icon name={SCOPE_ICON[o] ?? "circle"} size={14} />
+                <Icon name="users" size={14} />
               </span>
-              <span className="menu__label">{o}</span>
-              <span className="menu__desc">{SCOPE_DESC[o]}</span>
-              {o === scope && (
+              <span className="menu__label">{team.name}</span>
+              <span className="menu__desc">team</span>
+              {selected.has(team.id) && (
                 <span className="menu__check">
                   <Icon name="check" size={13} />
                 </span>
@@ -83,11 +106,15 @@ export function VisibilityControl({
 
 export function PropList({
   skill,
+  teams,
   onChangeVisibility,
 }: {
   skill: SkillVM;
-  onChangeVisibility: (s: Scope) => void;
+  teams: TeamVM[];
+  onChangeVisibility: (visibility: SkillVisibilityInput) => void;
 }) {
+  const meta = visibilityMeta(skill);
+  const teamNames = skill.teams.map((team) => team.name).join(", ");
   return (
     <div className="props">
       <div className="prop">
@@ -101,11 +128,11 @@ export function PropList({
       </div>
       <div className="prop">
         <span className="prop__label">
-          <Icon name={SCOPE_ICON[skill.scope] ?? "circle"} size={14} />
+          <Icon name={meta.icon} size={14} />
           Visibility
         </span>
         <span className="prop__value">
-          <VisibilityControl scope={skill.scope} onChange={onChangeVisibility} />
+          <VisibilityControl skill={skill} teams={teams} onChange={onChangeVisibility} />
         </span>
       </div>
       <div className="prop">
@@ -132,10 +159,10 @@ export function PropList({
       <div className="prop">
         <span className="prop__label">
           <Icon name="users" size={14} />
-          Team
+          Teams
         </span>
         <span className="prop__value">
-          <span className="mono">{skill.team ?? "—"}</span>
+          <span className="mono" title={teamNames || undefined}>{teamNames || "—"}</span>
         </span>
       </div>
       <div className="divider" />

@@ -36,7 +36,7 @@ export function TeamGeneralPane({ ctx, team }: { ctx: OrgCtx; team: OrgTeam }) {
     <div className="sx-pane">
       <PaneHead
         title={team.name}
-        desc="Team identity and configuration. Teams group members and scope which skills they can reach."
+        desc="Team identity and configuration. Teams group members and define which skill shares they can reach."
       />
 
       <div className="sx-profile sx-profile--team">
@@ -106,7 +106,7 @@ export function TeamGeneralPane({ ctx, team }: { ctx: OrgCtx; team: OrgTeam }) {
 
       <EditField
         label="Team name"
-        hint="Shown in the sidebar, member lists, and skill scopes."
+        hint="Shown in the sidebar, member lists, and skill visibility."
         value={team.name}
         locked={!manage}
         onSave={(n) => ctx.updateTeam(team.id, { name: n })}
@@ -117,7 +117,7 @@ export function TeamGeneralPane({ ctx, team }: { ctx: OrgCtx; team: OrgTeam }) {
         mono
         prefix="team/"
         placeholder="platform"
-        hint="Used to scope skills (e.g. team/platform) and in the API. Lowercase letters, numbers, and dashes."
+        hint="Used for skill team shares and in the API. Lowercase letters, numbers, and dashes."
         value={team.slug}
         locked={!manage}
         onSave={(s) =>
@@ -157,8 +157,8 @@ export function TeamGeneralPane({ ctx, team }: { ctx: OrgCtx; team: OrgTeam }) {
             <span className="sx-def__v mono">{team.id}</span>
           </div>
           <div className="sx-def">
-            <span className="sx-def__k">Skill scope</span>
-            <span className="sx-def__v mono">team/{team.slug}</span>
+            <span className="sx-def__k">Skill share</span>
+            <span className="sx-def__v mono">{team.slug}</span>
           </div>
           <div className="sx-def">
             <span className="sx-def__k">Members</span>
@@ -188,8 +188,8 @@ export function TeamGeneralPane({ ctx, team }: { ctx: OrgCtx; team: OrgTeam }) {
             <div className="sx-danger__txt">
               <div className="sx-danger__t">Delete team</div>
               <div className="sx-danger__d">
-                Remove {team.name} and unscope its skills. Members keep their workspace access. This
-                cannot be undone.
+                Remove {team.name} and its skill shares. Members keep their workspace access. This cannot
+                be undone.
               </div>
             </div>
             <button
@@ -211,9 +211,9 @@ export function TeamGeneralPane({ ctx, team }: { ctx: OrgCtx; team: OrgTeam }) {
           iconDanger
           title={"Delete " + team.name + "?"}
           desc={
-            "Skills scoped to team/" +
+            "Skill shares for " +
             team.slug +
-            " will lose their scope. Members are not removed from the workspace."
+            " will be removed. Members are not removed from the workspace."
           }
           onClose={() => setConfirm(false)}
           foot={

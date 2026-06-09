@@ -11,7 +11,7 @@ Granite memory, OpenRouter model routing, and pluggable infrastructure) and wrap
 multi-tenant web portal where an **Organization → Team → User** hierarchy with RBAC governs every
 resource. A builder publishes a versioned `SKILL.md` package once; an admin approves a Postgres or
 MCP-server container once; a team defines a Hermès agent once — and the right people across the org
-get **one-click, scoped access**, with no shell, no TOML, and no infrastructure tickets.
+get **one-click, governed access**, with no shell, no TOML, and no infrastructure tickets.
 
 ## Why now
 
@@ -33,7 +33,7 @@ three jobs that today require three separate systems:
 |---|---|
 | An internal developer portal (Backstage) for a catalog | …a catalog that actually **deploys** |
 | A PaaS (Coolify/Fly/K8s) to run things | …pluggable deploy under shared **governance** |
-| A wiki/Drive to share prompts & skills | …a versioned, scoped **skills registry** |
+| A wiki/Drive to share prompts & skills | …a versioned, governed **skills registry** |
 
 The 10x is **not** a better agent runtime. It's collapsing **deploy + govern + share** into a single,
 opinionated, open product that runs on your own infrastructure — so that adopting AI agents across a
@@ -45,12 +45,12 @@ team stops being an ops project and becomes a self-serve workflow.
    comes, is the same artifacts behind a control plane — never a fork that leaves self-hosters behind.
 2. **Open standards over lock-in.** `SKILL.md`, MCP, OpenRouter, OCI images. Companion is the hub that
    connects open pieces, not a walled garden.
-3. **Governed by default.** Every resource has an owner, a visibility scope, and an audit trail.
+3. **Governed by default.** Every resource has an owner, explicit visibility, and an audit trail.
    Sharing is explicit; access is always attributable.
 4. **Desired-state everywhere.** Every deployable is a declared intent; a reconciler converges
    reality and heals drift. The v1 plan/apply discipline, re-homed for teams.
-5. **Scope and role are orthogonal.** *Who can see a thing* (scope: user/team/org) and *what they can
-   do with it* (role) are separate axes that compose into one clear decision.
+5. **Visibility and role are orthogonal.** *Who can see a thing* (owner, admins, Everyone, or shared
+   teams) and *what they can do with it* (role) are separate axes that compose into one clear decision.
 6. **Provider-agnostic.** Where a resource runs — local Docker, Fly, Kubernetes, Modal — is a choice,
    not a constraint baked into the product.
 

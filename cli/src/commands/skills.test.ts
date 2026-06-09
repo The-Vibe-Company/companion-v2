@@ -4,7 +4,15 @@ import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
 import type { LockedSkill } from "@companion/contracts";
 import { packDir } from "@companion/skills";
-import { assertCanReplaceExistingInstall, verifyDownloadedArchive } from "./skills";
+import { loadLockfile } from "../lib/lockfile";
+import {
+  assertCanReplaceExistingInstall,
+  lockfileVisibility,
+  parseVisibilityFilter,
+  resolvePushVisibility,
+  splitTeams,
+  verifyDownloadedArchive,
+} from "./skills";
 
 async function withSkillDir(fn: (dir: string) => Promise<void>) {
   const dir = await mkdtemp(join(tmpdir(), "companion-cli-test-"));
@@ -20,6 +28,16 @@ async function withSkillDir(fn: (dir: string) => Promise<void>) {
 }
 
 describe("skills pull safeguards", () => {
+  it("fails loudly instead of replacing a malformed existing lockfile", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "companion-lock-test-"));
+    try {
+      await writeFile(join(dir, "companion.lock"), JSON.stringify({ lockfileVersion: 1, skills: { demo: { scope: "public" } } }));
+      await expect(loadLockfile(dir)).rejects.toThrow();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("rejects downloaded archives whose checksum differs from the registry", async () => {
     await withSkillDir(async (dir) => {
       const packed = await packDir(dir);
@@ -41,6 +59,119 @@ describe("skills pull safeguards", () => {
       const locked = { checksum: "sha256:old" } as LockedSkill;
       await expect(assertCanReplaceExistingInstall(dir, locked, false)).rejects.toThrow(/local changes detected/);
       await expect(assertCanReplaceExistingInstall(dir, locked, true)).resolves.toBeUndefined();
+    });
+  });
+});
+
+describe("skills visibility helpers", () => {
+  it("parses repeatable and comma-separated team flags", () => {
+    expect(splitTeams(["platform,data", "platform", " security "])).toEqual(["platform", "data", "security"]);
+  });
+
+  it("validates list visibility filters locally", () => {
+    expect(parseVisibilityFilter("everyone")).toBe("everyone");
+    expect(parseVisibilityFilter("team")).toBe("team");
+    expect(parseVisibilityFilter(undefined)).toBeUndefined();
+    expect(() => parseVisibilityFilter("public")).toThrow(/visibility must be one of/);
+  });
+
+  it("stores downloaded visibility in lockfile input shape", () => {
+    expect(
+      lockfileVisibility({
+        everyone: true,
+        teams: [
+          { id: "team-1", slug: "platform", name: "Platform" },
+          { id: "team-2", slug: "data", name: "Data" },
+        ],
+      }),
+    ).toEqual({ everyone: true, teams: ["platform", "data"] });
+  });
+
+  it("preserves existing registry visibility when update flags are omitted", () => {
+    expect(
+      resolvePushVisibility(
+        {
+          exists: true,
+          id: "skill-1",
+          currentVersion: "1.0.0",
+          versions: ["1.0.0"],
+          row: {
+            id: "skill-1",
+            org_id: "org-1",
+            slug: "demo",
+            description: "Demo skill",
+            visibility: { everyone: true, teams: [{ id: "team-1", slug: "platform", name: "Platform" }] },
+            validation: "valid",
+            validation_error: null,
+            owner_id: "user-1",
+            owner_name: "User One",
+            owner_handle: null,
+            owner_initials: "UO",
+            current_version: "1.0.0",
+            license: null,
+            checksum: null,
+            size_bytes: 10,
+            tools: [],
+            star_count: 0,
+            starred: false,
+            created_at: "2026-06-09T12:00:00.000Z",
+            updated_at: "2026-06-09T12:00:00.000Z",
+          },
+        },
+        {},
+      ),
+    ).toEqual({ everyone: true, teams: ["platform"] });
+  });
+
+  it("can explicitly clear existing registry visibility", () => {
+    expect(
+      resolvePushVisibility(
+        {
+          exists: true,
+          id: "skill-1",
+          currentVersion: "1.0.0",
+          versions: ["1.0.0"],
+          row: {
+            id: "skill-1",
+            org_id: "org-1",
+            slug: "demo",
+            description: "Demo skill",
+            visibility: { everyone: true, teams: [{ id: "team-1", slug: "platform", name: "Platform" }] },
+            validation: "valid",
+            validation_error: null,
+            owner_id: "user-1",
+            owner_name: "User One",
+            owner_handle: null,
+            owner_initials: "UO",
+            current_version: "1.0.0",
+            license: null,
+            checksum: null,
+            size_bytes: 10,
+            tools: [],
+            star_count: 0,
+            starred: false,
+            created_at: "2026-06-09T12:00:00.000Z",
+            updated_at: "2026-06-09T12:00:00.000Z",
+          },
+        },
+        { private: true },
+      ),
+    ).toEqual({ everyone: false, teams: [] });
+  });
+
+  it("rejects conflicting private and shared visibility flags", () => {
+    expect(() =>
+      resolvePushVisibility({ exists: false, id: null, currentVersion: null, versions: [] }, { private: true, everyone: true }),
+    ).toThrow(/--private cannot be combined/);
+    expect(() =>
+      resolvePushVisibility({ exists: false, id: null, currentVersion: null, versions: [] }, { private: true, team: ["platform"] }),
+    ).toThrow(/--private cannot be combined/);
+  });
+
+  it("defaults new skills to private when update flags are omitted", () => {
+    expect(resolvePushVisibility({ exists: false, id: null, currentVersion: null, versions: [] }, {})).toEqual({
+      everyone: false,
+      teams: [],
     });
   });
 });

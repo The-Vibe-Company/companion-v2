@@ -39,7 +39,7 @@ import {
   setCommentDeprecated,
   setMemberRole,
   setSkillFilterPreferences,
-  setSkillScope,
+  setSkillVisibility,
   setTeamMemberRole,
   setOrgLogoFromUpload,
   orgLogoPublicPath,
@@ -55,14 +55,15 @@ import {
   issueTokenInputSchema,
   orgSettingsResponseSchema,
   publishSkillInputSchema,
-  scopeSchema,
   setCommentDeprecatedInputSchema,
+  skillVisibilityInputSchema,
+  visibilityFilterSchema,
   skillFilterPreferencesSchema,
   updateOrgInputSchema,
   updateTeamInputSchema,
   resolveOrgLogoContentType,
   updateUserProfileInputSchema,
-  type Scope,
+  type SkillVisibilityInput,
   type SkillFrontmatter,
 } from "@companion/contracts";
 import {
@@ -137,6 +138,31 @@ function buildSkillMd(id: string, version: string, description: string, body: st
   return `${front}\n\n${body.trim()}\n`;
 }
 
+function parseBoolean(value: string | undefined): boolean {
+  if (value == null || value === "") return false;
+  if (["true", "1", "yes", "on"].includes(value.toLowerCase())) return true;
+  if (["false", "0", "no", "off"].includes(value.toLowerCase())) return false;
+  throw new Error("everyone must be true or false");
+}
+
+function parseTeamValues(values: Array<string | undefined>): string[] {
+  return [
+    ...new Set(
+      values
+        .filter((v): v is string => !!v)
+        .flatMap((v) => v.split(","))
+        .map((v) => v.trim())
+        .filter(Boolean),
+    ),
+  ];
+}
+
+function rejectLegacySkillVisibilityInput(hasField: (name: string) => boolean): void {
+  if (hasField("scope") || hasField("visibility")) {
+    throw new Error("legacy skill scope/visibility inputs are not supported; use everyone and team fields");
+  }
+}
+
 /**
  * Shared publish tail: store the canonical archive (idempotently) and write a new
  * skill_versions row, authorizing first and cleaning up the blob on failure.
@@ -146,18 +172,16 @@ async function publishCanonical(input: {
   orgId: string;
   canonical: Awaited<ReturnType<typeof packDir>>;
   fm: SkillFrontmatter;
-  scope: Scope;
-  teamSlug: string | null;
+  visibility: SkillVisibilityInput;
   version: string;
   note: string;
 }): Promise<{ id: string; slug: string; version: string; checksum: string }> {
-  const { actor, orgId, canonical, fm, scope, teamSlug, version, note } = input;
+  const { actor, orgId, canonical, fm, visibility, version, note } = input;
   if (!isValidSemver(version)) throw new Error(`invalid semver: ${version}`);
   const key = skillArchiveKey({ orgId, slug: fm.name, version });
   const payload = publishSkillInputSchema.parse({
     slug: fm.name,
-    scope,
-    team_slug: teamSlug,
+    visibility,
     version,
     description: fm.description,
     checksum: canonical.checksum,
@@ -726,10 +750,10 @@ app.delete("/v1/orgs/current/members/:userId", async (c) => {
 
 app.get("/v1/skills", async (c) => {
   try {
-    const scopeRaw = c.req.query("scope");
-    const scope = scopeRaw ? scopeSchema.parse(scopeRaw) : undefined;
+    const visibilityRaw = c.req.query("visibility");
+    const visibility = visibilityRaw ? visibilityFilterSchema.parse(visibilityRaw) : undefined;
     const mine = c.req.query("mine") === "true";
-    return c.json(await withTenant(c, ({ actor, orgId, database }) => listSkills({ actor, orgId, scope, mine, database })));
+    return c.json(await withTenant(c, ({ actor, orgId, database }) => listSkills({ actor, orgId, visibility, mine, database })));
   } catch (error) {
     return jsonError(c, error, 401);
   }
@@ -838,16 +862,15 @@ app.post("/v1/skills/:slug/star", async (c) => {
   }
 });
 
-app.put("/v1/skills/:slug/scope", async (c) => {
+app.put("/v1/skills/:slug/visibility", async (c) => {
   try {
-    const body = await c.req.json<{ scope: string; teamSlug?: string | null }>();
+    const body = skillVisibilityInputSchema.parse(await c.req.json());
     await withTenant(c, ({ actor, orgId, database }) =>
-      setSkillScope({
+      setSkillVisibility({
         actor,
         orgId,
         slug: c.req.param("slug"),
-        scope: scopeSchema.parse(body.scope),
-        teamSlug: body.teamSlug ?? null,
+        visibility: body,
         database,
       }),
     );
@@ -859,9 +882,9 @@ app.put("/v1/skills/:slug/scope", async (c) => {
 
 /**
  * Publish a packaged skill. Two body shapes:
- *  - multipart/form-data (browser dropzone / CLI): `file` + `action`/`scope`/`team`/`version`/`message`.
+ *  - multipart/form-data (browser dropzone / CLI): `file` + `action`/`everyone`/`team`/`version`/`message`.
  *  - raw `application/zip` or `application/gzip` (guided-prompt curl + Bearer token): the body IS the
- *    archive; `visibility`/`team`/`version`/`message` come from query params.
+ *    archive; `everyone`/`team`/`version`/`message` come from query params.
  * Accepts `.zip` or `.tar.gz`. Requires the `skills:write` scope for token-authed requests.
  * Bodies above 32 MB are rejected with 413 before buffering (just over the 25 MB archive cap).
  */
@@ -874,14 +897,15 @@ app.post("/v1/skills", bodyLimit({ maxSize: 32 * 1024 * 1024, onError: (c) => js
 
     let archive: Buffer;
     let action: string;
-    let scopeRaw: string | undefined;
-    let teamRaw: string | undefined;
+    let everyoneRaw: string | undefined;
+    let teamValues: string[] = [];
     let versionRaw: string | undefined;
     let messageRaw: string | undefined;
     let expectSlug: string | undefined;
 
     if (contentType.includes("multipart/form-data")) {
       const form = await c.req.formData();
+      rejectLegacySkillVisibilityInput((name) => form.has(name));
       const file = form.get("file");
       if (!(file instanceof File)) throw new Error("file is required");
       archive = Buffer.from(await file.arrayBuffer());
@@ -890,17 +914,19 @@ app.post("/v1/skills", bodyLimit({ maxSize: 32 * 1024 * 1024, onError: (c) => js
         return v != null && String(v) !== "" ? String(v) : undefined;
       };
       action = field("action") ?? "publish";
-      scopeRaw = field("scope") ?? field("visibility");
-      teamRaw = field("team");
+      everyoneRaw = field("everyone");
+      teamValues = parseTeamValues([...form.getAll("team"), ...form.getAll("teams")].map((v) => String(v)));
       versionRaw = field("version");
       messageRaw = field("message");
       expectSlug = field("expect_slug");
     } else {
+      const url = new URL(c.req.url);
+      rejectLegacySkillVisibilityInput((name) => url.searchParams.has(name));
       archive = Buffer.from(await c.req.arrayBuffer());
       if (!archive.length) throw new Error("request body is empty");
       action = c.req.query("action") ?? "publish";
-      scopeRaw = c.req.query("visibility") ?? c.req.query("scope");
-      teamRaw = c.req.query("team");
+      everyoneRaw = c.req.query("everyone");
+      teamValues = parseTeamValues([...url.searchParams.getAll("team"), ...url.searchParams.getAll("teams")]);
       versionRaw = c.req.query("version");
       messageRaw = c.req.query("message");
       expectSlug = c.req.query("expect_slug");
@@ -921,16 +947,14 @@ app.post("/v1/skills", bodyLimit({ maxSize: 32 * 1024 * 1024, onError: (c) => js
       );
     }
     const canonical = await canonicalizeSkillArchive(archive);
-    const scope = scopeSchema.parse(scopeRaw ?? fm.scope ?? "private");
-    const teamSlug = scope === "team" ? String(teamRaw ?? "") : null;
+    const visibility = skillVisibilityInputSchema.parse({ everyone: parseBoolean(everyoneRaw), teams: teamValues });
     const version = versionRaw ?? fm.version;
     const published = await publishCanonical({
       actor,
       orgId,
       canonical,
       fm,
-      scope,
-      teamSlug,
+      visibility,
       version,
       note: messageRaw ?? "",
     });
@@ -961,14 +985,12 @@ app.post("/v1/skills/create", bodyLimit({ maxSize: 2 * 1024 * 1024, onError: (c)
       if (!result.ok || !result.frontmatter) {
         return c.json({ result, error: result.error ?? "validation failed" }, 422);
       }
-      const teamSlug = input.scope === "team" ? String(input.team ?? "") : null;
       const published = await publishCanonical({
         actor,
         orgId,
         canonical,
         fm: result.frontmatter,
-        scope: input.scope,
-        teamSlug,
+        visibility: input.visibility,
         version,
         note: "",
       });

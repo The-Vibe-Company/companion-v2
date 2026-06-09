@@ -75,10 +75,10 @@ addGlobalOpts(
   skillsCmd
     .command("list")
     .description("list registry skills you can see")
-    .option("--scope <scope>", "filter by scope (private|team|public)")
+    .option("--visibility <visibility>", "filter by visibility (private|team|everyone)")
     .option("--mine", "only skills you own", false),
 ).action((opts, cmd: Command) =>
-  runAction(cmd, (g) => skills.list({ scope: opts.scope, mine: opts.mine }, g)),
+  runAction(cmd, (g) => skills.list({ visibility: opts.visibility, mine: opts.mine }, g)),
 );
 
 addGlobalOpts(
@@ -97,9 +97,12 @@ addGlobalOpts(
   skillsCmd
     .command("push <dir>")
     .description("validate, package, and publish a new version")
-    .option("--scope <scope>", "visibility scope (private|team|public)")
-    .option("--visibility <scope>", "alias for --scope (private|team|public)")
-    .option("--team <slug>", "team slug (required for team scope)")
+    .option("--private", "clear everyone and team shares")
+    .option("--everyone", "share with everyone in the workspace")
+    .option("--team <slug>", "team slug to share with (repeatable, comma-separated)", (value, previous: string[] = []) => [
+      ...previous,
+      value,
+    ], [])
     .option("--bump <kind>", "bump from the registry's current version (patch|minor|major)")
     .option("--set-version <semver>", "publish an explicit version")
     .option("--message <text>", "version note")
@@ -109,7 +112,8 @@ addGlobalOpts(
     skills.push(
       dir,
       {
-        scope: opts.scope ?? opts.visibility,
+        everyone: opts.everyone,
+        private: opts.private,
         team: opts.team,
         bump: opts.bump,
         setVersion: opts.setVersion,

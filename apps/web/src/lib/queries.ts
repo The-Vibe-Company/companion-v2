@@ -2,11 +2,11 @@
 
 import type {
   IssuedToken,
-  Scope,
   SkillCommentRow,
   SkillFile,
   SkillFilesResponse,
   SkillFilterPreferences,
+  SkillVisibilityInput,
   SkillVersionRow,
   TokenScope,
 } from "@companion/contracts";
@@ -41,13 +41,13 @@ export async function issueToken(scopes: TokenScope[], name?: string): Promise<I
 /** Publish a packaged skill (.zip or .tar.gz) via the multipart upload path. */
 export async function publishSkillPackage(
   file: File,
-  opts: { scope: Scope; team: string | null; version?: string; expectSlug?: string },
+  opts: { visibility: SkillVisibilityInput; version?: string; expectSlug?: string },
 ): Promise<PublishResult> {
   const fd = new FormData();
   fd.append("file", file);
   fd.append("action", "publish");
-  fd.append("scope", opts.scope);
-  if (opts.scope === "team" && opts.team) fd.append("team", opts.team);
+  fd.append("everyone", String(opts.visibility.everyone));
+  for (const team of opts.visibility.teams) fd.append("team", team);
   if (opts.version) fd.append("version", opts.version);
   // In update mode, bind the upload to the skill being updated (server rejects a mismatch).
   if (opts.expectSlug) fd.append("expect_slug", opts.expectSlug);
@@ -59,8 +59,7 @@ export async function createSkillInline(input: {
   id: string;
   description: string;
   body: string;
-  scope: Scope;
-  team: string | null;
+  visibility: SkillVisibilityInput;
 }): Promise<PublishResult> {
   return apiFetch<PublishResult>("/v1/skills/create", {
     method: "POST",
@@ -139,15 +138,14 @@ export async function fetchSkillDownloadUrl(slug: string, version: string | null
   return data.url;
 }
 
-export async function setSkillScope(
+export async function setSkillVisibility(
   slug: string,
-  scope: string,
-  teamSlug: string | null = null,
+  visibility: SkillVisibilityInput,
   _orgId: string | null = null,
 ): Promise<void> {
-  await apiFetch(`/v1/skills/${slug}/scope`, {
+  await apiFetch(`/v1/skills/${slug}/visibility`, {
     method: "PUT",
-    body: JSON.stringify({ scope, teamSlug }),
+    body: JSON.stringify(visibility),
   });
 }
 

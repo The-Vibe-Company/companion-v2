@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import type {
   OrgRole,
-  Scope,
+  SkillVisibilityInput,
   SkillCommentRow,
   SkillFile,
   SkillVersionRow,
@@ -16,8 +16,8 @@ import {
   fetchSkillVersionFiles,
   setCommentDeprecated as setCommentDeprecatedRpc,
 } from "@/lib/queries";
-import type { MeVM, SkillVM } from "@/lib/types";
-import { ScopeChip, StarButton, ValidBadge } from "./blocks";
+import type { MeVM, SkillVM, TeamVM } from "@/lib/types";
+import { StarButton, ValidBadge, VisibilityChip } from "./blocks";
 import { Activity, PropList } from "./detailParts";
 import { FileExplorer } from "./fileview";
 import { Discussion } from "./discussion";
@@ -38,6 +38,7 @@ export function DetailView({
   onChangeVisibility,
   onInstall,
   onUpdate,
+  teams,
 }: {
   skill: SkillVM;
   index: number;
@@ -48,9 +49,10 @@ export function DetailView({
   onPrev: () => void;
   onNext: () => void;
   onToggleStar: () => void;
-  onChangeVisibility: (s: Scope) => void;
+  onChangeVisibility: (visibility: SkillVisibilityInput) => void;
   onInstall: () => void;
   onUpdate: () => void;
+  teams: TeamVM[];
 }) {
   const invalid = skill.validation === "invalid";
   const [tab, setTab] = useState<Tab>("overview");
@@ -266,7 +268,7 @@ export function DetailView({
               <div className="dcontent__inner">
                 <h1 className="dtitle">{skill.id}</h1>
                 <div className="dchips">
-                  <ScopeChip scope={skill.scope} />
+                  <VisibilityChip skill={skill} />
                   <ValidBadge v={skill.validation} />
                   <span
                     className="mono"
@@ -337,7 +339,7 @@ export function DetailView({
           )}
           <aside className="dsidebar">
             <p className="railhead">Properties</p>
-            <PropList skill={skill} onChangeVisibility={onChangeVisibility} />
+            <PropList skill={skill} teams={teams} onChangeVisibility={onChangeVisibility} />
           </aside>
         </div>
       )}

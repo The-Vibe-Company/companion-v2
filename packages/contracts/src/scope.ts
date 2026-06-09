@@ -1,12 +1,11 @@
 import { z } from "zod";
 
 /**
- * Visibility scope on every resource. Rendered literally (machine value) in the UI.
- * `private` = owner only, `team` = a specific team, `public` = anyone with the link.
- * (There is no org-wide tier: sharing is team-centric.)
+ * Derived skill visibility filters. The persisted skill model is `everyone` plus
+ * zero or more team shares; `private` is derived from neither being present.
  */
-export const scopeSchema = z.enum(["private", "team", "public"]);
-export type Scope = z.infer<typeof scopeSchema>;
+export const visibilityFilterSchema = z.enum(["private", "team", "everyone"]);
+export type VisibilityFilter = z.infer<typeof visibilityFilterSchema>;
 
 /** Org roles, most-privileged first. */
 export const orgRoleSchema = z.enum(["owner", "admin", "developer"]);
@@ -20,12 +19,9 @@ export type TeamRole = z.infer<typeof teamRoleSchema>;
 export const validationStateSchema = z.enum(["valid", "validating", "invalid"]);
 export type ValidationState = z.infer<typeof validationStateSchema>;
 
-export const SCOPES: readonly Scope[] = ["private", "team", "public"] as const;
 export const ORG_ROLES: readonly OrgRole[] = ["owner", "admin", "developer"] as const;
 export const TEAM_ROLES: readonly TeamRole[] = ["admin", "editor", "reader"] as const;
-
-/** Scope ordering, narrowest to broadest. */
-export const SCOPE_RANK: Record<Scope, number> = { private: 0, team: 1, public: 2 };
+export const VISIBILITY_FILTERS: readonly VisibilityFilter[] = ["private", "team", "everyone"] as const;
 
 /** Lifecycle of a membership invitation. */
 export const inviteStatusSchema = z.enum(["pending", "accepted", "revoked", "expired"]);

@@ -1,6 +1,25 @@
 import { z } from "zod";
-import { scopeSchema, validationStateSchema } from "./scope";
+import { validationStateSchema } from "./scope";
 import { SKILL_NAME_RE } from "./frontmatter";
+
+export const teamVisibilitySchema = z.object({
+  id: z.string(),
+  slug: z.string(),
+  name: z.string(),
+});
+export type TeamVisibility = z.infer<typeof teamVisibilitySchema>;
+
+export const skillVisibilitySchema = z.object({
+  everyone: z.boolean(),
+  teams: z.array(teamVisibilitySchema),
+});
+export type SkillVisibility = z.infer<typeof skillVisibilitySchema>;
+
+export const skillVisibilityInputSchema = z.object({
+  everyone: z.boolean().default(false),
+  teams: z.array(z.string().min(1).max(128)).default([]),
+});
+export type SkillVisibilityInput = z.infer<typeof skillVisibilityInputSchema>;
 
 /**
  * One row of the `skill_list_v` view — the denormalized read shape the web table
@@ -11,10 +30,7 @@ export const skillListRowSchema = z.object({
   org_id: z.string(),
   slug: z.string(),
   description: z.string(),
-  scope: scopeSchema,
-  team_id: z.string().nullable(),
-  team_name: z.string().nullable(),
-  team_slug: z.string().nullable(),
+  visibility: skillVisibilitySchema,
   validation: validationStateSchema,
   validation_error: z.string().nullable(),
   owner_id: z.string(),
@@ -105,8 +121,7 @@ export type SkillVersionRow = z.infer<typeof skillVersionRowSchema>;
 /** Argument shape for the `publish_skill_version` RPC (web route + CLI share this). */
 export const publishSkillInputSchema = z.object({
   slug: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/),
-  scope: scopeSchema,
-  team_slug: z.string().nullable().optional(),
+  visibility: skillVisibilityInputSchema,
   version: z.string(),
   description: z.string(),
   checksum: z.string().regex(/^sha256:[0-9a-f]{64}$/),
@@ -128,7 +143,6 @@ export const createSkillInputSchema = z.object({
   id: z.string().regex(SKILL_NAME_RE, "id must be kebab-case (lowercase letters, digits, hyphens)"),
   description: z.string().min(1, "description is required").max(1024),
   body: z.string().max(1024 * 1024, "body is too large").default(""),
-  scope: scopeSchema.default("private"),
-  team: z.string().nullable().optional(),
+  visibility: skillVisibilityInputSchema,
 });
 export type CreateSkillInput = z.infer<typeof createSkillInputSchema>;

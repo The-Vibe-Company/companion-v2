@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
-import type { Scope } from "@companion/contracts";
+import type { SkillVisibilityInput } from "@companion/contracts";
 import type { SkillVM, TeamVM } from "@/lib/types";
 import {
   apiBase,
@@ -15,18 +15,26 @@ import { Icon } from "../Icon";
 
 /* ------------------------------------------------------------------ helpers */
 
-const UP_SCOPES = [
-  { id: "private", icon: "lock", label: "private", desc: "only you" },
-  { id: "team", icon: "users", label: "team", desc: "your team" },
-  { id: "public", icon: "globe", label: "public", desc: "anyone in the workspace" },
-] as const;
-
-/** Visibility is applied on the upload request, never written into the skill. */
-function visQuery(scope: Scope, team: string): string {
-  return scope === "team" ? `visibility=team&team=${team}` : `visibility=${scope}`;
+/** Visibility is applied on the upload request, never written into SKILL.md. */
+function visQuery(visibility: SkillVisibilityInput): string {
+  const qs = new URLSearchParams();
+  if (visibility.everyone) qs.set("everyone", "true");
+  for (const team of visibility.teams) qs.append("team", team);
+  return qs.toString() || "everyone=false";
 }
-function visFlags(scope: Scope, team: string): string {
-  return scope === "team" ? `--visibility team --team ${team}` : `--visibility ${scope}`;
+function visFlags(visibility: SkillVisibilityInput): string {
+  const parts = [];
+  if (visibility.everyone) parts.push("--everyone");
+  for (const team of visibility.teams) parts.push(`--team ${team}`);
+  return parts.join(" ") || "--private";
+}
+function visibilityLabel(visibility: SkillVisibilityInput, teams: TeamVM[]): string {
+  const names = visibility.teams.map((slug) => teams.find((team) => team.id === slug)?.name ?? slug);
+  if (visibility.everyone && names.length) return `Everyone + ${names.length} team${names.length === 1 ? "" : "s"}`;
+  if (visibility.everyone) return "Everyone";
+  if (names.length === 1) return names[0]!;
+  if (names.length > 1) return `${names.length} teams`;
+  return "Private";
 }
 
 /** Bump the patch component of a semver-ish version string. */
@@ -119,19 +127,19 @@ function CodeBlock({
   );
 }
 
-/** Team dropdown — shown when visibility is "team" (an operator can be in many). */
-function TeamSelect({
+function TeamMultiSelect({
   teams,
   value,
   onChange,
 }: {
   teams: TeamVM[];
-  value: string;
-  onChange: (id: string) => void;
+  value: string[];
+  onChange: (ids: string[]) => void;
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLSpanElement>(null);
-  const cur = teams.find((t) => t.id === value) ?? teams[0];
+  const selected = new Set(value);
+  const label = value.length === 0 ? "No teams" : value.length === 1 ? teams.find((t) => t.id === value[0])?.name ?? value[0] : `${value.length} teams`;
   useEffect(() => {
     if (!open) return;
     const h = (e: MouseEvent) => {
@@ -140,7 +148,6 @@ function TeamSelect({
     document.addEventListener("mousedown", h);
     return () => document.removeEventListener("mousedown", h);
   }, [open]);
-  if (!cur) return null;
   return (
     <span className="up-teamsel" ref={ref}>
       <button
@@ -150,28 +157,30 @@ function TeamSelect({
         aria-haspopup="menu"
         aria-expanded={open}
       >
-        <span className="up-teamav">{cur.initial}</span>
-        <span className="up-teamsel__name">{cur.name}</span>
+        <span className="up-teamav">{value.length || "0"}</span>
+        <span className="up-teamsel__name">{label}</span>
         <Icon name="chevron-down" size={13} style={{ color: "var(--color-faint)" }} />
       </button>
       {open && (
         <div className="up-teamsel__menu" role="menu">
-          <div className="up-teamsel__head">Share with team</div>
+          <div className="up-teamsel__head">Share with teams</div>
           {teams.map((t) => (
             <button
               key={t.id}
               type="button"
-              role="menuitemradio"
-              aria-checked={t.id === value}
-              className={"up-teamsel__item" + (t.id === value ? " is-sel" : "")}
+              role="menuitemcheckbox"
+              aria-checked={selected.has(t.id)}
+              className={"up-teamsel__item" + (selected.has(t.id) ? " is-sel" : "")}
               onClick={() => {
-                onChange(t.id);
-                setOpen(false);
+                const next = new Set(selected);
+                if (next.has(t.id)) next.delete(t.id);
+                else next.add(t.id);
+                onChange([...next]);
               }}
             >
               <span className="up-teamav">{t.initial}</span>
               <span className="up-teamsel__iname">{t.name}</span>
-              {t.id === value && (
+              {selected.has(t.id) && (
                 <Icon name="check" size={14} style={{ marginLeft: "auto", color: "var(--color-fg)" }} />
               )}
             </button>
@@ -182,44 +191,40 @@ function TeamSelect({
   );
 }
 
-/** Shared visibility selector — segmented control + team picker when scoped to a team. */
+/** Shared visibility selector: workspace-wide toggle plus team shares. */
 function VisibilityPicker({
   value,
   onChange,
-  team,
-  onChangeTeam,
   teams,
 }: {
-  value: Scope;
-  onChange: (s: Scope) => void;
-  team: string;
-  onChangeTeam: (id: string) => void;
+  value: SkillVisibilityInput;
+  onChange: (visibility: SkillVisibilityInput) => void;
   teams: TeamVM[];
 }) {
   return (
     <div className="up-vis">
-      <div className="up-seg" role="radiogroup" aria-label="Visibility">
-        {UP_SCOPES.map((s) => {
-          const disabled = s.id === "team" && teams.length === 0;
-          return (
-            <button
-              key={s.id}
-              type="button"
-              role="radio"
-              aria-checked={value === s.id}
-              className={value === s.id ? "is-on" : ""}
-              onClick={() => onChange(s.id)}
-              disabled={disabled}
-              title={disabled ? "You are not a member of any team" : undefined}
-            >
-              <Icon name={s.icon} size={12} />
-              {s.label}
-            </button>
-          );
-        })}
+      <div className="up-seg" role="group" aria-label="Visibility">
+        <button
+          type="button"
+          aria-pressed={!value.everyone && value.teams.length === 0}
+          className={!value.everyone && value.teams.length === 0 ? "is-on" : ""}
+          onClick={() => onChange({ everyone: false, teams: [] })}
+        >
+          <Icon name="lock" size={12} />
+          Private
+        </button>
+        <button
+          type="button"
+          aria-pressed={value.everyone}
+          className={value.everyone ? "is-on" : ""}
+          onClick={() => onChange({ ...value, everyone: !value.everyone })}
+        >
+          <Icon name="building-2" size={12} />
+          Everyone
+        </button>
       </div>
-      {value === "team" && teams.length > 1 && (
-        <TeamSelect teams={teams} value={team} onChange={onChangeTeam} />
+      {teams.length > 0 && (
+        <TeamMultiSelect teams={teams} value={value.teams} onChange={(teamIds) => onChange({ ...value, teams: teamIds })} />
       )}
     </div>
   );
@@ -400,19 +405,15 @@ const UP_METHODS = [
 type UploadMethod = (typeof UP_METHODS)[number]["id"];
 
 function PromptPanel({
-  scope,
-  setScope,
-  team,
-  setTeam,
+  visibility,
+  setVisibility,
   teams,
   token,
   ensure,
   regen,
 }: {
-  scope: Scope;
-  setScope: (s: Scope) => void;
-  team: string;
-  setTeam: (t: string) => void;
+  visibility: SkillVisibilityInput;
+  setVisibility: (visibility: SkillVisibilityInput) => void;
   teams: TeamVM[];
   token: string | null;
   ensure: () => Promise<string>;
@@ -425,12 +426,12 @@ working directory: a SKILL.md plus any files it references. SKILL.md
 is a standard Agent Skill: YAML frontmatter with name and description.
 
 1. Read SKILL.md and confirm the frontmatter has a name, a version
-   (semver), and a description. Do not add scope or visibility fields.
+   (semver), and a description. Do not add visibility fields.
    The registry sets visibility on the upload request, not in the skill.
 2. Zip the package from its root:
    zip -r skill.zip SKILL.md .
 3. Publish it. Visibility is set with query parameters on the request:
-   curl -X POST "${base}/skills?${visQuery(scope, team)}" \\
+   curl -X POST "${base}/skills?${visQuery(visibility)}" \\
      -H "Authorization: Bearer ${tok}" \\
      -H "Content-Type: application/zip" \\
      --data-binary @skill.zip
@@ -457,9 +458,9 @@ is a standard Agent Skill: YAML frontmatter with name and description.
       </div>
       <div className="up-step">
         <StepLabel n="2">Visibility</StepLabel>
-        <VisibilityPicker value={scope} onChange={setScope} team={team} onChangeTeam={setTeam} teams={teams} />
+        <VisibilityPicker value={visibility} onChange={setVisibility} teams={teams} />
         <p className="up-seg-note">
-          Applied on the request as <span className="mono">?{visQuery(scope, team)}</span>, not stored in
+          Applied on the request as <span className="mono">?{visQuery(visibility)}</span>, not stored in
           the skill.
         </p>
       </div>
@@ -477,19 +478,15 @@ is a standard Agent Skill: YAML frontmatter with name and description.
 }
 
 function CliPanel({
-  scope,
-  setScope,
-  team,
-  setTeam,
+  visibility,
+  setVisibility,
   teams,
 }: {
-  scope: Scope;
-  setScope: (s: Scope) => void;
-  team: string;
-  setTeam: (t: string) => void;
+  visibility: SkillVisibilityInput;
+  setVisibility: (visibility: SkillVisibilityInput) => void;
   teams: TeamVM[];
 }) {
-  const push = `companion skill push . ${visFlags(scope, team)}`;
+  const push = `companion skill push . ${visFlags(visibility)}`.trim();
   const setup = `# install once (macOS / Linux)
 brew install the-vibe-company/tap/companion
 
@@ -497,7 +494,7 @@ brew install the-vibe-company/tap/companion
 companion auth login
 
 # from the skill's directory, publish it
-companion skill push . ${visFlags(scope, team)}`;
+companion skill push . ${visFlags(visibility)}`.trim();
   return (
     <>
       <p className="up-panel__lede">
@@ -506,10 +503,10 @@ companion skill push . ${visFlags(scope, team)}`;
       </p>
       <div className="up-step">
         <StepLabel n="1">Visibility</StepLabel>
-        <VisibilityPicker value={scope} onChange={setScope} team={team} onChangeTeam={setTeam} teams={teams} />
+        <VisibilityPicker value={visibility} onChange={setVisibility} teams={teams} />
         <p className="up-seg-note">
-          Sets <span className="mono">{visFlags(scope, team)}</span> on the push. The skill itself carries
-          no scope.
+          Sets <span className="mono">{visFlags(visibility)}</span> on the push. The skill itself carries no
+          visibility fields.
         </p>
       </div>
       <div className="up-step">
@@ -525,18 +522,14 @@ companion skill push . ${visFlags(scope, team)}`;
 }
 
 function ZipPanel({
-  scope,
-  setScope,
-  team,
-  setTeam,
+  visibility,
+  setVisibility,
   teams,
   file,
   setFile,
 }: {
-  scope: Scope;
-  setScope: (s: Scope) => void;
-  team: string;
-  setTeam: (t: string) => void;
+  visibility: SkillVisibilityInput;
+  setVisibility: (visibility: SkillVisibilityInput) => void;
   teams: TeamVM[];
   file: File | null;
   setFile: (f: File | null) => void;
@@ -607,8 +600,8 @@ function ZipPanel({
       </div>
       <div className="up-step">
         <StepLabel n="1">Visibility</StepLabel>
-        <VisibilityPicker value={scope} onChange={setScope} team={team} onChangeTeam={setTeam} teams={teams} />
-        <p className="up-seg-note">Set on upload. Companion does not read a scope from the package.</p>
+        <VisibilityPicker value={visibility} onChange={setVisibility} teams={teams} />
+        <p className="up-seg-note">Set on upload. Companion does not read visibility from the package.</p>
       </div>
     </>
   );
@@ -633,19 +626,15 @@ interface CreateForm {
 }
 
 function CreatePanel({
-  scope,
-  setScope,
-  team,
-  setTeam,
+  visibility,
+  setVisibility,
   teams,
   form,
   setForm,
   locked,
 }: {
-  scope: Scope;
-  setScope: (s: Scope) => void;
-  team: string;
-  setTeam: (t: string) => void;
+  visibility: SkillVisibilityInput;
+  setVisibility: (visibility: SkillVisibilityInput) => void;
   teams: TeamVM[];
   form: CreateForm;
   setForm: (f: (prev: CreateForm) => CreateForm) => void;
@@ -653,7 +642,6 @@ function CreatePanel({
 }) {
   const set = (k: keyof CreateForm) => (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) =>
     setForm((f) => ({ ...f, [k]: e.target.value }));
-  const teamLabel = teams.find((t) => t.id === team)?.name ?? "team";
   return (
     <>
       <p className="up-panel__lede">
@@ -690,17 +678,11 @@ function CreatePanel({
           <div className="up-field">
             <label className="up-field__label">Visibility</label>
             <VisibilityPicker
-              value={scope}
-              onChange={setScope}
-              team={team}
-              onChangeTeam={setTeam}
+              value={visibility}
+              onChange={setVisibility}
               teams={teams}
             />
-            <span className="up-field__hint">
-              {scope === "team"
-                ? "Shared with the " + teamLabel + " team."
-                : (UP_SCOPES.find((s) => s.id === scope)?.desc ?? "") + "."}
-            </span>
+            <span className="up-field__hint">{visibilityLabel(visibility, teams)}.</span>
           </div>
         </div>
       </div>
@@ -747,14 +729,12 @@ function CreatePanel({
 interface PublishOutcome {
   id: string;
   version: string;
-  scope: Scope;
-  team: string;
+  visibility: SkillVisibilityInput;
   via: string;
 }
 
 function DonePanel({ result, update, teams }: { result: PublishOutcome; update: boolean; teams: TeamVM[] }) {
-  const scope = UP_SCOPES.find((s) => s.id === result.scope) ?? UP_SCOPES[1];
-  const visLabel = result.scope === "team" ? teams.find((t) => t.id === result.team)?.name ?? "team" : scope.label;
+  const visLabel = visibilityLabel(result.visibility, teams);
   return (
     <div className="up-done">
       <span className="up-done__badge">
@@ -777,7 +757,7 @@ function DonePanel({ result, update, teams }: { result: PublishOutcome; update: 
         <div className="up-done__row">
           <span className="up-done__k">Visibility</span>
           <span className="up-done__v">
-            <Icon name={scope.icon} size={13} />
+            <Icon name={result.visibility.everyone ? "building-2" : result.visibility.teams.length ? "users" : "lock"} size={13} />
             {visLabel}
           </span>
         </div>
@@ -809,12 +789,12 @@ export function UploadDialog({
   onPublished: () => void;
 }) {
   const isUpdate = mode === "update" && !!skill;
-  const firstTeam = teams[0]?.id ?? "";
   const [method, setMethod] = useState<UploadMethod>("prompt");
-  const [scope, setScope] = useState<Scope>(
-    isUpdate ? skill!.scope : teams.length ? "team" : "private",
+  const [visibility, setVisibility] = useState<SkillVisibilityInput>(
+    isUpdate
+      ? { everyone: skill!.visibility.everyone, teams: skill!.teamSlugs }
+      : { everyone: false, teams: [] },
   );
-  const [team, setTeam] = useState<string>(isUpdate && skill!.teamSlug ? skill!.teamSlug : firstTeam);
   const [token, setToken] = useState<string | null>(null);
   const [file, setFile] = useState<File | null>(null);
   const [form, setForm] = useState<CreateForm>(
@@ -865,16 +845,14 @@ export function UploadDialog({
     setError(null);
     try {
       const res = await publishSkillPackage(file, {
-        scope,
-        team,
+        visibility,
         version: isUpdate ? ver : undefined,
         expectSlug: isUpdate ? skill!.id : undefined,
       });
       finishPublish({
         id: res.slug || idFromZip,
         version: res.version,
-        scope,
-        team,
+        visibility,
         via: isUpdate ? "Updated from zip" : "Uploaded from zip",
       });
     } catch (e) {
@@ -894,14 +872,12 @@ export function UploadDialog({
         id,
         description: form.description.trim(),
         body: form.body,
-        scope,
-        team: scope === "team" ? team : null,
+        visibility,
       });
       finishPublish({
         id: res.slug || id,
         version: res.version,
-        scope,
-        team,
+        visibility,
         via: isUpdate ? "Edited and published" : "Created in the browser",
       });
     } catch (e) {
@@ -922,7 +898,6 @@ export function UploadDialog({
     hint: [string, string];
     cta?: { label: string; icon: string; disabled: boolean; run: () => void };
   };
-  const teamMissing = scope === "team" && !team;
   const FOOT: Record<UploadMethod, Foot> = {
     prompt: { hint: ["info", "The agent uploads over the API. Companion validates the package server-side."] },
     cli: { hint: ["info", "Companion validates the package server-side after the push."] },
@@ -931,7 +906,7 @@ export function UploadDialog({
       cta: {
         label: isUpdate ? "Publish update" : "Upload package",
         icon: "upload",
-        disabled: !canZip || busy || teamMissing,
+        disabled: !canZip || busy,
         run: runZip,
       },
     },
@@ -940,7 +915,7 @@ export function UploadDialog({
       cta: {
         label: isUpdate ? "Publish update" : "Create skill",
         icon: "check",
-        disabled: !canCreate || busy || teamMissing,
+        disabled: !canCreate || busy,
         run: runCreate,
       },
     },
@@ -1045,10 +1020,8 @@ export function UploadDialog({
               <div className="up__panel">
                 {method === "prompt" && (
                   <PromptPanel
-                    scope={scope}
-                    setScope={setScope}
-                    team={team}
-                    setTeam={setTeam}
+                    visibility={visibility}
+                    setVisibility={setVisibility}
                     teams={teams}
                     token={token}
                     ensure={ensureToken}
@@ -1056,14 +1029,12 @@ export function UploadDialog({
                   />
                 )}
                 {method === "cli" && (
-                  <CliPanel scope={scope} setScope={setScope} team={team} setTeam={setTeam} teams={teams} />
+                  <CliPanel visibility={visibility} setVisibility={setVisibility} teams={teams} />
                 )}
                 {method === "zip" && (
                   <ZipPanel
-                    scope={scope}
-                    setScope={setScope}
-                    team={team}
-                    setTeam={setTeam}
+                    visibility={visibility}
+                    setVisibility={setVisibility}
                     teams={teams}
                     file={file}
                     setFile={setFile}
@@ -1071,10 +1042,8 @@ export function UploadDialog({
                 )}
                 {method === "create" && (
                   <CreatePanel
-                    scope={scope}
-                    setScope={setScope}
-                    team={team}
-                    setTeam={setTeam}
+                    visibility={visibility}
+                    setVisibility={setVisibility}
                     teams={teams}
                     form={form}
                     setForm={setForm}

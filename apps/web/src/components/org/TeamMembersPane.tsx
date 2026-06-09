@@ -22,7 +22,7 @@ export function TeamMembersPane({ ctx, team }: { ctx: OrgCtx; team: OrgTeam }) {
     <div className="sx-pane">
       <PaneHead
         title={team.name + " · Members"}
-        desc={"Who belongs to " + team.name + ". Team roles scope what each person can do with this team's skills."}
+        desc={"Who belongs to " + team.name + ". Team roles decide what each person can do with this team's skills."}
         action={
           manage && addable.length > 0 ? (
             <AddTeamMember ctx={ctx} addable={addable} onAdd={(uid) => ctx.addTeamMember(ctx.currentOrg.id, team.id, uid, "editor")} />

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import type { OrgRole, Scope, TeamRole } from "@companion/contracts";
+import type { OrgRole, TeamRole } from "@companion/contracts";
 import {
-  canActAtScope,
+  canActAtVisibility,
   canManageOrg,
   canManageTeam,
   canModify,
@@ -13,47 +13,52 @@ import {
   type Actor,
 } from "../src/index";
 
-const actor = (orgRole: OrgRole, memberOfResourceTeam = false): Actor => ({
+const actor = (orgRole: OrgRole, teamRole?: TeamRole | null): Actor => ({
   orgRole,
-  memberOfResourceTeam,
+  teamRole,
 });
 
-describe("canActAtScope (create/publish target scope)", () => {
-  const cases: Array<[OrgRole, Scope, boolean, boolean]> = [
-    // role, scope, memberOfTeam, expected
-    ["owner", "public", false, true],
-    ["admin", "team", false, true],
-    ["developer", "public", false, true], // developers may publish public (their choice)
-    ["developer", "private", false, true],
-    ["developer", "team", true, true], // ...team only within their own team
-    ["developer", "team", false, false], // ...not another team
+describe("canActAtVisibility (create/publish target visibility)", () => {
+  const cases: Array<[OrgRole, boolean, number, boolean | undefined, boolean]> = [
+    // role, everyone, teamCount, memberOfAllTargetTeams, expected
+    ["owner", true, 2, false, true],
+    ["admin", false, 1, false, true],
+    ["developer", true, 0, undefined, true],
+    ["developer", false, 0, undefined, true],
+    ["developer", false, 1, true, true],
+    ["developer", true, 2, true, true],
+    ["developer", false, 1, false, false],
+    ["developer", true, 2, false, false],
   ];
-  it.each(cases)("%s @ %s (team=%s) -> %s", (role, scope, team, expected) => {
-    expect(canActAtScope(actor(role, team), scope)).toBe(expected);
-  });
+  it.each(cases)(
+    "%s everyone=%s teams=%s ownTeams=%s -> %s",
+    (role, everyone, teamCount, memberOfAllTargetTeams, expected) => {
+      expect(canActAtVisibility(actor(role), { everyone, teamCount, memberOfAllTargetTeams })).toBe(expected);
+    },
+  );
 });
 
 describe("canModify (update/delete existing)", () => {
-  it("org admins modify anything; developers only what they own", () => {
-    expect(canModify(actor("admin"), { scope: "team", isOwner: false })).toBe(true);
-    expect(canModify(actor("owner"), { scope: "public", isOwner: false })).toBe(true);
-    expect(canModify(actor("developer"), { scope: "private", isOwner: true })).toBe(true);
-    expect(canModify(actor("developer"), { scope: "private", isOwner: false })).toBe(false);
+  it("org admins modify anything; developers modify owned or editable team-shared resources", () => {
+    expect(canModify(actor("admin"), { isOwner: false })).toBe(true);
+    expect(canModify(actor("owner"), { isOwner: false })).toBe(true);
+    expect(canModify(actor("developer"), { isOwner: true })).toBe(true);
+    expect(canModify(actor("developer"), { isOwner: false })).toBe(false);
+    expect(canModify(actor("developer", "admin"), { isOwner: false })).toBe(true);
+    expect(canModify(actor("developer", "editor"), { isOwner: false })).toBe(true);
+    expect(canModify(actor("developer", "reader"), { isOwner: false })).toBe(false);
   });
 });
 
 describe("canPerform — full surface", () => {
   it("reads are always capability-allowed (RLS gates visibility)", () => {
-    expect(canPerform(actor("developer"), "skill.read", { scope: "team", isOwner: false })).toBe(true);
+    expect(canPerform(actor("developer"), "skill.read", { isOwner: false })).toBe(true);
   });
-  it("developers cannot create team skills for a team they are not on", () => {
-    expect(canPerform(actor("developer", false), "skill.create", { scope: "team", isOwner: false })).toBe(false);
-  });
-  it("developers can create team skills for their own team", () => {
-    expect(canPerform(actor("developer", true), "skill.create", { scope: "team", isOwner: false })).toBe(true);
+  it("developers may create skills; target visibility is checked separately", () => {
+    expect(canPerform(actor("developer"), "skill.create", { isOwner: false })).toBe(true);
   });
   it("owner can publish a new version of any skill", () => {
-    expect(canPerform(actor("owner"), "skill.publish", { scope: "team", isOwner: false })).toBe(true);
+    expect(canPerform(actor("owner"), "skill.publish", { isOwner: false })).toBe(true);
   });
 });
 
