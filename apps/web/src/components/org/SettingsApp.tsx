@@ -116,6 +116,18 @@ export function SettingsController({
   useEffect(() => setRoute(initialRoute), [initialRoute]);
   useEffect(() => setDialog(initialDialog), [initialDialog]);
 
+  // Keep the URL the source of truth for the active pane. Every pane change — clicks AND
+  // programmatic navigation (after invite / create / delete) — goes through `navigate` so a
+  // reload or back/forward restores the right pane.
+  const replaceUrl = (r: SettingsRoute, d: SettingsDialog) => {
+    window.history.replaceState(window.history.state, "", settingsHref(r, d));
+  };
+  const navigate = (r: SettingsRoute) => {
+    setRoute(r);
+    setDialog(null);
+    replaceUrl(r, null);
+  };
+
   // Per-device theme + accent prefs (localStorage), applied to <html> live.
   // Start from the SSR-safe default so the server-rendered HTML and the first
   // client render match (no hydration mismatch on the Preferences selection);
@@ -267,7 +279,7 @@ export function SettingsController({
             n.delete(teamId);
             return n;
           });
-          setRoute({ view: "general" });
+          navigate({ view: "general" });
         },
       ),
     createApiKey: async (name, scope) => {
@@ -325,7 +337,7 @@ export function SettingsController({
       try {
         const { token } = await inviteMemberRpc(orgId, email, role);
         await refreshSettingsData();
-        setRoute({ view: "invitations" });
+        navigate({ view: "invitations" });
         return token;
       } catch (e) {
         setErr((e as Error).message);
@@ -382,7 +394,7 @@ export function SettingsController({
         const { id } = await createTeamRpc(orgId, name);
         await refreshSettingsData();
         setExpanded((s) => new Set([...s, id]));
-        setRoute({ view: "team-general", teamId: id });
+        navigate({ view: "team-general", teamId: id });
       } catch (e) {
         setErr((e as Error).message);
       } finally {
@@ -394,14 +406,7 @@ export function SettingsController({
     busy: busy || actions.busy,
   };
 
-  const replaceUrl = (r: SettingsRoute, d: SettingsDialog) => {
-    window.history.replaceState(window.history.state, "", settingsHref(r, d));
-  };
-  const onView = (r: SettingsRoute) => {
-    setRoute(r);
-    setDialog(null);
-    replaceUrl(r, null);
-  };
+  const onView = navigate;
   const onDialog = (d: SettingsDialog) => {
     setDialog(d);
     replaceUrl(route, d);
