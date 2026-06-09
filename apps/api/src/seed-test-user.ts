@@ -1,5 +1,6 @@
 import { createOrg, ensureUserBootstrap, listOrgs, markOnboarded } from "@companion/core/services";
-import { closeDb, db } from "@companion/db";
+import { closeDb, db, schema } from "@companion/db";
+import { eq } from "drizzle-orm";
 
 const DEFAULT_EMAIL = "admin@tvc.dev";
 const DEFAULT_PASSWORD = "adminadmin";
@@ -87,6 +88,12 @@ async function main(): Promise<void> {
   }
 
   if (!user) throw new Error(`could not create seed user ${email}`);
+
+  // Email/password sign-in now requires a verified email (requireEmailVerification). Mark the local
+  // test user verified so `pnpm dev` / browser:smoke can sign in without going through the OTP flow.
+  if (!user.emailVerified) {
+    await db.update(schema.user).set({ emailVerified: true }).where(eq(schema.user.id, user.id));
+  }
 
   const actor = { id: user.id, email: user.email, name: user.name || name };
   await ensureUserBootstrap(actor);

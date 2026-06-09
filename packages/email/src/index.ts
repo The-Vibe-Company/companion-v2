@@ -144,3 +144,28 @@ export function inviteEmail(input: { to: string; orgName: string; inviteUrl: str
     idempotencyKey: emailIdempotencyKey(["invite", input.orgName, input.to]),
   };
 }
+
+/** A 6-digit code rendered as a large, monospace block — the focal point of OTP emails. */
+function codeBlock(code: string): string {
+  return `<p style="font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:30px;font-weight:600;letter-spacing:8px;margin:16px 0">${escapeHtml(code)}</p>`;
+}
+
+export function verificationCodeEmail(input: { to: string; code: string }): TransactionalEmail {
+  return {
+    to: input.to,
+    subject: "Your Companion verification code",
+    html: `<p>Confirm your email to finish setting up your Companion workspace. Enter this code:</p>${codeBlock(input.code)}<p>The code expires in 10 minutes. If you didn't request it, you can ignore this email.</p>`,
+    text: `Your Companion verification code is ${input.code}. It expires in 10 minutes. If you didn't request it, you can ignore this email.`,
+    idempotencyKey: emailIdempotencyKey(["verify", input.to, input.code]),
+  };
+}
+
+export function passwordResetCodeEmail(input: { to: string; code: string }): TransactionalEmail {
+  return {
+    to: input.to,
+    subject: "Reset your Companion password",
+    html: `<p>We received a request to reset your Companion password. Enter this code to choose a new one:</p>${codeBlock(input.code)}<p>The code expires in 10 minutes. If you didn't request a reset, you can ignore this email — your password stays the same.</p>`,
+    text: `Your Companion password reset code is ${input.code}. It expires in 10 minutes. If you didn't request a reset, you can ignore this email.`,
+    idempotencyKey: emailIdempotencyKey(["reset", input.to, input.code]),
+  };
+}
