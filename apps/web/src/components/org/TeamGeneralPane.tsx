@@ -62,6 +62,7 @@ export function TeamGeneralPane({ ctx, team }: { ctx: OrgCtx; team: OrgTeam }) {
         label="Team name"
         hint="Shown in the sidebar, member lists, and skill scopes."
         value={team.name}
+        locked={!manage}
         onSave={(n) => ctx.updateTeam(team.id, { name: n })}
       />
 
@@ -72,6 +73,7 @@ export function TeamGeneralPane({ ctx, team }: { ctx: OrgCtx; team: OrgTeam }) {
         placeholder="platform"
         hint="Used to scope skills (e.g. team/platform) and in the API. Lowercase letters, numbers, and dashes."
         value={team.slug}
+        locked={!manage}
         onSave={(s) =>
           ctx.updateTeam(team.id, { slug: s.toLowerCase().replace(/[^a-z0-9-]/g, "-") })
         }
@@ -83,11 +85,12 @@ export function TeamGeneralPane({ ctx, team }: { ctx: OrgCtx; team: OrgTeam }) {
           className="sx-input"
           style={{ height: 72, padding: "9px 12px", resize: "vertical", lineHeight: 1.5 }}
           value={desc}
+          readOnly={!manage}
           onChange={(e) => setDesc(e.target.value)}
           placeholder="What this team is responsible for"
         />
         <span className="sx-field__hint">A short summary shown on the team overview.</span>
-        {descDirty && (
+        {manage && descDirty && (
           <div className="sx-row-actions">
             <button className="btn-primary" onClick={() => ctx.updateTeam(team.id, { description: desc.trim() })}>
               <Icon name="check" size={14} />

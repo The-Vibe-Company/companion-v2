@@ -94,20 +94,26 @@ export async function updateMe(name: string): Promise<{ id: string; name: string
   });
 }
 
-/** Rename and/or re-slug the current workspace. Mirrors `PUT /v1/orgs/current`. */
-export async function updateOrg(patch: { name?: string; slug?: string }): Promise<void> {
-  await apiFetch("/v1/orgs/current", {
+/**
+ * Rename and/or re-slug the current workspace. Mirrors `PUT /v1/orgs/current`.
+ * Returns the server-normalized values so the caller can reconcile (the server slugifies).
+ */
+export async function updateOrg(patch: { name?: string; slug?: string }): Promise<{ id: string; name: string; slug: string }> {
+  return apiFetch("/v1/orgs/current", {
     method: "PUT",
     body: JSON.stringify(patch),
   });
 }
 
-/** Rename, re-slug, and/or edit a team's description. Mirrors `PUT /v1/teams/:id`. */
+/**
+ * Rename, re-slug, and/or edit a team's description. Mirrors `PUT /v1/teams/:id`.
+ * Returns the server-normalized values so the caller can reconcile (the server slugifies).
+ */
 export async function updateTeam(
   id: string,
   patch: { name?: string; slug?: string; description?: string },
-): Promise<void> {
-  await apiFetch(`/v1/teams/${id}`, {
+): Promise<{ id: string; name: string; slug: string; description: string | null }> {
+  return apiFetch(`/v1/teams/${id}`, {
     method: "PUT",
     body: JSON.stringify(patch),
   });
@@ -134,17 +140,4 @@ export async function issueToken(input: { name: string; scopes: TokenScope[] }):
 /** Revoke a personal access token. Mirrors `DELETE /v1/tokens/:id`. */
 export async function revokeToken(id: string): Promise<void> {
   await apiFetch(`/v1/tokens/${id}`, { method: "DELETE" });
-}
-
-/**
- * End the current session. Hits `POST /v1/auth/logout` with an explicit JSON content-type
- * and empty `{}` body (Better Auth 415s otherwise) and clears the session cookie. The caller
- * is responsible for redirecting afterwards.
- */
-export async function signOut(): Promise<void> {
-  await apiFetch("/v1/auth/logout", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: "{}",
-  });
 }

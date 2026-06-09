@@ -6,10 +6,11 @@ import { Dialog } from "./primitives";
 import { PaneHead } from "./paneKit";
 import type { ApiKeyVM, OrgCtx } from "./model";
 
-/** The two real, enforceable key scopes. Each maps to a concrete set of API scope strings. */
+/** The two real, enforceable key scopes (label + description). The scope→API-scope-strings
+ *  mapping lives in SettingsApp.createApiKey, the single place that issues keys. */
 const KEY_SCOPES = {
-  read: { label: "Read", desc: "Read-only access to skills.", scopes: ["skills:read"] },
-  write: { label: "Read & write", desc: "Read plus create/edit skills.", scopes: ["skills:read", "skills:write"] },
+  read: { label: "Read", desc: "Read-only access to skills." },
+  write: { label: "Read & write", desc: "Read plus create/edit skills." },
 } as const;
 const KEY_SCOPE_ORDER = ["read", "write"] as const;
 
@@ -66,7 +67,7 @@ export function ApiKeysPane({ ctx, keys }: { ctx: OrgCtx; keys: ApiKeyVM[] }) {
                     <span className="badge scopebadge">{KEY_SCOPES[k.scope].label}</span>
                   </div>
                   <div className="keytok">
-                    <b>{k.prefix}</b>••••••••••••{k.last4} · created {k.created}
+                    <b>{k.prefix}</b>••••••••••••{k.last4} · created {k.created} · expires {k.expires}
                   </div>
                 </div>
                 <div className="mrow__end">

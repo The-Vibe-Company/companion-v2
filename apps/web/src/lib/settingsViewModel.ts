@@ -24,7 +24,9 @@ export function hashColor(str: string): string {
 }
 
 export function initialsOf(name: string): string {
-  const parts = name.trim().split(/[.\s@]+/).filter(Boolean);
+  // Keep the delimiter set in sync with the server's initialsFor (@companion/db ids) so an
+  // optimistic avatar (e.g. after a self-rename) doesn't flip once the server value comes back.
+  const parts = name.trim().split(/[.\s@_-]+/).filter(Boolean);
   return ((parts[0]?.[0] ?? "?") + (parts[1]?.[0] ?? "")).toUpperCase();
 }
 
@@ -63,6 +65,7 @@ export function mapApiKey(row: ApiTokenRow): ApiKeyVM {
     last4: row.prefix.slice(-4),
     created: formatDate(row.created_at),
     lastUsed: row.last_used_at ? relativeTime(row.last_used_at) : "never",
+    expires: formatDate(row.expires_at),
   };
 }
 

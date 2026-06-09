@@ -7,14 +7,8 @@ import { PaneHead } from "./paneKit";
 import { Avatar, RoleDot } from "./primitives";
 import { RoleSelect } from "./RoleSelect";
 import { ORG_ROLES, TEAM_ROLES, TEAM_ROLE_ORDER } from "./roles";
+import { teamManageable } from "./TeamGeneralPane";
 import type { OrgCtx, OrgMember, OrgTeam } from "./model";
-
-/** Org admins, or this team's admins, can manage the team. */
-function teamManageable(ctx: OrgCtx, team: OrgTeam): boolean {
-  if (ctx.canManage) return true;
-  const mine = team.members.find((m) => m.userId === ctx.myId);
-  return Boolean(mine && mine.role === "admin");
-}
 
 /* ============================ Team › Members ============================ */
 export function TeamMembersPane({ ctx, team }: { ctx: OrgCtx; team: OrgTeam }) {

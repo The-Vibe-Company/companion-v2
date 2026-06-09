@@ -2,16 +2,11 @@
 
 import { useState } from "react";
 import { Icon } from "../Icon";
+import { inviteLink } from "@/lib/org";
 import { PaneHead } from "./paneKit";
 import { RoleDot } from "./primitives";
 import { orgRole } from "./roles";
 import type { Invite, OrgCtx } from "./model";
-
-/** Shareable join link for a pending invite, using the current host (SSR-safe fallback). */
-function joinLink(token: string): string {
-  const host = typeof window !== "undefined" ? window.location.host : "companion.dev";
-  return `https://${host}/join/${token}`;
-}
 
 /**
  * Workspace › Invitations — pending invites to join the workspace. Managers can copy the
@@ -31,7 +26,7 @@ export function InvitationsPane({
 
   const copy = async (token: string) => {
     try {
-      await navigator.clipboard.writeText(joinLink(token));
+      await navigator.clipboard.writeText(inviteLink(token));
       // The inline "Copied" label on the button is the visible feedback.
       setCopied(token);
       setTimeout(() => setCopied((c) => (c === token ? null : c)), 1600);

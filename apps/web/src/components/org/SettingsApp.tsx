@@ -16,7 +16,6 @@ import {
   revokeToken as revokeTokenRpc,
   setMemberRole as setMemberRoleRpc,
   setTeamMemberRole as setTeamMemberRoleRpc,
-  signOut as signOutRpc,
   updateMe as updateMeRpc,
   updateOrg as updateOrgRpc,
   updateTeam as updateTeamRpc,
@@ -224,16 +223,40 @@ export function SettingsController({
         })
         .finally(() => setBusy(false));
     },
-    setWorkspace: (patch) =>
-      optimistic({ ...current, ...patch }, () => updateOrgRpc(patch)),
-    updateTeam: (teamId, patch) =>
-      optimistic(
-        {
-          ...current,
-          teams: current.teams.map((t) => (t.id === teamId ? { ...t, ...patch } : t)),
-        },
-        () => updateTeamRpc(teamId, patch),
-      ),
+    setWorkspace: (patch) => {
+      // Apply optimistically, then reconcile from the server response — the server slugifies
+      // (trims/collapses dashes), so the raw client value would otherwise stick until reload.
+      setCurrent((c) => ({ ...c, ...patch }));
+      setBusy(true);
+      updateOrgRpc(patch)
+        .then((res) => setCurrent((c) => ({ ...c, name: res.name, slug: res.slug })))
+        .catch((e: Error) => {
+          setErr(e.message);
+          void refreshSettingsData();
+        })
+        .finally(() => setBusy(false));
+    },
+    updateTeam: (teamId, patch) => {
+      setCurrent((c) => ({
+        ...c,
+        teams: c.teams.map((t) => (t.id === teamId ? { ...t, ...patch } : t)),
+      }));
+      setBusy(true);
+      updateTeamRpc(teamId, patch)
+        .then((res) =>
+          setCurrent((c) => ({
+            ...c,
+            teams: c.teams.map((t) =>
+              t.id === teamId ? { ...t, name: res.name, slug: res.slug, description: res.description ?? "" } : t,
+            ),
+          })),
+        )
+        .catch((e: Error) => {
+          setErr(e.message);
+          void refreshSettingsData();
+        })
+        .finally(() => setBusy(false));
+    },
     deleteTeam: (teamId) =>
       optimistic(
         { ...current, teams: current.teams.filter((t) => t.id !== teamId) },
@@ -252,9 +275,12 @@ export function SettingsController({
       try {
         const scopes = scope === "write" ? (["skills:read", "skills:write"] as const) : (["skills:read"] as const);
         const issued = await issueTokenRpc({ name: name.trim(), scopes: [...scopes] });
-        // Not optimistic: re-fetch the canonical list so the masked row matches the server.
-        const rows = await listTokensRpc();
-        setApiKeys(rows.map(mapApiKey));
+        // The one-time secret is the important result — return it as soon as the key exists.
+        // Refresh the masked list best-effort; if it fails, fall back to a full resync rather
+        // than throwing (which would hide the just-created key + its reveal dialog).
+        listTokensRpc()
+          .then((rows) => setApiKeys(rows.map(mapApiKey)))
+          .catch(() => void refreshSettingsData());
         return issued.token;
       } catch (e) {
         setErr((e as Error).message);
@@ -273,9 +299,6 @@ export function SettingsController({
           setApiKeys(prev);
         })
         .finally(() => setBusy(false));
-    },
-    signOut: () => {
-      void signOutRpc().catch((e: Error) => setErr(e.message));
     },
     setMemberRole: (orgId, userId, role: OrgRole) =>
       optimistic(

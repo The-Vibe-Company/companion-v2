@@ -64,6 +64,7 @@ export interface ApiKeyVM {
   last4: string; // last 4 visible chars (from the prefix; the secret is never stored)
   created: string; // formatted creation date
   lastUsed: string; // relative label, or "never"
+  expires: string; // formatted expiry date (keys are time-limited)
 }
 
 export interface SettingsAppData {
@@ -123,7 +124,6 @@ export interface OrgCtx {
   deleteTeam: (teamId: string) => void;
   createApiKey: (name: string, scope: "read" | "write") => Promise<string>;
   revokeApiKey: (id: string) => void;
-  signOut: () => void;
   setMemberRole: (orgId: string, userId: string, role: OrgRole) => void;
   removeMember: (orgId: string, userId: string) => void;
   inviteMember: (orgId: string, email: string, role: OrgRole) => Promise<string>;
