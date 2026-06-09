@@ -228,7 +228,7 @@ body { background: var(--color-canvas); color: var(--color-fg); font-family: var
 .prop:hover { background: var(--color-surface-raised); }
 .prop__label { display: flex; align-items: center; gap: 8px; width: 104px; flex: none; color: var(--color-muted); font-size: var(--text-xs); }
 .prop__label i { color: var(--color-faint); }
-.prop__value { display: flex; align-items: center; gap: 7px; font-size: var(--text-sm); color: var(--color-fg); min-width: 0; white-space: nowrap; }
+.prop__value { flex: 1; display: flex; align-items: center; gap: 7px; font-size: var(--text-sm); color: var(--color-fg); min-width: 0; white-space: nowrap; }
 .prop__value .chips { flex-wrap: wrap; white-space: normal; }
 .prop__value .mono { font-size: var(--text-xs); white-space: normal; overflow-wrap: anywhere; }
 .divider { height: 1px; background: var(--color-line); margin: 10px 0; }
@@ -328,13 +328,14 @@ body { background: var(--color-canvas); color: var(--color-fg); font-family: var
 .starbtn__count { font-family: var(--font-mono); font-size: 11px; color: var(--color-muted); padding: 0 8px; margin-left: 2px; border-left: 1px solid var(--color-line); height: 18px; display: inline-flex; align-items: center; }
 
 /* --- Visibility control (editable property) ------------------------------ */
-.vis { position: relative; }
-.vis__btn { display: inline-flex; align-items: center; gap: 5px; font-family: var(--font-mono); font-size: var(--text-xs); color: var(--color-fg);
+.vis { position: relative; min-width: 0; max-width: 100%; }
+.vis__btn { display: inline-flex; align-items: center; gap: 5px; max-width: 100%; min-width: 0; font-family: var(--font-mono); font-size: var(--text-xs); color: var(--color-fg);
   border: 1px solid var(--color-line); background: var(--color-surface); border-radius: var(--radius-sm); padding: 3px 6px 3px 8px; cursor: pointer;
   transition: background-color var(--duration-fast) var(--ease-out-quint), border-color var(--duration-fast) var(--ease-out-quint); }
 .vis__btn:hover { background: var(--color-surface-raised); border-color: var(--color-line-strong); }
-.vis__btn .lead { color: var(--color-faint); display: inline-flex; }
-.vis__btn .caret { color: var(--color-faint); display: inline-flex; }
+.vis__btn .lead { color: var(--color-faint); display: inline-flex; flex: none; }
+.vis__label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vis__btn .caret { color: var(--color-faint); display: inline-flex; flex: none; }
 .menu { position: absolute; top: calc(100% + 6px); right: 0; left: auto; z-index: 30; min-width: 236px;
   background: var(--color-surface); border: 1px solid var(--color-line); border-radius: var(--radius-md); box-shadow: var(--shadow-lg); padding: 4px; }
 .menu__head { font-size: 10px; text-transform: uppercase; letter-spacing: var(--tracking-wide); color: var(--color-faint); padding: 6px 8px 4px; }

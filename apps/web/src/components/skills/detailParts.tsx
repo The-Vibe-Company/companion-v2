@@ -52,7 +52,7 @@ export function VisibilityControl({
         <span className="lead">
           <Icon name={meta.icon} size={11} />
         </span>
-        {meta.label}
+        <span className="vis__label">{meta.label}</span>
         <span className="caret">
           <Icon name="chevron-down" size={12} />
         </span>
