@@ -267,6 +267,32 @@ export function SkillsApp({
     setCustomViews(nextCustomViews);
     persistPreferences(filters, nextCustomViews);
   }, [customViews, filters, persistPreferences]);
+  const renameView = useCallback(
+    (id: string, name: string) => {
+      const trimmed = name.trim().slice(0, 128);
+      if (!trimmed) return;
+      const next = customViews.map((v) => (v.id === id ? { ...v, name: trimmed } : v));
+      skipNextDebouncedPersistRef.current = true;
+      setCustomViews(next);
+      persistPreferences(filters, next);
+    },
+    [customViews, filters, persistPreferences],
+  );
+  const deleteView = useCallback(
+    (id: string) => {
+      const target = customViews.find((v) => v.id === id);
+      const next = customViews.filter((v) => v.id !== id);
+      const wasActive = !!target && filtersKey(target.filters) === filtersKey(filters);
+      if (wasActive) {
+        setFilters([]);
+        setOpenId(null);
+      }
+      skipNextDebouncedPersistRef.current = true;
+      setCustomViews(next);
+      persistPreferences(wasActive ? [] : filters, next);
+    },
+    [customViews, filters, persistPreferences],
+  );
   const retryPreferenceSave = useCallback(() => {
     if (!queuedPreferencesRef.current) persistPreferences(filters, customViews);
     else void flushPreferenceQueue();
@@ -388,6 +414,8 @@ export function SkillsApp({
             views={views}
             activeViewId={activeViewId}
             onSelectView={selectView}
+            onRenameView={renameView}
+            onDeleteView={deleteView}
             filters={filters}
             onToggleFilter={toggleFilter}
             onRemoveFilter={removeFilter}

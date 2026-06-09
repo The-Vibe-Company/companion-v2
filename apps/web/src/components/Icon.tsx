@@ -66,6 +66,7 @@ import {
   Sparkles,
   SquarePen,
   Terminal,
+  Trash2,
   Unlock,
   type LucideIcon,
 } from "lucide-react";
@@ -117,6 +118,7 @@ const ICONS: Record<string, LucideIcon> = {
   "square-stack": SquareStack,
   star: Star,
   tag: Tag,
+  "trash-2": Trash2,
   upload: Upload,
   "upload-cloud": UploadCloud,
   user: User,

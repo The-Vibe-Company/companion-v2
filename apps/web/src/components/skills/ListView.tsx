@@ -5,6 +5,7 @@ import type { SkillVM, TeamVM } from "@/lib/types";
 import { scopeMeta, vdot } from "./blocks";
 import { chipParts, type Filter, type ViewDef } from "./filters";
 import { FilterAdd } from "./FilterMenu";
+import { ViewTab } from "./ViewTab";
 
 export function ListView({
   skills,
@@ -14,6 +15,8 @@ export function ListView({
   views,
   activeViewId,
   onSelectView,
+  onRenameView,
+  onDeleteView,
   filters,
   onToggleFilter,
   onRemoveFilter,
@@ -33,6 +36,8 @@ export function ListView({
   views: ViewDef[];
   activeViewId: string | null;
   onSelectView: (id: string) => void;
+  onRenameView: (id: string, name: string) => void;
+  onDeleteView: (id: string) => void;
   filters: Filter[];
   onToggleFilter: (type: Filter["type"], value: string) => void;
   onRemoveFilter: (f: Filter) => void;
@@ -59,21 +64,15 @@ export function ListView({
 
       <div className="viewbar" role="tablist" aria-label="Views">
         {views.map((v) => (
-          <button
+          <ViewTab
             key={v.id}
-            role="tab"
-            aria-selected={activeViewId === v.id}
-            className={
-              "vtab" +
-              (activeViewId === v.id ? " is-active" : "") +
-              (v.custom ? " vtab--custom" : "")
-            }
-            onClick={() => onSelectView(v.id)}
-          >
-            <Icon name={v.icon} size={14} />
-            {v.name}
-            <span className="vtab__count tnum">{viewCounts[v.id] ?? 0}</span>
-          </button>
+            view={v}
+            active={activeViewId === v.id}
+            count={viewCounts[v.id] ?? 0}
+            onSelect={onSelectView}
+            onRename={onRenameView}
+            onDelete={onDeleteView}
+          />
         ))}
       </div>
 
