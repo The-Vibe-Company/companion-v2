@@ -447,13 +447,30 @@ cleanup() {
 }
 
 # ---------------------------------------------------------------------------
-# Migrations + seed (need only DATABASE_URL)
+# Migrations + seed
 # ---------------------------------------------------------------------------
 migrate_and_seed() {
   step "Applying migrations + seeding test user"
   DATABASE_URL="$DATABASE_URL" pnpm db:migrate || die "Migrations failed"
   ok "Migrations applied"
-  if DATABASE_URL="$DATABASE_URL" pnpm --filter @companion/api seed:test-user; then
+
+  local seed_env=(
+    DATABASE_URL="$DATABASE_URL"
+    BETTER_AUTH_URL="$API_URL"
+    COMPANION_API_URL="$API_URL"
+  )
+  if [ "$HAS_MINIO" = true ]; then
+    seed_env+=(
+      S3_ENDPOINT="$S3_ENDPOINT"
+      S3_REGION=us-east-1
+      S3_ACCESS_KEY_ID="$S3_ACCESS_KEY_ID"
+      S3_SECRET_ACCESS_KEY="$S3_SECRET_ACCESS_KEY"
+      S3_BUCKET_SKILL_ARCHIVES="$S3_BUCKET"
+      S3_FORCE_PATH_STYLE=true
+    )
+  fi
+
+  if env "${seed_env[@]}" pnpm --filter @companion/api seed:test-user; then
     ok "Seed complete — login: admin@tvc.dev / adminadmin"
   else
     warn "Seed failed (database still usable)"
