@@ -3,7 +3,27 @@
 import { useEffect, useRef, useState } from "react";
 import { Icon } from "../Icon";
 import type { OrgVM } from "@/lib/types";
+import { hashColor, initialsOf } from "@/lib/settingsViewModel";
 import { orgRole } from "./roles";
+
+function OrgAvatar({ org, size = 26 }: { org: OrgVM; size?: number }) {
+  const personal = org.kind === "personal";
+  const style = {
+    width: size,
+    height: size,
+    fontSize: Math.round(size * 0.48),
+    ...(personal || org.logoUrl ? {} : { background: org.color ?? hashColor(org.name) }),
+  };
+
+  return (
+    <span
+      className={"og-switch__av" + (personal ? " og-switch__av--personal" : "")}
+      style={style}
+    >
+      {org.logoUrl ? <img src={org.logoUrl} alt="" /> : initialsOf(org.name)}
+    </span>
+  );
+}
 
 /** Sidebar brand-area workspace switcher: switch orgs, or create / join one. */
 export function OrgSwitcher({
@@ -35,14 +55,12 @@ export function OrgSwitcher({
     };
   }, [open]);
 
-  const personal = current.kind === "personal";
   return (
     <div className="og-switch" ref={ref}>
       <button className="og-switch__btn" onClick={() => setOpen((o) => !o)} aria-haspopup="menu" aria-expanded={open}>
-        <span className={"og-switch__av" + (personal ? " og-switch__av--personal" : "")}>{current.name[0]}</span>
+        <OrgAvatar org={current} />
         <span className="og-switch__meta">
           <span className="og-switch__name">{current.name}</span>
-          <span className="og-switch__plan" style={{ textTransform: "capitalize" }}>{current.plan}</span>
         </span>
         <span className="og-switch__chev">
           <Icon name="chevrons-up-down" size={15} />
@@ -53,12 +71,7 @@ export function OrgSwitcher({
           <div className="og-pop__label">Switch workspace</div>
           {orgs.map((o) => (
             <button key={o.id} className="og-pop__item" onClick={() => { onSwitch(o.id); setOpen(false); }}>
-              <span
-                className={"og-switch__av" + (o.kind === "personal" ? " og-switch__av--personal" : "")}
-                style={{ width: 22, height: 22, fontSize: 11 }}
-              >
-                {o.name[0]}
-              </span>
+              <OrgAvatar org={o} size={22} />
               <span className="og-pop__name">{o.name}</span>
               <span className="og-pop__role">{orgRole(o.myRole).label.toLowerCase()}</span>
               {o.id === current.id && (

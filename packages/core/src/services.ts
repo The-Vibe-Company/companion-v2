@@ -48,6 +48,8 @@ export interface OrgSummary {
   plan: "free" | "team";
   org_role: OrgRole;
   member_count: number;
+  color: string | null;
+  logo_url: string | null;
 }
 
 export interface OrgSettingsMember {
@@ -107,6 +109,8 @@ export async function listOrgs(actor: ActorContext, database: Db = db): Promise<
       kind: schema.organizations.kind,
       plan: schema.organizations.plan,
       org_role: schema.memberships.orgRole,
+      color: schema.organizations.color,
+      logo_url: schema.organizations.logoUrl,
     })
     .from(schema.organizations)
     .innerJoin(schema.memberships, eq(schema.memberships.orgId, schema.organizations.id))

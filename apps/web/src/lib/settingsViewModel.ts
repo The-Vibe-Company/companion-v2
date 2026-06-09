@@ -3,6 +3,21 @@ import type { OrgFull, SeedUser, SettingsAppData } from "@/components/org/model"
 import { formatDate } from "./format";
 import type { MeVM, OrgVM } from "./types";
 
+const LOGO_COLORS = [
+  "oklch(0.56 0.13 250)",
+  "oklch(0.54 0.10 168)",
+  "oklch(0.55 0.13 300)",
+  "oklch(0.60 0.10 66)",
+  "oklch(0.55 0.13 24)",
+  "oklch(0.50 0.035 265)",
+];
+
+export function hashColor(str: string): string {
+  let h = 0;
+  for (let i = 0; i < str.length; i++) h = ((h * 31 + str.charCodeAt(i)) >>> 0);
+  return LOGO_COLORS[h % LOGO_COLORS.length]!;
+}
+
 export function initialsOf(name: string): string {
   const parts = name.trim().split(/[.\s@]+/).filter(Boolean);
   return ((parts[0]?.[0] ?? "?") + (parts[1]?.[0] ?? "")).toUpperCase();

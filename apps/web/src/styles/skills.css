@@ -36,7 +36,7 @@ body { background: var(--color-canvas); color: var(--color-fg); font-family: var
 /* ========================================================================== */
 .side { width: var(--sidebar-w); flex: none; display: flex; flex-direction: column;
   background: var(--color-surface); border-right: 1px solid var(--color-line); }
-.side__brand { display: flex; align-items: center; gap: 10px; height: 53px; padding: 0 16px; border-bottom: 1px solid var(--color-line); }
+.side__brand { display: flex; align-items: center; gap: 8px; height: 53px; padding: 0 16px; border-bottom: 1px solid var(--color-line); }
 .brandmark { display: grid; place-items: center; width: 26px; height: 26px; border-radius: var(--radius-md);
   background: var(--color-accent); color: var(--color-accent-fg); font-weight: 600; font-size: 14px; flex: none; }
 .brandname { font-weight: 600; font-size: var(--text-base); letter-spacing: var(--tracking-tight); line-height: 1.1; }
@@ -347,11 +347,10 @@ body { background: var(--color-canvas); color: var(--color-fg); font-family: var
 .menu__check { margin-left: auto; color: var(--color-fg); display: inline-flex; flex: none; }
 
 /* --- Sidebar search button (right of the org) ---------------------------- */
-.side__search { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 8px;
+.side__search { flex: none; margin-left: auto; display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; padding: 0;
   border: 1px solid var(--color-line); border-radius: var(--radius-md); background: var(--color-surface); color: var(--color-muted); cursor: pointer;
   transition: background-color var(--duration-fast) var(--ease-out-quint), color var(--duration-fast) var(--ease-out-quint); }
 .side__search:hover { background: var(--color-surface-raised); color: var(--color-fg); }
-.side__search .kbd { font-family: var(--font-mono); font-size: 10px; color: var(--color-faint); border: 1px solid var(--color-line); border-radius: 4px; padding: 0 4px; }
 
 /* --- View tabs ----------------------------------------------------------- */
 .viewbar { display: flex; align-items: center; gap: 2px; padding: 7px var(--space-5) 0; border-bottom: 1px solid var(--color-line); overflow-x: auto; flex: none; }
