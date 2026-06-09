@@ -82,6 +82,8 @@ export interface OrgVM {
   kind: "personal" | "team";
   plan: "free" | "team";
   myRole: OrgRole; // this user's role in THIS org
+  color: string | null;
+  logoUrl: string | null;
 }
 
 /** A row in the Members table — an active member, or a pending invite. */

@@ -26,6 +26,8 @@ const current = {
   kind: "team",
   plan: "team",
   myRole: "owner",
+  color: null,
+  logoUrl: null,
 } as const;
 
 describe("parseOrgSettingsResponse", () => {

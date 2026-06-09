@@ -3,7 +3,6 @@
 import { useState } from "react";
 import { Icon } from "../Icon";
 import { OrgSwitcher } from "../org/OrgSwitcher";
-import { orgRole } from "../org/roles";
 import type { SettingsIntent } from "../org/model";
 import type { OrgVM, TeamVM } from "@/lib/types";
 
@@ -60,7 +59,6 @@ export function Sidebar({
         <OrgSwitcher orgs={orgs} current={currentOrg} onSwitch={onSwitchOrg} onOnboard={onOnboard} />
         <button className="side__search" onClick={onOpenPalette} title="Search (⌘K)" aria-label="Search">
           <Icon name="search" size={14} />
-          <span className="kbd">⌘K</span>
         </button>
       </div>
       <nav className="side__nav" aria-label="Primary">
@@ -173,7 +171,6 @@ export function Sidebar({
         onPointerEnter={warmSettings}
       >
         <Icon name="settings" size={14} /> Settings
-        <span className="side__foot__role">{orgRole(currentOrg.myRole).label.toLowerCase()}</span>
       </button>
     </aside>
   );
