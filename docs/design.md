@@ -63,7 +63,10 @@ adds `profiles`, `organizations`, `memberships`, `teams`, `team_memberships`, `i
 
 Every tenant-owned table carries `org_id`. Skills keep ownership, visibility, and provenance
 separate: `owner_id`, `scope`, `team_id`, and `creator_id`. Valid scopes are `private`, `team`,
-and `public`.
+and `public`. A version's declared tools (`skill_versions.tools`) come from the `SKILL.md`
+frontmatter — Companion's native `tools` list, or the Claude skill-format `allowed-tools` (a YAML
+list or comma-separated string) accepted as an alias; tool names may be identifiers in any case
+(`Bash`, `read_file`, `mcp__server__tool`).
 
 `api_tokens` holds short-lived, scoped personal access tokens for programmatic publish/install.
 Only the `sha256` `token_hash` is stored (the plaintext `cmp_pat_…` is shown once); each row carries
@@ -72,6 +75,14 @@ Only the `sha256` `token_hash` is stored (the plaintext `cmp_pat_…` is shown o
 `skill_filter_preferences` stores the current user's Skills Hub filter state for one organization.
 The row is keyed by `(org_id, user_id)` and contains `active_filters` plus `custom_views` JSONB.
 It is personal UI state, not a shared organization resource.
+
+`skill_comments` powers the threaded **Discussion** on a skill's detail page. Beyond `body`/`author_id`
+it carries `parent_id` (a self-FK — `null` is a root thread, non-null is a reply; single-level nesting),
+`version_id` (FK → `skill_versions`, `on delete set null`; `null` = a *global* thread, otherwise the
+thread is scoped to that version), and `deprecated` (threads are greyed/struck-through, never deleted).
+Cross-skill integrity for `parent_id`/`version_id` is not FK-enforceable and is validated in the service
+layer; a reply inherits its thread's scope (its `version_id` is forced `null`). Marking a thread
+deprecated is allowed for the comment author, an org admin, or the skill owner.
 
 Onboarding adds a few columns: `organizations.domain` + `organizations.domain_auto_join` (a verified
 email domain that grants membership, and whether matching signups join automatically), plus cosmetic
@@ -150,13 +161,19 @@ directly to Postgres.
   `DELETE /v1/tokens/:id`. Session-authenticated only — a token cannot mint another.
 - Skills: `/v1/skills`, `/v1/skills/:slug`, `/v1/skills/:slug/versions`,
   `/v1/skills/:slug/download`, `/v1/skills/:slug/scope`, `/v1/skill-filter-preferences`,
-  `POST /v1/skills/create` (author a SKILL.md inline), and
-  `GET /v1/skills/:slug/versions/:version/package` (download a version as `.zip`).
+  `POST /v1/skills/create` (author a SKILL.md inline),
+  `GET /v1/skills/:slug/versions/:version/package` (download a version as `.zip`), and
+  `GET /v1/skills/:slug/versions/:version/files` (read a version's package contents for the in-app
+  file explorer — text files are returned UTF-8-decoded and capped, binaries carry `content: null`).
+  Threaded discussion: `GET`/`POST /v1/skills/:slug/comments` (a `POST` may carry `parent_id` for a
+  reply and `version_id` to scope the thread to a version) and
+  `PATCH /v1/skills/:slug/comments/:id` (deprecate / restore a thread).
 - Orgs: `/v1/orgs`, `/v1/orgs/current`, `/v1/teams`, `/v1/invitations`.
 
 Requests authenticate by Better Auth cookie session. An `Authorization: Bearer cmp_pat_…` token is
 accepted **only** on the PAT-enabled skills endpoints (`POST /v1/skills`, `POST /v1/skills/create`,
-`GET /v1/skills/:slug/download`, `GET /v1/skills/:slug/versions/:version/package`); every other
+`GET /v1/skills/:slug/download`, `GET /v1/skills/:slug/versions/:version/package`,
+`GET /v1/skills/:slug/versions/:version/files`); every other
 endpoint rejects tokens. Token requests are scope-gated (`skills:write` to publish/create,
 `skills:read` to download). `POST /v1/skills` accepts a multipart `file` (browser/CLI) or a raw
 `application/zip` / `application/gzip` body with `visibility`/`team`/`version` query params (the
