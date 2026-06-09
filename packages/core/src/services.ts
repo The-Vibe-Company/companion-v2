@@ -684,6 +684,17 @@ export async function deleteTeam(input: {
       .from(schema.teams)
       .where(eq(schema.teams.orgId, input.orgId));
     if (Number(teamCount?.value ?? 0) <= 1) throw new Error("organization must keep at least one team");
+    const affectedShares = await tx
+      .select({ skillId: schema.skillTeamShares.skillId })
+      .from(schema.skillTeamShares)
+      .where(and(eq(schema.skillTeamShares.orgId, input.orgId), eq(schema.skillTeamShares.teamId, input.teamId)));
+    const affectedSkillIds = [...new Set(affectedShares.map((share) => share.skillId))];
+    if (affectedSkillIds.length) {
+      await tx
+        .update(schema.skills)
+        .set({ updatedAt: new Date() })
+        .where(and(eq(schema.skills.orgId, input.orgId), inArray(schema.skills.id, affectedSkillIds)));
+    }
     await tx
       .delete(schema.teams)
       .where(and(eq(schema.teams.orgId, input.orgId), eq(schema.teams.id, input.teamId)));

@@ -70,6 +70,8 @@ interface FakeDbOptions {
   tokenRows?: Array<Record<string, unknown>>;
   /** Rows returned by an `update(...).returning(...)`. */
   updateReturning?: Array<Record<string, unknown>>;
+  /** Skill share rows affected by deleteTeam. */
+  teamSkillShares?: Array<{ skillId: string }>;
 }
 
 function fakeDb(options: FakeDbOptions = {}) {
@@ -145,6 +147,7 @@ function fakeDb(options: FakeDbOptions = {}) {
 
   const selectBuilder = (cols: Record<string, unknown>) => {
     const isCount = "value" in cols;
+    const isSkillShareSelect = "skillId" in cols;
     const builder: Record<string, unknown> = {
       from() {
         return builder;
@@ -153,15 +156,20 @@ function fakeDb(options: FakeDbOptions = {}) {
         return builder;
       },
       where(expr: unknown) {
-        if (!isCount) calls.tokenWhere = expr;
+        if (!isCount && !isSkillShareSelect) calls.tokenWhere = expr;
         return builder;
       },
       orderBy() {
         if (isCount) return Promise.resolve([{ value: options.teamCount ?? 1 }]);
+        if (isSkillShareSelect) return Promise.resolve(options.teamSkillShares ?? []);
         return Promise.resolve(options.tokenRows ?? []);
       },
       then(resolve: (v: unknown) => unknown) {
-        const rows = isCount ? [{ value: options.teamCount ?? 1 }] : (options.tokenRows ?? []);
+        const rows = isCount
+          ? [{ value: options.teamCount ?? 1 }]
+          : isSkillShareSelect
+            ? (options.teamSkillShares ?? [])
+            : (options.tokenRows ?? []);
         return Promise.resolve(rows).then(resolve);
       },
     };
@@ -172,8 +180,8 @@ function fakeDb(options: FakeDbOptions = {}) {
     values: () => ({ onConflictDoNothing: vi.fn(async () => undefined) }),
   });
 
-  // The transaction handle records an ordered marker sequence so the deleteTeam test can assert the
-  // operation only deletes the team. Skill visibility shares cascade through `skill_team_shares`.
+  // The transaction handle records an ordered marker sequence so the deleteTeam tests can assert
+  // skill visibility metadata is touched before the team row deletion when shares are affected.
   const txUpdate = vi.fn(() => {
     calls.txSequence.push("update");
     const api = {
@@ -475,13 +483,27 @@ describe("deleteTeam", () => {
     expect(txHandle.delete).not.toHaveBeenCalled();
   });
 
-  it("deletes the team without rewriting skills", async () => {
+  it("deletes the team without touching skills when it has no skill shares", async () => {
     const { database, calls } = fakeDb({ role: "owner", team: { id: TEAM_1, orgId: ORG_A }, teamCount: 3 });
 
     await deleteTeam({ actor: owner, orgId: ORG_A, teamId: TEAM_1, database });
 
     expect(calls.txSequence).toEqual(["delete"]);
     expect(calls.txPatch).toBeUndefined();
+  });
+
+  it("touches affected skills before deleting a team whose shares cascade", async () => {
+    const { database, calls } = fakeDb({
+      role: "owner",
+      team: { id: TEAM_1, orgId: ORG_A },
+      teamCount: 3,
+      teamSkillShares: [{ skillId: "skill-1" }],
+    });
+
+    await deleteTeam({ actor: owner, orgId: ORG_A, teamId: TEAM_1, database });
+
+    expect(calls.txSequence).toEqual(["update", "delete"]);
+    expect(calls.txPatch?.updatedAt).toBeInstanceOf(Date);
   });
 
   it("throws when the team is not found", async () => {
