@@ -31,10 +31,6 @@ export function ProfilePane({ ctx }: { ctx: OrgCtx }) {
           <div className="sx-profile__name">{me.name}</div>
           <div className="sx-profile__email">{me.email}</div>
         </div>
-        <button className="btn-sec" style={{ marginLeft: "auto" }} type="button">
-          <Icon name="pencil" size={14} />
-          Change
-        </button>
       </div>
 
       <EditField

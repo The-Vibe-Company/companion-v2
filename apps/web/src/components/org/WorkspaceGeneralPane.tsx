@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import { Icon } from "../Icon";
 import { PaneHead, EditField } from "./paneKit";
 import { RoleDot } from "./primitives";
@@ -9,6 +10,12 @@ import type { OrgCtx } from "./model";
 /* ============================ Workspace › General ============================ */
 export function WorkspaceGeneralPane({ ctx }: { ctx: OrgCtx }) {
   const ws = ctx.currentOrg;
+  // The workspace URL is host-relative: show the real deployment host (self-host friendly), not a
+  // hard-coded domain. Resolved after mount so SSR and first client render agree (no host on the
+  // server); the prefix is cosmetic until then.
+  const [host, setHost] = useState("");
+  useEffect(() => setHost(window.location.host), []);
+  const urlPrefix = host ? `${host}/` : "";
 
   return (
     <div className="sx-pane">
@@ -18,7 +25,7 @@ export function WorkspaceGeneralPane({ ctx }: { ctx: OrgCtx }) {
         <span className="sx-profile__av" style={{ borderRadius: "var(--radius-md)" }}>{ws.name[0]}</span>
         <div className="sx-profile__meta">
           <div className="sx-profile__name">{ws.name}</div>
-          <div className="sx-profile__email">companion.dev/{ws.slug}</div>
+          <div className="sx-profile__email">{urlPrefix}{ws.slug}</div>
         </div>
       </div>
 
@@ -40,7 +47,7 @@ export function WorkspaceGeneralPane({ ctx }: { ctx: OrgCtx }) {
       <EditField
         label="URL identifier"
         mono
-        prefix="companion.dev/"
+        prefix={urlPrefix}
         placeholder="acme"
         hint="Used in links and the API base path. Lowercase letters, numbers, and dashes."
         value={ws.slug}
