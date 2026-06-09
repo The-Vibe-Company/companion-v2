@@ -85,11 +85,10 @@ If migrations fail, startup fails rather than serving newer code against an olde
 
 ### Conductor workspaces
 
-Conductor uses the same full-stack entrypoint as local development: `pnpm dev`. The Run button still
-calls `bash scripts/conductor-workspace.sh run`, but that script only delegates to `pnpm dev`.
-When `CONDUCTOR_PORT` is present, `scripts/dev-stack.sh` switches into Conductor mode, derives all
-ports from that base port, and uses a workspace-specific Docker Compose project name so Postgres and
-MinIO volumes do not leak between workspaces. The allocated ports are:
+Conductor's Run button calls `bash scripts/dev-conductor.sh` — a **native, Docker-free** launcher
+(modeled on `~/Dev/monkapps`). It starts a per-workspace Postgres cluster, plus optional native MinIO
+and Mailpit, under `.conductor-pg/`, applies migrations, seeds the test user, then runs the API + web
+with `concurrently`. All ports derive from `CONDUCTOR_PORT` (fallback `3000` outside Conductor):
 
 | Service | Port |
 |---|---|
@@ -101,8 +100,13 @@ MinIO volumes do not leak between workspaces. The allocated ports are:
 | Mailpit SMTP | `CONDUCTOR_PORT + 5` |
 | Mailpit UI | `CONDUCTOR_PORT + 6` |
 
-Archiving a workspace runs `bash scripts/conductor-workspace.sh archive`, which removes only that
-workspace's Compose project and volumes.
+Auth cookies are namespaced with a `companion-<workspace>` prefix so sessions never leak between
+workspaces. If `minio`/`mailpit` aren't installed (the `setup` step best-effort `brew install`s them),
+the stack still runs — S3 uploads are disabled and email falls back to `EMAIL_PROVIDER=log`. A cleanup
+trap stops every native service on Ctrl+C. Archiving a workspace runs
+`bash scripts/dev-conductor.sh archive`, which stops the services and removes `.conductor-pg/`.
+
+The non-Conductor `pnpm dev` path is unchanged and still uses Docker Compose (`scripts/dev-stack.sh`).
 
 ## How it relates to Companion v1
 

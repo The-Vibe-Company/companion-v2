@@ -31,6 +31,9 @@ companion.lock
 .context/
 .conductor/settings.local.toml
 
+# Conductor native dev stack (Postgres/MinIO/Mailpit state)
+.conductor-pg/
+
 # OS / editor
 .DS_Store
 *.log

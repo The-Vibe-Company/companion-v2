@@ -3,7 +3,7 @@
 spotlight_testing = false
 
 [scripts]
-setup = "corepack enable && pnpm install"
-run = "bash scripts/conductor-workspace.sh run"
-archive = "bash scripts/conductor-workspace.sh archive"
+setup = "corepack enable && pnpm install && (brew install postgresql@17 minio mailpit || true)"
+run = "bash scripts/dev-conductor.sh"
+archive = "bash scripts/dev-conductor.sh archive"
 run_mode = "concurrent"
