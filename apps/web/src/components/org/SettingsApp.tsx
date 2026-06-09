@@ -41,21 +41,27 @@ export function SettingsController({
   initialTab,
   initialDialog,
   onClose,
+  onRefreshData,
 }: {
   data: SettingsAppData;
   initialTab: SettingsTab;
   initialDialog: SettingsDialog;
   onClose: () => void;
+  onRefreshData?: () => Promise<SettingsAppData | null>;
 }) {
   const router = useRouter();
   const actions = useOrgActions();
-  const { me, users } = data;
+  const { me } = data;
 
   const [current, setCurrent] = useState<OrgFull>(() => normalizeOrgFull(data.current));
+  const [users, setUsers] = useState(data.users);
   useEffect(() => {
     router.prefetch("/skills");
   }, [router]);
-  useEffect(() => setCurrent(normalizeOrgFull(data.current)), [data.current]);
+  useEffect(() => {
+    setCurrent(normalizeOrgFull(data.current));
+    setUsers(data.users);
+  }, [data.current, data.users]);
   useEffect(() => {
     document.cookie = `companion_org=${encodeURIComponent(data.current.id)}; path=/; SameSite=Lax`;
   }, [data.current.id]);
@@ -67,6 +73,23 @@ export function SettingsController({
   useEffect(() => setDialog(initialDialog), [initialDialog]);
 
   const setErr = actions.setError;
+  const refreshSettingsData = async () => {
+    if (!onRefreshData) {
+      router.refresh();
+      return;
+    }
+    try {
+      const next = await onRefreshData();
+      if (!next) {
+        router.refresh();
+        return;
+      }
+      setUsers(next.users);
+      setCurrent(normalizeOrgFull(next.current));
+    } catch (error) {
+      setErr((error as Error).message);
+    }
+  };
 
   // Optimistic mutate: apply locally, call the RPC. On failure, resync from the server
   // (router.refresh) rather than restoring a captured snapshot — a stale snapshot could
@@ -78,7 +101,7 @@ export function SettingsController({
       .then(() => after?.())
       .catch((e: Error) => {
         setErr(e.message);
-        router.refresh();
+        void refreshSettingsData();
       })
       .finally(() => setBusy(false));
   };
@@ -110,7 +133,7 @@ export function SettingsController({
       setBusy(true);
       try {
         const { token } = await inviteMemberRpc(orgId, email, role);
-        router.refresh();
+        await refreshSettingsData();
         return token;
       } catch (e) {
         setErr((e as Error).message);
@@ -157,7 +180,7 @@ export function SettingsController({
       setBusy(true);
       try {
         await createTeamRpc(orgId, name);
-        router.refresh();
+        await refreshSettingsData();
       } catch (e) {
         setErr((e as Error).message);
       } finally {

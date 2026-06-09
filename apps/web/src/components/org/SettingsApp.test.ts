@@ -23,7 +23,7 @@ describe("SettingsController", () => {
   it("normalizes malformed member and team collections before rendering", async () => {
     const { SettingsController } = await import("./SettingsApp");
     const data = {
-      me: { id: "user_1", name: "Admin", initials: "A" },
+      me: { id: "user_1", name: "Admin", email: "admin@tvc.dev", initials: "A" },
       users: {
         user_1: { id: "user_1", name: "Admin", email: "admin@tvc.dev", initials: "A" },
       },

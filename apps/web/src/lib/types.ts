@@ -68,6 +68,7 @@ export interface TeamVM {
 export interface MeVM {
   id: string;
   name: string;
+  email: string;
   initials: string;
 }
 

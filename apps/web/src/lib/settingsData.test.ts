@@ -26,7 +26,7 @@ const current = {
   kind: "team",
   plan: "team",
   myRole: "owner",
-};
+} as const;
 
 describe("parseOrgSettingsResponse", () => {
   beforeEach(() => {
@@ -48,6 +48,61 @@ describe("parseOrgSettingsResponse", () => {
         }),
       ]),
     );
+  });
+
+  it("builds settings app data from a validated settings response", async () => {
+    const { buildSettingsAppData } = await import("./settingsViewModel");
+
+    const data = buildSettingsAppData({
+      me: { id: "user_1", name: "Admin", email: "admin@tvc.dev", initials: "A" },
+      current,
+      settings: {
+        members: [
+          {
+            userId: "user_1",
+            role: "owner",
+            joined: "2026-06-09T05:00:00.000Z",
+            pending: false,
+            name: "Admin",
+            email: "admin@tvc.dev",
+            initials: "A",
+          },
+        ],
+        teams: [
+          {
+            id: "team_1",
+            slug: "platform",
+            name: "Platform",
+            members: [
+              {
+                userId: "user_1",
+                role: "admin",
+                name: "Admin",
+                email: "admin@tvc.dev",
+                initials: "A",
+              },
+            ],
+          },
+        ],
+      },
+    });
+
+    expect(data.current.members).toEqual([
+      expect.objectContaining({ userId: "user_1", role: "owner", joined: "2026-06-09" }),
+    ]);
+    expect(data.current.teams).toEqual([
+      expect.objectContaining({
+        id: "team_1",
+        slug: "platform",
+        members: [{ userId: "user_1", role: "admin" }],
+      }),
+    ]);
+    expect(data.users.user_1).toEqual({
+      id: "user_1",
+      name: "Admin",
+      email: "admin@tvc.dev",
+      initials: "A",
+    });
   });
 
   it("makes loadSettingsPageData return null for malformed settings data", async () => {
