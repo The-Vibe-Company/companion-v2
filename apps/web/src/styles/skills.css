@@ -157,13 +157,16 @@ body { background: var(--color-canvas); color: var(--color-fg); font-family: var
 .chead { height: 34px; border-bottom: 1px solid var(--color-line); position: sticky; top: 0; background: var(--color-surface); z-index: 1; }
 .chead span { font-size: 10px; text-transform: uppercase; letter-spacing: var(--tracking-wide); color: var(--color-faint); }
 .chead .r { text-align: right; }
-.crow { height: 42px; cursor: pointer; position: relative; border-bottom: 1px solid color-mix(in oklab, var(--color-line) 55%, transparent);
+.crow { height: 42px; position: relative; border-bottom: 1px solid color-mix(in oklab, var(--color-line) 55%, transparent);
   transition: background-color var(--duration-fast) var(--ease-out-quint); }
-.crow::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 2px; background: transparent; }
+.crow::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 2px; background: transparent; z-index: 2; pointer-events: none; }
 .crow:hover { background: var(--color-surface-raised); }
 .crow.is-active { background: var(--color-accent-tint); }
 .crow.is-active::before { background: var(--color-accent-edge); }
-.crow:focus-visible { outline: 2px solid var(--color-accent); outline-offset: -2px; }
+.crow__hit { position: absolute; inset: 0; border: none; background: transparent; cursor: pointer; padding: 0; z-index: 0; }
+.crow__hit:focus-visible { outline: 2px solid var(--color-accent); outline-offset: -2px; }
+.crow > :not(.crow__hit) { position: relative; z-index: 1; pointer-events: none; }
+.crow .stars { pointer-events: auto; }
 .crow__name { font-family: var(--font-mono); font-size: var(--text-sm); font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--color-fg); display: flex; align-items: center; gap: 8px; }
 .crow__name .invalid { font-size: 10px; }
 .crow__scope { display: inline-flex; align-items: center; gap: 5px; font-family: var(--font-mono); font-size: var(--text-xs); color: var(--color-muted); }

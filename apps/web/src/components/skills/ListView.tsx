@@ -133,20 +133,13 @@ export function ListView({
           <span className="r">Updated</span>
         </div>
         {skills.map((s) => (
-          <div
-            key={s.id}
-            className={"crow" + (lastId === s.id ? " is-active" : "")}
-            role="button"
-            aria-label={`Open skill ${s.id}`}
-            tabIndex={0}
-            onClick={() => onOpen(s.id)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" || e.key === " ") {
-                e.preventDefault();
-                onOpen(s.id);
-              }
-            }}
-          >
+          <div key={s.id} className={"crow" + (lastId === s.id ? " is-active" : "")}>
+            <button
+              type="button"
+              className="crow__hit"
+              aria-label={`Open skill ${s.id}`}
+              onClick={() => onOpen(s.id)}
+            />
             <span className={"vdot vdot--" + vdot(s.validation)} />
             <span className="crow__name">
               {s.id}
@@ -169,13 +162,7 @@ export function ListView({
                 title={s.starred ? "Unstar this skill" : "Star this skill"}
                 aria-pressed={s.starred}
                 aria-label={(s.starred ? "Unstar" : "Star") + " " + s.id}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onToggleStar(s.id);
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" || e.key === " ") e.stopPropagation();
-                }}
+                onClick={() => onToggleStar(s.id)}
               >
                 <Icon name="star" size={13} />
                 <span className="tnum">{s.stars}</span>
