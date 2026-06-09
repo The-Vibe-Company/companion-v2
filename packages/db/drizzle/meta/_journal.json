@@ -64,6 +64,13 @@
       "when": 1780939700000,
       "tag": "0008_verify_existing_users",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1780939800000,
+      "tag": "0009_settings_team_description",
+      "breakpoints": true
     }
   ]
 }

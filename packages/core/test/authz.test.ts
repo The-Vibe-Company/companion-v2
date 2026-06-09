@@ -69,6 +69,21 @@ describe("isOrgAdmin / canManageOrg", () => {
   });
 });
 
+describe("settings services rely on these capability decisions", () => {
+  // Documentary: the workspace/team settings services gate on these exact predicates. updateOrg and
+  // deleteTeam require an org admin (`canManageOrg`); a developer is denied at both.
+  it("org rename/re-slug (updateOrg) is gated by canManageOrg", () => {
+    expect(canManageOrg("owner")).toBe(true);
+    expect(canManageOrg("admin")).toBe(true);
+    expect(canManageOrg("developer")).toBe(false);
+  });
+  it("team delete (deleteTeam) is gated by canManageOrg (org admin, not merely team admin)", () => {
+    expect(canManageOrg("owner")).toBe(true);
+    expect(canManageOrg("admin")).toBe(true);
+    expect(canManageOrg("developer")).toBe(false);
+  });
+});
+
 describe("canTouchOwner (grant/modify/remove the owner role)", () => {
   it("only an owner may", () => {
     expect(canTouchOwner("owner")).toBe(true);
