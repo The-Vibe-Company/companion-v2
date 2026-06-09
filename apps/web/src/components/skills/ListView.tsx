@@ -10,6 +10,7 @@ import { ViewTab } from "./ViewTab";
 export function ListView({
   skills,
   onOpen,
+  onToggleStar,
   onUpload,
   lastId,
   views,
@@ -31,6 +32,7 @@ export function ListView({
 }: {
   skills: SkillVM[];
   onOpen: (id: string) => void;
+  onToggleStar: (id: string) => void;
   onUpload: () => void;
   lastId: string | null;
   views: ViewDef[];
@@ -131,20 +133,13 @@ export function ListView({
           <span className="r">Updated</span>
         </div>
         {skills.map((s) => (
-          <div
-            key={s.id}
-            className={"crow" + (lastId === s.id ? " is-active" : "")}
-            role="button"
-            aria-label={`Open skill ${s.id}`}
-            tabIndex={0}
-            onClick={() => onOpen(s.id)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" || e.key === " ") {
-                e.preventDefault();
-                onOpen(s.id);
-              }
-            }}
-          >
+          <div key={s.id} className={"crow" + (lastId === s.id ? " is-active" : "")}>
+            <button
+              type="button"
+              className="crow__hit"
+              aria-label={`Open skill ${s.id}`}
+              onClick={() => onOpen(s.id)}
+            />
             <span className={"vdot vdot--" + vdot(s.validation)} />
             <span className="crow__name">
               {s.id}
@@ -161,10 +156,17 @@ export function ListView({
             </span>
             <span className="ver">{s.version ?? "—"}</span>
             <span className="r">
-              <span className={"stars" + (s.starred ? " is-on" : "")}>
+              <button
+                type="button"
+                className={"stars" + (s.starred ? " is-on" : "")}
+                title={s.starred ? "Unstar this skill" : "Star this skill"}
+                aria-pressed={s.starred}
+                aria-label={(s.starred ? "Unstar" : "Star") + " " + s.id}
+                onClick={() => onToggleStar(s.id)}
+              >
                 <Icon name="star" size={13} />
                 <span className="tnum">{s.stars}</span>
-              </span>
+              </button>
             </span>
             <span className="r when">{s.updated}</span>
           </div>
