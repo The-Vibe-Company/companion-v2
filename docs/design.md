@@ -147,8 +147,9 @@ directly to Postgres.
 - Onboarding: `GET /v1/onboarding/context` (email-domain classification + any auto-join org, no org id),
   `POST /v1/onboarding/join` (join the auto-join org for the verified domain),
   `POST /v1/onboarding/create` (create org + first team + invites, finish onboarding).
-- Tokens: `GET /v1/tokens` (list the caller's keys — admins see the whole org's — with no plaintext),
-  `POST /v1/tokens` (issue a scoped `cmp_pat_…`, plaintext returned once), `DELETE /v1/tokens/:id`.
+- Tokens: `GET /v1/tokens` (list the caller's own active keys, no plaintext — it backs the personal
+  Account pane, so it is caller-scoped even for admins), `POST /v1/tokens` (issue a scoped `cmp_pat_…`,
+  plaintext returned once), `DELETE /v1/tokens/:id` (an org admin may revoke any token by id).
   Session-authenticated only — a token cannot mint another.
 - Skills: `/v1/skills`, `/v1/skills/:slug`, `/v1/skills/:slug/versions`,
   `/v1/skills/:slug/download`, `/v1/skills/:slug/scope`, `/v1/skill-filter-preferences`,
