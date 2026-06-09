@@ -20,6 +20,8 @@ export interface SkillVM {
   error: string | null;
   owner: SkillOwnerVM;
   tools: string[];
+  compatibility: string | null;
+  metadata: Record<string, string>;
   size: string;
   license: string | null;
   checksum: string | null;
@@ -49,6 +51,8 @@ export function mapSkill(row: SkillListRow): SkillVM {
       team: row.team_name,
     },
     tools: row.tools ?? [],
+    compatibility: row.compatibility,
+    metadata: row.metadata ?? {},
     size: formatBytes(row.size_bytes),
     license: row.license,
     checksum: row.checksum,

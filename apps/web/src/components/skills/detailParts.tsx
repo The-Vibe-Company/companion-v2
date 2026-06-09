@@ -9,6 +9,10 @@ import { Avatar, SCOPE_DESC, SCOPE_ICON, ValidBadge } from "./blocks";
 
 const VIS_ORDER: Scope[] = ["private", "team", "public"];
 
+function metadataKeyLabel(key: string): string {
+  return key.startsWith("companion_") ? key.slice("companion_".length).replaceAll("_", " ") : key;
+}
+
 /** Editable visibility property — click to change scope, incl. make public. */
 export function VisibilityControl({
   scope,
@@ -88,6 +92,7 @@ export function PropList({
   skill: SkillVM;
   onChangeVisibility: (s: Scope) => void;
 }) {
+  const metadataEntries = Object.entries(skill.metadata).sort(([a], [b]) => a.localeCompare(b));
   return (
     <div className="props">
       <div className="prop">
@@ -182,6 +187,15 @@ export function PropList({
       <p className="railhead railhead--sub">Manifest</p>
       <div className="prop prop--stack">
         <span className="prop__label">
+          <Icon name="layers" size={14} />
+          Compatibility
+        </span>
+        <span className="prop__value">
+          <span className="mono prop__wrap">{skill.compatibility ?? "—"}</span>
+        </span>
+      </div>
+      <div className="prop prop--stack prop--metadata">
+        <span className="prop__label">
           <Icon name="shield" size={14} />
           Allowed tools
           <span className="prop__count">{skill.tools.length}</span>
@@ -207,6 +221,29 @@ export function PropList({
         </span>
         <span className="prop__value">
           <span className="mono">{skill.license ?? "—"}</span>
+        </span>
+      </div>
+      <div className="prop prop--stack">
+        <span className="prop__label">
+          <Icon name="braces" size={14} />
+          Metadata
+          <span className="prop__count">{metadataEntries.length}</span>
+        </span>
+        <span className="prop__value">
+          {metadataEntries.length ? (
+            <span className="kvlist">
+              {metadataEntries.map(([key, value]) => (
+                <span className="kv" key={key}>
+                  <span className="kv__k" title={key} aria-label={key}>
+                    {metadataKeyLabel(key)}
+                  </span>
+                  <span className="kv__v">{value}</span>
+                </span>
+              ))}
+            </span>
+          ) : (
+            <span style={{ color: "var(--color-muted)" }}>None declared</span>
+          )}
         </span>
       </div>
     </div>

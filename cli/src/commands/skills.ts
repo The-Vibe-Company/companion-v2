@@ -6,6 +6,7 @@ import type { LockedSkill, Scope, SkillListRow, SkillVersionRow } from "@compani
 import {
   bumpSemver,
   packDir,
+  prepareSkillDirForPublish,
   skillChecksum,
   toTar,
   unpackTo,
@@ -143,6 +144,28 @@ export interface PushOpts {
   dryRun?: boolean;
 }
 
+export function resolvePushVersion(input: {
+  setVersion?: string;
+  bump?: "patch" | "minor" | "major";
+  metadataVersion?: string;
+  metadataSkillId?: string;
+  legacyVersion?: string;
+  registry: RegistryInfo;
+}): string {
+  if (input.setVersion) return input.setVersion;
+  if (input.bump && input.registry.exists && input.registry.currentVersion) {
+    return bumpSemver(input.registry.currentVersion, input.bump);
+  }
+  const metadataIsPublishedProvenance = Boolean(input.registry.exists && input.metadataSkillId);
+  if (input.metadataVersion && !metadataIsPublishedProvenance) return input.metadataVersion;
+  if (input.legacyVersion) return input.legacyVersion;
+  return (
+    input.registry.exists && input.registry.currentVersion
+      ? bumpSemver(input.registry.currentVersion, "patch")
+      : "1.0.0"
+  );
+}
+
 export async function push(dir: string, opts: PushOpts, g: GlobalOpts): Promise<void> {
   const abs = resolve(dir);
   const result = await validateSkillDir(abs);
@@ -153,25 +176,34 @@ export async function push(dir: string, opts: PushOpts, g: GlobalOpts): Promise<
   const client = await getClient(g.profile, g.org);
   const reg = await getRegistryInfo(client, fm.name);
 
-  let version = fm.version;
-  if (reg.exists && reg.currentVersion) {
-    if (opts.bump) version = bumpSemver(reg.currentVersion, opts.bump);
-    else if (opts.setVersion) version = opts.setVersion;
-  } else if (opts.setVersion) {
-    version = opts.setVersion;
-  }
+  const version = resolvePushVersion({
+    setVersion: opts.setVersion,
+    bump: opts.bump,
+    metadataVersion: fm.metadata.companion_version,
+    metadataSkillId: fm.metadata.companion_skill_id,
+    legacyVersion: result.legacy?.version,
+    registry: reg,
+  });
 
-  const scope = (opts.scope ?? fm.scope ?? "private") as Scope;
+  const scope = (opts.scope ?? "private") as Scope;
   const team = scope === "team" ? (opts.team ?? null) : null;
   if (scope === "team" && !team) throw new CliError("team scope requires --team <slug>", 2);
 
   const packed = await packDir(abs);
   if (opts.dryRun) {
     if (g.json)
-      emitJson({ dryRun: true, name: fm.name, version, scope, checksum: packed.checksum, size: packed.sizeBytes, files: packed.files });
+      emitJson({
+        dryRun: true,
+        name: fm.name,
+        version,
+        scope,
+        localChecksum: packed.checksum,
+        localSize: packed.sizeBytes,
+        files: packed.files,
+      });
     else
       out(
-        `would publish ${pc.bold(`${fm.name}@${version}`)}  scope=${scope}  ${packed.checksum}  ${packed.sizeBytes} bytes  ${packed.files.length} files`,
+        `would publish ${pc.bold(`${fm.name}@${version}`)}  scope=${scope}  local=${packed.checksum}  ${packed.sizeBytes} bytes  ${packed.files.length} files`,
       );
     return;
   }
@@ -184,9 +216,23 @@ export async function push(dir: string, opts: PushOpts, g: GlobalOpts): Promise<
   if (team) fd.append("team", team);
   if (opts.message) fd.append("message", opts.message);
 
-  const published = await client.request<{ checksum: string }>("/v1/skills", { method: "POST", body: fd });
+  const published = await client.request<{ id: string; checksum: string; sizeBytes?: number }>("/v1/skills", { method: "POST", body: fd });
+  let lockRoot = abs;
+  let lockChecksum = published.checksum;
+  let lockSize = published.sizeBytes ?? packed.sizeBytes;
+  const warnings: string[] = [];
+  try {
+    const normalized = await prepareSkillDirForPublish(abs, { skillId: published.id, version });
+    lockRoot = normalized.rootDir;
+  } catch (error) {
+    lockChecksum = packed.checksum;
+    lockSize = packed.sizeBytes;
+    warnings.push(
+      `published remotely, but local SKILL.md could not be normalized: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
   const orgId = await getOrgId(client);
-  const lockDir = findLockfileDir(abs) ?? process.cwd();
+  const lockDir = findLockfileDir(lockRoot) ?? process.cwd();
   const lock = await loadLockfile(lockDir);
   if (!lock.registry.url) lock.registry = { url: client.url, orgId };
   upsertLockedSkill(lock, {
@@ -195,18 +241,21 @@ export async function push(dir: string, opts: PushOpts, g: GlobalOpts): Promise<
     team: team ?? null,
     pinned: null,
     resolved: version,
-    checksum: published.checksum,
-    size: packed.sizeBytes,
+    checksum: lockChecksum,
+    size: lockSize,
     source: "published",
-    installPath: relative(lockDir, abs) || ".",
-    frontmatter: { version, license: fm.license, tools: fm.tools },
+    installPath: relative(lockDir, lockRoot) || ".",
+    frontmatter: { version, license: fm.license, tools: fm.allowedTools },
     addedAt: lock.skills[fm.name]?.addedAt ?? nowIso(),
     updatedAt: nowIso(),
   });
   await saveLockfile(lockDir, lock);
 
-  if (g.json) emitJson({ ok: true, name: fm.name, version, checksum: published.checksum });
-  else out(pc.green(`published ${fm.name}@${version}`));
+  if (g.json) emitJson({ ok: true, name: fm.name, version, checksum: published.checksum, warnings });
+  else {
+    for (const warning of warnings) out(pc.yellow(`warning: ${warning}`));
+    out(pc.green(`published ${fm.name}@${version}`));
+  }
 }
 
 function parseSpec(spec: string): { name: string; version: string | null } {

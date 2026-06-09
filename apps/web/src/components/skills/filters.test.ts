@@ -23,6 +23,8 @@ function mk(p: Partial<SkillVM> & { id: string }): SkillVM {
     team: null,
     teamSlug: null,
     ...p,
+    compatibility: p.compatibility ?? null,
+    metadata: p.metadata ?? {},
   };
 }
 
