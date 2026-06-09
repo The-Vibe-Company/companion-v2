@@ -5,14 +5,12 @@ import { Icon } from "../Icon";
 import { PaneHead, EditField } from "./paneKit";
 import { RoleDot } from "./primitives";
 import { orgRole } from "./roles";
+import { WorkspaceLogoPicker } from "./WorkspaceLogoPicker";
 import type { OrgCtx } from "./model";
 
 /* ============================ Workspace › General ============================ */
 export function WorkspaceGeneralPane({ ctx }: { ctx: OrgCtx }) {
   const ws = ctx.currentOrg;
-  // The workspace URL is host-relative: show the real deployment host (self-host friendly), not a
-  // hard-coded domain. Resolved after mount so SSR and first client render agree (no host on the
-  // server); the prefix is cosmetic until then.
   const [host, setHost] = useState("");
   useEffect(() => setHost(window.location.host), []);
   const urlPrefix = host ? `${host}/` : "";
@@ -21,8 +19,8 @@ export function WorkspaceGeneralPane({ ctx }: { ctx: OrgCtx }) {
     <div className="sx-pane">
       <PaneHead title="Workspace" desc="Identity and configuration for the whole organization. Visible to all members." />
 
-      <div className="sx-profile">
-        <span className="sx-profile__av" style={{ borderRadius: "var(--radius-md)" }}>{ws.name[0]}</span>
+      <div className="sx-profile sx-profile--team">
+        <WorkspaceLogoPicker ctx={ctx} />
         <div className="sx-profile__meta">
           <div className="sx-profile__name">{ws.name}</div>
           <div className="sx-profile__email">{urlPrefix}{ws.slug}</div>

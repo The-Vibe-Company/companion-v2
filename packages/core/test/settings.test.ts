@@ -104,6 +104,8 @@ function fakeDb(options: FakeDbOptions = {}) {
     slug: "acme",
     domain: null as string | null,
     domainAutoJoin: false,
+    color: null as string | null,
+    logoUrl: null as string | null,
   };
 
   const updateBuilder = (table: unknown) => {
@@ -297,6 +299,57 @@ describe("updateOrg", () => {
     await expect(updateOrg({ actor: stranger, orgId: ORG_A, name: "Acme", database })).rejects.toThrow(
       "not allowed to update this organization",
     );
+  });
+
+  it("sets branding when no logo is configured yet", async () => {
+    const color = TEAM_BRAND_COLORS[0]!;
+    const logoUrl = "https://icon.horse/icon/acme.com";
+    const { database, calls } = fakeDb({
+      role: "admin",
+      org: { id: ORG_A, name: "Acme", slug: "acme", kind: "team", domain: null, domainAutoJoin: false, logoUrl: null },
+      updateReturning: [{ id: ORG_A, name: "Acme", slug: "acme", domain: null, domainAutoJoin: false, color, logoUrl }],
+    });
+    await expect(
+      updateOrg({ actor: admin, orgId: ORG_A, color, logoUrl, database }),
+    ).resolves.toMatchObject({ color, logoUrl });
+    expect(calls.updates.at(-1)?.patch).toMatchObject({ color, logoUrl });
+  });
+
+  it("replaces branding when a logo is already configured", async () => {
+    const logoUrl = "https://icon.horse/icon/other.com";
+    const { database, calls } = fakeDb({
+      role: "admin",
+      org: {
+        id: ORG_A,
+        name: "Acme",
+        slug: "acme",
+        kind: "team",
+        domain: null,
+        domainAutoJoin: false,
+        logoUrl: "https://icon.horse/icon/acme.com",
+      },
+      updateReturning: [{ id: ORG_A, name: "Acme", slug: "acme", domain: null, domainAutoJoin: false, color: null, logoUrl }],
+    });
+    await expect(updateOrg({ actor: admin, orgId: ORG_A, logoUrl, database })).resolves.toMatchObject({ logoUrl });
+    expect(calls.updates.at(-1)?.patch).toMatchObject({ logoUrl });
+  });
+
+  it("clears the logo when logoUrl is null", async () => {
+    const { database, calls } = fakeDb({
+      role: "admin",
+      org: {
+        id: ORG_A,
+        name: "Acme",
+        slug: "acme",
+        kind: "team",
+        domain: null,
+        domainAutoJoin: false,
+        logoUrl: "https://icon.horse/icon/acme.com",
+      },
+      updateReturning: [{ id: ORG_A, name: "Acme", slug: "acme", domain: null, domainAutoJoin: false, color: null, logoUrl: null }],
+    });
+    await expect(updateOrg({ actor: admin, orgId: ORG_A, logoUrl: null, database })).resolves.toMatchObject({ logoUrl: null });
+    expect(calls.updates.at(-1)?.patch).toMatchObject({ logoUrl: null });
   });
 });
 

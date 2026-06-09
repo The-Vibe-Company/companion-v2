@@ -8,6 +8,7 @@
 .og-switch__btn:hover { background: var(--color-surface-raised); }
 .og-switch__av { width: 26px; height: 26px; border-radius: var(--radius-md); display: grid; place-items: center; font-weight: 600; font-size: 13px; flex: none; overflow: hidden;
   background: var(--color-accent); color: var(--color-accent-fg); }
+.og-switch__av:has(img) { background: var(--color-surface-raised); color: var(--color-fg); border: 1px solid var(--color-line); }
 .og-switch__av img { width: 100%; height: 100%; object-fit: cover; }
 .og-switch__av--personal { background: var(--color-surface-raised); color: var(--color-fg); border: 1px solid var(--color-line); }
 .og-switch__meta { min-width: 0; flex: 1; overflow: hidden; }

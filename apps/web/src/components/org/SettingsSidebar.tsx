@@ -1,6 +1,8 @@
 "use client";
 
+import type { ReactNode } from "react";
 import { Icon } from "../Icon";
+import { WorkspaceAvatar } from "./WorkspaceAvatar";
 import type { OrgCtx, SettingsRoute, SettingsView } from "./model";
 
 /** One sidebar row — either an avatar chip (Profile / Workspace) or a Lucide icon. */
@@ -14,7 +16,7 @@ function NavItem({
 }: {
   active: boolean;
   icon?: string;
-  avatar?: { cls: string; txt: string };
+  avatar?: ReactNode;
   label: string;
   meta?: string;
   onClick: () => void;
@@ -25,11 +27,7 @@ function NavItem({
       aria-current={active ? "page" : undefined}
       onClick={onClick}
     >
-      {avatar ? (
-        <span className={"sx-av " + avatar.cls}>{avatar.txt}</span>
-      ) : (
-        <Icon name={icon ?? "circle"} size={16} />
-      )}
+      {avatar ?? <Icon name={icon ?? "circle"} size={16} />}
       <span className="sx-item__txt">{label}</span>
       {meta && <span className="sx-item__meta">{meta}</span>}
     </button>
@@ -81,7 +79,7 @@ export function SettingsSidebar({
           <div className="sx-group__label">Account</div>
           <NavItem
             active={is("profile")}
-            avatar={{ cls: "sx-av--me", txt: me.initials }}
+            avatar={<span className="sx-av sx-av--me">{me.initials}</span>}
             label="Profile"
             onClick={() => go({ view: "profile" })}
           />
@@ -104,7 +102,15 @@ export function SettingsSidebar({
           <div className="sx-group__label">Workspace</div>
           <NavItem
             active={is("general")}
-            avatar={{ cls: "sx-av--ws", txt: ws.name[0] ?? "?" }}
+            avatar={
+              <WorkspaceAvatar
+                org={ws}
+                className={
+                  "sx-av sx-av--ws" + (ws.kind === "personal" && !ws.logoUrl ? " is-personal" : "")
+                }
+                size={20}
+              />
+            }
             label="General"
             onClick={() => go({ view: "general" })}
           />

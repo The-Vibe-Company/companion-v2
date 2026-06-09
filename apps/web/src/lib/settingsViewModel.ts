@@ -104,6 +104,8 @@ export function buildSettingsAppData(input: {
     created: formatDate(settings.org.createdAt),
     domain: settings.org.domain ?? null,
     domainAutoJoin: settings.org.domainAutoJoin,
+    color: settings.org.color ?? current.color ?? null,
+    logoUrl: settings.org.logoUrl ?? current.logoUrl ?? null,
     members: settings.members.map((member) => ({
       userId: member.userId,
       role: member.role,

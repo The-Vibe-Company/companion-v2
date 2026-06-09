@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { orgSettingsResponseSchema, updateTeamInputSchema } from "../src/orgSettings";
+import {
+  isAllowedOrgLogoFile,
+  orgSettingsResponseSchema,
+  ORG_LOGO_FILE_ACCEPT,
+  resolveOrgLogoContentType,
+  updateTeamInputSchema,
+} from "../src/orgSettings";
 
 const org = {
   id: "org_1",
@@ -10,6 +16,8 @@ const org = {
   createdAt: "2026-06-01T12:00:00.000Z",
   domain: null,
   domainAutoJoin: false,
+  color: null,
+  logoUrl: null,
 };
 
 const domainJoin = {
@@ -130,5 +138,22 @@ describe("updateTeamInputSchema", () => {
     expect(updateTeamInputSchema.parse({ color: "oklch(0.56 0.13 250)" })).toEqual({
       color: "oklch(0.56 0.13 250)",
     });
+  });
+});
+
+describe("org logo file accept", () => {
+  it("includes logo extensions for native file pickers", () => {
+    expect(ORG_LOGO_FILE_ACCEPT).toBe(".png,.jpg,.jpeg,.webp,.gif");
+    expect(ORG_LOGO_FILE_ACCEPT).not.toContain("image/");
+  });
+
+  it("resolves MIME type from extension when the browser omits file.type", () => {
+    expect(resolveOrgLogoContentType({ type: "", name: "logo.PNG" })).toBe("image/png");
+    expect(resolveOrgLogoContentType({ type: "application/octet-stream", name: "brand.webp" })).toBe("image/webp");
+  });
+
+  it("rejects unsupported files", () => {
+    expect(isAllowedOrgLogoFile({ type: "application/pdf", name: "logo.pdf" })).toBe(false);
+    expect(isAllowedOrgLogoFile({ type: "image/svg+xml", name: "logo.svg" })).toBe(false);
   });
 });

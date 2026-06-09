@@ -44,6 +44,57 @@ export function skillArchiveKey(input: { orgId: string; slug: string; version: s
   return `${input.orgId}/${input.slug}/${input.version}.tar.gz`;
 }
 
+/** Stored workspace brand logo for an org (content-type is kept on the object). */
+export function orgLogoKey(orgId: string): string {
+  return `orgs/${orgId}/logo`;
+}
+
+export async function putOrgLogo(input: {
+  orgId: string;
+  body: Uint8Array;
+  contentType: string;
+  client?: S3Client;
+  config?: StorageConfig;
+}): Promise<void> {
+  const config = input.config ?? getStorageConfig();
+  const client = input.client ?? createStorageClient(config);
+  await client.send(
+    new PutObjectCommand({
+      Bucket: config.bucket,
+      Key: orgLogoKey(input.orgId),
+      Body: input.body,
+      ContentType: input.contentType,
+    }),
+  );
+}
+
+export async function getOrgLogo(input: {
+  orgId: string;
+  client?: S3Client;
+  config?: StorageConfig;
+}): Promise<{ body: Buffer; contentType: string } | null> {
+  const config = input.config ?? getStorageConfig();
+  const client = input.client ?? createStorageClient(config);
+  try {
+    const res = await client.send(
+      new GetObjectCommand({
+        Bucket: config.bucket,
+        Key: orgLogoKey(input.orgId),
+      }),
+    );
+    if (!res.Body) return null;
+    const bytes = await res.Body.transformToByteArray();
+    return {
+      body: Buffer.from(bytes),
+      contentType: res.ContentType ?? "application/octet-stream",
+    };
+  } catch (error) {
+    const name = error instanceof Error ? error.name : "";
+    if (name === "NoSuchKey" || name === "NotFound") return null;
+    throw error;
+  }
+}
+
 export async function putSkillArchive(input: {
   key: string;
   body: Uint8Array;

@@ -21,6 +21,7 @@ import {
   getSkillFilterPreferences,
   getOrgSettings,
   getDownloadVersion,
+  getOrgLogoAsset,
   issueApiToken,
   joinOrgByDomain,
   listApiTokens,
@@ -40,6 +41,8 @@ import {
   setSkillFilterPreferences,
   setSkillScope,
   setTeamMemberRole,
+  setOrgLogoFromUpload,
+  orgLogoPublicPath,
   toggleStar,
   updateOrg,
   updateTeam,
@@ -57,6 +60,7 @@ import {
   skillFilterPreferencesSchema,
   updateOrgInputSchema,
   updateTeamInputSchema,
+  resolveOrgLogoContentType,
   updateUserProfileInputSchema,
   type Scope,
   type SkillFrontmatter,
@@ -64,6 +68,8 @@ import {
 import {
   deleteSkillArchive,
   getSkillArchive,
+  getOrgLogo,
+  putOrgLogo,
   skillArchiveKey,
   putSkillArchive,
   signedSkillArchiveUrl,
@@ -488,9 +494,63 @@ app.put("/v1/orgs/current", async (c) => {
     const input = updateOrgInputSchema.parse(await c.req.json());
     return c.json(
       await withTenant(c, ({ actor, orgId, database }) =>
-        updateOrg({ actor, orgId, name: input.name, slug: input.slug, domainAutoJoin: input.domainAutoJoin, database }),
+        updateOrg({
+          actor,
+          orgId,
+          name: input.name,
+          slug: input.slug,
+          domainAutoJoin: input.domainAutoJoin,
+          color: input.color,
+          logoUrl: input.logoUrl,
+          database,
+        }),
       ),
     );
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
+/** Upload a workspace logo image (once — while no logo is configured). */
+app.post(
+  "/v1/orgs/current/logo",
+  bodyLimit({ maxSize: 2 * 1024 * 1024, onError: (c) => jsonError(c, "logo exceeds the 2 MB upload limit", 413) }),
+  async (c) => {
+    try {
+      if (isTokenRequest(c)) throw new Error("personal access tokens cannot update the workspace");
+      const file = (await c.req.formData()).get("file");
+      if (!(file instanceof File)) throw new Error("file is required");
+      const contentType = resolveOrgLogoContentType(file);
+      if (!contentType) throw new Error("logo must be a PNG, JPEG, WebP, or GIF image");
+      const body = Buffer.from(await file.arrayBuffer());
+      if (!body.length) throw new Error("file is empty");
+
+      return c.json(
+        await withTenant(c, async ({ actor, orgId, database }) => {
+          await putOrgLogo({ orgId, body, contentType });
+          return setOrgLogoFromUpload({ actor, orgId, logoUrl: orgLogoPublicPath(orgId), database });
+        }),
+      );
+    } catch (error) {
+      return jsonError(c, error);
+    }
+  },
+);
+
+/** Serve a hosted workspace logo binary for org members. */
+app.get("/v1/orgs/:orgId/logo", async (c) => {
+  try {
+    const actor = actorFromContext(c, true);
+    const orgId = c.req.param("orgId");
+    await getOrgLogoAsset({ actor, orgId });
+    const asset = await getOrgLogo({ orgId });
+    if (!asset) return c.json({ error: "logo not found" }, 404);
+    return new Response(asset.body, {
+      headers: {
+        "Content-Type": asset.contentType,
+        "Cache-Control": "private, no-cache",
+      },
+    });
   } catch (error) {
     return jsonError(c, error);
   }

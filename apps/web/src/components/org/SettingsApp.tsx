@@ -19,6 +19,7 @@ import {
   updateMe as updateMeRpc,
   updateOrg as updateOrgRpc,
   updateTeam as updateTeamRpc,
+  uploadWorkspaceLogo as uploadWorkspaceLogoRpc,
 } from "@/lib/org";
 import {
   applyAccent,
@@ -252,6 +253,8 @@ export function SettingsController({
             slug: res.slug,
             domain: res.domain ?? null,
             domainAutoJoin: res.domainAutoJoin,
+            color: res.color ?? null,
+            logoUrl: res.logoUrl ?? null,
           })),
         )
         .catch((e: Error) => {
@@ -259,6 +262,27 @@ export function SettingsController({
           void refreshSettingsData();
         })
         .finally(() => setBusy(false));
+    },
+    uploadWorkspaceLogo: async (file) => {
+      setBusy(true);
+      try {
+        const res = await uploadWorkspaceLogoRpc(file);
+        setCurrent((c) => ({
+          ...c,
+          name: res.name,
+          slug: res.slug,
+          domain: res.domain ?? null,
+          domainAutoJoin: res.domainAutoJoin,
+          color: res.color ?? null,
+          logoUrl: res.logoUrl ?? null,
+        }));
+      } catch (e) {
+        setErr(e instanceof Error ? e.message : String(e));
+        void refreshSettingsData();
+        throw e;
+      } finally {
+        setBusy(false);
+      }
     },
     updateTeam: (teamId, patch) => {
       setCurrent((c) => ({
