@@ -1,6 +1,22 @@
-import { createOrg, ensureUserBootstrap, listOrgs, markOnboarded } from "@companion/core/services";
+import type { Scope } from "@companion/contracts";
+import {
+  createOrg,
+  createTeam,
+  ensureUserBootstrap,
+  listOrgs,
+  listSkills,
+  listTeamsForUser,
+  markOnboarded,
+  publishSkillVersion,
+  type ActorContext,
+} from "@companion/core/services";
 import { closeDb, db, schema } from "@companion/db";
+import { packDir, parseFrontmatter } from "@companion/skills";
+import { putSkillArchive, skillArchiveKey } from "@companion/storage";
 import { eq } from "drizzle-orm";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const DEFAULT_EMAIL = "admin@tvc.dev";
 const DEFAULT_PASSWORD = "adminadmin";
@@ -46,6 +62,142 @@ function createdMessage(email: string, password: string): string {
     return `Seeded local test user ${email}; password was read from COMPANION_SEED_PASSWORD`;
   }
   return `Seeded local test user ${email} / ${password}`;
+}
+
+const SEED_TEAM_NAME = "Engineering";
+
+function storageConfigured(): boolean {
+  return Boolean(
+    process.env.S3_ENDPOINT &&
+      process.env.S3_ACCESS_KEY_ID &&
+      process.env.S3_SECRET_ACCESS_KEY &&
+      process.env.S3_BUCKET_SKILL_ARCHIVES,
+  );
+}
+
+interface SeedSkillSpec {
+  slug: string;
+  version: string;
+  description: string;
+  body: string;
+  scope: Scope;
+  teamSlug?: string;
+  tools?: string[];
+  license?: string;
+}
+
+function buildSkillMd(spec: Pick<SeedSkillSpec, "slug" | "version" | "description" | "body" | "tools" | "license">): string {
+  const lines = [
+    "---",
+    `name: ${spec.slug}`,
+    `version: ${spec.version}`,
+    `description: ${JSON.stringify(spec.description)}`,
+  ];
+  if (spec.license) lines.push(`license: ${spec.license}`);
+  if (spec.tools?.length) {
+    lines.push("tools:");
+    for (const tool of spec.tools) lines.push(`  - ${tool}`);
+  }
+  lines.push("---");
+  return `${lines.join("\n")}\n\n${spec.body.trim()}\n`;
+}
+
+async function seedSkill(actor: ActorContext, orgId: string, spec: SeedSkillSpec): Promise<void> {
+  const dir = await mkdtemp(join(tmpdir(), "companion-seed-skill-"));
+  try {
+    const md = buildSkillMd(spec);
+    await writeFile(join(dir, "SKILL.md"), md);
+    const canonical = await packDir(dir);
+    const parsed = parseFrontmatter(md);
+    if (!parsed.ok) throw new Error(parsed.error);
+    const fm = parsed.data;
+    const key = skillArchiveKey({ orgId, slug: fm.name, version: spec.version });
+    const payload = {
+      slug: fm.name,
+      scope: spec.scope,
+      team_slug: spec.teamSlug ?? null,
+      version: spec.version,
+      description: fm.description,
+      checksum: canonical.checksum,
+      storage_path: key,
+      size_bytes: canonical.sizeBytes,
+      frontmatter: JSON.stringify(fm, null, 2),
+      tools: fm.tools,
+      license: fm.license ?? null,
+      note: "Seeded for local development",
+    };
+    try {
+      await putSkillArchive({ key, body: canonical.archive, preventOverwrite: true });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!message.toLowerCase().includes("precondition") && !message.toLowerCase().includes("already exists")) {
+        throw error;
+      }
+    }
+    await publishSkillVersion({ actor, orgId, payload, archiveKey: key });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+async function seedDemoContent(actor: ActorContext): Promise<void> {
+  const orgs = await listOrgs(actor);
+  if (orgs.length === 0) return;
+  const orgId = orgs[0]!.org_id;
+
+  let teamSlug = (await listTeamsForUser({ actor, orgId }))[0]?.slug;
+  if (!teamSlug) {
+    const created = await createTeam({ actor, orgId, name: SEED_TEAM_NAME });
+    teamSlug = created.slug;
+    console.log(`Seeded team "${SEED_TEAM_NAME}" (${teamSlug})`);
+  }
+
+  if (!storageConfigured()) {
+    console.warn("Skipping demo skills: S3 storage is not configured (S3_ENDPOINT and related env vars)");
+    return;
+  }
+
+  const existingSlugs = new Set((await listSkills({ actor, orgId })).map((skill) => skill.slug));
+  const specs: SeedSkillSpec[] = [
+    {
+      slug: "pdf-extract",
+      version: "1.0.0",
+      description: "Extract text, tables, and metadata from PDF documents.",
+      body: "# pdf-extract\n\nExtracts text, tables, and metadata from PDF documents.",
+      scope: "public",
+      tools: ["read_file", "run_python"],
+      license: "MIT",
+    },
+    {
+      slug: "code-review",
+      version: "1.0.0",
+      description: "Review pull requests for bugs, style, and missing tests.",
+      body: "# code-review\n\nStructured PR review checklist for backend and frontend changes.",
+      scope: "team",
+      teamSlug,
+      tools: ["read_file", "grep"],
+      license: "MIT",
+    },
+    {
+      slug: "meeting-notes",
+      version: "1.0.0",
+      description: "Turn rough meeting transcripts into concise action items.",
+      body: "# meeting-notes\n\nSummarize discussions and extract owners, deadlines, and follow-ups.",
+      scope: "private",
+      tools: ["read_file"],
+    },
+  ];
+
+  for (const spec of specs) {
+    if (existingSlugs.has(spec.slug)) continue;
+    try {
+      await seedSkill(actor, orgId, spec);
+      console.log(`Seeded skill ${spec.slug}@${spec.version} (${spec.scope})`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(`Skipped skill ${spec.slug}: ${message}`);
+    }
+  }
 }
 
 async function createAuthUser(input: { email: string; password: string; name: string }): Promise<void> {
@@ -104,6 +256,7 @@ async function main(): Promise<void> {
     await createOrg({ actor, name: "Acme", kind: "team" });
   }
   await markOnboarded(actor);
+  await seedDemoContent(actor);
 
   console.log(created ? createdMessage(email, password) : `Local test user ${email} already exists; leaving password unchanged`);
 }
