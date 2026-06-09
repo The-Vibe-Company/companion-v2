@@ -1,6 +1,9 @@
+import { SettingsDrawerBackgroundGuard } from "@/components/org/SettingsDrawer";
+
 export default function Loading() {
   return (
     <div className="settings-drawer settings-drawer--loading" role="status" aria-live="polite" aria-busy="true">
+      <SettingsDrawerBackgroundGuard />
       <span className="sr-only">Loading settings…</span>
       <div className="settings-drawer__panel" aria-hidden="true">
         <div className="og-set">

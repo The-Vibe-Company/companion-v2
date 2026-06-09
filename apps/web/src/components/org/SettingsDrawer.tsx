@@ -8,6 +8,48 @@ import type { SettingsAppData, SettingsDialog, SettingsTab } from "./model";
 const FOCUSABLE =
   'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
+export function SettingsDrawerBackgroundGuard() {
+  useEffect(() => {
+    const drawer = document.querySelector<HTMLElement>(".settings-drawer");
+    const parent = drawer?.parentElement;
+    if (!drawer || !parent) return;
+
+    const hiddenSiblings = Array.from(parent.children)
+      .filter((node): node is HTMLElement => (
+        node instanceof HTMLElement
+        && node !== drawer
+        && !node.contains(drawer)
+        && node.tagName !== "SCRIPT"
+        && node.tagName !== "STYLE"
+        && node.tagName !== "NEXTJS-PORTAL"
+        && node.tagName !== "NEXT-ROUTE-ANNOUNCER"
+      ))
+      .map((element) => ({
+        element,
+        inert: element.inert,
+        ariaHidden: element.getAttribute("aria-hidden"),
+      }));
+
+    for (const { element } of hiddenSiblings) {
+      element.inert = true;
+      element.setAttribute("aria-hidden", "true");
+    }
+
+    return () => {
+      for (const { element, inert, ariaHidden } of hiddenSiblings) {
+        element.inert = inert;
+        if (ariaHidden === null) {
+          element.removeAttribute("aria-hidden");
+        } else {
+          element.setAttribute("aria-hidden", ariaHidden);
+        }
+      }
+    };
+  }, []);
+
+  return null;
+}
+
 export function SettingsDrawer({
   data,
   initialTab,
@@ -66,6 +108,7 @@ export function SettingsDrawer({
         if (e.target === e.currentTarget) close();
       }}
     >
+      <SettingsDrawerBackgroundGuard />
       <div
         className="settings-drawer__panel"
         role="dialog"
