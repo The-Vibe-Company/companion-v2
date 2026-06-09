@@ -170,7 +170,9 @@ function fakeDb(options: FakeDbOptions = {}) {
     calls.txSequence.push("delete");
     return { where: () => Promise.resolve(undefined) };
   });
-  const txHandle = { update: txUpdate, delete: txDelete };
+  // deleteTeam now takes an advisory lock and counts teams INSIDE the transaction, so the tx
+  // handle must also answer execute()/select() (the count reuses the same select builder).
+  const txHandle = { update: txUpdate, delete: txDelete, select: vi.fn(selectBuilder), execute: vi.fn(async () => undefined) };
 
   const database = {
     query: {
@@ -401,13 +403,12 @@ describe("listApiTokens", () => {
     expect(whereTouchesColumn(calls.tokenWhere, "revoked_at")).toBe(true);
   });
 
-  it("lets an admin see all org tokens (where omits userId)", async () => {
+  it("scopes an org admin to their OWN tokens too (personal pane, not an org-wide view)", async () => {
     const { database, calls } = fakeDb({ role: "admin", tokenRows: [tokenRow] });
     await listApiTokens({ actor: admin, orgId: ORG_A, database });
-    expect(whereMentions(calls.tokenWhere, admin.id)).toBe(false);
-    expect(whereMentions(calls.tokenWhere, developer.id)).toBe(false);
+    // The personal "Account › API keys" pane must never surface other members' keys, even to an admin.
+    expect(whereMentions(calls.tokenWhere, admin.id)).toBe(true);
     expect(whereMentions(calls.tokenWhere, ORG_A)).toBe(true);
-    // Even an org admin should not see revoked keys resurrected into the active list.
     expect(whereTouchesColumn(calls.tokenWhere, "revoked_at")).toBe(true);
   });
 

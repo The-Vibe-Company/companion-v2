@@ -499,13 +499,16 @@ export async function deleteTeam(input: {
     where: and(eq(schema.teams.orgId, input.orgId), eq(schema.teams.id, input.teamId)),
   });
   if (!team) throw new Error("team not found");
-  const [teamCount] = await database
-    .select({ value: count() })
-    .from(schema.teams)
-    .where(eq(schema.teams.orgId, input.orgId));
-  if (Number(teamCount?.value ?? 0) <= 1) throw new Error("organization must keep at least one team");
 
   await database.transaction(async (tx) => {
+    // Serialize concurrent deletes for this org so the "keep at least one team" invariant can't be
+    // raced (two deletes both seeing count > 1 and leaving zero teams). Mirrors the org-owner guard.
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`companion:org-teams:${input.orgId}`}))`);
+    const [teamCount] = await tx
+      .select({ value: count() })
+      .from(schema.teams)
+      .where(eq(schema.teams.orgId, input.orgId));
+    if (Number(teamCount?.value ?? 0) <= 1) throw new Error("organization must keep at least one team");
     // Re-scope this team's skills to private BEFORE deleting so the team_id/scope CHECK stays satisfied.
     await tx
       .update(schema.skills)
@@ -1309,15 +1312,16 @@ export async function listApiTokens(input: {
   const database = input.database ?? db;
   const role = await getOrgRole(input.orgId, input.actor.id, database);
   if (!role) throw new Error("not a member of this organization");
+  // Always scope to the caller's OWN tokens: this backs the personal "Account › API keys" pane,
+  // so even an org admin must not see (or be able to revoke from here) other members' keys. The
+  // admin's broader revoke capability stays available by token id in `revokeApiToken`.
   // Only active tokens: revoke is a soft delete (revoked_at is set, the row stays), so revoked
-  // keys must be filtered out or they reappear in the settings list masked as if still active.
-  const where = canManageOrg(role)
-    ? and(eq(schema.apiTokens.orgId, input.orgId), isNull(schema.apiTokens.revokedAt))
-    : and(
-        eq(schema.apiTokens.orgId, input.orgId),
-        eq(schema.apiTokens.userId, input.actor.id),
-        isNull(schema.apiTokens.revokedAt),
-      );
+  // keys must be filtered out or they reappear in the list masked as if still active.
+  const where = and(
+    eq(schema.apiTokens.orgId, input.orgId),
+    eq(schema.apiTokens.userId, input.actor.id),
+    isNull(schema.apiTokens.revokedAt),
+  );
   const rows = await database
     .select({
       id: schema.apiTokens.id,
