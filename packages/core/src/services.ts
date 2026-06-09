@@ -75,6 +75,8 @@ export interface OrgSettingsTeam {
   slug: string;
   name: string;
   description: string | null;
+  color: string | null;
+  icon: string | null;
   members: Array<{
     userId: string;
     role: TeamRole;
