@@ -11,14 +11,14 @@ export const SCOPE_ICON: Record<string, string> = {
 /**
  * The list "Scope" cell, context-aware: each scope has a distinct icon for quick
  * differentiation, and the label carries the specific identity —
- *   public -> "public" · team -> the team · private -> the owner's short name.
+ *   public -> "public" · team -> the team display name · private -> the owner's short name.
  */
 export function scopeMeta(s: SkillVM): { icon: string; label: string } {
   switch (s.scope) {
     case "public":
       return { icon: "globe", label: "public" };
     case "team":
-      return { icon: "users", label: s.teamSlug ?? s.team ?? "team" };
+      return { icon: "users", label: s.team ?? s.teamSlug ?? "team" };
     case "private":
       return { icon: "lock", label: s.owner.handle ?? s.owner.initials.toLowerCase() };
     default:

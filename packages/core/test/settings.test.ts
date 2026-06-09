@@ -54,7 +54,9 @@ function whereTouchesColumn(expr: unknown, columnName: string): boolean {
 interface FakeDbOptions {
   /** orgRole returned by `getOrgRole` for the (orgId, userId) lookup; `null` => non-member. */
   role?: "owner" | "admin" | "developer" | null;
-  /** Result of `query.organizations.findFirst` (org slug-conflict / getOrgSettings lookups). */
+  /** Result of the first `query.organizations.findFirst` (the org row under update). */
+  org?: Record<string, unknown> | null;
+  /** Result of the second `query.organizations.findFirst` (slug-conflict probe). */
   orgConflict?: Record<string, unknown> | null;
   /** Result of `query.teams.findFirst` (team slug-conflict / team lookup). */
   team?: Record<string, unknown> | null;
@@ -89,6 +91,21 @@ function fakeDb(options: FakeDbOptions = {}) {
   if (options.teamConflict !== undefined) teamFindResults.push(options.teamConflict);
   teamFindResults.push(options.team ?? null);
 
+  const orgFindResults: Array<Record<string, unknown> | null | undefined> = [
+    options.org === undefined
+      ? { id: ORG_A, name: "Acme", slug: "acme", domain: null, domainAutoJoin: false }
+      : options.org,
+  ];
+  if (options.orgConflict !== undefined) orgFindResults.push(options.orgConflict);
+
+  const defaultOrgUpdateRow = {
+    id: ORG_A,
+    name: "Acme",
+    slug: "acme",
+    domain: null as string | null,
+    domainAutoJoin: false,
+  };
+
   const updateBuilder = (table: unknown) => {
     const record: { table: unknown; patch?: Record<string, unknown>; where?: unknown } = { table };
     calls.updates.push(record);
@@ -102,7 +119,9 @@ function fakeDb(options: FakeDbOptions = {}) {
         return api;
       },
       returning() {
-        return Promise.resolve(options.updateReturning ?? []);
+        return Promise.resolve(
+          options.updateReturning ?? [{ ...defaultOrgUpdateRow }],
+        );
       },
       then(resolve: (v: unknown) => unknown) {
         return Promise.resolve(undefined).then(resolve);
@@ -161,7 +180,10 @@ function fakeDb(options: FakeDbOptions = {}) {
         return api;
       },
       where() {
-        return Promise.resolve(undefined);
+        return api;
+      },
+      returning() {
+        return Promise.resolve(options.updateReturning ?? [{ ...defaultOrgUpdateRow }]);
       },
     };
     return api;
@@ -180,7 +202,10 @@ function fakeDb(options: FakeDbOptions = {}) {
         findFirst: vi.fn(async () => (options.role === undefined || options.role === null ? null : { orgRole: options.role })),
       },
       organizations: {
-        findFirst: vi.fn(async () => options.orgConflict ?? null),
+        findFirst: vi.fn(async () => (orgFindResults.length ? orgFindResults.shift() ?? null : null)),
+      },
+      user: {
+        findFirst: vi.fn(async () => ({ emailVerified: true })),
       },
       teams: {
         findFirst: vi.fn(async () => (teamFindResults.length ? teamFindResults.shift() ?? null : options.team ?? null)),
@@ -209,10 +234,13 @@ describe("updateOrg", () => {
     [null, false], // non-member
   ];
   it.each(roleCases)("role=%s -> allowed=%s", async (role, allowed) => {
-    const { database } = fakeDb({ role, updateReturning: [{ id: ORG_A, name: "Acme", slug: "acme" }] });
+    const { database } = fakeDb({
+      role,
+      updateReturning: [{ id: ORG_A, name: "Acme", slug: "acme", domain: null, domainAutoJoin: false }],
+    });
     const run = updateOrg({ actor: role === null ? stranger : owner, orgId: ORG_A, name: "Acme", database });
     if (allowed) {
-      await expect(run).resolves.toEqual({ id: ORG_A, name: "Acme", slug: "acme" });
+      await expect(run).resolves.toMatchObject({ id: ORG_A, name: "Acme", slug: "acme" });
     } else {
       await expect(run).rejects.toThrow("not allowed to update this organization");
     }
@@ -239,6 +267,18 @@ describe("updateOrg", () => {
   it("rejects an empty patch with nothing to update", async () => {
     const { database } = fakeDb({ role: "owner" });
     await expect(updateOrg({ actor: owner, orgId: ORG_A, database })).rejects.toThrow("nothing to update");
+  });
+
+  it("enables domain auto-join for the actor's corporate domain", async () => {
+    const { database, calls } = fakeDb({
+      role: "admin",
+      org: { id: ORG_A, name: "Acme", slug: "acme", domain: null, domainAutoJoin: false },
+      updateReturning: [{ id: ORG_A, name: "Acme", slug: "acme", domain: "a.dev", domainAutoJoin: true }],
+    });
+    await expect(
+      updateOrg({ actor: admin, orgId: ORG_A, domainAutoJoin: true, database }),
+    ).resolves.toMatchObject({ domain: "a.dev", domainAutoJoin: true });
+    expect(calls.txPatch).toMatchObject({ domain: "a.dev", domainAutoJoin: true });
   });
 
   it("denies a member of another org (cross-tenant)", async () => {

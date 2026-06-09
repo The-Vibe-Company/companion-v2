@@ -110,6 +110,8 @@ export function buildSettingsAppData(input: {
     plan: settings.org.plan,
     myRole: current.myRole,
     created: formatDate(settings.org.createdAt),
+    domain: settings.org.domain ?? null,
+    domainAutoJoin: settings.org.domainAutoJoin,
     members: settings.members.map((member) => ({
       userId: member.userId,
       role: member.role,
@@ -123,6 +125,8 @@ export function buildSettingsAppData(input: {
       slug: team.slug,
       name: team.name,
       description: team.description ?? "",
+      color: team.color ?? null,
+      icon: team.icon ?? null,
       members: team.members.map((member) => ({ userId: member.userId, role: member.role })),
     })),
   };
@@ -141,6 +145,10 @@ export function buildSettingsAppData(input: {
   return {
     me,
     current: currentFull,
+    domainJoin: {
+      actorDomain: settings.domainJoin.actorDomain,
+      actorDomainIsPersonal: settings.domainJoin.actorDomainIsPersonal,
+    },
     users,
     invites,
     apiKeys: tokens.map(mapApiKey),

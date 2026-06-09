@@ -28,6 +28,8 @@ export const orgSettingsTeamSchema = z.object({
   slug: z.string(),
   name: z.string(),
   description: z.string().nullable().default(null),
+  color: z.string().nullable().default(null),
+  icon: z.string().nullable().default(null),
   members: z.array(orgSettingsTeamMemberSchema).default([]),
 });
 export type OrgSettingsTeam = z.infer<typeof orgSettingsTeamSchema>;
@@ -52,11 +54,21 @@ export const orgSettingsOrgSchema = z.object({
   kind: z.enum(["personal", "team"]),
   plan: z.enum(["free", "team"]),
   createdAt: z.string(),
+  domain: z.string().nullable().default(null),
+  domainAutoJoin: z.boolean().default(false),
 });
 export type OrgSettingsOrg = z.infer<typeof orgSettingsOrgSchema>;
 
+/** Signed-in actor context for the domain auto-join control (Workspace › General). */
+export const orgSettingsDomainJoinSchema = z.object({
+  actorDomain: z.string().nullable(),
+  actorDomainIsPersonal: z.boolean(),
+});
+export type OrgSettingsDomainJoin = z.infer<typeof orgSettingsDomainJoinSchema>;
+
 export const orgSettingsResponseSchema = z.object({
   org: orgSettingsOrgSchema,
+  domainJoin: orgSettingsDomainJoinSchema,
   members: z.array(orgSettingsMemberSchema).default([]),
   teams: z.array(orgSettingsTeamSchema).default([]),
   invitations: z.array(orgSettingsInvitationSchema).default([]),
@@ -69,26 +81,34 @@ export const updateUserProfileInputSchema = z.object({
 });
 export type UpdateUserProfileInput = z.infer<typeof updateUserProfileInputSchema>;
 
-/** Body of `PUT /v1/orgs/current` — rename and/or re-slug the workspace. */
+/** Body of `PUT /v1/orgs/current` — rename, re-slug, and/or edit domain auto-join. */
 export const updateOrgInputSchema = z
   .object({
     name: z.string().min(1).max(120).optional(),
     slug: z.string().min(1).max(120).optional(),
+    domainAutoJoin: z.boolean().optional(),
   })
-  .refine((v) => v.name !== undefined || v.slug !== undefined, {
+  .refine((v) => v.name !== undefined || v.slug !== undefined || v.domainAutoJoin !== undefined, {
     message: "Provide at least one field to update.",
   });
 export type UpdateOrgInput = z.infer<typeof updateOrgInputSchema>;
 
-/** Body of `PUT /v1/teams/:teamId` — rename, re-slug, and/or edit description. */
+/** Body of `PUT /v1/teams/:teamId` — rename, re-slug, describe, and/or edit branding. */
 export const updateTeamInputSchema = z
   .object({
     name: z.string().min(1).max(120).optional(),
     slug: z.string().min(1).max(120).optional(),
     description: z.string().max(2000).nullish(),
+    color: z.string().max(120).nullish(),
+    icon: z.string().max(32).nullish(),
   })
   .refine(
-    (v) => v.name !== undefined || v.slug !== undefined || v.description !== undefined,
+    (v) =>
+      v.name !== undefined ||
+      v.slug !== undefined ||
+      v.description !== undefined ||
+      v.color !== undefined ||
+      v.icon !== undefined,
     { message: "Provide at least one field to update." },
   );
 export type UpdateTeamInput = z.infer<typeof updateTeamInputSchema>;

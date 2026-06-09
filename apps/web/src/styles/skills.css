@@ -4,13 +4,6 @@
    ============================================================================ */
 
 :root {
-  --color-accent:       oklch(0.81 0.166 88);
-  --color-accent-hover: oklch(0.75 0.166 88);
-  --color-accent-fg:    oklch(0.27 0.04 88);
-  --color-accent-ring:  oklch(0.66 0.166 88 / 0.55);
-  --color-accent-tint:  oklch(0.955 0.05 88);
-  --color-accent-line:  oklch(0.66 0.166 88 / 0.30);
-  --color-accent-edge:  oklch(0.81 0.166 88);
   --sidebar-w: 244px;
 }
 
@@ -278,7 +271,7 @@ body { background: var(--color-canvas); color: var(--color-fg); font-family: var
 .act { display: grid; grid-template-columns: 24px 1fr; column-gap: 12px; }
 .act__rail { display: flex; flex-direction: column; align-items: center; }
 .act__node { width: 24px; height: 24px; border-radius: var(--radius-full); background: var(--color-surface-raised); border: 1px solid var(--color-line); display: grid; place-items: center; color: var(--color-faint); flex: none; }
-.act__node--cur { background: var(--color-accent-tint); border-color: var(--color-accent-line); color: var(--color-accent-fg); }
+.act__node--cur { background: var(--color-accent-tint); border-color: var(--color-accent-line); color: var(--color-accent-edge); }
 .act__line { flex: 1; width: 1px; background: var(--color-line); margin: 2px 0; }
 .act__body { padding-bottom: 16px; min-width: 0; }
 .act:last-child .act__body { padding-bottom: 0; }

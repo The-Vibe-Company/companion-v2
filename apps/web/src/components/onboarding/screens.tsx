@@ -133,7 +133,7 @@ const EMOJIS: EmojiEntry[] = [
   { e: "🌈", k: "rainbow design color" }, { e: "❤️", k: "heart love care" },
 ];
 
-function EmojiPicker({ value, onPick, onClose }: { value?: string; onPick: (e: string | null) => void; onClose: () => void }) {
+export function EmojiPicker({ value, onPick, onClose }: { value?: string; onPick: (e: string | null) => void; onClose: () => void }) {
   const [q, setQ] = useState("");
   const list = q.trim() ? EMOJIS.filter((x) => x.k.includes(q.trim().toLowerCase())) : EMOJIS;
   return (

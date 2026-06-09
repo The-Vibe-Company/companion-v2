@@ -29,6 +29,8 @@ export interface OrgTeam {
   slug: string;
   name: string;
   description: string; // team description ("" when unset)
+  color: string | null;
+  icon: string | null;
   members: OrgTeamMember[];
 }
 
@@ -41,8 +43,16 @@ export interface OrgFull {
   plan: "free" | "team";
   myRole: OrgRole;
   created: string; // formatted creation date (Workspace › General "Details")
+  domain: string | null;
+  domainAutoJoin: boolean;
   members: OrgMember[];
   teams: OrgTeam[];
+}
+
+/** Signed-in actor context for the domain auto-join control. */
+export interface DomainJoinVM {
+  actorDomain: string | null;
+  actorDomainIsPersonal: boolean;
 }
 
 /** A pending workspace invitation (Workspace › Invitations pane). */
@@ -70,6 +80,7 @@ export interface ApiKeyVM {
 export interface SettingsAppData {
   me: MeVM;
   current: OrgFull;
+  domainJoin: DomainJoinVM;
   users: Record<string, SeedUser>;
   invites: Invite[];
   apiKeys: ApiKeyVM[];
@@ -116,11 +127,13 @@ export interface OrgCtx {
   ownerCount: (org: OrgFull) => number;
   /** Personal display prefs (theme + accent), persisted per-device in localStorage. */
   prefs: { theme: "light" | "dark" | "system"; accent: string };
+  /** Signed-in actor context for the domain auto-join control (Workspace › General). */
+  domainJoin: DomainJoinVM;
   setTheme: (theme: "light" | "dark" | "system") => void;
   setAccent: (accent: string) => void;
   setMyName: (name: string) => void;
-  setWorkspace: (patch: { name?: string; slug?: string }) => void;
-  updateTeam: (teamId: string, patch: { name?: string; slug?: string; description?: string }) => void;
+  setWorkspace: (patch: { name?: string; slug?: string; domainAutoJoin?: boolean }) => void;
+  updateTeam: (teamId: string, patch: { name?: string; slug?: string; description?: string; color?: string | null; icon?: string | null }) => void;
   deleteTeam: (teamId: string) => void;
   createApiKey: (name: string, scope: "read" | "write") => Promise<string>;
   revokeApiKey: (id: string) => void;

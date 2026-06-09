@@ -17,10 +17,12 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     // on <html> before hydration, so the client <html> attributes intentionally
     // differ from the server-rendered ones. This suppresses only this element's attrs.
     <html lang="en" suppressHydrationWarning>
-      <head>
+      <body>
+        {/* First in <body> so it runs before paint; kept out of <head> to avoid
+            hydration mismatch when the host injects its own import map there. */}
         <script dangerouslySetInnerHTML={{ __html: NO_FOUC_SCRIPT }} />
-      </head>
-      <body>{children}</body>
+        {children}
+      </body>
     </html>
   );
 }

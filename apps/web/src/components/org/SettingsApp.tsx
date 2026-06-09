@@ -87,6 +87,7 @@ export function SettingsController({
   const { me } = data;
 
   const [current, setCurrent] = useState<OrgFull>(() => normalizeOrgFull(data.current));
+  const [domainJoin, setDomainJoin] = useState(data.domainJoin);
   const [users, setUsers] = useState(data.users);
   const [apiKeys, setApiKeys] = useState<ApiKeyVM[]>(data.apiKeys);
   const [invites, setInvites] = useState<Invite[]>(data.invites);
@@ -95,10 +96,11 @@ export function SettingsController({
   }, [router]);
   useEffect(() => {
     setCurrent(normalizeOrgFull(data.current));
+    setDomainJoin(data.domainJoin);
     setUsers(data.users);
     setApiKeys(data.apiKeys);
     setInvites(data.invites);
-  }, [data.current, data.users, data.apiKeys, data.invites]);
+  }, [data.current, data.domainJoin, data.users, data.apiKeys, data.invites]);
   useEffect(() => {
     document.cookie = `companion_org=${encodeURIComponent(data.current.id)}; path=/; SameSite=Lax`;
   }, [data.current.id]);
@@ -188,6 +190,7 @@ export function SettingsController({
       }
       setUsers(next.users);
       setCurrent(normalizeOrgFull(next.current));
+      setDomainJoin(next.domainJoin);
       setApiKeys(next.apiKeys);
       setInvites(next.invites);
     } catch (error) {
@@ -218,6 +221,7 @@ export function SettingsController({
     canManage: current.myRole === "owner" || current.myRole === "admin",
     isOwner: current.myRole === "owner",
     ownerCount: (org) => org.members.filter((m) => m.role === "owner" && !m.pending).length,
+    domainJoin,
     prefs,
     setTheme,
     setAccent,
@@ -241,7 +245,15 @@ export function SettingsController({
       setCurrent((c) => ({ ...c, ...patch }));
       setBusy(true);
       updateOrgRpc(patch)
-        .then((res) => setCurrent((c) => ({ ...c, name: res.name, slug: res.slug })))
+        .then((res) =>
+          setCurrent((c) => ({
+            ...c,
+            name: res.name,
+            slug: res.slug,
+            domain: res.domain ?? null,
+            domainAutoJoin: res.domainAutoJoin,
+          })),
+        )
         .catch((e: Error) => {
           setErr(e.message);
           void refreshSettingsData();
@@ -259,7 +271,16 @@ export function SettingsController({
           setCurrent((c) => ({
             ...c,
             teams: c.teams.map((t) =>
-              t.id === teamId ? { ...t, name: res.name, slug: res.slug, description: res.description ?? "" } : t,
+              t.id === teamId
+                ? {
+                    ...t,
+                    name: res.name,
+                    slug: res.slug,
+                    description: res.description ?? "",
+                    color: res.color ?? null,
+                    icon: res.icon ?? null,
+                  }
+                : t,
             ),
           })),
         )

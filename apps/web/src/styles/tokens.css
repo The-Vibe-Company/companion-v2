@@ -97,7 +97,7 @@
 }
 
 /* Canonical cloud-blue accent (the design-system default), opt-in. */
-[data-accent="cloud"] {
+:root[data-accent="cloud"] {
   --color-accent: oklch(0.585 0.142 242);
   --color-accent-hover: oklch(0.52 0.142 242);
   --color-accent-muted: oklch(0.52 0.128 242);
