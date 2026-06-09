@@ -1,6 +1,11 @@
-import { orgSettingsResponseSchema, type OrgSettingsResponse } from "@companion/contracts";
-import type { OrgFull, SeedUser, SettingsAppData } from "@/components/org/model";
-import { formatDate } from "./format";
+import {
+  apiTokenRowSchema,
+  orgSettingsResponseSchema,
+  type ApiTokenRow,
+  type OrgSettingsResponse,
+} from "@companion/contracts";
+import type { ApiKeyVM, Invite, OrgFull, SeedUser, SettingsAppData } from "@/components/org/model";
+import { formatDate, relativeTime } from "./format";
 import type { MeVM, OrgVM } from "./types";
 
 export function initialsOf(name: string): string {
@@ -21,12 +26,38 @@ export function parseOrgSettingsResponse(raw: unknown): OrgSettingsResponse | nu
   return null;
 }
 
+/** Validate the raw `GET /v1/tokens` payload; drops any malformed rows. */
+export function parseApiTokensResponse(raw: unknown): ApiTokenRow[] {
+  if (!Array.isArray(raw)) return [];
+  const rows: ApiTokenRow[] = [];
+  for (const item of raw) {
+    const result = apiTokenRowSchema.safeParse(item);
+    if (result.success) rows.push(result.data);
+  }
+  return rows;
+}
+
+/** Map a stored token row to its masked, display-ready view-model. */
+export function mapApiKey(row: ApiTokenRow): ApiKeyVM {
+  return {
+    id: row.id,
+    name: row.name,
+    scope: row.scopes.includes("skills:write") ? "write" : "read",
+    prefix: row.prefix,
+    // The raw secret is never stored; the prefix is the only post-creation visible part.
+    last4: row.prefix.slice(-4),
+    created: formatDate(row.created_at),
+    lastUsed: row.last_used_at ? relativeTime(row.last_used_at) : "never",
+  };
+}
+
 export function buildSettingsAppData(input: {
   me: MeVM;
   current: OrgVM;
   settings: OrgSettingsResponse;
+  tokens?: ApiTokenRow[];
 }): SettingsAppData {
-  const { me, current, settings } = input;
+  const { me, current, settings, tokens = [] } = input;
   const users: Record<string, SeedUser> = {
     [me.id]: { id: me.id, name: me.name, email: me.email, initials: me.initials },
   };
@@ -57,6 +88,7 @@ export function buildSettingsAppData(input: {
     kind: current.kind,
     plan: current.plan,
     myRole: current.myRole,
+    created: formatDate(settings.org.createdAt),
     members: settings.members.map((member) => ({
       userId: member.userId,
       role: member.role,
@@ -69,13 +101,27 @@ export function buildSettingsAppData(input: {
       id: team.id,
       slug: team.slug,
       name: team.name,
+      description: team.description ?? "",
       members: team.members.map((member) => ({ userId: member.userId, role: member.role })),
     })),
   };
+
+  // The Invitations pane reads pending invites on their own; `by` (inviter name) isn't
+  // surfaced by the settings response, so it's left blank.
+  const invites: Invite[] = settings.invitations.map((inv) => ({
+    id: inv.id,
+    email: inv.email,
+    role: inv.role,
+    invited: relativeTime(inv.createdAt),
+    by: "",
+    token: inv.token,
+  }));
 
   return {
     me,
     current: currentFull,
     users,
+    invites,
+    apiKeys: tokens.map(mapApiKey),
   };
 }

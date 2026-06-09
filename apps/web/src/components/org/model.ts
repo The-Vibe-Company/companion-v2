@@ -28,6 +28,7 @@ export interface OrgTeam {
   id: string; // teams.id
   slug: string;
   name: string;
+  description: string; // team description ("" when unset)
   members: OrgTeamMember[];
 }
 
@@ -39,21 +40,63 @@ export interface OrgFull {
   kind: "personal" | "team";
   plan: "free" | "team";
   myRole: OrgRole;
+  created: string; // formatted creation date (Workspace › General "Details")
   members: OrgMember[];
   teams: OrgTeam[];
+}
+
+/** A pending workspace invitation (Workspace › Invitations pane). */
+export interface Invite {
+  id: string;
+  email: string;
+  role: OrgRole;
+  invited: string; // relative label, e.g. "2 days ago"
+  by: string; // inviter display name ("" when unknown)
+  token: string; // shareable join token
+}
+
+/** A personal API key, masked for display (the raw secret is shown once at creation). */
+export interface ApiKeyVM {
+  id: string;
+  name: string;
+  scope: "read" | "write";
+  prefix: string; // e.g. "cmp_pat_…"
+  last4: string; // last 4 visible chars (from the prefix; the secret is never stored)
+  created: string; // formatted creation date
+  lastUsed: string; // relative label, or "never"
 }
 
 export interface SettingsAppData {
   me: MeVM;
   current: OrgFull;
   users: Record<string, SeedUser>;
+  invites: Invite[];
+  apiKeys: ApiKeyVM[];
 }
 
-export type SettingsTab = "general" | "members" | "teams";
+/** Which settings pane is mounted. Team panes also carry a `teamId` (see SettingsRoute). */
+export type SettingsView =
+  | "profile"
+  | "preferences"
+  | "apikeys"
+  | "general"
+  | "members"
+  | "invitations"
+  | "team-general"
+  | "team-members";
+
+/** A resolved settings destination — a pane plus, for team panes, the team it targets. */
+export interface SettingsRoute {
+  view: SettingsView;
+  teamId?: string;
+}
+
+/** Top-level dialogs the shell owns. Key create/reveal dialogs are local to ApiKeysPane. */
 export type SettingsDialog = null | "invite" | "team";
 /** Where a sidebar affordance wants to land the user inside Settings. */
 export interface SettingsIntent {
-  tab?: SettingsTab;
+  view?: SettingsView;
+  teamId?: string;
   dialog?: Exclude<SettingsDialog, null>;
 }
 
@@ -70,6 +113,17 @@ export interface OrgCtx {
   canManage: boolean;
   isOwner: boolean;
   ownerCount: (org: OrgFull) => number;
+  /** Personal display prefs (theme + accent), persisted per-device in localStorage. */
+  prefs: { theme: "light" | "dark" | "system"; accent: string };
+  setTheme: (theme: "light" | "dark" | "system") => void;
+  setAccent: (accent: string) => void;
+  setMyName: (name: string) => void;
+  setWorkspace: (patch: { name?: string; slug?: string }) => void;
+  updateTeam: (teamId: string, patch: { name?: string; slug?: string; description?: string }) => void;
+  deleteTeam: (teamId: string) => void;
+  createApiKey: (name: string, scope: "read" | "write") => Promise<string>;
+  revokeApiKey: (id: string) => void;
+  signOut: () => void;
   setMemberRole: (orgId: string, userId: string, role: OrgRole) => void;
   removeMember: (orgId: string, userId: string) => void;
   inviteMember: (orgId: string, email: string, role: OrgRole) => Promise<string>;

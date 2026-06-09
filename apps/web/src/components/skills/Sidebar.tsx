@@ -105,7 +105,7 @@ export function Sidebar({
               aria-label="New team"
               onFocus={warmSettings}
               onMouseDown={warmSettings}
-              onClick={() => onOpenSettings({ tab: "teams", dialog: "team" })}
+              onClick={() => onOpenSettings({ dialog: "team" })}
               onPointerEnter={warmSettings}
             >
               <Icon name="plus" size={14} />
@@ -132,7 +132,7 @@ export function Sidebar({
                   onMouseDown={warmSettings}
                   onClick={(e) => {
                     e.stopPropagation();
-                    onOpenSettings({ tab: "teams" });
+                    onOpenSettings({ view: "team-general", teamId: tm.id });
                   }}
                   onPointerEnter={warmSettings}
                 >

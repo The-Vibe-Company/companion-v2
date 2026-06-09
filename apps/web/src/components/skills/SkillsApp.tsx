@@ -15,7 +15,7 @@ import { Onboarding } from "../org/Onboarding";
 import { settingsHref } from "../org/SettingsApp";
 import { SettingsDrawer, SettingsDrawerError } from "../org/SettingsDrawer";
 import { useOrgActions } from "../org/useOrgActions";
-import type { SettingsAppData, SettingsDialog, SettingsIntent, SettingsTab } from "../org/model";
+import type { SettingsAppData, SettingsDialog, SettingsIntent, SettingsRoute, SettingsView } from "../org/model";
 import {
   BUILTIN_VIEWS,
   chipParts,
@@ -30,7 +30,7 @@ const SETTINGS_LOAD_ERROR =
   "Refresh the page to try again. If the problem continues, check that the API and database are reachable.";
 
 type SettingsState = {
-  initialTab: SettingsTab;
+  initialRoute: SettingsRoute;
   initialDialog: SettingsDialog;
 };
 
@@ -38,19 +38,38 @@ type LocalSettingsSurface =
   | ({ kind: "ready"; data: SettingsAppData } & SettingsState)
   | ({ kind: "error"; message: string; busy: boolean } & SettingsState);
 
+const SETTINGS_VIEWS: readonly SettingsView[] = [
+  "profile",
+  "preferences",
+  "apikeys",
+  "general",
+  "members",
+  "invitations",
+  "team-general",
+  "team-members",
+];
+
+function isSettingsView(value: string | null): value is SettingsView {
+  return value !== null && (SETTINGS_VIEWS as readonly string[]).includes(value);
+}
+
 function settingsStateFromIntent(intent?: SettingsIntent): SettingsState {
+  const view: SettingsView = intent?.view ?? (intent?.dialog === "team" ? "general" : "profile");
+  const teamId = view.startsWith("team-") ? intent?.teamId : undefined;
   return {
-    initialTab: intent?.tab ?? (intent?.dialog === "team" ? "teams" : "members"),
+    initialRoute: { view, teamId },
     initialDialog: intent?.dialog ?? null,
   };
 }
 
 function settingsStateFromSearch(search: string): SettingsState {
   const params = new URLSearchParams(search);
-  const tabRaw = params.get("tab");
+  const viewRaw = params.get("view");
+  const view: SettingsView = isSettingsView(viewRaw) ? viewRaw : "profile";
+  const teamId = view.startsWith("team-") ? params.get("team") ?? undefined : undefined;
   const dialogRaw = params.get("dialog");
   return {
-    initialTab: tabRaw === "general" || tabRaw === "teams" ? tabRaw : "members",
+    initialRoute: { view, teamId },
     initialDialog: dialogRaw === "invite" || dialogRaw === "team" ? dialogRaw : null,
   };
 }
@@ -114,14 +133,14 @@ export function SkillsApp({
         .then((data) => {
           if (!pushHistory && window.location.pathname !== "/settings") return;
           if (pushHistory) {
-            window.history.pushState(window.history.state, "", settingsHref(state.initialTab, state.initialDialog));
+            window.history.pushState(window.history.state, "", settingsHref(state.initialRoute, state.initialDialog));
           }
           setLocalSettings({ kind: "ready", data, ...state });
         })
         .catch((error) => {
           if (!pushHistory && window.location.pathname !== "/settings") return;
           if (pushHistory) {
-            window.history.pushState(window.history.state, "", settingsHref(state.initialTab, state.initialDialog));
+            window.history.pushState(window.history.state, "", settingsHref(state.initialRoute, state.initialDialog));
           }
           setLocalSettings({ kind: "error", message: settingsErrorMessage(error), busy: false, ...state });
         });
@@ -139,12 +158,12 @@ export function SkillsApp({
   const retryLocalSettings = useCallback(() => {
     const surface = localSettings;
     if (!surface || surface.kind !== "error") return;
-    const state = { initialTab: surface.initialTab, initialDialog: surface.initialDialog };
+    const state = { initialRoute: surface.initialRoute, initialDialog: surface.initialDialog };
     setLocalSettings({ ...surface, busy: true });
     void loadSettingsData()
       .then((data) => {
         settingsWarmupRef.current = { orgId: currentOrg.id, promise: Promise.resolve(data) };
-        window.history.replaceState(window.history.state, "", settingsHref(state.initialTab, state.initialDialog));
+        window.history.replaceState(window.history.state, "", settingsHref(state.initialRoute, state.initialDialog));
         setLocalSettings({ kind: "ready", data, ...state });
       })
       .catch((error) => {
@@ -591,7 +610,7 @@ export function SkillsApp({
       {localSettings?.kind === "ready" && (
         <SettingsDrawer
           data={localSettings.data}
-          initialTab={localSettings.initialTab}
+          initialRoute={localSettings.initialRoute}
           initialDialog={localSettings.initialDialog}
           onRefreshData={refreshLocalSettingsData}
         />

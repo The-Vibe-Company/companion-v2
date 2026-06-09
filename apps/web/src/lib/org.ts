@@ -1,6 +1,6 @@
 "use client";
 
-import type { OrgRole, TeamRole } from "@companion/contracts";
+import type { ApiTokenRow, IssuedToken, OrgRole, TeamRole, TokenScope } from "@companion/contracts";
 import { apiFetch } from "./apiClient";
 
 export async function setCurrentOrg(orgId: string): Promise<void> {
@@ -84,4 +84,67 @@ export async function removeTeamMember(teamId: string, userId: string): Promise<
 export function inviteLink(token: string): string {
   const base = typeof window !== "undefined" ? window.location.origin : "";
   return `${base}/join/${token}`;
+}
+
+/** Rename the signed-in user. Mirrors `PUT /v1/users/me`. */
+export async function updateMe(name: string): Promise<{ id: string; name: string; initials: string }> {
+  return apiFetch("/v1/users/me", {
+    method: "PUT",
+    body: JSON.stringify({ name }),
+  });
+}
+
+/** Rename and/or re-slug the current workspace. Mirrors `PUT /v1/orgs/current`. */
+export async function updateOrg(patch: { name?: string; slug?: string }): Promise<void> {
+  await apiFetch("/v1/orgs/current", {
+    method: "PUT",
+    body: JSON.stringify(patch),
+  });
+}
+
+/** Rename, re-slug, and/or edit a team's description. Mirrors `PUT /v1/teams/:id`. */
+export async function updateTeam(
+  id: string,
+  patch: { name?: string; slug?: string; description?: string },
+): Promise<void> {
+  await apiFetch(`/v1/teams/${id}`, {
+    method: "PUT",
+    body: JSON.stringify(patch),
+  });
+}
+
+/** Permanently delete a team (its skills are unscoped). Mirrors `DELETE /v1/teams/:id`. */
+export async function deleteTeam(id: string): Promise<void> {
+  await apiFetch(`/v1/teams/${id}`, { method: "DELETE" });
+}
+
+/** List the signed-in user's personal access tokens. Mirrors `GET /v1/tokens`. */
+export async function listTokens(): Promise<ApiTokenRow[]> {
+  return apiFetch("/v1/tokens");
+}
+
+/** Issue a new personal access token. Returns the one-time plaintext `token`. */
+export async function issueToken(input: { name: string; scopes: TokenScope[] }): Promise<IssuedToken> {
+  return apiFetch("/v1/tokens", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+/** Revoke a personal access token. Mirrors `DELETE /v1/tokens/:id`. */
+export async function revokeToken(id: string): Promise<void> {
+  await apiFetch(`/v1/tokens/${id}`, { method: "DELETE" });
+}
+
+/**
+ * End the current session. Hits `POST /v1/auth/logout` with an explicit JSON content-type
+ * and empty `{}` body (Better Auth 415s otherwise) and clears the session cookie. The caller
+ * is responsible for redirecting afterwards.
+ */
+export async function signOut(): Promise<void> {
+  await apiFetch("/v1/auth/logout", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: "{}",
+  });
 }
