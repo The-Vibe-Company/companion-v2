@@ -87,14 +87,20 @@ describe("matchFilters — other dimensions", () => {
 });
 
 describe("built-in views", () => {
+  it("only ships the All view", () => {
+    expect(BUILTIN_VIEWS.map((v) => v.id)).toEqual(["all"]);
+    expect(BUILTIN_VIEWS[0]?.filters).toEqual([]);
+  });
   it("Needs attention = invalid OR validating", () => {
-    const view = BUILTIN_VIEWS.find((v) => v.id === "attention");
-    expect(view).toBeTruthy();
-    expect(run(view!.filters).sort()).toEqual(["image-ocr", "sql-query"]);
+    expect(
+      run([
+        { type: "status", value: "invalid" },
+        { type: "status", value: "validating" },
+      ]).sort(),
+    ).toEqual(["image-ocr", "sql-query"]);
   });
   it("Public view = scope public", () => {
-    const view = BUILTIN_VIEWS.find((v) => v.id === "public");
-    expect(run(view!.filters)).toEqual(["pdf-extract", "web-fetch"]);
+    expect(run([{ type: "scope", value: "public" }])).toEqual(["pdf-extract", "web-fetch"]);
   });
   it("filtersKey is order-independent", () => {
     expect(filtersKey([

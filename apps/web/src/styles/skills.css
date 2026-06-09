@@ -365,6 +365,15 @@ body { background: var(--color-canvas); color: var(--color-fg); font-family: var
 .vtab.is-active i { color: var(--color-fg); }
 .vtab__count { font-family: var(--font-mono); font-size: 10px; color: var(--color-faint); }
 .vtab--custom.is-active i { color: var(--color-accent-edge); }
+.vtab-wrap { position: relative; display: inline-flex; }
+.vtab__rename { width: 9ch; min-width: 60px; max-width: 18ch; height: 22px; padding: 0 5px; border: 1px solid var(--color-line-strong);
+  border-radius: var(--radius-sm); background: var(--color-surface); color: var(--color-fg); font-family: var(--font-ui); font-size: var(--text-sm); }
+.vtab__rename:focus { outline: none; border-color: var(--color-accent-edge); }
+.vmenu { position: fixed; z-index: 60; min-width: 160px; background: var(--color-surface);
+  border: 1px solid var(--color-line); border-radius: var(--radius-md); box-shadow: var(--shadow-lg); padding: 6px; }
+.vmenu .fmenu__item .lbl { font-family: var(--font-ui); }
+.vmenu__danger, .vmenu__danger .ico { color: var(--color-danger); }
+.vmenu__danger:hover { background: var(--color-danger-tint); }
 
 /* --- Filter bar + chips -------------------------------------------------- */
 .filterbar { display: flex; align-items: center; gap: 8px; padding: 9px var(--space-5); border-bottom: 1px solid var(--color-line); flex-wrap: wrap; flex: none; }

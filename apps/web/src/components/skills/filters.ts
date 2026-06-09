@@ -16,17 +16,6 @@ export type SavedViewDef = SkillSavedView;
 
 export const BUILTIN_VIEWS: ViewDef[] = [
   { id: "all", name: "All", icon: "layers", filters: [] },
-  { id: "starred", name: "Starred", icon: "star", filters: [{ type: "starred", value: "true" }] },
-  { id: "public", name: "Public", icon: "globe", filters: [{ type: "scope", value: "public" }] },
-  {
-    id: "attention",
-    name: "Needs attention",
-    icon: "alert-triangle",
-    filters: [
-      { type: "status", value: "invalid" },
-      { type: "status", value: "validating" },
-    ],
-  },
 ];
 
 export function filtersKey(fs: Filter[]): string {
