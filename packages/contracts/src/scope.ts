@@ -53,5 +53,7 @@ export const orgSummarySchema = z.object({
   plan: z.enum(["free", "team"]),
   org_role: orgRoleSchema,
   member_count: z.number().int().nonnegative(),
+  color: z.string().nullable().optional(),
+  logo_url: z.string().nullable().optional(),
 });
 export type OrgSummary = z.infer<typeof orgSummarySchema>;
