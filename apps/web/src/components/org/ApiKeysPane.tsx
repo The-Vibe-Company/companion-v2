@@ -119,6 +119,10 @@ function CreateKeyDialog({
     try {
       const secret = await ctx.createApiKey(name.trim(), scope);
       onCreated({ name: name.trim(), scope, secret });
+    } catch {
+      // createApiKey already surfaced the failure via ctx.setError; swallow here so the
+      // `void submit()` callers don't produce an unhandled rejection. The dialog stays open
+      // (busy cleared below) so the user can retry or cancel.
     } finally {
       setBusy(false);
     }
