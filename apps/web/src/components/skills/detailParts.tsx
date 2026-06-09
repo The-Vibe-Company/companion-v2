@@ -178,6 +178,37 @@ export function PropList({
           )}
         </span>
       </div>
+      <div className="divider" />
+      <p className="railhead railhead--sub">Manifest</p>
+      <div className="prop prop--stack">
+        <span className="prop__label">
+          <Icon name="shield" size={14} />
+          Allowed tools
+          <span className="prop__count">{skill.tools.length}</span>
+        </span>
+        <span className="prop__value">
+          {skill.tools.length ? (
+            <span className="chips">
+              {skill.tools.map((t) => (
+                <span className="chip" key={t}>
+                  {t}
+                </span>
+              ))}
+            </span>
+          ) : (
+            <span style={{ color: "var(--color-muted)" }}>None declared</span>
+          )}
+        </span>
+      </div>
+      <div className="prop">
+        <span className="prop__label">
+          <Icon name="file-text" size={14} />
+          License
+        </span>
+        <span className="prop__value">
+          <span className="mono">{skill.license ?? "—"}</span>
+        </span>
+      </div>
     </div>
   );
 }

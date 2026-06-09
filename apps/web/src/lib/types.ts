@@ -12,6 +12,7 @@ export interface SkillOwnerVM {
 export interface SkillVM {
   uuid: string; // db id
   id: string; // slug (the displayed machine name)
+  ownerId: string; // principal the skill is for (deprecate/restore gating)
   scope: Scope;
   version: string | null;
   validation: ValidationState;
@@ -35,6 +36,7 @@ export function mapSkill(row: SkillListRow): SkillVM {
   return {
     uuid: row.id,
     id: row.slug,
+    ownerId: row.owner_id,
     scope: row.scope,
     version: row.current_version,
     validation: row.validation,
