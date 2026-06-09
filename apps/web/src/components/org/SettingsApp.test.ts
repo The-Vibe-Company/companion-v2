@@ -13,11 +13,15 @@ vi.mock("next/navigation", () => ({
 }));
 
 describe("SettingsController", () => {
-  it("builds stable settings URLs for tab and dialog state", async () => {
+  it("builds stable settings URLs for route and dialog state", async () => {
     const { settingsHref } = await import("./SettingsApp");
 
-    expect(settingsHref("general", null)).toBe("/settings?tab=general");
-    expect(settingsHref("teams", "team")).toBe("/settings?tab=teams&dialog=team");
+    expect(settingsHref({ view: "general" }, null)).toBe("/settings?view=general");
+    expect(settingsHref({ view: "team-general", teamId: "team_1" }, "team")).toBe(
+      "/settings?view=team-general&team=team_1&dialog=team",
+    );
+    // `team` is only serialized for team panes.
+    expect(settingsHref({ view: "profile", teamId: "team_1" }, null)).toBe("/settings?view=profile");
   });
 
   it("normalizes malformed member and team collections before rendering", async () => {
@@ -27,6 +31,8 @@ describe("SettingsController", () => {
       users: {
         user_1: { id: "user_1", name: "Admin", email: "admin@tvc.dev", initials: "A" },
       },
+      invites: [],
+      apiKeys: [],
       current: {
         id: "org_1",
         name: "Acme",
@@ -35,7 +41,7 @@ describe("SettingsController", () => {
         plan: "team",
         myRole: "owner",
         members: {},
-        teams: [{ id: "team_1", slug: "platform", name: "Platform", members: {} }],
+        teams: [{ id: "team_1", slug: "platform", name: "Platform", description: "", members: {} }],
       },
     } as unknown as SettingsAppData;
 
@@ -43,7 +49,7 @@ describe("SettingsController", () => {
       renderToString(
         React.createElement(SettingsController, {
           data,
-          initialTab: "teams",
+          initialRoute: { view: "general" },
           initialDialog: null,
           onClose: vi.fn(),
         }),

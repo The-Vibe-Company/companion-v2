@@ -151,6 +151,7 @@ export const teams = pgTable(
       .references(() => organizations.id, { onDelete: "cascade" }),
     slug: text("slug").notNull(),
     name: text("name").notNull(),
+    description: text("description"),
     /** Team color (CSS color string) chosen during onboarding; cosmetic. */
     color: text("color"),
     /** Team icon: a single emoji rendered monochrome and tinted with `color`; null = use initials. */

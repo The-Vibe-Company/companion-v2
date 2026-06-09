@@ -86,7 +86,8 @@ deprecated is allowed for the comment author, an org admin, or the skill owner.
 
 Onboarding adds a few columns: `organizations.domain` + `organizations.domain_auto_join` (a verified
 email domain that grants membership, and whether matching signups join automatically), plus cosmetic
-`organizations.color`/`logo_url` and `teams.color`/`teams.icon`. `profiles.onboarded_at` records that a
+`organizations.color`/`logo_url` and `teams.color`/`teams.icon`. `teams.description` holds an optional
+free-text summary shown on the team's settings page. `profiles.onboarded_at` records that a
 user has finished onboarding. A partial unique index on `lower(organizations.domain)` enforces one org
 per verified domain.
 
@@ -157,8 +158,10 @@ directly to Postgres.
 - Onboarding: `GET /v1/onboarding/context` (email-domain classification + any auto-join org, no org id),
   `POST /v1/onboarding/join` (join the auto-join org for the verified domain),
   `POST /v1/onboarding/create` (create org + first team + invites, finish onboarding).
-- Tokens: `POST /v1/tokens` (issue a scoped `cmp_pat_…`, plaintext returned once),
-  `DELETE /v1/tokens/:id`. Session-authenticated only — a token cannot mint another.
+- Tokens: `GET /v1/tokens` (list the caller's own active keys, no plaintext — it backs the personal
+  Account pane, so it is caller-scoped even for admins), `POST /v1/tokens` (issue a scoped `cmp_pat_…`,
+  plaintext returned once), `DELETE /v1/tokens/:id` (an org admin may revoke any token by id).
+  Session-authenticated only — a token cannot mint another.
 - Skills: `/v1/skills`, `/v1/skills/:slug`, `/v1/skills/:slug/versions`,
   `/v1/skills/:slug/download`, `/v1/skills/:slug/scope`, `/v1/skill-filter-preferences`,
   `POST /v1/skills/create` (author a SKILL.md inline),
@@ -168,7 +171,10 @@ directly to Postgres.
   Threaded discussion: `GET`/`POST /v1/skills/:slug/comments` (a `POST` may carry `parent_id` for a
   reply and `version_id` to scope the thread to a version) and
   `PATCH /v1/skills/:slug/comments/:id` (deprecate / restore a thread).
-- Orgs: `/v1/orgs`, `/v1/orgs/current`, `/v1/teams`, `/v1/invitations`.
+- Orgs & settings: `/v1/orgs`, `GET`/`POST`/`PUT /v1/orgs/current` (read/select/rename+reslug the org,
+  admin only for `PUT`), `GET /v1/orgs/current/settings` (members, invitations, teams + descriptions),
+  `PUT /v1/users/me` (update display name), `/v1/teams` + `PUT`/`DELETE /v1/teams/:id` (rename/describe,
+  or delete a team — org admin, re-scoping the team's skills to private), and `/v1/invitations`.
 
 Requests authenticate by Better Auth cookie session. An `Authorization: Bearer cmp_pat_…` token is
 accepted **only** on the PAT-enabled skills endpoints (`POST /v1/skills`, `POST /v1/skills/create`,

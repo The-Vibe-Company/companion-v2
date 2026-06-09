@@ -108,6 +108,63 @@
   --color-accent-edge: oklch(0.585 0.142 242);
 }
 
+/* Accent presets (Preferences). yellow = default/no-attr; cloud above. */
+:root[data-accent="evergreen"] {
+  --color-accent: oklch(0.58 0.115 162);
+  --color-accent-hover: oklch(0.52 0.115 162);
+  --color-accent-fg: oklch(0.99 0.02 162);
+  --color-accent-ring: oklch(0.58 0.115 162 / 0.55);
+  --color-accent-tint: oklch(0.58 0.115 162 / 0.12);
+  --color-accent-line: oklch(0.58 0.115 162 / 0.3);
+  --color-accent-edge: oklch(0.58 0.115 162);
+}
+:root[data-accent="coral"] {
+  --color-accent: oklch(0.66 0.165 30);
+  --color-accent-hover: oklch(0.6 0.165 30);
+  --color-accent-fg: oklch(0.99 0.02 30);
+  --color-accent-ring: oklch(0.66 0.165 30 / 0.55);
+  --color-accent-tint: oklch(0.66 0.165 30 / 0.12);
+  --color-accent-line: oklch(0.66 0.165 30 / 0.3);
+  --color-accent-edge: oklch(0.66 0.165 30);
+}
+
+/* ---- Dark theme --------------------------------------------------------- */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --color-canvas: oklch(0.175 0.012 265);
+  --color-surface: oklch(0.205 0.013 265);
+  --color-surface-raised: oklch(0.255 0.015 265);
+  --color-surface-sunken: oklch(0.165 0.011 265);
+  --color-line: oklch(0.305 0.013 265);
+  --color-line-strong: oklch(0.4 0.015 265);
+  --color-fg: oklch(0.95 0.006 265);
+  --color-muted: oklch(0.72 0.013 265);
+  --color-faint: oklch(0.56 0.014 265);
+  --color-scrim: oklch(0.12 0.02 265 / 0.62);
+  --color-accent-tint: oklch(0.81 0.166 88 / 0.16);
+  --shadow-md: 0 2px 6px oklch(0 0 0 / 0.3), 0 1px 2px oklch(0 0 0 / 0.3);
+  --shadow-lg: 0 12px 34px oklch(0 0 0 / 0.45), 0 2px 8px oklch(0 0 0 / 0.35);
+}
+
+/* Dark x accent tint overrides (the default yellow tint is set above). */
+:root[data-theme="dark"][data-accent="cloud"] {
+  --color-accent-tint: oklch(0.585 0.142 242 / 0.18);
+}
+:root[data-theme="dark"][data-accent="evergreen"] {
+  --color-accent-tint: oklch(0.58 0.115 162 / 0.18);
+}
+:root[data-theme="dark"][data-accent="coral"] {
+  --color-accent-tint: oklch(0.66 0.165 30 / 0.18);
+}
+
+/* Freeze all transitions for one frame during a theme/accent swap so
+   background-color doesn't interpolate across the var change (Chromium freeze). */
+:root.no-anim *,
+:root.no-anim *::before,
+:root.no-anim *::after {
+  transition: none !important;
+}
+
 *,
 *::before,
 *::after {

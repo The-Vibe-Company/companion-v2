@@ -1,54 +1,126 @@
 "use client";
 
+import { Fragment, useEffect } from "react";
 import { Icon } from "../Icon";
-import { GeneralPane } from "./GeneralPane";
-import { MembersSection } from "./MembersSection";
-import { TeamsSection } from "./TeamsSection";
+import { SettingsSidebar } from "./SettingsSidebar";
+import { ProfilePane } from "./ProfilePane";
+import { PreferencesPane } from "./PreferencesPane";
+import { ApiKeysPane } from "./ApiKeysPane";
+import { WorkspaceGeneralPane } from "./WorkspaceGeneralPane";
+import { MembersPane } from "./MembersPane";
+import { InvitationsPane } from "./InvitationsPane";
+import { TeamGeneralPane } from "./TeamGeneralPane";
+import { TeamMembersPane } from "./TeamMembersPane";
 import { InviteDialog, CreateTeamDialog } from "./dialogs";
-import type { OrgCtx, SettingsDialog, SettingsTab } from "./model";
+import type { ApiKeyVM, Invite, OrgCtx, SettingsDialog, SettingsRoute } from "./model";
 
-/** The settings surface: left nav (General/Members/Teams) + the active pane + dialogs. */
+/** Breadcrumb segments for the current route — [section, page] (ported from app.jsx). */
+function crumbFor(ctx: OrgCtx, route: SettingsRoute): string[] {
+  const ws = ctx.currentOrg;
+  const team = route.teamId ? ctx.currentOrg.teams.find((t) => t.id === route.teamId) : null;
+  switch (route.view) {
+    case "profile":
+      return ["Account", "Profile"];
+    case "preferences":
+      return ["Account", "Preferences"];
+    case "apikeys":
+      return ["Account", "API keys"];
+    case "general":
+      return [ws.name, "General"];
+    case "members":
+      return [ws.name, "Members"];
+    case "invitations":
+      return [ws.name, "Invitations"];
+    case "team-general":
+      return [team ? team.name : "Team", "General"];
+    case "team-members":
+      return [team ? team.name : "Team", "Members"];
+    default:
+      return [ws.name];
+  }
+}
+
+/**
+ * The settings surface: the `.sx` shell = collapsible sidebar + main column
+ * (breadcrumb + the active pane), the workspace-level dialogs, and the shared
+ * error bar. A route guard redirects team panes back to Workspace › General when
+ * the targeted team disappears (e.g. after a delete or a switch).
+ */
 export function SettingsView({
   ctx,
-  tab,
+  route,
   dialog,
-  onTab,
+  apiKeys,
+  invites,
+  expanded,
+  onView,
   onDialog,
+  onToggleTeam,
   onClose,
 }: {
   ctx: OrgCtx;
-  tab: SettingsTab;
+  route: SettingsRoute;
   dialog: SettingsDialog;
-  onTab: (t: SettingsTab) => void;
-  onDialog: (d: SettingsDialog) => void;
+  apiKeys: ApiKeyVM[];
+  invites: Invite[];
+  expanded: Set<string>;
+  onView: (route: SettingsRoute) => void;
+  onDialog: (dialog: SettingsDialog) => void;
+  onToggleTeam: (teamId: string) => void;
   onClose: () => void;
 }) {
-  const org = ctx.currentOrg;
+  // Resolve the current team (team panes only) and guard against deletion.
+  const team =
+    route.view === "team-general" || route.view === "team-members"
+      ? ctx.currentOrg.teams.find((t) => t.id === route.teamId) ?? null
+      : null;
+  useEffect(() => {
+    if ((route.view === "team-general" || route.view === "team-members") && !team) {
+      onView({ view: "general" });
+    }
+  }, [route.view, team, onView]);
+
+  let pane: React.ReactNode;
+  if (route.view === "profile") pane = <ProfilePane ctx={ctx} />;
+  else if (route.view === "preferences") pane = <PreferencesPane ctx={ctx} />;
+  else if (route.view === "apikeys") pane = <ApiKeysPane ctx={ctx} keys={apiKeys} />;
+  else if (route.view === "general") pane = <WorkspaceGeneralPane ctx={ctx} />;
+  else if (route.view === "members") pane = <MembersPane ctx={ctx} onInvite={() => onDialog("invite")} />;
+  else if (route.view === "invitations")
+    pane = <InvitationsPane ctx={ctx} invites={invites} onInvite={() => onDialog("invite")} />;
+  else if (route.view === "team-general" && team)
+    pane = <TeamGeneralPane ctx={ctx} team={team} key={team.id} />;
+  else if (route.view === "team-members" && team)
+    pane = <TeamMembersPane ctx={ctx} team={team} key={team.id} />;
+  else pane = <WorkspaceGeneralPane ctx={ctx} />;
+
+  const crumb = crumbFor(ctx, route);
+
   return (
-    <div className="og-set">
-      <div className="og-set__top">
-        <button className="og-set__back" onClick={onClose}>
-          <Icon name="arrow-left" size={14} />
-          Back to skills
-        </button>
-        <div className="og-set__crumb">
-          <Icon name="settings" size={14} /> Settings <span>/</span> <b>{org.name}</b>
+    <div className="sx">
+      <SettingsSidebar
+        ctx={ctx}
+        route={route}
+        go={onView}
+        expanded={expanded}
+        toggleTeam={onToggleTeam}
+        onCreateTeam={() => onDialog("team")}
+        onClose={onClose}
+        apiKeyCount={apiKeys.length}
+        inviteCount={invites.length}
+      />
+      <div className="sx-main">
+        <div className="sx-crumb">
+          <Icon name="settings" size={13} />
+          <span>Settings</span>
+          {crumb.map((c, i) => (
+            <Fragment key={i}>
+              <span className="sx-crumb__sep">/</span>
+              {i === crumb.length - 1 ? <b>{c}</b> : <span>{c}</span>}
+            </Fragment>
+          ))}
         </div>
-      </div>
-      <div className="og-set__body">
-        <nav className="og-snav">
-          <div className="og-snav__label">Workspace</div>
-          <button className={"og-snav__item" + (tab === "general" ? " is-active" : "")} onClick={() => onTab("general")}>
-            <span className="og-snav__av">{org.name[0]}</span>General
-          </button>
-          <button className={"og-snav__item" + (tab === "members" ? " is-active" : "")} onClick={() => onTab("members")}>
-            <Icon name="users" size={15} />Members
-          </button>
-          <button className={"og-snav__item" + (tab === "teams" ? " is-active" : "")} onClick={() => onTab("teams")}>
-            <Icon name="layers" size={15} />Teams
-          </button>
-        </nav>
-        <div className="og-pane">
+        <div className="sx-scroll">
           {ctx.error && (
             <div className="og-errbar" role="alert">
               <Icon name="alert-triangle" size={14} />
@@ -58,13 +130,11 @@ export function SettingsView({
               </button>
             </div>
           )}
-          {tab === "general" && <GeneralPane org={org} ctx={ctx} />}
-          {tab === "members" && <MembersSection org={org} ctx={ctx} onInvite={() => onDialog("invite")} />}
-          {tab === "teams" && <TeamsSection org={org} ctx={ctx} onCreateTeam={() => onDialog("team")} />}
+          {pane}
         </div>
       </div>
-      {dialog === "invite" && <InviteDialog org={org} ctx={ctx} onClose={() => onDialog(null)} />}
-      {dialog === "team" && <CreateTeamDialog org={org} ctx={ctx} onClose={() => onDialog(null)} />}
+      {dialog === "invite" && <InviteDialog ctx={ctx} onClose={() => onDialog(null)} />}
+      {dialog === "team" && <CreateTeamDialog ctx={ctx} onClose={() => onDialog(null)} />}
     </div>
   );
 }

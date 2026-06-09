@@ -59,6 +59,14 @@ describe("parseOrgSettingsResponse", () => {
       me: { id: "user_1", name: "Admin", email: "admin@tvc.dev", initials: "A" },
       current,
       settings: {
+        org: {
+          id: "org_1",
+          name: "Acme",
+          slug: "acme",
+          kind: "team",
+          plan: "team",
+          createdAt: "2025-01-12T00:00:00.000Z",
+        },
         members: [
           {
             userId: "user_1",
@@ -75,6 +83,7 @@ describe("parseOrgSettingsResponse", () => {
             id: "team_1",
             slug: "platform",
             name: "Platform",
+            description: "Owns the deploy plane.",
             members: [
               {
                 userId: "user_1",
@@ -86,9 +95,35 @@ describe("parseOrgSettingsResponse", () => {
             ],
           },
         ],
+        invitations: [
+          {
+            id: "inv_1",
+            email: "new@tvc.dev",
+            role: "developer",
+            token: "tok_abc",
+            status: "pending",
+            createdAt: "2026-06-08T05:00:00.000Z",
+            expiresAt: "2026-06-15T05:00:00.000Z",
+          },
+        ],
       },
+      tokens: [
+        {
+          id: "tok_1",
+          org_id: "org_1",
+          user_id: "user_1",
+          name: "Local CLI",
+          prefix: "cmp_pat_a3f9",
+          scopes: ["skills:read", "skills:write"],
+          expires_at: "2026-06-10T05:00:00.000Z",
+          last_used_at: null,
+          revoked_at: null,
+          created_at: "2026-06-01T05:00:00.000Z",
+        },
+      ],
     });
 
+    expect(data.current.created).toBe("2025-01-12");
     expect(data.current.members).toEqual([
       expect.objectContaining({ userId: "user_1", role: "owner", joined: "2026-06-09" }),
     ]);
@@ -96,8 +131,15 @@ describe("parseOrgSettingsResponse", () => {
       expect.objectContaining({
         id: "team_1",
         slug: "platform",
+        description: "Owns the deploy plane.",
         members: [{ userId: "user_1", role: "admin" }],
       }),
+    ]);
+    expect(data.invites).toEqual([
+      expect.objectContaining({ id: "inv_1", email: "new@tvc.dev", role: "developer", by: "", token: "tok_abc" }),
+    ]);
+    expect(data.apiKeys).toEqual([
+      expect.objectContaining({ id: "tok_1", name: "Local CLI", scope: "write", last4: "a3f9", lastUsed: "never" }),
     ]);
     expect(data.users.user_1).toEqual({
       id: "user_1",

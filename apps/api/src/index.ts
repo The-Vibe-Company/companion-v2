@@ -15,6 +15,7 @@ import {
   createInvitation,
   createOrg,
   createTeam,
+  deleteTeam,
   getOnboardingContext,
   getOnboardingState,
   getSkillFilterPreferences,
@@ -22,6 +23,7 @@ import {
   getDownloadVersion,
   issueApiToken,
   joinOrgByDomain,
+  listApiTokens,
   listOrgs,
   listSkillComments,
   listSkills,
@@ -39,6 +41,9 @@ import {
   setSkillScope,
   setTeamMemberRole,
   toggleStar,
+  updateOrg,
+  updateTeam,
+  updateUserProfile,
 } from "@companion/core/services";
 import {
   addCommentInputSchema,
@@ -50,6 +55,9 @@ import {
   scopeSchema,
   setCommentDeprecatedInputSchema,
   skillFilterPreferencesSchema,
+  updateOrgInputSchema,
+  updateTeamInputSchema,
+  updateUserProfileInputSchema,
   type Scope,
   type SkillFrontmatter,
 } from "@companion/contracts";
@@ -345,6 +353,26 @@ app.get("/v1/auth/whoami", async (c) => {
   }
 });
 
+app.put("/v1/users/me", async (c) => {
+  try {
+    if (isTokenRequest(c)) throw new Error("personal access tokens cannot update the profile");
+    const actor = actorFromContext(c);
+    const input = updateUserProfileInputSchema.parse(await c.req.json());
+    // `profiles` carries no RLS (keyed by the auth user id), so this is not org-scoped.
+    const profile = await updateUserProfile({ actor, name: input.name });
+    // Best-effort: keep the Better Auth `user.name` in sync so the session display name matches.
+    // `core` stays auth-free; the sync lives here in the route. A failure must not fail the request.
+    await auth.api
+      .updateUser({ headers: c.req.raw.headers, body: { name: profile.name } })
+      .catch((authError) => {
+        console.error("failed to sync Better Auth user name", authError);
+      });
+    return c.json(profile);
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
 app.get("/v1/onboarding/context", async (c) => {
   try {
     const actor = actorFromContext(c);
@@ -454,6 +482,20 @@ app.post("/v1/orgs/current", async (c) => {
   }
 });
 
+app.put("/v1/orgs/current", async (c) => {
+  try {
+    if (isTokenRequest(c)) throw new Error("personal access tokens cannot update the workspace");
+    const input = updateOrgInputSchema.parse(await c.req.json());
+    return c.json(
+      await withTenant(c, ({ actor, orgId, database }) =>
+        updateOrg({ actor, orgId, name: input.name, slug: input.slug, database }),
+      ),
+    );
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
 app.get("/v1/teams", async (c) => {
   try {
     return c.json(await withTenant(c, ({ actor, orgId, database }) => listTeamsForUser({ actor, orgId, database })));
@@ -466,6 +508,40 @@ app.post("/v1/teams", async (c) => {
   try {
     const body = await c.req.json<{ name: string }>();
     return c.json(await withTenant(c, ({ actor, orgId, database }) => createTeam({ actor, orgId, name: body.name, database })));
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
+app.put("/v1/teams/:teamId", async (c) => {
+  try {
+    if (isTokenRequest(c)) throw new Error("personal access tokens cannot update teams");
+    const input = updateTeamInputSchema.parse(await c.req.json());
+    return c.json(
+      await withTenant(c, ({ actor, orgId, database }) =>
+        updateTeam({
+          actor,
+          orgId,
+          teamId: c.req.param("teamId"),
+          name: input.name,
+          slug: input.slug,
+          description: input.description,
+          database,
+        }),
+      ),
+    );
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
+app.delete("/v1/teams/:teamId", async (c) => {
+  try {
+    if (isTokenRequest(c)) throw new Error("personal access tokens cannot delete teams");
+    await withTenant(c, ({ actor, orgId, database }) =>
+      deleteTeam({ actor, orgId, teamId: c.req.param("teamId"), database }),
+    );
+    return c.json({ ok: true });
   } catch (error) {
     return jsonError(c, error);
   }
@@ -912,6 +988,19 @@ app.get("/v1/skills/:slug/versions/:version/files", async (c) => {
     return c.json({ version: found.version, files });
   } catch (error) {
     return jsonError(c, error);
+  }
+});
+
+/**
+ * List the caller's personal access tokens for the settings UI. Cookie session only — a PAT cannot
+ * enumerate tokens. Developers see only their own; org admins see all in the org. No secret is returned.
+ */
+app.get("/v1/tokens", async (c) => {
+  try {
+    if (isTokenRequest(c)) throw new Error("personal access tokens cannot list tokens");
+    return c.json(await withTenant(c, ({ actor, orgId, database }) => listApiTokens({ actor, orgId, database })));
+  } catch (error) {
+    return jsonError(c, error, 401);
   }
 });
 

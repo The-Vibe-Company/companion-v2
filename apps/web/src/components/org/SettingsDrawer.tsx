@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { Button, EmptyState } from "@/components/cds";
 import { SettingsController } from "./SettingsApp";
-import type { SettingsAppData, SettingsDialog, SettingsTab } from "./model";
+import type { SettingsAppData, SettingsDialog, SettingsRoute } from "./model";
 
 const FOCUSABLE =
   'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
@@ -53,12 +53,12 @@ export function SettingsDrawerBackgroundGuard() {
 
 export function SettingsDrawer({
   data,
-  initialTab,
+  initialRoute,
   initialDialog,
   onRefreshData,
 }: {
   data: SettingsAppData;
-  initialTab: SettingsTab;
+  initialRoute: SettingsRoute;
   initialDialog: SettingsDialog;
   onRefreshData?: () => Promise<SettingsAppData | null>;
 }) {
@@ -122,7 +122,7 @@ export function SettingsDrawer({
       >
         <SettingsController
           data={data}
-          initialTab={initialTab}
+          initialRoute={initialRoute}
           initialDialog={initialDialog}
           onClose={close}
           onRefreshData={onRefreshData}

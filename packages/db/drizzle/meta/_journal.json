@@ -69,7 +69,14 @@
       "idx": 9,
       "version": "7",
       "when": 1780939800000,
-      "tag": "0009_skill_comment_threads",
+      "tag": "0009_settings_team_description",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1780939900000,
+      "tag": "0010_skill_comment_threads",
       "breakpoints": true
     }
   ]

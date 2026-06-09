@@ -22,6 +22,7 @@ const FOCUSABLE =
 
 export function Dialog({
   icon,
+  iconDanger,
   title,
   desc,
   children,
@@ -30,6 +31,7 @@ export function Dialog({
   className = "og-dialog",
 }: {
   icon: string;
+  iconDanger?: boolean;
   title: string;
   desc: string;
   children?: ReactNode;
@@ -76,7 +78,7 @@ export function Dialog({
     <div className="og-scrim" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
       <div className={className} role="dialog" aria-modal="true" ref={dialogRef} tabIndex={-1}>
         <div className="og-dialog__head">
-          <span className="og-dialog__ic">
+          <span className={"og-dialog__ic" + (iconDanger ? " og-dialog__ic--danger" : "")}>
             <Icon name={icon} size={17} />
           </span>
           <div style={{ flex: 1 }}>
