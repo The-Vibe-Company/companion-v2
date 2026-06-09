@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { Icon } from "../Icon";
-import { Avatar, EmojiPicker, LOGO_COLORS } from "../onboarding/screens";
+import { Avatar, EmojiPicker, LOGO_COLORS } from "@/components/branding";
 import { hashColor, initialsOf } from "@/lib/settingsViewModel";
 import { PaneHead, EditField } from "./paneKit";
 import { Dialog, RoleDot } from "./primitives";

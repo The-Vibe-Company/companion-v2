@@ -18,6 +18,7 @@ import {
   API_TOKEN_PREFIX,
   publishSkillInputSchema,
   skillFilterPreferencesSchema,
+  TEAM_BRAND_COLORS,
   type PublishSkillInput,
 } from "@companion/contracts";
 import { compareSemver } from "@companion/skills";
@@ -250,6 +251,9 @@ export async function updateOrg(input: {
   if (input.domainAutoJoin !== undefined) {
     const { domain: actorDomain, isPersonal } = classifyEmailDomain(input.actor.email);
     if (input.domainAutoJoin) {
+      if (orgRow.kind !== "team") {
+        throw new Error("domain auto-join is only available for team workspaces");
+      }
       const domain = orgRow.domain ?? (actorDomain && !isPersonal ? actorDomain : null);
       if (!domain || isPersonal || domain !== actorDomain) {
         throw new Error("domain auto-join requires a matching corporate email domain on your account");
@@ -553,6 +557,9 @@ export async function updateTeam(input: {
   }
   if (input.color !== undefined) {
     const color = input.color?.trim() ?? "";
+    if (color && !(TEAM_BRAND_COLORS as readonly string[]).includes(color)) {
+      throw new Error("invalid team color");
+    }
     patch.color = color ? color : null;
   }
   if (input.icon !== undefined) {

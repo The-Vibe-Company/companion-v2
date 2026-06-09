@@ -93,13 +93,25 @@ export const updateOrgInputSchema = z
   });
 export type UpdateOrgInput = z.infer<typeof updateOrgInputSchema>;
 
+/** Allowed team avatar swatches (CSS colors rendered inline in the UI). */
+export const TEAM_BRAND_COLORS = [
+  "oklch(0.56 0.13 250)", // blue
+  "oklch(0.54 0.10 168)", // teal
+  "oklch(0.55 0.13 300)", // violet
+  "oklch(0.60 0.10 66)", // amber
+  "oklch(0.55 0.13 24)", // terracotta
+  "oklch(0.50 0.035 265)", // slate
+] as const;
+
+export const teamBrandColorSchema = z.enum(TEAM_BRAND_COLORS);
+
 /** Body of `PUT /v1/teams/:teamId` — rename, re-slug, describe, and/or edit branding. */
 export const updateTeamInputSchema = z
   .object({
     name: z.string().min(1).max(120).optional(),
     slug: z.string().min(1).max(120).optional(),
     description: z.string().max(2000).nullish(),
-    color: z.string().max(120).nullish(),
+    color: teamBrandColorSchema.nullish(),
     icon: z.string().max(32).nullish(),
   })
   .refine(

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Db } from "@companion/db";
-import { apiTokenRowSchema } from "@companion/contracts";
+import { apiTokenRowSchema, TEAM_BRAND_COLORS } from "@companion/contracts";
 import {
   deleteTeam,
   listApiTokens,
@@ -93,7 +93,7 @@ function fakeDb(options: FakeDbOptions = {}) {
 
   const orgFindResults: Array<Record<string, unknown> | null | undefined> = [
     options.org === undefined
-      ? { id: ORG_A, name: "Acme", slug: "acme", domain: null, domainAutoJoin: false }
+      ? { id: ORG_A, name: "Acme", slug: "acme", kind: "team", domain: null, domainAutoJoin: false }
       : options.org,
   ];
   if (options.orgConflict !== undefined) orgFindResults.push(options.orgConflict);
@@ -272,13 +272,23 @@ describe("updateOrg", () => {
   it("enables domain auto-join for the actor's corporate domain", async () => {
     const { database, calls } = fakeDb({
       role: "admin",
-      org: { id: ORG_A, name: "Acme", slug: "acme", domain: null, domainAutoJoin: false },
+      org: { id: ORG_A, name: "Acme", slug: "acme", kind: "team", domain: null, domainAutoJoin: false },
       updateReturning: [{ id: ORG_A, name: "Acme", slug: "acme", domain: "a.dev", domainAutoJoin: true }],
     });
     await expect(
       updateOrg({ actor: admin, orgId: ORG_A, domainAutoJoin: true, database }),
     ).resolves.toMatchObject({ domain: "a.dev", domainAutoJoin: true });
     expect(calls.txPatch).toMatchObject({ domain: "a.dev", domainAutoJoin: true });
+  });
+
+  it("rejects domain auto-join on a personal workspace", async () => {
+    const { database } = fakeDb({
+      role: "admin",
+      org: { id: ORG_A, name: "Personal", slug: "personal", kind: "personal", domain: null, domainAutoJoin: false },
+    });
+    await expect(updateOrg({ actor: admin, orgId: ORG_A, domainAutoJoin: true, database })).rejects.toThrow(
+      "domain auto-join is only available for team workspaces",
+    );
   });
 
   it("denies a member of another org (cross-tenant)", async () => {
@@ -348,6 +358,28 @@ describe("updateTeam", () => {
     await updateTeam({ actor: admin, orgId: ORG_A, teamId: TEAM_1, description: "   ", database });
     const teamUpdate = calls.updates.at(-1);
     expect(teamUpdate?.patch).toMatchObject({ description: null });
+  });
+
+  it("rejects an invalid team color", async () => {
+    const { database } = fakeDb({
+      role: "admin",
+      team: { id: TEAM_1, orgId: ORG_A },
+    });
+    await expect(
+      updateTeam({ actor: admin, orgId: ORG_A, teamId: TEAM_1, color: "url(https://evil.test/x.png)", database }),
+    ).rejects.toThrow("invalid team color");
+  });
+
+  it("accepts a palette team color", async () => {
+    const color = TEAM_BRAND_COLORS[0]!;
+    const { database } = fakeDb({
+      role: "admin",
+      team: { id: TEAM_1, orgId: ORG_A },
+      updateReturning: [{ id: TEAM_1, name: "Platform", slug: "platform", description: null, color, icon: null }],
+    });
+    await expect(updateTeam({ actor: admin, orgId: ORG_A, teamId: TEAM_1, color, database })).resolves.toMatchObject({
+      color,
+    });
   });
 
   it("throws when the team is not found", async () => {
