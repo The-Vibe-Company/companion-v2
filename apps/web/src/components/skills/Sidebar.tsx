@@ -13,6 +13,7 @@ export function Sidebar({
   onSwitchOrg,
   onOnboard,
   onOpenSettings,
+  onWarmSettings,
   teams,
   totalCount,
   myCount,
@@ -30,6 +31,7 @@ export function Sidebar({
   onSwitchOrg: (id: string) => void;
   onOnboard: (mode: "create" | "join") => void;
   onOpenSettings: (intent?: SettingsIntent) => void;
+  onWarmSettings: () => void;
   teams: TeamVM[];
   totalCount: number;
   myCount: number;
@@ -50,6 +52,7 @@ export function Sidebar({
       else n.add(id);
       return n;
     });
+  const warmSettings = () => onWarmSettings();
 
   return (
     <aside className="side">
@@ -100,7 +103,10 @@ export function Sidebar({
               className="side__addteam"
               title="New team"
               aria-label="New team"
+              onFocus={warmSettings}
+              onMouseDown={warmSettings}
               onClick={() => onOpenSettings({ tab: "teams", dialog: "team" })}
+              onPointerEnter={warmSettings}
             >
               <Icon name="plus" size={14} />
             </button>
@@ -122,10 +128,13 @@ export function Sidebar({
                   className="teamitem__gear"
                   title={tm.name + " settings"}
                   aria-label={tm.name + " settings"}
+                  onFocus={warmSettings}
+                  onMouseDown={warmSettings}
                   onClick={(e) => {
                     e.stopPropagation();
                     onOpenSettings({ tab: "teams" });
                   }}
+                  onPointerEnter={warmSettings}
                 >
                   <Icon name="settings" size={14} />
                 </button>
@@ -156,7 +165,13 @@ export function Sidebar({
           );
         })}
       </nav>
-      <button className="side__foot side__foot--btn" onClick={() => onOpenSettings()}>
+      <button
+        className="side__foot side__foot--btn"
+        onFocus={warmSettings}
+        onMouseDown={warmSettings}
+        onClick={() => onOpenSettings()}
+        onPointerEnter={warmSettings}
+      >
         <Icon name="settings" size={14} /> Settings
         <span className="side__foot__role">{orgRole(currentOrg.myRole).label.toLowerCase()}</span>
       </button>

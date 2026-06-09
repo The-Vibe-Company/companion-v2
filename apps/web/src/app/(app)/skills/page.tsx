@@ -33,6 +33,7 @@ export default async function SkillsPage() {
   const me: MeVM = {
     id: whoami.userId,
     name: whoami.name || whoami.email || "You",
+    email: whoami.email,
     initials: (whoami.name?.[0] ?? whoami.email?.[0] ?? "?").toUpperCase(),
   };
 

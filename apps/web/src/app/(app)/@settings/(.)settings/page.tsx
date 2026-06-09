@@ -1,4 +1,4 @@
-import { SettingsDrawer } from "@/components/org/SettingsDrawer";
+import { SettingsDrawer, SettingsDrawerBackgroundGuard } from "@/components/org/SettingsDrawer";
 import { loadSettingsPageData, type SettingsSearchParams } from "@/lib/settingsData";
 
 export const dynamic = "force-dynamic";
@@ -12,6 +12,7 @@ export default async function InterceptedSettingsPage({
   if (!props) {
     return (
       <div className="settings-drawer">
+        <SettingsDrawerBackgroundGuard />
         <div className="settings-drawer__panel" role="dialog" aria-modal="true" aria-label="Settings" tabIndex={-1}>
           <div className="og-set">
             <div className="og-set__top">

@@ -13,10 +13,17 @@ vi.mock("next/navigation", () => ({
 }));
 
 describe("SettingsController", () => {
+  it("builds stable settings URLs for tab and dialog state", async () => {
+    const { settingsHref } = await import("./SettingsApp");
+
+    expect(settingsHref("general", null)).toBe("/settings?tab=general");
+    expect(settingsHref("teams", "team")).toBe("/settings?tab=teams&dialog=team");
+  });
+
   it("normalizes malformed member and team collections before rendering", async () => {
     const { SettingsController } = await import("./SettingsApp");
     const data = {
-      me: { id: "user_1", name: "Admin", initials: "A" },
+      me: { id: "user_1", name: "Admin", email: "admin@tvc.dev", initials: "A" },
       users: {
         user_1: { id: "user_1", name: "Admin", email: "admin@tvc.dev", initials: "A" },
       },

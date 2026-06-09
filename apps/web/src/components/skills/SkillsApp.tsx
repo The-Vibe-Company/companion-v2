@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import type { Scope, SkillFilterPreferences } from "@companion/contracts";
 import { saveSkillFilterPreferences, setSkillScope, toggleStar as toggleStarRpc } from "@/lib/queries";
+import { fetchSettingsAppData } from "@/lib/settingsClient";
 import type { MeVM, OrgVM, SkillVM, TeamVM } from "@/lib/types";
 import { Sidebar } from "./Sidebar";
 import { ListView } from "./ListView";
@@ -11,8 +12,10 @@ import { DetailView } from "./DetailView";
 import { CommandPalette } from "./CommandPalette";
 import { UploadDialog, InstallDialog } from "./UploadDialog";
 import { Onboarding } from "../org/Onboarding";
+import { settingsHref } from "../org/SettingsApp";
+import { SettingsDrawer, SettingsDrawerError } from "../org/SettingsDrawer";
 import { useOrgActions } from "../org/useOrgActions";
-import type { SettingsIntent } from "../org/model";
+import type { SettingsAppData, SettingsDialog, SettingsIntent, SettingsTab } from "../org/model";
 import {
   BUILTIN_VIEWS,
   chipParts,
@@ -22,6 +25,39 @@ import {
   type Filter,
   type ViewDef,
 } from "./filters";
+
+const SETTINGS_LOAD_ERROR =
+  "Refresh the page to try again. If the problem continues, check that the API and database are reachable.";
+
+type SettingsState = {
+  initialTab: SettingsTab;
+  initialDialog: SettingsDialog;
+};
+
+type LocalSettingsSurface =
+  | ({ kind: "ready"; data: SettingsAppData } & SettingsState)
+  | ({ kind: "error"; message: string; busy: boolean } & SettingsState);
+
+function settingsStateFromIntent(intent?: SettingsIntent): SettingsState {
+  return {
+    initialTab: intent?.tab ?? (intent?.dialog === "team" ? "teams" : "members"),
+    initialDialog: intent?.dialog ?? null,
+  };
+}
+
+function settingsStateFromSearch(search: string): SettingsState {
+  const params = new URLSearchParams(search);
+  const tabRaw = params.get("tab");
+  const dialogRaw = params.get("dialog");
+  return {
+    initialTab: tabRaw === "general" || tabRaw === "teams" ? tabRaw : "members",
+    initialDialog: dialogRaw === "invite" || dialogRaw === "team" ? dialogRaw : null,
+  };
+}
+
+function settingsErrorMessage(error: unknown): string {
+  return error instanceof Error && error.message ? error.message : SETTINGS_LOAD_ERROR;
+}
 
 export function SkillsApp({
   initialSkills,
@@ -40,24 +76,98 @@ export function SkillsApp({
 }) {
   const router = useRouter();
   const orgActions = useOrgActions();
-  useEffect(() => {
-    router.prefetch("/settings");
-  }, [router]);
-  const openSettings = useCallback(
-    (intent?: SettingsIntent) => {
-      const qs = new URLSearchParams();
-      if (intent?.tab) qs.set("tab", intent.tab);
-      if (intent?.dialog) qs.set("dialog", intent.dialog);
-      const s = qs.toString();
-      router.push("/settings" + (s ? `?${s}` : ""));
-    },
-    [router],
-  );
+  const settingsWarmupRef = useRef<{ orgId: string; promise: Promise<SettingsAppData> } | null>(null);
+  const [localSettings, setLocalSettings] = useState<LocalSettingsSurface | null>(null);
   const [skills, setSkills] = useState<SkillVM[]>(initialSkills);
   useEffect(() => setSkills(initialSkills), [initialSkills]);
   useEffect(() => {
     document.cookie = `companion_org=${encodeURIComponent(currentOrg.id)}; path=/; SameSite=Lax`;
   }, [currentOrg.id]);
+
+  const loadSettingsData = useCallback(async () => {
+    const data = await fetchSettingsAppData({ me, currentOrg });
+    if (!data) throw new Error(SETTINGS_LOAD_ERROR);
+    return data;
+  }, [currentOrg, me]);
+
+  const warmSettings = useCallback(() => {
+    const cached = settingsWarmupRef.current;
+    if (cached?.orgId === currentOrg.id) return cached.promise;
+    const promise = loadSettingsData();
+    settingsWarmupRef.current = { orgId: currentOrg.id, promise };
+    promise.catch(() => {
+      if (settingsWarmupRef.current?.promise === promise) settingsWarmupRef.current = null;
+    });
+    return promise;
+  }, [currentOrg.id, loadSettingsData]);
+
+  const refreshLocalSettingsData = useCallback(async () => {
+    const data = await loadSettingsData();
+    settingsWarmupRef.current = { orgId: currentOrg.id, promise: Promise.resolve(data) };
+    setLocalSettings((surface) => (surface?.kind === "ready" ? { ...surface, data } : surface));
+    return data;
+  }, [currentOrg.id, loadSettingsData]);
+
+  const showLocalSettings = useCallback(
+    (state: SettingsState, pushHistory: boolean) => {
+      void warmSettings()
+        .then((data) => {
+          if (!pushHistory && window.location.pathname !== "/settings") return;
+          if (pushHistory) {
+            window.history.pushState(window.history.state, "", settingsHref(state.initialTab, state.initialDialog));
+          }
+          setLocalSettings({ kind: "ready", data, ...state });
+        })
+        .catch((error) => {
+          if (!pushHistory && window.location.pathname !== "/settings") return;
+          if (pushHistory) {
+            window.history.pushState(window.history.state, "", settingsHref(state.initialTab, state.initialDialog));
+          }
+          setLocalSettings({ kind: "error", message: settingsErrorMessage(error), busy: false, ...state });
+        });
+    },
+    [warmSettings],
+  );
+
+  const openSettings = useCallback(
+    (intent?: SettingsIntent) => {
+      showLocalSettings(settingsStateFromIntent(intent), true);
+    },
+    [showLocalSettings],
+  );
+
+  const retryLocalSettings = useCallback(() => {
+    const surface = localSettings;
+    if (!surface || surface.kind !== "error") return;
+    const state = { initialTab: surface.initialTab, initialDialog: surface.initialDialog };
+    setLocalSettings({ ...surface, busy: true });
+    void loadSettingsData()
+      .then((data) => {
+        settingsWarmupRef.current = { orgId: currentOrg.id, promise: Promise.resolve(data) };
+        window.history.replaceState(window.history.state, "", settingsHref(state.initialTab, state.initialDialog));
+        setLocalSettings({ kind: "ready", data, ...state });
+      })
+      .catch((error) => {
+        setLocalSettings({ kind: "error", message: settingsErrorMessage(error), busy: false, ...state });
+      });
+  }, [currentOrg.id, loadSettingsData, localSettings]);
+
+  useEffect(() => {
+    settingsWarmupRef.current = null;
+    setLocalSettings(null);
+  }, [currentOrg.id]);
+
+  useEffect(() => {
+    const onPopState = () => {
+      if (window.location.pathname === "/settings") {
+        showLocalSettings(settingsStateFromSearch(window.location.search), false);
+        return;
+      }
+      setLocalSettings(null);
+    };
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, [showLocalSettings]);
 
   const [filters, setFilters] = useState<Filter[]>(() => initialFilterPreferences.active_filters);
   const [customViews, setCustomViews] = useState<ViewDef[]>(() =>
@@ -378,6 +488,9 @@ export function SkillsApp({
         onSwitchOrg={orgActions.switchOrg}
         onOnboard={(m) => orgActions.setOnboarding(m)}
         onOpenSettings={openSettings}
+        onWarmSettings={() => {
+          void warmSettings();
+        }}
         teams={teams}
         totalCount={skills.length}
         myCount={myCount}
@@ -474,6 +587,22 @@ export function SkillsApp({
         <div className="og-toast" role="alert" onClick={() => orgActions.setError(null)}>
           {orgActions.error}
         </div>
+      )}
+      {localSettings?.kind === "ready" && (
+        <SettingsDrawer
+          data={localSettings.data}
+          initialTab={localSettings.initialTab}
+          initialDialog={localSettings.initialDialog}
+          onRefreshData={refreshLocalSettingsData}
+        />
+      )}
+      {localSettings?.kind === "error" && (
+        <SettingsDrawerError
+          message={localSettings.message}
+          busy={localSettings.busy}
+          onClose={() => window.history.back()}
+          onRetry={retryLocalSettings}
+        />
       )}
     </div>
   );
