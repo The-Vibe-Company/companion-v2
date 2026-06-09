@@ -97,7 +97,7 @@ export function MembersPane({ ctx, onInvite }: { ctx: OrgCtx; onInvite: () => vo
       <div className="og-toolbar">
         <div className="og-search">
           <Icon name="search" size={15} />
-          <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search members" />
+          <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search members" aria-label="Search members" />
         </div>
       </div>
 

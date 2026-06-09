@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useId, useState, type CSSProperties, type ReactNode } from "react";
 import { Icon } from "../Icon";
 
 /** Pane header — title, optional description, and an optional right-aligned action. */
@@ -53,15 +53,17 @@ export function EditField({
   const [v, setV] = useState(value);
   useEffect(() => setV(value), [value]);
   const dirty = !locked && v.trim() !== value && v.trim().length > 0;
+  const inputId = useId();
   const wrapStyle: CSSProperties | undefined = prefix
     ? ({ "--pfx": "calc(" + prefix.length + "ch + 18px)" } as CSSProperties)
     : undefined;
   return (
     <div className="sx-field">
-      <label className="sx-field__label">{label}</label>
+      <label className="sx-field__label" htmlFor={inputId}>{label}</label>
       <div className="sx-inputwrap" style={wrapStyle}>
         {prefix && <span className="pfx">{prefix}</span>}
         <input
+          id={inputId}
           className={"sx-input" + (mono ? " sx-input--mono" : "")}
           value={v}
           placeholder={placeholder}
