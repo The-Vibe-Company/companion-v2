@@ -184,9 +184,11 @@ The interface is product software, not marketing. It should feel calm, dense, pr
 
 Design for technical users who read resource ids, scopes, roles, providers, model routes, vault names, lifecycle states, and audit records directly. Do not prettify machine values. Do not hide operational truth behind marketing language. Healthy state should be quiet. Broken state should be unmistakable without alarm theater.
 
-This document describes the light Companion theme as implemented in `apps/web`. CSS custom properties live in
+This document describes the Companion theme as implemented in `apps/web`. Light is the default; a full dark
+theme and user-selectable accent presets are available (see Colors). CSS custom properties live in
 `apps/web/src/styles/tokens.css`; the `cds-*` component layer is in `cds.css`; feature-specific layout and
-styling extend those tokens in `auth.css`, `skills.css`, `onboarding.css`, `org.css`, and `upload.css`.
+styling extend those tokens in `auth.css`, `skills.css`, `onboarding.css`, `org.css`, `settings.css`, and
+`upload.css`.
 
 ## Colors
 
@@ -203,9 +205,20 @@ focus indication. Do not use accent as decoration, chart filler, page glow, or g
 buttons use `accent-hover`; selected rows use `accent-tint` plus an inset accent edge (`accent-edge` or
 `accent-line`). `accent-muted` is available for subdued accent treatments.
 
-The canonical **cloud-blue** accent from the original handoff remains available as an opt-in variant: set
-`data-accent="cloud"` on a root element to swap in the `accent-cloud*` tokens
-(`oklch(0.585 0.142 242)` family). The live app defaults to signal yellow everywhere unless that attribute is set.
+Three accent presets are user-selectable in Account › Preferences via a `data-accent` attribute on `<html>`
+(persisted per-device in `localStorage`, applied before first paint by a no-FOUC inline script). Signal yellow
+is the default with no attribute. `data-accent="cloud"` swaps in the canonical cloud-blue tokens
+(`oklch(0.585 0.142 242)` family). `data-accent="evergreen"` swaps in a calm green (`oklch(0.58 0.115 162)`
+family) and `data-accent="coral"` a warm red-orange (`oklch(0.66 0.165 30)` family); each redefines the full
+`accent*` set so primary actions, focus rings, and selected-row tints stay coherent.
+
+A dark theme is available app-wide via `data-theme="dark"` on `<html>` (also chosen in Preferences — light,
+dark, or follow-system — and applied before first paint to avoid a flash). It sets `color-scheme: dark` and
+overrides the neutral ramp (`canvas`, `surface`, `surface-raised`, `surface-sunken`, `line`, `line-strong`,
+`fg`, `muted`, `faint`), the `scrim`, and the `shadow-md`/`shadow-lg` elevations for a dark ground. Accent hues
+are unchanged in dark mode; only `accent-tint` is lifted per accent (`data-theme="dark"` × `data-accent`) so
+selected rows read against the darker surface. A one-frame `no-anim` class is toggled during a theme or accent
+swap so background colors don't interpolate across the variable change.
 
 During onboarding, org and team brand colors are chosen from a fixed six-color palette (`brand-blue`, `brand-teal`,
 `brand-violet`, `brand-amber`, `brand-terracotta`, `brand-slate`). These are cosmetic only and stored per org/team;

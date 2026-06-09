@@ -50,6 +50,8 @@ export function RoleSelect({
         disabled={disabled}
         onClick={() => setOpen((o) => !o)}
         title={disabled ? lockReason || "" : "Change role"}
+        aria-haspopup="menu"
+        aria-expanded={open}
       >
         <RoleDot role={role} />
         {map[role] ? map[role].label : role}
@@ -60,7 +62,7 @@ export function RoleSelect({
       {open && (
         <div className="og-menu" role="menu">
           {ord.map((r) => (
-            <button key={r} className="og-menu__item" onClick={() => { onChange(r); setOpen(false); }}>
+            <button key={r} role="menuitem" className="og-menu__item" onClick={() => { onChange(r); setOpen(false); }}>
               <RoleDot role={r} />
               <span className="og-menu__txt">
                 <div className="og-menu__name">{map[r]?.label ?? r}</div>

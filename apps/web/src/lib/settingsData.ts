@@ -3,27 +3,49 @@ import "server-only";
 import { redirect } from "next/navigation";
 import { loadOrgContext } from "@/lib/currentOrg";
 import { serverApiFetch } from "@/lib/apiServer";
-import { buildSettingsAppData, initialsOf, parseOrgSettingsResponse } from "@/lib/settingsViewModel";
-import type { SettingsAppData, SettingsDialog, SettingsTab } from "@/components/org/model";
+import {
+  buildSettingsAppData,
+  initialsOf,
+  parseApiTokensResponse,
+  parseOrgSettingsResponse,
+} from "@/lib/settingsViewModel";
+import type { SettingsAppData, SettingsDialog, SettingsRoute, SettingsView } from "@/components/org/model";
 import type { MeVM } from "@/lib/types";
 
 export type SettingsSearchParams = Promise<Record<string, string | string[] | undefined>>;
 export { parseOrgSettingsResponse } from "@/lib/settingsViewModel";
 
+const SETTINGS_VIEWS: readonly SettingsView[] = [
+  "profile",
+  "preferences",
+  "apikeys",
+  "general",
+  "members",
+  "invitations",
+  "team-general",
+  "team-members",
+];
+
+function isSettingsView(value: string): value is SettingsView {
+  return (SETTINGS_VIEWS as readonly string[]).includes(value);
+}
+
 function parseSettingsState(sp: Record<string, string | string[] | undefined>): {
-  initialTab: SettingsTab;
+  initialRoute: SettingsRoute;
   initialDialog: SettingsDialog;
 } {
-  const tabRaw = typeof sp.tab === "string" ? sp.tab : undefined;
-  const initialTab: SettingsTab = tabRaw === "general" || tabRaw === "teams" ? tabRaw : "members";
+  const viewRaw = typeof sp.view === "string" ? sp.view : undefined;
+  const view: SettingsView = viewRaw && isSettingsView(viewRaw) ? viewRaw : "profile";
+  // `team` is only meaningful for the per-team panes.
+  const teamId = view.startsWith("team-") && typeof sp.team === "string" ? sp.team : undefined;
   const dialogRaw = typeof sp.dialog === "string" ? sp.dialog : undefined;
   const initialDialog: SettingsDialog = dialogRaw === "invite" || dialogRaw === "team" ? dialogRaw : null;
-  return { initialTab, initialDialog };
+  return { initialRoute: { view, teamId }, initialDialog };
 }
 
 export async function loadSettingsPageData(searchParams: SettingsSearchParams): Promise<{
   data: SettingsAppData;
-  initialTab: SettingsTab;
+  initialRoute: SettingsRoute;
   initialDialog: SettingsDialog;
 } | null> {
   const whoami = await serverApiFetch<{ userId: string; email: string; name: string; needsOnboarding?: boolean }>(
@@ -52,9 +74,15 @@ export async function loadSettingsPageData(searchParams: SettingsSearchParams): 
   const settings = parseOrgSettingsResponse(settingsRaw);
   if (!settings) return null;
 
+  // Personal access tokens live on their own endpoint; a failed fetch degrades to an empty list.
+  const tokensRaw = await serverApiFetch<unknown>("/v1/tokens", {
+    headers: orgHeaders,
+  }).catch(() => null);
+  const tokens = parseApiTokensResponse(tokensRaw);
+
   const state = parseSettingsState(await searchParams);
   return {
     ...state,
-    data: buildSettingsAppData({ me, current, settings }),
+    data: buildSettingsAppData({ me, current, settings, tokens }),
   };
 }

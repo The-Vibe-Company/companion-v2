@@ -1,7 +1,10 @@
 import { createHash, randomBytes } from "node:crypto";
-import { and, asc, count, desc, eq, exists, gt, inArray, isNull, or, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, exists, gt, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import type {
+  ApiTokenRow,
   OrgRole,
+  OrgSettingsInvitation,
+  OrgSettingsOrg,
   Scope,
   SkillCommentRow,
   SkillFilterPreferences,
@@ -68,6 +71,7 @@ export interface OrgSettingsTeam {
   id: string;
   slug: string;
   name: string;
+  description: string | null;
   members: Array<{
     userId: string;
     role: TeamRole;
@@ -79,6 +83,11 @@ export interface OrgSettingsTeam {
 
 export function uniqueSlug(base: string, suffix: string): string {
   return `${slugify(base)}-${suffix.slice(0, 8).toLowerCase()}`;
+}
+
+/** True when an error is a Postgres unique-constraint violation (SQLSTATE 23505). */
+function isUniqueViolation(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error && (error as { code?: unknown }).code === "23505";
 }
 
 /**
@@ -97,6 +106,28 @@ export async function ensureUserBootstrap(actor: ActorContext, database: Db = db
       handle: actor.email.split("@")[0] ?? null,
     })
     .onConflictDoNothing();
+}
+
+/**
+ * Self-service profile rename. Trims the name, recomputes `initials`, and writes the `profiles` row.
+ * `profiles` carries no RLS (it is keyed by the auth user id), so this runs on the plain `db` handle
+ * like `ensureUserBootstrap`. The caller (REST route) separately syncs the Better Auth `user.name`.
+ */
+export async function updateUserProfile(input: {
+  actor: ActorContext;
+  name: string;
+  database?: Db;
+}): Promise<{ id: string; name: string; initials: string }> {
+  const database = input.database ?? db;
+  const name = input.name.trim();
+  if (!name) throw new Error("name is required");
+  const initials = initialsFor(name);
+  await ensureUserBootstrap(input.actor, database);
+  await database
+    .update(schema.profiles)
+    .set({ name, initials, updatedAt: new Date() })
+    .where(eq(schema.profiles.id, input.actor.id));
+  return { id: input.actor.id, name, initials };
 }
 
 export async function listOrgs(actor: ActorContext, database: Db = db): Promise<OrgSummary[]> {
@@ -157,6 +188,57 @@ export async function createOrg(input: {
   return { id: org.id, slug: org.slug };
 }
 
+/**
+ * Rename and/or re-slug the current organization. Requires an org admin (`canManageOrg`). The slug is
+ * normalized via `slugify` and must be globally unique (org slugs are unique org-wide); we check first
+ * (excluding self) for a friendly message and still catch the unique-violation as a backstop on races.
+ */
+export async function updateOrg(input: {
+  actor: ActorContext;
+  orgId: string;
+  name?: string;
+  slug?: string;
+  database?: Db;
+}): Promise<{ id: string; name: string; slug: string }> {
+  const database = input.database ?? db;
+  const role = await getOrgRole(input.orgId, input.actor.id, database);
+  if (!role || !canManageOrg(role)) throw new Error("not allowed to update this organization");
+
+  const patch: { name?: string; slug?: string; updatedAt: Date } = { updatedAt: new Date() };
+  if (input.name !== undefined) {
+    const name = input.name.trim();
+    if (!name) throw new Error("name is required");
+    patch.name = name;
+  }
+  if (input.slug !== undefined) {
+    const slug = slugify(input.slug);
+    const conflict = await database.query.organizations.findFirst({
+      where: and(eq(schema.organizations.slug, slug), ne(schema.organizations.id, input.orgId)),
+    });
+    if (conflict) throw new Error("that workspace URL is already taken");
+    patch.slug = slug;
+  }
+  if (patch.name === undefined && patch.slug === undefined) throw new Error("nothing to update");
+
+  let row;
+  try {
+    [row] = await database
+      .update(schema.organizations)
+      .set(patch)
+      .where(eq(schema.organizations.id, input.orgId))
+      .returning({
+        id: schema.organizations.id,
+        name: schema.organizations.name,
+        slug: schema.organizations.slug,
+      });
+  } catch (error) {
+    if (isUniqueViolation(error)) throw new Error("that workspace URL is already taken");
+    throw error;
+  }
+  if (!row) throw new Error("organization not found");
+  return row;
+}
+
 export async function listTeamsForUser(input: {
   actor: ActorContext;
   orgId: string;
@@ -176,10 +258,28 @@ export async function getOrgSettings(input: {
   actor: ActorContext;
   orgId: string;
   database?: Db;
-}): Promise<{ members: OrgSettingsMember[]; teams: OrgSettingsTeam[] }> {
+}): Promise<{
+  org: OrgSettingsOrg;
+  members: OrgSettingsMember[];
+  teams: OrgSettingsTeam[];
+  invitations: OrgSettingsInvitation[];
+}> {
   const database = input.database ?? db;
   const orgRole = await getOrgRole(input.orgId, input.actor.id, database);
   if (!orgRole) throw new Error("not a member of this organization");
+
+  const orgRow = await database.query.organizations.findFirst({
+    where: eq(schema.organizations.id, input.orgId),
+  });
+  if (!orgRow) throw new Error("organization not found");
+  const org: OrgSettingsOrg = {
+    id: orgRow.id,
+    name: orgRow.name,
+    slug: orgRow.slug,
+    kind: orgRow.kind,
+    plan: orgRow.plan,
+    createdAt: orgRow.createdAt.toISOString(),
+  };
 
   const memberRows = await database
     .select({
@@ -205,6 +305,9 @@ export async function getOrgSettings(input: {
     initials: r.initials,
   }));
 
+  // Admins additionally see pending invitations: folded into `members[]` (legacy, for the existing
+  // Members UI) and surfaced as a clean `invitations[]` for the dedicated Invitations pane.
+  const invitations: OrgSettingsInvitation[] = [];
   if (canManageOrg(orgRole)) {
     const inviteRows = await database
       .select({
@@ -212,7 +315,9 @@ export async function getOrgSettings(input: {
         email: schema.invitations.email,
         role: schema.invitations.orgRole,
         token: schema.invitations.token,
+        status: schema.invitations.status,
         createdAt: schema.invitations.createdAt,
+        expiresAt: schema.invitations.expiresAt,
       })
       .from(schema.invitations)
       .where(and(eq(schema.invitations.orgId, input.orgId), eq(schema.invitations.status, "pending")))
@@ -230,11 +335,25 @@ export async function getOrgSettings(input: {
         email: invite.email,
         initials: initialsFor(display),
       });
+      invitations.push({
+        id: invite.id,
+        email: invite.email,
+        role: invite.role as OrgRole,
+        token: invite.token,
+        status: invite.status,
+        createdAt: invite.createdAt.toISOString(),
+        expiresAt: invite.expiresAt.toISOString(),
+      });
     }
   }
 
   const teamRows = await database
-    .select({ id: schema.teams.id, slug: schema.teams.slug, name: schema.teams.name })
+    .select({
+      id: schema.teams.id,
+      slug: schema.teams.slug,
+      name: schema.teams.name,
+      description: schema.teams.description,
+    })
     .from(schema.teams)
     .where(eq(schema.teams.orgId, input.orgId))
     .orderBy(asc(schema.teams.name));
@@ -257,6 +376,7 @@ export async function getOrgSettings(input: {
       id: team.id,
       slug: team.slug,
       name: team.name,
+      description: team.description,
       members: teamMembers.map((m) => ({
         userId: m.userId,
         role: m.role as TeamRole,
@@ -267,7 +387,7 @@ export async function getOrgSettings(input: {
     });
   }
 
-  return { members, teams };
+  return { org, members, teams, invitations };
 }
 
 export async function createTeam(input: {
@@ -292,6 +412,112 @@ export async function createTeam(input: {
     teamRole: "admin",
   });
   return { id: team.id, slug: team.slug };
+}
+
+/**
+ * Rename, re-slug, and/or edit a team's description. Allowed for an org admin OR a team admin (reuses
+ * `assertCanManageTeam`). The slug is normalized and unique per-org (`org_id` + `slug`); description is
+ * trimmed and an empty string collapses to `null`.
+ */
+export async function updateTeam(input: {
+  actor: ActorContext;
+  orgId: string;
+  teamId: string;
+  name?: string;
+  slug?: string;
+  description?: string | null;
+  database?: Db;
+}): Promise<{ id: string; name: string; slug: string; description: string | null }> {
+  const database = input.database ?? db;
+  await assertCanManageTeam({ actor: input.actor, orgId: input.orgId, teamId: input.teamId, database });
+
+  const patch: { name?: string; slug?: string; description?: string | null; updatedAt: Date } = {
+    updatedAt: new Date(),
+  };
+  if (input.name !== undefined) {
+    const name = input.name.trim();
+    if (!name) throw new Error("name is required");
+    patch.name = name;
+  }
+  if (input.slug !== undefined) {
+    const slug = slugify(input.slug);
+    const conflict = await database.query.teams.findFirst({
+      where: and(
+        eq(schema.teams.orgId, input.orgId),
+        eq(schema.teams.slug, slug),
+        ne(schema.teams.id, input.teamId),
+      ),
+    });
+    if (conflict) throw new Error("that team URL is already taken");
+    patch.slug = slug;
+  }
+  if (input.description !== undefined) {
+    const description = input.description?.trim() ?? "";
+    patch.description = description ? description : null;
+  }
+  if (patch.name === undefined && patch.slug === undefined && patch.description === undefined) {
+    throw new Error("nothing to update");
+  }
+
+  let row;
+  try {
+    [row] = await database
+      .update(schema.teams)
+      .set(patch)
+      .where(and(eq(schema.teams.orgId, input.orgId), eq(schema.teams.id, input.teamId)))
+      .returning({
+        id: schema.teams.id,
+        name: schema.teams.name,
+        slug: schema.teams.slug,
+        description: schema.teams.description,
+      });
+  } catch (error) {
+    if (isUniqueViolation(error)) throw new Error("that team URL is already taken");
+    throw error;
+  }
+  if (!row) throw new Error("team not found");
+  return row;
+}
+
+/**
+ * Delete a team. Requires an org admin (`canManageOrg`), and the org must keep at least one team.
+ * `skills.team_id` is `onDelete SET NULL`, but a CHECK enforces `(scope = 'team') = (team_id is not
+ * null)`, so a raw delete would leave team-scoped skills violating the constraint. Inside one
+ * transaction we first re-scope this team's skills to `{ scope: "private", teamId: null }`, then drop
+ * the team (its memberships cascade).
+ */
+export async function deleteTeam(input: {
+  actor: ActorContext;
+  orgId: string;
+  teamId: string;
+  database?: Db;
+}): Promise<void> {
+  const database = input.database ?? db;
+  const role = await getOrgRole(input.orgId, input.actor.id, database);
+  if (!role || !canManageOrg(role)) throw new Error("not allowed to delete teams");
+  const team = await database.query.teams.findFirst({
+    where: and(eq(schema.teams.orgId, input.orgId), eq(schema.teams.id, input.teamId)),
+  });
+  if (!team) throw new Error("team not found");
+
+  await database.transaction(async (tx) => {
+    // Serialize concurrent deletes for this org so the "keep at least one team" invariant can't be
+    // raced (two deletes both seeing count > 1 and leaving zero teams). Mirrors the org-owner guard.
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`companion:org-teams:${input.orgId}`}))`);
+    const [teamCount] = await tx
+      .select({ value: count() })
+      .from(schema.teams)
+      .where(eq(schema.teams.orgId, input.orgId));
+    if (Number(teamCount?.value ?? 0) <= 1) throw new Error("organization must keep at least one team");
+    // Re-scope this team's skills to private BEFORE deleting so the team_id/scope CHECK stays satisfied.
+    await tx
+      .update(schema.skills)
+      .set({ scope: "private", teamId: null, updatedAt: new Date() })
+      .where(and(eq(schema.skills.orgId, input.orgId), eq(schema.skills.teamId, input.teamId)));
+    await tx
+      .delete(schema.teams)
+      .where(and(eq(schema.teams.orgId, input.orgId), eq(schema.teams.id, input.teamId)));
+  });
 }
 
 export async function revokeInvitation(input: {
@@ -1070,6 +1296,60 @@ export async function issueApiToken(input: {
     .returning({ id: schema.apiTokens.id });
   if (!row) throw new Error("could not issue token");
   return { id: row.id, token, prefix, scopes: input.scopes, expiresAt };
+}
+
+/**
+ * List a member's personal access tokens for the settings UI. A developer sees only their own tokens
+ * (`where userId = actor.id`); an org admin sees every token in the org — this mirrors the `0005` RLS
+ * policy. Rows are mapped to the `apiTokenRowSchema` shape (snake_case, ISO timestamps); the secret
+ * (`tokenHash`) is never selected or returned.
+ */
+export async function listApiTokens(input: {
+  actor: ActorContext;
+  orgId: string;
+  database?: Db;
+}): Promise<ApiTokenRow[]> {
+  const database = input.database ?? db;
+  const role = await getOrgRole(input.orgId, input.actor.id, database);
+  if (!role) throw new Error("not a member of this organization");
+  // Always scope to the caller's OWN tokens: this backs the personal "Account › API keys" pane,
+  // so even an org admin must not see (or be able to revoke from here) other members' keys. The
+  // admin's broader revoke capability stays available by token id in `revokeApiToken`.
+  // Only active tokens: revoke is a soft delete (revoked_at is set, the row stays), so revoked
+  // keys must be filtered out or they reappear in the list masked as if still active.
+  const where = and(
+    eq(schema.apiTokens.orgId, input.orgId),
+    eq(schema.apiTokens.userId, input.actor.id),
+    isNull(schema.apiTokens.revokedAt),
+  );
+  const rows = await database
+    .select({
+      id: schema.apiTokens.id,
+      orgId: schema.apiTokens.orgId,
+      userId: schema.apiTokens.userId,
+      name: schema.apiTokens.name,
+      tokenPrefix: schema.apiTokens.tokenPrefix,
+      scopes: schema.apiTokens.scopes,
+      expiresAt: schema.apiTokens.expiresAt,
+      lastUsedAt: schema.apiTokens.lastUsedAt,
+      revokedAt: schema.apiTokens.revokedAt,
+      createdAt: schema.apiTokens.createdAt,
+    })
+    .from(schema.apiTokens)
+    .where(where)
+    .orderBy(desc(schema.apiTokens.createdAt));
+  return rows.map((r) => ({
+    id: r.id,
+    org_id: r.orgId,
+    user_id: r.userId,
+    name: r.name,
+    prefix: r.tokenPrefix,
+    scopes: (r.scopes ?? []) as TokenScope[],
+    expires_at: r.expiresAt.toISOString(),
+    last_used_at: r.lastUsedAt ? r.lastUsedAt.toISOString() : null,
+    revoked_at: r.revokedAt ? r.revokedAt.toISOString() : null,
+    created_at: r.createdAt.toISOString(),
+  }));
 }
 
 /**
