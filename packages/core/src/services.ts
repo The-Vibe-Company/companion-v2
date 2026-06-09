@@ -220,8 +220,18 @@ export async function updateOrg(input: {
   name?: string;
   slug?: string;
   domainAutoJoin?: boolean;
+  color?: string | null;
+  logoUrl?: string | null;
   database?: Db;
-}): Promise<{ id: string; name: string; slug: string; domain: string | null; domainAutoJoin: boolean }> {
+}): Promise<{
+  id: string;
+  name: string;
+  slug: string;
+  domain: string | null;
+  domainAutoJoin: boolean;
+  color: string | null;
+  logoUrl: string | null;
+}> {
   const database = input.database ?? db;
   const role = await getOrgRole(input.orgId, input.actor.id, database);
   if (!role || !canManageOrg(role)) throw new Error("not allowed to update this organization");
@@ -236,6 +246,8 @@ export async function updateOrg(input: {
     slug?: string;
     domain?: string | null;
     domainAutoJoin?: boolean;
+    color?: string | null;
+    logoUrl?: string | null;
     updatedAt: Date;
   } = { updatedAt: new Date() };
   if (input.name !== undefined) {
@@ -270,11 +282,19 @@ export async function updateOrg(input: {
       patch.domainAutoJoin = false;
     }
   }
+  if (input.color !== undefined) {
+    patch.color = input.color;
+  }
+  if (input.logoUrl !== undefined) {
+    patch.logoUrl = input.logoUrl;
+  }
   if (
     patch.name === undefined &&
     patch.slug === undefined &&
     patch.domain === undefined &&
-    patch.domainAutoJoin === undefined
+    patch.domainAutoJoin === undefined &&
+    patch.color === undefined &&
+    patch.logoUrl === undefined
   ) {
     throw new Error("nothing to update");
   }
@@ -296,6 +316,8 @@ export async function updateOrg(input: {
             slug: schema.organizations.slug,
             domain: schema.organizations.domain,
             domainAutoJoin: schema.organizations.domainAutoJoin,
+            color: schema.organizations.color,
+            logoUrl: schema.organizations.logoUrl,
           });
       });
     } else {
@@ -309,6 +331,8 @@ export async function updateOrg(input: {
           slug: schema.organizations.slug,
           domain: schema.organizations.domain,
           domainAutoJoin: schema.organizations.domainAutoJoin,
+          color: schema.organizations.color,
+          logoUrl: schema.organizations.logoUrl,
         });
     }
   } catch (error) {
@@ -321,6 +345,33 @@ export async function updateOrg(input: {
   }
   if (!row) throw new Error("organization not found");
   return row;
+}
+
+export function orgLogoPublicPath(orgId: string): string {
+  return `/v1/orgs/${orgId}/logo`;
+}
+
+/**
+ * Persist a hosted workspace logo URL after the binary has been stored. Requires an org admin.
+ */
+export async function setOrgLogoFromUpload(input: {
+  actor: ActorContext;
+  orgId: string;
+  logoUrl: string;
+  database?: Db;
+}): Promise<{ id: string; name: string; slug: string; domain: string | null; domainAutoJoin: boolean; color: string | null; logoUrl: string | null }> {
+  return updateOrg({ actor: input.actor, orgId: input.orgId, logoUrl: input.logoUrl, database: input.database });
+}
+
+/** Read access to a hosted workspace logo binary — any org member. */
+export async function getOrgLogoAsset(input: {
+  actor: ActorContext;
+  orgId: string;
+  database?: Db;
+}): Promise<void> {
+  const database = input.database ?? db;
+  const role = await getOrgRole(input.orgId, input.actor.id, database);
+  if (!role) throw new Error("not a member of this organization");
 }
 
 export async function listTeamsForUser(input: {
@@ -369,6 +420,8 @@ export async function getOrgSettings(input: {
     createdAt: orgRow.createdAt.toISOString(),
     domain: orgRow.domain,
     domainAutoJoin: orgRow.domainAutoJoin,
+    color: orgRow.color,
+    logoUrl: orgRow.logoUrl,
   };
 
   const memberRows = await database

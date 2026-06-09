@@ -56,6 +56,8 @@ export const orgSettingsOrgSchema = z.object({
   createdAt: z.string(),
   domain: z.string().nullable().default(null),
   domainAutoJoin: z.boolean().default(false),
+  color: z.string().nullable().default(null),
+  logoUrl: z.string().nullable().default(null),
 });
 export type OrgSettingsOrg = z.infer<typeof orgSettingsOrgSchema>;
 
@@ -81,18 +83,6 @@ export const updateUserProfileInputSchema = z.object({
 });
 export type UpdateUserProfileInput = z.infer<typeof updateUserProfileInputSchema>;
 
-/** Body of `PUT /v1/orgs/current` — rename, re-slug, and/or edit domain auto-join. */
-export const updateOrgInputSchema = z
-  .object({
-    name: z.string().min(1).max(120).optional(),
-    slug: z.string().min(1).max(120).optional(),
-    domainAutoJoin: z.boolean().optional(),
-  })
-  .refine((v) => v.name !== undefined || v.slug !== undefined || v.domainAutoJoin !== undefined, {
-    message: "Provide at least one field to update.",
-  });
-export type UpdateOrgInput = z.infer<typeof updateOrgInputSchema>;
-
 /** Allowed team avatar swatches (CSS colors rendered inline in the UI). */
 export const TEAM_BRAND_COLORS = [
   "oklch(0.56 0.13 250)", // blue
@@ -104,6 +94,26 @@ export const TEAM_BRAND_COLORS = [
 ] as const;
 
 export const teamBrandColorSchema = z.enum(TEAM_BRAND_COLORS);
+
+/** Body of `PUT /v1/orgs/current` — rename, re-slug, domain auto-join, and/or branding. */
+export const updateOrgInputSchema = z
+  .object({
+    name: z.string().min(1).max(120).optional(),
+    slug: z.string().min(1).max(120).optional(),
+    domainAutoJoin: z.boolean().optional(),
+    color: teamBrandColorSchema.nullish(),
+    logoUrl: z.string().url().max(2048).nullish(),
+  })
+  .refine(
+    (v) =>
+      v.name !== undefined ||
+      v.slug !== undefined ||
+      v.domainAutoJoin !== undefined ||
+      v.color !== undefined ||
+      v.logoUrl !== undefined,
+    { message: "Provide at least one field to update." },
+  );
+export type UpdateOrgInput = z.infer<typeof updateOrgInputSchema>;
 
 /** Body of `PUT /v1/teams/:teamId` — rename, re-slug, describe, and/or edit branding. */
 export const updateTeamInputSchema = z
@@ -124,3 +134,38 @@ export const updateTeamInputSchema = z
     { message: "Provide at least one field to update." },
   );
 export type UpdateTeamInput = z.infer<typeof updateTeamInputSchema>;
+
+/** Allowed workspace logo uploads (PNG, JPEG, WebP, GIF). */
+export const ORG_LOGO_MIME_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"] as const;
+export type OrgLogoMimeType = (typeof ORG_LOGO_MIME_TYPES)[number];
+
+const ORG_LOGO_EXTENSION_TO_MIME: Record<string, OrgLogoMimeType> = {
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".webp": "image/webp",
+  ".gif": "image/gif",
+};
+
+export const ORG_LOGO_FILE_EXTENSIONS = Object.keys(ORG_LOGO_EXTENSION_TO_MIME) as Array<
+  keyof typeof ORG_LOGO_EXTENSION_TO_MIME
+>;
+
+/**
+ * `accept` value for `<input type="file">`.
+ * Extensions only — macOS Finder ignores the filter when MIME types are mixed in.
+ */
+export const ORG_LOGO_FILE_ACCEPT = ORG_LOGO_FILE_EXTENSIONS.join(",");
+
+export function resolveOrgLogoContentType(file: { type: string; name: string }): OrgLogoMimeType | null {
+  if ((ORG_LOGO_MIME_TYPES as readonly string[]).includes(file.type)) {
+    return file.type as OrgLogoMimeType;
+  }
+  const ext = file.name.toLowerCase().match(/\.[^.]+$/)?.[0];
+  if (ext && ext in ORG_LOGO_EXTENSION_TO_MIME) return ORG_LOGO_EXTENSION_TO_MIME[ext]!;
+  return null;
+}
+
+export function isAllowedOrgLogoFile(file: { type: string; name: string }): boolean {
+  return resolveOrgLogoContentType(file) !== null;
+}

@@ -45,6 +45,8 @@ export interface OrgFull {
   created: string; // formatted creation date (Workspace › General "Details")
   domain: string | null;
   domainAutoJoin: boolean;
+  color: string | null;
+  logoUrl: string | null;
   members: OrgMember[];
   teams: OrgTeam[];
 }
@@ -132,7 +134,14 @@ export interface OrgCtx {
   setTheme: (theme: "light" | "dark" | "system") => void;
   setAccent: (accent: string) => void;
   setMyName: (name: string) => void;
-  setWorkspace: (patch: { name?: string; slug?: string; domainAutoJoin?: boolean }) => void;
+  setWorkspace: (patch: {
+    name?: string;
+    slug?: string;
+    domainAutoJoin?: boolean;
+    color?: string | null;
+    logoUrl?: string | null;
+  }) => void;
+  uploadWorkspaceLogo: (file: File) => Promise<void>;
   updateTeam: (teamId: string, patch: { name?: string; slug?: string; description?: string; color?: string | null; icon?: string | null }) => void;
   deleteTeam: (teamId: string) => void;
   createApiKey: (name: string, scope: "read" | "write") => Promise<string>;

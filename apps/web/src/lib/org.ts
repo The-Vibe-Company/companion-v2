@@ -99,8 +99,22 @@ export async function updateMe(name: string): Promise<{ id: string; name: string
  * Returns the server-normalized values so the caller can reconcile (the server slugifies).
  */
 export async function updateOrg(
-  patch: { name?: string; slug?: string; domainAutoJoin?: boolean },
-): Promise<{ id: string; name: string; slug: string; domain: string | null; domainAutoJoin: boolean }> {
+  patch: {
+    name?: string;
+    slug?: string;
+    domainAutoJoin?: boolean;
+    color?: string | null;
+    logoUrl?: string | null;
+  },
+): Promise<{
+  id: string;
+  name: string;
+  slug: string;
+  domain: string | null;
+  domainAutoJoin: boolean;
+  color: string | null;
+  logoUrl: string | null;
+}> {
   return apiFetch("/v1/orgs/current", {
     method: "PUT",
     body: JSON.stringify(patch),
@@ -124,6 +138,21 @@ export async function updateTeam(
 /** Permanently delete a team (its skills are unscoped). Mirrors `DELETE /v1/teams/:id`. */
 export async function deleteTeam(id: string): Promise<void> {
   await apiFetch(`/v1/teams/${id}`, { method: "DELETE" });
+}
+
+/** Upload a workspace logo image. Mirrors `POST /v1/orgs/current/logo`. */
+export async function uploadWorkspaceLogo(file: File): Promise<{
+  id: string;
+  name: string;
+  slug: string;
+  domain: string | null;
+  domainAutoJoin: boolean;
+  color: string | null;
+  logoUrl: string | null;
+}> {
+  const fd = new FormData();
+  fd.append("file", file);
+  return apiFetch("/v1/orgs/current/logo", { method: "POST", body: fd });
 }
 
 /** List the signed-in user's personal access tokens. Mirrors `GET /v1/tokens`. */

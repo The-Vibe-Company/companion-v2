@@ -68,6 +68,8 @@ describe("parseOrgSettingsResponse", () => {
           createdAt: "2025-01-12T00:00:00.000Z",
           domain: "tvc.dev",
           domainAutoJoin: true,
+          color: null,
+          logoUrl: null,
         },
         domainJoin: {
           actorDomain: "tvc.dev",
