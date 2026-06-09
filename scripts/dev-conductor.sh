@@ -1,0 +1,547 @@
+#!/usr/bin/env bash
+# =============================================================================
+# scripts/dev-conductor.sh — Conductor dev launcher for Companion v2, WITHOUT
+# Docker. Runs Postgres + MinIO + Mailpit as native per-workspace services and
+# launches the API + web apps via concurrently, deriving every port from the
+# Conductor port range (CONDUCTOR_PORT + offset). All state lives in
+# .conductor-pg/ and is torn down by `archive`.
+#
+# Modeled on ~/Dev/monkapps/scripts/dev-conductor.sh.
+#
+# Usage:
+#   bash scripts/dev-conductor.sh                 # run the full stack
+#   bash scripts/dev-conductor.sh archive         # stop services + rm .conductor-pg/
+#   bash scripts/dev-conductor.sh --reset-db      # purge .conductor-pg/ then run
+#   bash scripts/dev-conductor.sh --base 13000    # override CONDUCTOR_PORT
+#
+# Port allocation (BASE = CONDUCTOR_PORT, fallback 3000):
+#   +0  web (Next.js)            ← Conductor's "Run" opens this
+#   +1  api (Hono)
+#   +2  Postgres (native cluster)
+#   +3  MinIO S3 API
+#   +4  MinIO console
+#   +5  Mailpit SMTP
+#   +6  Mailpit web UI
+#   +7..+9 reserved
+# =============================================================================
+
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$REPO_ROOT"
+
+# ---------------------------------------------------------------------------
+# Colours & logging
+# ---------------------------------------------------------------------------
+if [ -t 1 ]; then
+  RED=$'\033[31m'; GREEN=$'\033[32m'; YELLOW=$'\033[33m'; BLUE=$'\033[34m'
+  CYAN=$'\033[36m'; BOLD=$'\033[1m'; DIM=$'\033[2m'; RESET=$'\033[0m'
+else
+  RED=''; GREEN=''; YELLOW=''; BLUE=''; CYAN=''; BOLD=''; DIM=''; RESET=''
+fi
+
+step() { printf '\n%s%s==> %s%s\n' "$BOLD" "$BLUE" "$1" "$RESET"; }
+info() { printf '  %s%s%s\n' "$CYAN" "$1" "$RESET"; }
+ok()   { printf '  %s[OK]%s %s\n' "$GREEN" "$RESET" "$1"; }
+warn() { printf '  %s[WARN]%s %s\n' "$YELLOW" "$RESET" "$1"; }
+die()  { printf '  %s[ERROR]%s %s\n' "$RED" "$RESET" "$1" >&2; exit 1; }
+
+# ---------------------------------------------------------------------------
+# Arguments
+# ---------------------------------------------------------------------------
+COMMAND="run"
+RESET_DB=false
+BASE_OVERRIDE=""
+
+usage() {
+  cat <<EOF
+${BOLD}dev-conductor.sh${RESET} — Companion v2 Conductor dev stack, native (no Docker).
+
+Usage: bash scripts/dev-conductor.sh [command] [options]
+
+Commands:
+  run               Start Postgres/MinIO/Mailpit + API + web (default)
+  archive           Stop native services and remove .conductor-pg/
+
+Options:
+  --reset-db        Purge .conductor-pg/ and re-init before running
+  --base N          Override CONDUCTOR_PORT (e.g. --base 13000)
+  -h, --help        Show this help
+EOF
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    run|archive)  COMMAND="$1";       shift ;;
+    --reset-db)   RESET_DB=true;       shift ;;
+    --base)
+      if [ $# -lt 2 ] || [ -z "$2" ] || [ "${2#--}" != "$2" ]; then
+        die "--base requires a numeric value (e.g. --base 13000)"
+      fi
+      BASE_OVERRIDE="$2"; shift 2 ;;
+    --base=*)
+      BASE_OVERRIDE="${1#--base=}"
+      if [ -z "$BASE_OVERRIDE" ]; then
+        die "--base= requires a numeric value (e.g. --base=13000)"
+      fi
+      shift ;;
+    -h|--help)    usage; exit 0 ;;
+    *)            die "Unknown argument: $1 (--help for usage)" ;;
+  esac
+done
+
+# ---------------------------------------------------------------------------
+# Resolve BASE port + derive the workspace port range
+# ---------------------------------------------------------------------------
+if [ -n "$BASE_OVERRIDE" ]; then
+  BASE="$BASE_OVERRIDE"
+elif [ -n "${CONDUCTOR_PORT:-}" ]; then
+  BASE="$CONDUCTOR_PORT"
+else
+  warn "CONDUCTOR_PORT absent — fallback BASE=3000 (workspace not isolated by port)"
+  BASE=3000
+fi
+
+case "$BASE" in
+  ''|*[!0-9]*) die "BASE port must be numeric, got: '$BASE'" ;;
+esac
+# We use a 10-port window [BASE..BASE+9].
+#   BASE >= 1024  : avoid privileged ports (need root)
+#   BASE+9 <= 65535 : stay within the valid TCP range
+if [ "$BASE" -lt 1024 ]; then
+  die "BASE port invalid: $BASE — use BASE >= 1024 (ports < 1024 need root)"
+fi
+if [ $((BASE + 9)) -gt 65535 ]; then
+  die "BASE port invalid: $BASE — BASE+9 exceeds 65535. Use BASE <= 65526"
+fi
+
+WEB_PORT=$((BASE + 0))
+API_PORT=$((BASE + 1))
+PG_PORT=$((BASE + 2))
+MINIO_API_PORT=$((BASE + 3))
+MINIO_CONSOLE_PORT=$((BASE + 4))
+MAILPIT_SMTP_PORT=$((BASE + 5))
+MAILPIT_UI_PORT=$((BASE + 6))
+
+# ---------------------------------------------------------------------------
+# Workspace identity (cookie prefix isolation) — mirrors the old
+# sanitize_project_name so auth cookies stay namespaced per workspace.
+# ---------------------------------------------------------------------------
+workspace_slug() {
+  local raw="${CONDUCTOR_WORKSPACE_NAME:-$(basename "$REPO_ROOT")}"
+  local cleaned
+  cleaned="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9_-]+/-/g; s/^-+//; s/-+$//')"
+  [ -z "$cleaned" ] && cleaned="workspace"
+  printf '%s' "$cleaned" | grep -Eq '^[a-z0-9]' || cleaned="w-${cleaned}"
+  printf 'companion-%s' "$cleaned"
+}
+PROJECT="$(workspace_slug)"
+
+# ---------------------------------------------------------------------------
+# Paths (all workspace state under .conductor-pg/)
+# ---------------------------------------------------------------------------
+STATE_DIR="$REPO_ROOT/.conductor-pg"
+PG_DATA="$STATE_DIR/postgres/data"
+# Socket lives in a short /tmp path, NOT under the (long) workspace dir: the
+# Unix-domain socket path has a hard 103-byte limit and Conductor workspace
+# paths blow past it. Clients connect over TCP (127.0.0.1) anyway; the socket
+# filename embeds the port so workspaces never collide.
+PG_SOCK="/tmp/companion-pg-${PG_PORT}"
+PG_LOG="$STATE_DIR/postgres/postgres.log"
+MINIO_DATA="$STATE_DIR/minio/data"
+MINIO_LOG="$STATE_DIR/minio/minio.log"
+MINIO_PID="$STATE_DIR/minio/minio.pid"
+MAILPIT_LOG="$STATE_DIR/mailpit/mailpit.log"
+MAILPIT_PID="$STATE_DIR/mailpit/mailpit.pid"
+
+# ---------------------------------------------------------------------------
+# Derived runtime config
+# ---------------------------------------------------------------------------
+PG_USER="companion"
+PG_PASS="companion"
+PG_DB="companion"
+DATABASE_URL="postgres://${PG_USER}:${PG_PASS}@127.0.0.1:${PG_PORT}/${PG_DB}"
+
+WEB_URL="http://127.0.0.1:${WEB_PORT}"
+API_URL="http://127.0.0.1:${API_PORT}"
+
+S3_ACCESS_KEY_ID="companion"
+S3_SECRET_ACCESS_KEY="companion-secret"
+S3_BUCKET="skill-archives"
+S3_ENDPOINT="http://127.0.0.1:${MINIO_API_PORT}"
+
+# Detected at runtime
+PG_BIN=""
+HAS_MINIO=false
+HAS_MAILPIT=false
+
+# ---------------------------------------------------------------------------
+# Detection helpers
+# ---------------------------------------------------------------------------
+detect_pg_bin() {
+  local c
+  for c in \
+    /opt/homebrew/opt/postgresql@17/bin \
+    /opt/homebrew/opt/postgresql@16/bin \
+    /usr/local/opt/postgresql@17/bin \
+    /usr/local/opt/postgresql@16/bin; do
+    if [ -x "$c/pg_ctl" ] && [ -x "$c/initdb" ] && [ -x "$c/psql" ]; then
+      printf '%s' "$c"; return 0
+    fi
+  done
+  if command -v pg_ctl >/dev/null 2>&1 && command -v initdb >/dev/null 2>&1 && command -v psql >/dev/null 2>&1; then
+    dirname "$(command -v pg_ctl)"; return 0
+  fi
+  return 1
+}
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || die "Missing required command: $1${2:+ ($2)}"
+}
+
+is_port_open() {
+  # lsof catches IPv4 + IPv6 listeners; /dev/tcp misses ::1-only binds.
+  lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1
+}
+
+# A PID is "ours" when its working directory is inside this repo — i.e. a dev
+# or native-service process this workspace started. We only ever kill our own
+# stale processes; an unrelated process on a derived port is a hard error so a
+# port collision never silently takes out someone else's work.
+is_repo_pid() {
+  local pid="$1" cwd
+  cwd="$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1 || true)"
+  case "$cwd" in
+    "$REPO_ROOT"|"$REPO_ROOT"/*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+free_port() {
+  local port="$1" label="$2" pids pid repo_pids="" foreign_pids="" waited=0
+  is_port_open "$port" || return 0
+  pids="$(lsof -ti :"$port" 2>/dev/null || true)"
+  if [ -z "$pids" ]; then
+    warn "$label port $port in use but PID not found"; return 0
+  fi
+
+  for pid in $pids; do
+    if is_repo_pid "$pid"; then
+      repo_pids="${repo_pids:+$repo_pids }$pid"
+    else
+      foreign_pids="${foreign_pids:+$foreign_pids }$pid"
+    fi
+  done
+
+  if [ -n "$foreign_pids" ]; then
+    die "$label port $port is held by an unrelated process (PID ${foreign_pids}). Stop it or run with a different CONDUCTOR_PORT/--base."
+  fi
+
+  warn "$label port $port busy (our PID ${repo_pids}) — terminating stale process"
+  kill ${repo_pids} 2>/dev/null || true
+  while [ "$waited" -lt 3 ] && is_port_open "$port"; do sleep 1; waited=$((waited + 1)); done
+  if is_port_open "$port"; then
+    kill -9 ${repo_pids} 2>/dev/null || true
+    sleep 1
+  fi
+  is_port_open "$port" && die "Port $port still busy after stopping our process. Manual kill: lsof -ti :$port | xargs kill -9"
+  ok "$label port $port freed"
+}
+
+# ---------------------------------------------------------------------------
+# Prerequisites
+# ---------------------------------------------------------------------------
+check_prerequisites() {
+  step "Checking prerequisites"
+  require_command node "install Node.js >= 20"
+  require_command pnpm "corepack enable && corepack prepare pnpm@9 --activate"
+  require_command lsof "brew install lsof (macOS) / apt-get install lsof (Debian)"
+  ok "node $(node -v)"
+  ok "pnpm $(pnpm --version)"
+
+  PG_BIN="$(detect_pg_bin || true)"
+  [ -n "$PG_BIN" ] || die "Postgres binaries not found. Install: brew install postgresql@17"
+  ok "postgres $("$PG_BIN/postgres" --version | awk '{print $3}') (${PG_BIN})"
+
+  if command -v minio >/dev/null 2>&1; then
+    HAS_MINIO=true
+    ok "minio"
+  else
+    warn "minio not installed — S3 storage disabled (skill uploads/downloads will fail). brew install minio"
+  fi
+
+  if command -v mailpit >/dev/null 2>&1; then
+    HAS_MAILPIT=true
+    ok "mailpit"
+  else
+    warn "mailpit not installed — email falls back to console log (EMAIL_PROVIDER=log). brew install mailpit"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Postgres lifecycle (native per-workspace cluster, idempotent)
+# ---------------------------------------------------------------------------
+postgres_running() {
+  [ -f "$PG_DATA/postmaster.pid" ] && "$PG_BIN/pg_ctl" -D "$PG_DATA" status >/dev/null 2>&1
+}
+
+start_postgres() {
+  step "Starting Postgres (native workspace cluster)"
+
+  if [ "$RESET_DB" = true ] && [ -d "$STATE_DIR/postgres" ]; then
+    postgres_running && "$PG_BIN/pg_ctl" -D "$PG_DATA" -m fast stop >/dev/null 2>&1 || true
+    info "Purging $STATE_DIR/postgres"
+    rm -rf "$STATE_DIR/postgres"
+  fi
+
+  mkdir -p "$PG_SOCK" "$(dirname "$PG_LOG")"
+
+  if [ ! -s "$PG_DATA/PG_VERSION" ]; then
+    info "initdb → $PG_DATA"
+    "$PG_BIN/initdb" -D "$PG_DATA" \
+      --username=postgres \
+      --auth-local=trust --auth-host=trust \
+      --encoding=UTF8 --locale=C >/dev/null
+    ok "Cluster initialised"
+  fi
+
+  if postgres_running; then
+    if "$PG_BIN/pg_isready" -h 127.0.0.1 -p "$PG_PORT" -U postgres >/dev/null 2>&1; then
+      ok "Postgres already running on 127.0.0.1:$PG_PORT"
+    else
+      warn "Cluster running but not on 127.0.0.1:$PG_PORT — restarting"
+      "$PG_BIN/pg_ctl" -D "$PG_DATA" -m fast stop >/dev/null 2>&1 || true
+    fi
+  fi
+
+  if ! postgres_running; then
+    info "pg_ctl start → port $PG_PORT"
+    "$PG_BIN/pg_ctl" -D "$PG_DATA" -l "$PG_LOG" \
+      -o "-p $PG_PORT -k $PG_SOCK -h 127.0.0.1" -w start >/dev/null \
+      || die "Postgres failed to start. See $PG_LOG"
+    ok "Postgres started on 127.0.0.1:$PG_PORT"
+  fi
+
+  local waited=0
+  while [ "$waited" -lt 15 ]; do
+    "$PG_BIN/pg_isready" -h 127.0.0.1 -p "$PG_PORT" -U postgres >/dev/null 2>&1 && break
+    sleep 1; waited=$((waited + 1))
+  done
+  "$PG_BIN/pg_isready" -h 127.0.0.1 -p "$PG_PORT" -U postgres >/dev/null 2>&1 \
+    || die "Postgres not ready on 127.0.0.1:$PG_PORT after 15s. See $PG_LOG"
+
+  # Idempotent: ensures role+db exist on every run (self-heals a cluster that
+  # was initialised but never bootstrapped).
+  bootstrap_database
+}
+
+bootstrap_database() {
+  step "Ensuring role + database"
+  local PSQL=("$PG_BIN/psql" -h 127.0.0.1 -p "$PG_PORT" -U postgres -d postgres -v ON_ERROR_STOP=1)
+  "${PSQL[@]}" -c "DO \$\$ BEGIN
+    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '$PG_USER') THEN
+      CREATE ROLE $PG_USER LOGIN PASSWORD '$PG_PASS' SUPERUSER;
+    END IF;
+  END \$\$;" >/dev/null
+  "${PSQL[@]}" -c "CREATE DATABASE $PG_DB OWNER $PG_USER;" 2>/dev/null || true
+  ok "Role '$PG_USER' + database '$PG_DB' ready"
+}
+
+# ---------------------------------------------------------------------------
+# MinIO lifecycle (native, optional)
+# ---------------------------------------------------------------------------
+minio_running() {
+  [ -f "$MINIO_PID" ] && kill -0 "$(cat "$MINIO_PID" 2>/dev/null)" 2>/dev/null
+}
+
+start_minio() {
+  [ "$HAS_MINIO" = true ] || return 0
+  step "Starting MinIO (native, optional)"
+  mkdir -p "$MINIO_DATA" "$(dirname "$MINIO_LOG")"
+
+  if minio_running && is_port_open "$MINIO_API_PORT"; then
+    ok "MinIO already running on :$MINIO_API_PORT (PID $(cat "$MINIO_PID"))"
+  else
+    if minio_running; then
+      warn "MinIO process alive but not bound to :$MINIO_API_PORT — restarting"
+      kill "$(cat "$MINIO_PID")" 2>/dev/null || true
+      rm -f "$MINIO_PID"
+    fi
+    free_port "$MINIO_API_PORT" "minio-api"
+    free_port "$MINIO_CONSOLE_PORT" "minio-console"
+    MINIO_ROOT_USER="$S3_ACCESS_KEY_ID" MINIO_ROOT_PASSWORD="$S3_SECRET_ACCESS_KEY" \
+      minio server "$MINIO_DATA" \
+        --address "127.0.0.1:${MINIO_API_PORT}" \
+        --console-address "127.0.0.1:${MINIO_CONSOLE_PORT}" \
+        >"$MINIO_LOG" 2>&1 &
+    echo $! >"$MINIO_PID"
+    ok "MinIO started (PID $(cat "$MINIO_PID"))"
+  fi
+
+  local waited=0
+  while [ "$waited" -lt 15 ] && ! is_port_open "$MINIO_API_PORT"; do sleep 1; waited=$((waited + 1)); done
+  if ! is_port_open "$MINIO_API_PORT"; then
+    warn "MinIO did not open 127.0.0.1:$MINIO_API_PORT — see $MINIO_LOG (continuing, S3 degraded)"
+    return 0
+  fi
+
+  # Create the skill-archives bucket via the repo's own AWS SDK (no `mc` CLI,
+  # which collides with midnight-commander).
+  if S3_ENDPOINT="$S3_ENDPOINT" S3_REGION=us-east-1 \
+     S3_ACCESS_KEY_ID="$S3_ACCESS_KEY_ID" S3_SECRET_ACCESS_KEY="$S3_SECRET_ACCESS_KEY" \
+     S3_BUCKET_SKILL_ARCHIVES="$S3_BUCKET" S3_FORCE_PATH_STYLE=true \
+     node "$REPO_ROOT/scripts/ensure-skill-bucket.mjs" >>"$MINIO_LOG" 2>&1; then
+    ok "Bucket '$S3_BUCKET' ready"
+  else
+    warn "Could not create bucket '$S3_BUCKET' — see $MINIO_LOG (uploads may fail)"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Mailpit lifecycle (native, optional)
+# ---------------------------------------------------------------------------
+mailpit_running() {
+  [ -f "$MAILPIT_PID" ] && kill -0 "$(cat "$MAILPIT_PID" 2>/dev/null)" 2>/dev/null
+}
+
+start_mailpit() {
+  [ "$HAS_MAILPIT" = true ] || return 0
+  step "Starting Mailpit (native, optional)"
+  mkdir -p "$(dirname "$MAILPIT_LOG")"
+  if mailpit_running && is_port_open "$MAILPIT_SMTP_PORT"; then
+    ok "Mailpit already running on :$MAILPIT_SMTP_PORT (PID $(cat "$MAILPIT_PID"))"
+    return 0
+  fi
+  if mailpit_running; then
+    warn "Mailpit process alive but not bound to :$MAILPIT_SMTP_PORT — restarting"
+    kill "$(cat "$MAILPIT_PID")" 2>/dev/null || true
+    rm -f "$MAILPIT_PID"
+  fi
+  free_port "$MAILPIT_SMTP_PORT" "mailpit-smtp"
+  free_port "$MAILPIT_UI_PORT" "mailpit-ui"
+  mailpit \
+    --smtp "127.0.0.1:${MAILPIT_SMTP_PORT}" \
+    --listen "127.0.0.1:${MAILPIT_UI_PORT}" \
+    >"$MAILPIT_LOG" 2>&1 &
+  echo $! >"$MAILPIT_PID"
+  ok "Mailpit started (PID $(cat "$MAILPIT_PID"))"
+}
+
+# ---------------------------------------------------------------------------
+# Cleanup trap — stop native services when concurrently exits.
+# ---------------------------------------------------------------------------
+stop_services() {
+  if mailpit_running; then kill "$(cat "$MAILPIT_PID")" 2>/dev/null || true; rm -f "$MAILPIT_PID"; fi
+  if minio_running;   then kill "$(cat "$MINIO_PID")"   2>/dev/null || true; rm -f "$MINIO_PID";   fi
+  if [ -n "$PG_BIN" ] && postgres_running; then
+    "$PG_BIN/pg_ctl" -D "$PG_DATA" -m fast stop >/dev/null 2>&1 || true
+  fi
+  rm -rf "$PG_SOCK"
+}
+
+cleanup() {
+  trap - INT TERM EXIT
+  printf '\n%s%sShutting down…%s\n' "$BOLD" "$YELLOW" "$RESET"
+  stop_services
+  ok "Native services stopped"
+}
+
+# ---------------------------------------------------------------------------
+# Migrations + seed (need only DATABASE_URL)
+# ---------------------------------------------------------------------------
+migrate_and_seed() {
+  step "Applying migrations + seeding test user"
+  DATABASE_URL="$DATABASE_URL" pnpm db:migrate || die "Migrations failed"
+  ok "Migrations applied"
+  if DATABASE_URL="$DATABASE_URL" pnpm --filter @companion/api seed:test-user; then
+    ok "Seed complete — login: admin@tvc.dev / adminadmin"
+  else
+    warn "Seed failed (database still usable)"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Header
+# ---------------------------------------------------------------------------
+print_header() {
+  printf '\n  %s%sCompanion v2 — Conductor dev (native, no Docker)%s\n' "$BOLD" "$CYAN" "$RESET"
+  printf '  %sWorkspace%s  %s\n' "$DIM" "$RESET" "${CONDUCTOR_WORKSPACE_NAME:-(hors-conductor)}"
+  printf '  %sBase port%s  %s (range %s-%s)\n' "$DIM" "$RESET" "$BASE" "$BASE" "$((BASE + 9))"
+  printf '  %sWeb%s        %s\n' "$DIM" "$RESET" "$WEB_URL"
+  printf '  %sAPI%s        %s\n' "$DIM" "$RESET" "$API_URL"
+  printf '  %sPostgres%s   127.0.0.1:%s\n' "$DIM" "$RESET" "$PG_PORT"
+  if [ "$HAS_MINIO" = true ]; then
+    printf '  %sMinIO%s      %s (console http://127.0.0.1:%s)\n' "$DIM" "$RESET" "$S3_ENDPOINT" "$MINIO_CONSOLE_PORT"
+  else
+    printf '  %sMinIO%s      disabled (brew install minio) — S3 uploads unavailable\n' "$DIM" "$RESET"
+  fi
+  if [ "$HAS_MAILPIT" = true ]; then
+    printf '  %sMailpit%s    http://127.0.0.1:%s (smtp %s)\n' "$DIM" "$RESET" "$MAILPIT_UI_PORT" "$MAILPIT_SMTP_PORT"
+  else
+    printf '  %sEmail%s      console log (brew install mailpit for a mailbox)\n' "$DIM" "$RESET"
+  fi
+  printf '  %sCtrl+C%s     stop everything (apps + native services)\n\n' "$DIM" "$RESET"
+}
+
+# ---------------------------------------------------------------------------
+# Launch apps via concurrently (inline env, no .env mutation)
+# ---------------------------------------------------------------------------
+launch_apps() {
+  step "Launching API + web via concurrently"
+
+  # Shared API env: storage + email vary with what's installed.
+  local api_storage_env="" api_email_env
+  if [ "$HAS_MINIO" = true ]; then
+    api_storage_env="S3_ENDPOINT=\"$S3_ENDPOINT\" S3_REGION=us-east-1 S3_ACCESS_KEY_ID=\"$S3_ACCESS_KEY_ID\" S3_SECRET_ACCESS_KEY=\"$S3_SECRET_ACCESS_KEY\" S3_BUCKET_SKILL_ARCHIVES=\"$S3_BUCKET\" S3_FORCE_PATH_STYLE=true"
+  fi
+  if [ "$HAS_MAILPIT" = true ]; then
+    api_email_env="EMAIL_PROVIDER=mailpit EMAIL_FROM=\"Companion <noreply@companion.local>\" MAILPIT_SMTP_HOST=127.0.0.1 MAILPIT_SMTP_PORT=$MAILPIT_SMTP_PORT"
+  else
+    api_email_env="EMAIL_PROVIDER=log"
+  fi
+
+  local api_cmd="COMPANION_API_HOST=127.0.0.1 COMPANION_API_PORT=$API_PORT DATABASE_URL=\"$DATABASE_URL\" BETTER_AUTH_URL=\"$API_URL\" BETTER_AUTH_COOKIE_PREFIX=\"$PROJECT\" COMPANION_WEB_URL=\"$WEB_URL\" COMPANION_API_URL=\"$API_URL\" NEXT_PUBLIC_COMPANION_API_URL=\"$API_URL\" $api_storage_env $api_email_env pnpm --filter @companion/api dev"
+  local web_cmd="COMPANION_API_URL=\"$API_URL\" NEXT_PUBLIC_COMPANION_API_URL=\"$API_URL\" pnpm --filter @companion/web dev --hostname 127.0.0.1 --port $WEB_PORT"
+
+  free_port "$API_PORT" "api"
+  free_port "$WEB_PORT" "web"
+
+  # No `exec`: keep this bash alive so the EXIT trap stops native services
+  # after concurrently returns (Ctrl+C → SIGINT → concurrently kills the apps
+  # → bash exits → trap → pg_ctl stop / kill minio,mailpit).
+  pnpm exec concurrently \
+    --names api,web \
+    --prefix-colors blue,green \
+    --prefix "[{name}]" \
+    --kill-others-on-fail \
+    --restart-tries 0 \
+    "$api_cmd" "$web_cmd"
+}
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+cmd_run() {
+  trap cleanup INT TERM EXIT
+  check_prerequisites
+  start_postgres
+  start_minio
+  start_mailpit
+  migrate_and_seed
+  print_header
+  launch_apps
+}
+
+cmd_archive() {
+  step "Archiving workspace — stopping native services + removing .conductor-pg/"
+  PG_BIN="$(detect_pg_bin || true)"
+  stop_services
+  rm -rf "$STATE_DIR"
+  ok "Removed $STATE_DIR"
+}
+
+case "$COMMAND" in
+  run)     cmd_run ;;
+  archive) cmd_archive ;;
+  *)       usage; exit 64 ;;
+esac

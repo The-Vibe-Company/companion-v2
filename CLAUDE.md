@@ -101,13 +101,17 @@ pnpm db:seed                # seed an org/team/user for local dev
 pnpm dev                    # run API + web in watch mode
 ```
 
-For Conductor, use the checked-in `.conductor/settings.toml`: setup runs `corepack enable && pnpm install`,
-run executes `bash scripts/conductor-workspace.sh run`, and archive executes
-`bash scripts/conductor-workspace.sh archive`. The run script delegates to `pnpm dev`; when
-`CONDUCTOR_PORT` is set, `scripts/dev-stack.sh` gives each workspace its own Docker Compose project,
-Postgres/MinIO volumes, Better Auth cookie prefix, and ports derived from `CONDUCTOR_PORT`:
-web `+0`, API `+1`, Postgres `+2`, MinIO API `+3`, MinIO console `+4`, Mailpit SMTP `+5`, Mailpit UI `+6`.
-Archive intentionally deletes that workspace's local Compose volumes.
+For Conductor, use the checked-in `.conductor/settings.toml`: setup runs `corepack enable && pnpm install`
+(and best-effort `brew install postgresql@17 minio mailpit`), run executes `bash scripts/dev-conductor.sh`, and archive
+executes `bash scripts/dev-conductor.sh archive`. The Conductor run path is **native — no Docker**:
+`scripts/dev-conductor.sh` (modeled on `~/Dev/monkapps`) starts a per-workspace Postgres cluster, plus
+optional native MinIO + Mailpit, under `.conductor-pg/`, then launches the API + web via `concurrently`.
+All ports derive from `CONDUCTOR_PORT` (fallback `3000`): web `+0`, API `+1`, Postgres `+2`, MinIO API
+`+3`, MinIO console `+4`, Mailpit SMTP `+5`, Mailpit UI `+6`. Better Auth cookies are namespaced by a
+`companion-<workspace>` prefix. If `minio`/`mailpit` aren't installed the stack still runs (S3 uploads
+disabled; email falls back to `EMAIL_PROVIDER=log`). A cleanup trap stops every native service on Ctrl+C,
+and `archive` stops them then removes `.conductor-pg/`. The non-Conductor `pnpm dev` path is unchanged and
+still uses Docker Compose (`scripts/dev-stack.sh`).
 
 ## Tests & quality gates
 

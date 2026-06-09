@@ -25,13 +25,17 @@ the local test user, and starts only the long-running API and web processes. Loc
 to `COMPOSE_BIND_HOST`, which defaults to `127.0.0.1`. `pnpm dev:app` is the app-only loop when infra
 is already prepared.
 
-Conductor workspaces use the same `pnpm dev` entrypoint as local development. The
-`scripts/conductor-workspace.sh` run command delegates to `pnpm dev`; when `CONDUCTOR_PORT` is set,
-`scripts/dev-stack.sh` derives a Docker Compose project name from the workspace and allocates all
-local services from `CONDUCTOR_PORT`: web `+0`, API `+1`, Postgres `+2`, MinIO API `+3`, MinIO
-console `+4`, Mailpit SMTP `+5`, and Mailpit UI `+6`. It injects workspace-specific `DATABASE_URL`,
-API URLs, S3 endpoint, Mailpit ports, and Better Auth cookie prefix without mutating `.env`.
-Archiving a workspace runs Compose `down -v` for that project.
+Conductor workspaces use a separate, **native (Docker-free)** entrypoint, `scripts/dev-conductor.sh`
+(modeled on `~/Dev/monkapps`). It starts a per-workspace Postgres cluster — plus optional native MinIO
+and Mailpit — under `.conductor-pg/`, applies migrations, seeds the test user, and runs only the
+long-running API and web processes via `concurrently`. All services are allocated from
+`CONDUCTOR_PORT`: web `+0`, API `+1`, Postgres `+2`, MinIO API `+3`, MinIO console `+4`, Mailpit SMTP
+`+5`, and Mailpit UI `+6`. It injects workspace-specific `DATABASE_URL`, API URLs, S3 endpoint,
+Mailpit ports, and a `companion-<workspace>` Better Auth cookie prefix inline — without mutating
+`.env`. MinIO/Mailpit degrade gracefully when their binaries are absent (S3 uploads disabled, email
+falls back to `EMAIL_PROVIDER=log`). A cleanup trap stops every native service on exit; archiving a
+workspace runs `scripts/dev-conductor.sh archive`, which stops the services and removes
+`.conductor-pg/`.
 
 ## Repository Layout
 

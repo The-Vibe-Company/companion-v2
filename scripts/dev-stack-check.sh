@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-bash -n scripts/dev-stack.sh scripts/conductor-workspace.sh scripts/dev-stack-check.sh
+bash -n scripts/dev-stack.sh scripts/dev-conductor.sh scripts/dev-stack-check.sh
 
 config="$(
   env -u CONDUCTOR_PORT -u CONDUCTOR_WORKSPACE_NAME \
@@ -103,42 +103,27 @@ require_conductor_env "MINIO_CONSOLE_PORT=55104"
 require_conductor_env "MAILPIT_SMTP_PORT=55105"
 require_conductor_env "MAILPIT_WEB_PORT=55106"
 
-docker_shim_dir="$(mktemp -d)"
-docker_shim_log="${docker_shim_dir}/docker.log"
-trap 'rm -rf "$docker_shim_dir"' EXIT
-
-cat > "${docker_shim_dir}/docker" <<'SH'
-#!/usr/bin/env bash
-set -euo pipefail
-
-printf '%s\n' "$*" >> "$DOCKER_SHIM_LOG"
-
-if [ "${1:-}" = "ps" ]; then
-  printf 'companion-old-montpellier\n'
-fi
-SH
-chmod +x "${docker_shim_dir}/docker"
-
-env \
-  PATH="${docker_shim_dir}:$PATH" \
-  DOCKER_SHIM_LOG="$docker_shim_log" \
-  COMPOSE_PROJECT_NAME=wrong-project \
-  CONDUCTOR_WORKSPACE_NAME=montpellier-v1 \
-  bash scripts/conductor-workspace.sh archive >/dev/null
-
-require_archive_call() {
-  local expected="$1"
-  if ! grep -Fxq "$expected" "$docker_shim_log"; then
-    printf '[dev-stack-check] Missing expected archive docker call: %s\n' "$expected" >&2
+# --- Native Conductor launcher (scripts/dev-conductor.sh) ------------------
+# The Conductor run/archive path is native (no Docker). Port-range guards run
+# before any service starts, so these reject-cases exit early with no side
+# effects (nothing is initialised, no ports are bound, no .conductor-pg/).
+assert_conductor_rejects() {
+  local label="$1"
+  shift
+  if bash scripts/dev-conductor.sh "$@" >/dev/null 2>&1; then
+    printf '[dev-stack-check] dev-conductor.sh should reject %s\n' "$label" >&2
     exit 1
   fi
 }
 
-require_archive_call "ps -a --filter label=com.docker.compose.project.working_dir=${ROOT} --format {{.Label \"com.docker.compose.project\"}}"
-require_archive_call "compose -p companion-montpellier-v1 down -v --remove-orphans"
-require_archive_call "compose -p companion-old-montpellier down -v --remove-orphans"
-if grep -Fq "wrong-project" "$docker_shim_log"; then
-  printf '[dev-stack-check] Archive should ignore inherited COMPOSE_PROJECT_NAME\n' >&2
+assert_conductor_rejects "privileged base port" --base 100
+assert_conductor_rejects "out-of-range base port" --base 70000
+assert_conductor_rejects "non-numeric base port" --base notaport
+assert_conductor_rejects "empty --base= value" --base=
+assert_conductor_rejects "unknown argument" --bogus-flag
+
+if ! bash scripts/dev-conductor.sh --help >/dev/null 2>&1; then
+  printf '[dev-stack-check] dev-conductor.sh --help should exit 0\n' >&2
   exit 1
 fi
 
