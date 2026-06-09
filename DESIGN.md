@@ -1,5 +1,5 @@
 ---
-version: alpha
+version: beta
 name: Companion
 description: Operator-grade light design system for Companion v2, a self-hostable portal to deploy, govern, and share AI agents, curated containers, and skills across teams.
 colors:
@@ -13,12 +13,19 @@ colors:
   fg: "oklch(0.27 0.021 265)"
   muted: "oklch(0.475 0.018 265)"
   faint: "oklch(0.62 0.014 265)"
-  accent: "oklch(0.52 0.142 242)"
-  accent-hover: "oklch(0.46 0.142 242)"
-  accent-fg: "oklch(0.99 0.012 242)"
-  accent-ring: "oklch(0.585 0.142 242 / 0.55)"
-  accent-tint: "oklch(0.94 0.025 242)"
-  accent-line: "oklch(0.585 0.142 242 / 0.28)"
+  accent: "oklch(0.81 0.166 88)"
+  accent-hover: "oklch(0.75 0.166 88)"
+  accent-muted: "oklch(0.75 0.166 88)"
+  accent-fg: "oklch(0.27 0.04 88)"
+  accent-ring: "oklch(0.66 0.166 88 / 0.55)"
+  accent-tint: "oklch(0.955 0.05 88)"
+  accent-line: "oklch(0.66 0.166 88 / 0.30)"
+  accent-edge: "oklch(0.66 0.166 88)"
+  accent-cloud: "oklch(0.585 0.142 242)"
+  accent-cloud-hover: "oklch(0.52 0.142 242)"
+  accent-cloud-fg: "oklch(0.99 0.012 242)"
+  accent-cloud-tint: "oklch(0.585 0.142 242 / 0.1)"
+  accent-cloud-line: "oklch(0.585 0.142 242 / 0.28)"
   ok: "oklch(0.55 0.13 156)"
   warn: "oklch(0.60 0.12 75)"
   danger: "oklch(0.55 0.20 25)"
@@ -30,6 +37,12 @@ colors:
   danger-tint: "oklch(0.55 0.20 25 / 0.10)"
   danger-line: "oklch(0.55 0.20 25 / 0.32)"
   scrim: "oklch(0.27 0.02 265 / 0.40)"
+  brand-blue: "oklch(0.56 0.13 250)"
+  brand-teal: "oklch(0.54 0.10 168)"
+  brand-violet: "oklch(0.55 0.13 300)"
+  brand-amber: "oklch(0.60 0.10 66)"
+  brand-terracotta: "oklch(0.55 0.13 24)"
+  brand-slate: "oklch(0.50 0.035 265)"
 typography:
   body:
     fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, Roboto, Helvetica, Arial, sans-serif"
@@ -40,7 +53,7 @@ typography:
     fontFeature: "'tnum' 1"
   label:
     fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, Roboto, Helvetica, Arial, sans-serif"
-    fontSize: "0.75rem"
+    fontSize: "0.8125rem"
     fontWeight: 500
     lineHeight: 1.5
     letterSpacing: "0em"
@@ -66,6 +79,12 @@ typography:
     lineHeight: 1.4
     letterSpacing: "0em"
     fontFeature: "'tnum' 1"
+  scale-xs: "0.75rem"
+  scale-sm: "0.8125rem"
+  scale-base: "0.875rem"
+  scale-md: "1rem"
+  scale-lg: "1.125rem"
+  scale-xl: "1.375rem"
 rounded:
   sm: "4px"
   md: "6px"
@@ -80,6 +99,21 @@ spacing:
   2xl: "32px"
   3xl: "48px"
   4xl: "64px"
+shadows:
+  xs: "0 1px 2px oklch(0.27 0.02 265 / 0.04)"
+  sm: "0 1px 2px oklch(0.27 0.02 265 / 0.05), 0 1px 1px oklch(0.27 0.02 265 / 0.04)"
+  md: "0 2px 6px oklch(0.27 0.02 265 / 0.06), 0 1px 2px oklch(0.27 0.02 265 / 0.05)"
+  lg: "0 8px 28px oklch(0.27 0.02 265 / 0.12), 0 2px 6px oklch(0.27 0.02 265 / 0.06)"
+motion:
+  duration-fast: "120ms"
+  duration-base: "180ms"
+  duration-slow: "240ms"
+  ease-out-quint: "cubic-bezier(0.22, 1, 0.36, 1)"
+layout:
+  sidebar-width: "244px"
+  topbar-height: "56px"
+  content-max: "1120px"
+  drawer-width: "460px"
 components:
   button-primary:
     backgroundColor: "{colors.accent}"
@@ -97,7 +131,7 @@ components:
     height: "36px"
   button-danger:
     backgroundColor: "{colors.danger}"
-    textColor: "{colors.accent-fg}"
+    textColor: "oklch(0.99 0.01 25)"
     typography: "{typography.label}"
     rounded: "{rounded.md}"
     padding: "0 16px"
@@ -150,15 +184,32 @@ The interface is product software, not marketing. It should feel calm, dense, pr
 
 Design for technical users who read resource ids, scopes, roles, providers, model routes, vault names, lifecycle states, and audit records directly. Do not prettify machine values. Do not hide operational truth behind marketing language. Healthy state should be quiet. Broken state should be unmistakable without alarm theater.
 
-This document describes the light Companion theme from the design handoff. It is a visual identity contract for future implementation and does not imply that a production UI already exists in this repository.
+This document describes the light Companion theme as implemented in `apps/web`. CSS custom properties live in
+`apps/web/src/styles/tokens.css`; the `cds-*` component layer is in `cds.css`; feature-specific layout and
+styling extend those tokens in `auth.css`, `skills.css`, `onboarding.css`, `org.css`, and `upload.css`.
 
 ## Colors
 
-Companion uses restrained tinted neutrals and one cloud-blue accent. Every neutral is slightly tinted toward the cool Companion hue. Never use pure `#000` or pure `#fff` for product UI surfaces or text.
+Companion uses restrained tinted neutrals and a **signal yellow** accent by default. Every neutral is slightly
+tinted toward the cool Companion hue (~265 in OKLCH). Never use pure `#000` or pure `#fff` for product UI
+surfaces or text.
 
-The page sits on `canvas`, with panels, cards, sidebars, topbars, drawers, and form controls using `surface`. Hovered rows and active navigation use `surface-raised`; inset code blocks and quiet wells use `surface-sunken`. Structure comes from `line` and `line-strong`, not heavy shadows.
+The page sits on `canvas`, with panels, cards, sidebars, topbars, drawers, and form controls using `surface`.
+Hovered rows and active navigation use `surface-raised`; inset code blocks and quiet wells use `surface-sunken`.
+Structure comes from `line` and `line-strong`, not heavy shadows.
 
-`accent` is the only chromatic action color. Use it for primary actions, links, selected row treatment, and focus indication. Do not use accent as decoration, chart filler, page glow, or gradient material. Hovered primary buttons use `accent-hover`; selected rows use `accent-tint` plus an inset accent edge.
+`accent` is the primary chromatic action color. Use it for primary actions, links, selected row treatment, and
+focus indication. Do not use accent as decoration, chart filler, page glow, or gradient material. Hovered primary
+buttons use `accent-hover`; selected rows use `accent-tint` plus an inset accent edge (`accent-edge` or
+`accent-line`). `accent-muted` is available for subdued accent treatments.
+
+The canonical **cloud-blue** accent from the original handoff remains available as an opt-in variant: set
+`data-accent="cloud"` on a root element to swap in the `accent-cloud*` tokens
+(`oklch(0.585 0.142 242)` family). The live app defaults to signal yellow everywhere unless that attribute is set.
+
+During onboarding, org and team brand colors are chosen from a fixed six-color palette (`brand-blue`, `brand-teal`,
+`brand-violet`, `brand-amber`, `brand-terracotta`, `brand-slate`). These are cosmetic only and stored per org/team;
+they do not replace the product accent tokens.
 
 Status colors are calm and slightly desaturated:
 
@@ -173,7 +224,10 @@ Color never carries status alone. A dot, badge, or rail must always be paired wi
 
 Use system fonts only. No web fonts, no Google Fonts, no downloaded brand fonts. Companion must work offline and on private networks.
 
-Use `body` for most UI text, `heading` for page titles and card titles, `label` for metadata and form labels, `badge` for compact chips, and `mono` for machine values. Typography hierarchy comes from size and weight, not from color saturation.
+Use `body` (`scale-base`, 0.875rem) for most UI text, `heading` (`scale-lg`, 1.125rem) for page titles and card titles,
+`label` (`scale-sm`, 0.8125rem) for metadata and form labels, `badge` (`scale-xs`, 0.75rem) for compact chips, and
+`mono` for machine values. The full type scale also includes `scale-md` (1rem) and `scale-xl` (1.375rem) for auth titles
+and onboarding headings. Typography hierarchy comes from size and weight, not from color saturation.
 
 Machine values are load-bearing and must remain literal in monospace:
 
@@ -191,7 +245,7 @@ UI copy is terse and operational. Say what happened, what will happen next, or w
 
 ## Layout
 
-Use a dense operator layout. The primary shell is a fixed sidebar plus compact topbar, with the main content constrained enough to scan but not padded into a landing page.
+Use a dense operator layout. The primary shell is a fixed sidebar (244px in the Skills Hub) plus compact topbar, with the main content constrained enough to scan but not padded into a landing page. Layout tokens: `sidebar-width` 244px, `topbar-height` 56px, `content-max` 1120px, `drawer-width` 460px.
 
 Prefer tables and structured rows for resources. Companion lists fleets, containers, skills, members, providers, scopes, audit events, and planned changes. These surfaces should be compact and sortable/filterable over time, not inflated into repeated marketing cards.
 
@@ -207,11 +261,14 @@ Forms are direct and compact. Use labels, concise helper text, and explicit cons
 
 Companion is flat and hairline-driven. Use 1px borders and subtle surface changes to separate layers. Cards, tables, sidebars, and topbars rely on `line`, not drop-shadow stacks.
 
-Use shadows only for floating layers such as drawers, dropdowns, and dialogs. Shadows should be soft and restrained; never use glow. Scrims are flat tinted overlays with no blur.
+Use shadows only for floating layers such as drawers, dropdowns, and dialogs. Shadow tokens are `xs`, `sm`, `md`, and `lg`; they should be soft and restrained; never use glow. Scrims are flat tinted overlays with no blur.
 
 No glassmorphism. No backdrop blur. No translucent panels pretending to be glass. No gradient depth. No bokeh, grain, decorative textures, or atmospheric image backgrounds in product UI.
 
-Motion is sparse and functional. Use 120ms to 240ms transitions, ease-out only. Allowed motion: drawer slide-in/out, scrim fade, hover color changes, selection color changes, and short copy confirmation. Do not animate layout properties such as width, height, margin, or top. Respect `prefers-reduced-motion` by removing drawer slide and scrim fade.
+Motion is sparse and functional. Use `duration-fast` (120ms), `duration-base` (180ms), or `duration-slow` (240ms) with
+`ease-out-quint` transitions. Allowed motion: drawer slide-in/out, scrim fade, hover color changes, selection color
+changes, and short copy confirmation. Do not animate layout properties such as width, height, margin, or top. Respect
+`prefers-reduced-motion` by removing drawer slide and scrim fade.
 
 ## Shapes
 
@@ -230,7 +287,7 @@ Selection uses a tinted row background plus an inset accent edge via box-shadow.
 
 **Topbar** is compact and single-line. It shows product/workspace/view context, connection state, and updated timestamp. Use middle-dot separators and mono timestamps. No tagline, greeting, or hero title.
 
-**Sidebar** contains the Companion brand mark, wordmark, workspace context, primary navigation, counts where useful, and a quiet environment/footer indicator. Active nav uses `surface-raised`; selected icon color may use accent because the element itself is selected.
+**Sidebar** contains the Companion brand mark, wordmark, workspace context, primary navigation, counts where useful, and a quiet environment/footer indicator. Active nav uses `surface-raised` with foreground text; unread counts may use the accent fill. The brand mark tile uses `accent` background with `accent-fg` text.
 
 **Summary counts** are slim inline rows. Use tabular numbers, muted labels, and status dot plus label. They are not cards.
 
@@ -240,7 +297,7 @@ Selection uses a tinted row background plus an inset accent edge via box-shadow.
 
 **Badges** are compact chips for scope, lifecycle, role, provider, and status. Use mono only for machine-like values. Status badges use low-tint backgrounds and borders; neutral badges use raised surface and muted text.
 
-**Buttons** are restrained. Primary uses cloud blue and appears only for the main action on the surface. Secondary buttons are hairline-bordered surface buttons. Ghost buttons are quiet utility actions. Danger buttons are reserved for destructive intent.
+**Buttons** are restrained. Primary uses signal yellow (`accent` / `accent-fg`) and appears only for the main action on the surface. Secondary buttons are hairline-bordered surface buttons. Ghost buttons are quiet utility actions. Danger buttons are reserved for destructive intent. Default control height is 36px (`cds-btn--md`); compact actions use 28px (`cds-btn--sm`); onboarding primary actions may use 40px (`cds-btn--lg`).
 
 **Forms** use 36px controls, clear labels, one-line helper text, and visible error text. Technical inputs such as ids, env vars, paths, hosts, and resource addresses use monospace.
 
