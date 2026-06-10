@@ -1,14 +1,15 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import type { CSSProperties } from "react";
-import type { SkillVisibilityInput } from "@companion/contracts";
+import type { SkillVisibilityInput, ValidationResult } from "@companion/contracts";
 import type { SkillVM, TeamVM } from "@/lib/types";
 import {
   apiBase,
   createSkillInline,
   issueToken,
   publishSkillPackage,
+  validateSkillPackage,
   versionPackageUrl,
 } from "@/lib/queries";
 import { Icon } from "../Icon";
@@ -130,6 +131,28 @@ function CodeBlock({
         <Icon name={done ? "check" : "copy"} size={13} />
         {done ? "Copied" : copyLabel}
       </button>
+    </div>
+  );
+}
+
+function ValidationList({ result }: { result: ValidationResult }) {
+  return (
+    <div className="up-checks">
+      {result.checks.map((check) => {
+        const icon = check.status === "pass" ? "check" : check.status === "warn" ? "alert-triangle" : "x";
+        const statusText = check.status === "pass" ? "Passed" : check.status === "warn" ? "Warning" : "Failed";
+        return (
+          <div className={`up-checkrow up-checkrow--${check.status}`} key={check.id}>
+            <Icon name={icon} size={13} />
+            <span>
+              <span className="sr-only">{statusText}: </span>
+              {check.label}
+              {check.detail && <span className="up-checkrow__detail"> · {check.detail}</span>}
+              {check.suggestion && <span className="up-checkrow__suggestion">{check.suggestion}</span>}
+            </span>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -558,9 +581,9 @@ function PromptPanel({
 working directory: a SKILL.md plus any files it references. SKILL.md
 is a standard Agent Skill: YAML frontmatter with name and description.
 
-1. Read SKILL.md and confirm the frontmatter has a name, a version
-   (semver), and a description. Do not add visibility fields.
-   The registry sets visibility on the upload request, not in the skill.
+1. Read SKILL.md and confirm the frontmatter has a name and description.
+   Use allowed-tools for declared tools. Put vendor data under metadata.
+   Do not add top-level version, tools, scope, or visibility fields.
 2. Zip the package from its root:
    zip -r skill.zip SKILL.md .
 3. Publish it. Ownership and visibility are set with query parameters on the request:
@@ -568,7 +591,7 @@ is a standard Agent Skill: YAML frontmatter with name and description.
      -H "Authorization: Bearer ${tok}" \\
      -H "Content-Type: application/zip" \\
      --data-binary @skill.zip
-4. Report the skill id and version from the response, then remove
+4. Report the skill id and Companion-assigned version from the response, then remove
    skill.zip. If validation returns 422, fix the frontmatter it names
    and retry once.`;
   const displayPrompt = buildPrompt(token ?? "cmp_pat_…");
@@ -679,6 +702,9 @@ function ZipPanel({
   file,
   setFile,
   lockedOwner,
+  validation,
+  validating,
+  validationError,
 }: {
   ownerTeam: string | null;
   setOwnerTeam: (ownerTeam: string | null) => void;
@@ -688,8 +714,12 @@ function ZipPanel({
   file: File | null;
   setFile: (f: File | null) => void;
   lockedOwner: boolean;
+  validation: ValidationResult | null;
+  validating: boolean;
+  validationError: string | null;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
+  const dropHelpId = useId();
   const [over, setOver] = useState(false);
   return (
     <>
@@ -699,9 +729,12 @@ function ZipPanel({
       </p>
       <div className="up-step">
         {!file ? (
-          <div
+          <>
+          <button
+            type="button"
             className={"up-drop" + (over ? " is-over" : "")}
             onClick={() => inputRef.current?.click()}
+            aria-describedby={dropHelpId}
             onDragOver={(e) => {
               e.preventDefault();
               setOver(true);
@@ -717,10 +750,11 @@ function ZipPanel({
             <span className="up-drop__ico">
               <Icon name="upload-cloud" size={22} />
             </span>
-            <div className="up-drop__main">
+            <span className="up-drop__main">
               <b>Click to browse</b> or drag a package here
-            </div>
-            <div className="up-drop__sub">.zip · SKILL.md at root · up to 25 MB</div>
+            </span>
+            <span className="up-drop__sub" id={dropHelpId}>.zip · SKILL.md at root · up to 25 MB</span>
+          </button>
             <input
               ref={inputRef}
               type="file"
@@ -731,7 +765,7 @@ function ZipPanel({
                 if (f) setFile(f);
               }}
             />
-          </div>
+          </>
         ) : (
           <div className="up-file">
             <span className="up-file__ico">
@@ -747,10 +781,16 @@ function ZipPanel({
           </div>
         )}
         {file && (
-          <p className="up-check" style={{ marginTop: 4 }}>
-            <Icon name="shield-check" size={14} />
-            Frontmatter and archive will be validated on upload.
-          </p>
+          <div role="status" aria-live="polite" aria-busy={validating}>
+            {validating && (
+              <p className="up-check" style={{ marginTop: 4 }}>
+                <Icon name="loader" size={14} />
+                Validating package…
+              </p>
+            )}
+            {validationError && <div className="up-errblock" role="alert">{validationError}</div>}
+            {validation && <ValidationList result={validation} />}
+          </div>
         )}
       </div>
       <div className="up-step">
@@ -970,6 +1010,9 @@ export function UploadDialog({
   );
   const [token, setToken] = useState<string | null>(null);
   const [file, setFile] = useState<File | null>(null);
+  const [validation, setValidation] = useState<ValidationResult | null>(null);
+  const [validating, setValidating] = useState(false);
+  const [validationError, setValidationError] = useState<string | null>(null);
   const [form, setForm] = useState<CreateForm>(
     isUpdate
       ? { id: skill!.id, description: skill!.description, body: "" }
@@ -980,6 +1023,32 @@ export function UploadDialog({
   const [error, setError] = useState<string | null>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
   const ver = isUpdate ? nextVersion(skill!.version) : "1.0.0";
+
+  useEffect(() => {
+    if (!file) {
+      setValidation(null);
+      setValidationError(null);
+      setValidating(false);
+      return;
+    }
+    let active = true;
+    setValidation(null);
+    setValidationError(null);
+    setValidating(true);
+    validateSkillPackage(file)
+      .then((next) => {
+        if (active) setValidation(next);
+      })
+      .catch((e) => {
+        if (active) setValidationError(e instanceof Error ? e.message : "Validation failed");
+      })
+      .finally(() => {
+        if (active) setValidating(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [file]);
 
   const ensureToken = useCallback(async () => {
     if (token) return token;
@@ -1004,7 +1073,7 @@ export function UploadDialog({
           .replace(/[^a-z0-9-]+/g, "-")
           .replace(/^-+|-+$/g, "") || "new-skill"
       : "new-skill";
-  const canZip = !!file;
+  const canZip = !!file && validation?.ok === true && !validating;
   const canCreate = !!(form.id.trim() && form.description.trim() && form.body.trim());
 
   const finishPublish = (outcome: PublishOutcome) => {
@@ -1013,7 +1082,7 @@ export function UploadDialog({
   };
 
   const runZip = async () => {
-    if (!file) return;
+    if (!file || validation?.ok !== true) return;
     setBusy(true);
     setError(null);
     try {
@@ -1065,6 +1134,8 @@ export function UploadDialog({
   const reset = () => {
     setResult(null);
     setFile(null);
+    setValidation(null);
+    setValidationError(null);
     setError(null);
     if (!isUpdate) setForm(() => ({ id: "", description: "", body: CREATE_BODY_TEMPLATE }));
   };
@@ -1226,6 +1297,9 @@ export function UploadDialog({
                     file={file}
                     setFile={setFile}
                     lockedOwner={isUpdate}
+                    validation={validation}
+                    validating={validating}
+                    validationError={validationError}
                   />
                 )}
                 {method === "create" && (

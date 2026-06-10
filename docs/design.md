@@ -66,11 +66,15 @@ separate: `owner_id` / `owner_team_id`, `everyone`, `skill_team_shares`, and `cr
 `owner_team_id` means the skill is owned by a team; admin/editor members of that owner team can
 modify it. `everyone=true` means every member of the current workspace can see the skill. Team
 visibility is zero or more rows in `skill_team_shares`; those rows grant read access only. Private
-is derived from `everyone=false` and no team shares. A version's
-declared tools (`skill_versions.tools`) come from the `SKILL.md`
-frontmatter — Companion's native `tools` list, or the Claude skill-format `allowed-tools` (a YAML
-list or comma-separated string) accepted as an alias; tool names may be identifiers in any case
-(`Bash`, `read_file`, `mcp__server__tool`).
+is derived from `everyone=false` and no team shares. A version's declared tools
+(`skill_versions.tools`) come from the Agent Skills `allowed-tools` frontmatter string.
+Companion-specific registry data is written under `metadata.companion_*` when a package is
+published, including `companion_skill_id` and `companion_version`. On re-publish of an existing
+Companion package, that reserved metadata is treated as provenance; the API/CLI still assigns the
+next registry version unless the caller passes an explicit version. Legacy top-level `version`,
+`tools`, and unknown fields are warnings and are not preserved as top-level fields in newly stored
+packages; top-level `scope` or `visibility` is rejected because visibility belongs to the publish
+request.
 
 `api_tokens` holds short-lived, scoped personal access tokens for programmatic publish/install.
 Only the `sha256` `token_hash` is stored (the plaintext `cmp_pat_…` is shown once); each row carries

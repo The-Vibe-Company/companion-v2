@@ -18,6 +18,8 @@ import type {
 } from "@companion/contracts";
 import {
   API_TOKEN_PREFIX,
+  parseAllowedTools,
+  parseStoredSkillFrontmatter,
   publishSkillInputSchema,
   skillFilterPreferencesSchema,
   TEAM_BRAND_COLORS,
@@ -1007,6 +1009,7 @@ export async function listSkills(input: {
       owner_initials: sql<string>`case when ${schema.skills.ownerTeamId} is null then ${schema.profiles.initials} else upper(left(${schema.teams.name}, 2)) end`,
       current_version: schema.skillVersions.version,
       license: schema.skillVersions.license,
+      frontmatter: schema.skillVersions.frontmatter,
       checksum: schema.skillVersions.checksum,
       size_bytes: schema.skillVersions.sizeBytes,
       tools: schema.skillVersions.tools,
@@ -1056,31 +1059,36 @@ export async function listSkills(input: {
     }
   }
 
-  return rows.map((r) => ({
-    id: r.id,
-    org_id: r.org_id,
-    slug: r.slug,
-    description: r.description,
-    visibility: { everyone: r.everyone, teams: sharesBySkill.get(r.id) ?? [] },
-    validation: r.validation,
-    validation_error: r.validation_error,
-    owner_kind: r.owner_kind,
-    owner_id: r.owner_id,
-    owner_user_id: r.owner_user_id,
-    owner_team_id: r.owner_team_id,
-    owner_name: r.owner_name,
-    owner_handle: r.owner_handle,
-    owner_initials: r.owner_initials,
-    current_version: r.current_version,
-    license: r.license,
-    checksum: r.checksum,
-    size_bytes: r.size_bytes,
-    tools: r.tools ?? [],
-    star_count: r.star_count,
-    starred: r.starred,
-    created_at: r.created_at.toISOString(),
-    updated_at: r.updated_at.toISOString(),
-  })) as SkillListRow[];
+  return rows.map((r) => {
+    const manifest = parseStoredSkillFrontmatter(r.frontmatter);
+    return {
+      id: r.id,
+      org_id: r.org_id,
+      slug: r.slug,
+      description: r.description,
+      visibility: { everyone: r.everyone, teams: sharesBySkill.get(r.id) ?? [] },
+      validation: r.validation,
+      validation_error: r.validation_error,
+      owner_kind: r.owner_kind,
+      owner_id: r.owner_id,
+      owner_user_id: r.owner_user_id,
+      owner_team_id: r.owner_team_id,
+      owner_name: r.owner_name,
+      owner_handle: r.owner_handle,
+      owner_initials: r.owner_initials,
+      current_version: r.current_version,
+      compatibility: manifest?.compatibility ?? null,
+      metadata: manifest?.metadata ?? {},
+      license: r.license ?? manifest?.license ?? null,
+      tools: r.tools?.length ? r.tools : parseAllowedTools(manifest?.["allowed-tools"]),
+      checksum: r.checksum,
+      size_bytes: r.size_bytes,
+      star_count: r.star_count,
+      starred: r.starred,
+      created_at: r.created_at.toISOString(),
+      updated_at: r.updated_at.toISOString(),
+    };
+  }) as SkillListRow[];
 }
 
 const EMPTY_SKILL_FILTER_PREFERENCES: SkillFilterPreferences = {
@@ -1283,22 +1291,27 @@ export async function listSkillVersions(input: {
     .from(schema.skillVersions)
     .where(and(eq(schema.skillVersions.orgId, input.orgId), eq(schema.skillVersions.skillId, skill.id)))
     .orderBy(desc(schema.skillVersions.createdAt));
-  return rows.map((r) => ({
-    id: r.id,
-    skill_id: r.skillId,
-    version: r.version,
-    note: r.note,
-    frontmatter: r.frontmatter,
-    tools: r.tools,
-    license: r.license,
-    size_bytes: r.sizeBytes,
-    checksum: r.checksum,
-    storage_path: r.storagePath,
-    validation: r.validation,
-    validation_error: r.validationError,
-    created_by: r.createdBy,
-    created_at: r.createdAt.toISOString(),
-  }));
+  return rows.map((r) => {
+    const manifest = parseStoredSkillFrontmatter(r.frontmatter);
+    return {
+      id: r.id,
+      skill_id: r.skillId,
+      version: r.version,
+      note: r.note,
+      frontmatter: r.frontmatter,
+      tools: r.tools.length ? r.tools : parseAllowedTools(manifest?.["allowed-tools"]),
+      license: r.license ?? manifest?.license ?? null,
+      compatibility: manifest?.compatibility ?? null,
+      metadata: manifest?.metadata ?? {},
+      size_bytes: r.sizeBytes,
+      checksum: r.checksum,
+      storage_path: r.storagePath,
+      validation: r.validation,
+      validation_error: r.validationError,
+      created_by: r.createdBy,
+      created_at: r.createdAt.toISOString(),
+    };
+  });
 }
 
 export async function listSkillComments(input: {
@@ -1644,6 +1657,9 @@ export async function assertCanPublishSkillVersion(input: {
     if (!canModify({ orgRole }, { isOwner: canModifyExisting })) {
       throw new Error("not allowed to publish this skill");
     }
+    if (payload.skill_id && payload.skill_id !== existing.id) {
+      throw new Error("skill_id does not match existing skill");
+    }
     if (
       !canActAtVisibility(
         { orgRole },
@@ -1703,6 +1719,9 @@ async function writeSkillVersion(input: {
   const existing = await database.query.skills.findFirst({
     where: and(eq(schema.skills.orgId, input.orgId), eq(schema.skills.slug, payload.slug)),
   });
+  if (existing && payload.skill_id && payload.skill_id !== existing.id) {
+    throw new Error("skill_id does not match existing skill");
+  }
 
   const [skill] = existing
     ? await database
@@ -1719,6 +1738,7 @@ async function writeSkillVersion(input: {
     : await database
         .insert(schema.skills)
         .values({
+          ...(payload.skill_id ? { id: payload.skill_id } : {}),
           orgId: input.orgId,
           slug: payload.slug,
           description: payload.description,

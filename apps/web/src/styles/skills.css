@@ -239,11 +239,21 @@ body { background: var(--color-canvas); color: var(--color-fg); font-family: var
 .prop__value { flex: 1; display: flex; align-items: center; gap: 7px; font-size: var(--text-sm); color: var(--color-fg); min-width: 0; white-space: nowrap; }
 .prop__value .chips { flex-wrap: wrap; white-space: normal; }
 .prop__value .mono { font-size: var(--text-xs); white-space: normal; overflow-wrap: anywhere; }
+.prop--stack { align-items: flex-start; flex-direction: column; gap: 7px; }
+.prop--stack .prop__label { width: 100%; }
+.prop--stack .prop__value { width: 100%; white-space: normal; }
+.prop__wrap { white-space: normal; overflow-wrap: anywhere; }
+.prop__count { margin-left: auto; font-family: var(--font-mono); font-size: 10px; color: var(--color-faint); }
 .divider { height: 1px; background: var(--color-line); margin: 10px 0; }
 
 /* chips + badges */
 .chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .chip { font-family: var(--font-mono); font-size: var(--text-xs); color: var(--color-muted); border: 1px solid var(--color-line); background: var(--color-surface); border-radius: var(--radius-sm); padding: 2px 7px; }
+.kvlist { display: flex; flex-direction: column; gap: 5px; min-width: 0; width: 100%; }
+.prop--metadata .kvlist { max-height: 168px; overflow-y: auto; padding-right: 2px; }
+.kv { display: grid; grid-template-columns: minmax(78px, 0.45fr) minmax(0, 1fr); gap: 8px; align-items: baseline; font-family: var(--font-mono); font-size: 11px; }
+.kv__k { color: var(--color-faint); white-space: normal; overflow-wrap: anywhere; }
+.kv__v { color: var(--color-muted); overflow-wrap: anywhere; }
 .scopechip { display: inline-flex; align-items: center; gap: 5px; font-family: var(--font-mono); font-size: var(--text-xs); color: var(--color-fg); border: 1px solid var(--color-line); background: var(--color-surface); border-radius: var(--radius-sm); padding: 2px 8px; }
 .scopechip i { color: var(--color-faint); }
 .vbadge { display: inline-flex; align-items: center; gap: 6px; font-size: var(--text-xs); border-radius: var(--radius-sm); padding: 2px 8px; }

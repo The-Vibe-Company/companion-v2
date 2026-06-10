@@ -48,6 +48,8 @@ export interface ArchiveFinding {
   fileCount: number;
   /** Content of the shallowest SKILL.md, or null. */
   skillMd: string | null;
+  /** Path of the selected SKILL.md inside the archive, or null when absent. */
+  skillMdPath: string | null;
   /** Traversal / symlink / special-entry messages. */
   violations: string[];
   /** Exceeded a size or entry-count cap. */
@@ -65,10 +67,11 @@ export async function inspectTar(tar: Buffer): Promise<ArchiveFinding> {
     totalBytes: 0,
     fileCount: 0,
     skillMd: null,
+    skillMdPath: null,
     violations: [],
     oversize: false,
   };
-  const skillCandidates: { depth: number; content: string }[] = [];
+  const skillCandidates: { path: string; depth: number; content: string }[] = [];
   const ex = tarExtract();
 
   await new Promise<void>((resolve, reject) => {
@@ -102,7 +105,12 @@ export async function inspectTar(tar: Buffer): Promise<ArchiveFinding> {
         stream.resume();
         return;
       }
-
+      if (!norm.path) {
+        finding.violations.push(`empty path: ${rawName}`);
+        stream.on("end", next);
+        stream.resume();
+        return;
+      }
       finding.fileCount += 1;
       const size = header.size ?? 0;
       finding.totalBytes += size;
@@ -112,6 +120,11 @@ export async function inspectTar(tar: Buffer): Promise<ArchiveFinding> {
         finding.fileCount > MAX_ENTRY_COUNT
       ) {
         finding.oversize = true;
+      }
+      if (isExcluded(norm.path)) {
+        stream.on("end", next);
+        stream.resume();
+        return;
       }
       finding.files.push(norm.path);
 
@@ -125,6 +138,7 @@ export async function inspectTar(tar: Buffer): Promise<ArchiveFinding> {
         });
         stream.on("end", () => {
           skillCandidates.push({
+            path: norm.path,
             depth: norm.path.split("/").length,
             content: Buffer.concat(chunks).toString("utf8"),
           });
@@ -144,6 +158,7 @@ export async function inspectTar(tar: Buffer): Promise<ArchiveFinding> {
 
   skillCandidates.sort((a, b) => a.depth - b.depth);
   finding.skillMd = skillCandidates[0]?.content ?? null;
+  finding.skillMdPath = skillCandidates[0]?.path ?? null;
   return finding;
 }
 
@@ -251,10 +266,8 @@ export async function extractArchiveFiles(
         stream.resume();
         return;
       }
-
-      // Skip packaging junk (.git, .DS_Store, node_modules, __pycache__, *.pyc, …) the same
-      // way the packer excludes it — an uploaded macOS/IDE archive shouldn't clutter the explorer.
-      if (isExcluded(norm.path)) {
+      if (!norm.path) {
+        violations.push(`empty path: ${rawName}`);
         stream.on("end", next);
         stream.resume();
         return;
@@ -269,6 +282,15 @@ export async function extractArchiveFiles(
         fileCount > MAX_ENTRY_COUNT
       ) {
         oversize = true;
+      }
+
+      // Skip packaging junk (.git, .DS_Store, node_modules, __pycache__, *.pyc, …) the same
+      // way the packer excludes it — an uploaded macOS/IDE archive shouldn't clutter the explorer.
+      // Security size limits above still count excluded bytes and entries.
+      if (isExcluded(norm.path)) {
+        stream.on("end", next);
+        stream.resume();
+        return;
       }
 
       if (isTextPath(norm.path)) {
@@ -330,6 +352,7 @@ export interface DirScan {
   files: DirFile[];
   totalBytes: number;
   skillMd: string | null;
+  skillMdPath: string | null;
   violations: string[];
   oversize: boolean;
 }
@@ -383,5 +406,5 @@ export async function scanDir(dir: string): Promise<DirScan> {
     .sort((a, b) => a.relPath.split("/").length - b.relPath.split("/").length)[0];
   const skillMd = skillEntry ? await readFile(join(dir, skillEntry.relPath), "utf8") : null;
 
-  return { files, totalBytes, skillMd, violations, oversize };
+  return { files, totalBytes, skillMd, skillMdPath: skillEntry?.relPath ?? null, violations, oversize };
 }

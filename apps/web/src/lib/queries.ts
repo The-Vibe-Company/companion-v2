@@ -9,6 +9,8 @@ import type {
   SkillVisibilityInput,
   SkillVersionRow,
   TokenScope,
+  ValidationResult,
+  FrontmatterWarning,
 } from "@companion/contracts";
 import { apiFetch } from "./apiClient";
 
@@ -20,6 +22,8 @@ export interface PublishResult {
   slug: string;
   version: string;
   checksum: string;
+  sizeBytes?: number;
+  warnings?: FrontmatterWarning[];
 }
 
 /** Public API base used in the copy-paste curl prompts (an external agent hits it directly). */
@@ -53,6 +57,15 @@ export async function publishSkillPackage(
   // In update mode, bind the upload to the skill being updated (server rejects a mismatch).
   if (opts.expectSlug) fd.append("expect_slug", opts.expectSlug);
   return apiFetch<PublishResult>("/v1/skills", { method: "POST", body: fd });
+}
+
+/** Validate a packaged skill without publishing it. Warnings are non-blocking. */
+export async function validateSkillPackage(file: File): Promise<ValidationResult> {
+  const fd = new FormData();
+  fd.append("file", file);
+  fd.append("action", "validate");
+  const data = await apiFetch<{ result: ValidationResult }>("/v1/skills", { method: "POST", body: fd });
+  return data.result;
 }
 
 /** Author a SKILL.md inline ("Create in the browser") and publish it. */

@@ -47,6 +47,8 @@ export const skillListRowSchema = z.object({
   owner_initials: z.string(),
   current_version: z.string().nullable(),
   license: z.string().nullable(),
+  compatibility: z.string().nullable(),
+  metadata: z.record(z.string()),
   checksum: z.string().nullable(),
   size_bytes: z.number().nullable(),
   tools: z.array(z.string()),
@@ -116,6 +118,8 @@ export const skillVersionRowSchema = z.object({
   frontmatter: z.string(),
   tools: z.array(z.string()),
   license: z.string().nullable(),
+  compatibility: z.string().nullable().optional(),
+  metadata: z.record(z.string()).optional(),
   size_bytes: z.number().int().nonnegative(),
   checksum: z.string(),
   storage_path: z.string(),
@@ -128,6 +132,7 @@ export type SkillVersionRow = z.infer<typeof skillVersionRowSchema>;
 
 /** Argument shape for the `publish_skill_version` RPC (web route + CLI share this). */
 export const publishSkillInputSchema = z.object({
+  skill_id: z.string().uuid().optional(),
   slug: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/),
   owner_team: skillOwnerTeamInputSchema,
   visibility: skillVisibilityInputSchema,

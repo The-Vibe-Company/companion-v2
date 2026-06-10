@@ -109,10 +109,12 @@
 .up-token__btn.is-done { color: var(--color-ok); }
 
 /* dropzone --------------------------------------------------------------- */
-.up-drop { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; text-align: center;
+.up-drop { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; width: 100%; text-align: center;
   padding: 34px 20px; border: 1.5px dashed var(--color-line-strong); border-radius: var(--radius-md); background: var(--color-surface-sunken); cursor: pointer;
+  color: inherit; font: inherit;
   transition: border-color var(--duration-fast) var(--ease-out-quint), background-color var(--duration-fast) var(--ease-out-quint); }
 .up-drop:hover { border-color: var(--color-faint); }
+.up-drop:focus-visible { outline: none; border-color: var(--color-accent-edge); box-shadow: 0 0 0 2px var(--color-accent-ring); }
 .up-drop.is-over { border-color: var(--color-accent-edge); background: var(--color-accent-tint); }
 .up-drop__ico { width: 44px; height: 44px; display: grid; place-items: center; border-radius: var(--radius-md); background: var(--color-surface); border: 1px solid var(--color-line); color: var(--color-muted); }
 .up-drop__main { font-size: var(--text-sm); color: var(--color-fg); }
@@ -133,8 +135,10 @@
 .up-checkrow { display: flex; align-items: flex-start; gap: 8px; font-size: 12px; color: var(--color-muted); }
 .up-checkrow svg { margin-top: 1px; flex: none; }
 .up-checkrow--pass svg { color: var(--color-ok); }
+.up-checkrow--warn svg { color: var(--color-warn); }
 .up-checkrow--fail svg { color: var(--color-danger); }
 .up-checkrow__detail { color: var(--color-faint); }
+.up-checkrow__suggestion { display: block; color: var(--color-faint); margin-top: 2px; }
 .up-errblock { font-size: 12px; color: var(--color-danger); background: var(--color-danger-tint); border: 1px solid var(--color-danger-line); border-radius: var(--radius-md); padding: 9px 11px; white-space: pre-wrap; }
 
 /* inline form fields ----------------------------------------------------- */

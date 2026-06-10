@@ -1,4 +1,5 @@
 import { serve } from "@hono/node-server";
+import { randomUUID } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -18,6 +19,7 @@ import {
   deleteTeam,
   getOnboardingContext,
   getOnboardingState,
+  getSkillBySlug,
   getSkillFilterPreferences,
   getOrgSettings,
   getDownloadVersion,
@@ -56,9 +58,11 @@ import {
   orgSettingsResponseSchema,
   publishSkillInputSchema,
   setCommentDeprecatedInputSchema,
+  skillFrontmatterSchema,
   skillVisibilityInputSchema,
   visibilityFilterSchema,
   skillFilterPreferencesSchema,
+  toStoredSkillFrontmatter,
   updateOrgInputSchema,
   updateTeamInputSchema,
   resolveOrgLogoContentType,
@@ -80,7 +84,9 @@ import {
   compareSemver,
   extractArchiveFiles,
   isValidSemver,
+  buildNormalizedSkillMd,
   packDir,
+  prepareSkillDirForPublish,
   tarGzToZip,
   toTar,
   unpackAnyTo,
@@ -122,20 +128,56 @@ async function withTenant<T>(
   return withTenantContext({ orgId, userId: actor.id }, (database) => fn({ actor, orgId, database }));
 }
 
-async function canonicalizeSkillArchive(archive: Buffer) {
+async function canonicalizeSkillArchive(archive: Buffer, companion: { skillId: string; version: string }) {
   const dir = await mkdtemp(join(tmpdir(), "companion-skill-"));
   try {
     await unpackAnyTo(archive, dir);
-    return await packDir(dir);
+    const prepared = await prepareSkillDirForPublish(dir, companion);
+    const canonical = await packDir(prepared.rootDir);
+    return { canonical, frontmatter: prepared.frontmatter };
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
 }
 
 /** Assemble a standard SKILL.md from inline fields. The registry sets the version, not the author. */
-function buildSkillMd(id: string, version: string, description: string, body: string): string {
-  const front = ["---", `name: ${id}`, `version: ${version}`, `description: ${JSON.stringify(description)}`, "---"].join("\n");
-  return `${front}\n\n${body.trim()}\n`;
+function buildSkillMd(id: string, description: string, body: string, companion: { skillId: string; version: string }): string {
+  const frontmatter = skillFrontmatterSchema.parse({
+    name: id,
+    description,
+    metadata: {
+      companion_skill_id: companion.skillId,
+      companion_version: companion.version,
+    },
+  });
+  return buildNormalizedSkillMd(frontmatter, body);
+}
+
+async function resolvePublishTarget(input: {
+  actor: ReturnType<typeof actorFromContext>;
+  orgId: string;
+  slug: string;
+  explicitVersion?: string;
+  metadataVersion?: string;
+  metadataSkillId?: string;
+  legacyVersion?: string;
+}): Promise<{ skillId: string; version: string }> {
+  return withTenantContext({ orgId: input.orgId, userId: input.actor.id }, async (database) => {
+    const existing = await getSkillBySlug({ actor: input.actor, orgId: input.orgId, slug: input.slug, database });
+    const metadataIsPublishedProvenance = Boolean(existing && input.metadataSkillId);
+    const candidate =
+      input.explicitVersion ??
+      (metadataIsPublishedProvenance ? undefined : input.metadataVersion) ??
+      input.legacyVersion;
+    if (candidate) {
+      if (!isValidSemver(candidate)) throw new Error(`invalid semver: ${candidate}`);
+      return { skillId: existing?.id ?? randomUUID(), version: candidate };
+    }
+    if (!existing) return { skillId: randomUUID(), version: "1.0.0" };
+    const versions = await listSkillVersions({ actor: input.actor, orgId: input.orgId, slug: input.slug, database });
+    const latest = versions.map((v) => v.version).sort((a, b) => compareSemver(b, a))[0];
+    return { skillId: existing.id, version: latest ? bumpSemver(latest, "patch") : "1.0.0" };
+  });
 }
 
 function parseBoolean(value: string | undefined): boolean {
@@ -172,15 +214,17 @@ async function publishCanonical(input: {
   orgId: string;
   canonical: Awaited<ReturnType<typeof packDir>>;
   fm: SkillFrontmatter;
+  skillId: string;
   ownerTeam?: string | null;
   visibility: SkillVisibilityInput;
   version: string;
   note: string;
-}): Promise<{ id: string; slug: string; version: string; checksum: string }> {
-  const { actor, orgId, canonical, fm, ownerTeam, visibility, version, note } = input;
+}): Promise<{ id: string; slug: string; version: string; checksum: string; sizeBytes: number }> {
+  const { actor, orgId, canonical, fm, skillId, ownerTeam, visibility, version, note } = input;
   if (!isValidSemver(version)) throw new Error(`invalid semver: ${version}`);
   const key = skillArchiveKey({ orgId, slug: fm.name, version });
   const payload = publishSkillInputSchema.parse({
+    skill_id: skillId,
     slug: fm.name,
     owner_team: ownerTeam,
     visibility,
@@ -189,8 +233,8 @@ async function publishCanonical(input: {
     checksum: canonical.checksum,
     storage_path: key,
     size_bytes: canonical.sizeBytes,
-    frontmatter: JSON.stringify(fm, null, 2),
-    tools: fm.tools,
+    frontmatter: JSON.stringify(toStoredSkillFrontmatter(fm), null, 2),
+    tools: fm.allowedTools,
     license: fm.license ?? null,
     note,
   });
@@ -202,7 +246,7 @@ async function publishCanonical(input: {
     const published = await withTenantContext({ orgId, userId: actor.id }, (database) =>
       publishSkillVersion({ actor, orgId, payload, archiveKey: key, database }),
     );
-    return { ...published, slug: fm.name, checksum: canonical.checksum };
+    return { ...published, slug: fm.name, checksum: canonical.checksum, sizeBytes: canonical.sizeBytes };
   } catch (error) {
     await deleteSkillArchive({ key }).catch((cleanupError) => {
       console.error(`failed to delete orphaned skill archive ${key}`, cleanupError);
@@ -951,20 +995,36 @@ app.post("/v1/skills", bodyLimit({ maxSize: 32 * 1024 * 1024, onError: (c) => js
         422,
       );
     }
-    const canonical = await canonicalizeSkillArchive(archive);
     const visibility = skillVisibilityInputSchema.parse({ everyone: parseBoolean(everyoneRaw), teams: teamValues });
-    const version = versionRaw ?? fm.version;
+    const target = await resolvePublishTarget({
+      actor,
+      orgId,
+      slug: fm.name,
+      explicitVersion: versionRaw,
+      metadataVersion: fm.metadata.companion_version,
+      metadataSkillId: fm.metadata.companion_skill_id,
+      legacyVersion: result.legacy?.version,
+    });
+    const normalized = await canonicalizeSkillArchive(archive, {
+      skillId: target.skillId,
+      version: target.version,
+    });
+    const normalizedResult = await validateSkillArchive(normalized.canonical.archive);
+    if (!normalizedResult.ok || !normalizedResult.frontmatter) {
+      return c.json({ result: normalizedResult, error: normalizedResult.error ?? "validation failed after normalization" }, 422);
+    }
     const published = await publishCanonical({
       actor,
       orgId,
-      canonical,
-      fm,
+      canonical: normalized.canonical,
+      fm: normalized.frontmatter,
+      skillId: target.skillId,
       ownerTeam: ownerTeamRaw,
       visibility,
-      version,
+      version: target.version,
       note: messageRaw ?? "",
     });
-    return c.json({ ok: true, ...published });
+    return c.json({ ok: true, ...published, warnings: result.warnings ?? [] });
   } catch (error) {
     return jsonError(c, error);
   }
@@ -977,15 +1037,14 @@ app.post("/v1/skills/create", bodyLimit({ maxSize: 2 * 1024 * 1024, onError: (c)
     requireScope(c, "skills:write");
     const orgId = await orgIdFromContext(c);
     const input = createSkillInputSchema.parse(await c.req.json());
-    const version = await withTenantContext({ orgId, userId: actor.id }, async (database) => {
-      const existing = await listSkillVersions({ actor, orgId, slug: input.id, database }).catch(() => []);
-      // Bump from the highest existing version by semver (not row order).
-      const latest = existing.map((v) => v.version).sort((a, b) => compareSemver(b, a))[0];
-      return latest ? bumpSemver(latest, "patch") : "1.0.0";
+    const target = await resolvePublishTarget({
+      actor,
+      orgId,
+      slug: input.id,
     });
     const dir = await mkdtemp(join(tmpdir(), "companion-skill-"));
     try {
-      await writeFile(join(dir, "SKILL.md"), buildSkillMd(input.id, version, input.description, input.body), "utf8");
+      await writeFile(join(dir, "SKILL.md"), buildSkillMd(input.id, input.description, input.body, target), "utf8");
       const canonical = await packDir(dir);
       const result = await validateSkillArchive(canonical.archive);
       if (!result.ok || !result.frontmatter) {
@@ -996,12 +1055,13 @@ app.post("/v1/skills/create", bodyLimit({ maxSize: 2 * 1024 * 1024, onError: (c)
         orgId,
         canonical,
         fm: result.frontmatter,
+        skillId: target.skillId,
         ownerTeam: input.owner_team,
         visibility: input.visibility,
-        version,
+        version: target.version,
         note: "",
       });
-      return c.json({ ok: true, ...published });
+      return c.json({ ok: true, ...published, warnings: result.warnings ?? [] });
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

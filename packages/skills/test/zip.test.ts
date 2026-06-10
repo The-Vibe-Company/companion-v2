@@ -7,9 +7,10 @@ import { isZip, zipToTar, unzipToDir, tarGzToZip, validateSkillArchive, packDir 
 
 const SKILL_MD = `---
 name: zip-demo
-version: 1.2.3
 description: A demo skill packaged as a zip.
-tools: [read_file]
+metadata:
+  companion_version: "1.2.3"
+allowed-tools: read_file
 ---
 
 # What it does
@@ -35,7 +36,7 @@ describe("zip support", () => {
     const result = await validateSkillArchive(zip);
     expect(result.ok).toBe(true);
     expect(result.frontmatter?.name).toBe("zip-demo");
-    expect(result.frontmatter?.version).toBe("1.2.3");
+    expect(result.frontmatter?.metadata.companion_version).toBe("1.2.3");
   });
 
   it("fails validation when SKILL.md is missing from the zip", async () => {

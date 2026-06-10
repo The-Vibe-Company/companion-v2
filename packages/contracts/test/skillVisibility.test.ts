@@ -33,6 +33,8 @@ describe("skill visibility contracts", () => {
       owner_initials: "SG",
       current_version: "1.0.0",
       license: null,
+      compatibility: null,
+      metadata: {},
       checksum: null,
       size_bytes: 123,
       tools: [],

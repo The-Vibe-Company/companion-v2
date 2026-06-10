@@ -7,3 +7,4 @@ export * from "./pack";
 export * from "./unpack";
 export * from "./zip";
 export * from "./validateSkill";
+export * from "./manifest";
