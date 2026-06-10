@@ -23,9 +23,10 @@ export function emitJson(value: unknown): void {
 export function printValidation(result: ValidationResult, json: boolean): void {
   if (json) return;
   for (const c of result.checks) {
-    const mark = c.status === "pass" ? pc.green("ok") : pc.red("fail");
+    const mark = c.status === "pass" ? pc.green("ok") : c.status === "warn" ? pc.yellow("warn") : pc.red("fail");
     const detail = c.detail ? pc.dim(`  ${c.detail}`) : "";
     out(`  ${mark}  ${c.label}${detail}`);
+    if (c.status === "warn" && c.suggestion) out(pc.dim(`        ${c.suggestion}`));
   }
 }
 

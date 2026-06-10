@@ -107,7 +107,7 @@ permitted members. Only approved images are deployable.
 
 ### Pillar 3 — skills: upload → share → attach
 A Builder uploads a `SKILL.md` package → the portal **validates** the frontmatter (`name`,
-`description`, version, declared tools) and assigns a version → the Builder **scopes** it
+`description`, `compatibility`, `metadata`, and `allowed-tools`) and assigns a registry version → the Builder **scopes** it
 (private/team/org) → it enters the registry → any permitted user **attaches** it (opt-in) to an agent
 they can edit → the agent gains the skill on its next run. Versioning lets teams **pin** or **upgrade**.
 

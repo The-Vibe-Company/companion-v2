@@ -1,4 +1,5 @@
 import type { Scope } from "@companion/contracts";
+import { toStoredSkillFrontmatter } from "@companion/contracts";
 import {
   createOrg,
   createTeam,
@@ -90,13 +91,13 @@ function buildSkillMd(spec: Pick<SeedSkillSpec, "slug" | "version" | "descriptio
   const lines = [
     "---",
     `name: ${spec.slug}`,
-    `version: ${spec.version}`,
     `description: ${JSON.stringify(spec.description)}`,
+    "metadata:",
+    `  companion_version: ${JSON.stringify(spec.version)}`,
   ];
   if (spec.license) lines.push(`license: ${spec.license}`);
   if (spec.tools?.length) {
-    lines.push("tools:");
-    for (const tool of spec.tools) lines.push(`  - ${tool}`);
+    lines.push(`allowed-tools: ${JSON.stringify(spec.tools.join(" "))}`);
   }
   lines.push("---");
   return `${lines.join("\n")}\n\n${spec.body.trim()}\n`;
@@ -121,8 +122,8 @@ async function seedSkill(actor: ActorContext, orgId: string, spec: SeedSkillSpec
       checksum: canonical.checksum,
       storage_path: key,
       size_bytes: canonical.sizeBytes,
-      frontmatter: JSON.stringify(fm, null, 2),
-      tools: fm.tools,
+      frontmatter: JSON.stringify(toStoredSkillFrontmatter(fm), null, 2),
+      tools: fm.allowedTools,
       license: fm.license ?? null,
       note: "Seeded for local development",
     };

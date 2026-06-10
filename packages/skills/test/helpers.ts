@@ -5,13 +5,12 @@ import { dirname, join } from "node:path";
 
 export const VALID_SKILL_MD = `---
 name: pdf-extract
-version: 2.3.1
 description: Extract text, tables, and metadata from PDF documents.
+compatibility: claude-code codex
+metadata:
+  companion_version: "2.3.1"
 license: MIT
-tools:
-  - read_file
-  - run_python
-scope: public
+allowed-tools: read_file run_python
 ---
 
 # pdf-extract
@@ -41,7 +40,7 @@ export async function mkTmpDir(): Promise<string> {
 export interface TarEntrySpec {
   name: string;
   type?: "file" | "directory" | "symlink" | "link";
-  content?: string;
+  content?: string | Buffer;
   linkname?: string;
   /** Override the declared size in the header (for zip-bomb / oversize tests). */
   size?: number;
@@ -65,7 +64,12 @@ export function buildTar(entries: TarEntrySpec[]): Promise<Buffer> {
           header.size = 0;
           await new Promise<void>((res, rej) => p.entry(header, (err) => (err ? rej(err) : res())));
         } else {
-          const content = e.content !== undefined ? Buffer.from(e.content) : Buffer.alloc(0);
+          const content =
+            e.content !== undefined
+              ? Buffer.isBuffer(e.content)
+                ? e.content
+                : Buffer.from(e.content)
+              : Buffer.alloc(0);
           header.size = e.size ?? content.length;
           await new Promise<void>((res, rej) =>
             p.entry(header, content, (err) => (err ? rej(err) : res())),

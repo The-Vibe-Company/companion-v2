@@ -16,6 +16,7 @@ export const SKILL_FILE = "SKILL.md";
 export const EXCLUDE_PATTERNS: readonly RegExp[] = [
   /(^|\/)\.git(\/|$)/,
   /(^|\/)\.DS_Store$/,
+  /(^|\/)__MACOSX(\/|$)/,
   /(^|\/)node_modules(\/|$)/,
   /(^|\/)__pycache__(\/|$)/,
   /\.pyc$/,

@@ -1,16 +1,19 @@
 import {
+  SEMVER_RE,
   VALIDATION_CHECK_LABELS,
+  invalidAllowedTools,
   type ValidationCheck,
   type ValidationResult,
 } from "@companion/contracts";
 import { parseFrontmatter } from "./frontmatter";
-import { isValidSemver } from "./semver";
 import { inspectTar, scanDir, toTar, type ArchiveFinding } from "./archive";
 import { isZip, zipToTar } from "./zip";
-import { MAX_ARCHIVE_BYTES, TOOL_NAME_RE } from "./constants";
+import { MAX_ARCHIVE_BYTES } from "./constants";
 
 interface RawFindings {
+  files: string[];
   skillMd: string | null;
+  skillMdPath: string | null;
   totalBytes: number;
   fileCount: number;
   violations: string[];
@@ -21,6 +24,27 @@ function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function layoutCheck(f: RawFindings, skillName: string | null): ValidationCheck {
+  if (!f.skillMdPath) {
+    return { id: "layout", label: VALIDATION_CHECK_LABELS.layout, status: "fail", detail: "SKILL.md not found in package" };
+  }
+  if (f.skillMdPath === "SKILL.md") {
+    return { id: "layout", label: VALIDATION_CHECK_LABELS.layout, status: "pass", detail: "SKILL.md" };
+  }
+  if (skillName) {
+    const wrapper = `${skillName}/`;
+    if (f.skillMdPath === `${wrapper}SKILL.md` && f.files.length > 0 && f.files.every((path) => path.startsWith(wrapper))) {
+      return { id: "layout", label: VALIDATION_CHECK_LABELS.layout, status: "pass", detail: `${skillName}/ wrapper` };
+    }
+  }
+  return {
+    id: "layout",
+    label: VALIDATION_CHECK_LABELS.layout,
+    status: "fail",
+    detail: `unexpected SKILL.md location: ${f.skillMdPath}`,
+  };
 }
 
 function buildResult(f: RawFindings): ValidationResult {
@@ -36,37 +60,85 @@ function buildResult(f: RawFindings): ValidationResult {
     checks.push({ id: "frontmatter", label: VALIDATION_CHECK_LABELS.frontmatter, status: "fail", detail: fm?.error ?? "frontmatter missing" });
   }
 
-  // 2. Semver well-formed
-  const version = fm && fm.ok ? fm.data.version : undefined;
-  if (version && isValidSemver(version)) {
-    checks.push({ id: "semver", label: VALIDATION_CHECK_LABELS.semver, status: "pass", detail: version });
+  // 2. Layout matches Agent Skills package shape.
+  checks.push(layoutCheck(f, fm && fm.ok ? fm.data.name : null));
+
+  // 3. Compatibility + metadata follow the official field constraints.
+  if (fm && fm.ok) {
+    const companionVersion = fm.data.metadata.companion_version;
+    if (companionVersion && !SEMVER_RE.test(companionVersion)) {
+      checks.push({
+        id: "metadata",
+        label: VALIDATION_CHECK_LABELS.metadata,
+        status: "fail",
+        detail: `metadata.companion_version must be valid semver: ${companionVersion}`,
+      });
+    } else {
+      const detail = [
+        fm.data.compatibility ? "compatibility declared" : "no compatibility",
+        `${Object.keys(fm.data.metadata).length} metadata keys`,
+      ].join(", ");
+      checks.push({ id: "metadata", label: VALIDATION_CHECK_LABELS.metadata, status: "pass", detail });
+    }
   } else {
-    checks.push({ id: "semver", label: VALIDATION_CHECK_LABELS.semver, status: "fail", detail: version ? `not a valid semver: ${version}` : "version missing from frontmatter" });
+    checks.push({ id: "metadata", label: VALIDATION_CHECK_LABELS.metadata, status: "fail", detail: "cannot inspect metadata (frontmatter invalid)" });
   }
 
-  // 3. No path traversal / symlinks
+  // 4. No path traversal / symlinks
   if (f.violations.length === 0) {
     checks.push({ id: "traversal", label: VALIDATION_CHECK_LABELS.traversal, status: "pass" });
   } else {
     checks.push({ id: "traversal", label: VALIDATION_CHECK_LABELS.traversal, status: "fail", detail: f.violations[0] });
   }
 
-  // 4. Archive under size limit
+  // 5. Archive under size limit
   if (!f.oversize) {
     checks.push({ id: "size", label: VALIDATION_CHECK_LABELS.size, status: "pass", detail: `${formatBytes(f.totalBytes)} / ${formatBytes(MAX_ARCHIVE_BYTES)}` });
   } else {
     checks.push({ id: "size", label: VALIDATION_CHECK_LABELS.size, status: "fail", detail: `exceeds limit (${formatBytes(f.totalBytes)}, ${f.fileCount} files)` });
   }
 
-  // 5. Declared tools resolved
-  const tools = fm && fm.ok ? fm.data.tools : [];
-  const badTool = tools.find((t) => !TOOL_NAME_RE.test(t));
-  if (fm && fm.ok && !badTool) {
-    checks.push({ id: "tools", label: VALIDATION_CHECK_LABELS.tools, status: "pass", detail: tools.length ? tools.join(", ") : "none declared" });
-  } else if (fm && fm.ok && badTool) {
-    checks.push({ id: "tools", label: VALIDATION_CHECK_LABELS.tools, status: "fail", detail: `invalid tool name: ${badTool}` });
+  // 6. Official allowed-tools string parsed into Companion's internal list.
+  const tools = fm && fm.ok ? fm.data.allowedTools : [];
+  if (fm && fm.ok) {
+    const invalidTools = invalidAllowedTools(tools);
+    if (invalidTools.length > 0) {
+      checks.push({
+        id: "tools",
+        label: VALIDATION_CHECK_LABELS.tools,
+        status: "fail",
+        detail: `invalid tool token: ${invalidTools[0]}`,
+      });
+    } else {
+      checks.push({ id: "tools", label: VALIDATION_CHECK_LABELS.tools, status: "pass", detail: tools.length ? tools.join(", ") : "none declared" });
+    }
   } else {
     checks.push({ id: "tools", label: VALIDATION_CHECK_LABELS.tools, status: "fail", detail: "cannot resolve tools (frontmatter invalid)" });
+  }
+
+  // 7. Legacy/non-spec top-level fields are warnings only.
+  const warnings = fm?.warnings ?? [];
+  const legacyVersion = fm?.legacy.version;
+  if (fm && legacyVersion && !SEMVER_RE.test(legacyVersion)) {
+    checks.push({
+      id: "legacy",
+      label: VALIDATION_CHECK_LABELS.legacy,
+      status: "fail",
+      detail: `legacy version must be valid semver: ${legacyVersion}`,
+    });
+  } else if (fm && warnings.length > 0) {
+    checks.push({
+      id: "legacy",
+      label: VALIDATION_CHECK_LABELS.legacy,
+      status: "warn",
+      detail: warnings.map((w) => w.field).join(", "),
+      code: warnings[0]?.code,
+      suggestion: warnings[0]?.suggestion,
+    });
+  } else if (fm) {
+    checks.push({ id: "legacy", label: VALIDATION_CHECK_LABELS.legacy, status: "pass", detail: "none found" });
+  } else {
+    checks.push({ id: "legacy", label: VALIDATION_CHECK_LABELS.legacy, status: "fail", detail: "cannot inspect legacy fields (frontmatter missing)" });
   }
 
   const failed = checks.filter((c) => c.status === "fail");
@@ -74,6 +146,8 @@ function buildResult(f: RawFindings): ValidationResult {
     ok: failed.length === 0,
     checks,
     frontmatter: fm && fm.ok ? fm.data : undefined,
+    legacy: fm?.legacy,
+    warnings,
     error: failed.length
       ? failed.map((c) => `${c.label}${c.detail ? `: ${c.detail}` : ""}`).join("\n")
       : undefined,
@@ -88,7 +162,7 @@ export async function validateSkillArchive(input: Buffer): Promise<ValidationRes
   } catch {
     // Unreadable / over-cap archive (e.g. a zip-bomb tripping the decompression caps):
     // keep the full 5-check result shape so callers (CLI, API) render a consistent checklist.
-    return buildResult({ skillMd: null, totalBytes: input.length, fileCount: 0, violations: [], oversize: true });
+    return buildResult({ files: [], skillMd: null, skillMdPath: null, totalBytes: input.length, fileCount: 0, violations: [], oversize: true });
   }
   let finding: ArchiveFinding;
   try {
@@ -102,7 +176,9 @@ export async function validateSkillArchive(input: Buffer): Promise<ValidationRes
     };
   }
   return buildResult({
+    files: finding.files,
     skillMd: finding.skillMd,
+    skillMdPath: finding.skillMdPath,
     totalBytes: finding.totalBytes,
     fileCount: finding.fileCount,
     violations: finding.violations,
@@ -114,7 +190,9 @@ export async function validateSkillArchive(input: Buffer): Promise<ValidationRes
 export async function validateSkillDir(dir: string): Promise<ValidationResult> {
   const scan = await scanDir(dir);
   return buildResult({
+    files: scan.files.map((file) => file.relPath),
     skillMd: scan.skillMd,
+    skillMdPath: scan.skillMdPath,
     totalBytes: scan.totalBytes,
     fileCount: scan.files.length,
     violations: scan.violations,

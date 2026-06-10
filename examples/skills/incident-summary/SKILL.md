@@ -1,12 +1,10 @@
 ---
 name: incident-summary
-version: 0.1.0
 description: Summarize an incident timeline from logs into a concise postmortem draft.
+metadata:
+  companion_version: "0.1.0"
 license: MIT
-tools:
-  - read_file
-  - run_python
-scope: team
+allowed-tools: read_file run_python
 ---
 
 # incident-summary
