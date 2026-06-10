@@ -3,7 +3,7 @@
    Ported from the claude.ai/design handoff (landing-v5.css + landing-v6.css).
    The accent (signal yellow) and the full token set live in tokens.css; this
    file only adds the landing-only tokens (brand avatars, ink finale, hero type
-   scale) and the .v5-*/.v6-* presentation classes.
+   scale) and the v5 / v6 presentation classes.
    Flat, hairlines, system fonts. No gradients-as-color, no glass, no glow.
    ============================================================================ */
 
