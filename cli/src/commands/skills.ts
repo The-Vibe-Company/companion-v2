@@ -2,7 +2,15 @@ import { existsSync } from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
 import { dirname, join, relative, resolve } from "node:path";
 import pc from "picocolors";
-import type { LockedSkill, Scope, SkillListRow, SkillVersionRow } from "@companion/contracts";
+import {
+  visibilityFilterSchema,
+  type LockedSkill,
+  type SkillListRow,
+  type SkillVersionRow,
+  type SkillVisibility,
+  type SkillVisibilityInput,
+  type VisibilityFilter,
+} from "@companion/contracts";
 import {
   bumpSemver,
   packDir,
@@ -38,6 +46,71 @@ import {
 
 const nowIso = () => new Date().toISOString();
 
+export function splitTeams(values: string[] | undefined): string[] {
+  return [
+    ...new Set(
+      (values ?? [])
+        .flatMap((value) => value.split(","))
+        .map((value) => value.trim())
+        .filter(Boolean),
+    ),
+  ];
+}
+
+export function parseVisibilityFilter(value: string | undefined): VisibilityFilter | undefined {
+  if (!value) return undefined;
+  const parsed = visibilityFilterSchema.safeParse(value);
+  if (!parsed.success) throw new CliError("visibility must be one of: private, team, everyone", 2);
+  return parsed.data;
+}
+
+export function lockfileVisibility(input: SkillVisibility | SkillVisibilityInput): SkillVisibilityInput {
+  return {
+    everyone: input.everyone,
+    teams: input.teams.map((team) => (typeof team === "string" ? team : team.slug)),
+  };
+}
+
+export function resolvePushVisibility(reg: RegistryInfo, opts: Pick<PushOpts, "everyone" | "private" | "team">): SkillVisibilityInput {
+  const teams = splitTeams(opts.team);
+  if (opts.private && (opts.everyone || teams.length > 0)) {
+    throw new CliError("--private cannot be combined with --everyone or --team", 2);
+  }
+  if (opts.private) return { everyone: false, teams: [] };
+  const hasVisibilityFlags = opts.everyone === true || teams.length > 0;
+  if (hasVisibilityFlags) return { everyone: Boolean(opts.everyone), teams };
+  if (reg.row) return lockfileVisibility(reg.row.visibility);
+  return { everyone: false, teams: [] };
+}
+
+export function buildPublishFormData(input: {
+  archive: Buffer;
+  name: string;
+  version: string;
+  visibility: SkillVisibilityInput;
+  ownerTeam?: string;
+  message?: string;
+}): FormData {
+  const fd = new FormData();
+  fd.append("file", new Blob([input.archive], { type: "application/gzip" }), `${input.name}-${input.version}.tar.gz`);
+  fd.append("action", "publish");
+  fd.append("everyone", String(input.visibility.everyone));
+  fd.append("version", input.version);
+  if (input.ownerTeam) fd.append("owner_team", input.ownerTeam);
+  for (const team of input.visibility.teams) fd.append("team", team);
+  if (input.message) fd.append("message", input.message);
+  return fd;
+}
+
+function visibilityLabel(input: { everyone: boolean; teams: Array<{ slug: string; name?: string }> | string[] }): string {
+  const teams = input.teams.map((team) => (typeof team === "string" ? team : team.name ?? team.slug));
+  const teamLabel = teams.length === 0 ? "" : teams.length === 1 ? teams[0]! : `${teams.length} teams`;
+  if (input.everyone && teamLabel) return `Everyone + ${teamLabel}`;
+  if (input.everyone) return "Everyone";
+  if (teamLabel) return teamLabel;
+  return "Private";
+}
+
 export function verifyDownloadedArchive(name: string, version: string, archive: Buffer, expectedChecksum: string): string {
   const checksum = skillChecksum(toTar(archive));
   if (checksum !== expectedChecksum) {
@@ -62,12 +135,13 @@ export async function assertCanReplaceExistingInstall(
 }
 
 export async function list(
-  opts: { scope?: string; mine?: boolean },
+  opts: { visibility?: string; mine?: boolean },
   g: GlobalOpts,
 ): Promise<void> {
   const client = await getClient(g.profile, g.org);
   const qs = new URLSearchParams();
-  if (opts.scope) qs.set("scope", opts.scope);
+  const visibility = parseVisibilityFilter(opts.visibility);
+  if (visibility) qs.set("visibility", visibility);
   if (opts.mine) qs.set("mine", "true");
   const rows = await client.request<SkillListRow[]>(`/v1/skills${qs.size ? `?${qs.toString()}` : ""}`);
   if (g.json) {
@@ -75,10 +149,10 @@ export async function list(
     return;
   }
   printTable(
-    ["skill", "scope", "version", "owner", "stars", "state"],
+    ["skill", "visibility", "version", "owner", "stars", "state"],
     rows.map((r) => [
       r.slug,
-      r.scope === "team" ? `team:${r.team_slug ?? ""}` : r.scope,
+      visibilityLabel(r.visibility),
       r.current_version ?? "-",
       `@${r.owner_handle ?? r.owner_name}`,
       String(r.star_count ?? 0),
@@ -96,9 +170,9 @@ export async function info(name: string, g: GlobalOpts): Promise<void> {
   }
   out(`${pc.bold(r.slug)}  ${pc.dim(r.current_version ?? "-")}`);
   out(r.description);
-  out(`scope      ${r.scope}`);
+  out(`visibility ${visibilityLabel(r.visibility)}`);
   out(`owner      ${r.owner_name} (@${r.owner_handle ?? ""})`);
-  out(`team       ${r.team_name ?? "-"}`);
+  out(`teams      ${r.visibility.teams.map((team) => team.slug).join(", ") || "-"}`);
   out(`license    ${r.license ?? "-"}`);
   out(`checksum   ${r.checksum ?? "-"}`);
   out(`validation ${r.validation}`);
@@ -136,8 +210,10 @@ export async function validate(dir: string, g: GlobalOpts): Promise<void> {
 }
 
 export interface PushOpts {
-  scope?: string;
-  team?: string;
+  everyone?: boolean;
+  private?: boolean;
+  ownerTeam?: string;
+  team?: string[];
   bump?: "patch" | "minor" | "major";
   setVersion?: string;
   message?: string;
@@ -185,9 +261,8 @@ export async function push(dir: string, opts: PushOpts, g: GlobalOpts): Promise<
     registry: reg,
   });
 
-  const scope = (opts.scope ?? "private") as Scope;
-  const team = scope === "team" ? (opts.team ?? null) : null;
-  if (scope === "team" && !team) throw new CliError("team scope requires --team <slug>", 2);
+  const visibility = resolvePushVisibility(reg, opts);
+  const ownerTeam = opts.ownerTeam?.trim() || undefined;
 
   const packed = await packDir(abs);
   if (opts.dryRun) {
@@ -196,25 +271,29 @@ export async function push(dir: string, opts: PushOpts, g: GlobalOpts): Promise<
         dryRun: true,
         name: fm.name,
         version,
-        scope,
+        ownerTeam,
+        visibility,
+        checksum: packed.checksum,
+        size: packed.sizeBytes,
         localChecksum: packed.checksum,
         localSize: packed.sizeBytes,
         files: packed.files,
       });
     else
       out(
-        `would publish ${pc.bold(`${fm.name}@${version}`)}  scope=${scope}  local=${packed.checksum}  ${packed.sizeBytes} bytes  ${packed.files.length} files`,
+        `would publish ${pc.bold(`${fm.name}@${version}`)}  owner=${ownerTeam ?? "me"}  visibility=${visibilityLabel(visibility)}  ${packed.checksum}  ${packed.sizeBytes} bytes  ${packed.files.length} files`,
       );
     return;
   }
 
-  const fd = new FormData();
-  fd.append("file", new Blob([packed.archive], { type: "application/gzip" }), `${fm.name}-${version}.tar.gz`);
-  fd.append("action", "publish");
-  fd.append("scope", scope);
-  fd.append("version", version);
-  if (team) fd.append("team", team);
-  if (opts.message) fd.append("message", opts.message);
+  const fd = buildPublishFormData({
+    archive: packed.archive,
+    name: fm.name,
+    version,
+    visibility,
+    ownerTeam,
+    message: opts.message,
+  });
 
   const published = await client.request<{ id: string; checksum: string; sizeBytes?: number }>("/v1/skills", { method: "POST", body: fd });
   let lockRoot = abs;
@@ -237,8 +316,7 @@ export async function push(dir: string, opts: PushOpts, g: GlobalOpts): Promise<
   if (!lock.registry.url) lock.registry = { url: client.url, orgId };
   upsertLockedSkill(lock, {
     name: fm.name,
-    scope,
-    team: team ?? null,
+    visibility,
     pinned: null,
     resolved: version,
     checksum: lockChecksum,
@@ -273,8 +351,7 @@ export async function pull(spec: string, opts: { dir?: string; dest?: string; fo
     checksum: string;
     url: string;
     sizeBytes: number;
-    scope: Scope;
-    teamSlug: string | null;
+    visibility: SkillVisibility;
   }>(`/v1/skills/${name}/download${qs}`);
   const res = await fetch(dl.url);
   if (!res.ok) throw new CliError(`download failed: ${res.statusText}`, 8);
@@ -302,8 +379,7 @@ export async function pull(spec: string, opts: { dir?: string; dest?: string; fo
   if (!lock.registry.url) lock.registry = { url: client.url, orgId };
   upsertLockedSkill(lock, {
     name,
-    scope: dl.scope,
-    team: dl.teamSlug,
+    visibility: lockfileVisibility(dl.visibility),
     pinned: version,
     resolved: dl.version,
     checksum: dl.checksum,

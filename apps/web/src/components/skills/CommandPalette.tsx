@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Icon } from "../Icon";
 import type { SkillVM } from "@/lib/types";
-import { SCOPE_ICON } from "./blocks";
+import { visibilityMeta } from "./blocks";
 
 export function CommandPalette({
   allSkills,
@@ -107,6 +107,7 @@ export function CommandPalette({
           {skills.length > 0 && <div className="cpal__group">Skills</div>}
           {skills.map((s, idx) => {
             const fi = actions.length + idx;
+            const visibility = visibilityMeta(s);
             return (
               <div
                 key={s.id}
@@ -124,8 +125,8 @@ export function CommandPalette({
                   <span className="tnum">{s.stars}</span>
                 </span>
                 <span className="cpal__scope">
-                  <Icon name={SCOPE_ICON[s.scope] ?? "circle"} size={11} />
-                  {s.scope}
+                  <Icon name={visibility.icon} size={11} />
+                  {visibility.label}
                 </span>
               </div>
             );

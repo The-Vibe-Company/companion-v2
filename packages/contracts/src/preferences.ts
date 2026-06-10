@@ -1,11 +1,11 @@
 import { z } from "zod";
-import { scopeSchema, validationStateSchema } from "./scope";
+import { validationStateSchema, visibilityFilterSchema } from "./scope";
 
-export const skillFilterTypeSchema = z.enum(["scope", "status", "starred", "owner", "team"]);
+export const skillFilterTypeSchema = z.enum(["visibility", "status", "starred", "owner", "team"]);
 export type SkillFilterType = z.infer<typeof skillFilterTypeSchema>;
 
 export const skillFilterSchema = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("scope"), value: scopeSchema }),
+  z.object({ type: z.literal("visibility"), value: visibilityFilterSchema }),
   z.object({ type: z.literal("status"), value: validationStateSchema }),
   z.object({ type: z.literal("starred"), value: z.literal("true") }),
   z.object({ type: z.literal("owner"), value: z.string().min(1).max(256) }),

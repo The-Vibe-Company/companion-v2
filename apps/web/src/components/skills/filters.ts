@@ -1,6 +1,6 @@
 import { skillFilterSchema, type SkillFilter, type SkillSavedView } from "@companion/contracts";
 import type { SkillVM } from "@/lib/types";
-import { SCOPE_ICON } from "./blocks";
+import { VISIBILITY_ICON } from "./blocks";
 
 export type Filter = SkillFilter;
 
@@ -23,11 +23,16 @@ export function filtersKey(fs: Filter[]): string {
 }
 
 function matchOne(s: SkillVM, type: string, v: string): boolean {
-  if (type === "scope") return s.scope === v;
+  if (type === "visibility") {
+    if (v === "everyone") return s.visibility.everyone;
+    if (v === "team") return s.visibility.teams.length > 0;
+    if (v === "private") return !s.visibility.everyone && s.visibility.teams.length === 0;
+    return false;
+  }
   if (type === "status") return s.validation === v;
   if (type === "starred") return s.starred === true;
   if (type === "owner") return s.owner.name === v;
-  if (type === "team") return s.teamSlug === v;
+  if (type === "team") return s.teamSlugs.includes(v);
   return true;
 }
 
@@ -41,7 +46,7 @@ export function matchFilters(s: SkillVM, filters: Filter[]): boolean {
 }
 
 export function chipParts(f: Filter): { icon: string; key: string; val: string } {
-  if (f.type === "scope") return { icon: SCOPE_ICON[f.value] ?? "globe", key: "scope", val: f.value };
+  if (f.type === "visibility") return { icon: VISIBILITY_ICON[f.value] ?? "circle", key: "visibility", val: f.value };
   if (f.type === "status")
     return {
       icon: f.value === "invalid" ? "alert-triangle" : f.value === "valid" ? "check" : "loader",

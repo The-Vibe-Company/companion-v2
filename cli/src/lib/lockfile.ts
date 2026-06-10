@@ -21,12 +21,12 @@ export function emptyLockfile(url = "", orgId: string | null = null): Lockfile {
 }
 
 export async function loadLockfile(dir: string): Promise<Lockfile> {
-  try {
-    const raw = JSON.parse(await readFile(join(dir, LOCKFILE_NAME), "utf8"));
-    return lockfileSchema.parse(raw);
-  } catch {
+  const path = join(dir, LOCKFILE_NAME);
+  if (!existsSync(path)) {
     return emptyLockfile();
   }
+  const raw = JSON.parse(await readFile(path, "utf8"));
+  return lockfileSchema.parse(raw);
 }
 
 export async function saveLockfile(dir: string, lock: Lockfile): Promise<void> {

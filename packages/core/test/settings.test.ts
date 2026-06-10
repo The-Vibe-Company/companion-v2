@@ -70,6 +70,10 @@ interface FakeDbOptions {
   tokenRows?: Array<Record<string, unknown>>;
   /** Rows returned by an `update(...).returning(...)`. */
   updateReturning?: Array<Record<string, unknown>>;
+  /** Skill share rows affected by deleteTeam. */
+  teamSkillShares?: Array<{ skillId: string }>;
+  /** Team-owned skill rows affected by deleteTeam's owner_team_id SET NULL. */
+  teamOwnedSkills?: Array<{ skillId: string }>;
 }
 
 function fakeDb(options: FakeDbOptions = {}) {
@@ -143,8 +147,14 @@ function fakeDb(options: FakeDbOptions = {}) {
     };
   };
 
+  let skillSelectCalls = 0;
   const selectBuilder = (cols: Record<string, unknown>) => {
     const isCount = "value" in cols;
+    const isSkillShareSelect = "skillId" in cols;
+    const skillRows = () => {
+      skillSelectCalls += 1;
+      return skillSelectCalls === 1 ? (options.teamSkillShares ?? []) : (options.teamOwnedSkills ?? []);
+    };
     const builder: Record<string, unknown> = {
       from() {
         return builder;
@@ -153,15 +163,20 @@ function fakeDb(options: FakeDbOptions = {}) {
         return builder;
       },
       where(expr: unknown) {
-        if (!isCount) calls.tokenWhere = expr;
+        if (!isCount && !isSkillShareSelect) calls.tokenWhere = expr;
         return builder;
       },
       orderBy() {
         if (isCount) return Promise.resolve([{ value: options.teamCount ?? 1 }]);
+        if (isSkillShareSelect) return Promise.resolve(skillRows());
         return Promise.resolve(options.tokenRows ?? []);
       },
       then(resolve: (v: unknown) => unknown) {
-        const rows = isCount ? [{ value: options.teamCount ?? 1 }] : (options.tokenRows ?? []);
+        const rows = isCount
+          ? [{ value: options.teamCount ?? 1 }]
+          : isSkillShareSelect
+            ? skillRows()
+            : (options.tokenRows ?? []);
         return Promise.resolve(rows).then(resolve);
       },
     };
@@ -172,8 +187,8 @@ function fakeDb(options: FakeDbOptions = {}) {
     values: () => ({ onConflictDoNothing: vi.fn(async () => undefined) }),
   });
 
-  // The transaction handle records an ordered marker sequence so the deleteTeam test can assert the
-  // skills re-scope (update) runs strictly BEFORE the team delete.
+  // The transaction handle records an ordered marker sequence so the deleteTeam tests can assert
+  // skill visibility metadata is touched before the team row deletion when shares are affected.
   const txUpdate = vi.fn(() => {
     calls.txSequence.push("update");
     const api = {
@@ -449,7 +464,7 @@ describe("deleteTeam", () => {
   it("allows an org admin", async () => {
     const { database, txHandle } = fakeDb({ role: "admin", team: { id: TEAM_1, orgId: ORG_A }, teamCount: 2 });
     await expect(deleteTeam({ actor: admin, orgId: ORG_A, teamId: TEAM_1, database })).resolves.toBeUndefined();
-    expect(txHandle.update).toHaveBeenCalled();
+    expect(txHandle.update).not.toHaveBeenCalled();
     expect(txHandle.delete).toHaveBeenCalled();
   });
 
@@ -475,15 +490,42 @@ describe("deleteTeam", () => {
     expect(txHandle.delete).not.toHaveBeenCalled();
   });
 
-  it("re-scopes team skills to private BEFORE deleting the team", async () => {
+  it("deletes the team without touching skills when it has no skill shares", async () => {
     const { database, calls } = fakeDb({ role: "owner", team: { id: TEAM_1, orgId: ORG_A }, teamCount: 3 });
 
     await deleteTeam({ actor: owner, orgId: ORG_A, teamId: TEAM_1, database });
 
-    // The skills update must happen strictly before the teams delete inside the transaction...
+    expect(calls.txSequence).toEqual(["delete"]);
+    expect(calls.txPatch).toBeUndefined();
+  });
+
+  it("touches affected skills before deleting a team whose shares cascade", async () => {
+    const { database, calls } = fakeDb({
+      role: "owner",
+      team: { id: TEAM_1, orgId: ORG_A },
+      teamCount: 3,
+      teamSkillShares: [{ skillId: "skill-1" }],
+    });
+
+    await deleteTeam({ actor: owner, orgId: ORG_A, teamId: TEAM_1, database });
+
     expect(calls.txSequence).toEqual(["update", "delete"]);
-    // ...and it must flip this team's skills to private + detach the team_id (the scope/team_id CHECK).
-    expect(calls.txPatch).toMatchObject({ scope: "private", teamId: null });
+    expect(calls.txPatch?.updatedAt).toBeInstanceOf(Date);
+  });
+
+  it("touches affected skills before deleting their owner team", async () => {
+    const { database, calls } = fakeDb({
+      role: "owner",
+      team: { id: TEAM_1, orgId: ORG_A },
+      teamCount: 3,
+      teamOwnedSkills: [{ skillId: "skill-owned-by-team" }],
+    });
+
+    await deleteTeam({ actor: owner, orgId: ORG_A, teamId: TEAM_1, database });
+
+    expect(calls.txSequence).toEqual(["update", "update", "delete"]);
+    expect(calls.txPatch?.updatedAt).toBeInstanceOf(Date);
+    expect(calls.txPatch?.ownerTeamId).toBeNull();
   });
 
   it("throws when the team is not found", async () => {

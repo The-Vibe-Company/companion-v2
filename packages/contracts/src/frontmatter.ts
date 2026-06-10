@@ -101,6 +101,15 @@ const skillFrontmatterFields = z
     metadata: z.record(z.string()).default({}),
     "allowed-tools": z.string().optional(),
   })
+  .passthrough()
+  .superRefine((value, ctx) => {
+    if ("scope" in value || "visibility" in value) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "skill frontmatter must not declare visibility; use upload visibility instead",
+      });
+    }
+  })
   .transform((value) => {
     const allowedToolsRaw = value["allowed-tools"];
     return {

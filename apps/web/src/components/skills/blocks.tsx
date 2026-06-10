@@ -1,37 +1,36 @@
-import type { Scope, ValidationState } from "@companion/contracts";
+import type { ValidationState, VisibilityFilter } from "@companion/contracts";
 import type { SkillVM } from "@/lib/types";
 import { Icon } from "../Icon";
 
-export const SCOPE_ICON: Record<string, string> = {
+export const VISIBILITY_ICON: Record<string, string> = {
   private: "lock",
   team: "users",
-  public: "globe",
+  everyone: "building-2",
 };
 
-/**
- * The list "Scope" cell, context-aware: each scope has a distinct icon for quick
- * differentiation, and the label carries the specific identity —
- *   public -> "public" · team -> the team display name · private -> the owner's short name.
- */
-export function scopeMeta(s: SkillVM): { icon: string; label: string } {
-  switch (s.scope) {
-    case "public":
-      return { icon: "globe", label: "public" };
-    case "team":
-      return { icon: "users", label: s.team ?? s.teamSlug ?? "team" };
-    case "private":
-      return { icon: "lock", label: s.owner.handle ?? s.owner.initials.toLowerCase() };
-    default:
-      return { icon: "circle", label: String(s.scope) };
-  }
+export function visibilityKind(s: SkillVM): VisibilityFilter {
+  if (s.visibility.everyone) return "everyone";
+  if (s.visibility.teams.length) return "team";
+  return "private";
 }
-export const SCOPE_DESC: Record<string, string> = {
+
+export function visibilityMeta(s: SkillVM): { icon: string; label: string } {
+  const teams = s.visibility.teams;
+  if (s.visibility.everyone && teams.length > 0) {
+    return { icon: "building-2", label: `Everyone + ${teams.length} team${teams.length === 1 ? "" : "s"}` };
+  }
+  if (s.visibility.everyone) return { icon: "building-2", label: "Everyone" };
+  if (teams.length === 1) return { icon: "users", label: teams[0]!.name };
+  if (teams.length > 1) return { icon: "users", label: `${teams.length} teams` };
+  return { icon: "lock", label: "Private" };
+}
+
+export const VISIBILITY_DESC: Record<VisibilityFilter, string> = {
   private: "only you",
-  team: "your team",
-  public: "anyone with the link",
+  team: "selected teams",
+  everyone: "everyone in the workspace",
 };
-/** Order shown in the scope filter + visibility menu (broadest first). */
-export const SCOPE_ORDER: Scope[] = ["public", "team", "private"];
+export const VISIBILITY_ORDER: VisibilityFilter[] = ["everyone", "team", "private"];
 
 export function vdot(v: ValidationState): "ok" | "down" | "unknown" {
   return v === "valid" ? "ok" : v === "invalid" ? "down" : "unknown";
@@ -54,11 +53,12 @@ export function Avatar({ initials, size = 18 }: { initials: string; size?: numbe
   );
 }
 
-export function ScopeChip({ scope }: { scope: Scope }) {
+export function VisibilityChip({ skill }: { skill: SkillVM }) {
+  const meta = visibilityMeta(skill);
   return (
     <span className="scopechip">
-      <Icon name={SCOPE_ICON[scope] ?? "circle"} size={11} />
-      {scope}
+      <Icon name={meta.icon} size={11} />
+      {meta.label}
     </span>
   );
 }

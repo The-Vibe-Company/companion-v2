@@ -38,7 +38,7 @@ describe("skill filter preferences", () => {
   it("validates the shared preference contract", () => {
     const parsed = skillFilterPreferencesSchema.parse({
       active_filters: [
-        { type: "scope", value: "public" },
+        { type: "visibility", value: "everyone" },
         { type: "status", value: "invalid" },
         { type: "starred", value: "true" },
         { type: "owner", value: "Alice Nardon" },
@@ -47,18 +47,18 @@ describe("skill filter preferences", () => {
       custom_views: [
         {
           id: "view-1",
-          name: "Public",
+          name: "Everyone",
           icon: "bookmark",
           custom: true,
-          filters: [{ type: "scope", value: "public" }],
+          filters: [{ type: "visibility", value: "everyone" }],
         },
       ],
     });
-    expect(parsed.active_filters).toContainEqual({ type: "scope", value: "public" });
+    expect(parsed.active_filters).toContainEqual({ type: "visibility", value: "everyone" });
     expect(parsed.custom_views[0]?.id).toBe("view-1");
     expect(skillFilterPreferencesSchema.parse({})).toEqual({ active_filters: [], custom_views: [] });
-    expect(() => skillFilterPreferencesSchema.parse({ active_filters: [{ type: "unknown", value: "public" }], custom_views: [] })).toThrow();
-    expect(() => skillFilterPreferencesSchema.parse({ active_filters: [{ type: "scope", value: "org" }], custom_views: [] })).toThrow();
+    expect(() => skillFilterPreferencesSchema.parse({ active_filters: [{ type: "unknown", value: "everyone" }], custom_views: [] })).toThrow();
+    expect(() => skillFilterPreferencesSchema.parse({ active_filters: [{ type: "visibility", value: "public" }], custom_views: [] })).toThrow();
     expect(() => skillFilterPreferencesSchema.parse({ active_filters: [{ type: "starred", value: "false" }], custom_views: [] })).toThrow();
   });
 
@@ -74,28 +74,64 @@ describe("skill filter preferences", () => {
   it("parses an existing preference row", async () => {
     const { database } = fakeDb({
       existing: {
-        activeFilters: [{ type: "scope", value: "public" }],
+        activeFilters: [{ type: "visibility", value: "everyone" }],
         customViews: [
           {
             id: "view-1",
-            name: "Public",
+            name: "Everyone",
             icon: "bookmark",
             custom: true,
-            filters: [{ type: "scope", value: "public" }],
+            filters: [{ type: "visibility", value: "everyone" }],
           },
         ],
       },
     });
 
     await expect(getSkillFilterPreferences({ actor, orgId: "00000000-0000-0000-0000-000000000001", database })).resolves.toEqual({
-      active_filters: [{ type: "scope", value: "public" }],
+      active_filters: [{ type: "visibility", value: "everyone" }],
       custom_views: [
         {
           id: "view-1",
-          name: "Public",
+          name: "Everyone",
           icon: "bookmark",
           custom: true,
-          filters: [{ type: "scope", value: "public" }],
+          filters: [{ type: "visibility", value: "everyone" }],
+        },
+      ],
+    });
+  });
+
+  it("normalizes old persisted scope filters before parsing", async () => {
+    const { database } = fakeDb({
+      existing: {
+        activeFilters: [{ type: "scope", value: "public" }],
+        customViews: [
+          {
+            id: "view-1",
+            name: "Team",
+            icon: "users",
+            custom: true,
+            filters: [
+              { type: "scope", value: "team" },
+              { type: "status", value: "valid" },
+            ],
+          },
+        ],
+      },
+    });
+
+    await expect(getSkillFilterPreferences({ actor, orgId: "00000000-0000-0000-0000-000000000001", database })).resolves.toEqual({
+      active_filters: [{ type: "visibility", value: "everyone" }],
+      custom_views: [
+        {
+          id: "view-1",
+          name: "Team",
+          icon: "users",
+          custom: true,
+          filters: [
+            { type: "visibility", value: "team" },
+            { type: "status", value: "valid" },
+          ],
         },
       ],
     });

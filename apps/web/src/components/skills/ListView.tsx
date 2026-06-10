@@ -2,10 +2,54 @@
 
 import { Icon } from "../Icon";
 import type { SkillVM, TeamVM } from "@/lib/types";
-import { scopeMeta, vdot } from "./blocks";
+import { visibilityMeta, vdot } from "./blocks";
 import { chipParts, type Filter, type ViewDef } from "./filters";
 import { FilterAdd } from "./FilterMenu";
 import { ViewTab } from "./ViewTab";
+
+function teamInitial(name: string): string {
+  const compact = name
+    .split(/\s+/)
+    .map((part) => part[0])
+    .join("")
+    .slice(0, 2);
+  return (compact || name[0] || "?").toUpperCase();
+}
+
+function VisibilityCell({ skill }: { skill: SkillVM }) {
+  const meta = visibilityMeta(skill);
+  const teams = skill.visibility.teams;
+  const shownTeams = teams.slice(0, 3);
+  const extraTeams = teams.length - shownTeams.length;
+  const teamNames = teams.map((team) => team.name).join(", ");
+  const label =
+    teams.length > 0
+      ? skill.visibility.everyone
+        ? `Everyone; teams: ${teamNames}`
+        : `Teams: ${teamNames}`
+      : meta.label;
+  return (
+    <span className="crow__scope" title={label} aria-label={label}>
+      <Icon name={meta.icon} size={11} />
+      {teams.length > 0 ? (
+        <>
+          {skill.visibility.everyone && <span className="crow__scopeText crow__scopeText--base">Everyone</span>}
+          <span className="crow__teampile" aria-hidden="true">
+            {shownTeams.map((team) => (
+              <span className="crow__teamdot" key={team.slug} title={team.name}>
+                {teamInitial(team.name)}
+              </span>
+            ))}
+            {extraTeams > 0 && <span className="crow__teamdot crow__teamdot--more">+{extraTeams}</span>}
+          </span>
+          <span className="sr-only">{label}</span>
+        </>
+      ) : (
+        <span className="crow__scopeText">{meta.label}</span>
+      )}
+    </span>
+  );
+}
 
 export function ListView({
   skills,
@@ -127,7 +171,7 @@ export function ListView({
         <div className="chead">
           <span></span>
           <span>Skill</span>
-          <span>Scope</span>
+          <span>Visibility</span>
           <span>Version</span>
           <span className="r">Stars</span>
           <span className="r">Updated</span>
@@ -150,10 +194,7 @@ export function ListView({
                 </span>
               )}
             </span>
-            <span className="crow__scope" title={s.scope}>
-              <Icon name={scopeMeta(s).icon} size={11} />
-              {scopeMeta(s).label}
-            </span>
+            <VisibilityCell skill={s} />
             <span className="ver">{s.version ?? "—"}</span>
             <span className="r">
               <button

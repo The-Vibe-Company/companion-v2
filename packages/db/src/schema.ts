@@ -2,6 +2,7 @@ import {
   type AnyPgColumn,
   boolean,
   check,
+  foreignKey,
   index,
   integer,
   jsonb,
@@ -16,7 +17,6 @@ import {
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 
-export const scopeEnum = pgEnum("scope", ["private", "team", "public"]);
 export const orgRoleEnum = pgEnum("org_role", ["owner", "admin", "developer"]);
 export const teamRoleEnum = pgEnum("team_role", ["admin", "editor", "reader"]);
 export const validationStateEnum = pgEnum("validation_state", ["valid", "validating", "invalid"]);
@@ -161,6 +161,7 @@ export const teams = pgTable(
   },
   (t) => ({
     uniqueOrgSlug: unique("teams_org_slug_uq").on(t.orgId, t.slug),
+    uniqueOrgId: unique("teams_org_id_id_uq").on(t.orgId, t.id),
   }),
 );
 
@@ -220,11 +221,11 @@ export const skills = pgTable(
     ownerId: text("owner_id")
       .notNull()
       .references(() => user.id, { onDelete: "cascade" }),
+    ownerTeamId: uuid("owner_team_id").references(() => teams.id, { onDelete: "set null" }),
     creatorId: text("creator_id")
       .notNull()
       .references(() => user.id, { onDelete: "cascade" }),
-    scope: scopeEnum("scope").notNull().default("private"),
-    teamId: uuid("team_id").references(() => teams.id, { onDelete: "set null" }),
+    everyone: boolean("everyone").notNull().default(false),
     currentVersionId: uuid("current_version_id"),
     validation: validationStateEnum("validation").notNull().default("valid"),
     validationError: text("validation_error"),
@@ -233,8 +234,45 @@ export const skills = pgTable(
   },
   (t) => ({
     uniqueOrgSlug: unique("skills_org_slug_uq").on(t.orgId, t.slug),
-    byVisibility: index("skills_visibility_idx").on(t.orgId, t.scope, t.teamId),
-    teamCheck: check("skills_team_scope_check", sql`(${t.scope} = 'team') = (${t.teamId} is not null)`),
+    uniqueOrgId: unique("skills_org_id_id_uq").on(t.orgId, t.id),
+    ownerTeamOrgFk: foreignKey({
+      columns: [t.orgId, t.ownerTeamId],
+      foreignColumns: [teams.orgId, teams.id],
+      name: "skills_owner_team_org_fk",
+    }),
+    byEveryone: index("skills_everyone_idx").on(t.orgId, t.everyone),
+    byOwnerTeam: index("skills_owner_team_idx").on(t.orgId, t.ownerTeamId),
+  }),
+);
+
+export const skillTeamShares = pgTable(
+  "skill_team_shares",
+  {
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    skillId: uuid("skill_id")
+      .notNull()
+      .references(() => skills.id, { onDelete: "cascade" }),
+    teamId: uuid("team_id")
+      .notNull()
+      .references(() => teams.id, { onDelete: "cascade" }),
+    createdAt: now(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.skillId, t.teamId] }),
+    skillOrgFk: foreignKey({
+      columns: [t.orgId, t.skillId],
+      foreignColumns: [skills.orgId, skills.id],
+      name: "skill_team_shares_skill_org_fk",
+    }).onDelete("cascade"),
+    teamOrgFk: foreignKey({
+      columns: [t.orgId, t.teamId],
+      foreignColumns: [teams.orgId, teams.id],
+      name: "skill_team_shares_team_org_fk",
+    }).onDelete("cascade"),
+    byOrgSkill: index("skill_team_shares_org_skill_idx").on(t.orgId, t.skillId),
+    byOrgTeam: index("skill_team_shares_org_team_idx").on(t.orgId, t.teamId),
   }),
 );
 

@@ -135,7 +135,7 @@ export async function updateTeam(
   });
 }
 
-/** Permanently delete a team (its skills are unscoped). Mirrors `DELETE /v1/teams/:id`. */
+/** Permanently delete a team; its visibility shares are removed and team-owned skills fall back. */
 export async function deleteTeam(id: string): Promise<void> {
   await apiFetch(`/v1/teams/${id}`, { method: "DELETE" });
 }

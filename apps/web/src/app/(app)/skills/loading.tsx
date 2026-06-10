@@ -81,7 +81,7 @@ export default function Loading() {
           <div className="chead">
             <span />
             <span>Skill</span>
-            <span>Scope</span>
+            <span>Visibility</span>
             <span>Version</span>
             <span className="r">Stars</span>
             <span className="r">Updated</span>
@@ -93,8 +93,8 @@ export default function Loading() {
                 <span className="skel" style={{ width }} />
               </span>
               <span className="crow__scope">
-                <Icon name={i % 3 === 0 ? "globe" : i % 3 === 1 ? "users" : "lock"} size={13} />
-                <span className="skel skel--scope" />
+                <Icon name={i % 3 === 0 ? "building-2" : i % 3 === 1 ? "users" : "lock"} size={13} />
+                <span className="skel skel--visibility" />
               </span>
               <span className="ver skel skel--version" />
               <span className="r skel skel--stars" />

@@ -135,7 +135,7 @@ describe("prepareSkillDirForPublish", () => {
   it("rewrites SKILL.md with Companion metadata and no legacy top-level fields", async () => {
     const dir = await makeSkillDir({
       "SKILL.md": skillMd(
-        "name: legacy-publish\ndescription: Legacy package.\nversion: 1.2.3\nscope: team\ntools:\n  - read_file",
+        "name: legacy-publish\ndescription: Legacy package.\nversion: 1.2.3\ntools:\n  - read_file",
         "# Body\n",
       ),
     });
@@ -150,7 +150,20 @@ describe("prepareSkillDirForPublish", () => {
     expect(rewritten).not.toMatch(/^version:/m);
     expect(rewritten).not.toMatch(/^scope:/m);
     expect(rewritten).not.toMatch(/^tools:/m);
-    expect(prepared.warnings.map((w) => w.field).sort()).toEqual(["scope", "tools", "version"]);
+    expect(prepared.warnings.map((w) => w.field).sort()).toEqual(["tools", "version"]);
+  });
+
+  it("rejects legacy top-level visibility fields on publish", async () => {
+    const dir = await makeSkillDir({
+      "SKILL.md": skillMd("name: scoped-publish\ndescription: Scoped package.\nscope: team", "# Body\n"),
+    });
+
+    await expect(
+      prepareSkillDirForPublish(dir, {
+        skillId: "skill-123",
+        version: "2.0.0",
+      }),
+    ).rejects.toThrow(/must not declare visibility/);
   });
 
   it("accepts a single wrapper folder matching the skill name and packs from inside it", async () => {
@@ -254,15 +267,31 @@ describe("validateSkillDir — frontmatter failures and warnings", () => {
     expect(check(res.checks, "frontmatter")?.status).toBe("pass");
   });
 
-  it("warns on legacy top-level version/scope and unknown fields", async () => {
+  it("warns on legacy top-level version and unknown fields", async () => {
     const dir = await makeSkillDir({
-      "SKILL.md": skillMd("name: legacy\ndescription: old\nversion: 1.2.3\nscope: team\nargument-hint: foo"),
+      "SKILL.md": skillMd("name: legacy\ndescription: old\nversion: 1.2.3\nargument-hint: foo"),
     });
     const res = await validateSkillDir(dir);
     expect(res.ok).toBe(true);
     expect(check(res.checks, "legacy")?.status).toBe("warn");
     expect(res.legacy?.version).toBe("1.2.3");
-    expect(res.warnings?.map((w) => w.field).sort()).toEqual(["argument-hint", "scope", "version"]);
+    expect(res.warnings?.map((w) => w.field).sort()).toEqual(["argument-hint", "version"]);
+  });
+
+  it("rejects legacy top-level scope or visibility", async () => {
+    const scoped = await makeSkillDir({
+      "SKILL.md": skillMd("name: legacy-scope\ndescription: old\nscope: team"),
+    });
+    const scopedRes = await validateSkillDir(scoped);
+    expect(scopedRes.ok).toBe(false);
+    expect(check(scopedRes.checks, "frontmatter")?.status).toBe("fail");
+
+    const visible = await makeSkillDir({
+      "SKILL.md": skillMd("name: legacy-visibility\ndescription: old\nvisibility: public"),
+    });
+    const visibleRes = await validateSkillDir(visible);
+    expect(visibleRes.ok).toBe(false);
+    expect(check(visibleRes.checks, "frontmatter")?.status).toBe("fail");
   });
 
   it("fails when metadata values are not strings", async () => {

@@ -1,7 +1,11 @@
-import type { OrgRole, Scope, SkillListRow, TeamRole, ValidationState } from "@companion/contracts";
+import type { OrgRole, SkillListRow, SkillOwnerKind, SkillVisibility, TeamRole, ValidationState } from "@companion/contracts";
 import { formatBytes, formatDate, relativeTime } from "./format";
 
 export interface SkillOwnerVM {
+  kind: SkillOwnerKind;
+  id: string;
+  userId: string;
+  teamId: string | null;
   name: string;
   initials: string;
   handle: string | null;
@@ -12,8 +16,8 @@ export interface SkillOwnerVM {
 export interface SkillVM {
   uuid: string; // db id
   id: string; // slug (the displayed machine name)
-  ownerId: string; // principal the skill is for (deprecate/restore gating)
-  scope: Scope;
+  ownerId: string; // effective owner principal (user id or team id)
+  visibility: SkillVisibility;
   version: string | null;
   validation: ValidationState;
   description: string;
@@ -29,8 +33,8 @@ export interface SkillVM {
   updated: string; // relative label (server-computed)
   stars: number;
   starred: boolean;
-  team: string | null; // team display name (visibility team)
-  teamSlug: string | null; // team slug (for filtering)
+  teams: SkillVisibility["teams"];
+  teamSlugs: string[]; // team slugs (for filtering)
 }
 
 /** Map a skill_list_v row to the UI view-model. Date formatting runs server-side. */
@@ -39,16 +43,20 @@ export function mapSkill(row: SkillListRow): SkillVM {
     uuid: row.id,
     id: row.slug,
     ownerId: row.owner_id,
-    scope: row.scope,
+    visibility: row.visibility,
     version: row.current_version,
     validation: row.validation,
     description: row.description,
     error: row.validation_error,
     owner: {
+      kind: row.owner_kind,
+      id: row.owner_id,
+      userId: row.owner_user_id,
+      teamId: row.owner_team_id,
       name: row.owner_name,
       initials: row.owner_initials,
       handle: row.owner_handle,
-      team: row.team_name,
+      team: row.owner_kind === "team" ? row.owner_name : null,
     },
     tools: row.tools ?? [],
     compatibility: row.compatibility,
@@ -60,8 +68,8 @@ export function mapSkill(row: SkillListRow): SkillVM {
     updated: relativeTime(row.updated_at),
     stars: row.star_count,
     starred: row.starred,
-    team: row.team_name,
-    teamSlug: row.team_slug,
+    teams: row.visibility.teams,
+    teamSlugs: row.visibility.teams.map((team) => team.slug),
   };
 }
 
@@ -69,6 +77,8 @@ export interface TeamVM {
   id: string; // slug
   name: string;
   initial: string;
+  role: TeamRole;
+  dbId?: string;
 }
 
 export interface MeVM {

@@ -127,7 +127,22 @@ export function parseFrontmatter(md: string): ParseFrontmatterResult {
   if (doc === null || typeof doc !== "object" || Array.isArray(doc)) {
     return { ok: false, error: "frontmatter must be a mapping of keys to values", raw, body, warnings: [], legacy: emptyLegacy };
   }
-  const { normalized, warnings, legacy } = analyzeLegacyFields(doc as Record<string, unknown>);
+  const rawDoc = doc as Record<string, unknown>;
+  if ("scope" in rawDoc || "visibility" in rawDoc) {
+    return {
+      ok: false,
+      error: "skill frontmatter must not declare visibility; use upload visibility instead",
+      raw,
+      body,
+      warnings: [],
+      legacy: {
+        version: stringifyScalar(rawDoc.version),
+        tools: normalizeLegacyTools(rawDoc.tools),
+        unknownFields: Object.keys(rawDoc).filter((key) => !OFFICIAL_KEYS.has(key)),
+      },
+    };
+  }
+  const { normalized, warnings, legacy } = analyzeLegacyFields(rawDoc);
   const result = skillFrontmatterSchema.safeParse(normalized);
   if (!result.success) {
     const issues = result.error.issues

@@ -1,11 +1,10 @@
 import { z } from "zod";
-import { scopeSchema } from "./scope";
+import { skillVisibilityInputSchema } from "./skill";
 
 /** One tracked skill in `companion.lock`. */
 export const lockedSkillSchema = z.object({
   name: z.string(),
-  scope: scopeSchema,
-  team: z.string().nullable().optional(),
+  visibility: skillVisibilityInputSchema,
   /** User intent: exact ("1.4.0"), a range ("^1.4.0"), or null (float to current). */
   pinned: z.string().nullable(),
   /** The version actually on disk. */

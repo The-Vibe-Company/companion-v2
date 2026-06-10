@@ -25,7 +25,10 @@ export default async function SkillsPage() {
   const [skillsResult, filterPreferences, teamsResult] = await Promise.all([
     serverApiFetch<SkillListRow[]>("/v1/skills", { headers: orgHeaders }).catch(() => null),
     serverApiFetch<SkillFilterPreferences>("/v1/skill-filter-preferences", { headers: orgHeaders }).catch(() => null),
-    serverApiFetch<Array<{ slug: string; name: string }>>("/v1/teams", { headers: orgHeaders }).catch(() => null),
+    serverApiFetch<Array<{ id: string; slug: string; name: string; teamRole: "admin" | "editor" | "reader" }>>(
+      "/v1/teams",
+      { headers: orgHeaders },
+    ).catch(() => null),
   ]);
   if (!skillsResult || !filterPreferences || !teamsResult) return <WorkspaceLoadError />;
   const skills = skillsResult.map(mapSkill);
@@ -39,8 +42,10 @@ export default async function SkillsPage() {
 
   const teams: TeamVM[] = teamsResult.map((t) => ({
     id: t.slug,
+    dbId: t.id,
     name: t.name,
     initial: (t.name[0] ?? "T").toUpperCase(),
+    role: t.teamRole,
   }));
 
   return (

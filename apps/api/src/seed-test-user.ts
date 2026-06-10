@@ -1,4 +1,4 @@
-import type { Scope } from "@companion/contracts";
+import type { SkillVisibilityInput } from "@companion/contracts";
 import { toStoredSkillFrontmatter } from "@companion/contracts";
 import {
   createOrg,
@@ -81,8 +81,7 @@ interface SeedSkillSpec {
   version: string;
   description: string;
   body: string;
-  scope: Scope;
-  teamSlug?: string;
+  visibility: SkillVisibilityInput;
   tools?: string[];
   license?: string;
 }
@@ -115,8 +114,7 @@ async function seedSkill(actor: ActorContext, orgId: string, spec: SeedSkillSpec
     const key = skillArchiveKey({ orgId, slug: fm.name, version: spec.version });
     const payload = {
       slug: fm.name,
-      scope: spec.scope,
-      team_slug: spec.teamSlug ?? null,
+      visibility: spec.visibility,
       version: spec.version,
       description: fm.description,
       checksum: canonical.checksum,
@@ -165,7 +163,7 @@ async function seedDemoContent(actor: ActorContext): Promise<void> {
       version: "1.0.0",
       description: "Extract text, tables, and metadata from PDF documents.",
       body: "# pdf-extract\n\nExtracts text, tables, and metadata from PDF documents.",
-      scope: "public",
+      visibility: { everyone: true, teams: [] },
       tools: ["read_file", "run_python"],
       license: "MIT",
     },
@@ -174,8 +172,7 @@ async function seedDemoContent(actor: ActorContext): Promise<void> {
       version: "1.0.0",
       description: "Review pull requests for bugs, style, and missing tests.",
       body: "# code-review\n\nStructured PR review checklist for backend and frontend changes.",
-      scope: "team",
-      teamSlug,
+      visibility: { everyone: false, teams: [teamSlug] },
       tools: ["read_file", "grep"],
       license: "MIT",
     },
@@ -184,7 +181,7 @@ async function seedDemoContent(actor: ActorContext): Promise<void> {
       version: "1.0.0",
       description: "Turn rough meeting transcripts into concise action items.",
       body: "# meeting-notes\n\nSummarize discussions and extract owners, deadlines, and follow-ups.",
-      scope: "private",
+      visibility: { everyone: false, teams: [] },
       tools: ["read_file"],
     },
   ];
@@ -193,7 +190,7 @@ async function seedDemoContent(actor: ActorContext): Promise<void> {
     if (existingSlugs.has(spec.slug)) continue;
     try {
       await seedSkill(actor, orgId, spec);
-      console.log(`Seeded skill ${spec.slug}@${spec.version} (${spec.scope})`);
+      console.log(`Seeded skill ${spec.slug}@${spec.version}`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       console.warn(`Skipped skill ${spec.slug}: ${message}`);

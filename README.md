@@ -25,7 +25,7 @@ or permissions.
 **Companion v2 is the team version.** It takes that engine and wraps it in a web portal where an
 **Organization → Team → User** hierarchy with RBAC governs every resource. Publish a versioned
 skill once, approve a container image once, define an agent template once — and the right people
-across your org get **one-click, scoped access**. No shell, no TOML, no infrastructure tickets.
+across your org get **one-click, permissioned access**. No shell, no TOML, no infrastructure tickets.
 
 Think *"GitHub for your team's agents"* — but open-source and running on **your** infrastructure.
 
@@ -37,8 +37,10 @@ Think *"GitHub for your team's agents"* — but open-source and running on **you
 | 📦 **Curated Container Catalog** | One-click deploy of admin-approved images & templates — databases, MCP servers, tools, web UIs. | Org Admins approve, members deploy |
 | 🧩 **Skills Hub** | Upload, version, and share `SKILL.md` packages. Attach them opt-in to the agents that should have them. | Anyone publishes, owners attach |
 
-Every agent, container, and skill carries a **visibility scope** — `private` (you), `team`, or
-`org` — so sharing is explicit and access is always attributable.
+Skills use explicit workspace visibility: **Private** by default, **Everyone** for the whole
+workspace, and optional team shares for one or more teams. Everyone is organization-local; there is no
+internet-wide or cross-org visibility. Ownership is separate: a skill is owned by a user or by a
+team, and team-owned skills can be edited by that team's Admins and Editors.
 
 ## Why Companion
 
@@ -69,9 +71,9 @@ pnpm dev                                    # infra + migrations + seed + API :3
 # 2) CLI
 pnpm --filter @companion/cli build
 node cli/dist/index.js login --url http://127.0.0.1:3001 --signup --email you@example.com
-node cli/dist/index.js skills push examples/skills/incident-summary --scope team --team platform
+node cli/dist/index.js skills push examples/skills/incident-summary --everyone
 node cli/dist/index.js skills list
-node cli/dist/index.js skills pull pdf-extract
+node cli/dist/index.js skills pull incident-summary
 node cli/dist/index.js skills status        # diff local copies vs the registry
 ```
 
@@ -114,7 +116,7 @@ The non-Conductor `pnpm dev` path is unchanged and still uses Docker Compose (`s
 |---|---|---|
 | Primary user | Single operator | Organizations & teams |
 | Interface | CLI + IaC (TOML) | Web portal + API (+ CLI) |
-| Access control | None | Org → Team → User, RBAC, scopes |
+| Access control | None | Org → Team → User, RBAC, workspace visibility |
 | State | Local SQLite + files | Postgres, multi-tenant |
 | Deploy targets | Fly.io | Docker · Fly · Kubernetes · Modal |
 | Skills | Ad-hoc | Versioned registry + opt-in attach |
