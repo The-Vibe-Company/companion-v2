@@ -221,6 +221,7 @@ export const skills = pgTable(
     ownerId: text("owner_id")
       .notNull()
       .references(() => user.id, { onDelete: "cascade" }),
+    ownerTeamId: uuid("owner_team_id").references(() => teams.id, { onDelete: "set null" }),
     creatorId: text("creator_id")
       .notNull()
       .references(() => user.id, { onDelete: "cascade" }),
@@ -234,7 +235,13 @@ export const skills = pgTable(
   (t) => ({
     uniqueOrgSlug: unique("skills_org_slug_uq").on(t.orgId, t.slug),
     uniqueOrgId: unique("skills_org_id_id_uq").on(t.orgId, t.id),
+    ownerTeamOrgFk: foreignKey({
+      columns: [t.orgId, t.ownerTeamId],
+      foreignColumns: [teams.orgId, teams.id],
+      name: "skills_owner_team_org_fk",
+    }),
     byEveryone: index("skills_everyone_idx").on(t.orgId, t.everyone),
+    byOwnerTeam: index("skills_owner_team_idx").on(t.orgId, t.ownerTeamId),
   }),
 );
 

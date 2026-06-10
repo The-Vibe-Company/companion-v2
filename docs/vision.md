@@ -49,8 +49,9 @@ team stops being an ops project and becomes a self-serve workflow.
    Sharing is explicit; access is always attributable.
 4. **Desired-state everywhere.** Every deployable is a declared intent; a reconciler converges
    reality and heals drift. The v1 plan/apply discipline, re-homed for teams.
-5. **Visibility and role are orthogonal.** *Who can see a thing* (owner, admins, Everyone, or shared
-   teams) and *what they can do with it* (role) are separate axes that compose into one clear decision.
+5. **Ownership, visibility, and role are orthogonal.** *Who can edit a thing* (user owner, owner
+   team Admin/Editor, or org admin), *who can see it* (Everyone or shared teams), and *what role the
+   actor has* are separate axes that compose into one clear decision.
 6. **Provider-agnostic.** Where a resource runs — local Docker, Fly, Kubernetes, Modal — is a choice,
    not a constraint baked into the product.
 

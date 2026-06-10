@@ -58,10 +58,11 @@ Skills carry explicit **workspace visibility**:
 - **Team shares** — one or more teams can be attached to the skill's visibility.
 - **Everyone** — every member of the current workspace/organization can see it.
 
-Everyone is not internet-wide and never crosses organization boundaries. Admins can deploy a resource
-**for** someone else: the resource is owned by the intended principal (a
-user, a team, or the workspace) and visible at the chosen visibility, while the acting admin is recorded as its
-creator in the audit log. *Who it's for*, *who can see it*, and *who created it* are independent.
+Everyone is not internet-wide and never crosses organization boundaries. Ownership is separate from
+visibility: a skill can be owned by a user or a team, and a team-owned skill can be edited by that
+team's Admins and Editors. Visibility only decides who can read the skill: selected teams,
+Everyone, both, or neither. The acting admin is recorded as creator in the audit log. *Who can edit
+it*, *who can see it*, and *who created it* are independent.
 
 ### Pillar 1 — Hermès Agents
 Deploy curated AI agents built on the **Hermes** runtime, with **Granite** markdown memory and model
@@ -120,13 +121,13 @@ they can edit → the agent gains the skill on its next run. Versioning lets tea
 catalog, deploy at any visibility) → `Member` (use resources, deploy privately or to allowed teams) → `Guest`
 (read-only on explicitly shared resources).
 
-**Team roles:** `Admin` (manage team membership, deploy for the team, attach skills to team agents) →
-`Member` (use team resources, deploy privately).
+**Team roles:** `Admin` (manage team membership and edit team-owned resources) →
+`Editor` (edit team-owned resources) → `Reader` (read team-owned and team-visible resources).
 
 A permission decision combines two checks: **can the actor see the resource** (the visibility rule) **and
 can the actor perform the action** (the role rule). The "admin deploys *for* X" case is handled by
-separating ownership, visibility, and provenance — see [`design.md`](design.md) for the full
-model.
+separating ownership, visibility, and provenance. Team shares are read visibility; team ownership is
+what grants team Admins/Editors write access — see [`design.md`](design.md) for the full model.
 
 ---
 

@@ -72,6 +72,8 @@ interface FakeDbOptions {
   updateReturning?: Array<Record<string, unknown>>;
   /** Skill share rows affected by deleteTeam. */
   teamSkillShares?: Array<{ skillId: string }>;
+  /** Team-owned skill rows affected by deleteTeam's owner_team_id SET NULL. */
+  teamOwnedSkills?: Array<{ skillId: string }>;
 }
 
 function fakeDb(options: FakeDbOptions = {}) {
@@ -145,9 +147,14 @@ function fakeDb(options: FakeDbOptions = {}) {
     };
   };
 
+  let skillSelectCalls = 0;
   const selectBuilder = (cols: Record<string, unknown>) => {
     const isCount = "value" in cols;
     const isSkillShareSelect = "skillId" in cols;
+    const skillRows = () => {
+      skillSelectCalls += 1;
+      return skillSelectCalls === 1 ? (options.teamSkillShares ?? []) : (options.teamOwnedSkills ?? []);
+    };
     const builder: Record<string, unknown> = {
       from() {
         return builder;
@@ -161,14 +168,14 @@ function fakeDb(options: FakeDbOptions = {}) {
       },
       orderBy() {
         if (isCount) return Promise.resolve([{ value: options.teamCount ?? 1 }]);
-        if (isSkillShareSelect) return Promise.resolve(options.teamSkillShares ?? []);
+        if (isSkillShareSelect) return Promise.resolve(skillRows());
         return Promise.resolve(options.tokenRows ?? []);
       },
       then(resolve: (v: unknown) => unknown) {
         const rows = isCount
           ? [{ value: options.teamCount ?? 1 }]
           : isSkillShareSelect
-            ? (options.teamSkillShares ?? [])
+            ? skillRows()
             : (options.tokenRows ?? []);
         return Promise.resolve(rows).then(resolve);
       },
@@ -504,6 +511,21 @@ describe("deleteTeam", () => {
 
     expect(calls.txSequence).toEqual(["update", "delete"]);
     expect(calls.txPatch?.updatedAt).toBeInstanceOf(Date);
+  });
+
+  it("touches affected skills before deleting their owner team", async () => {
+    const { database, calls } = fakeDb({
+      role: "owner",
+      team: { id: TEAM_1, orgId: ORG_A },
+      teamCount: 3,
+      teamOwnedSkills: [{ skillId: "skill-owned-by-team" }],
+    });
+
+    await deleteTeam({ actor: owner, orgId: ORG_A, teamId: TEAM_1, database });
+
+    expect(calls.txSequence).toEqual(["update", "update", "delete"]);
+    expect(calls.txPatch?.updatedAt).toBeInstanceOf(Date);
+    expect(calls.txPatch?.ownerTeamId).toBeNull();
   });
 
   it("throws when the team is not found", async () => {

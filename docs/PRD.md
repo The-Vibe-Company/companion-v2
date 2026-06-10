@@ -53,7 +53,7 @@ one person. There is no open, self-hostable answer for a **team**.
 | Area | Included |
 |---|---|
 | **Install** | Single `docker compose up` bundle: Postgres, object storage (MinIO), Mailpit for local email, web portal, and API. First user becomes Org Owner. Temporal is prepared but deferred. |
-| **Identity & access** | Organization → Team → User; email invitations; RBAC roles (Org Owner/Admin/Member/Guest, Team Admin/Member); visibility through Private, team shares, and Everyone; "deploy **for** user/team/workspace" semantics. |
+| **Identity & access** | Organization → Team → User; email invitations; RBAC roles (Org Owner/Admin/Developer, Team Admin/Editor/Reader); user/team ownership; visibility through Private, team shares, and Everyone. |
 | **Providers** | **Local Docker** provider behind the pluggable interface; **Fly.io Machines** as fast-follow. (Kubernetes & Modal deferred to V1.) |
 | **Pillar 1 — Agents** | Deploy ≥1 Hermès agent template; choose model via OpenRouter; attach skills; attach a Granite vault; chat surface. |
 | **Pillar 2 — Containers** | Org-admin **approval** of images into the catalog; **1-click deploy** of ≥1 container; surface connection details/secrets. |
@@ -90,9 +90,10 @@ Each requirement has user stories with acceptance criteria. Priorities: **P0** =
 - As any actor, I can only **see** resources whose visibility I satisfy (owner, Everyone, or any shared team), with
   Org Owner/Admin able to see everything in the tenant. *AC:* list/detail endpoints are visibility-filtered;
   cross-tenant access is impossible (verified by tests).
-- As an Org/Team Admin, I can **deploy a resource for** a specific user, my team, or the workspace. *AC:* the
-  created resource's owner = the intended principal, visibility = the chosen target, and the acting admin
-  is recorded as creator in the audit log.
+- As an Org Admin or Team Admin/Editor, I can **own a skill as** a specific user or editable team, then
+  choose separate read visibility for teams and/or Everyone. *AC:* team ownership grants write access
+  only to that owner team's Admins/Editors; team visibility shares grant read access only; the acting
+  admin is recorded as creator in the audit log.
 
 ### 5.3 Skills Hub (P0)
 - As a Builder, I can **upload a `SKILL.md` package** and have it validated and versioned. *AC:*

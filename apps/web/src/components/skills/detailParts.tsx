@@ -11,10 +11,12 @@ export function VisibilityControl({
   skill,
   teams,
   onChange,
+  canChange,
 }: {
   skill: SkillVM;
   teams: TeamVM[];
   onChange: (visibility: SkillVisibilityInput) => void;
+  canChange: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLSpanElement>(null);
@@ -41,6 +43,19 @@ export function VisibilityControl({
       document.removeEventListener("keydown", k);
     };
   }, []);
+  if (!canChange) {
+    return (
+      <span className="vis__btn vis__btn--readonly" title="Only the owner can change visibility" aria-label={`Visibility: ${meta.label}`}>
+        <span className="lead">
+          <Icon name={meta.icon} size={11} />
+        </span>
+        <span className="vis__label">{meta.label}</span>
+        <span className="caret">
+          <Icon name="lock" size={11} />
+        </span>
+      </span>
+    );
+  }
   return (
     <span className="vis" ref={ref}>
       <button
@@ -108,10 +123,12 @@ export function PropList({
   skill,
   teams,
   onChangeVisibility,
+  canChangeVisibility,
 }: {
   skill: SkillVM;
   teams: TeamVM[];
   onChangeVisibility: (visibility: SkillVisibilityInput) => void;
+  canChangeVisibility: boolean;
 }) {
   const meta = visibilityMeta(skill);
   const teamNames = skill.teams.map((team) => team.name).join(", ");
@@ -132,7 +149,7 @@ export function PropList({
           Visibility
         </span>
         <span className="prop__value">
-          <VisibilityControl skill={skill} teams={teams} onChange={onChangeVisibility} />
+          <VisibilityControl skill={skill} teams={teams} onChange={onChangeVisibility} canChange={canChangeVisibility} />
         </span>
       </div>
       <div className="prop">

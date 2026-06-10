@@ -41,12 +41,13 @@ export async function issueToken(scopes: TokenScope[], name?: string): Promise<I
 /** Publish a packaged skill (.zip or .tar.gz) via the multipart upload path. */
 export async function publishSkillPackage(
   file: File,
-  opts: { visibility: SkillVisibilityInput; version?: string; expectSlug?: string },
+  opts: { ownerTeam?: string | null; visibility: SkillVisibilityInput; version?: string; expectSlug?: string },
 ): Promise<PublishResult> {
   const fd = new FormData();
   fd.append("file", file);
   fd.append("action", "publish");
   fd.append("everyone", String(opts.visibility.everyone));
+  if (opts.ownerTeam) fd.append("owner_team", opts.ownerTeam);
   for (const team of opts.visibility.teams) fd.append("team", team);
   if (opts.version) fd.append("version", opts.version);
   // In update mode, bind the upload to the skill being updated (server rejects a mismatch).
@@ -59,6 +60,7 @@ export async function createSkillInline(input: {
   id: string;
   description: string;
   body: string;
+  owner_team?: string | null;
   visibility: SkillVisibilityInput;
 }): Promise<PublishResult> {
   return apiFetch<PublishResult>("/v1/skills/create", {

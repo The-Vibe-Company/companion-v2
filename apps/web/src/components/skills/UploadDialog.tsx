@@ -15,15 +15,17 @@ import { Icon } from "../Icon";
 
 /* ------------------------------------------------------------------ helpers */
 
-/** Visibility is applied on the upload request, never written into SKILL.md. */
-function visQuery(visibility: SkillVisibilityInput): string {
+/** Ownership and visibility are applied on the upload request, never written into SKILL.md. */
+function visQuery(visibility: SkillVisibilityInput, ownerTeam?: string | null): string {
   const qs = new URLSearchParams();
+  if (ownerTeam) qs.set("owner_team", ownerTeam);
   if (visibility.everyone) qs.set("everyone", "true");
   for (const team of visibility.teams) qs.append("team", team);
   return qs.toString() || "everyone=false";
 }
-function visFlags(visibility: SkillVisibilityInput): string {
+function visFlags(visibility: SkillVisibilityInput, ownerTeam?: string | null): string {
   const parts = [];
+  if (ownerTeam) parts.push(`--owner-team ${ownerTeam}`);
   if (visibility.everyone) parts.push("--everyone");
   for (const team of visibility.teams) parts.push(`--team ${team}`);
   return parts.join(" ") || "--private";
@@ -35,6 +37,11 @@ function visibilityLabel(visibility: SkillVisibilityInput, teams: TeamVM[]): str
   if (names.length === 1) return names[0]!;
   if (names.length > 1) return `${names.length} teams`;
   return "Private";
+}
+
+function ownerLabel(ownerTeam: string | null, teams: TeamVM[]): string {
+  if (!ownerTeam) return "Personal";
+  return teams.find((team) => team.id === ownerTeam)?.name ?? ownerTeam;
 }
 
 /** Bump the patch component of a semver-ish version string. */
@@ -140,16 +147,33 @@ function TeamMultiSelect({
   const ref = useRef<HTMLSpanElement>(null);
   const selected = new Set(value);
   const label = value.length === 0 ? "No teams" : value.length === 1 ? teams.find((t) => t.id === value[0])?.name ?? value[0] : `${value.length} teams`;
+  const toggleTeam = (id: string) => {
+    const next = new Set(selected);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    onChange([...next]);
+  };
   useEffect(() => {
     if (!open) return;
     const h = (e: MouseEvent) => {
       if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
     };
-    document.addEventListener("mousedown", h);
-    return () => document.removeEventListener("mousedown", h);
+    document.addEventListener("click", h);
+    return () => document.removeEventListener("click", h);
   }, [open]);
   return (
-    <span className="up-teamsel" ref={ref}>
+    <span
+      className="up-teamsel"
+      ref={ref}
+      data-modal-menu-open={open ? "true" : undefined}
+      onKeyDown={(event) => {
+        if (!open || event.key !== "Escape") return;
+        event.preventDefault();
+        event.stopPropagation();
+        setOpen(false);
+        ref.current?.querySelector("button")?.focus();
+      }}
+    >
       <button
         className="up-teamsel__btn"
         type="button"
@@ -171,11 +195,13 @@ function TeamMultiSelect({
               role="menuitemcheckbox"
               aria-checked={selected.has(t.id)}
               className={"up-teamsel__item" + (selected.has(t.id) ? " is-sel" : "")}
-              onClick={() => {
-                const next = new Set(selected);
-                if (next.has(t.id)) next.delete(t.id);
-                else next.add(t.id);
-                onChange([...next]);
+              onMouseDown={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                toggleTeam(t.id);
+              }}
+              onClick={(event) => {
+                if (event.detail === 0) toggleTeam(t.id);
               }}
             >
               <span className="up-teamav">{t.initial}</span>
@@ -183,6 +209,106 @@ function TeamMultiSelect({
               {selected.has(t.id) && (
                 <Icon name="check" size={14} style={{ marginLeft: "auto", color: "var(--color-fg)" }} />
               )}
+            </button>
+          ))}
+        </div>
+      )}
+    </span>
+  );
+}
+
+function OwnerPicker({
+  value,
+  onChange,
+  teams,
+  disabled = false,
+}: {
+  value: string | null;
+  onChange: (team: string | null) => void;
+  teams: TeamVM[];
+  disabled?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLSpanElement>(null);
+  const ownerTeams = teams.filter((team) => team.role === "admin" || team.role === "editor");
+  const label = ownerLabel(value, teams);
+  const chooseOwner = (team: string | null) => {
+    onChange(team);
+    setOpen(false);
+  };
+  useEffect(() => {
+    if (!open) return;
+    const h = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("click", h);
+    return () => document.removeEventListener("click", h);
+  }, [open]);
+  return (
+    <span
+      className="up-teamsel"
+      ref={ref}
+      data-modal-menu-open={open ? "true" : undefined}
+      onKeyDown={(event) => {
+        if (!open || event.key !== "Escape") return;
+        event.preventDefault();
+        event.stopPropagation();
+        setOpen(false);
+        ref.current?.querySelector("button")?.focus();
+      }}
+    >
+      <button
+        className="up-teamsel__btn"
+        type="button"
+        onClick={() => !disabled && setOpen((o) => !o)}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        disabled={disabled}
+      >
+        <span className="up-teamav">{value ? teams.find((t) => t.id === value)?.initial ?? "T" : "Me"}</span>
+        <span className="up-teamsel__name">{label}</span>
+        <Icon name={disabled ? "lock" : "chevron-down"} size={13} style={{ color: "var(--color-faint)" }} />
+      </button>
+      {open && (
+        <div className="up-teamsel__menu" role="menu">
+          <div className="up-teamsel__head">Owner</div>
+          <button
+            type="button"
+            role="menuitemradio"
+            aria-checked={value === null}
+            className={"up-teamsel__item" + (value === null ? " is-sel" : "")}
+            onMouseDown={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              chooseOwner(null);
+            }}
+            onClick={(event) => {
+              if (event.detail === 0) chooseOwner(null);
+            }}
+          >
+            <span className="up-teamav">Me</span>
+            <span className="up-teamsel__iname">Personal</span>
+            {value === null && <Icon name="check" size={14} style={{ marginLeft: "auto", color: "var(--color-fg)" }} />}
+          </button>
+          {ownerTeams.map((team) => (
+            <button
+              key={team.id}
+              type="button"
+              role="menuitemradio"
+              aria-checked={value === team.id}
+              className={"up-teamsel__item" + (value === team.id ? " is-sel" : "")}
+              onMouseDown={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                chooseOwner(team.id);
+              }}
+              onClick={(event) => {
+                if (event.detail === 0) chooseOwner(team.id);
+              }}
+            >
+              <span className="up-teamav">{team.initial}</span>
+              <span className="up-teamsel__iname">{team.name}</span>
+              {value === team.id && <Icon name="check" size={14} style={{ marginLeft: "auto", color: "var(--color-fg)" }} />}
             </button>
           ))}
         </div>
@@ -254,6 +380,7 @@ function useModalA11y(ref: React.RefObject<HTMLElement | null>, onClose: () => v
     (el?.querySelector<HTMLElement>(FOCUSABLE) ?? el)?.focus();
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
+        if (el?.querySelector('[data-modal-menu-open="true"]')) return;
         e.preventDefault();
         e.stopPropagation();
         onClose();
@@ -405,19 +532,25 @@ const UP_METHODS = [
 type UploadMethod = (typeof UP_METHODS)[number]["id"];
 
 function PromptPanel({
+  ownerTeam,
+  setOwnerTeam,
   visibility,
   setVisibility,
   teams,
   token,
   ensure,
   regen,
+  lockedOwner,
 }: {
+  ownerTeam: string | null;
+  setOwnerTeam: (ownerTeam: string | null) => void;
   visibility: SkillVisibilityInput;
   setVisibility: (visibility: SkillVisibilityInput) => void;
   teams: TeamVM[];
   token: string | null;
   ensure: () => Promise<string>;
   regen: () => Promise<string>;
+  lockedOwner: boolean;
 }) {
   const base = apiBase();
   const buildPrompt = (tok: string) =>
@@ -430,8 +563,8 @@ is a standard Agent Skill: YAML frontmatter with name and description.
    The registry sets visibility on the upload request, not in the skill.
 2. Zip the package from its root:
    zip -r skill.zip SKILL.md .
-3. Publish it. Visibility is set with query parameters on the request:
-   curl -X POST "${base}/skills?${visQuery(visibility)}" \\
+3. Publish it. Ownership and visibility are set with query parameters on the request:
+   curl -X POST "${base}/skills?${visQuery(visibility, lockedOwner ? null : ownerTeam)}" \\
      -H "Authorization: Bearer ${tok}" \\
      -H "Content-Type: application/zip" \\
      --data-binary @skill.zip
@@ -457,15 +590,19 @@ is a standard Agent Skill: YAML frontmatter with name and description.
         />
       </div>
       <div className="up-step">
-        <StepLabel n="2">Visibility</StepLabel>
+        <StepLabel n="2">Owner</StepLabel>
+        <OwnerPicker value={ownerTeam} onChange={setOwnerTeam} teams={teams} disabled={lockedOwner} />
+        <p className="up-seg-note">Owner: <span className="mono">{ownerLabel(ownerTeam, teams)}</span>.</p>
+      </div>
+      <div className="up-step">
+        <StepLabel n="3">Visibility</StepLabel>
         <VisibilityPicker value={visibility} onChange={setVisibility} teams={teams} />
         <p className="up-seg-note">
-          Applied on the request as <span className="mono">?{visQuery(visibility)}</span>, not stored in
-          the skill.
+          Applied on the request as <span className="mono">?{visQuery(visibility, lockedOwner ? null : ownerTeam)}</span>.
         </p>
       </div>
       <div className="up-step">
-        <StepLabel n="3">Prompt</StepLabel>
+        <StepLabel n="4">Prompt</StepLabel>
         <CodeBlock
           text={displayPrompt}
           scroll
@@ -478,15 +615,22 @@ is a standard Agent Skill: YAML frontmatter with name and description.
 }
 
 function CliPanel({
+  ownerTeam,
+  setOwnerTeam,
   visibility,
   setVisibility,
   teams,
+  lockedOwner,
 }: {
+  ownerTeam: string | null;
+  setOwnerTeam: (ownerTeam: string | null) => void;
   visibility: SkillVisibilityInput;
   setVisibility: (visibility: SkillVisibilityInput) => void;
   teams: TeamVM[];
+  lockedOwner: boolean;
 }) {
-  const push = `companion skill push . ${visFlags(visibility)}`.trim();
+  const flags = visFlags(visibility, lockedOwner ? null : ownerTeam);
+  const push = `companion skill push . ${flags}`.trim();
   const setup = `# install once (macOS / Linux)
 brew install the-vibe-company/tap/companion
 
@@ -494,7 +638,7 @@ brew install the-vibe-company/tap/companion
 companion auth login
 
 # from the skill's directory, publish it
-companion skill push . ${visFlags(visibility)}`.trim();
+companion skill push . ${flags}`.trim();
   return (
     <>
       <p className="up-panel__lede">
@@ -502,15 +646,20 @@ companion skill push . ${visFlags(visibility)}`.trim();
         Requires the companion CLI <span className="inline-code">v0.4+</span>, signed in to this workspace.
       </p>
       <div className="up-step">
-        <StepLabel n="1">Visibility</StepLabel>
+        <StepLabel n="1">Owner</StepLabel>
+        <OwnerPicker value={ownerTeam} onChange={setOwnerTeam} teams={teams} disabled={lockedOwner} />
+        <p className="up-seg-note">Owner flag: <span className="mono">{lockedOwner || !ownerTeam ? "none" : `--owner-team ${ownerTeam}`}</span>.</p>
+      </div>
+      <div className="up-step">
+        <StepLabel n="2">Visibility</StepLabel>
         <VisibilityPicker value={visibility} onChange={setVisibility} teams={teams} />
         <p className="up-seg-note">
-          Sets <span className="mono">{visFlags(visibility)}</span> on the push. The skill itself carries no
+          Sets <span className="mono">{flags}</span> on the push. The skill itself carries no
           visibility fields.
         </p>
       </div>
       <div className="up-step">
-        <StepLabel n="2">Publish</StepLabel>
+        <StepLabel n="3">Publish</StepLabel>
         <CodeBlock text={push} copyLabel="Copy command" />
       </div>
       <div className="up-step">
@@ -522,17 +671,23 @@ companion skill push . ${visFlags(visibility)}`.trim();
 }
 
 function ZipPanel({
+  ownerTeam,
+  setOwnerTeam,
   visibility,
   setVisibility,
   teams,
   file,
   setFile,
+  lockedOwner,
 }: {
+  ownerTeam: string | null;
+  setOwnerTeam: (ownerTeam: string | null) => void;
   visibility: SkillVisibilityInput;
   setVisibility: (visibility: SkillVisibilityInput) => void;
   teams: TeamVM[];
   file: File | null;
   setFile: (f: File | null) => void;
+  lockedOwner: boolean;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [over, setOver] = useState(false);
@@ -599,7 +754,11 @@ function ZipPanel({
         )}
       </div>
       <div className="up-step">
-        <StepLabel n="1">Visibility</StepLabel>
+        <StepLabel n="1">Owner</StepLabel>
+        <OwnerPicker value={ownerTeam} onChange={setOwnerTeam} teams={teams} disabled={lockedOwner} />
+      </div>
+      <div className="up-step">
+        <StepLabel n="2">Visibility</StepLabel>
         <VisibilityPicker value={visibility} onChange={setVisibility} teams={teams} />
         <p className="up-seg-note">Set on upload. Companion does not read visibility from the package.</p>
       </div>
@@ -626,6 +785,8 @@ interface CreateForm {
 }
 
 function CreatePanel({
+  ownerTeam,
+  setOwnerTeam,
   visibility,
   setVisibility,
   teams,
@@ -633,6 +794,8 @@ function CreatePanel({
   setForm,
   locked,
 }: {
+  ownerTeam: string | null;
+  setOwnerTeam: (ownerTeam: string | null) => void;
   visibility: SkillVisibilityInput;
   setVisibility: (visibility: SkillVisibilityInput) => void;
   teams: TeamVM[];
@@ -674,6 +837,11 @@ function CreatePanel({
               {!locked && <span className="inline-code">name</span>}
               {!locked && " in the frontmatter."}
             </span>
+          </div>
+          <div className="up-field">
+            <label className="up-field__label">Owner</label>
+            <OwnerPicker value={ownerTeam} onChange={setOwnerTeam} teams={teams} disabled={locked} />
+            <span className="up-field__hint">{locked ? "Locked for updates." : `${ownerLabel(ownerTeam, teams)} can edit.`}</span>
           </div>
           <div className="up-field">
             <label className="up-field__label">Visibility</label>
@@ -789,7 +957,12 @@ export function UploadDialog({
   onPublished: () => void;
 }) {
   const isUpdate = mode === "update" && !!skill;
+  const initialOwnerTeam =
+    isUpdate && skill!.owner.kind === "team"
+      ? (skill!.owner.handle ?? teams.find((team) => team.dbId === skill!.owner.teamId)?.id ?? null)
+      : null;
   const [method, setMethod] = useState<UploadMethod>("prompt");
+  const [ownerTeam, setOwnerTeam] = useState<string | null>(initialOwnerTeam);
   const [visibility, setVisibility] = useState<SkillVisibilityInput>(
     isUpdate
       ? { everyone: skill!.visibility.everyone, teams: skill!.teamSlugs }
@@ -845,6 +1018,7 @@ export function UploadDialog({
     setError(null);
     try {
       const res = await publishSkillPackage(file, {
+        ownerTeam: isUpdate ? undefined : ownerTeam,
         visibility,
         version: isUpdate ? ver : undefined,
         expectSlug: isUpdate ? skill!.id : undefined,
@@ -872,6 +1046,7 @@ export function UploadDialog({
         id,
         description: form.description.trim(),
         body: form.body,
+        owner_team: isUpdate ? undefined : ownerTeam,
         visibility,
       });
       finishPublish({
@@ -1020,28 +1195,43 @@ export function UploadDialog({
               <div className="up__panel">
                 {method === "prompt" && (
                   <PromptPanel
+                    ownerTeam={ownerTeam}
+                    setOwnerTeam={setOwnerTeam}
                     visibility={visibility}
                     setVisibility={setVisibility}
                     teams={teams}
                     token={token}
                     ensure={ensureToken}
                     regen={regenToken}
+                    lockedOwner={isUpdate}
                   />
                 )}
                 {method === "cli" && (
-                  <CliPanel visibility={visibility} setVisibility={setVisibility} teams={teams} />
+                  <CliPanel
+                    ownerTeam={ownerTeam}
+                    setOwnerTeam={setOwnerTeam}
+                    visibility={visibility}
+                    setVisibility={setVisibility}
+                    teams={teams}
+                    lockedOwner={isUpdate}
+                  />
                 )}
                 {method === "zip" && (
                   <ZipPanel
+                    ownerTeam={ownerTeam}
+                    setOwnerTeam={setOwnerTeam}
                     visibility={visibility}
                     setVisibility={setVisibility}
                     teams={teams}
                     file={file}
                     setFile={setFile}
+                    lockedOwner={isUpdate}
                   />
                 )}
                 {method === "create" && (
                   <CreatePanel
+                    ownerTeam={ownerTeam}
+                    setOwnerTeam={setOwnerTeam}
                     visibility={visibility}
                     setVisibility={setVisibility}
                     teams={teams}

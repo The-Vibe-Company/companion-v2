@@ -82,6 +82,25 @@ export function resolvePushVisibility(reg: RegistryInfo, opts: Pick<PushOpts, "e
   return { everyone: false, teams: [] };
 }
 
+export function buildPublishFormData(input: {
+  archive: Buffer;
+  name: string;
+  version: string;
+  visibility: SkillVisibilityInput;
+  ownerTeam?: string;
+  message?: string;
+}): FormData {
+  const fd = new FormData();
+  fd.append("file", new Blob([input.archive], { type: "application/gzip" }), `${input.name}-${input.version}.tar.gz`);
+  fd.append("action", "publish");
+  fd.append("everyone", String(input.visibility.everyone));
+  fd.append("version", input.version);
+  if (input.ownerTeam) fd.append("owner_team", input.ownerTeam);
+  for (const team of input.visibility.teams) fd.append("team", team);
+  if (input.message) fd.append("message", input.message);
+  return fd;
+}
+
 function visibilityLabel(input: { everyone: boolean; teams: Array<{ slug: string; name?: string }> | string[] }): string {
   const teams = input.teams.map((team) => (typeof team === "string" ? team : team.name ?? team.slug));
   const teamLabel = teams.length === 0 ? "" : teams.length === 1 ? teams[0]! : `${teams.length} teams`;
@@ -192,6 +211,7 @@ export async function validate(dir: string, g: GlobalOpts): Promise<void> {
 export interface PushOpts {
   everyone?: boolean;
   private?: boolean;
+  ownerTeam?: string;
   team?: string[];
   bump?: "patch" | "minor" | "major";
   setVersion?: string;
@@ -218,25 +238,36 @@ export async function push(dir: string, opts: PushOpts, g: GlobalOpts): Promise<
   }
 
   const visibility = resolvePushVisibility(reg, opts);
+  const ownerTeam = opts.ownerTeam?.trim() || undefined;
 
   const packed = await packDir(abs);
   if (opts.dryRun) {
     if (g.json)
-      emitJson({ dryRun: true, name: fm.name, version, visibility, checksum: packed.checksum, size: packed.sizeBytes, files: packed.files });
+      emitJson({
+        dryRun: true,
+        name: fm.name,
+        version,
+        ownerTeam,
+        visibility,
+        checksum: packed.checksum,
+        size: packed.sizeBytes,
+        files: packed.files,
+      });
     else
       out(
-        `would publish ${pc.bold(`${fm.name}@${version}`)}  visibility=${visibilityLabel(visibility)}  ${packed.checksum}  ${packed.sizeBytes} bytes  ${packed.files.length} files`,
+        `would publish ${pc.bold(`${fm.name}@${version}`)}  owner=${ownerTeam ?? "me"}  visibility=${visibilityLabel(visibility)}  ${packed.checksum}  ${packed.sizeBytes} bytes  ${packed.files.length} files`,
       );
     return;
   }
 
-  const fd = new FormData();
-  fd.append("file", new Blob([packed.archive], { type: "application/gzip" }), `${fm.name}-${version}.tar.gz`);
-  fd.append("action", "publish");
-  fd.append("everyone", String(visibility.everyone));
-  fd.append("version", version);
-  for (const team of visibility.teams) fd.append("team", team);
-  if (opts.message) fd.append("message", opts.message);
+  const fd = buildPublishFormData({
+    archive: packed.archive,
+    name: fm.name,
+    version,
+    visibility,
+    ownerTeam,
+    message: opts.message,
+  });
 
   const published = await client.request<{ checksum: string }>("/v1/skills", { method: "POST", body: fd });
   const orgId = await getOrgId(client);

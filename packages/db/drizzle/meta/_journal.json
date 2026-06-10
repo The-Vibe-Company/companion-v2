@@ -85,6 +85,13 @@
       "when": 1781050000000,
       "tag": "0011_everyone_skill_visibility",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1781050100000,
+      "tag": "0012_skill_owner_team",
+      "breakpoints": true
     }
   ]
 }

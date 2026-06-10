@@ -362,9 +362,25 @@ export function SkillsApp({
   const canSaveView = filters.length > 0 && !activeViewId;
   const activeTeam = filters.find((f) => f.type === "team")?.value ?? null;
   const isAll = filters.length === 0;
-  const isMine =
-    filters.length === 1 && filters[0]?.type === "owner" && filters[0]?.value === me.name;
-  const myCount = useMemo(() => skills.filter((s) => s.owner.name === me.name).length, [skills, me.name]);
+  const editableTeams = useMemo(
+    () => teams.filter((team) => team.role === "admin" || team.role === "editor"),
+    [teams],
+  );
+  const mineOwnerNames = useMemo(
+    () => [...new Set([me.name, ...editableTeams.map((team) => team.name)])],
+    [me.name, editableTeams],
+  );
+  const mineOwnerKey = useMemo(() => filtersKey(mineOwnerNames.map((name) => ({ type: "owner", value: name }))), [mineOwnerNames]);
+  const isMine = filters.length > 0 && filters.every((f) => f.type === "owner") && filtersKey(filters) === mineOwnerKey;
+  const myCount = useMemo(
+    () =>
+      skills.filter((s) =>
+        s.owner.kind === "user"
+          ? s.owner.userId === me.id
+          : editableTeams.some((team) => team.dbId === s.owner.teamId || team.id === s.owner.handle),
+      ).length,
+    [skills, me.id, editableTeams],
+  );
 
   // --- View / filter actions -------------------------------------------------
   const selectView = useCallback(
@@ -450,9 +466,9 @@ export function SkillsApp({
     setOpenId(null);
   }, []);
   const selectMine = useCallback(() => {
-    setFilters([{ type: "owner", value: me.name }]);
+    setFilters(mineOwnerNames.map((name) => ({ type: "owner", value: name })));
     setOpenId(null);
-  }, [me.name]);
+  }, [mineOwnerNames]);
 
   // --- Open / navigate -------------------------------------------------------
   const index = openId ? filtered.findIndex((s) => s.id === openId) : -1;

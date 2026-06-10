@@ -21,6 +21,11 @@ export const skillVisibilityInputSchema = z.object({
 });
 export type SkillVisibilityInput = z.infer<typeof skillVisibilityInputSchema>;
 
+export const skillOwnerKindSchema = z.enum(["user", "team"]);
+export type SkillOwnerKind = z.infer<typeof skillOwnerKindSchema>;
+
+export const skillOwnerTeamInputSchema = z.string().min(1).max(128).nullable().optional();
+
 /**
  * One row of the `skill_list_v` view — the denormalized read shape the web table
  * and the CLI list both consume. Machine-facing snake_case (mirrors the DB).
@@ -33,7 +38,10 @@ export const skillListRowSchema = z.object({
   visibility: skillVisibilitySchema,
   validation: validationStateSchema,
   validation_error: z.string().nullable(),
+  owner_kind: skillOwnerKindSchema,
   owner_id: z.string(),
+  owner_user_id: z.string(),
+  owner_team_id: z.string().nullable(),
   owner_name: z.string(),
   owner_handle: z.string().nullable(),
   owner_initials: z.string(),
@@ -121,6 +129,7 @@ export type SkillVersionRow = z.infer<typeof skillVersionRowSchema>;
 /** Argument shape for the `publish_skill_version` RPC (web route + CLI share this). */
 export const publishSkillInputSchema = z.object({
   slug: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/),
+  owner_team: skillOwnerTeamInputSchema,
   visibility: skillVisibilityInputSchema,
   version: z.string(),
   description: z.string(),
@@ -143,6 +152,7 @@ export const createSkillInputSchema = z.object({
   id: z.string().regex(SKILL_NAME_RE, "id must be kebab-case (lowercase letters, digits, hyphens)"),
   description: z.string().min(1, "description is required").max(1024),
   body: z.string().max(1024 * 1024, "body is too large").default(""),
+  owner_team: skillOwnerTeamInputSchema,
   visibility: skillVisibilityInputSchema,
 });
 export type CreateSkillInput = z.infer<typeof createSkillInputSchema>;

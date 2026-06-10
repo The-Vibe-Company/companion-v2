@@ -31,7 +31,7 @@ The CLI holds only your user session cookie and API URL. It never receives Postg
 | `skills info <name>` | Show a skill's metadata |
 | `skills versions <name>` | Immutable version history |
 | `skills validate <dir>` | Validate a local package — offline, no network |
-| `skills push <dir> [--private --everyone --team slug --bump patch\|minor\|major --set-version --message --dry-run]` | Validate → package → upload → publish an immutable version |
+| `skills push <dir> [--owner-team slug --private --everyone --team slug --bump patch\|minor\|major --set-version --message --dry-run]` | Validate → package → upload → publish an immutable version |
 | `skills pull <name>[@version] [--dir --force]` | Download + unpack a skill; record it in `companion.lock` |
 | `skills status [--exit-code]` | Diff tracked skills vs the registry and your working tree |
 | `skills sync [--dry-run --force]` | Fast-forward outdated, unpinned, unmodified skills |

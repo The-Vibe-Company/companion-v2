@@ -7,6 +7,7 @@ import { packDir } from "@companion/skills";
 import { loadLockfile } from "../lib/lockfile";
 import {
   assertCanReplaceExistingInstall,
+  buildPublishFormData,
   lockfileVisibility,
   parseVisibilityFilter,
   resolvePushVisibility,
@@ -103,7 +104,10 @@ describe("skills visibility helpers", () => {
             visibility: { everyone: true, teams: [{ id: "team-1", slug: "platform", name: "Platform" }] },
             validation: "valid",
             validation_error: null,
+            owner_kind: "user",
             owner_id: "user-1",
+            owner_user_id: "user-1",
+            owner_team_id: null,
             owner_name: "User One",
             owner_handle: null,
             owner_initials: "UO",
@@ -139,7 +143,10 @@ describe("skills visibility helpers", () => {
             visibility: { everyone: true, teams: [{ id: "team-1", slug: "platform", name: "Platform" }] },
             validation: "valid",
             validation_error: null,
+            owner_kind: "user",
             owner_id: "user-1",
+            owner_user_id: "user-1",
+            owner_team_id: null,
             owner_name: "User One",
             owner_handle: null,
             owner_initials: "UO",
@@ -173,5 +180,24 @@ describe("skills visibility helpers", () => {
       everyone: false,
       teams: [],
     });
+  });
+
+  it("builds push form data with owner, everyone, and repeatable team shares", () => {
+    const fd = buildPublishFormData({
+      archive: Buffer.from("archive"),
+      name: "demo",
+      version: "1.2.3",
+      ownerTeam: "platform",
+      visibility: { everyone: true, teams: splitTeams(["platform,data", "platform"]) },
+      message: "release",
+    });
+
+    expect(fd.get("action")).toBe("publish");
+    expect(fd.get("everyone")).toBe("true");
+    expect(fd.get("version")).toBe("1.2.3");
+    expect(fd.get("owner_team")).toBe("platform");
+    expect(fd.getAll("team")).toEqual(["platform", "data"]);
+    expect(fd.get("message")).toBe("release");
+    expect(fd.get("file")).toBeInstanceOf(File);
   });
 });

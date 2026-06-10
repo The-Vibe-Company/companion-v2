@@ -65,20 +65,21 @@
 
 /* visibility row + team picker ------------------------------------------- */
 .up-vis { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.up-teamsel { position: relative; display: inline-flex; }
+.up-teamsel { position: relative; display: inline-flex; max-width: 100%; min-width: 0; }
 .up-teamsel__btn { display: inline-flex; align-items: center; gap: 7px; height: 36px; padding: 0 9px 0 7px; border: 1px solid var(--color-line); border-radius: var(--radius-md);
-  background: var(--color-surface); color: var(--color-fg); cursor: pointer; font-family: var(--font-ui); font-size: var(--text-sm);
+  max-width: min(260px, 100%); min-width: 0; background: var(--color-surface); color: var(--color-fg); cursor: pointer; font-family: var(--font-ui); font-size: var(--text-sm);
   transition: background-color var(--duration-fast) var(--ease-out-quint), border-color var(--duration-fast) var(--ease-out-quint); }
 .up-teamsel__btn:hover { background: var(--color-surface-raised); border-color: var(--color-line-strong); }
-.up-teamsel__name { font-weight: 500; }
+.up-teamsel__btn:disabled { cursor: default; color: var(--color-muted); background: var(--color-surface); border-color: var(--color-line); }
+.up-teamsel__name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
 .up-teamav { width: 20px; height: 20px; border-radius: var(--radius-sm); display: grid; place-items: center; flex: none;
   font-size: 10px; font-weight: 600; color: var(--color-fg); background: var(--color-surface-raised); border: 1px solid var(--color-line); }
 .up-teamsel__menu { position: absolute; top: calc(100% + 6px); left: 0; z-index: 40; min-width: 200px;
-  background: var(--color-surface); border: 1px solid var(--color-line); border-radius: var(--radius-md); box-shadow: var(--shadow-lg); padding: 4px; }
+  max-width: calc(100vw - 48px); background: var(--color-surface); border: 1px solid var(--color-line); border-radius: var(--radius-md); box-shadow: var(--shadow-lg); padding: 4px; }
 .up-teamsel__head { font-size: 10px; text-transform: uppercase; letter-spacing: var(--tracking-wide); color: var(--color-faint); padding: 6px 8px 4px; }
-.up-teamsel__item { display: flex; align-items: center; gap: 9px; width: 100%; text-align: left; border: none; background: none; cursor: pointer; padding: 7px 8px; border-radius: var(--radius-sm); color: var(--color-fg); }
+.up-teamsel__item { display: flex; align-items: center; gap: 9px; width: 100%; min-width: 0; text-align: left; border: none; background: none; cursor: pointer; padding: 7px 8px; border-radius: var(--radius-sm); color: var(--color-fg); }
 .up-teamsel__item:hover { background: var(--color-surface-raised); }
-.up-teamsel__iname { font-size: var(--text-sm); }
+.up-teamsel__iname { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--text-sm); }
 .up-teamsel__item.is-sel .up-teamsel__iname { font-weight: 600; }
 
 /* code block with copy --------------------------------------------------- */
@@ -149,7 +150,7 @@
 .up-input::placeholder, .up-textarea::placeholder { color: var(--color-faint); }
 .up-textarea { resize: vertical; min-height: 168px; line-height: 1.6; white-space: pre; overflow-wrap: normal; tab-size: 2; }
 .up-field__hint { font-size: 11px; color: var(--color-faint); }
-.up-tworow { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.up-tworow { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; }
 
 /* foot ------------------------------------------------------------------- */
 .up__foot { display: flex; align-items: center; gap: 12px; padding: 12px 18px; border-top: 1px solid var(--color-line); flex: none; background: var(--color-surface); }

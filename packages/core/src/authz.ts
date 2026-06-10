@@ -25,7 +25,7 @@ export interface Actor {
 }
 
 export interface ResourceCtx {
-  /** Does the actor own this resource (owner_id === actor)? */
+  /** Does the actor own this resource, either directly or through an owner team? */
   isOwner: boolean;
 }
 
@@ -57,7 +57,7 @@ export function canActAtVisibility(actor: Actor, target: VisibilityTarget): bool
 export function canModify(actor: Actor, res: ResourceCtx): boolean {
   if (isOrgAdmin(actor.orgRole)) return true;
   if (res.isOwner) return true;
-  return actor.teamRole === "admin" || actor.teamRole === "editor";
+  return false;
 }
 
 /* ---- Management capability gates (mirror the SQL RPC guards) ---------------- */

@@ -39,13 +39,13 @@ describe("canActAtVisibility (create/publish target visibility)", () => {
 });
 
 describe("canModify (update/delete existing)", () => {
-  it("org admins modify anything; developers modify owned or editable team-shared resources", () => {
+  it("org admins modify anything; developers modify only owned resources", () => {
     expect(canModify(actor("admin"), { isOwner: false })).toBe(true);
     expect(canModify(actor("owner"), { isOwner: false })).toBe(true);
     expect(canModify(actor("developer"), { isOwner: true })).toBe(true);
     expect(canModify(actor("developer"), { isOwner: false })).toBe(false);
-    expect(canModify(actor("developer", "admin"), { isOwner: false })).toBe(true);
-    expect(canModify(actor("developer", "editor"), { isOwner: false })).toBe(true);
+    expect(canModify(actor("developer", "admin"), { isOwner: false })).toBe(false);
+    expect(canModify(actor("developer", "editor"), { isOwner: false })).toBe(false);
     expect(canModify(actor("developer", "reader"), { isOwner: false })).toBe(false);
   });
 });

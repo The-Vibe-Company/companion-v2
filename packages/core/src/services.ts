@@ -380,13 +380,38 @@ export async function listTeamsForUser(input: {
   actor: ActorContext;
   orgId: string;
   database?: Db;
-}): Promise<Array<{ id: string; slug: string; name: string }>> {
+}): Promise<Array<{ id: string; slug: string; name: string; teamRole: TeamRole }>> {
   const database = input.database ?? db;
+  const orgRole = await getOrgRole(input.orgId, input.actor.id, database);
+  if (!orgRole) throw new Error("not a member of this organization");
+  if (canManageOrg(orgRole)) {
+    return database
+      .select({
+        id: schema.teams.id,
+        slug: schema.teams.slug,
+        name: schema.teams.name,
+        teamRole: sql<TeamRole>`'admin'::team_role`,
+      })
+      .from(schema.teams)
+      .where(eq(schema.teams.orgId, input.orgId))
+      .orderBy(asc(schema.teams.name));
+  }
   const rows = await database
-    .select({ id: schema.teams.id, slug: schema.teams.slug, name: schema.teams.name })
+    .select({
+      id: schema.teams.id,
+      slug: schema.teams.slug,
+      name: schema.teams.name,
+      teamRole: schema.teamMemberships.teamRole,
+    })
     .from(schema.teams)
     .innerJoin(schema.teamMemberships, eq(schema.teamMemberships.teamId, schema.teams.id))
-    .where(and(eq(schema.teams.orgId, input.orgId), eq(schema.teamMemberships.userId, input.actor.id)))
+    .where(
+      and(
+        eq(schema.teams.orgId, input.orgId),
+        eq(schema.teamMemberships.orgId, input.orgId),
+        eq(schema.teamMemberships.userId, input.actor.id),
+      ),
+    )
     .orderBy(asc(schema.teams.name));
   return rows;
 }
@@ -660,6 +685,7 @@ export async function updateTeam(input: {
  * Delete a team. Requires an org admin (`canManageOrg`), and the org must keep at least one team.
  * Skill team shares cascade through `skill_team_shares`, so deleting a team only removes that team's
  * visibility grant; a skill becomes private if it is not shared with Everyone and has no teams left.
+ * Team-owned skills fall back to their stored user owner when `owner_team_id` is set null by the FK.
  */
 export async function deleteTeam(input: {
   actor: ActorContext;
@@ -688,12 +714,23 @@ export async function deleteTeam(input: {
       .select({ skillId: schema.skillTeamShares.skillId })
       .from(schema.skillTeamShares)
       .where(and(eq(schema.skillTeamShares.orgId, input.orgId), eq(schema.skillTeamShares.teamId, input.teamId)));
-    const affectedSkillIds = [...new Set(affectedShares.map((share) => share.skillId))];
+    const ownedSkills = await tx
+      .select({ skillId: schema.skills.id })
+      .from(schema.skills)
+      .where(and(eq(schema.skills.orgId, input.orgId), eq(schema.skills.ownerTeamId, input.teamId)));
+    const affectedSkillIds = [...new Set([...affectedShares.map((share) => share.skillId), ...ownedSkills.map((skill) => skill.skillId)])];
     if (affectedSkillIds.length) {
       await tx
         .update(schema.skills)
         .set({ updatedAt: new Date() })
         .where(and(eq(schema.skills.orgId, input.orgId), inArray(schema.skills.id, affectedSkillIds)));
+    }
+    const ownedSkillIds = ownedSkills.map((skill) => skill.skillId);
+    if (ownedSkillIds.length) {
+      await tx
+        .update(schema.skills)
+        .set({ ownerTeamId: null, updatedAt: new Date() })
+        .where(and(eq(schema.skills.orgId, input.orgId), inArray(schema.skills.id, ownedSkillIds)));
     }
     await tx
       .delete(schema.teams)
@@ -888,11 +925,22 @@ async function visibleSkillPredicate(database: Db, actor: ActorContext, orgId: s
     .select({ skillId: schema.skillTeamShares.skillId })
     .from(schema.skillTeamShares)
     .where(and(eq(schema.skillTeamShares.orgId, orgId), inArray(schema.skillTeamShares.teamId, teamsForActor)));
+  const editableOwnerTeamsForActor = database
+    .select({ teamId: schema.teamMemberships.teamId })
+    .from(schema.teamMemberships)
+    .where(
+      and(
+        eq(schema.teamMemberships.orgId, orgId),
+        eq(schema.teamMemberships.userId, actor.id),
+        inArray(schema.teamMemberships.teamRole, ["admin", "editor"]),
+      ),
+    );
   return and(
     eq(schema.skills.orgId, orgId),
     or(
       eq(schema.skills.everyone, true),
-      eq(schema.skills.ownerId, actor.id),
+      and(isNull(schema.skills.ownerTeamId), eq(schema.skills.ownerId, actor.id)),
+      inArray(schema.skills.ownerTeamId, editableOwnerTeamsForActor),
       inArray(schema.skills.id, teamSharedSkillsForActor),
     ),
   );
@@ -922,7 +970,24 @@ export async function listSkills(input: {
   if (input.visibility === "private") {
     predicates.push(and(eq(schema.skills.everyone, false), not(skillHasTeamShare(database, input.orgId))));
   }
-  if (input.mine) predicates.push(eq(schema.skills.ownerId, input.actor.id));
+  if (input.mine) {
+    const editableOwnerTeamsForActor = database
+      .select({ teamId: schema.teamMemberships.teamId })
+      .from(schema.teamMemberships)
+      .where(
+        and(
+          eq(schema.teamMemberships.orgId, input.orgId),
+          eq(schema.teamMemberships.userId, input.actor.id),
+          inArray(schema.teamMemberships.teamRole, ["admin", "editor"]),
+        ),
+      );
+    predicates.push(
+      or(
+        and(isNull(schema.skills.ownerTeamId), eq(schema.skills.ownerId, input.actor.id)),
+        inArray(schema.skills.ownerTeamId, editableOwnerTeamsForActor),
+      ),
+    );
+  }
 
   const rows = await database
     .select({
@@ -933,10 +998,13 @@ export async function listSkills(input: {
       everyone: schema.skills.everyone,
       validation: schema.skills.validation,
       validation_error: schema.skills.validationError,
-      owner_id: schema.skills.ownerId,
-      owner_name: schema.profiles.name,
-      owner_handle: schema.profiles.handle,
-      owner_initials: schema.profiles.initials,
+      owner_kind: sql<"user" | "team">`case when ${schema.skills.ownerTeamId} is null then 'user' else 'team' end`,
+      owner_id: sql<string>`coalesce(${schema.skills.ownerTeamId}::text, ${schema.skills.ownerId})`,
+      owner_user_id: schema.skills.ownerId,
+      owner_team_id: schema.skills.ownerTeamId,
+      owner_name: sql<string>`coalesce(${schema.teams.name}, ${schema.profiles.name})`,
+      owner_handle: sql<string | null>`case when ${schema.skills.ownerTeamId} is null then ${schema.profiles.handle} else ${schema.teams.slug} end`,
+      owner_initials: sql<string>`case when ${schema.skills.ownerTeamId} is null then ${schema.profiles.initials} else upper(left(${schema.teams.name}, 2)) end`,
       current_version: schema.skillVersions.version,
       license: schema.skillVersions.license,
       checksum: schema.skillVersions.checksum,
@@ -960,10 +1028,11 @@ export async function listSkills(input: {
     })
     .from(schema.skills)
     .innerJoin(schema.profiles, eq(schema.profiles.id, schema.skills.ownerId))
+    .leftJoin(schema.teams, and(eq(schema.teams.orgId, input.orgId), eq(schema.teams.id, schema.skills.ownerTeamId)))
     .leftJoin(schema.skillVersions, eq(schema.skillVersions.id, schema.skills.currentVersionId))
     .leftJoin(schema.skillStars, eq(schema.skillStars.skillId, schema.skills.id))
     .where(and(...predicates))
-    .groupBy(schema.skills.id, schema.profiles.id, schema.skillVersions.id)
+    .groupBy(schema.skills.id, schema.profiles.id, schema.teams.id, schema.skillVersions.id)
     .orderBy(desc(schema.skills.updatedAt));
 
   const skillIds = rows.map((r) => r.id);
@@ -995,7 +1064,10 @@ export async function listSkills(input: {
     visibility: { everyone: r.everyone, teams: sharesBySkill.get(r.id) ?? [] },
     validation: r.validation,
     validation_error: r.validation_error,
+    owner_kind: r.owner_kind,
     owner_id: r.owner_id,
+    owner_user_id: r.owner_user_id,
+    owner_team_id: r.owner_team_id,
     owner_name: r.owner_name,
     owner_handle: r.owner_handle,
     owner_initials: r.owner_initials,
@@ -1101,87 +1173,64 @@ function normalizeVisibility(input: SkillVisibilityInput): SkillVisibilityInput 
   };
 }
 
-function strongestTeamRole(rows: Array<{ teamRole: TeamRole }>): TeamRole | null {
-  if (rows.some((row) => row.teamRole === "admin")) return "admin";
-  if (rows.some((row) => row.teamRole === "editor")) return "editor";
-  if (rows.some((row) => row.teamRole === "reader")) return "reader";
-  return null;
-}
-
-type SharedSkillTeamMembership = { teamId: string; slug: string; teamRole: TeamRole };
-
-async function sharedSkillTeamMemberships(input: {
+async function ownerTeamRole(input: {
   database: Db;
   orgId: string;
   actor: ActorContext;
-  skillId: string;
-}): Promise<SharedSkillTeamMembership[]> {
-  return input.database
-    .select({
-      teamId: schema.skillTeamShares.teamId,
-      slug: schema.teams.slug,
-      teamRole: schema.teamMemberships.teamRole,
-    })
-    .from(schema.skillTeamShares)
-    .innerJoin(
-      schema.teams,
-      and(
-        eq(schema.teams.orgId, input.orgId),
-        eq(schema.teams.id, schema.skillTeamShares.teamId),
-      ),
-    )
-    .innerJoin(
-      schema.teamMemberships,
-      and(
-        eq(schema.teamMemberships.orgId, input.orgId),
-        eq(schema.teamMemberships.teamId, schema.skillTeamShares.teamId),
-        eq(schema.teamMemberships.userId, input.actor.id),
-      ),
-    )
-    .where(and(eq(schema.skillTeamShares.orgId, input.orgId), eq(schema.skillTeamShares.skillId, input.skillId)));
+  ownerTeamId: string | null;
+}): Promise<TeamRole | null> {
+  if (!input.ownerTeamId) return null;
+  const row = await input.database.query.teamMemberships.findFirst({
+    where: and(
+      eq(schema.teamMemberships.orgId, input.orgId),
+      eq(schema.teamMemberships.teamId, input.ownerTeamId),
+      eq(schema.teamMemberships.userId, input.actor.id),
+    ),
+  });
+  return row?.teamRole ?? null;
 }
 
-function canUseExistingSkillVisibilityTarget(input: {
+function canEditOwnerTeam(role: TeamRole | null): boolean {
+  return role === "admin" || role === "editor";
+}
+
+async function canModifySkill(input: {
+  database: Db;
+  orgId: string;
   orgRole: OrgRole;
-  isOwner: boolean;
-  teamRole: TeamRole | null;
-  existing: SkillVisibility;
-  target: SkillVisibilityInput;
-  memberOfAllTargetTeams: boolean;
-  sharedMemberships: SharedSkillTeamMembership[];
-}): boolean {
-  if (isOrgAdmin(input.orgRole) || input.isOwner) {
-    return canActAtVisibility(
-      { orgRole: input.orgRole },
-      {
-        everyone: input.target.everyone,
-        teamCount: input.target.teams.length,
-        memberOfAllTargetTeams: input.memberOfAllTargetTeams,
-      },
-    );
+  actor: ActorContext;
+  ownerUserId: string;
+  ownerTeamId: string | null;
+}): Promise<boolean> {
+  if (isOrgAdmin(input.orgRole)) return true;
+  if (input.ownerTeamId) {
+    return canEditOwnerTeam(await ownerTeamRole(input));
   }
-  if (input.teamRole !== "admin" && input.teamRole !== "editor") return false;
-  if (input.existing.everyone) return false;
-  if (input.target.everyone !== input.existing.everyone) return false;
+  return input.ownerUserId === input.actor.id;
+}
 
-  const editable = new Set(
-    input.sharedMemberships
-      .filter((row) => row.teamRole === "admin" || row.teamRole === "editor")
-      .map((row) => row.slug),
-  );
-  if (!editable.size) return false;
-
-  const existing = new Set(input.existing.teams.map((team) => team.slug));
-  const target = new Set(input.target.teams);
-  if (![...target].some((slug) => existing.has(slug) && editable.has(slug))) return false;
-
-  for (const slug of existing) {
-    if (!editable.has(slug) && !target.has(slug)) return false;
-  }
-  for (const slug of target) {
-    if (!existing.has(slug)) return false;
-  }
-  return true;
+async function resolveOwnerTeam(input: {
+  actor: ActorContext;
+  orgId: string;
+  ownerTeam: string | null | undefined;
+  orgRole: OrgRole;
+  database: Db;
+}): Promise<{ id: string; slug: string; name: string } | null> {
+  const slug = input.ownerTeam?.trim();
+  if (!slug) return null;
+  const team = await input.database.query.teams.findFirst({
+    where: and(eq(schema.teams.orgId, input.orgId), eq(schema.teams.slug, slug)),
+  });
+  if (!team) throw new Error("owner team must exist");
+  if (canManageOrg(input.orgRole)) return { id: team.id, slug: team.slug, name: team.name };
+  const role = await ownerTeamRole({
+    database: input.database,
+    orgId: input.orgId,
+    actor: input.actor,
+    ownerTeamId: team.id,
+  });
+  if (!canEditOwnerTeam(role)) throw new Error("not allowed to create skills for this team");
+  return { id: team.id, slug: team.slug, name: team.name };
 }
 
 async function resolveVisibilityTeams(input: {
@@ -1414,10 +1463,18 @@ export async function setCommentDeprecated(input: {
   if (!comment) throw new Error("comment not found");
 
   const orgRole = await getOrgRole(input.orgId, input.actor.id, database);
+  if (!orgRole) throw new Error("not a member of this organization");
+  const canModifyExisting = await canModifySkill({
+    database,
+    orgId: input.orgId,
+    orgRole,
+    actor: input.actor,
+    ownerUserId: skill.owner_user_id,
+    ownerTeamId: skill.owner_team_id,
+  });
   const allowed =
     comment.authorId === input.actor.id ||
-    (orgRole ? isOrgAdmin(orgRole) : false) ||
-    skill.owner_id === input.actor.id;
+    canModify({ orgRole }, { isOwner: canModifyExisting });
   if (!allowed) throw new Error("not allowed to change this comment");
 
   const [updated] = await database
@@ -1471,24 +1528,24 @@ export async function setSkillVisibility(input: {
     orgRole,
     database,
   });
-  const sharedMemberships = await sharedSkillTeamMemberships({
+  const canModifyExisting = await canModifySkill({
     database,
     orgId: input.orgId,
     actor: input.actor,
-    skillId: skill.id,
+    orgRole,
+    ownerUserId: skill.owner_user_id,
+    ownerTeamId: skill.owner_team_id,
   });
-  const teamRole = strongestTeamRole(sharedMemberships);
   if (
-    !canModify({ orgRole, teamRole }, { isOwner: skill.owner_id === input.actor.id }) ||
-    !canUseExistingSkillVisibilityTarget({
-      orgRole,
-      isOwner: skill.owner_id === input.actor.id,
-      teamRole,
-      existing: skill.visibility,
-      target: { everyone: resolved.visibility.everyone, teams: resolved.teams.map((team) => team.slug) },
-      memberOfAllTargetTeams: resolved.memberOfAllTargetTeams,
-      sharedMemberships,
-    })
+    !canModify({ orgRole }, { isOwner: canModifyExisting }) ||
+    !canActAtVisibility(
+      { orgRole },
+      {
+        everyone: resolved.visibility.everyone,
+        teamCount: resolved.teams.length,
+        memberOfAllTargetTeams: resolved.memberOfAllTargetTeams,
+      },
+    )
   ) {
     throw new Error("not allowed to change this skill");
   }
@@ -1521,7 +1578,7 @@ export async function publishSkillVersion(input: {
 }): Promise<{ id: string; version: string }> {
   const database = input.database ?? db;
   const payload = publishSkillInputSchema.parse({ ...input.payload, storage_path: input.archiveKey });
-  await assertCanPublishSkillVersion({ actor: input.actor, orgId: input.orgId, payload, database });
+  const ownerTeam = await assertCanPublishSkillVersion({ actor: input.actor, orgId: input.orgId, payload, database });
 
   return database.transaction(async (tx) => {
     const publishPayload = publishSkillInputSchema.parse({ ...payload, storage_path: input.archiveKey });
@@ -1530,6 +1587,7 @@ export async function publishSkillVersion(input: {
       orgId: input.orgId,
       payload: publishPayload,
       archiveKey: input.archiveKey,
+      ownerTeam,
       database: tx as unknown as Db,
     });
   });
@@ -1540,7 +1598,7 @@ export async function assertCanPublishSkillVersion(input: {
   orgId: string;
   payload: PublishSkillInput;
   database?: Db;
-}): Promise<void> {
+}): Promise<{ id: string; slug: string; name: string } | null> {
   const database = input.database ?? db;
   const payload = publishSkillInputSchema.parse(input.payload);
   const orgRole = await getOrgRole(input.orgId, input.actor.id, database);
@@ -1549,6 +1607,13 @@ export async function assertCanPublishSkillVersion(input: {
     actor: input.actor,
     orgId: input.orgId,
     visibility: payload.visibility,
+    orgRole,
+    database,
+  });
+  const ownerTeam = await resolveOwnerTeam({
+    actor: input.actor,
+    orgId: input.orgId,
+    ownerTeam: payload.owner_team,
     orgRole,
     database,
   });
@@ -1564,26 +1629,30 @@ export async function assertCanPublishSkillVersion(input: {
       database,
     });
     if (!existingSkill) throw new Error("not allowed to publish this skill");
-    const sharedMemberships = await sharedSkillTeamMemberships({
+    if (payload.owner_team !== undefined) {
+      const requestedOwnerTeamId = ownerTeam?.id ?? null;
+      if (requestedOwnerTeamId !== existing.ownerTeamId) throw new Error("skill owner cannot be changed by publish");
+    }
+    const canModifyExisting = await canModifySkill({
       database,
       orgId: input.orgId,
       actor: input.actor,
-      skillId: existing.id,
+      orgRole,
+      ownerUserId: existing.ownerId,
+      ownerTeamId: existing.ownerTeamId,
     });
-    const teamRole = strongestTeamRole(sharedMemberships);
-    if (!canModify({ orgRole, teamRole }, { isOwner: existing.ownerId === input.actor.id })) {
+    if (!canModify({ orgRole }, { isOwner: canModifyExisting })) {
       throw new Error("not allowed to publish this skill");
     }
     if (
-      !canUseExistingSkillVisibilityTarget({
-        orgRole,
-        isOwner: existing.ownerId === input.actor.id,
-        teamRole,
-        existing: existingSkill.visibility,
-        target: { everyone: resolved.visibility.everyone, teams: resolved.teams.map((team) => team.slug) },
-        memberOfAllTargetTeams: resolved.memberOfAllTargetTeams,
-        sharedMemberships,
-      })
+      !canActAtVisibility(
+        { orgRole },
+        {
+          everyone: resolved.visibility.everyone,
+          teamCount: resolved.teams.length,
+          memberOfAllTargetTeams: resolved.memberOfAllTargetTeams,
+        },
+      )
     ) {
       throw new Error("not allowed to publish at this visibility");
     }
@@ -1594,7 +1663,7 @@ export async function assertCanPublishSkillVersion(input: {
     if (versions.some((v) => v.version === payload.version)) throw new Error("version already exists");
     const latest = versions.map((v) => v.version).sort((a, b) => compareSemver(b, a))[0];
     if (latest && compareSemver(payload.version, latest) <= 0) throw new Error("version must increase monotonically");
-    return;
+    return null;
   }
 
   if (
@@ -1609,6 +1678,7 @@ export async function assertCanPublishSkillVersion(input: {
   ) {
     throw new Error("not allowed to publish at this visibility");
   }
+  return ownerTeam;
 }
 
 async function writeSkillVersion(input: {
@@ -1616,6 +1686,7 @@ async function writeSkillVersion(input: {
   orgId: string;
   payload: PublishSkillInput;
   archiveKey: string;
+  ownerTeam: { id: string; slug: string; name: string } | null;
   database: Db;
 }): Promise<{ id: string; version: string }> {
   const database = input.database;
@@ -1652,6 +1723,7 @@ async function writeSkillVersion(input: {
           slug: payload.slug,
           description: payload.description,
           ownerId: input.actor.id,
+          ownerTeamId: input.ownerTeam?.id ?? null,
           creatorId: input.actor.id,
           everyone: resolved.visibility.everyone,
           validation: "valid",

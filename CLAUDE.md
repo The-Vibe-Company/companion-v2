@@ -33,6 +33,7 @@ Canonical terms — **do not invent synonyms**:
 - Hierarchy: **Organization → Team → User**.
 - Org roles: **Owner, Admin, Developer**. Team roles: **Admin, Editor, Reader**.
 - Skill visibility: **Private** is derived from `everyone=false` and no team shares; **Everyone** means every member of the current workspace; team shares are explicit and can be combined with Everyone.
+- Skill ownership: a skill is owned by a user unless `owner_team_id` is set; owner-team Admins/Editors can modify that skill. Team visibility shares do not grant write access.
 - Deploy targets are **providers**: **Docker (local), Fly, Kubernetes, Modal**.
 
 ## Target repository layout
@@ -78,7 +79,8 @@ docs/         # vision / product / design / PRD
   a **capability gate** (can the actor do it?). Enforce in the **service layer** (`packages/core`) so
   web, REST, and the worker share one path — never only in route handlers.
 - **"Deploy for" semantics:** keep ownership, visibility, and provenance distinct:
-  `owner_id` (the principal it's for), visibility state/share rows, and creator/audit (who acted).
+  `owner_id` / `owner_team_id` (who can edit), visibility state/share rows (who can read), and
+  creator/audit (who acted).
 - **Desired-state:** every deployable is a row of declared intent; the reconciler converges reality and
   heals drift. Provisioning is **idempotent** (keyed so retries never double-provision).
 - **Secrets** are envelope-encrypted, **write-only** over the API, referenced by id, and injected by the

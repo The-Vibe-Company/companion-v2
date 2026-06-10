@@ -1,13 +1,22 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Db } from "@companion/db";
-import { assertCanPublishSkillVersion, listSkills, type ActorContext } from "../src/services";
+import { assertCanPublishSkillVersion, listSkills, setSkillVisibility, type ActorContext } from "../src/services";
 
 const ORG = "00000000-0000-0000-0000-0000000000aa";
 const actor: ActorContext = { id: "user-1", email: "user@example.com", name: "User One" };
 
 const createdAt = new Date("2026-06-09T12:00:00.000Z");
 
-function skillRow(id: string, slug: string, everyone: boolean) {
+function skillRow(
+  id: string,
+  slug: string,
+  everyone: boolean,
+  owner: { kind?: "user" | "team"; userId?: string; teamId?: string | null; name?: string; handle?: string | null } = {},
+) {
+  const ownerKind = owner.kind ?? "user";
+  const ownerUserId = owner.userId ?? actor.id;
+  const ownerTeamId = owner.teamId ?? null;
+  const ownerName = owner.name ?? (ownerKind === "team" ? "Platform" : "User One");
   return {
     id,
     org_id: ORG,
@@ -16,10 +25,13 @@ function skillRow(id: string, slug: string, everyone: boolean) {
     everyone,
     validation: "valid",
     validation_error: null,
-    owner_id: actor.id,
-    owner_name: "User One",
-    owner_handle: null,
-    owner_initials: "UO",
+    owner_kind: ownerKind,
+    owner_id: ownerTeamId ?? ownerUserId,
+    owner_user_id: ownerUserId,
+    owner_team_id: ownerTeamId,
+    owner_name: ownerName,
+    owner_handle: owner.handle ?? (ownerKind === "team" ? "platform" : null),
+    owner_initials: ownerKind === "team" ? "PL" : "UO",
     current_version: "1.0.0",
     license: null,
     checksum: null,
@@ -43,19 +55,63 @@ function selectChain(rows: unknown[]) {
   return chain;
 }
 
+function whereTouchesColumn(expr: unknown, columnName: string): boolean {
+  const seen = new Set<unknown>();
+  const walk = (node: unknown): boolean => {
+    if (node === null || typeof node !== "object") return false;
+    if (seen.has(node)) return false;
+    seen.add(node);
+    const record = node as Record<string, unknown>;
+    if (record.name === columnName && "columnType" in record) return true;
+    return Object.values(record).some(walk);
+  };
+  return walk(expr);
+}
+
+function whereMentions(expr: unknown, value: string): boolean {
+  const seen = new Set<unknown>();
+  const walk = (node: unknown): boolean => {
+    if (node === value) return true;
+    if (node === null || typeof node !== "object") return false;
+    if (seen.has(node)) return false;
+    seen.add(node);
+    return Object.values(node as Record<string, unknown>).some(walk);
+  };
+  return walk(expr);
+}
+
 function fakeDb({
   orgRole = "developer",
   sharedTeamRole = "editor",
+  ownerTeamRole = "editor",
+  memberOfVisibilityTeams = true,
+  existingSkill = { id: "skill-one-team", ownerId: "other-user", ownerTeamId: null as string | null },
 }: {
   orgRole?: "owner" | "admin" | "developer" | null;
   sharedTeamRole?: "admin" | "editor" | "reader" | null;
+  ownerTeamRole?: "admin" | "editor" | "reader" | null;
+  memberOfVisibilityTeams?: boolean;
+  existingSkill?: { id: string; ownerId: string; ownerTeamId: string | null } | null;
 } = {}) {
+  const writes = {
+    updates: [] as Array<Record<string, unknown>>,
+    deletes: [] as unknown[],
+    insertedShares: [] as unknown[],
+    skillListWhere: undefined as unknown,
+    teamIdWheres: [] as unknown[],
+  };
   const skills = [
     skillRow("skill-private", "private-skill", false),
     skillRow("skill-everyone", "everyone-skill", true),
-    skillRow("skill-one-team", "one-team-skill", false),
-    skillRow("skill-multi-team", "multi-team-skill", false),
-    skillRow("skill-everyone-team", "everyone-team-skill", true),
+    skillRow("skill-one-team", "one-team-skill", false, { userId: "other-user", name: "Other User" }),
+    skillRow("skill-multi-team", "multi-team-skill", false, { userId: "other-user", name: "Other User" }),
+    skillRow("skill-everyone-team", "everyone-team-skill", true, { userId: "other-user", name: "Other User" }),
+    skillRow("skill-owner-team", "owner-team-skill", false, {
+      kind: "team",
+      userId: "creator-user",
+      teamId: "team-platform",
+      name: "Platform",
+    }),
   ];
   const shares = [
     { skill_id: "skill-one-team", id: "team-platform", slug: "platform", name: "Platform" },
@@ -64,31 +120,91 @@ function fakeDb({
     { skill_id: "skill-everyone-team", id: "team-platform", slug: "platform", name: "Platform" },
   ];
 
-  const database = {
+  const database: Record<string, unknown> = {
+    __writes: writes,
     query: {
       memberships: {
         findFirst: vi.fn(async () => (orgRole ? { orgRole } : null)),
       },
       skills: {
-        findFirst: vi.fn(async () => ({ id: "skill-one-team", ownerId: "other-user" })),
+        findFirst: vi.fn(async () => existingSkill),
+      },
+      teams: {
+        findFirst: vi.fn(async () => ({ id: "team-platform", slug: "platform", name: "Platform" })),
+      },
+      teamMemberships: {
+        findFirst: vi.fn(async () => (ownerTeamRole ? { teamRole: ownerTeamRole } : null)),
       },
     },
     select: vi.fn((cols: Record<string, unknown>) => {
       if ("skill_id" in cols) return selectChain(shares);
-      if ("teamRole" in cols && "slug" in cols) {
-        return selectChain(sharedTeamRole ? [{ teamId: "team-platform", slug: "platform", teamRole: sharedTeamRole }] : []);
-      }
       if ("teamRole" in cols) return selectChain(sharedTeamRole ? [{ teamRole: sharedTeamRole }] : []);
-      if ("teamId" in cols) return selectChain([{ teamId: "team-platform" }]);
+      if ("teamId" in cols) {
+        const chain = selectChain(memberOfVisibilityTeams ? [{ teamId: "team-platform" }] : []);
+        const originalWhere = chain.where as (expr: unknown) => typeof chain;
+        chain.where = vi.fn((expr: unknown) => {
+          writes.teamIdWheres.push(expr);
+          return originalWhere(expr);
+        });
+        return chain;
+      }
       if ("version" in cols) return selectChain([]);
       if ("id" in cols && "slug" in cols && "name" in cols) {
         return selectChain([{ id: "team-platform", slug: "platform", name: "Platform" }]);
       }
-      if ("id" in cols && "slug" in cols && "everyone" in cols) return selectChain(skills);
+      if ("id" in cols && "slug" in cols && "everyone" in cols) {
+        const chain = selectChain(skills);
+        const originalWhere = chain.where as (expr: unknown) => typeof chain;
+        chain.where = vi.fn((expr: unknown) => {
+          writes.skillListWhere = expr;
+          return originalWhere(expr);
+        });
+        return chain;
+      }
       return selectChain([]);
     }),
+    update: vi.fn(() => ({
+      set: vi.fn((patch: Record<string, unknown>) => {
+        writes.updates.push(patch);
+        return {
+          where: vi.fn(async () => undefined),
+        };
+      }),
+    })),
+    delete: vi.fn((table: unknown) => {
+      writes.deletes.push(table);
+      return {
+        where: vi.fn(async () => undefined),
+      };
+    }),
+    insert: vi.fn(() => ({
+      values: vi.fn(async (rows: unknown) => {
+        writes.insertedShares.push(...(Array.isArray(rows) ? rows : [rows]));
+      }),
+    })),
+    transaction: vi.fn(async (fn: (tx: unknown) => unknown) => fn(database)),
   };
   return database as unknown as Db;
+}
+
+function publishPayload(
+  slug: string,
+  visibility: { everyone: boolean; teams: string[] } = { everyone: false, teams: ["platform"] },
+  ownerTeam?: string | null,
+) {
+  return {
+    slug,
+    owner_team: ownerTeam,
+    visibility,
+    version: "1.1.0",
+    note: "",
+    description: slug,
+    checksum: `sha256:${"a".repeat(64)}`,
+    storage_path: `skills/org/${slug}/1.1.0.zip`,
+    size_bytes: 123,
+    frontmatter: `---\nname: ${slug}\n---`,
+    tools: [],
+  };
 }
 
 describe("listSkills visibility assembly", () => {
@@ -121,92 +237,64 @@ describe("listSkills visibility assembly", () => {
     });
   });
 
-  it("lets team editors publish new versions of existing skills shared with their team", async () => {
+  it("builds owner-team read visibility from editable team memberships only", async () => {
+    const database = fakeDb() as Db & { __writes: { teamIdWheres: unknown[] } };
+
+    await listSkills({ actor, orgId: ORG, database });
+
+    expect(database.__writes.teamIdWheres.some((where) => whereTouchesColumn(where, "team_role"))).toBe(true);
+    expect(database.__writes.teamIdWheres.some((where) => whereMentions(where, "admin"))).toBe(true);
+    expect(database.__writes.teamIdWheres.some((where) => whereMentions(where, "editor"))).toBe(true);
+  });
+
+  it("does not let team editors publish existing skills only shared with their team", async () => {
     await expect(
       assertCanPublishSkillVersion({
         actor,
         orgId: ORG,
         database: fakeDb({ sharedTeamRole: "editor" }),
-        payload: {
-          slug: "one-team-skill",
-          visibility: { everyone: false, teams: ["platform"] },
-          version: "1.1.0",
-          note: "",
-          description: "one-team-skill",
-          checksum: `sha256:${"a".repeat(64)}`,
-          storage_path: "skills/org/one-team-skill/1.1.0.zip",
-          size_bytes: 123,
-          frontmatter: "---\nname: one-team-skill\n---",
-          tools: [],
-        },
-      }),
-    ).resolves.toBeUndefined();
-  });
-
-  it("keeps team readers read-only for existing skills shared with their team", async () => {
-    await expect(
-      assertCanPublishSkillVersion({
-        actor,
-        orgId: ORG,
-        database: fakeDb({ sharedTeamRole: "reader" }),
-        payload: {
-          slug: "one-team-skill",
-          visibility: { everyone: false, teams: ["platform"] },
-          version: "1.1.0",
-          note: "",
-          description: "one-team-skill",
-          checksum: `sha256:${"a".repeat(64)}`,
-          storage_path: "skills/org/one-team-skill/1.1.0.zip",
-          size_bytes: 123,
-          frontmatter: "---\nname: one-team-skill\n---",
-          tools: [],
-        },
+        payload: publishPayload("one-team-skill"),
       }),
     ).rejects.toThrow("not allowed to publish this skill");
   });
 
-  it("prevents team editors from broadening someone else's shared skill to everyone", async () => {
+  it("lets owner team editors publish new versions of team-owned skills", async () => {
     await expect(
       assertCanPublishSkillVersion({
         actor,
         orgId: ORG,
-        database: fakeDb({ sharedTeamRole: "editor" }),
-        payload: {
-          slug: "one-team-skill",
-          visibility: { everyone: true, teams: ["platform"] },
-          version: "1.1.0",
-          note: "",
-          description: "one-team-skill",
-          checksum: `sha256:${"a".repeat(64)}`,
-          storage_path: "skills/org/one-team-skill/1.1.0.zip",
-          size_bytes: 123,
-          frontmatter: "---\nname: one-team-skill\n---",
-          tools: [],
-        },
+        database: fakeDb({
+          ownerTeamRole: "editor",
+          existingSkill: { id: "skill-owner-team", ownerId: "creator-user", ownerTeamId: "team-platform" },
+        }),
+        payload: publishPayload("owner-team-skill"),
       }),
-    ).rejects.toThrow("not allowed to publish at this visibility");
+    ).resolves.toBe(null);
   });
 
-  it("prevents team editors from making someone else's shared skill private", async () => {
+  it("keeps owner team readers read-only for team-owned skills", async () => {
+    await expect(
+      assertCanPublishSkillVersion({
+        actor,
+        orgId: ORG,
+        database: fakeDb({
+          ownerTeamRole: "reader",
+          existingSkill: { id: "skill-owner-team", ownerId: "creator-user", ownerTeamId: "team-platform" },
+        }),
+        payload: publishPayload("owner-team-skill"),
+      }),
+    ).rejects.toThrow("not allowed to publish this skill");
+  });
+
+  it("prevents visibility-team editors from broadening someone else's shared skill to everyone", async () => {
     await expect(
       assertCanPublishSkillVersion({
         actor,
         orgId: ORG,
         database: fakeDb({ sharedTeamRole: "editor" }),
-        payload: {
-          slug: "one-team-skill",
-          visibility: { everyone: false, teams: [] },
-          version: "1.1.0",
-          note: "",
-          description: "one-team-skill",
-          checksum: `sha256:${"a".repeat(64)}`,
-          storage_path: "skills/org/one-team-skill/1.1.0.zip",
-          size_bytes: 123,
-          frontmatter: "---\nname: one-team-skill\n---",
-          tools: [],
-        },
+        payload: publishPayload("one-team-skill", { everyone: true, teams: ["platform"] }),
       }),
-    ).rejects.toThrow("not allowed to publish at this visibility");
+    ).rejects.toThrow("not allowed to publish this skill");
   });
 
   it("prevents team editors from publishing someone else's everyone-visible skill through a team share", async () => {
@@ -215,19 +303,128 @@ describe("listSkills visibility assembly", () => {
         actor,
         orgId: ORG,
         database: fakeDb({ sharedTeamRole: "editor" }),
-        payload: {
-          slug: "everyone-team-skill",
-          visibility: { everyone: true, teams: ["platform"] },
-          version: "1.1.0",
-          note: "",
-          description: "everyone-team-skill",
-          checksum: `sha256:${"a".repeat(64)}`,
-          storage_path: "skills/org/everyone-team-skill/1.1.0.zip",
-          size_bytes: 123,
-          frontmatter: "---\nname: everyone-team-skill\n---",
-          tools: [],
-        },
+        payload: publishPayload("everyone-team-skill", { everyone: true, teams: ["platform"] }),
       }),
-    ).rejects.toThrow("not allowed to publish at this visibility");
+    ).rejects.toThrow("not allowed to publish this skill");
+  });
+
+  it("lets developers create team-owned skills for teams they can edit", async () => {
+    await expect(
+      assertCanPublishSkillVersion({
+        actor,
+        orgId: ORG,
+        database: fakeDb({ ownerTeamRole: "editor", existingSkill: null }),
+        payload: publishPayload("new-team-skill", { everyone: false, teams: [] }, "platform"),
+      }),
+    ).resolves.toEqual({ id: "team-platform", slug: "platform", name: "Platform" });
+  });
+
+  it("prevents developers from creating team-owned skills for read-only teams", async () => {
+    await expect(
+      assertCanPublishSkillVersion({
+        actor,
+        orgId: ORG,
+        database: fakeDb({ ownerTeamRole: "reader", existingSkill: null }),
+        payload: publishPayload("new-team-skill", { everyone: false, teams: [] }, "platform"),
+      }),
+    ).rejects.toThrow("not allowed to create skills for this team");
+  });
+});
+
+describe("setSkillVisibility authorization", () => {
+  it("lets a direct user owner update everyone and team shares", async () => {
+    const database = fakeDb() as Db & { __writes: { updates: Array<Record<string, unknown>>; insertedShares: unknown[] } };
+
+    await setSkillVisibility({
+      actor,
+      orgId: ORG,
+      slug: "private-skill",
+      visibility: { everyone: true, teams: ["platform"] },
+      database,
+    });
+
+    expect(database.__writes.updates).toEqual([expect.objectContaining({ everyone: true })]);
+    expect(database.__writes.insertedShares).toEqual([
+      { orgId: ORG, skillId: "skill-private", teamId: "team-platform" },
+    ]);
+  });
+
+  it("lets owner team editors update team-owned skill visibility", async () => {
+    const database = fakeDb({ ownerTeamRole: "editor" }) as Db & { __writes: { updates: Array<Record<string, unknown>>; insertedShares: unknown[] } };
+
+    await setSkillVisibility({
+      actor,
+      orgId: ORG,
+      slug: "owner-team-skill",
+      visibility: { everyone: false, teams: [] },
+      database,
+    });
+
+    expect(database.__writes.updates).toEqual([expect.objectContaining({ everyone: false })]);
+    expect(database.__writes.insertedShares).toEqual([]);
+  });
+
+  it("keeps owner team readers read-only", async () => {
+    await expect(
+      setSkillVisibility({
+        actor,
+        orgId: ORG,
+        slug: "owner-team-skill",
+        visibility: { everyone: true, teams: [] },
+        database: fakeDb({ ownerTeamRole: "reader" }),
+      }),
+    ).rejects.toThrow("not allowed to change this skill");
+  });
+
+  it("does not let visibility-team editors mutate someone else's skill", async () => {
+    await expect(
+      setSkillVisibility({
+        actor,
+        orgId: ORG,
+        slug: "one-team-skill",
+        visibility: { everyone: true, teams: ["platform"] },
+        database: fakeDb({ sharedTeamRole: "editor" }),
+      }),
+    ).rejects.toThrow("not allowed to change this skill");
+  });
+
+  it("prevents developers from sharing to teams they do not belong to", async () => {
+    await expect(
+      setSkillVisibility({
+        actor,
+        orgId: ORG,
+        slug: "private-skill",
+        visibility: { everyone: false, teams: ["platform"] },
+        database: fakeDb({ memberOfVisibilityTeams: false }),
+      }),
+    ).rejects.toThrow("not allowed to change this skill");
+  });
+
+  it("lets org admins share to any team", async () => {
+    const database = fakeDb({ orgRole: "admin", memberOfVisibilityTeams: false }) as Db & { __writes: { insertedShares: unknown[] } };
+
+    await setSkillVisibility({
+      actor,
+      orgId: ORG,
+      slug: "one-team-skill",
+      visibility: { everyone: false, teams: ["platform"] },
+      database,
+    });
+
+    expect(database.__writes.insertedShares).toEqual([
+      { orgId: ORG, skillId: "skill-one-team", teamId: "team-platform" },
+    ]);
+  });
+
+  it("denies non-members before visibility mutation", async () => {
+    await expect(
+      setSkillVisibility({
+        actor,
+        orgId: ORG,
+        slug: "private-skill",
+        visibility: { everyone: true, teams: [] },
+        database: fakeDb({ orgRole: null }),
+      }),
+    ).rejects.toThrow("not a member of this organization");
   });
 });

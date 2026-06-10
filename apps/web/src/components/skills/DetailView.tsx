@@ -109,13 +109,18 @@ export function DetailView({
     setTab("files");
   };
 
+  const ownerTeam = skill.owner.teamId
+    ? teams.find((team) => team.dbId === skill.owner.teamId || team.id === skill.owner.handle)
+    : null;
+  const canModifySkill =
+    myRole === "admin" ||
+    myRole === "owner" ||
+    (skill.owner.kind === "user" && skill.owner.userId === me.id) ||
+    (skill.owner.kind === "team" && (ownerTeam?.role === "admin" || ownerTeam?.role === "editor"));
   const canDeprecate = (c: SkillCommentRow): boolean =>
     // Hide the control on a still-optimistic row (a PATCH to a tmp id would 404).
     !c.id.startsWith("tmp-") &&
-    (c.author_id === me.id ||
-      myRole === "admin" ||
-      myRole === "owner" ||
-      skill.ownerId === me.id);
+    (c.author_id === me.id || canModifySkill);
 
   const addComment = (
     body: string,
@@ -200,7 +205,12 @@ export function DetailView({
           {index + 1} / {total}
         </span>
         <StarButton starred={skill.starred} count={skill.stars} onToggle={onToggleStar} />
-        <button className="dsecbtn" onClick={onUpdate} title="Publish a new version">
+        <button
+          className="dsecbtn"
+          onClick={onUpdate}
+          disabled={!canModifySkill}
+          title={canModifySkill ? "Publish a new version" : "Only the owner can publish a new version"}
+        >
           <Icon name="git-commit" size={14} />
           Update
         </button>
@@ -339,7 +349,12 @@ export function DetailView({
           )}
           <aside className="dsidebar">
             <p className="railhead">Properties</p>
-            <PropList skill={skill} teams={teams} onChangeVisibility={onChangeVisibility} />
+            <PropList
+              skill={skill}
+              teams={teams}
+              onChangeVisibility={onChangeVisibility}
+              canChangeVisibility={canModifySkill}
+            />
           </aside>
         </div>
       )}

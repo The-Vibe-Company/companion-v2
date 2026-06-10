@@ -172,15 +172,17 @@ async function publishCanonical(input: {
   orgId: string;
   canonical: Awaited<ReturnType<typeof packDir>>;
   fm: SkillFrontmatter;
+  ownerTeam?: string | null;
   visibility: SkillVisibilityInput;
   version: string;
   note: string;
 }): Promise<{ id: string; slug: string; version: string; checksum: string }> {
-  const { actor, orgId, canonical, fm, visibility, version, note } = input;
+  const { actor, orgId, canonical, fm, ownerTeam, visibility, version, note } = input;
   if (!isValidSemver(version)) throw new Error(`invalid semver: ${version}`);
   const key = skillArchiveKey({ orgId, slug: fm.name, version });
   const payload = publishSkillInputSchema.parse({
     slug: fm.name,
+    owner_team: ownerTeam,
     visibility,
     version,
     description: fm.description,
@@ -902,6 +904,7 @@ app.post("/v1/skills", bodyLimit({ maxSize: 32 * 1024 * 1024, onError: (c) => js
     let versionRaw: string | undefined;
     let messageRaw: string | undefined;
     let expectSlug: string | undefined;
+    let ownerTeamRaw: string | undefined;
 
     if (contentType.includes("multipart/form-data")) {
       const form = await c.req.formData();
@@ -919,6 +922,7 @@ app.post("/v1/skills", bodyLimit({ maxSize: 32 * 1024 * 1024, onError: (c) => js
       versionRaw = field("version");
       messageRaw = field("message");
       expectSlug = field("expect_slug");
+      ownerTeamRaw = field("owner_team");
     } else {
       const url = new URL(c.req.url);
       rejectLegacySkillVisibilityInput((name) => url.searchParams.has(name));
@@ -930,6 +934,7 @@ app.post("/v1/skills", bodyLimit({ maxSize: 32 * 1024 * 1024, onError: (c) => js
       versionRaw = c.req.query("version");
       messageRaw = c.req.query("message");
       expectSlug = c.req.query("expect_slug");
+      ownerTeamRaw = c.req.query("owner_team");
     }
 
     const result = await validateSkillArchive(archive);
@@ -954,6 +959,7 @@ app.post("/v1/skills", bodyLimit({ maxSize: 32 * 1024 * 1024, onError: (c) => js
       orgId,
       canonical,
       fm,
+      ownerTeam: ownerTeamRaw,
       visibility,
       version,
       note: messageRaw ?? "",
@@ -990,6 +996,7 @@ app.post("/v1/skills/create", bodyLimit({ maxSize: 2 * 1024 * 1024, onError: (c)
         orgId,
         canonical,
         fm: result.frontmatter,
+        ownerTeam: input.owner_team,
         visibility: input.visibility,
         version,
         note: "",

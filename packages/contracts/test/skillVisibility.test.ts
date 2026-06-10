@@ -24,7 +24,10 @@ describe("skill visibility contracts", () => {
       visibility,
       validation: "valid",
       validation_error: null,
+      owner_kind: "user",
       owner_id: "user_1",
+      owner_user_id: "user_1",
+      owner_team_id: null,
       owner_name: "Stan",
       owner_handle: null,
       owner_initials: "SG",
@@ -49,11 +52,16 @@ describe("skill visibility contracts", () => {
       id: "incident-summary",
       description: "Summarize incidents.",
       body: "",
+      owner_team: "platform",
       visibility: { everyone: false, teams: ["platform", "data"] },
-    }).visibility).toEqual({ everyone: false, teams: ["platform", "data"] });
+    })).toMatchObject({
+      owner_team: "platform",
+      visibility: { everyone: false, teams: ["platform", "data"] },
+    });
 
     expect(publishSkillInputSchema.parse({
       slug: "incident-summary",
+      owner_team: "platform",
       visibility: { everyone: true, teams: ["platform"] },
       version: "1.0.0",
       description: "Summarize incidents.",
@@ -62,7 +70,10 @@ describe("skill visibility contracts", () => {
       size_bytes: 123,
       frontmatter: "---\nname: incident-summary\n---",
       tools: [],
-    }).visibility).toEqual({ everyone: true, teams: ["platform"] });
+    })).toMatchObject({
+      owner_team: "platform",
+      visibility: { everyone: true, teams: ["platform"] },
+    });
   });
 
   it("rejects visibility fields in SKILL.md frontmatter", () => {

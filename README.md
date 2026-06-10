@@ -39,7 +39,8 @@ Think *"GitHub for your team's agents"* — but open-source and running on **you
 
 Skills use explicit workspace visibility: **Private** by default, **Everyone** for the whole
 workspace, and optional team shares for one or more teams. Everyone is organization-local; there is no
-internet-wide or cross-org visibility.
+internet-wide or cross-org visibility. Ownership is separate: a skill is owned by a user or by a
+team, and team-owned skills can be edited by that team's Admins and Editors.
 
 ## Why Companion
 

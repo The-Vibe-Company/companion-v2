@@ -1,7 +1,11 @@
-import type { OrgRole, SkillListRow, SkillVisibility, TeamRole, ValidationState } from "@companion/contracts";
+import type { OrgRole, SkillListRow, SkillOwnerKind, SkillVisibility, TeamRole, ValidationState } from "@companion/contracts";
 import { formatBytes, formatDate, relativeTime } from "./format";
 
 export interface SkillOwnerVM {
+  kind: SkillOwnerKind;
+  id: string;
+  userId: string;
+  teamId: string | null;
   name: string;
   initials: string;
   handle: string | null;
@@ -12,7 +16,7 @@ export interface SkillOwnerVM {
 export interface SkillVM {
   uuid: string; // db id
   id: string; // slug (the displayed machine name)
-  ownerId: string; // principal the skill is for (deprecate/restore gating)
+  ownerId: string; // effective owner principal (user id or team id)
   visibility: SkillVisibility;
   version: string | null;
   validation: ValidationState;
@@ -43,10 +47,14 @@ export function mapSkill(row: SkillListRow): SkillVM {
     description: row.description,
     error: row.validation_error,
     owner: {
+      kind: row.owner_kind,
+      id: row.owner_id,
+      userId: row.owner_user_id,
+      teamId: row.owner_team_id,
       name: row.owner_name,
       initials: row.owner_initials,
       handle: row.owner_handle,
-      team: row.visibility.teams[0]?.name ?? null,
+      team: row.owner_kind === "team" ? row.owner_name : null,
     },
     tools: row.tools ?? [],
     size: formatBytes(row.size_bytes),
@@ -65,6 +73,8 @@ export interface TeamVM {
   id: string; // slug
   name: string;
   initial: string;
+  role: TeamRole;
+  dbId?: string;
 }
 
 export interface MeVM {

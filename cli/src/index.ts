@@ -98,6 +98,7 @@ addGlobalOpts(
     .command("push <dir>")
     .description("validate, package, and publish a new version")
     .option("--private", "clear everyone and team shares")
+    .option("--owner-team <slug>", "team slug that owns the skill and can edit it")
     .option("--everyone", "share with everyone in the workspace")
     .option("--team <slug>", "team slug to share with (repeatable, comma-separated)", (value, previous: string[] = []) => [
       ...previous,
@@ -114,6 +115,7 @@ addGlobalOpts(
       {
         everyone: opts.everyone,
         private: opts.private,
+        ownerTeam: opts.ownerTeam,
         team: opts.team,
         bump: opts.bump,
         setVersion: opts.setVersion,

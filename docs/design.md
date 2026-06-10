@@ -62,9 +62,11 @@ adds `profiles`, `organizations`, `memberships`, `teams`, `team_memberships`, `i
 `api_tokens`, and `audit_log`.
 
 Every tenant-owned table carries `org_id`. Skills keep ownership, visibility, and provenance
-separate: `owner_id`, `everyone`, `skill_team_shares`, and `creator_id`. `everyone=true` means
-every member of the current workspace can see the skill. Team visibility is zero or more rows in
-`skill_team_shares`; private is derived from `everyone=false` and no team shares. A version's
+separate: `owner_id` / `owner_team_id`, `everyone`, `skill_team_shares`, and `creator_id`.
+`owner_team_id` means the skill is owned by a team; admin/editor members of that owner team can
+modify it. `everyone=true` means every member of the current workspace can see the skill. Team
+visibility is zero or more rows in `skill_team_shares`; those rows grant read access only. Private
+is derived from `everyone=false` and no team shares. A version's
 declared tools (`skill_versions.tools`) come from the `SKILL.md`
 frontmatter — Companion's native `tools` list, or the Claude skill-format `allowed-tools` (a YAML
 list or comma-separated string) accepted as an alias; tool names may be identifiers in any case
@@ -145,8 +147,8 @@ enabling auto-join) requires a verified email when `COMPANION_REQUIRE_VERIFIED_D
 
 The service layer in `packages/core` is the primary enforcement point. It applies:
 
-- visibility gate: owner, org admin, `everyone=true`, or membership in any shared team;
-- capability gate: org/team role, owner checks, and visibility-target action checks;
+- visibility gate: user owner, org admin, `everyone=true`, or membership in any shared team; owner-team admin/editor membership is also sufficient to read the skill so those owners can manage it;
+- capability gate: org admin, user owner, owner-team admin/editor, and visibility-target action checks; owner-team readers do not gain edit rights;
 - tenant gate: all service queries are scoped to the selected `org_id`.
 
 Postgres RLS may be added later as defense-in-depth, but browser and CLI clients never connect
