@@ -92,9 +92,9 @@ at the end of its install flow, and status is derived (Not installed / Installed
 by comparing the reported version against the bundled version. Installs are recorded with an
 `audit_log` `local_skill.install` entry.
 
-`api_tokens` holds short-lived, scoped personal access tokens for programmatic publish/install.
+`api_tokens` holds scoped personal access tokens for programmatic publish/install.
 Only the `sha256` `token_hash` is stored (the plaintext `cmp_pat_…` is shown once); each row carries
-`scopes` (`skills:read` / `skills:write`), an `expires_at` (24h default), and `revoked_at`.
+`scopes` (`skills:read` / `skills:write`), an `expires_at` (90-day default), and `revoked_at`.
 
 `skill_filter_preferences` stores the current user's Skills Hub filter state for one organization.
 The row is keyed by `(org_id, user_id)` and contains `active_filters` plus `custom_views` JSONB.

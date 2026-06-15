@@ -63,40 +63,63 @@ function buildPrompts(version: string): LocalSkillPrompts {
   const report =
     `curl -s "{base}/local-skills/companion/installed" -H "Authorization: Bearer {token}" ` +
     `-H "Content-Type: application/json" -d '{"version":"${version}","agent":"<your assistant>"}'`;
+  const credentials = [
+    "Save the current Companion credentials before doing anything else. Do not print the token.",
+    "",
+    "macOS/Linux:",
+    "```sh",
+    'mkdir -p "$HOME/.companion"',
+    "umask 077",
+    `printf '{"apiUrl":"%s","token":"%s","updatedAt":"%s"}\\n' "{base}" "{token}" "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" > "$HOME/.companion/credentials.json"`,
+    'chmod 600 "$HOME/.companion/credentials.json" 2>/dev/null || true',
+    "```",
+    "",
+    "Windows PowerShell:",
+    "```powershell",
+    '$dir = Join-Path $HOME ".companion"',
+    "New-Item -ItemType Directory -Force -Path $dir | Out-Null",
+    '@{ apiUrl = "{base}"; token = "{token}"; updatedAt = (Get-Date).ToUniversalTime().ToString("o") } | ConvertTo-Json -Compress | Set-Content -NoNewline -Encoding UTF8 (Join-Path $dir "credentials.json")',
+    "```",
+  ].join("\n");
 
   const install = [
     "You are installing the Companion skill for this workspace. It lets you manage, validate,",
     "publish, and update my skills here, and you always confirm a change with me first.",
     "",
-    `1. Download version ${version} of the package:`,
+    "1. Run the credential snippet for this user's OS:",
+    credentials,
+    `2. Download version ${version} of the package:`,
     `   ${download}`,
-    "2. Unzip companion.zip into wherever you keep skills (for example ~/.claude/skills/companion)",
+    "3. Unzip companion.zip into wherever you keep skills (for example ~/.claude/skills/companion)",
     "   and confirm SKILL.md sits at the package root. Remove companion.zip when done.",
-    "3. Confirm the install so this workspace knows it is ready:",
+    "4. Confirm the install so this workspace knows it is ready:",
     `   ${report}`,
-    "4. Tell me when it's ready.",
+    "5. Tell me when it's ready.",
   ].join("\n");
 
   const update = [
     `Please update the Companion skill to version ${version}.`,
     "",
-    "1. Download the latest package:",
+    "1. Run the credential snippet for this user's OS so future skill calls use the current workspace:",
+    credentials,
+    "2. Download the latest package:",
     `   ${download}`,
-    "2. Unzip it over your existing companion skill folder, keeping SKILL.md at the root.",
+    "3. Unzip it over your existing companion skill folder, keeping SKILL.md at the root.",
     "   Remove companion.zip when done.",
-    "3. Confirm the new version with the workspace:",
+    "4. Confirm the new version with the workspace:",
     `   ${report}`,
-    "4. Tell me what changed.",
+    "5. Tell me what changed.",
   ].join("\n");
 
-  // The "use" prompt also carries fresh credentials: the drawer mints a new token on copy/send, and
-  // the originally-installed token is short-lived (24h), so handing these over lets the skill keep
-  // working without a reinstall.
+  // The "use" prompt also carries fresh credentials: the drawer mints a new token on copy/send, so
+  // handing these over lets the skill keep working without a reinstall.
   const use = [
     "Use the Companion skill to manage, validate, and publish my skills.",
-    "If it needs fresh workspace access, set:",
-    "  COMPANION_API_URL={base}",
-    "  COMPANION_TOKEN={token}",
+    "First refresh its stored workspace credentials by running the snippet for this user's OS:",
+    credentials,
+    "Then use the skill. It should read COMPANION_API_URL and COMPANION_TOKEN from the environment if",
+    "both are set; otherwise it should read them from ~/.companion/credentials.json on macOS/Linux or",
+    "$HOME\\.companion\\credentials.json on Windows.",
   ].join("\n");
 
   return { install, update, use };

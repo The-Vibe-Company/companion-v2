@@ -3,6 +3,15 @@
 Base URL is `COMPANION_API_URL` (ends in `/v1`). Authenticate every request with
 `Authorization: Bearer $COMPANION_TOKEN`. The token is scoped to `skills:read` + `skills:write`.
 
+Resolve those values from the environment first. If either variable is missing, read the dedicated
+local credentials file written by the Companion install/use prompt:
+
+- macOS/Linux: `~/.companion/credentials.json`
+- Windows: `$HOME\.companion\credentials.json`
+
+The file contains `apiUrl`, `token`, and `updatedAt`. Use `apiUrl` as `COMPANION_API_URL` and `token`
+as `COMPANION_TOKEN`. Never print the token back to the user.
+
 These are the endpoints a personal access token (`skills:read` + `skills:write`) can call:
 
 | Action | Method & path | Scope |
@@ -51,8 +60,8 @@ version you fetched.
 POST /local-skills/companion/installed
 Content-Type: application/json
 
-{ "version": "1.0.0", "agent": "Claude Code" }
+{ "version": "1.0.1", "agent": "Claude Code" }
 ```
 
 `version` must be valid semver (use this skill's `metadata.companion_version`). The response is
-`{ "ok": true, "status": "installed" | "update", "availableVersion": "1.0.0" }`.
+`{ "ok": true, "status": "installed" | "update", "availableVersion": "1.0.1" }`.

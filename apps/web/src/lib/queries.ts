@@ -35,7 +35,7 @@ export function apiBase(): string {
   return "/v1";
 }
 
-/** Mint a short-lived scoped personal access token (used by the guided-prompt methods). */
+/** Mint a scoped personal access token (used by the guided-prompt methods). */
 export async function issueToken(scopes: TokenScope[], name?: string): Promise<IssuedToken> {
   return apiFetch<IssuedToken>("/v1/tokens", {
     method: "POST",

@@ -9,7 +9,7 @@ export type TokenScope = z.infer<typeof tokenScopeSchema>;
 
 export const TOKEN_SCOPES: readonly TokenScope[] = ["skills:read", "skills:write"] as const;
 
-/** Body of `POST /v1/tokens` — request a short-lived scoped token. */
+/** Body of `POST /v1/tokens` — request a scoped token. */
 export const issueTokenInputSchema = z.object({
   scopes: z.array(tokenScopeSchema).min(1),
   name: z.string().min(1).max(120).optional(),

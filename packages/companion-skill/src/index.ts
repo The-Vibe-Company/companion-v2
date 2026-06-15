@@ -58,6 +58,13 @@ export const COMPANION_SKILL_MANIFEST: CompanionSkillManifest = {
   ],
   changelog: [
     {
+      version: "1.0.1",
+      changes: [
+        "Stores the current workspace API URL and token in a local credentials file during install and use prompts.",
+        "Reads credentials from the environment first, then from the local Companion credentials file.",
+      ],
+    },
+    {
       version: "1.0.0",
       changes: [
         "Publish, update, validate, and list skills from your assistant.",

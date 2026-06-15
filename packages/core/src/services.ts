@@ -1890,8 +1890,8 @@ export async function getDownloadVersion(input: {
 
 /* ---- Personal access tokens (programmatic publish / install) --------------- */
 
-/** Default lifetime of an issued token (24h), unless overridden by the caller. */
-export const API_TOKEN_TTL_MS = 1000 * 60 * 60 * 24;
+/** Default lifetime of an issued token (90 days), unless overridden by the caller. */
+export const API_TOKEN_TTL_MS = 1000 * 60 * 60 * 24 * 90;
 
 function hashApiToken(raw: string): string {
   return createHash("sha256").update(raw).digest("hex");

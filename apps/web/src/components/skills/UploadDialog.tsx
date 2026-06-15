@@ -660,7 +660,7 @@ Workflow:
     <>
       <p className="up-panel__lede">
         Give an agent everything it needs to publish on your behalf. The token below is scoped to{" "}
-        <b>skills:write</b> and expires in 24 hours.
+        <b>skills:write</b> and expires in 90 days.
       </p>
       <div className="up-step">
         <StepLabel n="1">Upload token</StepLabel>
@@ -1611,7 +1611,7 @@ Choose the right local skills folder for the user's agent, download the package,
                         regen={regenToken}
                         hint={
                           <>
-                            Scoped to <b>skills:read</b>, expires in 24 hours.
+                            Scoped to <b>skills:read</b>, expires in 90 days.
                           </>
                         }
                       />
