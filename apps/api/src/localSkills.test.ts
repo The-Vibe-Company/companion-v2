@@ -57,6 +57,19 @@ describe("companion skill package + row", () => {
     expect(row.prompts.install).toContain(pkg.version);
   });
 
+  it("prompts persist fresh workspace credentials for future skill calls", async () => {
+    const row = await buildCompanionSkillRow(null);
+    for (const prompt of [row.prompts.install, row.prompts.update, row.prompts.use]) {
+      expect(prompt).toContain("$HOME/.companion/credentials.json");
+      expect(prompt).toContain("credentials.json");
+      expect(prompt).toContain("{base}");
+      expect(prompt).toContain("{token}");
+      expect(prompt).toContain("Do not print the token");
+    }
+    expect(row.prompts.install).toContain("/local-skills/companion/installed");
+    expect(row.prompts.update).toContain("/local-skills/companion/installed");
+  });
+
   it("reflects an install record as installed/update", async () => {
     const pkg = await getCompanionSkillPackage();
     const base = {

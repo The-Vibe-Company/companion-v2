@@ -349,7 +349,7 @@ function LocalSkillDrawer({ skill, onClose }: { skill: LocalSkillRow; onClose: (
             {phase === "ready" && prompt && (
               <>
                 <CodeBlock text={prompt} scroll copyLabel="Copy prompt" />
-                <p className="ls-prompt-hint">Scoped to skills:read + skills:write, expires in 24 hours.</p>
+                <p className="ls-prompt-hint">Scoped to skills:read + skills:write, expires in 90 days.</p>
                 {copied && (
                   <div className="ls-copied" role="status">
                     <Icon name="check" size={14} />

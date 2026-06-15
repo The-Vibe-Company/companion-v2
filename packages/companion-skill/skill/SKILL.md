@@ -3,7 +3,7 @@ name: companion
 description: Manage, validate, publish, update, and audit your Companion skills from a coding assistant, using the Companion workspace API.
 license: MIT
 metadata:
-  companion_version: 1.0.0
+  companion_version: 1.0.1
 allowed-tools: read_file write_file run_shell
 ---
 
@@ -15,14 +15,37 @@ You always confirm a change with the user before anything is published.
 
 ## Configuration
 
-You need two values, supplied when this skill is installed (or set them in the environment):
+You need two values, supplied when this skill is installed, refreshed by the web app's "Use" prompt,
+or set in the environment:
 
 - `COMPANION_API_URL` — the workspace API base, e.g. `https://companion.acme.dev/v1`.
 - `COMPANION_TOKEN` — a personal access token (`cmp_pat_…`) scoped to `skills:read` and
   `skills:write`. Send it as `Authorization: Bearer $COMPANION_TOKEN`.
 
-Never print the token back to the user or write it into a skill package. Treat skill files as the
-only thing you read; do not scan the rest of the machine.
+Resolve credentials in this order before any network call:
+
+1. If both `COMPANION_API_URL` and `COMPANION_TOKEN` are set in the environment, use them.
+2. Otherwise read the dedicated local credentials file:
+   - macOS/Linux: `~/.companion/credentials.json`
+   - Windows: `$HOME\.companion\credentials.json`
+
+The file is JSON:
+
+```json
+{
+  "apiUrl": "https://companion.acme.dev/v1",
+  "token": "cmp_pat_...",
+  "updatedAt": "2026-06-15T12:00:00.000Z"
+}
+```
+
+Use `apiUrl` as `COMPANION_API_URL` and `token` as `COMPANION_TOKEN`. If neither source is available,
+stop and ask the user to copy the latest Companion install/use prompt from the workspace so fresh
+credentials can be saved.
+
+Never print the token back to the user or write it into a skill package. Only read
+`~/.companion/credentials.json` (or the Windows equivalent) for credentials, and otherwise treat
+skill files as the only thing you read; do not scan the rest of the machine.
 
 A skill is a folder with a `SKILL.md` at its root. Companion records two values under
 `metadata` in that file:
@@ -125,7 +148,7 @@ skills view shows the correct status and version. Report the version from this f
 curl -s "$COMPANION_API_URL/local-skills/companion/installed" \
   -H "Authorization: Bearer $COMPANION_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"version":"1.0.0","agent":"<your assistant name>"}'
+  -d '{"version":"1.0.1","agent":"<your assistant name>"}'
 ```
 
 A `{ "ok": true, "status": "installed" }` response confirms the workspace now knows this machine has

@@ -2,7 +2,9 @@ import { describe, expect, it, vi } from "vitest";
 import type { Db } from "@companion/db";
 import { apiTokenRowSchema, TEAM_BRAND_COLORS } from "@companion/contracts";
 import {
+  API_TOKEN_TTL_MS,
   deleteTeam,
+  issueApiToken,
   listApiTokens,
   updateOrg,
   updateTeam,
@@ -68,6 +70,8 @@ interface FakeDbOptions {
   teamCount?: number;
   /** Rows returned for the `apiTokens` select (listApiTokens). */
   tokenRows?: Array<Record<string, unknown>>;
+  /** Rows returned by an `insert(...).returning(...)`. */
+  insertReturning?: Array<Record<string, unknown>>;
   /** Rows returned by an `update(...).returning(...)`. */
   updateReturning?: Array<Record<string, unknown>>;
   /** Skill share rows affected by deleteTeam. */
@@ -88,6 +92,8 @@ function fakeDb(options: FakeDbOptions = {}) {
     txPatch: undefined as Record<string, unknown> | undefined,
     /** the `.where` expr captured from the most recent token select. */
     tokenWhere: undefined as unknown,
+    /** every `insert(table).values(...)` call, in order. */
+    inserts: [] as Array<{ table: unknown; values?: Record<string, unknown> }>,
   };
   // `query.teams.findFirst` may be called twice (slug-conflict probe then guard lookup). We pop
   // through configured results: first `teamConflict` (if set) else `team`, then `team`.
@@ -183,9 +189,21 @@ function fakeDb(options: FakeDbOptions = {}) {
     return builder;
   };
 
-  const insertBuilder = () => ({
-    values: () => ({ onConflictDoNothing: vi.fn(async () => undefined) }),
-  });
+  const insertBuilder = (table: unknown) => {
+    const record: { table: unknown; values?: Record<string, unknown> } = { table };
+    calls.inserts.push(record);
+    const api = {
+      values(values: Record<string, unknown>) {
+        record.values = values;
+        return api;
+      },
+      onConflictDoNothing: vi.fn(async () => undefined),
+      returning() {
+        return Promise.resolve(options.insertReturning ?? [{ id: "token-id" }]);
+      },
+    };
+    return api;
+  };
 
   // The transaction handle records an ordered marker sequence so the deleteTeam tests can assert
   // skill visibility metadata is touched before the team row deletion when shares are affected.
@@ -533,6 +551,54 @@ describe("deleteTeam", () => {
     await expect(deleteTeam({ actor: admin, orgId: ORG_A, teamId: TEAM_1, database })).rejects.toThrow(
       "team not found",
     );
+  });
+});
+
+/* ---- issueApiToken --------------------------------------------------------- */
+
+describe("issueApiToken", () => {
+  function tokenInsertValues(calls: ReturnType<typeof fakeDb>["calls"]): Record<string, unknown> {
+    const insert = calls.inserts.find((entry) => entry.values && "tokenHash" in entry.values);
+    if (!insert?.values) throw new Error("api token insert not captured");
+    return insert.values;
+  }
+
+  it("defaults issued tokens to at least 90 days", async () => {
+    const { database, calls } = fakeDb({ role: "developer" });
+    const before = Date.now();
+
+    const issued = await issueApiToken({
+      actor: developer,
+      orgId: ORG_A,
+      scopes: ["skills:read", "skills:write"],
+      database,
+    });
+
+    const values = tokenInsertValues(calls);
+    expect(values).toMatchObject({ orgId: ORG_A, userId: developer.id, scopes: ["skills:read", "skills:write"] });
+    expect(values.tokenHash).toEqual(expect.any(String));
+    expect(values.tokenHash).not.toBe(issued.token);
+    expect(values.expiresAt).toBeInstanceOf(Date);
+    expect((values.expiresAt as Date).getTime()).toBeGreaterThanOrEqual(before + API_TOKEN_TTL_MS);
+    expect(issued.expiresAt).toBe(values.expiresAt);
+  });
+
+  it("honors an explicit ttlMs override", async () => {
+    const { database, calls } = fakeDb({ role: "developer" });
+    const ttlMs = 1000 * 60 * 5;
+    const before = Date.now();
+
+    await issueApiToken({
+      actor: developer,
+      orgId: ORG_A,
+      scopes: ["skills:read"],
+      ttlMs,
+      database,
+    });
+
+    const expiresAt = tokenInsertValues(calls).expiresAt as Date;
+    expect(expiresAt.getTime()).toBeGreaterThanOrEqual(before + ttlMs);
+    expect(expiresAt.getTime()).toBeLessThan(before + API_TOKEN_TTL_MS);
   });
 });
 

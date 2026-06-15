@@ -1298,7 +1298,7 @@ app.get("/v1/tokens", async (c) => {
 });
 
 /**
- * Issue a short-lived scoped personal access token for the guided-prompt / install flows.
+ * Issue a scoped personal access token for the guided-prompt / install flows.
  * Cookie session only — a token cannot mint another token. The plaintext is returned once.
  */
 app.post("/v1/tokens", async (c) => {

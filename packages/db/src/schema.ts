@@ -378,8 +378,8 @@ export const skillComments = pgTable(
 /**
  * Personal access tokens for programmatic publish/install over the API. The plaintext
  * `cmp_pat_<hex>` is shown to the caller once; only its sha256 `token_hash` is stored.
- * `scopes` gates capability (`skills:read` / `skills:write`); tokens are short-lived
- * (24h by default) and can be revoked.
+ * `scopes` gates capability (`skills:read` / `skills:write`); tokens expire
+ * (90 days by default) and can be revoked.
  */
 export const apiTokens = pgTable(
   "api_tokens",
