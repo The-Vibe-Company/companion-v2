@@ -69,8 +69,10 @@ visibility is zero or more rows in `skill_team_shares`; those rows grant read ac
 is derived from `everyone=false` and no team shares. A version's declared tools
 (`skill_versions.tools`) come from the Agent Skills `allowed-tools` frontmatter string.
 Companion-specific registry data is written under `metadata.companion_*` when a package is
-published, including `companion_skill_id` and `companion_version`. On re-publish of an existing
-Companion package, that reserved metadata is treated as provenance; the API/CLI still assigns the
+published, including `companion_skill_id` and `companion_version`. On targeted re-publish, callers
+may send `expect_slug` and `expect_skill_id`; validation and publication reject mismatched
+frontmatter names and any present `metadata.companion_skill_id` that points at a different skill.
+On re-publish of an existing Companion package, reserved version metadata is treated as provenance; the API/CLI still assigns the
 next registry version unless the caller passes an explicit version. Legacy top-level `version`,
 `tools`, and unknown fields are warnings and are not preserved as top-level fields in newly stored
 packages; top-level `scope` or `visibility` is rejected because visibility belongs to the publish
@@ -191,9 +193,10 @@ accepted **only** on the PAT-enabled skills endpoints (`POST /v1/skills`, `POST 
 `GET /v1/skills/:slug/versions/:version/files`); every other
 endpoint rejects tokens. Token requests are scope-gated (`skills:write` to publish/create,
 `skills:read` to download). `POST /v1/skills` accepts a multipart `file` (browser/CLI) or a raw
-`application/zip` / `application/gzip` body with `everyone`/`team`/`version` query params (the
-guided-prompt curl). Uploads accept `.zip` or `.tar.gz`; the canonical stored, checksummed format
-is `.tar.gz`.
+`application/zip` / `application/gzip` body with `everyone`/`team`/`version` query params. Setting
+`action=validate` runs the same package checks without publishing; targeted updates also accept
+`expect_slug` and `expect_skill_id` in form fields or query params for both validation and
+publication. Uploads accept `.zip` or `.tar.gz`; the canonical stored, checksummed format is `.tar.gz`.
 
 Skill archives are stored under `{org_id}/{slug}/{version}.tar.gz` in the `skill-archives` bucket;
 the per-version package endpoint repackages them as `.zip` on the fly. Clients never receive S3

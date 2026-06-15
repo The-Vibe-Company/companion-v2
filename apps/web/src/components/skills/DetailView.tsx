@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type {
   OrgRole,
   SkillVisibilityInput,
@@ -24,6 +24,117 @@ import { Discussion } from "./discussion";
 import { fmtBytes, iconForFile } from "./fileFormat";
 
 type Tab = "overview" | "files" | "activity";
+
+export function DetailMoreMenuContent({
+  canModifySkill,
+  canDownload,
+  onUpdate,
+  onDownload,
+}: {
+  canModifySkill: boolean;
+  canDownload: boolean;
+  onUpdate: () => void;
+  onDownload: () => void;
+}) {
+  return (
+    <div className="menu dmore__menu" role="menu">
+      <div className="menu__head">Actions</div>
+      {canModifySkill && (
+        <button className="menu__item" role="menuitem" onClick={onUpdate}>
+          <span className="ico">
+            <Icon name="git-commit" size={14} />
+          </span>
+          <span className="menu__label">Publish new version</span>
+        </button>
+      )}
+      <button
+        className="menu__item"
+        role="menuitem"
+        onClick={onDownload}
+        disabled={!canDownload}
+      >
+        <span className="ico">
+          <Icon name="package-2" size={14} />
+        </span>
+        <span className="menu__label">Download package</span>
+      </button>
+    </div>
+  );
+}
+
+function DetailMoreMenu({
+  canModifySkill,
+  canDownload,
+  onUpdate,
+  onDownload,
+}: {
+  canModifySkill: boolean;
+  canDownload: boolean;
+  onUpdate: () => void;
+  onDownload: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLSpanElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onPointer = (event: MouseEvent) => {
+      if (ref.current && !ref.current.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", onPointer);
+    return () => document.removeEventListener("mousedown", onPointer);
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    ref.current?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus();
+  }, [open]);
+
+  const choose = (fn: () => void) => {
+    setOpen(false);
+    fn();
+  };
+
+  return (
+    <span
+      className="dmore"
+      ref={ref}
+      onKeyDown={(event) => {
+        if (!open) return;
+        if (event.key === "Escape") {
+          event.preventDefault();
+          setOpen(false);
+          ref.current?.querySelector<HTMLButtonElement>(".iconbtn")?.focus();
+        }
+        if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+        event.preventDefault();
+        const items = Array.from(ref.current?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)') ?? []);
+        const current = items.indexOf(document.activeElement as HTMLButtonElement);
+        const next = event.key === "ArrowDown" ? current + 1 : current - 1;
+        items[(next + items.length) % items.length]?.focus();
+      }}
+    >
+      <button
+        className="iconbtn"
+        title="More actions"
+        aria-label="More actions"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => setOpen((next) => !next)}
+      >
+        <Icon name="more-horizontal" size={15} />
+      </button>
+      {open && (
+        <DetailMoreMenuContent
+          canModifySkill={canModifySkill}
+          canDownload={canDownload}
+          onUpdate={() => choose(onUpdate)}
+          onDownload={() => choose(onDownload)}
+        />
+      )}
+    </span>
+  );
+}
 
 export function DetailView({
   skill,
@@ -206,15 +317,6 @@ export function DetailView({
         </span>
         <StarButton starred={skill.starred} count={skill.stars} onToggle={onToggleStar} />
         <button
-          className="dsecbtn"
-          onClick={onUpdate}
-          disabled={!canModifySkill}
-          title={canModifySkill ? "Publish a new version" : "Only the owner can publish a new version"}
-        >
-          <Icon name="git-commit" size={14} />
-          Update
-        </button>
-        <button
           className="btn-primary"
           disabled={invalid || !skill.version}
           onClick={onInstall}
@@ -229,12 +331,12 @@ export function DetailView({
           <Icon name="download" size={14} />
           Install skill
         </button>
-        <button className="iconbtn" title="Download package" onClick={download}>
-          <Icon name="package-2" size={15} />
-        </button>
-        <button className="iconbtn" title="More">
-          <Icon name="more-horizontal" size={15} />
-        </button>
+        <DetailMoreMenu
+          canModifySkill={canModifySkill}
+          canDownload={!!skill.version}
+          onUpdate={onUpdate}
+          onDownload={download}
+        />
       </div>
 
       <div className="viewbar dtabs" role="tablist" aria-label="Skill detail sections">

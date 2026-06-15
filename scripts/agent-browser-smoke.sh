@@ -184,7 +184,7 @@ log "Checking upload dialog opens"
 agent-browser find role button click --name "Upload skill"
 agent-browser wait 500
 assert_body_contains "Upload a skill"
-assert_body_contains "Guided prompt"
+assert_body_contains "Assistant IA"
 assert_body_contains "Create in the browser"
 agent-browser find role button click --name "Cancel"
 
