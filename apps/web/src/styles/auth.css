@@ -50,9 +50,13 @@
   display: grid; place-items: center;
   width: 32px; height: 32px;
   border-radius: var(--radius-md);
-  background: var(--color-accent);
-  color: var(--color-accent-fg);
-  font-weight: 600; font-size: 17px;
+  background: var(--color-surface);
+  background-image: url("/brand/companion-mark-ui.png");
+  background-size: 86%;
+  background-repeat: no-repeat;
+  background-position: center;
+  border: 1px solid var(--color-line);
+  overflow: hidden;
   flex: none;
 }
 .brandname { font-size: var(--text-md); font-weight: 600; letter-spacing: var(--tracking-tight); line-height: 1.1; }

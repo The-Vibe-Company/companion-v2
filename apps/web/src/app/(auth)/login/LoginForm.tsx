@@ -88,7 +88,7 @@ const GoogleG = () => (
 function Brand() {
   return (
     <div className="authbrand">
-      <span className="brandmark">C</span>
+      <span className="brandmark" aria-hidden="true" />
       <div>
         <div className="brandname">Companion</div>
       </div>

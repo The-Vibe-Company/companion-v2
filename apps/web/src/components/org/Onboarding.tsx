@@ -29,7 +29,7 @@ export function Onboarding({
     <div className="og-scrim" onMouseDown={(e) => { if (e.target === e.currentTarget) close(); }}>
       <div className="og-dialog og-onb" role="dialog" aria-modal="true">
         <div className="og-onb__brand">
-          <span className="og-onb__mark">C</span>
+          <span className="og-onb__mark" aria-hidden="true" />
           <span className="og-onb__wm">Companion</span>
         </div>
         <h2 className="og-onb__h">Set up your workspace</h2>

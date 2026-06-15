@@ -174,7 +174,7 @@
 /* ---- Onboarding (first-run: create personal / join) -------------------- */
 .og-onb { width: min(540px, 94vw); }
 .og-onb__brand { display: flex; align-items: center; gap: 10px; padding: 22px 24px 0; }
-.og-onb__mark { width: 30px; height: 30px; border-radius: var(--radius-md); display: grid; place-items: center; font-weight: 600; font-size: 16px; background: var(--color-accent); color: var(--color-accent-fg); }
+.og-onb__mark { width: 30px; height: 30px; border-radius: var(--radius-md); display: grid; place-items: center; background: var(--color-surface) url("/brand/companion-mark-ui.png") center / 86% no-repeat; border: 1px solid var(--color-line); overflow: hidden; }
 .og-onb__wm { font-weight: 600; font-size: var(--text-base); letter-spacing: var(--tracking-tight); }
 .og-onb__h { font-size: var(--text-lg); font-weight: 600; letter-spacing: var(--tracking-tight); margin: 18px 24px 4px; }
 .og-onb__sub { font-size: var(--text-sm); color: var(--color-muted); margin: 0 24px 18px; line-height: var(--leading-relaxed); }

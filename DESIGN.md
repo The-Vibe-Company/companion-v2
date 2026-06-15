@@ -300,7 +300,7 @@ Selection uses a tinted row background plus an inset accent edge via box-shadow.
 
 **Topbar** is compact and single-line. It shows product/workspace/view context, connection state, and updated timestamp. Use middle-dot separators and mono timestamps. No tagline, greeting, or hero title.
 
-**Sidebar** contains the Companion brand mark, wordmark, workspace context, primary navigation, counts where useful, and a quiet environment/footer indicator. Active nav uses `surface-raised` with foreground text; unread counts may use the accent fill. The brand mark tile uses `accent` background with `accent-fg` text.
+**Sidebar** contains the Companion brand mark, wordmark, workspace context, primary navigation, counts where useful, and a quiet environment/footer indicator. Active nav uses `surface-raised` with foreground text; unread counts may use the accent fill. The brand mark tile uses the official transparent Companion mark on a tokenized `surface` tile with a `line` border, so it works across light, dark, and accent presets.
 
 **Summary counts** are slim inline rows. Use tabular numbers, muted labels, and status dot plus label. They are not cards.
 
