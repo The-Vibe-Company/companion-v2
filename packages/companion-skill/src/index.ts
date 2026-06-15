@@ -1,0 +1,92 @@
+import { existsSync } from "node:fs";
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
+/**
+ * `@companion/companion-skill` — the built-in "Companion" management skill.
+ *
+ * This package ships both the packable skill source (`skill/SKILL.md` + supporting files) and the
+ * presentation manifest the "Companion skills" view renders. The authoritative version is the
+ * `metadata.companion_version` baked into `skill/SKILL.md`; the API derives `availableVersion` from
+ * the packed package, never from a constant here.
+ */
+
+export const COMPANION_SKILL_KEY = "companion";
+
+export interface CompanionSkillCommand {
+  name: string;
+  desc: string;
+}
+
+export interface CompanionSkillChangelogEntry {
+  version: string;
+  changes: string[];
+}
+
+export interface CompanionSkillManifest {
+  key: string;
+  name: string;
+  description: string;
+  what: string;
+  uses: string;
+  why: string[];
+  commands: CompanionSkillCommand[];
+  changelog: CompanionSkillChangelogEntry[];
+}
+
+export const COMPANION_SKILL_MANIFEST: CompanionSkillManifest = {
+  key: COMPANION_SKILL_KEY,
+  name: "Companion",
+  description:
+    "Manages the skills on this machine and publishes or updates them in Companion, through your assistant.",
+  what:
+    "The Companion skill gives your assistant everything it needs to look after your skills on this machine. It can validate them, publish new ones, push updates, and check that everything is current. It always confirms a change with you before anything is published.",
+  uses:
+    "Your assistant uses it whenever you ask to publish, update, validate, or check your skills, so the steps stay consistent and safe.",
+  why: [
+    "Reads only the skills you point it at. Nothing else on your machine.",
+    "Always validates and confirms with you before it publishes anything.",
+    "Every publish and update is recorded in the workspace history.",
+  ],
+  commands: [
+    { name: "Publish a skill", desc: "Validate a skill and publish it to Companion safely." },
+    { name: "Update a skill", desc: "Push a new version of a skill you have changed." },
+    { name: "Check for updates", desc: "See whether the skills on this machine are up to date." },
+    { name: "Install updates", desc: "Bring outdated skills up to the latest published version." },
+    { name: "Validate a skill", desc: "Check a skill is well formed before you share it." },
+    { name: "Manage your skills", desc: "List and organize the skills on this machine." },
+  ],
+  changelog: [
+    {
+      version: "1.0.0",
+      changes: [
+        "Publish, update, validate, and list skills from your assistant.",
+        "Checks every skill on this machine against the workspace and flags what is out of date.",
+        "Confirms each change with you and records it in the workspace history.",
+      ],
+    },
+  ],
+};
+
+/** Free-form changelog lookup; empty array when the version is unknown. */
+export function companionSkillChanges(version: string): string[] {
+  return COMPANION_SKILL_MANIFEST.changelog.find((entry) => entry.version === version)?.changes ?? [];
+}
+
+/**
+ * Absolute path to the packable `skill/` directory. Resolves for `tsx` dev runs and tests (via the
+ * package source), for bundled production builds (the dir is copied next to the bundle as
+ * `companion-skill/`), and for a repo-root cwd. Override with `COMPANION_SKILL_DIR`.
+ */
+export function companionSkillDir(): string {
+  const candidates = [
+    process.env.COMPANION_SKILL_DIR,
+    fileURLToPath(new URL("../skill", import.meta.url)),
+    fileURLToPath(new URL("./companion-skill", import.meta.url)),
+    resolve(process.cwd(), "packages/companion-skill/skill"),
+  ].filter((value): value is string => Boolean(value));
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) return candidate;
+  }
+  return candidates[0]!;
+}

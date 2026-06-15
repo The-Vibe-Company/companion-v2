@@ -25,6 +25,9 @@ export function Sidebar({
   onSelectMine,
   onSelectAll,
   onSelectTeam,
+  onSelectLocal,
+  localActive,
+  localUpdateCount,
   mobileOpen,
   compactRail,
   onToggleMobile,
@@ -47,6 +50,9 @@ export function Sidebar({
   onSelectMine: () => void;
   onSelectAll: () => void;
   onSelectTeam: (id: string) => void;
+  onSelectLocal: () => void;
+  localActive: boolean;
+  localUpdateCount: number;
   mobileOpen: boolean;
   compactRail: boolean;
   onToggleMobile: () => void;
@@ -204,6 +210,24 @@ export function Sidebar({
             </div>
           );
         })}
+
+        <div className="side__grouplabel">On this machine</div>
+        <button
+          className={"navitem" + (localActive ? " navitem--active" : "")}
+          aria-current={localActive ? "page" : undefined}
+          onClick={() => runAndClose(onSelectLocal)}
+          title="Companion skills"
+        >
+          <span className="navitem__ico">
+            <Icon name="laptop" />
+          </span>
+          <span className="navitem__label">Companion skills</span>
+          {localUpdateCount > 0 && (
+            <span className="navitem__count navitem__count--warn tnum" title="Updates available">
+              {localUpdateCount}
+            </span>
+          )}
+        </button>
       </nav>
       <button
         className="side__foot side__foot--btn"

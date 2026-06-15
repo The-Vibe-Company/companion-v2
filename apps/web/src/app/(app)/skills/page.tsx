@@ -1,5 +1,5 @@
 import { redirect } from "next/navigation";
-import type { SkillFilterPreferences, SkillListRow } from "@companion/contracts";
+import type { LocalSkillRow, SkillFilterPreferences, SkillListRow } from "@companion/contracts";
 import { loadOrgContext } from "@/lib/currentOrg";
 import { serverApiFetch } from "@/lib/apiServer";
 import { SkillsApp } from "@/components/skills/SkillsApp";
@@ -22,7 +22,7 @@ export default async function SkillsPage() {
   if (!current) redirect("/onboarding");
   const orgHeaders = { "x-companion-org": current.id };
 
-  const [skillsResult, filterPreferences, teamsResult] = await Promise.all([
+  const [skillsResult, filterPreferences, teamsResult, localSkillsResult] = await Promise.all([
     serverApiFetch<SkillListRow[]>("/v1/skills", { headers: orgHeaders }).catch(() => null),
     serverApiFetch<SkillFilterPreferences>("/v1/skill-filter-preferences", { headers: orgHeaders }).catch(() => null),
     serverApiFetch<
@@ -38,6 +38,8 @@ export default async function SkillsPage() {
       "/v1/teams",
       { headers: orgHeaders },
     ).catch(() => null),
+    // Best-effort: the Companion skills section degrades gracefully if this fails.
+    serverApiFetch<LocalSkillRow[]>("/v1/local-skills", { headers: orgHeaders }).catch(() => [] as LocalSkillRow[]),
   ]);
   if (!skillsResult || !filterPreferences || !teamsResult) return <WorkspaceLoadError />;
   const skills = skillsResult.map(mapSkill);
@@ -62,6 +64,7 @@ export default async function SkillsPage() {
   return (
     <SkillsApp
       initialSkills={skills}
+      initialLocalSkills={localSkillsResult ?? []}
       initialFilterPreferences={filterPreferences}
       me={me}
       teams={teams}

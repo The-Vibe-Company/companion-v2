@@ -59,7 +59,7 @@ cli/          # companion CLI
 Better Auth owns the core `user`, `session`, `account`, and `verification` tables. Companion
 adds `profiles`, `organizations`, `memberships`, `teams`, `team_memberships`, `invitations`,
 `skills`, `skill_versions`, `skill_stars`, `skill_filter_preferences`, `skill_comments`,
-`api_tokens`, and `audit_log`.
+`local_skill_installs`, `api_tokens`, and `audit_log`.
 
 Every tenant-owned table carries `org_id`. Skills keep ownership, visibility, and provenance
 separate: `owner_id` / `owner_team_id`, `everyone`, `skill_team_shares`, and `creator_id`.
@@ -77,6 +77,20 @@ next registry version unless the caller passes an explicit version. Legacy top-l
 `tools`, and unknown fields are warnings and are not preserved as top-level fields in newly stored
 packages; top-level `scope` or `visibility` is rejected because visibility belongs to the publish
 request.
+
+**Companion skills (local skills).** A built-in catalog of official helper skills users install on
+their own machine or hand to a coding assistant, surfaced in the "Companion skills" sidebar section
+(above Settings). The catalog currently has one entry, `companion` — the management skill that an
+assistant uses to upload, update, validate, and check whether the user's skills are up to date
+(comparing each local skill's `metadata.companion_skill_id` / `companion_version` against the
+registry). The package and its presentation manifest ship in `packages/companion-skill`; the
+authoritative version is the `metadata.companion_version` baked into the bundled `SKILL.md`, which
+the API packs (and caches) on demand. Only per-member install state is persisted, in
+`local_skill_installs` (`(org_id, user_id, skill_key)` PK, the reported `installed_version`, an
+optional `agent_label`, `installed_at`, and `last_reported_at`). The skill reports its own install
+at the end of its install flow, and status is derived (Not installed / Installed / Update available)
+by comparing the reported version against the bundled version. Installs are recorded with an
+`audit_log` `local_skill.install` entry.
 
 `api_tokens` holds short-lived, scoped personal access tokens for programmatic publish/install.
 Only the `sha256` `token_hash` is stored (the plaintext `cmp_pat_…` is shown once); each row carries
@@ -181,6 +195,10 @@ directly to Postgres.
   Threaded discussion: `GET`/`POST /v1/skills/:slug/comments` (a `POST` may carry `parent_id` for a
   reply and `version_id` to link the thread to a version) and
   `PATCH /v1/skills/:slug/comments/:id` (deprecate / restore a thread).
+- Local skills (Companion skills): `GET /v1/local-skills` (built-in catalog with the caller's
+  per-machine status), `GET /v1/local-skills/:key`, `GET /v1/local-skills/:key/package` (download the
+  bundled skill as `.zip`), and `POST /v1/local-skills/:key/installed` (the install callback: the
+  skill reports `{ version, agent? }` so the workspace learns it is installed and at which version).
 - Orgs & settings: `/v1/orgs`, `GET`/`POST`/`PUT /v1/orgs/current` (read/select/rename+reslug the org,
   admin only for `PUT`), `GET /v1/orgs/current/settings` (members, invitations, teams + descriptions),
   `PUT /v1/users/me` (update display name), `/v1/teams` + `PUT`/`DELETE /v1/teams/:id` (rename/describe,
@@ -190,9 +208,12 @@ directly to Postgres.
 Requests authenticate by Better Auth cookie session. An `Authorization: Bearer cmp_pat_…` token is
 accepted **only** on the PAT-enabled skills endpoints (`POST /v1/skills`, `POST /v1/skills/create`,
 `GET /v1/skills/:slug/download`, `GET /v1/skills/:slug/versions/:version/package`,
-`GET /v1/skills/:slug/versions/:version/files`); every other
+`GET /v1/skills/:slug/versions/:version/files`, and the `/v1/local-skills*` endpoints); every other
 endpoint rejects tokens. Token requests are scope-gated (`skills:write` to publish/create,
-`skills:read` to download). `POST /v1/skills` accepts a multipart `file` (browser/CLI) or a raw
+`skills:read` to download). Reading the local-skills catalog and downloading its package require
+`skills:read`; the install callback (`POST /v1/local-skills/:key/installed`) mutates state and writes
+an audit row, so it requires `skills:write` — the read+write token the install prompt mints satisfies
+both, while a read-only token cannot spoof an install. `POST /v1/skills` accepts a multipart `file` (browser/CLI) or a raw
 `application/zip` / `application/gzip` body with `everyone`/`team`/`version` query params. Setting
 `action=validate` runs the same package checks without publishing; targeted updates also accept
 `expect_slug` and `expect_skill_id` in form fields or query params for both validation and

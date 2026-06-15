@@ -2,6 +2,8 @@
 
 import type {
   IssuedToken,
+  LocalSkillRow,
+  ReportLocalSkillInstallResult,
   SkillCommentRow,
   SkillFile,
   SkillFilesResponse,
@@ -184,4 +186,28 @@ export async function saveSkillFilterPreferences(
     method: "PUT",
     body: JSON.stringify(preferences),
   });
+}
+
+// --- Local skills (the "Companion skills" section) ----------------------------------------------
+
+/** Fetch the built-in local skills with the caller's per-machine install status. */
+export async function fetchLocalSkills(): Promise<LocalSkillRow[]> {
+  return apiFetch<LocalSkillRow[]>("/v1/local-skills");
+}
+
+/** Public download URL for a local skill package (referenced by the assistant prompt). */
+export function localSkillPackageUrl(key: string): string {
+  return `${apiBase()}/local-skills/${encodeURIComponent(key)}/package`;
+}
+
+/** Manual fallback: record that this member installed the local skill at a version. */
+export async function reportLocalSkillInstalled(
+  key: string,
+  version: string,
+  agent?: string,
+): Promise<ReportLocalSkillInstallResult> {
+  return apiFetch<ReportLocalSkillInstallResult>(
+    `/v1/local-skills/${encodeURIComponent(key)}/installed`,
+    { method: "POST", body: JSON.stringify({ version, agent }) },
+  );
 }

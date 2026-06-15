@@ -17,6 +17,8 @@ import {
   createOrg,
   createTeam,
   deleteTeam,
+  computeLocalSkillStatus,
+  getLocalSkillInstall,
   getOnboardingContext,
   getOnboardingState,
   getSkillBySlug,
@@ -34,6 +36,7 @@ import {
   listTeamsForUser,
   publishSkillVersion,
   assertCanPublishSkillVersion,
+  reportLocalSkillInstall,
   removeMember,
   removeTeamMember,
   revokeApiToken,
@@ -57,6 +60,7 @@ import {
   issueTokenInputSchema,
   orgSettingsResponseSchema,
   publishSkillInputSchema,
+  reportLocalSkillInstallInputSchema,
   setCommentDeprecatedInputSchema,
   skillFrontmatterSchema,
   skillVisibilityInputSchema,
@@ -106,6 +110,8 @@ import {
 } from "./context";
 import { appRouter } from "./trpc";
 import { assertTargetedSkillUpdate, parseSkillPublishAction } from "./skillPublishGuards";
+import { buildCompanionSkillRow, getCompanionSkillPackage } from "./companionSkillPackage";
+import { COMPANION_SKILL_KEY } from "@companion/companion-skill";
 
 const app = new Hono<{ Variables: ApiVariables }>();
 
@@ -1161,6 +1167,118 @@ app.get("/v1/skills/:slug/versions/:version/files", async (c) => {
     const tar = toTar(tarGz);
     const { files } = await extractArchiveFiles(tar);
     return c.json({ version: found.version, files });
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
+/**
+ * "Companion skills" (local skills) — the built-in helper-skill catalog. Currently one entry,
+ * `companion`. Status is per-member: the skill reports its install via the endpoint below, and the
+ * view compares the reported version against the bundled package version. Session or token
+ * (`skills:read`); a read+write token (the one the install prompt mints) satisfies the gate.
+ */
+app.get("/v1/local-skills", async (c) => {
+  try {
+    actorFromContext(c, true);
+    requireScope(c, "skills:read");
+    const install = await withTenant(
+      c,
+      ({ actor, orgId, database }) =>
+        getLocalSkillInstall({ actor, orgId, skillKey: COMPANION_SKILL_KEY, database }),
+      true,
+    );
+    return c.json([await buildCompanionSkillRow(install)]);
+  } catch (error) {
+    return jsonError(c, error, 401);
+  }
+});
+
+app.get("/v1/local-skills/:key", async (c) => {
+  try {
+    actorFromContext(c, true);
+    requireScope(c, "skills:read");
+    const key = c.req.param("key");
+    if (key !== COMPANION_SKILL_KEY) return c.json({ error: `unknown local skill: ${key}` }, 404);
+    const install = await withTenant(
+      c,
+      ({ actor, orgId, database }) => getLocalSkillInstall({ actor, orgId, skillKey: key, database }),
+      true,
+    );
+    return c.json(await buildCompanionSkillRow(install));
+  } catch (error) {
+    return jsonError(c, error, 401);
+  }
+});
+
+/** Download the bundled local skill as a `.zip` for the assistant to unpack. Auth like skill packages. */
+app.get("/v1/local-skills/:key/package", async (c) => {
+  try {
+    actorFromContext(c, true);
+    requireScope(c, "skills:read");
+    const key = c.req.param("key");
+    if (key !== COMPANION_SKILL_KEY) return c.json({ error: `unknown local skill: ${key}` }, 404);
+    const pkg = await getCompanionSkillPackage();
+    const zip = await tarGzToZip(pkg.archive);
+    return new Response(new Uint8Array(zip), {
+      headers: {
+        "content-type": "application/zip",
+        "content-disposition": `attachment; filename="${key}.zip"`,
+        "content-length": String(zip.length),
+        "x-skill-checksum": pkg.checksum,
+        "x-skill-version": pkg.version,
+      },
+    });
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
+/**
+ * The install callback. The local skill posts here at the end of its install (and after updates) to
+ * record that this member has it, and at which version. This mutates workspace state (and writes an
+ * audit row), so token callers need `skills:write` — a read-only PAT cannot report/spoof an install.
+ * The install prompt mints a read+write token, so the skill satisfies this.
+ */
+app.post("/v1/local-skills/:key/installed", async (c) => {
+  try {
+    actorFromContext(c, true);
+    requireScope(c, "skills:write");
+    const key = c.req.param("key");
+    if (key !== COMPANION_SKILL_KEY) return c.json({ error: `unknown local skill: ${key}` }, 404);
+    let input;
+    try {
+      input = reportLocalSkillInstallInputSchema.parse(await c.req.json());
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : String(error) }, 422);
+    }
+    const pkg = await getCompanionSkillPackage();
+    // The workspace only serves the bundled version, so a report newer than it cannot be real; reject
+    // it rather than let a typo/bogus version (e.g. 999.0.0) silently suppress update prompts forever.
+    if (compareSemver(input.version, pkg.version) > 0) {
+      return c.json(
+        { error: `reported version ${input.version} is newer than the available version ${pkg.version}` },
+        422,
+      );
+    }
+    const install = await withTenant(
+      c,
+      ({ actor, orgId, database }) =>
+        reportLocalSkillInstall({
+          actor,
+          orgId,
+          skillKey: key,
+          version: input.version,
+          agentLabel: input.agent ?? null,
+          database,
+        }),
+      true,
+    );
+    return c.json({
+      ok: true as const,
+      status: computeLocalSkillStatus(install.installedVersion, pkg.version),
+      availableVersion: pkg.version,
+    });
   } catch (error) {
     return jsonError(c, error);
   }

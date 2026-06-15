@@ -2,13 +2,19 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import type { SkillFilterPreferences, SkillVisibilityInput } from "@companion/contracts";
-import { saveSkillFilterPreferences, setSkillVisibility, toggleStar as toggleStarRpc } from "@/lib/queries";
+import type { LocalSkillRow, SkillFilterPreferences, SkillVisibilityInput } from "@companion/contracts";
+import {
+  fetchLocalSkills,
+  saveSkillFilterPreferences,
+  setSkillVisibility,
+  toggleStar as toggleStarRpc,
+} from "@/lib/queries";
 import { fetchSettingsAppData } from "@/lib/settingsClient";
 import type { MeVM, OrgVM, SkillVM, TeamVM } from "@/lib/types";
 import { Sidebar } from "./Sidebar";
 import { ListView } from "./ListView";
 import { DetailView } from "./DetailView";
+import { LocalSkillsView } from "./LocalSkillsView";
 import { CommandPalette } from "./CommandPalette";
 import { UploadDialog, InstallDialog } from "./UploadDialog";
 import { Onboarding } from "../org/Onboarding";
@@ -80,6 +86,7 @@ function settingsErrorMessage(error: unknown): string {
 
 export function SkillsApp({
   initialSkills,
+  initialLocalSkills,
   initialFilterPreferences,
   me,
   teams: initialTeams,
@@ -87,6 +94,7 @@ export function SkillsApp({
   currentOrg,
 }: {
   initialSkills: SkillVM[];
+  initialLocalSkills: LocalSkillRow[];
   initialFilterPreferences: SkillFilterPreferences;
   me: MeVM;
   teams: TeamVM[];
@@ -99,8 +107,11 @@ export function SkillsApp({
   const [localSettings, setLocalSettings] = useState<LocalSettingsSurface | null>(null);
   const [skills, setSkills] = useState<SkillVM[]>(initialSkills);
   const [teams, setTeams] = useState<TeamVM[]>(initialTeams);
+  const [localSkills, setLocalSkills] = useState<LocalSkillRow[]>(initialLocalSkills);
+  const [currentView, setCurrentView] = useState<"workspace" | "local">("workspace");
   useEffect(() => setSkills(initialSkills), [initialSkills]);
   useEffect(() => setTeams(initialTeams), [initialTeams]);
+  useEffect(() => setLocalSkills(initialLocalSkills), [initialLocalSkills]);
   useEffect(() => {
     document.cookie = `companion_org=${encodeURIComponent(currentOrg.id)}; path=/; SameSite=Lax`;
   }, [currentOrg.id]);
@@ -234,6 +245,7 @@ export function SkillsApp({
     didInitializePersistenceRef.current = false;
     setPreferenceStatus("idle");
     setOpenId(null);
+    setCurrentView("workspace");
   }, [currentOrg.id, preferenceKey, initialFilterPreferences]);
 
   const flushPreferenceQueue = useCallback(async () => {
@@ -473,17 +485,33 @@ export function SkillsApp({
     else void flushPreferenceQueue();
   }, [customViews, filters, flushPreferenceQueue, persistPreferences]);
   const selectTeam = useCallback((teamId: string) => {
+    setCurrentView("workspace");
     setFilters([{ type: "team", value: teamId }]);
     setOpenId(null);
   }, []);
   const selectAll = useCallback(() => {
+    setCurrentView("workspace");
     setFilters([]);
     setOpenId(null);
   }, []);
   const selectMine = useCallback(() => {
+    setCurrentView("workspace");
     setFilters(mineOwnerNames.map((name) => ({ type: "owner", value: name })));
     setOpenId(null);
   }, [mineOwnerNames]);
+  const selectLocal = useCallback(() => {
+    setOpenId(null);
+    setCurrentView("local");
+  }, []);
+  const refreshLocalSkills = useCallback(async () => {
+    const rows = await fetchLocalSkills();
+    setLocalSkills(rows);
+    return rows;
+  }, []);
+  const localUpdateCount = useMemo(
+    () => localSkills.filter((s) => s.status === "update").length,
+    [localSkills],
+  );
 
   // --- Open / navigate -------------------------------------------------------
   const index = openId ? filtered.findIndex((s) => s.id === openId) : -1;
@@ -491,6 +519,7 @@ export function SkillsApp({
   openIdRef.current = openId;
 
   const open = useCallback((id: string) => {
+    setCurrentView("workspace");
     setUploadOpen(false);
     setOpenId(id);
     setLastId(id);
@@ -646,13 +675,16 @@ export function SkillsApp({
         totalCount={skills.length}
         myCount={myCount}
         teamCounts={teamCounts}
-        activeTeam={activeTeam}
-        isMine={isMine}
-        workspaceActive={isAll}
+        activeTeam={currentView === "workspace" ? activeTeam : null}
+        isMine={currentView === "workspace" && isMine}
+        workspaceActive={currentView === "workspace" && isAll}
         onOpenPalette={() => setPaletteOpen(true)}
         onSelectMine={selectMine}
         onSelectAll={selectAll}
         onSelectTeam={selectTeam}
+        onSelectLocal={selectLocal}
+        localActive={currentView === "local"}
+        localUpdateCount={localUpdateCount}
         mobileOpen={mobileSidebarOpen}
         compactRail={isNarrowViewport && !mobileSidebarOpen}
         onToggleMobile={() => setMobileSidebarOpen((open) => !open)}
@@ -667,7 +699,9 @@ export function SkillsApp({
         />
       )}
       <div className="main" aria-hidden={mobileSidebarOpen || undefined} inert={mobileSidebarOpen ? true : undefined}>
-        {skill ? (
+        {currentView === "local" ? (
+          <LocalSkillsView skills={localSkills} workspaceName={currentOrg.name} onRefresh={refreshLocalSkills} />
+        ) : skill ? (
           <DetailView
             skill={skill}
             index={index}

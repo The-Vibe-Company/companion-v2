@@ -92,6 +92,13 @@
       "when": 1781050100000,
       "tag": "0012_skill_owner_team",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1781050200000,
+      "tag": "0013_local_skill_installs",
+      "breakpoints": true
     }
   ]
 }
