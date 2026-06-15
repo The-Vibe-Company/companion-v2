@@ -32,7 +32,7 @@ export function AcceptInvite({ token }: { token: string }) {
     <div className="authwrap">
       <div className="authcard">
         <div className="authcard__brand">
-          <span className="brandmark">C</span>
+          <span className="brandmark" aria-hidden="true" />
           <div>
             <div className="brandname">Companion</div>
             <div className="brandsub">join workspace</div>

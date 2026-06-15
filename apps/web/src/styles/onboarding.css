@@ -31,8 +31,9 @@ body:has(.ob) { overflow: hidden; }
 .ob-brand { display: flex; align-items: center; gap: 10px; }
 .ob-brand__mark {
   width: 28px; height: 28px; border-radius: var(--radius-md); flex: none;
-  display: grid; place-items: center; font-weight: 600; font-size: 15px;
-  background: var(--color-accent); color: var(--color-accent-fg);
+  display: grid; place-items: center;
+  background: var(--color-surface) url("/brand/companion-mark-ui.png") center / 86% no-repeat;
+  border: 1px solid var(--color-line); overflow: hidden;
 }
 .ob-brand__wm { font-weight: 600; font-size: var(--text-base); letter-spacing: var(--tracking-tight); }
 
