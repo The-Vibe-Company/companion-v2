@@ -38,7 +38,7 @@ export const COMPANION_SKILL_MANIFEST: CompanionSkillManifest = {
   key: COMPANION_SKILL_KEY,
   name: "Companion",
   description:
-    "Manages the skills on this machine and publishes or updates them in Companion, through your assistant.",
+    "Manage local SKILL.md packages with Companion: validate, publish, update, install updates, audit skills, check workspace versions, and self-update this Companion skill.",
   what:
     "The Companion skill gives your assistant everything it needs to look after your skills on this machine. It can validate them, publish new ones, push updates, and check that everything is current. It always confirms a change with you before anything is published.",
   uses:
@@ -51,12 +51,20 @@ export const COMPANION_SKILL_MANIFEST: CompanionSkillManifest = {
   commands: [
     { name: "Publish a skill", desc: "Validate a skill and publish it to Companion safely." },
     { name: "Update a skill", desc: "Push a new version of a skill you have changed." },
+    { name: "Update Companion skill", desc: "Check and install the latest bundled Companion skill safely." },
     { name: "Check for updates", desc: "See whether the skills on this machine are up to date." },
     { name: "Install updates", desc: "Bring outdated skills up to the latest published version." },
     { name: "Validate a skill", desc: "Check a skill is well formed before you share it." },
     { name: "Manage your skills", desc: "List and organize the skills on this machine." },
   ],
   changelog: [
+    {
+      version: "1.0.2",
+      changes: [
+        "Adds an explicit self-update flow for the bundled Companion skill.",
+        "Checks the local skill against the workspace Companion skills catalog before replacing files.",
+      ],
+    },
     {
       version: "1.0.1",
       changes: [

@@ -104,11 +104,15 @@ function buildPrompts(version: string): LocalSkillPrompts {
     credentials,
     "2. Download the latest package:",
     `   ${download}`,
-    "3. Unzip it over your existing companion skill folder, keeping SKILL.md at the root.",
-    "   Remove companion.zip when done.",
-    "4. Confirm the new version with the workspace:",
+    "3. Unzip companion.zip into a temporary folder and verify SKILL.md is at the package root.",
+    `   Verify its metadata.companion_version is ${version}.`,
+    "4. Validate the existing companion skill folder, then move it to a backup path and move the",
+    "   extracted package folder into its place. Do not delete the existing folder before the new",
+    "   package has been staged and verified.",
+    "   Remove companion.zip and the temporary folder when done.",
+    "5. Confirm the new version with the workspace:",
     `   ${report}`,
-    "5. Tell me what changed.",
+    "6. Tell me what changed.",
   ].join("\n");
 
   // The "use" prompt also carries fresh credentials: the drawer mints a new token on copy/send, so

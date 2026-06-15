@@ -46,11 +46,19 @@ describe("companion skill package + row", () => {
     const pkg = await getCompanionSkillPackage();
     const row = await buildCompanionSkillRow(null);
     expect(row.status).toBe("none");
+    expect(row.description).toContain("SKILL.md");
+    expect(row.description).toContain("self-update");
     expect(row.installedVersion).toBeNull();
     expect(row.lastReportedAt).toBeNull();
     expect(row.availableVersion).toBe(pkg.version);
     expect(row.commands.length).toBeGreaterThan(0);
+    expect(row.commands).toContainEqual({
+      name: "Update Companion skill",
+      desc: "Check and install the latest bundled Companion skill safely.",
+    });
+    expect(row.changes).toContain("Adds an explicit self-update flow for the bundled Companion skill.");
     // The install prompt drives the report-back call and leaves placeholders for the client.
+    expect(row.prompts.install).toContain("/local-skills/companion/package");
     expect(row.prompts.install).toContain("/local-skills/companion/installed");
     expect(row.prompts.install).toContain("{base}");
     expect(row.prompts.install).toContain("{token}");
@@ -66,6 +74,10 @@ describe("companion skill package + row", () => {
       expect(prompt).toContain("{token}");
       expect(prompt).toContain("Do not print the token");
     }
+    expect(row.prompts.update).toContain("/local-skills/companion/package");
+    expect(row.prompts.update).toContain("move it to a backup path");
+    expect(row.prompts.update).toContain("Do not delete the existing folder");
+    expect(row.prompts.update).not.toContain("Unzip it over");
     expect(row.prompts.install).toContain("/local-skills/companion/installed");
     expect(row.prompts.update).toContain("/local-skills/companion/installed");
   });
