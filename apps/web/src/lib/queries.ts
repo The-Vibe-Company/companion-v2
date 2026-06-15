@@ -26,7 +26,7 @@ export interface PublishResult {
   warnings?: FrontmatterWarning[];
 }
 
-/** Public API base used in the copy-paste curl prompts (an external agent hits it directly). */
+/** Public API base used in the guided assistant prompts (an external agent hits it directly). */
 export function apiBase(): string {
   const env = process.env.NEXT_PUBLIC_COMPANION_API_BASE;
   if (env) return env.replace(/\/$/, "");
@@ -45,7 +45,13 @@ export async function issueToken(scopes: TokenScope[], name?: string): Promise<I
 /** Publish a packaged skill (.zip or .tar.gz) via the multipart upload path. */
 export async function publishSkillPackage(
   file: File,
-  opts: { ownerTeam?: string | null; visibility: SkillVisibilityInput; version?: string; expectSlug?: string },
+  opts: {
+    ownerTeam?: string | null;
+    visibility: SkillVisibilityInput;
+    version?: string;
+    expectSlug?: string;
+    expectSkillId?: string;
+  },
 ): Promise<PublishResult> {
   const fd = new FormData();
   fd.append("file", file);
@@ -56,14 +62,21 @@ export async function publishSkillPackage(
   if (opts.version) fd.append("version", opts.version);
   // In update mode, bind the upload to the skill being updated (server rejects a mismatch).
   if (opts.expectSlug) fd.append("expect_slug", opts.expectSlug);
+  if (opts.expectSkillId) fd.append("expect_skill_id", opts.expectSkillId);
   return apiFetch<PublishResult>("/v1/skills", { method: "POST", body: fd });
 }
 
 /** Validate a packaged skill without publishing it. Warnings are non-blocking. */
-export async function validateSkillPackage(file: File): Promise<ValidationResult> {
+export async function validateSkillPackage(
+  file: File,
+  opts: { version?: string; expectSlug?: string; expectSkillId?: string } = {},
+): Promise<ValidationResult> {
   const fd = new FormData();
   fd.append("file", file);
   fd.append("action", "validate");
+  if (opts.version) fd.append("version", opts.version);
+  if (opts.expectSlug) fd.append("expect_slug", opts.expectSlug);
+  if (opts.expectSkillId) fd.append("expect_skill_id", opts.expectSkillId);
   const data = await apiFetch<{ result: ValidationResult }>("/v1/skills", { method: "POST", body: fd });
   return data.result;
 }

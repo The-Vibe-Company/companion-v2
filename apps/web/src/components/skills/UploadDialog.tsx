@@ -24,12 +24,21 @@ function visQuery(visibility: SkillVisibilityInput, ownerTeam?: string | null): 
   for (const team of visibility.teams) qs.append("team", team);
   return qs.toString() || "everyone=false";
 }
-function visFlags(visibility: SkillVisibilityInput, ownerTeam?: string | null): string {
-  const parts = [];
-  if (ownerTeam) parts.push(`--owner-team ${ownerTeam}`);
-  if (visibility.everyone) parts.push("--everyone");
-  for (const team of visibility.teams) parts.push(`--team ${team}`);
-  return parts.join(" ") || "--private";
+
+function skillUploadQuery(
+  visibility: SkillVisibilityInput,
+  ownerTeam: string | null | undefined,
+  target?: { slug: string; skillId: string; version?: string },
+  action?: "validate",
+): string {
+  const qs = new URLSearchParams(visQuery(visibility, ownerTeam));
+  if (action) qs.set("action", action);
+  if (target) {
+    qs.set("expect_slug", target.slug);
+    qs.set("expect_skill_id", target.skillId);
+    if (target.version) qs.set("version", target.version);
+  }
+  return qs.toString();
 }
 function visibilityLabel(visibility: SkillVisibilityInput, teams: TeamVM[]): string {
   const names = visibility.teams.map((slug) => teams.find((team) => team.id === slug)?.name ?? slug);
@@ -534,11 +543,10 @@ const UP_METHODS = [
   {
     id: "prompt",
     icon: "sparkles",
-    name: "Guided prompt",
+    name: "Assistant IA",
     tag: "AI",
-    desc: "Hand a prompt and a token to an agent. It packages and uploads over the API.",
+    desc: "Hand a guided prompt and a scoped token to an agent.",
   },
-  { id: "cli", icon: "terminal", name: "Command line", desc: "Push from your machine with the companion CLI." },
   {
     id: "zip",
     icon: "file-archive",
@@ -564,6 +572,7 @@ function PromptPanel({
   ensure,
   regen,
   lockedOwner,
+  target,
 }: {
   ownerTeam: string | null;
   setOwnerTeam: (ownerTeam: string | null) => void;
@@ -574,32 +583,79 @@ function PromptPanel({
   ensure: () => Promise<string>;
   regen: () => Promise<string>;
   lockedOwner: boolean;
+  target?: {
+    slug: string;
+    skillId: string;
+    currentVersion: string | null;
+    nextVersion: string;
+  };
 }) {
   const base = apiBase();
+  const queryTarget = target ? { slug: target.slug, skillId: target.skillId, version: target.nextVersion } : undefined;
+  const validateQuery = skillUploadQuery(
+    visibility,
+    lockedOwner ? null : ownerTeam,
+    queryTarget,
+    "validate",
+  );
+  const publishQuery = skillUploadQuery(
+    visibility,
+    lockedOwner ? null : ownerTeam,
+    queryTarget,
+  );
+  const validateUrl = `${base}/skills?${validateQuery}`;
+  const publishUrl = `${base}/skills?${publishQuery}`;
   const buildPrompt = (tok: string) =>
-    `You are publishing a Companion skill. The package is in the current
-working directory: a SKILL.md plus any files it references. SKILL.md
-is a standard Agent Skill: YAML frontmatter with name and description.
+    target
+      ? `You are updating an existing Companion skill through the workspace API.
 
-1. Read SKILL.md and confirm the frontmatter has a name and description.
-   Use allowed-tools for declared tools. Put vendor data under metadata.
-   Do not add top-level version, tools, scope, or visibility fields.
-2. Zip the package from its root:
-   zip -r skill.zip SKILL.md .
-3. Publish it. Ownership and visibility are set with query parameters on the request:
-   curl -X POST "${base}/skills?${visQuery(visibility, lockedOwner ? null : ownerTeam)}" \\
-     -H "Authorization: Bearer ${tok}" \\
-     -H "Content-Type: application/zip" \\
-     --data-binary @skill.zip
-4. Report the skill id and Companion-assigned version from the response, then remove
-   skill.zip. If validation returns 422, fix the frontmatter it names
-   and retry once.`;
+Target skill slug: ${target.slug}
+Target Companion skill id: ${target.skillId}
+Current version: ${target.currentVersion ?? "none"}
+Next version to publish: ${target.nextVersion}
+
+Validation endpoint:
+${validateUrl}
+
+Publish endpoint:
+${publishUrl}
+
+Workflow:
+1. Read SKILL.md and verify the frontmatter name is exactly "${target.slug}".
+2. If metadata.companion_skill_id exists, verify it is exactly "${target.skillId}". If it is different, stop and tell the user this is not the same skill and they should review the package.
+3. Keep vendor data under metadata. Do not add top-level version, tools, scope, or visibility fields.
+4. Package SKILL.md with any referenced files once.
+5. Validate first: create a POST request to the validation endpoint with the archive as the body.
+6. Use Authorization: Bearer ${tok} and Content-Type: application/zip or application/gzip.
+7. Read the validation response. If it reports package name mismatch, target skill id mismatch, missing target skill, or metadata.companion_skill_id mismatch, do not edit the package and do not publish. Tell the user this appears to be a different skill.
+8. If result.ok is not true for any other reason, do not publish. Fix only the validation issue named by Companion, then validate once more.
+9. Publish only after validation is accepted: create a POST request to the publish endpoint with the same validated archive as the body.
+10. Report the published skill id and version from the response. Never publish after failed validation or ambiguous identity.`
+      : `You are publishing a Companion skill through the workspace API.
+
+The package is a standard Agent Skill: SKILL.md at the root, with YAML frontmatter containing name and description.
+
+Validation endpoint:
+${validateUrl}
+
+Publish endpoint:
+${publishUrl}
+
+Workflow:
+1. Read SKILL.md and confirm the frontmatter has name and description.
+2. Keep vendor data under metadata. Do not add top-level version, tools, scope, or visibility fields.
+3. Package SKILL.md with any referenced files once.
+4. Validate first: create a POST request to the validation endpoint with the archive as the body.
+5. Use Authorization: Bearer ${tok} and Content-Type: application/zip or application/gzip.
+6. Read the validation response. If result.ok is not true, or if the response is 422, do not publish. Fix only the validation issue named by Companion, then validate once more.
+7. Publish only after validation is accepted: create a POST request to the publish endpoint with the same validated archive as the body.
+8. Report the published skill id and Companion-assigned version from the response. Never publish after failed validation or ambiguous identity.`;
   const displayPrompt = buildPrompt(token ?? "cmp_pat_…");
   return (
     <>
       <p className="up-panel__lede">
-        Give an agent (Claude, Cursor, or any tool with shell access) everything it needs to publish on
-        your behalf. The token below is scoped to <b>skills:write</b> and expires in 24 hours.
+        Give an agent everything it needs to publish on your behalf. The token below is scoped to{" "}
+        <b>skills:write</b> and expires in 24 hours.
       </p>
       <div className="up-step">
         <StepLabel n="1">Upload token</StepLabel>
@@ -621,7 +677,8 @@ is a standard Agent Skill: YAML frontmatter with name and description.
         <StepLabel n="3">Visibility</StepLabel>
         <VisibilityPicker value={visibility} onChange={setVisibility} teams={teams} />
         <p className="up-seg-note">
-          Applied on the request as <span className="mono">?{visQuery(visibility, lockedOwner ? null : ownerTeam)}</span>.
+          Validates with <span className="mono">?{validateQuery}</span>, then publishes with{" "}
+          <span className="mono">?{publishQuery}</span>.
         </p>
       </div>
       <div className="up-step">
@@ -632,62 +689,6 @@ is a standard Agent Skill: YAML frontmatter with name and description.
           copyLabel="Copy prompt"
           resolveText={async () => buildPrompt(await ensure())}
         />
-      </div>
-    </>
-  );
-}
-
-function CliPanel({
-  ownerTeam,
-  setOwnerTeam,
-  visibility,
-  setVisibility,
-  teams,
-  lockedOwner,
-}: {
-  ownerTeam: string | null;
-  setOwnerTeam: (ownerTeam: string | null) => void;
-  visibility: SkillVisibilityInput;
-  setVisibility: (visibility: SkillVisibilityInput) => void;
-  teams: TeamVM[];
-  lockedOwner: boolean;
-}) {
-  const flags = visFlags(visibility, lockedOwner ? null : ownerTeam);
-  const push = `companion skill push . ${flags}`.trim();
-  const setup = `# install once (macOS / Linux)
-brew install the-vibe-company/tap/companion
-
-# authenticate against this workspace
-companion auth login
-
-# from the skill's directory, publish it
-companion skill push . ${flags}`.trim();
-  return (
-    <>
-      <p className="up-panel__lede">
-        Push straight from the directory that holds your <span className="inline-code">SKILL.md</span>.
-        Requires the companion CLI <span className="inline-code">v0.4+</span>, signed in to this workspace.
-      </p>
-      <div className="up-step">
-        <StepLabel n="1">Owner</StepLabel>
-        <OwnerPicker value={ownerTeam} onChange={setOwnerTeam} teams={teams} disabled={lockedOwner} />
-        <p className="up-seg-note">Owner flag: <span className="mono">{lockedOwner || !ownerTeam ? "none" : `--owner-team ${ownerTeam}`}</span>.</p>
-      </div>
-      <div className="up-step">
-        <StepLabel n="2">Visibility</StepLabel>
-        <VisibilityPicker value={visibility} onChange={setVisibility} teams={teams} />
-        <p className="up-seg-note">
-          Sets <span className="mono">{flags}</span> on the push. The skill itself carries no
-          visibility fields.
-        </p>
-      </div>
-      <div className="up-step">
-        <StepLabel n="3">Publish</StepLabel>
-        <CodeBlock text={push} copyLabel="Copy command" />
-      </div>
-      <div className="up-step">
-        <StepLabel>First time? Full setup</StepLabel>
-        <CodeBlock text={setup} copyLabel="Copy all" />
       </div>
     </>
   );
@@ -1035,7 +1036,16 @@ export function UploadDialog({
     setValidation(null);
     setValidationError(null);
     setValidating(true);
-    validateSkillPackage(file)
+    validateSkillPackage(
+      file,
+      isUpdate
+        ? {
+            version: ver,
+            expectSlug: skill!.id,
+            expectSkillId: skill!.uuid,
+          }
+        : undefined,
+    )
       .then((next) => {
         if (active) setValidation(next);
       })
@@ -1048,7 +1058,7 @@ export function UploadDialog({
     return () => {
       active = false;
     };
-  }, [file]);
+  }, [file, isUpdate, skill, ver]);
 
   const ensureToken = useCallback(async () => {
     if (token) return token;
@@ -1091,6 +1101,7 @@ export function UploadDialog({
         visibility,
         version: isUpdate ? ver : undefined,
         expectSlug: isUpdate ? skill!.id : undefined,
+        expectSkillId: isUpdate ? skill!.uuid : undefined,
       });
       finishPublish({
         id: res.slug || idFromZip,
@@ -1145,8 +1156,7 @@ export function UploadDialog({
     cta?: { label: string; icon: string; disabled: boolean; run: () => void };
   };
   const FOOT: Record<UploadMethod, Foot> = {
-    prompt: { hint: ["info", "The agent uploads over the API. Companion validates the package server-side."] },
-    cli: { hint: ["info", "Companion validates the package server-side after the push."] },
+    prompt: { hint: ["info", "The agent validates first, then publishes only if the package is accepted."] },
     zip: {
       hint: ["file-archive", "The package must contain SKILL.md at its root."],
       cta: {
@@ -1275,16 +1285,16 @@ export function UploadDialog({
                     ensure={ensureToken}
                     regen={regenToken}
                     lockedOwner={isUpdate}
-                  />
-                )}
-                {method === "cli" && (
-                  <CliPanel
-                    ownerTeam={ownerTeam}
-                    setOwnerTeam={setOwnerTeam}
-                    visibility={visibility}
-                    setVisibility={setVisibility}
-                    teams={teams}
-                    lockedOwner={isUpdate}
+                    target={
+                      isUpdate
+                        ? {
+                            slug: skill!.id,
+                            skillId: skill!.uuid,
+                            currentVersion: skill!.version,
+                            nextVersion: ver,
+                          }
+                        : undefined
+                    }
                   />
                 )}
                 {method === "zip" && (
@@ -1359,16 +1369,15 @@ const INSTALL_METHODS = [
   {
     id: "prompt",
     icon: "sparkles",
-    name: "Guided prompt",
+    name: "Assistant IA",
     tag: "AI",
-    desc: "Paste into Claude Code or Codex. It downloads and installs the skill for you.",
+    desc: "Paste into an agent. It downloads and installs the skill for you.",
   },
-  { id: "cli", icon: "terminal", name: "Command line", desc: "Install into your skills directory with the companion CLI." },
   {
     id: "manual",
     icon: "file-archive",
     name: "Download package",
-    desc: "Grab the .zip and unzip it into your skills directory.",
+    desc: "Download the package and place it in your skills folder.",
   },
 ] as const;
 type InstallMethod = (typeof INSTALL_METHODS)[number]["id"];
@@ -1401,7 +1410,7 @@ function InstallDone({ result }: { result: { id: string; version: string; target
       </span>
       <h3 className="up-done__title">Package downloaded</h3>
       <p className="up-done__sub">
-        {result.via}. Unzip it into {targetName(result.target)} to finish installing.
+        {result.via}. Extract it into {targetName(result.target)} to finish installing.
       </p>
       <div className="up-done__card">
         <div className="up-done__row">
@@ -1462,20 +1471,14 @@ export function InstallDialog({ skill, onClose }: { skill: SkillVM; onClose: () 
   const path = targetPath(target, id);
   const base = apiBase();
   const buildPrompt = (tok: string) =>
-    `You are installing the Companion skill ${id}. Decide where it should
-live (for example ~/.claude/skills, a project .skills folder, or
-wherever you keep skills) and install it there.
+    `You are installing the Companion skill ${id}.
 
-1. Download version ${version} of the package:
-   curl -L "${base}/skills/${id}/versions/${version}/package" \\
-     -H "Authorization: Bearer ${tok}" \\
-     -o ${id}.zip
-2. Unzip ${id}.zip into the skills directory you chose and confirm
-   SKILL.md sits at the package root.
-3. Remove ${id}.zip when done.`;
+Version: ${version}
+Package URL: ${base}/skills/${id}/versions/${version}/package
+Authorization header: Bearer ${tok}
+
+Choose the right local skills folder for the user's agent, download the package, extract it there, and confirm SKILL.md sits at the package root. Report the installed location when done.`;
   const displayPrompt = buildPrompt(token ?? "cmp_pat_…");
-  const cli = `companion skill install ${id}@${version}`;
-  const unzip = `unzip ${id}.zip -d ${path}`;
 
   const download = async () => {
     if (!skill.version) return;
@@ -1507,9 +1510,8 @@ wherever you keep skills) and install it there.
   };
   const FOOT: Record<InstallMethod, Foot> = {
     prompt: { hint: ["info", "The agent downloads the skill and installs it wherever it keeps skills."] },
-    cli: { hint: ["info", "Pulls the package from the registry and installs it."] },
     manual: {
-      hint: skill.version ? ["folder", "Unzip into " + path + "."] : ["info", "No published version to download yet."],
+      hint: skill.version ? ["folder", "Download the package, then extract it into " + path + "."] : ["info", "No published version to download yet."],
       cta: { label: "Download .zip", icon: "download", run: download, disabled: !skill.version },
     },
   };
@@ -1593,8 +1595,8 @@ wherever you keep skills) and install it there.
                 {method === "prompt" && (
                   <>
                     <p className="up-panel__lede">
-                      Paste this into Claude Code, Codex, or any coding agent with shell access. It downloads{" "}
-                      <span className="inline-code">{id}</span> and installs it wherever it keeps skills.
+                      Paste this into an agent that can work with local files. It downloads{" "}
+                      <span className="inline-code">{id}</span> and installs it in the right skills folder.
                     </p>
                     <div className="up-step">
                       <StepLabel n="1">Access token</StepLabel>
@@ -1620,32 +1622,20 @@ wherever you keep skills) and install it there.
                     </div>
                   </>
                 )}
-                {method === "cli" && (
-                  <>
-                    <p className="up-panel__lede">
-                      Install the skill with the companion CLI. Requires{" "}
-                      <span className="inline-code">v0.4+</span>, signed in to this workspace.
-                    </p>
-                    <div className="up-step">
-                      <StepLabel n="1">Install</StepLabel>
-                      <CodeBlock text={cli} copyLabel="Copy command" />
-                    </div>
-                  </>
-                )}
                 {method === "manual" && (
                   <>
                     <p className="up-panel__lede">
-                      Download the packaged skill and unzip it into your skills directory yourself.
+                      Download the packaged skill and extract it into the selected skills folder.
                     </p>
                     <div className="up-step">
                       <StepLabel n="1">Install location</StepLabel>
                       <TargetSeg value={target} onChange={setTarget} />
                     </div>
                     <div className="up-step">
-                      <StepLabel n="2">Unzip</StepLabel>
-                      <CodeBlock text={unzip} copyLabel="Copy command" />
+                      <StepLabel n="2">Package</StepLabel>
                       <p className="up-seg-note">
-                        Then confirm <span className="mono">{path}/SKILL.md</span> exists.
+                        Download the package, extract it into <span className="mono">{path}</span>, then confirm{" "}
+                        <span className="mono">{path}/SKILL.md</span> exists.
                       </p>
                     </div>
                   </>

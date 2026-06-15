@@ -105,6 +105,7 @@ import {
   type ApiVariables,
 } from "./context";
 import { appRouter } from "./trpc";
+import { assertTargetedSkillUpdate, parseSkillPublishAction } from "./skillPublishGuards";
 
 const app = new Hono<{ Variables: ApiVariables }>();
 
@@ -929,8 +930,9 @@ app.put("/v1/skills/:slug/visibility", async (c) => {
 /**
  * Publish a packaged skill. Two body shapes:
  *  - multipart/form-data (browser dropzone / CLI): `file` + `action`/`everyone`/`team`/`version`/`message`.
- *  - raw `application/zip` or `application/gzip` (guided-prompt curl + Bearer token): the body IS the
+ *  - raw `application/zip` or `application/gzip` (guided assistant + Bearer token): the body IS the
  *    archive; `everyone`/`team`/`version`/`message` come from query params.
+ * `action=validate` runs the same package and targeted identity checks without publishing.
  * Accepts `.zip` or `.tar.gz`. Requires the `skills:write` scope for token-authed requests.
  * Bodies above 32 MB are rejected with 413 before buffering (just over the 25 MB archive cap).
  */
@@ -948,6 +950,7 @@ app.post("/v1/skills", bodyLimit({ maxSize: 32 * 1024 * 1024, onError: (c) => js
     let versionRaw: string | undefined;
     let messageRaw: string | undefined;
     let expectSlug: string | undefined;
+    let expectSkillId: string | undefined;
     let ownerTeamRaw: string | undefined;
 
     if (contentType.includes("multipart/form-data")) {
@@ -966,6 +969,7 @@ app.post("/v1/skills", bodyLimit({ maxSize: 32 * 1024 * 1024, onError: (c) => js
       versionRaw = field("version");
       messageRaw = field("message");
       expectSlug = field("expect_slug");
+      expectSkillId = field("expect_skill_id");
       ownerTeamRaw = field("owner_team");
     } else {
       const url = new URL(c.req.url);
@@ -978,23 +982,43 @@ app.post("/v1/skills", bodyLimit({ maxSize: 32 * 1024 * 1024, onError: (c) => js
       versionRaw = c.req.query("version");
       messageRaw = c.req.query("message");
       expectSlug = c.req.query("expect_slug");
+      expectSkillId = c.req.query("expect_skill_id");
       ownerTeamRaw = c.req.query("owner_team");
     }
 
+    let parsedAction;
+    try {
+      parsedAction = parseSkillPublishAction(action);
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : String(error) }, 400);
+    }
+
     const result = await validateSkillArchive(archive);
-    if (action === "validate") return c.json({ result });
     if (!result.ok || !result.frontmatter) {
+      if (parsedAction === "validate") return c.json({ result });
       return c.json({ result, error: result.error ?? "validation failed" }, 422);
     }
     const fm = result.frontmatter;
-    // When updating a known skill, the uploaded package must be that skill (its frontmatter
-    // `name` is the slug the server publishes), so an upload can never silently target another id.
-    if (expectSlug && fm.name !== expectSlug) {
-      return c.json(
-        { error: `package name "${fm.name}" does not match the skill you are updating ("${expectSlug}")` },
-        422,
-      );
+    // When updating a known skill, bind the upload to both the slug and, when supplied, the
+    // Companion skill UUID. Metadata is optional for old packages, but cannot point elsewhere.
+    if (expectSlug || expectSkillId) {
+      const expectedSkill = await getSkillBySlug({
+        actor,
+        orgId,
+        slug: expectSlug ?? fm.name,
+      });
+      try {
+        assertTargetedSkillUpdate({
+          frontmatter: fm,
+          expectSlug,
+          expectSkillId,
+          expectedSkill,
+        });
+      } catch (error) {
+        return c.json({ result, error: error instanceof Error ? error.message : String(error) }, 422);
+      }
     }
+    if (parsedAction === "validate") return c.json({ result });
     const visibility = skillVisibilityInputSchema.parse({ everyone: parseBoolean(everyoneRaw), teams: teamValues });
     const target = await resolvePublishTarget({
       actor,
@@ -1089,8 +1113,8 @@ app.get("/v1/skills/:slug/download", async (c) => {
 });
 
 /**
- * Download a specific version as a `.zip` (the install flow's `curl … -o <id>.zip` + "Download
- * package" button). Visibility-gated; requires `skills:read` for token-authed callers.
+ * Download a specific version as a `.zip` for assistant or direct-download installs.
+ * Visibility-gated; requires `skills:read` for token-authed callers.
  */
 app.get("/v1/skills/:slug/versions/:version/package", async (c) => {
   try {
