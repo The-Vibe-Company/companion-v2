@@ -22,11 +22,16 @@ These are the endpoints a personal access token (`skills:read` + `skills:write`)
 | Validate (no publish) | `POST /skills?action=validate` | `skills:write` |
 | Publish a new skill | `POST /skills` | `skills:write` |
 | Update a skill | `POST /skills?expect_slug={slug}&expect_skill_id={id}` | `skills:write` |
+| Current bundled Companion skill status | `GET /local-skills/companion` | `skills:read` |
+| Download bundled Companion skill package | `GET /local-skills/companion/package` | `skills:read` |
 | Confirm this skill installed | `POST /local-skills/companion/installed` | `skills:write` |
 
 Listing the whole workspace catalog (`GET /skills`) and enumerating versions are **session-only** in
 the web app and reject tokens. To inventory what is installed on this machine, read the local skill
 folders directly (each has a `SKILL.md` with `metadata.companion_skill_id` / `companion_version`).
+
+The built-in Companion skill is different from user-published skills. For the skill shown in the
+workspace's **Companion skills** section, use only the `/local-skills/companion` endpoints.
 
 ## Upload bodies
 
@@ -54,14 +59,40 @@ treat it as a version identity reference, not a byte check of the download. To c
 check that `SKILL.md` is at the package root and its `metadata.companion_version` matches the
 version you fetched.
 
+## Update the Companion skill itself
+
+To check whether this local Companion skill is current:
+
+```http
+GET /local-skills/companion
+```
+
+The response includes `status`, `installedVersion`, `availableVersion`, and `changes`. Compare
+`availableVersion` with the `metadata.companion_version` in the installed Companion skill's
+`SKILL.md`. If they match, no update is needed.
+
+If `availableVersion` is newer, download the bundled package:
+
+```http
+GET /local-skills/companion/package
+```
+
+Extract it into a temporary directory, verify `SKILL.md` is at the package root, and verify its
+`metadata.companion_version` equals the `availableVersion` from `/local-skills/companion`. Only then
+replace the installed Companion skill folder. After replacement, call
+`POST /local-skills/companion/installed` with the installed version so the workspace status updates.
+
+Do not use `/skills/{slug}/download` or `/skills/{slug}/versions/{version}/package` to update the
+built-in Companion skill. Those endpoints are for workspace-published skills.
+
 ## Confirm install
 
 ```http
 POST /local-skills/companion/installed
 Content-Type: application/json
 
-{ "version": "1.0.1", "agent": "Claude Code" }
+{ "version": "1.0.2", "agent": "Claude Code" }
 ```
 
 `version` must be valid semver (use this skill's `metadata.companion_version`). The response is
-`{ "ok": true, "status": "installed" | "update", "availableVersion": "1.0.1" }`.
+`{ "ok": true, "status": "installed" | "update", "availableVersion": "1.0.2" }`.

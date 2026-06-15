@@ -1,9 +1,9 @@
 ---
 name: companion
-description: Manage, validate, publish, update, and audit your Companion skills from a coding assistant, using the Companion workspace API.
+description: "Use when managing local SKILL.md packages with Companion: validate, publish, update, install updates, audit skills, check workspace versions, or self-update this Companion skill through the Companion workspace API."
 license: MIT
 metadata:
-  companion_version: 1.0.1
+  companion_version: 1.0.2
 allowed-tools: read_file write_file run_shell
 ---
 
@@ -138,6 +138,81 @@ Unzip it over the folder, then confirm `SKILL.md` sits at the package root and i
 the canonical tar, not of this repackaged zip, so use it as a version identity reference, not a
 byte hash of `update.zip`.)
 
+### Update this Companion skill
+
+Use this flow when the user asks to update **the Companion skill itself**. This is the built-in
+local skill shown in the workspace's **Companion skills** section, so never use the generic
+`/skills/$SLUG/download` or `/skills/$SLUG/versions/$VERSION/package` endpoints for it.
+
+1. Resolve credentials as described above, without printing the token.
+2. Read this skill's local `metadata.companion_version` from its own `SKILL.md`.
+3. Ask the workspace for the current bundled Companion skill:
+
+```sh
+curl -s "$COMPANION_API_URL/local-skills/companion" \
+  -H "Authorization: Bearer $COMPANION_TOKEN"
+```
+
+The response includes `status`, `installedVersion`, `availableVersion`, and `changes`. If
+`availableVersion` is equal to the local `metadata.companion_version`, report that this skill is
+already current and stop. If `availableVersion` is greater, summarize `changes` and confirm with the
+user before replacing local files.
+
+After confirmation, download and stage the latest package in a temporary directory before touching
+the installed skill folder:
+
+```sh
+tmp="$(mktemp -d)"
+curl -fsSL "$COMPANION_API_URL/local-skills/companion/package" \
+  -H "Authorization: Bearer $COMPANION_TOKEN" \
+  -o "$tmp/companion.zip"
+unzip -q "$tmp/companion.zip" -d "$tmp/package"
+test -f "$tmp/package/SKILL.md"
+```
+
+Read `metadata.companion_version` from `$tmp/package/SKILL.md` and verify it equals the
+`availableVersion` returned by `/local-skills/companion`. If it does not match, delete the temporary
+directory and stop without changing the installed folder.
+
+If validation passes, replace the existing Companion skill folder with a staged copy. Validate the
+target before moving anything: `skill_dir` must be an absolute path, its basename must be
+`companion`, and the existing `$skill_dir/SKILL.md` must declare `name: companion`.
+
+```sh
+skill_dir="<path-to-installed-companion-skill>"
+case "$skill_dir" in
+  /*) ;;
+  *) echo "skill_dir must be absolute" >&2; exit 1 ;;
+esac
+test "$(basename "$skill_dir")" = "companion"
+test -f "$skill_dir/SKILL.md"
+grep -q '^name: companion$' "$skill_dir/SKILL.md"
+
+parent="$(dirname "$skill_dir")"
+staged="$(mktemp -d "$parent/.companion-update.XXXXXX")"
+cp -R "$tmp/package/." "$staged/"
+test -f "$staged/SKILL.md"
+grep -q '^name: companion$' "$staged/SKILL.md"
+
+backup="$(mktemp -d "$parent/.companion-backup.XXXXXX")"
+rmdir "$backup"
+mv "$skill_dir" "$backup"
+mv "$staged" "$skill_dir"
+echo "Previous Companion skill saved at $backup"
+```
+
+Then report the installed version back to the workspace:
+
+```sh
+curl -s "$COMPANION_API_URL/local-skills/companion/installed" \
+  -H "Authorization: Bearer $COMPANION_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"version":"<availableVersion>","agent":"<your assistant name>"}'
+```
+
+Treat `{ "ok": true, "status": "installed" }` as success. If the response says `status: "update"`,
+tell the user the workspace still has a newer bundled version available.
+
 ## Confirm installation (run once, at the end of install)
 
 The last step of installing **this** skill is to tell the workspace it is present, so the Companion
@@ -148,7 +223,7 @@ skills view shows the correct status and version. Report the version from this f
 curl -s "$COMPANION_API_URL/local-skills/companion/installed" \
   -H "Authorization: Bearer $COMPANION_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"version":"1.0.1","agent":"<your assistant name>"}'
+  -d '{"version":"1.0.2","agent":"<your assistant name>"}'
 ```
 
 A `{ "ok": true, "status": "installed" }` response confirms the workspace now knows this machine has
