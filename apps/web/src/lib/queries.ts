@@ -2,7 +2,6 @@
 
 import type {
   IssuedToken,
-  LocalSkillRow,
   ReportLocalSkillInstallResult,
   SkillCommentRow,
   SkillFile,
@@ -189,11 +188,6 @@ export async function saveSkillFilterPreferences(
 }
 
 // --- Local skills (the "Companion skills" section) ----------------------------------------------
-
-/** Fetch the built-in local skills with the caller's per-machine install status. */
-export async function fetchLocalSkills(): Promise<LocalSkillRow[]> {
-  return apiFetch<LocalSkillRow[]>("/v1/local-skills");
-}
 
 /** Public download URL for a local skill package (referenced by the assistant prompt). */
 export function localSkillPackageUrl(key: string): string {

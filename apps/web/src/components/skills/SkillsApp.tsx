@@ -4,7 +4,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import type { LocalSkillRow, SkillFilterPreferences, SkillVisibilityInput } from "@companion/contracts";
 import {
-  fetchLocalSkills,
   saveSkillFilterPreferences,
   setSkillVisibility,
   toggleStar as toggleStarRpc,
@@ -503,11 +502,6 @@ export function SkillsApp({
     setOpenId(null);
     setCurrentView("local");
   }, []);
-  const refreshLocalSkills = useCallback(async () => {
-    const rows = await fetchLocalSkills();
-    setLocalSkills(rows);
-    return rows;
-  }, []);
   const localUpdateCount = useMemo(
     () => localSkills.filter((s) => s.status === "update").length,
     [localSkills],
@@ -700,7 +694,7 @@ export function SkillsApp({
       )}
       <div className="main" aria-hidden={mobileSidebarOpen || undefined} inert={mobileSidebarOpen ? true : undefined}>
         {currentView === "local" ? (
-          <LocalSkillsView skills={localSkills} workspaceName={currentOrg.name} onRefresh={refreshLocalSkills} />
+          <LocalSkillsView skills={localSkills} workspaceName={currentOrg.name} />
         ) : skill ? (
           <DetailView
             skill={skill}

@@ -36,32 +36,14 @@ function fillPrompt(template: string, base: string, token: string): string {
 export function LocalSkillsView({
   skills,
   workspaceName,
-  onRefresh,
 }: {
   skills: LocalSkillRow[];
   workspaceName: string;
-  onRefresh: () => Promise<LocalSkillRow[]>;
 }) {
   const [openKey, setOpenKey] = useState<string | null>(null);
-  const [checking, setChecking] = useState(false);
 
   const featured = skills[0] ?? null;
   const open = useMemo(() => skills.find((s) => s.key === openKey) ?? null, [skills, openKey]);
-  const lastChecked = useMemo(
-    () => (featured ? relativeTime(featured.lastReportedAt) : "—"),
-    [featured],
-  );
-
-  const recheck = useCallback(async () => {
-    setChecking(true);
-    try {
-      await onRefresh();
-    } catch {
-      /* keep the current rows on a failed re-check */
-    } finally {
-      setChecking(false);
-    }
-  }, [onRefresh]);
 
   return (
     <div className="ls">
@@ -77,29 +59,15 @@ export function LocalSkillsView({
         <div className="ls-page">
           <div className="ls-head">
             <div>
-              <div className="ls-eyebrow">On this machine</div>
               <h1 className="ls-title">Companion skills</h1>
               <p className="ls-lede">
                 One helper you install on your machine, or hand to your assistant. It manages the
                 skills on this machine and publishes or updates them in Companion, safely.
               </p>
             </div>
-            <div className="ls-head__actions">
-              <span className="ls-checked mono">checked {lastChecked}</span>
-              <button className="dsecbtn" type="button" onClick={recheck} disabled={checking}>
-                <Icon name="refresh-cw" size={14} />
-                Check again
-              </button>
-            </div>
           </div>
 
-          {checking ? (
-            <div className="ls-state">
-              <Icon name="loader" size={22} className="ls-spin" />
-              <div className="ls-state__title">Checking your machine</div>
-              <div className="ls-state__sub">Looking for installed skills and comparing versions.</div>
-            </div>
-          ) : featured ? (
+          {featured ? (
             <div className="ls-list">
               <LocalSkillCard skill={featured} onOpen={() => setOpenKey(featured.key)} />
               <p className="ls-foot">
@@ -115,10 +83,6 @@ export function LocalSkillsView({
                 Companion publishes these skills and keeps them current, so there&rsquo;s usually
                 nothing to do here. New skills appear automatically when they&rsquo;re available.
               </div>
-              <button className="dsecbtn" type="button" onClick={recheck} style={{ marginTop: 4 }}>
-                <Icon name="refresh-cw" size={14} />
-                Check again
-              </button>
             </div>
           )}
         </div>
@@ -193,7 +157,7 @@ function LocalSkillDrawer({ skill, onClose }: { skill: LocalSkillRow; onClose: (
   const meta = STATUS_META[skill.status];
   const ref = useRef<HTMLDivElement>(null);
   const [copied, setCopied] = useState(false);
-  const [confirm, setConfirm] = useState<"sent" | "used" | null>(null);
+  const [confirm, setConfirm] = useState<"used" | null>(null);
   // A fresh token is minted once when the drawer opens; copy/send are gated on "ready" so a failed
   // mint can never hand off a placeholder credential the assistant can't authenticate with.
   const [token, setToken] = useState<string | null>(null);
@@ -248,22 +212,14 @@ function LocalSkillDrawer({ skill, onClose }: { skill: LocalSkillRow; onClose: (
     setTimeout(() => setCopied(false), 1800);
   }, [prompt, writeClipboard]);
 
-  const handAndConfirm = useCallback(
-    async (kind: "sent" | "used") => {
-      if (!prompt || !(await writeClipboard(prompt))) return;
-      setClipFailed(false);
-      setCopied(false);
-      setConfirm(kind);
-    },
-    [prompt, writeClipboard],
-  );
+  const handAndConfirm = useCallback(async () => {
+    if (!prompt || !(await writeClipboard(prompt))) return;
+    setClipFailed(false);
+    setCopied(false);
+    setConfirm("used");
+  }, [prompt, writeClipboard]);
 
-  const confirmText =
-    confirm === "used"
-      ? `Opened with your assistant. ${skill.name} is ready to use.`
-      : skill.status === "update"
-        ? `Sent to your assistant. It will update ${skill.name} to ${skill.availableVersion} and confirm when it's done.`
-        : `Sent to your assistant. It will install ${skill.name} and confirm when it's ready.`;
+  const confirmText = `Opened with your assistant. ${skill.name} is ready to use.`;
 
   return (
     <>
@@ -421,7 +377,7 @@ function LocalSkillDrawer({ skill, onClose }: { skill: LocalSkillRow; onClose: (
               <button
                 className="btn-primary"
                 type="button"
-                onClick={() => handAndConfirm("used")}
+                onClick={handAndConfirm}
                 disabled={phase !== "ready"}
               >
                 <Icon name="sparkles" size={14} />
@@ -429,21 +385,10 @@ function LocalSkillDrawer({ skill, onClose }: { skill: LocalSkillRow; onClose: (
               </button>
             </>
           ) : (
-            <>
-              <button
-                className="btn-ghost"
-                type="button"
-                onClick={() => handAndConfirm("sent")}
-                disabled={phase !== "ready"}
-              >
-                <Icon name="send" size={14} />
-                Send to assistant
-              </button>
-              <button className="btn-primary" type="button" onClick={copyPrompt} disabled={phase !== "ready"}>
-                <Icon name={copied ? "check" : "copy"} size={14} />
-                {copied ? "Copied" : primaryLabel}
-              </button>
-            </>
+            <button className="btn-primary" type="button" onClick={copyPrompt} disabled={phase !== "ready"}>
+              <Icon name={copied ? "check" : "copy"} size={14} />
+              {copied ? "Copied" : primaryLabel}
+            </button>
           )}
         </div>
       </div>

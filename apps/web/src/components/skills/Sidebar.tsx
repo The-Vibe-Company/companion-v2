@@ -211,9 +211,8 @@ export function Sidebar({
           );
         })}
 
-        <div className="side__grouplabel">On this machine</div>
         <button
-          className={"navitem" + (localActive ? " navitem--active" : "")}
+          className={"navitem navitem--bottom" + (localActive ? " navitem--active" : "")}
           aria-current={localActive ? "page" : undefined}
           onClick={() => runAndClose(onSelectLocal)}
           title="Companion skills"
