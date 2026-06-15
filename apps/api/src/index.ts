@@ -110,6 +110,7 @@ import {
 } from "./context";
 import { appRouter } from "./trpc";
 import { assertTargetedSkillUpdate, parseSkillPublishAction } from "./skillPublishGuards";
+import { buildSkillUploadOptions } from "./skillUploadOptions";
 import { buildCompanionSkillRow, getCompanionSkillPackage } from "./companionSkillPackage";
 import { COMPANION_SKILL_KEY } from "@companion/companion-skill";
 
@@ -833,6 +834,26 @@ app.put("/v1/skill-filter-preferences", async (c) => {
         setSkillFilterPreferences({ actor, orgId, preferences: body, database }),
       ),
     );
+  } catch (error) {
+    return jsonError(c, error, 401);
+  }
+});
+
+/**
+ * Skills-scoped upload choices for assistants. This deliberately lives under `/skills` rather than
+ * opening the general team-management surface to PATs: a read/write skill token can list the teams
+ * it may present as owner/share choices, but cannot manage those teams.
+ */
+app.get("/v1/skills/upload-options", async (c) => {
+  try {
+    actorFromContext(c, true);
+    requireScope(c, "skills:write");
+    const teams = await withTenant(
+      c,
+      ({ actor, orgId, database }) => listTeamsForUser({ actor, orgId, database }),
+      true,
+    );
+    return c.json(buildSkillUploadOptions(teams));
   } catch (error) {
     return jsonError(c, error, 401);
   }

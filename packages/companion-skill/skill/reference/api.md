@@ -16,6 +16,7 @@ These are the skills endpoints a personal access token (`skills:read` + `skills:
 
 | Action | Method & path | Scope |
 | --- | --- | --- |
+| Upload owner/visibility choices | `GET /skills/upload-options` | `skills:write` |
 | Current published version + checksum | `GET /skills/{slug}/download` | `skills:read` |
 | Download a version package | `GET /skills/{slug}/versions/{version}/package` | `skills:read` |
 | Browse a version's files | `GET /skills/{slug}/versions/{version}/files` | `skills:read` |
@@ -51,6 +52,38 @@ The built-in Companion skill is different from user-published skills. For the sk
 workspace's **Companion skills** section, use only the `/local-skills/companion` endpoints.
 
 ## Upload bodies and ownership
+
+Before asking the user to choose ownership or visibility, fetch the available choices:
+
+```http
+GET /skills/upload-options
+```
+
+The response shape is:
+
+```json
+{
+  "defaults": {
+    "owner_team": null,
+    "visibility": { "everyone": false, "teams": [] }
+  },
+  "teams": [
+    {
+      "id": "team_...",
+      "slug": "platform",
+      "name": "Platform",
+      "color": null,
+      "icon": null,
+      "teamRole": "editor",
+      "canOwn": true
+    }
+  ]
+}
+```
+
+Present "Personal" plus `canOwn=true` teams as owner choices. Present "Private", "Everyone", and
+optional team shares from `teams` as visibility choices. For a new publish, keep the response
+defaults unless the user chooses otherwise.
 
 `POST /skills` accepts either:
 
@@ -93,6 +126,12 @@ silently retarget another skill.
 If you include `owner_team` on an update, it must match the skill's current owner team. Publishing a
 new version cannot move a skill between personal and team ownership, or from one owner team to
 another.
+
+For updates, keep existing settings as the default. Read `GET /skills/{slug}/download`, use its
+returned `visibility` as the default, and include that visibility in the upload query. Do not omit
+`everyone`/`team` on updates: omitted visibility fields mean Private (`everyone=false`, no team
+shares), not "preserve existing". Omit `owner_team` unless the user explicitly chooses a team owner
+that already owns the skill.
 
 ## Versions & checksums
 

@@ -65,6 +65,7 @@ export const COMPANION_SKILL_MANIFEST: CompanionSkillManifest = {
       changes: [
         "Adds explicit owner-team guidance for publishing skills under a team.",
         "Documents Private, Everyone, and team-share visibility separately from ownership.",
+        "Lets assistants fetch and propose available teams while preserving current upload defaults.",
         "Clarifies the supported skills API management surface for assistants.",
       ],
     },

@@ -188,6 +188,7 @@ directly to Postgres.
   Session-authenticated only — a token cannot mint another.
 - Skills: `/v1/skills`, `/v1/skills/:slug`, `/v1/skills/:slug/versions`,
   `/v1/skills/:slug/download`, `/v1/skills/:slug/visibility`, `/v1/skill-filter-preferences`,
+  `GET /v1/skills/upload-options` (skills-token upload owner/visibility choices),
   `POST /v1/skills/create` (author a SKILL.md inline),
   `GET /v1/skills/:slug/versions/:version/package` (download a version as `.zip`), and
   `GET /v1/skills/:slug/versions/:version/files` (read a version's package contents for the in-app
@@ -207,12 +208,14 @@ directly to Postgres.
 
 Requests authenticate by Better Auth cookie session. An `Authorization: Bearer cmp_pat_…` token is
 accepted **only** on the PAT-enabled skills endpoints (`POST /v1/skills`, `POST /v1/skills/create`,
-`GET /v1/skills/:slug/download`, `GET /v1/skills/:slug/versions/:version/package`,
+`GET /v1/skills/upload-options`, `GET /v1/skills/:slug/download`,
+`GET /v1/skills/:slug/versions/:version/package`,
 `GET /v1/skills/:slug/versions/:version/files`, and the `/v1/local-skills*` endpoints); every other
 endpoint rejects tokens. Token requests are scope-gated (`skills:write` to publish/create,
-`skills:read` to download). Reading the local-skills catalog and downloading its package require
-`skills:read`; the install callback (`POST /v1/local-skills/:key/installed`) mutates state and writes
-an audit row, so it requires `skills:write` — the read+write token the install prompt mints satisfies
+`skills:write` to fetch upload options, `skills:read` to download). Reading the local-skills catalog
+and downloading its package require `skills:read`; the install callback
+(`POST /v1/local-skills/:key/installed`) mutates state and writes an audit row, so it requires
+`skills:write` — the read+write token the install prompt mints satisfies
 both, while a read-only token cannot spoof an install. `POST /v1/skills` accepts a multipart `file` (browser/CLI) or a raw
 `application/zip` / `application/gzip` body with `everyone`/`team`/`version` query params. Setting
 `action=validate` runs the same package checks without publishing; targeted updates also accept

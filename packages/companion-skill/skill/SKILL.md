@@ -82,7 +82,21 @@ Report the checklist back to the user. If any check fails, fix it and re-validat
 ### Publish a skill
 
 After a clean validation, and after the user confirms, publish a brand-new skill. Ask the user where
-the skill should be owned and who should be able to read it before you upload.
+the skill should be owned and who should be able to read it before you upload. Do not ask for a raw
+team slug first: fetch upload options and propose the available choices.
+
+```sh
+curl -s "$COMPANION_API_URL/skills/upload-options" \
+  -H "Authorization: Bearer $COMPANION_TOKEN"
+```
+
+The response contains `defaults` and `teams`. Present:
+
+- Owner choices: "Personal" plus teams where `canOwn=true`.
+- Visibility choices: "Private", "Everyone", and optional team shares from `teams`.
+
+Keep the current defaults unless the user chooses otherwise. For a brand-new publish, default to the
+response defaults: personal owner (`owner_team` omitted) and Private (`everyone=false`, no `team`).
 
 Ownership is separate from visibility:
 
@@ -120,9 +134,19 @@ folder stays linked to the workspace skill.
 
 When the user changed a skill that already exists in the workspace, bind the upload to that exact
 skill so an edit can never retarget another one. Pass `expect_slug` and `expect_skill_id` (read them
-from the folder's `metadata`). Keep the existing owner stable: if you pass `owner_team`, it must be
-the skill's current owner team, or the server rejects the upload. Use `everyone` and optional `team`
-values to change visibility on the new version.
+from the folder's `metadata`). Keep existing settings as the default: first read the current
+published settings, present them to the user, and only change them when the user explicitly asks.
+
+```sh
+curl -s "$COMPANION_API_URL/skills/$SLUG/download" \
+  -H "Authorization: Bearer $COMPANION_TOKEN"
+```
+
+Use the returned `visibility` as the default visibility and include it in the upload query. Do not
+omit `everyone`/`team` on updates: omitted visibility fields mean Private (`everyone=false`, no
+team shares), not "preserve existing". Omit `owner_team` by default so the current owner stays
+unchanged. If you pass `owner_team`, it must be the skill's current owner team, or the server
+rejects the upload.
 
 ```sh
 curl -s "$COMPANION_API_URL/skills?expect_slug=$SLUG&expect_skill_id=$SKILL_ID&owner_team=platform&everyone=true&team=research" \
@@ -141,6 +165,8 @@ members, teams, invitations, org settings, or tokens.
 
 Allowed skills API tasks:
 
+- Fetch upload owner/visibility choices with `GET /skills/upload-options` using a `skills:write`
+  token.
 - Validate, publish, or update a skill with `POST /skills`.
 - Read current published metadata with `GET /skills/$SLUG/download`.
 - Download packages with `GET /skills/$SLUG/versions/$VERSION/package`.
