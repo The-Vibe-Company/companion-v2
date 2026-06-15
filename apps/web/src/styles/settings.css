@@ -55,8 +55,12 @@
 /* team group (collapsible) */
 .sx-team { display: flex; align-items: center; border-radius: var(--radius-md); }
 .sx-team:hover { background: var(--color-surface-raised); }
+.sx-team__chev-btn { width: 28px; height: 28px; margin-left: 5px; display: grid; place-items: center; border: none; background: none; cursor: pointer;
+  color: var(--color-faint); border-radius: 4px; flex: none; transition: background-color var(--duration-fast) var(--ease-out-quint), color var(--duration-fast) var(--ease-out-quint); }
+.sx-team__chev-btn:hover { background: var(--color-surface-sunken); color: var(--color-fg); }
 .sx-team__btn { flex: 1; min-width: 0; display: flex; align-items: center; gap: 9px; padding: 7px 9px; border: none; background: none; cursor: pointer;
   color: var(--color-fg); font-family: var(--font-ui); font-size: var(--text-sm); font-weight: 500; text-align: left; }
+.sx-team__btn.is-active { background: var(--color-surface-raised); font-weight: 600; }
 .sx-team__chev { color: var(--color-faint); display: inline-flex; flex: none; transition: transform var(--duration-fast) var(--ease-out-quint); }
 .sx-team__chev.is-open { transform: rotate(90deg); }
 .sx-team__name { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -374,6 +378,7 @@
   .sx-nav:not(.is-mobile-open) .sx-item__txt,
   .sx-nav:not(.is-mobile-open) .sx-item__meta,
   .sx-nav:not(.is-mobile-open) .sx-team__chev,
+  .sx-nav:not(.is-mobile-open) .sx-team__chev-btn,
   .sx-nav:not(.is-mobile-open) .sx-team__name,
   .sx-nav:not(.is-mobile-open) .sx-team__gear,
   .sx-nav:not(.is-mobile-open) .sx-sub {
