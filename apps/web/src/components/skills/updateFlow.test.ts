@@ -5,7 +5,17 @@ import type { SkillVM, TeamVM } from "@/lib/types";
 import { DetailMoreMenuContent, DetailView } from "./DetailView";
 import { UploadDialog } from "./UploadDialog";
 
-const teams: TeamVM[] = [{ id: "engineering", name: "Engineering", initial: "EN", role: "editor", dbId: "team-1" }];
+const teams: TeamVM[] = [
+  {
+    id: "engineering",
+    name: "Engineering",
+    initial: "EN",
+    color: null,
+    icon: null,
+    role: "editor",
+    dbId: "team-1",
+  },
+];
 
 const skill: SkillVM = {
   uuid: "skill-1",
