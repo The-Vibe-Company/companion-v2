@@ -53,10 +53,15 @@ describe("companion skill package + row", () => {
     expect(row.availableVersion).toBe(pkg.version);
     expect(row.commands.length).toBeGreaterThan(0);
     expect(row.commands).toContainEqual({
-      name: "Update Companion skill",
-      desc: "Check and install the latest bundled Companion skill safely.",
+      name: "Publish a skill",
+      desc: "Validate a skill, choose owner/visibility, and publish it safely.",
     });
-    expect(row.changes).toContain("Adds an explicit self-update flow for the bundled Companion skill.");
+    expect(row.commands).toContainEqual({
+      name: "Manage skill API calls",
+      desc: "Use the supported skills API surface without crossing into workspace admin.",
+    });
+    expect(row.changes).toContain("Adds explicit owner-team guidance for publishing skills under a team.");
+    expect(row.changes).toContain("Documents Private, Everyone, and team-share visibility separately from ownership.");
     // The install prompt drives the report-back call and leaves placeholders for the client.
     expect(row.prompts.install).toContain("/local-skills/companion/package");
     expect(row.prompts.install).toContain("/local-skills/companion/installed");
