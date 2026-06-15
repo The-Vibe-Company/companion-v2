@@ -3,7 +3,7 @@ name: companion
 description: "Use when managing local SKILL.md packages with Companion: validate, publish, update, install updates, audit skills, check workspace versions, or self-update this Companion skill through the Companion workspace API."
 license: MIT
 metadata:
-  companion_version: 1.0.2
+  companion_version: 1.1.0
 allowed-tools: read_file write_file run_shell
 ---
 
@@ -81,15 +81,37 @@ Report the checklist back to the user. If any check fails, fix it and re-validat
 
 ### Publish a skill
 
-After a clean validation, and after the user confirms, publish a brand-new skill:
+After a clean validation, and after the user confirms, publish a brand-new skill. Ask the user where
+the skill should be owned and who should be able to read it before you upload.
+
+Ownership is separate from visibility:
+
+- `owner_team=<team-slug>` uploads the skill under that team. A user can do this only when they are
+  an organization Owner/Admin, or an Admin/Editor of that team. Team Readers cannot upload or update
+  skills for that team.
+- Omit `owner_team` to keep the skill personally owned by the user.
+- `everyone=false` with no `team` values means Private.
+- `everyone=true` means every member of the current workspace can read the skill.
+- `team=<team-slug>` shares read visibility with a team. Team visibility does **not** grant edit
+  rights; only direct ownership, owner-team Admin/Editor, or org Owner/Admin can modify a skill.
 
 ```sh
-curl -s "$COMPANION_API_URL/skills?everyone=false" \
+curl -s "$COMPANION_API_URL/skills?owner_team=platform&everyone=false" \
   -H "Authorization: Bearer $COMPANION_TOKEN" \
   -H "Content-Type: application/zip" \
   --data-binary @../skill.zip
 ```
 
+For a workspace-wide skill owned by a team, use `everyone=true`:
+
+```sh
+curl -s "$COMPANION_API_URL/skills?owner_team=platform&everyone=true" \
+  -H "Authorization: Bearer $COMPANION_TOKEN" \
+  -H "Content-Type: application/zip" \
+  --data-binary @../skill.zip
+```
+
+For private personal ownership, omit `owner_team`, set `everyone=false`, and do not send `team`.
 The response contains the assigned `id`, `version`, and `checksum`. Write the returned
 `companion_skill_id` and `companion_version` back into the folder's `SKILL.md` `metadata` so the
 folder stays linked to the workspace skill.
@@ -98,10 +120,12 @@ folder stays linked to the workspace skill.
 
 When the user changed a skill that already exists in the workspace, bind the upload to that exact
 skill so an edit can never retarget another one. Pass `expect_slug` and `expect_skill_id` (read them
-from the folder's `metadata`):
+from the folder's `metadata`). Keep the existing owner stable: if you pass `owner_team`, it must be
+the skill's current owner team, or the server rejects the upload. Use `everyone` and optional `team`
+values to change visibility on the new version.
 
 ```sh
-curl -s "$COMPANION_API_URL/skills?expect_slug=$SLUG&expect_skill_id=$SKILL_ID" \
+curl -s "$COMPANION_API_URL/skills?expect_slug=$SLUG&expect_skill_id=$SKILL_ID&owner_team=platform&everyone=true&team=research" \
   -H "Authorization: Bearer $COMPANION_TOKEN" \
   -H "Content-Type: application/zip" \
   --data-binary @../skill.zip
@@ -109,6 +133,25 @@ curl -s "$COMPANION_API_URL/skills?expect_slug=$SLUG&expect_skill_id=$SKILL_ID" 
 
 The server assigns the next version unless you pass an explicit `version=`. Summarize what changed
 and confirm before sending.
+
+### Manage skill API calls
+
+Use the workspace API only for skills-management tasks. Do not use this skill to manage workspace
+members, teams, invitations, org settings, or tokens.
+
+Allowed skills API tasks:
+
+- Validate, publish, or update a skill with `POST /skills`.
+- Read current published metadata with `GET /skills/$SLUG/download`.
+- Download packages with `GET /skills/$SLUG/versions/$VERSION/package`.
+- Browse version files with `GET /skills/$SLUG/versions/$VERSION/files`.
+- Change visibility with `PUT /skills/$SLUG/visibility` only when authenticated as a signed-in
+  session that can call that endpoint; personal access tokens may be rejected.
+- Read or write skill comments and stars only when the caller has a valid signed-in session for
+  those routes. Do not assume a `cmp_pat_...` token can call session-only endpoints.
+
+For token-authenticated automation, prefer the documented read/write package endpoints in
+`reference/api.md`.
 
 ### Check for updates
 
@@ -223,7 +266,7 @@ skills view shows the correct status and version. Report the version from this f
 curl -s "$COMPANION_API_URL/local-skills/companion/installed" \
   -H "Authorization: Bearer $COMPANION_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"version":"1.0.2","agent":"<your assistant name>"}'
+  -d '{"version":"1.1.0","agent":"<your assistant name>"}'
 ```
 
 A `{ "ok": true, "status": "installed" }` response confirms the workspace now knows this machine has

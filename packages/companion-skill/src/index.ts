@@ -38,19 +38,21 @@ export const COMPANION_SKILL_MANIFEST: CompanionSkillManifest = {
   key: COMPANION_SKILL_KEY,
   name: "Companion",
   description:
-    "Manage local SKILL.md packages with Companion: validate, publish, update, install updates, audit skills, check workspace versions, and self-update this Companion skill.",
+    "Manage local SKILL.md packages with Companion: validate, publish, update, choose owner teams and visibility, install updates, audit skills, check workspace versions, and self-update this Companion skill.",
   what:
-    "The Companion skill gives your assistant everything it needs to look after your skills on this machine. It can validate them, publish new ones, push updates, and check that everything is current. It always confirms a change with you before anything is published.",
+    "The Companion skill gives your assistant everything it needs to look after your skills on this machine. It can validate them, publish new ones, push updates, choose owner teams and visibility, and check that everything is current. It always confirms a change with you before anything is published.",
   uses:
     "Your assistant uses it whenever you ask to publish, update, validate, or check your skills, so the steps stay consistent and safe.",
   why: [
     "Reads only the skills you point it at. Nothing else on your machine.",
     "Always validates and confirms with you before it publishes anything.",
+    "Keeps ownership and visibility explicit, including team-owned uploads and private or Everyone sharing.",
     "Every publish and update is recorded in the workspace history.",
   ],
   commands: [
-    { name: "Publish a skill", desc: "Validate a skill and publish it to Companion safely." },
-    { name: "Update a skill", desc: "Push a new version of a skill you have changed." },
+    { name: "Publish a skill", desc: "Validate a skill, choose owner/visibility, and publish it safely." },
+    { name: "Update a skill", desc: "Push a new version with targeted identity and visibility checks." },
+    { name: "Manage skill API calls", desc: "Use the supported skills API surface without crossing into workspace admin." },
     { name: "Update Companion skill", desc: "Check and install the latest bundled Companion skill safely." },
     { name: "Check for updates", desc: "See whether the skills on this machine are up to date." },
     { name: "Install updates", desc: "Bring outdated skills up to the latest published version." },
@@ -58,6 +60,14 @@ export const COMPANION_SKILL_MANIFEST: CompanionSkillManifest = {
     { name: "Manage your skills", desc: "List and organize the skills on this machine." },
   ],
   changelog: [
+    {
+      version: "1.1.0",
+      changes: [
+        "Adds explicit owner-team guidance for publishing skills under a team.",
+        "Documents Private, Everyone, and team-share visibility separately from ownership.",
+        "Clarifies the supported skills API management surface for assistants.",
+      ],
+    },
     {
       version: "1.0.2",
       changes: [
