@@ -1,20 +1,12 @@
 "use client";
 
 import { Icon } from "../Icon";
+import { TeamAvatar } from "../org/TeamAvatar";
 import type { SkillVM, TeamVM } from "@/lib/types";
 import { visibilityMeta, vdot } from "./blocks";
 import { chipParts, type Filter, type ViewDef } from "./filters";
 import { FilterAdd } from "./FilterMenu";
 import { ViewTab } from "./ViewTab";
-
-function teamInitial(name: string): string {
-  const compact = name
-    .split(/\s+/)
-    .map((part) => part[0])
-    .join("")
-    .slice(0, 2);
-  return (compact || name[0] || "?").toUpperCase();
-}
 
 function VisibilityCell({ skill }: { skill: SkillVM }) {
   const meta = visibilityMeta(skill);
@@ -36,9 +28,7 @@ function VisibilityCell({ skill }: { skill: SkillVM }) {
           {skill.visibility.everyone && <span className="crow__scopeText crow__scopeText--base">Everyone</span>}
           <span className="crow__teampile" aria-hidden="true">
             {shownTeams.map((team) => (
-              <span className="crow__teamdot" key={team.slug} title={team.name}>
-                {teamInitial(team.name)}
-              </span>
+              <TeamAvatar className="crow__teamdot" key={team.slug} team={team} />
             ))}
             {extraTeams > 0 && <span className="crow__teamdot crow__teamdot--more">+{extraTeams}</span>}
           </span>

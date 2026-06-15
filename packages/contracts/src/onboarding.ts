@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { teamBrandColorSchema } from "./orgSettings";
 
 /** A domain-auto-join org surfaced during onboarding (no id — coarse counts only). */
 export const onboardingMatchedOrgSchema = z.object({
@@ -18,21 +19,18 @@ export const onboardingContextSchema = z.object({
 });
 export type OnboardingContextResponse = z.infer<typeof onboardingContextSchema>;
 
-/** A CSS color string (hex or oklch); kept permissive since brand colors come from a fixed palette. */
-const colorString = z.string().min(1).max(64);
-
 /** Request body of `POST /v1/onboarding/create`. */
 export const completeOnboardingInputSchema = z.object({
   org: z.object({
     name: z.string().min(1).max(120),
     domain: z.string().max(253).nullish(),
     autoJoin: z.boolean().default(false),
-    color: colorString.nullish(),
+    color: teamBrandColorSchema.nullish(),
     logoUrl: z.string().url().max(2048).nullish(),
   }),
   team: z.object({
     name: z.string().min(1).max(120),
-    color: colorString.nullish(),
+    color: teamBrandColorSchema.nullish(),
     icon: z.string().max(16).nullish(),
   }),
   invites: z.array(z.string().email()).max(50).default([]),

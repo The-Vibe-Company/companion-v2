@@ -4,13 +4,15 @@ import { describe, expect, it, vi } from "vitest";
 import type { SkillVM, TeamVM } from "@/lib/types";
 import { PropList } from "./detailParts";
 
-const teams: TeamVM[] = [{ id: "engineering", name: "Engineering", initial: "EN", role: "editor", dbId: "team-1" }];
+const teams: TeamVM[] = [
+  { id: "engineering", name: "Engineering", initial: "EN", color: null, icon: null, role: "editor", dbId: "team-1" },
+];
 
 const skill: SkillVM = {
   uuid: "skill-1",
   id: "manifest-demo",
   ownerId: "user-1",
-  visibility: { everyone: false, teams: [{ id: "team-1", slug: "engineering", name: "Engineering" }] },
+  visibility: { everyone: false, teams: [{ id: "team-1", slug: "engineering", name: "Engineering", color: null, icon: null }] },
   version: "1.2.3",
   validation: "valid",
   description: "Demo skill.",
@@ -33,7 +35,7 @@ const skill: SkillVM = {
   updated: "just now",
   stars: 0,
   starred: false,
-  teams: [{ id: "team-1", slug: "engineering", name: "Engineering" }],
+  teams: [{ id: "team-1", slug: "engineering", name: "Engineering", color: null, icon: null }],
   teamSlugs: ["engineering"],
   compatibility: "Requires Python 3.14+ and uv with network access",
   metadata: {

@@ -1,5 +1,6 @@
 import { and, count, eq, isNull, sql } from "drizzle-orm";
 import { db, schema, type Db } from "@companion/db";
+import { TEAM_BRAND_COLORS } from "@companion/contracts";
 import { classifyEmailDomain } from "./email-domains";
 import { uniqueSlug, type ActorContext } from "./services";
 
@@ -35,6 +36,13 @@ function requireVerifiedForDomainJoin(): boolean {
   if (flag === "true") return true;
   if (flag === "false") return false;
   return process.env.NODE_ENV === "production";
+}
+
+function normalizeBrandColor(value: string | null | undefined, label: "org" | "team"): string | null {
+  const color = value?.trim() ?? "";
+  if (!color) return null;
+  if (!(TEAM_BRAND_COLORS as readonly string[]).includes(color)) throw new Error(`invalid ${label} color`);
+  return color;
 }
 
 async function isEmailVerified(actorId: string, database: Db): Promise<boolean> {
@@ -147,6 +155,8 @@ export async function completeOnboarding(
     throw new Error("verify your email to enable domain auto-join");
   }
 
+  const orgColor = normalizeBrandColor(input.org.color, "org");
+  const teamColor = normalizeBrandColor(input.team.color, "team");
   const inviteTokens: Array<{ email: string; token: string }> = [];
 
   const orgId = await database
@@ -164,7 +174,7 @@ export async function completeOnboarding(
           plan: "team",
           domain: orgDomain,
           domainAutoJoin,
-          color: input.org.color ?? null,
+          color: orgColor,
           logoUrl: input.org.logoUrl ?? null,
         })
         .returning();
@@ -178,7 +188,7 @@ export async function completeOnboarding(
           orgId: org.id,
           name: input.team.name,
           slug: uniqueSlug(input.team.name, crypto.randomUUID()),
-          color: input.team.color ?? null,
+          color: teamColor,
           icon: input.team.icon ?? null,
         })
         .returning();
