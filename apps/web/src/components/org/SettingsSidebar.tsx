@@ -40,9 +40,10 @@ function NavItem({
 
 /**
  * Settings nav: three groups (Account / Workspace / Your teams). Teams are
- * collapsible blocks, each with its own General + Members and a gear that jumps
- * straight to its General pane. "Back to Skills" closes the surface; "+" creates
- * a team (managers only). Expanded-team state is owned by the parent (SettingsView).
+ * collapsible blocks. Clicking a team name opens its General pane; the chevron
+ * expands General + Members; the gear jumps straight to General too. "Back to
+ * Skills" closes the surface; "+" creates a team (managers only). Expanded-team
+ * state is owned by the parent (SettingsView).
  */
 export function SettingsSidebar({
   ctx,
@@ -69,7 +70,6 @@ export function SettingsSidebar({
   const ws = ctx.currentOrg;
   const navId = useId();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
-  const [isNarrowViewport, setIsNarrowViewport] = useState(false);
   const is = (view: SettingsView, teamId?: string) =>
     route.view === view && (teamId === undefined || route.teamId === teamId);
   const goTo = (nextRoute: SettingsRoute) => {
@@ -80,7 +80,6 @@ export function SettingsSidebar({
   useEffect(() => {
     const query = window.matchMedia("(max-width: 820px)");
     const sync = () => {
-      setIsNarrowViewport(query.matches);
       if (!query.matches) setMobileMenuOpen(false);
     };
     sync();
@@ -196,22 +195,25 @@ export function SettingsSidebar({
                   <div className="sx-team">
                     <button
                       type="button"
-                      className="sx-team__btn"
-                      title={t.name}
+                      className="sx-team__chev-btn"
+                      title={open ? "Collapse" : "Expand"}
                       aria-expanded={open}
                       aria-controls={subnavId}
-                      onClick={() => {
-                        if (isNarrowViewport && !mobileMenuOpen) {
-                          setMobileMenuOpen(true);
-                          if (!open) toggleTeam(t.id);
-                          return;
-                        }
-                        toggleTeam(t.id);
-                      }}
+                      onClick={() => toggleTeam(t.id)}
                     >
                       <span className={"sx-team__chev" + (open ? " is-open" : "")}>
                         <Icon name="chevron-right" size={14} />
                       </span>
+                    </button>
+                    <button
+                      type="button"
+                      className={"sx-team__btn" + (is("team-general", t.id) || is("team-members", t.id) ? " is-active" : "")}
+                      title={t.name}
+                      onClick={() => {
+                        if (!open) toggleTeam(t.id);
+                        goTo({ view: "team-general", teamId: t.id });
+                      }}
+                    >
                       <TeamAvatar team={t} className="sx-av" />
                       <span className="sx-team__name">{t.name}</span>
                     </button>
