@@ -4,6 +4,10 @@ import "./globals.css";
 export const metadata: Metadata = {
   title: "Companion · Skills",
   description: "A versioned registry of SKILL.md packages.",
+  icons: {
+    icon: "/brand/favicon.png",
+    apple: "/brand/apple-icon.png",
+  },
 };
 
 // Set data-theme / data-accent on <html> before paint to avoid a theme flash.

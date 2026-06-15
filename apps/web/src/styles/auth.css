@@ -50,9 +50,13 @@
   display: grid; place-items: center;
   width: 32px; height: 32px;
   border-radius: var(--radius-md);
-  background: var(--color-accent);
-  color: var(--color-accent-fg);
-  font-weight: 600; font-size: 17px;
+  background: var(--color-surface);
+  background-image: url("/brand/companion-mark-ui.png");
+  background-size: 86%;
+  background-repeat: no-repeat;
+  background-position: center;
+  border: 1px solid var(--color-line);
+  overflow: hidden;
   flex: none;
 }
 .brandname { font-size: var(--text-md); font-weight: 600; letter-spacing: var(--tracking-tight); line-height: 1.1; }
@@ -115,6 +119,21 @@
   border-radius: var(--radius-md); padding: 9px 11px; line-height: var(--leading-normal);
 }
 .autherr svg { width: 15px; height: 15px; flex: none; margin-top: 1px; }
+
+.devloginbtn {
+  min-height: 36px;
+  height: auto;
+  background: var(--color-surface-sunken);
+  border-color: var(--color-line);
+  color: var(--color-muted);
+  line-height: var(--leading-tight);
+  white-space: normal;
+}
+.devloginbtn:hover:not(:disabled) {
+  background: var(--color-surface-raised);
+  border-color: var(--color-line-strong);
+  color: var(--color-fg);
+}
 
 .authnotice {
   margin: 0;

@@ -204,7 +204,7 @@ export function OnboardingFlow({ context, me }: { context: OnboardingContext; me
       <main className="ob-main">
         <div className="ob-main__top">
           <div className="ob-main__topbrand">
-            <span className="ob-brand__mark">C</span>
+            <span className="ob-brand__mark" aria-hidden="true" />
             <span className="ob-brand__wm">Companion</span>
           </div>
           <div className="ob-topright">

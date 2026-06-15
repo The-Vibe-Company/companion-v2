@@ -34,10 +34,10 @@ body { background: var(--color-canvas); color: var(--color-fg); font-family: var
   border: 1px solid var(--color-line); border-radius: var(--radius-md); background: var(--color-surface); color: var(--color-muted); cursor: pointer;
   transition: background-color var(--duration-fast) var(--ease-out-quint), color var(--duration-fast) var(--ease-out-quint); }
 .side__toggle:hover { background: var(--color-surface-raised); color: var(--color-fg); }
-.brandmark { display: grid; place-items: center; width: 26px; height: 26px; border-radius: var(--radius-md);
-  background: var(--color-accent); color: var(--color-accent-fg); font-weight: 600; font-size: 14px; flex: none; }
-.brandname { font-weight: 600; font-size: var(--text-base); letter-spacing: var(--tracking-tight); line-height: 1.1; }
-.brandsub { font-size: 11px; color: var(--color-faint); font-family: var(--font-mono); }
+.side .brandmark { display: grid; place-items: center; width: 26px; height: 26px; border-radius: var(--radius-md);
+  background: var(--color-surface) url("/brand/companion-mark-ui.png") center / 86% no-repeat; border: 1px solid var(--color-line); overflow: hidden; flex: none; }
+.side .brandname { font-weight: 600; font-size: var(--text-base); letter-spacing: var(--tracking-tight); line-height: 1.1; }
+.side .brandsub { font-size: 11px; color: var(--color-faint); font-family: var(--font-mono); }
 .side__nav { flex: 1; min-height: 0; overflow-y: auto; padding: 8px; display: flex; flex-direction: column; gap: 2px; }
 .side__grouplabel { font-size: 10px; text-transform: uppercase; letter-spacing: var(--tracking-wide); color: var(--color-faint); padding: 12px 8px 4px; }
 .navitem { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; padding: 8px 10px; border: none;

@@ -223,7 +223,7 @@ function ChatDemo({ c, animate, replayKey }: { c: Copy; animate: boolean; replay
           </span>
           <div className="v6-panel">
             <div className="v6-panel__head">
-              <span className="v5-brand__mark v5-brand__mark--sm">C</span>
+              <span className="v5-brand__mark v5-brand__mark--logo v5-brand__mark--sm" aria-hidden="true" />
               {c.libLabel}
             </div>
             <div className="v6-panel__body">
@@ -336,7 +336,7 @@ function Nav({ c }: { c: Copy }) {
     <header className="v5-nav">
       <div className="v5-wrap v5-nav__inner">
         <a className="v5-brand" href="#top" aria-label="Companion">
-          <span className="v5-brand__mark">C</span>
+          <span className="v5-brand__mark v5-brand__mark--logo" aria-hidden="true" />
           <span className="v5-brand__name">Companion</span>
         </a>
         <nav className="v5-nav__links" aria-label="Sections">
@@ -708,7 +708,7 @@ function Footer({ c }: { c: Copy }) {
     <footer className="v5-footer">
       <div className="v5-wrap v5-footer__inner">
         <span className="v5-brand">
-          <span className="v5-brand__mark v5-brand__mark--sm">C</span>
+          <span className="v5-brand__mark v5-brand__mark--logo v5-brand__mark--sm" aria-hidden="true" />
           <span className="v5-brand__name v5-brand__name--sm">Companion</span>
         </span>
         <span>{c.footerBy}</span>

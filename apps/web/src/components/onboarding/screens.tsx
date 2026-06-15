@@ -60,7 +60,7 @@ export function Aside({
   return (
     <aside className="ob-aside">
       <div className="ob-brand">
-        <span className="ob-brand__mark">C</span>
+        <span className="ob-brand__mark" aria-hidden="true" />
         <span className="ob-brand__wm">Companion</span>
       </div>
       <nav className="ob-steps">

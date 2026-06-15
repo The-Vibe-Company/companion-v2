@@ -88,7 +88,7 @@ const GoogleG = () => (
 function Brand() {
   return (
     <div className="authbrand">
-      <span className="brandmark">C</span>
+      <span className="brandmark" aria-hidden="true" />
       <div>
         <div className="brandname">Companion</div>
       </div>
@@ -364,6 +364,9 @@ function useCountdown(initial: number): [number, () => void] {
    Screens
    ============================================================================ */
 type Screen = "signin" | "signup" | "verify" | "forgot" | "reset";
+const DEV_LOGIN_EMAIL = "admin@tvc.dev";
+const DEV_LOGIN_PASSWORD = "adminadmin";
+const ENABLE_DEV_LOGIN = process.env.NODE_ENV === "development";
 
 export function LoginForm({
   next = "/skills",
@@ -488,16 +491,15 @@ function SignIn({
   const [err, setErr] = useState<string | null>(initialError);
   const [busy, setBusy] = useState(false);
 
-  const submit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!email || !password) {
+  const submitCredentials = async (credentials: { email: string; password: string }) => {
+    if (!credentials.email || !credentials.password) {
       setErr("Enter your email and password to continue.");
       return;
     }
     setErr(null);
     setBusy(true);
     try {
-      const { data } = await postJson("/v1/auth/signin", { email, password, next });
+      const { data } = await postJson("/v1/auth/signin", { ...credentials, next });
       if (data.ok && typeof data.redirect === "string") {
         window.location.href = data.redirect;
         return;
@@ -512,6 +514,17 @@ function SignIn({
     } finally {
       setBusy(false);
     }
+  };
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    await submitCredentials({ email, password });
+  };
+
+  const devLogin = async () => {
+    setEmail(DEV_LOGIN_EMAIL);
+    setPassword(DEV_LOGIN_PASSWORD);
+    await submitCredentials({ email: DEV_LOGIN_EMAIL, password: DEV_LOGIN_PASSWORD });
   };
 
   return (
@@ -540,6 +553,11 @@ function SignIn({
         </div>
         {err ? <ErrorNote>{err}</ErrorNote> : null}
         <SubmitButton busy={busy}>{busy ? "Signing in…" : "Sign in"}</SubmitButton>
+        {ENABLE_DEV_LOGIN ? (
+          <Button type="button" variant="secondary" className="devloginbtn" disabled={busy} onClick={() => void devLogin()}>
+            Dev login as {DEV_LOGIN_EMAIL}
+          </Button>
+        ) : null}
         <div className="authrow">
           <span className="authnote">No account yet?</span>
           <button type="button" className="cds-link" onClick={goSignup}>
