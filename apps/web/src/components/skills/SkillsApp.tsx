@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type MutableRefObject } from "react";
 import { useRouter } from "next/navigation";
 import type { LocalSkillRow, SkillFilterPreferences, SkillVisibilityInput } from "@companion/contracts";
 import {
@@ -16,6 +16,7 @@ import { DetailView } from "./DetailView";
 import { LocalSkillsView } from "./LocalSkillsView";
 import { CommandPalette } from "./CommandPalette";
 import { UploadDialog, InstallDialog } from "./UploadDialog";
+import { parseSkillsRoute, skillsRouteHref, skillsRouteKey, skillsRouteSource, type SkillsRoute, type SkillsRouteSource } from "./route";
 import { Onboarding } from "../org/Onboarding";
 import { settingsHref } from "../org/SettingsApp";
 import { SettingsDrawer, SettingsDrawerError } from "../org/SettingsDrawer";
@@ -83,6 +84,46 @@ function settingsErrorMessage(error: unknown): string {
   return error instanceof Error && error.message ? error.message : SETTINGS_LOAD_ERROR;
 }
 
+function mineOwnerNamesFor(me: MeVM, teams: TeamVM[]): string[] {
+  const editableTeams = teams.filter((team) => team.role === "admin" || team.role === "editor");
+  return [...new Set([me.name, ...editableTeams.map((team) => team.name)])];
+}
+
+function normalizeSkillsRoute(route: SkillsRoute, teams: TeamVM[]): SkillsRoute {
+  if (route.kind !== "team") return route;
+  return teams.some((team) => team.id === route.team) ? route : { kind: "all" };
+}
+
+function filtersForSkillsRoute(route: SkillsRoute, mineOwnerNames: string[]): Filter[] {
+  if (route.kind === "mine") return mineOwnerNames.map((name) => ({ type: "owner", value: name }));
+  if (route.kind === "team") return [{ type: "team", value: route.team }];
+  return [];
+}
+
+function skillsViewForRoute(route: SkillsRoute): "workspace" | "local" {
+  return route.kind === "local" ? "local" : "workspace";
+}
+
+function applyRouteFilters(
+  route: SkillsRoute,
+  mineOwnerNames: string[],
+  setFilters: (filters: Filter[]) => void,
+  skipNextDebouncedPersistRef: MutableRefObject<boolean>,
+) {
+  skipNextDebouncedPersistRef.current = true;
+  setFilters(filtersForSkillsRoute(route, mineOwnerNames));
+}
+
+function initialFiltersForSkillsRoute(
+  route: SkillsRoute,
+  routeSource: SkillsRouteSource,
+  mineOwnerNames: string[],
+  savedFilters: Filter[],
+): Filter[] {
+  if (routeSource === "default" && route.kind === "all") return savedFilters;
+  return filtersForSkillsRoute(route, mineOwnerNames);
+}
+
 export function SkillsApp({
   initialSkills,
   initialLocalSkills,
@@ -91,6 +132,8 @@ export function SkillsApp({
   teams: initialTeams,
   orgs,
   currentOrg,
+  initialRoute,
+  initialRouteSource,
 }: {
   initialSkills: SkillVM[];
   initialLocalSkills: LocalSkillRow[];
@@ -99,15 +142,29 @@ export function SkillsApp({
   teams: TeamVM[];
   orgs: OrgVM[];
   currentOrg: OrgVM;
+  initialRoute: SkillsRoute;
+  initialRouteSource: SkillsRouteSource;
 }) {
   const router = useRouter();
   const orgActions = useOrgActions();
   const settingsWarmupRef = useRef<{ orgId: string; promise: Promise<SettingsAppData> } | null>(null);
+  const initialNormalizedRoute = normalizeSkillsRoute(initialRoute, initialTeams);
+  const initialMineOwnerNames = mineOwnerNamesFor(me, initialTeams);
   const [localSettings, setLocalSettings] = useState<LocalSettingsSurface | null>(null);
   const [skills, setSkills] = useState<SkillVM[]>(initialSkills);
   const [teams, setTeams] = useState<TeamVM[]>(initialTeams);
   const [localSkills, setLocalSkills] = useState<LocalSkillRow[]>(initialLocalSkills);
-  const [currentView, setCurrentView] = useState<"workspace" | "local">("workspace");
+  const [currentView, setCurrentView] = useState<"workspace" | "local">(() =>
+    skillsViewForRoute(initialNormalizedRoute),
+  );
+  const [filters, setFilters] = useState<Filter[]>(() =>
+    initialFiltersForSkillsRoute(
+      initialNormalizedRoute,
+      initialRouteSource,
+      initialMineOwnerNames,
+      initialFilterPreferences.active_filters,
+    ),
+  );
   useEffect(() => setSkills(initialSkills), [initialSkills]);
   useEffect(() => setTeams(initialTeams), [initialTeams]);
   useEffect(() => setLocalSkills(initialLocalSkills), [initialLocalSkills]);
@@ -188,23 +245,6 @@ export function SkillsApp({
     setLocalSettings(null);
   }, [currentOrg.id]);
 
-  useEffect(() => {
-    const onPopState = () => {
-      if (window.location.pathname === "/settings") {
-        showLocalSettings(settingsStateFromSearch(window.location.search), false);
-        return;
-      }
-      // Closing the drawer drops the warmed snapshot so the next open re-fetches current server
-      // state (a hover re-warms it). Otherwise optimistic in-drawer mutations wouldn't survive a
-      // close/reopen until a full page refresh.
-      settingsWarmupRef.current = null;
-      setLocalSettings(null);
-    };
-    window.addEventListener("popstate", onPopState);
-    return () => window.removeEventListener("popstate", onPopState);
-  }, [showLocalSettings]);
-
-  const [filters, setFilters] = useState<Filter[]>(() => initialFilterPreferences.active_filters);
   const [customViews, setCustomViews] = useState<ViewDef[]>(() =>
     initialFilterPreferences.custom_views.map((v) => ({ ...v, custom: true })),
   );
@@ -226,6 +266,13 @@ export function SkillsApp({
   const queuedPreferencesRef = useRef<SkillFilterPreferences | null>(null);
   const skipNextDebouncedPersistRef = useRef(false);
   const preferenceKey = JSON.stringify(initialFilterPreferences);
+  const initialRouteKey = skillsRouteKey(initialRoute);
+  const replaceSkillsUrl = useCallback((route: SkillsRoute) => {
+    if (typeof window === "undefined" || window.location.pathname !== "/skills") return;
+    const href = skillsRouteHref(route);
+    const currentHref = `${window.location.pathname}${window.location.search}`;
+    if (currentHref !== href) window.history.replaceState(window.history.state, "", href);
+  }, []);
 
   useEffect(() => {
     const query = window.matchMedia("(max-width: 820px)");
@@ -239,13 +286,28 @@ export function SkillsApp({
   }, []);
 
   useEffect(() => {
-    setFilters(initialFilterPreferences.active_filters);
+    const route = normalizeSkillsRoute(initialRoute, initialTeams);
+    const routeFilters = initialFiltersForSkillsRoute(
+      route,
+      initialRouteSource,
+      mineOwnerNamesFor(me, initialTeams),
+      initialFilterPreferences.active_filters,
+    );
+    if (initialRouteSource === "default" && route.kind === "all") {
+      setFilters(routeFilters);
+    } else {
+      skipNextDebouncedPersistRef.current = true;
+      setFilters(routeFilters);
+    }
     setCustomViews(initialFilterPreferences.custom_views.map((v) => ({ ...v, custom: true })));
     didInitializePersistenceRef.current = false;
     setPreferenceStatus("idle");
     setOpenId(null);
-    setCurrentView("workspace");
-  }, [currentOrg.id, preferenceKey, initialFilterPreferences]);
+    setCurrentView(skillsViewForRoute(route));
+    if (typeof window !== "undefined" && window.location.pathname === "/skills") {
+      replaceSkillsUrl(route);
+    }
+  }, [currentOrg.id, preferenceKey, initialFilterPreferences, initialRoute, initialRouteKey, initialRouteSource, initialTeams, me, replaceSkillsUrl]);
 
   const flushPreferenceQueue = useCallback(async () => {
     if (persistInFlightRef.current) return;
@@ -393,8 +455,8 @@ export function SkillsApp({
     [teams],
   );
   const mineOwnerNames = useMemo(
-    () => [...new Set([me.name, ...editableTeams.map((team) => team.name)])],
-    [me.name, editableTeams],
+    () => mineOwnerNamesFor(me, teams),
+    [me, teams],
   );
   const mineOwnerKey = useMemo(() => filtersKey(mineOwnerNames.map((name) => ({ type: "owner", value: name }))), [mineOwnerNames]);
   const isMine = filters.length > 0 && filters.every((f) => f.type === "owner") && filtersKey(filters) === mineOwnerKey;
@@ -413,13 +475,18 @@ export function SkillsApp({
     (id: string) => {
       const v = [...BUILTIN_VIEWS, ...customViews].find((x) => x.id === id);
       if (v) {
+        setCurrentView("workspace");
         setFilters(v.filters.map((f) => ({ ...f })));
         setOpenId(null);
+        replaceSkillsUrl({ kind: "all" });
       }
     },
-    [customViews],
+    [customViews, replaceSkillsUrl],
   );
   const toggleFilter = useCallback((type: Filter["type"], value: string) => {
+    setCurrentView("workspace");
+    setOpenId(null);
+    replaceSkillsUrl({ kind: "all" });
     setFilters((fs) =>
       fs.some((f) => f.type === type && f.value === value)
         ? fs.filter((f) => !(f.type === type && f.value === value))
@@ -428,12 +495,22 @@ export function SkillsApp({
             return next ? [...fs, next] : fs;
           })(),
     );
-  }, []);
+  }, [replaceSkillsUrl]);
   const removeFilter = useCallback(
-    (f: Filter) => setFilters((fs) => fs.filter((x) => !(x.type === f.type && x.value === f.value))),
-    [],
+    (f: Filter) => {
+      setCurrentView("workspace");
+      setOpenId(null);
+      replaceSkillsUrl({ kind: "all" });
+      setFilters((fs) => fs.filter((x) => !(x.type === f.type && x.value === f.value)));
+    },
+    [replaceSkillsUrl],
   );
-  const clearFilters = useCallback(() => setFilters([]), []);
+  const clearFilters = useCallback(() => {
+    setCurrentView("workspace");
+    setOpenId(null);
+    replaceSkillsUrl({ kind: "all" });
+    setFilters([]);
+  }, [replaceSkillsUrl]);
   const saveView = useCallback(() => {
     const name =
       filters
@@ -472,40 +549,76 @@ export function SkillsApp({
       if (wasActive) {
         setFilters([]);
         setOpenId(null);
+        replaceSkillsUrl({ kind: "all" });
       }
       skipNextDebouncedPersistRef.current = true;
       setCustomViews(next);
       persistPreferences(wasActive ? [] : filters, next);
     },
-    [customViews, filters, persistPreferences],
+    [customViews, filters, persistPreferences, replaceSkillsUrl],
   );
   const retryPreferenceSave = useCallback(() => {
     if (!queuedPreferencesRef.current) persistPreferences(filters, customViews);
     else void flushPreferenceQueue();
   }, [customViews, filters, flushPreferenceQueue, persistPreferences]);
+  const applySkillsRoute = useCallback(
+    (route: SkillsRoute, history: "push" | "replace" | "none") => {
+      const normalized = normalizeSkillsRoute(route, teams);
+      setCurrentView(skillsViewForRoute(normalized));
+      applyRouteFilters(normalized, mineOwnerNames, setFilters, skipNextDebouncedPersistRef);
+      setOpenId(null);
+      if (history === "none" || typeof window === "undefined") return;
+      const href = skillsRouteHref(normalized);
+      const currentHref = `${window.location.pathname}${window.location.search}`;
+      if (currentHref === href) return;
+      if (history === "push") window.history.pushState(window.history.state, "", href);
+      else window.history.replaceState(window.history.state, "", href);
+    },
+    [mineOwnerNames, teams],
+  );
   const selectTeam = useCallback((teamId: string) => {
-    setCurrentView("workspace");
-    setFilters([{ type: "team", value: teamId }]);
-    setOpenId(null);
-  }, []);
+    applySkillsRoute({ kind: "team", team: teamId }, "push");
+  }, [applySkillsRoute]);
   const selectAll = useCallback(() => {
-    setCurrentView("workspace");
-    setFilters([]);
-    setOpenId(null);
-  }, []);
+    applySkillsRoute({ kind: "all" }, "push");
+  }, [applySkillsRoute]);
   const selectMine = useCallback(() => {
-    setCurrentView("workspace");
-    setFilters(mineOwnerNames.map((name) => ({ type: "owner", value: name })));
-    setOpenId(null);
-  }, [mineOwnerNames]);
+    applySkillsRoute({ kind: "mine" }, "push");
+  }, [applySkillsRoute]);
   const selectLocal = useCallback(() => {
-    setOpenId(null);
-    setCurrentView("local");
-  }, []);
+    applySkillsRoute({ kind: "local" }, "push");
+  }, [applySkillsRoute]);
   const localUpdateCount = useMemo(
     () => localSkills.filter((s) => s.status === "update").length,
     [localSkills],
   );
+
+  useEffect(() => {
+    const onPopState = () => {
+      if (window.location.pathname === "/settings") {
+        showLocalSettings(settingsStateFromSearch(window.location.search), false);
+        return;
+      }
+      // Closing the drawer drops the warmed snapshot so the next open re-fetches current server
+      // state (a hover re-warms it). Otherwise optimistic in-drawer mutations wouldn't survive a
+      // close/reopen until a full page refresh.
+      settingsWarmupRef.current = null;
+      setLocalSettings(null);
+      if (window.location.pathname === "/skills") {
+        const route = parseSkillsRoute(window.location.search);
+        const source = skillsRouteSource(window.location.search);
+        if (source === "default" && route.kind === "all") {
+          setCurrentView("workspace");
+          setFilters(initialFilterPreferences.active_filters);
+          setOpenId(null);
+        } else {
+          applySkillsRoute(route, "none");
+        }
+      }
+    };
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, [applySkillsRoute, initialFilterPreferences.active_filters, showLocalSettings]);
 
   // --- Open / navigate -------------------------------------------------------
   const index = openId ? filtered.findIndex((s) => s.id === openId) : -1;
@@ -513,11 +626,12 @@ export function SkillsApp({
   openIdRef.current = openId;
 
   const open = useCallback((id: string) => {
+    if (currentView === "local") replaceSkillsUrl({ kind: "all" });
     setCurrentView("workspace");
     setUploadOpen(false);
     setOpenId(id);
     setLastId(id);
-  }, []);
+  }, [currentView, replaceSkillsUrl]);
   const back = useCallback(() => setOpenId(null), []);
   const go = useCallback(
     (delta: number) => {
@@ -584,10 +698,14 @@ export function SkillsApp({
           ),
         })),
       );
+      const route = parseSkillsRoute(window.location.search);
+      if (route.kind === "team" && previousSlug && route.team === previousSlug && previousSlug !== detail.slug) {
+        replaceSkillsUrl({ kind: "team", team: detail.slug });
+      }
     };
     window.addEventListener("companion:team-updated", onTeamUpdated);
     return () => window.removeEventListener("companion:team-updated", onTeamUpdated);
-  }, [teams]);
+  }, [replaceSkillsUrl, teams]);
 
   useEffect(() => {
     if (!mobileSidebarOpen) return;

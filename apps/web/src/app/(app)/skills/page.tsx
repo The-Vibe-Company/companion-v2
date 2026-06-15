@@ -3,12 +3,20 @@ import type { LocalSkillRow, SkillFilterPreferences, SkillListRow } from "@compa
 import { loadOrgContext } from "@/lib/currentOrg";
 import { serverApiFetch } from "@/lib/apiServer";
 import { SkillsApp } from "@/components/skills/SkillsApp";
+import { parseSkillsRoute, skillsRouteSource } from "@/components/skills/route";
 import { WorkspaceLoadError } from "@/components/org/WorkspaceLoadError";
 import { mapSkill, type MeVM, type TeamVM } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
-export default async function SkillsPage() {
+export default async function SkillsPage({
+  searchParams,
+}: {
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}) {
+  const params = await searchParams;
+  const initialRoute = parseSkillsRoute(params);
+  const initialRouteSource = skillsRouteSource(params);
   const whoami = await serverApiFetch<{ userId: string; email: string; name: string; needsOnboarding?: boolean }>(
     "/v1/auth/whoami",
   ).catch(() => null);
@@ -70,6 +78,8 @@ export default async function SkillsPage() {
       teams={teams}
       orgs={orgs}
       currentOrg={current}
+      initialRoute={initialRoute}
+      initialRouteSource={initialRouteSource}
     />
   );
 }
