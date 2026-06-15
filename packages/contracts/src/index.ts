@@ -4,6 +4,7 @@ export * from "./validation";
 export * from "./skill";
 export * from "./token";
 export * from "./lockfile";
+export * from "./localSkills";
 export * from "./onboarding";
 export * from "./preferences";
 export * from "./orgSettings";

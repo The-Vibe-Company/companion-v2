@@ -107,7 +107,7 @@ function CodeText({ text }: { text: string }) {
 }
 
 /** Code block with a copy button. `resolveText` (optional) mints fresh content before copy. */
-function CodeBlock({
+export function CodeBlock({
   text,
   scroll,
   copyLabel = "Copy",
@@ -393,7 +393,7 @@ function VisibilityPicker({
   );
 }
 
-function StepLabel({ n, children }: { n?: string; children: React.ReactNode }) {
+export function StepLabel({ n, children }: { n?: string; children: React.ReactNode }) {
   return (
     <div className="up-fieldlabel">
       {n != null && <span className="n">{n}</span>}
@@ -410,7 +410,7 @@ const FOCUSABLE =
  * opener on close, and close on Escape. Escape is handled in the capture phase + `stopPropagation`
  * so it never reaches the list/detail keyboard handler behind the scrim.
  */
-function useModalA11y(ref: React.RefObject<HTMLElement | null>, onClose: () => void) {
+export function useModalA11y(ref: React.RefObject<HTMLElement | null>, onClose: () => void) {
   useEffect(() => {
     const opener = document.activeElement as HTMLElement | null;
     const el = ref.current;
@@ -447,7 +447,7 @@ function useModalA11y(ref: React.RefObject<HTMLElement | null>, onClose: () => v
 }
 
 /** Token row: lazily mints a scoped token on first reveal / copy / regenerate. */
-function TokenRow({
+export function TokenRow({
   token,
   ensure,
   regen,
