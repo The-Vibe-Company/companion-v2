@@ -29,6 +29,9 @@ function promptFor(skill: LocalSkillRow): string {
   return skill.prompts.install;
 }
 
+type PromptMode = "default" | "reinstall";
+type CopiedKind = "prompt" | "reinstall";
+
 function fillPrompt(template: string, base: string, token: string): string {
   return template.split("{base}").join(base).split("{token}").join(token);
 }
@@ -153,11 +156,12 @@ function LocalSkillCard({ skill, onOpen }: { skill: LocalSkillRow; onOpen: () =>
   );
 }
 
-function LocalSkillDrawer({ skill, onClose }: { skill: LocalSkillRow; onClose: () => void }) {
+export function LocalSkillDrawer({ skill, onClose }: { skill: LocalSkillRow; onClose: () => void }) {
   const meta = STATUS_META[skill.status];
   const ref = useRef<HTMLDivElement>(null);
-  const [copied, setCopied] = useState(false);
+  const [copied, setCopied] = useState<CopiedKind | null>(null);
   const [confirm, setConfirm] = useState<"used" | null>(null);
+  const [promptMode, setPromptMode] = useState<PromptMode>("default");
   // A fresh token is minted once when the drawer opens; copy/send are gated on "ready" so a failed
   // mint can never hand off a placeholder credential the assistant can't authenticate with.
   const [token, setToken] = useState<string | null>(null);
@@ -167,9 +171,11 @@ function LocalSkillDrawer({ skill, onClose }: { skill: LocalSkillRow; onClose: (
   useModalA11y(ref, onClose);
 
   const base = apiBase();
-  const template = promptFor(skill);
   const isInstalled = skill.status === "installed";
-  const primaryLabel = skill.status === "update" ? "Copy update prompt" : "Copy install prompt";
+  const isUpdate = skill.status === "update";
+  const isReinstall = isUpdate && promptMode === "reinstall";
+  const template = isReinstall ? skill.prompts.install : promptFor(skill);
+  const primaryLabel = isUpdate ? "Copy update prompt" : "Copy install prompt";
 
   // Mint a read+write token once when the drawer opens. The prompt TEXT is derived below from the
   // current template, so it stays correct even if `skill` (and its status) changes while open.
@@ -204,18 +210,31 @@ function LocalSkillDrawer({ skill, onClose }: { skill: LocalSkillRow; onClose: (
     }
   }, []);
 
-  const copyPrompt = useCallback(async () => {
-    if (!prompt || !(await writeClipboard(prompt))) return;
+  const copyPrompt = useCallback(async (kind: CopiedKind = "prompt", value = prompt) => {
+    if (!value || !(await writeClipboard(value))) return;
     setClipFailed(false);
     setConfirm(null);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1800);
+    setCopied(kind);
+    setTimeout(() => setCopied(null), 1800);
   }, [prompt, writeClipboard]);
+
+  const copyDefaultPrompt = useCallback(async () => {
+    if (!token) return;
+    setPromptMode("default");
+    await copyPrompt("prompt", fillPrompt(promptFor(skill), base, token));
+  }, [base, copyPrompt, skill, token]);
+
+  const copyReinstallPrompt = useCallback(async () => {
+    if (!token) return;
+    const reinstallPrompt = fillPrompt(skill.prompts.install, base, token);
+    setPromptMode("reinstall");
+    await copyPrompt("reinstall", reinstallPrompt);
+  }, [base, copyPrompt, skill.prompts.install, token]);
 
   const handAndConfirm = useCallback(async () => {
     if (!prompt || !(await writeClipboard(prompt))) return;
     setClipFailed(false);
-    setCopied(false);
+    setCopied(null);
     setConfirm("used");
   }, [prompt, writeClipboard]);
 
@@ -353,7 +372,9 @@ function LocalSkillDrawer({ skill, onClose }: { skill: LocalSkillRow; onClose: (
                 {copied && (
                   <div className="ls-copied" role="status">
                     <Icon name="check" size={14} />
-                    Copied to your clipboard. Paste it into your assistant.
+                    {copied === "reinstall"
+                      ? "Reinstall prompt copied. Paste it into your assistant."
+                      : "Copied to your clipboard. Paste it into your assistant."}
                   </div>
                 )}
                 {clipFailed && (
@@ -370,9 +391,9 @@ function LocalSkillDrawer({ skill, onClose }: { skill: LocalSkillRow; onClose: (
         <div className="ls-drawer__foot">
           {isInstalled ? (
             <>
-              <button className="btn-ghost" type="button" onClick={copyPrompt} disabled={phase !== "ready"}>
-                <Icon name={copied ? "check" : "copy"} size={14} />
-                {copied ? "Copied" : "Copy prompt"}
+              <button className="btn-ghost" type="button" onClick={copyDefaultPrompt} disabled={phase !== "ready"}>
+                <Icon name={copied === "prompt" ? "check" : "copy"} size={14} />
+                {copied === "prompt" ? "Copied" : "Copy prompt"}
               </button>
               <button
                 className="btn-primary"
@@ -385,10 +406,22 @@ function LocalSkillDrawer({ skill, onClose }: { skill: LocalSkillRow; onClose: (
               </button>
             </>
           ) : (
-            <button className="btn-primary" type="button" onClick={copyPrompt} disabled={phase !== "ready"}>
-              <Icon name={copied ? "check" : "copy"} size={14} />
-              {copied ? "Copied" : primaryLabel}
-            </button>
+            <>
+              {isUpdate && (
+                <button
+                  className="ls-textbtn"
+                  type="button"
+                  onClick={copyReinstallPrompt}
+                  disabled={phase !== "ready"}
+                >
+                  {copied === "reinstall" ? "Copied" : "Reinstall Skill?"}
+                </button>
+              )}
+              <button className="btn-primary" type="button" onClick={copyDefaultPrompt} disabled={phase !== "ready"}>
+                <Icon name={copied === "prompt" ? "check" : "copy"} size={14} />
+                {copied === "prompt" ? "Copied" : primaryLabel}
+              </button>
+            </>
           )}
         </div>
       </div>

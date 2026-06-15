@@ -1,8 +1,10 @@
 import React from "react";
 import { renderToString } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
+import type { LocalSkillRow } from "@companion/contracts";
 import type { SkillVM, TeamVM } from "@/lib/types";
 import { DetailMoreMenuContent, DetailView } from "./DetailView";
+import { LocalSkillDrawer } from "./LocalSkillsView";
 import { UploadDialog } from "./UploadDialog";
 
 const teams: TeamVM[] = [
@@ -52,6 +54,29 @@ const skill: SkillVM = {
     companion_version: "1.2.3",
   },
 };
+
+function localSkill(status: LocalSkillRow["status"]): LocalSkillRow {
+  return {
+    key: "companion",
+    name: "Companion",
+    description: "Manage skills locally.",
+    status,
+    installedVersion: status === "none" ? null : "1.0.0",
+    availableVersion: status === "update" ? "1.1.0" : "1.0.0",
+    lastReportedAt: null,
+    agentLabel: null,
+    what: "A local helper skill.",
+    uses: "Installs and updates skills.",
+    why: ["Keeps local skills current."],
+    commands: [],
+    changes: ["Refreshes the bundled helper."],
+    prompts: {
+      install: "install {base} {token}",
+      update: "update {base} {token}",
+      use: "use {base} {token}",
+    },
+  };
+}
 
 describe("skill update flow", () => {
   it("removes the visible Update button from the skill detail topbar", () => {
@@ -140,5 +165,32 @@ describe("skill update flow", () => {
     expect(html).toContain("action=validate");
     expect(html).toContain("Validate first");
     expect(html).toContain("Publish only after validation is accepted");
+  });
+
+  it("shows reinstall only beside the local skill update prompt", () => {
+    const update = renderToString(
+      React.createElement(LocalSkillDrawer, {
+        skill: localSkill("update"),
+        onClose: vi.fn(),
+      }),
+    );
+    const installed = renderToString(
+      React.createElement(LocalSkillDrawer, {
+        skill: localSkill("installed"),
+        onClose: vi.fn(),
+      }),
+    );
+    const fresh = renderToString(
+      React.createElement(LocalSkillDrawer, {
+        skill: localSkill("none"),
+        onClose: vi.fn(),
+      }),
+    );
+
+    expect(update).toContain("Copy update prompt");
+    expect(update).toContain("Reinstall Skill?");
+    expect(installed).not.toContain("Reinstall Skill?");
+    expect(fresh).toContain("Copy install prompt");
+    expect(fresh).not.toContain("Reinstall Skill?");
   });
 });
