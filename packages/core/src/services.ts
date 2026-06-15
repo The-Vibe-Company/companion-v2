@@ -2,6 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { and, asc, count, desc, eq, exists, gt, inArray, isNull, ne, not, or, sql } from "drizzle-orm";
 import type {
   ApiTokenRow,
+  LocalSkillStatus,
   OrgRole,
   OrgSettingsDomainJoin,
   OrgSettingsInvitation,
@@ -2049,4 +2050,102 @@ export async function revokeApiToken(input: {
     .update(schema.apiTokens)
     .set({ revokedAt: new Date() })
     .where(eq(schema.apiTokens.id, input.tokenId));
+}
+
+// --- Local skills (the "Companion skills" section) ------------------------------------------
+
+export interface LocalSkillInstall {
+  skillKey: string;
+  installedVersion: string;
+  agentLabel: string | null;
+  installedAt: Date;
+  lastReportedAt: Date;
+}
+
+/** The caller's install record for a built-in local skill, or null if they never reported one. */
+export async function getLocalSkillInstall(input: {
+  actor: ActorContext;
+  orgId: string;
+  skillKey: string;
+  database?: Db;
+}): Promise<LocalSkillInstall | null> {
+  const database = input.database ?? db;
+  const row = await database.query.localSkillInstalls.findFirst({
+    where: and(
+      eq(schema.localSkillInstalls.orgId, input.orgId),
+      eq(schema.localSkillInstalls.userId, input.actor.id),
+      eq(schema.localSkillInstalls.skillKey, input.skillKey),
+    ),
+  });
+  if (!row) return null;
+  return {
+    skillKey: row.skillKey,
+    installedVersion: row.installedVersion,
+    agentLabel: row.agentLabel ?? null,
+    installedAt: row.installedAt,
+    lastReportedAt: row.lastReportedAt,
+  };
+}
+
+/**
+ * Record (or refresh) the caller's install of a built-in local skill. Idempotent per
+ * (org, user, skillKey): the first report sets `installedAt`; later reports update the version,
+ * label, and `lastReportedAt`. The local skill calls this at the end of its install flow.
+ */
+export async function reportLocalSkillInstall(input: {
+  actor: ActorContext;
+  orgId: string;
+  skillKey: string;
+  version: string;
+  agentLabel?: string | null;
+  database?: Db;
+}): Promise<LocalSkillInstall> {
+  const database = input.database ?? db;
+  const now = new Date();
+  const agentLabel = input.agentLabel?.trim() ? input.agentLabel.trim() : null;
+  const [row] = await database
+    .insert(schema.localSkillInstalls)
+    .values({
+      orgId: input.orgId,
+      userId: input.actor.id,
+      skillKey: input.skillKey,
+      installedVersion: input.version,
+      agentLabel,
+      installedAt: now,
+      lastReportedAt: now,
+    })
+    .onConflictDoUpdate({
+      target: [
+        schema.localSkillInstalls.orgId,
+        schema.localSkillInstalls.userId,
+        schema.localSkillInstalls.skillKey,
+      ],
+      set: { installedVersion: input.version, agentLabel, lastReportedAt: now },
+    })
+    .returning();
+  if (!row) throw new Error("could not record install");
+  await database.insert(schema.auditLog).values({
+    orgId: input.orgId,
+    actorId: input.actor.id,
+    action: "local_skill.install",
+    targetType: "local_skill",
+    targetId: input.skillKey,
+    metadata: { version: input.version, agent: agentLabel },
+  });
+  return {
+    skillKey: row.skillKey,
+    installedVersion: row.installedVersion,
+    agentLabel: row.agentLabel ?? null,
+    installedAt: row.installedAt,
+    lastReportedAt: row.lastReportedAt,
+  };
+}
+
+/** Derive install status from the reported version (null = never reported) and the available version. */
+export function computeLocalSkillStatus(
+  installedVersion: string | null,
+  availableVersion: string,
+): LocalSkillStatus {
+  if (!installedVersion) return "none";
+  return compareSemver(installedVersion, availableVersion) < 0 ? "update" : "installed";
 }

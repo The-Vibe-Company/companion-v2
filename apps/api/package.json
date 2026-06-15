@@ -17,6 +17,7 @@
     "@aws-sdk/s3-request-presigner": "^3.744.0",
     "@better-auth/drizzle-adapter": "^1.6.4",
     "@companion/auth": "workspace:*",
+    "@companion/companion-skill": "workspace:*",
     "@companion/contracts": "workspace:*",
     "@companion/core": "workspace:*",
     "@companion/db": "workspace:*",

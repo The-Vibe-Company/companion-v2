@@ -417,3 +417,36 @@ export const auditLog = pgTable("audit_log", {
   metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
   createdAt: now(),
 });
+
+/**
+ * Tracks which built-in local helper skills (the "Companion skills" section) a member has installed
+ * on their machine, and at which version. The local skill reports here at the end of its install via
+ * `POST /v1/local-skills/:key/installed`; the UI compares `installed_version` against the bundled
+ * package version to show Not installed / Installed / Update available. One row per member per
+ * `skill_key` per workspace.
+ */
+export const localSkillInstalls = pgTable(
+  "local_skill_installs",
+  {
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    /** Built-in skill key, e.g. `companion`. */
+    skillKey: text("skill_key").notNull(),
+    /** Semver the agent reported installing. */
+    installedVersion: text("installed_version").notNull(),
+    /** Optional free-form source label, e.g. "Claude Code". */
+    agentLabel: text("agent_label"),
+    /** First time this member reported the skill installed. */
+    installedAt: timestamp("installed_at", { withTimezone: true }).notNull().defaultNow(),
+    /** Latest report ("last checked" in the UI). */
+    lastReportedAt: timestamp("last_reported_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.orgId, t.userId, t.skillKey] }),
+    byOrgUser: index("local_skill_installs_org_user_idx").on(t.orgId, t.userId),
+  }),
+);
