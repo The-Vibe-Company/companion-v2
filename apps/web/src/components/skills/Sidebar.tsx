@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { Icon } from "../Icon";
 import { OrgSwitcher } from "../org/OrgSwitcher";
+import { TeamAvatar } from "../org/TeamAvatar";
 import type { SettingsIntent } from "../org/model";
 import type { OrgVM, TeamVM } from "@/lib/types";
 
@@ -24,6 +25,10 @@ export function Sidebar({
   onSelectMine,
   onSelectAll,
   onSelectTeam,
+  mobileOpen,
+  compactRail,
+  onToggleMobile,
+  onCloseMobile,
 }: {
   orgs: OrgVM[];
   currentOrg: OrgVM;
@@ -42,6 +47,10 @@ export function Sidebar({
   onSelectMine: () => void;
   onSelectAll: () => void;
   onSelectTeam: (id: string) => void;
+  mobileOpen: boolean;
+  compactRail: boolean;
+  onToggleMobile: () => void;
+  onCloseMobile: () => void;
 }) {
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set(teams[0] ? [teams[0].id] : []));
   const toggle = (id: string) =>
@@ -52,12 +61,36 @@ export function Sidebar({
       return n;
     });
   const warmSettings = () => onWarmSettings();
+  const runAndClose = (action: () => void) => {
+    action();
+    onCloseMobile();
+  };
 
   return (
-    <aside className="side">
+    <aside className={"side" + (mobileOpen ? " side--mobile-open" : "")}>
       <div className="side__brand">
-        <OrgSwitcher orgs={orgs} current={currentOrg} onSwitch={onSwitchOrg} onOnboard={onOnboard} />
-        <button className="side__search" onClick={onOpenPalette} title="Search (⌘K)" aria-label="Search">
+        <button
+          className="side__toggle"
+          type="button"
+          onClick={onToggleMobile}
+          aria-label={mobileOpen ? "Collapse navigation" : "Expand navigation"}
+          aria-expanded={mobileOpen}
+          title={mobileOpen ? "Collapse navigation" : "Expand navigation"}
+        >
+          <Icon name={mobileOpen ? "panel-left-close" : "panel-left-open"} size={15} />
+        </button>
+        <OrgSwitcher
+          orgs={orgs}
+          current={currentOrg}
+          onSwitch={(id) => runAndClose(() => onSwitchOrg(id))}
+          onOnboard={(mode) => runAndClose(() => onOnboard(mode))}
+        />
+        <button
+          className="side__search"
+          onClick={() => runAndClose(onOpenPalette)}
+          title="Search (⌘K)"
+          aria-label="Search"
+        >
           <Icon name="search" size={14} />
         </button>
       </div>
@@ -65,12 +98,13 @@ export function Sidebar({
         <button
           className={"navitem" + (isMine ? " navitem--active" : "")}
           aria-current={isMine ? "page" : undefined}
-          onClick={onSelectMine}
+          onClick={() => runAndClose(onSelectMine)}
+          title="My skills"
         >
           <span className="navitem__ico">
             <Icon name="user" />
           </span>
-          My skills
+          <span className="navitem__label">My skills</span>
           <span className="navitem__count tnum">{myCount}</span>
         </button>
 
@@ -78,19 +112,20 @@ export function Sidebar({
         <button
           className={"navitem" + (workspaceActive ? " navitem--active" : "")}
           aria-current={workspaceActive ? "page" : undefined}
-          onClick={onSelectAll}
+          onClick={() => runAndClose(onSelectAll)}
+          title="Workspace skills"
         >
           <span className="navitem__ico">
             <Icon name="package" />
           </span>
-          Skills
+          <span className="navitem__label">Skills</span>
           <span className="navitem__count">{totalCount}</span>
         </button>
-        <button className="navitem navitem--muted" disabled tabIndex={-1}>
+        <button className="navitem navitem--muted" disabled tabIndex={-1} title="Agents coming soon" aria-label="Agents coming soon">
           <span className="navitem__ico">
             <Icon name="square-stack" />
           </span>
-          Agents
+          <span className="navitem__label">Agents</span>
           <span className="navitem__soon">soon</span>
         </button>
 
@@ -103,7 +138,7 @@ export function Sidebar({
               aria-label="New team"
               onFocus={warmSettings}
               onMouseDown={warmSettings}
-              onClick={() => onOpenSettings({ dialog: "team" })}
+              onClick={() => runAndClose(() => onOpenSettings({ dialog: "team" }))}
               onPointerEnter={warmSettings}
             >
               <Icon name="plus" size={14} />
@@ -115,11 +150,17 @@ export function Sidebar({
           return (
             <div className="teamblock" key={tm.id}>
               <div className="teamitem">
-                <button className="teamitem__main" onClick={() => toggle(tm.id)} aria-expanded={open}>
+                <button
+                  className="teamitem__main"
+                  onClick={() => (compactRail ? runAndClose(() => onSelectTeam(tm.id)) : toggle(tm.id))}
+                  aria-expanded={compactRail ? undefined : open}
+                  title={tm.name}
+                  aria-label={compactRail ? tm.name + " skills" : undefined}
+                >
                   <span className={"teamitem__chev" + (open ? " is-open" : "")}>
                     <Icon name="chevron-right" size={13} />
                   </span>
-                  <span className="teamavatar">{tm.initial}</span>
+                  <TeamAvatar team={tm} className="teamavatar" />
                   <span className="teamitem__name">{tm.name}</span>
                 </button>
                 <button
@@ -130,7 +171,7 @@ export function Sidebar({
                   onMouseDown={warmSettings}
                   onClick={(e) => {
                     e.stopPropagation();
-                    onOpenSettings({ view: "team-general", teamId: tm.id });
+                    runAndClose(() => onOpenSettings({ view: "team-general", teamId: tm.id }));
                   }}
                   onPointerEnter={warmSettings}
                 >
@@ -142,19 +183,20 @@ export function Sidebar({
                   <button
                     className={"navitem navitem--sub" + (activeTeam === tm.id ? " navitem--active" : "")}
                     aria-current={activeTeam === tm.id ? "page" : undefined}
-                    onClick={() => onSelectTeam(tm.id)}
+                    onClick={() => runAndClose(() => onSelectTeam(tm.id))}
+                    title={tm.name + " skills"}
                   >
                     <span className="navitem__ico">
                       <Icon name="package" size={15} />
                     </span>
-                    Skills
+                    <span className="navitem__label">Skills</span>
                     <span className="navitem__count">{teamCounts[tm.id] || 0}</span>
                   </button>
-                  <button className="navitem navitem--sub navitem--muted" disabled tabIndex={-1}>
+                  <button className="navitem navitem--sub navitem--muted" disabled tabIndex={-1} title={tm.name + " agents coming soon"} aria-label={tm.name + " agents coming soon"}>
                     <span className="navitem__ico">
                       <Icon name="square-stack" size={15} />
                     </span>
-                    Agents
+                    <span className="navitem__label">Agents</span>
                     <span className="navitem__soon">soon</span>
                   </button>
                 </div>
@@ -167,10 +209,11 @@ export function Sidebar({
         className="side__foot side__foot--btn"
         onFocus={warmSettings}
         onMouseDown={warmSettings}
-        onClick={() => onOpenSettings()}
+        onClick={() => runAndClose(() => onOpenSettings())}
         onPointerEnter={warmSettings}
+        title="Settings"
       >
-        <Icon name="settings" size={14} /> Settings
+        <Icon name="settings" size={14} /> <span className="side__foot__label">Settings</span>
       </button>
     </aside>
   );

@@ -202,7 +202,7 @@
   font-size: var(--text-sm); box-shadow: var(--shadow-lg); cursor: pointer; }
 
 /* ---- Settings drawer --------------------------------------------------- */
-.settings-drawer { position: fixed; inset: 0; z-index: 65; display: flex; justify-content: flex-end; background: var(--color-surface); }
+.settings-drawer { position: fixed; inset: 0; z-index: 80; display: flex; justify-content: flex-end; background: var(--color-surface); }
 .settings-drawer__panel { width: 100vw; height: 100vh; min-width: 0; outline: none;
   border-left: none; background: var(--color-surface); box-shadow: none;
   display: flex; flex-direction: column; overflow: hidden; }

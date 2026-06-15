@@ -82,7 +82,7 @@ export function SkillsApp({
   initialSkills,
   initialFilterPreferences,
   me,
-  teams,
+  teams: initialTeams,
   orgs,
   currentOrg,
 }: {
@@ -98,7 +98,9 @@ export function SkillsApp({
   const settingsWarmupRef = useRef<{ orgId: string; promise: Promise<SettingsAppData> } | null>(null);
   const [localSettings, setLocalSettings] = useState<LocalSettingsSurface | null>(null);
   const [skills, setSkills] = useState<SkillVM[]>(initialSkills);
+  const [teams, setTeams] = useState<TeamVM[]>(initialTeams);
   useEffect(() => setSkills(initialSkills), [initialSkills]);
+  useEffect(() => setTeams(initialTeams), [initialTeams]);
   useEffect(() => {
     document.cookie = `companion_org=${encodeURIComponent(currentOrg.id)}; path=/; SameSite=Lax`;
   }, [currentOrg.id]);
@@ -198,6 +200,8 @@ export function SkillsApp({
   );
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [uploadOpen, setUploadOpen] = useState(false);
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  const [isNarrowViewport, setIsNarrowViewport] = useState(false);
   const [updateSkill, setUpdateSkill] = useState<SkillVM | null>(null);
   const [installSkill, setInstallSkill] = useState<SkillVM | null>(null);
   const [openId, setOpenId] = useState<string | null>(null);
@@ -212,6 +216,17 @@ export function SkillsApp({
   const queuedPreferencesRef = useRef<SkillFilterPreferences | null>(null);
   const skipNextDebouncedPersistRef = useRef(false);
   const preferenceKey = JSON.stringify(initialFilterPreferences);
+
+  useEffect(() => {
+    const query = window.matchMedia("(max-width: 820px)");
+    const sync = () => {
+      setIsNarrowViewport(query.matches);
+      if (!query.matches) setMobileSidebarOpen(false);
+    };
+    sync();
+    query.addEventListener("change", sync);
+    return () => query.removeEventListener("change", sync);
+  }, []);
 
   useEffect(() => {
     setFilters(initialFilterPreferences.active_filters);
@@ -309,7 +324,7 @@ export function SkillsApp({
           const nextTeams = visibility.teams.map((slug) => {
             const existing = s.teams.find((team) => team.slug === slug);
             const team = teams.find((t) => t.id === slug);
-            return existing ?? { id: slug, slug, name: team?.name ?? slug };
+            return existing ?? { id: slug, slug, name: team?.name ?? slug, color: team?.color ?? null, icon: team?.icon ?? null };
           });
           return { ...s, visibility: { everyone: visibility.everyone, teams: nextTeams }, teams: nextTeams, teamSlugs: nextTeams.map((team) => team.slug) };
         }
@@ -501,11 +516,97 @@ export function SkillsApp({
     if (openId && index < 0) setOpenId(null);
   }, [openId, index]);
 
+  useEffect(() => {
+    const onTeamUpdated = (event: Event) => {
+      const detail = (event as CustomEvent<{
+        id: string;
+        slug: string;
+        name: string;
+        color: string | null;
+        icon: string | null;
+      }>).detail;
+      if (!detail?.id || !detail.slug) return;
+      const previousSlug = teams.find((team) => team.dbId === detail.id || team.id === detail.slug)?.id;
+      setTeams((rows) =>
+        rows.map((team) =>
+          team.dbId === detail.id || team.id === detail.slug
+            ? { ...team, id: detail.slug, dbId: detail.id, name: detail.name, color: detail.color, icon: detail.icon }
+            : team,
+        ),
+      );
+      setSkills((rows) =>
+        rows.map((skill) => {
+          const nextTeams = skill.teams.map((team) =>
+            team.id === detail.id || team.slug === detail.slug
+              ? { ...team, id: detail.id, slug: detail.slug, name: detail.name, color: detail.color, icon: detail.icon }
+              : team,
+          );
+          return { ...skill, visibility: { ...skill.visibility, teams: nextTeams }, teams: nextTeams, teamSlugs: nextTeams.map((team) => team.slug) };
+        }),
+      );
+      setFilters((rows) =>
+        rows.map((filter) =>
+          filter.type === "team" && previousSlug && filter.value === previousSlug && previousSlug !== detail.slug
+            ? { ...filter, value: detail.slug }
+            : filter,
+        ),
+      );
+      setCustomViews((rows) =>
+        rows.map((view) => ({
+          ...view,
+          filters: view.filters.map((filter) =>
+            filter.type === "team" && previousSlug && filter.value === previousSlug && previousSlug !== detail.slug
+              ? { ...filter, value: detail.slug }
+              : filter,
+          ),
+        })),
+      );
+    };
+    window.addEventListener("companion:team-updated", onTeamUpdated);
+    return () => window.removeEventListener("companion:team-updated", onTeamUpdated);
+  }, [teams]);
+
+  useEffect(() => {
+    if (!mobileSidebarOpen) return;
+    const side = document.querySelector<HTMLElement>(".side--mobile-open");
+    const focusable = () =>
+      Array.from(
+        side?.querySelectorAll<HTMLElement>(
+          'button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        ) ?? [],
+      ).filter((node) => !node.hasAttribute("disabled") && node.offsetParent !== null);
+    const items = focusable();
+    if (!side?.contains(document.activeElement) && items[0]) items[0].focus();
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Tab") return;
+      const nodes = focusable();
+      if (!nodes.length) return;
+      const first = nodes[0]!;
+      const last = nodes[nodes.length - 1]!;
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+        return;
+      }
+      if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [mobileSidebarOpen]);
+
   // Keyboard: ⌘K toggles palette; Esc back to list; ↑/↓ move between skills.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       // Modal dialogs own the keyboard while open (their own Esc closes them).
       if (uploadOpen || updateSkill || installSkill) return;
+      if (mobileSidebarOpen && e.key === "Escape") {
+        e.preventDefault();
+        setMobileSidebarOpen(false);
+        return;
+      }
       if ((e.metaKey || e.ctrlKey) && (e.key === "k" || e.key === "K")) {
         e.preventDefault();
         setPaletteOpen((o) => !o);
@@ -528,10 +629,10 @@ export function SkillsApp({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [openId, paletteOpen, uploadOpen, updateSkill, installSkill, back, go]);
+  }, [openId, paletteOpen, mobileSidebarOpen, uploadOpen, updateSkill, installSkill, back, go]);
 
   return (
-    <div className="app">
+    <div className={"app app--skills" + (mobileSidebarOpen ? " app--side-open" : "")}>
       <Sidebar
         orgs={orgs}
         currentOrg={currentOrg}
@@ -552,8 +653,20 @@ export function SkillsApp({
         onSelectMine={selectMine}
         onSelectAll={selectAll}
         onSelectTeam={selectTeam}
+        mobileOpen={mobileSidebarOpen}
+        compactRail={isNarrowViewport && !mobileSidebarOpen}
+        onToggleMobile={() => setMobileSidebarOpen((open) => !open)}
+        onCloseMobile={() => setMobileSidebarOpen(false)}
       />
-      <div className="main">
+      {mobileSidebarOpen && (
+        <button
+          type="button"
+          className="side-scrim"
+          aria-label="Close navigation"
+          onClick={() => setMobileSidebarOpen(false)}
+        />
+      )}
+      <div className="main" aria-hidden={mobileSidebarOpen || undefined} inert={mobileSidebarOpen ? true : undefined}>
         {skill ? (
           <DetailView
             skill={skill}

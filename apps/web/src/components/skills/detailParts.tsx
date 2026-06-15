@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { SkillCommentRow, SkillVisibilityInput, SkillVersionRow } from "@companion/contracts";
 import { Icon } from "../Icon";
+import { TeamAvatar } from "../org/TeamAvatar";
 import { relativeTime } from "@/lib/format";
 import type { MeVM, SkillVM, TeamVM } from "@/lib/types";
 import { Avatar, ValidBadge, visibilityMeta } from "./blocks";
@@ -105,9 +106,7 @@ export function VisibilityControl({
               className={"menu__item" + (selected.has(team.id) ? " is-sel" : "")}
               onClick={() => toggleTeam(team.id)}
             >
-              <span className="ico">
-                <Icon name="users" size={14} />
-              </span>
+              <TeamAvatar team={team} className="ico menu__teamav" />
               <span className="menu__label">{team.name}</span>
               <span className="menu__desc">team</span>
               {selected.has(team.id) && (

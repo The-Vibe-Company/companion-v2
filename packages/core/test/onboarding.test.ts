@@ -1,0 +1,77 @@
+import { describe, expect, it, vi } from "vitest";
+import type { Db } from "@companion/db";
+import { TEAM_BRAND_COLORS } from "@companion/contracts";
+import { completeOnboarding, type CompleteOnboardingInput } from "../src/onboarding";
+
+const actor = { id: "user-1", email: "owner@acme.test", name: "Owner" };
+
+function input(patch: Partial<CompleteOnboardingInput> = {}): CompleteOnboardingInput {
+  const base: CompleteOnboardingInput = {
+    org: { name: "Acme", domain: "acme.test", autoJoin: false, color: null, logoUrl: null },
+    team: { name: "Engineering", color: null, icon: null },
+    invites: [],
+  };
+  return {
+    org: { ...base.org, ...patch.org },
+    team: { ...base.team, ...patch.team },
+    invites: patch.invites ?? base.invites,
+  };
+}
+
+describe("completeOnboarding", () => {
+  it("rejects arbitrary org colors before writing", async () => {
+    const database = { transaction: vi.fn() } as unknown as Db;
+
+    await expect(
+      completeOnboarding(
+        actor,
+        input({ org: { name: "Acme", color: "url(https://evil.test/x.png)" } }),
+        database,
+      ),
+    ).rejects.toThrow("invalid org color");
+    expect(database.transaction).not.toHaveBeenCalled();
+  });
+
+  it("rejects arbitrary team colors before writing", async () => {
+    const database = { transaction: vi.fn() } as unknown as Db;
+
+    await expect(
+      completeOnboarding(
+        actor,
+        input({ team: { name: "Engineering", color: "url(https://evil.test/x.png)" } }),
+        database,
+      ),
+    ).rejects.toThrow("invalid team color");
+    expect(database.transaction).not.toHaveBeenCalled();
+  });
+
+  it("accepts palette colors", async () => {
+    const color = TEAM_BRAND_COLORS[0]!;
+    const tx = {
+      execute: vi.fn(async () => undefined),
+      insert: vi
+        .fn()
+        .mockReturnValueOnce({ values: () => ({ returning: async () => [{ id: "org-1" }] }) })
+        .mockReturnValueOnce({ values: () => undefined })
+        .mockReturnValueOnce({ values: () => ({ returning: async () => [{ id: "team-1" }] }) })
+        .mockReturnValueOnce({ values: () => undefined }),
+      update: vi.fn(() => ({ set: () => ({ where: async () => undefined }) })),
+    };
+    const database = {
+      transaction: vi.fn(async (cb: (txArg: typeof tx) => Promise<string>) => cb(tx)),
+    } as unknown as Db;
+
+    await expect(
+      completeOnboarding(
+        actor,
+        input({
+          org: { name: "Acme", color },
+          team: { name: "Engineering", color },
+        }),
+        database,
+      ),
+    ).resolves.toEqual({ orgId: "org-1", inviteTokens: [] });
+
+    expect(tx.insert).toHaveBeenCalledTimes(4);
+  });
+});

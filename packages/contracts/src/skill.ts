@@ -6,6 +6,8 @@ export const teamVisibilitySchema = z.object({
   id: z.string(),
   slug: z.string(),
   name: z.string(),
+  color: z.string().nullable().optional(),
+  icon: z.string().nullable().optional(),
 });
 export type TeamVisibility = z.infer<typeof teamVisibilitySchema>;
 

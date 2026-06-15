@@ -4,10 +4,13 @@ const ROW_WIDTHS = ["84%", "62%", "74%", "51%", "68%", "79%", "57%", "70%"];
 
 export default function Loading() {
   return (
-    <div className="app skel-shell" role="status" aria-live="polite" aria-busy="true">
+    <div className="app app--skills skel-shell" role="status" aria-live="polite" aria-busy="true">
       <span className="sr-only">Loading skills...</span>
       <aside className="side" aria-hidden="true">
         <div className="side__brand">
+          <div className="side__toggle skel__iconbtn">
+            <Icon name="panel-left-open" size={14} />
+          </div>
           <div className="brandmark skel__brandmark" />
           <div className="skel__brandmeta">
             <div className="skel skel--brandname" />
@@ -22,7 +25,7 @@ export default function Loading() {
             <span className="navitem__ico">
               <Icon name="user" />
             </span>
-            <span className="skel skel--navlabel" />
+            <span className="navitem__label skel skel--navlabel" />
             <span className="navitem__count skel skel--count" />
           </div>
           <div className="side__grouplabel">Workspace</div>
@@ -30,20 +33,20 @@ export default function Loading() {
             <span className="navitem__ico">
               <Icon name="package" />
             </span>
-            <span className="skel skel--navlabel" />
+            <span className="navitem__label skel skel--navlabel" />
             <span className="navitem__count skel skel--count" />
           </div>
           <div className="navitem navitem--muted">
             <span className="navitem__ico">
               <Icon name="square-stack" />
             </span>
-            <span className="skel skel--navlabel skel--short" />
+            <span className="navitem__label skel skel--navlabel skel--short" />
             <span className="navitem__soon">soon</span>
           </div>
         </nav>
         <div className="side__foot side__foot--btn skel__foot">
           <Icon name="settings" size={14} />
-          <span className="skel skel--navlabel" />
+          <span className="side__foot__label skel skel--navlabel" />
           <span className="side__foot__role skel skel--role" />
         </div>
       </aside>

@@ -25,7 +25,16 @@ export default async function SkillsPage() {
   const [skillsResult, filterPreferences, teamsResult] = await Promise.all([
     serverApiFetch<SkillListRow[]>("/v1/skills", { headers: orgHeaders }).catch(() => null),
     serverApiFetch<SkillFilterPreferences>("/v1/skill-filter-preferences", { headers: orgHeaders }).catch(() => null),
-    serverApiFetch<Array<{ id: string; slug: string; name: string; teamRole: "admin" | "editor" | "reader" }>>(
+    serverApiFetch<
+      Array<{
+        id: string;
+        slug: string;
+        name: string;
+        color: string | null;
+        icon: string | null;
+        teamRole: "admin" | "editor" | "reader";
+      }>
+    >(
       "/v1/teams",
       { headers: orgHeaders },
     ).catch(() => null),
@@ -45,6 +54,8 @@ export default async function SkillsPage() {
     dbId: t.id,
     name: t.name,
     initial: (t.name[0] ?? "T").toUpperCase(),
+    color: t.color,
+    icon: t.icon,
     role: t.teamRole,
   }));
 

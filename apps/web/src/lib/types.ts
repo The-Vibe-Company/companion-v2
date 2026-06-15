@@ -77,6 +77,8 @@ export interface TeamVM {
   id: string; // slug
   name: string;
   initial: string;
+  color: string | null;
+  icon: string | null;
   role: TeamRole;
   dbId?: string;
 }

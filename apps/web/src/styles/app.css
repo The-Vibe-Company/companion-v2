@@ -6,6 +6,26 @@
 
 /* --- Detail: tabbed body ------------------------------------------------- */
 /* (reuses .viewbar / .vtab from skills.css) */
+.team-brand-avatar {
+  overflow: hidden;
+}
+.team-brand-avatar__icon {
+  color: transparent;
+  line-height: 1;
+  text-shadow: 0 0 0 var(--team-brand-color);
+}
+.menu__teamav,
+.fmenu__teamav {
+  width: 18px;
+  height: 18px;
+  border-radius: var(--radius-sm);
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  font-size: 9px;
+  font-weight: 600;
+}
+
 .dtabs { padding-top: 6px; }
 .dbody--full { grid-template-columns: 1fr; }
 .dcontent--flush { padding: 0; overflow: hidden; display: flex; min-height: 0; }
