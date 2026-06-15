@@ -6,7 +6,7 @@
    page stays in sync with the real design system. The portal demo is
    presentational — it mirrors the real Skills list but is not API-wired. */
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { Button, Badge } from "@/components/cds";
 import { Icon } from "@/components/Icon";
@@ -17,34 +17,25 @@ const SKILL_MD_URL = "https://github.com/anthropics/skills";
 /* ---------------------------------------------------------------- copy --- */
 
 const COPY = {
-  nav: { story: "How it works", portal: "The portal", devs: "For developers" },
+  nav: { story: "How it works", moat: "Why it matters", library: "The library" },
   github: "GitHub",
   navCta: "Get started",
+  heroBadge: "The team skill library",
   heroTitlePre: "You can't be good at everything. ",
   heroTitleMark: "Your team already is.",
   heroSub:
-    "Skills are your colleagues' best prompts, packaged. Browse the team library, install the ones you need, and use them in your AI for anything.",
+    "Skills are your colleagues' best prompts, packaged. Browse the team library, pick the ones you need, and use them in your AI for anything.",
   ctaPrimary: "Start your team's library",
   ctaSecondary: "See how it works",
   heroNote: "Free and open source",
-  libLabel: "Team skill library",
-  libInstall: "Install",
-  libInstalled: "Installed",
-  step1Label: "Install a skill from your team",
-  step2Label: "Use it for anything",
-  alsoLabel: "Also in the library",
-  chatTitle: "Tom's AI assistant",
-  chatUserText: "Draft a post about our new release",
-  chatReplyMeta: "using linkedin-posts · by Léa, marketing",
-  chatReplyHook: "Shipping week: the release nobody believed we'd pull off.",
-  chatReplyBody: "One idea, told like a story. Ends on a question for the comments.",
-  chatCaption: "Installed once. Léa's expertise, whenever Tom needs it.",
-  cardTitle: "LinkedIn posts that sound human",
-  lossNum: "Without Companion",
+  libInstall: "Use this skill",
+  libInstalled: "Added",
+  tickerLabel: "A few skills your colleagues have already shared",
+  lossNum: "01 · Without Companion",
   lossTitle: "The same prompt, written four times.",
   lossSub:
-    "You're brilliant at your job, so your prompts for it are brilliant too. Same for everyone else, in their own corner. But nothing circulates: each team quietly rebuilds what another already perfected. Hours lost, every week, in every team.",
-  lossPunch: "Sound familiar?",
+    "You're brilliant at your job, so your prompts for it are brilliant too. Same for everyone else, in their own corner. But nothing circulates: each team quietly rebuilds what another already perfected.",
+  lossPunch: "Hours lost, every week, in every team.",
   lostNote: { where: "Marie · product", text: "Meeting-summary prompt v7. The good one." },
   lostDm: {
     who: "Jonas",
@@ -54,33 +45,52 @@ const COPY = {
   },
   lostDoc: { where: "Tom · engineering", text: "meeting-notes-prompt-FINAL-v2" },
   lostGhost: { where: "you, next week", text: "About to write it a fourth time" },
-  turnNum: "With Companion",
+  turnNum: "02 · With Companion",
   turnTitle: "Borrow the expert, every time.",
   turnSub:
     "A skill is an expert's know-how, packaged: the best prompt for the job, written by the person who does that job best, ready for anyone to use.",
   turnSteps: [
     {
-      title: "Experts publish",
-      desc: "Léa publishes her LinkedIn skill, Sam his debugging assistant. Each skill comes from the person who knows that job best.",
+      title: "Experts share",
+      desc: "Léa shares her LinkedIn skill, Sam his troubleshooting helper. Each one comes from the person who knows that job best.",
     },
     {
       title: "Everyone borrows",
-      desc: "Search the library, click, use. You post like marketing, debug like engineering, analyze like finance.",
+      desc: "Find it in the library, pick it, use it. You write like marketing, plan like product, research like sales.",
     },
     {
       title: "Simply and safely",
-      desc: "Each skill is shared exactly as widely as its owner decides: private, team, or the whole company.",
+      desc: "Each skill is shared exactly as widely as its owner decides: just you, your team, or the whole company.",
     },
   ],
-  payoffNum: "The result",
+  moatNum: "Why it matters",
+  moatTitlePre: "The advantage ",
+  moatTitleMark: "no AI can copy.",
+  moatSub:
+    "You're building a company. Everyone has access to the same AI. What's yours is how your people use it: the prompts your experts refined on your problems, your customers, your real work. Skills capture that know-how and keep it in the building.",
+  moatCols: [
+    {
+      title: "Built on your reality",
+      desc: "Not generic prompt-library filler. The exact approach that works on your customers, your product, your tone.",
+    },
+    {
+      title: "AI can't guess it",
+      desc: "AI writes a fluent first draft. It can't know how your best person actually does the job. Your team does.",
+    },
+    {
+      title: "Competitors don't have it",
+      desc: "This is your own know-how, getting better every week. The longer you run, the wider the gap.",
+    },
+  ],
+  payoffNum: "03 · The result",
   payoffTitle: "Every expert's best work, one search away.",
   payoffSub:
     "The library grows every week. New hires start with the whole company's playbook on day one.",
-  portalCaption: "The actual portal. Click around: star, filter, install.",
+  portalCaption: "This is the real thing. Click around: star, filter, pick a skill.",
   portalDescs: {
     "linkedin-posts": "Léa's prompt for posts that hook in line one and never sound like a robot.",
     "meeting-summaries": "Paste a transcript, get decisions, owners and deadlines.",
-    "debug-my-setup": "Sam's checklist prompt for fixing a broken local setup.",
+    "debug-my-setup": "Sam's checklist for fixing a broken setup, step by step.",
     "sales-research": "A 10-minute company brief before any sales call.",
     "brand-voice": "Rewrites anything in the company tone.",
     "weekly-report": "Your Friday report, assembled from the week's notes.",
@@ -130,14 +140,26 @@ type PortalRow = {
 };
 
 const PORTAL_ROWS: PortalRow[] = [
-  { id: "linkedin-posts", team: "marketing", who: "Léa", a: "terracotta", scope: "public", scopeLabel: "public", ver: "1.4.0", stars: 13, when: "2h ago", recent: true },
-  { id: "meeting-summaries", team: "product", who: "Marie", a: "violet", scope: "public", scopeLabel: "public", ver: "2.2.0", stars: 11, when: "yesterday", recent: true },
+  { id: "linkedin-posts", team: "marketing", who: "Léa", a: "terracotta", scope: "public", scopeLabel: "everyone", ver: "1.4.0", stars: 13, when: "2h ago", recent: true },
+  { id: "meeting-summaries", team: "product", who: "Marie", a: "violet", scope: "public", scopeLabel: "everyone", ver: "2.2.0", stars: 11, when: "yesterday", recent: true },
   { id: "debug-my-setup", team: "platform", who: "Sam", a: "amber", scope: "team", scopeLabel: "platform", ver: "3.0.1", stars: 8, when: "3d ago", recent: true },
   { id: "sales-research", team: "sales", who: "Jonas", a: "blue", scope: "team", scopeLabel: "sales", ver: "1.0.2", stars: 6, when: "1w ago" },
-  { id: "brand-voice", team: "marketing", who: "Léa", a: "terracotta", scope: "public", scopeLabel: "public", ver: "1.1.0", stars: 9, when: "2w ago" },
-  { id: "weekly-report", team: "you", who: "You", a: "slate", scope: "private", scopeLabel: "you", ver: "0.9.1", stars: 0, when: "4w ago", draft: true },
+  { id: "brand-voice", team: "marketing", who: "Léa", a: "terracotta", scope: "public", scopeLabel: "everyone", ver: "1.1.0", stars: 9, when: "2w ago" },
+  { id: "weekly-report", team: "you", who: "You", a: "slate", scope: "private", scopeLabel: "just you", ver: "0.9.1", stars: 0, when: "4w ago", draft: true },
 ];
 const SCOPE_ICON: Record<PortalRow["scope"], string> = { private: "lock", team: "users", public: "globe" };
+
+/* Ticker chips — a slice of the library in motion. */
+type TickerSkill = { id: string; who: string; a: string; stars: number };
+const TICKER_SKILLS: TickerSkill[] = [
+  { id: "linkedin-posts", who: "Léa", a: "terracotta", stars: 13 },
+  { id: "meeting-summaries", who: "Marie", a: "violet", stars: 11 },
+  { id: "debug-my-setup", who: "Sam", a: "amber", stars: 8 },
+  { id: "sales-research", who: "Jonas", a: "blue", stars: 6 },
+  { id: "brand-voice", who: "Léa", a: "terracotta", stars: 9 },
+  { id: "cold-emails", who: "Jonas", a: "blue", stars: 11 },
+  { id: "incident-postmortem", who: "Sam", a: "amber", stars: 7 },
+];
 
 /* ------------------------------------------------------------ utilities --- */
 
@@ -169,163 +191,11 @@ function useReveal() {
   }, []);
 }
 
-const prefersReducedMotion = () =>
-  typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-
 function Avatar({ who, tone, sm }: { who: string; tone: string; sm?: boolean }) {
   return (
     <span className={"v5-avatar v5-avatar--" + tone + (sm ? " v5-avatar--sm" : "")} aria-hidden="true">
       {who[0]}
     </span>
-  );
-}
-
-function HandArrow() {
-  return (
-    <svg width="72" height="44" viewBox="0 0 72 44" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d="M4 36 C 22 30, 44 26, 64 12" />
-      <path d="M52 10 l 12 2 -5 11" />
-    </svg>
-  );
-}
-
-/* ----------------------------------------------------------------- hero --- */
-
-function ChatDemo({ c, animate, replayKey }: { c: Copy; animate: boolean; replayKey: number }) {
-  const FINAL = 4;
-  // SSR-deterministic initial state (no window access) to avoid a hydration
-  // mismatch for reduced-motion users; the effect below settles to FINAL on mount.
-  const [step, setStep] = useState(animate ? 0 : FINAL);
-  const timers = useRef<ReturnType<typeof setTimeout>[]>([]);
-
-  useEffect(() => {
-    timers.current.forEach(clearTimeout);
-    timers.current = [];
-    if (!animate || prefersReducedMotion()) {
-      setStep(FINAL);
-      return;
-    }
-    setStep(0);
-    timers.current.push(setTimeout(() => setStep(1), 1300));
-    timers.current.push(setTimeout(() => setStep(2), 2300));
-    timers.current.push(setTimeout(() => setStep(3), 3300));
-    timers.current.push(setTimeout(() => setStep(4), 4100));
-    return () => timers.current.forEach(clearTimeout);
-  }, [animate, replayKey]);
-
-  return (
-    <div data-screen-label="hero-install">
-      <div className="v6-flow">
-        <div className="v6-flow__col">
-          <span className="v6-steplabel">
-            <span className="v6-steplabel__num">01</span>
-            {c.step1Label}
-          </span>
-          <div className="v6-panel">
-            <div className="v6-panel__head">
-              <span className="v5-brand__mark v5-brand__mark--logo v5-brand__mark--sm" aria-hidden="true" />
-              {c.libLabel}
-            </div>
-            <div className="v6-panel__body">
-              <div className={"v6-libcard" + (step >= 1 ? " v6-libcard--installed" : "")}>
-                <div className="v6-card__title">{c.cardTitle}</div>
-                <div className="v6-card__by">
-                  <Avatar who="Léa" tone="terracotta" />
-                  Léa · marketing
-                </div>
-                <div className="v6-card__foot">
-                  {step >= 1 ? (
-                    <Badge tone="ok" dot>
-                      {c.libInstalled}
-                    </Badge>
-                  ) : (
-                    <Button variant="primary" size="sm">
-                      {c.libInstall}
-                    </Button>
-                  )}
-                  <span className="v6-card__stars">
-                    <Icon name="star" size={12} />14
-                  </span>
-                </div>
-              </div>
-              <div className="v6-minilabel">{c.alsoLabel}</div>
-              <div>
-                <div className="v6-minirow">
-                  <Avatar who="Jonas" tone="blue" sm />
-                  <span className="v6-minirow__name">cold-emails</span>
-                  <span className="v6-minirow__stars">
-                    <Icon name="star" size={11} />11
-                  </span>
-                </div>
-                <div className="v6-minirow">
-                  <Avatar who="Marie" tone="violet" sm />
-                  <span className="v6-minirow__name">meeting-summaries</span>
-                  <span className="v6-minirow__stars">
-                    <Icon name="star" size={11} />12
-                  </span>
-                </div>
-                <div className="v6-minirow">
-                  <Avatar who="Sam" tone="amber" sm />
-                  <span className="v6-minirow__name">debug-my-setup</span>
-                  <span className="v6-minirow__stars">
-                    <Icon name="star" size={11} />8
-                  </span>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-        <div className={"v6-flow__connector" + (step >= 1 ? "" : " v5-hidden")} aria-hidden="true">
-          <span className="v6-skillchip">linkedin-posts</span>
-          <svg width="56" height="12" viewBox="0 0 56 12" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M2 6h44" />
-            <path d="m40 1 8 5-8 5" />
-          </svg>
-        </div>
-        <div className="v6-flow__col">
-          <span className="v6-steplabel">
-            <span className="v6-steplabel__num">02</span>
-            {c.step2Label}
-          </span>
-          <div className="v6-panel">
-            <div className="v6-panel__head">
-              <Avatar who="Tom" tone="teal" sm />
-              {c.chatTitle}
-            </div>
-            <div className="v6-panel__body">
-              <div className="v6-chatmsgs">
-                {step >= 2 && (
-                  <div className="v6-bubble-user">
-                    <span className="v6-skillchip">linkedin-posts</span>
-                    <span>{c.chatUserText}</span>
-                  </div>
-                )}
-                {step >= 3 && (
-                  <div className="v6-reply">
-                    <div className="v6-reply__meta">
-                      <Avatar who="Léa" tone="terracotta" sm />
-                      {c.chatReplyMeta}
-                    </div>
-                    <div className="v6-reply__hook">{c.chatReplyHook}</div>
-                    <div className="v6-reply__body">{c.chatReplyBody}</div>
-                  </div>
-                )}
-              </div>
-              <div className="v6-composer">
-                <span className="v6-composer__ghost">…</span>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-      <div className={"v6-caption" + (step >= 4 ? "" : " v5-hidden")}>
-        <span className="v5-avatars">
-          <Avatar who="Léa" tone="terracotta" />
-          <Avatar who="Tom" tone="teal" />
-        </span>
-        {c.chatCaption}
-      </div>
-    </div>
   );
 }
 
@@ -343,11 +213,11 @@ function Nav({ c }: { c: Copy }) {
           <a className="v5-nav__link" href="#loss">
             {c.nav.story}
           </a>
-          <a className="v5-nav__link" href="#payoff">
-            {c.nav.portal}
+          <a className="v5-nav__link" href="#moat">
+            {c.nav.moat}
           </a>
-          <a className="v5-nav__link" href="#devs">
-            {c.nav.devs}
+          <a className="v5-nav__link" href="#payoff">
+            {c.nav.library}
           </a>
         </nav>
         <span className="v5-nav__spacer"></span>
@@ -364,7 +234,7 @@ function Nav({ c }: { c: Copy }) {
   );
 }
 
-function Hero({ c, animate, replayKey }: { c: Copy; animate: boolean; replayKey: number }) {
+function Hero({ c }: { c: Copy }) {
   const [swept, setSwept] = useState(false);
   useEffect(() => {
     const id = setTimeout(() => setSwept(true), 500);
@@ -372,6 +242,10 @@ function Hero({ c, animate, replayKey }: { c: Copy; animate: boolean; replayKey:
   }, []);
   return (
     <section className="v5-hero v5-wrap" id="top" data-screen-label="hero">
+      <span className="v5-hero__badge">
+        <span className="v5-hero__badge-dot" aria-hidden="true"></span>
+        {c.heroBadge}
+      </span>
       <h1>
         {c.heroTitlePre}
         <span className={"v5-mark" + (swept ? " v5-mark--on" : "")}>{c.heroTitleMark}</span>
@@ -386,7 +260,28 @@ function Hero({ c, animate, replayKey }: { c: Copy; animate: boolean; replayKey:
         </Button>
       </div>
       <p className="v5-hero__note">{c.heroNote}</p>
-      <ChatDemo c={c} animate={animate} replayKey={replayKey} />
+    </section>
+  );
+}
+
+function Ticker({ c }: { c: Copy }) {
+  const chips = [...TICKER_SKILLS, ...TICKER_SKILLS];
+  return (
+    <section className="v5-ticker" data-screen-label="skill-ticker" aria-hidden="true">
+      <div className="v5-wrap">
+        <span className="v5-ticker__label">{c.tickerLabel}</span>
+      </div>
+      <div className="v5-ticker__mask">
+        <div className="v5-ticker__track">
+          {chips.map((s, i) => (
+            <span className="v5-ticker__chip" key={s.id + i}>
+              <Avatar who={s.who} tone={s.a} sm />
+              <span className="v5-ticker__name">{s.id}</span>
+              <span className="v5-ticker__stars">★ {s.stars}</span>
+            </span>
+          ))}
+        </div>
+      </div>
     </section>
   );
 }
@@ -455,6 +350,29 @@ function Turn({ c }: { c: Copy }) {
   );
 }
 
+function Moat({ c }: { c: Copy }) {
+  return (
+    <section className="v5-act v5-moat" id="moat" data-screen-label="moat">
+      <div className="v5-wrap v5-moat__inner">
+        <p className="v5-act__num">{c.moatNum}</p>
+        <h2 className="v5-reveal">
+          {c.moatTitlePre}
+          <span className="v5-mark v5-mark--lit">{c.moatTitleMark}</span>
+        </h2>
+        <p className="v5-act__sub v5-moat__lead v5-reveal">{c.moatSub}</p>
+        <div className="v5-moat__cols">
+          {c.moatCols.map((col) => (
+            <div className="v5-moat__col v5-reveal" key={col.title}>
+              <h3>{col.title}</h3>
+              <p>{col.desc}</p>
+            </div>
+          ))}
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function PortalCapture({ c }: { c: Copy }) {
   const [selected, setSelected] = useState("linkedin-posts");
   const [starred, setStarred] = useState<Record<string, boolean>>({ "linkedin-posts": true, "meeting-summaries": true });
@@ -502,9 +420,8 @@ function PortalCapture({ c }: { c: Copy }) {
       <div className="v5-portal">
         <aside className="v5-portal__side">
           <div className="v5-portal__org">
-            <span className="v5-brand__mark v5-brand__mark--sm">A</span>
-            acme
-            <span className="v5-portal__kbd">⌘K</span>
+            <span className="v5-brand__mark v5-brand__mark--sm">Y</span>
+            Your team
           </div>
           <NavItem k="mine" icon="user" label="My skills" count={PORTAL_ROWS.filter((r) => r.team === "you").length} />
           <div className="v5-portal__grouplabel">Workspace</div>
@@ -521,7 +438,7 @@ function PortalCapture({ c }: { c: Copy }) {
             <span className="v5-portal__count">{rows.length}</span>
             <span className="v5-portal__spacer"></span>
             <Button variant="primary" size="sm">
-              Upload skill
+              Share a skill
             </Button>
           </div>
           <div className="v5-portal__viewbar">
@@ -553,7 +470,7 @@ function PortalCapture({ c }: { c: Copy }) {
           <div className="v5-portal__chead" aria-hidden="true">
             <span></span>
             <span>Skill</span>
-            <span>Scope</span>
+            <span>Shared with</span>
             <span>Version</span>
             <span style={{ textAlign: "right" }}>Stars</span>
             <span style={{ textAlign: "right" }}>Updated</span>
@@ -602,7 +519,7 @@ function PortalCapture({ c }: { c: Copy }) {
           </div>
           <p className="v6-pdrawer__desc">{c.portalDescs[sel.id] || ""}</p>
           <dl className="v6-pdrawer__kv">
-            <dt>owner</dt>
+            <dt>shared by</dt>
             <dd>
               {sel.who} · {sel.team}
             </dd>
@@ -738,9 +655,11 @@ export function LandingPage() {
     <div className="v5-landing">
       <Nav c={c} />
       <main>
-        <Hero c={c} animate={true} replayKey={0} />
+        <Hero c={c} />
+        <Ticker c={c} />
         <Loss c={c} />
         <Turn c={c} />
+        <Moat c={c} />
         <Payoff c={c} />
         <Builders c={c} />
         <Finale c={c} />
