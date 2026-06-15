@@ -812,6 +812,39 @@
   background: var(--color-surface);
 }
 @media (max-width: 860px) { .v6-pdrawer { border-left: none; border-top: var(--border-width) solid var(--color-line); } }
+@media (max-width: 640px) {
+  /* tighten frame chrome so the stacked rows have room to breathe */
+  .v6-pframe .v5-portal__head,
+  .v6-pframe .v5-portal__viewbar,
+  .v6-pframe .v5-portal__filterbar,
+  .v6-pframe .v5-portal__crow,
+  .v6-pframe .v5-libframe__caption {
+    padding-left: var(--space-4);
+    padding-right: var(--space-4);
+  }
+
+  /* column labels are meaningless once rows stack */
+  .v6-pframe .v5-portal__chead { display: none; }
+
+  /* stack each skill row: name + version on top, scope beneath */
+  .v6-pframe .v5-portal__crow {
+    grid-template-columns: 14px minmax(0, 1fr) auto;
+    grid-template-areas:
+      "dot name ver"
+      "dot scope scope";
+    column-gap: var(--space-2);
+    row-gap: 3px;
+    align-items: center;
+    padding-top: var(--space-3);
+    padding-bottom: var(--space-3);
+  }
+  .v6-pframe .v5-portal__crow .v5-vdot { grid-area: dot; align-self: start; margin-top: 6px; }
+  .v6-pframe .v5-portal__crow .v5-portal__name { grid-area: name; }
+  .v6-pframe .v5-portal__crow .v5-portal__ver { grid-area: ver; }
+  .v6-pframe .v5-portal__crow .v5-portal__scope { grid-area: scope; }
+  /* .v6-pstar re-shows the star button past the 760px hide, so re-hide it here */
+  .v6-pframe .v5-portal__crow .v5-portal__stars { display: none; }
+}
 .v6-pdrawer__head { display: flex; align-items: center; gap: var(--space-2); }
 .v6-pdrawer__title { font-family: var(--font-mono); font-size: var(--text-md); font-weight: var(--weight-semibold); margin: 0; overflow: hidden; text-overflow: ellipsis; }
 .v6-pdrawer__desc { margin: 0; font-size: var(--text-sm); color: var(--color-muted); text-wrap: pretty; }
