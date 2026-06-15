@@ -382,7 +382,7 @@ export async function listTeamsForUser(input: {
   actor: ActorContext;
   orgId: string;
   database?: Db;
-}): Promise<Array<{ id: string; slug: string; name: string; teamRole: TeamRole }>> {
+}): Promise<Array<{ id: string; slug: string; name: string; color: string | null; icon: string | null; teamRole: TeamRole }>> {
   const database = input.database ?? db;
   const orgRole = await getOrgRole(input.orgId, input.actor.id, database);
   if (!orgRole) throw new Error("not a member of this organization");
@@ -392,6 +392,8 @@ export async function listTeamsForUser(input: {
         id: schema.teams.id,
         slug: schema.teams.slug,
         name: schema.teams.name,
+        color: schema.teams.color,
+        icon: schema.teams.icon,
         teamRole: sql<TeamRole>`'admin'::team_role`,
       })
       .from(schema.teams)
@@ -403,6 +405,8 @@ export async function listTeamsForUser(input: {
       id: schema.teams.id,
       slug: schema.teams.slug,
       name: schema.teams.name,
+      color: schema.teams.color,
+      icon: schema.teams.icon,
       teamRole: schema.teamMemberships.teamRole,
     })
     .from(schema.teams)
@@ -1047,6 +1051,8 @@ export async function listSkills(input: {
         id: schema.teams.id,
         slug: schema.teams.slug,
         name: schema.teams.name,
+        color: schema.teams.color,
+        icon: schema.teams.icon,
       })
       .from(schema.skillTeamShares)
       .innerJoin(schema.teams, eq(schema.teams.id, schema.skillTeamShares.teamId))
@@ -1054,7 +1060,7 @@ export async function listSkills(input: {
       .orderBy(asc(schema.teams.name));
     for (const row of shareRows) {
       const list = sharesBySkill.get(row.skill_id) ?? [];
-      list.push({ id: row.id, slug: row.slug, name: row.name });
+      list.push({ id: row.id, slug: row.slug, name: row.name, color: row.color, icon: row.icon });
       sharesBySkill.set(row.skill_id, list);
     }
   }

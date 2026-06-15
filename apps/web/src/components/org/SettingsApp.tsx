@@ -291,7 +291,7 @@ export function SettingsController({
       }));
       setBusy(true);
       updateTeamRpc(teamId, patch)
-        .then((res) =>
+        .then((res) => {
           setCurrent((c) => ({
             ...c,
             teams: c.teams.map((t) =>
@@ -306,8 +306,19 @@ export function SettingsController({
                   }
                 : t,
             ),
-          })),
-        )
+          }));
+          window.dispatchEvent(
+            new CustomEvent("companion:team-updated", {
+              detail: {
+                id: res.id,
+                slug: res.slug,
+                name: res.name,
+                color: res.color ?? null,
+                icon: res.icon ?? null,
+              },
+            }),
+          );
+        })
         .catch((e: Error) => {
           setErr(e.message);
           void refreshSettingsData();

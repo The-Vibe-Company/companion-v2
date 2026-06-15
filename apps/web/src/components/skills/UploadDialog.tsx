@@ -13,6 +13,7 @@ import {
   versionPackageUrl,
 } from "@/lib/queries";
 import { Icon } from "../Icon";
+import { TeamAvatar } from "../org/TeamAvatar";
 
 /* ------------------------------------------------------------------ helpers */
 
@@ -236,7 +237,7 @@ function TeamMultiSelect({
                 if (event.detail === 0) toggleTeam(t.id);
               }}
             >
-              <span className="up-teamav">{t.initial}</span>
+              <TeamAvatar team={t} className="up-teamav" />
               <span className="up-teamsel__iname">{t.name}</span>
               {selected.has(t.id) && (
                 <Icon name="check" size={14} style={{ marginLeft: "auto", color: "var(--color-fg)" }} />
@@ -297,7 +298,11 @@ function OwnerPicker({
         aria-expanded={open}
         disabled={disabled}
       >
-        <span className="up-teamav">{value ? teams.find((t) => t.id === value)?.initial ?? "T" : "Me"}</span>
+        {value ? (
+          <TeamAvatar team={teams.find((t) => t.id === value) ?? { name: value, color: null, icon: null }} className="up-teamav" />
+        ) : (
+          <span className="up-teamav">Me</span>
+        )}
         <span className="up-teamsel__name">{label}</span>
         <Icon name={disabled ? "lock" : "chevron-down"} size={13} style={{ color: "var(--color-faint)" }} />
       </button>
@@ -338,7 +343,7 @@ function OwnerPicker({
                 if (event.detail === 0) chooseOwner(team.id);
               }}
             >
-              <span className="up-teamav">{team.initial}</span>
+              <TeamAvatar team={team} className="up-teamav" />
               <span className="up-teamsel__iname">{team.name}</span>
               {value === team.id && <Icon name="check" size={14} style={{ marginLeft: "auto", color: "var(--color-fg)" }} />}
             </button>

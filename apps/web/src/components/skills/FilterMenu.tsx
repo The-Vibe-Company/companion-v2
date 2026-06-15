@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Icon } from "../Icon";
+import { TeamAvatar } from "../org/TeamAvatar";
 import type { TeamVM } from "@/lib/types";
 import { VISIBILITY_ICON, VISIBILITY_ORDER } from "./blocks";
 import type { Filter } from "./filters";
@@ -48,16 +49,20 @@ function FilterMenuPopover({
     value,
     icon,
     label,
+    avatar,
   }: {
     type: Filter["type"];
     value: string;
     icon: string;
     label: string;
+    avatar?: React.ReactNode;
   }) => (
     <button className="fmenu__item" onClick={() => onToggle(type, value)}>
-      <span className="ico">
-        <Icon name={icon} size={14} />
-      </span>
+      {avatar ?? (
+        <span className="ico">
+          <Icon name={icon} size={14} />
+        </span>
+      )}
       <span className="lbl">{label}</span>
       {has(type, value) && (
         <span className="chk">
@@ -92,7 +97,14 @@ function FilterMenuPopover({
           <div className="fmenu__divider" />
           <div className="fmenu__grouphead">Teams</div>
           {teams.map((tm) => (
-            <Item key={tm.id} type="team" value={tm.id} icon="users" label={tm.name} />
+            <Item
+              key={tm.id}
+              type="team"
+              value={tm.id}
+              icon="users"
+              label={tm.name}
+              avatar={<TeamAvatar team={tm} className="ico fmenu__teamav" />}
+            />
           ))}
         </>
       )}
