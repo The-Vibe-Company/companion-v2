@@ -457,47 +457,14 @@ export function SkillsApp({
     [commitVisibility],
   );
 
-  // Confirm a cascade: re-apply the change with cascade=true, then reconcile the affected skills
-  // locally to mirror the server — union with the new audience when broadening, intersection when
-  // narrowing (the same transforms the service applies).
+  // Confirm a cascade: re-apply the change with cascade=true (the skill itself updates optimistically
+  // via commitVisibility), then re-sync from the server so every cascaded skill — including
+  // transitive ones and any implicit owner-team shares — reflects authoritative state.
   const confirmCascade = useCallback(async () => {
     if (!visWarn) return;
     const { slug, visibility, direction } = visWarn;
     const { cascaded } = await commitVisibility(slug, visibility, true);
-    if (cascaded.length) {
-      const set = new Set(cascaded);
-      const targetSlugs = new Set(visibility.teams);
-      setSkills((arr) =>
-        arr.map((s) => {
-          if (!set.has(s.id)) return s;
-          let nextTeams: SkillVM["teams"];
-          let everyone: boolean;
-          if (direction === "broaden") {
-            const have = new Set(s.teamSlugs);
-            nextTeams = [...s.teams];
-            for (const teamSlug of visibility.teams) {
-              if (have.has(teamSlug)) continue;
-              const team = teams.find((t) => t.id === teamSlug);
-              nextTeams.push({ id: teamSlug, slug: teamSlug, name: team?.name ?? teamSlug, color: team?.color ?? null, icon: team?.icon ?? null });
-            }
-            everyone = s.visibility.everyone || visibility.everyone;
-          } else {
-            // Narrowing: keep only the teams within the new audience (or the audience itself if the
-            // skill was Everyone), and drop the Everyone flag unless the target is still Everyone.
-            nextTeams = visibility.everyone
-              ? s.teams
-              : s.visibility.everyone
-                ? visibility.teams.map((teamSlug) => {
-                    const team = teams.find((t) => t.id === teamSlug);
-                    return { id: teamSlug, slug: teamSlug, name: team?.name ?? teamSlug, color: team?.color ?? null, icon: team?.icon ?? null };
-                  })
-                : s.teams.filter((t) => targetSlugs.has(t.slug));
-            everyone = s.visibility.everyone && visibility.everyone;
-          }
-          return { ...s, visibility: { everyone, teams: nextTeams }, teams: nextTeams, teamSlugs: nextTeams.map((t) => t.slug) };
-        }),
-      );
-    }
+    if (cascaded.length) router.refresh();
     setVisWarn(null);
     const noun = direction === "broaden" ? "sub-skill" : "dependent skill";
     setVisNotice(
@@ -505,7 +472,7 @@ export function SkillsApp({
         ? `Updated ${cascaded.length} ${noun}${cascaded.length === 1 ? "" : "s"} to match.`
         : "Visibility updated.",
     );
-  }, [visWarn, commitVisibility, teams]);
+  }, [visWarn, commitVisibility, router]);
 
   // Auto-dismiss the visibility notice toast.
   useEffect(() => {

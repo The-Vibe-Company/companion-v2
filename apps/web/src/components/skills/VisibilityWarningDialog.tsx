@@ -126,7 +126,7 @@ export function VisibilityWarningDialog({
           <button className="btn-sec" onClick={onCancel} disabled={busy}>
             Cancel
           </button>
-          <button className="btn-primary" onClick={confirm} disabled={busy || count === 0}>
+          <button className="btn-primary" onClick={confirm} disabled={busy || affected === null}>
             {busy ? "Updating…" : count > 0 ? `Update ${count} ${noun}${count === 1 ? "" : "s"}` : `Update ${noun}s`}
           </button>
         </>
@@ -135,7 +135,9 @@ export function VisibilityWarningDialog({
       {affected === null ? (
         <p className="og-field__hint">Checking dependencies…</p>
       ) : count === 0 ? (
-        <p className="og-field__hint">No {noun}s need updating.</p>
+        // The direct edges are all fine, but the server still flagged the change — deeper skills in
+        // the dependency graph need updating. Confirming cascades to them.
+        <p className="og-field__hint">Skills deeper in the dependency graph will be updated to match.</p>
       ) : (
         <ul className="viswarn__list">
           {affected.map((row) => (
