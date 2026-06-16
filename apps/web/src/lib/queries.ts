@@ -1,12 +1,15 @@
 "use client";
 
 import type {
+  DependencyPlan,
   IssuedToken,
   ReportLocalSkillInstallResult,
   SkillCommentRow,
+  SkillDependenciesResponse,
   SkillFile,
   SkillFilesResponse,
   SkillFilterPreferences,
+  SkillListRow,
   SkillVisibilityInput,
   SkillVersionRow,
   TokenScope,
@@ -25,6 +28,7 @@ export interface PublishResult {
   checksum: string;
   sizeBytes?: number;
   warnings?: FrontmatterWarning[];
+  dependency_plan?: DependencyPlan;
 }
 
 /** Public API base used in the guided assistant prompts (an external agent hits it directly). */
@@ -52,6 +56,7 @@ export async function publishSkillPackage(
     version?: string;
     expectSlug?: string;
     expectSkillId?: string;
+    dependencies?: string[];
   },
 ): Promise<PublishResult> {
   const fd = new FormData();
@@ -64,22 +69,44 @@ export async function publishSkillPackage(
   // In update mode, bind the upload to the skill being updated (server rejects a mismatch).
   if (opts.expectSlug) fd.append("expect_slug", opts.expectSlug);
   if (opts.expectSkillId) fd.append("expect_skill_id", opts.expectSkillId);
+  for (const dep of opts.dependencies ?? []) fd.append("dependency", dep);
   return apiFetch<PublishResult>("/v1/skills", { method: "POST", body: fd });
 }
 
-/** Validate a packaged skill without publishing it. Warnings are non-blocking. */
+/**
+ * Validate a packaged skill without publishing it. Returns the validation result plus the
+ * dependency preflight plan (declared / published / to-upload / removed / archival candidates).
+ * Warnings are non-blocking.
+ */
 export async function validateSkillPackage(
   file: File,
-  opts: { version?: string; expectSlug?: string; expectSkillId?: string } = {},
-): Promise<ValidationResult> {
+  opts: {
+    version?: string;
+    expectSlug?: string;
+    expectSkillId?: string;
+    dependencies?: string[];
+    /** Pass the selected visibility so the dependency plan's visibility checks match publish. */
+    visibility?: SkillVisibilityInput;
+    ownerTeam?: string | null;
+  } = {},
+): Promise<{ result: ValidationResult; dependencyPlan: DependencyPlan | null }> {
   const fd = new FormData();
   fd.append("file", file);
   fd.append("action", "validate");
   if (opts.version) fd.append("version", opts.version);
   if (opts.expectSlug) fd.append("expect_slug", opts.expectSlug);
   if (opts.expectSkillId) fd.append("expect_skill_id", opts.expectSkillId);
-  const data = await apiFetch<{ result: ValidationResult }>("/v1/skills", { method: "POST", body: fd });
-  return data.result;
+  for (const dep of opts.dependencies ?? []) fd.append("dependency", dep);
+  if (opts.visibility) {
+    fd.append("everyone", String(opts.visibility.everyone));
+    for (const team of opts.visibility.teams) fd.append("team", team);
+  }
+  if (opts.ownerTeam) fd.append("owner_team", opts.ownerTeam);
+  const data = await apiFetch<{ result: ValidationResult; dependency_plan?: DependencyPlan }>("/v1/skills", {
+    method: "POST",
+    body: fd,
+  });
+  return { result: data.result, dependencyPlan: data.dependency_plan ?? null };
 }
 
 /** Author a SKILL.md inline ("Create in the browser") and publish it. */
@@ -185,6 +212,35 @@ export async function saveSkillFilterPreferences(
     method: "PUT",
     body: JSON.stringify(preferences),
   });
+}
+
+// --- Dependencies + archive ---------------------------------------------------------------------
+
+/** Resolve the Requires + Used by graph for a skill (optionally a specific version). */
+export async function fetchSkillDependencies(
+  slug: string,
+  version: string | null,
+): Promise<SkillDependenciesResponse> {
+  const qs = version ? `?version=${encodeURIComponent(version)}` : "";
+  return apiFetch<SkillDependenciesResponse>(`/v1/skills/${slug}/dependencies${qs}`);
+}
+
+/** Archive a skill (hide it from normal lists; stays restorable + downloadable while referenced). */
+export async function archiveSkill(slug: string, reason?: string): Promise<void> {
+  await apiFetch(`/v1/skills/${slug}/archive`, {
+    method: "POST",
+    body: JSON.stringify(reason ? { reason } : {}),
+  });
+}
+
+/** Restore an archived skill back into the normal lists. */
+export async function restoreSkill(slug: string): Promise<void> {
+  await apiFetch(`/v1/skills/${slug}/restore`, { method: "POST", body: "{}" });
+}
+
+/** Fetch the archived skills for the workspace (the Archived view). */
+export async function fetchArchivedSkills(): Promise<SkillListRow[]> {
+  return apiFetch<SkillListRow[]>("/v1/skills?archived=true");
 }
 
 // --- Local skills (the "Companion skills" section) ----------------------------------------------

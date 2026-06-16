@@ -48,6 +48,10 @@ const skill: SkillVM = {
   starred: false,
   teams: [{ id: "team-1", slug: "engineering", name: "Engineering" }],
   teamSlugs: ["engineering"],
+  requiresCount: 0,
+  usedByCount: 0,
+  depWarn: false,
+  archived: false,
   compatibility: null,
   metadata: {
     companion_skill_id: "skill-1",
@@ -94,6 +98,9 @@ describe("skill update flow", () => {
         onChangeVisibility: vi.fn(),
         onInstall: vi.fn(),
         onUpdate: vi.fn(),
+        onOpenSkill: vi.fn(),
+        onRestore: vi.fn(),
+        onArchive: vi.fn(),
         teams,
       }),
     );
@@ -107,16 +114,20 @@ describe("skill update flow", () => {
       React.createElement(DetailMoreMenuContent, {
         canModifySkill: true,
         canDownload: true,
+        canArchive: true,
         onUpdate: vi.fn(),
         onDownload: vi.fn(),
+        onArchive: vi.fn(),
       }),
     );
     const readOnly = renderToString(
       React.createElement(DetailMoreMenuContent, {
         canModifySkill: false,
         canDownload: true,
+        canArchive: false,
         onUpdate: vi.fn(),
         onDownload: vi.fn(),
+        onArchive: vi.fn(),
       }),
     );
 

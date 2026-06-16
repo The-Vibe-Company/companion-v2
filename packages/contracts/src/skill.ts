@@ -29,6 +29,80 @@ export type SkillOwnerKind = z.infer<typeof skillOwnerKindSchema>;
 export const skillOwnerTeamInputSchema = z.string().min(1).max(128).nullable().optional();
 
 /**
+ * Live status of a single skill→skill dependency edge, computed from current state on every read.
+ * Dependencies are un-versioned (pure skill→skill links): there is deliberately no "update
+ * available" status — versions are a skill's own publish concern, not the dependency graph's.
+ */
+export const skillDependencyStatusSchema = z.enum([
+  "satisfied", // target published, not archived, visible-enough, no cycle
+  "missing", // declared slug has no published skill in the workspace
+  "archived", // target exists but is archived
+  "visibility", // target's audience does not cover the dependent's audience
+  "cycle", // edge participates in a directed dependency cycle
+]);
+export type SkillDependencyStatus = z.infer<typeof skillDependencyStatusSchema>;
+
+/** A "Requires" row: a skill the current version pulls in when it is installed. */
+export const skillDependencyRowSchema = z.object({
+  slug: z.string(),
+  status: skillDependencyStatusSchema,
+  /** The resolved target's visibility (null when missing/unpublished). */
+  visibility: skillVisibilitySchema.nullable(),
+  /** Short human note (e.g. "not published to this workspace", cycle hint). */
+  note: z.string().nullable(),
+  /** True when the target exists and is visible to the actor (the slug links to its detail). */
+  can_open: z.boolean(),
+});
+export type SkillDependencyRow = z.infer<typeof skillDependencyRowSchema>;
+
+/** A "Used by" row: a skill version that declares this skill as a dependency. */
+export const skillDependentRowSchema = z.object({
+  slug: z.string(),
+  status: skillDependencyStatusSchema,
+  visibility: skillVisibilitySchema,
+  archived: z.boolean(),
+  note: z.string().nullable(),
+  can_open: z.boolean(),
+});
+export type SkillDependentRow = z.infer<typeof skillDependentRowSchema>;
+
+/** Response of `GET /v1/skills/:slug/dependencies` — the Requires + Used by graph for one skill. */
+export const skillDependenciesResponseSchema = z.object({
+  slug: z.string(),
+  version: z.string().nullable(),
+  requires: z.array(skillDependencyRowSchema),
+  used_by: z.array(skillDependentRowSchema),
+  requires_n: z.number().int().nonnegative(),
+  used_by_n: z.number().int().nonnegative(),
+});
+export type SkillDependenciesResponse = z.infer<typeof skillDependenciesResponseSchema>;
+
+/**
+ * Dependency preflight returned by `POST /v1/skills?action=validate` and echoed on publish.
+ * Drives the upload dialog's "Dependency preflight" step.
+ */
+export const dependencyPlanSchema = z.object({
+  declared: z.array(z.string()),
+  /** Declared dependencies already published in the workspace registry. */
+  ready: z.array(z.string()),
+  /** Declared but not in the registry — must be uploaded too, or the version stays unresolved. */
+  upload: z.array(z.object({ slug: z.string(), msg: z.string() })),
+  /** Required by the previous version and dropped from this one. */
+  removed: z.array(z.string()),
+  /** Removed dependencies that no published skill references anymore — candidates to archive. */
+  archive_candidates: z.array(z.object({ slug: z.string(), reason: z.string() })),
+  /** Blocking reasons (missing/cycle/visibility) that must be resolved before publish. */
+  blocked: z.array(z.object({ slug: z.string(), status: skillDependencyStatusSchema, msg: z.string() })),
+});
+export type DependencyPlan = z.infer<typeof dependencyPlanSchema>;
+
+/** Body of `POST /v1/skills/:slug/archive` — archive a skill (reason optional). */
+export const archiveSkillInputSchema = z.object({
+  reason: z.string().max(500).optional(),
+});
+export type ArchiveSkillInput = z.infer<typeof archiveSkillInputSchema>;
+
+/**
  * One row of the `skill_list_v` view — the denormalized read shape the web table
  * and the CLI list both consume. Machine-facing snake_case (mirrors the DB).
  */
@@ -56,6 +130,16 @@ export const skillListRowSchema = z.object({
   tools: z.array(z.string()),
   star_count: z.number().int().nonnegative(),
   starred: z.boolean(),
+  /** Number of dependencies the current version declares. */
+  requires_count: z.number().int().nonnegative().default(0),
+  /** Number of other skills (current versions) that depend on this one. */
+  used_by_count: z.number().int().nonnegative().default(0),
+  /** True when any declared dependency is not satisfied (drives the warn-tinted Deps pill). */
+  dep_warn: z.boolean().default(false),
+  /** True when the skill is archived (hidden from normal lists). */
+  archived: z.boolean().default(false),
+  /** True when ANY published version (current or older) references this skill — gates archived download. */
+  referenced: z.boolean().default(false),
   created_at: z.string(),
   updated_at: z.string(),
 });
@@ -147,6 +231,11 @@ export const publishSkillInputSchema = z.object({
   tools: z.array(z.string()),
   license: z.string().nullable().optional(),
   note: z.string().default(""),
+  /** Declared required dependencies (target skill slugs). Un-versioned: no ranges. */
+  dependencies: z
+    .array(z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/))
+    .max(64)
+    .default([]),
 });
 export type PublishSkillInput = z.infer<typeof publishSkillInputSchema>;
 

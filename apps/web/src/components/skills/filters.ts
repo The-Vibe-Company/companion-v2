@@ -33,6 +33,11 @@ function matchOne(s: SkillVM, type: string, v: string): boolean {
   if (type === "starred") return s.starred === true;
   if (type === "owner") return s.owner.name === v;
   if (type === "team") return s.teamSlugs.includes(v);
+  if (type === "deps") {
+    if (v === "has") return s.requiresCount > 0;
+    if (v === "used") return s.usedByCount > 0;
+    return false;
+  }
   return true;
 }
 
@@ -56,6 +61,12 @@ export function chipParts(f: Filter): { icon: string; key: string; val: string }
   if (f.type === "starred") return { icon: "star", key: "", val: "starred" };
   if (f.type === "owner") return { icon: "user", key: "owner", val: f.value };
   if (f.type === "team") return { icon: "users", key: "team", val: f.value };
+  if (f.type === "deps")
+    return {
+      icon: f.value === "has" ? "package" : "corner-down-right",
+      key: "deps",
+      val: f.value === "has" ? "has dependencies" : "used as dependency",
+    };
   return { icon: "filter", key: "", val: "" };
 }
 

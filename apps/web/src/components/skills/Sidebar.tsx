@@ -26,8 +26,11 @@ export function Sidebar({
   onSelectAll,
   onSelectTeam,
   onSelectLocal,
+  onSelectArchived,
   localActive,
   localUpdateCount,
+  archivedActive,
+  archivedCount,
   mobileOpen,
   compactRail,
   onToggleMobile,
@@ -51,8 +54,11 @@ export function Sidebar({
   onSelectAll: () => void;
   onSelectTeam: (id: string) => void;
   onSelectLocal: () => void;
+  onSelectArchived: () => void;
   localActive: boolean;
   localUpdateCount: number;
+  archivedActive: boolean;
+  archivedCount: number;
   mobileOpen: boolean;
   compactRail: boolean;
   onToggleMobile: () => void;
@@ -210,6 +216,20 @@ export function Sidebar({
             </div>
           );
         })}
+
+        <button
+          className={"navitem" + (archivedActive ? " navitem--active" : "")}
+          aria-current={archivedActive ? "page" : undefined}
+          onClick={() => runAndClose(onSelectArchived)}
+          title="Archived skills"
+          style={{ marginTop: 6 }}
+        >
+          <span className="navitem__ico">
+            <Icon name="archive" />
+          </span>
+          <span className="navitem__label">Archived skills</span>
+          <span className="navitem__count tnum">{archivedCount}</span>
+        </button>
 
         <button
           className={"navitem navitem--bottom" + (localActive ? " navitem--active" : "")}

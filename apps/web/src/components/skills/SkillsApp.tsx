@@ -4,14 +4,18 @@ import { useCallback, useEffect, useMemo, useRef, useState, type MutableRefObjec
 import { useRouter } from "next/navigation";
 import type { LocalSkillRow, SkillFilterPreferences, SkillVisibilityInput } from "@companion/contracts";
 import {
+  archiveSkill as archiveSkillRpc,
+  fetchArchivedSkills,
+  restoreSkill as restoreSkillRpc,
   saveSkillFilterPreferences,
   setSkillVisibility,
   toggleStar as toggleStarRpc,
 } from "@/lib/queries";
 import { fetchSettingsAppData } from "@/lib/settingsClient";
-import type { MeVM, OrgVM, SkillVM, TeamVM } from "@/lib/types";
+import { mapSkill, type MeVM, type OrgVM, type SkillVM, type TeamVM } from "@/lib/types";
 import { Sidebar } from "./Sidebar";
 import { ListView } from "./ListView";
+import { ArchivedListView } from "./ArchivedListView";
 import { DetailView } from "./DetailView";
 import { LocalSkillsView } from "./LocalSkillsView";
 import { CommandPalette } from "./CommandPalette";
@@ -100,8 +104,12 @@ function filtersForSkillsRoute(route: SkillsRoute, mineOwnerNames: string[]): Fi
   return [];
 }
 
-function skillsViewForRoute(route: SkillsRoute): "workspace" | "local" {
-  return route.kind === "local" ? "local" : "workspace";
+type SkillsView = "workspace" | "local" | "archived";
+
+function skillsViewForRoute(route: SkillsRoute): SkillsView {
+  if (route.kind === "local") return "local";
+  if (route.kind === "archived") return "archived";
+  return "workspace";
 }
 
 function applyRouteFilters(
@@ -154,9 +162,10 @@ export function SkillsApp({
   const [skills, setSkills] = useState<SkillVM[]>(initialSkills);
   const [teams, setTeams] = useState<TeamVM[]>(initialTeams);
   const [localSkills, setLocalSkills] = useState<LocalSkillRow[]>(initialLocalSkills);
-  const [currentView, setCurrentView] = useState<"workspace" | "local">(() =>
+  const [currentView, setCurrentView] = useState<SkillsView>(() =>
     skillsViewForRoute(initialNormalizedRoute),
   );
+  const [archivedSkills, setArchivedSkills] = useState<SkillVM[]>([]);
   const [filters, setFilters] = useState<Filter[]>(() =>
     initialFiltersForSkillsRoute(
       initialNormalizedRoute,
@@ -425,6 +434,50 @@ export function SkillsApp({
     }
   }, [currentOrg.id, teams]);
 
+  // --- Archived skills -------------------------------------------------------
+  const loadArchived = useCallback(() => {
+    fetchArchivedSkills()
+      .then((rows) => setArchivedSkills(rows.map(mapSkill)))
+      .catch(() => {});
+  }, []);
+
+  // Load the archived list once for the sidebar count (and refresh whenever the org changes).
+  useEffect(() => {
+    setArchivedSkills([]);
+    loadArchived();
+  }, [currentOrg.id, loadArchived]);
+
+  const archiveSkillById = useCallback(
+    (id: string) => {
+      // Optimistically drop it from the normal list so it disappears before the server round-trip;
+      // router.refresh() re-syncs `skills` from props (and restores it on failure).
+      setSkills((arr) => arr.filter((s) => s.id !== id));
+      setOpenId((cur) => (cur === id ? null : cur));
+      archiveSkillRpc(id)
+        .then(() => {
+          loadArchived();
+          router.refresh();
+        })
+        .catch(() => router.refresh());
+    },
+    [loadArchived, router],
+  );
+
+  const restoreSkillById = useCallback(
+    (id: string) => {
+      // Optimistically drop it from the archived list; refresh both lists from the server.
+      setArchivedSkills((arr) => arr.filter((s) => s.id !== id));
+      setOpenId((cur) => (cur === id ? null : cur));
+      restoreSkillRpc(id)
+        .then(() => {
+          loadArchived();
+          router.refresh();
+        })
+        .catch(() => loadArchived());
+    },
+    [loadArchived, router],
+  );
+
   // --- Derived ---------------------------------------------------------------
   const owners = useMemo(() => [...new Set(skills.map((s) => s.owner.name))].sort(), [skills]);
   const teamCounts = useMemo(() => {
@@ -588,6 +641,10 @@ export function SkillsApp({
   const selectLocal = useCallback(() => {
     applySkillsRoute({ kind: "local" }, "push");
   }, [applySkillsRoute]);
+  const selectArchived = useCallback(() => {
+    loadArchived();
+    applySkillsRoute({ kind: "archived" }, "push");
+  }, [applySkillsRoute, loadArchived]);
   const localUpdateCount = useMemo(
     () => localSkills.filter((s) => s.status === "update").length,
     [localSkills],
@@ -621,23 +678,52 @@ export function SkillsApp({
   }, [applySkillsRoute, initialFilterPreferences.active_filters, showLocalSettings]);
 
   // --- Open / navigate -------------------------------------------------------
-  const index = openId ? filtered.findIndex((s) => s.id === openId) : -1;
-  const skill = index >= 0 ? filtered[index] : null;
+  // The detail view draws from the archived list when that view is active, else the filtered list.
+  const detailPool = currentView === "archived" ? archivedSkills : filtered;
+  const index = openId ? detailPool.findIndex((s) => s.id === openId) : -1;
+  const skill = index >= 0 ? detailPool[index] : null;
   openIdRef.current = openId;
 
   const open = useCallback((id: string) => {
     if (currentView === "local") replaceSkillsUrl({ kind: "all" });
-    setCurrentView("workspace");
+    if (currentView !== "archived") setCurrentView("workspace");
     setUploadOpen(false);
     setOpenId(id);
     setLastId(id);
   }, [currentView, replaceSkillsUrl]);
+
+  // Open a skill by slug from a dependency link. A visible dependency target is always in exactly
+  // one list: if it is not in the live workspace list it is archived (archived skills stay viewable).
+  // For an archived target we fetch the archived list and await it BEFORE setting openId, so the
+  // detail pool already contains the skill and the "drop out of filter" effect can't close it first.
+  const openSkillBySlug = useCallback(
+    async (slug: string) => {
+      setUploadOpen(false);
+      if (skills.some((s) => s.id === slug)) {
+        setCurrentView("workspace");
+        setFilters([]);
+        replaceSkillsUrl({ kind: "all" });
+        setOpenId(slug);
+        setLastId(slug);
+        return;
+      }
+      const rows = await fetchArchivedSkills()
+        .then((r) => r.map(mapSkill))
+        .catch(() => archivedSkills);
+      setArchivedSkills(rows);
+      setCurrentView("archived");
+      replaceSkillsUrl({ kind: "archived" });
+      setOpenId(slug);
+      setLastId(slug);
+    },
+    [replaceSkillsUrl, skills, archivedSkills],
+  );
   const back = useCallback(() => setOpenId(null), []);
   const go = useCallback(
     (delta: number) => {
       setOpenId((cur) => {
-        const i = filtered.findIndex((s) => s.id === cur);
-        const n = filtered[i + delta];
+        const i = detailPool.findIndex((s) => s.id === cur);
+        const n = detailPool[i + delta];
         if (n) {
           setLastId(n.id);
           return n.id;
@@ -645,7 +731,7 @@ export function SkillsApp({
         return cur;
       });
     },
-    [filtered],
+    [detailPool],
   );
 
   // If the open skill drops out of the filter, fall back to the list.
@@ -795,8 +881,11 @@ export function SkillsApp({
         onSelectAll={selectAll}
         onSelectTeam={selectTeam}
         onSelectLocal={selectLocal}
+        onSelectArchived={selectArchived}
         localActive={currentView === "local"}
         localUpdateCount={localUpdateCount}
+        archivedActive={currentView === "archived"}
+        archivedCount={archivedSkills.length}
         mobileOpen={mobileSidebarOpen}
         compactRail={isNarrowViewport && !mobileSidebarOpen}
         onToggleMobile={() => setMobileSidebarOpen((open) => !open)}
@@ -817,7 +906,7 @@ export function SkillsApp({
           <DetailView
             skill={skill}
             index={index}
-            total={filtered.length}
+            total={detailPool.length}
             me={me}
             myRole={currentOrg.myRole}
             teams={teams}
@@ -828,6 +917,16 @@ export function SkillsApp({
             onChangeVisibility={(sc) => changeVisibility(skill.id, sc)}
             onInstall={() => setInstallSkill(skill)}
             onUpdate={() => setUpdateSkill(skill)}
+            onOpenSkill={openSkillBySlug}
+            onRestore={() => restoreSkillById(skill.id)}
+            onArchive={() => archiveSkillById(skill.id)}
+          />
+        ) : currentView === "archived" ? (
+          <ArchivedListView
+            skills={archivedSkills}
+            onOpen={open}
+            onRestore={restoreSkillById}
+            onUpload={openUpload}
           />
         ) : (
           <ListView

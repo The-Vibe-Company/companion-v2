@@ -1,6 +1,6 @@
 import { serve } from "@hono/node-server";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fetchRequestHandler } from "@trpc/server/adapters/fetch";
@@ -12,16 +12,21 @@ import {
   acceptInvitation,
   addComment,
   addTeamMember,
+  archiveSkill,
+  buildDependencyPlan,
   completeOnboarding,
   createInvitation,
   createOrg,
   createTeam,
   deleteTeam,
+  DependencyPublishError,
   computeLocalSkillStatus,
   getLocalSkillInstall,
   getOnboardingContext,
   getOnboardingState,
   getSkillBySlug,
+  getSkillDependencies,
+  restoreSkill,
   getSkillFilterPreferences,
   getOrgSettings,
   getDownloadVersion,
@@ -55,6 +60,7 @@ import {
 } from "@companion/core/services";
 import {
   addCommentInputSchema,
+  archiveSkillInputSchema,
   completeOnboardingInputSchema,
   createSkillInputSchema,
   issueTokenInputSchema,
@@ -214,6 +220,42 @@ function rejectLegacySkillVisibilityInput(hasField: (name: string) => boolean): 
 }
 
 /**
+ * Read declared skill→skill dependencies from an optional `companion.json` at the package root
+ * (`{ "dependencies": ["slug", ...] }`, also tolerating `[{ "slug": "..." }]`). Returns the declared
+ * slugs so both the browser zip upload and the CLI/companion-skill flow declare dependencies the same
+ * way. Best-effort: a missing or malformed file yields no dependencies.
+ */
+async function readDeclaredDependencies(archive: Buffer): Promise<string[]> {
+  const dir = await mkdtemp(join(tmpdir(), "companion-deps-"));
+  try {
+    await unpackAnyTo(archive, dir);
+    // The package may extract to the root or be wrapped in a single folder; check both depths.
+    const roots = [dir];
+    for (const entry of await readdir(dir, { withFileTypes: true }).catch(() => [])) {
+      if (entry.isDirectory()) roots.push(join(dir, entry.name));
+    }
+    for (const root of roots) {
+      const raw = await readFile(join(root, "companion.json"), "utf8").catch(() => null);
+      if (!raw) continue;
+      const parsed = JSON.parse(raw) as { dependencies?: unknown };
+      if (!Array.isArray(parsed.dependencies)) return [];
+      return [
+        ...new Set(
+          parsed.dependencies
+            .map((d) => (typeof d === "string" ? d : (d as { slug?: unknown })?.slug))
+            .filter((s): s is string => typeof s === "string" && s.length > 0),
+        ),
+      ];
+    }
+    return [];
+  } catch {
+    return [];
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+/**
  * Shared publish tail: store the canonical archive (idempotently) and write a new
  * skill_versions row, authorizing first and cleaning up the blob on failure.
  */
@@ -227,8 +269,9 @@ async function publishCanonical(input: {
   visibility: SkillVisibilityInput;
   version: string;
   note: string;
+  dependencies?: string[];
 }): Promise<{ id: string; slug: string; version: string; checksum: string; sizeBytes: number }> {
-  const { actor, orgId, canonical, fm, skillId, ownerTeam, visibility, version, note } = input;
+  const { actor, orgId, canonical, fm, skillId, ownerTeam, visibility, version, note, dependencies } = input;
   if (!isValidSemver(version)) throw new Error(`invalid semver: ${version}`);
   const key = skillArchiveKey({ orgId, slug: fm.name, version });
   const payload = publishSkillInputSchema.parse({
@@ -245,6 +288,7 @@ async function publishCanonical(input: {
     tools: fm.allowedTools,
     license: fm.license ?? null,
     note,
+    dependencies: dependencies ?? [],
   });
   await withTenantContext({ orgId, userId: actor.id }, (database) =>
     assertCanPublishSkillVersion({ actor, orgId, payload, database }),
@@ -807,7 +851,10 @@ app.get("/v1/skills", async (c) => {
     const visibilityRaw = c.req.query("visibility");
     const visibility = visibilityRaw ? visibilityFilterSchema.parse(visibilityRaw) : undefined;
     const mine = c.req.query("mine") === "true";
-    return c.json(await withTenant(c, ({ actor, orgId, database }) => listSkills({ actor, orgId, visibility, mine, database })));
+    const archived = c.req.query("archived") === "true";
+    return c.json(
+      await withTenant(c, ({ actor, orgId, database }) => listSkills({ actor, orgId, visibility, mine, archived, database })),
+    );
   } catch (error) {
     return jsonError(c, error, 401);
   }
@@ -861,8 +908,10 @@ app.get("/v1/skills/upload-options", async (c) => {
 
 app.get("/v1/skills/:slug", async (c) => {
   try {
-    const row = await withTenant(c, async ({ actor, orgId, database }) =>
-      (await listSkills({ actor, orgId, database })).find((s) => s.slug === c.req.param("slug")),
+    // Resolve archived skills too — they stay viewable, so the canonical detail endpoint must
+    // return them (getSkillBySlug includes archived).
+    const row = await withTenant(c, ({ actor, orgId, database }) =>
+      getSkillBySlug({ actor, orgId, slug: c.req.param("slug"), database }),
     );
     if (!row) return jsonError(c, "skill not found", 404);
     return c.json(row);
@@ -954,6 +1003,59 @@ app.put("/v1/skills/:slug/visibility", async (c) => {
   }
 });
 
+/** Requires + Used by graph for a skill (optionally a specific version). Session or skills:read PAT. */
+app.get("/v1/skills/:slug/dependencies", async (c) => {
+  try {
+    actorFromContext(c, true);
+    requireScope(c, "skills:read");
+    const version = c.req.query("version") ?? null;
+    return c.json(
+      await withTenant(
+        c,
+        ({ actor, orgId, database }) =>
+          getSkillDependencies({ actor, orgId, slug: c.req.param("slug"), version, database }),
+        true,
+      ),
+    );
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
+/** Archive a skill — hides it from normal lists but keeps it viewable/restorable/downloadable. */
+app.post("/v1/skills/:slug/archive", async (c) => {
+  try {
+    actorFromContext(c, true);
+    requireScope(c, "skills:write");
+    const body = archiveSkillInputSchema.parse(await c.req.json().catch(() => ({})));
+    await withTenant(
+      c,
+      ({ actor, orgId, database }) =>
+        archiveSkill({ actor, orgId, slug: c.req.param("slug"), reason: body.reason, database }),
+      true,
+    );
+    return c.json({ ok: true });
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
+/** Restore an archived skill back into the normal lists. */
+app.post("/v1/skills/:slug/restore", async (c) => {
+  try {
+    actorFromContext(c, true);
+    requireScope(c, "skills:write");
+    await withTenant(
+      c,
+      ({ actor, orgId, database }) => restoreSkill({ actor, orgId, slug: c.req.param("slug"), database }),
+      true,
+    );
+    return c.json({ ok: true });
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
 /**
  * Publish a packaged skill. Two body shapes:
  *  - multipart/form-data (browser dropzone / CLI): `file` + `action`/`everyone`/`team`/`version`/`message`.
@@ -979,6 +1081,7 @@ app.post("/v1/skills", bodyLimit({ maxSize: 32 * 1024 * 1024, onError: (c) => js
     let expectSlug: string | undefined;
     let expectSkillId: string | undefined;
     let ownerTeamRaw: string | undefined;
+    let dependencyValues: string[] = [];
 
     if (contentType.includes("multipart/form-data")) {
       const form = await c.req.formData();
@@ -998,6 +1101,7 @@ app.post("/v1/skills", bodyLimit({ maxSize: 32 * 1024 * 1024, onError: (c) => js
       expectSlug = field("expect_slug");
       expectSkillId = field("expect_skill_id");
       ownerTeamRaw = field("owner_team");
+      dependencyValues = parseTeamValues([...form.getAll("dependency"), ...form.getAll("dependencies")].map((v) => String(v)));
     } else {
       const url = new URL(c.req.url);
       rejectLegacySkillVisibilityInput((name) => url.searchParams.has(name));
@@ -1011,6 +1115,7 @@ app.post("/v1/skills", bodyLimit({ maxSize: 32 * 1024 * 1024, onError: (c) => js
       expectSlug = c.req.query("expect_slug");
       expectSkillId = c.req.query("expect_skill_id");
       ownerTeamRaw = c.req.query("owner_team");
+      dependencyValues = parseTeamValues([...url.searchParams.getAll("dependency"), ...url.searchParams.getAll("dependencies")]);
     }
 
     let parsedAction;
@@ -1045,8 +1150,30 @@ app.post("/v1/skills", bodyLimit({ maxSize: 32 * 1024 * 1024, onError: (c) => js
         return c.json({ result, error: error instanceof Error ? error.message : String(error) }, 422);
       }
     }
-    if (parsedAction === "validate") return c.json({ result });
+    // Declared dependencies come from the request `dependency` fields and/or an optional
+    // companion.json at the package root, so a browser zip upload declares the same graph as the CLI.
+    const declaredFromPackage = await readDeclaredDependencies(archive);
+    if (declaredFromPackage.length) {
+      dependencyValues = [...new Set([...dependencyValues, ...declaredFromPackage])];
+    }
     const visibility = skillVisibilityInputSchema.parse({ everyone: parseBoolean(everyoneRaw), teams: teamValues });
+    // Dependency preflight: which declared deps are published / must be uploaded / dropped, plus any
+    // blockers (missing / cycle / visibility). Computed for both validate (preview) and publish.
+    const dependencyPlan = await withTenant(
+      c,
+      ({ actor: a, orgId: o, database }) =>
+        buildDependencyPlan({
+          actor: a,
+          orgId: o,
+          slug: fm.name,
+          declaredSlugs: dependencyValues,
+          visibility,
+          ownerTeamSlug: ownerTeamRaw ?? null,
+          database,
+        }),
+      true,
+    );
+    if (parsedAction === "validate") return c.json({ result, dependency_plan: dependencyPlan });
     const target = await resolvePublishTarget({
       actor,
       orgId,
@@ -1064,18 +1191,28 @@ app.post("/v1/skills", bodyLimit({ maxSize: 32 * 1024 * 1024, onError: (c) => js
     if (!normalizedResult.ok || !normalizedResult.frontmatter) {
       return c.json({ result: normalizedResult, error: normalizedResult.error ?? "validation failed after normalization" }, 422);
     }
-    const published = await publishCanonical({
-      actor,
-      orgId,
-      canonical: normalized.canonical,
-      fm: normalized.frontmatter,
-      skillId: target.skillId,
-      ownerTeam: ownerTeamRaw,
-      visibility,
-      version: target.version,
-      note: messageRaw ?? "",
-    });
-    return c.json({ ok: true, ...published, warnings: result.warnings ?? [] });
+    let published;
+    try {
+      published = await publishCanonical({
+        actor,
+        orgId,
+        canonical: normalized.canonical,
+        fm: normalized.frontmatter,
+        skillId: target.skillId,
+        ownerTeam: ownerTeamRaw,
+        visibility,
+        version: target.version,
+        note: messageRaw ?? "",
+        dependencies: dependencyValues,
+      });
+    } catch (error) {
+      // Unresolved dependencies (missing / cycle / visibility) — surface the plan, don't 500.
+      if (error instanceof DependencyPublishError) {
+        return c.json({ error: error.message, dependency_plan: error.plan }, 422);
+      }
+      throw error;
+    }
+    return c.json({ ok: true, ...published, dependency_plan: dependencyPlan, warnings: result.warnings ?? [] });
   } catch (error) {
     return jsonError(c, error);
   }
@@ -1093,6 +1230,19 @@ app.post("/v1/skills/create", bodyLimit({ maxSize: 2 * 1024 * 1024, onError: (c)
       orgId,
       slug: input.id,
     });
+    // Edit-in-browser reuses this endpoint to publish a new version of an existing skill. Carry
+    // forward the current version's declared dependencies so an inline edit never silently drops
+    // them (there is no companion.json on this path).
+    const carriedDependencies = await withTenant(
+      c,
+      async ({ actor: a, orgId: o, database }) => {
+        const existing = await getSkillBySlug({ actor: a, orgId: o, slug: input.id, database });
+        if (!existing?.current_version) return [];
+        const deps = await getSkillDependencies({ actor: a, orgId: o, slug: input.id, database });
+        return deps.requires.map((r) => r.slug);
+      },
+      true,
+    );
     const dir = await mkdtemp(join(tmpdir(), "companion-skill-"));
     try {
       await writeFile(join(dir, "SKILL.md"), buildSkillMd(input.id, input.description, input.body, target), "utf8");
@@ -1111,6 +1261,7 @@ app.post("/v1/skills/create", bodyLimit({ maxSize: 2 * 1024 * 1024, onError: (c)
         visibility: input.visibility,
         version: target.version,
         note: "",
+        dependencies: carriedDependencies,
       });
       return c.json({ ok: true, ...published, warnings: result.warnings ?? [] });
     } finally {

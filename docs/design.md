@@ -58,8 +58,8 @@ cli/          # companion CLI
 
 Better Auth owns the core `user`, `session`, `account`, and `verification` tables. Companion
 adds `profiles`, `organizations`, `memberships`, `teams`, `team_memberships`, `invitations`,
-`skills`, `skill_versions`, `skill_stars`, `skill_filter_preferences`, `skill_comments`,
-`local_skill_installs`, `api_tokens`, and `audit_log`.
+`skills`, `skill_versions`, `skill_version_dependencies`, `skill_stars`, `skill_filter_preferences`,
+`skill_comments`, `local_skill_installs`, `api_tokens`, and `audit_log`.
 
 Every tenant-owned table carries `org_id`. Skills keep ownership, visibility, and provenance
 separate: `owner_id` / `owner_team_id`, `everyone`, `skill_team_shares`, and `creator_id`.
@@ -77,6 +77,31 @@ next registry version unless the caller passes an explicit version. Legacy top-l
 `tools`, and unknown fields are warnings and are not preserved as top-level fields in newly stored
 packages; top-level `scope` or `visibility` is rejected because visibility belongs to the publish
 request.
+
+**Skill dependencies (un-versioned skill→skill links).** A skill version can declare that it
+requires other skills. Edges live in `skill_version_dependencies` (`(skill_version_id,
+depends_on_slug)` PK, plus `org_id`, the dependent `skill_id`, and a resolved `depends_on_skill_id`
+that is `null` when the declared slug is not published — a *missing* dependency), so each version
+keeps its exact graph. Dependencies are **un-versioned**: there are no semver ranges, no resolved
+version pins, and no "update available" status — versions are a skill's own publish concern, not the
+dependency graph's. Each edge's status is computed live on read from current state: **Satisfied**,
+**Missing** (target unpublished), **Archived** (target archived), **Visibility mismatch** (the
+target's audience does not cover the dependent's — everyone⇒everyone, team-scoped⇒target everyone or
+team-superset), or **Cycle blocked** (the edge sits in a directed cycle). Publishing **hard-blocks**
+declared dependencies that are missing, cyclic, or visibility-mismatched; edges are written in the
+same transaction as the version. `POST /v1/skills?action=validate` returns a `dependencyPlan`
+(declared / already-published / must-upload / removed-since-previous / archival candidates) that
+drives the upload dialog's **Dependency preflight** step. In this slice declared dependencies are
+passed to the publish API as a list of slugs; reading them from a package `companion.json` and the
+CLI/`companion`-skill authoring flow are deferred.
+
+**Skill archive.** `skills.archived_at` / `archived_by` / `archive_reason` soft-hide a skill: archived
+skills drop out of the normal workspace/team/search lists but stay viewable, **restorable**, and
+**downloadable while a published version still references them** (so existing installs never break).
+They surface in a dedicated **Archived skills** view; `archiveSkill`/`restoreSkill` carry the same
+capability gate as modifying a skill and write `skill.archive` / `skill.restore` audit entries.
+`listSkills` excludes archived by default, with an `archived`-only mode and an `includeArchived` mode
+(detail / dependency / download resolution).
 
 **Companion skills (local skills).** A built-in catalog of official helper skills users install on
 their own machine or hand to a coding assistant, surfaced in the "Companion skills" sidebar section
@@ -196,6 +221,11 @@ directly to Postgres.
   Threaded discussion: `GET`/`POST /v1/skills/:slug/comments` (a `POST` may carry `parent_id` for a
   reply and `version_id` to link the thread to a version) and
   `PATCH /v1/skills/:slug/comments/:id` (deprecate / restore a thread).
+  Dependencies & archive: `GET /v1/skills/:slug/dependencies?version=` (the Requires + Used by graph
+  with live statuses), `POST /v1/skills/:slug/archive` (optional `{reason}`) and
+  `POST /v1/skills/:slug/restore`, and `GET /v1/skills?archived=true` (the Archived view). `POST
+  /v1/skills` accepts declared `dependency` fields and, on `action=validate`, returns a
+  `dependency_plan`; an unresolved-dependency publish returns 422 with that plan.
 - Local skills (Companion skills): `GET /v1/local-skills` (built-in catalog with the caller's
   per-machine status), `GET /v1/local-skills/:key`, `GET /v1/local-skills/:key/package` (download the
   bundled skill as `.zip`), and `POST /v1/local-skills/:key/installed` (the install callback: the
