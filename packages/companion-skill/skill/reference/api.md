@@ -95,9 +95,11 @@ defaults unless the user chooses otherwise.
 - a raw `application/zip` or `application/gzip` body (the archive itself), with the same options as
   query params.
 
-Declare required dependencies with repeated `dependency=<slug>` parameters (from `companion.json`).
-Set `action=validate` to run every package and identity check without publishing; the validate
-response is `{ "result": <validation>, "dependency_plan": <plan> }`.
+Declare required dependencies with repeated `dependency=<slug>` parameters. The API only receives
+that explicit list; the Companion skill is responsible for analyzing the local package, comparing
+the result with `companion.json`, asking before synchronizing `companion.json`, and then sending the
+confirmed final list. Set `action=validate` to run every package and identity check without
+publishing; the validate response is `{ "result": <validation>, "dependency_plan": <plan> }`.
 
 Ownership and visibility are separate:
 
@@ -140,9 +142,11 @@ that already owns the skill.
 
 ## Dependencies & archive
 
-Dependencies are un-versioned skill→skill links declared in a package's `companion.json`
-(`{ "dependencies": ["slug-a", "slug-b"] }`). Pass each slug as a repeated `dependency=` parameter
-on validate and publish.
+Dependencies are un-versioned skill→skill links persisted in a package's `companion.json`
+(`{ "dependencies": ["slug-a", "slug-b"] }`). Before validate or publish, the Companion skill must
+still analyze the full local package, compare inferred dependencies with `companion.json`, and ask
+before synchronizing additions or removals. Pass each confirmed slug as a repeated `dependency=`
+parameter on validate and publish.
 
 `POST /skills?action=validate&dependency=...` returns a `dependency_plan`:
 
@@ -209,8 +213,8 @@ built-in Companion skill. Those endpoints are for workspace-published skills.
 POST /local-skills/companion/installed
 Content-Type: application/json
 
-{ "version": "1.2.0", "agent": "Claude Code" }
+{ "version": "1.2.1", "agent": "Claude Code" }
 ```
 
 `version` must be valid semver (use this skill's `metadata.companion_version`). The response is
-`{ "ok": true, "status": "installed" | "update", "availableVersion": "1.2.0" }`.
+`{ "ok": true, "status": "installed" | "update", "availableVersion": "1.2.1" }`.
