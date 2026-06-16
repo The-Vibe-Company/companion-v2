@@ -83,13 +83,16 @@ as enough evidence by itself:
    - inferred only — found by analysis but missing from `companion.json`, with brief evidence such as
      the file path and referenced slug/name;
    - declared only — present in `companion.json` but not found by analysis.
-5. If the diff is non-empty, ask the user to confirm the final dependency list. Offer to create or
+5. If the diff is non-empty, ask the user to confirm the final dependency list, then create or
    update `companion.json` so it matches that confirmed list before validation/upload. If the user
-   declines and does not explicitly choose a final dependency list, stop before upload.
+   declines synchronizing `companion.json`, stop before upload; the server also reads
+   `companion.json` from the archive, so a stale file would override removals.
 
-Pass the confirmed final dependency list to the API as repeated `dependency=` query parameters on
-validate and publish calls; the server records the graph and blocks a publish whose dependencies are
-missing, cyclic, or less visible than the skill itself.
+Pass the same confirmed final dependency list to the API as repeated `dependency=` query parameters
+on validate and publish calls. Because the server also reads `companion.json` from the archive,
+package the skill only after `companion.json` matches the confirmed list. The server records the
+graph and blocks a publish whose dependencies are missing, cyclic, or less visible than the skill
+itself.
 
 ## Capabilities
 
@@ -147,10 +150,11 @@ any upload.
 
 After a clean validation **and** a resolved dependency plan, and after the user confirms, publish a
 brand-new skill. If the local analysis found dependencies that differ from `companion.json`, create
-or update `companion.json` with the confirmed final list before packaging. If the plan listed
-dependencies under `upload`, analyze and publish those first (topological order). Ask the user where
-the skill should be owned and who should be able to read it before you upload. Do not ask for a raw
-team slug first: fetch upload options and propose the available choices.
+or update `companion.json` with the confirmed final list before packaging; do not upload a package
+with a stale dependency manifest. If the plan listed dependencies under `upload`, analyze and
+publish those first (topological order). Ask the user where the skill should be owned and who should
+be able to read it before you upload. Do not ask for a raw team slug first: fetch upload options and
+propose the available choices.
 
 ```sh
 curl -s "$COMPANION_API_URL/skills/upload-options" \
