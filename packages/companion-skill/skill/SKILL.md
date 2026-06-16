@@ -75,9 +75,9 @@ as enough evidence by itself:
 2. Build a local skill index from sibling skill folders and any skill folders the user explicitly
    gave you. A skill folder is a directory with `SKILL.md`; use that file's frontmatter `name` as the
    slug. Do not scan the whole machine.
-3. Scan every text file in the target skill package (including `SKILL.md`, references, scripts, and
-   docs; skip binaries and dependency/build directories) for exact references to indexed skill slugs
-   or names. Exclude the target skill itself.
+3. Scan every text file in the target skill package except `companion.json` (include `SKILL.md`,
+   references, scripts, and docs; skip binaries and dependency/build directories) for exact
+   references to indexed skill slugs or names. Exclude the target skill itself.
 4. Compare declared vs inferred dependencies and present the diff:
    - matching — declared and found by analysis;
    - inferred only — found by analysis but missing from `companion.json`, with brief evidence such as
