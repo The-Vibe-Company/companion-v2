@@ -5,12 +5,14 @@ import type {
   OrgRole,
   SkillVisibilityInput,
   SkillCommentRow,
+  SkillDependenciesResponse,
   SkillFile,
   SkillVersionRow,
 } from "@companion/contracts";
 import { Icon } from "../Icon";
 import {
   addComment as addCommentRpc,
+  fetchSkillDependencies,
   fetchSkillDetail,
   fetchSkillDownloadUrl,
   fetchSkillVersionFiles,
@@ -19,22 +21,27 @@ import {
 import type { MeVM, SkillVM, TeamVM } from "@/lib/types";
 import { StarButton, ValidBadge, VisibilityChip } from "./blocks";
 import { Activity, PropList } from "./detailParts";
+import { DependenciesTab } from "./DependenciesTab";
 import { FileExplorer } from "./fileview";
 import { Discussion } from "./discussion";
 import { fmtBytes, iconForFile } from "./fileFormat";
 
-type Tab = "overview" | "files" | "activity";
+type Tab = "overview" | "dependencies" | "files" | "activity";
 
 export function DetailMoreMenuContent({
   canModifySkill,
   canDownload,
+  canArchive,
   onUpdate,
   onDownload,
+  onArchive,
 }: {
   canModifySkill: boolean;
   canDownload: boolean;
+  canArchive: boolean;
   onUpdate: () => void;
   onDownload: () => void;
+  onArchive: () => void;
 }) {
   return (
     <div className="menu dmore__menu" role="menu">
@@ -58,6 +65,14 @@ export function DetailMoreMenuContent({
         </span>
         <span className="menu__label">Download package</span>
       </button>
+      {canArchive && (
+        <button className="menu__item" role="menuitem" onClick={onArchive}>
+          <span className="ico">
+            <Icon name="archive" size={14} />
+          </span>
+          <span className="menu__label">Archive skill</span>
+        </button>
+      )}
     </div>
   );
 }
@@ -65,13 +80,17 @@ export function DetailMoreMenuContent({
 function DetailMoreMenu({
   canModifySkill,
   canDownload,
+  canArchive,
   onUpdate,
   onDownload,
+  onArchive,
 }: {
   canModifySkill: boolean;
   canDownload: boolean;
+  canArchive: boolean;
   onUpdate: () => void;
   onDownload: () => void;
+  onArchive: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLSpanElement>(null);
@@ -128,8 +147,10 @@ function DetailMoreMenu({
         <DetailMoreMenuContent
           canModifySkill={canModifySkill}
           canDownload={canDownload}
+          canArchive={canArchive}
           onUpdate={() => choose(onUpdate)}
           onDownload={() => choose(onDownload)}
+          onArchive={() => choose(onArchive)}
         />
       )}
     </span>
@@ -149,6 +170,9 @@ export function DetailView({
   onChangeVisibility,
   onInstall,
   onUpdate,
+  onOpenSkill,
+  onRestore,
+  onArchive,
   teams,
 }: {
   skill: SkillVM;
@@ -163,6 +187,9 @@ export function DetailView({
   onChangeVisibility: (visibility: SkillVisibilityInput) => void;
   onInstall: () => void;
   onUpdate: () => void;
+  onOpenSkill: (slug: string) => void;
+  onRestore: () => void;
+  onArchive: () => void;
   teams: TeamVM[];
 }) {
   const invalid = skill.validation === "invalid";
@@ -171,6 +198,7 @@ export function DetailView({
   const [versions, setVersions] = useState<SkillVersionRow[]>([]);
   const [comments, setComments] = useState<SkillCommentRow[]>([]);
   const [files, setFiles] = useState<SkillFile[]>([]);
+  const [deps, setDeps] = useState<SkillDependenciesResponse | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -203,6 +231,20 @@ export function DetailView({
     fetchSkillVersionFiles(skill.id, skill.version)
       .then((res) => {
         if (active) setFiles(res.files);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [skill.id, skill.version]);
+
+  // Resolve the dependency graph (Requires + Used by) for the tab and the rail counters.
+  useEffect(() => {
+    let active = true;
+    setDeps(null);
+    fetchSkillDependencies(skill.id, skill.version)
+      .then((d) => {
+        if (active) setDeps(d);
       })
       .catch(() => {});
     return () => {
@@ -287,8 +329,18 @@ export function DetailView({
       );
   };
 
+  const reqN = deps?.requires_n ?? skill.requiresCount;
+  const usedN = deps?.used_by_n ?? skill.usedByCount;
+  const reqIssues = (deps?.requires ?? []).filter((r) => r.status !== "satisfied");
+  const depFlag = deps
+    ? reqIssues.length > 0
+      ? { n: reqIssues.length, blocked: reqIssues.some((r) => r.status === "cycle" || r.status === "missing") }
+      : null
+    : undefined;
+
   const TABS: { id: Tab; label: string; icon: string; n?: number }[] = [
     { id: "overview", label: "Overview", icon: "file-text" },
+    { id: "dependencies", label: "Dependencies", icon: "git-branch", n: reqN + usedN },
     { id: "files", label: "Files", icon: "package-open", n: files.length },
     { id: "activity", label: "Activity", icon: "activity", n: versions.length },
   ];
@@ -316,26 +368,35 @@ export function DetailView({
           {index + 1} / {total}
         </span>
         <StarButton starred={skill.starred} count={skill.stars} onToggle={onToggleStar} />
-        <button
-          className="btn-primary"
-          disabled={invalid || !skill.version}
-          onClick={onInstall}
-          title={
-            invalid
-              ? "Resolve validation errors first"
-              : !skill.version
-                ? "No published version yet"
-                : "Install skill"
-          }
-        >
-          <Icon name="download" size={14} />
-          Install skill
-        </button>
+        {skill.archived ? (
+          <button className="btn-ghost" onClick={onRestore} title="Restore this skill">
+            <Icon name="rotate-ccw" size={14} />
+            Restore
+          </button>
+        ) : (
+          <button
+            className="btn-primary"
+            disabled={invalid || !skill.version}
+            onClick={onInstall}
+            title={
+              invalid
+                ? "Resolve validation errors first"
+                : !skill.version
+                  ? "No published version yet"
+                  : "Install skill"
+            }
+          >
+            <Icon name="download" size={14} />
+            Install skill
+          </button>
+        )}
         <DetailMoreMenu
           canModifySkill={canModifySkill}
-          canDownload={!!skill.version}
+          canDownload={!!skill.version && (!skill.archived || (skill.referenced ?? skill.usedByCount > 0))}
+          canArchive={canModifySkill && !skill.archived}
           onUpdate={onUpdate}
           onDownload={download}
+          onArchive={onArchive}
         />
       </div>
 
@@ -435,6 +496,17 @@ export function DetailView({
                 </div>
               </div>
             </div>
+          ) : tab === "dependencies" ? (
+            <div className="dcontent">
+              <div className="dcontent__inner dcontent__inner--wide">
+                <DependenciesTab
+                  slug={skill.id}
+                  version={skill.version}
+                  deps={deps}
+                  onOpenSkill={onOpenSkill}
+                />
+              </div>
+            </div>
           ) : (
             <div className="dcontent">
               <div className="dcontent__inner">
@@ -456,6 +528,10 @@ export function DetailView({
               teams={teams}
               onChangeVisibility={onChangeVisibility}
               canChangeVisibility={canModifySkill}
+              requiresN={reqN}
+              usedByN={usedN}
+              depFlag={depFlag}
+              onOpenDeps={() => setTab("dependencies")}
             />
           </aside>
         </div>

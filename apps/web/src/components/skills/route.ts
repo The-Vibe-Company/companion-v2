@@ -2,7 +2,8 @@ export type SkillsRoute =
   | { kind: "all" }
   | { kind: "mine" }
   | { kind: "team"; team: string }
-  | { kind: "local" };
+  | { kind: "local" }
+  | { kind: "archived" };
 
 export type SkillsSearchParams =
   | URLSearchParams
@@ -44,6 +45,7 @@ export function parseSkillsRoute(input: SkillsSearchParams): SkillsRoute {
   const view = firstParam(params, "view");
   if (view === "mine") return { kind: "mine" };
   if (view === "local") return { kind: "local" };
+  if (view === "archived") return { kind: "archived" };
   if (view === "team") {
     const team = firstParam(params, "team")?.trim();
     return team ? { kind: "team", team } : { kind: "all" };
@@ -54,6 +56,7 @@ export function parseSkillsRoute(input: SkillsSearchParams): SkillsRoute {
 export function skillsRouteHref(route: SkillsRoute): string {
   if (route.kind === "mine") return "/skills?view=mine";
   if (route.kind === "local") return "/skills?view=local";
+  if (route.kind === "archived") return "/skills?view=archived";
   if (route.kind === "team") {
     return `/skills?view=team&team=${encodeURIComponent(route.team)}`;
   }

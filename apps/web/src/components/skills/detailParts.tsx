@@ -127,14 +127,27 @@ export function PropList({
   teams,
   onChangeVisibility,
   canChangeVisibility,
+  requiresN,
+  usedByN,
+  depFlag,
+  onOpenDeps,
 }: {
   skill: SkillVM;
   teams: TeamVM[];
   onChangeVisibility: (visibility: SkillVisibilityInput) => void;
   canChangeVisibility: boolean;
+  /** Dependency counts for the rail (fall back to the list-row counts before the graph loads). */
+  requiresN?: number;
+  usedByN?: number;
+  /** Set when at least one dependency is unsatisfied; `blocked` means a missing/cycle edge. */
+  depFlag?: { n: number; blocked: boolean } | null;
+  onOpenDeps?: () => void;
 }) {
   const meta = visibilityMeta(skill);
   const teamNames = skill.teams.map((team) => team.name).join(", ");
+  const reqN = requiresN ?? skill.requiresCount;
+  const usedN = usedByN ?? skill.usedByCount;
+  const flag = depFlag ?? (skill.depWarn ? { n: 0, blocked: false } : null);
   const metadataEntries = Object.entries(skill.metadata).sort(([a], [b]) => a.localeCompare(b));
   return (
     <div className="props">
@@ -185,6 +198,34 @@ export function PropList({
         <span className="prop__value">
           <span className="mono" title={teamNames || undefined}>{teamNames || "—"}</span>
         </span>
+      </div>
+      <div className="divider" />
+      <p className="railhead railhead--sub">Dependencies</p>
+      <div className="depmeter">
+        <button className="depmeter__cell" onClick={onOpenDeps} type="button">
+          <span className="depmeter__top">
+            <span className="depmeter__lbl">
+              <Icon name="package" size={13} />
+              Requires
+            </span>
+            {flag && (
+              <span className={"depmeter__flag depmeter__flag--" + (flag.blocked ? "down" : "warn")}>
+                <Icon name="alert-triangle" size={10} />
+                {flag.n > 0 ? flag.n : null}
+              </span>
+            )}
+          </span>
+          <span className="depmeter__val">{reqN}</span>
+        </button>
+        <button className="depmeter__cell" onClick={onOpenDeps} type="button">
+          <span className="depmeter__top">
+            <span className="depmeter__lbl">
+              <Icon name="corner-down-right" size={13} />
+              Used by
+            </span>
+          </span>
+          <span className="depmeter__val">{usedN}</span>
+        </button>
       </div>
       <div className="divider" />
       <div className="prop">

@@ -35,6 +35,11 @@ export interface SkillVM {
   starred: boolean;
   teams: SkillVisibility["teams"];
   teamSlugs: string[]; // team slugs (for filtering)
+  requiresCount: number; // dependencies the current version declares
+  usedByCount: number; // other skills (current versions) that depend on this one
+  depWarn: boolean; // any declared dependency is not satisfied
+  archived: boolean; // hidden from normal lists
+  referenced?: boolean; // referenced by ANY published version (gates archived download)
 }
 
 /** Map a skill_list_v row to the UI view-model. Date formatting runs server-side. */
@@ -70,6 +75,11 @@ export function mapSkill(row: SkillListRow): SkillVM {
     starred: row.starred,
     teams: row.visibility.teams,
     teamSlugs: row.visibility.teams.map((team) => team.slug),
+    requiresCount: row.requires_count ?? 0,
+    usedByCount: row.used_by_count ?? 0,
+    depWarn: row.dep_warn ?? false,
+    archived: row.archived ?? false,
+    referenced: row.referenced ?? false,
   };
 }
 

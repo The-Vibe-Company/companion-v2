@@ -57,6 +57,10 @@ function skill(overrides: Partial<SkillVM>): SkillVM {
     starred: false,
     teams: [],
     teamSlugs: [],
+    requiresCount: 0,
+    usedByCount: 0,
+    depWarn: false,
+    archived: false,
     ...overrides,
   };
 }

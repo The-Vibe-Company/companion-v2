@@ -74,6 +74,10 @@ function FilterMenuPopover({
 
   return (
     <div className="fmenu" ref={ref} role="menu">
+      <div className="fmenu__grouphead">Dependencies</div>
+      <Item type="deps" value="has" icon="package" label="Has dependencies" />
+      <Item type="deps" value="used" icon="corner-down-right" label="Used as dependency" />
+      <div className="fmenu__divider" />
       <div className="fmenu__grouphead">Visibility</div>
       {VISIBILITY_ORDER.map((v) => (
         <Item

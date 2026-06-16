@@ -157,12 +157,13 @@ export function ListView({
         )}
       </div>
 
-      <div className="clist">
+      <div className="clist clist--deps">
         <div className="chead">
           <span></span>
           <span>Skill</span>
           <span>Visibility</span>
           <span>Version</span>
+          <span>Deps</span>
           <span className="r">Stars</span>
           <span className="r">Updated</span>
         </div>
@@ -186,6 +187,21 @@ export function ListView({
             </span>
             <VisibilityCell skill={s} />
             <span className="ver">{s.version ?? "—"}</span>
+            <span className="crow__deps">
+              {s.requiresCount > 0 ? (
+                <span className={"depspill" + (s.depWarn ? " depspill--warn" : "")} title={`${s.requiresCount} dependency${s.requiresCount === 1 ? "" : "ies"}`}>
+                  <Icon name="package" size={11} />
+                  {s.requiresCount}
+                </span>
+              ) : s.usedByCount > 0 ? (
+                <span className="depspill depspill--used" title={`Used by ${s.usedByCount}`}>
+                  <Icon name="corner-down-right" size={11} />
+                  {s.usedByCount}
+                </span>
+              ) : (
+                <span style={{ color: "var(--color-faint)" }}>—</span>
+              )}
+            </span>
             <span className="r">
               <button
                 type="button"

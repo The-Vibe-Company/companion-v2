@@ -37,6 +37,10 @@ const skill: SkillVM = {
   starred: false,
   teams: [{ id: "team-1", slug: "engineering", name: "Engineering", color: null, icon: null }],
   teamSlugs: ["engineering"],
+  requiresCount: 0,
+  usedByCount: 0,
+  depWarn: false,
+  archived: false,
   compatibility: "Requires Python 3.14+ and uv with network access",
   metadata: {
     companion_skill_id: "skill-1",

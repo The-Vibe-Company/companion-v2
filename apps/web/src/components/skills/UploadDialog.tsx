@@ -2,11 +2,18 @@
 
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import type { CSSProperties } from "react";
-import type { SkillVisibilityInput, ValidationResult } from "@companion/contracts";
+import type {
+  DependencyPlan,
+  SkillDependenciesResponse,
+  SkillVisibilityInput,
+  ValidationResult,
+} from "@companion/contracts";
 import type { SkillVM, TeamVM } from "@/lib/types";
 import {
   apiBase,
+  archiveSkill,
   createSkillInline,
+  fetchSkillDependencies,
   issueToken,
   publishSkillPackage,
   validateSkillPackage,
@@ -945,6 +952,8 @@ interface PublishOutcome {
   version: string;
   visibility: SkillVisibilityInput;
   via: string;
+  /** Non-fatal note when archive-on-publish could not archive some candidates (e.g. permissions). */
+  archiveWarning?: string;
 }
 
 function DonePanel({ result, update, teams }: { result: PublishOutcome; update: boolean; teams: TeamVM[] }) {
@@ -956,6 +965,11 @@ function DonePanel({ result, update, teams }: { result: PublishOutcome; update: 
       </span>
       <h3 className="up-done__title">{update ? "Update published" : "Skill published"}</h3>
       <p className="up-done__sub">{result.via}. Run plan &amp; apply to deploy it to your agents.</p>
+      {result.archiveWarning && (
+        <div className="up-errblock" role="alert" style={{ margin: "0 0 14px" }}>
+          <Icon name="alert-triangle" size={13} /> {result.archiveWarning}
+        </div>
+      )}
       <div className="up-done__card">
         <div className="up-done__row">
           <span className="up-done__k">Skill</span>
@@ -989,6 +1003,193 @@ function DonePanel({ result, update, teams }: { result: PublishOutcome; update: 
 
 /* ----------------------------------------------------------- upload dialog */
 
+/** The dependency preflight step: exactly what changes in the graph before a version is published. */
+function DependencyPreflight({
+  plan,
+  skillId,
+  nextVer,
+  archiveOn,
+  onToggleArchive,
+}: {
+  plan: DependencyPlan;
+  skillId: string;
+  nextVer: string;
+  archiveOn: boolean;
+  onToggleArchive: () => void;
+}) {
+  return (
+    <div className="pf">
+      <p className="pf__lede">
+        <b>Dependency preflight.</b> Validation passed. Before publishing{" "}
+        <span className="mono">{skillId}</span> as <span className="mono">{nextVer}</span>, here is exactly what
+        changes in the dependency graph.
+      </p>
+
+      <div className="pf-overview">
+        <div className="pf-stat">
+          <div className="pf-stat__v">{plan.declared.length}</div>
+          <div className="pf-stat__l">
+            <Icon name="package" size={13} /> Declared
+          </div>
+        </div>
+        <div className="pf-stat">
+          <div className="pf-stat__v">{plan.ready.length}</div>
+          <div className="pf-stat__l">
+            <Icon name="circle-check" size={13} /> Published
+          </div>
+        </div>
+        <div className="pf-stat pf-stat--act">
+          <div className="pf-stat__v">{plan.upload.length}</div>
+          <div className="pf-stat__l">
+            <Icon name="upload" size={13} /> To upload
+          </div>
+        </div>
+        <div className="pf-stat">
+          <div className="pf-stat__v">{plan.removed.length}</div>
+          <div className="pf-stat__l">
+            <Icon name="x" size={13} /> Removed
+          </div>
+        </div>
+      </div>
+
+      {plan.blocked.length > 0 && (
+        <div className="pf-group pf-group--act">
+          <div className="pf-group__head">
+            <span className="pf-group__ico">
+              <Icon name="alert-triangle" size={14} />
+            </span>
+            <span>
+              <span className="pf-group__title">Cannot publish yet</span>
+              <span className="pf-group__sub">Resolve these before publishing — the version would stay unresolved.</span>
+            </span>
+            <span className="pf-group__n">{plan.blocked.length}</span>
+          </div>
+          {plan.blocked.map((b) => (
+            <div className="pf-item" key={b.slug}>
+              <span className="pf-item__mark pf-item__mark--add">
+                <Icon name="alert-triangle" size={15} />
+              </span>
+              <span className="pf-item__slug">{b.slug}</span>
+              <span className="pf-item__msg">{b.msg}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {plan.ready.length > 0 && (
+        <div className="pf-group">
+          <div className="pf-group__head">
+            <span className="pf-group__ico">
+              <Icon name="circle-check" size={14} />
+            </span>
+            <span>
+              <span className="pf-group__title">Already published</span>
+              <span className="pf-group__sub">Declared dependencies that already exist in the workspace registry.</span>
+            </span>
+            <span className="pf-group__n">{plan.ready.length}</span>
+          </div>
+          {plan.ready.map((slug) => (
+            <div className="pf-item" key={slug}>
+              <span className="pf-item__mark pf-item__mark--ok">
+                <Icon name="circle-check" size={15} />
+              </span>
+              <span className="pf-item__slug">{slug}</span>
+              <span className="pf-item__tag pf-item__tag--ok">in registry</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {plan.upload.length > 0 && (
+        <div className="pf-group pf-group--act">
+          <div className="pf-group__head">
+            <span className="pf-group__ico">
+              <Icon name="upload" size={14} />
+            </span>
+            <span>
+              <span className="pf-group__title">Must be uploaded too</span>
+              <span className="pf-group__sub">Declared but not in the registry. Publish these or the new version stays unresolved.</span>
+            </span>
+            <span className="pf-group__n">{plan.upload.length}</span>
+          </div>
+          {plan.upload.map((d) => (
+            <div className="pf-item" key={d.slug}>
+              <span className="pf-item__mark pf-item__mark--add">
+                <Icon name="alert-triangle" size={15} />
+              </span>
+              <span className="pf-item__slug">{d.slug}</span>
+              <span className="pf-item__msg">{d.msg}</span>
+              <span className="pf-item__tag pf-item__tag--add">upload</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {plan.removed.length > 0 && (
+        <div className="pf-group pf-group--cut">
+          <div className="pf-group__head">
+            <span className="pf-group__ico">
+              <Icon name="x" size={14} />
+            </span>
+            <span>
+              <span className="pf-group__title">No longer required</span>
+              <span className="pf-group__sub">Required by the previous version and dropped from this one.</span>
+            </span>
+            <span className="pf-group__n">{plan.removed.length}</span>
+          </div>
+          {plan.removed.map((slug) => (
+            <div className="pf-item" key={slug}>
+              <span className="pf-item__mark pf-item__mark--cut">
+                <Icon name="corner-down-right" size={15} />
+              </span>
+              <span className="pf-item__slug" style={{ textDecoration: "line-through", color: "var(--color-faint)" }}>
+                {slug}
+              </span>
+              <span className="pf-item__tag pf-item__tag--cut">dropped</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {plan.archive_candidates.length > 0 && (
+        <div className="pf-group">
+          <div className="pf-group__head">
+            <span className="pf-group__ico">
+              <Icon name="archive" size={14} />
+            </span>
+            <span>
+              <span className="pf-group__title">Archival candidates</span>
+              <span className="pf-group__sub">No published skill references these after the removal above. Archive to keep lists clean.</span>
+            </span>
+            <span className="pf-group__n">{plan.archive_candidates.length}</span>
+          </div>
+          {plan.archive_candidates.map((d) => (
+            <div className="pf-item" key={d.slug}>
+              <span className="pf-item__mark pf-item__mark--arch">
+                <Icon name="archive" size={15} />
+              </span>
+              <span className="pf-item__slug">{d.slug}</span>
+              <span className="pf-item__cons">{d.reason}</span>
+              <button
+                type="button"
+                className="pf-item__check pf-cb-row"
+                onClick={onToggleArchive}
+                aria-pressed={archiveOn}
+                aria-label={`Archive ${d.slug} on publish`}
+              >
+                <span className={"pf-cb" + (archiveOn ? " is-on" : "")}>
+                  <Icon name="check" size={12} />
+                </span>
+                Archive on publish
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function UploadDialog({
   mode = "create",
   skill = null,
@@ -1017,6 +1218,9 @@ export function UploadDialog({
   const [token, setToken] = useState<string | null>(null);
   const [file, setFile] = useState<File | null>(null);
   const [validation, setValidation] = useState<ValidationResult | null>(null);
+  const [dependencyPlan, setDependencyPlan] = useState<DependencyPlan | null>(null);
+  const [showPreflight, setShowPreflight] = useState(false);
+  const [archiveOnPublish, setArchiveOnPublish] = useState(true);
   const [validating, setValidating] = useState(false);
   const [validationError, setValidationError] = useState<string | null>(null);
   const [form, setForm] = useState<CreateForm>(
@@ -1039,6 +1243,7 @@ export function UploadDialog({
     }
     let active = true;
     setValidation(null);
+    setDependencyPlan(null);
     setValidationError(null);
     setValidating(true);
     validateSkillPackage(
@@ -1052,7 +1257,9 @@ export function UploadDialog({
         : undefined,
     )
       .then((next) => {
-        if (active) setValidation(next);
+        if (!active) return;
+        setValidation(next.result);
+        setDependencyPlan(next.dependencyPlan);
       })
       .catch((e) => {
         if (active) setValidationError(e instanceof Error ? e.message : "Validation failed");
@@ -1107,15 +1314,60 @@ export function UploadDialog({
         version: isUpdate ? ver : undefined,
         expectSlug: isUpdate ? skill!.id : undefined,
         expectSkillId: isUpdate ? skill!.uuid : undefined,
+        dependencies: dependencyPlan?.declared ?? [],
       });
+      // Archive the candidates the operator confirmed (dependencies dropped and now unreferenced).
+      // The publish already succeeded, so a failed archive is non-fatal — but surface it rather than
+      // silently dropping it, so the operator knows the archive step did not complete.
+      let archiveWarning: string | undefined;
+      if (archiveOnPublish && dependencyPlan?.archive_candidates.length) {
+        const results = await Promise.allSettled(
+          dependencyPlan.archive_candidates.map((c) => archiveSkill(c.slug, "Unreferenced after dependency removal")),
+        );
+        const failed = dependencyPlan.archive_candidates
+          .filter((_, i) => results[i]!.status === "rejected")
+          .map((c) => c.slug);
+        if (failed.length) archiveWarning = `Published, but could not archive ${failed.join(", ")} — archive them manually if needed.`;
+      }
       finishPublish({
         id: res.slug || idFromZip,
         version: res.version,
         visibility,
         via: isUpdate ? "Updated from zip" : "Uploaded from zip",
+        archiveWarning,
       });
     } catch (e) {
       setError(e instanceof Error ? e.message : "Upload failed");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Route the zip/update publish through a dependency preflight whenever the graph changes
+  // (declared, dropped, or archival candidates). A no-dependency upload publishes directly.
+  const hasDepReview = !!dependencyPlan &&
+    (dependencyPlan.declared.length > 0 ||
+      dependencyPlan.removed.length > 0 ||
+      dependencyPlan.archive_candidates.length > 0);
+
+  // Re-validate with the SELECTED visibility/owner before showing the preflight, so the plan's
+  // visibility checks match what publish will enforce (avoids a clean preview that then 422s).
+  const openPreflight = async () => {
+    if (!file) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const next = await validateSkillPackage(file, {
+        ...(isUpdate ? { version: ver, expectSlug: skill!.id, expectSkillId: skill!.uuid } : {}),
+        visibility,
+        ownerTeam: isUpdate ? undefined : ownerTeam,
+        dependencies: dependencyPlan?.declared ?? [],
+      });
+      setValidation(next.result);
+      setDependencyPlan(next.dependencyPlan);
+      setShowPreflight(true);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Validation failed");
     } finally {
       setBusy(false);
     }
@@ -1163,12 +1415,14 @@ export function UploadDialog({
   const FOOT: Record<UploadMethod, Foot> = {
     prompt: { hint: ["info", "The agent validates first, then publishes only if the package is accepted."] },
     zip: {
-      hint: ["file-archive", "The package must contain SKILL.md at its root."],
+      hint: hasDepReview
+        ? ["git-branch", "Companion previews dependency changes before anything is published."]
+        : ["file-archive", "The package must contain SKILL.md at its root."],
       cta: {
-        label: isUpdate ? "Publish update" : "Upload package",
-        icon: "upload",
+        label: hasDepReview ? "Review dependencies" : isUpdate ? "Publish update" : "Upload package",
+        icon: hasDepReview ? "git-branch" : "upload",
         disabled: !canZip || busy,
-        run: runZip,
+        run: hasDepReview ? openPreflight : runZip,
       },
     },
     create: {
@@ -1245,6 +1499,51 @@ export function UploadDialog({
               <button className="btn-primary" type="button" onClick={onClose}>
                 <Icon name="arrow-right" size={14} />
                 Done
+              </button>
+            </div>
+          </>
+        ) : showPreflight && dependencyPlan ? (
+          <>
+            <div className="up__panel" style={{ gridColumn: "1 / -1" }}>
+              <DependencyPreflight
+                plan={dependencyPlan}
+                skillId={isUpdate ? skill!.id : idFromZip}
+                nextVer={`v${ver}`}
+                archiveOn={archiveOnPublish}
+                onToggleArchive={() => setArchiveOnPublish((v) => !v)}
+              />
+              {error && (
+                <div className="up-errblock" role="alert" style={{ marginTop: 14 }}>
+                  {error}
+                </div>
+              )}
+            </div>
+            <div className="up__foot">
+              <span className="up__foothint">
+                <Icon name="git-branch" size={14} />
+                {dependencyPlan.upload.length > 0
+                  ? `${dependencyPlan.upload.length} dependency must be uploaded`
+                  : "All dependencies are in the registry"}
+                {dependencyPlan.archive_candidates.length > 0 &&
+                  ` · ${archiveOnPublish ? dependencyPlan.archive_candidates.length : 0} will be archived`}
+              </span>
+              <span className="up__footspacer" />
+              <button className="btn-ghost" type="button" onClick={() => setShowPreflight(false)}>
+                Back
+              </button>
+              <button
+                className="btn-primary"
+                type="button"
+                disabled={busy || dependencyPlan.blocked.length > 0}
+                onClick={runZip}
+                title={dependencyPlan.blocked.length > 0 ? "Resolve blocking dependencies first" : undefined}
+              >
+                {busy ? (
+                  <span className="cds-spinner" style={{ width: 14, height: 14 }} />
+                ) : (
+                  <Icon name="upload" size={14} />
+                )}
+                Publish v{ver}
               </button>
             </div>
           </>
@@ -1457,7 +1756,22 @@ export function InstallDialog({ skill, onClose }: { skill: SkillVM; onClose: () 
     via: string;
   } | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [deps, setDeps] = useState<SkillDependenciesResponse | null>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
+
+  // Resolve the dependency set this skill brings with it (installed together on the next reconcile).
+  useEffect(() => {
+    let active = true;
+    fetchSkillDependencies(id, skill.version)
+      .then((d) => {
+        if (active) setDeps(d);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [id, skill.version]);
+  const installSet = (deps?.requires ?? []).filter((r) => r.status !== "missing");
 
   const ensureToken = useCallback(async () => {
     if (token) return token;
@@ -1597,6 +1911,39 @@ Choose the right local skills folder for the user's agent, download the package,
                 ))}
               </div>
               <div className="up__panel">
+                {installSet.length > 0 && (
+                  <div className="up-step">
+                    <div className="up-fieldlabel">Resolved install set</div>
+                    <p className="up-panel__lede" style={{ marginTop: 4 }}>
+                      This skill brings <b>{installSet.length}</b>{" "}
+                      {installSet.length === 1 ? "dependency" : "dependencies"} with it. They resolve and install
+                      together on the agent&apos;s next reconcile.
+                    </p>
+                    <div className="dptable" style={{ marginTop: 8 }}>
+                      <div className="pf-item">
+                        <span className="pf-item__mark pf-item__mark--ok">
+                          <Icon name="package" size={15} />
+                        </span>
+                        <span className="pf-item__slug" style={{ color: "var(--color-fg)", fontWeight: 600 }}>
+                          {id}
+                        </span>
+                        <span className="pf-item__cons">v{skill.version ?? "—"}</span>
+                        <span className="pf-item__tag pf-item__tag--ok">root</span>
+                      </div>
+                      {installSet.map((d) => (
+                        <div className="pf-item" key={d.slug}>
+                          <span className="pf-item__mark pf-item__mark--ok">
+                            <Icon name="corner-down-right" size={15} />
+                          </span>
+                          <span className="pf-item__slug">{d.slug}</span>
+                          <span className="pf-item__tag pf-item__tag--ok">
+                            {d.status === "satisfied" ? "resolved" : d.status}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
                 {method === "prompt" && (
                   <>
                     <p className="up-panel__lede">
