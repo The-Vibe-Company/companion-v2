@@ -501,3 +501,41 @@ export const localSkillInstalls = pgTable(
     byOrgUser: index("local_skill_installs_org_user_idx").on(t.orgId, t.userId),
   }),
 );
+
+/**
+ * Tracks which PUBLISHED Skills Hub skills (the `skills` table) a member has installed, and at which
+ * version. The assistant reports a confirmed install via `POST /v1/skills/:slug/install`
+ * (source = "agent") at the end of the normal install flow; a member can also mark a skill
+ * installed / not-installed by hand from the UI (source = "manual", e.g. installed another way, or
+ * correcting a false state). `installed_version` is null when a manual mark didn't supply one. The
+ * list view compares `installed_version` against the skill's current published version to show
+ * Installed / Update available. One row per member per skill per workspace.
+ */
+export const skillInstalls = pgTable(
+  "skill_installs",
+  {
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    skillId: uuid("skill_id")
+      .notNull()
+      .references(() => skills.id, { onDelete: "cascade" }),
+    /** Semver the member/agent reported, or null when a manual mark didn't supply one. */
+    installedVersion: text("installed_version"),
+    /** Optional free-form source label, e.g. "Claude Code". */
+    agentLabel: text("agent_label"),
+    /** How the install was recorded: "agent" (reported by the assistant) or "manual" (marked by hand). */
+    source: text("source", { enum: ["agent", "manual"] }).notNull().default("manual"),
+    /** First time this member recorded the skill installed. */
+    installedAt: timestamp("installed_at", { withTimezone: true }).notNull().defaultNow(),
+    /** Latest report/mark ("last checked"). */
+    lastReportedAt: timestamp("last_reported_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.orgId, t.userId, t.skillId] }),
+    byOrgUser: index("skill_installs_org_user_idx").on(t.orgId, t.userId),
+  }),
+);
