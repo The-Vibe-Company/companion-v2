@@ -140,17 +140,45 @@ export function VisibilityWarningDialog({
         <p className="og-field__hint">Skills deeper in the dependency graph will be updated to match.</p>
       ) : (
         <ul className="viswarn__list">
-          {affected.map((row) => (
-            <li key={row.slug} className="viswarn__row">
-              <span className="viswarn__slug">{row.slug}</span>
-              <span className="dpvis dpvis--warn">
-                <Icon name="lock" size={12} />
-                {visLabel(row.visibility)}
-                <Icon name="arrow-right" size={12} />
-                {target}
-              </span>
-            </li>
-          ))}
+          {affected.map((row) => {
+            // Show each skill's ACTUAL resulting visibility: broadening unions its audience with the
+            // target, narrowing intersects it — so e.g. narrowing a Data-only skill to Platform makes
+            // it Private, not Platform.
+            const rowSlugs = row.visibility?.teams.map((t) => t.slug) ?? [];
+            const rowEveryone = row.visibility?.everyone ?? false;
+            const resultEveryone = direction === "broaden" ? rowEveryone || visibility.everyone : rowEveryone && visibility.everyone;
+            const resultSlugs =
+              direction === "broaden"
+                ? [...new Set([...rowSlugs, ...visibility.teams])]
+                : visibility.everyone
+                  ? rowSlugs
+                  : rowEveryone
+                    ? [...visibility.teams]
+                    : rowSlugs.filter((s) => visibility.teams.includes(s));
+            const nameFor = (slug: string) =>
+              row.visibility?.teams.find((t) => t.slug === slug)?.name ?? teams.find((t) => t.id === slug)?.name ?? slug;
+            const resultLabel =
+              resultEveryone && resultSlugs.length
+                ? `Everyone + ${resultSlugs.length} team${resultSlugs.length === 1 ? "" : "s"}`
+                : resultEveryone
+                  ? "Everyone"
+                  : resultSlugs.length === 1
+                    ? nameFor(resultSlugs[0]!)
+                    : resultSlugs.length > 1
+                      ? `${resultSlugs.length} teams`
+                      : "Private";
+            return (
+              <li key={row.slug} className="viswarn__row">
+                <span className="viswarn__slug">{row.slug}</span>
+                <span className="dpvis dpvis--warn">
+                  <Icon name="lock" size={12} />
+                  {visLabel(row.visibility)}
+                  <Icon name="arrow-right" size={12} />
+                  {resultLabel}
+                </span>
+              </li>
+            );
+          })}
         </ul>
       )}
       {error && <p className="viswarn__err">{error}</p>}

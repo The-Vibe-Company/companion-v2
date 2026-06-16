@@ -1688,13 +1688,16 @@ export async function setSkillVisibility(input: {
     }
   }
 
-  // Every cascaded skill (raised or restricted) must be one the actor can modify, or the whole
-  // change is rejected — no partial visibility state.
+  // Every cascaded skill (raised or restricted) must pass BOTH authorization gates the primary skill
+  // does: the capability gate (can the actor modify it?) and the visibility gate (may the actor target
+  // the audience it gains?). The visibility gate is checked against the teams a change *adds* — those
+  // are always a subset of the new audience the actor already proved they can target, so legitimate
+  // cascades pass while any future widening beyond that audience is rejected.
   const changes = [...raises, ...restricts];
   const forbidden: string[] = [];
   for (const change of changes) {
     const dep = graph.byId.get(change.id)!;
-    const allowed = await canModifySkill({
+    const canModifyDep = await canModifySkill({
       database,
       orgId: input.orgId,
       actor: input.actor,
@@ -1702,7 +1705,17 @@ export async function setSkillVisibility(input: {
       ownerUserId: dep.ownerId,
       ownerTeamId: dep.ownerTeamId,
     });
-    if (!allowed) forbidden.push(dep.slug);
+    const originalShares = new Set([...dep.audienceTeams].filter((t) => t !== dep.ownerTeamId));
+    const addedTeams = change.teamIds.filter((t) => !originalShares.has(t));
+    const canTargetAudience = canActAtVisibility(
+      { orgRole },
+      {
+        everyone: change.everyone && !dep.everyone,
+        teamCount: addedTeams.length,
+        memberOfAllTargetTeams: resolved.memberOfAllTargetTeams,
+      },
+    );
+    if (!canModifyDep || !canTargetAudience) forbidden.push(dep.slug);
   }
   if (forbidden.length) {
     throw new Error(
