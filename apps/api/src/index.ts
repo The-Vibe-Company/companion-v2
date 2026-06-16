@@ -54,6 +54,8 @@ import {
   setOrgLogoFromUpload,
   orgLogoPublicPath,
   toggleStar,
+  installSkill,
+  uninstallSkill,
   updateOrg,
   updateTeam,
   updateUserProfile,
@@ -67,6 +69,7 @@ import {
   orgSettingsResponseSchema,
   publishSkillInputSchema,
   reportLocalSkillInstallInputSchema,
+  reportSkillInstallInputSchema,
   setCommentDeprecatedInputSchema,
   skillFrontmatterSchema,
   skillVisibilityInputSchema,
@@ -988,6 +991,67 @@ app.patch("/v1/skills/:slug/comments/:id", async (c) => {
 app.post("/v1/skills/:slug/star", async (c) => {
   try {
     return c.json({ starred: await withTenant(c, ({ actor, orgId, database }) => toggleStar({ actor, orgId, slug: c.req.param("slug"), database })) });
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
+/**
+ * Record a published skill as installed for the caller. The assistant posts here at the end of the
+ * normal install flow (`source: "agent"`); a member can also hand-mark via the UI (`source: "manual"`,
+ * e.g. installed another way). This is per-member personal state (like a star) that only affects the
+ * caller's own view, so `skills:read` suffices — the install prompt's download token can report
+ * without ever holding publish/archive/visibility authority. Visibility is still enforced via the slug.
+ */
+app.post("/v1/skills/:slug/install", async (c) => {
+  try {
+    actorFromContext(c, true);
+    requireScope(c, "skills:read");
+    let input;
+    try {
+      // An empty body is a valid bare "mark installed"; malformed JSON is an error, not an empty mark.
+      const raw = await c.req.text();
+      input = reportSkillInstallInputSchema.parse(raw.trim() ? JSON.parse(raw) : {});
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : String(error) }, 422);
+    }
+    const result = await withTenant(
+      c,
+      ({ actor, orgId, database }) =>
+        installSkill({
+          actor,
+          orgId,
+          slug: c.req.param("slug"),
+          version: input.version ?? null,
+          agentLabel: input.agent ?? null,
+          source: input.source ?? "manual",
+          database,
+        }),
+      true,
+    );
+    return c.json({
+      ok: true as const,
+      installed: true as const,
+      status: result.status,
+      installed_version: result.installedVersion,
+      current_version: result.currentVersion,
+    });
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
+/** Mark a published skill NOT installed for the caller (uninstall / correct a false state). */
+app.delete("/v1/skills/:slug/install", async (c) => {
+  try {
+    actorFromContext(c, true);
+    requireScope(c, "skills:read");
+    await withTenant(
+      c,
+      ({ actor, orgId, database }) => uninstallSkill({ actor, orgId, slug: c.req.param("slug"), database }),
+      true,
+    );
+    return c.json({ ok: true as const, installed: false as const, status: "none" as const });
   } catch (error) {
     return jsonError(c, error);
   }

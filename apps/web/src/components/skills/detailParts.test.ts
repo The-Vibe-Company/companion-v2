@@ -44,6 +44,8 @@ const skill: SkillVM = {
   updated: "just now",
   stars: 0,
   starred: false,
+  installStatus: "none",
+  installedVersion: null,
   teams: [{ id: "team-1", slug: "engineering", name: "Engineering", color: null, icon: null }],
   teamSlugs: ["engineering"],
   requiresCount: 0,

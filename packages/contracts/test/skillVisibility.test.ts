@@ -45,6 +45,10 @@ describe("skill visibility contracts", () => {
     });
 
     expect(row.visibility).toEqual(visibility);
+    // Install fields are optional on the wire (older API responses omit them) and default safely.
+    expect(row.installed).toBe(false);
+    expect(row.installed_version).toBeNull();
+    expect(row.install_status).toBe("none");
     expect(() => skillListRowSchema.parse({ ...row, scope: "public", visibility: undefined })).toThrow();
   });
 

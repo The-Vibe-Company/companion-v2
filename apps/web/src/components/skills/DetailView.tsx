@@ -19,7 +19,7 @@ import {
   setCommentDeprecated as setCommentDeprecatedRpc,
 } from "@/lib/queries";
 import type { MeVM, SkillVM, TeamVM } from "@/lib/types";
-import { StarButton, ValidBadge, VisibilityChip } from "./blocks";
+import { StarButton, ValidBadge, VisibilityChip, InstallBadge } from "./blocks";
 import { Activity, PropList, Requirements } from "./detailParts";
 import { DependenciesTab } from "./DependenciesTab";
 import { FileExplorer } from "./fileview";
@@ -32,6 +32,8 @@ export function DetailMoreMenuContent({
   canModifySkill,
   canDownload,
   canArchive,
+  installed,
+  onToggleInstalled,
   onUpdate,
   onDownload,
   onArchive,
@@ -39,6 +41,8 @@ export function DetailMoreMenuContent({
   canModifySkill: boolean;
   canDownload: boolean;
   canArchive: boolean;
+  installed: boolean;
+  onToggleInstalled: () => void;
   onUpdate: () => void;
   onDownload: () => void;
   onArchive: () => void;
@@ -46,6 +50,12 @@ export function DetailMoreMenuContent({
   return (
     <div className="menu dmore__menu" role="menu">
       <div className="menu__head">Actions</div>
+      <button className="menu__item" role="menuitem" onClick={onToggleInstalled}>
+        <span className="ico">
+          <Icon name={installed ? "circle-x" : "circle-check"} size={14} />
+        </span>
+        <span className="menu__label">{installed ? "Mark as not installed" : "Mark as installed"}</span>
+      </button>
       {canModifySkill && (
         <button className="menu__item" role="menuitem" onClick={onUpdate}>
           <span className="ico">
@@ -81,6 +91,8 @@ function DetailMoreMenu({
   canModifySkill,
   canDownload,
   canArchive,
+  installed,
+  onToggleInstalled,
   onUpdate,
   onDownload,
   onArchive,
@@ -88,6 +100,8 @@ function DetailMoreMenu({
   canModifySkill: boolean;
   canDownload: boolean;
   canArchive: boolean;
+  installed: boolean;
+  onToggleInstalled: () => void;
   onUpdate: () => void;
   onDownload: () => void;
   onArchive: () => void;
@@ -148,6 +162,8 @@ function DetailMoreMenu({
           canModifySkill={canModifySkill}
           canDownload={canDownload}
           canArchive={canArchive}
+          installed={installed}
+          onToggleInstalled={() => choose(onToggleInstalled)}
           onUpdate={() => choose(onUpdate)}
           onDownload={() => choose(onDownload)}
           onArchive={() => choose(onArchive)}
@@ -167,6 +183,7 @@ export function DetailView({
   onPrev,
   onNext,
   onToggleStar,
+  onToggleInstalled,
   onChangeVisibility,
   onInstall,
   onUpdate,
@@ -184,6 +201,7 @@ export function DetailView({
   onPrev: () => void;
   onNext: () => void;
   onToggleStar: () => void;
+  onToggleInstalled: () => void;
   onChangeVisibility: (visibility: SkillVisibilityInput) => void;
   onInstall: () => void;
   onUpdate: () => void;
@@ -395,6 +413,8 @@ export function DetailView({
           canModifySkill={canModifySkill}
           canDownload={!!skill.version && (!skill.archived || (skill.referenced ?? skill.usedByCount > 0))}
           canArchive={canModifySkill && !skill.archived}
+          installed={skill.installStatus !== "none"}
+          onToggleInstalled={onToggleInstalled}
           onUpdate={onUpdate}
           onDownload={download}
           onArchive={onArchive}
@@ -444,6 +464,7 @@ export function DetailView({
                 <div className="dchips">
                   <VisibilityChip skill={skill} />
                   <ValidBadge v={skill.validation} />
+                  <InstallBadge state={skill.installStatus} />
                   <span
                     className="mono"
                     style={{ fontSize: "var(--text-xs)", color: "var(--color-muted)" }}

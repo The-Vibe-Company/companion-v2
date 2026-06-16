@@ -42,6 +42,8 @@ export interface SkillVM {
   updated: string; // relative label (server-computed)
   stars: number;
   starred: boolean;
+  installStatus: "none" | "installed" | "update"; // caller's install state for this skill
+  installedVersion: string | null; // version the caller recorded installing, if any
   teams: SkillVisibility["teams"];
   teamSlugs: string[]; // team slugs (for filtering)
   requiresCount: number; // dependencies the current version declares
@@ -83,6 +85,8 @@ export function mapSkill(row: SkillListRow): SkillVM {
     updated: relativeTime(row.updated_at),
     stars: row.star_count,
     starred: row.starred,
+    installStatus: row.install_status ?? "none",
+    installedVersion: row.installed_version ?? null,
     teams: row.visibility.teams,
     teamSlugs: row.visibility.teams.map((team) => team.slug),
     requiresCount: row.requires_count ?? 0,

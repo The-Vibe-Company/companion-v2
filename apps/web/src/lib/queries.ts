@@ -4,6 +4,8 @@ import type {
   DependencyPlan,
   IssuedToken,
   ReportLocalSkillInstallResult,
+  ReportSkillInstallResult,
+  SkillUninstallResult,
   SkillCommentRow,
   SkillDependenciesResponse,
   SkillFile,
@@ -149,6 +151,22 @@ export async function fetchSkillDetail(
 export async function toggleStar(slug: string): Promise<boolean> {
   const data = await apiFetch<{ starred: boolean }>(`/v1/skills/${slug}/star`, { method: "POST" });
   return data.starred;
+}
+
+/** Mark a published skill as installed for the current user (manual mark or agent report). */
+export async function markSkillInstalled(
+  slug: string,
+  version?: string | null,
+): Promise<ReportSkillInstallResult> {
+  return apiFetch<ReportSkillInstallResult>(`/v1/skills/${slug}/install`, {
+    method: "POST",
+    body: JSON.stringify(version ? { version } : {}),
+  });
+}
+
+/** Mark a published skill as not installed for the current user (uninstall / correct a false state). */
+export async function markSkillUninstalled(slug: string): Promise<SkillUninstallResult> {
+  return apiFetch<SkillUninstallResult>(`/v1/skills/${slug}/install`, { method: "DELETE" });
 }
 
 /** Fetch every file inside a packaged skill version (eager: one fetch per slug+version). */
