@@ -110,6 +110,26 @@ export function InstallBadge({ state }: { state: InstallState }) {
   return null;
 }
 
+/**
+ * Compact icon-only install indicator for dense list rows (the full text badge lives in the detail
+ * header). The icon shape carries the meaning, not just color; the label is exposed via title/aria.
+ */
+export function InstallMark({ state }: { state: InstallState }) {
+  if (state === "installed")
+    return (
+      <span className="imark imark--ok" title="Installed" aria-label="Installed">
+        <Icon name="circle-check" size={13} />
+      </span>
+    );
+  if (state === "update")
+    return (
+      <span className="imark imark--warn" title="Update available" aria-label="Update available">
+        <Icon name="arrow-up-circle" size={13} />
+      </span>
+    );
+  return null;
+}
+
 /** GitHub-style star toggle (detail topbar). */
 export function StarButton({
   starred,

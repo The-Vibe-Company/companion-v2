@@ -3,7 +3,7 @@
 import { Icon } from "../Icon";
 import { TeamAvatar } from "../org/TeamAvatar";
 import type { SkillVM, TeamVM } from "@/lib/types";
-import { visibilityMeta, vdot, InstallBadge } from "./blocks";
+import { visibilityMeta, vdot, InstallMark } from "./blocks";
 import { chipParts, type Filter, type ViewDef } from "./filters";
 import { FilterAdd } from "./FilterMenu";
 import { ViewTab } from "./ViewTab";
@@ -184,7 +184,7 @@ export function ListView({
                   invalid
                 </span>
               )}
-              <InstallBadge state={s.installStatus} />
+              <InstallMark state={s.installStatus} />
             </span>
             <VisibilityCell skill={s} />
             <span className="ver">{s.version ?? "—"}</span>

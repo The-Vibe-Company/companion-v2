@@ -281,6 +281,9 @@ body { background: var(--color-canvas); color: var(--color-fg); font-family: var
 .ibadge__dot { width: 6px; height: 6px; border-radius: var(--radius-full); background: currentColor; flex: none; }
 .ibadge--ok { color: var(--color-ok); background: var(--color-ok-tint); border: 1px solid var(--color-ok-line); }
 .ibadge--warn { color: var(--color-warn); background: var(--color-warn-tint); border: 1px solid var(--color-warn-line); }
+.imark { display: inline-flex; align-items: center; flex: none; }
+.imark--ok { color: var(--color-ok); }
+.imark--warn { color: var(--color-warn); }
 
 .seclabel { font-size: 11px; text-transform: uppercase; letter-spacing: var(--tracking-wide); color: var(--color-faint); margin: 0 0 12px; display: flex; align-items: center; gap: 8px; }
 .seclabel__n { font-family: var(--font-mono); color: var(--color-muted); }
