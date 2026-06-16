@@ -32,6 +32,8 @@ function mk(p: Partial<SkillVM> & { id: string }): SkillVM {
     updated: "",
     stars: 0,
     starred: false,
+    installStatus: "none",
+    installedVersion: null,
     teams: [],
     teamSlugs: [],
     requiresCount: 0,
