@@ -39,6 +39,7 @@ const skill: SkillVM = {
     team: null,
   },
   tools: ["read_file"],
+  requirements: [],
   size: "1 KB",
   license: "MIT",
   checksum: "sha256:abc",

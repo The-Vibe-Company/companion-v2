@@ -15,9 +15,28 @@ export const AGENT_SKILL_FRONTMATTER_KEYS = [
   "compatibility",
   "metadata",
   "allowed-tools",
+  "requirements",
 ] as const;
 
 export const ALLOWED_TOOL_RE = /^[A-Za-z0-9_.:-]+(?:\([A-Za-z0-9_.*: -]+\))?$/;
+
+/** A required secret / environment variable a skill needs at run time. Declarations only — never values. */
+export const SKILL_REQUIREMENT_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+export const skillRequirementSchema = z
+  .object({
+    key: z
+      .string()
+      .min(1, "requirement key is required")
+      .max(128, "requirement key must be at most 128 characters")
+      .regex(SKILL_REQUIREMENT_KEY_RE, "requirement key must look like an environment variable (letters, digits, underscores)"),
+    type: z.enum(["secret", "env"]).default("secret"),
+    required: z.boolean().default(true),
+    note: z.string().max(2000, "requirement note must be at most 2000 characters").default(""),
+  })
+  .strip();
+
+export type SkillRequirement = z.infer<typeof skillRequirementSchema>;
 
 export type FrontmatterWarningCode =
   | "legacy-version"
@@ -100,6 +119,7 @@ const skillFrontmatterFields = z
       .optional(),
     metadata: z.record(z.string()).default({}),
     "allowed-tools": z.string().optional(),
+    requirements: z.array(skillRequirementSchema).max(64, "at most 64 requirements are allowed").default([]),
   })
   .passthrough()
   .superRefine((value, ctx) => {
@@ -108,6 +128,17 @@ const skillFrontmatterFields = z
         code: z.ZodIssueCode.custom,
         message: "skill frontmatter must not declare visibility; use upload visibility instead",
       });
+    }
+    const seen = new Set<string>();
+    for (const requirement of value.requirements) {
+      if (seen.has(requirement.key)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["requirements"],
+          message: `duplicate requirement key: ${requirement.key}`,
+        });
+      }
+      seen.add(requirement.key);
     }
   })
   .transform((value) => {
@@ -120,6 +151,7 @@ const skillFrontmatterFields = z
       metadata: value.metadata,
       allowedToolsRaw,
       allowedTools: parseAllowedTools(allowedToolsRaw),
+      requirements: value.requirements,
     };
   });
 
@@ -133,6 +165,7 @@ export interface StoredSkillFrontmatter {
   compatibility?: string;
   metadata: Record<string, string>;
   "allowed-tools"?: string;
+  requirements?: SkillRequirement[];
 }
 
 function sortRecord(value: Record<string, string>): Record<string, string> {
@@ -149,6 +182,16 @@ export function toStoredSkillFrontmatter(frontmatter: SkillFrontmatter): StoredS
   if (frontmatter.compatibility) stored.compatibility = frontmatter.compatibility;
   const allowedTools = frontmatter.allowedTools.join(" ");
   if (allowedTools.trim()) stored["allowed-tools"] = allowedTools.trim();
+  if (frontmatter.requirements.length) {
+    stored.requirements = [...frontmatter.requirements]
+      .sort((a, b) => a.key.localeCompare(b.key))
+      .map((requirement) => ({
+        key: requirement.key,
+        type: requirement.type,
+        required: requirement.required,
+        note: requirement.note,
+      }));
+  }
   return stored;
 }
 

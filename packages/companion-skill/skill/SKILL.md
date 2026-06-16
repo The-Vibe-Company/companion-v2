@@ -1,9 +1,9 @@
 ---
 name: companion
-description: "Use when managing local SKILL.md packages with Companion: validate, publish, update, resolve skill dependencies, install updates, audit skills, check workspace versions, or self-update this Companion skill through the Companion workspace API."
+description: "Use when managing local SKILL.md packages with Companion: validate, publish, update, resolve skill dependencies, declare the secrets and environment variables a skill needs, install updates, audit skills, check workspace versions, or self-update this Companion skill through the Companion workspace API."
 license: MIT
 metadata:
-  companion_version: 1.2.0
+  companion_version: 1.3.0
 allowed-tools: read_file write_file run_shell
 ---
 
@@ -117,6 +117,52 @@ The `dependency_plan` from validate tells you exactly what will change in the de
 
 Present the plan to the user as a short summary (declared / already published / must upload too /
 removed / archival candidates / blocked) and get confirmation before any upload.
+
+### Declare required secrets and environment variables
+
+Before you publish or update, work out what the skill needs to run and record it so the workspace can
+show clear setup notes. Many skills need credentials or configuration — an API key, a service
+endpoint, a token (for example, an image-generation skill needs an Azure OpenAI key). Capture these
+as a `requirements` list in the skill's `SKILL.md` frontmatter.
+
+Analyze **only the skill's own files** (its `SKILL.md` body, scripts, `reference/`, examples, and any
+config it ships) for references to credentials or environment variables. Look for:
+
+- environment variable names, usually ALL_CAPS (e.g. `AZURE_OPENAI_API_KEY`, `OPENAI_BASE_URL`);
+- code that reads them: `process.env.X`, `os.environ["X"]` / `getenv("X")`, `$VAR` / `${VAR}`;
+- mentions of credential files or named services (Azure OpenAI, OpenAI, Anthropic, AWS, GitHub, …).
+
+Never scan anything outside the skill folder, and never read, copy, or write an actual secret value —
+you record **declarations and instructions only**, never the secret itself.
+
+From what you find, draft a `requirements` list. Each entry is:
+
+- `key` — the environment variable / secret name (e.g. `AZURE_OPENAI_API_KEY`).
+- `type` — `secret` for sensitive credentials (API keys, tokens) or `env` for plain configuration.
+- `required` — `true` if the skill cannot run without it, `false` if it is optional.
+- `note` — a short, human explanation of how to obtain it: who to ask in the organization, or a link
+  to where it is created.
+
+Show the proposed list to the user and let them edit, add, remove, or confirm it. Then write the
+confirmed block into the skill's `SKILL.md` frontmatter and **re-validate** before publishing:
+
+```yaml
+requirements:
+  - key: AZURE_OPENAI_API_KEY
+    type: secret
+    required: true
+    note: >-
+      Azure OpenAI key. Ask your org admin to provision an Azure OpenAI resource,
+      or create one at https://portal.azure.com.
+  - key: OPENAI_BASE_URL
+    type: env
+    required: false
+    note: Optional override for the model gateway; defaults to the shared endpoint.
+```
+
+The workspace displays these as the skill's setup notes. When you install a skill that declares
+requirements, surface them to the user so they can set the secrets and environment variables before
+running it. Requirements travel inside the frontmatter — there are no extra upload parameters.
 
 ### Publish a skill
 
@@ -344,7 +390,7 @@ skills view shows the correct status and version. Report the version from this f
 curl -s "$COMPANION_API_URL/local-skills/companion/installed" \
   -H "Authorization: Bearer $COMPANION_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"version":"1.2.0","agent":"<your assistant name>"}'
+  -d '{"version":"1.3.0","agent":"<your assistant name>"}'
 ```
 
 A `{ "ok": true, "status": "installed" }` response confirms the workspace now knows this machine has

@@ -11,6 +11,7 @@ function fm(input: Partial<SkillFrontmatter> & { name?: string } = {}): SkillFro
     allowedTools: input.allowedTools ?? [],
     license: input.license,
     compatibility: input.compatibility,
+    requirements: input.requirements ?? [],
   };
 }
 

@@ -1,4 +1,12 @@
-import type { OrgRole, SkillListRow, SkillOwnerKind, SkillVisibility, TeamRole, ValidationState } from "@companion/contracts";
+import type {
+  OrgRole,
+  SkillListRow,
+  SkillOwnerKind,
+  SkillRequirement,
+  SkillVisibility,
+  TeamRole,
+  ValidationState,
+} from "@companion/contracts";
 import { formatBytes, formatDate, relativeTime } from "./format";
 
 export interface SkillOwnerVM {
@@ -24,6 +32,7 @@ export interface SkillVM {
   error: string | null;
   owner: SkillOwnerVM;
   tools: string[];
+  requirements: SkillRequirement[]; // declared secrets / env vars + install notes
   compatibility: string | null;
   metadata: Record<string, string>;
   size: string;
@@ -64,6 +73,7 @@ export function mapSkill(row: SkillListRow): SkillVM {
       team: row.owner_kind === "team" ? row.owner_name : null,
     },
     tools: row.tools ?? [],
+    requirements: row.requirements ?? [],
     compatibility: row.compatibility,
     metadata: row.metadata ?? {},
     size: formatBytes(row.size_bytes),
