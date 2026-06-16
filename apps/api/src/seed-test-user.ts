@@ -14,7 +14,7 @@ import {
 import { closeDb, db, schema } from "@companion/db";
 import { packDir, parseFrontmatter } from "@companion/skills";
 import { putSkillArchive, skillArchiveKey } from "@companion/storage";
-import { eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -84,6 +84,8 @@ interface SeedSkillSpec {
   visibility: SkillVisibilityInput;
   tools?: string[];
   license?: string;
+  /** Declared required dependencies (must resolve cleanly — published earlier in the list). */
+  dependencies?: string[];
 }
 
 function buildSkillMd(spec: Pick<SeedSkillSpec, "slug" | "version" | "description" | "body" | "tools" | "license">): string {
@@ -124,6 +126,7 @@ async function seedSkill(actor: ActorContext, orgId: string, spec: SeedSkillSpec
       tools: fm.allowedTools,
       license: fm.license ?? null,
       note: "Seeded for local development",
+      dependencies: spec.dependencies ?? [],
     };
     try {
       await putSkillArchive({ key, body: canonical.archive, preventOverwrite: true });
@@ -156,33 +159,105 @@ async function seedDemoContent(actor: ActorContext): Promise<void> {
     return;
   }
 
-  const existingSlugs = new Set((await listSkills({ actor, orgId })).map((skill) => skill.slug));
+  // Include archived skills so a re-run does not try to republish ones the showcase archived.
+  const existingSlugs = new Set(
+    (await listSkills({ actor, orgId, includeArchived: true })).map((skill) => skill.slug),
+  );
+  // Ordered so every declared dependency is published before its dependents (publish blocks
+  // missing/cycle/visibility). The showcase edges below (missing/cycle/visibility/archived) are
+  // inserted directly afterwards, since those states cannot pass the publish-time check.
   const specs: SeedSkillSpec[] = [
     {
-      slug: "pdf-extract",
+      slug: "markdown-report",
+      version: "2.1.0",
+      description: "Render structured findings into a clean Markdown report.",
+      body: "# markdown-report\n\nRenders structured findings into a clean Markdown report.",
+      visibility: { everyone: true, teams: [] },
+      tools: ["read_file"],
+      license: "MIT",
+    },
+    {
+      slug: "log-parser",
+      version: "1.4.0",
+      description: "Parse heterogeneous log formats into a normalized event stream.",
+      body: "# log-parser\n\nParses heterogeneous log formats into a normalized event stream.",
+      visibility: { everyone: true, teams: [] },
+      tools: ["read_file"],
+      license: "MIT",
+    },
+    {
+      slug: "diff-tools",
+      version: "0.9.4",
+      description: "Compute and present structured diffs across files and revisions.",
+      body: "# diff-tools\n\nComputes and presents structured diffs across files and revisions.",
+      visibility: { everyone: true, teams: [] },
+      tools: ["read_file"],
+      license: "MIT",
+    },
+    {
+      slug: "slack-notify",
+      version: "1.1.0",
+      description: "Post a formatted notification to a Slack channel.",
+      body: "# slack-notify\n\nPosts a formatted notification to a Slack channel.",
+      visibility: { everyone: false, teams: [teamSlug] },
+      tools: ["run_python"],
+      license: "MIT",
+    },
+    {
+      slug: "vault-index",
+      version: "1.3.0",
+      description: "Maintain a searchable index over a Granite memory vault.",
+      body: "# vault-index\n\nMaintains a searchable index over a Granite memory vault.",
+      visibility: { everyone: true, teams: [] },
+      tools: ["read_file"],
+      license: "MIT",
+    },
+    {
+      slug: "granite-recall",
       version: "1.0.0",
-      description: "Extract text, tables, and metadata from PDF documents.",
-      body: "# pdf-extract\n\nExtracts text, tables, and metadata from PDF documents.",
+      description: "Recall relevant memories from a Granite vault for a given query.",
+      body: "# granite-recall\n\nRecalls relevant memories from a Granite vault for a query.",
+      visibility: { everyone: true, teams: [] },
+      tools: ["read_file"],
+      license: "MIT",
+    },
+    {
+      slug: "screenshot-grab",
+      version: "0.2.0",
+      description: "Capture a rendered screenshot of a page region.",
+      body: "# screenshot-grab\n\nCaptures a rendered screenshot of a page region.",
+      visibility: { everyone: true, teams: [] },
+      tools: ["run_python"],
+      license: "MIT",
+    },
+    {
+      slug: "html-export",
+      version: "1.0.0",
+      description: "Export a report to a standalone HTML file. Superseded by markdown-report.",
+      body: "# html-export\n\nExports a report to a standalone HTML file.",
+      visibility: { everyone: true, teams: [] },
+      tools: ["read_file"],
+      license: "MIT",
+    },
+    {
+      slug: "incident-summary",
+      version: "0.1.8",
+      description: "Summarize an incident timeline from logs into a concise postmortem draft.",
+      body: "# incident-summary\n\nReads a directory of log excerpts and produces a terse incident summary.",
       visibility: { everyone: true, teams: [] },
       tools: ["read_file", "run_python"],
       license: "MIT",
+      dependencies: ["log-parser", "markdown-report"],
     },
     {
-      slug: "code-review",
-      version: "1.0.0",
-      description: "Review pull requests for bugs, style, and missing tests.",
-      body: "# code-review\n\nStructured PR review checklist for backend and frontend changes.",
-      visibility: { everyone: false, teams: [teamSlug] },
-      tools: ["read_file", "grep"],
-      license: "MIT",
-    },
-    {
-      slug: "meeting-notes",
-      version: "1.0.0",
-      description: "Turn rough meeting transcripts into concise action items.",
-      body: "# meeting-notes\n\nSummarize discussions and extract owners, deadlines, and follow-ups.",
-      visibility: { everyone: false, teams: [] },
+      slug: "email-digest",
+      version: "1.2.0",
+      description: "Compile a daily digest of activity into a short formatted email.",
+      body: "# email-digest\n\nCompiles a daily digest of activity into a short formatted email.",
+      visibility: { everyone: true, teams: [] },
       tools: ["read_file"],
+      license: "MIT",
+      dependencies: ["markdown-report"],
     },
   ];
 
@@ -196,6 +271,60 @@ async function seedDemoContent(actor: ActorContext): Promise<void> {
       console.warn(`Skipped skill ${spec.slug}: ${message}`);
     }
   }
+
+  await seedDependencyShowcase(actor, orgId);
+}
+
+/**
+ * Insert the showcase dependency states (missing / visibility / cycle / archived) directly, since
+ * these deliberately cannot pass the publish-time check. Idempotent: edges use onConflictDoNothing
+ * and archive flags are set unconditionally.
+ */
+async function seedDependencyShowcase(actor: ActorContext, orgId: string): Promise<void> {
+  const rows = await db
+    .select({ id: schema.skills.id, slug: schema.skills.slug, currentVersionId: schema.skills.currentVersionId })
+    .from(schema.skills)
+    .where(eq(schema.skills.orgId, orgId));
+  const bySlug = new Map(rows.map((r) => [r.slug, r] as const));
+
+  const edge = (dependentSlug: string, dependsOnSlug: string) => {
+    const dependent = bySlug.get(dependentSlug);
+    if (!dependent?.currentVersionId) return null;
+    const target = bySlug.get(dependsOnSlug);
+    return {
+      orgId,
+      skillVersionId: dependent.currentVersionId,
+      skillId: dependent.id,
+      dependsOnSlug,
+      dependsOnSkillId: target?.id ?? null,
+    };
+  };
+
+  const edges = [
+    // Cycle: vault-index ↔ granite-recall.
+    edge("vault-index", "granite-recall"),
+    edge("granite-recall", "vault-index"),
+    // Visibility mismatch: an Everyone skill requiring a team-only dependency.
+    edge("email-digest", "slack-notify"),
+    // Missing: a declared dependency that was never published to the workspace.
+    edge("incident-summary", "html-sanitize"),
+    // Archived dependency, still referenced by a live version (keeps it downloadable).
+    edge("incident-summary", "screenshot-grab"),
+  ].filter((e): e is NonNullable<typeof e> => e != null);
+
+  if (edges.length) {
+    await db.insert(schema.skillVersionDependencies).values(edges).onConflictDoNothing();
+  }
+
+  // Archive screenshot-grab (referenced by incident-summary → downloadable) and html-export (unreferenced).
+  const toArchive = ["screenshot-grab", "html-export"].map((slug) => bySlug.get(slug)?.id).filter((id): id is string => !!id);
+  if (toArchive.length) {
+    await db
+      .update(schema.skills)
+      .set({ archivedAt: new Date(), archivedBy: actor.id, archiveReason: "Superseded — seeded archive demo" })
+      .where(and(eq(schema.skills.orgId, orgId), inArray(schema.skills.id, toArchive)));
+  }
+  console.log("Seeded dependency showcase (cycle, visibility, missing, archived)");
 }
 
 async function createAuthUser(input: { email: string; password: string; name: string }): Promise<void> {

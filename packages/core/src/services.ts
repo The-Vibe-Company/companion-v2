@@ -2,12 +2,17 @@ import { createHash, randomBytes } from "node:crypto";
 import { and, asc, count, desc, eq, exists, gt, inArray, isNull, ne, not, or, sql } from "drizzle-orm";
 import type {
   ApiTokenRow,
+  DependencyPlan,
   LocalSkillStatus,
   OrgRole,
   OrgSettingsDomainJoin,
   OrgSettingsInvitation,
   OrgSettingsOrg,
   SkillCommentRow,
+  SkillDependenciesResponse,
+  SkillDependencyRow,
+  SkillDependencyStatus,
+  SkillDependentRow,
   SkillFilterPreferences,
   SkillListRow,
   SkillVisibility,
@@ -953,6 +958,14 @@ async function visibleSkillPredicate(database: Db, actor: ActorContext, orgId: s
   );
 }
 
+/** The set of skill ids (live + archived) the actor may read — the tenant visibility gate as a Set. */
+async function visibleSkillIds(database: Db, actor: ActorContext, orgId: string): Promise<Set<string>> {
+  const predicate = await visibleSkillPredicate(database, actor, orgId);
+  const rows = await database.select({ id: schema.skills.id }).from(schema.skills).where(predicate);
+  // Defensive (mocked DBs in tests may return a non-array for this shape) — see loadDepGraph.
+  return new Set((Array.isArray(rows) ? rows : []).map((r) => r.id));
+}
+
 function skillHasTeamShare(database: Db, orgId: string) {
   return exists(
     database
@@ -967,11 +980,20 @@ export async function listSkills(input: {
   orgId: string;
   visibility?: VisibilityFilter;
   mine?: boolean;
+  /** Return ONLY archived skills (the Archived view). Ignored when `includeArchived` is set. */
+  archived?: boolean;
+  /** Include both archived and live skills (detail / dependency / download resolution). */
+  includeArchived?: boolean;
   database?: Db;
 }): Promise<SkillListRow[]> {
   const database = input.database ?? db;
   const baseVisibility = await visibleSkillPredicate(database, input.actor, input.orgId);
   const predicates = [baseVisibility];
+  // Archived skills drop out of normal lists; the Archived view shows only them; detail/deps/
+  // download resolution includes both so an archived skill stays viewable and downloadable.
+  if (!input.includeArchived) {
+    predicates.push(input.archived ? not(isNull(schema.skills.archivedAt)) : isNull(schema.skills.archivedAt));
+  }
   if (input.visibility === "everyone") predicates.push(eq(schema.skills.everyone, true));
   if (input.visibility === "team") predicates.push(skillHasTeamShare(database, input.orgId));
   if (input.visibility === "private") {
@@ -1031,6 +1053,7 @@ export async function listSkills(input: {
             ),
           ),
       ),
+      archived_at: schema.skills.archivedAt,
       created_at: schema.skills.createdAt,
       updated_at: schema.skills.updatedAt,
     })
@@ -1066,8 +1089,23 @@ export async function listSkills(input: {
     }
   }
 
+  // Dependency counts + warn flag, computed from the org's current-version dependency graph.
+  const graph = await loadDepGraph(database, input.orgId);
+  // Used-by counts must not leak dependents the actor cannot read — scope to the visibility gate.
+  const visibleIds = await visibleSkillIds(database, input.actor, input.orgId);
+  // "Referenced by any version" (current or older), matching the archived-download gate; not
+  // visibility-scoped, since an install of any referencing version must keep the package fetchable.
+  const referencedRows = await database
+    .select({ slug: schema.skillVersionDependencies.dependsOnSlug })
+    .from(schema.skillVersionDependencies)
+    .where(eq(schema.skillVersionDependencies.orgId, input.orgId));
+  const referencedSlugs = new Set((Array.isArray(referencedRows) ? referencedRows : []).map((d) => d.slug));
+
   return rows.map((r) => {
     const manifest = parseStoredSkillFrontmatter(r.frontmatter);
+    const requires = graph.requiresBySkill.get(r.id) ?? [];
+    const usedBy = (graph.dependentsByTarget.get(r.id) ?? []).filter((u) => visibleIds.has(u.dependentId));
+    const depWarn = requires.some((edge) => depEdgeStatus(graph, r.id, edge) !== "satisfied");
     return {
       id: r.id,
       org_id: r.org_id,
@@ -1092,6 +1130,11 @@ export async function listSkills(input: {
       size_bytes: r.size_bytes,
       star_count: r.star_count,
       starred: r.starred,
+      requires_count: requires.length,
+      used_by_count: new Set(usedBy.map((u) => u.dependentId)).size,
+      dep_warn: depWarn,
+      archived: r.archived_at != null,
+      referenced: referencedSlugs.has(r.slug),
       created_at: r.created_at.toISOString(),
       updated_at: r.updated_at.toISOString(),
     };
@@ -1177,7 +1220,8 @@ export async function getSkillBySlug(input: {
   slug: string;
   database?: Db;
 }): Promise<SkillListRow | null> {
-  const rows = await listSkills({ ...input, database: input.database ?? db });
+  // Resolve by slug across both live and archived skills — archived ones stay viewable.
+  const rows = await listSkills({ ...input, includeArchived: true, database: input.database ?? db });
   return rows.find((r) => r.slug === input.slug) ?? null;
 }
 
@@ -1569,6 +1613,43 @@ export async function setSkillVisibility(input: {
   ) {
     throw new Error("not allowed to change this skill");
   }
+
+  // Changing visibility must not break the dependency visibility-cover invariant: a skill cannot
+  // become more visible than the dependencies its current version pulls in (e.g. team → Everyone
+  // while it requires a team-only skill). Re-check the current version's edges against the new audience.
+  const graph = await loadDepGraph(database, input.orgId);
+  const self = graph.bySlug.get(skill.slug);
+  const currentEdges = self ? (graph.requiresBySkill.get(self.id) ?? []) : [];
+  const dependents = self ? (graph.dependentsByTarget.get(self.id) ?? []) : [];
+  if (currentEdges.length || dependents.length) {
+    const newAudienceTeamIds = new Set(resolved.teams.map((t) => t.id));
+    if (skill.owner_team_id) newAudienceTeamIds.add(skill.owner_team_id);
+    const newAudience = { everyone: resolved.visibility.everyone, teams: [...newAudienceTeamIds] };
+    // Outgoing: broadening this skill must not make it more visible than the dependencies it pulls in.
+    for (const edge of currentEdges) {
+      const target = graph.bySlug.get(edge.dependsOnSlug);
+      if (!target) continue; // a missing dependency is not a visibility-cover concern here
+      const targetAudience = { everyone: target.everyone, teams: [...target.audienceTeams] };
+      if (!visibilityCovers(newAudience, targetAudience)) {
+        throw new Error(
+          `cannot broaden visibility: dependency ${edge.dependsOnSlug} would be less visible than this skill`,
+        );
+      }
+    }
+    // Incoming: narrowing this skill (even a leaf dependency with no requires of its own) must not
+    // strand a more-visible dependent that requires it.
+    for (const ref of dependents) {
+      const dependent = graph.byId.get(ref.dependentId);
+      if (!dependent) continue;
+      const dependentAudience = { everyone: dependent.everyone, teams: [...dependent.audienceTeams] };
+      if (!visibilityCovers(dependentAudience, newAudience)) {
+        throw new Error(
+          `cannot narrow visibility: ${dependent.slug} depends on this skill and would lose access`,
+        );
+      }
+    }
+  }
+
   await database.transaction(async (tx) => {
     await tx
       .update(schema.skills)
@@ -1599,6 +1680,25 @@ export async function publishSkillVersion(input: {
   const database = input.database ?? db;
   const payload = publishSkillInputSchema.parse({ ...input.payload, storage_path: input.archiveKey });
   const ownerTeam = await assertCanPublishSkillVersion({ actor: input.actor, orgId: input.orgId, payload, database });
+  // Required dependencies must resolve (no missing/cycle/visibility) before we write anything.
+  await assertDependenciesResolvable({
+    actor: input.actor,
+    orgId: input.orgId,
+    slug: payload.slug,
+    dependencies: payload.dependencies,
+    visibility: payload.visibility,
+    ownerTeamSlug: ownerTeam?.slug ?? null,
+    database,
+  });
+  // Re-publishing can change this skill's visibility — narrowing it must not strand skills that
+  // already depend on it (the incoming-edge mirror of the dependency cover check).
+  await assertDependentsRemainCovered({
+    orgId: input.orgId,
+    slug: payload.slug,
+    visibility: payload.visibility,
+    ownerTeamSlug: ownerTeam?.slug ?? null,
+    database,
+  });
 
   return database.transaction(async (tx) => {
     const publishPayload = publishSkillInputSchema.parse({ ...payload, storage_path: input.archiveKey });
@@ -1794,13 +1894,38 @@ async function writeSkillVersion(input: {
     .update(schema.skills)
     .set({ currentVersionId: version.id, updatedAt: new Date() })
     .where(eq(schema.skills.id, skill.id));
+
+  // Persist this version's dependency edges (un-versioned skill→skill links). Resolve each declared
+  // slug to a current skill id, scoped to skills the actor can read so an edge can never bind to a
+  // hidden skill; an unresolved slug is stored with a null target (a "missing" dep). Gate on the
+  // self-filtered set so a self-only declaration never asks Drizzle to insert an empty values array.
+  const declaredDeps = [...new Set(payload.dependencies)].filter((slug) => slug !== payload.slug);
+  if (declaredDeps.length) {
+    const declared = declaredDeps;
+    const visiblePredicate = await visibleSkillPredicate(database, input.actor, input.orgId);
+    const targets = await database
+      .select({ id: schema.skills.id, slug: schema.skills.slug })
+      .from(schema.skills)
+      .where(and(visiblePredicate, inArray(schema.skills.slug, declared)));
+    const idBySlug = new Map(targets.map((t) => [t.slug, t.id] as const));
+    await database.insert(schema.skillVersionDependencies).values(
+      declared.map((slug) => ({
+        orgId: input.orgId,
+        skillVersionId: version.id,
+        skillId: skill.id,
+        dependsOnSlug: slug,
+        dependsOnSkillId: idBySlug.get(slug) ?? null,
+      })),
+    );
+  }
+
   await database.insert(schema.auditLog).values({
     orgId: input.orgId,
     actorId: input.actor.id,
     action: "skill.publish",
     targetType: "skill",
     targetId: skill.id,
-    metadata: { slug: payload.slug, version: payload.version, visibility: resolved.visibility },
+    metadata: { slug: payload.slug, version: payload.version, visibility: resolved.visibility, dependencies: payload.dependencies },
   });
   return { id: skill.id, version: version.version };
 }
@@ -1872,20 +1997,635 @@ export async function getDownloadVersion(input: {
   checksum: string;
   sizeBytes: number;
   visibility: SkillVisibility;
+  dependencies: string[];
 }> {
   const database = input.database ?? db;
-  const visible = (await listSkills({ actor: input.actor, orgId: input.orgId, database })).find((s) => s.slug === input.slug);
+  // Archived skills stay downloadable ONLY while a published version still references them — across
+  // ALL versions (an old published version may still declare a dependency the current one dropped),
+  // so existing installs of that version never break. An unreferenced archived skill is not found.
+  const visible = (await listSkills({ actor: input.actor, orgId: input.orgId, includeArchived: true, database })).find(
+    (s) => s.slug === input.slug,
+  );
   if (!visible) throw new Error("skill not found");
+  if (visible.archived) {
+    const referenced = await database
+      .select({ one: sql<number>`1` })
+      .from(schema.skillVersionDependencies)
+      .where(
+        and(
+          eq(schema.skillVersionDependencies.orgId, input.orgId),
+          eq(schema.skillVersionDependencies.dependsOnSlug, input.slug),
+        ),
+      )
+      .limit(1);
+    if (referenced.length === 0) throw new Error("skill not found");
+  }
   const versions = await listSkillVersions({ ...input, database });
   const row = input.version ? versions.find((v) => v.version === input.version) : versions[0];
   if (!row) throw new Error("version not found");
+  const depRows = await database
+    .select({ slug: schema.skillVersionDependencies.dependsOnSlug })
+    .from(schema.skillVersionDependencies)
+    .where(
+      and(
+        eq(schema.skillVersionDependencies.orgId, input.orgId),
+        eq(schema.skillVersionDependencies.skillVersionId, row.id),
+      ),
+    )
+    .orderBy(asc(schema.skillVersionDependencies.dependsOnSlug));
   return {
     storagePath: row.storage_path,
     version: row.version,
     checksum: row.checksum,
     sizeBytes: row.size_bytes,
     visibility: visible.visibility,
+    dependencies: depRows.map((d) => d.slug),
   };
+}
+
+/* ---- Skill dependencies (un-versioned skill→skill links) + archive --------- */
+
+interface DepGraphSkill {
+  id: string;
+  slug: string;
+  everyone: boolean;
+  archivedAt: Date | null;
+  currentVersionId: string | null;
+  ownerId: string;
+  ownerTeamId: string | null;
+  /** Teams that can see this skill = its team shares plus its owning team. */
+  audienceTeams: Set<string>;
+}
+
+interface DepEdge {
+  skillId: string;
+  dependsOnSlug: string;
+  dependsOnSkillId: string | null;
+}
+
+interface DepGraph {
+  byId: Map<string, DepGraphSkill>;
+  bySlug: Map<string, DepGraphSkill>;
+  /** Current-version outgoing edges per dependent skill id. */
+  requiresBySkill: Map<string, DepEdge[]>;
+  /** Current-version incoming edges per target skill id. */
+  dependentsByTarget: Map<string, { dependentId: string; edge: DepEdge }[]>;
+}
+
+/**
+ * Load the org's *current-version* dependency graph once: every skill (live + archived), its
+ * audience teams, and the dependency edges declared by each skill's current version. Used to
+ * derive live statuses (satisfied / missing / archived / visibility / cycle) and counts.
+ */
+async function loadDepGraph(database: Db, orgId: string): Promise<DepGraph> {
+  const skillRowsRaw = await database
+    .select({
+      id: schema.skills.id,
+      slug: schema.skills.slug,
+      everyone: schema.skills.everyone,
+      archivedAt: schema.skills.archivedAt,
+      currentVersionId: schema.skills.currentVersionId,
+      ownerId: schema.skills.ownerId,
+      ownerTeamId: schema.skills.ownerTeamId,
+    })
+    .from(schema.skills)
+    .where(eq(schema.skills.orgId, orgId));
+  // Defensive: enrichment-only loader — never let a malformed result break list/detail reads.
+  const skillRows = Array.isArray(skillRowsRaw) ? skillRowsRaw : [];
+
+  const byId = new Map<string, DepGraphSkill>();
+  const bySlug = new Map<string, DepGraphSkill>();
+  for (const s of skillRows) {
+    const entry: DepGraphSkill = {
+      id: s.id,
+      slug: s.slug,
+      everyone: s.everyone,
+      archivedAt: s.archivedAt,
+      currentVersionId: s.currentVersionId,
+      ownerId: s.ownerId,
+      ownerTeamId: s.ownerTeamId,
+      audienceTeams: new Set(s.ownerTeamId ? [s.ownerTeamId] : []),
+    };
+    byId.set(s.id, entry);
+    bySlug.set(s.slug, entry);
+  }
+
+  const shareRowsRaw = await database
+    .select({ skillId: schema.skillTeamShares.skillId, teamId: schema.skillTeamShares.teamId })
+    .from(schema.skillTeamShares)
+    .where(eq(schema.skillTeamShares.orgId, orgId));
+  const shareRows = Array.isArray(shareRowsRaw) ? shareRowsRaw : [];
+  for (const share of shareRows) byId.get(share.skillId)?.audienceTeams.add(share.teamId);
+
+  const edgeRowsRaw = await database
+    .select({
+      skillId: schema.skillVersionDependencies.skillId,
+      skillVersionId: schema.skillVersionDependencies.skillVersionId,
+      dependsOnSlug: schema.skillVersionDependencies.dependsOnSlug,
+      dependsOnSkillId: schema.skillVersionDependencies.dependsOnSkillId,
+    })
+    .from(schema.skillVersionDependencies)
+    .where(eq(schema.skillVersionDependencies.orgId, orgId));
+  const edgeRows = Array.isArray(edgeRowsRaw) ? edgeRowsRaw : [];
+
+  const requiresBySkill = new Map<string, DepEdge[]>();
+  const dependentsByTarget = new Map<string, { dependentId: string; edge: DepEdge }[]>();
+  for (const row of edgeRows) {
+    // Only the dependent skill's CURRENT version contributes to the live graph.
+    const dependent = byId.get(row.skillId);
+    if (!dependent || dependent.currentVersionId !== row.skillVersionId) continue;
+    // Resolve the target LIVE by its declared slug, not the stored id snapshot — so a dependency
+    // recorded as missing (null id) re-satisfies once a skill with that slug is published.
+    const resolved = bySlug.get(row.dependsOnSlug);
+    const edge: DepEdge = {
+      skillId: row.skillId,
+      dependsOnSlug: row.dependsOnSlug,
+      dependsOnSkillId: resolved ? resolved.id : null,
+    };
+    const requires = requiresBySkill.get(row.skillId) ?? [];
+    requires.push(edge);
+    requiresBySkill.set(row.skillId, requires);
+    if (resolved) {
+      const list = dependentsByTarget.get(resolved.id) ?? [];
+      list.push({ dependentId: row.skillId, edge });
+      dependentsByTarget.set(resolved.id, list);
+    }
+  }
+
+  return { byId, bySlug, requiresBySkill, dependentsByTarget };
+}
+
+/**
+ * The visibility-cover rule: everyone who can see `dependent` must also be able to see `target`,
+ * otherwise installing the dependent would pull a skill its viewers cannot access. Pure + exported
+ * so the rule is table-driven testable.
+ */
+export function visibilityCovers(
+  dependent: { everyone: boolean; teams: string[] },
+  target: { everyone: boolean; teams: string[] },
+): boolean {
+  if (target.everyone) return true; // visible to all
+  if (dependent.everyone) return false; // dependent public, target not → mismatch
+  if (dependent.teams.length === 0) return true; // private/owner-only — owner manages both
+  const targetTeams = new Set(target.teams);
+  return dependent.teams.every((team) => targetTeams.has(team));
+}
+
+/** Precedence for an edge's status given its computed flags (missing → cycle → archived → visibility). */
+export function dependencyStatusFromFlags(flags: {
+  resolved: boolean;
+  cycle: boolean;
+  archived: boolean;
+  covered: boolean;
+}): SkillDependencyStatus {
+  if (!flags.resolved) return "missing";
+  if (flags.cycle) return "cycle";
+  if (flags.archived) return "archived";
+  if (!flags.covered) return "visibility";
+  return "satisfied";
+}
+
+function audienceCovers(dependent: DepGraphSkill, target: DepGraphSkill): boolean {
+  return visibilityCovers(
+    { everyone: dependent.everyone, teams: [...dependent.audienceTeams] },
+    { everyone: target.everyone, teams: [...target.audienceTeams] },
+  );
+}
+
+/** Does `fromId` transitively depend on `targetId` over current-version edges? (cycle probe) */
+function depReaches(graph: DepGraph, fromId: string, targetId: string, seen: Set<string>): boolean {
+  if (fromId === targetId) return true;
+  if (seen.has(fromId)) return false;
+  seen.add(fromId);
+  for (const edge of graph.requiresBySkill.get(fromId) ?? []) {
+    // Resolve by slug so an edge declaring a slug that only resolves once a prospective skill is
+    // registered (publish-time probe) still participates in cycle detection.
+    const next = graph.bySlug.get(edge.dependsOnSlug);
+    if (next && depReaches(graph, next.id, targetId, seen)) return true;
+  }
+  return false;
+}
+
+/** Compute the live status of one dependency edge declared by `dependentId`. */
+function depEdgeStatus(graph: DepGraph, dependentId: string, edge: DepEdge): SkillDependencyStatus {
+  // Resolve by the stable declared slug so a once-missing edge re-satisfies when the target is published.
+  const target = graph.bySlug.get(edge.dependsOnSlug);
+  const dependent = graph.byId.get(dependentId);
+  return dependencyStatusFromFlags({
+    resolved: !!target,
+    cycle: !!target && !!dependent && depReaches(graph, target.id, dependentId, new Set()),
+    archived: !!target?.archivedAt,
+    covered: !target || !dependent || audienceCovers(dependent, target),
+  });
+}
+
+function depNote(status: SkillDependencyStatus, targetSlug: string, dependentSlug: string): string | null {
+  switch (status) {
+    case "missing":
+      return "not published to this workspace";
+    case "archived":
+      return "publisher archived this skill";
+    case "visibility":
+      return `not visible to everyone who can install ${dependentSlug}`;
+    case "cycle":
+      return `${targetSlug} already requires ${dependentSlug}`;
+    default:
+      return null;
+  }
+}
+
+/**
+ * Resolve the Requires + Used by graph for one skill (optionally a specific version), with each
+ * edge's live status. Tenant + visibility scoped: only actor-visible targets/dependents are linkable.
+ */
+export async function getSkillDependencies(input: {
+  actor: ActorContext;
+  orgId: string;
+  slug: string;
+  version?: string | null;
+  database?: Db;
+}): Promise<SkillDependenciesResponse> {
+  const database = input.database ?? db;
+  const skill = await getSkillBySlug(input);
+  if (!skill) throw new Error("skill not found");
+
+  const graph = await loadDepGraph(database, input.orgId);
+  const visibleBySlug = new Map(
+    (await listSkills({ actor: input.actor, orgId: input.orgId, includeArchived: true, database })).map((s) => [s.slug, s] as const),
+  );
+
+  // Requires: edges declared by the selected (or current) version.
+  const versions = await listSkillVersions({ actor: input.actor, orgId: input.orgId, slug: input.slug, database });
+  const versionRow = input.version
+    ? versions.find((v) => v.version === input.version)
+    : versions.find((v) => v.version === skill.current_version) ?? versions[0];
+  // A typo'd / stale version is an error, mirroring the download + files endpoints.
+  if (input.version && !versionRow) throw new Error("version not found");
+  const requiresEdgeRows = versionRow
+    ? await database
+        .select({
+          dependsOnSlug: schema.skillVersionDependencies.dependsOnSlug,
+          dependsOnSkillId: schema.skillVersionDependencies.dependsOnSkillId,
+        })
+        .from(schema.skillVersionDependencies)
+        .where(
+          and(
+            eq(schema.skillVersionDependencies.orgId, input.orgId),
+            eq(schema.skillVersionDependencies.skillVersionId, versionRow.id),
+          ),
+        )
+        .orderBy(asc(schema.skillVersionDependencies.dependsOnSlug))
+    : [];
+
+  const requires: SkillDependencyRow[] = requiresEdgeRows.map((row) => {
+    const edge: DepEdge = { skillId: skill.id, dependsOnSlug: row.dependsOnSlug, dependsOnSkillId: row.dependsOnSkillId };
+    const targetRow = visibleBySlug.get(row.dependsOnSlug);
+    const canOpen = !!targetRow;
+    // A target the actor cannot read is reported as "missing" — same no-existence-leak behavior as
+    // the publish preflight; the real status is only computed for visible targets.
+    const status = canOpen ? depEdgeStatus(graph, skill.id, edge) : "missing";
+    return {
+      slug: row.dependsOnSlug,
+      status,
+      visibility: targetRow ? targetRow.visibility : null,
+      note: depNote(status, row.dependsOnSlug, skill.slug),
+      can_open: canOpen,
+    };
+  });
+
+  // Used by: other skills whose current version declares this skill as a dependency.
+  const usedBy: SkillDependentRow[] = [];
+  for (const ref of graph.dependentsByTarget.get(skill.id) ?? []) {
+    const dependent = graph.byId.get(ref.dependentId);
+    const dependentRow = dependent ? visibleBySlug.get(dependent.slug) : undefined;
+    if (!dependent || !dependentRow) continue;
+    const status = depEdgeStatus(graph, dependent.id, ref.edge);
+    const note = status === "cycle" ? "forms a dependency cycle" : dependent.archivedAt ? "archived dependent" : null;
+    usedBy.push({
+      slug: dependent.slug,
+      status,
+      visibility: dependentRow.visibility,
+      archived: dependent.archivedAt != null,
+      note,
+      can_open: true,
+    });
+  }
+  usedBy.sort((a, b) => a.slug.localeCompare(b.slug));
+
+  return {
+    slug: skill.slug,
+    version: versionRow?.version ?? skill.current_version,
+    requires,
+    used_by: usedBy,
+    requires_n: requires.length,
+    used_by_n: usedBy.length,
+  };
+}
+
+/**
+ * Build the dependency preflight for publishing `slug` with `declaredSlugs`: which dependencies are
+ * already published, which must be uploaded, which were dropped vs the previous version, which become
+ * archival candidates, and which are blocking (missing/cycle/visibility).
+ */
+export async function buildDependencyPlan(input: {
+  actor: ActorContext;
+  orgId: string;
+  slug: string;
+  declaredSlugs: string[];
+  /** Requested visibility (team values are slugs). Used for the publish-time visibility-cover check. */
+  visibility?: SkillVisibilityInput;
+  /** Owning team slug (its members can see the skill). */
+  ownerTeamSlug?: string | null;
+  database?: Db;
+}): Promise<DependencyPlan> {
+  const database = input.database ?? db;
+  const graph = await loadDepGraph(database, input.orgId);
+  // Resolve declared dependencies against the actor's visibility gate, not the org-wide graph: a
+  // skill the actor cannot read must be indistinguishable from one that does not exist (no existence
+  // leak) and cannot be bound as a dependency. So "visible & published" → ready; everything else →
+  // must-upload / missing.
+  const visibleIds = await visibleSkillIds(database, input.actor, input.orgId);
+  const isVisible = (s: string) => {
+    const t = graph.bySlug.get(s);
+    return !!t && visibleIds.has(t.id);
+  };
+  const declared = [...new Set(input.declaredSlugs)].filter((s) => s !== input.slug);
+  const existing = graph.bySlug.get(input.slug);
+  const dependentTeamIds = await resolveAudienceTeamIds(database, input.orgId, input.visibility?.teams, input.ownerTeamSlug);
+
+  const ready = declared.filter((s) => isVisible(s) && !graph.bySlug.get(s)!.archivedAt);
+  const upload = declared
+    .filter((s) => !isVisible(s))
+    .map((s) => ({ slug: s, msg: "declared in the new SKILL.md, not in the registry" }));
+
+  // Previous current version's declared dependencies.
+  let prevSlugs: string[] = [];
+  if (existing?.currentVersionId) {
+    const prev = await database
+      .select({ slug: schema.skillVersionDependencies.dependsOnSlug })
+      .from(schema.skillVersionDependencies)
+      .where(
+        and(
+          eq(schema.skillVersionDependencies.orgId, input.orgId),
+          eq(schema.skillVersionDependencies.skillVersionId, existing.currentVersionId),
+        ),
+      );
+    prevSlugs = prev.map((p) => p.slug);
+  }
+  const removed = prevSlugs.filter((s) => !declared.includes(s));
+  const candidateTargets = removed
+    .map((s) => graph.bySlug.get(s))
+    .filter((t): t is DepGraphSkill => !!t && !t.archivedAt);
+  let archive_candidates: DependencyPlan["archive_candidates"] = [];
+  if (candidateTargets.length) {
+    // Consider ALL published versions' references (not just current-version edges, and org-wide):
+    // a dependency still required by any other skill's version — even one the actor cannot see —
+    // must NOT be offered for archiving. Excluding this skill's own edges only exposes a boolean
+    // ("still used somewhere") about the publisher's own removed dependency, never who uses it.
+    const candidateSlugs = candidateTargets.map((t) => t.slug);
+    const refRows = await database
+      .select({
+        slug: schema.skillVersionDependencies.dependsOnSlug,
+        skillId: schema.skillVersionDependencies.skillId,
+      })
+      .from(schema.skillVersionDependencies)
+      .where(
+        and(
+          eq(schema.skillVersionDependencies.orgId, input.orgId),
+          inArray(schema.skillVersionDependencies.dependsOnSlug, candidateSlugs),
+        ),
+      );
+    const stillReferenced = new Set(
+      (Array.isArray(refRows) ? refRows : []).filter((r) => r.skillId !== existing?.id).map((r) => r.slug),
+    );
+    archive_candidates = candidateTargets
+      .filter((t) => !stillReferenced.has(t.slug))
+      .map((t) => ({ slug: t.slug, reason: "no published skill requires it anymore" }));
+  }
+
+  // Blocking check: model the publishing skill as a dependent at its requested visibility.
+  const dependent = depGraphDependentFor({
+    graph,
+    slug: input.slug,
+    everyone: input.visibility?.everyone,
+    audienceTeamIds: dependentTeamIds,
+  });
+  // Register the prospective skill + its declared edges in the graph so existing edges that declare
+  // this slug (including ones currently unresolved/"missing") resolve to it — catching a cycle that
+  // publishing this slug would introduce, not just cycles already present.
+  graph.bySlug.set(dependent.slug, dependent);
+  graph.byId.set(dependent.id, dependent);
+  graph.requiresBySkill.set(
+    dependent.id,
+    declared
+      .filter(isVisible)
+      .map((s) => ({ skillId: dependent.id, dependsOnSlug: s, dependsOnSkillId: graph.bySlug.get(s)?.id ?? null })),
+  );
+  const blocked: DependencyPlan["blocked"] = [];
+  for (const s of declared) {
+    const target = graph.bySlug.get(s);
+    // A dependency the actor cannot read is treated as missing — same as a nonexistent slug.
+    if (!target || !visibleIds.has(target.id)) {
+      blocked.push({ slug: s, status: "missing", msg: "not published to this workspace" });
+      continue;
+    }
+    const edge: DepEdge = { skillId: dependent.id, dependsOnSlug: s, dependsOnSkillId: target.id };
+    // Temporarily register the prospective dependent + edge for an accurate cycle probe.
+    const status = depEdgeStatusWithDependent(graph, dependent, edge);
+    if (status === "cycle") blocked.push({ slug: s, status, msg: `${s} would form a dependency cycle` });
+    else if (status === "visibility") blocked.push({ slug: s, status, msg: `${s} is less visible than ${input.slug}` });
+    else if (status === "archived") blocked.push({ slug: s, status, msg: `${s} is archived — restore it or drop the dependency` });
+  }
+
+  return { declared, ready, upload, removed, archive_candidates, blocked };
+}
+
+/** Resolve a visibility's team slugs + owner-team slug to the team ids that form a skill's audience. */
+async function resolveAudienceTeamIds(
+  database: Db,
+  orgId: string,
+  teamSlugs: string[] | undefined,
+  ownerTeamSlug: string | null | undefined,
+): Promise<string[]> {
+  const slugs = [...new Set([...(teamSlugs ?? []), ...(ownerTeamSlug ? [ownerTeamSlug] : [])])];
+  if (!slugs.length) return [];
+  const rows = await database
+    .select({ id: schema.teams.id, slug: schema.teams.slug })
+    .from(schema.teams)
+    .where(and(eq(schema.teams.orgId, orgId), inArray(schema.teams.slug, slugs)));
+  return rows.map((r) => r.id);
+}
+
+/** A prospective dependent (the skill being published), inserted into the graph for status probes. */
+function depGraphDependentFor(input: {
+  graph: DepGraph;
+  slug: string;
+  everyone?: boolean;
+  audienceTeamIds?: string[];
+}): DepGraphSkill {
+  const existing = input.graph.bySlug.get(input.slug);
+  const everyone = input.everyone ?? existing?.everyone ?? false;
+  // An explicitly-provided audience (even an empty one, i.e. narrowing to private) must be honored;
+  // only fall back to the existing audience when no audience was requested at all.
+  const teams =
+    input.audienceTeamIds !== undefined
+      ? new Set(input.audienceTeamIds)
+      : new Set<string>(existing?.audienceTeams ?? []);
+  // The owning team can always see/install the skill, so it is always part of the audience — even
+  // when a re-publish of an existing team-owned skill does not re-send owner_team.
+  if (existing?.ownerTeamId) teams.add(existing.ownerTeamId);
+  return {
+    id: existing?.id ?? `prospective:${input.slug}`,
+    slug: input.slug,
+    everyone,
+    archivedAt: null,
+    currentVersionId: existing?.currentVersionId ?? null,
+    ownerId: existing?.ownerId ?? "",
+    ownerTeamId: existing?.ownerTeamId ?? null,
+    audienceTeams: teams,
+  };
+}
+
+/** Like depEdgeStatus but for a dependent that may not yet be in the graph (publish-time probe). */
+function depEdgeStatusWithDependent(graph: DepGraph, dependent: DepGraphSkill, edge: DepEdge): SkillDependencyStatus {
+  const target = graph.bySlug.get(edge.dependsOnSlug);
+  return dependencyStatusFromFlags({
+    resolved: !!target,
+    // Cycle: does the target transitively depend back on this dependent's existing skill id?
+    cycle: !!target && graph.byId.has(dependent.id) && depReaches(graph, target.id, dependent.id, new Set()),
+    archived: !!target?.archivedAt,
+    covered: !target || audienceCovers(dependent, target),
+  });
+}
+
+/** Carries the dependency plan when a publish is blocked, so the API can surface it to the client. */
+export class DependencyPublishError extends Error {
+  constructor(public readonly plan: DependencyPlan) {
+    super("dependencies must be resolved before publishing");
+    this.name = "DependencyPublishError";
+  }
+}
+
+/** Throw a DependencyPublishError if any declared dependency is missing / cyclic / visibility-mismatched. */
+export async function assertDependenciesResolvable(input: {
+  actor: ActorContext;
+  orgId: string;
+  slug: string;
+  dependencies: string[];
+  visibility?: SkillVisibilityInput;
+  ownerTeamSlug?: string | null;
+  database?: Db;
+}): Promise<void> {
+  if (!input.dependencies.length) return;
+  const plan = await buildDependencyPlan({
+    actor: input.actor,
+    orgId: input.orgId,
+    slug: input.slug,
+    declaredSlugs: input.dependencies,
+    visibility: input.visibility,
+    ownerTeamSlug: input.ownerTeamSlug,
+    database: input.database,
+  });
+  if (plan.blocked.length || plan.upload.length) throw new DependencyPublishError(plan);
+}
+
+/**
+ * Assert that changing `slug`'s visibility to the given audience does not strand any skill that
+ * currently depends on it (an Everyone/broader dependent must still be able to see this skill).
+ * Shared by publish (which can narrow a dependency target's visibility) and setSkillVisibility.
+ */
+export async function assertDependentsRemainCovered(input: {
+  orgId: string;
+  slug: string;
+  visibility: SkillVisibilityInput;
+  ownerTeamSlug?: string | null;
+  database?: Db;
+}): Promise<void> {
+  const database = input.database ?? db;
+  const graph = await loadDepGraph(database, input.orgId);
+  const self = graph.bySlug.get(input.slug);
+  if (!self) return;
+  const dependents = graph.dependentsByTarget.get(self.id) ?? [];
+  if (!dependents.length) return;
+  const teamIds = new Set(await resolveAudienceTeamIds(database, input.orgId, input.visibility.teams, input.ownerTeamSlug));
+  if (self.ownerTeamId) teamIds.add(self.ownerTeamId); // owner team can always see it
+  const newAudience = { everyone: input.visibility.everyone, teams: [...teamIds] };
+  for (const ref of dependents) {
+    const dependent = graph.byId.get(ref.dependentId);
+    if (!dependent) continue;
+    if (!visibilityCovers({ everyone: dependent.everyone, teams: [...dependent.audienceTeams] }, newAudience)) {
+      throw new Error(`cannot narrow visibility: ${dependent.slug} depends on this skill and would lose access`);
+    }
+  }
+}
+
+export async function archiveSkill(input: {
+  actor: ActorContext;
+  orgId: string;
+  slug: string;
+  reason?: string;
+  database?: Db;
+}): Promise<void> {
+  const database = input.database ?? db;
+  const skill = await getSkillBySlug(input);
+  if (!skill) throw new Error("skill not found");
+  await assertCanModifySkillRow({ actor: input.actor, orgId: input.orgId, skill, database });
+  await database
+    .update(schema.skills)
+    .set({ archivedAt: new Date(), archivedBy: input.actor.id, archiveReason: input.reason ?? null, updatedAt: new Date() })
+    .where(eq(schema.skills.id, skill.id));
+  await database.insert(schema.auditLog).values({
+    orgId: input.orgId,
+    actorId: input.actor.id,
+    action: "skill.archive",
+    targetType: "skill",
+    targetId: skill.id,
+    metadata: { slug: skill.slug, reason: input.reason ?? null },
+  });
+}
+
+export async function restoreSkill(input: {
+  actor: ActorContext;
+  orgId: string;
+  slug: string;
+  database?: Db;
+}): Promise<void> {
+  const database = input.database ?? db;
+  const skill = await getSkillBySlug(input);
+  if (!skill) throw new Error("skill not found");
+  await assertCanModifySkillRow({ actor: input.actor, orgId: input.orgId, skill, database });
+  await database
+    .update(schema.skills)
+    .set({ archivedAt: null, archivedBy: null, archiveReason: null, updatedAt: new Date() })
+    .where(eq(schema.skills.id, skill.id));
+  await database.insert(schema.auditLog).values({
+    orgId: input.orgId,
+    actorId: input.actor.id,
+    action: "skill.restore",
+    targetType: "skill",
+    targetId: skill.id,
+    metadata: { slug: skill.slug },
+  });
+}
+
+/** Shared modify gate (owner / owner-team admin-editor / org admin) for a resolved skill row. */
+async function assertCanModifySkillRow(input: {
+  actor: ActorContext;
+  orgId: string;
+  skill: SkillListRow;
+  database: Db;
+}): Promise<void> {
+  const orgRole = await getOrgRole(input.orgId, input.actor.id, input.database);
+  if (!orgRole) throw new Error("not a member of this organization");
+  const canModifyExisting = await canModifySkill({
+    database: input.database,
+    orgId: input.orgId,
+    actor: input.actor,
+    orgRole,
+    ownerUserId: input.skill.owner_user_id,
+    ownerTeamId: input.skill.owner_team_id,
+  });
+  if (!canModify({ orgRole }, { isOwner: canModifyExisting })) throw new Error("not allowed to modify this skill");
 }
 
 /* ---- Personal access tokens (programmatic publish / install) --------------- */

@@ -204,6 +204,7 @@ function publishPayload(
     size_bytes: 123,
     frontmatter: `---\nname: ${slug}\n---`,
     tools: [],
+    dependencies: [],
   };
 }
 

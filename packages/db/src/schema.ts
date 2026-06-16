@@ -229,6 +229,11 @@ export const skills = pgTable(
     currentVersionId: uuid("current_version_id"),
     validation: validationStateEnum("validation").notNull().default("valid"),
     validationError: text("validation_error"),
+    // Archive (soft-hide) lifecycle: archived skills drop out of the normal lists but stay
+    // viewable, restorable, and downloadable while a published version still references them.
+    archivedAt: timestamp("archived_at", { withTimezone: true }),
+    archivedBy: text("archived_by").references(() => user.id, { onDelete: "set null" }),
+    archiveReason: text("archive_reason"),
     createdAt: now(),
     updatedAt: updatedAt(),
   },
@@ -242,6 +247,7 @@ export const skills = pgTable(
     }),
     byEveryone: index("skills_everyone_idx").on(t.orgId, t.everyone),
     byOwnerTeam: index("skills_owner_team_idx").on(t.orgId, t.ownerTeamId),
+    byArchived: index("skills_archived_idx").on(t.orgId, t.archivedAt),
   }),
 );
 
@@ -303,8 +309,53 @@ export const skillVersions = pgTable(
   },
   (t) => ({
     uniqueSkillVersion: unique("skill_versions_skill_version_uq").on(t.skillId, t.version),
+    // Supports org-scoped composite FKs from skill_version_dependencies.
+    uniqueOrgId: unique("skill_versions_org_id_id_uq").on(t.orgId, t.id),
     byOrg: index("skill_versions_org_idx").on(t.orgId),
     checksumCheck: check("skill_versions_checksum_check", sql`${t.checksum} ~ '^sha256:[0-9a-f]{64}$'`),
+  }),
+);
+
+/**
+ * One required skill→skill dependency edge, declared by a specific source *version*
+ * (so each version keeps its exact dependency graph). Dependencies are un-versioned: a row
+ * records the declared target *slug* and a resolved target skill id. `dependsOnSkillId` is null
+ * when the slug is not published in the workspace (a "missing" dependency). Statuses
+ * (satisfied / missing / archived / visibility / cycle) are computed live at read time from
+ * current skill state — never stored.
+ */
+export const skillVersionDependencies = pgTable(
+  "skill_version_dependencies",
+  {
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    // The dependent version that declares this dependency.
+    skillVersionId: uuid("skill_version_id").notNull(),
+    // The dependent skill (denormalized so "current-version edges" and "used-by" queries stay simple).
+    skillId: uuid("skill_id").notNull(),
+    // The declared dependency slug — always present, so a missing dependency is representable.
+    dependsOnSlug: text("depends_on_slug").notNull(),
+    // The resolved target skill, or null when the slug is not published in the workspace.
+    dependsOnSkillId: uuid("depends_on_skill_id").references(() => skills.id, { onDelete: "set null" }),
+    createdAt: now(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.skillVersionId, t.dependsOnSlug] }),
+    bySkill: index("skill_version_deps_skill_idx").on(t.orgId, t.skillId),
+    byTarget: index("skill_version_deps_target_idx").on(t.orgId, t.dependsOnSkillId),
+    // Org-scoped composite FKs (like skill_team_shares) guarantee the row's org matches the rows it
+    // references, so a service/seed/import bug can never persist a cross-tenant dependency edge.
+    versionOrgFk: foreignKey({
+      columns: [t.orgId, t.skillVersionId],
+      foreignColumns: [skillVersions.orgId, skillVersions.id],
+      name: "skill_version_deps_version_org_fk",
+    }).onDelete("cascade"),
+    skillOrgFk: foreignKey({
+      columns: [t.orgId, t.skillId],
+      foreignColumns: [skills.orgId, skills.id],
+      name: "skill_version_deps_skill_org_fk",
+    }).onDelete("cascade"),
   }),
 );
 
