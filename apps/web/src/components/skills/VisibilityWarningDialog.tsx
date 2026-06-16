@@ -181,7 +181,7 @@ export function VisibilityWarningDialog({
           })}
         </ul>
       )}
-      {error && <p className="viswarn__err">{error}</p>}
+      {error && <p className="viswarn__err" role="alert">{error}</p>}
     </Dialog>
   );
 }
