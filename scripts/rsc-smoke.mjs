@@ -44,7 +44,10 @@ async function request(path, init = {}) {
 }
 
 function assertNoDigest(path, body) {
-  const markers = [/Application error/i, /Server Components render/i, /\bdigest\b/i];
+  // The React prod error digest serializes as a `digest` JSON key (escaped `\"digest\":` in the
+  // flight stream) and the error UI says "Application error". Match those precisely — a bare
+  // `\bdigest\b` also matches legitimate page content like the "email-digest" skill slug.
+  const markers = [/Application error/i, /Server Components render/i, /\\?"digest\\?":/i];
   for (const marker of markers) {
     if (marker.test(body)) {
       fail(`${path} rendered a production server-component error marker: ${marker}`);
