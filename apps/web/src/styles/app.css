@@ -9,13 +9,21 @@
 .team-brand-avatar {
   overflow: hidden;
 }
+/* Size wrapper classes assume a neutral placeholder; drop their frame when branded. */
+.team-brand-avatar.crow__teamdot,
+.team-brand-avatar.teamavatar,
+.team-brand-avatar.up-teamav,
+.team-brand-avatar.sx-av {
+  border: none;
+  box-shadow: none;
+}
 .team-brand-avatar__icon {
   color: transparent;
   line-height: 1;
   text-shadow: 0 0 0 var(--team-brand-color);
 }
-.menu__teamav,
-.fmenu__teamav {
+.menu__item .menu__teamav,
+.fmenu__item .fmenu__teamav {
   width: 18px;
   height: 18px;
   border-radius: var(--radius-sm);
@@ -24,6 +32,7 @@
   flex: none;
   font-size: 9px;
   font-weight: 600;
+  line-height: 1;
 }
 
 .dtabs { padding-top: 6px; }

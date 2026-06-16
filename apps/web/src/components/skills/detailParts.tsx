@@ -24,7 +24,10 @@ export function VisibilityControl({
   canChange: boolean;
 }) {
   const [open, setOpen] = useState(false);
+  const [menuPos, setMenuPos] = useState({ x: 0, y: 0 });
   const ref = useRef<HTMLSpanElement>(null);
+  const btnRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
   const meta = visibilityMeta(skill);
   const selected = new Set(skill.teamSlugs);
   const commit = (everyone: boolean, nextTeams: string[]) => onChange({ everyone, teams: nextTeams });
@@ -34,6 +37,21 @@ export function VisibilityControl({
     else next.add(slug);
     commit(skill.visibility.everyone, [...next]);
   };
+  useEffect(() => {
+    if (!open) return;
+    const el = menuRef.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    const pad = 8;
+    let left = menuPos.x - r.width;
+    let top = menuPos.y;
+    if (left < pad) left = pad;
+    if (left + r.width > window.innerWidth - pad) left = Math.max(pad, window.innerWidth - r.width - pad);
+    if (top + r.height > window.innerHeight - pad) top = Math.max(pad, window.innerHeight - r.height - pad);
+    el.style.left = `${left}px`;
+    el.style.top = `${top}px`;
+  }, [open, menuPos]);
+
   useEffect(() => {
     const h = (e: MouseEvent) => {
       if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
@@ -48,6 +66,16 @@ export function VisibilityControl({
       document.removeEventListener("keydown", k);
     };
   }, []);
+
+  const toggleMenu = () => {
+    setOpen((wasOpen) => {
+      if (!wasOpen) {
+        const r = btnRef.current?.getBoundingClientRect();
+        if (r) setMenuPos({ x: r.right, y: r.bottom + 6 });
+      }
+      return !wasOpen;
+    });
+  };
   if (!canChange) {
     return (
       <span className="vis__btn vis__btn--readonly" title="Only the owner can change visibility" aria-label={`Visibility: ${meta.label}`}>
@@ -64,8 +92,9 @@ export function VisibilityControl({
   return (
     <span className="vis" ref={ref}>
       <button
+        ref={btnRef}
         className="vis__btn"
-        onClick={() => setOpen((o) => !o)}
+        onClick={toggleMenu}
         aria-haspopup="menu"
         aria-expanded={open}
       >
@@ -78,7 +107,7 @@ export function VisibilityControl({
         </span>
       </button>
       {open && (
-        <div className="menu" role="menu">
+        <div className="menu menu--fixed" role="menu" ref={menuRef}>
           <div className="menu__head">Visibility</div>
           <button
             role="menuitemcheckbox"
