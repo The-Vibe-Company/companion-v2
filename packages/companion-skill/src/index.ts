@@ -52,7 +52,7 @@ export const COMPANION_SKILL_MANIFEST: CompanionSkillManifest = {
   commands: [
     { name: "Publish a skill", desc: "Validate a skill, choose owner/visibility, and publish it safely." },
     { name: "Update a skill", desc: "Push a new version with targeted identity and visibility checks." },
-    { name: "Resolve dependencies", desc: "Analyze companion.json before upload: preflight required skills and archival candidates." },
+    { name: "Resolve dependencies", desc: "Analyze packages and sync companion.json before upload." },
     { name: "Manage skill API calls", desc: "Use the supported skills API surface without crossing into workspace admin." },
     { name: "Update Companion skill", desc: "Check and install the latest bundled Companion skill safely." },
     { name: "Check for updates", desc: "See whether the skills on this machine are up to date." },
@@ -61,6 +61,14 @@ export const COMPANION_SKILL_MANIFEST: CompanionSkillManifest = {
     { name: "Manage your skills", desc: "List and organize the skills on this machine." },
   ],
   changelog: [
+    {
+      version: "1.2.1",
+      changes: [
+        "Always analyzes the full skill package for dependencies before validate, publish, or update.",
+        "Compares inferred dependencies with companion.json and asks before synchronizing additions or removals.",
+        "Uses the confirmed dependency list for validation and upload, then publishes missing local dependencies first.",
+      ],
+    },
     {
       version: "1.2.0",
       changes: [
