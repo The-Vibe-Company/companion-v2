@@ -20,6 +20,7 @@ import { DetailView } from "./DetailView";
 import { LocalSkillsView } from "./LocalSkillsView";
 import { CommandPalette } from "./CommandPalette";
 import { UploadDialog, InstallDialog } from "./UploadDialog";
+import { VisibilityWarningDialog, type VisWarnDirection } from "./VisibilityWarningDialog";
 import { parseSkillsRoute, skillsRouteHref, skillsRouteKey, skillsRouteSource, type SkillsRoute, type SkillsRouteSource } from "./route";
 import { Onboarding } from "../org/Onboarding";
 import { settingsHref } from "../org/SettingsApp";
@@ -263,6 +264,9 @@ export function SkillsApp({
   const [isNarrowViewport, setIsNarrowViewport] = useState(false);
   const [updateSkill, setUpdateSkill] = useState<SkillVM | null>(null);
   const [installSkill, setInstallSkill] = useState<SkillVM | null>(null);
+  // A visibility change that would break the dependency cover invariant — offer to cascade it.
+  const [visWarn, setVisWarn] = useState<{ slug: string; visibility: SkillVisibilityInput; direction: VisWarnDirection } | null>(null);
+  const [visNotice, setVisNotice] = useState<string | null>(null);
   const [openId, setOpenId] = useState<string | null>(null);
   const [lastId, setLastId] = useState<string | null>(null);
   const [preferenceStatus, setPreferenceStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
@@ -397,42 +401,118 @@ export function SkillsApp({
     });
   }, []);
 
-  const changeVisibility = useCallback((id: string, visibility: SkillVisibilityInput) => {
-    let prev: SkillVM["visibility"] | null = null;
-    setSkills((arr) =>
-      arr.map((s) => {
-        if (s.id === id) {
-          prev = s.visibility;
-          const nextTeams = visibility.teams.map((slug) => {
-            const existing = s.teams.find((team) => team.slug === slug);
-            const team = teams.find((t) => t.id === slug);
-            return existing ?? { id: slug, slug, name: team?.name ?? slug, color: team?.color ?? null, icon: team?.icon ?? null };
-          });
-          return { ...s, visibility: { everyone: visibility.everyone, teams: nextTeams }, teams: nextTeams, teamSlugs: nextTeams.map((team) => team.slug) };
-        }
-        return s;
-      }),
-    );
-    setSkillVisibility(id, visibility, currentOrg.id).catch(() => {
-      if (prev) {
-        setSkills((arr) => arr.map((s) => (s.id === id ? { ...s, visibility: prev!, teams: prev!.teams, teamSlugs: prev!.teams.map((team) => team.slug) } : s)));
+  // Optimistically set a skill's visibility, persist it (optionally cascading to dependencies), and
+  // revert + rethrow on failure so the caller can react (e.g. open the cascade warning dialog).
+  const commitVisibility = useCallback(
+    (id: string, visibility: SkillVisibilityInput, cascade = false): Promise<{ cascaded: string[] }> => {
+      let prev: SkillVM["visibility"] | null = null;
+      setSkills((arr) =>
+        arr.map((s) => {
+          if (s.id === id) {
+            prev = s.visibility;
+            const nextTeams = visibility.teams.map((slug) => {
+              const existing = s.teams.find((team) => team.slug === slug);
+              const team = teams.find((t) => t.id === slug);
+              return existing ?? { id: slug, slug, name: team?.name ?? slug, color: team?.color ?? null, icon: team?.icon ?? null };
+            });
+            return { ...s, visibility: { everyone: visibility.everyone, teams: nextTeams }, teams: nextTeams, teamSlugs: nextTeams.map((team) => team.slug) };
+          }
+          return s;
+        }),
+      );
+      // Keep the open skill visible if an active visibility filter would now hide it.
+      if (id === openIdRef.current) {
+        setFilters((fs) => {
+          const nextVisibility = new Set<string>();
+          if (visibility.everyone) nextVisibility.add("everyone");
+          if (visibility.teams.length) nextVisibility.add("team");
+          if (!visibility.everyone && visibility.teams.length === 0) nextVisibility.add("private");
+          const hasVisibility = fs.some((f) => f.type === "visibility");
+          if (hasVisibility && !fs.some((f) => f.type === "visibility" && nextVisibility.has(f.value))) {
+            return fs.filter((f) => f.type !== "visibility");
+          }
+          return fs;
+        });
       }
-    });
-    // Keep the open skill visible if an active visibility filter would now hide it.
-    if (id === openIdRef.current) {
-      setFilters((fs) => {
-        const nextVisibility = new Set<string>();
-        if (visibility.everyone) nextVisibility.add("everyone");
-        if (visibility.teams.length) nextVisibility.add("team");
-        if (!visibility.everyone && visibility.teams.length === 0) nextVisibility.add("private");
-        const hasVisibility = fs.some((f) => f.type === "visibility");
-        if (hasVisibility && !fs.some((f) => f.type === "visibility" && nextVisibility.has(f.value))) {
-          return fs.filter((f) => f.type !== "visibility");
+      return setSkillVisibility(id, visibility, { cascade }).catch((err) => {
+        if (prev) {
+          setSkills((arr) => arr.map((s) => (s.id === id ? { ...s, visibility: prev!, teams: prev!.teams, teamSlugs: prev!.teams.map((team) => team.slug) } : s)));
         }
-        return fs;
+        throw err;
       });
+    },
+    [teams],
+  );
+
+  const changeVisibility = useCallback(
+    (id: string, visibility: SkillVisibilityInput) => {
+      commitVisibility(id, visibility, false).catch((err: unknown) => {
+        const msg = err instanceof Error ? err.message : "Could not change visibility.";
+        // A cover-invariant break → offer to cascade the change to the affected skills.
+        if (/^cannot broaden visibility/.test(msg)) setVisWarn({ slug: id, visibility, direction: "broaden" });
+        else if (/^cannot narrow visibility/.test(msg)) setVisWarn({ slug: id, visibility, direction: "narrow" });
+        else setVisNotice(msg);
+      });
+    },
+    [commitVisibility],
+  );
+
+  // Confirm a cascade: re-apply the change with cascade=true, then reconcile the affected skills
+  // locally to mirror the server — union with the new audience when broadening, intersection when
+  // narrowing (the same transforms the service applies).
+  const confirmCascade = useCallback(async () => {
+    if (!visWarn) return;
+    const { slug, visibility, direction } = visWarn;
+    const { cascaded } = await commitVisibility(slug, visibility, true);
+    if (cascaded.length) {
+      const set = new Set(cascaded);
+      const targetSlugs = new Set(visibility.teams);
+      setSkills((arr) =>
+        arr.map((s) => {
+          if (!set.has(s.id)) return s;
+          let nextTeams: SkillVM["teams"];
+          let everyone: boolean;
+          if (direction === "broaden") {
+            const have = new Set(s.teamSlugs);
+            nextTeams = [...s.teams];
+            for (const teamSlug of visibility.teams) {
+              if (have.has(teamSlug)) continue;
+              const team = teams.find((t) => t.id === teamSlug);
+              nextTeams.push({ id: teamSlug, slug: teamSlug, name: team?.name ?? teamSlug, color: team?.color ?? null, icon: team?.icon ?? null });
+            }
+            everyone = s.visibility.everyone || visibility.everyone;
+          } else {
+            // Narrowing: keep only the teams within the new audience (or the audience itself if the
+            // skill was Everyone), and drop the Everyone flag unless the target is still Everyone.
+            nextTeams = visibility.everyone
+              ? s.teams
+              : s.visibility.everyone
+                ? visibility.teams.map((teamSlug) => {
+                    const team = teams.find((t) => t.id === teamSlug);
+                    return { id: teamSlug, slug: teamSlug, name: team?.name ?? teamSlug, color: team?.color ?? null, icon: team?.icon ?? null };
+                  })
+                : s.teams.filter((t) => targetSlugs.has(t.slug));
+            everyone = s.visibility.everyone && visibility.everyone;
+          }
+          return { ...s, visibility: { everyone, teams: nextTeams }, teams: nextTeams, teamSlugs: nextTeams.map((t) => t.slug) };
+        }),
+      );
     }
-  }, [currentOrg.id, teams]);
+    setVisWarn(null);
+    const noun = direction === "broaden" ? "sub-skill" : "dependent skill";
+    setVisNotice(
+      cascaded.length
+        ? `Updated ${cascaded.length} ${noun}${cascaded.length === 1 ? "" : "s"} to match.`
+        : "Visibility updated.",
+    );
+  }, [visWarn, commitVisibility, teams]);
+
+  // Auto-dismiss the visibility notice toast.
+  useEffect(() => {
+    if (!visNotice) return;
+    const t = setTimeout(() => setVisNotice(null), 5000);
+    return () => clearTimeout(t);
+  }, [visNotice]);
 
   // --- Archived skills -------------------------------------------------------
   const loadArchived = useCallback(() => {
@@ -984,6 +1064,21 @@ export function SkillsApp({
       )}
       {installSkill && (
         <InstallDialog skill={installSkill} onClose={() => setInstallSkill(null)} />
+      )}
+      {visWarn && (
+        <VisibilityWarningDialog
+          slug={visWarn.slug}
+          visibility={visWarn.visibility}
+          direction={visWarn.direction}
+          teams={teams}
+          onCancel={() => setVisWarn(null)}
+          onConfirm={confirmCascade}
+        />
+      )}
+      {visNotice && (
+        <div className="og-toast" role="alert" onClick={() => setVisNotice(null)}>
+          {visNotice}
+        </div>
       )}
       {orgActions.onboarding && (
         <Onboarding

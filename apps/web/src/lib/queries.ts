@@ -194,15 +194,20 @@ export async function fetchSkillDownloadUrl(slug: string, version: string | null
   return data.url;
 }
 
+/**
+ * Change a skill's visibility. With `cascade`, the server also raises the skill's (transitive)
+ * dependencies so they stay at least as visible — returns the slugs it raised.
+ */
 export async function setSkillVisibility(
   slug: string,
   visibility: SkillVisibilityInput,
-  _orgId: string | null = null,
-): Promise<void> {
-  await apiFetch(`/v1/skills/${slug}/visibility`, {
+  opts: { cascade?: boolean } = {},
+): Promise<{ cascaded: string[] }> {
+  const res = await apiFetch<{ ok: true; cascaded: string[] }>(`/v1/skills/${slug}/visibility`, {
     method: "PUT",
-    body: JSON.stringify(visibility),
+    body: JSON.stringify({ ...visibility, cascade: opts.cascade ?? false }),
   });
+  return { cascaded: res.cascaded ?? [] };
 }
 
 export async function saveSkillFilterPreferences(
