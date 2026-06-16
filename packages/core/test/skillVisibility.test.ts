@@ -591,4 +591,22 @@ describe("setSkillVisibility dependent (narrowing) cascade", () => {
       }),
     ).rejects.toThrow("would stay visible to an owner outside the new audience");
   });
+
+  it("does not silently skip a private dependent owned by another user", async () => {
+    // A private dependent reads as "covered" by visibilityCovers, but its owner still can't see the
+    // narrowed dependency — the cascade must reject it rather than skip it.
+    await expect(
+      setSkillVisibility({
+        actor,
+        orgId: ORG,
+        slug: "everyone-skill",
+        visibility: { everyone: false, teams: [] },
+        cascade: true,
+        database: fakeDb({
+          orgRole: "admin",
+          ...dependedOnBy({ userId: "other-user", name: "Other User" }, false),
+        }),
+      }),
+    ).rejects.toThrow("would stay visible to an owner outside the new audience");
+  });
 });

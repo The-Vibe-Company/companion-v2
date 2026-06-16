@@ -1668,26 +1668,28 @@ export async function setSkillVisibility(input: {
   if (self && dependents.length) {
     for (const dep of collectReachableDependents(graph, self.id)) {
       const depAudience = { everyone: dep.everyone, teams: [...dep.audienceTeams] };
-      if (visibilityCovers(depAudience, newAudience)) continue; // still covered
+      // A dependent always stays visible to its own owner (a user or a team), so that owner must be
+      // able to see the narrowed target too. visibilityCovers() alone treats a private dependent as
+      // covered — true only when the same owner manages both — so the owner is part of "still covered":
+      // a cross-owned private dependent must NOT be skipped.
+      const ownerCovered =
+        newAudience.everyone ||
+        (dep.ownerTeamId
+          ? newAudienceTeamIds.has(dep.ownerTeamId)
+          : dep.ownerId === skill.owner_user_id ||
+            (await userInAnyTeam(database, input.orgId, dep.ownerId, [...newAudienceTeamIds])));
+      if (visibilityCovers(depAudience, newAudience) && ownerCovered) continue; // genuinely still covered
       if (!input.cascade) {
         throw new Error(
           `cannot narrow visibility: ${dep.slug} depends on this skill and would lose access`,
         );
       }
-      // A reduced dependent always stays visible to its own owner (a user or a team), so that owner
-      // must be able to see the narrowed target too — otherwise the cover invariant is still broken
-      // after the cascade (e.g. a private dependent owned by someone who cannot see the now-private
-      // target). Narrowing to Everyone is always fine.
-      if (!newAudience.everyone) {
-        const ownerCovered = dep.ownerTeamId
-          ? newAudienceTeamIds.has(dep.ownerTeamId)
-          : dep.ownerId === skill.owner_user_id ||
-            (await userInAnyTeam(database, input.orgId, dep.ownerId, [...newAudienceTeamIds]));
-        if (!ownerCovered) {
-          throw new Error(
-            `cannot narrow visibility: ${dep.slug} would stay visible to an owner outside the new audience`,
-          );
-        }
+      // Reducing team shares can't drop the dependent's own owner, so if that owner is outside the new
+      // audience the dependent can never be covered — narrowing is impossible.
+      if (!ownerCovered) {
+        throw new Error(
+          `cannot narrow visibility: ${dep.slug} would stay visible to an owner outside the new audience`,
+        );
       }
       const restricted = restrictAudience(depAudience, newAudience);
       const restrictedTeamIds = new Set(restricted.teams);
