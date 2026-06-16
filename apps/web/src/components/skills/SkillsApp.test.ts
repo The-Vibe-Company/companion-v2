@@ -46,6 +46,7 @@ function skill(overrides: Partial<SkillVM>): SkillVM {
       team: null,
     },
     tools: [],
+    requirements: [],
     compatibility: null,
     metadata: {},
     size: "1 KB",

@@ -53,6 +53,7 @@ export const COMPANION_SKILL_MANIFEST: CompanionSkillManifest = {
     { name: "Publish a skill", desc: "Validate a skill, choose owner/visibility, and publish it safely." },
     { name: "Update a skill", desc: "Push a new version with targeted identity and visibility checks." },
     { name: "Resolve dependencies", desc: "Analyze packages and sync companion.json before upload." },
+    { name: "Declare required secrets", desc: "Detect the secrets and env vars a skill needs and record how to obtain each." },
     { name: "Manage skill API calls", desc: "Use the supported skills API surface without crossing into workspace admin." },
     { name: "Update Companion skill", desc: "Check and install the latest bundled Companion skill safely." },
     { name: "Check for updates", desc: "See whether the skills on this machine are up to date." },
@@ -61,6 +62,14 @@ export const COMPANION_SKILL_MANIFEST: CompanionSkillManifest = {
     { name: "Manage your skills", desc: "List and organize the skills on this machine." },
   ],
   changelog: [
+    {
+      version: "1.3.0",
+      changes: [
+        "Analyzes a skill before upload to detect the secrets and environment variables it needs.",
+        "Proposes a `requirements` list (secret/env, required, and a note on how to obtain each) and confirms it with you before writing it into the SKILL.md frontmatter.",
+        "Surfaces a skill's declared requirements as setup notes so you know what to configure before running it.",
+      ],
+    },
     {
       version: "1.2.1",
       changes: [

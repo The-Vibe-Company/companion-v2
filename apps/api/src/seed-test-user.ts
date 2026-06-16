@@ -1,4 +1,4 @@
-import type { SkillVisibilityInput } from "@companion/contracts";
+import type { SkillRequirement, SkillVisibilityInput } from "@companion/contracts";
 import { toStoredSkillFrontmatter } from "@companion/contracts";
 import {
   createOrg,
@@ -86,9 +86,13 @@ interface SeedSkillSpec {
   license?: string;
   /** Declared required dependencies (must resolve cleanly — published earlier in the list). */
   dependencies?: string[];
+  /** Declared required secrets / env vars + install notes (declarations only, never values). */
+  requirements?: SkillRequirement[];
 }
 
-function buildSkillMd(spec: Pick<SeedSkillSpec, "slug" | "version" | "description" | "body" | "tools" | "license">): string {
+function buildSkillMd(
+  spec: Pick<SeedSkillSpec, "slug" | "version" | "description" | "body" | "tools" | "license" | "requirements">,
+): string {
   const lines = [
     "---",
     `name: ${spec.slug}`,
@@ -99,6 +103,15 @@ function buildSkillMd(spec: Pick<SeedSkillSpec, "slug" | "version" | "descriptio
   if (spec.license) lines.push(`license: ${spec.license}`);
   if (spec.tools?.length) {
     lines.push(`allowed-tools: ${JSON.stringify(spec.tools.join(" "))}`);
+  }
+  if (spec.requirements?.length) {
+    lines.push("requirements:");
+    for (const req of spec.requirements) {
+      lines.push(`  - key: ${req.key}`);
+      lines.push(`    type: ${req.type}`);
+      lines.push(`    required: ${req.required}`);
+      lines.push(`    note: ${JSON.stringify(req.note)}`);
+    }
   }
   lines.push("---");
   return `${lines.join("\n")}\n\n${spec.body.trim()}\n`;
@@ -202,6 +215,20 @@ async function seedDemoContent(actor: ActorContext): Promise<void> {
       visibility: { everyone: false, teams: [teamSlug] },
       tools: ["run_python"],
       license: "MIT",
+      requirements: [
+        {
+          key: "SLACK_BOT_TOKEN",
+          type: "secret",
+          required: true,
+          note: "Slack bot token (xoxb-…). Ask a workspace admin to install the Companion app, or create one at https://api.slack.com/apps → OAuth & Permissions.",
+        },
+        {
+          key: "SLACK_DEFAULT_CHANNEL",
+          type: "env",
+          required: false,
+          note: "Channel ID to post to when a message does not specify one. Defaults to #general.",
+        },
+      ],
     },
     {
       slug: "vault-index",

@@ -65,10 +65,10 @@ describe("companion skill package + row", () => {
       desc: "Analyze packages and sync companion.json before upload.",
     });
     expect(row.changes).toContain(
-      "Always analyzes the full skill package for dependencies before validate, publish, or update.",
+      "Analyzes a skill before upload to detect the secrets and environment variables it needs.",
     );
     expect(row.changes).toContain(
-      "Compares inferred dependencies with companion.json and asks before synchronizing additions or removals.",
+      "Surfaces a skill's declared requirements as setup notes so you know what to configure before running it.",
     );
     // The install prompt drives the report-back call and leaves placeholders for the client.
     expect(row.prompts.install).toContain("/local-skills/companion/package");
