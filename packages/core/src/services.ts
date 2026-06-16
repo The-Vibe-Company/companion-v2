@@ -29,8 +29,13 @@ import {
   publishSkillInputSchema,
   skillFilterPreferencesSchema,
   TEAM_BRAND_COLORS,
+  visibilityCovers,
   type PublishSkillInput,
 } from "@companion/contracts";
+
+// Re-exported so existing importers (tests, callers) keep `visibilityCovers` from core; the rule
+// itself now lives in @companion/contracts as the single source of truth shared with the web app.
+export { visibilityCovers } from "@companion/contracts";
 import { compareSemver } from "@companion/skills";
 import { db, schema, type Db } from "@companion/db";
 import { initialsFor, slugify } from "@companion/db/ids";
@@ -1578,8 +1583,14 @@ export async function setSkillVisibility(input: {
   orgId: string;
   slug: string;
   visibility: SkillVisibilityInput;
+  /**
+   * When the new visibility would leave a dependency less visible than the skill, also raise that
+   * dependency (transitively) to cover the new audience instead of rejecting. All raised skills are
+   * authorized individually; if the actor cannot modify one, the whole change is rejected.
+   */
+  cascade?: boolean;
   database?: Db;
-}): Promise<void> {
+}): Promise<{ cascaded: string[] }> {
   const database = input.database ?? db;
   const skill = await getSkillBySlug(input);
   if (!skill) throw new Error("skill not found");
@@ -1621,53 +1632,153 @@ export async function setSkillVisibility(input: {
   const self = graph.bySlug.get(skill.slug);
   const currentEdges = self ? (graph.requiresBySkill.get(self.id) ?? []) : [];
   const dependents = self ? (graph.dependentsByTarget.get(self.id) ?? []) : [];
-  if (currentEdges.length || dependents.length) {
-    const newAudienceTeamIds = new Set(resolved.teams.map((t) => t.id));
-    if (skill.owner_team_id) newAudienceTeamIds.add(skill.owner_team_id);
-    const newAudience = { everyone: resolved.visibility.everyone, teams: [...newAudienceTeamIds] };
-    // Outgoing: broadening this skill must not make it more visible than the dependencies it pulls in.
-    for (const edge of currentEdges) {
-      const target = graph.bySlug.get(edge.dependsOnSlug);
-      if (!target) continue; // a missing dependency is not a visibility-cover concern here
-      const targetAudience = { everyone: target.everyone, teams: [...target.audienceTeams] };
-      if (!visibilityCovers(newAudience, targetAudience)) {
+  const newAudienceTeamIds = new Set(resolved.teams.map((t) => t.id));
+  if (skill.owner_team_id) newAudienceTeamIds.add(skill.owner_team_id);
+  const newAudience = { everyone: resolved.visibility.everyone, teams: [...newAudienceTeamIds] };
+
+  // The new audience the skill itself will have, as plain team ids (owner team is always included).
+  type Change = { id: string; slug: string; everyone: boolean; teamIds: string[] };
+
+  // Outgoing (broadening): dependencies (transitively) the new audience would NOT cover must be
+  // raised. Each gets the new audience unioned onto its own — adding the same audience everywhere
+  // preserves cover on every edge between dependencies (orig v ⊇ orig u ⇒ v∪P ⊇ u∪P).
+  const raises: Change[] = [];
+  if (self && currentEdges.length) {
+    for (const dep of collectReachableDependencies(graph, self.id)) {
+      const depAudience = { everyone: dep.everyone, teams: [...dep.audienceTeams] };
+      if (visibilityCovers(newAudience, depAudience)) continue; // already visible enough
+      if (!input.cascade) {
         throw new Error(
-          `cannot broaden visibility: dependency ${edge.dependsOnSlug} would be less visible than this skill`,
+          `cannot broaden visibility: dependency ${dep.slug} would be less visible than this skill`,
         );
       }
-    }
-    // Incoming: narrowing this skill (even a leaf dependency with no requires of its own) must not
-    // strand a more-visible dependent that requires it.
-    for (const ref of dependents) {
-      const dependent = graph.byId.get(ref.dependentId);
-      if (!dependent) continue;
-      const dependentAudience = { everyone: dependent.everyone, teams: [...dependent.audienceTeams] };
-      if (!visibilityCovers(dependentAudience, newAudience)) {
-        throw new Error(
-          `cannot narrow visibility: ${dependent.slug} depends on this skill and would lose access`,
-        );
-      }
+      // Team shares exclude the dep's own owner team (that audience comes from the
+      // skills.owner_team_id column, not a share row).
+      const raisedTeamIds = new Set<string>([...dep.audienceTeams, ...newAudienceTeamIds]);
+      if (dep.ownerTeamId) raisedTeamIds.delete(dep.ownerTeamId);
+      raises.push({ id: dep.id, slug: dep.slug, everyone: dep.everyone || newAudience.everyone, teamIds: [...raisedTeamIds] });
     }
   }
 
-  await database.transaction(async (tx) => {
-    await tx
-      .update(schema.skills)
-      .set({ everyone: resolved.visibility.everyone, updatedAt: new Date() })
-      .where(eq(schema.skills.id, skill.id));
-    await tx
-      .delete(schema.skillTeamShares)
-      .where(and(eq(schema.skillTeamShares.orgId, input.orgId), eq(schema.skillTeamShares.skillId, skill.id)));
-    if (resolved.teams.length) {
-      await tx.insert(schema.skillTeamShares).values(
-        resolved.teams.map((team) => ({
-          orgId: input.orgId,
-          skillId: skill.id,
-          teamId: team.id,
-        })),
-      );
+  // Incoming (narrowing): dependents (transitively) that the new audience would NOT cover would lose
+  // access. Without cascade this is a hard block; with cascade we restrict each to the intersection
+  // with the new audience (the mirror of the raise — restricting everywhere preserves every edge).
+  const restricts: Change[] = [];
+  if (self && dependents.length) {
+    for (const dep of collectReachableDependents(graph, self.id)) {
+      const depAudience = { everyone: dep.everyone, teams: [...dep.audienceTeams] };
+      if (visibilityCovers(depAudience, newAudience)) continue; // still covered
+      if (!input.cascade) {
+        throw new Error(
+          `cannot narrow visibility: ${dep.slug} depends on this skill and would lose access`,
+        );
+      }
+      // A team-owned dependent always stays visible to its owner team; if that team is not part of
+      // the new (non-everyone) audience, the dependent can never be covered — narrowing is impossible.
+      if (dep.ownerTeamId && !newAudience.everyone && !newAudienceTeamIds.has(dep.ownerTeamId)) {
+        throw new Error(
+          `cannot narrow visibility: ${dep.slug} is owned by a team that would still see it`,
+        );
+      }
+      const restricted = restrictAudience(depAudience, newAudience);
+      const restrictedTeamIds = new Set(restricted.teams);
+      if (dep.ownerTeamId) restrictedTeamIds.delete(dep.ownerTeamId);
+      restricts.push({ id: dep.id, slug: dep.slug, everyone: restricted.everyone, teamIds: [...restrictedTeamIds] });
     }
+  }
+
+  // Every cascaded skill (raised or restricted) must be one the actor can modify, or the whole
+  // change is rejected — no partial visibility state.
+  const changes = [...raises, ...restricts];
+  const forbidden: string[] = [];
+  for (const change of changes) {
+    const dep = graph.byId.get(change.id)!;
+    const allowed = await canModifySkill({
+      database,
+      orgId: input.orgId,
+      actor: input.actor,
+      orgRole,
+      ownerUserId: dep.ownerId,
+      ownerTeamId: dep.ownerTeamId,
+    });
+    if (!allowed) forbidden.push(dep.slug);
+  }
+  if (forbidden.length) {
+    throw new Error(
+      `cannot update sub-skill${forbidden.length > 1 ? "s" : ""} ${forbidden.join(", ")}: you do not have permission to change ${forbidden.length > 1 ? "their" : "its"} visibility`,
+    );
+  }
+
+  await database.transaction(async (tx) => {
+    const writeVisibility = async (skillId: string, everyone: boolean, teamIds: string[]) => {
+      await tx
+        .update(schema.skills)
+        .set({ everyone, updatedAt: new Date() })
+        .where(eq(schema.skills.id, skillId));
+      await tx
+        .delete(schema.skillTeamShares)
+        .where(and(eq(schema.skillTeamShares.orgId, input.orgId), eq(schema.skillTeamShares.skillId, skillId)));
+      if (teamIds.length) {
+        await tx.insert(schema.skillTeamShares).values(
+          teamIds.map((teamId) => ({ orgId: input.orgId, skillId, teamId })),
+        );
+      }
+    };
+    await writeVisibility(skill.id, resolved.visibility.everyone, resolved.teams.map((t) => t.id));
+    for (const change of changes) await writeVisibility(change.id, change.everyone, change.teamIds);
   });
+
+  return { cascaded: changes.map((c) => c.slug).sort() };
+}
+
+/** Skills reachable from `fromId` over current-version dependency edges (resolved by slug, cycle-safe). */
+function collectReachableDependencies(graph: DepGraph, fromId: string): DepGraphSkill[] {
+  const out: DepGraphSkill[] = [];
+  const seen = new Set<string>([fromId]);
+  const stack = [fromId];
+  while (stack.length) {
+    const id = stack.pop()!;
+    for (const edge of graph.requiresBySkill.get(id) ?? []) {
+      const target = graph.bySlug.get(edge.dependsOnSlug);
+      if (!target || seen.has(target.id)) continue;
+      seen.add(target.id);
+      out.push(target);
+      stack.push(target.id);
+    }
+  }
+  return out;
+}
+
+/** Skills that transitively depend on `fromId` over current-version edges (the reverse graph). */
+function collectReachableDependents(graph: DepGraph, fromId: string): DepGraphSkill[] {
+  const out: DepGraphSkill[] = [];
+  const seen = new Set<string>([fromId]);
+  const stack = [fromId];
+  while (stack.length) {
+    const id = stack.pop()!;
+    for (const ref of graph.dependentsByTarget.get(id) ?? []) {
+      const dependent = graph.byId.get(ref.dependentId);
+      if (!dependent || seen.has(dependent.id)) continue;
+      seen.add(dependent.id);
+      out.push(dependent);
+      stack.push(dependent.id);
+    }
+  }
+  return out;
+}
+
+/**
+ * Reduce `dependent`'s audience to the most it can keep while staying covered by `target` (used when
+ * narrowing a skill cascades to its dependents). Mirror of the union used when broadening.
+ */
+function restrictAudience(
+  dependent: { everyone: boolean; teams: string[] },
+  target: { everyone: boolean; teams: string[] },
+): { everyone: boolean; teams: string[] } {
+  if (target.everyone) return { everyone: dependent.everyone, teams: [...dependent.teams] };
+  const allowed = new Set(target.teams);
+  const teams = dependent.everyone ? [...target.teams] : dependent.teams.filter((t) => allowed.has(t));
+  return { everyone: false, teams };
 }
 
 export async function publishSkillVersion(input: {
@@ -2155,21 +2266,6 @@ async function loadDepGraph(database: Db, orgId: string): Promise<DepGraph> {
   return { byId, bySlug, requiresBySkill, dependentsByTarget };
 }
 
-/**
- * The visibility-cover rule: everyone who can see `dependent` must also be able to see `target`,
- * otherwise installing the dependent would pull a skill its viewers cannot access. Pure + exported
- * so the rule is table-driven testable.
- */
-export function visibilityCovers(
-  dependent: { everyone: boolean; teams: string[] },
-  target: { everyone: boolean; teams: string[] },
-): boolean {
-  if (target.everyone) return true; // visible to all
-  if (dependent.everyone) return false; // dependent public, target not → mismatch
-  if (dependent.teams.length === 0) return true; // private/owner-only — owner manages both
-  const targetTeams = new Set(target.teams);
-  return dependent.teams.every((team) => targetTeams.has(team));
-}
 
 /** Precedence for an edge's status given its computed flags (missing → cycle → archived → visibility). */
 export function dependencyStatusFromFlags(flags: {

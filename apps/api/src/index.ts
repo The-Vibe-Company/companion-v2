@@ -68,6 +68,7 @@ import {
   publishSkillInputSchema,
   reportLocalSkillInstallInputSchema,
   setCommentDeprecatedInputSchema,
+  setSkillVisibilityInputSchema,
   skillFrontmatterSchema,
   skillVisibilityInputSchema,
   visibilityFilterSchema,
@@ -987,17 +988,23 @@ app.post("/v1/skills/:slug/star", async (c) => {
 
 app.put("/v1/skills/:slug/visibility", async (c) => {
   try {
-    const body = skillVisibilityInputSchema.parse(await c.req.json());
-    await withTenant(c, ({ actor, orgId, database }) =>
-      setSkillVisibility({
-        actor,
-        orgId,
-        slug: c.req.param("slug"),
-        visibility: body,
-        database,
-      }),
+    actorFromContext(c, true);
+    requireScope(c, "skills:write");
+    const { cascade, ...visibility } = setSkillVisibilityInputSchema.parse(await c.req.json());
+    const { cascaded } = await withTenant(
+      c,
+      ({ actor, orgId, database }) =>
+        setSkillVisibility({
+          actor,
+          orgId,
+          slug: c.req.param("slug"),
+          visibility,
+          cascade,
+          database,
+        }),
+      true,
     );
-    return c.json({ ok: true });
+    return c.json({ ok: true, cascaded });
   } catch (error) {
     return jsonError(c, error);
   }
