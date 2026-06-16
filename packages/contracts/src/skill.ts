@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { validationStateSchema } from "./scope";
-import { SKILL_NAME_RE, SEMVER_RE } from "./frontmatter";
+import { SKILL_NAME_RE, SEMVER_RE, skillRequirementSchema } from "./frontmatter";
 import { localSkillStatusSchema } from "./localSkills";
 
 export const teamVisibilitySchema = z.object({
@@ -163,6 +163,8 @@ export const skillListRowSchema = z.object({
   checksum: z.string().nullable(),
   size_bytes: z.number().nullable(),
   tools: z.array(z.string()),
+  /** Declared required secrets / env vars + install notes (parsed from the version frontmatter). */
+  requirements: z.array(skillRequirementSchema).default([]),
   star_count: z.number().int().nonnegative(),
   starred: z.boolean(),
   /** Whether the caller has this skill recorded as installed (any version). */

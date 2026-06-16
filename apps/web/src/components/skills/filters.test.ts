@@ -25,6 +25,7 @@ function mk(p: Partial<SkillVM> & { id: string }): SkillVM {
       team: null,
     },
     tools: [],
+    requirements: [],
     size: "1 KB",
     license: null,
     checksum: null,

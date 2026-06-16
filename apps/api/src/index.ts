@@ -82,6 +82,7 @@ import {
   updateUserProfileInputSchema,
   type SkillVisibilityInput,
   type SkillFrontmatter,
+  type SkillRequirement,
 } from "@companion/contracts";
 import {
   deleteSkillArchive,
@@ -158,7 +159,13 @@ async function canonicalizeSkillArchive(archive: Buffer, companion: { skillId: s
 }
 
 /** Assemble a standard SKILL.md from inline fields. The registry sets the version, not the author. */
-function buildSkillMd(id: string, description: string, body: string, companion: { skillId: string; version: string }): string {
+function buildSkillMd(
+  id: string,
+  description: string,
+  body: string,
+  companion: { skillId: string; version: string },
+  requirements: SkillRequirement[] = [],
+): string {
   const frontmatter = skillFrontmatterSchema.parse({
     name: id,
     description,
@@ -166,6 +173,7 @@ function buildSkillMd(id: string, description: string, body: string, companion: 
       companion_skill_id: companion.skillId,
       companion_version: companion.version,
     },
+    requirements,
   });
   return buildNormalizedSkillMd(frontmatter, body);
 }
@@ -1295,21 +1303,29 @@ app.post("/v1/skills/create", bodyLimit({ maxSize: 2 * 1024 * 1024, onError: (c)
       slug: input.id,
     });
     // Edit-in-browser reuses this endpoint to publish a new version of an existing skill. Carry
-    // forward the current version's declared dependencies so an inline edit never silently drops
-    // them (there is no companion.json on this path).
-    const carriedDependencies = await withTenant(
+    // forward the current version's declared dependencies and requirements (declared secrets/env
+    // setup notes) so an inline edit never silently drops them — this path rebuilds the frontmatter
+    // from id/description/body alone (there is no companion.json or frontmatter editor here).
+    const { carriedDependencies, carriedRequirements } = await withTenant(
       c,
       async ({ actor: a, orgId: o, database }) => {
         const existing = await getSkillBySlug({ actor: a, orgId: o, slug: input.id, database });
-        if (!existing?.current_version) return [];
+        if (!existing?.current_version) return { carriedDependencies: [], carriedRequirements: [] };
         const deps = await getSkillDependencies({ actor: a, orgId: o, slug: input.id, database });
-        return deps.requires.map((r) => r.slug);
+        return {
+          carriedDependencies: deps.requires.map((r) => r.slug),
+          carriedRequirements: existing.requirements,
+        };
       },
       true,
     );
     const dir = await mkdtemp(join(tmpdir(), "companion-skill-"));
     try {
-      await writeFile(join(dir, "SKILL.md"), buildSkillMd(input.id, input.description, input.body, target), "utf8");
+      await writeFile(
+        join(dir, "SKILL.md"),
+        buildSkillMd(input.id, input.description, input.body, target, carriedRequirements),
+        "utf8",
+      );
       const canonical = await packDir(dir);
       const result = await validateSkillArchive(canonical.archive);
       if (!result.ok || !result.frontmatter) {

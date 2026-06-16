@@ -2,7 +2,7 @@ import React from "react";
 import { renderToString } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import type { SkillVM, TeamVM } from "@/lib/types";
-import { PropList } from "./detailParts";
+import { PropList, Requirements } from "./detailParts";
 
 const teams: TeamVM[] = [
   { id: "engineering", name: "Engineering", initial: "EN", color: null, icon: null, role: "editor", dbId: "team-1" },
@@ -28,6 +28,15 @@ const skill: SkillVM = {
     team: null,
   },
   tools: ["read_file"],
+  requirements: [
+    {
+      key: "AZURE_OPENAI_API_KEY",
+      type: "secret",
+      required: true,
+      note: "Ask your org admin to provision an Azure OpenAI resource.",
+    },
+    { key: "OPENAI_BASE_URL", type: "env", required: false, note: "" },
+  ],
   size: "1 KB",
   license: "MIT",
   checksum: "sha256:abc",
@@ -72,5 +81,24 @@ describe("PropList manifest rendering", () => {
     expect(html).toContain('title="companion_version"');
     expect(html).toContain(">version</span>");
     expect(html).toContain("1.2.3");
+    // Requirements live in their own tab, not the manifest rail.
+    expect(html).not.toContain("AZURE_OPENAI_API_KEY");
+  });
+});
+
+describe("Requirements tab rendering", () => {
+  it("lists declared secrets and env vars with their notes and badges", () => {
+    const html = renderToString(React.createElement(Requirements, { requirements: skill.requirements }));
+    expect(html).toContain("Setup &amp; secrets");
+    expect(html).toContain("AZURE_OPENAI_API_KEY");
+    expect(html).toContain("secret");
+    expect(html).toContain("Ask your org admin to provision an Azure OpenAI resource.");
+    expect(html).toContain("OPENAI_BASE_URL");
+    expect(html).toContain("optional");
+  });
+
+  it("shows an empty state when nothing is declared", () => {
+    const html = renderToString(React.createElement(Requirements, { requirements: [] }));
+    expect(html).toContain("no required secrets or environment variables");
   });
 });

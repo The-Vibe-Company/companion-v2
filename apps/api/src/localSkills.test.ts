@@ -60,11 +60,15 @@ describe("companion skill package + row", () => {
       name: "Manage skill API calls",
       desc: "Use the supported skills API surface without crossing into workspace admin.",
     });
+    expect(row.commands).toContainEqual({
+      name: "Resolve dependencies",
+      desc: "Analyze packages and sync companion.json before upload.",
+    });
     expect(row.changes).toContain(
-      "Reads an optional companion.json to declare required skill→skill dependencies (un-versioned slugs).",
+      "Analyzes a skill before upload to detect the secrets and environment variables it needs.",
     );
     expect(row.changes).toContain(
-      "Runs a dependency preflight before publishing: surfaces already-published, must-upload-too, removed, and archival-candidate dependencies.",
+      "Surfaces a skill's declared requirements as setup notes so you know what to configure before running it.",
     );
     // The install prompt drives the report-back call and leaves placeholders for the client.
     expect(row.prompts.install).toContain("/local-skills/companion/package");

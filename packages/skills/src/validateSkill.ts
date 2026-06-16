@@ -77,6 +77,7 @@ function buildResult(f: RawFindings): ValidationResult {
       const detail = [
         fm.data.compatibility ? "compatibility declared" : "no compatibility",
         `${Object.keys(fm.data.metadata).length} metadata keys`,
+        `${fm.data.requirements.length} requirement${fm.data.requirements.length === 1 ? "" : "s"}`,
       ].join(", ");
       checks.push({ id: "metadata", label: VALIDATION_CHECK_LABELS.metadata, status: "pass", detail });
     }

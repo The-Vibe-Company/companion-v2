@@ -68,6 +68,14 @@ modify it. `everyone=true` means every member of the current workspace can see t
 visibility is zero or more rows in `skill_team_shares`; those rows grant read access only. Private
 is derived from `everyone=false` and no team shares. A version's declared tools
 (`skill_versions.tools`) come from the Agent Skills `allowed-tools` frontmatter string.
+A version may also declare a `requirements` list in its frontmatter — the secrets and environment
+variables the skill needs at run time, each with `key`, `type` (`secret` | `env`), `required`, and a
+human `note` on how to obtain it (these are **declarations and install notes only — never secret
+values**, which remain envelope-encrypted and write-only). Like `metadata` and `compatibility`,
+`requirements` is not a column: it rides in the existing `skill_versions.frontmatter` JSON and is
+parsed back into the read shape (`skillListRowSchema.requirements`) for the skill detail view. The
+bundled Companion skill analyzes a package before upload, proposes the detected requirements, and
+(after the user confirms) writes them into the SKILL.md frontmatter.
 Companion-specific registry data is written under `metadata.companion_*` when a package is
 published, including `companion_skill_id` and `companion_version`. On targeted re-publish, callers
 may send `expect_slug` and `expect_skill_id`; validation and publication reject mismatched
