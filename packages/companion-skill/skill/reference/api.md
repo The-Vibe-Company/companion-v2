@@ -20,9 +20,12 @@ These are the skills endpoints a personal access token (`skills:read` + `skills:
 | Current published version + checksum | `GET /skills/{slug}/download` | `skills:read` |
 | Download a version package | `GET /skills/{slug}/versions/{version}/package` | `skills:read` |
 | Browse a version's files | `GET /skills/{slug}/versions/{version}/files` | `skills:read` |
-| Validate (no publish) | `POST /skills?action=validate` | `skills:write` |
+| Validate (no publish) + dependency preflight | `POST /skills?action=validate` | `skills:write` |
 | Publish a new skill | `POST /skills` | `skills:write` |
 | Update a skill | `POST /skills?expect_slug={slug}&expect_skill_id={id}` | `skills:write` |
+| Inspect a skill's dependency graph | `GET /skills/{slug}/dependencies` | `skills:read` |
+| Archive a skill | `POST /skills/{slug}/archive` | `skills:write` |
+| Restore an archived skill | `POST /skills/{slug}/restore` | `skills:write` |
 | Current bundled Companion skill status | `GET /local-skills/companion` | `skills:read` |
 | Download bundled Companion skill package | `GET /local-skills/companion/package` | `skills:read` |
 | Confirm this skill installed | `POST /local-skills/companion/installed` | `skills:write` |
@@ -88,11 +91,13 @@ defaults unless the user chooses otherwise.
 `POST /skills` accepts either:
 
 - `multipart/form-data` with a `file` field (and `owner_team` / `everyone` / `team` / `version` /
-  `message` / `expect_slug` / `expect_skill_id` fields), or
+  `message` / `expect_slug` / `expect_skill_id` / `dependency` fields), or
 - a raw `application/zip` or `application/gzip` body (the archive itself), with the same options as
   query params.
 
-Set `action=validate` to run every package and identity check without publishing.
+Declare required dependencies with repeated `dependency=<slug>` parameters (from `companion.json`).
+Set `action=validate` to run every package and identity check without publishing; the validate
+response is `{ "result": <validation>, "dependency_plan": <plan> }`.
 
 Ownership and visibility are separate:
 
@@ -132,6 +137,37 @@ returned `visibility` as the default, and include that visibility in the upload 
 `everyone`/`team` on updates: omitted visibility fields mean Private (`everyone=false`, no team
 shares), not "preserve existing". Omit `owner_team` unless the user explicitly chooses a team owner
 that already owns the skill.
+
+## Dependencies & archive
+
+Dependencies are un-versioned skill→skill links declared in a package's `companion.json`
+(`{ "dependencies": ["slug-a", "slug-b"] }`). Pass each slug as a repeated `dependency=` parameter
+on validate and publish.
+
+`POST /skills?action=validate&dependency=...` returns a `dependency_plan`:
+
+```json
+{
+  "declared": ["log-parser", "timeline-fmt"],
+  "ready": ["log-parser"],
+  "upload": [{ "slug": "timeline-fmt", "msg": "declared in the new SKILL.md, not in the registry" }],
+  "removed": ["csv-export"],
+  "archive_candidates": [{ "slug": "csv-export", "reason": "no published skill requires it anymore" }],
+  "blocked": [{ "slug": "secret-helper", "status": "visibility", "msg": "secret-helper is less visible than incident-summary" }]
+}
+```
+
+A publish whose dependencies are missing, cyclic, or less visible than the skill is rejected with
+`422` and the same `dependency_plan` (look at `blocked`). Publish dependencies in `upload` first,
+in topological order. `GET /skills/{slug}/dependencies?version=` returns the resolved Requires + Used
+by graph with each edge's live status (`satisfied` / `missing` / `archived` / `visibility` /
+`cycle`).
+
+Archiving hides a skill from the normal lists but keeps it viewable, restorable, and downloadable
+while a published version still references it. `POST /skills/{slug}/archive` accepts an optional
+`{ "reason": "…" }`; `POST /skills/{slug}/restore` brings it back. Both require the same permission
+as modifying the skill. Only archive a removed dependency after the user confirms, and never when
+another published skill still requires it.
 
 ## Versions & checksums
 
@@ -173,8 +209,8 @@ built-in Companion skill. Those endpoints are for workspace-published skills.
 POST /local-skills/companion/installed
 Content-Type: application/json
 
-{ "version": "1.1.0", "agent": "Claude Code" }
+{ "version": "1.2.0", "agent": "Claude Code" }
 ```
 
 `version` must be valid semver (use this skill's `metadata.companion_version`). The response is
-`{ "ok": true, "status": "installed" | "update", "availableVersion": "1.1.0" }`.
+`{ "ok": true, "status": "installed" | "update", "availableVersion": "1.2.0" }`.

@@ -1,9 +1,9 @@
 ---
 name: companion
-description: "Use when managing local SKILL.md packages with Companion: validate, publish, update, install updates, audit skills, check workspace versions, or self-update this Companion skill through the Companion workspace API."
+description: "Use when managing local SKILL.md packages with Companion: validate, publish, update, resolve skill dependencies, install updates, audit skills, check workspace versions, or self-update this Companion skill through the Companion workspace API."
 license: MIT
 metadata:
-  companion_version: 1.1.0
+  companion_version: 1.2.0
 allowed-tools: read_file write_file run_shell
 ---
 
@@ -55,6 +55,22 @@ A skill is a folder with a `SKILL.md` at its root. Companion records two values 
 
 These let you tell, offline, which workspace skill a folder maps to and whether it is behind.
 
+## Dependencies (companion.json)
+
+A skill may require other skills. Declare them in an optional `companion.json` at the package root —
+a flat list of skill slugs, no versions:
+
+```json
+{ "dependencies": ["log-parser", "markdown-report"] }
+```
+
+Dependencies are **un-versioned**: they are plain skill→skill links. Do not add version ranges, and
+do not put dependencies in `SKILL.md` frontmatter — keep them in `companion.json`. Always **read
+`companion.json` and analyze the dependency graph before you validate, publish, or update** a skill
+(see "Resolve dependencies before publishing"). Pass each declared slug to the API as a repeated
+`dependency=` query parameter on the validate and publish calls; the server records the graph and
+blocks a publish whose dependencies are missing, cyclic, or less visible than the skill itself.
+
 ## Capabilities
 
 ### Manage your skills
@@ -67,23 +83,47 @@ workspace catalog (that listing is session-only in the web app).
 
 ### Validate a skill
 
-Always validate before you publish. The server runs the same checks without writing anything:
+Always validate before you publish. First read the folder's `companion.json` (if present) and turn
+its `dependencies` into repeated `dependency=` query parameters. The server runs the same package
+checks without writing anything, and also returns the dependency preflight:
 
 ```sh
 cd <skill-folder> && zip -r -q ../skill.zip . \
-  && curl -s "$COMPANION_API_URL/skills?action=validate" \
+  && curl -s "$COMPANION_API_URL/skills?action=validate&dependency=log-parser&dependency=markdown-report" \
        -H "Authorization: Bearer $COMPANION_TOKEN" \
        -H "Content-Type: application/zip" \
        --data-binary @../skill.zip
 ```
 
-Report the checklist back to the user. If any check fails, fix it and re-validate; do not publish.
+The response is `{ "result": <validation>, "dependency_plan": <plan> }`. Report the validation
+checklist back to the user. If any check fails, fix it and re-validate; do not publish. Then analyze
+`dependency_plan` before publishing — see the next section.
+
+### Resolve dependencies before publishing
+
+The `dependency_plan` from validate tells you exactly what will change in the dependency graph:
+
+- `ready` — declared dependencies already published in the workspace. Nothing to do.
+- `upload` — declared but **not** in the registry. The new version stays unresolved until each is
+  published. For each, look for a local skill folder whose `SKILL.md` `name` matches the slug,
+  validate it, and (after the user confirms) publish it **first**. Publish in topological order:
+  dependencies before the skills that require them.
+- `removed` — required by the previous version and dropped from this one (update only).
+- `archive_candidates` — removed dependencies that no published skill references anymore. After the
+  main publish, offer to archive each one (`POST /skills/$SLUG/archive`); never archive automatically.
+- `blocked` — dependencies that are missing, cyclic (`A → B → A`), or less visible than the skill
+  (e.g. an Everyone skill that requires a Private one). **Stop**: a publish with blockers is rejected
+  with 422 and this same plan. Explain the blockers and help the user fix them before retrying.
+
+Present the plan to the user as a short summary (declared / already published / must upload too /
+removed / archival candidates / blocked) and get confirmation before any upload.
 
 ### Publish a skill
 
-After a clean validation, and after the user confirms, publish a brand-new skill. Ask the user where
-the skill should be owned and who should be able to read it before you upload. Do not ask for a raw
-team slug first: fetch upload options and propose the available choices.
+After a clean validation **and** a resolved dependency plan, and after the user confirms, publish a
+brand-new skill. If the plan listed dependencies under `upload`, publish those first (topological
+order). Ask the user where the skill should be owned and who should be able to read it before you
+upload. Do not ask for a raw team slug first: fetch upload options and propose the available choices.
 
 ```sh
 curl -s "$COMPANION_API_URL/skills/upload-options" \
@@ -109,8 +149,10 @@ Ownership is separate from visibility:
 - `team=<team-slug>` shares read visibility with a team. Team visibility does **not** grant edit
   rights; only direct ownership, owner-team Admin/Editor, or org Owner/Admin can modify a skill.
 
+Pass the same `dependency=` parameters you validated with so the dependency graph is recorded:
+
 ```sh
-curl -s "$COMPANION_API_URL/skills?owner_team=platform&everyone=false" \
+curl -s "$COMPANION_API_URL/skills?owner_team=platform&everyone=false&dependency=log-parser&dependency=markdown-report" \
   -H "Authorization: Bearer $COMPANION_TOKEN" \
   -H "Content-Type: application/zip" \
   --data-binary @../skill.zip
@@ -155,8 +197,13 @@ curl -s "$COMPANION_API_URL/skills?expect_slug=$SLUG&expect_skill_id=$SKILL_ID&o
   --data-binary @../skill.zip
 ```
 
-The server assigns the next version unless you pass an explicit `version=`. Summarize what changed
-and confirm before sending.
+Include the current `dependency=` parameters from `companion.json` on updates too — omitting them
+drops the dependency from the new version. Re-run validate first to get a fresh `dependency_plan`:
+its `removed` list shows dependencies dropped since the previous version, and `archive_candidates`
+shows removed dependencies no longer referenced by any published skill. After the update publishes,
+offer to archive each candidate (`POST /skills/$SLUG/archive`) — only with the user's confirmation,
+and never if another skill still requires it. The server assigns the next version unless you pass an
+explicit `version=`. Summarize what changed and confirm before sending.
 
 ### Manage skill API calls
 
@@ -167,8 +214,13 @@ Allowed skills API tasks:
 
 - Fetch upload owner/visibility choices with `GET /skills/upload-options` using a `skills:write`
   token.
-- Validate, publish, or update a skill with `POST /skills`.
-- Read current published metadata with `GET /skills/$SLUG/download`.
+- Validate, publish, or update a skill with `POST /skills` (pass `dependency=` parameters from
+  `companion.json`).
+- Inspect a skill's dependency graph with `GET /skills/$SLUG/dependencies`.
+- Archive or restore a skill with `POST /skills/$SLUG/archive` and `POST /skills/$SLUG/restore`
+  (same permissions as modifying the skill).
+- Read current published metadata with `GET /skills/$SLUG/download` (its `dependencies` array lists
+  the current version's required slugs).
 - Download packages with `GET /skills/$SLUG/versions/$VERSION/package`.
 - Browse version files with `GET /skills/$SLUG/versions/$VERSION/files`.
 - Change visibility with `PUT /skills/$SLUG/visibility` only when authenticated as a signed-in
@@ -292,7 +344,7 @@ skills view shows the correct status and version. Report the version from this f
 curl -s "$COMPANION_API_URL/local-skills/companion/installed" \
   -H "Authorization: Bearer $COMPANION_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"version":"1.1.0","agent":"<your assistant name>"}'
+  -d '{"version":"1.2.0","agent":"<your assistant name>"}'
 ```
 
 A `{ "ok": true, "status": "installed" }` response confirms the workspace now knows this machine has
