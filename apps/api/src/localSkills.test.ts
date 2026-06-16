@@ -61,10 +61,10 @@ describe("companion skill package + row", () => {
       desc: "Use the supported skills API surface without crossing into workspace admin.",
     });
     expect(row.changes).toContain(
-      "Reads an optional companion.json to declare required skill→skill dependencies (un-versioned slugs).",
+      "Changes a published skill's visibility with PUT /skills/{slug}/visibility (works with a skills:write token).",
     );
     expect(row.changes).toContain(
-      "Runs a dependency preflight before publishing: surfaces already-published, must-upload-too, removed, and archival-candidate dependencies.",
+      "Cascade option raises a skill's transitive dependencies to stay at least as visible when broadening.",
     );
     // The install prompt drives the report-back call and leaves placeholders for the client.
     expect(row.prompts.install).toContain("/local-skills/companion/package");

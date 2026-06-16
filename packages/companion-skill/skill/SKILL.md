@@ -3,7 +3,7 @@ name: companion
 description: "Use when managing local SKILL.md packages with Companion: validate, publish, update, resolve skill dependencies, install updates, audit skills, check workspace versions, or self-update this Companion skill through the Companion workspace API."
 license: MIT
 metadata:
-  companion_version: 1.2.0
+  companion_version: 1.3.0
 allowed-tools: read_file write_file run_shell
 ---
 
@@ -205,6 +205,42 @@ offer to archive each candidate (`POST /skills/$SLUG/archive`) — only with the
 and never if another skill still requires it. The server assigns the next version unless you pass an
 explicit `version=`. Summarize what changed and confirm before sending.
 
+### Change a skill's visibility
+
+Use this to re-share an already-published skill without uploading a new version. It changes who can
+read the skill, never its ownership or contents.
+
+```sh
+curl -s -X PUT "$COMPANION_API_URL/skills/$SLUG/visibility" \
+  -H "Authorization: Bearer $COMPANION_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"everyone":true,"teams":[],"cascade":false}'
+```
+
+The JSON body is the target visibility plus a cascade flag:
+
+- `everyone` — `true` makes every workspace member able to read the skill.
+- `teams` — array of team **slugs** to share read access with (combine with `everyone` or use alone).
+  Omitting both `everyone` and `teams` makes the skill Private. As with updates, omitted fields are
+  not "preserve existing": send the full target visibility every time.
+- `cascade` — see below; defaults to `false`.
+
+A skill must never be more visible than the skills it depends on, or someone could install it but not
+its sub-skills. So:
+
+- **Broadening** a skill (e.g. team → Everyone) while it requires a less-visible dependency is
+  **rejected** unless you pass `"cascade": true`. With `cascade`, the server also raises every
+  (transitive) dependency to at least the skill's new audience, in one atomic change, and the
+  response lists what it raised: `{ "ok": true, "cascaded": ["log-parser", "markdown-report"] }`.
+  The cascade is rejected as a whole if the caller lacks permission to change any of those
+  sub-skills.
+- **Narrowing** a skill that another, more-visible skill depends on is **rejected** (it would strand
+  that dependent's viewers). `cascade` does not override this — fix the dependent first.
+
+Always confirm the change with the user before sending, and when broadening with dependencies, tell
+them which sub-skills will also become more visible. Inspect the graph first with
+`GET /skills/$SLUG/dependencies` if you are unsure what the skill pulls in.
+
 ### Manage skill API calls
 
 Use the workspace API only for skills-management tasks. Do not use this skill to manage workspace
@@ -223,8 +259,8 @@ Allowed skills API tasks:
   the current version's required slugs).
 - Download packages with `GET /skills/$SLUG/versions/$VERSION/package`.
 - Browse version files with `GET /skills/$SLUG/versions/$VERSION/files`.
-- Change visibility with `PUT /skills/$SLUG/visibility` only when authenticated as a signed-in
-  session that can call that endpoint; personal access tokens may be rejected.
+- Change a skill's visibility with `PUT /skills/$SLUG/visibility` (see "Change a skill's
+  visibility"). Works with a `skills:write` token.
 - Read or write skill comments and stars only when the caller has a valid signed-in session for
   those routes. Do not assume a `cmp_pat_...` token can call session-only endpoints.
 
@@ -344,7 +380,7 @@ skills view shows the correct status and version. Report the version from this f
 curl -s "$COMPANION_API_URL/local-skills/companion/installed" \
   -H "Authorization: Bearer $COMPANION_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"version":"1.2.0","agent":"<your assistant name>"}'
+  -d '{"version":"1.3.0","agent":"<your assistant name>"}'
 ```
 
 A `{ "ok": true, "status": "installed" }` response confirms the workspace now knows this machine has

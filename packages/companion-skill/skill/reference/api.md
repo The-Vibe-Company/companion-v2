@@ -24,6 +24,7 @@ These are the skills endpoints a personal access token (`skills:read` + `skills:
 | Publish a new skill | `POST /skills` | `skills:write` |
 | Update a skill | `POST /skills?expect_slug={slug}&expect_skill_id={id}` | `skills:write` |
 | Inspect a skill's dependency graph | `GET /skills/{slug}/dependencies` | `skills:read` |
+| Change a skill's visibility | `PUT /skills/{slug}/visibility` | `skills:write` |
 | Archive a skill | `POST /skills/{slug}/archive` | `skills:write` |
 | Restore an archived skill | `POST /skills/{slug}/restore` | `skills:write` |
 | Current bundled Companion skill status | `GET /local-skills/companion` | `skills:read` |
@@ -38,7 +39,6 @@ Companion PAT. Use them only when the caller is operating with a valid session c
 | List visible skills | `GET /skills` | Session |
 | Get skill metadata | `GET /skills/{slug}` | Session |
 | Enumerate versions | `GET /skills/{slug}/versions` | Session |
-| Change visibility | `PUT /skills/{slug}/visibility` | Session |
 | Read comments | `GET /skills/{slug}/comments` | Session |
 | Add a comment | `POST /skills/{slug}/comments` | Session |
 | Deprecate/restore a comment | `PATCH /skills/{slug}/comments/{id}` | Session |
@@ -169,6 +169,27 @@ while a published version still references it. `POST /skills/{slug}/archive` acc
 as modifying the skill. Only archive a removed dependency after the user confirms, and never when
 another published skill still requires it.
 
+## Change visibility
+
+`PUT /skills/{slug}/visibility` re-shares an existing skill without uploading a new version. JSON body:
+
+```json
+{ "everyone": true, "teams": ["research"], "cascade": false }
+```
+
+- `everyone` — workspace-wide read access.
+- `teams` — team **slugs** to grant read access to (combinable with `everyone`). Send the full target
+  visibility; omitted fields mean Private, not "preserve existing".
+- `cascade` — when broadening would leave a dependency less visible than the skill, `true` also raises
+  every (transitive) dependency to cover the new audience instead of rejecting.
+
+The cover invariant (a skill is never more visible than what it depends on) is enforced here too:
+
+- Broadening past a less-visible dependency is rejected unless `cascade=true`. With cascade the
+  response lists the raised sub-skills: `{ "ok": true, "cascaded": ["log-parser"] }`. The whole change
+  is rejected if the caller cannot modify one of those sub-skills.
+- Narrowing a skill that a more-visible skill depends on is always rejected (cascade cannot override).
+
 ## Versions & checksums
 
 Versions are immutable. Each version row carries a `checksum` of the form `sha256:<64 hex>` over the
@@ -209,8 +230,8 @@ built-in Companion skill. Those endpoints are for workspace-published skills.
 POST /local-skills/companion/installed
 Content-Type: application/json
 
-{ "version": "1.2.0", "agent": "Claude Code" }
+{ "version": "1.3.0", "agent": "Claude Code" }
 ```
 
 `version` must be valid semver (use this skill's `metadata.companion_version`). The response is
-`{ "ok": true, "status": "installed" | "update", "availableVersion": "1.2.0" }`.
+`{ "ok": true, "status": "installed" | "update", "availableVersion": "1.3.0" }`.
