@@ -60,6 +60,10 @@ describe("companion skill package + row", () => {
       name: "Manage skill API calls",
       desc: "Use the supported skills API surface without crossing into workspace admin.",
     });
+    expect(row.commands).toContainEqual({
+      name: "Resolve dependencies",
+      desc: "Analyze packages and sync companion.json before upload.",
+    });
     expect(row.changes).toContain(
       "Analyzes a skill before upload to detect the secrets and environment variables it needs.",
     );
