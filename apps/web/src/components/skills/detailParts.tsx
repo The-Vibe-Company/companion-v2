@@ -363,6 +363,41 @@ export function PropList({
   );
 }
 
+export function Requirements({ requirements }: { requirements: SkillVM["requirements"] }) {
+  return (
+    <div className="dblocks">
+      <div>
+        <p className="seclabel">
+          <Icon name="key-round" size={14} />
+          Setup &amp; secrets <span className="seclabel__n">{requirements.length}</span>
+        </p>
+        <p className="ov__lead" style={{ marginBottom: 18 }}>
+          Secrets and environment variables this skill needs to run. Set these before using it. The
+          values themselves are never stored here.
+        </p>
+        {requirements.length ? (
+          <div className="reqlist reqlist--full">
+            {requirements.map((req) => (
+              <div className="req" key={req.key}>
+                <div className="req__head">
+                  <span className="req__key mono">{req.key}</span>
+                  <span className={`req__tag req__tag--${req.type}`}>{req.type}</span>
+                  {req.required ? null : <span className="req__tag req__tag--optional">optional</span>}
+                </div>
+                {req.note ? <p className="req__note">{req.note}</p> : null}
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p style={{ color: "var(--color-muted)" }}>
+            This skill declares no required secrets or environment variables.
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function Activity({
   versions,
   ownerName,

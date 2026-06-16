@@ -52,8 +52,9 @@ export const COMPANION_SKILL_MANIFEST: CompanionSkillManifest = {
   commands: [
     { name: "Publish a skill", desc: "Validate a skill, choose owner/visibility, and publish it safely." },
     { name: "Update a skill", desc: "Push a new version with targeted identity and visibility checks." },
-    { name: "Change visibility", desc: "Re-share a published skill, optionally raising its dependencies to match." },
-    { name: "Resolve dependencies", desc: "Analyze companion.json before upload: preflight required skills and archival candidates." },
+    { name: "Change visibility", desc: "Re-share a published skill; cascade to dependencies or dependents." },
+    { name: "Resolve dependencies", desc: "Analyze packages and sync companion.json before upload." },
+    { name: "Declare required secrets", desc: "Detect the secrets and env vars a skill needs and record how to obtain each." },
     { name: "Manage skill API calls", desc: "Use the supported skills API surface without crossing into workspace admin." },
     { name: "Update Companion skill", desc: "Check and install the latest bundled Companion skill safely." },
     { name: "Check for updates", desc: "See whether the skills on this machine are up to date." },
@@ -63,11 +64,26 @@ export const COMPANION_SKILL_MANIFEST: CompanionSkillManifest = {
   ],
   changelog: [
     {
-      version: "1.3.0",
+      version: "1.4.0",
       changes: [
         "Changes a published skill's visibility with PUT /skills/{slug}/visibility (works with a skills:write token).",
-        "Cascade option raises a skill's transitive dependencies to stay at least as visible when broadening.",
-        "Still blocks narrowing that would strand a more-visible dependent.",
+        "Cascade also raises required sub-skills or reduces dependent skills so the cover invariant holds.",
+      ],
+    },
+    {
+      version: "1.3.0",
+      changes: [
+        "Analyzes a skill before upload to detect the secrets and environment variables it needs.",
+        "Proposes a `requirements` list (secret/env, required, and a note on how to obtain each) and confirms it with you before writing it into the SKILL.md frontmatter.",
+        "Surfaces a skill's declared requirements as setup notes so you know what to configure before running it.",
+      ],
+    },
+    {
+      version: "1.2.1",
+      changes: [
+        "Always analyzes the full skill package for dependencies before validate, publish, or update.",
+        "Compares inferred dependencies with companion.json and asks before synchronizing additions or removals.",
+        "Uses the confirmed dependency list for validation and upload, then publishes missing local dependencies first.",
       ],
     },
     {

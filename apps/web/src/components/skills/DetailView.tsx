@@ -20,13 +20,13 @@ import {
 } from "@/lib/queries";
 import type { MeVM, SkillVM, TeamVM } from "@/lib/types";
 import { StarButton, ValidBadge, VisibilityChip } from "./blocks";
-import { Activity, PropList } from "./detailParts";
+import { Activity, PropList, Requirements } from "./detailParts";
 import { DependenciesTab } from "./DependenciesTab";
 import { FileExplorer } from "./fileview";
 import { Discussion } from "./discussion";
 import { fmtBytes, iconForFile } from "./fileFormat";
 
-type Tab = "overview" | "dependencies" | "files" | "activity";
+type Tab = "overview" | "dependencies" | "requirements" | "files" | "activity";
 
 export function DetailMoreMenuContent({
   canModifySkill,
@@ -341,6 +341,7 @@ export function DetailView({
   const TABS: { id: Tab; label: string; icon: string; n?: number }[] = [
     { id: "overview", label: "Overview", icon: "file-text" },
     { id: "dependencies", label: "Dependencies", icon: "git-branch", n: reqN + usedN },
+    { id: "requirements", label: "Setup & secrets", icon: "key-round", n: skill.requirements.length },
     { id: "files", label: "Files", icon: "package-open", n: files.length },
     { id: "activity", label: "Activity", icon: "activity", n: versions.length },
   ];
@@ -505,6 +506,12 @@ export function DetailView({
                   deps={deps}
                   onOpenSkill={onOpenSkill}
                 />
+              </div>
+            </div>
+          ) : tab === "requirements" ? (
+            <div className="dcontent">
+              <div className="dcontent__inner">
+                <Requirements requirements={skill.requirements} />
               </div>
             </div>
           ) : (

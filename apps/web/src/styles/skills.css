@@ -256,6 +256,20 @@ body { background: var(--color-canvas); color: var(--color-fg); font-family: var
 .kv { display: grid; grid-template-columns: minmax(78px, 0.45fr) minmax(0, 1fr); gap: 8px; align-items: baseline; font-family: var(--font-mono); font-size: 11px; }
 .kv__k { color: var(--color-faint); white-space: normal; overflow-wrap: anywhere; }
 .kv__v { color: var(--color-muted); overflow-wrap: anywhere; }
+
+/* required secrets / env vars + install notes (Setup & secrets tab) */
+.reqlist { display: flex; flex-direction: column; gap: 8px; min-width: 0; width: 100%; }
+.req { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.req__head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.req__key { font-size: 11px; color: var(--color-fg); overflow-wrap: anywhere; }
+.req__tag { font-family: var(--font-mono); font-size: 10px; text-transform: uppercase; letter-spacing: var(--tracking-wide); border-radius: var(--radius-sm); padding: 1px 6px; border: 1px solid var(--color-line); color: var(--color-muted); background: var(--color-surface); }
+.req__tag--secret { color: var(--color-warn); background: var(--color-warn-tint); border-color: var(--color-warn-line); }
+.req__tag--optional { color: var(--color-faint); }
+.req__note { font-size: 11px; line-height: 1.45; color: var(--color-muted); overflow-wrap: anywhere; margin: 0; }
+.reqlist--full { gap: 10px; max-width: 64ch; }
+.reqlist--full .req { border: 1px solid var(--color-line); border-radius: var(--radius-md); padding: 12px 14px; gap: 6px; }
+.reqlist--full .req__key { font-size: var(--text-sm); }
+.reqlist--full .req__note { font-size: var(--text-sm); line-height: var(--leading-relaxed); }
 .scopechip { display: inline-flex; align-items: center; gap: 5px; font-family: var(--font-mono); font-size: var(--text-xs); color: var(--color-fg); border: 1px solid var(--color-line); background: var(--color-surface); border-radius: var(--radius-sm); padding: 2px 8px; }
 .scopechip i { color: var(--color-faint); }
 .vbadge { display: inline-flex; align-items: center; gap: 6px; font-size: var(--text-xs); border-radius: var(--radius-sm); padding: 2px 8px; }

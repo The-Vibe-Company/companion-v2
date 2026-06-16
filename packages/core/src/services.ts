@@ -1131,6 +1131,7 @@ export async function listSkills(input: {
       metadata: manifest?.metadata ?? {},
       license: r.license ?? manifest?.license ?? null,
       tools: r.tools?.length ? r.tools : parseAllowedTools(manifest?.["allowed-tools"]),
+      requirements: manifest?.requirements ?? [],
       checksum: r.checksum,
       size_bytes: r.size_bytes,
       star_count: r.star_count,

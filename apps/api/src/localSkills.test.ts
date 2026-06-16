@@ -60,11 +60,15 @@ describe("companion skill package + row", () => {
       name: "Manage skill API calls",
       desc: "Use the supported skills API surface without crossing into workspace admin.",
     });
+    expect(row.commands).toContainEqual({
+      name: "Resolve dependencies",
+      desc: "Analyze packages and sync companion.json before upload.",
+    });
     expect(row.changes).toContain(
       "Changes a published skill's visibility with PUT /skills/{slug}/visibility (works with a skills:write token).",
     );
     expect(row.changes).toContain(
-      "Cascade option raises a skill's transitive dependencies to stay at least as visible when broadening.",
+      "Cascade also raises required sub-skills or reduces dependent skills so the cover invariant holds.",
     );
     // The install prompt drives the report-back call and leaves placeholders for the client.
     expect(row.prompts.install).toContain("/local-skills/companion/package");
