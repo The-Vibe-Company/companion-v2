@@ -558,7 +558,7 @@ describe("setSkillVisibility dependent (narrowing) cascade", () => {
     ]);
   });
 
-  it("rejects narrowing when a dependent is owned by a team that would still see it", async () => {
+  it("rejects narrowing when a dependent's owner team is outside the new audience", async () => {
     await expect(
       setSkillVisibility({
         actor,
@@ -572,6 +572,23 @@ describe("setSkillVisibility dependent (narrowing) cascade", () => {
           ...dependedOnBy({ kind: "team", userId: "creator", teamId: "team-x", name: "X" }, false),
         }),
       }),
-    ).rejects.toThrow("owned by a team that would still see it");
+    ).rejects.toThrow("would stay visible to an owner outside the new audience");
+  });
+
+  it("rejects narrowing to private when a dependent is owned by another user", async () => {
+    await expect(
+      setSkillVisibility({
+        actor,
+        orgId: ORG,
+        slug: "everyone-skill",
+        visibility: { everyone: false, teams: [] },
+        cascade: true,
+        // dependent-skill is owned by another user, who would keep seeing it but lose the dependency.
+        database: fakeDb({
+          orgRole: "admin",
+          ...dependedOnBy({ userId: "other-user", name: "Other User" }, true),
+        }),
+      }),
+    ).rejects.toThrow("would stay visible to an owner outside the new audience");
   });
 });

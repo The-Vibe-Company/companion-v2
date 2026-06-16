@@ -1674,12 +1674,20 @@ export async function setSkillVisibility(input: {
           `cannot narrow visibility: ${dep.slug} depends on this skill and would lose access`,
         );
       }
-      // A team-owned dependent always stays visible to its owner team; if that team is not part of
-      // the new (non-everyone) audience, the dependent can never be covered — narrowing is impossible.
-      if (dep.ownerTeamId && !newAudience.everyone && !newAudienceTeamIds.has(dep.ownerTeamId)) {
-        throw new Error(
-          `cannot narrow visibility: ${dep.slug} is owned by a team that would still see it`,
-        );
+      // A reduced dependent always stays visible to its own owner (a user or a team), so that owner
+      // must be able to see the narrowed target too — otherwise the cover invariant is still broken
+      // after the cascade (e.g. a private dependent owned by someone who cannot see the now-private
+      // target). Narrowing to Everyone is always fine.
+      if (!newAudience.everyone) {
+        const ownerCovered = dep.ownerTeamId
+          ? newAudienceTeamIds.has(dep.ownerTeamId)
+          : dep.ownerId === skill.owner_user_id ||
+            (await userInAnyTeam(database, input.orgId, dep.ownerId, [...newAudienceTeamIds]));
+        if (!ownerCovered) {
+          throw new Error(
+            `cannot narrow visibility: ${dep.slug} would stay visible to an owner outside the new audience`,
+          );
+        }
       }
       const restricted = restrictAudience(depAudience, newAudience);
       const restrictedTeamIds = new Set(restricted.teams);
@@ -1761,6 +1769,19 @@ function collectReachableDependencies(graph: DepGraph, fromId: string): DepGraph
     }
   }
   return out;
+}
+
+/** Whether `userId` belongs to any of `teamIds` in the org (used to check owner coverage on narrow). */
+async function userInAnyTeam(database: Db, orgId: string, userId: string, teamIds: string[]): Promise<boolean> {
+  if (!teamIds.length) return false;
+  const row = await database.query.teamMemberships.findFirst({
+    where: and(
+      eq(schema.teamMemberships.orgId, orgId),
+      eq(schema.teamMemberships.userId, userId),
+      inArray(schema.teamMemberships.teamId, teamIds),
+    ),
+  });
+  return !!row;
 }
 
 /** Skills that transitively depend on `fromId` over current-version edges (the reverse graph). */
