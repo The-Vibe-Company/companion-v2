@@ -738,4 +738,13 @@ body { background: var(--color-canvas); color: var(--color-fg); font-family: var
 .ls-prompt-hint { margin: 8px 0 0; font-size: var(--text-xs); color: var(--color-faint); }
 .ls-retry { margin: 0 4px; padding: 0; border: 0; background: none; color: inherit; font: inherit; text-decoration: underline; cursor: pointer; }
 
+/* Visibility cascade warning dialog — list of sub-skills that would be raised. */
+.viswarn__list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column;
+  border: 1px solid var(--color-line); border-radius: var(--radius-md); overflow: hidden; }
+.viswarn__row { display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 9px 12px; border-bottom: 1px solid var(--color-line); }
+.viswarn__row:last-child { border-bottom: none; }
+.viswarn__slug { font-family: var(--font-mono); font-size: var(--text-xs); color: var(--color-fg); }
+.viswarn__err { margin: 10px 0 0; font-size: var(--text-xs); color: var(--color-danger); }
+
 /* Login / auth styles live in styles/auth.css. */

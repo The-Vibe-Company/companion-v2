@@ -65,10 +65,10 @@ describe("companion skill package + row", () => {
       desc: "Analyze packages and sync companion.json before upload.",
     });
     expect(row.changes).toContain(
-      "Analyzes a skill before upload to detect the secrets and environment variables it needs.",
+      "Changes a published skill's visibility with PUT /skills/{slug}/visibility (works with a skills:write token).",
     );
     expect(row.changes).toContain(
-      "Surfaces a skill's declared requirements as setup notes so you know what to configure before running it.",
+      "Cascade also raises required sub-skills or reduces dependent skills so the cover invariant holds.",
     );
     // The install prompt drives the report-back call and leaves placeholders for the client.
     expect(row.prompts.install).toContain("/local-skills/companion/package");

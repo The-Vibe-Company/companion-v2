@@ -24,6 +24,46 @@ export const skillVisibilityInputSchema = z.object({
 });
 export type SkillVisibilityInput = z.infer<typeof skillVisibilityInputSchema>;
 
+/**
+ * Body of `PUT /v1/skills/:slug/visibility`. `cascade` opts into also raising the skill's
+ * (transitive) dependencies so they stay at least as visible as the skill — without it, a
+ * broadening change that would leave a dependency less visible is rejected.
+ */
+export const setSkillVisibilityInputSchema = skillVisibilityInputSchema.extend({
+  cascade: z.boolean().default(false),
+});
+export type SetSkillVisibilityInput = z.infer<typeof setSkillVisibilityInputSchema>;
+
+/** Result of a visibility change: the slugs of dependencies raised to cover the new audience. */
+export const setSkillVisibilityResultSchema = z.object({
+  ok: z.literal(true),
+  cascaded: z.array(z.string()),
+});
+export type SetSkillVisibilityResult = z.infer<typeof setSkillVisibilityResultSchema>;
+
+/**
+ * The visibility-cover rule: can everyone who sees `dependent` also see `target`? A skill must
+ * never be more visible than the dependencies it pulls in. Pure + shared by core (enforcement),
+ * the API, and the web app (pre-flight warning) so the rule has one source of truth.
+ *
+ * - target Everyone → always covers.
+ * - dependent Everyone but target not → mismatch.
+ * - dependent private (no teams) → owner-managed, always covered.
+ * - otherwise dependent's teams must be a subset of target's teams.
+ *
+ * `teams` are opaque identifiers; callers must compare like-for-like (all slugs or all ids).
+ */
+export function visibilityCovers(
+  dependent: { everyone: boolean; teams: string[] },
+  target: { everyone: boolean; teams: string[] },
+): boolean {
+  if (target.everyone) return true;
+  if (dependent.everyone) return false;
+  if (dependent.teams.length === 0) return true;
+  const targetTeams = new Set(target.teams);
+  return dependent.teams.every((team) => targetTeams.has(team));
+}
+
 export const skillOwnerKindSchema = z.enum(["user", "team"]);
 export type SkillOwnerKind = z.infer<typeof skillOwnerKindSchema>;
 
