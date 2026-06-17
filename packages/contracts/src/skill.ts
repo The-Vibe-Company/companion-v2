@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { validationStateSchema } from "./scope";
-import { SKILL_NAME_RE, skillRequirementSchema } from "./frontmatter";
+import { SKILL_NAME_RE, SEMVER_RE, skillRequirementSchema } from "./frontmatter";
+import { localSkillStatusSchema } from "./localSkills";
 
 export const teamVisibilitySchema = z.object({
   id: z.string(),
@@ -143,6 +144,40 @@ export const archiveSkillInputSchema = z.object({
 export type ArchiveSkillInput = z.infer<typeof archiveSkillInputSchema>;
 
 /**
+ * Body of `POST /v1/skills/:slug/install` — record a published skill as installed for the caller.
+ * The assistant posts this at the end of the normal install flow (`source: "agent"`); a member can
+ * also mark a skill installed by hand from the UI (`source: "manual"`, e.g. installed another way).
+ * Every field is optional so a bare manual mark with no version is valid.
+ */
+export const reportSkillInstallInputSchema = z.object({
+  /** The installed semver. Drives "update" detection; omitted = version-unknown (stays "installed"). */
+  version: z.string().regex(SEMVER_RE, "version must be a valid semver").optional(),
+  /** Optional source label, e.g. "Claude Code". */
+  agent: z.string().min(1).max(120).optional(),
+  /** Who recorded it. Defaults to "manual"; the agent prompt passes "agent". */
+  source: z.enum(["agent", "manual"]).optional(),
+});
+export type ReportSkillInstallInput = z.infer<typeof reportSkillInstallInputSchema>;
+
+/** Response from `POST /v1/skills/:slug/install`. */
+export const reportSkillInstallResultSchema = z.object({
+  ok: z.literal(true),
+  installed: z.literal(true),
+  status: localSkillStatusSchema,
+  installed_version: z.string().nullable(),
+  current_version: z.string().nullable(),
+});
+export type ReportSkillInstallResult = z.infer<typeof reportSkillInstallResultSchema>;
+
+/** Response from `DELETE /v1/skills/:slug/install` — mark a published skill not installed. */
+export const skillUninstallResultSchema = z.object({
+  ok: z.literal(true),
+  installed: z.literal(false),
+  status: z.literal("none"),
+});
+export type SkillUninstallResult = z.infer<typeof skillUninstallResultSchema>;
+
+/**
  * One row of the `skill_list_v` view — the denormalized read shape the web table
  * and the CLI list both consume. Machine-facing snake_case (mirrors the DB).
  */
@@ -172,6 +207,12 @@ export const skillListRowSchema = z.object({
   requirements: z.array(skillRequirementSchema).default([]),
   star_count: z.number().int().nonnegative(),
   starred: z.boolean(),
+  /** Whether the caller has this skill recorded as installed (any version). */
+  installed: z.boolean().default(false),
+  /** Version the caller recorded installing, or null (never installed, or marked without a version). */
+  installed_version: z.string().nullable().default(null),
+  /** "none" (not installed) | "installed" (current, or version-unknown) | "update" (behind current). */
+  install_status: localSkillStatusSchema.default("none"),
   /** Number of dependencies the current version declares. */
   requires_count: z.number().int().nonnegative().default(0),
   /** Number of other skills (current versions) that depend on this one. */

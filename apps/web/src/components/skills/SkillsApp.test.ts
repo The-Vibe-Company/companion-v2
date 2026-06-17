@@ -56,6 +56,8 @@ function skill(overrides: Partial<SkillVM>): SkillVM {
     updated: "just now",
     stars: 0,
     starred: false,
+    installStatus: "none",
+    installedVersion: null,
     teams: [],
     teamSlugs: [],
     requiresCount: 0,

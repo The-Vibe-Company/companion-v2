@@ -1058,6 +1058,18 @@ export async function listSkills(input: {
             ),
           ),
       ),
+      installed: exists(
+        database
+          .select({ one: sql`1` })
+          .from(schema.skillInstalls)
+          .where(
+            and(
+              eq(schema.skillInstalls.orgId, input.orgId),
+              eq(schema.skillInstalls.skillId, schema.skills.id),
+              eq(schema.skillInstalls.userId, input.actor.id),
+            ),
+          ),
+      ),
       archived_at: schema.skills.archivedAt,
       created_at: schema.skills.createdAt,
       updated_at: schema.skills.updatedAt,
@@ -1106,6 +1118,34 @@ export async function listSkills(input: {
     .where(eq(schema.skillVersionDependencies.orgId, input.orgId));
   const referencedSlugs = new Set((Array.isArray(referencedRows) ? referencedRows : []).map((d) => d.slug));
 
+  // The caller's installed version per skill, for status computation. Scoped to the whole org (not
+  // just the displayed rows) so dependency-aware roll-up can see installs outside the current filter/
+  // view. A separate query (not a join) keeps the grouped main select simple; guarded for mocked DBs.
+  const installBySkill = new Map<string, string | null>();
+  const installRows = await database
+    .select({
+      skill_id: schema.skillInstalls.skillId,
+      installed_version: schema.skillInstalls.installedVersion,
+    })
+    .from(schema.skillInstalls)
+    .where(
+      and(eq(schema.skillInstalls.orgId, input.orgId), eq(schema.skillInstalls.userId, input.actor.id)),
+    );
+  for (const row of Array.isArray(installRows) ? installRows : []) {
+    installBySkill.set(row.skill_id, row.installed_version);
+  }
+
+  // Dependency-aware update detection: a skill is "update" if it is behind its own current version,
+  // OR any skill in its dependency closure that the caller has installed is behind. Reinstalling the
+  // parent re-pulls its dependency set, so a stale dependency means the parent is effectively stale.
+  // Current versions come from the org-wide graph so the result is the same in every filtered view.
+  const selfBehind = (id: string): boolean => {
+    const installedVersion = installBySkill.get(id);
+    const current = graph.byId.get(id)?.currentVersion ?? null;
+    if (installedVersion == null || current == null) return false;
+    return compareSemver(installedVersion, current) < 0;
+  };
+
   return rows.map((r) => {
     const manifest = parseStoredSkillFrontmatter(r.frontmatter);
     const requires = graph.requiresBySkill.get(r.id) ?? [];
@@ -1136,6 +1176,20 @@ export async function listSkills(input: {
       size_bytes: r.size_bytes,
       star_count: r.star_count,
       starred: r.starred,
+      installed: Boolean(r.installed),
+      installed_version: installBySkill.get(r.id) ?? null,
+      install_status: (() => {
+        const own = computeSkillInstallStatus(
+          Boolean(r.installed),
+          installBySkill.get(r.id) ?? null,
+          r.current_version,
+        );
+        // Roll up a stale dependency into an "update" hint on the installed parent.
+        if (own === "installed" && depClosureHasUpdate(r.id, graph.requiresBySkill, selfBehind)) {
+          return "update";
+        }
+        return own;
+      })(),
       requires_count: requires.length,
       used_by_count: new Set(usedBy.map((u) => u.dependentId)).size,
       dep_warn: depWarn,
@@ -2199,6 +2253,8 @@ interface DepGraphSkill {
   everyone: boolean;
   archivedAt: Date | null;
   currentVersionId: string | null;
+  /** Current published version string (null when no version), for org-wide update comparisons. */
+  currentVersion: string | null;
   ownerId: string;
   ownerTeamId: string | null;
   /** Teams that can see this skill = its team shares plus its owning team. */
@@ -2233,10 +2289,12 @@ async function loadDepGraph(database: Db, orgId: string): Promise<DepGraph> {
       everyone: schema.skills.everyone,
       archivedAt: schema.skills.archivedAt,
       currentVersionId: schema.skills.currentVersionId,
+      currentVersion: schema.skillVersions.version,
       ownerId: schema.skills.ownerId,
       ownerTeamId: schema.skills.ownerTeamId,
     })
     .from(schema.skills)
+    .leftJoin(schema.skillVersions, eq(schema.skillVersions.id, schema.skills.currentVersionId))
     .where(eq(schema.skills.orgId, orgId));
   // Defensive: enrichment-only loader — never let a malformed result break list/detail reads.
   const skillRows = Array.isArray(skillRowsRaw) ? skillRowsRaw : [];
@@ -2250,6 +2308,7 @@ async function loadDepGraph(database: Db, orgId: string): Promise<DepGraph> {
       everyone: s.everyone,
       archivedAt: s.archivedAt,
       currentVersionId: s.currentVersionId,
+      currentVersion: s.currentVersion ?? null,
       ownerId: s.ownerId,
       ownerTeamId: s.ownerTeamId,
       audienceTeams: new Set(s.ownerTeamId ? [s.ownerTeamId] : []),
@@ -2613,6 +2672,7 @@ function depGraphDependentFor(input: {
     everyone,
     archivedAt: null,
     currentVersionId: existing?.currentVersionId ?? null,
+    currentVersion: existing?.currentVersion ?? null,
     ownerId: existing?.ownerId ?? "",
     ownerTeamId: existing?.ownerTeamId ?? null,
     audienceTeams: teams,
@@ -3021,4 +3081,183 @@ export function computeLocalSkillStatus(
 ): LocalSkillStatus {
   if (!installedVersion) return "none";
   return compareSemver(installedVersion, availableVersion) < 0 ? "update" : "installed";
+}
+
+/**
+ * Install status for a PUBLISHED skill row from the caller's point of view. Distinct from
+ * `computeLocalSkillStatus` because a manual mark can have a null version: a present-but-version-
+ * unknown install is "installed", never "update".
+ */
+export function computeSkillInstallStatus(
+  hasInstall: boolean,
+  installedVersion: string | null,
+  currentVersion: string | null,
+): LocalSkillStatus {
+  if (!hasInstall) return "none";
+  if (!installedVersion || !currentVersion) return "installed";
+  return compareSemver(installedVersion, currentVersion) < 0 ? "update" : "installed";
+}
+
+/**
+ * Does any skill in `rootId`'s transitive dependency closure satisfy `isBehind`? Installing a skill
+ * also installs its dependency set, so a stale dependency makes the parent effectively stale — this
+ * rolls that up into an "update available" hint on the parent. Cycle-safe via the visited set.
+ */
+export function depClosureHasUpdate(
+  rootId: string,
+  requiresBySkill: Map<string, { dependsOnSkillId: string | null }[]>,
+  isBehind: (skillId: string) => boolean,
+): boolean {
+  const seen = new Set<string>([rootId]);
+  const walk = (id: string): boolean => {
+    for (const edge of requiresBySkill.get(id) ?? []) {
+      const targetId = edge.dependsOnSkillId;
+      if (!targetId || seen.has(targetId)) continue;
+      seen.add(targetId);
+      if (isBehind(targetId) || walk(targetId)) return true;
+    }
+    return false;
+  };
+  return walk(rootId);
+}
+
+/**
+ * Record (or refresh) the caller's install of a PUBLISHED skill. Idempotent per (org, user, skill):
+ * the first call sets `installedAt`; later calls update the version, label, source, and
+ * `lastReportedAt`. The assistant calls this at the end of the normal install flow (source "agent");
+ * the UI calls it for a manual mark (source "manual"). Visibility-gated via `getSkillBySlug`.
+ */
+export async function installSkill(input: {
+  actor: ActorContext;
+  orgId: string;
+  slug: string;
+  version?: string | null;
+  agentLabel?: string | null;
+  source?: "agent" | "manual";
+  database?: Db;
+}): Promise<{ status: LocalSkillStatus; installedVersion: string | null; currentVersion: string | null }> {
+  const database = input.database ?? db;
+  const skill = await getSkillBySlug(input);
+  if (!skill) throw new Error("skill not found");
+  const now = new Date();
+  const version = input.version?.trim() ? input.version.trim() : null;
+  const agentLabel = input.agentLabel?.trim() ? input.agentLabel.trim() : null;
+  const source = input.source ?? "manual";
+
+  // Reject a reported version newer than the current published version (mirrors the local-skill
+  // guard): a typo/bogus version must not silently suppress future "update" prompts.
+  if (version && skill.current_version && compareSemver(version, skill.current_version) > 0) {
+    throw new Error(
+      `reported version ${version} is newer than the current published version ${skill.current_version}`,
+    );
+  }
+
+  await database
+    .insert(schema.skillInstalls)
+    .values({
+      orgId: input.orgId,
+      userId: input.actor.id,
+      skillId: skill.id,
+      installedVersion: version,
+      agentLabel,
+      source,
+      installedAt: now,
+      lastReportedAt: now,
+    })
+    .onConflictDoUpdate({
+      target: [schema.skillInstalls.orgId, schema.skillInstalls.userId, schema.skillInstalls.skillId],
+      set: { installedVersion: version, agentLabel, source, lastReportedAt: now },
+    });
+
+  await database.insert(schema.auditLog).values({
+    orgId: input.orgId,
+    actorId: input.actor.id,
+    action: "skill.install",
+    targetType: "skill",
+    targetId: skill.id,
+    metadata: { slug: skill.slug, version, agent: agentLabel, source },
+  });
+
+  // Installing a skill also installs its dependency set, so record each resolved (live) dependency in
+  // the closure at its current version. This gives dependency-aware update detection a per-dependency
+  // baseline to compare against later. Idempotent; cascades on every report so a reinstall refreshes
+  // the dependencies too. No audit row per dependency — the parent install is the user-facing action.
+  // The dependency graph is current-version-only, so this only matches reality when the reported
+  // install IS the current version (or unknown); reporting an older version may declare a different
+  // dependency set, so we skip the cascade rather than record dependencies it might not pull.
+  const reflectsCurrentVersion = version === null || version === skill.current_version;
+  const graph = reflectsCurrentVersion ? await loadDepGraph(database, input.orgId) : null;
+  const closure = new Set<string>();
+  const collect = (id: string) => {
+    for (const edge of graph!.requiresBySkill.get(id) ?? []) {
+      const targetId = edge.dependsOnSkillId;
+      if (!targetId || closure.has(targetId)) continue;
+      const target = graph!.byId.get(targetId);
+      if (!target || target.archivedAt || !target.currentVersionId) continue;
+      closure.add(targetId);
+      collect(targetId);
+    }
+  };
+  if (graph) collect(skill.id);
+  if (closure.size) {
+    const versionRowsRaw = await database
+      .select({ id: schema.skills.id, version: schema.skillVersions.version })
+      .from(schema.skills)
+      .innerJoin(schema.skillVersions, eq(schema.skillVersions.id, schema.skills.currentVersionId))
+      .where(and(eq(schema.skills.orgId, input.orgId), inArray(schema.skills.id, [...closure])));
+    for (const dep of Array.isArray(versionRowsRaw) ? versionRowsRaw : []) {
+      if (!dep.version) continue;
+      await database
+        .insert(schema.skillInstalls)
+        .values({
+          orgId: input.orgId,
+          userId: input.actor.id,
+          skillId: dep.id,
+          installedVersion: dep.version,
+          agentLabel,
+          source,
+          installedAt: now,
+          lastReportedAt: now,
+        })
+        .onConflictDoUpdate({
+          target: [schema.skillInstalls.orgId, schema.skillInstalls.userId, schema.skillInstalls.skillId],
+          set: { installedVersion: dep.version, agentLabel, source, lastReportedAt: now },
+        });
+    }
+  }
+
+  return {
+    status: computeSkillInstallStatus(true, version, skill.current_version),
+    installedVersion: version,
+    currentVersion: skill.current_version,
+  };
+}
+
+/** Mark a PUBLISHED skill NOT installed for the caller (uninstall / correct a false state). Idempotent. */
+export async function uninstallSkill(input: {
+  actor: ActorContext;
+  orgId: string;
+  slug: string;
+  database?: Db;
+}): Promise<void> {
+  const database = input.database ?? db;
+  const skill = await getSkillBySlug(input);
+  if (!skill) throw new Error("skill not found");
+  await database
+    .delete(schema.skillInstalls)
+    .where(
+      and(
+        eq(schema.skillInstalls.orgId, input.orgId),
+        eq(schema.skillInstalls.userId, input.actor.id),
+        eq(schema.skillInstalls.skillId, skill.id),
+      ),
+    );
+  await database.insert(schema.auditLog).values({
+    orgId: input.orgId,
+    actorId: input.actor.id,
+    action: "skill.uninstall",
+    targetType: "skill",
+    targetId: skill.id,
+    metadata: { slug: skill.slug },
+  });
 }

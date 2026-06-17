@@ -6,6 +6,8 @@ import type { LocalSkillRow, SkillFilterPreferences, SkillVisibilityInput } from
 import {
   archiveSkill as archiveSkillRpc,
   fetchArchivedSkills,
+  markSkillInstalled,
+  markSkillUninstalled,
   restoreSkill as restoreSkillRpc,
   saveSkillFilterPreferences,
   setSkillVisibility,
@@ -270,6 +272,7 @@ export function SkillsApp({
   const [openId, setOpenId] = useState<string | null>(null);
   const [lastId, setLastId] = useState<string | null>(null);
   const [preferenceStatus, setPreferenceStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const [toast, setToast] = useState<string | null>(null);
   const viewSeq = useRef(0);
   const openIdRef = useRef<string | null>(null);
   const uploadReturnRef = useRef<HTMLElement | null>(null);
@@ -443,6 +446,59 @@ export function SkillsApp({
     },
     [teams],
   );
+
+  // Mark a published skill installed / not installed for the current user. Optimistic, with rollback;
+  // on success it reconciles with the server's computed status (so "update" stays accurate).
+  const setInstalled = useCallback(
+    (id: string, installed: boolean) => {
+      // Derive from the current render snapshot, not from a side effect inside the state updater.
+      const target = skills.find((s) => s.id === id);
+      // Marking installed records the current published version, so a later release surfaces an
+      // "update available" hint (and the persisted state matches this optimistic update).
+      const markVersion = target?.version ?? null;
+      const prev = target ? { status: target.installStatus, version: target.installedVersion } : null;
+      setSkills((arr) =>
+        arr.map((s) =>
+          s.id === id
+            ? installed
+              ? { ...s, installStatus: "installed" as const, installedVersion: markVersion }
+              : { ...s, installStatus: "none" as const, installedVersion: null }
+            : s,
+        ),
+      );
+      const request = installed ? markSkillInstalled(id, markVersion) : markSkillUninstalled(id);
+      request
+        .then((res) => {
+          // res.installed discriminates the union: true → install result (carries the computed status).
+          if (res.installed) {
+            setSkills((arr) =>
+              arr.map((s) =>
+                s.id === id ? { ...s, installStatus: res.status, installedVersion: res.installed_version } : s,
+              ),
+            );
+          }
+          setToast(installed ? `Marked ${id} as installed` : `Marked ${id} as not installed`);
+        })
+        .catch((e) => {
+          if (prev) {
+            setSkills((arr) =>
+              arr.map((s) =>
+                s.id === id ? { ...s, installStatus: prev.status, installedVersion: prev.version } : s,
+              ),
+            );
+          }
+          orgActions.setError((e as Error).message);
+        });
+    },
+    [orgActions, skills],
+  );
+
+  // Auto-dismiss the success toast.
+  useEffect(() => {
+    if (!toast) return;
+    const timer = setTimeout(() => setToast(null), 3000);
+    return () => clearTimeout(timer);
+  }, [toast]);
 
   const changeVisibility = useCallback(
     (id: string, visibility: SkillVisibilityInput) => {
@@ -961,6 +1017,7 @@ export function SkillsApp({
             onPrev={() => go(-1)}
             onNext={() => go(1)}
             onToggleStar={() => toggleStar(skill.id)}
+            onToggleInstalled={() => setInstalled(skill.id, skill.installStatus === "none")}
             onChangeVisibility={(sc) => changeVisibility(skill.id, sc)}
             onInstall={() => setInstallSkill(skill)}
             onUpdate={() => setUpdateSkill(skill)}
@@ -1059,6 +1116,11 @@ export function SkillsApp({
       {orgActions.error && (
         <div className="og-toast" role="alert" onClick={() => orgActions.setError(null)}>
           {orgActions.error}
+        </div>
+      )}
+      {toast && (
+        <div className="og-toast og-toast--ok" role="status" onClick={() => setToast(null)}>
+          {toast}
         </div>
       )}
       {localSettings?.kind === "ready" && (

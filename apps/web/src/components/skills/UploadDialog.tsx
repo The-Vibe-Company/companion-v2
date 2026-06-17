@@ -1773,6 +1773,8 @@ export function InstallDialog({ skill, onClose }: { skill: SkillVM; onClose: () 
   }, [id, skill.version]);
   const installSet = (deps?.requires ?? []).filter((r) => r.status !== "missing");
 
+  // skills:read covers both downloading the package and confirming the install back to Companion
+  // (recording your own install is personal state, so it needs no write authority).
   const ensureToken = useCallback(async () => {
     if (token) return token;
     const issued = await issueToken(["skills:read"]);
@@ -1796,7 +1798,9 @@ Version: ${version}
 Package URL: ${base}/skills/${id}/versions/${version}/package
 Authorization header: Bearer ${tok}
 
-Choose the right local skills folder for the user's agent, download the package, extract it there, and confirm SKILL.md sits at the package root. Report the installed location when done.`;
+Choose the right local skills folder for the user's agent, download the package, extract it there, and confirm SKILL.md sits at the package root. Report the installed location when done.
+
+When the skill is installed, confirm it to Companion so it shows as installed in the workspace: send POST ${base}/skills/${id}/install with header "Authorization: Bearer ${tok}" and JSON body {"version":"${version}","agent":"<the agent you are>","source":"agent"}.`;
   const displayPrompt = buildPrompt(token ?? "cmp_pat_…");
 
   const download = async () => {

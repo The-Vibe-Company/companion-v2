@@ -86,6 +86,50 @@ export function ValidBadge({ v }: { v: ValidationState }) {
   );
 }
 
+export type InstallState = "none" | "installed" | "update";
+
+/**
+ * Per-user install indicator. Returns null for "none" so list rows stay quiet (only Installed /
+ * Update available ever show). Color is always paired with a label per the DESIGN.md status rule.
+ */
+export function InstallBadge({ state }: { state: InstallState }) {
+  if (state === "installed")
+    return (
+      <span className="ibadge ibadge--ok">
+        <span className="ibadge__dot" />
+        Installed
+      </span>
+    );
+  if (state === "update")
+    return (
+      <span className="ibadge ibadge--warn">
+        <span className="ibadge__dot" />
+        Update available
+      </span>
+    );
+  return null;
+}
+
+/**
+ * Compact icon-only install indicator for dense list rows (the full text badge lives in the detail
+ * header). The icon shape carries the meaning, not just color; the label is exposed via title/aria.
+ */
+export function InstallMark({ state }: { state: InstallState }) {
+  if (state === "installed")
+    return (
+      <span className="imark imark--ok" title="Installed" aria-label="Installed">
+        <Icon name="circle-check" size={13} />
+      </span>
+    );
+  if (state === "update")
+    return (
+      <span className="imark imark--warn" title="Update available" aria-label="Update available">
+        <Icon name="arrow-up-circle" size={13} />
+      </span>
+    );
+  return null;
+}
+
 /** GitHub-style star toggle (detail topbar). */
 export function StarButton({
   starred,

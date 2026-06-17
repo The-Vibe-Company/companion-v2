@@ -200,6 +200,7 @@
 .og-toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); z-index: 90; max-width: min(440px, 92vw); padding: 10px 14px;
   border-radius: var(--radius-md); border: 1px solid var(--color-danger-line); background: var(--color-danger-tint); color: var(--color-danger);
   font-size: var(--text-sm); box-shadow: var(--shadow-lg); cursor: pointer; }
+.og-toast--ok { border-color: var(--color-ok-line); background: var(--color-ok-tint); color: var(--color-ok); }
 
 /* ---- Settings drawer --------------------------------------------------- */
 .settings-drawer { position: fixed; inset: 0; z-index: 80; display: flex; justify-content: flex-end; background: var(--color-surface); }

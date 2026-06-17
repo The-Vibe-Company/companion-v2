@@ -39,6 +39,7 @@ function skillRow(
     tools: [],
     star_count: 0,
     starred: false,
+    installed: false,
     created_at: createdAt,
     updated_at: createdAt,
     // camelCase fields read by loadDepGraph (listSkills reads the snake_case ones above).
@@ -147,6 +148,9 @@ function fakeDb({
       },
     },
     select: vi.fn((cols: Record<string, unknown>) => {
+      // The caller's per-skill install rows (none in these visibility fixtures). Must precede the
+      // shares branch below, which also keys on skill_id.
+      if ("skill_id" in cols && "installed_version" in cols) return selectChain([]);
       if ("skill_id" in cols) return selectChain(shares);
       // loadDepGraph's current-version dependency edges (distinct from listSkills' referencedRows).
       if ("dependsOnSlug" in cols && "skillVersionId" in cols) return selectChain(edges);
