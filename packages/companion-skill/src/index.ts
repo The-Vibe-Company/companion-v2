@@ -52,6 +52,7 @@ export const COMPANION_SKILL_MANIFEST: CompanionSkillManifest = {
   commands: [
     { name: "Publish a skill", desc: "Validate a skill, choose owner/visibility, and publish it safely." },
     { name: "Update a skill", desc: "Push a new version with targeted identity and visibility checks." },
+    { name: "Change visibility", desc: "Re-share a published skill; cascade to dependencies or dependents." },
     { name: "Resolve dependencies", desc: "Analyze packages and sync companion.json before upload." },
     { name: "Declare required secrets", desc: "Detect the secrets and env vars a skill needs and record how to obtain each." },
     { name: "Manage skill API calls", desc: "Use the supported skills API surface without crossing into workspace admin." },
@@ -62,6 +63,13 @@ export const COMPANION_SKILL_MANIFEST: CompanionSkillManifest = {
     { name: "Manage your skills", desc: "List and organize the skills on this machine." },
   ],
   changelog: [
+    {
+      version: "1.4.0",
+      changes: [
+        "Changes a published skill's visibility with PUT /skills/{slug}/visibility (works with a skills:write token).",
+        "Cascade also raises required sub-skills or reduces dependent skills so the cover invariant holds.",
+      ],
+    },
     {
       version: "1.3.0",
       changes: [

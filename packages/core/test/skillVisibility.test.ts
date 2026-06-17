@@ -42,6 +42,11 @@ function skillRow(
     installed: false,
     created_at: createdAt,
     updated_at: createdAt,
+    // camelCase fields read by loadDepGraph (listSkills reads the snake_case ones above).
+    archivedAt: null,
+    currentVersionId: `${id}-cv`,
+    ownerId: ownerUserId,
+    ownerTeamId,
   };
 }
 
@@ -87,12 +92,16 @@ function fakeDb({
   ownerTeamRole = "editor",
   memberOfVisibilityTeams = true,
   existingSkill = { id: "skill-one-team", ownerId: "other-user", ownerTeamId: null as string | null },
+  extraSkills = [] as ReturnType<typeof skillRow>[],
+  edges = [] as Array<{ skillId: string; skillVersionId: string; dependsOnSlug: string; dependsOnSkillId: string | null }>,
 }: {
   orgRole?: "owner" | "admin" | "developer" | null;
   sharedTeamRole?: "admin" | "editor" | "reader" | null;
   ownerTeamRole?: "admin" | "editor" | "reader" | null;
   memberOfVisibilityTeams?: boolean;
   existingSkill?: { id: string; ownerId: string; ownerTeamId: string | null } | null;
+  extraSkills?: ReturnType<typeof skillRow>[];
+  edges?: Array<{ skillId: string; skillVersionId: string; dependsOnSlug: string; dependsOnSkillId: string | null }>;
 } = {}) {
   const writes = {
     updates: [] as Array<Record<string, unknown>>,
@@ -113,6 +122,7 @@ function fakeDb({
       teamId: "team-platform",
       name: "Platform",
     }),
+    ...extraSkills,
   ];
   const shares = [
     { skill_id: "skill-one-team", id: "team-platform", slug: "platform", name: "Platform" },
@@ -142,6 +152,10 @@ function fakeDb({
       // shares branch below, which also keys on skill_id.
       if ("skill_id" in cols && "installed_version" in cols) return selectChain([]);
       if ("skill_id" in cols) return selectChain(shares);
+      // loadDepGraph's current-version dependency edges (distinct from listSkills' referencedRows).
+      if ("dependsOnSlug" in cols && "skillVersionId" in cols) return selectChain(edges);
+      // loadDepGraph's team-share rows (camelCase {skillId, teamId}); membership query is {teamId} only.
+      if ("skillId" in cols && "teamId" in cols) return selectChain([]);
       if ("teamRole" in cols) return selectChain(sharedTeamRole ? [{ teamRole: sharedTeamRole }] : []);
       if ("teamId" in cols) {
         const chain = selectChain(memberOfVisibilityTeams ? [{ teamId: "team-platform" }] : []);
@@ -431,5 +445,172 @@ describe("setSkillVisibility authorization", () => {
         database: fakeDb({ orgRole: null }),
       }),
     ).rejects.toThrow("not a member of this organization");
+  });
+});
+
+describe("setSkillVisibility dependency cascade", () => {
+  // private-skill (owned by the actor) requires dep-skill via its current version.
+  const requiresDep = (depOwner: Parameters<typeof skillRow>[3] = {}) => ({
+    extraSkills: [skillRow("skill-dep", "dep-skill", false, depOwner)],
+    edges: [
+      {
+        skillId: "skill-private",
+        skillVersionId: "skill-private-cv",
+        dependsOnSlug: "dep-skill",
+        dependsOnSkillId: "skill-dep",
+      },
+    ],
+  });
+
+  it("rejects broadening past a less-visible dependency without cascade", async () => {
+    await expect(
+      setSkillVisibility({
+        actor,
+        orgId: ORG,
+        slug: "private-skill",
+        visibility: { everyone: true, teams: [] },
+        database: fakeDb(requiresDep()),
+      }),
+    ).rejects.toThrow("cannot broaden visibility: dependency dep-skill");
+  });
+
+  it("raises the dependency to match when cascade is set", async () => {
+    const database = fakeDb(requiresDep()) as Db & {
+      __writes: { updates: Array<Record<string, unknown>>; insertedShares: unknown[] };
+    };
+
+    const result = await setSkillVisibility({
+      actor,
+      orgId: ORG,
+      slug: "private-skill",
+      visibility: { everyone: true, teams: [] },
+      cascade: true,
+      database,
+    });
+
+    expect(result).toEqual({ cascaded: ["dep-skill"] });
+    // Both the skill and its dependency are flipped to everyone in the same transaction.
+    expect(database.__writes.updates).toEqual([
+      expect.objectContaining({ everyone: true }),
+      expect.objectContaining({ everyone: true }),
+    ]);
+  });
+
+  it("rejects the cascade when the actor cannot modify a dependency", async () => {
+    await expect(
+      setSkillVisibility({
+        actor,
+        orgId: ORG,
+        slug: "private-skill",
+        visibility: { everyone: true, teams: [] },
+        cascade: true,
+        // dep-skill is owned by a team where the actor is only a reader.
+        database: fakeDb({
+          ownerTeamRole: "reader",
+          ...requiresDep({ kind: "team", userId: "creator", teamId: "team-x", name: "X" }),
+        }),
+      }),
+    ).rejects.toThrow("cannot update sub-skill dep-skill");
+  });
+});
+
+describe("setSkillVisibility dependent (narrowing) cascade", () => {
+  // dependent-skill (the dependent) requires everyone-skill (the parent being narrowed).
+  const dependedOnBy = (dependent: Parameters<typeof skillRow>[3] = {}, everyone = true) => ({
+    extraSkills: [skillRow("skill-dependent", "dependent-skill", everyone, dependent)],
+    edges: [
+      {
+        skillId: "skill-dependent",
+        skillVersionId: "skill-dependent-cv",
+        dependsOnSlug: "everyone-skill",
+        dependsOnSkillId: "skill-everyone",
+      },
+    ],
+  });
+
+  it("rejects narrowing that would strand a dependent without cascade", async () => {
+    await expect(
+      setSkillVisibility({
+        actor,
+        orgId: ORG,
+        slug: "everyone-skill",
+        visibility: { everyone: false, teams: [] },
+        database: fakeDb(dependedOnBy()),
+      }),
+    ).rejects.toThrow("cannot narrow visibility: dependent-skill depends on this skill");
+  });
+
+  it("restricts the dependent to match when cascade is set", async () => {
+    const database = fakeDb(dependedOnBy()) as Db & {
+      __writes: { updates: Array<Record<string, unknown>> };
+    };
+
+    const result = await setSkillVisibility({
+      actor,
+      orgId: ORG,
+      slug: "everyone-skill",
+      visibility: { everyone: false, teams: [] },
+      cascade: true,
+      database,
+    });
+
+    expect(result).toEqual({ cascaded: ["dependent-skill"] });
+    // Both the skill and its dependent are narrowed to private in the same transaction.
+    expect(database.__writes.updates).toEqual([
+      expect.objectContaining({ everyone: false }),
+      expect.objectContaining({ everyone: false }),
+    ]);
+  });
+
+  it("rejects narrowing when a dependent's owner team is outside the new audience", async () => {
+    await expect(
+      setSkillVisibility({
+        actor,
+        orgId: ORG,
+        slug: "everyone-skill",
+        visibility: { everyone: false, teams: [] },
+        cascade: true,
+        // dependent-skill is owned by team-x, which is not in the new (private) audience.
+        database: fakeDb({
+          orgRole: "admin",
+          ...dependedOnBy({ kind: "team", userId: "creator", teamId: "team-x", name: "X" }, false),
+        }),
+      }),
+    ).rejects.toThrow("would stay visible to an owner outside the new audience");
+  });
+
+  it("rejects narrowing to private when a dependent is owned by another user", async () => {
+    await expect(
+      setSkillVisibility({
+        actor,
+        orgId: ORG,
+        slug: "everyone-skill",
+        visibility: { everyone: false, teams: [] },
+        cascade: true,
+        // dependent-skill is owned by another user, who would keep seeing it but lose the dependency.
+        database: fakeDb({
+          orgRole: "admin",
+          ...dependedOnBy({ userId: "other-user", name: "Other User" }, true),
+        }),
+      }),
+    ).rejects.toThrow("would stay visible to an owner outside the new audience");
+  });
+
+  it("does not silently skip a private dependent owned by another user", async () => {
+    // A private dependent reads as "covered" by visibilityCovers, but its owner still can't see the
+    // narrowed dependency — the cascade must reject it rather than skip it.
+    await expect(
+      setSkillVisibility({
+        actor,
+        orgId: ORG,
+        slug: "everyone-skill",
+        visibility: { everyone: false, teams: [] },
+        cascade: true,
+        database: fakeDb({
+          orgRole: "admin",
+          ...dependedOnBy({ userId: "other-user", name: "Other User" }, false),
+        }),
+      }),
+    ).rejects.toThrow("would stay visible to an owner outside the new audience");
   });
 });
