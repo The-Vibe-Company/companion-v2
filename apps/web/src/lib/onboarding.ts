@@ -3,6 +3,7 @@
 import { apiFetch } from "./apiClient";
 
 export interface OnboardingMatchedOrg {
+  id: string;
   name: string;
   domain: string;
   memberCount: number;
@@ -14,7 +15,7 @@ export interface OnboardingContext {
   email: string;
   domain: string | null;
   isPersonal: boolean;
-  matchedOrg: OnboardingMatchedOrg | null;
+  matchedOrgs: OnboardingMatchedOrg[];
 }
 
 export interface CompleteOnboardingPayload {
@@ -23,9 +24,9 @@ export interface CompleteOnboardingPayload {
   invites: string[];
 }
 
-/** Join the domain-auto-join org for the signed-in user's verified email domain. */
-export async function joinByDomain(): Promise<{ orgId: string }> {
-  return apiFetch("/v1/onboarding/join", { method: "POST" });
+/** Join a selected domain-access org for the signed-in user's verified email domain. */
+export async function joinByDomain(orgId: string): Promise<{ orgId: string }> {
+  return apiFetch("/v1/onboarding/join", { method: "POST", body: JSON.stringify({ orgId }) });
 }
 
 /** Create the org + first team + invites and finish onboarding. */

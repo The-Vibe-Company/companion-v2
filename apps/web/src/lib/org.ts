@@ -102,7 +102,6 @@ export async function updateOrg(
   patch: {
     name?: string;
     slug?: string;
-    domainAutoJoin?: boolean;
     color?: string | null;
     logoUrl?: string | null;
   },
@@ -119,6 +118,17 @@ export async function updateOrg(
     method: "PUT",
     body: JSON.stringify(patch),
   });
+}
+
+export async function addAccessDomain(domain: string): Promise<{ id: string; domain: string; createdAt: string }> {
+  return apiFetch("/v1/orgs/current/domains", {
+    method: "POST",
+    body: JSON.stringify({ domain }),
+  });
+}
+
+export async function removeAccessDomain(domainId: string): Promise<void> {
+  await apiFetch(`/v1/orgs/current/domains/${domainId}`, { method: "DELETE" });
 }
 
 /**

@@ -44,6 +44,7 @@ describe("SettingsController", () => {
         created: "2025-01-12",
         domain: null,
         domainAutoJoin: false,
+        accessDomains: [],
         members: {},
         teams: [{ id: "team_1", slug: "platform", name: "Platform", description: "", color: null, icon: null, members: {} }],
       },

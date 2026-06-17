@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import type { OrgRole, TeamRole } from "@companion/contracts";
 import {
+  addAccessDomain as addAccessDomainRpc,
   addTeamMember as addTeamMemberRpc,
   createTeam as createTeamRpc,
   deleteTeam as deleteTeamRpc,
@@ -11,6 +12,7 @@ import {
   issueToken as issueTokenRpc,
   listTokens as listTokensRpc,
   removeMember as removeMemberRpc,
+  removeAccessDomain as removeAccessDomainRpc,
   removeTeamMember as removeTeamMemberRpc,
   revokeInvite as revokeInviteRpc,
   revokeToken as revokeTokenRpc,
@@ -50,13 +52,14 @@ import type {
 
 function normalizeOrgFull(org: OrgFull): OrgFull {
   const members = Array.isArray(org.members) ? org.members : [];
+  const accessDomains = Array.isArray(org.accessDomains) ? org.accessDomains : [];
   const teams = Array.isArray(org.teams)
     ? org.teams.map((team) => ({
         ...team,
         members: Array.isArray(team.members) ? team.members : [],
       }))
     : [];
-  return { ...org, members, teams };
+  return { ...org, accessDomains, members, teams };
 }
 
 /** Build the canonical settings URL: `?view=` (+ `&team=` for team panes, `&dialog=`). */
@@ -280,6 +283,40 @@ export function SettingsController({
         setErr(e instanceof Error ? e.message : String(e));
         void refreshSettingsData();
         throw e;
+      } finally {
+        setBusy(false);
+      }
+    },
+    addAccessDomain: async (domain) => {
+      setBusy(true);
+      try {
+        const added = await addAccessDomainRpc(domain);
+        setCurrent((c) => ({
+          ...c,
+          accessDomains: c.accessDomains.some((item) => item.id === added.id)
+            ? c.accessDomains
+            : [...c.accessDomains, { id: added.id, domain: added.domain, createdAt: "today" }].sort((a, b) =>
+                a.domain.localeCompare(b.domain),
+              ),
+        }));
+      } catch (e) {
+        setErr((e as Error).message);
+        void refreshSettingsData();
+        throw e;
+      } finally {
+        setBusy(false);
+      }
+    },
+    removeAccessDomain: async (domainId) => {
+      const prev = current.accessDomains;
+      setCurrent((c) => ({ ...c, accessDomains: c.accessDomains.filter((domain) => domain.id !== domainId) }));
+      setBusy(true);
+      try {
+        await removeAccessDomainRpc(domainId);
+      } catch (e) {
+        setErr((e as Error).message);
+        setCurrent((c) => ({ ...c, accessDomains: prev }));
+        void refreshSettingsData();
       } finally {
         setBusy(false);
       }

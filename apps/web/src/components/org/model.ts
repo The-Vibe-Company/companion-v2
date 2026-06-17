@@ -34,6 +34,12 @@ export interface OrgTeam {
   members: OrgTeamMember[];
 }
 
+export interface OrgAccessDomain {
+  id: string;
+  domain: string;
+  createdAt: string;
+}
+
 /** The current org with its full membership + team graph (powers the settings panes). */
 export interface OrgFull {
   id: string;
@@ -45,13 +51,14 @@ export interface OrgFull {
   created: string; // formatted creation date (Workspace › General "Details")
   domain: string | null;
   domainAutoJoin: boolean;
+  accessDomains: OrgAccessDomain[];
   color: string | null;
   logoUrl: string | null;
   members: OrgMember[];
   teams: OrgTeam[];
 }
 
-/** Signed-in actor context for the domain auto-join control. */
+/** Signed-in actor context for the domain access editor. */
 export interface DomainJoinVM {
   actorDomain: string | null;
   actorDomainIsPersonal: boolean;
@@ -129,7 +136,7 @@ export interface OrgCtx {
   ownerCount: (org: OrgFull) => number;
   /** Personal display prefs (theme + accent), persisted per-device in localStorage. */
   prefs: { theme: "light" | "dark" | "system"; accent: string };
-  /** Signed-in actor context for the domain auto-join control (Workspace › General). */
+  /** Signed-in actor context for the domain access editor (Workspace › General). */
   domainJoin: DomainJoinVM;
   setTheme: (theme: "light" | "dark" | "system") => void;
   setAccent: (accent: string) => void;
@@ -137,10 +144,11 @@ export interface OrgCtx {
   setWorkspace: (patch: {
     name?: string;
     slug?: string;
-    domainAutoJoin?: boolean;
     color?: string | null;
     logoUrl?: string | null;
   }) => void;
+  addAccessDomain: (domain: string) => Promise<void>;
+  removeAccessDomain: (domainId: string) => Promise<void>;
   uploadWorkspaceLogo: (file: File) => Promise<void>;
   updateTeam: (teamId: string, patch: { name?: string; slug?: string; description?: string; color?: string | null; icon?: string | null }) => void;
   deleteTeam: (teamId: string) => void;

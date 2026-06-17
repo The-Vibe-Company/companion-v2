@@ -46,6 +46,13 @@ export const orgSettingsInvitationSchema = z.object({
 });
 export type OrgSettingsInvitation = z.infer<typeof orgSettingsInvitationSchema>;
 
+export const orgSettingsAccessDomainSchema = z.object({
+  id: z.string(),
+  domain: z.string(),
+  createdAt: z.string(),
+});
+export type OrgSettingsAccessDomain = z.infer<typeof orgSettingsAccessDomainSchema>;
+
 /** Current org identity shown on the Workspace → General "Details" block. */
 export const orgSettingsOrgSchema = z.object({
   id: z.string(),
@@ -56,12 +63,13 @@ export const orgSettingsOrgSchema = z.object({
   createdAt: z.string(),
   domain: z.string().nullable().default(null),
   domainAutoJoin: z.boolean().default(false),
+  accessDomains: z.array(orgSettingsAccessDomainSchema).default([]),
   color: z.string().nullable().default(null),
   logoUrl: z.string().nullable().default(null),
 });
 export type OrgSettingsOrg = z.infer<typeof orgSettingsOrgSchema>;
 
-/** Signed-in actor context for the domain auto-join control (Workspace › General). */
+/** Signed-in actor context for the domain access editor (Workspace › General). */
 export const orgSettingsDomainJoinSchema = z.object({
   actorDomain: z.string().nullable(),
   actorDomainIsPersonal: z.boolean(),
@@ -95,12 +103,11 @@ export const TEAM_BRAND_COLORS = [
 
 export const teamBrandColorSchema = z.enum(TEAM_BRAND_COLORS);
 
-/** Body of `PUT /v1/orgs/current` — rename, re-slug, domain auto-join, and/or branding. */
+/** Body of `PUT /v1/orgs/current` — rename, re-slug, and/or branding. */
 export const updateOrgInputSchema = z
   .object({
     name: z.string().min(1).max(120).optional(),
     slug: z.string().min(1).max(120).optional(),
-    domainAutoJoin: z.boolean().optional(),
     color: teamBrandColorSchema.nullish(),
     logoUrl: z.string().url().max(2048).nullish(),
   })
@@ -108,12 +115,16 @@ export const updateOrgInputSchema = z
     (v) =>
       v.name !== undefined ||
       v.slug !== undefined ||
-      v.domainAutoJoin !== undefined ||
       v.color !== undefined ||
       v.logoUrl !== undefined,
     { message: "Provide at least one field to update." },
   );
 export type UpdateOrgInput = z.infer<typeof updateOrgInputSchema>;
+
+export const addOrgAccessDomainInputSchema = z.object({
+  domain: z.string().min(1).max(253),
+});
+export type AddOrgAccessDomainInput = z.infer<typeof addOrgAccessDomainInputSchema>;
 
 /** Body of `PUT /v1/teams/:teamId` — rename, re-slug, describe, and/or edit branding. */
 export const updateTeamInputSchema = z

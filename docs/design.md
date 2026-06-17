@@ -141,12 +141,14 @@ Cross-skill integrity for `parent_id`/`version_id` is not FK-enforceable and is 
 layer; a reply inherits its thread context (its `version_id` is forced `null`). Marking a thread
 deprecated is allowed for the comment author, an org admin, or the skill owner.
 
-Onboarding adds a few columns: `organizations.domain` + `organizations.domain_auto_join` (a verified
-email domain that grants membership, and whether matching signups join automatically), plus cosmetic
-`organizations.color`/`logo_url` and `teams.color`/`teams.icon`. `teams.description` holds an optional
-free-text summary shown on the team's settings page. `profiles.onboarded_at` records that a
-user has finished onboarding. A partial unique index on `lower(organizations.domain)` enforces one org
-per verified domain.
+Onboarding adds cosmetic `organizations.color`/`logo_url` and `teams.color`/`teams.icon`.
+`teams.description` holds an optional free-text summary shown on the team's settings page.
+`profiles.onboarded_at` records that a user has finished onboarding. Domain-based discovery and
+self-serve joining live in `organization_domains`: each row belongs to one org, stores a normalized
+email domain, and is unique only within that org (`org_id`, `lower(domain)`). Multiple orgs may share
+the same domain, and one org may allow multiple domains. Legacy `organizations.domain` +
+`organizations.domain_auto_join` columns may still be populated for compatibility, but they are not
+the source of truth for onboarding joins.
 
 ## Authentication
 
@@ -184,16 +186,18 @@ drives the flow:
 
 - A **free/consumer** domain (e.g. `gmail.com`) — classified via the maintained `free-email-domains`
   blocklist in `packages/core/email-domains.ts` — has no inferable org, so the user creates one.
-- A **corporate** domain that matches an existing `domain_auto_join` org → the user is offered to join it
-  (the org is re-derived server-side from the verified email; the client never supplies an org id).
+- A **corporate** domain that matches one or more `organization_domains` rows → the user is offered the
+  matching org list and chooses one. The selected org id is revalidated server-side against the actor's
+  verified email domain before membership is created.
 - Otherwise the user creates an org (name, optional website + best-effort logo/brand color, a first team
   with a color + emoji icon, and teammate invites).
 
 `completeOnboarding` writes the org, first team, invitations, and `onboarded_at` in one transaction;
 `joinOrgByDomain` adds the membership and stamps `onboarded_at`; `acceptInvitation` stamps it too.
-Domain claiming and auto-join are only honored for the actor's **own** corporate domain, and joining (or
-enabling auto-join) requires a verified email when `COMPANION_REQUIRE_VERIFIED_DOMAIN_JOIN` is on
-(default: production). `ensureUserBootstrap` now only upserts the `profiles` row — the legacy
+Onboarding-created domain access is only honored for the actor's **own** corporate domain, and joining
+requires a verified email when `COMPANION_REQUIRE_VERIFIED_DOMAIN_JOIN` is on (default: production).
+Org owners/admins can later add or remove access domains from Workspace settings, but adding a domain
+requires the admin's own verified corporate email domain to match the requested domain. `ensureUserBootstrap` now only upserts the `profiles` row — the legacy
 "first user owns the seeded Acme org" auto-bootstrap was removed in favor of this flow.
 
 ## Authorization
@@ -212,8 +216,9 @@ directly to Postgres.
 - Auth: `/auth/*` Better Auth endpoints (email/password, `email-otp/*` verification + reset, and
   `sign-in/social` + `callback/google`), plus `/v1/auth/login`, `/v1/auth/logout`,
   `/v1/auth/whoami` for CLI ergonomics. `whoami` also returns `onboarded` / `needsOnboarding`.
-- Onboarding: `GET /v1/onboarding/context` (email-domain classification + any auto-join org, no org id),
-  `POST /v1/onboarding/join` (join the auto-join org for the verified domain),
+- Onboarding: `GET /v1/onboarding/context` (email-domain classification + `matched_orgs[]` for
+  domain-access orgs), `POST /v1/onboarding/join` (join a selected org after server-side domain
+  revalidation),
   `POST /v1/onboarding/create` (create org + first team + invites, finish onboarding).
 - Tokens: `GET /v1/tokens` (list the caller's own active keys, no plaintext — it backs the personal
   Account pane, so it is caller-scoped even for admins), `POST /v1/tokens` (issue a scoped `cmp_pat_…`,
@@ -239,7 +244,9 @@ directly to Postgres.
   bundled skill as `.zip`), and `POST /v1/local-skills/:key/installed` (the install callback: the
   skill reports `{ version, agent? }` so the workspace learns it is installed and at which version).
 - Orgs & settings: `/v1/orgs`, `GET`/`POST`/`PUT /v1/orgs/current` (read/select/rename+reslug the org,
-  admin only for `PUT`), `GET /v1/orgs/current/settings` (members, invitations, teams + descriptions),
+  admin only for `PUT`), `GET /v1/orgs/current/settings` (members, invitations, teams + descriptions,
+  access domains), `POST /v1/orgs/current/domains` and
+  `DELETE /v1/orgs/current/domains/:domainId` (admin-only domain access list management),
   `PUT /v1/users/me` (update display name), `/v1/teams` + `PUT`/`DELETE /v1/teams/:id` (rename/describe,
   or delete a team — org admin; deleting a team cascades only that team's skill-share rows), and
   `/v1/invitations`.

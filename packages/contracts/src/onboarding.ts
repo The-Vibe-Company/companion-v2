@@ -1,8 +1,9 @@
 import { z } from "zod";
 import { teamBrandColorSchema } from "./orgSettings";
 
-/** A domain-auto-join org surfaced during onboarding (no id — coarse counts only). */
+/** A domain-access org surfaced during onboarding. The id is safe: join is re-verified server-side. */
 export const onboardingMatchedOrgSchema = z.object({
+  id: z.string(),
   name: z.string(),
   domain: z.string(),
   member_count: z.number().int().nonnegative(),
@@ -15,9 +16,14 @@ export const onboardingContextSchema = z.object({
   email: z.string(),
   domain: z.string().nullable(),
   is_personal: z.boolean(),
-  matched_org: onboardingMatchedOrgSchema.nullable(),
+  matched_orgs: z.array(onboardingMatchedOrgSchema).default([]),
 });
 export type OnboardingContextResponse = z.infer<typeof onboardingContextSchema>;
+
+export const joinOnboardingOrgInputSchema = z.object({
+  orgId: z.string().min(1),
+});
+export type JoinOnboardingOrgInput = z.infer<typeof joinOnboardingOrgInputSchema>;
 
 /** Request body of `POST /v1/onboarding/create`. */
 export const completeOnboardingInputSchema = z.object({

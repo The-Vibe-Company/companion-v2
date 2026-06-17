@@ -3,9 +3,11 @@ import type { Db } from "@companion/db";
 import { apiTokenRowSchema, TEAM_BRAND_COLORS } from "@companion/contracts";
 import {
   API_TOKEN_TTL_MS,
+  addOrgAccessDomain,
   deleteTeam,
   issueApiToken,
   listApiTokens,
+  removeOrgAccessDomain,
   updateOrg,
   updateTeam,
   updateUserProfile,
@@ -72,6 +74,8 @@ interface FakeDbOptions {
   tokenRows?: Array<Record<string, unknown>>;
   /** Rows returned by an `insert(...).returning(...)`. */
   insertReturning?: Array<Record<string, unknown>>;
+  /** Whether the actor's email is verified for domain-access mutations. */
+  emailVerified?: boolean;
   /** Rows returned by an `update(...).returning(...)`. */
   updateReturning?: Array<Record<string, unknown>>;
   /** Skill share rows affected by deleteTeam. */
@@ -197,7 +201,7 @@ function fakeDb(options: FakeDbOptions = {}) {
         record.values = values;
         return api;
       },
-      onConflictDoNothing: vi.fn(async () => undefined),
+      onConflictDoNothing: vi.fn(() => api),
       returning() {
         return Promise.resolve(options.insertReturning ?? [{ id: "token-id" }]);
       },
@@ -240,7 +244,7 @@ function fakeDb(options: FakeDbOptions = {}) {
         findFirst: vi.fn(async () => (orgFindResults.length ? orgFindResults.shift() ?? null : null)),
       },
       user: {
-        findFirst: vi.fn(async () => ({ emailVerified: true })),
+        findFirst: vi.fn(async () => ({ emailVerified: options.emailVerified ?? true })),
       },
       teams: {
         findFirst: vi.fn(async () => (teamFindResults.length ? teamFindResults.shift() ?? null : options.team ?? null)),
@@ -304,28 +308,6 @@ describe("updateOrg", () => {
     await expect(updateOrg({ actor: owner, orgId: ORG_A, database })).rejects.toThrow("nothing to update");
   });
 
-  it("enables domain auto-join for the actor's corporate domain", async () => {
-    const { database, calls } = fakeDb({
-      role: "admin",
-      org: { id: ORG_A, name: "Acme", slug: "acme", kind: "team", domain: null, domainAutoJoin: false },
-      updateReturning: [{ id: ORG_A, name: "Acme", slug: "acme", domain: "a.dev", domainAutoJoin: true }],
-    });
-    await expect(
-      updateOrg({ actor: admin, orgId: ORG_A, domainAutoJoin: true, database }),
-    ).resolves.toMatchObject({ domain: "a.dev", domainAutoJoin: true });
-    expect(calls.txPatch).toMatchObject({ domain: "a.dev", domainAutoJoin: true });
-  });
-
-  it("rejects domain auto-join on a personal workspace", async () => {
-    const { database } = fakeDb({
-      role: "admin",
-      org: { id: ORG_A, name: "Personal", slug: "personal", kind: "personal", domain: null, domainAutoJoin: false },
-    });
-    await expect(updateOrg({ actor: admin, orgId: ORG_A, domainAutoJoin: true, database })).rejects.toThrow(
-      "domain auto-join is only available for team workspaces",
-    );
-  });
-
   it("denies a member of another org (cross-tenant)", async () => {
     // getOrgRole resolves to null because the stranger has no membership row in ORG_A.
     const { database } = fakeDb({ role: null });
@@ -383,6 +365,77 @@ describe("updateOrg", () => {
     });
     await expect(updateOrg({ actor: admin, orgId: ORG_A, logoUrl: null, database })).resolves.toMatchObject({ logoUrl: null });
     expect(calls.updates.at(-1)?.patch).toMatchObject({ logoUrl: null });
+  });
+});
+
+/* ---- organization domains ------------------------------------------------ */
+
+describe("organization access domains", () => {
+  it("allows org admins to add a normalized access domain", async () => {
+    const { database, calls } = fakeDb({
+      role: "admin",
+      org: { id: ORG_A, name: "Acme", slug: "acme", kind: "team", domain: null, domainAutoJoin: false },
+      insertReturning: [{ id: "domain-1", domain: "a.dev", createdAt: new Date("2026-06-16T12:00:00.000Z") }],
+    });
+
+    await expect(addOrgAccessDomain({ actor: admin, orgId: ORG_A, domain: "@a.dev", database })).resolves.toEqual({
+      id: "domain-1",
+      domain: "a.dev",
+      createdAt: "2026-06-16T12:00:00.000Z",
+    });
+    expect(calls.inserts.at(-1)?.values).toMatchObject({ orgId: ORG_A, domain: "a.dev", createdBy: admin.id });
+  });
+
+  it("rejects domains that do not match the admin's verified email domain", async () => {
+    const { database } = fakeDb({
+      role: "admin",
+      org: { id: ORG_A, name: "Acme", slug: "acme", kind: "team", domain: null, domainAutoJoin: false },
+    });
+
+    await expect(addOrgAccessDomain({ actor: admin, orgId: ORG_A, domain: "client.dev", database })).rejects.toThrow(
+      "you can only add your verified corporate email domain",
+    );
+  });
+
+  it("requires a verified email before adding an access domain", async () => {
+    const { database } = fakeDb({
+      role: "admin",
+      emailVerified: false,
+      org: { id: ORG_A, name: "Acme", slug: "acme", kind: "team", domain: null, domainAutoJoin: false },
+    });
+
+    await expect(addOrgAccessDomain({ actor: admin, orgId: ORG_A, domain: "a.dev", database })).rejects.toThrow(
+      "verify your email to add this domain",
+    );
+  });
+
+  it("rejects invalid email-domain values", async () => {
+    const { database } = fakeDb({
+      role: "admin",
+      org: { id: ORG_A, name: "Acme", slug: "acme", kind: "team", domain: null, domainAutoJoin: false },
+    });
+
+    await expect(addOrgAccessDomain({ actor: admin, orgId: ORG_A, domain: "a.dev:3000", database })).rejects.toThrow(
+      "enter a valid email domain",
+    );
+  });
+
+  it("denies developers when adding or removing access domains", async () => {
+    const { database } = fakeDb({ role: "developer" });
+
+    await expect(addOrgAccessDomain({ actor: developer, orgId: ORG_A, domain: "client.dev", database })).rejects.toThrow(
+      "not allowed to manage workspace domains",
+    );
+    await expect(removeOrgAccessDomain({ actor: developer, orgId: ORG_A, domainId: "domain-1", database })).rejects.toThrow(
+      "not allowed to manage workspace domains",
+    );
+  });
+
+  it("allows org admins to remove an access domain scoped to their org", async () => {
+    const { database, calls } = fakeDb({ role: "owner" });
+
+    await expect(removeOrgAccessDomain({ actor: owner, orgId: ORG_A, domainId: "domain-1", database })).resolves.toBeUndefined();
+    expect(calls.deletes).toHaveLength(1);
   });
 });
 

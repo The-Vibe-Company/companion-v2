@@ -1,41 +1,31 @@
-import { and, count, eq, isNull, sql } from "drizzle-orm";
+import { and, eq, isNull, sql } from "drizzle-orm";
 import { db, schema, type Db } from "@companion/db";
 import { TEAM_BRAND_COLORS } from "@companion/contracts";
+import {
+  isActorEmailVerified,
+  listJoinableOrgsByDomain,
+  normalizeAccessDomain,
+  orgAllowsEmailDomain,
+  requireVerifiedForDomainJoin,
+  type DomainJoinableOrg,
+} from "./domainAccess";
 import { classifyEmailDomain } from "./email-domains";
 import { uniqueSlug, type ActorContext } from "./services";
 
-export interface OnboardingMatchedOrg {
-  name: string;
-  domain: string;
-  memberCount: number;
-  teamCount: number;
-}
+export type OnboardingMatchedOrg = DomainJoinableOrg;
 
 export interface OnboardingContextResult {
   email: string;
   domain: string | null;
   isPersonal: boolean;
-  /** A domain-auto-join org the actor can hop straight into; null for personal domains or no match. */
-  matchedOrg: OnboardingMatchedOrg | null;
+  /** Domain-access orgs the actor can join; empty for personal domains or no match. */
+  matchedOrgs: OnboardingMatchedOrg[];
 }
 
 export interface CompleteOnboardingInput {
   org: { name: string; domain?: string | null; autoJoin?: boolean; color?: string | null; logoUrl?: string | null };
   team: { name: string; color?: string | null; icon?: string | null };
   invites: string[];
-}
-
-/**
- * Whether the domain-join path must require a verified email. Auto-join trusts the email domain, so
- * in production we require `emailVerified` to stop `attacker@bigcorp.com` from slipping into BigCorp.
- * Defaults to on in production; overridable with `COMPANION_REQUIRE_VERIFIED_DOMAIN_JOIN=true|false`
- * (off by default in dev, where email infra may be log-only).
- */
-function requireVerifiedForDomainJoin(): boolean {
-  const flag = process.env.COMPANION_REQUIRE_VERIFIED_DOMAIN_JOIN;
-  if (flag === "true") return true;
-  if (flag === "false") return false;
-  return process.env.NODE_ENV === "production";
 }
 
 function normalizeBrandColor(value: string | null | undefined, label: "org" | "team"): string | null {
@@ -45,84 +35,45 @@ function normalizeBrandColor(value: string | null | undefined, label: "org" | "t
   return color;
 }
 
-async function isEmailVerified(actorId: string, database: Db): Promise<boolean> {
-  const row = await database.query.user.findFirst({
-    where: eq(schema.user.id, actorId),
-    columns: { emailVerified: true },
-  });
-  return row?.emailVerified === true;
-}
-
-/** Find the org that auto-joins a given verified domain, if any. */
-async function findAutoJoinOrg(domain: string, database: Db) {
-  return database.query.organizations.findFirst({
-    where: and(
-      sql`lower(${schema.organizations.domain}) = ${domain}`,
-      eq(schema.organizations.domainAutoJoin, true),
-    ),
-  });
-}
-
 /**
  * Classify the authenticated user's email domain and, for corporate domains, surface a matching
- * domain-auto-join org (name + coarse counts only — never the org id, to avoid cross-tenant leakage).
+ * domain-access org list. The returned ids are still verified server-side by `joinOrgByDomain`.
  */
 export async function getOnboardingContext(
   actor: ActorContext,
   database: Db = db,
 ): Promise<OnboardingContextResult> {
   const { domain, isPersonal } = classifyEmailDomain(actor.email);
-  const base = { email: actor.email, domain, isPersonal, matchedOrg: null as OnboardingMatchedOrg | null };
+  const base = { email: actor.email, domain, isPersonal, matchedOrgs: [] as OnboardingMatchedOrg[] };
   if (!domain || isPersonal) return base;
-
-  const org = await findAutoJoinOrg(domain, database);
-  if (!org) return base;
-
-  // Don't offer to join an org the user already belongs to.
-  const existing = await database.query.memberships.findFirst({
-    where: and(eq(schema.memberships.orgId, org.id), eq(schema.memberships.userId, actor.id)),
-  });
-  if (existing) return base;
-
-  const [members] = await database
-    .select({ value: count() })
-    .from(schema.memberships)
-    .where(eq(schema.memberships.orgId, org.id));
-  const [teams] = await database
-    .select({ value: count() })
-    .from(schema.teams)
-    .where(eq(schema.teams.orgId, org.id));
-
-  return {
-    ...base,
-    matchedOrg: {
-      name: org.name,
-      domain: org.domain ?? domain,
-      memberCount: Number(members?.value ?? 0),
-      teamCount: Number(teams?.value ?? 0),
-    },
-  };
+  return { ...base, matchedOrgs: await listJoinableOrgsByDomain(domain, actor.id, database) };
 }
 
 /**
- * Join the domain-auto-join org for the actor's verified email domain. The org is re-derived server-side
- * from the email (a client never supplies an org id), and joining requires a verified email when gated.
+ * Join a domain-access org for the actor's verified email domain. The org id is client-selected from
+ * onboarding context, but the email-domain match is always re-derived and re-verified server-side.
  */
-export async function joinOrgByDomain(actor: ActorContext, database: Db = db): Promise<{ orgId: string }> {
+export async function joinOrgByDomain(actor: ActorContext, orgId: string, database: Db = db): Promise<{ orgId: string }> {
   const { domain, isPersonal } = classifyEmailDomain(actor.email);
   if (!domain || isPersonal) throw new Error("no organization to join for this email domain");
 
-  const org = await findAutoJoinOrg(domain, database);
-  if (!org) throw new Error("no organization to join for this email domain");
+  if (!(await orgAllowsEmailDomain({ orgId, emailDomain: domain, database }))) {
+    throw new Error("no organization to join for this email domain");
+  }
+  const org = await database.query.organizations.findFirst({
+    where: eq(schema.organizations.id, orgId),
+    columns: { kind: true },
+  });
+  if (!org || org.kind !== "team") throw new Error("no organization to join for this email domain");
 
-  if (requireVerifiedForDomainJoin() && !(await isEmailVerified(actor.id, database))) {
+  if (requireVerifiedForDomainJoin() && !(await isActorEmailVerified(actor.id, database))) {
     throw new Error("verify your email to join this organization");
   }
 
   await database.transaction(async (tx) => {
     await tx
       .insert(schema.memberships)
-      .values({ orgId: org.id, userId: actor.id, orgRole: "developer" })
+      .values({ orgId, userId: actor.id, orgRole: "developer" })
       .onConflictDoNothing();
     await tx
       .update(schema.profiles)
@@ -130,12 +81,12 @@ export async function joinOrgByDomain(actor: ActorContext, database: Db = db): P
       .where(and(eq(schema.profiles.id, actor.id), isNull(schema.profiles.onboardedAt)));
   });
 
-  return { orgId: org.id };
+  return { orgId };
 }
 
 /**
  * Atomically create the user's organization, first team, and invitations, and mark onboarding complete.
- * Domain claiming + auto-join are only honored for the actor's own (verified, when gated) work domain.
+ * Domain access is only honored for the actor's own (verified, when gated) work domain during onboarding.
  */
 export async function completeOnboarding(
   actor: ActorContext,
@@ -144,15 +95,15 @@ export async function completeOnboarding(
 ): Promise<{ orgId: string; inviteTokens: Array<{ email: string; token: string }> }> {
   const { domain: actorDomain, isPersonal } = classifyEmailDomain(actor.email);
 
-  // A domain may only be claimed (and auto-join enabled) for the actor's own corporate domain — this
+  // A domain may only be enabled for the actor's own corporate domain during onboarding — this
   // stops a gmail user (or anyone) from squatting `bigcorp.com` and harvesting future signups.
-  let orgDomain = input.org.domain?.trim().toLowerCase() || null;
+  let orgDomain = input.org.domain ? normalizeAccessDomain(input.org.domain) : null;
   const ownsDomain = !!orgDomain && !isPersonal && orgDomain === actorDomain;
   if (orgDomain && !ownsDomain) orgDomain = null;
 
-  let domainAutoJoin = !!input.org.autoJoin && ownsDomain;
-  if (domainAutoJoin && requireVerifiedForDomainJoin() && !(await isEmailVerified(actor.id, database))) {
-    throw new Error("verify your email to enable domain auto-join");
+  const domainAccessEnabled = !!input.org.autoJoin && ownsDomain;
+  if (domainAccessEnabled && requireVerifiedForDomainJoin() && !(await isActorEmailVerified(actor.id, database))) {
+    throw new Error("verify your email to enable domain access");
   }
 
   const orgColor = normalizeBrandColor(input.org.color, "org");
@@ -161,10 +112,6 @@ export async function completeOnboarding(
 
   const orgId = await database
     .transaction(async (tx) => {
-      if (orgDomain) {
-        await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`companion:org-domain:${orgDomain}`}))`);
-      }
-
       const [org] = await tx
         .insert(schema.organizations)
         .values({
@@ -173,12 +120,19 @@ export async function completeOnboarding(
           kind: "team",
           plan: "team",
           domain: orgDomain,
-          domainAutoJoin,
+          domainAutoJoin: domainAccessEnabled,
           color: orgColor,
           logoUrl: input.org.logoUrl ?? null,
         })
         .returning();
       if (!org) throw new Error("could not create organization");
+
+      if (orgDomain && domainAccessEnabled) {
+        await tx
+          .insert(schema.organizationDomains)
+          .values({ orgId: org.id, domain: orgDomain, createdBy: actor.id })
+          .onConflictDoNothing();
+      }
 
       await tx.insert(schema.memberships).values({ orgId: org.id, userId: actor.id, orgRole: "owner" });
 
@@ -228,9 +182,6 @@ export async function completeOnboarding(
     })
     .catch((error: unknown) => {
       const message = error instanceof Error ? error.message : String(error);
-      if (message.includes("organizations_domain_uq")) {
-        throw new Error("an organization already exists for this domain");
-      }
       throw error;
     });
 

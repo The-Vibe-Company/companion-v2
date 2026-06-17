@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { completeOnboardingInputSchema, TEAM_BRAND_COLORS } from "@companion/contracts";
+import { completeOnboardingInputSchema, onboardingContextSchema, TEAM_BRAND_COLORS } from "@companion/contracts";
 
 const baseInput = {
   org: {
@@ -41,5 +41,21 @@ describe("completeOnboardingInputSchema", () => {
       org: { color },
       team: { color },
     });
+  });
+});
+
+describe("onboardingContextSchema", () => {
+  it("accepts multiple matched organizations", () => {
+    expect(
+      onboardingContextSchema.parse({
+        email: "owner@acme.test",
+        domain: "acme.test",
+        is_personal: false,
+        matched_orgs: [
+          { id: "org_1", name: "Client A", domain: "acme.test", member_count: 2, team_count: 1 },
+          { id: "org_2", name: "Client B", domain: "acme.test", member_count: 4, team_count: 3 },
+        ],
+      }),
+    ).toMatchObject({ matched_orgs: [{ id: "org_1" }, { id: "org_2" }] });
   });
 });

@@ -120,6 +120,13 @@
       "when": 1781050500000,
       "tag": "0016_skill_installs",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1781050600000,
+      "tag": "0017_organization_domains",
+      "breakpoints": true
     }
   ]
 }

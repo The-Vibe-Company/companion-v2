@@ -167,42 +167,59 @@ export function ScreenDetecting({ domain }: { domain: string | null }) {
   );
 }
 
-/* ================================================ SCREEN: ORG FOUND (auto-join) */
+/* ================================================ SCREEN: ORG FOUND (domain access) */
 export function ScreenFound({
-  org,
+  orgs,
+  selectedOrgId,
+  setSelectedOrgId,
   onJoin,
   onCreateInstead,
   busy,
 }: {
-  org: OnboardingMatchedOrg;
+  orgs: OnboardingMatchedOrg[];
+  selectedOrgId: string | null;
+  setSelectedOrgId: (id: string) => void;
   onJoin: () => void;
   onCreateInstead: () => void;
   busy: boolean;
 }) {
+  const selected = orgs.find((org) => org.id === selectedOrgId) ?? orgs[0]!;
+  const hasMany = orgs.length > 1;
   return (
     <div className="ob-panel" key="found">
-      <p className="ob-eyebrow">Organization found</p>
-      <h1 className="ob-h1">Join {org.name} on Companion</h1>
+      <p className="ob-eyebrow">{hasMany ? "Organizations found" : "Organization found"}</p>
+      <h1 className="ob-h1">{hasMany ? "Choose your organization" : `Join ${selected.name} on Companion`}</h1>
       <p className="ob-sub">
-        We found an existing organization for <code>{org.domain}</code>. You can hop straight in.
+        We found {hasMany ? "organizations" : "an organization"} that allow verified <code>@{selected.domain}</code> addresses.
       </p>
       <div className="ob-body">
-        <div className="ob-orgcard">
-          <Avatar size="lg" color={hashColor(org.name)} initial={initialsOf(org.name)} />
-          <div className="ob-orgcard__meta">
-            <div className="ob-orgcard__name">{org.name}</div>
-            <div className="ob-orgcard__domain">{org.domain}</div>
-            <div className="ob-orgcard__stats">
-              <span>{org.memberCount} {org.memberCount === 1 ? "member" : "members"}</span>
-              <span className="ob-dot-sep">·</span>
-              <span>{org.teamCount} {org.teamCount === 1 ? "team" : "teams"}</span>
-            </div>
-          </div>
+        <div className="ob-orglist" aria-label="Organizations available for your email domain">
+          {orgs.map((org) => (
+            <button
+              key={org.id}
+              type="button"
+              className={`ob-orgcard ob-orgcard--choice${org.id === selected.id ? " is-sel" : ""}`}
+              aria-pressed={org.id === selected.id}
+              onClick={() => setSelectedOrgId(org.id)}
+            >
+              <Avatar size="lg" color={hashColor(org.name)} initial={initialsOf(org.name)} />
+              <div className="ob-orgcard__meta">
+                <div className="ob-orgcard__name">{org.name}</div>
+                <div className="ob-orgcard__domain">{org.domain}</div>
+                <div className="ob-orgcard__stats">
+                  <span>{org.memberCount} {org.memberCount === 1 ? "member" : "members"}</span>
+                  <span className="ob-dot-sep">·</span>
+                  <span>{org.teamCount} {org.teamCount === 1 ? "team" : "teams"}</span>
+                </div>
+              </div>
+              {org.id === selected.id && <span className="ob-choice-check"><Icon name="check" size={13} /></span>}
+            </button>
+          ))}
         </div>
         <div className="ob-note ob-note--ok">
           <Icon name="unlock" size={15} />
           <span>
-            <b>{org.name} lets anyone with an @{org.domain} address join automatically.</b> No invite needed — you'll be added as a member.
+            <b>{selected.name} allows @{selected.domain} addresses.</b> No invite needed — you'll be added as a member.
           </span>
         </div>
         <button className="cds-btn cds-btn--lg cds-btn--primary ob-btn-block" disabled={busy} onClick={onJoin}>
@@ -210,13 +227,13 @@ export function ScreenFound({
             <span className="cds-spinner" />
           ) : (
             <>
-              <span className="cds-btn__icon"><Icon name="log-in" /></span>Join {org.name}
+              <span className="cds-btn__icon"><Icon name="log-in" /></span>Join {selected.name}
             </>
           )}
         </button>
       </div>
       <div className="ob-foot">
-        <button className="ob-skip" onClick={onCreateInstead}>Not your team? Create a new organization instead</button>
+        <button className="ob-skip" onClick={onCreateInstead}>Create a new organization instead</button>
       </div>
     </div>
   );
@@ -542,7 +559,7 @@ export function ScreenInvite({
       <p className="ob-eyebrow">Invite your team</p>
       <h1 className="ob-h1">Bring in your collaborators</h1>
       <p className="ob-sub">
-        Invite people by email{canAutoJoin ? ", or let anyone from your domain join on their own" : ""}. Skip and do this later if you like.
+        Invite people by email{canAutoJoin ? ", or enable your domain for self-serve joining" : ""}. Skip and do this later if you like.
       </p>
       <div className="ob-body">
         <div className="ob-field">
@@ -584,9 +601,9 @@ export function ScreenInvite({
         {canAutoJoin && (
           <label className={`ob-toggcard${allowDomain ? " is-on" : ""}`}>
             <div className="ob-toggcard__meta">
-              <div className="ob-toggcard__t">Let anyone with @{domain} join automatically</div>
+              <div className="ob-toggcard__t">Allow @{domain} addresses to join this organization</div>
               <div className="ob-toggcard__d">
-                New people who sign up with a matching email are added as members without an invite. You can change this in settings.
+                New people who sign up with a matching verified email can choose this organization without an invite. You can change this in settings.
               </div>
             </div>
             <span className="ob-switch">
@@ -696,7 +713,7 @@ export function ScreenWelcome({
                     {invites.length ? `${invites.length} invite${invites.length > 1 ? "s" : ""} sent` : "No invites yet"}
                   </div>
                   <div className="ob-srow__d">
-                    {allowDomain && domain ? `Anyone @${domain} can join automatically` : "Domain auto-join is off"}
+                    {allowDomain && domain ? `@${domain} is enabled for onboarding` : "Domain access is off"}
                   </div>
                 </div>
                 <span className="ob-srow__tag">members</span>
