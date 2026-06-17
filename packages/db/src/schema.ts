@@ -115,11 +115,23 @@ export const organizations = pgTable(
     createdAt: now(),
     updatedAt: updatedAt(),
   },
+);
+
+export const organizationDomains = pgTable(
+  "organization_domains",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    domain: text("domain").notNull(),
+    createdBy: text("created_by").references(() => user.id, { onDelete: "set null" }),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
   (t) => ({
-    // One organization per verified domain (partial: only rows that declare a domain).
-    domainUq: uniqueIndex("organizations_domain_uq")
-      .on(sql`lower(${t.domain})`)
-      .where(sql`${t.domain} is not null`),
+    uniqueOrgDomain: uniqueIndex("organization_domains_org_domain_uq").on(t.orgId, sql`lower(${t.domain})`),
+    byDomain: index("organization_domains_domain_idx").on(sql`lower(${t.domain})`),
   }),
 );
 

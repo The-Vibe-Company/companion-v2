@@ -61,6 +61,7 @@ export function OnboardingFlow({ context, me }: { context: OnboardingContext; me
   const [path, setPath] = useState<Path>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [selectedOrgId, setSelectedOrgId] = useState<string | null>(() => context.matchedOrgs[0]?.id ?? null);
 
   const [org, setOrg] = useState<OrgDraft>({ name: "", website: "", logo: null, candidates: [], fetchedFrom: "", domain: "" });
   const [team, setTeam] = useState<TeamDraft>({ name: "", color: LOGO_COLORS[0]! });
@@ -82,7 +83,7 @@ export function OnboardingFlow({ context, me }: { context: OnboardingContext; me
     setScreen("detecting");
     if (detectTimer.current) clearTimeout(detectTimer.current);
     detectTimer.current = setTimeout(() => {
-      if (context.matchedOrg) {
+      if (context.matchedOrgs.length > 0) {
         setPath("join");
         setScreen("found");
       } else {
@@ -92,10 +93,15 @@ export function OnboardingFlow({ context, me }: { context: OnboardingContext; me
   }
 
   async function joinOrg() {
+    const orgId = selectedOrgId ?? context.matchedOrgs[0]?.id;
+    if (!orgId) {
+      setError("Choose an organization to join.");
+      return;
+    }
     setError(null);
     setBusy(true);
     try {
-      await joinByDomain();
+      await joinByDomain(orgId);
       setPath("join");
       setScreen("welcome");
     } catch (e) {
@@ -146,8 +152,17 @@ export function OnboardingFlow({ context, me }: { context: OnboardingContext; me
     panel = <ScreenAccount name={name} email={email} setName={setName} onNext={gotoDetect} />;
   } else if (screen === "detecting") {
     panel = <ScreenDetecting domain={context.domain} />;
-  } else if (screen === "found" && context.matchedOrg) {
-    panel = <ScreenFound org={context.matchedOrg} busy={busy} onJoin={joinOrg} onCreateInstead={seedCreateOrg} />;
+  } else if (screen === "found" && context.matchedOrgs.length > 0) {
+    panel = (
+      <ScreenFound
+        orgs={context.matchedOrgs}
+        selectedOrgId={selectedOrgId}
+        setSelectedOrgId={setSelectedOrgId}
+        busy={busy}
+        onJoin={joinOrg}
+        onCreateInstead={seedCreateOrg}
+      />
+    );
   } else if (screen === "create_org") {
     panel = (
       <ScreenCreateOrg
@@ -155,7 +170,7 @@ export function OnboardingFlow({ context, me }: { context: OnboardingContext; me
         setOrg={setOrg}
         domainHint={corporateDomain}
         onNext={() => setScreen("create_team")}
-        onBack={() => (context.matchedOrg ? setScreen("found") : setScreen("account"))}
+        onBack={() => (context.matchedOrgs.length ? setScreen("found") : setScreen("account"))}
       />
     );
   } else if (screen === "create_team") {
@@ -189,7 +204,7 @@ export function OnboardingFlow({ context, me }: { context: OnboardingContext; me
         invites={invites}
         allowDomain={allowDomain}
         domain={org.domain || null}
-        joinedOrg={context.matchedOrg}
+        joinedOrg={context.matchedOrgs.find((org) => org.id === selectedOrgId) ?? context.matchedOrgs[0] ?? null}
         busy={busy}
         onEnter={path === "join" ? openApp : finishCreate}
       />

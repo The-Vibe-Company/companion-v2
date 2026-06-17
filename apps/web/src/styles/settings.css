@@ -117,6 +117,17 @@
 .sx-readline i { color: var(--color-faint); display: inline-flex; }
 .sx-readline .badge { margin-left: auto; }
 
+.sx-domainbox { display: flex; flex-direction: column; gap: 12px; }
+.sx-domainbox__add { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center; }
+.sx-domainlist { border: 1px solid var(--color-line); border-radius: var(--radius-md); overflow: hidden; background: var(--color-surface); }
+.sx-domainrow { display: flex; align-items: center; gap: 11px; min-height: 48px; padding: 9px 10px 9px 12px; }
+.sx-domainrow + .sx-domainrow { border-top: 1px solid var(--color-line); }
+.sx-domainrow__icon { width: 28px; height: 28px; border-radius: var(--radius-md); display: grid; place-items: center; flex: none;
+  background: var(--color-surface-raised); color: var(--color-muted); border: 1px solid var(--color-line); }
+.sx-domainrow__meta { min-width: 0; flex: 1; }
+.sx-domainrow__name { font-family: var(--font-mono); font-size: var(--text-sm); color: var(--color-fg); overflow-wrap: anywhere; }
+.sx-domainrow__sub { margin-top: 2px; font-size: 11px; color: var(--color-faint); }
+
 /* definition rows (read-only meta) */
 .sx-defs { border: 1px solid var(--color-line); border-radius: var(--radius-md); overflow: hidden; }
 .sx-def { display: grid; grid-template-columns: 168px 1fr; align-items: center; gap: 14px; padding: 12px 14px; background: var(--color-surface); }

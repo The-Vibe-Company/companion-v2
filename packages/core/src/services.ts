@@ -39,6 +39,7 @@ export { visibilityCovers } from "@companion/contracts";
 import { compareSemver } from "@companion/skills";
 import { db, schema, type Db } from "@companion/db";
 import { initialsFor, slugify } from "@companion/db/ids";
+import { listOrgAccessDomains } from "./domainAccess";
 import { classifyEmailDomain } from "./email-domains";
 import {
   canActAtVisibility,
@@ -55,6 +56,14 @@ import {
 // everything from `@companion/core/services`. `onboarding.ts` only imports `uniqueSlug` (a hoisted
 // function declaration) and the `ActorContext` type from here, so the cycle is load-order safe.
 export * from "./onboarding";
+export {
+  addOrgAccessDomain,
+  listJoinableOrgsByDomain,
+  listOrgAccessDomains,
+  normalizeAccessDomain,
+  orgAllowsEmailDomain,
+  removeOrgAccessDomain,
+} from "./domainAccess";
 
 export interface ActorContext {
   id: string;
@@ -209,32 +218,15 @@ export async function createOrg(input: {
   return { id: org.id, slug: org.slug };
 }
 
-function requireVerifiedForDomainJoin(): boolean {
-  const flag = process.env.COMPANION_REQUIRE_VERIFIED_DOMAIN_JOIN;
-  if (flag === "true") return true;
-  if (flag === "false") return false;
-  return process.env.NODE_ENV === "production";
-}
-
-async function isActorEmailVerified(actorId: string, database: Db): Promise<boolean> {
-  const row = await database.query.user.findFirst({
-    where: eq(schema.user.id, actorId),
-    columns: { emailVerified: true },
-  });
-  return row?.emailVerified === true;
-}
-
 /**
- * Rename and/or re-slug the current organization, and/or toggle domain auto-join. Requires an org
- * admin (`canManageOrg`). Domain auto-join may only be enabled for the actor's own corporate email
- * domain (same rule as onboarding).
+ * Rename, re-slug, and/or edit branding for the current organization. Requires an org admin
+ * (`canManageOrg`). Domain access is managed separately through `organization_domains`.
  */
 export async function updateOrg(input: {
   actor: ActorContext;
   orgId: string;
   name?: string;
   slug?: string;
-  domainAutoJoin?: boolean;
   color?: string | null;
   logoUrl?: string | null;
   database?: Db;
@@ -259,8 +251,6 @@ export async function updateOrg(input: {
   const patch: {
     name?: string;
     slug?: string;
-    domain?: string | null;
-    domainAutoJoin?: boolean;
     color?: string | null;
     logoUrl?: string | null;
     updatedAt: Date;
@@ -278,25 +268,6 @@ export async function updateOrg(input: {
     if (conflict) throw new Error("that workspace URL is already taken");
     patch.slug = slug;
   }
-  if (input.domainAutoJoin !== undefined) {
-    const { domain: actorDomain, isPersonal } = classifyEmailDomain(input.actor.email);
-    if (input.domainAutoJoin) {
-      if (orgRow.kind !== "team") {
-        throw new Error("domain auto-join is only available for team workspaces");
-      }
-      const domain = orgRow.domain ?? (actorDomain && !isPersonal ? actorDomain : null);
-      if (!domain || isPersonal || domain !== actorDomain) {
-        throw new Error("domain auto-join requires a matching corporate email domain on your account");
-      }
-      if (requireVerifiedForDomainJoin() && !(await isActorEmailVerified(input.actor.id, database))) {
-        throw new Error("verify your email to enable domain auto-join");
-      }
-      patch.domain = domain;
-      patch.domainAutoJoin = true;
-    } else {
-      patch.domainAutoJoin = false;
-    }
-  }
   if (input.color !== undefined) {
     patch.color = input.color;
   }
@@ -306,55 +277,28 @@ export async function updateOrg(input: {
   if (
     patch.name === undefined &&
     patch.slug === undefined &&
-    patch.domain === undefined &&
-    patch.domainAutoJoin === undefined &&
     patch.color === undefined &&
     patch.logoUrl === undefined
   ) {
     throw new Error("nothing to update");
   }
 
-  const domainToClaim = patch.domain && patch.domain !== orgRow.domain ? patch.domain : null;
-
   let row;
   try {
-    if (domainToClaim) {
-      [row] = await database.transaction(async (tx) => {
-        await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`companion:org-domain:${domainToClaim}`}))`);
-        return tx
-          .update(schema.organizations)
-          .set(patch)
-          .where(eq(schema.organizations.id, input.orgId))
-          .returning({
-            id: schema.organizations.id,
-            name: schema.organizations.name,
-            slug: schema.organizations.slug,
-            domain: schema.organizations.domain,
-            domainAutoJoin: schema.organizations.domainAutoJoin,
-            color: schema.organizations.color,
-            logoUrl: schema.organizations.logoUrl,
-          });
+    [row] = await database
+      .update(schema.organizations)
+      .set(patch)
+      .where(eq(schema.organizations.id, input.orgId))
+      .returning({
+        id: schema.organizations.id,
+        name: schema.organizations.name,
+        slug: schema.organizations.slug,
+        domain: schema.organizations.domain,
+        domainAutoJoin: schema.organizations.domainAutoJoin,
+        color: schema.organizations.color,
+        logoUrl: schema.organizations.logoUrl,
       });
-    } else {
-      [row] = await database
-        .update(schema.organizations)
-        .set(patch)
-        .where(eq(schema.organizations.id, input.orgId))
-        .returning({
-          id: schema.organizations.id,
-          name: schema.organizations.name,
-          slug: schema.organizations.slug,
-          domain: schema.organizations.domain,
-          domainAutoJoin: schema.organizations.domainAutoJoin,
-          color: schema.organizations.color,
-          logoUrl: schema.organizations.logoUrl,
-        });
-    }
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    if (message.includes("organizations_domain_uq")) {
-      throw new Error("an organization already exists for this domain");
-    }
     if (isUniqueViolation(error)) throw new Error("that workspace URL is already taken");
     throw error;
   }
@@ -464,6 +408,7 @@ export async function getOrgSettings(input: {
     createdAt: orgRow.createdAt.toISOString(),
     domain: orgRow.domain,
     domainAutoJoin: orgRow.domainAutoJoin,
+    accessDomains: await listOrgAccessDomains(input.orgId, database),
     color: orgRow.color,
     logoUrl: orgRow.logoUrl,
   };

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import type { CSSProperties } from "react";
 import { Icon } from "../Icon";
 import { PaneHead, EditField } from "./paneKit";
 import { RoleDot } from "./primitives";
@@ -12,8 +13,22 @@ import type { OrgCtx } from "./model";
 export function WorkspaceGeneralPane({ ctx }: { ctx: OrgCtx }) {
   const ws = ctx.currentOrg;
   const [host, setHost] = useState("");
+  const [domainDraft, setDomainDraft] = useState("");
+  const [domainError, setDomainError] = useState<string | null>(null);
   useEffect(() => setHost(window.location.host), []);
   const urlPrefix = host ? `${host}/` : "";
+  const domainPlaceholder = ctx.domainJoin.actorDomainIsPersonal || !ctx.domainJoin.actorDomain ? "client.com" : ctx.domainJoin.actorDomain;
+  const addDomain = async () => {
+    const domain = domainDraft.trim();
+    if (!domain || ctx.busy) return;
+    setDomainError(null);
+    try {
+      await ctx.addAccessDomain(domain);
+      setDomainDraft("");
+    } catch (error) {
+      setDomainError(error instanceof Error ? error.message : String(error));
+    }
+  };
 
   return (
     <div className="sx-pane">
@@ -57,47 +72,75 @@ export function WorkspaceGeneralPane({ ctx }: { ctx: OrgCtx }) {
         <div className="sx-sec">
           <h2 className="sx-sec__h">Domain access</h2>
           <p className="sx-sec__d">
-            Let people with a matching verified work email join the workspace without an invite — the same
-            option offered during onboarding.
+            Let people with matching verified work emails discover and join this workspace during onboarding.
+            Owners and admins can add their own verified corporate email domain here.
           </p>
-          {ctx.domainJoin.actorDomainIsPersonal || !ctx.domainJoin.actorDomain ? (
-            <div className="sx-readline">
-              <Icon name="info" size={14} />
-              Domain auto-join requires a corporate email domain on your account (not a personal provider like
-              Gmail).
-            </div>
-          ) : ctx.domainJoin.actorDomain !== ws.domain && ws.domain ? (
-            <div className="sx-readline">
-              <Icon name="lock" size={14} />
-              This workspace is linked to <code>@{ws.domain}</code>. Only an admin with that same email domain
-              can change auto-join.
-            </div>
-          ) : (
-            <label
-              className={"ob-toggcard" + (ws.domainAutoJoin ? " is-on" : "")}
-              style={ctx.canManage ? undefined : { cursor: "default", opacity: 0.85 }}
-            >
-              <div className="ob-toggcard__meta">
-                <div className="ob-toggcard__t">
-                  Let anyone with @{ws.domain ?? ctx.domainJoin.actorDomain} join automatically
+          <div className="sx-domainbox">
+            {ctx.canManage && (
+              <form
+                className="sx-domainbox__add"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  void addDomain();
+                }}
+              >
+                <div className="sx-inputwrap">
+                  <span className="pfx">@</span>
+                  <input
+                    className="sx-input sx-input--mono"
+                    style={{ "--pfx": "30px" } as CSSProperties}
+                    value={domainDraft}
+                    placeholder={domainPlaceholder}
+                    aria-label="Domain to allow during onboarding"
+                    aria-invalid={domainError ? true : undefined}
+                    aria-describedby={domainError ? "domain-access-error" : undefined}
+                    disabled={ctx.busy}
+                    onChange={(e) => setDomainDraft(e.target.value)}
+                  />
                 </div>
-                <div className="ob-toggcard__d">
-                  New signups with a verified <code>@{ws.domain ?? ctx.domainJoin.actorDomain}</code> address are
-                  added as members without an invite. You can change this later in settings.
-                </div>
+                <button className="btn-sec" type="submit" disabled={!domainDraft.trim() || ctx.busy}>
+                  <Icon name="plus" size={14} />Add
+                </button>
+                {domainError && (
+                  <div className="sx-field__hint sx-field__hint--error" id="domain-access-error" aria-live="polite">
+                    {domainError}
+                  </div>
+                )}
+              </form>
+            )}
+            {ws.accessDomains.length ? (
+              <div className="sx-domainlist">
+                {ws.accessDomains.map((domain) => (
+                  <div className="sx-domainrow" key={domain.id}>
+                    <span className="sx-domainrow__icon"><Icon name="globe-2" size={14} /></span>
+                    <div className="sx-domainrow__meta">
+                      <div className="sx-domainrow__name">@{domain.domain}</div>
+                      <div className="sx-domainrow__sub">Added {domain.createdAt}</div>
+                    </div>
+                    {ctx.canManage && (
+                      <button
+                        className="iconbtn"
+                        aria-label={`Remove ${domain.domain}`}
+                        title={`Remove ${domain.domain}`}
+                        disabled={ctx.busy}
+                        onClick={() => void ctx.removeAccessDomain(domain.id)}
+                      >
+                        <Icon name="x" size={14} />
+                      </button>
+                    )}
+                  </div>
+                ))}
               </div>
-              <span className="ob-switch">
-                <input
-                  type="checkbox"
-                  checked={ws.domainAutoJoin}
-                  disabled={!ctx.canManage}
-                  onChange={(e) => ctx.setWorkspace({ domainAutoJoin: e.target.checked })}
-                />
-                <span className="ob-switch__track" />
-                <span className="ob-switch__thumb" />
-              </span>
-            </label>
-          )}
+            ) : (
+              <div className="sx-readline">
+                <Icon name="info" size={14} />
+                No domains are enabled. People can still join by invitation.
+              </div>
+            )}
+            {!ctx.canManage && (
+              <div className="sx-field__hint">Only owners and admins can manage domain access.</div>
+            )}
+          </div>
         </div>
       )}
 
@@ -115,12 +158,10 @@ export function WorkspaceGeneralPane({ ctx }: { ctx: OrgCtx }) {
             <span className="sx-def__v">{ws.kind === "personal" ? "Personal workspace" : "Team organization"}</span>
           </div>
           <div className="sx-def">
-            <span className="sx-def__k">Domain auto-join</span>
+            <span className="sx-def__k">Access domains</span>
             <span className="sx-def__v">
-              {ws.domainAutoJoin && ws.domain ? (
-                <>On · @{ws.domain}</>
-              ) : ws.domain ? (
-                <>Off · @{ws.domain} claimed</>
+              {ws.accessDomains.length ? (
+                <>{ws.accessDomains.length} enabled</>
               ) : (
                 <span style={{ color: "var(--color-faint)" }}>Off</span>
               )}

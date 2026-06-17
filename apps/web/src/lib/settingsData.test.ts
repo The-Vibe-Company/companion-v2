@@ -68,6 +68,7 @@ describe("parseOrgSettingsResponse", () => {
           createdAt: "2025-01-12T00:00:00.000Z",
           domain: "tvc.dev",
           domainAutoJoin: true,
+          accessDomains: [{ id: "domain_1", domain: "tvc.dev", createdAt: "2025-01-12T00:00:00.000Z" }],
           color: null,
           logoUrl: null,
         },
@@ -136,6 +137,7 @@ describe("parseOrgSettingsResponse", () => {
     expect(data.current.created).toBe("2025-01-12");
     expect(data.current.domain).toBe("tvc.dev");
     expect(data.current.domainAutoJoin).toBe(true);
+    expect(data.current.accessDomains).toEqual([{ id: "domain_1", domain: "tvc.dev", createdAt: "2025-01-12" }]);
     expect(data.domainJoin).toEqual({ actorDomain: "tvc.dev", actorDomainIsPersonal: false });
     expect(data.current.members).toEqual([
       expect.objectContaining({ userId: "user_1", role: "owner", joined: "2026-06-09" }),

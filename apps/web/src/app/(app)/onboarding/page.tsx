@@ -24,16 +24,15 @@ export default async function OnboardingPage() {
         email: raw.email,
         domain: raw.domain,
         isPersonal: raw.is_personal,
-        matchedOrg: raw.matched_org
-          ? {
-              name: raw.matched_org.name,
-              domain: raw.matched_org.domain,
-              memberCount: raw.matched_org.member_count,
-              teamCount: raw.matched_org.team_count,
-            }
-          : null,
+        matchedOrgs: (raw.matched_orgs ?? []).map((org) => ({
+          id: org.id,
+          name: org.name,
+          domain: org.domain,
+          memberCount: org.member_count,
+          teamCount: org.team_count,
+        })),
       }
-    : { email: whoami.email, domain: null, isPersonal: false, matchedOrg: null };
+    : { email: whoami.email, domain: null, isPersonal: false, matchedOrgs: [] };
 
   return <OnboardingFlow context={context} me={{ name: whoami.name, email: whoami.email }} />;
 }

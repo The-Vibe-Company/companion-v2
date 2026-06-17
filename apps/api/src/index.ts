@@ -11,6 +11,7 @@ import { setCookie } from "hono/cookie";
 import {
   acceptInvitation,
   addComment,
+  addOrgAccessDomain,
   addTeamMember,
   archiveSkill,
   buildDependencyPlan,
@@ -42,6 +43,7 @@ import {
   publishSkillVersion,
   assertCanPublishSkillVersion,
   reportLocalSkillInstall,
+  removeOrgAccessDomain,
   removeMember,
   removeTeamMember,
   revokeApiToken,
@@ -62,10 +64,12 @@ import {
 } from "@companion/core/services";
 import {
   addCommentInputSchema,
+  addOrgAccessDomainInputSchema,
   archiveSkillInputSchema,
   completeOnboardingInputSchema,
   createSkillInputSchema,
   issueTokenInputSchema,
+  joinOnboardingOrgInputSchema,
   orgSettingsResponseSchema,
   publishSkillInputSchema,
   reportLocalSkillInstallInputSchema,
@@ -521,14 +525,13 @@ app.get("/v1/onboarding/context", async (c) => {
       email: ctx.email,
       domain: ctx.domain,
       is_personal: ctx.isPersonal,
-      matched_org: ctx.matchedOrg
-        ? {
-            name: ctx.matchedOrg.name,
-            domain: ctx.matchedOrg.domain,
-            member_count: ctx.matchedOrg.memberCount,
-            team_count: ctx.matchedOrg.teamCount,
-          }
-        : null,
+      matched_orgs: ctx.matchedOrgs.map((org) => ({
+        id: org.id,
+        name: org.name,
+        domain: org.domain,
+        member_count: org.memberCount,
+        team_count: org.teamCount,
+      })),
     });
   } catch (error) {
     return jsonError(c, error, 401);
@@ -538,7 +541,8 @@ app.get("/v1/onboarding/context", async (c) => {
 app.post("/v1/onboarding/join", async (c) => {
   try {
     const actor = actorFromContext(c);
-    const { orgId } = await joinOrgByDomain(actor);
+    const input = joinOnboardingOrgInputSchema.parse(await c.req.json());
+    const { orgId } = await joinOrgByDomain(actor, input.orgId);
     setOrgCookie(c, orgId);
     return c.json({ ok: true, orgId });
   } catch (error) {
@@ -633,13 +637,34 @@ app.put("/v1/orgs/current", async (c) => {
           orgId,
           name: input.name,
           slug: input.slug,
-          domainAutoJoin: input.domainAutoJoin,
           color: input.color,
           logoUrl: input.logoUrl,
           database,
         }),
       ),
     );
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
+app.post("/v1/orgs/current/domains", async (c) => {
+  try {
+    if (isTokenRequest(c)) throw new Error("personal access tokens cannot manage workspace domains");
+    const input = addOrgAccessDomainInputSchema.parse(await c.req.json());
+    return c.json(await withTenant(c, ({ actor, orgId, database }) => addOrgAccessDomain({ actor, orgId, domain: input.domain, database })));
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
+app.delete("/v1/orgs/current/domains/:domainId", async (c) => {
+  try {
+    if (isTokenRequest(c)) throw new Error("personal access tokens cannot manage workspace domains");
+    await withTenant(c, ({ actor, orgId, database }) =>
+      removeOrgAccessDomain({ actor, orgId, domainId: c.req.param("domainId"), database }),
+    );
+    return c.json({ ok: true });
   } catch (error) {
     return jsonError(c, error);
   }

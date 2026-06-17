@@ -8,16 +8,21 @@ async function main(): Promise<void> {
   });
   if (existing) return;
 
-  await db.insert(schema.organizations).values({
-    name: "Acme",
-    slug: "acme",
-    kind: "team",
-    plan: "free",
-    // Domain auto-join so a local signup with `@acme.com` exercises the onboarding "join" path
-    // (`@gmail.com` → personal/create, any other corporate domain → create).
-    domain: "acme.com",
-    domainAutoJoin: true,
-  });
+  const [org] = await db
+    .insert(schema.organizations)
+    .values({
+      name: "Acme",
+      slug: "acme",
+      kind: "team",
+      plan: "free",
+      // Legacy fields kept populated for compatibility; domain access now lives in organization_domains.
+      domain: "acme.com",
+      domainAutoJoin: true,
+    })
+    .returning({ id: schema.organizations.id });
+  if (org) {
+    await db.insert(schema.organizationDomains).values({ orgId: org.id, domain: "acme.com" }).onConflictDoNothing();
+  }
 
   console.log("Seeded Acme workspace placeholder. Create the first user through the UI or CLI.");
   console.log(`Default initials helper loaded: ${initialsFor("admin@tvc.dev")}`);
