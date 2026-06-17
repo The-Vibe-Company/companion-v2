@@ -19,14 +19,19 @@ import {
   setCommentDeprecated as setCommentDeprecatedRpc,
 } from "@/lib/queries";
 import type { MeVM, SkillVM, TeamVM } from "@/lib/types";
-import { StarButton, ValidBadge, VisibilityChip, InstallBadge } from "./blocks";
-import { Activity, PropList, Requirements } from "./detailParts";
+import { StarButton } from "./blocks";
+import {
+  Activity,
+  ChecksumDetails,
+  DetailRail,
+  ManifestDetails,
+  Requirements,
+  type DetailPanel,
+  type DetailPanelItem,
+} from "./detailParts";
 import { DependenciesTab } from "./DependenciesTab";
 import { FileExplorer } from "./fileview";
 import { Discussion } from "./discussion";
-import { fmtBytes, iconForFile } from "./fileFormat";
-
-type Tab = "overview" | "dependencies" | "requirements" | "files" | "activity";
 
 export function DetailMoreMenuContent({
   canModifySkill,
@@ -191,6 +196,7 @@ export function DetailView({
   onRestore,
   onArchive,
   teams,
+  initialPanel = null,
 }: {
   skill: SkillVM;
   index: number;
@@ -209,10 +215,10 @@ export function DetailView({
   onRestore: () => void;
   onArchive: () => void;
   teams: TeamVM[];
+  initialPanel?: DetailPanel | null;
 }) {
   const invalid = skill.validation === "invalid";
-  const [tab, setTab] = useState<Tab>("overview");
-  const [selectedPath, setSelectedPath] = useState<string | null>(null);
+  const [panel, setPanel] = useState<DetailPanel | null>(initialPanel);
   const [versions, setVersions] = useState<SkillVersionRow[]>([]);
   const [comments, setComments] = useState<SkillCommentRow[]>([]);
   const [files, setFiles] = useState<SkillFile[]>([]);
@@ -220,8 +226,7 @@ export function DetailView({
 
   useEffect(() => {
     let active = true;
-    setTab("overview");
-    setSelectedPath(null);
+    setPanel(initialPanel);
     setFiles([]);
     // Clear the previous skill's discussion/versions so they don't flash under the new title.
     setComments([]);
@@ -236,7 +241,20 @@ export function DetailView({
     return () => {
       active = false;
     };
-  }, [skill.id, skill.version]);
+  }, [skill.id, skill.version, initialPanel]);
+
+  useEffect(() => {
+    if (!panel) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation();
+      setPanel(null);
+    };
+    window.addEventListener("keydown", onKey, { capture: true });
+    return () => window.removeEventListener("keydown", onKey, { capture: true });
+  }, [panel]);
 
   // Eagerly load the package file list once per (slug, version); the archive has
   // no random access, so one fetch beats lazily re-streaming per file.
@@ -273,11 +291,6 @@ export function DetailView({
   const download = async () => {
     const url = await fetchSkillDownloadUrl(skill.id, skill.version);
     window.location.href = url;
-  };
-
-  const openFile = (path: string) => {
-    setSelectedPath(path);
-    setTab("files");
   };
 
   const ownerTeam = skill.owner.teamId
@@ -356,13 +369,22 @@ export function DetailView({
       : null
     : undefined;
 
-  const TABS: { id: Tab; label: string; icon: string; n?: number }[] = [
-    { id: "overview", label: "Overview", icon: "file-text" },
-    { id: "dependencies", label: "Dependencies", icon: "git-branch", n: reqN + usedN },
-    { id: "requirements", label: "Setup & secrets", icon: "key-round", n: skill.requirements.length },
-    { id: "files", label: "Files", icon: "package-open", n: files.length },
-    { id: "activity", label: "Activity", icon: "activity", n: versions.length },
+  const dependencyPanel: DetailPanelItem = {
+    id: "dependencies",
+    label: "Dependencies",
+    icon: "git-branch",
+    count: reqN + usedN,
+  };
+  const morePanelItems: DetailPanelItem[] = [
+    { id: "files", label: "Files", icon: "package-open", count: files.length },
+    { id: "requirements", label: "Setup & secrets", icon: "key-round", count: skill.requirements.length },
+    { id: "activity", label: "Activity", icon: "activity", count: versions.length },
+    { id: "manifest", label: "Manifest", icon: "braces", count: skill.tools.length + Object.keys(skill.metadata).length },
+    { id: "checksum", label: "Checksum", icon: "hash", count: skill.checksum ? "set" : "—" },
   ];
+  const panelItems = [dependencyPanel, ...morePanelItems];
+  const currentPanel = panel ? panelItems.find((item) => item.id === panel) ?? dependencyPanel : null;
+  const showDrawerNav = panel ? morePanelItems.some((item) => item.id === panel) : false;
 
   return (
     <div className="dpage">
@@ -421,106 +443,80 @@ export function DetailView({
         />
       </div>
 
-      <div className="viewbar dtabs" role="tablist" aria-label="Skill detail sections">
-        {TABS.map((t) => (
-          <button
-            key={t.id}
-            role="tab"
-            id={`skilltab-${t.id}`}
-            aria-selected={tab === t.id}
-            aria-controls="skilltab-panel"
-            className={"vtab" + (tab === t.id ? " is-active" : "")}
-            onClick={() => setTab(t.id)}
-          >
-            <Icon name={t.icon} size={14} />
-            {t.label}
-            {t.n != null && <span className="vtab__count">{t.n}</span>}
-          </button>
-        ))}
-      </div>
-
-      {tab === "files" ? (
-        <div
-          className="dbody dbody--full"
-          role="tabpanel"
-          id="skilltab-panel"
-          aria-labelledby={`skilltab-${tab}`}
-        >
-          <div className="dcontent dcontent--flush">
-            <FileExplorer files={files} requestedPath={selectedPath} />
+      <div className="dbody dbody--linear">
+        <div className="dcontent dcontent--linear">
+          <div className="dcontent__inner dcontent__inner--linear">
+            <p className="lin-eyebrow">
+              <Icon name="package" size={13} />
+              Skill package
+            </p>
+            <h1 className="dtitle dtitle--linear">{skill.id}</h1>
+            <p className="ov__lead ov__lead--linear">{skill.description}</p>
+            {invalid && skill.error && (
+              <div className="lin-alert">
+                <p className="seclabel" style={{ color: "var(--color-danger)", marginBottom: 8 }}>
+                  Validation error
+                </p>
+                <div className="errblock">{skill.error}</div>
+              </div>
+            )}
+            <div className="lin-discussion">
+              <Discussion
+                comments={comments}
+                versions={versions}
+                me={{ id: me.id, name: me.name, initials: me.initials }}
+                canDeprecate={canDeprecate}
+                onAdd={addComment}
+                onToggleDeprecated={toggleDeprecated}
+              />
+            </div>
           </div>
         </div>
-      ) : (
-        <div
-          className="dbody"
-          role="tabpanel"
-          id="skilltab-panel"
-          aria-labelledby={`skilltab-${tab}`}
-        >
-          {tab === "overview" ? (
-            <div className="dcontent">
-              <div className="dcontent__inner">
-                <h1 className="dtitle">{skill.id}</h1>
-                <div className="dchips">
-                  <VisibilityChip skill={skill} />
-                  <ValidBadge v={skill.validation} />
-                  <InstallBadge state={skill.installStatus} />
-                  <span
-                    className="mono"
-                    style={{ fontSize: "var(--text-xs)", color: "var(--color-muted)" }}
-                  >
-                    {skill.version ?? "—"}
-                  </span>
-                </div>
-                <div className="ov">
-                  {invalid && skill.error && (
-                    <div>
-                      <p className="seclabel" style={{ color: "var(--color-danger)" }}>
-                        Validation error
-                      </p>
-                      <div className="errblock">{skill.error}</div>
-                    </div>
-                  )}
-                  <p className="ov__lead">{skill.description}</p>
-
-                  {files.length > 0 && (
-                    <div className="contents">
-                      <div className="contents__head">
-                        <Icon name="package-open" size={14} />
-                        <span className="contents__title">Package contents</span>
-                        <span className="contents__n">{files.length} files</span>
-                      </div>
-                      <div className="contents__grid">
-                        {files.map((f) => (
-                          <button
-                            className="contents__item"
-                            key={f.path}
-                            onClick={() => openFile(f.path)}
-                            title={"Open " + f.path}
-                          >
-                            <Icon name={iconForFile(f.path)} size={15} />
-                            <span className="contents__fname">{f.path}</span>
-                            <span className="contents__fsize">{fmtBytes(f.size)}</span>
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  <Discussion
-                    comments={comments}
-                    versions={versions}
-                    me={{ id: me.id, name: me.name, initials: me.initials }}
-                    canDeprecate={canDeprecate}
-                    onAdd={addComment}
-                    onToggleDeprecated={toggleDeprecated}
-                  />
-                </div>
-              </div>
-            </div>
-          ) : tab === "dependencies" ? (
-            <div className="dcontent">
-              <div className="dcontent__inner dcontent__inner--wide">
+        <aside className="dsidebar dsidebar--linear">
+          <DetailRail
+            skill={skill}
+            teams={teams}
+            onChangeVisibility={onChangeVisibility}
+            canChangeVisibility={canModifySkill}
+            requiresN={reqN}
+            usedByN={usedN}
+            depFlag={depFlag}
+            panelItems={morePanelItems}
+            onOpenPanel={setPanel}
+          />
+        </aside>
+      </div>
+      {panel && currentPanel && (
+        <aside className={"dpanel" + (panel === "files" ? " dpanel--files" : "")} aria-label={currentPanel.label}>
+          <div className="dpanel__head">
+            <span className="dpanel__title">
+              <Icon name={currentPanel.icon} size={14} />
+              {currentPanel.label}
+            </span>
+            <button className="iconbtn" onClick={() => setPanel(null)} aria-label="Close panel" title="Close panel">
+              <Icon name="x" size={14} />
+            </button>
+          </div>
+          {showDrawerNav && (
+            <nav className="dpanel__nav" aria-label="More sections">
+              {morePanelItems.map((item) => (
+                <button
+                  key={item.id}
+                  className={"dpanel__navitem" + (panel === item.id ? " is-active" : "")}
+                  aria-current={panel === item.id ? "page" : undefined}
+                  onClick={() => setPanel(item.id)}
+                  type="button"
+                >
+                  <Icon name={item.icon} size={13} />
+                  <span>{item.label}</span>
+                  <b>{item.count}</b>
+                </button>
+              ))}
+            </nav>
+          )}
+          <div className={"dpanel__body" + (panel === "files" ? " dpanel__body--flush" : "")}>
+            {panel === "dependencies" ? (
+              <div className="dpanel__inner dpanel__inner--wide">
                 <DependenciesTab
                   slug={skill.id}
                   version={skill.version}
@@ -528,17 +524,15 @@ export function DetailView({
                   onOpenSkill={onOpenSkill}
                 />
               </div>
-            </div>
-          ) : tab === "requirements" ? (
-            <div className="dcontent">
-              <div className="dcontent__inner">
+            ) : panel === "requirements" ? (
+              <div className="dpanel__inner">
                 <Requirements requirements={skill.requirements} />
               </div>
-            </div>
-          ) : (
-            <div className="dcontent">
-              <div className="dcontent__inner">
-                <div className="dblocks">
+            ) : panel === "files" ? (
+              <FileExplorer files={files} requestedPath={null} panelMode />
+            ) : panel === "activity" ? (
+              <div className="dpanel__inner">
+                <div className="dblocks dblocks--panel">
                   <div>
                     <p className="seclabel">
                       Versions <span className="seclabel__n">{versions.length}</span>
@@ -547,22 +541,17 @@ export function DetailView({
                   </div>
                 </div>
               </div>
-            </div>
-          )}
-          <aside className="dsidebar">
-            <p className="railhead">Properties</p>
-            <PropList
-              skill={skill}
-              teams={teams}
-              onChangeVisibility={onChangeVisibility}
-              canChangeVisibility={canModifySkill}
-              requiresN={reqN}
-              usedByN={usedN}
-              depFlag={depFlag}
-              onOpenDeps={() => setTab("dependencies")}
-            />
-          </aside>
-        </div>
+            ) : panel === "manifest" ? (
+              <div className="dpanel__inner">
+                <ManifestDetails skill={skill} />
+              </div>
+            ) : (
+              <div className="dpanel__inner">
+                <ChecksumDetails checksum={skill.checksum} />
+              </div>
+            )}
+          </div>
+        </aside>
       )}
     </div>
   );

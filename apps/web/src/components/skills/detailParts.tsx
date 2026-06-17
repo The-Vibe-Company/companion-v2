@@ -8,6 +8,14 @@ import { relativeTime } from "@/lib/format";
 import type { MeVM, SkillVM, TeamVM } from "@/lib/types";
 import { Avatar, ValidBadge, visibilityMeta } from "./blocks";
 
+export type DetailPanel = "dependencies" | "requirements" | "files" | "activity" | "manifest" | "checksum";
+export type DetailPanelItem = {
+  id: DetailPanel;
+  label: string;
+  icon: string;
+  count: string | number;
+};
+
 function metadataKeyLabel(key: string): string {
   return key.startsWith("companion_") ? key.slice("companion_".length).replaceAll("_", " ") : key;
 }
@@ -358,6 +366,212 @@ export function PropList({
             <span style={{ color: "var(--color-muted)" }}>None declared</span>
           )}
         </span>
+      </div>
+    </div>
+  );
+}
+
+export function DetailRail({
+  skill,
+  teams,
+  onChangeVisibility,
+  canChangeVisibility,
+  requiresN,
+  usedByN,
+  depFlag,
+  panelItems,
+  onOpenPanel,
+}: {
+  skill: SkillVM;
+  teams: TeamVM[];
+  onChangeVisibility: (visibility: SkillVisibilityInput) => void;
+  canChangeVisibility: boolean;
+  requiresN?: number;
+  usedByN?: number;
+  depFlag?: { n: number; blocked: boolean } | null;
+  panelItems: DetailPanelItem[];
+  onOpenPanel: (panel: DetailPanel) => void;
+}) {
+  const meta = visibilityMeta(skill);
+  const reqN = requiresN ?? skill.requiresCount;
+  const usedN = usedByN ?? skill.usedByCount;
+  const flag = depFlag ?? (skill.depWarn ? { n: 0, blocked: false } : null);
+  const depLabel = flag ? (flag.blocked ? "Blocked" : "Attention") : "Clean";
+  const depTone = flag ? (flag.blocked ? "danger" : "warn") : "ok";
+  return (
+    <div className="linrail">
+      <p className="railhead">Essential</p>
+      <div className="linprop">
+        <span className="linprop__label">
+          <Icon name="activity" size={13} />
+          Status
+        </span>
+        <span className="linprop__value">
+          <ValidBadge v={skill.validation} />
+        </span>
+      </div>
+      <div className="linprop">
+        <span className="linprop__label">
+          <Icon name={meta.icon} size={13} />
+          Visibility
+        </span>
+        <span className="linprop__value">
+          <VisibilityControl skill={skill} teams={teams} onChange={onChangeVisibility} canChange={canChangeVisibility} />
+        </span>
+      </div>
+      <div className="linprop">
+        <span className="linprop__label">
+          <Icon name="tag" size={13} />
+          Version
+        </span>
+        <span className="linprop__value">
+          <span className="mono">{skill.version ?? "—"}</span>
+        </span>
+      </div>
+      <div className="linprop">
+        <span className="linprop__label">
+          <Icon name="user" size={13} />
+          Owner
+        </span>
+        <span className="linprop__value">
+          <Avatar initials={skill.owner.initials} />
+          <span className="linprop__truncate">{skill.owner.name}</span>
+        </span>
+      </div>
+      <button className="linprop linprop--button" onClick={() => onOpenPanel("dependencies")} type="button">
+        <span className="linprop__label">
+          <Icon name="git-branch" size={13} />
+          Dependencies
+        </span>
+        <span className={"linprop__value linprop__value--" + depTone}>
+          <span className="linstatus">{depLabel}</span>
+          <span className="mono">{reqN}/{usedN}</span>
+        </span>
+      </button>
+      <div className="linprop">
+        <span className="linprop__label">
+          <Icon name="clock" size={13} />
+          Updated
+        </span>
+        <span className="linprop__value">
+          <span className="mono">{skill.updated}</span>
+        </span>
+      </div>
+
+      <div className="divider" />
+      <p className="railhead railhead--sub">More</p>
+      <div className="linlinks">
+        {panelItems.map((item) => (
+          <button className="linlink" onClick={() => onOpenPanel(item.id)} type="button" key={item.id}>
+            <span><Icon name={item.icon} size={13} /> {item.label}</span>
+            <b>{item.count}</b>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+export function ManifestDetails({ skill }: { skill: SkillVM }) {
+  const metadataEntries = Object.entries(skill.metadata).sort(([a], [b]) => a.localeCompare(b));
+  return (
+    <div className="dblocks dblocks--panel">
+      <div>
+        <p className="seclabel">
+          <Icon name="braces" size={14} />
+          Manifest
+        </p>
+        <p className="ov__lead" style={{ marginBottom: 18 }}>
+          Runtime declarations from the published skill package. These values are inspectable, not
+          marketing copy.
+        </p>
+        <div className="manifeststack">
+          <div className="manifestrow">
+            <span className="manifestrow__label">
+              <Icon name="layers" size={13} />
+              Compatibility
+            </span>
+            <span className="manifestrow__value mono">{skill.compatibility ?? "—"}</span>
+          </div>
+          <div className="manifestrow manifestrow--stack">
+            <span className="manifestrow__label">
+              <Icon name="shield" size={13} />
+              Allowed tools
+              <b>{skill.tools.length}</b>
+            </span>
+            <span className="manifestrow__value">
+              {skill.tools.length ? (
+                <span className="chips">
+                  {skill.tools.map((tool) => (
+                    <span className="chip" key={tool}>{tool}</span>
+                  ))}
+                </span>
+              ) : (
+                <span className="muted">None declared</span>
+              )}
+            </span>
+          </div>
+          <div className="manifestrow">
+            <span className="manifestrow__label">
+              <Icon name="file-text" size={13} />
+              License
+            </span>
+            <span className="manifestrow__value mono">{skill.license ?? "—"}</span>
+          </div>
+          <div className="manifestrow manifestrow--stack">
+            <span className="manifestrow__label">
+              <Icon name="braces" size={13} />
+              Metadata
+              <b>{metadataEntries.length}</b>
+            </span>
+            <span className="manifestrow__value">
+              {metadataEntries.length ? (
+                <span className="kvlist">
+                  {metadataEntries.map(([key, value]) => (
+                    <span className="kv" key={key}>
+                      <span className="kv__k" title={key} aria-label={key}>
+                        {metadataKeyLabel(key)}
+                      </span>
+                      <span className="kv__v">{value}</span>
+                    </span>
+                  ))}
+                </span>
+              ) : (
+                <span className="muted">None declared</span>
+              )}
+            </span>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export function ChecksumDetails({ checksum }: { checksum: string | null }) {
+  return (
+    <div className="dblocks dblocks--panel">
+      <div>
+        <p className="seclabel">
+          <Icon name="hash" size={14} />
+          Checksum
+        </p>
+        <p className="ov__lead" style={{ marginBottom: 18 }}>
+          Digest for the current published package. Use it to verify the package downloaded from
+          the registry.
+        </p>
+        <div className="checksumcard">
+          <code>{checksum ?? "No checksum recorded"}</code>
+          {checksum && (
+            <button
+              className="iconbtn"
+              title="Copy checksum"
+              aria-label="Copy checksum"
+              onClick={() => navigator.clipboard?.writeText(checksum).catch(() => {})}
+            >
+              <Icon name="copy" size={13} />
+            </button>
+          )}
+        </div>
       </div>
     </div>
   );

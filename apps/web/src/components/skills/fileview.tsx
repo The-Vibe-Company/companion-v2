@@ -237,9 +237,11 @@ function TreeFolder({
 export function FileExplorer({
   files,
   requestedPath,
+  panelMode = false,
 }: {
   files: SkillFile[];
   requestedPath?: string | null;
+  panelMode?: boolean;
 }) {
   const tree = useMemo(() => buildTree(files), [files]);
   const byPath = useMemo(() => {
@@ -270,7 +272,7 @@ export function FileExplorer({
 
   if (files.length === 0) {
     return (
-      <div className="fx">
+      <div className={"fx" + (panelMode ? " fx--panel" : "")}>
         <div className="fx-pane">
           <div className="fv-body">
             <div className="fx-empty">
@@ -284,7 +286,7 @@ export function FileExplorer({
   }
 
   return (
-    <div className="fx">
+    <div className={"fx" + (panelMode ? " fx--panel" : "")}>
       <div className="fx-tree">
         <div className="fx-treehead">
           <Icon name="package-open" size={13} />
