@@ -95,12 +95,13 @@ defaults unless the user chooses otherwise.
 - a raw `application/zip` or `application/gzip` body (the archive itself), with the same options as
   query params.
 
-Declare required dependencies with repeated `dependency=<slug>` parameters. The API also reads
-`companion.json` from the uploaded archive and merges it with those parameters, so the Companion
-skill must analyze the local package, compare the result with `companion.json`, ask before changing
-the dependency list, synchronize `companion.json` to the confirmed final list, and only then package
-and send the archive. Set `action=validate` to run every package and identity check without
-publishing; the validate response is `{ "result": <validation>, "dependency_plan": <plan> }`.
+Declare dependencies in the package root `companion.json`. The API still accepts repeated
+`dependency=<slug>` parameters as a legacy fallback only when the uploaded archive has no
+`companion.json`; when the manifest exists, its `dependencies` list wins. The Companion skill must
+analyze the local package, compare the result with `companion.json`, ask before changing the
+dependency list, synchronize `companion.json` to the confirmed final list, and only then package and
+send the archive. Set `action=validate` to run every package and identity check without publishing;
+the validate response is `{ "result": <validation>, "dependency_plan": <plan> }`.
 
 Ownership and visibility are separate:
 
@@ -146,10 +147,10 @@ that already owns the skill.
 Dependencies are un-versioned skill→skill links persisted in a package's `companion.json`
 (`{ "dependencies": ["slug-a", "slug-b"] }`). Before validate or publish, the Companion skill must
 still analyze the full local package, compare inferred dependencies with `companion.json`, and ask
-before synchronizing additions or removals. Because the server merges `companion.json` from the
-archive with repeated `dependency=` parameters, package only after `companion.json` matches the
-confirmed final list, then pass each confirmed slug as a repeated `dependency=` parameter on validate
-and publish.
+before synchronizing additions or removals. Package only after `companion.json` matches the confirmed
+final list. Repeated `dependency=` parameters are accepted only for old packages without
+`companion.json`; do not send them for manifest-backed packages because the manifest is the source of
+truth.
 
 `POST /skills?action=validate&dependency=...` returns a `dependency_plan`:
 

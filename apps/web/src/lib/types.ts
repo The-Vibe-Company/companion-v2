@@ -1,5 +1,6 @@
 import type {
   OrgRole,
+  CompanionDisplay,
   SkillListRow,
   SkillOwnerKind,
   SkillRequirement,
@@ -29,6 +30,7 @@ export interface SkillVM {
   version: string | null;
   validation: ValidationState;
   description: string;
+  display?: CompanionDisplay;
   error: string | null;
   owner: SkillOwnerVM;
   tools: string[];
@@ -63,6 +65,7 @@ export function mapSkill(row: SkillListRow): SkillVM {
     version: row.current_version,
     validation: row.validation,
     description: row.description,
+    display: row.display ?? {},
     error: row.validation_error,
     owner: {
       kind: row.owner_kind,

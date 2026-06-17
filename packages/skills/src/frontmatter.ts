@@ -1,6 +1,7 @@
 import { parse as parseYaml } from "yaml";
 import {
   AGENT_SKILL_FRONTMATTER_KEYS,
+  skillRequirementSchema,
   skillFrontmatterSchema,
   type FrontmatterWarning,
   type SkillFrontmatter,
@@ -49,6 +50,11 @@ function normalizeLegacyTools(value: unknown): string[] | undefined {
   return tools.length ? tools : undefined;
 }
 
+function normalizeLegacyRequirements(value: unknown): SkillLegacyFrontmatter["requirements"] {
+  const result = skillRequirementSchema.array().safeParse(value);
+  return result.success ? result.data : undefined;
+}
+
 function analyzeLegacyFields(doc: Record<string, unknown>): {
   normalized: Record<string, unknown>;
   warnings: FrontmatterWarning[];
@@ -63,7 +69,8 @@ function analyzeLegacyFields(doc: Record<string, unknown>): {
     version: stringifyScalar(doc.version),
     scope: stringifyScalar(doc.scope),
     tools: normalizeLegacyTools(doc.tools),
-    unknownFields: Object.keys(doc).filter((key) => !OFFICIAL_KEYS.has(key)),
+    requirements: normalizeLegacyRequirements(doc.requirements),
+    unknownFields: Object.keys(doc).filter((key) => !OFFICIAL_KEYS.has(key) && key !== "requirements"),
   };
   const warnings: FrontmatterWarning[] = [];
 
@@ -94,9 +101,18 @@ function analyzeLegacyFields(doc: Record<string, unknown>): {
       suggestion: "Set visibility on the Companion upload request instead.",
     });
   }
+  if (doc.requirements !== undefined) {
+    warnings.push({
+      code: "legacy-requirements",
+      field: "requirements",
+      message: "Top-level requirements are a legacy Companion field.",
+      suggestion: "Move required secrets and environment variables to companion.json.",
+    });
+    normalized.requirements = doc.requirements;
+  }
 
   for (const field of legacy.unknownFields) {
-    if (field === "version" || field === "tools" || field === "scope") continue;
+    if (field === "version" || field === "tools" || field === "scope" || field === "requirements") continue;
     warnings.push({
       code: "unknown-field",
       field,
@@ -138,7 +154,8 @@ export function parseFrontmatter(md: string): ParseFrontmatterResult {
       legacy: {
         version: stringifyScalar(rawDoc.version),
         tools: normalizeLegacyTools(rawDoc.tools),
-        unknownFields: Object.keys(rawDoc).filter((key) => !OFFICIAL_KEYS.has(key)),
+        requirements: normalizeLegacyRequirements(rawDoc.requirements),
+        unknownFields: Object.keys(rawDoc).filter((key) => !OFFICIAL_KEYS.has(key) && key !== "requirements"),
       },
     };
   }

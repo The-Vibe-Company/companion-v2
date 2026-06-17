@@ -68,14 +68,14 @@ modify it. `everyone=true` means every member of the current workspace can see t
 visibility is zero or more rows in `skill_team_shares`; those rows grant read access only. Private
 is derived from `everyone=false` and no team shares. A version's declared tools
 (`skill_versions.tools`) come from the Agent Skills `allowed-tools` frontmatter string.
-A version may also declare a `requirements` list in its frontmatter — the secrets and environment
-variables the skill needs at run time, each with `key`, `type` (`secret` | `env`), `required`, and a
-human `note` on how to obtain it (these are **declarations and install notes only — never secret
-values**, which remain envelope-encrypted and write-only). Like `metadata` and `compatibility`,
-`requirements` is not a column: it rides in the existing `skill_versions.frontmatter` JSON and is
-parsed back into the read shape (`skillListRowSchema.requirements`) for the skill detail view. The
-bundled Companion skill analyzes a package before upload, proposes the detected requirements, and
-(after the user confirms) writes them into the SKILL.md frontmatter.
+Companion-specific package data lives in root `companion.json`, not `SKILL.md`: `display` (human
+name, short summary, long description), `requirements` (declared secrets and environment variables,
+never values), and un-versioned skill `dependencies`. `display.summary` updates the existing
+`skills.description` listing field; the full normalized manifest rides in the existing
+`skill_versions.frontmatter` JSON under `companion` and is parsed back into the read shape
+(`skillListRowSchema.display` / `skillListRowSchema.requirements`) for the skill detail view. Legacy
+packages that still declare `requirements` in `SKILL.md` are readable for compatibility and are
+normalized into `companion.json` on publish.
 Companion-specific registry data is written under `metadata.companion_*` when a package is
 published, including `companion_skill_id` and `companion_version`. On targeted re-publish, callers
 may send `expect_slug` and `expect_skill_id`; validation and publication reject mismatched
@@ -100,8 +100,8 @@ declared dependencies that are missing, cyclic, or visibility-mismatched; edges 
 same transaction as the version. `POST /v1/skills?action=validate` returns a `dependencyPlan`
 (declared / already-published / must-upload / removed-since-previous / archival candidates) that
 drives the upload dialog's **Dependency preflight** step. In this slice declared dependencies are
-passed to the publish API as a list of slugs; reading them from a package `companion.json` and the
-CLI/`companion`-skill authoring flow are deferred.
+read from package `companion.json`; legacy `dependency=` upload parameters are accepted only when a
+package has no Companion manifest.
 
 **Skill archive.** `skills.archived_at` / `archived_by` / `archive_reason` soft-hide a skill: archived
 skills drop out of the normal workspace/team/search lists but stay viewable, **restorable**, and

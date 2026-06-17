@@ -1,5 +1,5 @@
 import type { SkillRequirement, SkillVisibilityInput } from "@companion/contracts";
-import { toStoredSkillFrontmatter } from "@companion/contracts";
+import { fallbackCompanionManifest } from "@companion/contracts";
 import {
   createOrg,
   createTeam,
@@ -12,7 +12,7 @@ import {
   type ActorContext,
 } from "@companion/core/services";
 import { closeDb, db, schema } from "@companion/db";
-import { packDir, parseFrontmatter } from "@companion/skills";
+import { packDir, parseFrontmatter, toStoredSkillVersionManifest } from "@companion/skills";
 import { putSkillArchive, skillArchiveKey } from "@companion/storage";
 import { and, eq, inArray } from "drizzle-orm";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -90,9 +90,7 @@ interface SeedSkillSpec {
   requirements?: SkillRequirement[];
 }
 
-function buildSkillMd(
-  spec: Pick<SeedSkillSpec, "slug" | "version" | "description" | "body" | "tools" | "license" | "requirements">,
-): string {
+function buildSkillMd(spec: Pick<SeedSkillSpec, "slug" | "version" | "description" | "body" | "tools" | "license">): string {
   const lines = [
     "---",
     `name: ${spec.slug}`,
@@ -104,15 +102,6 @@ function buildSkillMd(
   if (spec.tools?.length) {
     lines.push(`allowed-tools: ${JSON.stringify(spec.tools.join(" "))}`);
   }
-  if (spec.requirements?.length) {
-    lines.push("requirements:");
-    for (const req of spec.requirements) {
-      lines.push(`  - key: ${req.key}`);
-      lines.push(`    type: ${req.type}`);
-      lines.push(`    required: ${req.required}`);
-      lines.push(`    note: ${JSON.stringify(req.note)}`);
-    }
-  }
   lines.push("---");
   return `${lines.join("\n")}\n\n${spec.body.trim()}\n`;
 }
@@ -121,7 +110,13 @@ async function seedSkill(actor: ActorContext, orgId: string, spec: SeedSkillSpec
   const dir = await mkdtemp(join(tmpdir(), "companion-seed-skill-"));
   try {
     const md = buildSkillMd(spec);
+    const companionManifest = fallbackCompanionManifest({
+      summary: spec.description,
+      requirements: spec.requirements ?? [],
+      dependencies: spec.dependencies ?? [],
+    });
     await writeFile(join(dir, "SKILL.md"), md);
+    await writeFile(join(dir, "companion.json"), `${JSON.stringify(companionManifest, null, 2)}\n`);
     const canonical = await packDir(dir);
     const parsed = parseFrontmatter(md);
     if (!parsed.ok) throw new Error(parsed.error);
@@ -135,7 +130,7 @@ async function seedSkill(actor: ActorContext, orgId: string, spec: SeedSkillSpec
       checksum: canonical.checksum,
       storage_path: key,
       size_bytes: canonical.sizeBytes,
-      frontmatter: JSON.stringify(toStoredSkillFrontmatter(fm), null, 2),
+      frontmatter: JSON.stringify(toStoredSkillVersionManifest(fm, companionManifest), null, 2),
       tools: fm.allowedTools,
       license: fm.license ?? null,
       note: "Seeded for local development",

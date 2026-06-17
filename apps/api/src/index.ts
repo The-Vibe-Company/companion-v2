@@ -1,6 +1,6 @@
 import { serve } from "@hono/node-server";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fetchRequestHandler } from "@trpc/server/adapters/fetch";
@@ -80,14 +80,14 @@ import {
   skillVisibilityInputSchema,
   visibilityFilterSchema,
   skillFilterPreferencesSchema,
-  toStoredSkillFrontmatter,
+  fallbackCompanionManifest,
   updateOrgInputSchema,
   updateTeamInputSchema,
   resolveOrgLogoContentType,
   updateUserProfileInputSchema,
+  type CompanionManifest,
   type SkillVisibilityInput,
   type SkillFrontmatter,
-  type SkillRequirement,
 } from "@companion/contracts";
 import {
   deleteSkillArchive,
@@ -103,9 +103,11 @@ import {
   compareSemver,
   extractArchiveFiles,
   isValidSemver,
+  buildNormalizedCompanionJson,
   buildNormalizedSkillMd,
   packDir,
   prepareSkillDirForPublish,
+  toStoredSkillVersionManifest,
   tarGzToZip,
   toTar,
   unpackAnyTo,
@@ -125,6 +127,7 @@ import {
 } from "./context";
 import { appRouter } from "./trpc";
 import { assertTargetedSkillUpdate, parseSkillPublishAction } from "./skillPublishGuards";
+import { buildInlineCompanionManifest, uploadDependencyValues } from "./skillCompanionManifest";
 import { buildSkillUploadOptions } from "./skillUploadOptions";
 import { buildCompanionSkillRow, getCompanionSkillPackage } from "./companionSkillPackage";
 import { COMPANION_SKILL_KEY } from "@companion/companion-skill";
@@ -151,13 +154,28 @@ async function withTenant<T>(
   return withTenantContext({ orgId, userId: actor.id }, (database) => fn({ actor, orgId, database }));
 }
 
-async function canonicalizeSkillArchive(archive: Buffer, companion: { skillId: string; version: string }) {
+async function canonicalizeSkillArchive(
+  archive: Buffer,
+  companion: { skillId: string; version: string },
+  overrides: { dependencies?: string[] } = {},
+) {
   const dir = await mkdtemp(join(tmpdir(), "companion-skill-"));
   try {
     await unpackAnyTo(archive, dir);
     const prepared = await prepareSkillDirForPublish(dir, companion);
+    const companionManifest = overrides.dependencies
+      ? fallbackCompanionManifest({
+          summary: prepared.companionManifest.display.summary ?? prepared.frontmatter.description,
+          display: prepared.companionManifest.display,
+          requirements: prepared.companionManifest.requirements,
+          dependencies: overrides.dependencies,
+        })
+      : prepared.companionManifest;
+    if (overrides.dependencies) {
+      await writeFile(prepared.companionManifestPath, buildNormalizedCompanionJson(companionManifest), "utf8");
+    }
     const canonical = await packDir(prepared.rootDir);
-    return { canonical, frontmatter: prepared.frontmatter };
+    return { canonical, frontmatter: prepared.frontmatter, companionManifest };
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -169,7 +187,6 @@ function buildSkillMd(
   description: string,
   body: string,
   companion: { skillId: string; version: string },
-  requirements: SkillRequirement[] = [],
 ): string {
   const frontmatter = skillFrontmatterSchema.parse({
     name: id,
@@ -178,9 +195,12 @@ function buildSkillMd(
       companion_skill_id: companion.skillId,
       companion_version: companion.version,
     },
-    requirements,
   });
   return buildNormalizedSkillMd(frontmatter, body);
+}
+
+function skillSummary(fm: SkillFrontmatter, manifest: CompanionManifest): string {
+  return manifest.display.summary ?? fm.description;
 }
 
 async function resolvePublishTarget(input: {
@@ -236,42 +256,6 @@ function rejectLegacySkillVisibilityInput(hasField: (name: string) => boolean): 
 }
 
 /**
- * Read declared skill→skill dependencies from an optional `companion.json` at the package root
- * (`{ "dependencies": ["slug", ...] }`, also tolerating `[{ "slug": "..." }]`). Returns the declared
- * slugs so both the browser zip upload and the CLI/companion-skill flow declare dependencies the same
- * way. Best-effort: a missing or malformed file yields no dependencies.
- */
-async function readDeclaredDependencies(archive: Buffer): Promise<string[]> {
-  const dir = await mkdtemp(join(tmpdir(), "companion-deps-"));
-  try {
-    await unpackAnyTo(archive, dir);
-    // The package may extract to the root or be wrapped in a single folder; check both depths.
-    const roots = [dir];
-    for (const entry of await readdir(dir, { withFileTypes: true }).catch(() => [])) {
-      if (entry.isDirectory()) roots.push(join(dir, entry.name));
-    }
-    for (const root of roots) {
-      const raw = await readFile(join(root, "companion.json"), "utf8").catch(() => null);
-      if (!raw) continue;
-      const parsed = JSON.parse(raw) as { dependencies?: unknown };
-      if (!Array.isArray(parsed.dependencies)) return [];
-      return [
-        ...new Set(
-          parsed.dependencies
-            .map((d) => (typeof d === "string" ? d : (d as { slug?: unknown })?.slug))
-            .filter((s): s is string => typeof s === "string" && s.length > 0),
-        ),
-      ];
-    }
-    return [];
-  } catch {
-    return [];
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
-}
-
-/**
  * Shared publish tail: store the canonical archive (idempotently) and write a new
  * skill_versions row, authorizing first and cleaning up the blob on failure.
  */
@@ -280,6 +264,7 @@ async function publishCanonical(input: {
   orgId: string;
   canonical: Awaited<ReturnType<typeof packDir>>;
   fm: SkillFrontmatter;
+  companionManifest: CompanionManifest;
   skillId: string;
   ownerTeam?: string | null;
   visibility: SkillVisibilityInput;
@@ -287,7 +272,7 @@ async function publishCanonical(input: {
   note: string;
   dependencies?: string[];
 }): Promise<{ id: string; slug: string; version: string; checksum: string; sizeBytes: number }> {
-  const { actor, orgId, canonical, fm, skillId, ownerTeam, visibility, version, note, dependencies } = input;
+  const { actor, orgId, canonical, fm, companionManifest, skillId, ownerTeam, visibility, version, note, dependencies } = input;
   if (!isValidSemver(version)) throw new Error(`invalid semver: ${version}`);
   const key = skillArchiveKey({ orgId, slug: fm.name, version });
   const payload = publishSkillInputSchema.parse({
@@ -296,11 +281,11 @@ async function publishCanonical(input: {
     owner_team: ownerTeam,
     visibility,
     version,
-    description: fm.description,
+    description: skillSummary(fm, companionManifest),
     checksum: canonical.checksum,
     storage_path: key,
     size_bytes: canonical.sizeBytes,
-    frontmatter: JSON.stringify(toStoredSkillFrontmatter(fm), null, 2),
+    frontmatter: JSON.stringify(toStoredSkillVersionManifest(fm, companionManifest), null, 2),
     tools: fm.allowedTools,
     license: fm.license ?? null,
     note,
@@ -1254,12 +1239,13 @@ app.post("/v1/skills", bodyLimit({ maxSize: 32 * 1024 * 1024, onError: (c) => js
         return c.json({ result, error: error instanceof Error ? error.message : String(error) }, 422);
       }
     }
-    // Declared dependencies come from the request `dependency` fields and/or an optional
-    // companion.json at the package root, so a browser zip upload declares the same graph as the CLI.
-    const declaredFromPackage = await readDeclaredDependencies(archive);
-    if (declaredFromPackage.length) {
-      dependencyValues = [...new Set([...dependencyValues, ...declaredFromPackage])];
-    }
+    // companion.json is the preferred dependency source. Legacy dependency= query params remain a
+    // fallback for old clients that upload packages without a Companion manifest.
+    dependencyValues = uploadDependencyValues({
+      queryDependencies: dependencyValues,
+      companionManifestPath: result.companion_manifest_path,
+      companionManifest: result.companion_manifest,
+    });
     const visibility = skillVisibilityInputSchema.parse({ everyone: parseBoolean(everyoneRaw), teams: teamValues });
     // Dependency preflight: which declared deps are published / must be uploaded / dropped, plus any
     // blockers (missing / cycle / visibility). Computed for both validate (preview) and publish.
@@ -1290,7 +1276,7 @@ app.post("/v1/skills", bodyLimit({ maxSize: 32 * 1024 * 1024, onError: (c) => js
     const normalized = await canonicalizeSkillArchive(archive, {
       skillId: target.skillId,
       version: target.version,
-    });
+    }, result.companion_manifest_path === null ? { dependencies: dependencyValues } : {});
     const normalizedResult = await validateSkillArchive(normalized.canonical.archive);
     if (!normalizedResult.ok || !normalizedResult.frontmatter) {
       return c.json({ result: normalizedResult, error: normalizedResult.error ?? "validation failed after normalization" }, 422);
@@ -1302,12 +1288,13 @@ app.post("/v1/skills", bodyLimit({ maxSize: 32 * 1024 * 1024, onError: (c) => js
         orgId,
         canonical: normalized.canonical,
         fm: normalized.frontmatter,
+        companionManifest: normalized.companionManifest,
         skillId: target.skillId,
         ownerTeam: ownerTeamRaw,
         visibility,
         version: target.version,
         note: messageRaw ?? "",
-        dependencies: dependencyValues,
+        dependencies: normalized.companionManifest.dependencies,
       });
     } catch (error) {
       // Unresolved dependencies (missing / cycle / visibility) — surface the plan, don't 500.
@@ -1338,26 +1325,30 @@ app.post("/v1/skills/create", bodyLimit({ maxSize: 2 * 1024 * 1024, onError: (c)
     // forward the current version's declared dependencies and requirements (declared secrets/env
     // setup notes) so an inline edit never silently drops them — this path rebuilds the frontmatter
     // from id/description/body alone (there is no companion.json or frontmatter editor here).
-    const { carriedDependencies, carriedRequirements } = await withTenant(
+    const { carriedDependencies, carriedRequirements, carriedDisplay } = await withTenant(
       c,
       async ({ actor: a, orgId: o, database }) => {
         const existing = await getSkillBySlug({ actor: a, orgId: o, slug: input.id, database });
-        if (!existing?.current_version) return { carriedDependencies: [], carriedRequirements: [] };
+        if (!existing?.current_version) return { carriedDependencies: [], carriedRequirements: [], carriedDisplay: null };
         const deps = await getSkillDependencies({ actor: a, orgId: o, slug: input.id, database });
         return {
           carriedDependencies: deps.requires.map((r) => r.slug),
           carriedRequirements: existing.requirements,
+          carriedDisplay: existing.display,
         };
       },
       true,
     );
+    const companionManifest = buildInlineCompanionManifest({
+      description: input.description,
+      carriedDisplay,
+      carriedRequirements,
+      carriedDependencies,
+    });
     const dir = await mkdtemp(join(tmpdir(), "companion-skill-"));
     try {
-      await writeFile(
-        join(dir, "SKILL.md"),
-        buildSkillMd(input.id, input.description, input.body, target, carriedRequirements),
-        "utf8",
-      );
+      await writeFile(join(dir, "SKILL.md"), buildSkillMd(input.id, input.description, input.body, target), "utf8");
+      await writeFile(join(dir, "companion.json"), buildNormalizedCompanionJson(companionManifest), "utf8");
       const canonical = await packDir(dir);
       const result = await validateSkillArchive(canonical.archive);
       if (!result.ok || !result.frontmatter) {
@@ -1368,6 +1359,7 @@ app.post("/v1/skills/create", bodyLimit({ maxSize: 2 * 1024 * 1024, onError: (c)
         orgId,
         canonical,
         fm: result.frontmatter,
+        companionManifest,
         skillId: target.skillId,
         ownerTeam: input.owner_team,
         visibility: input.visibility,

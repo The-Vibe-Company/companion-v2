@@ -99,6 +99,164 @@ describe("validateSkillDir — allowed-tools", () => {
   });
 });
 
+describe("validateSkillDir — companion.json", () => {
+  it("uses companion.json as the effective manifest", async () => {
+    const dir = await makeSkillDir({
+      "SKILL.md": skillMd(
+        "name: manifest-skill\ndescription: Frontmatter fallback.\nrequirements:\n  - key: LEGACY_TOKEN",
+      ),
+      "companion.json": JSON.stringify({
+        display: {
+          name: "Manifest skill",
+          summary: "Manifest summary.",
+          description: "Manifest long description.",
+        },
+        requirements: [{ key: "MANIFEST_TOKEN", type: "secret", required: true, note: "Ask an admin." }],
+        dependencies: ["markdown-report"],
+      }),
+    });
+
+    const res = await validateSkillDir(dir);
+    expect(res.ok).toBe(true);
+    expect(check(res.checks, "companion")?.status).toBe("pass");
+    expect(res.companion_manifest_path).toBe("companion.json");
+    expect(res.companion_manifest?.display.summary).toBe("Manifest summary.");
+    expect(res.companion_manifest?.requirements.map((r) => r.key)).toEqual(["MANIFEST_TOKEN"]);
+    expect(res.companion_manifest?.dependencies).toEqual(["markdown-report"]);
+    expect(res.warnings?.some((w) => w.code === "legacy-requirements")).toBe(true);
+  });
+
+  it("synthesizes a manifest when companion.json is absent", async () => {
+    const dir = await makeSkillDir({
+      "SKILL.md": skillMd("name: legacy-req\ndescription: Legacy fallback.\nrequirements:\n  - key: LEGACY_TOKEN"),
+    });
+
+    const res = await validateSkillDir(dir);
+    expect(res.ok).toBe(true);
+    expect(res.companion_manifest_path).toBeNull();
+    expect(res.companion_manifest?.display.summary).toBe("Legacy fallback.");
+    expect(res.companion_manifest?.requirements.map((r) => r.key)).toEqual(["LEGACY_TOKEN"]);
+  });
+
+  it("fails validation when companion.json is invalid", async () => {
+    const dir = await makeSkillDir({
+      "SKILL.md": skillMd("name: bad-manifest\ndescription: A skill."),
+      "companion.json": JSON.stringify({ dependencies: ["Bad Slug"] }),
+    });
+
+    const res = await validateSkillDir(dir);
+    expect(res.ok).toBe(false);
+    expect(check(res.checks, "companion")?.status).toBe("fail");
+  });
+
+  it("fails validation when companion.json is empty", async () => {
+    const dir = await makeSkillDir({
+      "SKILL.md": skillMd("name: empty-manifest\ndescription: A skill."),
+      "companion.json": "",
+    });
+
+    const res = await validateSkillDir(dir);
+    expect(res.ok).toBe(false);
+    expect(check(res.checks, "companion")?.status).toBe("fail");
+  });
+
+  it("fails validation when companion.json is over the manifest read cap", async () => {
+    const dir = await makeSkillDir({
+      "SKILL.md": skillMd("name: huge-manifest\ndescription: A skill."),
+      "companion.json": Buffer.alloc(1024 * 1024 + 1, "{").toString(),
+    });
+
+    const res = await validateSkillDir(dir);
+    expect(res.ok).toBe(false);
+    expect(check(res.checks, "companion")?.status).toBe("fail");
+    expect(check(res.checks, "size")?.status).toBe("pass");
+  });
+});
+
+describe("validateSkillArchive — companion.json", () => {
+  it("reads companion.json next to a root SKILL.md", async () => {
+    const tar = await buildTar([
+      { name: "SKILL.md", content: skillMd("name: root-manifest\ndescription: Root fallback.") },
+      {
+        name: "companion.json",
+        content: JSON.stringify({ display: { summary: "Root manifest." }, dependencies: ["markdown-report"] }),
+      },
+    ]);
+
+    const res = await validateSkillArchive(tar);
+    expect(res.ok).toBe(true);
+    expect(res.companion_manifest_path).toBe("companion.json");
+    expect(res.companion_manifest?.display.summary).toBe("Root manifest.");
+    expect(res.companion_manifest?.dependencies).toEqual(["markdown-report"]);
+  });
+
+  it("ignores companion.json files outside the selected package root", async () => {
+    const tar = await buildTar([
+      { name: "SKILL.md", content: skillMd("name: root-skill\ndescription: Root fallback.") },
+      {
+        name: "nested/companion.json",
+        content: JSON.stringify({ display: { summary: "Wrong manifest." }, dependencies: ["nested-dep"] }),
+      },
+    ]);
+
+    const res = await validateSkillArchive(tar);
+    expect(res.ok).toBe(true);
+    expect(res.companion_manifest_path).toBeNull();
+    expect(res.companion_manifest?.display.summary).toBe("Root fallback.");
+    expect(res.companion_manifest?.dependencies).toEqual([]);
+  });
+
+  it("uses the wrapped companion.json when the selected SKILL.md is wrapped", async () => {
+    const tar = await buildTar([
+      { name: "wrapped-skill/SKILL.md", content: skillMd("name: wrapped-skill\ndescription: Wrapped fallback.") },
+      {
+        name: "wrapped-skill/companion.json",
+        content: JSON.stringify({ display: { summary: "Wrapped manifest." }, dependencies: ["wrapped-dep"] }),
+      },
+    ]);
+
+    const res = await validateSkillArchive(tar);
+    expect(res.ok).toBe(true);
+    expect(res.companion_manifest_path).toBe("wrapped-skill/companion.json");
+    expect(res.companion_manifest?.display.summary).toBe("Wrapped manifest.");
+    expect(res.companion_manifest?.dependencies).toEqual(["wrapped-dep"]);
+  });
+
+  it("fails validation for an invalid companion.json next to the selected SKILL.md", async () => {
+    const tar = await buildTar([
+      { name: "SKILL.md", content: skillMd("name: invalid-manifest\ndescription: Root fallback.") },
+      { name: "companion.json", content: JSON.stringify({ dependencies: ["Not A Slug"] }) },
+    ]);
+
+    const res = await validateSkillArchive(tar);
+    expect(res.ok).toBe(false);
+    expect(check(res.checks, "companion")?.status).toBe("fail");
+  });
+
+  it("fails validation for an empty companion.json next to the selected SKILL.md", async () => {
+    const tar = await buildTar([
+      { name: "SKILL.md", content: skillMd("name: empty-manifest\ndescription: Root fallback.") },
+      { name: "companion.json", content: "" },
+    ]);
+
+    const res = await validateSkillArchive(tar);
+    expect(res.ok).toBe(false);
+    expect(check(res.checks, "companion")?.status).toBe("fail");
+  });
+
+  it("fails validation for an oversized companion.json next to the selected SKILL.md", async () => {
+    const tar = await buildTar([
+      { name: "SKILL.md", content: skillMd("name: huge-manifest\ndescription: Root fallback.") },
+      { name: "companion.json", content: Buffer.alloc(1024 * 1024 + 1, "{") },
+    ]);
+
+    const res = await validateSkillArchive(tar);
+    expect(res.ok).toBe(false);
+    expect(check(res.checks, "companion")?.status).toBe("fail");
+    expect(check(res.checks, "size")?.status).toBe("pass");
+  });
+});
+
 describe("packDir — determinism & integrity", () => {
   it("produces a stable checksum across repeated packs", async () => {
     const dir = await makeSkillDir({ "SKILL.md": VALID_SKILL_MD, "scripts/x.py": "x\n" });

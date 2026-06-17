@@ -24,12 +24,15 @@ import type {
 } from "@companion/contracts";
 import {
   API_TOKEN_PREFIX,
+  companionManifestSchema,
+  fallbackCompanionManifest,
   parseAllowedTools,
   parseStoredSkillFrontmatter,
   publishSkillInputSchema,
   skillFilterPreferencesSchema,
   TEAM_BRAND_COLORS,
   visibilityCovers,
+  type CompanionManifest,
   type PublishSkillInput,
 } from "@companion/contracts";
 
@@ -118,6 +121,34 @@ export function uniqueSlug(base: string, suffix: string): string {
 /** True when an error is a Postgres unique-constraint violation (SQLSTATE 23505). */
 function isUniqueViolation(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error && (error as { code?: unknown }).code === "23505";
+}
+
+function parseStoredCompanionManifest(frontmatter: string, fallbackSummary: string): CompanionManifest {
+  const legacy = parseStoredSkillFrontmatter(frontmatter);
+  try {
+    const raw = JSON.parse(frontmatter) as { companion?: unknown };
+    const parsed = raw.companion ? companionManifestSchema.safeParse(raw.companion) : null;
+    if (parsed?.success) {
+      return fallbackCompanionManifest({
+        summary: fallbackSummary,
+        display: {
+          ...parsed.data.display,
+          description: parsed.data.display.description ?? legacy?.description,
+        },
+        requirements: parsed.data.requirements,
+        dependencies: parsed.data.dependencies,
+      });
+    }
+  } catch {
+    // Fall back to legacy frontmatter fields below.
+  }
+  return fallbackCompanionManifest({
+    summary: fallbackSummary,
+    display: {
+      description: legacy?.description,
+    },
+    requirements: legacy?.requirements ?? [],
+  });
 }
 
 /**
@@ -1092,7 +1123,10 @@ export async function listSkills(input: {
   };
 
   return rows.map((r) => {
-    const manifest = parseStoredSkillFrontmatter(r.frontmatter);
+    const frontmatter = r.frontmatter ?? "";
+    const manifest = parseStoredSkillFrontmatter(frontmatter);
+    const summary = r.description ?? manifest?.description ?? r.slug ?? "skill";
+    const companion = parseStoredCompanionManifest(frontmatter, summary);
     const requires = graph.requiresBySkill.get(r.id) ?? [];
     const usedBy = (graph.dependentsByTarget.get(r.id) ?? []).filter((u) => visibleIds.has(u.dependentId));
     const depWarn = requires.some((edge) => depEdgeStatus(graph, r.id, edge) !== "satisfied");
@@ -1100,7 +1134,8 @@ export async function listSkills(input: {
       id: r.id,
       org_id: r.org_id,
       slug: r.slug,
-      description: r.description,
+      description: summary,
+      display: companion.display,
       visibility: { everyone: r.everyone, teams: sharesBySkill.get(r.id) ?? [] },
       validation: r.validation,
       validation_error: r.validation_error,
@@ -1116,7 +1151,7 @@ export async function listSkills(input: {
       metadata: manifest?.metadata ?? {},
       license: r.license ?? manifest?.license ?? null,
       tools: r.tools?.length ? r.tools : parseAllowedTools(manifest?.["allowed-tools"]),
-      requirements: manifest?.requirements ?? [],
+      requirements: companion.requirements,
       checksum: r.checksum,
       size_bytes: r.size_bytes,
       star_count: r.star_count,
@@ -1349,6 +1384,7 @@ export async function listSkillVersions(input: {
     .orderBy(desc(schema.skillVersions.createdAt));
   return rows.map((r) => {
     const manifest = parseStoredSkillFrontmatter(r.frontmatter);
+    const companion = parseStoredCompanionManifest(r.frontmatter, skill.description);
     return {
       id: r.id,
       skill_id: r.skillId,
@@ -1359,6 +1395,8 @@ export async function listSkillVersions(input: {
       license: r.license ?? manifest?.license ?? null,
       compatibility: manifest?.compatibility ?? null,
       metadata: manifest?.metadata ?? {},
+      display: companion.display,
+      requirements: companion.requirements,
       size_bytes: r.sizeBytes,
       checksum: r.checksum,
       storage_path: r.storagePath,

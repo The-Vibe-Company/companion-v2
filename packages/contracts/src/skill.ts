@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { validationStateSchema } from "./scope";
 import { SKILL_NAME_RE, SEMVER_RE, skillRequirementSchema } from "./frontmatter";
+import { companionDisplaySchema } from "./companionManifest";
 import { localSkillStatusSchema } from "./localSkills";
 
 export const teamVisibilitySchema = z.object({
@@ -186,6 +187,8 @@ export const skillListRowSchema = z.object({
   org_id: z.string(),
   slug: z.string(),
   description: z.string(),
+  /** Human display fields normalized from companion.json, with SKILL.md fallbacks. */
+  display: companionDisplaySchema.default({}),
   visibility: skillVisibilitySchema,
   validation: validationStateSchema,
   validation_error: z.string().nullable(),
@@ -289,6 +292,8 @@ export const skillVersionRowSchema = z.object({
   license: z.string().nullable(),
   compatibility: z.string().nullable().optional(),
   metadata: z.record(z.string()).optional(),
+  display: companionDisplaySchema.default({}),
+  requirements: z.array(skillRequirementSchema).default([]),
   size_bytes: z.number().int().nonnegative(),
   checksum: z.string(),
   storage_path: z.string(),

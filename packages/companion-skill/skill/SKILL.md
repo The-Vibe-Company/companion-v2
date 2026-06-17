@@ -3,7 +3,7 @@ name: companion
 description: "Use when managing local SKILL.md packages with Companion: validate, publish, update, resolve skill dependencies, declare the secrets and environment variables a skill needs, install updates, audit skills, check workspace versions, or self-update this Companion skill through the Companion workspace API."
 license: MIT
 metadata:
-  companion_version: 1.4.0
+  companion_version: 1.5.0
 allowed-tools: read_file write_file run_shell
 ---
 
@@ -55,23 +55,42 @@ A skill is a folder with a `SKILL.md` at its root. Companion records two values 
 
 These let you tell, offline, which workspace skill a folder maps to and whether it is behind.
 
-## Dependencies (analyze, then sync companion.json)
+## Companion manifest (analyze, then sync companion.json)
 
-A skill may require other skills. Persist those dependencies in an optional `companion.json` at the
-package root — a flat list of skill slugs, no versions:
+A skill may require other skills, setup variables, and product-facing display copy. Persist those
+Companion-specific declarations in an optional `companion.json` at the package root:
 
 ```json
-{ "dependencies": ["log-parser", "markdown-report"] }
+{
+  "display": {
+    "name": "Incident summary",
+    "summary": "Generate clean incident handoffs from raw notes.",
+    "description": "Longer human-readable description shown in Companion."
+  },
+  "requirements": [
+    {
+      "key": "OPENAI_API_KEY",
+      "type": "secret",
+      "required": true,
+      "note": "Create this in your model gateway or ask an org admin."
+    }
+  ],
+  "dependencies": ["log-parser", "markdown-report"]
+}
 ```
 
 Dependencies are **un-versioned**: they are plain skill→skill links. Do not add version ranges, and
-do not put dependencies in `SKILL.md` frontmatter — keep them in `companion.json`.
+do not put dependencies, required env vars, secrets, or rich display copy in `SKILL.md` frontmatter
+— keep them in `companion.json`. `SKILL.md.description` stays the standard Agent Skills fallback;
+`display.summary` is the short Companion listing text, and `display.description` is the longer human
+description shown in the workspace.
 
 Always **analyze the whole skill package before you validate, publish, or update**, even when
 `companion.json` already exists. Treat `companion.json` as the persisted declaration to verify, not
 as enough evidence by itself:
 
-1. Read `companion.json` if present and collect declared dependencies.
+1. Read `companion.json` if present and collect declared dependencies, requirements, and display
+   fields.
 2. Build a local skill index from sibling skill folders and any skill folders the user explicitly
    gave you. A skill folder is a directory with `SKILL.md`; use that file's frontmatter `name` as the
    slug. Do not scan the whole machine.
@@ -85,14 +104,13 @@ as enough evidence by itself:
    - declared only — present in `companion.json` but not found by analysis.
 5. If the diff is non-empty, ask the user to confirm the final dependency list, then create or
    update `companion.json` so it matches that confirmed list before validation/upload. If the user
-   declines synchronizing `companion.json`, stop before upload; the server also reads
-   `companion.json` from the archive, so a stale file would override removals.
+   declines synchronizing `companion.json`, stop before upload; the server reads `companion.json`
+   from the archive, so a stale file would override removals.
 
-Pass the same confirmed final dependency list to the API as repeated `dependency=` query parameters
-on validate and publish calls. Because the server also reads `companion.json` from the archive,
-package the skill only after `companion.json` matches the confirmed list. The server records the
-graph and blocks a publish whose dependencies are missing, cyclic, or less visible than the skill
-itself.
+Package the skill only after `companion.json` matches the confirmed list. New clients do not need
+extra upload parameters for dependencies; legacy `dependency=` query parameters are only a fallback
+when a package has no `companion.json`. The server records the graph and blocks a publish whose
+dependencies are missing, cyclic, or less visible than the skill itself.
 
 ## Capabilities
 
@@ -106,14 +124,14 @@ workspace catalog (that listing is session-only in the web app).
 
 ### Validate a skill
 
-Always validate before you publish. First run the full dependency analysis above, compare it with
-`companion.json`, and get confirmation for the final dependency list if there is any mismatch. Turn
-that confirmed list into repeated `dependency=` query parameters. The server runs the same package
-checks without writing anything, and also returns the dependency preflight:
+Always validate before you publish. First run the full manifest analysis above, compare it with
+`companion.json`, and get confirmation for the final dependency list and any setup requirements if
+there is a mismatch. The server runs the same package checks without writing anything, and also
+returns the dependency preflight:
 
 ```sh
 cd <skill-folder> && zip -r -q ../skill.zip . \
-  && curl -s "$COMPANION_API_URL/skills?action=validate&dependency=log-parser&dependency=markdown-report" \
+  && curl -s "$COMPANION_API_URL/skills?action=validate" \
        -H "Authorization: Bearer $COMPANION_TOKEN" \
        -H "Content-Type: application/zip" \
        --data-binary @../skill.zip
@@ -126,8 +144,9 @@ publishing — see the next section.
 
 ### Resolve dependencies before publishing
 
-The local dependency analysis chooses the final list of slugs to send. The `dependency_plan` from
-validate then tells you exactly what will change in the workspace dependency graph:
+The local dependency analysis chooses the final list of slugs to write in `companion.json`. The
+`dependency_plan` from validate then tells you exactly what will change in the workspace dependency
+graph:
 
 - `ready` — declared dependencies already published in the workspace. Nothing to do.
 - `upload` — declared but **not** in the registry. The new version stays unresolved until each is
@@ -151,7 +170,7 @@ any upload.
 Before you publish or update, work out what the skill needs to run and record it so the workspace can
 show clear setup notes. Many skills need credentials or configuration — an API key, a service
 endpoint, a token (for example, an image-generation skill needs an Azure OpenAI key). Capture these
-as a `requirements` list in the skill's `SKILL.md` frontmatter.
+as a `requirements` list in the skill's `companion.json`.
 
 Analyze **only the skill's own files** (its `SKILL.md` body, scripts, `reference/`, examples, and any
 config it ships) for references to credentials or environment variables. Look for:
@@ -172,25 +191,30 @@ From what you find, draft a `requirements` list. Each entry is:
   to where it is created.
 
 Show the proposed list to the user and let them edit, add, remove, or confirm it. Then write the
-confirmed block into the skill's `SKILL.md` frontmatter and **re-validate** before publishing:
+confirmed block into the skill's `companion.json` and **re-validate** before publishing:
 
-```yaml
-requirements:
-  - key: AZURE_OPENAI_API_KEY
-    type: secret
-    required: true
-    note: >-
-      Azure OpenAI key. Ask your org admin to provision an Azure OpenAI resource,
-      or create one at https://portal.azure.com.
-  - key: OPENAI_BASE_URL
-    type: env
-    required: false
-    note: Optional override for the model gateway; defaults to the shared endpoint.
+```json
+{
+  "requirements": [
+    {
+      "key": "AZURE_OPENAI_API_KEY",
+      "type": "secret",
+      "required": true,
+      "note": "Azure OpenAI key. Ask your org admin to provision an Azure OpenAI resource, or create one at https://portal.azure.com."
+    },
+    {
+      "key": "OPENAI_BASE_URL",
+      "type": "env",
+      "required": false,
+      "note": "Optional override for the model gateway; defaults to the shared endpoint."
+    }
+  ]
+}
 ```
 
 The workspace displays these as the skill's setup notes. When you install a skill that declares
 requirements, surface them to the user so they can set the secrets and environment variables before
-running it. Requirements travel inside the frontmatter — there are no extra upload parameters.
+running it. Requirements travel inside `companion.json` — there are no extra upload parameters.
 
 ### Publish a skill
 
@@ -226,11 +250,11 @@ Ownership is separate from visibility:
 - `team=<team-slug>` shares read visibility with a team. Team visibility does **not** grant edit
   rights; only direct ownership, owner-team Admin/Editor, or org Owner/Admin can modify a skill.
 
-Pass the same confirmed `dependency=` parameters you validated with so the dependency graph is
-recorded:
+Make sure `companion.json.dependencies` contains the same confirmed dependencies you validated with
+so the dependency graph is recorded:
 
 ```sh
-curl -s "$COMPANION_API_URL/skills?owner_team=platform&everyone=false&dependency=log-parser&dependency=markdown-report" \
+curl -s "$COMPANION_API_URL/skills?owner_team=platform&everyone=false" \
   -H "Authorization: Bearer $COMPANION_TOKEN" \
   -H "Content-Type: application/zip" \
   --data-binary @../skill.zip
@@ -275,9 +299,9 @@ curl -s "$COMPANION_API_URL/skills?expect_slug=$SLUG&expect_skill_id=$SKILL_ID&o
   --data-binary @../skill.zip
 ```
 
-Run the full dependency analysis on updates too. Include the confirmed final `dependency=`
-parameters, not just the current `companion.json`; omitting a dependency drops it from the new
-version. Re-run validate first to get a fresh `dependency_plan`: its `removed` list shows
+Run the full dependency analysis on updates too. Write the confirmed final list to
+`companion.json.dependencies`; omitting a dependency drops it from the new version. Re-run validate
+first to get a fresh `dependency_plan`: its `removed` list shows
 dependencies dropped since the previous version, and `archive_candidates` shows removed dependencies
 no longer referenced by any published skill. After the update publishes, offer to archive each
 candidate (`POST /skills/$SLUG/archive`) — only with the user's confirmation, and never if another
@@ -331,8 +355,8 @@ Allowed skills API tasks:
 
 - Fetch upload owner/visibility choices with `GET /skills/upload-options` using a `skills:write`
   token.
-- Validate, publish, or update a skill with `POST /skills` (pass confirmed `dependency=` parameters
-  from full local analysis, synced to `companion.json` when the user confirms).
+- Validate, publish, or update a skill with `POST /skills` after full local analysis and a synced
+  `companion.json`. Use `dependency=` parameters only for old packages that have no manifest yet.
 - Inspect a skill's dependency graph with `GET /skills/$SLUG/dependencies`.
 - Archive or restore a skill with `POST /skills/$SLUG/archive` and `POST /skills/$SLUG/restore`
   (same permissions as modifying the skill).
