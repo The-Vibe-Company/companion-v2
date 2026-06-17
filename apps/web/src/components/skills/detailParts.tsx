@@ -6,7 +6,7 @@ import { Icon } from "../Icon";
 import { TeamAvatar } from "../org/TeamAvatar";
 import { relativeTime } from "@/lib/format";
 import type { MeVM, SkillVM, TeamVM } from "@/lib/types";
-import { Avatar, ValidBadge, visibilityMeta } from "./blocks";
+import { Avatar, visibilityMeta } from "./blocks";
 
 export type DetailPanel = "dependencies" | "requirements" | "files" | "activity" | "manifest" | "checksum";
 export type DetailPanelItem = {
@@ -190,15 +190,6 @@ export function PropList({
     <div className="props">
       <div className="prop">
         <span className="prop__label">
-          <Icon name="activity" size={14} />
-          Status
-        </span>
-        <span className="prop__value">
-          <ValidBadge v={skill.validation} />
-        </span>
-      </div>
-      <div className="prop">
-        <span className="prop__label">
           <Icon name={meta.icon} size={14} />
           Visibility
         </span>
@@ -371,7 +362,7 @@ export function PropList({
   );
 }
 
-export function DetailRail({
+export function DetailMeta({
   skill,
   teams,
   onChangeVisibility,
@@ -379,8 +370,7 @@ export function DetailRail({
   requiresN,
   usedByN,
   depFlag,
-  panelItems,
-  onOpenPanel,
+  onOpenDependencies,
 }: {
   skill: SkillVM;
   teams: TeamVM[];
@@ -389,81 +379,133 @@ export function DetailRail({
   requiresN?: number;
   usedByN?: number;
   depFlag?: { n: number; blocked: boolean } | null;
-  panelItems: DetailPanelItem[];
-  onOpenPanel: (panel: DetailPanel) => void;
+  onOpenDependencies: () => void;
 }) {
-  const meta = visibilityMeta(skill);
   const reqN = requiresN ?? skill.requiresCount;
   const usedN = usedByN ?? skill.usedByCount;
   const flag = depFlag ?? (skill.depWarn ? { n: 0, blocked: false } : null);
-  const depLabel = flag ? (flag.blocked ? "Blocked" : "Attention") : "Clean";
+  const depLabel = flag ? (flag.blocked ? "Blocked" : "Attention") : null;
   const depTone = flag ? (flag.blocked ? "danger" : "warn") : "ok";
+
   return (
-    <div className="linrail">
-      <p className="railhead">Essential</p>
-      <div className="linprop">
-        <span className="linprop__label">
-          <Icon name="activity" size={13} />
-          Status
-        </span>
-        <span className="linprop__value">
-          <ValidBadge v={skill.validation} />
-        </span>
-      </div>
-      <div className="linprop">
-        <span className="linprop__label">
-          <Icon name={meta.icon} size={13} />
-          Visibility
-        </span>
-        <span className="linprop__value">
-          <VisibilityControl skill={skill} teams={teams} onChange={onChangeVisibility} canChange={canChangeVisibility} />
-        </span>
-      </div>
-      <div className="linprop">
-        <span className="linprop__label">
-          <Icon name="tag" size={13} />
-          Version
-        </span>
-        <span className="linprop__value">
-          <span className="mono">{skill.version ?? "—"}</span>
-        </span>
-      </div>
-      <div className="linprop">
-        <span className="linprop__label">
-          <Icon name="user" size={13} />
-          Owner
-        </span>
-        <span className="linprop__value">
-          <Avatar initials={skill.owner.initials} />
-          <span className="linprop__truncate">{skill.owner.name}</span>
-        </span>
-      </div>
-      <button className="linprop linprop--button" onClick={() => onOpenPanel("dependencies")} type="button">
-        <span className="linprop__label">
-          <Icon name="git-branch" size={13} />
-          Dependencies
-        </span>
-        <span className={"linprop__value linprop__value--" + depTone}>
-          <span className="linstatus">{depLabel}</span>
-          <span className="mono">{reqN}/{usedN}</span>
+    <div className="linmeta">
+      <VisibilityControl skill={skill} teams={teams} onChange={onChangeVisibility} canChange={canChangeVisibility} />
+      <span className="linmeta__sep" aria-hidden="true">
+        ·
+      </span>
+      <span className="linmeta__item">
+        <Icon name="tag" size={11} />
+        <span className="mono">{skill.version ?? "—"}</span>
+      </span>
+      <span className="linmeta__sep" aria-hidden="true">
+        ·
+      </span>
+      <span className="linmeta__item linmeta__item--owner">
+        <Avatar initials={skill.owner.initials} size={16} />
+        <span className="linmeta__truncate">{skill.owner.name}</span>
+      </span>
+      <span className="linmeta__sep" aria-hidden="true">
+        ·
+      </span>
+      <button
+        className={"linmeta__item linmeta__item--button linmeta__item--deps linmeta__item--deps--" + depTone}
+        onClick={onOpenDependencies}
+        type="button"
+        aria-label={`Dependencies: ${reqN} required, ${usedN} used by${depLabel ? `, ${depLabel.toLowerCase()}` : ""}`}
+      >
+        <Icon name="git-branch" size={11} />
+        {depLabel && <span className="linmeta__deps-label">{depLabel}</span>}
+        <span className="mono">
+          {reqN}/{usedN}
         </span>
       </button>
-      <div className="linprop">
-        <span className="linprop__label">
-          <Icon name="clock" size={13} />
-          Updated
-        </span>
-        <span className="linprop__value">
-          <span className="mono">{skill.updated}</span>
-        </span>
-      </div>
+      <span className="linmeta__sep" aria-hidden="true">
+        ·
+      </span>
+      <span className="linmeta__item">
+        <Icon name="clock" size={11} />
+        <span className="mono">{skill.updated}</span>
+      </span>
+    </div>
+  );
+}
 
-      <div className="divider" />
-      <p className="railhead railhead--sub">More</p>
+export function DetailPanelNav({
+  panelItems,
+  panel,
+  navOpen,
+  onToggleNav,
+  onSelectPanel,
+  onCloseNav,
+}: {
+  panelItems: DetailPanelItem[];
+  panel: DetailPanel;
+  navOpen: boolean;
+  onToggleNav: () => void;
+  onSelectPanel: (panel: DetailPanel) => void;
+  onCloseNav: () => void;
+}) {
+  return (
+    <>
+      <nav className={"dpanel__nav" + (navOpen ? " dpanel__nav--open" : "")} aria-label="More sections">
+        <button
+          type="button"
+          className="dpanel__navtoggle"
+          onClick={onToggleNav}
+          aria-label={navOpen ? "Collapse sections menu" : "Expand sections menu"}
+          aria-expanded={navOpen}
+          title={navOpen ? "Collapse sections menu" : "Expand sections menu"}
+        >
+          <Icon name={navOpen ? "panel-left-close" : "panel-left-open"} size={15} />
+        </button>
+        {panelItems.map((item) => (
+          <button
+            key={item.id}
+            className={"dpanel__navitem" + (panel === item.id ? " is-active" : "")}
+            aria-current={panel === item.id ? "page" : undefined}
+            onClick={() => {
+              onSelectPanel(item.id);
+              onCloseNav();
+            }}
+            type="button"
+            title={item.label}
+          >
+            <span className="dpanel__navitem-main">
+              <Icon name={item.icon} size={13} />
+              <span className="dpanel__navitem-label">{item.label}</span>
+            </span>
+            <b className="dpanel__navitem-count">{item.count}</b>
+          </button>
+        ))}
+      </nav>
+    </>
+  );
+}
+
+export function DetailRail({
+  panelItems,
+  onOpenPanel,
+  inline = false,
+}: {
+  panelItems: DetailPanelItem[];
+  onOpenPanel: (panel: DetailPanel) => void;
+  inline?: boolean;
+}) {
+  return (
+    <div className={"linrail" + (inline ? " linrail--inline" : "")}>
+      {inline ? (
+        <p className="seclabel" style={{ margin: 0 }}>
+          More
+        </p>
+      ) : (
+        <p className="railhead">More</p>
+      )}
       <div className="linlinks">
         {panelItems.map((item) => (
           <button className="linlink" onClick={() => onOpenPanel(item.id)} type="button" key={item.id}>
-            <span><Icon name={item.icon} size={13} /> {item.label}</span>
+            <span>
+              <Icon name={item.icon} size={13} /> {item.label}
+            </span>
             <b>{item.count}</b>
           </button>
         ))}

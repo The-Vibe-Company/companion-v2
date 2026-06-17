@@ -23,6 +23,8 @@ import { StarButton } from "./blocks";
 import {
   Activity,
   ChecksumDetails,
+  DetailMeta,
+  DetailPanelNav,
   DetailRail,
   ManifestDetails,
   Requirements,
@@ -219,6 +221,8 @@ export function DetailView({
 }) {
   const invalid = skill.validation === "invalid";
   const [panel, setPanel] = useState<DetailPanel | null>(initialPanel);
+  const [panelNavOpen, setPanelNavOpen] = useState(false);
+  const [compactPanelNav, setCompactPanelNav] = useState(false);
   const [versions, setVersions] = useState<SkillVersionRow[]>([]);
   const [comments, setComments] = useState<SkillCommentRow[]>([]);
   const [files, setFiles] = useState<SkillFile[]>([]);
@@ -244,9 +248,31 @@ export function DetailView({
   }, [skill.id, skill.version, initialPanel]);
 
   useEffect(() => {
+    const query = window.matchMedia("(max-width: 820px)");
+    const sync = () => {
+      setCompactPanelNav(query.matches);
+      if (!query.matches) setPanelNavOpen(false);
+    };
+    sync();
+    query.addEventListener("change", sync);
+    return () => query.removeEventListener("change", sync);
+  }, []);
+
+  useEffect(() => {
+    if (!panel) setPanelNavOpen(false);
+  }, [panel]);
+
+  useEffect(() => {
     if (!panel) return;
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
+      if (panelNavOpen && compactPanelNav) {
+        event.preventDefault();
+        event.stopPropagation();
+        event.stopImmediatePropagation();
+        setPanelNavOpen(false);
+        return;
+      }
       event.preventDefault();
       event.stopPropagation();
       event.stopImmediatePropagation();
@@ -254,7 +280,7 @@ export function DetailView({
     };
     window.addEventListener("keydown", onKey, { capture: true });
     return () => window.removeEventListener("keydown", onKey, { capture: true });
-  }, [panel]);
+  }, [panel, panelNavOpen, compactPanelNav]);
 
   // Eagerly load the package file list once per (slug, version); the archive has
   // no random access, so one fetch beats lazily re-streaming per file.
@@ -384,7 +410,6 @@ export function DetailView({
   ];
   const panelItems = [dependencyPanel, ...morePanelItems];
   const currentPanel = panel ? panelItems.find((item) => item.id === panel) ?? dependencyPanel : null;
-  const showDrawerNav = panel ? morePanelItems.some((item) => item.id === panel) : false;
 
   return (
     <div className="dpage">
@@ -443,7 +468,7 @@ export function DetailView({
         />
       </div>
 
-      <div className="dbody dbody--linear">
+      <div className={"dbody dbody--linear" + (panel ? " dbody--panel-open" : "")}>
         <div className="dcontent dcontent--linear">
           <div className="dcontent__inner dcontent__inner--linear">
             <p className="lin-eyebrow">
@@ -451,6 +476,16 @@ export function DetailView({
               Skill package
             </p>
             <h1 className="dtitle dtitle--linear">{skill.id}</h1>
+            <DetailMeta
+              skill={skill}
+              teams={teams}
+              onChangeVisibility={onChangeVisibility}
+              canChangeVisibility={canModifySkill}
+              requiresN={reqN}
+              usedByN={usedN}
+              depFlag={depFlag}
+              onOpenDependencies={() => setPanel("dependencies")}
+            />
             <p className="ov__lead ov__lead--linear">{skill.description}</p>
             {invalid && skill.error && (
               <div className="lin-alert">
@@ -470,89 +505,75 @@ export function DetailView({
                 onToggleDeprecated={toggleDeprecated}
               />
             </div>
+            <div className="lin-more lin-more--mobile">
+              <DetailRail panelItems={panelItems} onOpenPanel={setPanel} inline />
+            </div>
           </div>
         </div>
         <aside className="dsidebar dsidebar--linear">
-          <DetailRail
-            skill={skill}
-            teams={teams}
-            onChangeVisibility={onChangeVisibility}
-            canChangeVisibility={canModifySkill}
-            requiresN={reqN}
-            usedByN={usedN}
-            depFlag={depFlag}
-            panelItems={morePanelItems}
-            onOpenPanel={setPanel}
-          />
+          <DetailRail panelItems={panelItems} onOpenPanel={setPanel} />
         </aside>
-      </div>
-      {panel && currentPanel && (
-        <aside className={"dpanel" + (panel === "files" ? " dpanel--files" : "")} aria-label={currentPanel.label}>
-          <div className="dpanel__head">
-            <span className="dpanel__title">
-              <Icon name={currentPanel.icon} size={14} />
-              {currentPanel.label}
-            </span>
-            <button className="iconbtn" onClick={() => setPanel(null)} aria-label="Close panel" title="Close panel">
-              <Icon name="x" size={14} />
-            </button>
-          </div>
-          {showDrawerNav && (
-            <nav className="dpanel__nav" aria-label="More sections">
-              {morePanelItems.map((item) => (
-                <button
-                  key={item.id}
-                  className={"dpanel__navitem" + (panel === item.id ? " is-active" : "")}
-                  aria-current={panel === item.id ? "page" : undefined}
-                  onClick={() => setPanel(item.id)}
-                  type="button"
-                >
-                  <Icon name={item.icon} size={13} />
-                  <span>{item.label}</span>
-                  <b>{item.count}</b>
-                </button>
-              ))}
-            </nav>
-          )}
-          <div className={"dpanel__body" + (panel === "files" ? " dpanel__body--flush" : "")}>
-            {panel === "dependencies" ? (
-              <div className="dpanel__inner dpanel__inner--wide">
-                <DependenciesTab
-                  slug={skill.id}
-                  version={skill.version}
-                  deps={deps}
-                  onOpenSkill={onOpenSkill}
-                />
-              </div>
-            ) : panel === "requirements" ? (
-              <div className="dpanel__inner">
-                <Requirements requirements={skill.requirements} />
-              </div>
-            ) : panel === "files" ? (
-              <FileExplorer files={files} requestedPath={null} panelMode />
-            ) : panel === "activity" ? (
-              <div className="dpanel__inner">
-                <div className="dblocks dblocks--panel">
-                  <div>
-                    <p className="seclabel">
-                      Versions <span className="seclabel__n">{versions.length}</span>
-                    </p>
-                    <Activity versions={versions} ownerName={skill.owner.name} />
+        {panel && currentPanel && (
+          <aside className="dpanel" aria-label={currentPanel.label}>
+            <div className="dpanel__head">
+              <span className="dpanel__title">
+                <Icon name={currentPanel.icon} size={14} />
+                {currentPanel.label}
+              </span>
+              <button className="iconbtn" onClick={() => setPanel(null)} aria-label="Close panel" title="Close panel">
+                <Icon name="x" size={14} />
+              </button>
+            </div>
+            <div className={"dpanel__shell" + (panelNavOpen && compactPanelNav ? " dpanel__shell--nav-open" : "")}>
+              <DetailPanelNav
+                panelItems={panelItems}
+                panel={panel}
+                navOpen={panelNavOpen}
+                onToggleNav={() => setPanelNavOpen((open) => !open)}
+                onSelectPanel={setPanel}
+                onCloseNav={() => setPanelNavOpen(false)}
+              />
+              <div className={"dpanel__body" + (panel === "files" ? " dpanel__body--flush" : "")}>
+              {panel === "dependencies" ? (
+                <div className="dpanel__inner dpanel__inner--wide">
+                  <DependenciesTab
+                    slug={skill.id}
+                    version={skill.version}
+                    deps={deps}
+                    onOpenSkill={onOpenSkill}
+                  />
+                </div>
+              ) : panel === "requirements" ? (
+                <div className="dpanel__inner">
+                  <Requirements requirements={skill.requirements} />
+                </div>
+              ) : panel === "files" ? (
+                <FileExplorer files={files} requestedPath={null} panelMode />
+              ) : panel === "activity" ? (
+                <div className="dpanel__inner">
+                  <div className="dblocks dblocks--panel">
+                    <div>
+                      <p className="seclabel">
+                        Versions <span className="seclabel__n">{versions.length}</span>
+                      </p>
+                      <Activity versions={versions} ownerName={skill.owner.name} />
+                    </div>
                   </div>
                 </div>
+              ) : panel === "manifest" ? (
+                <div className="dpanel__inner">
+                  <ManifestDetails skill={skill} />
+                </div>
+              ) : (
+                <div className="dpanel__inner">
+                  <ChecksumDetails checksum={skill.checksum} />
+                </div>
+              )}
               </div>
-            ) : panel === "manifest" ? (
-              <div className="dpanel__inner">
-                <ManifestDetails skill={skill} />
-              </div>
-            ) : (
-              <div className="dpanel__inner">
-                <ChecksumDetails checksum={skill.checksum} />
-              </div>
-            )}
-          </div>
-        </aside>
-      )}
+            </div>
+          </aside>
+        )}
+      </div>
     </div>
   );
 }
