@@ -80,13 +80,15 @@ describe("DetailView linear dense layout", () => {
 
     expect(html).toContain("linear-demo");
     expect(html).toContain("A focused skill for incident handoffs.");
-    expect(html).toContain("Essential");
-    expect(html).toContain("Status");
-    expect(html).toContain("Visibility");
-    expect(html).toContain("Version");
-    expect(html).toContain("Owner");
-    expect(html).toContain("Dependencies");
+    expect(html).toContain("Everyone");
+    expect(html).toContain("1.2.3");
+    expect(html).toContain("Ada Lovelace");
+    expect(html).toContain("Dependencies: 1 required, 2 used by");
+    expect(html).toContain("just now");
+    expect(html).toContain("More");
     expect(html).toContain("Discussion");
+    expect(html).toContain("dsidebar--linear");
+    expect(html).toContain("lin-more--mobile");
   });
 
   it("keeps advanced sections behind rail entries instead of first-level tabs", () => {
@@ -111,15 +113,25 @@ describe("DetailView linear dense layout", () => {
     expect(html).toContain('aria-label="More sections"');
     expect(html).toContain("dpanel__navitem is-active");
     expect(html).toContain('aria-current="page"');
+    expect(html).toContain("Dependencies");
     expect(html).toContain("Setup &amp; secrets");
     expect(html).toContain("Manifest");
+    expect(html).toContain("Checksum");
+  });
+
+  it("shows the shared drawer navigation when Dependencies is open", () => {
+    const html = renderDetail("dependencies");
+
+    expect(html).toContain('aria-label="Dependencies"');
+    expect(html).toContain('aria-label="More sections"');
+    expect(html).toContain("dpanel__navitem is-active");
+    expect(html).toContain("Files");
     expect(html).toContain("Checksum");
   });
 
   it("renders the Files panel through the drawer-aware file explorer", () => {
     const html = renderDetail("files");
 
-    expect(html).toContain("dpanel--files");
     expect(html).toContain("fx fx--panel");
     expect(html).toContain("No files in this package.");
   });
