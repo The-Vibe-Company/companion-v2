@@ -1,5 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { apiBaseUrl, safeNext, type AuthJson } from "@/lib/authProxy";
+import { apiBaseUrl, responseSetCookies, safeNext, type AuthJson } from "@/lib/authProxy";
 
 export const dynamic = "force-dynamic";
 
@@ -39,7 +39,9 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     });
     const json = (await response.json().catch(() => null)) as AuthJson;
     if (response.ok && json?.url) {
-      return NextResponse.redirect(json.url, 303);
+      const redirect = NextResponse.redirect(json.url, 303);
+      for (const cookie of responseSetCookies(response)) redirect.headers.append("set-cookie", cookie);
+      return redirect;
     }
     return errorRedirect();
   } catch {
