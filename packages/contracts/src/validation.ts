@@ -1,7 +1,8 @@
 import type { FrontmatterWarning, SkillFrontmatter, SkillLegacyFrontmatter } from "./frontmatter";
+import type { CompanionManifest } from "./companionManifest";
 
 /** Checks shown in the upload drawer's validation checklist. */
-export type ValidationCheckId = "frontmatter" | "layout" | "metadata" | "traversal" | "size" | "tools" | "legacy";
+export type ValidationCheckId = "frontmatter" | "layout" | "companion" | "metadata" | "traversal" | "size" | "tools" | "legacy";
 
 export interface ValidationCheck {
   id: ValidationCheckId;
@@ -19,6 +20,10 @@ export interface ValidationResult {
   checks: ValidationCheck[];
   /** Parsed frontmatter when the frontmatter check passed. */
   frontmatter?: SkillFrontmatter;
+  /** Effective Companion package manifest from companion.json, with legacy SKILL.md fallbacks. */
+  companion_manifest?: CompanionManifest;
+  /** Path to the package companion.json used for the effective manifest, or null when synthesized. */
+  companion_manifest_path?: string | null;
   /** Legacy non-spec fields found at top-level, kept only for migration/version resolution. */
   legacy?: SkillLegacyFrontmatter;
   /** Non-blocking migration or compatibility warnings. */
@@ -30,6 +35,7 @@ export interface ValidationResult {
 export const VALIDATION_CHECK_LABELS: Record<ValidationCheckId, string> = {
   frontmatter: "Agent Skills frontmatter parsed",
   layout: "SKILL.md is at the package root or a matching wrapper folder",
+  companion: "companion.json parsed",
   metadata: "Compatibility and metadata follow the spec",
   traversal: "No path traversal or symlinks escaping the package root",
   size: "Archive under the size limit",

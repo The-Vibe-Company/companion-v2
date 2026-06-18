@@ -1,5 +1,6 @@
 export * from "./scope";
 export * from "./frontmatter";
+export * from "./companionManifest";
 export * from "./validation";
 export * from "./skill";
 export * from "./token";

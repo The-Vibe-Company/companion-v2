@@ -39,8 +39,7 @@ describe("requirements frontmatter", () => {
         note: "Defaults to the shared gateway when unset.",
       },
     ]);
-    // `requirements` is an official key now — never warned as unknown.
-    expect(parsed.warnings.find((w) => w.field === "requirements")).toBeUndefined();
+    expect(parsed.warnings.find((w) => w.field === "requirements")?.code).toBe("legacy-requirements");
   });
 
   it("applies defaults when only a key is declared", () => {
@@ -77,23 +76,28 @@ describe("requirements frontmatter", () => {
     const dir = await makeSkillDir({ "SKILL.md": skillMd(REQUIREMENTS_FRONTMATTER) });
     await prepareSkillDirForPublish(dir, { version: "1.0.0" });
     const written = await readFile(join(dir, "SKILL.md"), "utf8");
+    const companionJson = JSON.parse(await readFile(join(dir, "companion.json"), "utf8")) as {
+      requirements: Array<{ key: string }>;
+    };
     const reparsed = parseFrontmatter(written);
     expect(reparsed.ok).toBe(true);
     if (!reparsed.ok) return;
-    expect(reparsed.data.requirements.map((r) => r.key)).toEqual([
+    expect(reparsed.data.requirements).toEqual([]);
+    expect(companionJson.requirements.map((r) => r.key)).toEqual([
       "AZURE_OPENAI_API_KEY",
       "AZURE_OPENAI_ENDPOINT",
     ]);
   });
 
-  it("sorts requirements by key in the canonical SKILL.md (deterministic output)", () => {
+  it("omits requirements from the canonical SKILL.md", () => {
     const parsed = parseFrontmatter(
       skillMd("name: s\ndescription: A skill.\nrequirements:\n  - key: ZEBRA_TOKEN\n  - key: ALPHA_TOKEN"),
     );
     expect(parsed.ok).toBe(true);
     if (!parsed.ok) return;
     const md = buildNormalizedSkillMd(parsed.data, "# body\n");
-    expect(md.indexOf("ALPHA_TOKEN")).toBeLessThan(md.indexOf("ZEBRA_TOKEN"));
+    expect(md).not.toContain("requirements:");
+    expect(md).not.toContain("ALPHA_TOKEN");
   });
 
   it("omits requirements from the canonical SKILL.md when none are declared", () => {

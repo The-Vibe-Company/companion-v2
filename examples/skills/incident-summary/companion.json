@@ -1,0 +1,7 @@
+{
+  "display": {
+    "summary": "Summarize an incident timeline from logs into a concise postmortem draft."
+  },
+  "requirements": [],
+  "dependencies": []
+}

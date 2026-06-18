@@ -15,7 +15,6 @@ export const AGENT_SKILL_FRONTMATTER_KEYS = [
   "compatibility",
   "metadata",
   "allowed-tools",
-  "requirements",
 ] as const;
 
 export const ALLOWED_TOOL_RE = /^[A-Za-z0-9_.:-]+(?:\([A-Za-z0-9_.*: -]+\))?$/;
@@ -42,6 +41,7 @@ export type FrontmatterWarningCode =
   | "legacy-version"
   | "legacy-tools"
   | "legacy-scope"
+  | "legacy-requirements"
   | "unknown-field"
   | "reserved-metadata";
 
@@ -56,6 +56,7 @@ export interface SkillLegacyFrontmatter {
   version?: string;
   scope?: string;
   tools?: string[];
+  requirements?: SkillRequirement[];
   unknownFields: string[];
 }
 
@@ -119,6 +120,7 @@ const skillFrontmatterFields = z
       .optional(),
     metadata: z.record(z.string()).default({}),
     "allowed-tools": z.string().optional(),
+    /** Legacy Companion location. New packages declare these in companion.json. */
     requirements: z.array(skillRequirementSchema).max(64, "at most 64 requirements are allowed").default([]),
   })
   .passthrough()
@@ -165,6 +167,7 @@ export interface StoredSkillFrontmatter {
   compatibility?: string;
   metadata: Record<string, string>;
   "allowed-tools"?: string;
+  /** Legacy read fallback only. New stored versions keep requirements in `companion`. */
   requirements?: SkillRequirement[];
 }
 
@@ -182,25 +185,27 @@ export function toStoredSkillFrontmatter(frontmatter: SkillFrontmatter): StoredS
   if (frontmatter.compatibility) stored.compatibility = frontmatter.compatibility;
   const allowedTools = frontmatter.allowedTools.join(" ");
   if (allowedTools.trim()) stored["allowed-tools"] = allowedTools.trim();
-  if (frontmatter.requirements.length) {
-    stored.requirements = [...frontmatter.requirements]
-      .sort((a, b) => a.key.localeCompare(b.key))
-      .map((requirement) => ({
-        key: requirement.key,
-        type: requirement.type,
-        required: requirement.required,
-        note: requirement.note,
-      }));
-  }
   return stored;
 }
 
 export function parseStoredSkillFrontmatter(value: string | null | undefined): StoredSkillFrontmatter | null {
   if (!value) return null;
   try {
-    const parsed = skillFrontmatterSchema.safeParse(JSON.parse(value));
+    const raw = JSON.parse(value);
+    const parsed = skillFrontmatterSchema.safeParse(raw);
     if (!parsed.success) return null;
-    return toStoredSkillFrontmatter(parsed.data);
+    const stored = toStoredSkillFrontmatter(parsed.data);
+    if (parsed.data.requirements.length) {
+      stored.requirements = [...parsed.data.requirements]
+        .sort((a, b) => a.key.localeCompare(b.key))
+        .map((requirement) => ({
+          key: requirement.key,
+          type: requirement.type,
+          required: requirement.required,
+          note: requirement.note,
+        }));
+    }
+    return stored;
   } catch {
     return null;
   }

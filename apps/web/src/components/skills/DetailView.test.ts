@@ -74,6 +74,30 @@ function renderDetail(initialPanel?: React.ComponentProps<typeof DetailView>["in
   );
 }
 
+function renderDetailFor(nextSkill: SkillVM) {
+  return renderToString(
+    React.createElement(DetailView, {
+      skill: nextSkill,
+      index: 0,
+      total: 1,
+      me,
+      myRole: "owner",
+      teams,
+      onBack: vi.fn(),
+      onPrev: vi.fn(),
+      onNext: vi.fn(),
+      onToggleStar: vi.fn(),
+      onToggleInstalled: vi.fn(),
+      onChangeVisibility: vi.fn(),
+      onInstall: vi.fn(),
+      onUpdate: vi.fn(),
+      onOpenSkill: vi.fn(),
+      onRestore: vi.fn(),
+      onArchive: vi.fn(),
+    }),
+  );
+}
+
 describe("DetailView linear dense layout", () => {
   it("renders the essential skill facts and discussion by default", () => {
     const html = renderDetail();
@@ -89,6 +113,21 @@ describe("DetailView linear dense layout", () => {
     expect(html).toContain("Discussion");
     expect(html).toContain("dsidebar--linear");
     expect(html).toContain("lin-more--mobile");
+  });
+
+  it("prefers Companion display copy for the detail title and lead", () => {
+    const html = renderDetailFor({
+      ...skill,
+      display: {
+        name: "Incident summary",
+        summary: "Short listing summary.",
+        description: "Long human-readable setup and capability description.",
+      },
+    });
+
+    expect(html).toContain("Incident summary");
+    expect(html).toContain("Long human-readable setup and capability description.");
+    expect(html).not.toContain("A focused skill for incident handoffs.");
   });
 
   it("keeps advanced sections behind rail entries instead of first-level tabs", () => {

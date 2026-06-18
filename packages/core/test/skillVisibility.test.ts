@@ -1,6 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Db } from "@companion/db";
-import { assertCanPublishSkillVersion, listSkills, setSkillVisibility, type ActorContext } from "../src/services";
+import {
+  assertCanPublishSkillVersion,
+  listSkillVersions,
+  listSkills,
+  setSkillVisibility,
+  type ActorContext,
+} from "../src/services";
 
 const ORG = "00000000-0000-0000-0000-0000000000aa";
 const actor: ActorContext = { id: "user-1", email: "user@example.com", name: "User One" };
@@ -11,7 +17,15 @@ function skillRow(
   id: string,
   slug: string,
   everyone: boolean,
-  owner: { kind?: "user" | "team"; userId?: string; teamId?: string | null; name?: string; handle?: string | null } = {},
+  owner: {
+    kind?: "user" | "team";
+    userId?: string;
+    teamId?: string | null;
+    name?: string;
+    handle?: string | null;
+    frontmatter?: string;
+    description?: string;
+  } = {},
 ) {
   const ownerKind = owner.kind ?? "user";
   const ownerUserId = owner.userId ?? actor.id;
@@ -21,7 +35,7 @@ function skillRow(
     id,
     org_id: ORG,
     slug,
-    description: slug,
+    description: owner.description ?? slug,
     everyone,
     validation: "valid",
     validation_error: null,
@@ -33,6 +47,13 @@ function skillRow(
     owner_handle: owner.handle ?? (ownerKind === "team" ? "platform" : null),
     owner_initials: ownerKind === "team" ? "PL" : "UO",
     current_version: "1.0.0",
+    frontmatter:
+      owner.frontmatter ??
+      JSON.stringify({
+        name: slug,
+        description: slug,
+        metadata: {},
+      }),
     license: null,
     checksum: null,
     size_bytes: 100,
@@ -47,6 +68,26 @@ function skillRow(
     currentVersionId: `${id}-cv`,
     ownerId: ownerUserId,
     ownerTeamId,
+  };
+}
+
+function skillVersionRow(skillId: string, frontmatter: string) {
+  return {
+    id: `${skillId}-v1`,
+    orgId: ORG,
+    skillId,
+    version: "1.0.0",
+    note: "Initial version",
+    frontmatter,
+    tools: [],
+    license: null,
+    sizeBytes: 100,
+    checksum: `sha256:${"b".repeat(64)}`,
+    storagePath: `skills/org/${skillId}/1.0.0.zip`,
+    validation: "valid",
+    validationError: null,
+    createdBy: actor.id,
+    createdAt: createdAt,
   };
 }
 
@@ -93,6 +134,7 @@ function fakeDb({
   memberOfVisibilityTeams = true,
   existingSkill = { id: "skill-one-team", ownerId: "other-user", ownerTeamId: null as string | null },
   extraSkills = [] as ReturnType<typeof skillRow>[],
+  versions = [] as ReturnType<typeof skillVersionRow>[],
   edges = [] as Array<{ skillId: string; skillVersionId: string; dependsOnSlug: string; dependsOnSkillId: string | null }>,
 }: {
   orgRole?: "owner" | "admin" | "developer" | null;
@@ -101,6 +143,7 @@ function fakeDb({
   memberOfVisibilityTeams?: boolean;
   existingSkill?: { id: string; ownerId: string; ownerTeamId: string | null } | null;
   extraSkills?: ReturnType<typeof skillRow>[];
+  versions?: ReturnType<typeof skillVersionRow>[];
   edges?: Array<{ skillId: string; skillVersionId: string; dependsOnSlug: string; dependsOnSkillId: string | null }>;
 } = {}) {
   const writes = {
@@ -147,7 +190,8 @@ function fakeDb({
         findFirst: vi.fn(async () => (ownerTeamRole ? { teamRole: ownerTeamRole } : null)),
       },
     },
-    select: vi.fn((cols: Record<string, unknown>) => {
+    select: vi.fn((cols?: Record<string, unknown>) => {
+      if (!cols) return selectChain(versions);
       // The caller's per-skill install rows (none in these visibility fixtures). Must precede the
       // shares branch below, which also keys on skill_id.
       if ("skill_id" in cols && "installed_version" in cols) return selectChain([]);
@@ -254,6 +298,77 @@ describe("listSkills visibility assembly", () => {
       everyone: true,
       teams: [{ id: "team-platform", slug: "platform", name: "Platform" }],
     });
+  });
+
+  it("normalizes companion display and setup requirements from stored version metadata", async () => {
+    const frontmatter = JSON.stringify({
+      name: "manifest-skill",
+      description: "SKILL.md fallback.",
+      metadata: {},
+      companion: {
+        display: {
+          name: "Manifest skill",
+          summary: "Manifest summary.",
+          description: "Manifest long description.",
+        },
+        requirements: [{ key: "OPENAI_API_KEY", type: "secret", required: true, note: "Ask an admin." }],
+        dependencies: [],
+      },
+    });
+    const rows = await listSkills({
+      actor,
+      orgId: ORG,
+      database: fakeDb({
+        extraSkills: [skillRow("skill-manifest", "manifest-skill", false, { frontmatter, description: "Manifest summary." })],
+      }),
+    });
+
+    const skill = rows.find((row) => row.slug === "manifest-skill");
+    expect(skill?.description).toBe("Manifest summary.");
+    expect(skill?.display).toEqual({
+      name: "Manifest skill",
+      summary: "Manifest summary.",
+      description: "Manifest long description.",
+    });
+    expect(skill?.requirements.map((req) => req.key)).toEqual(["OPENAI_API_KEY"]);
+  });
+
+  it("normalizes companion display and setup requirements on version rows", async () => {
+    const frontmatter = JSON.stringify({
+      name: "versioned-skill",
+      description: "SKILL.md long fallback.",
+      metadata: {},
+      companion: {
+        display: {
+          name: "Versioned skill",
+          summary: "Version summary.",
+        },
+        requirements: [{ key: "API_TOKEN", type: "secret", required: true, note: "Ask an admin." }],
+        dependencies: [],
+      },
+    });
+    const rows = await listSkillVersions({
+      actor,
+      orgId: ORG,
+      slug: "versioned-skill",
+      database: fakeDb({
+        extraSkills: [
+          skillRow("skill-versioned", "versioned-skill", false, {
+            frontmatter,
+            description: "Version summary.",
+          }),
+        ],
+        versions: [skillVersionRow("skill-versioned", frontmatter)],
+      }),
+    });
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.display).toEqual({
+      name: "Versioned skill",
+      summary: "Version summary.",
+      description: "SKILL.md long fallback.",
+    });
+    expect(rows[0]?.requirements.map((req) => req.key)).toEqual(["API_TOKEN"]);
   });
 
   it("builds owner-team read visibility from editable team memberships only", async () => {

@@ -475,7 +475,8 @@ export function DetailView({
               <Icon name="package" size={13} />
               Skill package
             </p>
-            <h1 className="dtitle dtitle--linear">{skill.id}</h1>
+            <h1 className="dtitle dtitle--linear">{skill.display?.name ?? skill.id}</h1>
+            {skill.display?.name ? <p className="dslug mono">{skill.id}</p> : null}
             <DetailMeta
               skill={skill}
               teams={teams}
@@ -486,7 +487,7 @@ export function DetailView({
               depFlag={depFlag}
               onOpenDependencies={() => setPanel("dependencies")}
             />
-            <p className="ov__lead ov__lead--linear">{skill.description}</p>
+            <p className="ov__lead ov__lead--linear">{skill.display?.description ?? skill.description}</p>
             {invalid && skill.error && (
               <div className="lin-alert">
                 <p className="seclabel" style={{ color: "var(--color-danger)", marginBottom: 8 }}>

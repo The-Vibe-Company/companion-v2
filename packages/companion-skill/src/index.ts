@@ -54,7 +54,7 @@ export const COMPANION_SKILL_MANIFEST: CompanionSkillManifest = {
     { name: "Update a skill", desc: "Push a new version with targeted identity and visibility checks." },
     { name: "Change visibility", desc: "Re-share a published skill; cascade to dependencies or dependents." },
     { name: "Resolve dependencies", desc: "Analyze packages and sync companion.json before upload." },
-    { name: "Declare required secrets", desc: "Detect the secrets and env vars a skill needs and record how to obtain each." },
+    { name: "Sync companion.json", desc: "Detect dependencies, setup requirements, and display copy and record them in the skill manifest." },
     { name: "Manage skill API calls", desc: "Use the supported skills API surface without crossing into workspace admin." },
     { name: "Update Companion skill", desc: "Check and install the latest bundled Companion skill safely." },
     { name: "Check for updates", desc: "See whether the skills on this machine are up to date." },
@@ -63,6 +63,14 @@ export const COMPANION_SKILL_MANIFEST: CompanionSkillManifest = {
     { name: "Manage your skills", desc: "List and organize the skills on this machine." },
   ],
   changelog: [
+    {
+      version: "1.5.0",
+      changes: [
+        "Moves Companion-specific package data into companion.json: display copy, dependencies, and setup requirements.",
+        "Keeps legacy SKILL.md requirements readable but normalizes them into companion.json on publish.",
+        "Uses companion.json dependencies as the upload source of truth, with dependency= kept only as an old-package fallback.",
+      ],
+    },
     {
       version: "1.4.0",
       changes: [

@@ -1,0 +1,22 @@
+{
+  "display": {
+    "name": "Companion",
+    "summary": "Manage local SKILL.md packages with Companion.",
+    "description": "Validate, publish, update, resolve dependencies, declare setup requirements, choose owner teams and visibility, audit versions, install updates, and self-update the bundled Companion skill through the workspace API."
+  },
+  "requirements": [
+    {
+      "key": "COMPANION_API_URL",
+      "type": "env",
+      "required": true,
+      "note": "Workspace API base URL. The install/use prompt stores this in ~/.companion/credentials.json when the environment variable is not set."
+    },
+    {
+      "key": "COMPANION_TOKEN",
+      "type": "secret",
+      "required": true,
+      "note": "Personal access token scoped to skills:read and skills:write. The install/use prompt stores this in ~/.companion/credentials.json when the environment variable is not set."
+    }
+  ],
+  "dependencies": []
+}

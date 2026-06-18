@@ -1,19 +1,25 @@
 import {
+  companionManifestSchema,
+  fallbackCompanionManifest,
   SEMVER_RE,
   VALIDATION_CHECK_LABELS,
   invalidAllowedTools,
+  type CompanionManifest,
   type ValidationCheck,
   type ValidationResult,
 } from "@companion/contracts";
 import { parseFrontmatter } from "./frontmatter";
 import { inspectTar, scanDir, toTar, type ArchiveFinding } from "./archive";
 import { isZip, zipToTar } from "./zip";
-import { MAX_ARCHIVE_BYTES } from "./constants";
+import { MAX_ARCHIVE_BYTES, MAX_SKILL_MD_BYTES } from "./constants";
 
 interface RawFindings {
   files: string[];
   skillMd: string | null;
   skillMdPath: string | null;
+  companionJson: string | null;
+  companionJsonPath: string | null;
+  companionJsonTooLargePath: string | null;
   totalBytes: number;
   fileCount: number;
   violations: string[];
@@ -45,6 +51,76 @@ function layoutCheck(f: RawFindings, skillName: string | null): ValidationCheck 
     status: "fail",
     detail: `unexpected SKILL.md location: ${f.skillMdPath}`,
   };
+}
+
+function parseCompanionManifest(f: RawFindings, fallback: { summary: string; requirements?: CompanionManifest["requirements"] }): {
+  check: ValidationCheck;
+  manifest?: CompanionManifest;
+  path: string | null;
+} {
+  if (f.companionJsonTooLargePath) {
+    return {
+      check: {
+        id: "companion",
+        label: VALIDATION_CHECK_LABELS.companion,
+        status: "fail",
+        detail: `${f.companionJsonTooLargePath} exceeds ${formatBytes(MAX_SKILL_MD_BYTES)}`,
+      },
+      path: f.companionJsonTooLargePath,
+    };
+  }
+  if (f.companionJson === null) {
+    return {
+      check: {
+        id: "companion",
+        label: VALIDATION_CHECK_LABELS.companion,
+        status: "pass",
+        detail: "not present, using SKILL.md fallback",
+      },
+      manifest: fallbackCompanionManifest(fallback),
+      path: null,
+    };
+  }
+  try {
+    const result = companionManifestSchema.safeParse(JSON.parse(f.companionJson));
+    if (!result.success) {
+      return {
+        check: {
+          id: "companion",
+          label: VALIDATION_CHECK_LABELS.companion,
+          status: "fail",
+          detail: result.error.issues.map((issue) => `${issue.path.join(".") || "manifest"}: ${issue.message}`).join("; "),
+        },
+        path: f.companionJsonPath,
+      };
+    }
+    const manifest = fallbackCompanionManifest({
+      summary: fallback.summary,
+      display: result.data.display,
+      requirements: result.data.requirements,
+      dependencies: result.data.dependencies,
+    });
+    return {
+      check: {
+        id: "companion",
+        label: VALIDATION_CHECK_LABELS.companion,
+        status: "pass",
+        detail: f.companionJsonPath ?? "companion.json",
+      },
+      manifest,
+      path: f.companionJsonPath,
+    };
+  } catch (err) {
+    return {
+      check: {
+        id: "companion",
+        label: VALIDATION_CHECK_LABELS.companion,
+        status: "fail",
+        detail: `companion.json is not valid JSON: ${(err as Error).message}`,
+      },
+      path: f.companionJsonPath,
+    };
+  }
 }
 
 function buildResult(f: RawFindings): ValidationResult {
@@ -85,6 +161,23 @@ function buildResult(f: RawFindings): ValidationResult {
     checks.push({ id: "metadata", label: VALIDATION_CHECK_LABELS.metadata, status: "fail", detail: "cannot inspect metadata (frontmatter invalid)" });
   }
 
+  const companion =
+    fm && fm.ok
+      ? parseCompanionManifest(f, {
+          summary: fm.data.description,
+          requirements: f.companionJson !== null ? [] : fm.data.requirements,
+        })
+      : {
+          check: {
+            id: "companion" as const,
+            label: VALIDATION_CHECK_LABELS.companion,
+            status: "fail" as const,
+            detail: "cannot inspect companion.json (frontmatter invalid)",
+          },
+          path: f.companionJsonPath,
+        };
+  checks.push(companion.check);
+
   // 4. No path traversal / symlinks
   if (f.violations.length === 0) {
     checks.push({ id: "traversal", label: VALIDATION_CHECK_LABELS.traversal, status: "pass" });
@@ -119,6 +212,14 @@ function buildResult(f: RawFindings): ValidationResult {
 
   // 7. Legacy/non-spec top-level fields are warnings only.
   const warnings = fm?.warnings ?? [];
+  if (fm?.ok && f.companionJson !== null && fm.data.requirements.length > 0) {
+    warnings.push({
+      code: "legacy-requirements",
+      field: "requirements",
+      message: "SKILL.md requirements are ignored because companion.json declares Companion setup data.",
+      suggestion: "Remove requirements from SKILL.md and keep them in companion.json.",
+    });
+  }
   const legacyVersion = fm?.legacy.version;
   if (fm && legacyVersion && !SEMVER_RE.test(legacyVersion)) {
     checks.push({
@@ -147,6 +248,8 @@ function buildResult(f: RawFindings): ValidationResult {
     ok: failed.length === 0,
     checks,
     frontmatter: fm && fm.ok ? fm.data : undefined,
+    companion_manifest: companion.manifest,
+    companion_manifest_path: companion.path,
     legacy: fm?.legacy,
     warnings,
     error: failed.length
@@ -163,7 +266,18 @@ export async function validateSkillArchive(input: Buffer): Promise<ValidationRes
   } catch {
     // Unreadable / over-cap archive (e.g. a zip-bomb tripping the decompression caps):
     // keep the full 5-check result shape so callers (CLI, API) render a consistent checklist.
-    return buildResult({ files: [], skillMd: null, skillMdPath: null, totalBytes: input.length, fileCount: 0, violations: [], oversize: true });
+    return buildResult({
+      files: [],
+      skillMd: null,
+      skillMdPath: null,
+      companionJson: null,
+      companionJsonPath: null,
+      companionJsonTooLargePath: null,
+      totalBytes: input.length,
+      fileCount: 0,
+      violations: [],
+      oversize: true,
+    });
   }
   let finding: ArchiveFinding;
   try {
@@ -180,6 +294,9 @@ export async function validateSkillArchive(input: Buffer): Promise<ValidationRes
     files: finding.files,
     skillMd: finding.skillMd,
     skillMdPath: finding.skillMdPath,
+    companionJson: finding.companionJson,
+    companionJsonPath: finding.companionJsonPath,
+    companionJsonTooLargePath: finding.companionJsonTooLargePath,
     totalBytes: finding.totalBytes,
     fileCount: finding.fileCount,
     violations: finding.violations,
@@ -194,6 +311,9 @@ export async function validateSkillDir(dir: string): Promise<ValidationResult> {
     files: scan.files.map((file) => file.relPath),
     skillMd: scan.skillMd,
     skillMdPath: scan.skillMdPath,
+    companionJson: scan.companionJson,
+    companionJsonPath: scan.companionJsonPath,
+    companionJsonTooLargePath: scan.companionJsonTooLargePath,
     totalBytes: scan.totalBytes,
     fileCount: scan.files.length,
     violations: scan.violations,

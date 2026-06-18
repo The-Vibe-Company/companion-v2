@@ -50,6 +50,12 @@ export interface ArchiveFinding {
   skillMd: string | null;
   /** Path of the selected SKILL.md inside the archive, or null when absent. */
   skillMdPath: string | null;
+  /** Content of companion.json next to the selected SKILL.md package root, or null. */
+  companionJson: string | null;
+  /** Path of the selected companion.json inside the archive, or null when absent. */
+  companionJsonPath: string | null;
+  /** Path of an oversized selected companion.json that was not buffered. */
+  companionJsonTooLargePath: string | null;
   /** Traversal / symlink / special-entry messages. */
   violations: string[];
   /** Exceeded a size or entry-count cap. */
@@ -68,10 +74,14 @@ export async function inspectTar(tar: Buffer): Promise<ArchiveFinding> {
     fileCount: 0,
     skillMd: null,
     skillMdPath: null,
+    companionJson: null,
+    companionJsonPath: null,
+    companionJsonTooLargePath: null,
     violations: [],
     oversize: false,
   };
   const skillCandidates: { path: string; depth: number; content: string }[] = [];
+  const companionCandidates: { path: string; depth: number; content: string | null }[] = [];
   const ex = tarExtract();
 
   await new Promise<void>((resolve, reject) => {
@@ -129,7 +139,17 @@ export async function inspectTar(tar: Buffer): Promise<ArchiveFinding> {
       finding.files.push(norm.path);
 
       const base = norm.path.split("/").pop();
-      if (base === SKILL_FILE && size <= MAX_SKILL_MD_BYTES) {
+      if (base === "companion.json" && size > MAX_SKILL_MD_BYTES) {
+        companionCandidates.push({
+          path: norm.path,
+          depth: norm.path.split("/").length,
+          content: null,
+        });
+        stream.on("end", next);
+        stream.resume();
+        return;
+      }
+      if ((base === SKILL_FILE || base === "companion.json") && size <= MAX_SKILL_MD_BYTES) {
         const chunks: Buffer[] = [];
         let read = 0;
         stream.on("data", (c: Buffer) => {
@@ -137,11 +157,13 @@ export async function inspectTar(tar: Buffer): Promise<ArchiveFinding> {
           if (read <= MAX_SKILL_MD_BYTES) chunks.push(c);
         });
         stream.on("end", () => {
-          skillCandidates.push({
+          const candidate = {
             path: norm.path,
             depth: norm.path.split("/").length,
             content: Buffer.concat(chunks).toString("utf8"),
-          });
+          };
+          if (base === SKILL_FILE) skillCandidates.push(candidate);
+          else companionCandidates.push(candidate);
           next();
         });
         stream.on("error", reject);
@@ -157,8 +179,15 @@ export async function inspectTar(tar: Buffer): Promise<ArchiveFinding> {
   });
 
   skillCandidates.sort((a, b) => a.depth - b.depth);
-  finding.skillMd = skillCandidates[0]?.content ?? null;
-  finding.skillMdPath = skillCandidates[0]?.path ?? null;
+  const skillCandidate = skillCandidates[0];
+  finding.skillMd = skillCandidate?.content ?? null;
+  finding.skillMdPath = skillCandidate?.path ?? null;
+  const packageRoot = skillCandidate?.path.includes("/") ? skillCandidate.path.slice(0, skillCandidate.path.lastIndexOf("/")) : "";
+  const expectedCompanionPath = packageRoot ? `${packageRoot}/companion.json` : "companion.json";
+  const companionCandidate = companionCandidates.find((candidate) => candidate.path === expectedCompanionPath);
+  finding.companionJson = companionCandidate?.content ?? null;
+  finding.companionJsonPath = companionCandidate?.path ?? null;
+  finding.companionJsonTooLargePath = companionCandidate?.content === null ? companionCandidate.path : null;
   return finding;
 }
 
@@ -353,6 +382,9 @@ export interface DirScan {
   totalBytes: number;
   skillMd: string | null;
   skillMdPath: string | null;
+  companionJson: string | null;
+  companionJsonPath: string | null;
+  companionJsonTooLargePath: string | null;
   violations: string[];
   oversize: boolean;
 }
@@ -405,6 +437,23 @@ export async function scanDir(dir: string): Promise<DirScan> {
     .filter((f) => f.relPath.split("/").pop() === SKILL_FILE)
     .sort((a, b) => a.relPath.split("/").length - b.relPath.split("/").length)[0];
   const skillMd = skillEntry ? await readFile(join(dir, skillEntry.relPath), "utf8") : null;
+  const packageRoot = skillEntry?.relPath.includes("/") ? skillEntry.relPath.slice(0, skillEntry.relPath.lastIndexOf("/")) : "";
+  const expectedCompanionPath = packageRoot ? `${packageRoot}/companion.json` : "companion.json";
+  const companionEntry = files.find((f) => f.relPath === expectedCompanionPath);
+  const companionJsonTooLargePath =
+    companionEntry && companionEntry.size > MAX_SKILL_MD_BYTES ? companionEntry.relPath : null;
+  const companionJson =
+    companionEntry && !companionJsonTooLargePath ? await readFile(join(dir, companionEntry.relPath), "utf8") : null;
 
-  return { files, totalBytes, skillMd, skillMdPath: skillEntry?.relPath ?? null, violations, oversize };
+  return {
+    files,
+    totalBytes,
+    skillMd,
+    skillMdPath: skillEntry?.relPath ?? null,
+    companionJson,
+    companionJsonPath: companionEntry?.relPath ?? null,
+    companionJsonTooLargePath,
+    violations,
+    oversize,
+  };
 }
