@@ -1,4 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
+import { authForwardOrigin } from "@/lib/authProxy";
 
 export const dynamic = "force-dynamic";
 
@@ -37,7 +38,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       headers: {
         "content-type": "application/json",
         cookie: request.headers.get("cookie") ?? "",
-        origin: request.headers.get("origin") ?? process.env.COMPANION_WEB_URL ?? request.nextUrl.origin,
+        origin: authForwardOrigin(request),
       },
       body: "{}",
     });

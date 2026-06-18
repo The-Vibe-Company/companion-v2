@@ -38,6 +38,27 @@ describe("signin route", () => {
     );
   });
 
+  it("uses the configured canonical origin when forwarding from an alternate web host", async () => {
+    vi.stubEnv("COMPANION_API_URL", "http://127.0.0.1:55031");
+    vi.stubEnv("COMPANION_WEB_URL", "https://thecompanion.sh");
+    const fetchMock = vi.fn(async () => Response.json({ message: "Invalid email or password" }, { status: 401 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await POST(
+      jsonRequest(
+        { email: "admin@tvc.dev", password: "wrong", next: "/skills" },
+        { origin: "https://www.thecompanion.sh" },
+      ),
+    );
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:55031/auth/sign-in/email",
+      expect.objectContaining({
+        headers: expect.objectContaining({ origin: "https://thecompanion.sh" }),
+      }),
+    );
+  });
+
   it("falls back to /skills for unsafe next values", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 200 })));
 
