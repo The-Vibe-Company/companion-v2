@@ -167,10 +167,12 @@ per verified domain.
   `apps/web/src/app/v1/auth/*` (`signin`, `signup`, `verify-email`, `verify-email/send`,
   `forgot-password`, `reset-password`, `google`) forward to the API's `/auth/*` server-side and re-emit
   the `Set-Cookie` on the **web origin**, keeping the session cookie same-origin (`shared lib/authProxy.ts`).
-  The Google start route must also re-emit Better Auth's transient OAuth state cookie before redirecting to
-  Google; otherwise the API callback cannot validate `state`. The callback itself still lands on `/auth/*`
-  through the web origin's rewrite. The reused 6-digit OTP UI is a single client state machine in
-  `(auth)/login/LoginForm.tsx`.
+  When forwarding to Better Auth, these proxy routes use the configured canonical `COMPANION_WEB_URL` as
+  the trusted origin, so alias hosts such as `www` can still re-emit cookies without being registered as
+  separate Better Auth origins. The Google start route must also re-emit Better Auth's transient OAuth
+  state cookie before redirecting to Google; otherwise the API callback cannot validate `state`. The
+  callback itself still lands on `/auth/*` through the web origin's rewrite. The reused 6-digit OTP UI is a
+  single client state machine in `(auth)/login/LoginForm.tsx`.
 
 Production requirements: set `BETTER_AUTH_URL` to the API's public origin (the Google redirect URI is
 derived as `${BETTER_AUTH_URL}/auth/callback/google` and must be registered in Google Cloud); keep web

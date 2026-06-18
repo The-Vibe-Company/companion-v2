@@ -14,6 +14,10 @@ export function apiBaseUrl(): string {
   return process.env.COMPANION_API_URL ?? "http://127.0.0.1:3001";
 }
 
+export function authForwardOrigin(request: NextRequest): string {
+  return process.env.COMPANION_WEB_URL ?? request.headers.get("origin") ?? request.nextUrl.origin;
+}
+
 /** Better Auth emits one cookie per header; read them all (a single comma-joined string mis-parses). */
 export function responseSetCookies(response: Response): string[] {
   const headers = response.headers as Headers & { getSetCookie?: () => string[] };
@@ -57,7 +61,7 @@ export async function forwardAuth(request: NextRequest, path: string, body: unkn
     headers: {
       "content-type": "application/json",
       cookie: request.headers.get("cookie") ?? "",
-      origin: request.headers.get("origin") ?? process.env.COMPANION_WEB_URL ?? request.nextUrl.origin,
+      origin: authForwardOrigin(request),
     },
     body: JSON.stringify(body ?? {}),
   });
