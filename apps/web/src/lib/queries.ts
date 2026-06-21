@@ -266,6 +266,14 @@ export async function fetchArchivedSkills(): Promise<SkillListRow[]> {
   return apiFetch<SkillListRow[]>("/v1/skills?archived=true");
 }
 
+/**
+ * Relevance-ranked full-text search across visible skills (slug, description, tools, owner, and the
+ * SKILL.md body). Server-ordered by relevance — render the rows as-is. Powers the ⌘K palette.
+ */
+export async function fetchSkillSearch(query: string, signal?: AbortSignal): Promise<SkillListRow[]> {
+  return apiFetch<SkillListRow[]>(`/v1/skills?q=${encodeURIComponent(query)}`, { signal });
+}
+
 // --- Local skills (the "Companion skills" section) ----------------------------------------------
 
 /** Public download URL for a local skill package (referenced by the assistant prompt). */

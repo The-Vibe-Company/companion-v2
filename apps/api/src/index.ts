@@ -270,9 +270,11 @@ async function publishCanonical(input: {
   visibility: SkillVisibilityInput;
   version: string;
   note: string;
+  /** SKILL.md markdown body — persisted server-side to power full-text content search. */
+  body: string;
   dependencies?: string[];
 }): Promise<{ id: string; slug: string; version: string; checksum: string; sizeBytes: number }> {
-  const { actor, orgId, canonical, fm, companionManifest, skillId, ownerTeam, visibility, version, note, dependencies } = input;
+  const { actor, orgId, canonical, fm, companionManifest, skillId, ownerTeam, visibility, version, note, body, dependencies } = input;
   if (!isValidSemver(version)) throw new Error(`invalid semver: ${version}`);
   const key = skillArchiveKey({ orgId, slug: fm.name, version });
   const payload = publishSkillInputSchema.parse({
@@ -286,6 +288,7 @@ async function publishCanonical(input: {
     storage_path: key,
     size_bytes: canonical.sizeBytes,
     frontmatter: JSON.stringify(toStoredSkillVersionManifest(fm, companionManifest), null, 2),
+    body,
     tools: fm.allowedTools,
     license: fm.license ?? null,
     note,
@@ -874,8 +877,13 @@ app.get("/v1/skills", async (c) => {
     const visibility = visibilityRaw ? visibilityFilterSchema.parse(visibilityRaw) : undefined;
     const mine = c.req.query("mine") === "true";
     const archived = c.req.query("archived") === "true";
+    // `?q=` turns this into a relevance-ranked full-text search (slug, description, tools, owner, and
+    // the SKILL.md body). Folded into the list endpoint so no path can shadow a valid `search` slug.
+    const query = c.req.query("q")?.trim() || undefined;
     return c.json(
-      await withTenant(c, ({ actor, orgId, database }) => listSkills({ actor, orgId, visibility, mine, archived, database })),
+      await withTenant(c, ({ actor, orgId, database }) =>
+        listSkills({ actor, orgId, visibility, mine, archived, query, limit: query ? 20 : undefined, database }),
+      ),
     );
   } catch (error) {
     return jsonError(c, error, 401);
@@ -1294,6 +1302,7 @@ app.post("/v1/skills", bodyLimit({ maxSize: 32 * 1024 * 1024, onError: (c) => js
         visibility,
         version: target.version,
         note: messageRaw ?? "",
+        body: normalizedResult.body ?? "",
         dependencies: normalized.companionManifest.dependencies,
       });
     } catch (error) {
@@ -1365,6 +1374,7 @@ app.post("/v1/skills/create", bodyLimit({ maxSize: 2 * 1024 * 1024, onError: (c)
         visibility: input.visibility,
         version: target.version,
         note: "",
+        body: result.body ?? "",
         dependencies: carriedDependencies,
       });
       return c.json({ ok: true, ...published, warnings: result.warnings ?? [] });

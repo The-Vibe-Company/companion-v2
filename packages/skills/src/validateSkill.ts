@@ -248,6 +248,7 @@ function buildResult(f: RawFindings): ValidationResult {
     ok: failed.length === 0,
     checks,
     frontmatter: fm && fm.ok ? fm.data : undefined,
+    body: fm ? fm.body : (f.skillMd ?? ""),
     companion_manifest: companion.manifest,
     companion_manifest_path: companion.path,
     legacy: fm?.legacy,

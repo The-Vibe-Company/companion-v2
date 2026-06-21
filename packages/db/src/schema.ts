@@ -307,6 +307,8 @@ export const skillVersions = pgTable(
     version: text("version").notNull(),
     note: text("note").notNull().default(""),
     frontmatter: text("frontmatter").notNull(),
+    // The SKILL.md markdown body (instructions), kept server-side to power full-text search.
+    body: text("body").notNull().default(""),
     tools: jsonb("tools").$type<string[]>().notNull().default([]),
     license: text("license"),
     sizeBytes: integer("size_bytes").notNull(),

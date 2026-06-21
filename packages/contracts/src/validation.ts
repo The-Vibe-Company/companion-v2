@@ -20,6 +20,8 @@ export interface ValidationResult {
   checks: ValidationCheck[];
   /** Parsed frontmatter when the frontmatter check passed. */
   frontmatter?: SkillFrontmatter;
+  /** The SKILL.md markdown body (everything after the frontmatter), used to index content for search. */
+  body?: string;
   /** Effective Companion package manifest from companion.json, with legacy SKILL.md fallbacks. */
   companion_manifest?: CompanionManifest;
   /** Path to the package companion.json used for the effective manifest, or null when synthesized. */

@@ -265,6 +265,7 @@ function publishPayload(
     storage_path: `skills/org/${slug}/1.1.0.zip`,
     size_bytes: 123,
     frontmatter: `---\nname: ${slug}\n---`,
+    body: "",
     tools: [],
     dependencies: [],
   };
