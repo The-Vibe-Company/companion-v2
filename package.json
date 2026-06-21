@@ -2,7 +2,7 @@
   "name": "companion-v2",
   "version": "0.0.0",
   "private": true,
-  "description": "Companion v2 — self-hostable portal to deploy, govern, and share AI agents, containers, and skills.",
+  "description": "Companion v2 — self-hostable, multi-tenant registry to publish, version, share, and install AI skills.",
   "license": "MIT",
   "packageManager": "pnpm@9.12.0",
   "engines": {
