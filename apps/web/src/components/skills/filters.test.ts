@@ -25,6 +25,7 @@ function mk(p: Partial<SkillVM> & { id: string }): SkillVM {
       team: null,
     },
     tools: [],
+    tags: [],
     requirements: [],
     size: "1 KB",
     license: null,
@@ -48,12 +49,13 @@ function mk(p: Partial<SkillVM> & { id: string }): SkillVM {
 }
 
 const registry: SkillVM[] = [
-  mk({ id: "jira-triage", visibility: { everyone: false, teams: [platform] }, teams: [platform], teamSlugs: ["platform"] }),
+  mk({ id: "jira-triage", visibility: { everyone: false, teams: [platform] }, teams: [platform], teamSlugs: ["platform"], tags: ["incident response"] }),
   mk({
     id: "k8s-logs",
     visibility: { everyone: false, teams: [platform, data] },
     teams: [platform, data],
     teamSlugs: ["platform", "data"],
+    tags: ["infra", "logs"],
   }),
   mk({ id: "sql-query", visibility: { everyone: false, teams: [data] }, teams: [data], teamSlugs: ["data"], validation: "validating" }),
   mk({ id: "pdf-extract", visibility: { everyone: true, teams: [] }, starred: true }),
@@ -131,6 +133,9 @@ describe("matchFilters — other dimensions", () => {
   it("owner", () => {
     expect(run([{ type: "owner", value: "Marek Doan" }])).toEqual(["web-fetch"]);
   });
+  it("tag", () => {
+    expect(run([{ type: "tag", value: "infra" }])).toEqual(["k8s-logs"]);
+  });
   it("different types are AND-ed (team AND status)", () => {
     expect(run([
       { type: "team", value: "data" },
@@ -176,6 +181,7 @@ describe("makeFilter", () => {
   it("returns typed filters for valid pairs", () => {
     expect(makeFilter("visibility", "everyone")).toEqual({ type: "visibility", value: "everyone" });
     expect(makeFilter("starred", "true")).toEqual({ type: "starred", value: "true" });
+    expect(makeFilter("tag", " Incident Response ")).toEqual({ type: "tag", value: "incident response" });
   });
 
   it("rejects invalid type/value pairs", () => {

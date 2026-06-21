@@ -62,6 +62,7 @@ export function ListView({
   onRetryPreferences,
   owners,
   teams,
+  tags,
   viewCounts,
 }: {
   skills: SkillVM[];
@@ -84,6 +85,7 @@ export function ListView({
   onRetryPreferences: () => void;
   owners: string[];
   teams: TeamVM[];
+  tags: string[];
   viewCounts: Record<string, number>;
 }) {
   return (
@@ -113,7 +115,7 @@ export function ListView({
       </div>
 
       <div className="filterbar">
-        <FilterAdd owners={owners} teams={teams} filters={filters} onToggle={onToggleFilter} />
+        <FilterAdd owners={owners} teams={teams} tags={tags} filters={filters} onToggle={onToggleFilter} />
         {filters.map((f) => {
           const p = chipParts(f);
           return (

@@ -39,6 +39,7 @@ const skill: SkillVM = {
     team: null,
   },
   tools: ["read_file"],
+  tags: [],
   requirements: [],
   size: "1 KB",
   license: "MIT",
@@ -100,6 +101,7 @@ describe("skill update flow", () => {
         onToggleStar: vi.fn(),
         onToggleInstalled: vi.fn(),
         onChangeVisibility: vi.fn(),
+        onChangeTags: vi.fn(),
         onInstall: vi.fn(),
         onUpdate: vi.fn(),
         onOpenSkill: vi.fn(),
@@ -166,6 +168,8 @@ describe("skill update flow", () => {
     expect(html).toContain("do not edit the package and do not publish");
     expect(html).toContain("this appears to be a different skill");
     expect(html).toContain("Never publish after failed validation or ambiguous identity");
+    expect(html).toContain("PUT /v1/skills/{slug}/tags");
+    expect(html).toContain("{&quot;tags&quot;:[]}");
     expect(html).not.toContain("Command line");
     expect(html).not.toContain("companion CLI");
   });

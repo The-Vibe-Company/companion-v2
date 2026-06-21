@@ -26,9 +26,11 @@ import {
   API_TOKEN_PREFIX,
   companionManifestSchema,
   fallbackCompanionManifest,
+  normalizeTag,
   parseAllowedTools,
   parseStoredSkillFrontmatter,
   publishSkillInputSchema,
+  setSkillTagsInputSchema,
   skillFilterPreferencesSchema,
   TEAM_BRAND_COLORS,
   visibilityCovers,
@@ -956,6 +958,26 @@ function skillHasTeamShare(database: Db, orgId: string) {
   );
 }
 
+function normalizeTagSet(tags: readonly string[] | undefined): string[] {
+  if (!tags?.length) return [];
+  return [...new Set(tags.map((tag) => normalizeTag(tag)))].sort((a, b) => a.localeCompare(b));
+}
+
+function skillHasAnyTag(database: Db, orgId: string, tags: string[]) {
+  return exists(
+    database
+      .select({ one: sql`1` })
+      .from(schema.skillTags)
+      .where(
+        and(
+          eq(schema.skillTags.orgId, orgId),
+          eq(schema.skillTags.skillId, schema.skills.id),
+          inArray(schema.skillTags.tag, tags),
+        ),
+      ),
+  );
+}
+
 /**
  * Turn free-text search input into a prefix `to_tsquery` string ("depl kube" → "depl:* & kube:*").
  * Tokenises to `[a-z0-9]` runs so the query can never carry `to_tsquery` operators (which would
@@ -981,11 +1003,13 @@ export async function listSkills(input: {
    * tools, owner name, and the SKILL.md body, and ordered by relevance (`ts_rank`) instead of recency.
    */
   query?: string;
+  tags?: string[];
   /** Cap the number of rows (used by the relevance-ranked search path). */
   limit?: number;
   database?: Db;
 }): Promise<SkillListRow[]> {
   const database = input.database ?? db;
+  const tagFilters = normalizeTagSet(input.tags);
   const baseVisibility = await visibleSkillPredicate(database, input.actor, input.orgId);
   const predicates = [baseVisibility];
   // Archived skills drop out of normal lists; the Archived view shows only them; detail/deps/
@@ -1016,6 +1040,7 @@ export async function listSkills(input: {
       ),
     );
   }
+  if (tagFilters.length) predicates.push(skillHasAnyTag(database, input.orgId, tagFilters));
 
   // Relevance-ranked full-text search. Active only when a non-empty query is supplied, so the default
   // list path (and every hand-rolled fakeDb in the tests) is left untouched. Fields are weighted
@@ -1032,7 +1057,19 @@ export async function listSkills(input: {
     setweight(to_tsvector('simple', coalesce(${schema.skills.slug}, '')), 'A') ||
     setweight(to_tsvector('simple', coalesce(${schema.skills.description}, '')), 'B') ||
     setweight(to_tsvector('simple', coalesce(${schema.skillVersions.tools}::text, '')), 'C') ||
-    setweight(to_tsvector('simple', coalesce(${schema.teams.name}, ${schema.profiles.name}, '')), 'C')
+    setweight(to_tsvector('simple', coalesce(${schema.teams.name}, ${schema.profiles.name}, '')), 'C') ||
+    setweight(
+      to_tsvector(
+        'simple',
+        coalesce((
+          select string_agg(${schema.skillTags.tag}, ' ')
+          from ${schema.skillTags}
+          where ${schema.skillTags.orgId} = ${input.orgId}
+            and ${schema.skillTags.skillId} = ${schema.skills.id}
+        ), '')
+      ),
+      'C'
+    )
   )`;
   const tsQuery = sql`to_tsquery('simple', ${tsQueryStr})`;
   // Rank over the full weighted vector (slug A > description B > tools/owner C > body D).
@@ -1107,6 +1144,7 @@ export async function listSkills(input: {
 
   const skillIds = rows.map((r) => r.id);
   const sharesBySkill = new Map<string, SkillVisibility["teams"]>();
+  const tagsBySkill = new Map<string, string[]>();
   if (skillIds.length) {
     const shareRows = await database
       .select({
@@ -1125,6 +1163,20 @@ export async function listSkills(input: {
       const list = sharesBySkill.get(row.skill_id) ?? [];
       list.push({ id: row.id, slug: row.slug, name: row.name, color: row.color, icon: row.icon });
       sharesBySkill.set(row.skill_id, list);
+    }
+
+    const tagRows = await database
+      .select({
+        skill_id: schema.skillTags.skillId,
+        tag: schema.skillTags.tag,
+      })
+      .from(schema.skillTags)
+      .where(and(eq(schema.skillTags.orgId, input.orgId), inArray(schema.skillTags.skillId, skillIds)))
+      .orderBy(asc(schema.skillTags.tag));
+    for (const row of Array.isArray(tagRows) ? tagRows : []) {
+      const list = tagsBySkill.get(row.skill_id) ?? [];
+      list.push(row.tag);
+      tagsBySkill.set(row.skill_id, list);
     }
   }
 
@@ -1197,6 +1249,7 @@ export async function listSkills(input: {
       metadata: manifest?.metadata ?? {},
       license: r.license ?? manifest?.license ?? null,
       tools: r.tools?.length ? r.tools : parseAllowedTools(manifest?.["allowed-tools"]),
+      tags: tagsBySkill.get(r.id) ?? [],
       requirements: companion.requirements,
       checksum: r.checksum,
       size_bytes: r.size_bytes,
@@ -1309,6 +1362,79 @@ export async function getSkillBySlug(input: {
   // Resolve by slug across both live and archived skills — archived ones stay viewable.
   const rows = await listSkills({ ...input, includeArchived: true, database: input.database ?? db });
   return rows.find((r) => r.slug === input.slug) ?? null;
+}
+
+export async function setSkillTags(input: {
+  actor: ActorContext;
+  orgId: string;
+  slug: string;
+  tags: string[];
+  database?: Db;
+}): Promise<{ tags: string[] }> {
+  const database = input.database ?? db;
+  const skill = await getSkillBySlug({
+    actor: input.actor,
+    orgId: input.orgId,
+    slug: input.slug,
+    database,
+  });
+  if (!skill) throw new Error("skill not found");
+  const orgRole = await getOrgRole(input.orgId, input.actor.id, database);
+  if (!orgRole) throw new Error("not a member of this organization");
+  const canModifyExisting = await canModifySkill({
+    database,
+    orgId: input.orgId,
+    actor: input.actor,
+    orgRole,
+    ownerUserId: skill.owner_user_id,
+    ownerTeamId: skill.owner_team_id,
+  });
+  if (!canModify({ orgRole }, { isOwner: canModifyExisting })) {
+    throw new Error("not allowed to change this skill");
+  }
+
+  const tags = normalizeTagSet(setSkillTagsInputSchema.parse({ tags: input.tags }).tags);
+  await database.transaction(async (tx) => {
+    await tx
+      .delete(schema.skillTags)
+      .where(and(eq(schema.skillTags.orgId, input.orgId), eq(schema.skillTags.skillId, skill.id)));
+    if (tags.length) {
+      await tx.insert(schema.skillTags).values(
+        tags.map((tag) => ({
+          orgId: input.orgId,
+          skillId: skill.id,
+          tag,
+          createdBy: input.actor.id,
+        })),
+      );
+    }
+  });
+
+  return { tags };
+}
+
+export async function listOrgTags(input: {
+  actor: ActorContext;
+  orgId: string;
+  database?: Db;
+}): Promise<string[]> {
+  const database = input.database ?? db;
+  const visibility = await visibleSkillPredicate(database, input.actor, input.orgId);
+  const frequency = count(schema.skillTags.skillId);
+  const rows = await database
+    .select({
+      tag: schema.skillTags.tag,
+      n: frequency,
+    })
+    .from(schema.skillTags)
+    .innerJoin(
+      schema.skills,
+      and(eq(schema.skills.orgId, schema.skillTags.orgId), eq(schema.skills.id, schema.skillTags.skillId)),
+    )
+    .where(and(eq(schema.skillTags.orgId, input.orgId), visibility))
+    .groupBy(schema.skillTags.tag)
+    .orderBy(desc(frequency), asc(schema.skillTags.tag));
+  return (Array.isArray(rows) ? rows : []).map((row) => row.tag);
 }
 
 function normalizeVisibility(input: SkillVisibilityInput): SkillVisibilityInput {
@@ -1907,7 +2033,7 @@ export async function publishSkillVersion(input: {
   payload: PublishSkillInput;
   archiveKey: string;
   database?: Db;
-}): Promise<{ id: string; version: string }> {
+}): Promise<{ id: string; slug: string; version: string }> {
   const database = input.database ?? db;
   const payload = publishSkillInputSchema.parse({ ...input.payload, storage_path: input.archiveKey });
   const ownerTeam = await assertCanPublishSkillVersion({ actor: input.actor, orgId: input.orgId, payload, database });
@@ -2042,7 +2168,7 @@ async function writeSkillVersion(input: {
   archiveKey: string;
   ownerTeam: { id: string; slug: string; name: string } | null;
   database: Db;
-}): Promise<{ id: string; version: string }> {
+}): Promise<{ id: string; slug: string; version: string }> {
   const database = input.database;
   const payload = input.payload;
   const orgRole = await getOrgRole(input.orgId, input.actor.id, database);
@@ -2159,7 +2285,7 @@ async function writeSkillVersion(input: {
     targetId: skill.id,
     metadata: { slug: payload.slug, version: payload.version, visibility: resolved.visibility, dependencies: payload.dependencies },
   });
-  return { id: skill.id, version: version.version };
+  return { id: skill.id, slug: payload.slug, version: version.version };
 }
 
 export async function createInvitation(input: {

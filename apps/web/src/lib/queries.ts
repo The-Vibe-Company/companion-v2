@@ -153,6 +153,18 @@ export async function toggleStar(slug: string): Promise<boolean> {
   return data.starred;
 }
 
+export async function fetchOrgTags(): Promise<string[]> {
+  return apiFetch<string[]>("/v1/skills/tags");
+}
+
+export async function setSkillTags(slug: string, tags: string[]): Promise<string[]> {
+  const data = await apiFetch<{ tags: string[] }>(`/v1/skills/${slug}/tags`, {
+    method: "PUT",
+    body: JSON.stringify({ tags }),
+  });
+  return data.tags;
+}
+
 /** Mark a published skill as installed for the current user (manual mark or agent report). */
 export async function markSkillInstalled(
   slug: string,

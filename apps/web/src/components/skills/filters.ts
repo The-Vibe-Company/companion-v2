@@ -1,4 +1,4 @@
-import { skillFilterSchema, type SkillFilter, type SkillSavedView } from "@companion/contracts";
+import { normalizeTag, skillFilterSchema, type SkillFilter, type SkillSavedView } from "@companion/contracts";
 import type { SkillVM } from "@/lib/types";
 import { VISIBILITY_ICON } from "./blocks";
 
@@ -33,6 +33,7 @@ function matchOne(s: SkillVM, type: string, v: string): boolean {
   if (type === "starred") return s.starred === true;
   if (type === "owner") return s.owner.name === v;
   if (type === "team") return s.teamSlugs.includes(v);
+  if (type === "tag") return s.tags.includes(v);
   if (type === "deps") {
     if (v === "has") return s.requiresCount > 0;
     if (v === "used") return s.usedByCount > 0;
@@ -61,6 +62,7 @@ export function chipParts(f: Filter): { icon: string; key: string; val: string }
   if (f.type === "starred") return { icon: "star", key: "", val: "starred" };
   if (f.type === "owner") return { icon: "user", key: "owner", val: f.value };
   if (f.type === "team") return { icon: "users", key: "team", val: f.value };
+  if (f.type === "tag") return { icon: "tag", key: "tag", val: f.value };
   if (f.type === "deps")
     return {
       icon: f.value === "has" ? "package" : "corner-down-right",
@@ -71,6 +73,13 @@ export function chipParts(f: Filter): { icon: string; key: string; val: string }
 }
 
 export function makeFilter(type: Filter["type"], value: string): Filter | null {
+  if (type === "tag") {
+    try {
+      return { type: "tag", value: normalizeTag(value) };
+    } catch {
+      return null;
+    }
+  }
   const parsed = skillFilterSchema.safeParse({ type, value });
   return parsed.success ? parsed.data : null;
 }

@@ -25,6 +25,7 @@ const queryMocks = vi.hoisted(() => ({
   publishSkillPackage: vi.fn(),
   restoreSkill: vi.fn(),
   saveSkillFilterPreferences: vi.fn(),
+  setSkillTags: vi.fn(),
   setCommentDeprecated: vi.fn(),
   setSkillVisibility: vi.fn(),
   toggleStar: vi.fn(),
@@ -78,6 +79,7 @@ function skill(overrides: Partial<SkillVM>): SkillVM {
       team: null,
     },
     tools: [],
+    tags: [],
     requirements: [],
     compatibility: null,
     metadata: {},
@@ -119,6 +121,7 @@ function skillRowFromVM(vm: SkillVM): SkillListRow {
     display: vm.display ?? {},
     validation_error: vm.error,
     tools: vm.tools,
+    tags: vm.tags,
     requirements: vm.requirements,
     compatibility: vm.compatibility,
     metadata: vm.metadata,
@@ -275,6 +278,7 @@ beforeEach(() => {
   queryMocks.restoreSkill.mockResolvedValue(undefined);
   queryMocks.saveSkillFilterPreferences.mockResolvedValue(undefined);
   queryMocks.setCommentDeprecated.mockResolvedValue(null);
+  queryMocks.setSkillTags.mockResolvedValue(["browser audit"]);
   queryMocks.setSkillVisibility.mockResolvedValue({ cascaded: [] });
   queryMocks.toggleStar.mockResolvedValue(true);
   queryMocks.validateSkillPackage.mockResolvedValue({ result: { ok: true }, dependencyPlan: null });
@@ -454,5 +458,82 @@ describe("SkillsApp initial route", () => {
     });
 
     expect(window.location.search).toBe("?view=team&team=platform&skill=team-skill");
+  });
+
+  it("restores active tag filters when an optimistic tag edit fails", async () => {
+    queryMocks.setSkillTags.mockRejectedValue(new Error("tag update failed"));
+    const tagged = skill({ id: "tagged-skill", tags: ["browser audit"] });
+    const { container } = await mountSkillsApp(
+      { kind: "all" },
+      {
+        url: "/skills",
+        props: {
+          initialSkills: [tagged],
+          initialFilterPreferences: { active_filters: [{ type: "tag", value: "browser audit" }], custom_views: [] },
+        },
+      },
+    );
+    await flushEffects();
+    expect(container.textContent).toContain("tag:browser audit");
+    clickButton(container, "Open skill tagged-skill");
+    await flushEffects();
+
+    const manifest = Array.from(container.querySelectorAll("button")).find((node) =>
+      node.textContent?.includes("Manifest"),
+    );
+    expect(manifest).toBeTruthy();
+    act(() => {
+      manifest!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flushEffects();
+    clickButton(container, "Remove tag browser audit");
+    await flushEffects();
+    clickButton(container, "Skills");
+    await flushEffects();
+
+    expect(container.textContent).toContain("tag:browser audit");
+  });
+
+  it("preserves unrelated active tag filters when a tag edit succeeds", async () => {
+    queryMocks.setSkillTags.mockResolvedValueOnce([]);
+    const frontend = skill({ id: "frontend-skill", tags: ["frontend"] });
+    const backend = skill({ id: "backend-skill", tags: ["backend"] });
+    const { container } = await mountSkillsApp(
+      { kind: "all" },
+      {
+        url: "/skills",
+        props: {
+          initialSkills: [frontend, backend],
+          initialFilterPreferences: {
+            active_filters: [
+              { type: "tag", value: "frontend" },
+              { type: "tag", value: "backend" },
+            ],
+            custom_views: [],
+          },
+        },
+      },
+    );
+    await flushEffects();
+    expect(container.textContent).toContain("tag:frontend");
+    expect(container.textContent).toContain("tag:backend");
+
+    clickButton(container, "Open skill frontend-skill");
+    await flushEffects();
+    const manifest = Array.from(container.querySelectorAll("button")).find((node) =>
+      node.textContent?.includes("Manifest"),
+    );
+    expect(manifest).toBeTruthy();
+    act(() => {
+      manifest!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flushEffects();
+    clickButton(container, "Remove tag frontend");
+    await flushEffects();
+
+    expect(queryMocks.setSkillTags).toHaveBeenCalledWith("frontend-skill", []);
+    expect(container.textContent).toContain("tag:backend");
+    expect(container.textContent).not.toContain("tag:frontend");
+    expect(container.textContent).toContain("backend-skill");
   });
 });

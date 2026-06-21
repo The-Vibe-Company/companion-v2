@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import type { SkillCommentRow, SkillVisibilityInput, SkillVersionRow } from "@companion/contracts";
+import { normalizeTag, type SkillCommentRow, type SkillVisibilityInput, type SkillVersionRow } from "@companion/contracts";
 import { Icon } from "../Icon";
 import { TeamAvatar } from "../org/TeamAvatar";
 import { relativeTime } from "@/lib/format";
@@ -18,6 +18,113 @@ export type DetailPanelItem = {
 
 function metadataKeyLabel(key: string): string {
   return key.startsWith("companion_") ? key.slice("companion_".length).replaceAll("_", " ") : key;
+}
+
+function sortedTags(tags: string[]): string[] {
+  return [...new Set(tags)].sort((a, b) => a.localeCompare(b));
+}
+
+function SkillTagsEditor({
+  tags,
+  canEdit,
+  onChange,
+}: {
+  tags: string[];
+  canEdit: boolean;
+  onChange: (tags: string[]) => Promise<void> | void;
+}) {
+  const [draft, setDraft] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const commit = async (next: string[]) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await onChange(sortedTags(next));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not update tags.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const add = () => {
+    let tag: string;
+    try {
+      tag = normalizeTag(draft);
+    } catch {
+      setError("Use letters, numbers, spaces, or hyphens.");
+      return;
+    }
+    if (tags.includes(tag)) {
+      setDraft("");
+      setError(null);
+      return;
+    }
+    if (tags.length >= 32) {
+      setError("A skill can have up to 32 tags.");
+      return;
+    }
+    setDraft("");
+    void commit([...tags, tag]);
+  };
+
+  return (
+    <div className="tagbox">
+      {tags.length ? (
+        <div className="chips">
+          {tags.map((tag) => (
+            <span className="chip tagchip" key={tag}>
+              {tag}
+              {canEdit && (
+                <button
+                  type="button"
+                  className="tagchip__x"
+                  onClick={() => void commit(tags.filter((t) => t !== tag))}
+                  disabled={busy}
+                  aria-label={`Remove tag ${tag}`}
+                  title={`Remove ${tag}`}
+                >
+                  <Icon name="x" size={11} />
+                </button>
+              )}
+            </span>
+          ))}
+        </div>
+      ) : (
+        <span className="muted">None</span>
+      )}
+      {canEdit && (
+        <form
+          className="tagadd"
+          onSubmit={(event) => {
+            event.preventDefault();
+            add();
+          }}
+        >
+          <input
+            value={draft}
+            onChange={(event) => {
+              setDraft(event.target.value);
+              if (error) setError(null);
+            }}
+            placeholder="Add tag"
+            disabled={busy}
+            aria-label="Add tag"
+          />
+          <button type="submit" disabled={busy || draft.trim().length === 0} title="Add tag" aria-label="Add tag">
+            <Icon name="plus" size={13} />
+          </button>
+        </form>
+      )}
+      {error && (
+        <span className="tagbox__error" role="alert">
+          {error}
+        </span>
+      )}
+    </div>
+  );
 }
 
 export function VisibilityControl({
@@ -163,7 +270,9 @@ export function PropList({
   skill,
   teams,
   onChangeVisibility,
+  onChangeTags,
   canChangeVisibility,
+  canChangeTags = false,
   requiresN,
   usedByN,
   depFlag,
@@ -172,7 +281,9 @@ export function PropList({
   skill: SkillVM;
   teams: TeamVM[];
   onChangeVisibility: (visibility: SkillVisibilityInput) => void;
+  onChangeTags?: (tags: string[]) => Promise<void> | void;
   canChangeVisibility: boolean;
+  canChangeTags?: boolean;
   /** Dependency counts for the rail (fall back to the list-row counts before the graph loads). */
   requiresN?: number;
   usedByN?: number;
@@ -325,6 +436,20 @@ export function PropList({
             <span style={{ color: "var(--color-muted)" }}>None declared</span>
           )}
         </span>
+      </div>
+      <div className="prop prop--stack prop--metadata">
+        <span className="prop__label">
+          <Icon name="tag" size={14} />
+          Tags
+          <span className="prop__count">{skill.tags.length}</span>
+        </span>
+        <div className="prop__value">
+          <SkillTagsEditor
+            tags={skill.tags}
+            canEdit={canChangeTags}
+            onChange={onChangeTags ?? (() => undefined)}
+          />
+        </div>
       </div>
       <div className="prop">
         <span className="prop__label">
@@ -514,7 +639,15 @@ export function DetailRail({
   );
 }
 
-export function ManifestDetails({ skill }: { skill: SkillVM }) {
+export function ManifestDetails({
+  skill,
+  canEditTags = false,
+  onChangeTags,
+}: {
+  skill: SkillVM;
+  canEditTags?: boolean;
+  onChangeTags?: (tags: string[]) => Promise<void> | void;
+}) {
   const metadataEntries = Object.entries(skill.metadata).sort(([a], [b]) => a.localeCompare(b));
   return (
     <div className="dblocks dblocks--panel">
@@ -552,6 +685,20 @@ export function ManifestDetails({ skill }: { skill: SkillVM }) {
                 <span className="muted">None declared</span>
               )}
             </span>
+          </div>
+          <div className="manifestrow manifestrow--stack">
+            <span className="manifestrow__label">
+              <Icon name="tag" size={13} />
+              Tags
+              <b>{skill.tags.length}</b>
+            </span>
+            <div className="manifestrow__value">
+              <SkillTagsEditor
+                tags={skill.tags}
+                canEdit={canEditTags}
+                onChange={onChangeTags ?? (() => undefined)}
+              />
+            </div>
           </div>
           <div className="manifestrow">
             <span className="manifestrow__label">

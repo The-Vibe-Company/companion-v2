@@ -43,6 +43,7 @@ describe("skill filter preferences", () => {
         { type: "starred", value: "true" },
         { type: "owner", value: "Alice Nardon" },
         { type: "team", value: "platform" },
+        { type: "tag", value: "incident response" },
       ],
       custom_views: [
         {
@@ -55,6 +56,7 @@ describe("skill filter preferences", () => {
       ],
     });
     expect(parsed.active_filters).toContainEqual({ type: "visibility", value: "everyone" });
+    expect(parsed.active_filters).toContainEqual({ type: "tag", value: "incident response" });
     expect(parsed.custom_views[0]?.id).toBe("view-1");
     expect(skillFilterPreferencesSchema.parse({})).toEqual({ active_filters: [], custom_views: [] });
     expect(() => skillFilterPreferencesSchema.parse({ active_filters: [{ type: "unknown", value: "everyone" }], custom_views: [] })).toThrow();

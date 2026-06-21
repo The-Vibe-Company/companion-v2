@@ -294,6 +294,29 @@ export const skillTeamShares = pgTable(
   }),
 );
 
+export const skillTags = pgTable(
+  "skill_tags",
+  {
+    orgId: uuid("org_id").notNull(),
+    skillId: uuid("skill_id")
+      .notNull()
+      .references(() => skills.id, { onDelete: "cascade" }),
+    tag: text("tag").notNull(),
+    createdBy: text("created_by").references(() => profiles.id, { onDelete: "set null" }),
+    createdAt: now(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.skillId, t.tag] }),
+    skillOrgFk: foreignKey({
+      columns: [t.orgId, t.skillId],
+      foreignColumns: [skills.orgId, skills.id],
+      name: "skill_tags_skill_org_fk",
+    }).onDelete("cascade"),
+    byOrgTag: index("skill_tags_org_tag_idx").on(t.orgId, t.tag),
+    byOrgSkill: index("skill_tags_org_skill_idx").on(t.orgId, t.skillId),
+  }),
+);
+
 export const skillVersions = pgTable(
   "skill_versions",
   {

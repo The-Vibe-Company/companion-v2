@@ -34,6 +34,7 @@ export interface SkillVM {
   error: string | null;
   owner: SkillOwnerVM;
   tools: string[];
+  tags: string[];
   requirements: SkillRequirement[]; // declared secrets / env vars + install notes
   compatibility: string | null;
   metadata: Record<string, string>;
@@ -78,6 +79,7 @@ export function mapSkill(row: SkillListRow): SkillVM {
       team: row.owner_kind === "team" ? row.owner_name : null,
     },
     tools: row.tools ?? [],
+    tags: row.tags ?? [],
     requirements: row.requirements ?? [],
     compatibility: row.compatibility,
     metadata: row.metadata ?? {},

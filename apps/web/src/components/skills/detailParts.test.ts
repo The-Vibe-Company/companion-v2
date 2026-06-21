@@ -1,6 +1,10 @@
+// @vitest-environment happy-dom
+
 import React from "react";
+import { act } from "react";
+import { createRoot, type Root } from "react-dom/client";
 import { renderToString } from "react-dom/server";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SkillVM, TeamVM } from "@/lib/types";
 import { PropList, Requirements } from "./detailParts";
 
@@ -28,6 +32,7 @@ const skill: SkillVM = {
     team: null,
   },
   tools: ["read_file"],
+  tags: ["automation", "incident response"],
   requirements: [
     {
       key: "AZURE_OPENAI_API_KEY",
@@ -59,6 +64,41 @@ const skill: SkillVM = {
   },
 };
 
+let roots: Root[] = [];
+
+beforeEach(() => {
+  (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+  roots = [];
+});
+
+afterEach(() => {
+  for (const root of roots) {
+    act(() => root.unmount());
+  }
+  document.body.innerHTML = "";
+  vi.restoreAllMocks();
+});
+
+async function mount(ui: React.ReactElement): Promise<HTMLElement> {
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  roots.push(root);
+  await act(async () => {
+    root.render(ui);
+  });
+  return container;
+}
+
+async function changeInput(input: HTMLInputElement, value: string) {
+  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+  await act(async () => {
+    setter?.call(input, value);
+    input.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: value }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+}
+
 describe("PropList manifest rendering", () => {
   it("renders Agent Skills manifest fields without treating registry version as manifest data", () => {
     const html = renderToString(
@@ -73,6 +113,8 @@ describe("PropList manifest rendering", () => {
     expect(html).toContain("Requires Python 3.14+ and uv with network access");
     expect(html).toContain("Allowed tools");
     expect(html).toContain("read_file");
+    expect(html).toContain("Tags");
+    expect(html).toContain("incident response");
     expect(html).toContain("License");
     expect(html).toContain("MIT");
     expect(html).toContain("Metadata");
@@ -83,6 +125,70 @@ describe("PropList manifest rendering", () => {
     expect(html).toContain("1.2.3");
     // Requirements live in their own tab, not the manifest rail.
     expect(html).not.toContain("AZURE_OPENAI_API_KEY");
+  });
+
+  it("lets editors add normalized tags and remove existing tags", async () => {
+    const onChangeTags = vi.fn().mockResolvedValue(undefined);
+    const container = await mount(
+      React.createElement(PropList, {
+        skill,
+        teams,
+        onChangeVisibility: vi.fn(),
+        canChangeVisibility: true,
+        onChangeTags,
+        canChangeTags: true,
+      }),
+    );
+
+    const input = container.querySelector<HTMLInputElement>('input[aria-label="Add tag"]');
+    expect(input).not.toBeNull();
+    await changeInput(input!, " QA Tag ");
+    await act(async () => {
+      input!.closest("form")?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+    expect(onChangeTags).toHaveBeenCalledWith(["automation", "incident response", "qa tag"]);
+
+    const remove = container.querySelector<HTMLButtonElement>('button[aria-label="Remove tag automation"]');
+    expect(remove).not.toBeNull();
+    await act(async () => {
+      remove!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(onChangeTags).toHaveBeenCalledWith(["incident response"]);
+  });
+
+  it("rejects invalid tags and hides edit controls for readers", async () => {
+    const onChangeTags = vi.fn().mockResolvedValue(undefined);
+    const editable = await mount(
+      React.createElement(PropList, {
+        skill,
+        teams,
+        onChangeVisibility: vi.fn(),
+        canChangeVisibility: true,
+        onChangeTags,
+        canChangeTags: true,
+      }),
+    );
+
+    const input = editable.querySelector<HTMLInputElement>('input[aria-label="Add tag"]');
+    await changeInput(input!, "bad_tag");
+    await act(async () => {
+      input!.closest("form")?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+    expect(editable.textContent).toContain("Use letters, numbers, spaces, or hyphens.");
+    expect(onChangeTags).not.toHaveBeenCalled();
+
+    const readOnly = await mount(
+      React.createElement(PropList, {
+        skill,
+        teams,
+        onChangeVisibility: vi.fn(),
+        canChangeVisibility: false,
+        onChangeTags,
+        canChangeTags: false,
+      }),
+    );
+    expect(readOnly.querySelector('input[aria-label="Add tag"]')).toBeNull();
+    expect(readOnly.querySelector('button[aria-label="Remove tag automation"]')).toBeNull();
   });
 });
 

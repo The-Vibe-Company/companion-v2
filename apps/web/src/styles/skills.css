@@ -250,7 +250,24 @@ body { background: var(--color-canvas); color: var(--color-fg); font-family: var
 
 /* chips + badges */
 .chips { display: flex; flex-wrap: wrap; gap: 6px; }
-.chip { font-family: var(--font-mono); font-size: var(--text-xs); color: var(--color-muted); border: 1px solid var(--color-line); background: var(--color-surface); border-radius: var(--radius-sm); padding: 2px 7px; }
+.chip { max-width: 100%; min-width: 0; font-family: var(--font-mono); font-size: var(--text-xs); color: var(--color-muted); border: 1px solid var(--color-line); background: var(--color-surface); border-radius: var(--radius-sm); padding: 2px 7px; overflow-wrap: anywhere; }
+.tagbox { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; min-width: 0; width: 100%; }
+.tagbox--upload { gap: 7px; }
+.tagchip { display: inline-flex; align-items: center; gap: 5px; background: var(--color-surface-raised); }
+.tagchip__x { display: inline-grid; place-items: center; width: 24px; height: 24px; margin: -4px -5px -4px 0; border: none; border-radius: var(--radius-sm); background: transparent; color: var(--color-faint); cursor: pointer; flex: none; }
+.tagchip__x:hover { background: var(--color-surface-sunken); color: var(--color-fg); }
+.tagchip__x:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 1px; }
+.tagchip__x:disabled { cursor: not-allowed; opacity: 0.55; }
+.tagadd { display: flex; align-items: center; gap: 6px; width: min(260px, 100%); }
+.tagadd input { flex: 1; min-width: 0; height: 36px; border: 1px solid var(--color-line); border-radius: var(--radius-md); background: var(--color-surface-sunken); color: var(--color-fg); font-family: var(--font-mono); font-size: var(--text-xs); padding: 0 10px; outline: none; }
+.tagadd input:focus { border-color: var(--color-line-strong); }
+.tagadd input:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 1px; }
+.tagadd input::placeholder { color: var(--color-faint); }
+.tagadd button { display: inline-grid; place-items: center; width: 36px; height: 36px; border: 1px solid var(--color-line); border-radius: var(--radius-md); background: var(--color-surface); color: var(--color-muted); cursor: pointer; }
+.tagadd button:hover { background: var(--color-surface-raised); color: var(--color-fg); }
+.tagadd button:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 1px; }
+.tagadd button:disabled { cursor: not-allowed; opacity: 0.55; }
+.tagbox__error { font-size: 11px; color: var(--color-danger); }
 .kvlist { display: flex; flex-direction: column; gap: 5px; min-width: 0; width: 100%; }
 .prop--metadata .kvlist { max-height: 168px; overflow-y: auto; padding-right: 2px; }
 .kv { display: grid; grid-template-columns: minmax(78px, 0.45fr) minmax(0, 1fr); gap: 8px; align-items: baseline; font-family: var(--font-mono); font-size: 11px; }
@@ -454,9 +471,14 @@ body { background: var(--color-canvas); color: var(--color-fg); font-family: var
 .fmenu__item { display: flex; align-items: center; gap: 9px; width: 100%; text-align: left; border: none; background: none; cursor: pointer; padding: 6px 7px; border-radius: var(--radius-sm); color: var(--color-fg); font-size: var(--text-xs); }
 .fmenu__item:hover { background: var(--color-surface-raised); }
 .fmenu__item .ico { color: var(--color-faint); display: inline-flex; flex: none; }
-.fmenu__item .lbl { font-family: var(--font-mono); }
+.fmenu__item .lbl { min-width: 0; font-family: var(--font-mono); overflow-wrap: anywhere; }
 .fmenu__item .chk { margin-left: auto; color: var(--color-fg); display: inline-flex; }
 .fmenu__divider { height: 1px; background: var(--color-line); margin: 4px 0; }
+.fmenu__search { display: flex; align-items: center; gap: 7px; height: 30px; margin: 2px 0 4px; padding: 0 8px; border: 1px solid var(--color-line); border-radius: var(--radius-md); background: var(--color-surface-sunken); color: var(--color-faint); }
+.fmenu__search:focus-within { border-color: var(--color-accent); box-shadow: 0 0 0 2px var(--color-accent-ring); }
+.fmenu__search input { flex: 1; min-width: 0; border: 0; outline: 0; background: transparent; color: var(--color-fg); font-family: var(--font-ui); font-size: var(--text-xs); }
+.fmenu__search input::placeholder { color: var(--color-faint); }
+.fmenu__empty { padding: 7px 8px; color: var(--color-faint); font-size: var(--text-xs); }
 
 /* --- Command palette (⌘K) ------------------------------------------------ */
 .cpal-scrim { position: fixed; inset: 0; background: var(--color-scrim); z-index: 60; display: flex; align-items: flex-start; justify-content: center; padding-top: 12vh; }

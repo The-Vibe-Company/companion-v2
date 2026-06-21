@@ -1,9 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
-import type { Db } from "@companion/db";
+import { schema, type Db } from "@companion/db";
 import {
   assertCanPublishSkillVersion,
+  listOrgTags,
   listSkillVersions,
   listSkills,
+  setSkillTags,
   setSkillVisibility,
   type ActorContext,
 } from "../src/services";
@@ -104,25 +106,27 @@ function selectChain(rows: unknown[]) {
 
 function whereTouchesColumn(expr: unknown, columnName: string): boolean {
   const seen = new Set<unknown>();
+  const values = (node: object) => Reflect.ownKeys(node).map((key) => (node as Record<PropertyKey, unknown>)[key]);
   const walk = (node: unknown): boolean => {
     if (node === null || typeof node !== "object") return false;
     if (seen.has(node)) return false;
     seen.add(node);
     const record = node as Record<string, unknown>;
     if (record.name === columnName && "columnType" in record) return true;
-    return Object.values(record).some(walk);
+    return values(node).some(walk);
   };
   return walk(expr);
 }
 
 function whereMentions(expr: unknown, value: string): boolean {
   const seen = new Set<unknown>();
+  const values = (node: object) => Reflect.ownKeys(node).map((key) => (node as Record<PropertyKey, unknown>)[key]);
   const walk = (node: unknown): boolean => {
     if (node === value) return true;
     if (node === null || typeof node !== "object") return false;
     if (seen.has(node)) return false;
     seen.add(node);
-    return Object.values(node as Record<string, unknown>).some(walk);
+    return values(node).some(walk);
   };
   return walk(expr);
 }
@@ -135,6 +139,8 @@ function fakeDb({
   existingSkill = { id: "skill-one-team", ownerId: "other-user", ownerTeamId: null as string | null },
   extraSkills = [] as ReturnType<typeof skillRow>[],
   versions = [] as ReturnType<typeof skillVersionRow>[],
+  tagRows = [] as Array<{ skill_id: string; tag: string }>,
+  orgTagRows = [] as Array<{ tag: string; n: number }>,
   edges = [] as Array<{ skillId: string; skillVersionId: string; dependsOnSlug: string; dependsOnSkillId: string | null }>,
 }: {
   orgRole?: "owner" | "admin" | "developer" | null;
@@ -144,13 +150,19 @@ function fakeDb({
   existingSkill?: { id: string; ownerId: string; ownerTeamId: string | null } | null;
   extraSkills?: ReturnType<typeof skillRow>[];
   versions?: ReturnType<typeof skillVersionRow>[];
+  tagRows?: Array<{ skill_id: string; tag: string }>;
+  orgTagRows?: Array<{ tag: string; n: number }>;
   edges?: Array<{ skillId: string; skillVersionId: string; dependsOnSlug: string; dependsOnSkillId: string | null }>;
 } = {}) {
   const writes = {
     updates: [] as Array<Record<string, unknown>>,
     deletes: [] as unknown[],
     insertedShares: [] as unknown[],
+    insertedTags: [] as unknown[],
+    tagFilterQueried: false,
+    tagFilterWhere: undefined as unknown,
     skillListWhere: undefined as unknown,
+    orgTagsWhere: undefined as unknown,
     teamIdWheres: [] as unknown[],
   };
   const skills = [
@@ -192,9 +204,33 @@ function fakeDb({
     },
     select: vi.fn((cols?: Record<string, unknown>) => {
       if (!cols) return selectChain(versions);
+      if ("one" in cols) {
+        const chain = selectChain([]);
+        const originalFrom = chain.from as (table: unknown) => typeof chain;
+        chain.from = vi.fn((table: unknown) => {
+          if (table === schema.skillTags) writes.tagFilterQueried = true;
+          return originalFrom(table);
+        });
+        const originalWhere = chain.where as (expr: unknown) => typeof chain;
+        chain.where = vi.fn((expr: unknown) => {
+          writes.tagFilterWhere = expr;
+          return originalWhere(expr);
+        });
+        return chain;
+      }
       // The caller's per-skill install rows (none in these visibility fixtures). Must precede the
       // shares branch below, which also keys on skill_id.
       if ("skill_id" in cols && "installed_version" in cols) return selectChain([]);
+      if ("skill_id" in cols && "tag" in cols) return selectChain(tagRows);
+      if ("tag" in cols && "n" in cols) {
+        const chain = selectChain(orgTagRows);
+        const originalWhere = chain.where as (expr: unknown) => typeof chain;
+        chain.where = vi.fn((expr: unknown) => {
+          writes.orgTagsWhere = expr;
+          return originalWhere(expr);
+        });
+        return chain;
+      }
       if ("skill_id" in cols) return selectChain(shares);
       // loadDepGraph's current-version dependency edges (distinct from listSkills' referencedRows).
       if ("dependsOnSlug" in cols && "skillVersionId" in cols) return selectChain(edges);
@@ -241,7 +277,12 @@ function fakeDb({
     }),
     insert: vi.fn(() => ({
       values: vi.fn(async (rows: unknown) => {
-        writes.insertedShares.push(...(Array.isArray(rows) ? rows : [rows]));
+        const list = Array.isArray(rows) ? rows : [rows];
+        if (list.some((row) => row && typeof row === "object" && "tag" in row)) {
+          writes.insertedTags.push(...list);
+        } else {
+          writes.insertedShares.push(...list);
+        }
       }),
     })),
     transaction: vi.fn(async (fn: (tx: unknown) => unknown) => fn(database)),
@@ -299,6 +340,53 @@ describe("listSkills visibility assembly", () => {
       everyone: true,
       teams: [{ id: "team-platform", slug: "platform", name: "Platform" }],
     });
+  });
+
+  it("includes mutable tags from the batched tag query", async () => {
+    const rows = await listSkills({
+      actor,
+      orgId: ORG,
+      database: fakeDb({
+        tagRows: [
+          { skill_id: "skill-private", tag: "automation" },
+          { skill_id: "skill-private", tag: "incident response" },
+          { skill_id: "skill-everyone", tag: "shared" },
+        ],
+      }),
+    });
+
+    expect(rows.find((row) => row.slug === "private-skill")?.tags).toEqual([
+      "automation",
+      "incident response",
+    ]);
+    expect(rows.find((row) => row.slug === "everyone-skill")?.tags).toEqual(["shared"]);
+  });
+
+  it("adds an EXISTS tag predicate when tag filters are supplied", async () => {
+    const database = fakeDb() as Db & { __writes: { tagFilterQueried: boolean; tagFilterWhere: unknown } };
+
+    await listSkills({ actor, orgId: ORG, tags: ["Ops", "incident response"], database });
+
+    expect(database.__writes.tagFilterQueried).toBe(true);
+    expect(whereTouchesColumn(database.__writes.tagFilterWhere, "org_id")).toBe(true);
+    expect(whereTouchesColumn(database.__writes.tagFilterWhere, "skill_id")).toBe(true);
+  });
+
+  it("lists visible org tags in service-provided frequency order", async () => {
+    const database = fakeDb({
+      orgTagRows: [
+        { tag: "ops", n: 3 },
+        { tag: "automation", n: 2 },
+        { tag: "incident response", n: 2 },
+      ],
+    }) as Db & { __writes: { orgTagsWhere: unknown } };
+
+    await expect(listOrgTags({ actor, orgId: ORG, database })).resolves.toEqual([
+      "ops",
+      "automation",
+      "incident response",
+    ]);
+    expect(whereTouchesColumn(database.__writes.orgTagsWhere, "org_id")).toBe(true);
   });
 
   it("normalizes companion display and setup requirements from stored version metadata", async () => {
@@ -561,6 +649,91 @@ describe("setSkillVisibility authorization", () => {
         database: fakeDb({ orgRole: null }),
       }),
     ).rejects.toThrow("not a member of this organization");
+  });
+});
+
+describe("setSkillTags authorization", () => {
+  it("lets a direct user owner replace tags with normalized unique values", async () => {
+    const database = fakeDb() as Db & { __writes: { insertedTags: unknown[] } };
+
+    await expect(
+      setSkillTags({
+        actor,
+        orgId: ORG,
+        slug: "private-skill",
+        tags: [" Ops ", "ops", "incident response"],
+        database,
+      }),
+    ).resolves.toEqual({ tags: ["incident response", "ops"] });
+
+    expect(database.__writes.insertedTags).toEqual([
+      { orgId: ORG, skillId: "skill-private", tag: "incident response", createdBy: actor.id },
+      { orgId: ORG, skillId: "skill-private", tag: "ops", createdBy: actor.id },
+    ]);
+  });
+
+  it("lets owner-team editors replace tags on team-owned skills", async () => {
+    const database = fakeDb({ ownerTeamRole: "editor" }) as Db & { __writes: { insertedTags: unknown[] } };
+
+    await setSkillTags({
+      actor,
+      orgId: ORG,
+      slug: "owner-team-skill",
+      tags: ["platform"],
+      database,
+    });
+
+    expect(database.__writes.insertedTags).toEqual([
+      { orgId: ORG, skillId: "skill-owner-team", tag: "platform", createdBy: actor.id },
+    ]);
+  });
+
+  it("keeps owner-team readers read-only for tags", async () => {
+    await expect(
+      setSkillTags({
+        actor,
+        orgId: ORG,
+        slug: "owner-team-skill",
+        tags: ["platform"],
+        database: fakeDb({ ownerTeamRole: "reader" }),
+      }),
+    ).rejects.toThrow("not allowed to change this skill");
+  });
+
+  it("does not let visibility-team editors tag someone else's shared skill", async () => {
+    await expect(
+      setSkillTags({
+        actor,
+        orgId: ORG,
+        slug: "one-team-skill",
+        tags: ["shared"],
+        database: fakeDb({ sharedTeamRole: "editor" }),
+      }),
+    ).rejects.toThrow("not allowed to change this skill");
+  });
+
+  it("denies non-members before tag mutation", async () => {
+    await expect(
+      setSkillTags({
+        actor,
+        orgId: ORG,
+        slug: "private-skill",
+        tags: ["ops"],
+        database: fakeDb({ orgRole: null }),
+      }),
+    ).rejects.toThrow("not a member of this organization");
+  });
+
+  it("enforces the shared tag count limit in the service layer", async () => {
+    await expect(
+      setSkillTags({
+        actor,
+        orgId: ORG,
+        slug: "private-skill",
+        tags: Array.from({ length: 33 }, (_, i) => `tag ${i}`),
+        database: fakeDb(),
+      }),
+    ).rejects.toThrow();
   });
 });
 
