@@ -2,9 +2,12 @@ import { describe, expect, it } from "vitest";
 import {
   createSkillInputSchema,
   publishSkillInputSchema,
+  setSkillTagsInputSchema,
+  setSkillTagsResultSchema,
   skillFilterSchema,
   skillFrontmatterSchema,
   skillListRowSchema,
+  skillTagSchema,
   skillVisibilityInputSchema,
   visibilityFilterSchema,
 } from "../src";
@@ -45,11 +48,52 @@ describe("skill visibility contracts", () => {
     });
 
     expect(row.visibility).toEqual(visibility);
+    expect(row.tags).toEqual([]);
     // Install fields are optional on the wire (older API responses omit them) and default safely.
     expect(row.installed).toBe(false);
     expect(row.installed_version).toBeNull();
     expect(row.install_status).toBe("none");
     expect(() => skillListRowSchema.parse({ ...row, scope: "public", visibility: undefined })).toThrow();
+  });
+
+  it("validates mutable skill tags consistently across read and write contracts", () => {
+    expect(skillTagSchema.parse(" Incident Response ")).toBe("incident response");
+    expect(() => skillTagSchema.parse("")).toThrow();
+    expect(() => skillTagSchema.parse("bad_tag")).toThrow();
+    expect(() => skillTagSchema.parse("a".repeat(49))).toThrow();
+    expect(setSkillTagsInputSchema.parse({ tags: ["Ops", "incident response"] })).toEqual({
+      tags: ["ops", "incident response"],
+    });
+    expect(() => setSkillTagsInputSchema.parse({ tags: Array.from({ length: 33 }, (_, i) => `tag ${i}`) })).toThrow();
+    expect(setSkillTagsResultSchema.parse({ tags: ["ops"] })).toEqual({ tags: ["ops"] });
+    expect(() => skillListRowSchema.parse({
+      id: "skill_1",
+      org_id: "org_1",
+      slug: "incident-summary",
+      description: "Summarize incidents.",
+      visibility,
+      validation: "valid",
+      validation_error: null,
+      owner_kind: "user",
+      owner_id: "user_1",
+      owner_user_id: "user_1",
+      owner_team_id: null,
+      owner_name: "Stan",
+      owner_handle: null,
+      owner_initials: "SG",
+      current_version: "1.0.0",
+      license: null,
+      compatibility: null,
+      metadata: {},
+      checksum: null,
+      size_bytes: 123,
+      tools: [],
+      tags: ["bad_tag"],
+      star_count: 0,
+      starred: false,
+      created_at: "2026-06-09T12:00:00.000Z",
+      updated_at: "2026-06-09T12:00:00.000Z",
+    })).toThrow();
   });
 
   it("parses create and publish inputs with visibility only", () => {

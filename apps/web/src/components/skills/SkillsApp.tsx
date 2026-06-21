@@ -10,6 +10,7 @@ import {
   markSkillUninstalled,
   restoreSkill as restoreSkillRpc,
   saveSkillFilterPreferences,
+  setSkillTags as setSkillTagsRpc,
   setSkillVisibility,
   toggleStar as toggleStarRpc,
 } from "@/lib/queries";
@@ -479,6 +480,51 @@ export function SkillsApp({
     [teams],
   );
 
+  const changeTags = useCallback(
+    (id: string, nextTags: string[]): Promise<void> => {
+      const live = skills.find((s) => s.id === id);
+      const archived = archivedSkills.find((s) => s.id === id);
+      const prevTags = live?.tags ?? archived?.tags ?? [];
+      const applyTags = (rows: SkillVM[], tags: string[]) =>
+        rows.map((s) => (s.id === id ? { ...s, tags } : s));
+      let removedTagFilters: Filter[] = [];
+      const prevSet = new Set(prevTags);
+      const nextSet = new Set(nextTags);
+      setSkills((rows) => applyTags(rows, nextTags));
+      setArchivedSkills((rows) => applyTags(rows, nextTags));
+      if (id === openIdRef.current) {
+        setFilters((fs) => {
+          const tagFilters = fs.filter((f) => f.type === "tag");
+          const staleFiltersForSkill = tagFilters.filter((f) => prevSet.has(f.value) && !nextSet.has(f.value));
+          if (tagFilters.length && staleFiltersForSkill.length && !tagFilters.some((f) => nextSet.has(f.value))) {
+            removedTagFilters = staleFiltersForSkill;
+            const staleKeys = new Set(staleFiltersForSkill.map((f) => f.value));
+            return fs.filter((f) => f.type !== "tag" || !staleKeys.has(f.value));
+          }
+          return fs;
+        });
+      }
+      return setSkillTagsRpc(id, nextTags)
+        .then((tags) => {
+          setSkills((rows) => applyTags(rows, tags));
+          setArchivedSkills((rows) => applyTags(rows, tags));
+        })
+        .catch((e) => {
+          setSkills((rows) => applyTags(rows, prevTags));
+          setArchivedSkills((rows) => applyTags(rows, prevTags));
+          if (removedTagFilters.length) {
+            setFilters((fs) => {
+              const seen = new Set(fs.map((f) => `${f.type}:${f.value}`));
+              return [...fs, ...removedTagFilters.filter((f) => !seen.has(`${f.type}:${f.value}`))];
+            });
+          }
+          orgActions.setError((e as Error).message);
+          throw e;
+        });
+    },
+    [archivedSkills, orgActions, skills],
+  );
+
   // Mark a published skill installed / not installed for the current user. Optimistic, with rollback;
   // on success it reconciles with the server's computed status (so "update" stays accurate).
   const setInstalled = useCallback(
@@ -631,6 +677,7 @@ export function SkillsApp({
 
   // --- Derived ---------------------------------------------------------------
   const owners = useMemo(() => [...new Set(skills.map((s) => s.owner.name))].sort(), [skills]);
+  const tags = useMemo(() => [...new Set(skills.flatMap((s) => s.tags))].sort(), [skills]);
   const teamCounts = useMemo(() => {
     const c: Record<string, number> = {};
     skills.forEach((s) => {
@@ -1111,6 +1158,7 @@ export function SkillsApp({
             onToggleStar={() => toggleStar(skill.id)}
             onToggleInstalled={() => setInstalled(skill.id, skill.installStatus === "none")}
             onChangeVisibility={(sc) => changeVisibility(skill.id, sc)}
+            onChangeTags={(nextTags) => changeTags(skill.id, nextTags)}
             onInstall={() => setInstallSkill(skill)}
             onUpdate={() => setUpdateSkill(skill)}
             onOpenSkill={openSkillBySlug}
@@ -1146,6 +1194,7 @@ export function SkillsApp({
             onRetryPreferences={retryPreferenceSave}
             owners={owners}
             teams={teams}
+            tags={tags}
             viewCounts={viewCounts}
           />
         )}

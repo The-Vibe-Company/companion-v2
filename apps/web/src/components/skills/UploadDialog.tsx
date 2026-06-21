@@ -8,6 +8,7 @@ import type {
   SkillVisibilityInput,
   ValidationResult,
 } from "@companion/contracts";
+import { normalizeTag } from "@companion/contracts";
 import type { SkillVM, TeamVM } from "@/lib/types";
 import {
   apiBase,
@@ -16,6 +17,7 @@ import {
   fetchSkillDependencies,
   issueToken,
   publishSkillPackage,
+  setSkillTags,
   validateSkillPackage,
   versionPackageUrl,
 } from "@/lib/queries";
@@ -400,6 +402,88 @@ function VisibilityPicker({
   );
 }
 
+function sortedTags(tags: string[]): string[] {
+  return [...new Set(tags)].sort((a, b) => a.localeCompare(b));
+}
+
+function TagsField({ value, onChange }: { value: string[]; onChange: (tags: string[]) => void }) {
+  const [draft, setDraft] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const add = () => {
+    let tag: string;
+    try {
+      tag = normalizeTag(draft);
+    } catch {
+      setError("Use letters, numbers, spaces, or hyphens.");
+      return;
+    }
+    if (value.includes(tag)) {
+      setDraft("");
+      setError(null);
+      return;
+    }
+    if (value.length >= 32) {
+      setError("A skill can have up to 32 tags.");
+      return;
+    }
+    onChange(sortedTags([...value, tag]));
+    setDraft("");
+    setError(null);
+  };
+  return (
+    <div className="up-field">
+      <label className="up-field__label" htmlFor="up-tags">
+        Tags <span className="up-field__opt">optional</span>
+      </label>
+      <div className="tagbox tagbox--upload">
+        {value.length > 0 && (
+          <span className="chips">
+            {value.map((tag) => (
+              <span className="chip tagchip" key={tag}>
+                {tag}
+                <button
+                  type="button"
+                  className="tagchip__x"
+                  onClick={() => onChange(value.filter((t) => t !== tag))}
+                  aria-label={`Remove tag ${tag}`}
+                  title={`Remove ${tag}`}
+                >
+                  <Icon name="x" size={11} />
+                </button>
+              </span>
+            ))}
+          </span>
+        )}
+        <form
+          className="tagadd"
+          onSubmit={(event) => {
+            event.preventDefault();
+            add();
+          }}
+        >
+          <input
+            id="up-tags"
+            value={draft}
+            onChange={(event) => {
+              setDraft(event.target.value);
+              if (error) setError(null);
+            }}
+            placeholder="Add tag"
+          />
+          <button type="submit" disabled={draft.trim().length === 0} title="Add tag" aria-label="Add tag">
+            <Icon name="plus" size={13} />
+          </button>
+        </form>
+        {error && (
+          <span className="tagbox__error" role="alert">
+            {error}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function StepLabel({ n, children }: { n?: string; children: React.ReactNode }) {
   return (
     <div className="up-fieldlabel">
@@ -579,6 +663,8 @@ function PromptPanel({
   setOwnerTeam,
   visibility,
   setVisibility,
+  tags,
+  setTags,
   teams,
   token,
   ensure,
@@ -590,6 +676,8 @@ function PromptPanel({
   setOwnerTeam: (ownerTeam: string | null) => void;
   visibility: SkillVisibilityInput;
   setVisibility: (visibility: SkillVisibilityInput) => void;
+  tags: string[];
+  setTags: (tags: string[]) => void;
   teams: TeamVM[];
   token: string | null;
   ensure: () => Promise<string>;
@@ -617,6 +705,11 @@ function PromptPanel({
   );
   const validateUrl = `${base}/skills?${validateQuery}`;
   const publishUrl = `${base}/skills?${publishQuery}`;
+  const tagBody = JSON.stringify({ tags });
+  const tagInstruction = (tok: string) =>
+    target || tags.length
+      ? `After publish succeeds, read the response slug field and call PUT ${base}/skills/{slug}/tags with Authorization: Bearer ${tok}, Content-Type: application/json, and body ${tagBody}.`
+      : "";
   const buildPrompt = (tok: string) =>
     target
       ? `You are updating an existing Companion skill through the workspace API.
@@ -642,7 +735,8 @@ Workflow:
 7. Read the validation response. If it reports package name mismatch, target skill id mismatch, missing target skill, or metadata.companion_skill_id mismatch, do not edit the package and do not publish. Tell the user this appears to be a different skill.
 8. If result.ok is not true for any other reason, do not publish. Fix only the validation issue named by Companion, then validate once more.
 9. Publish only after validation is accepted: create a POST request to the publish endpoint with the same validated archive as the body.
-10. Report the published skill id and version from the response. Never publish after failed validation or ambiguous identity.`
+10. Report the published skill id and version from the response. Never publish after failed validation or ambiguous identity.
+${tagInstruction(tok)}`.trim()
       : `You are publishing a Companion skill through the workspace API.
 
 The package is a standard Agent Skill: SKILL.md at the root, with YAML frontmatter containing name and description.
@@ -661,7 +755,8 @@ Workflow:
 5. Use Authorization: Bearer ${tok} and Content-Type: application/zip or application/gzip.
 6. Read the validation response. If result.ok is not true, or if the response is 422, do not publish. Fix only the validation issue named by Companion, then validate once more.
 7. Publish only after validation is accepted: create a POST request to the publish endpoint with the same validated archive as the body.
-8. Report the published skill id and Companion-assigned version from the response. Never publish after failed validation or ambiguous identity.`;
+8. Report the published skill id and Companion-assigned version from the response. Never publish after failed validation or ambiguous identity.
+${tagInstruction(tok)}`.trim();
   const displayPrompt = buildPrompt(token ?? "cmp_pat_…");
   return (
     <>
@@ -694,7 +789,11 @@ Workflow:
         </p>
       </div>
       <div className="up-step">
-        <StepLabel n="4">Prompt</StepLabel>
+        <StepLabel n="4">Tags</StepLabel>
+        <TagsField value={tags} onChange={setTags} />
+      </div>
+      <div className="up-step">
+        <StepLabel n="5">Prompt</StepLabel>
         <CodeBlock
           text={displayPrompt}
           scroll
@@ -711,6 +810,8 @@ function ZipPanel({
   setOwnerTeam,
   visibility,
   setVisibility,
+  tags,
+  setTags,
   teams,
   file,
   setFile,
@@ -723,6 +824,8 @@ function ZipPanel({
   setOwnerTeam: (ownerTeam: string | null) => void;
   visibility: SkillVisibilityInput;
   setVisibility: (visibility: SkillVisibilityInput) => void;
+  tags: string[];
+  setTags: (tags: string[]) => void;
   teams: TeamVM[];
   file: File | null;
   setFile: (f: File | null) => void;
@@ -815,6 +918,10 @@ function ZipPanel({
         <VisibilityPicker value={visibility} onChange={setVisibility} teams={teams} />
         <p className="up-seg-note">Set on upload. Companion does not read visibility from the package.</p>
       </div>
+      <div className="up-step">
+        <StepLabel n="3">Tags</StepLabel>
+        <TagsField value={tags} onChange={setTags} />
+      </div>
     </>
   );
 }
@@ -842,6 +949,8 @@ function CreatePanel({
   setOwnerTeam,
   visibility,
   setVisibility,
+  tags,
+  setTags,
   teams,
   form,
   setForm,
@@ -851,6 +960,8 @@ function CreatePanel({
   setOwnerTeam: (ownerTeam: string | null) => void;
   visibility: SkillVisibilityInput;
   setVisibility: (visibility: SkillVisibilityInput) => void;
+  tags: string[];
+  setTags: (tags: string[]) => void;
   teams: TeamVM[];
   form: CreateForm;
   setForm: (f: (prev: CreateForm) => CreateForm) => void;
@@ -905,6 +1016,7 @@ function CreatePanel({
             />
             <span className="up-field__hint">{visibilityLabel(visibility, teams)}.</span>
           </div>
+          <TagsField value={tags} onChange={setTags} />
         </div>
       </div>
       <div className="up-step">
@@ -1215,6 +1327,7 @@ export function UploadDialog({
       ? { everyone: skill!.visibility.everyone, teams: skill!.teamSlugs }
       : { everyone: false, teams: [] },
   );
+  const [tags, setTags] = useState<string[]>(() => (isUpdate ? sortedTags(skill!.tags) : []));
   const [token, setToken] = useState<string | null>(null);
   const [file, setFile] = useState<File | null>(null);
   const [validation, setValidation] = useState<ValidationResult | null>(null);
@@ -1303,6 +1416,16 @@ export function UploadDialog({
     onPublished();
   };
 
+  const applyTagsAfterPublish = async (slug: string): Promise<string | undefined> => {
+    if (!isUpdate && tags.length === 0) return undefined;
+    try {
+      await setSkillTags(slug, tags);
+      return undefined;
+    } catch {
+      return "Published, but could not update tags — edit them from the skill detail if needed.";
+    }
+  };
+
   const runZip = async () => {
     if (!file || validation?.ok !== true) return;
     setBusy(true);
@@ -1316,6 +1439,7 @@ export function UploadDialog({
         expectSkillId: isUpdate ? skill!.uuid : undefined,
         dependencies: dependencyPlan?.declared ?? [],
       });
+      const tagWarning = await applyTagsAfterPublish(res.slug || idFromZip);
       // Archive the candidates the operator confirmed (dependencies dropped and now unreferenced).
       // The publish already succeeded, so a failed archive is non-fatal — but surface it rather than
       // silently dropping it, so the operator knows the archive step did not complete.
@@ -1334,7 +1458,7 @@ export function UploadDialog({
         version: res.version,
         visibility,
         via: isUpdate ? "Updated from zip" : "Uploaded from zip",
-        archiveWarning,
+        archiveWarning: [tagWarning, archiveWarning].filter(Boolean).join(" ") || undefined,
       });
     } catch (e) {
       setError(e instanceof Error ? e.message : "Upload failed");
@@ -1386,11 +1510,13 @@ export function UploadDialog({
         owner_team: isUpdate ? undefined : ownerTeam,
         visibility,
       });
+      const tagWarning = await applyTagsAfterPublish(res.slug || id);
       finishPublish({
         id: res.slug || id,
         version: res.version,
         visibility,
         via: isUpdate ? "Edited and published" : "Created in the browser",
+        archiveWarning: tagWarning,
       });
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not publish");
@@ -1584,6 +1710,8 @@ export function UploadDialog({
                     setOwnerTeam={setOwnerTeam}
                     visibility={visibility}
                     setVisibility={setVisibility}
+                    tags={tags}
+                    setTags={setTags}
                     teams={teams}
                     token={token}
                     ensure={ensureToken}
@@ -1607,6 +1735,8 @@ export function UploadDialog({
                     setOwnerTeam={setOwnerTeam}
                     visibility={visibility}
                     setVisibility={setVisibility}
+                    tags={tags}
+                    setTags={setTags}
                     teams={teams}
                     file={file}
                     setFile={setFile}
@@ -1622,6 +1752,8 @@ export function UploadDialog({
                     setOwnerTeam={setOwnerTeam}
                     visibility={visibility}
                     setVisibility={setVisibility}
+                    tags={tags}
+                    setTags={setTags}
                     teams={teams}
                     form={form}
                     setForm={setForm}

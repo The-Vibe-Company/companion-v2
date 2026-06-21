@@ -16,17 +16,20 @@ const VISIBILITY_LABEL: Record<string, string> = {
 function FilterMenuPopover({
   owners,
   teams,
+  tags,
   filters,
   onToggle,
   onClose,
 }: {
   owners: string[];
   teams: TeamVM[];
+  tags: string[];
   filters: Filter[];
   onToggle: (type: Filter["type"], value: string) => void;
   onClose: () => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
+  const [tagQuery, setTagQuery] = useState("");
   useEffect(() => {
     const h = (e: MouseEvent) => {
       if (ref.current && !ref.current.contains(e.target as Node)) onClose();
@@ -44,6 +47,9 @@ function FilterMenuPopover({
 
   const has = (type: string, value: string) =>
     filters.some((f) => f.type === type && f.value === value);
+  const visibleTags = tagQuery.trim()
+    ? tags.filter((tag) => tag.includes(tagQuery.trim().toLowerCase()))
+    : tags;
   const Item = ({
     type,
     value,
@@ -73,7 +79,7 @@ function FilterMenuPopover({
   );
 
   return (
-    <div className="fmenu" ref={ref} role="menu">
+    <div className="fmenu" ref={ref} aria-label="Filter options">
       <div className="fmenu__grouphead">Dependencies</div>
       <Item type="deps" value="has" icon="package" label="Has dependencies" />
       <Item type="deps" value="used" icon="corner-down-right" label="Used as dependency" />
@@ -121,6 +127,27 @@ function FilterMenuPopover({
           ))}
         </>
       )}
+      {tags.length > 0 && (
+        <>
+          <div className="fmenu__divider" />
+          <div className="fmenu__grouphead">Tags</div>
+          {tags.length > 10 && (
+            <div className="fmenu__search">
+              <Icon name="search" size={13} />
+              <input
+                value={tagQuery}
+                onChange={(event) => setTagQuery(event.target.value)}
+                placeholder="Filter tags"
+                aria-label="Filter tags"
+              />
+            </div>
+          )}
+          {visibleTags.map((tag) => (
+            <Item key={tag} type="tag" value={tag} icon="tag" label={tag} />
+          ))}
+          {visibleTags.length === 0 && <div className="fmenu__empty">No tags</div>}
+        </>
+      )}
     </div>
   );
 }
@@ -128,11 +155,13 @@ function FilterMenuPopover({
 export function FilterAdd({
   owners,
   teams,
+  tags,
   filters,
   onToggle,
 }: {
   owners: string[];
   teams: TeamVM[];
+  tags: string[];
   filters: Filter[];
   onToggle: (type: Filter["type"], value: string) => void;
 }) {
@@ -142,7 +171,7 @@ export function FilterAdd({
       <button
         className="filter-add"
         onClick={() => setOpen((o) => !o)}
-        aria-haspopup="menu"
+        aria-haspopup="dialog"
         aria-expanded={open}
       >
         <Icon name="plus" size={13} />
@@ -152,6 +181,7 @@ export function FilterAdd({
         <FilterMenuPopover
           owners={owners}
           teams={teams}
+          tags={tags}
           filters={filters}
           onToggle={onToggle}
           onClose={() => setOpen(false)}

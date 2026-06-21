@@ -1,7 +1,8 @@
 import { z } from "zod";
 import { validationStateSchema, visibilityFilterSchema } from "./scope";
+import { skillTagSchema } from "./skill";
 
-export const skillFilterTypeSchema = z.enum(["visibility", "status", "starred", "owner", "team", "deps"]);
+export const skillFilterTypeSchema = z.enum(["visibility", "status", "starred", "owner", "team", "tag", "deps"]);
 export type SkillFilterType = z.infer<typeof skillFilterTypeSchema>;
 
 export const depsFilterSchema = z.enum(["has", "used"]);
@@ -13,6 +14,7 @@ export const skillFilterSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("starred"), value: z.literal("true") }),
   z.object({ type: z.literal("owner"), value: z.string().min(1).max(256) }),
   z.object({ type: z.literal("team"), value: z.string().min(1).max(128) }),
+  z.object({ type: z.literal("tag"), value: skillTagSchema }),
   // "has" = declares dependencies; "used" = depended on by another skill.
   z.object({ type: z.literal("deps"), value: depsFilterSchema }),
 ]);

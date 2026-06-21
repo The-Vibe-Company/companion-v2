@@ -192,6 +192,7 @@ export function DetailView({
   onToggleStar,
   onToggleInstalled,
   onChangeVisibility,
+  onChangeTags,
   onInstall,
   onUpdate,
   onOpenSkill,
@@ -211,6 +212,7 @@ export function DetailView({
   onToggleStar: () => void;
   onToggleInstalled: () => void;
   onChangeVisibility: (visibility: SkillVisibilityInput) => void;
+  onChangeTags: (tags: string[]) => Promise<void> | void;
   onInstall: () => void;
   onUpdate: () => void;
   onOpenSkill: (slug: string) => void;
@@ -405,7 +407,7 @@ export function DetailView({
     { id: "files", label: "Files", icon: "package-open", count: files.length },
     { id: "requirements", label: "Setup & secrets", icon: "key-round", count: skill.requirements.length },
     { id: "activity", label: "Activity", icon: "activity", count: versions.length },
-    { id: "manifest", label: "Manifest", icon: "braces", count: skill.tools.length + Object.keys(skill.metadata).length },
+    { id: "manifest", label: "Manifest", icon: "braces", count: skill.tools.length + skill.tags.length + Object.keys(skill.metadata).length },
     { id: "checksum", label: "Checksum", icon: "hash", count: skill.checksum ? "set" : "—" },
   ];
   const panelItems = [dependencyPanel, ...morePanelItems];
@@ -563,7 +565,7 @@ export function DetailView({
                 </div>
               ) : panel === "manifest" ? (
                 <div className="dpanel__inner">
-                  <ManifestDetails skill={skill} />
+                  <ManifestDetails skill={skill} canEditTags={canModifySkill} onChangeTags={onChangeTags} />
                 </div>
               ) : (
                 <div className="dpanel__inner">

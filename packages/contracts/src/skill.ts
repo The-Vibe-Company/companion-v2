@@ -25,6 +25,27 @@ export const skillVisibilityInputSchema = z.object({
 });
 export type SkillVisibilityInput = z.infer<typeof skillVisibilityInputSchema>;
 
+export const skillTagSchema = z
+  .string()
+  .trim()
+  .toLowerCase()
+  .regex(/^[a-z0-9][a-z0-9 -]{0,47}$/, "tag must be 1-48 chars using lowercase letters, digits, spaces, or hyphens");
+export type SkillTag = z.infer<typeof skillTagSchema>;
+
+export function normalizeTag(tag: string): string {
+  return skillTagSchema.parse(tag);
+}
+
+export const setSkillTagsInputSchema = z.object({
+  tags: z.array(skillTagSchema).max(32),
+});
+export type SetSkillTagsInput = z.infer<typeof setSkillTagsInputSchema>;
+
+export const setSkillTagsResultSchema = z.object({
+  tags: z.array(skillTagSchema),
+});
+export type SetSkillTagsResult = z.infer<typeof setSkillTagsResultSchema>;
+
 /**
  * Body of `PUT /v1/skills/:slug/visibility`. `cascade` opts into also raising the skill's
  * (transitive) dependencies so they stay at least as visible as the skill — without it, a
@@ -206,6 +227,7 @@ export const skillListRowSchema = z.object({
   checksum: z.string().nullable(),
   size_bytes: z.number().nullable(),
   tools: z.array(z.string()),
+  tags: z.array(skillTagSchema).default([]),
   /** Declared required secrets / env vars + install notes (parsed from the version frontmatter). */
   requirements: z.array(skillRequirementSchema).default([]),
   star_count: z.number().int().nonnegative(),

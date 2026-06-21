@@ -36,6 +36,7 @@ import {
   joinOrgByDomain,
   listApiTokens,
   listOrgs,
+  listOrgTags,
   listSkillComments,
   listSkills,
   listSkillVersions,
@@ -51,6 +52,7 @@ import {
   setCommentDeprecated,
   setMemberRole,
   setSkillFilterPreferences,
+  setSkillTags,
   setSkillVisibility,
   setTeamMemberRole,
   setOrgLogoFromUpload,
@@ -75,6 +77,8 @@ import {
   reportLocalSkillInstallInputSchema,
   reportSkillInstallInputSchema,
   setCommentDeprecatedInputSchema,
+  setSkillTagsInputSchema,
+  skillTagSchema,
   setSkillVisibilityInputSchema,
   skillFrontmatterSchema,
   skillVisibilityInputSchema,
@@ -132,7 +136,7 @@ import { buildSkillUploadOptions } from "./skillUploadOptions";
 import { buildCompanionSkillRow, getCompanionSkillPackage } from "./companionSkillPackage";
 import { COMPANION_SKILL_KEY } from "@companion/companion-skill";
 
-const app = new Hono<{ Variables: ApiVariables }>();
+export const app = new Hono<{ Variables: ApiVariables }>();
 
 /** Set the `companion_org` selection cookie (readable client-side, so not httpOnly). */
 function setOrgCookie(c: Context<{ Variables: ApiVariables }>, orgId: string): void {
@@ -880,9 +884,10 @@ app.get("/v1/skills", async (c) => {
     // `?q=` turns this into a relevance-ranked full-text search (slug, description, tools, owner, and
     // the SKILL.md body). Folded into the list endpoint so no path can shadow a valid `search` slug.
     const query = c.req.query("q")?.trim() || undefined;
+    const tags = parseTeamValues(c.req.queries("tag") ?? []).map((tag) => skillTagSchema.parse(tag));
     return c.json(
       await withTenant(c, ({ actor, orgId, database }) =>
-        listSkills({ actor, orgId, visibility, mine, archived, query, limit: query ? 20 : undefined, database }),
+        listSkills({ actor, orgId, visibility, mine, archived, query, tags, limit: query ? 20 : undefined, database }),
       ),
     );
   } catch (error) {
@@ -911,6 +916,14 @@ app.put("/v1/skill-filter-preferences", async (c) => {
         setSkillFilterPreferences({ actor, orgId, preferences: body, database }),
       ),
     );
+  } catch (error) {
+    return jsonError(c, error, 401);
+  }
+});
+
+app.get("/v1/skills/tags", async (c) => {
+  try {
+    return c.json(await withTenant(c, ({ actor, orgId, database }) => listOrgTags({ actor, orgId, database })));
   } catch (error) {
     return jsonError(c, error, 401);
   }
@@ -1010,6 +1023,24 @@ app.patch("/v1/skills/:slug/comments/:id", async (c) => {
 app.post("/v1/skills/:slug/star", async (c) => {
   try {
     return c.json({ starred: await withTenant(c, ({ actor, orgId, database }) => toggleStar({ actor, orgId, slug: c.req.param("slug"), database })) });
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
+app.put("/v1/skills/:slug/tags", async (c) => {
+  try {
+    actorFromContext(c, true);
+    requireScope(c, "skills:write");
+    const input = setSkillTagsInputSchema.parse(await c.req.json());
+    return c.json(
+      await withTenant(
+        c,
+        ({ actor, orgId, database }) =>
+          setSkillTags({ actor, orgId, slug: c.req.param("slug"), tags: input.tags, database }),
+        true,
+      ),
+    );
   } catch (error) {
     return jsonError(c, error);
   }
@@ -1618,8 +1649,10 @@ app.delete("/v1/tokens/:id", async (c) => {
   }
 });
 
-const port = Number(process.env.COMPANION_API_PORT ?? process.env.PORT ?? 3001);
-const hostname = process.env.COMPANION_API_HOST;
-serve({ fetch: app.fetch, port, ...(hostname ? { hostname } : {}) }, (info) => {
-  console.log(`Companion API listening on ${hostname ? `http://${hostname}:${info.port}` : `port ${info.port}`}`);
-});
+if (process.env.NODE_ENV !== "test") {
+  const port = Number(process.env.COMPANION_API_PORT ?? process.env.PORT ?? 3001);
+  const hostname = process.env.COMPANION_API_HOST;
+  serve({ fetch: app.fetch, port, ...(hostname ? { hostname } : {}) }, (info) => {
+    console.log(`Companion API listening on ${hostname ? `http://${hostname}:${info.port}` : `port ${info.port}`}`);
+  });
+}

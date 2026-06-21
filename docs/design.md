@@ -58,8 +58,8 @@ cli/          # companion CLI
 
 Better Auth owns the core `user`, `session`, `account`, and `verification` tables. Companion
 adds `profiles`, `organizations`, `memberships`, `teams`, `team_memberships`, `invitations`,
-`skills`, `skill_versions`, `skill_version_dependencies`, `skill_stars`, `skill_filter_preferences`,
-`skill_comments`, `local_skill_installs`, `api_tokens`, and `audit_log`.
+`skills`, `skill_versions`, `skill_version_dependencies`, `skill_tags`, `skill_stars`,
+`skill_filter_preferences`, `skill_comments`, `local_skill_installs`, `api_tokens`, and `audit_log`.
 
 Every tenant-owned table carries `org_id`. Skills keep ownership, visibility, and provenance
 separate: `owner_id` / `owner_team_id`, `everyone`, `skill_team_shares`, and `creator_id`.
@@ -85,6 +85,15 @@ next registry version unless the caller passes an explicit version. Legacy top-l
 `tools`, and unknown fields are warnings and are not preserved as top-level fields in newly stored
 packages; top-level `scope` or `visibility` is rejected because visibility belongs to the publish
 request.
+
+**Skill tags.** Mutable tags live in `skill_tags` as organization-scoped registry metadata. Each row
+stores `(org_id, skill_id, tag, created_by, created_at)` with a `(skill_id, tag)` primary key;
+`created_by` is nullable provenance so user/profile deletion does not remove the tag. Tags are
+normalized lowercase labels capped by the shared contract and are replaced transactionally by the
+skill owner, org admin, or owner-team Admin/Editor. Tags do not grant visibility or write access.
+They are returned with skill list/detail rows, included in full-text search, filterable via
+`GET /v1/skills?tag=...`, and aggregated for visible skills only so private tags never leak across
+the visibility gate.
 
 **Skill dependencies (un-versioned skill→skill links).** A skill version can declare that it
 requires other skills. Edges live in `skill_version_dependencies` (`(skill_version_id,
@@ -230,6 +239,8 @@ directly to Postgres.
   Session-authenticated only — a token cannot mint another.
 - Skills: `/v1/skills`, `/v1/skills/:slug`, `/v1/skills/:slug/versions`,
   `/v1/skills/:slug/download`, `/v1/skills/:slug/visibility`, `/v1/skill-filter-preferences`,
+  `GET /v1/skills/tags` (distinct visible tags ordered by usage),
+  `PUT /v1/skills/:slug/tags` (replace a skill's mutable tags),
   `GET /v1/skills/upload-options` (skills-token upload owner/visibility choices),
   `POST /v1/skills/create` (author a SKILL.md inline),
   `GET /v1/skills/:slug/versions/:version/package` (download a version as `.zip`), and
