@@ -1,8 +1,9 @@
 # Design - Companion v2
 
-> **Status:** greenfield self-host slice. The Skills Hub is implemented around the target
-> stack: Postgres + Drizzle, Better Auth, MinIO/S3, Hono API, Next.js web, and CLI. Agents,
-> the Container Catalog, and Temporal workflows are prepared conceptually but not implemented.
+> **Status:** Skills Hub in flight (post-MVP slice shipped). Implemented on Postgres + Drizzle,
+> Better Auth, MinIO/S3, Hono API, Next.js web, and CLI. Agents, the Container Catalog, providers,
+> Temporal, and reconcile loops are **not in scope** — abandoned, or exploration only (see
+> [`vision.md`](vision.md#where-were-heading-exploration-not-a-commitment)).
 
 ## Stack
 
@@ -14,8 +15,9 @@
 - **Web:** Next.js App Router in `apps/web`; it calls the API, not Postgres or MinIO directly.
 - **CLI:** `cli` stores an API URL plus Better Auth session cookie and uses REST endpoints.
 
-Redis/BullMQ are intentionally excluded. Temporal is the intended future workflow engine for
-deployments, reconcile loops, retries, compensation, and schedules.
+Redis/BullMQ and Temporal are intentionally excluded. There is no runtime, deploy, or reconcile layer
+in scope — the control plane only stores, validates, versions, and serves `SKILL.md` packages; all
+skill execution happens in the user's assistant.
 
 ## Local And Conductor Runtime
 

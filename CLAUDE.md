@@ -4,103 +4,103 @@ Guidance for Claude Code agents and human contributors working in this repositor
 
 ## Project overview
 
-**Companion v2** is an open-source (MIT), self-hostable, multi-tenant **portal** to deploy, govern, and
-share AI agents, curated containers, and skills across an organization and its teams. It is the team
-version of [Companion v1](https://github.com/The-Vibe-Company/companion) (a single-operator CLI/IaC tool
-for personal agent fleets), built around an **Organization → Team → User** hierarchy with RBAC and
-workspace-local resource visibility.
+**Companion v2** is an open-source (MIT), self-hostable, multi-tenant **skills registry** to publish,
+govern, version, share, and install AI skills (`SKILL.md` packages) across an organization and its
+teams. It is the team edition of [Companion v1](https://github.com/The-Vibe-Company/companion),
+rehomed around an **Organization → Team → User** hierarchy with RBAC and workspace-local visibility.
 
 Read these before making non-trivial changes:
 - [`docs/vision.md`](docs/vision.md) — why this exists, principles, non-goals.
-- [`docs/product.md`](docs/product.md) — personas, the three pillars, journeys, access model.
-- [`docs/design.md`](docs/design.md) — **authoritative architecture**: data model, RBAC, provider
-  abstraction, runtime integration. *(Maintained by the core team — treat it as the source of truth and
-  keep it in sync with the code.)*
+- [`docs/product.md`](docs/product.md) — personas, the Skills Hub, journeys, access model.
+- [`docs/design.md`](docs/design.md) — **authoritative architecture**: data model, RBAC, auth,
+  onboarding, public API. *(Maintained by the core team — treat it as the source of truth and keep it
+  in sync with the code.)*
 - [`docs/PRD.md`](docs/PRD.md) — MVP scope, requirements, roadmap, metrics.
 
-> **Status:** pre-MVP. The repository currently contains the launch documents; the application is being
-> scaffolded. The layout and contracts below are the **target** described in `docs/design.md` — confirm
-> against the actual tree before assuming a path exists.
+> **Status:** Skills Hub in flight (post-MVP slice shipped). The registry, RBAC, workspace visibility,
+> dependencies, discussion, archive, companion skill, CLI, and PAT tokens are implemented end-to-end.
+> Agents, the Container Catalog, providers, Temporal, and reconcile loops are **not in scope**
+> (abandoned or exploration — see [`docs/vision.md`](docs/vision.md#where-were-heading-exploration-not-a-commitment)).
 
-## The three pillars (domain vocabulary — keep it consistent)
+## The Skills Hub (domain vocabulary — keep it consistent)
 
-1. **Hermès Agents** — agents on the **Hermes** runtime, with **Granite** memory and **OpenRouter** model
-   routing.
-2. **Curated Container Catalog** — org-admin-approved images/templates, deployed 1-click.
-3. **Skills Hub** — versioned `SKILL.md` packages, shared via Everyone/team visibility and attached opt-in to agents.
+The product is the **Skills Hub**: a versioned, governed registry of `SKILL.md` packages, with
+one-click install and update detection on each member's assistants.
 
 Canonical terms — **do not invent synonyms**:
 - Hierarchy: **Organization → Team → User**.
-- Org roles: **Owner, Admin, Developer**. Team roles: **Admin, Editor, Reader**.
-- Skill visibility: **Private** is derived from `everyone=false` and no team shares; **Everyone** means every member of the current workspace; team shares are explicit and can be combined with Everyone.
-- Skill ownership: a skill is owned by a user unless `owner_team_id` is set; owner-team Admins/Editors can modify that skill. Team visibility shares do not grant write access.
-- Deploy targets are **providers**: **Docker (local), Fly, Kubernetes, Modal**.
+- Org roles: **Owner, Admin, Member** (plus optional **Guest** for read-only on explicitly shared
+  resources). *Note: the DB enum still uses the legacy `developer` value for Member — to be renamed.*
+- Team roles: **Admin, Editor, Reader**.
+- Skill visibility: **Private** is derived from `everyone=false` and no team shares; **Everyone** means
+  every member of the current workspace; team shares are explicit and can be combined with Everyone.
+- Skill ownership: a skill is owned by a user unless `owner_team_id` is set; owner-team Admins/Editors
+  can modify that skill. Team visibility shares do not grant write access.
+- **Target assistants**: any assistant that supports the open `SKILL.md` standard (Claude Code, Codex,
+  Cursor, …). Companion is assistant-agnostic; it does not run a runtime of its own.
 
-## Target repository layout
+## Repository layout
 
 ```
 apps/
-  web/        # Next.js App Router — UI, tRPC/API client
-  api/        # tRPC routers + REST/OpenAPI gateway (service layer entrypoints)
-  worker/     # reconcile loop + job runner (no HTTP surface)
+  web/                # Next.js App Router — UI, calls the API (never Postgres or MinIO directly)
+  api/                # Hono backend: Better Auth under /auth/*, REST under /v1/*, tRPC under /trpc/*
 packages/
-  db/         # Drizzle schema, migrations, query helpers  ← data source of truth
-  core/       # domain services (authz, scoping, deploy orchestration) — NO Next.js deps
-  providers/  # provider port + adapters: docker/, fly/, k8s/, modal/
-  hermes/     # Hermes config builder + runtime sync
-  granite/    # vault provisioning + mount/share
-  skills/     # SKILL.md parse / validate / version / package
-  contracts/  # shared Zod schemas + tRPC types (consumed by web, api, worker, cli)
-  auth/       # Better Auth config
-cli/          # `companion` CLI — talks REST/OpenAPI
-deploy/       # docker-compose.yaml (self-host) + helm/ chart
-docs/         # vision / product / design / PRD
+  db/                 # Drizzle schema, migrations, seeds  ← data source of truth
+  auth/               # Better Auth config
+  core/               # framework-free domain services: RBAC (authz.ts), scoping, onboarding
+  storage/            # S3/MinIO wrapper for skill archives
+  email/              # Mailpit/log/Resend providers
+  contracts/          # shared Zod schemas + types (consumed by web, api, cli)
+  skills/             # SKILL.md parse / validate / version / pack / unpack
+  companion-skill/    # built-in helper skill: upload, validate, update detection
+cli/                  # `companion` CLI — talks REST
+docs/                 # vision / product / design / PRD
 ```
 
 **Anchor files** (the contracts the system hinges on — see `docs/design.md`):
-- `packages/db/schema.ts` — all entities + the `org_id` / visibility / `owner_id` columns and team-share tables.
-- `packages/auth/policy.ts` — typed RBAC: visibility gate + capability gate; the "deploy for" logic.
-- `packages/providers/port.ts` — the `DeploymentProvider` interface + neutral `DeploySpec`.
-- `apps/worker/reconcile.ts` — observe → diff → apply → drift loop.
-- `packages/hermes/configBuilder.ts` — agent + skills + vault + model + secrets → `DeploySpec`.
+- `packages/db/src/schema.ts` — all entities + the `org_id` / visibility / `owner_id` / `owner_team_id`
+  columns and the team-share / dependency / archive / install-tracking tables.
+- `packages/core/src/authz.ts` — typed RBAC: visibility gate + capability gate.
+- `packages/core/src/services.ts` — service-layer entrypoints; the **single enforcement path** for
+  web, REST, and CLI.
+- `packages/skills/src/validateSkill.ts` + `frontmatter.ts` — SKILL.md validation + frontmatter schema.
+- `packages/contracts/src/skill.ts` — shared Zod schemas (read/write shapes, dependency plan, etc.).
+- `packages/companion-skill/` — the bundled `companion` skill (manifest + packaged `SKILL.md`).
+- `apps/api/src/index.ts` — Hono app, Better Auth mount, public REST + tRPC surface.
 
 ## Conventions & invariants
 
 - **Stack:** TypeScript everywhere, pnpm workspaces + Turborepo, **Drizzle ORM** (not Prisma),
-  **tRPC** internally with a thin REST/OpenAPI gateway for the CLI and integrations, **Better Auth**
-  for auth, S3-compatible object storage (MinIO in compose), and Resend for production email.
-  Redis/BullMQ are intentionally excluded; Temporal is the future workflow engine for long-running
-  deployments, reconcile loops, retries, and schedules.
-- **`packages/core` and `packages/providers` must not depend on Next.js** — the worker and CLI import
-  them directly.
+  **Better Auth** for auth (email/password + 6-digit OTP verification + Google OAuth), **Hono** for the
+  API (REST + tRPC), Next.js App Router for the web, S3-compatible object storage (MinIO in compose),
+  and Resend for production email. Redis/BullMQ and Temporal are intentionally excluded.
+- **`packages/core` must not depend on Next.js** — the CLI imports it directly.
 - **One source of truth for types:** entities live in `packages/db`; shared contracts in
   `packages/contracts`. Don't redefine shapes ad hoc.
-- **Visibility × role are orthogonal.** Authorization = a **visibility gate** (can the actor see it?) **plus**
-  a **capability gate** (can the actor do it?). Enforce in the **service layer** (`packages/core`) so
-  web, REST, and the worker share one path — never only in route handlers.
-- **"Deploy for" semantics:** keep ownership, visibility, and provenance distinct:
-  `owner_id` / `owner_team_id` (who can edit), visibility state/share rows (who can read), and
-  creator/audit (who acted).
-- **Desired-state:** every deployable is a row of declared intent; the reconciler converges reality and
-  heals drift. Provisioning is **idempotent** (keyed so retries never double-provision).
-- **Secrets** are envelope-encrypted, **write-only** over the API, referenced by id, and injected by the
-  provider at the last moment. Never log, return, or persist plaintext secrets.
-- **Security boundary (non-negotiable):** the control plane **never executes** untrusted skill scripts or
-  pulled images. All such execution happens inside sandboxed provider workloads. Catalog images are
-  admin-approved and digest-pinned.
+- **Visibility × role are orthogonal.** Authorization = a **visibility gate** (can the actor see it?)
+  **plus** a **capability gate** (can the actor do it?). Enforce in the **service layer**
+  (`packages/core`) so web, REST, and the CLI share one path — never only in route handlers.
+- **Ownership, visibility, and provenance are distinct:** `owner_id` / `owner_team_id` (who can edit),
+  visibility state/share rows (who can read), and `creator_id` / audit (who acted).
+- **Security boundary (non-negotiable):** the control plane **never executes** untrusted skill
+  scripts. All such execution happens inside the user's assistant, never on the server. Skill
+  `requirements` (secrets/env) are **declarations and install notes only — never secret values**;
+  secrets themselves are envelope-encrypted and write-only over the API when they are introduced.
 - **Multi-tenancy:** every row carries `org_id`; add Postgres row-level security as defense-in-depth.
   Any new query must be scoped to the tenant.
 - **Frontend must follow [`DESIGN.md`](DESIGN.md).** Any UI, styling, copy, component, layout, or
   interaction change must respect the root `DESIGN.md` visual contract and keep design tokens, product
   tone, accessibility, and absolute bans intact.
 
-## Development workflow (planned)
+## Development workflow
 
 ```bash
 pnpm compose:up             # postgres + minio + mailpit for manual local dev
 pnpm db:migrate             # apply Drizzle migrations
 pnpm db:seed                # seed an org/team/user for local dev
-pnpm dev                    # run API + web in watch mode
+pnpm dev                    # full stack: infra + migrations + seed + API :3001 + web :3000
+pnpm dev:app                # app-only loop when infra is already prepared
 ```
 
 For Conductor, use the checked-in `.conductor/settings.toml`: setup runs `corepack enable && pnpm install`
@@ -117,8 +117,8 @@ still uses Docker Compose (`scripts/dev-stack.sh`).
 
 ## Tests & quality gates
 
-- **RBAC is table-driven and exhaustive.** Add cases to the role × visibility × action matrix whenever you
-  touch authorization; assert cross-tenant access is denied.
+- **RBAC is table-driven and exhaustive.** Add cases to the role × visibility × action matrix whenever
+  you touch authorization; assert cross-tenant access is denied.
 - **Frontend browser validation is required after frontend changes.** After any UI, route, auth, style,
   component, or browser-facing behavior change, run the app and validate it with `agent-browser` before
   finishing. Use the automated shortcut `APP_URL=http://127.0.0.1:<port> pnpm browser:smoke` for the
@@ -126,19 +126,18 @@ still uses Docker Compose (`scripts/dev-stack.sh`).
 - **`DESIGN.md` follows the Google Design.md format.** Any change to the root `DESIGN.md` must pass
   `npx --yes @google/design.md@0.2.0 lint DESIGN.md --format json`; CI runs this automatically when
   `DESIGN.md` changes.
-- **Provider conformance suite.** Every provider adapter must pass the same contract tests; verify the
-  `capabilities()` declaration matches real behavior (e.g., exec, persistent volumes, scale-to-zero).
-- **Reconcile idempotency.** Re-applying a deployment must not create duplicates; destroy must be
-  idempotent and verified by re-observation.
+- **Skill validation is table-driven.** When you touch `packages/skills` (frontmatter, manifest,
+  packing, dependency resolution), extend the validation tests with valid + invalid fixtures and assert
+  the dependency plan (declared / already-published / must-upload / removed / archival candidates).
 
 ## When you finish a change
 
-- If you changed architecture, the data model, RBAC, the provider seam, or a runtime integration,
-  **update [`docs/design.md`](docs/design.md)** (and this file's anchors if paths moved). Keep the docs
-  and the code in agreement.
+- If you changed architecture, the data model, RBAC, the install flow, or the public API, **update
+  [`docs/design.md`](docs/design.md)** (and this file's anchors if paths moved). Keep the docs and the
+  code in agreement.
 - If you changed frontend behavior, include the `agent-browser` validation result in your handoff. The
   minimum smoke path is: signed-out redirect, login, Skills list, filters, detail view, upload drawer,
   mobile viewport, and browser errors.
-- Match the surrounding code's style; keep `packages/core`/`providers` framework-free.
+- Match the surrounding code's style; keep `packages/core` framework-free.
 - Prefer extending existing contracts in `packages/contracts` over introducing parallel ones.
-- PR titles should use Commitizen style, for example `feat(conductor): add isolated local workflows`.
+- PR titles should use Commitizen style, for example `feat(skills): change skill visibility with dependency cascade`.

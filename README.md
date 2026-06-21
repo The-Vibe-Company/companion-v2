@@ -2,10 +2,10 @@
 
 # Companion
 
-### The open hub for your team's AI agents, tools, and skills.
+### Where teams share and govern their AI skills.
 
-Self-hostable, multi-tenant control plane to **deploy**, **govern**, and **share** AI agents,
-curated containers, and skills across your organization — with permissions from day one.
+Self-hostable, multi-tenant registry to **publish**, **version**, **share**, and **install** AI skills
+across your organization — governed from day one.
 
 [Vision](docs/vision.md) · [Product](docs/product.md) · [Architecture](docs/design.md) · [PRD](docs/PRD.md) · [Contributing](CLAUDE.md)
 
@@ -17,46 +17,56 @@ curated containers, and skills across your organization — with permissions fro
 
 ## What is Companion?
 
-Companion v1 turned one operator's laptop into a fleet of personal AI agents — a CLI and
-infrastructure-as-code engine (Hermes runtime, Granite memory, OpenRouter, pluggable infra).
-It was built for **one person, one workspace**. It has no notion of organizations, teams, users,
-or permissions.
+Companion v1 turned one operator's laptop into a personal AI agent fleet — a CLI and
+infrastructure-as-code engine. It was built for **one person, one workspace**. It has no notion of
+organizations, teams, users, or permissions.
 
-**Companion v2 is the team version.** It takes that engine and wraps it in a web portal where an
-**Organization → Team → User** hierarchy with RBAC governs every resource. Publish a versioned
-skill once, approve a container image once, define an agent template once — and the right people
-across your org get **one-click, permissioned access**. No shell, no TOML, no infrastructure tickets.
+**Companion v2 is the team version.** Same mission — give a team governed access to AI capabilities —
+pivoted to where the value actually compounds today: **skills**. It is a web portal where an
+**Organization → Team → User** hierarchy with RBAC governs every published `SKILL.md` package.
+Publish a versioned skill once, set its visibility once — and the right people across your org get
+**one-click install and automatic update detection** on their assistants. No shell, no TOML, no
+copy-pasted folders.
 
-Think *"GitHub for your team's agents"* — but open-source and running on **your** infrastructure.
+Think *"GitHub for your team's AI skills"* — open-source and running on **your** infrastructure.
 
-## The three pillars
+## The Skills Hub
 
-| Pillar | What it does | Who governs it |
-|---|---|---|
-| 🤖 **Hermès Agents** | Deploy curated AI agents (Hermes runtime + Granite memory) into a team and chat with them. | Builders define, members use |
-| 📦 **Curated Container Catalog** | One-click deploy of admin-approved images & templates — databases, MCP servers, tools, web UIs. | Org Admins approve, members deploy |
-| 🧩 **Skills Hub** | Upload, version, and share `SKILL.md` packages. Attach them opt-in to the agents that should have them. | Anyone publishes, owners attach |
+The Skills Hub is both a **registry** (publish, version, browse, share) and a **delivery mechanism**
+(one-click install on each member's machine, with update detection).
 
-Skills use explicit workspace visibility: **Private** by default, **Everyone** for the whole
-workspace, and optional team shares for one or more teams. Everyone is organization-local; there is no
-internet-wide or cross-org visibility. Ownership is separate: a skill is owned by a user or by a
-team, and team-owned skills can be edited by that team's Admins and Editors.
+- **Validate & version.** A `SKILL.md` package is validated on upload; a valid upload produces an
+  immutable, checksummed, semver-tagged version.
+- **Workspace visibility.** **Private** by default, **Everyone** for the whole workspace, and optional
+  team shares for one or more teams. Everyone is organization-local; there is no internet-wide or
+  cross-org visibility.
+- **Ownership is separate from visibility.** A skill is owned by a user or by a team; team-owned
+  skills can be edited by that team's Admins and Editors. Visibility only decides who can read.
+- **Dependencies.** A version may declare required skills (slugs); missing, cyclic, or
+  visibility-mismatched edges hard-block publishing.
+- **Discussion & archive.** Threaded discussion per skill (optionally pinned to a version); soft
+  archive keeps skills restorable and downloadable while anything still references them.
+- **Companion skill.** A built-in helper that uploads, validates, analyzes dependencies, and checks
+  which of a user's installed skills are out of date against the registry.
 
 ## Why Companion
 
-- **Governed, not chaotic.** Shadow AI tools become a curated, permissioned catalog with an audit trail.
-- **Deploy anywhere.** A pluggable provider abstraction targets **local Docker**, **Fly.io Machines**,
-  **Kubernetes**, and **Modal** — pick where each resource runs.
-- **Open standards.** Built on the open [`SKILL.md`](https://github.com/anthropics/skills) format,
-  MCP, and OpenRouter model routing. No lock-in.
-- **Self-host first.** Your agents, your secrets, your infra. One command to run it.
+- **Governed, not chaotic.** Shadow prompt folders and scattered repos become a curated, permissioned
+  registry with an audit trail.
+- **Assistant-agnostic.** A skill is a portable asset — it works with any assistant that supports the
+  open [`SKILL.md`](https://github.com/anthropics/skills) standard: Claude Code, Codex, Cursor, and
+  what comes next.
+- **Open standards.** Built on `SKILL.md` and MCP. No lock-in.
+- **Self-host first.** Your skills, your secrets, your infra. One command to run it.
 - **Open source.** MIT, built in the open, continuing the Companion community.
 
 ## Status
 
-> 🚧 **Early.** The **Skills Hub (Pillar 3)** is implemented as a greenfield self-host slice:
-> Postgres + Drizzle, Better Auth, MinIO/S3 storage, a Hono API, a Next.js portal, and the
-> `companion` CLI to upload, download, and keep skills up to date. Agents and the Container Catalog are stubbed. See
+> 🚧 **Early — Skills Hub shipped.** The registry, RBAC, workspace visibility, dependencies,
+> discussion, archive, companion skill, CLI, and PAT tokens are implemented end-to-end on Postgres +
+> Drizzle, Better Auth, MinIO/S3, a Hono API, a Next.js portal, and the `companion` CLI.
+> **Agents and the Container Catalog are abandoned** in favor of the skills wedge; hosted
+> opencode-based agents are an **exploration** (not a commitment). See
 > [Architecture](docs/design.md) for what exists and [PRD](docs/PRD.md) for the roadmap.
 
 ## Quickstart — Skills Hub (local)
@@ -77,13 +87,12 @@ node cli/dist/index.js skills pull incident-summary
 node cli/dist/index.js skills status        # diff local copies vs the registry
 ```
 
-`cli/README.md` has the full command + exit-code reference. The self-host target is a single
-Docker Compose bundle plus the API, web, worker, and provider services (see the [PRD](docs/PRD.md)).
-For a manual split loop, `pnpm compose:up`, `pnpm db:migrate`, `pnpm db:seed`, and `pnpm dev:app`
-remain available.
+`cli/README.md` has the full command + exit-code reference. The self-host target is a single Docker
+Compose bundle plus the API and web services (see the [PRD](docs/PRD.md)). For a manual split loop,
+`pnpm compose:up`, `pnpm db:migrate`, `pnpm db:seed`, and `pnpm dev:app` remain available.
 
-In production, the API start script applies pending Drizzle migrations before the server listens.
-If migrations fail, startup fails rather than serving newer code against an older database schema.
+In production, the API start script applies pending Drizzle migrations before the server listens. If
+migrations fail, startup fails rather than serving newer code against an older database schema.
 
 ### Conductor workspaces
 
@@ -115,21 +124,22 @@ The non-Conductor `pnpm dev` path is unchanged and still uses Docker Compose (`s
 | | Companion v1 | Companion v2 |
 |---|---|---|
 | Primary user | Single operator | Organizations & teams |
-| Interface | CLI + IaC (TOML) | Web portal + API (+ CLI) |
+| Interface | CLI + IaC (TOML) | Web portal + API + CLI |
 | Access control | None | Org → Team → User, RBAC, workspace visibility |
 | State | Local SQLite + files | Postgres, multi-tenant |
-| Deploy targets | Fly.io | Docker · Fly · Kubernetes · Modal |
-| Skills | Ad-hoc | Versioned registry + opt-in attach |
-| Containers | Hand-written config | Admin-approved 1-click catalog |
+| Skills | Ad-hoc, per fleet | Versioned registry + dependencies + discussion + archive |
+| Target assistants | One fixed runtime | Any `SKILL.md`-compatible assistant (Claude Code, Codex, Cursor, …) |
+| Install | Manual file copies | One-click install + auto-update detection per machine |
+| Governance | None | Ownership, visibility, and audit fully separated |
 
-v1 stays a first-class, supported path — Companion v2 keeps an API/CLI surface and aims to offer an
-import bridge for existing fleets.
+v2 inherits v1's mission and brand, and keeps an API/CLI surface so the existing 2.4k-star community
+feels at home. The implementation pivots from a personal runtime to a team skills registry.
 
 ## Documentation
 
 - **[Vision](docs/vision.md)** — why this exists and the bet we're making.
-- **[Product](docs/product.md)** — personas, positioning, journeys, the three pillars.
-- **[Architecture](docs/design.md)** — data model, RBAC, provider abstraction, runtime.
+- **[Product](docs/product.md)** — personas, positioning, journeys, the Skills Hub.
+- **[Architecture](docs/design.md)** — data model, RBAC, auth, onboarding, public API.
 - **[PRD](docs/PRD.md)** — MVP scope, requirements, roadmap, metrics, risks.
 - **[CLAUDE.md](CLAUDE.md)** — guide for contributors and Claude Code agents.
 
