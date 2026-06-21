@@ -316,6 +316,8 @@ export const publishSkillInputSchema = z.object({
   storage_path: z.string(),
   size_bytes: z.number().int().nonnegative(),
   frontmatter: z.string(),
+  /** The SKILL.md markdown body, persisted server-side to power full-text content search. */
+  body: z.string().default(""),
   tools: z.array(z.string()),
   license: z.string().nullable().optional(),
   note: z.string().default(""),

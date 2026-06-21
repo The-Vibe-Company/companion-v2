@@ -956,6 +956,17 @@ function skillHasTeamShare(database: Db, orgId: string) {
   );
 }
 
+/**
+ * Turn free-text search input into a prefix `to_tsquery` string ("depl kube" → "depl:* & kube:*").
+ * Tokenises to `[a-z0-9]` runs so the query can never carry `to_tsquery` operators (which would
+ * raise a syntax error). Returns null when the input has no usable term.
+ */
+export function toPrefixTsQuery(raw: string): string | null {
+  const terms = raw.toLowerCase().match(/[a-z0-9]+/g);
+  if (!terms || terms.length === 0) return null;
+  return terms.map((t) => `${t}:*`).join(" & ");
+}
+
 export async function listSkills(input: {
   actor: ActorContext;
   orgId: string;
@@ -965,6 +976,13 @@ export async function listSkills(input: {
   archived?: boolean;
   /** Include both archived and live skills (detail / dependency / download resolution). */
   includeArchived?: boolean;
+  /**
+   * Free-text query. When set, results are filtered to full-text matches across slug, description,
+   * tools, owner name, and the SKILL.md body, and ordered by relevance (`ts_rank`) instead of recency.
+   */
+  query?: string;
+  /** Cap the number of rows (used by the relevance-ranked search path). */
+  limit?: number;
   database?: Db;
 }): Promise<SkillListRow[]> {
   const database = input.database ?? db;
@@ -999,7 +1017,30 @@ export async function listSkills(input: {
     );
   }
 
-  const rows = await database
+  // Relevance-ranked full-text search. Active only when a non-empty query is supplied, so the default
+  // list path (and every hand-rolled fakeDb in the tests) is left untouched. Fields are weighted
+  // slug (A) > description (B) > tools/owner (C) > SKILL.md body (D) so the strongest signal wins.
+  const doSearch = !!input.query && input.query.trim().length > 0;
+  const tsQueryStr = doSearch ? toPrefixTsQuery(input.query!) : null;
+  // A query with no usable term (e.g. only punctuation) can never match: return nothing rather than all.
+  if (doSearch && !tsQueryStr) return [];
+  // The body vector is written exactly as the `skill_versions_body_tsv_idx` GIN index expression
+  // (`to_tsvector('simple', body)` — body is NOT NULL) so the `@@` filter below can use that index.
+  const bodyTsv = sql`to_tsvector('simple', ${schema.skillVersions.body})`;
+  // The remaining fields are short, live on the skills/owner rows, and aren't worth their own index.
+  const headTsv = sql`(
+    setweight(to_tsvector('simple', coalesce(${schema.skills.slug}, '')), 'A') ||
+    setweight(to_tsvector('simple', coalesce(${schema.skills.description}, '')), 'B') ||
+    setweight(to_tsvector('simple', coalesce(${schema.skillVersions.tools}::text, '')), 'C') ||
+    setweight(to_tsvector('simple', coalesce(${schema.teams.name}, ${schema.profiles.name}, '')), 'C')
+  )`;
+  const tsQuery = sql`to_tsquery('simple', ${tsQueryStr})`;
+  // Rank over the full weighted vector (slug A > description B > tools/owner C > body D).
+  const searchRank = doSearch ? sql<number>`ts_rank(${headTsv} || setweight(${bodyTsv}, 'D'), ${tsQuery})` : null;
+  // Filter with `@@` (short-circuits, and the body branch is index-eligible) rather than `ts_rank > 0`.
+  if (doSearch) predicates.push(sql`(${bodyTsv} @@ ${tsQuery} or ${headTsv} @@ ${tsQuery})`);
+
+  const baseQuery = database
     .select({
       id: schema.skills.id,
       org_id: schema.skills.orgId,
@@ -1056,8 +1097,13 @@ export async function listSkills(input: {
     .leftJoin(schema.skillVersions, eq(schema.skillVersions.id, schema.skills.currentVersionId))
     .leftJoin(schema.skillStars, eq(schema.skillStars.skillId, schema.skills.id))
     .where(and(...predicates))
-    .groupBy(schema.skills.id, schema.profiles.id, schema.teams.id, schema.skillVersions.id)
-    .orderBy(desc(schema.skills.updatedAt));
+    .groupBy(schema.skills.id, schema.profiles.id, schema.teams.id, schema.skillVersions.id);
+
+  // Search path orders by relevance then recency and caps the result count; the default list path keeps
+  // its recency-only ordering and never calls `.limit()` (so the fakeDb query mocks stay untouched).
+  const rows = await (searchRank
+    ? baseQuery.orderBy(desc(searchRank), desc(schema.skills.updatedAt)).limit(input.limit ?? 20)
+    : baseQuery.orderBy(desc(schema.skills.updatedAt)));
 
   const skillIds = rows.map((r) => r.id);
   const sharesBySkill = new Map<string, SkillVisibility["teams"]>();
@@ -2064,6 +2110,7 @@ async function writeSkillVersion(input: {
       version: payload.version,
       note: payload.note,
       frontmatter: payload.frontmatter,
+      body: payload.body,
       tools: payload.tools,
       license: payload.license ?? null,
       sizeBytes: payload.size_bytes,

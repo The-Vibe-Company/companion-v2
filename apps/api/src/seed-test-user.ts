@@ -131,6 +131,7 @@ async function seedSkill(actor: ActorContext, orgId: string, spec: SeedSkillSpec
       storage_path: key,
       size_bytes: canonical.sizeBytes,
       frontmatter: JSON.stringify(toStoredSkillVersionManifest(fm, companionManifest), null, 2),
+      body: parsed.body,
       tools: fm.allowedTools,
       license: fm.license ?? null,
       note: "Seeded for local development",

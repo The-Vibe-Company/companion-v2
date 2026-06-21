@@ -2,7 +2,8 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Icon } from "../Icon";
-import type { SkillVM } from "@/lib/types";
+import { mapSkill, type SkillVM } from "@/lib/types";
+import { fetchSkillSearch } from "@/lib/queries";
 import { visibilityMeta } from "./blocks";
 
 export function CommandPalette({
@@ -18,22 +19,38 @@ export function CommandPalette({
 }) {
   const [q, setQ] = useState("");
   const [sel, setSel] = useState(0);
+  // Results are tagged with the query that produced them so a slow/earlier response can never render
+  // (or be selected) under a newer query.
+  const [results, setResults] = useState<{ q: string; items: SkillVM[] }>({ q: "", items: [] });
   const inputRef = useRef<HTMLInputElement>(null);
   useEffect(() => {
     inputRef.current?.focus();
   }, []);
 
   const ql = q.trim().toLowerCase();
-  const skills = allSkills
-    .filter(
-      (s) =>
-        !ql ||
-        s.id.toLowerCase().includes(ql) ||
-        s.description.toLowerCase().includes(ql) ||
-        s.owner.name.toLowerCase().includes(ql) ||
-        s.tools.some((t) => t.includes(ql)),
-    )
-    .slice(0, 7);
+  // Empty query: show the top of the already-loaded list, no network. Non-empty: debounced server-side
+  // relevance search across slug, description, tools, owner, and the SKILL.md body (ranked by the API).
+  useEffect(() => {
+    if (!ql) return;
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      fetchSkillSearch(ql, controller.signal)
+        .then((rows) => setResults({ q: ql, items: rows.map(mapSkill) }))
+        .catch(() => {
+          if (controller.signal.aborted) return;
+          setResults({ q: ql, items: [] });
+        });
+    }, 150);
+    return () => {
+      controller.abort();
+      clearTimeout(timer);
+    };
+  }, [ql]);
+
+  // Only show results that belong to the current query; until they arrive we are still loading.
+  const matched = ql !== "" && results.q === ql;
+  const loading = ql !== "" && !matched;
+  const skills = ql === "" ? allSkills.slice(0, 7) : matched ? results.items : [];
   const actions = [{ id: "upload", label: "Upload skill", icon: "upload" }].filter(
     (a) => !ql || a.label.toLowerCase().includes(ql),
   );
@@ -131,7 +148,8 @@ export function CommandPalette({
               </div>
             );
           })}
-          {items.length === 0 && <div className="cpal__empty">No matches for &ldquo;{q}&rdquo;.</div>}
+          {items.length === 0 && loading && <div className="cpal__empty">Searching&hellip;</div>}
+          {items.length === 0 && !loading && <div className="cpal__empty">No matches for &ldquo;{q}&rdquo;.</div>}
         </div>
         <div className="cpal__foot">
           <span className="cpal__hint">

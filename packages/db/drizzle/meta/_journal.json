@@ -127,6 +127,13 @@
       "when": 1781050600000,
       "tag": "0017_organization_domains",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1781050700000,
+      "tag": "0018_skill_version_body",
+      "breakpoints": true
     }
   ]
 }
