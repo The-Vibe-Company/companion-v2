@@ -402,6 +402,37 @@ body { background: var(--color-canvas); color: var(--color-fg); font-family: var
 .side__search:hover { background: var(--color-surface-raised); color: var(--color-fg); }
 .side-scrim { display: none; }
 
+/* Notification bell + dropdown panel (sidebar brand row). */
+.notif { position: relative; flex: none; }
+.notif-bell { position: relative; display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; padding: 0;
+  border: 1px solid var(--color-line); border-radius: var(--radius-md); background: var(--color-surface); color: var(--color-muted); cursor: pointer;
+  transition: background-color var(--duration-fast) var(--ease-out-quint), color var(--duration-fast) var(--ease-out-quint); }
+.notif-bell:hover { background: var(--color-surface-raised); color: var(--color-fg); }
+.notif-badge { position: absolute; top: -5px; right: -5px; min-width: 16px; height: 16px; padding: 0 4px; box-sizing: border-box;
+  display: inline-flex; align-items: center; justify-content: center; border-radius: var(--radius-full);
+  background: var(--color-accent); color: var(--color-accent-fg); font-size: 10px; font-weight: 600; line-height: 1; }
+/* Anchored to the bell's LEFT edge so it opens rightward into the content area — the bell sits on the
+   left rail, so a right-anchored panel would clip off the left of the viewport. */
+.notif-panel { position: absolute; top: calc(100% + 8px); left: 0; right: auto; z-index: 60; width: 340px; max-width: calc(100vw - 24px);
+  background: var(--color-surface); border: 1px solid var(--color-line); border-radius: var(--radius-lg); box-shadow: var(--shadow-lg); overflow: hidden; }
+.notif-panel__head { padding: 10px 14px; font-size: 13px; font-weight: 600; color: var(--color-fg); border-bottom: 1px solid var(--color-line); }
+.notif-panel__empty { padding: 28px 14px; text-align: center; font-size: 13px; color: var(--color-muted); }
+.notif-panel__list { list-style: none; margin: 0; padding: 4px; max-height: min(440px, 70vh); overflow-y: auto; }
+.notif-item { display: flex; gap: 10px; width: 100%; padding: 9px 10px; border: 0; background: transparent; border-radius: var(--radius-md);
+  cursor: pointer; text-align: left; color: var(--color-fg); transition: background-color var(--duration-fast) var(--ease-out-quint); }
+.notif-item:hover { background: var(--color-surface-raised); }
+.notif-item--unread { background: var(--color-accent-tint); }
+.notif-item--unread:hover { background: var(--color-accent-muted); }
+.notif-item__icon { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px;
+  border-radius: var(--radius-full); background: var(--color-surface-raised); color: var(--color-muted); }
+.notif-item__body { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.notif-item__title { font-size: 13px; line-height: 1.35; color: var(--color-fg); }
+.notif-item__snippet { font-size: 12px; color: var(--color-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.notif-item__time { font-size: 11px; color: var(--color-muted); }
+.notif-item__dot { flex: none; align-self: center; width: 7px; height: 7px; border-radius: var(--radius-full); background: var(--color-accent); }
+/* Mute toggle on the skill detail header. */
+.notif-mute--on { color: var(--color-muted); }
+
 /* --- View tabs ----------------------------------------------------------- */
 .viewbar { display: flex; align-items: center; gap: 2px; padding: 7px var(--space-5) 0; border-bottom: 1px solid var(--color-line); overflow-x: auto; flex: none; }
 .vtab { display: inline-flex; align-items: center; gap: 7px; height: 33px; padding: 0 11px; border: none; background: none; cursor: pointer;

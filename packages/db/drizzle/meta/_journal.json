@@ -134,6 +134,13 @@
       "when": 1781050700000,
       "tag": "0018_skill_version_body",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1781050800000,
+      "tag": "0019_skill_notifications",
+      "breakpoints": true
     }
   ]
 }

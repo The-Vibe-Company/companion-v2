@@ -1072,6 +1072,7 @@ export function SkillsApp({
         isMine={currentView === "workspace" && isMine}
         workspaceActive={currentView === "workspace" && isAll}
         onOpenPalette={() => setPaletteOpen(true)}
+        onOpenSkill={openSkillBySlug}
         onSelectMine={selectMine}
         onSelectAll={selectAll}
         onSelectTeam={selectTeam}

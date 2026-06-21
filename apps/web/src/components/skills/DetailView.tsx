@@ -10,6 +10,7 @@ import type {
   SkillVersionRow,
 } from "@companion/contracts";
 import { Icon } from "../Icon";
+import { MuteToggle } from "../notifications/MuteToggle";
 import {
   addComment as addCommentRpc,
   fetchSkillDependencies,
@@ -434,6 +435,7 @@ export function DetailView({
           {index + 1} / {total}
         </span>
         <StarButton starred={skill.starred} count={skill.stars} onToggle={onToggleStar} />
+        <MuteToggle slug={skill.id} subscriptionState={skill.subscriptionState} />
         {skill.archived ? (
           <button className="btn-ghost" onClick={onRestore} title="Restore this skill">
             <Icon name="rotate-ccw" size={14} />

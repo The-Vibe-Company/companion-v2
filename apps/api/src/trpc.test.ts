@@ -6,6 +6,8 @@ describe("appRouter", () => {
     const { appRouter } = await import("./trpc");
     expect(Object.keys(appRouter._def.procedures).sort()).toEqual([
       "me",
+      "notifications",
+      "notificationsUnreadCount",
       "orgs",
       "skillVersions",
       "skills",

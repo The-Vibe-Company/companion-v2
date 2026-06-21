@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { Icon } from "../Icon";
+import { NotificationBell } from "../notifications/NotificationBell";
 import { OrgSwitcher } from "../org/OrgSwitcher";
 import { TeamAvatar } from "../org/TeamAvatar";
 import type { SettingsIntent } from "../org/model";
@@ -22,6 +23,7 @@ export function Sidebar({
   isMine,
   workspaceActive,
   onOpenPalette,
+  onOpenSkill,
   onSelectMine,
   onSelectAll,
   onSelectTeam,
@@ -50,6 +52,7 @@ export function Sidebar({
   isMine: boolean;
   workspaceActive: boolean;
   onOpenPalette: () => void;
+  onOpenSkill: (slug: string) => void;
   onSelectMine: () => void;
   onSelectAll: () => void;
   onSelectTeam: (id: string) => void;
@@ -105,6 +108,7 @@ export function Sidebar({
         >
           <Icon name="search" size={14} />
         </button>
+        <NotificationBell onOpenSkill={(slug) => runAndClose(() => onOpenSkill(slug))} />
       </div>
       <nav className="side__nav" aria-label="Primary">
         <button

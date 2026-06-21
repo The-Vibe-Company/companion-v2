@@ -226,6 +226,11 @@ export const skillListRowSchema = z.object({
   archived: z.boolean().default(false),
   /** True when ANY published version (current or older) references this skill — gates archived download. */
   referenced: z.boolean().default(false),
+  /**
+   * The caller's explicit subscription override for this skill: "muted" (never notify me),
+   * "subscribed" (future explicit Watch), or null (implicit — derived from star/install/comment/own).
+   */
+  subscription_state: z.enum(["subscribed", "muted"]).nullable().default(null),
   created_at: z.string(),
   updated_at: z.string(),
 });

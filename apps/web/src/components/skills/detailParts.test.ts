@@ -52,6 +52,7 @@ const skill: SkillVM = {
   usedByCount: 0,
   depWarn: false,
   archived: false,
+  subscriptionState: null,
   compatibility: "Requires Python 3.14+ and uv with network access",
   metadata: {
     companion_skill_id: "skill-1",

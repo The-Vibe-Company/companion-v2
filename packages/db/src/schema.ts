@@ -28,6 +28,28 @@ export const invitationStatusEnum = pgEnum("invitation_status", [
   "revoked",
   "expired",
 ]);
+// The 4 values exist for extensibility; v1 only emits `version_published` and `comment_reply`.
+export const notificationTypeEnum = pgEnum("notification_type", [
+  "skill.version_published",
+  "skill.comment_added",
+  "skill.comment_reply",
+  "skill.archived",
+]);
+// Why the recipient got the notification — drives relationship-aware copy in the UI.
+export const notificationReasonEnum = pgEnum("notification_reason", [
+  "owner",
+  "installer",
+  "starrer",
+  "commenter",
+  "thread_participant",
+  "subscriber",
+]);
+// v1 only ever writes `muted` (implicit subscribe from relationships + explicit mute); `subscribed`
+// is reserved for a future explicit Watch.
+export const skillSubscriptionStateEnum = pgEnum("skill_subscription_state", [
+  "subscribed",
+  "muted",
+]);
 
 const now = () => timestamp("created_at", { withTimezone: true }).notNull().defaultNow();
 const updatedAt = () => timestamp("updated_at", { withTimezone: true }).notNull().defaultNow();
@@ -551,5 +573,91 @@ export const skillInstalls = pgTable(
   (t) => ({
     pk: primaryKey({ columns: [t.orgId, t.userId, t.skillId] }),
     byOrgUser: index("skill_installs_org_user_idx").on(t.orgId, t.userId),
+  }),
+);
+
+/**
+ * A user's notification inbox. Rows are fanned out synchronously when a skill event fires (a new
+ * version is published, or someone replies to a comment thread). The recipient set is *derived* from
+ * the actor's relationship to the skill (install / star / comment / ownership) at emit time — see
+ * `resolveSkillNotificationRecipients` in @companion/core. `reason` records why this recipient got
+ * the row so the UI can render relationship-aware copy.
+ *
+ * RLS scopes by `org_id` only — it does NOT constrain `recipient_user_id`. Cross-user inserts within
+ * an org therefore pass `WITH CHECK`, but every READ must additionally filter
+ * `recipient_user_id = <actor>` or it would leak the whole org's inbox.
+ */
+export const notifications = pgTable(
+  "notifications",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    recipientUserId: text("recipient_user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    /** The user whose action produced this notification; null for system events. */
+    actorId: text("actor_id").references(() => user.id, { onDelete: "set null" }),
+    type: notificationTypeEnum("type").notNull(),
+    reason: notificationReasonEnum("reason").notNull(),
+    skillId: uuid("skill_id")
+      .notNull()
+      .references(() => skills.id, { onDelete: "cascade" }),
+    /** Polymorphic deep-link target, e.g. "skill_version" | "skill_comment". */
+    targetType: text("target_type").notNull(),
+    targetId: text("target_id").notNull(),
+    /** Denormalized render payload: { slug, version?, snippet?, comment_id?, parent_comment_id? }. */
+    metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
+    readAt: timestamp("read_at", { withTimezone: true }),
+    createdAt: now(),
+  },
+  (t) => ({
+    skillOrgFk: foreignKey({
+      columns: [t.orgId, t.skillId],
+      foreignColumns: [skills.orgId, skills.id],
+      name: "notifications_skill_org_fk",
+    }).onDelete("cascade"),
+    // A recipient's newest-first feed within an org.
+    byRecipient: index("notifications_recipient_idx").on(t.orgId, t.recipientUserId, t.createdAt),
+    // Partial index powering the unread badge count.
+    unreadByRecipient: index("notifications_unread_idx")
+      .on(t.orgId, t.recipientUserId)
+      .where(sql`${t.readAt} is null`),
+  }),
+);
+
+/**
+ * Explicit override of a user's *implicit* subscription to a skill. Implicit = "I get notified
+ * because I starred / installed / commented on / own this skill" — that audience is derived at emit
+ * time from the relationship tables, not materialized here. This table stores only deliberate
+ * overrides: v1 writes `muted` (never notify me for this skill); `subscribed` is reserved for a
+ * future explicit Watch (subscribe even without a relationship).
+ */
+export const skillSubscriptions = pgTable(
+  "skill_subscriptions",
+  {
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    skillId: uuid("skill_id")
+      .notNull()
+      .references(() => skills.id, { onDelete: "cascade" }),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    state: skillSubscriptionStateEnum("state").notNull().default("subscribed"),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.skillId, t.userId] }),
+    skillOrgFk: foreignKey({
+      columns: [t.orgId, t.skillId],
+      foreignColumns: [skills.orgId, skills.id],
+      name: "skill_subscriptions_skill_org_fk",
+    }).onDelete("cascade"),
+    byOrgSkill: index("skill_subscriptions_org_skill_idx").on(t.orgId, t.skillId),
+    byOrgUser: index("skill_subscriptions_org_user_idx").on(t.orgId, t.userId),
   }),
 );

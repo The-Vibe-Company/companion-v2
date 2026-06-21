@@ -41,6 +41,7 @@ import {
 export { visibilityCovers } from "@companion/contracts";
 import { compareSemver } from "@companion/skills";
 import { db, schema, type Db } from "@companion/db";
+import { emitSkillNotifications, type NotificationRecipient } from "./notifications";
 import { initialsFor, slugify } from "@companion/db/ids";
 import { listOrgAccessDomains } from "./domainAccess";
 import { classifyEmailDomain } from "./email-domains";
@@ -67,6 +68,9 @@ export {
   orgAllowsEmailDomain,
   removeOrgAccessDomain,
 } from "./domainAccess";
+// Notification + subscription services. notifications.ts imports `getSkillBySlug` (a hoisted function
+// declaration) and the `ActorContext` type from here, so this cycle is load-order safe like onboarding.
+export * from "./notifications";
 
 export interface ActorContext {
   id: string;
@@ -906,7 +910,7 @@ export async function removeTeamMember(input: {
     .where(and(eq(schema.teamMemberships.teamId, input.teamId), eq(schema.teamMemberships.userId, input.userId)));
 }
 
-async function visibleSkillPredicate(database: Db, actor: ActorContext, orgId: string) {
+export async function visibleSkillPredicate(database: Db, actor: ActorContext, orgId: string) {
   const orgRole = await getOrgRole(orgId, actor.id, database);
   if (!orgRole) throw new Error("not a member of this organization");
   if (orgRole && canManageOrg(orgRole)) return eq(schema.skills.orgId, orgId);
@@ -1087,6 +1091,17 @@ export async function listSkills(input: {
             ),
           ),
       ),
+      // The caller's explicit subscription override (null = implicit). Raw scalar correlated subquery
+      // — (skill_id, user_id) is unique — so it neither inflates the star count nor touches the
+      // groupBy. Built as raw SQL (not database.select) so it never exercises the unit tests' fakeDb
+      // query-builder stubs, which mock the main chain but not a nested `.limit(...)`.
+      subscription_state: sql<"subscribed" | "muted" | null>`(
+        select ${schema.skillSubscriptions.state}
+        from ${schema.skillSubscriptions}
+        where ${schema.skillSubscriptions.skillId} = ${schema.skills.id}
+          and ${schema.skillSubscriptions.userId} = ${input.actor.id}
+        limit 1
+      )`,
       archived_at: schema.skills.archivedAt,
       created_at: schema.skills.createdAt,
       updated_at: schema.skills.updatedAt,
@@ -1221,6 +1236,7 @@ export async function listSkills(input: {
       dep_warn: depWarn,
       archived: r.archived_at != null,
       referenced: referencedSlugs.has(r.slug),
+      subscription_state: r.subscription_state ?? null,
       created_at: r.created_at.toISOString(),
       updated_at: r.updated_at.toISOString(),
     };
@@ -1530,7 +1546,7 @@ export async function addComment(input: {
   parentId?: string | null;
   versionId?: string | null;
   database?: Db;
-}): Promise<SkillCommentRow> {
+}): Promise<SkillCommentRow & { notified: NotificationRecipient[] }> {
   const database = input.database ?? db;
   const skill = await getSkillBySlug(input);
   if (!skill) throw new Error("skill not found");
@@ -1552,6 +1568,7 @@ export async function addComment(input: {
     versionLabel = version.version;
   }
 
+  let parentAuthorId: string | null = null;
   if (input.parentId) {
     const parent = await database.query.skillComments.findFirst({
       where: and(
@@ -1562,6 +1579,7 @@ export async function addComment(input: {
     });
     // Single-level nesting only: a reply must target an existing same-skill root thread.
     if (!parent || parent.parentId !== null) throw new Error("invalid parent comment");
+    parentAuthorId = parent.authorId;
   }
 
   const [row] = await database
@@ -1576,6 +1594,35 @@ export async function addComment(input: {
     })
     .returning();
   if (!row) throw new Error("could not add comment");
+
+  // Notify the thread when this is a reply: the parent author + every other participant + the owner.
+  // Root comments deliberately don't notify (would spam installers); best-effort so a fan-out failure
+  // never fails the comment.
+  let notified: NotificationRecipient[] = [];
+  if (input.parentId) {
+    try {
+      notified = await emitSkillNotifications({
+        database,
+        orgId: input.orgId,
+        skillId: skill.id,
+        actorId: input.actor.id,
+        type: "skill.comment_reply",
+        targetType: "skill_comment",
+        targetId: row.id,
+        metadata: {
+          slug: skill.slug,
+          comment_id: row.id,
+          parent_comment_id: input.parentId,
+          snippet: input.body.slice(0, 140),
+        },
+        parentCommentAuthorId: parentAuthorId,
+        parentCommentId: input.parentId,
+      });
+    } catch (error) {
+      console.error("notification fan-out failed (skill.comment_reply)", error);
+    }
+  }
+
   return {
     id: row.id,
     skill_id: row.skillId,
@@ -1586,6 +1633,7 @@ export async function addComment(input: {
     version_id: row.versionId,
     version: versionLabel,
     deprecated: row.deprecated,
+    notified,
   };
 }
 
@@ -1907,7 +1955,7 @@ export async function publishSkillVersion(input: {
   payload: PublishSkillInput;
   archiveKey: string;
   database?: Db;
-}): Promise<{ id: string; version: string }> {
+}): Promise<{ id: string; version: string; notified: NotificationRecipient[] }> {
   const database = input.database ?? db;
   const payload = publishSkillInputSchema.parse({ ...input.payload, storage_path: input.archiveKey });
   const ownerTeam = await assertCanPublishSkillVersion({ actor: input.actor, orgId: input.orgId, payload, database });
@@ -2042,7 +2090,7 @@ async function writeSkillVersion(input: {
   archiveKey: string;
   ownerTeam: { id: string; slug: string; name: string } | null;
   database: Db;
-}): Promise<{ id: string; version: string }> {
+}): Promise<{ id: string; version: string; notified: NotificationRecipient[] }> {
   const database = input.database;
   const payload = input.payload;
   const orgRole = await getOrgRole(input.orgId, input.actor.id, database);
@@ -2159,7 +2207,25 @@ async function writeSkillVersion(input: {
     targetId: skill.id,
     metadata: { slug: payload.slug, version: payload.version, visibility: resolved.visibility, dependencies: payload.dependencies },
   });
-  return { id: skill.id, version: version.version };
+
+  // Notify installers + starrers that an update is available. Best-effort: a fan-out failure must
+  // never roll back the publish (a first-publish has no installers/starrers yet, so this is a no-op).
+  let notified: NotificationRecipient[] = [];
+  try {
+    notified = await emitSkillNotifications({
+      database,
+      orgId: input.orgId,
+      skillId: skill.id,
+      actorId: input.actor.id,
+      type: "skill.version_published",
+      targetType: "skill_version",
+      targetId: version.id,
+      metadata: { slug: payload.slug, version: version.version, note: payload.note },
+    });
+  } catch (error) {
+    console.error("notification fan-out failed (skill.version_published)", error);
+  }
+  return { id: skill.id, version: version.version, notified };
 }
 
 export async function createInvitation(input: {

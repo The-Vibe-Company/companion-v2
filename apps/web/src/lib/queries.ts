@@ -14,6 +14,8 @@ import type {
   SkillListRow,
   SkillVisibilityInput,
   SkillVersionRow,
+  NotificationRow,
+  SkillSubscriptionResult,
   TokenScope,
   ValidationResult,
   FrontmatterWarning,
@@ -151,6 +153,47 @@ export async function fetchSkillDetail(
 export async function toggleStar(slug: string): Promise<boolean> {
   const data = await apiFetch<{ starred: boolean }>(`/v1/skills/${slug}/star`, { method: "POST" });
   return data.starred;
+}
+
+/** The caller's notification inbox (newest first). */
+export async function fetchNotifications(opts?: {
+  unreadOnly?: boolean;
+  limit?: number;
+  before?: string;
+}): Promise<NotificationRow[]> {
+  const params = new URLSearchParams();
+  if (opts?.unreadOnly) params.set("unread", "1");
+  if (opts?.limit) params.set("limit", String(opts.limit));
+  if (opts?.before) params.set("before", opts.before);
+  const qs = params.toString();
+  return apiFetch<NotificationRow[]>(`/v1/notifications${qs ? `?${qs}` : ""}`);
+}
+
+/** The caller's unread notification count (bell badge). */
+export async function fetchUnreadNotificationCount(): Promise<number> {
+  const data = await apiFetch<{ count: number }>("/v1/notifications/unread-count");
+  return data.count;
+}
+
+/** Mark notifications read — pass explicit `ids` (the rows just shown) or `{ all: true }`. */
+export async function markNotificationsRead(input: { ids?: string[]; all?: boolean }): Promise<void> {
+  await apiFetch<{ ok: true }>("/v1/notifications/read", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+/** Mute the current user for a skill (stop notifications). */
+export async function muteSkill(slug: string): Promise<SkillSubscriptionResult> {
+  return apiFetch<SkillSubscriptionResult>(`/v1/skills/${slug}/subscribe`, {
+    method: "POST",
+    body: JSON.stringify({ state: "muted" }),
+  });
+}
+
+/** Clear the explicit override for a skill, reverting to the implicit subscription. */
+export async function unmuteSkill(slug: string): Promise<SkillSubscriptionResult> {
+  return apiFetch<SkillSubscriptionResult>(`/v1/skills/${slug}/subscribe`, { method: "DELETE" });
 }
 
 /** Mark a published skill as installed for the current user (manual mark or agent report). */

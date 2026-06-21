@@ -53,6 +53,7 @@ export interface SkillVM {
   depWarn: boolean; // any declared dependency is not satisfied
   archived: boolean; // hidden from normal lists
   referenced?: boolean; // referenced by ANY published version (gates archived download)
+  subscriptionState: "subscribed" | "muted" | null; // explicit override (null = implicit)
 }
 
 /** Map a skill_list_v row to the UI view-model. Date formatting runs server-side. */
@@ -97,6 +98,7 @@ export function mapSkill(row: SkillListRow): SkillVM {
     depWarn: row.dep_warn ?? false,
     archived: row.archived ?? false,
     referenced: row.referenced ?? false,
+    subscriptionState: row.subscription_state ?? null,
   };
 }
 
