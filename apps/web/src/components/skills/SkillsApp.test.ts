@@ -96,6 +96,7 @@ function skill(overrides: Partial<SkillVM>): SkillVM {
     usedByCount: 0,
     depWarn: false,
     archived: false,
+    subscriptionState: null,
     ...overrides,
   };
 }
@@ -136,6 +137,7 @@ function skillRowFromVM(vm: SkillVM): SkillListRow {
     dep_warn: vm.depWarn,
     archived: vm.archived,
     referenced: vm.referenced ?? false,
+    subscription_state: vm.subscriptionState,
   } as SkillListRow;
 }
 

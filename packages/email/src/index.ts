@@ -169,3 +169,48 @@ export function passwordResetCodeEmail(input: { to: string; code: string }): Tra
     idempotencyKey: emailIdempotencyKey(["reset", input.to, input.code]),
   };
 }
+
+/**
+ * Sent to a member who installed (or starred) a skill when a new version is published. Idempotency
+ * keyed on `(slug, version, recipient)` so re-publishing the same version never double-sends.
+ */
+export function skillVersionEmail(input: {
+  to: string;
+  skillSlug: string;
+  version: string;
+  url: string;
+}): TransactionalEmail {
+  const slug = escapeHtml(input.skillSlug);
+  const version = escapeHtml(input.version);
+  const url = escapeHtml(input.url);
+  return {
+    to: input.to,
+    subject: `${headerValue(input.skillSlug)} v${headerValue(input.version)} is available`,
+    html: `<p>A new version of <strong>${slug}</strong> (v${version}) has been published — an update is available for the skill you installed.</p><p><a href="${url}">View ${slug}</a></p>`,
+    text: `A new version of ${input.skillSlug} (v${input.version}) has been published. View it: ${input.url}`,
+    idempotencyKey: emailIdempotencyKey(["skill-version", input.skillSlug, input.version, input.to]),
+  };
+}
+
+/**
+ * Sent to a comment thread participant when someone replies. Idempotency keyed on the new comment id
+ * (not the snippet, which isn't stable) so a retried send never duplicates.
+ */
+export function skillReplyEmail(input: {
+  to: string;
+  skillSlug: string;
+  snippet: string;
+  url: string;
+  commentId: string;
+}): TransactionalEmail {
+  const slug = escapeHtml(input.skillSlug);
+  const snippet = escapeHtml(input.snippet);
+  const url = escapeHtml(input.url);
+  return {
+    to: input.to,
+    subject: `New reply on ${headerValue(input.skillSlug)}`,
+    html: `<p>Someone replied in a comment thread on <strong>${slug}</strong>:</p><blockquote>${snippet}</blockquote><p><a href="${url}">View the thread</a></p>`,
+    text: `Someone replied in a comment thread on ${input.skillSlug}: "${input.snippet}". View it: ${input.url}`,
+    idempotencyKey: emailIdempotencyKey(["skill-reply", input.commentId, input.to]),
+  };
+}

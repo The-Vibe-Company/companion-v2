@@ -41,6 +41,7 @@ function mk(p: Partial<SkillVM> & { id: string }): SkillVM {
     usedByCount: 0,
     depWarn: false,
     archived: false,
+    subscriptionState: null,
     ...p,
     compatibility: p.compatibility ?? null,
     metadata: p.metadata ?? {},

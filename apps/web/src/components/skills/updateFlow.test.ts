@@ -55,6 +55,7 @@ const skill: SkillVM = {
   usedByCount: 0,
   depWarn: false,
   archived: false,
+  subscriptionState: null,
   compatibility: null,
   metadata: {
     companion_skill_id: "skill-1",

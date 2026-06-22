@@ -47,6 +47,7 @@ const skill: SkillVM = {
   usedByCount: 2,
   depWarn: false,
   archived: false,
+  subscriptionState: null,
 };
 
 function renderDetail(initialPanel?: React.ComponentProps<typeof DetailView>["initialPanel"]) {

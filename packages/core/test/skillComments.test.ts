@@ -37,15 +37,21 @@ interface FakeOptions {
   authorProfile?: Record<string, unknown> | null;
 }
 
-/** A select(...) chain that ignores every intermediate call and resolves to `rows` when awaited. */
+/**
+ * A select(...) chain that ignores every intermediate call and resolves to `rows` when awaited. It is
+ * also directly thenable (resolves to `rows`) so the notification-emission path's awaited
+ * `select().from().where()` and `.limit(...)` calls don't throw — those run after addComment inserts a
+ * reply; the comment-thread assertions here don't care about their result.
+ */
 function selectChain(rows: unknown[]) {
   const chain: Record<string, unknown> = {};
-  for (const m of ["from", "innerJoin", "leftJoin", "where", "groupBy"]) {
+  for (const m of ["from", "innerJoin", "leftJoin", "where", "groupBy", "limit"]) {
     chain[m] = vi.fn(() => chain);
   }
   chain.orderBy = vi.fn(async () => rows);
   // `visibleSkillPredicate` ends its team-subquery on `.where(...)` and passes the builder into
   // `inArray` (never awaited), so a self-returning `where` is sufficient there too.
+  chain.then = (resolve: (value: unknown[]) => void) => resolve(rows);
   return chain;
 }
 
@@ -89,6 +95,9 @@ function fakeDb(opts: FakeOptions = {}) {
 
   const database = {
     select: vi.fn(() => selectChain(skillRows)),
+    // The reply-emission path issues a `selectDistinct` for thread authors; canned skill rows carry no
+    // `userId`/`authorId`, so the defensive resolver simply yields no extra recipients here.
+    selectDistinct: vi.fn(() => selectChain(skillRows)),
     insert: vi.fn(() => ({ values: insertValues })),
     update: vi.fn(() => ({ set: updateSet })),
     query: {

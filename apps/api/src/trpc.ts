@@ -1,6 +1,13 @@
 import { initTRPC } from "@trpc/server";
 import { z } from "zod";
-import { listOrgs, listSkills, listSkillVersions, type ActorContext } from "@companion/core/services";
+import {
+  listNotifications,
+  listOrgs,
+  listSkills,
+  listSkillVersions,
+  unreadNotificationCount,
+  type ActorContext,
+} from "@companion/core/services";
 import { visibilityFilterSchema } from "@companion/contracts";
 import { withTenantContext } from "@companion/db";
 
@@ -37,6 +44,36 @@ export const appRouter = t.router({
         listSkillVersions({ actor: ctx.actor, orgId: ctx.orgId!, slug: input.slug, database }),
       );
     }),
+  notifications: t.procedure
+    .use(authed)
+    .input(
+      z
+        .object({
+          unreadOnly: z.boolean().optional(),
+          limit: z.number().int().positive().max(100).optional(),
+          before: z.string().optional(),
+        })
+        .optional(),
+    )
+    .query(({ ctx, input }) => {
+      if (!ctx.orgId) throw new Error("no organization selected");
+      return withTenantContext({ orgId: ctx.orgId, userId: ctx.actor.id }, (database) =>
+        listNotifications({
+          actor: ctx.actor,
+          orgId: ctx.orgId!,
+          unreadOnly: input?.unreadOnly,
+          limit: input?.limit,
+          before: input?.before,
+          database,
+        }),
+      );
+    }),
+  notificationsUnreadCount: t.procedure.use(authed).query(({ ctx }) => {
+    if (!ctx.orgId) throw new Error("no organization selected");
+    return withTenantContext({ orgId: ctx.orgId, userId: ctx.actor.id }, (database) =>
+      unreadNotificationCount({ actor: ctx.actor, orgId: ctx.orgId!, database }),
+    );
+  }),
 });
 
 export type AppRouter = typeof appRouter;

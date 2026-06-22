@@ -36,10 +36,13 @@ import {
   joinOrgByDomain,
   listApiTokens,
   listOrgs,
+  listNotifications,
   listSkillComments,
   listSkills,
   listSkillVersions,
   listTeamsForUser,
+  markNotificationsRead,
+  notificationEmailTargets,
   publishSkillVersion,
   assertCanPublishSkillVersion,
   reportLocalSkillInstall,
@@ -51,6 +54,7 @@ import {
   setCommentDeprecated,
   setMemberRole,
   setSkillFilterPreferences,
+  setSkillSubscription,
   setSkillVisibility,
   setTeamMemberRole,
   setOrgLogoFromUpload,
@@ -58,6 +62,7 @@ import {
   toggleStar,
   installSkill,
   uninstallSkill,
+  unreadNotificationCount,
   updateOrg,
   updateTeam,
   updateUserProfile,
@@ -70,11 +75,13 @@ import {
   createSkillInputSchema,
   issueTokenInputSchema,
   joinOnboardingOrgInputSchema,
+  markNotificationsReadInputSchema,
   orgSettingsResponseSchema,
   publishSkillInputSchema,
   reportLocalSkillInstallInputSchema,
   reportSkillInstallInputSchema,
   setCommentDeprecatedInputSchema,
+  setSkillSubscriptionInputSchema,
   setSkillVisibilityInputSchema,
   skillFrontmatterSchema,
   skillVisibilityInputSchema,
@@ -115,7 +122,7 @@ import {
 } from "@companion/skills";
 import { withTenantContext, type Db } from "@companion/db";
 import { auth } from "@companion/auth";
-import { inviteEmail, sendTransactionalEmail } from "@companion/email";
+import { inviteEmail, sendTransactionalEmail, skillReplyEmail, skillVersionEmail } from "@companion/email";
 import {
   actorFromContext,
   attachSession,
@@ -255,6 +262,45 @@ function rejectLegacySkillVisibilityInput(hasField: (name: string) => boolean): 
   }
 }
 
+/** Deep-link into the web app's skill detail view (matches `skillsRouteHref` in apps/web). */
+function skillDetailUrl(slug: string): string {
+  const base = process.env.COMPANION_WEB_URL ?? "http://127.0.0.1:3000";
+  return `${base}/skills?skill=${encodeURIComponent(slug)}`;
+}
+
+/**
+ * Fire best-effort notification emails for the high-signal recipients of a skill event. In-app
+ * notifications are the source of truth; email is a courtesy, so every send is independently
+ * try/caught and a failure never surfaces to the caller. Runs after the core mutation has committed.
+ */
+async function sendSkillNotificationEmails(input: {
+  orgId: string;
+  actorId: string;
+  notified: Array<{ userId: string; reason: string }>;
+  reasonToEmail: string;
+  build: (target: { email: string; name: string }) => Parameters<typeof sendTransactionalEmail>[0];
+}): Promise<void> {
+  const userIds = input.notified.filter((r) => r.reason === input.reasonToEmail).map((r) => r.userId);
+  if (userIds.length === 0) return;
+  try {
+    const targets = await withTenantContext({ orgId: input.orgId, userId: input.actorId }, (database) =>
+      notificationEmailTargets({ database, userIds }),
+    );
+    // Send concurrently so request latency is bounded by the slowest single send, not the sum — a
+    // skill with many installers or a large thread must not make the response scale with recipient
+    // count. Each send is independently caught; email is best-effort and never fails the request.
+    await Promise.allSettled(
+      targets.map((target) =>
+        sendTransactionalEmail(input.build(target)).catch((error) => {
+          console.error(`notification email to ${target.email} failed`, error);
+        }),
+      ),
+    );
+  } catch (error) {
+    console.error("resolving notification email targets failed", error);
+  }
+}
+
 /**
  * Shared publish tail: store the canonical archive (idempotently) and write a new
  * skill_versions row, authorizing first and cleaning up the blob on failure.
@@ -299,9 +345,19 @@ async function publishCanonical(input: {
   );
   await putSkillArchive({ key, body: canonical.archive, preventOverwrite: true });
   try {
-    const published = await withTenantContext({ orgId, userId: actor.id }, (database) =>
+    const { notified, ...published } = await withTenantContext({ orgId, userId: actor.id }, (database) =>
       publishSkillVersion({ actor, orgId, payload, archiveKey: key, database }),
     );
+    // Best-effort "update available" email to installers; never blocks or fails the publish. The
+    // `notified` recipient ids stay server-side (not returned to the client).
+    await sendSkillNotificationEmails({
+      orgId,
+      actorId: actor.id,
+      notified,
+      reasonToEmail: "installer",
+      build: (target) =>
+        skillVersionEmail({ to: target.email, skillSlug: fm.name, version: published.version, url: skillDetailUrl(fm.name) }),
+    });
     return { ...published, slug: fm.name, checksum: canonical.checksum, sizeBytes: canonical.sizeBytes };
   } catch (error) {
     await deleteSkillArchive({ key }).catch((cleanupError) => {
@@ -969,19 +1025,34 @@ app.get("/v1/skills/:slug/comments", async (c) => {
 app.post("/v1/skills/:slug/comments", async (c) => {
   try {
     const input = addCommentInputSchema.parse(await c.req.json());
-    return c.json(
-      await withTenant(c, ({ actor, orgId, database }) =>
-        addComment({
-          actor,
-          orgId,
-          slug: c.req.param("slug"),
-          body: input.body,
-          parentId: input.parent_id ?? null,
-          versionId: input.version_id ?? null,
-          database,
-        }),
-      ),
+    const slug = c.req.param("slug");
+    const { notified, ...comment } = await withTenant(c, ({ actor, orgId, database }) =>
+      addComment({
+        actor,
+        orgId,
+        slug,
+        body: input.body,
+        parentId: input.parent_id ?? null,
+        versionId: input.version_id ?? null,
+        database,
+      }),
     );
+    // Best-effort "new reply" email to thread participants; the recipient ids stay server-side.
+    await sendSkillNotificationEmails({
+      orgId: await orgIdFromContext(c),
+      actorId: actorFromContext(c).id,
+      notified,
+      reasonToEmail: "thread_participant",
+      build: (target) =>
+        skillReplyEmail({
+          to: target.email,
+          skillSlug: slug,
+          snippet: input.body.slice(0, 140),
+          url: skillDetailUrl(slug),
+          commentId: comment.id,
+        }),
+    });
+    return c.json(comment);
   } catch (error) {
     return jsonError(c, error);
   }
@@ -1071,6 +1142,77 @@ app.delete("/v1/skills/:slug/install", async (c) => {
       true,
     );
     return c.json({ ok: true as const, installed: false as const, status: "none" as const });
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
+/**
+ * Mute (stop notifying) the caller for a skill. Subscriptions are implicit — you're notified because
+ * you starred / installed / commented / own a skill — so this only stores an explicit opt-out.
+ */
+app.post("/v1/skills/:slug/subscribe", async (c) => {
+  try {
+    const input = setSkillSubscriptionInputSchema.parse(await c.req.json().catch(() => ({})));
+    return c.json(
+      await withTenant(c, ({ actor, orgId, database }) =>
+        setSkillSubscription({ actor, orgId, slug: c.req.param("slug"), state: input.state, database }),
+      ),
+    );
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
+/** Clear the caller's explicit override for a skill, reverting to the implicit subscription. */
+app.delete("/v1/skills/:slug/subscribe", async (c) => {
+  try {
+    return c.json(
+      await withTenant(c, ({ actor, orgId, database }) =>
+        setSkillSubscription({ actor, orgId, slug: c.req.param("slug"), state: "default", database }),
+      ),
+    );
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
+/** The caller's notification inbox (newest first). `?unread=1` filters to unread; `?before=<iso>` paginates. */
+app.get("/v1/notifications", async (c) => {
+  try {
+    const unreadOnly = ["1", "true"].includes((c.req.query("unread") ?? "").toLowerCase());
+    const limitRaw = Number(c.req.query("limit"));
+    const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 100) : undefined;
+    const before = c.req.query("before") || undefined;
+    return c.json(
+      await withTenant(c, ({ actor, orgId, database }) =>
+        listNotifications({ actor, orgId, unreadOnly, limit, before, database }),
+      ),
+    );
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
+/** The caller's unread notification count — powers the bell badge. */
+app.get("/v1/notifications/unread-count", async (c) => {
+  try {
+    return c.json({
+      count: await withTenant(c, ({ actor, orgId, database }) => unreadNotificationCount({ actor, orgId, database })),
+    });
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
+/** Mark the caller's notifications read — `{ ids: [...] }` (the rows just shown) or `{ all: true }`. */
+app.post("/v1/notifications/read", async (c) => {
+  try {
+    const input = markNotificationsReadInputSchema.parse(await c.req.json());
+    await withTenant(c, ({ actor, orgId, database }) =>
+      markNotificationsRead({ actor, orgId, ids: input.ids, all: input.all, database }),
+    );
+    return c.json({ ok: true as const });
   } catch (error) {
     return jsonError(c, error);
   }
