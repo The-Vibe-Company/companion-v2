@@ -64,9 +64,13 @@ adds `profiles`, `organizations`, `memberships`, `teams`, `team_memberships`, `i
 Every tenant-owned table carries `org_id`. Skills keep ownership, visibility, and provenance
 separate: `owner_id` / `owner_team_id`, `everyone`, `skill_team_shares`, and `creator_id`.
 `owner_team_id` means the skill is owned by a team; admin/editor members of that owner team can
-modify it. `everyone=true` means every member of the current workspace can see the skill. Team
-visibility is zero or more rows in `skill_team_shares`; those rows grant read access only. Private
-is derived from `everyone=false` and no team shares. A version's declared tools
+modify it, and *every* member of the owning team (any role, including Reader) can read it
+regardless of visibility. Ownership can be transferred between a user and a team, or between teams,
+via `PUT /v1/skills/:slug/owner` (see Authorization). `everyone=true` means every member of the
+current workspace can see the skill. Team visibility is zero or more rows in `skill_team_shares`;
+those rows grant read access only and never include the owning team (its audience comes from the
+column). Private is derived from `owner_team_id IS NULL`, `everyone=false`, and no team shares — a
+team-owned skill is never private (it reads as "Team"). A version's declared tools
 (`skill_versions.tools`) come from the Agent Skills `allowed-tools` frontmatter string.
 Companion-specific package data lives in root `companion.json`, not `SKILL.md`: `display` (human
 name, short summary, long description), `requirements` (declared secrets and environment variables,
@@ -208,8 +212,9 @@ requires the admin's own verified corporate email domain to match the requested 
 
 The service layer in `packages/core` is the primary enforcement point. It applies:
 
-- visibility gate: user owner, org admin, `everyone=true`, or membership in any shared team; owner-team admin/editor membership is also sufficient to read the skill so those owners can manage it;
+- visibility gate: user owner, org admin, `everyone=true`, membership in any shared team, or membership in the owning team at **any** role — so every member of a team can read its team-owned skills, Readers included, regardless of visibility;
 - capability gate: org admin, user owner, owner-team admin/editor, and visibility-target action checks; owner-team readers do not gain edit rights;
+- ownership transfer (`transferSkillOwnership`, `PUT /v1/skills/:slug/owner`): permitted for org admins or the current owner (the owning user, or an admin/editor of the owning team); the destination must be the caller as a personal owner (`owner_team=null`) or a team the caller administers/edits. Because the owning team is part of a skill's audience, transfers reuse the same visibility-cover cascade as a visibility change (reject by default, opt-in `cascade`);
 - tenant gate: all service queries are scoped to the selected `org_id`.
 
 Postgres RLS may be added later as defense-in-depth, but browser and CLI clients never connect
@@ -229,7 +234,8 @@ directly to Postgres.
   plaintext returned once), `DELETE /v1/tokens/:id` (an org admin may revoke any token by id).
   Session-authenticated only — a token cannot mint another.
 - Skills: `/v1/skills`, `/v1/skills/:slug`, `/v1/skills/:slug/versions`,
-  `/v1/skills/:slug/download`, `/v1/skills/:slug/visibility`, `/v1/skill-filter-preferences`,
+  `/v1/skills/:slug/download`, `/v1/skills/:slug/visibility`,
+  `PUT /v1/skills/:slug/owner` (transfer ownership user↔team / team↔team), `/v1/skill-filter-preferences`,
   `GET /v1/skills/upload-options` (skills-token upload owner/visibility choices),
   `POST /v1/skills/create` (author a SKILL.md inline),
   `GET /v1/skills/:slug/versions/:version/package` (download a version as `.zip`), and

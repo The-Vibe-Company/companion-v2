@@ -5,6 +5,7 @@ import {
   listSkillVersions,
   listSkills,
   setSkillVisibility,
+  transferSkillOwnership,
   type ActorContext,
 } from "../src/services";
 
@@ -372,14 +373,22 @@ describe("listSkills visibility assembly", () => {
     expect(rows[0]?.requirements.map((req) => req.key)).toEqual(["API_TOKEN"]);
   });
 
-  it("builds owner-team read visibility from editable team memberships only", async () => {
-    const database = fakeDb() as Db & { __writes: { teamIdWheres: unknown[] } };
+  it("reads owner-team skills by membership, but gates `mine`/edit on admin/editor", async () => {
+    // The read predicate references the owner_team_id branch (any owning-team member can read).
+    const readDb = fakeDb() as Db & {
+      __writes: { teamIdWheres: unknown[]; skillListWhere: unknown };
+    };
+    await listSkills({ actor, orgId: ORG, database: readDb });
+    expect(whereTouchesColumn(readDb.__writes.skillListWhere, "owner_team_id")).toBe(true);
 
-    await listSkills({ actor, orgId: ORG, database });
-
-    expect(database.__writes.teamIdWheres.some((where) => whereTouchesColumn(where, "team_role"))).toBe(true);
-    expect(database.__writes.teamIdWheres.some((where) => whereMentions(where, "admin"))).toBe(true);
-    expect(database.__writes.teamIdWheres.some((where) => whereMentions(where, "editor"))).toBe(true);
+    // `mine` adds exactly one more team-membership subquery than the read path — the admin/editor edit
+    // gate. (Absolute counts are coupled to internals; the +1 delta is the robust, intent-revealing
+    // signal that the read path itself is NOT role-gated.)
+    const mineDb = fakeDb() as Db & { __writes: { teamIdWheres: unknown[] } };
+    await listSkills({ actor, orgId: ORG, mine: true, database: mineDb });
+    expect(mineDb.__writes.teamIdWheres.length).toBe(readDb.__writes.teamIdWheres.length + 1);
+    expect(mineDb.__writes.teamIdWheres.some((where) => whereMentions(where, "admin"))).toBe(true);
+    expect(mineDb.__writes.teamIdWheres.some((where) => whereMentions(where, "editor"))).toBe(true);
   });
 
   it("does not let team editors publish existing skills only shared with their team", async () => {
@@ -728,5 +737,309 @@ describe("setSkillVisibility dependent (narrowing) cascade", () => {
         }),
       }),
     ).rejects.toThrow("would stay visible to an owner outside the new audience");
+  });
+});
+
+describe("transferSkillOwnership", () => {
+  it("transfers a personal skill to a team the actor can edit", async () => {
+    const database = fakeDb({ ownerTeamRole: "editor" }) as Db & {
+      __writes: { updates: Array<Record<string, unknown>>; deletes: unknown[]; insertedShares: unknown[] };
+    };
+
+    const result = await transferSkillOwnership({
+      actor,
+      orgId: ORG,
+      slug: "private-skill", // owned by the actor
+      ownerTeam: "platform",
+      database,
+    });
+
+    expect(result).toEqual({
+      owner_kind: "team",
+      owner_team_id: "team-platform",
+      owner_id: actor.id,
+      cascaded: [],
+    });
+    expect(database.__writes.updates[0]).toMatchObject({ ownerTeamId: "team-platform", ownerId: actor.id });
+    // The owner team's audience comes from the column — it is dropped from explicit shares (cleanup
+    // delete fires) and never re-inserted as a redundant share row. (The fake records every insert in
+    // `insertedShares`, incl. the audit row, so check specifically for share-shaped rows.)
+    expect(database.__writes.deletes.length).toBeGreaterThan(0);
+    const shareInserts = database.__writes.insertedShares.filter(
+      (r): r is Record<string, unknown> => !!r && typeof r === "object" && "teamId" in r && "skillId" in r,
+    );
+    expect(shareInserts).toEqual([]);
+  });
+
+  it("transfers a team-owned skill back to the acting user", async () => {
+    const database = fakeDb({ ownerTeamRole: "editor" }) as Db & {
+      __writes: { updates: Array<Record<string, unknown>> };
+    };
+
+    const result = await transferSkillOwnership({
+      actor,
+      orgId: ORG,
+      slug: "owner-team-skill", // owned by team-platform
+      ownerTeam: null,
+      database,
+    });
+
+    expect(result).toEqual({
+      owner_kind: "user",
+      owner_team_id: null,
+      owner_id: actor.id,
+      cascaded: [],
+    });
+    expect(database.__writes.updates[0]).toMatchObject({ ownerTeamId: null, ownerId: actor.id });
+  });
+
+  it("transfers between teams the actor can edit", async () => {
+    const database = fakeDb({
+      ownerTeamRole: "editor",
+      extraSkills: [
+        skillRow("skill-team-other", "team-other-skill", false, {
+          kind: "team",
+          teamId: "team-other",
+          name: "Other",
+        }),
+      ],
+    }) as Db & { __writes: { updates: Array<Record<string, unknown>> } };
+
+    const result = await transferSkillOwnership({
+      actor,
+      orgId: ORG,
+      slug: "team-other-skill", // owned by team-other
+      ownerTeam: "platform", // the fake resolves any slug to team-platform
+      database,
+    });
+
+    expect(result.owner_kind).toBe("team");
+    expect(result.owner_team_id).toBe("team-platform");
+    expect(database.__writes.updates[0]).toMatchObject({ ownerTeamId: "team-platform" });
+  });
+
+  it("is a no-op when the skill already has the requested owner", async () => {
+    const database = fakeDb({ ownerTeamRole: "editor" }) as Db & {
+      __writes: { updates: Array<Record<string, unknown>> };
+    };
+
+    const result = await transferSkillOwnership({
+      actor,
+      orgId: ORG,
+      slug: "owner-team-skill", // already owned by team-platform; "platform" resolves to it
+      ownerTeam: "platform",
+      database,
+    });
+
+    expect(result).toEqual({
+      owner_kind: "team",
+      owner_team_id: "team-platform",
+      owner_id: "creator-user",
+      cascaded: [],
+    });
+    expect(database.__writes.updates).toEqual([]);
+  });
+
+  it("is a no-op when the owner transfers their own personal skill to personal", async () => {
+    const database = fakeDb() as Db & { __writes: { updates: Array<Record<string, unknown>> } };
+
+    const result = await transferSkillOwnership({
+      actor,
+      orgId: ORG,
+      slug: "private-skill", // already personally owned by the actor
+      ownerTeam: null,
+      database,
+    });
+
+    expect(result).toEqual({ owner_kind: "user", owner_team_id: null, owner_id: actor.id, cascaded: [] });
+    expect(database.__writes.updates).toEqual([]);
+  });
+
+  it("lets an org admin claim another user's personal skill (personal reassignment)", async () => {
+    const database = fakeDb({
+      orgRole: "admin",
+      extraSkills: [skillRow("skill-someone", "someone-skill", false, { userId: "other-user", name: "Other User" })],
+    }) as Db & { __writes: { updates: Array<Record<string, unknown>> } };
+
+    const result = await transferSkillOwnership({
+      actor,
+      orgId: ORG,
+      slug: "someone-skill", // personally owned by other-user
+      ownerTeam: null,
+      database,
+    });
+
+    expect(result).toEqual({ owner_kind: "user", owner_team_id: null, owner_id: actor.id, cascaded: [] });
+    expect(database.__writes.updates[0]).toMatchObject({ ownerTeamId: null, ownerId: actor.id });
+  });
+
+  it("rejects a non-owner developer", async () => {
+    await expect(
+      transferSkillOwnership({
+        actor,
+        orgId: ORG,
+        slug: "one-team-skill", // owned by other-user
+        ownerTeam: "platform",
+        database: fakeDb({ sharedTeamRole: "editor" }),
+      }),
+    ).rejects.toThrow("not allowed to transfer this skill");
+  });
+
+  it("rejects an owning-team reader", async () => {
+    await expect(
+      transferSkillOwnership({
+        actor,
+        orgId: ORG,
+        slug: "owner-team-skill",
+        ownerTeam: null,
+        database: fakeDb({ ownerTeamRole: "reader" }),
+      }),
+    ).rejects.toThrow("not allowed to transfer this skill");
+  });
+
+  it("rejects transferring into a team the actor cannot edit", async () => {
+    await expect(
+      transferSkillOwnership({
+        actor,
+        orgId: ORG,
+        slug: "private-skill", // owned by the actor (source ok)
+        ownerTeam: "platform",
+        database: fakeDb({ ownerTeamRole: "reader" }),
+      }),
+    ).rejects.toThrow("not allowed to create skills for this team");
+  });
+
+  it("lets org admins transfer any skill", async () => {
+    const database = fakeDb({ orgRole: "admin" }) as Db & {
+      __writes: { updates: Array<Record<string, unknown>> };
+    };
+
+    const result = await transferSkillOwnership({
+      actor,
+      orgId: ORG,
+      slug: "one-team-skill", // owned by other-user
+      ownerTeam: "platform",
+      database,
+    });
+
+    expect(result.owner_kind).toBe("team");
+    expect(database.__writes.updates[0]).toMatchObject({ ownerTeamId: "team-platform" });
+  });
+
+  // private-skill (owned by the actor) requires dep-skill via its current version.
+  const requiresDep = (depOwner: Parameters<typeof skillRow>[3] = {}) => ({
+    extraSkills: [skillRow("skill-dep", "dep-skill", false, depOwner)],
+    edges: [
+      {
+        skillId: "skill-private",
+        skillVersionId: "skill-private-cv",
+        dependsOnSlug: "dep-skill",
+        dependsOnSkillId: "skill-dep",
+      },
+    ],
+  });
+
+  it("rejects a transfer that would broaden past a private dependency without cascade", async () => {
+    await expect(
+      transferSkillOwnership({
+        actor,
+        orgId: ORG,
+        slug: "private-skill",
+        ownerTeam: "platform",
+        database: fakeDb({ ownerTeamRole: "editor", ...requiresDep() }),
+      }),
+    ).rejects.toThrow("cannot broaden visibility: dependency dep-skill");
+  });
+
+  it("raises the dependency when transferring with cascade", async () => {
+    const database = fakeDb({ ownerTeamRole: "editor", ...requiresDep() }) as Db & {
+      __writes: { updates: Array<Record<string, unknown>> };
+    };
+
+    const result = await transferSkillOwnership({
+      actor,
+      orgId: ORG,
+      slug: "private-skill",
+      ownerTeam: "platform",
+      cascade: true,
+      database,
+    });
+
+    expect(result.cascaded).toEqual(["dep-skill"]);
+    expect(result.owner_kind).toBe("team");
+  });
+
+  // dependent-skill requires owner-team-skill (the skill being transferred to personal).
+  const dependedOnBy = (everyone = true) => ({
+    extraSkills: [skillRow("skill-dependent", "dependent-skill", everyone)],
+    edges: [
+      {
+        skillId: "skill-dependent",
+        skillVersionId: "skill-dependent-cv",
+        dependsOnSlug: "owner-team-skill",
+        dependsOnSkillId: "skill-owner-team",
+      },
+    ],
+  });
+
+  it("rejects a team→personal transfer that would strand a dependent without cascade", async () => {
+    await expect(
+      transferSkillOwnership({
+        actor,
+        orgId: ORG,
+        slug: "owner-team-skill",
+        ownerTeam: null,
+        database: fakeDb({ orgRole: "admin", ...dependedOnBy() }),
+      }),
+    ).rejects.toThrow("cannot narrow visibility: dependent-skill depends on this skill");
+  });
+
+  it("restricts the dependent when transferring to personal with cascade", async () => {
+    const database = fakeDb({ orgRole: "admin", ...dependedOnBy() }) as Db & {
+      __writes: { updates: Array<Record<string, unknown>> };
+    };
+
+    const result = await transferSkillOwnership({
+      actor,
+      orgId: ORG,
+      slug: "owner-team-skill",
+      ownerTeam: null,
+      cascade: true,
+      database,
+    });
+
+    expect(result.cascaded).toEqual(["dependent-skill"]);
+    expect(result.owner_kind).toBe("user");
+  });
+
+  it("rejects moving a user's private dependency into a team its owner is not in", async () => {
+    // other-user owns a private skill `dep-priv` and a private dependent `dependent2` that requires it.
+    // An org admin moves dep-priv into team-platform, where other-user is NOT a member (ownerTeamRole
+    // null → userInAnyTeam false). The dependent would point at a dependency its owner can no longer
+    // see, so the cover guard must reject — the team-owned target gives NO same-user cover shortcut.
+    await expect(
+      transferSkillOwnership({
+        actor,
+        orgId: ORG,
+        slug: "dep-priv",
+        ownerTeam: "platform",
+        database: fakeDb({
+          orgRole: "admin",
+          ownerTeamRole: null,
+          extraSkills: [
+            skillRow("skill-dep-priv", "dep-priv", false, { userId: "other-user", name: "Other" }),
+            skillRow("skill-dependent2", "dependent2", false, { userId: "other-user", name: "Other" }),
+          ],
+          edges: [
+            {
+              skillId: "skill-dependent2",
+              skillVersionId: "skill-dependent2-cv",
+              dependsOnSlug: "dep-priv",
+              dependsOnSkillId: "skill-dep-priv",
+            },
+          ],
+        }),
+      }),
+    ).rejects.toThrow(/cannot narrow visibility/);
   });
 });

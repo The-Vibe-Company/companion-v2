@@ -65,8 +65,12 @@ describe("PropList manifest rendering", () => {
       React.createElement(PropList, {
         skill,
         teams,
+        ownerTeams: teams,
+        me: { id: "user-1", name: "Alice Nardon", email: "alice@example.com", initials: "AN" },
         onChangeVisibility: vi.fn(),
         canChangeVisibility: true,
+        onChangeOwner: vi.fn(),
+        canChangeOwner: true,
       }),
     );
     expect(html).toContain("Compatibility");

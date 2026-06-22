@@ -6,6 +6,7 @@ import {
   skillFrontmatterSchema,
   skillListRowSchema,
   skillVisibilityInputSchema,
+  transferSkillOwnershipInputSchema,
   visibilityFilterSchema,
 } from "../src";
 
@@ -109,5 +110,16 @@ describe("skill visibility contracts", () => {
     });
     expect(() => skillFilterSchema.parse({ type: "visibility", value: "public" })).toThrow();
     expect(() => skillFilterSchema.parse({ type: "scope", value: "public" })).toThrow();
+  });
+
+  it("requires an explicit owner_team for ownership transfer (null = personal)", () => {
+    expect(transferSkillOwnershipInputSchema.parse({ owner_team: null })).toEqual({ owner_team: null, cascade: false });
+    expect(transferSkillOwnershipInputSchema.parse({ owner_team: "platform", cascade: true })).toEqual({
+      owner_team: "platform",
+      cascade: true,
+    });
+    // An omitted destination must be rejected so a malformed body can't silently reassign to the caller.
+    expect(() => transferSkillOwnershipInputSchema.parse({})).toThrow();
+    expect(() => transferSkillOwnershipInputSchema.parse({ cascade: true })).toThrow();
   });
 });

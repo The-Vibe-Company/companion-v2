@@ -192,6 +192,7 @@ export function DetailView({
   onToggleStar,
   onToggleInstalled,
   onChangeVisibility,
+  onChangeOwner,
   onInstall,
   onUpdate,
   onOpenSkill,
@@ -211,6 +212,7 @@ export function DetailView({
   onToggleStar: () => void;
   onToggleInstalled: () => void;
   onChangeVisibility: (visibility: SkillVisibilityInput) => void;
+  onChangeOwner: (ownerTeam: string | null) => void;
   onInstall: () => void;
   onUpdate: () => void;
   onOpenSkill: (slug: string) => void;
@@ -327,6 +329,12 @@ export function DetailView({
     myRole === "owner" ||
     (skill.owner.kind === "user" && skill.owner.userId === me.id) ||
     (skill.owner.kind === "team" && (ownerTeam?.role === "admin" || ownerTeam?.role === "editor"));
+  // Destinations the actor may transfer ownership INTO: org admins can pick any team; everyone else is
+  // limited to teams they admin/edit. (The server re-checks; this just scopes the menu.)
+  const transferTeams =
+    myRole === "admin" || myRole === "owner"
+      ? teams
+      : teams.filter((team) => team.role === "admin" || team.role === "editor");
   const canDeprecate = (c: SkillCommentRow): boolean =>
     // Hide the control on a still-optimistic row (a PATCH to a tmp id would 404).
     !c.id.startsWith("tmp-") &&
@@ -480,8 +488,12 @@ export function DetailView({
             <DetailMeta
               skill={skill}
               teams={teams}
+              ownerTeams={transferTeams}
+              me={me}
               onChangeVisibility={onChangeVisibility}
               canChangeVisibility={canModifySkill}
+              onChangeOwner={onChangeOwner}
+              canChangeOwner={canModifySkill}
               requiresN={reqN}
               usedByN={usedN}
               depFlag={depFlag}

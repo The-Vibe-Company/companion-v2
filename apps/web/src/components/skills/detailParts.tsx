@@ -6,7 +6,7 @@ import { Icon } from "../Icon";
 import { TeamAvatar } from "../org/TeamAvatar";
 import { relativeTime } from "@/lib/format";
 import type { MeVM, SkillVM, TeamVM } from "@/lib/types";
-import { Avatar, visibilityMeta } from "./blocks";
+import { visibilityMeta } from "./blocks";
 
 export type DetailPanel = "dependencies" | "requirements" | "files" | "activity" | "manifest" | "checksum";
 export type DetailPanelItem = {
@@ -38,6 +38,10 @@ export function VisibilityControl({
   const menuRef = useRef<HTMLDivElement>(null);
   const meta = visibilityMeta(skill);
   const selected = new Set(skill.teamSlugs);
+  // The owning team is part of the audience via ownership, not a share — never offer it as a toggle
+  // here (selecting it would write a redundant share row and read as "Team · X + 1 team").
+  const ownerTeamSlug = skill.owner.kind === "team" ? skill.owner.handle : null;
+  const shareTeams = teams.filter((team) => team.id !== ownerTeamSlug);
   const commit = (everyone: boolean, nextTeams: string[]) => onChange({ everyone, teams: nextTeams });
   const toggleTeam = (slug: string) => {
     const next = new Set(selected);
@@ -134,8 +138,8 @@ export function VisibilityControl({
               </span>
             )}
           </button>
-          {teams.length > 0 && <div className="menu__head">Teams</div>}
-          {teams.map((team) => (
+          {shareTeams.length > 0 && <div className="menu__head">Teams</div>}
+          {shareTeams.map((team) => (
             <button
               key={team.id}
               role="menuitemcheckbox"
@@ -159,11 +163,164 @@ export function VisibilityControl({
   );
 }
 
+/**
+ * Owner control — orthogonal to visibility. Owning a skill (personally or via a team) implies it is
+ * visible to that owner; transferring it changes which team the skill "lives in". Single-select between
+ * Personal and the teams the actor may transfer into (the parent passes the allowed destinations).
+ */
+export function OwnerControl({
+  skill,
+  ownerTeams,
+  me,
+  onChange,
+  canChange,
+}: {
+  skill: SkillVM;
+  ownerTeams: TeamVM[];
+  me: MeVM;
+  onChange: (ownerTeam: string | null) => void;
+  canChange: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const [menuPos, setMenuPos] = useState({ x: 0, y: 0 });
+  const ref = useRef<HTMLSpanElement>(null);
+  const btnRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const isTeam = skill.owner.kind === "team";
+  const currentTeamSlug = isTeam ? skill.owner.handle : null;
+  // "Personal" represents the acting user, so it is the current owner only when THIS user owns it —
+  // not for an org admin viewing someone else's personal skill (where choosing it reassigns to them).
+  const ownedByMe = !isTeam && skill.owner.userId === me.id;
+  // Show the actual owner on the button (a person's name, or the team name); the "Personal" wording is
+  // reserved for the menu's transfer-to-me option.
+  const label = skill.owner.name;
+  const icon = isTeam ? "users" : "user";
+  const choose = (ownerTeam: string | null) => {
+    onChange(ownerTeam);
+    setOpen(false);
+  };
+
+  useEffect(() => {
+    if (!open) return;
+    const el = menuRef.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    const pad = 8;
+    let left = menuPos.x - r.width;
+    let top = menuPos.y;
+    if (left < pad) left = pad;
+    if (left + r.width > window.innerWidth - pad) left = Math.max(pad, window.innerWidth - r.width - pad);
+    if (top + r.height > window.innerHeight - pad) top = Math.max(pad, window.innerHeight - r.height - pad);
+    el.style.left = `${left}px`;
+    el.style.top = `${top}px`;
+  }, [open, menuPos]);
+
+  useEffect(() => {
+    const h = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    const k = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", h);
+    document.addEventListener("keydown", k);
+    return () => {
+      document.removeEventListener("mousedown", h);
+      document.removeEventListener("keydown", k);
+    };
+  }, []);
+
+  const toggleMenu = () => {
+    setOpen((wasOpen) => {
+      if (!wasOpen) {
+        const r = btnRef.current?.getBoundingClientRect();
+        if (r) setMenuPos({ x: r.right, y: r.bottom + 6 });
+      }
+      return !wasOpen;
+    });
+  };
+
+  if (!canChange) {
+    return (
+      <span className="vis__btn vis__btn--readonly" title="Only the owner can transfer this skill" aria-label={`Owner: ${label}`}>
+        <span className="lead">
+          <Icon name={icon} size={11} />
+        </span>
+        <span className="vis__label">{label}</span>
+        <span className="caret">
+          <Icon name="lock" size={11} />
+        </span>
+      </span>
+    );
+  }
+  return (
+    <span className="vis" ref={ref}>
+      <button ref={btnRef} className="vis__btn" onClick={toggleMenu} aria-haspopup="menu" aria-expanded={open}>
+        <span className="lead">
+          <Icon name={icon} size={11} />
+        </span>
+        <span className="vis__label">{label}</span>
+        <span className="caret">
+          <Icon name="chevron-down" size={12} />
+        </span>
+      </button>
+      {open && (
+        <div className="menu menu--fixed" role="menu" ref={menuRef}>
+          <div className="menu__head">Owner</div>
+          <button
+            role="menuitemradio"
+            aria-checked={ownedByMe}
+            className={"menu__item" + (ownedByMe ? " is-sel" : "")}
+            onClick={() => choose(null)}
+          >
+            <span className="ico">
+              <Icon name="user" size={14} />
+            </span>
+            <span className="menu__label">Personal</span>
+            <span className="menu__desc">you</span>
+            {ownedByMe && (
+              <span className="menu__check">
+                <Icon name="check" size={13} />
+              </span>
+            )}
+          </button>
+          {ownerTeams.length > 0 && <div className="menu__head">Teams</div>}
+          {ownerTeams.map((team) => {
+            const sel = currentTeamSlug === team.id;
+            return (
+              <button
+                key={team.id}
+                role="menuitemradio"
+                aria-checked={sel}
+                className={"menu__item" + (sel ? " is-sel" : "")}
+                onClick={() => choose(team.id)}
+              >
+                <TeamAvatar team={team} className="ico menu__teamav" />
+                <span className="menu__label">{team.name}</span>
+                <span className="menu__desc">team</span>
+                {sel && (
+                  <span className="menu__check">
+                    <Icon name="check" size={13} />
+                  </span>
+                )}
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </span>
+  );
+}
+
 export function PropList({
   skill,
   teams,
+  ownerTeams,
+  me,
   onChangeVisibility,
   canChangeVisibility,
+  onChangeOwner,
+  canChangeOwner,
   requiresN,
   usedByN,
   depFlag,
@@ -171,8 +328,12 @@ export function PropList({
 }: {
   skill: SkillVM;
   teams: TeamVM[];
+  ownerTeams: TeamVM[];
+  me: MeVM;
   onChangeVisibility: (visibility: SkillVisibilityInput) => void;
   canChangeVisibility: boolean;
+  onChangeOwner: (ownerTeam: string | null) => void;
+  canChangeOwner: boolean;
   /** Dependency counts for the rail (fall back to the list-row counts before the graph loads). */
   requiresN?: number;
   usedByN?: number;
@@ -190,8 +351,17 @@ export function PropList({
     <div className="props">
       <div className="prop">
         <span className="prop__label">
+          <Icon name={skill.owner.kind === "team" ? "users" : "user"} size={14} />
+          Owner
+        </span>
+        <span className="prop__value">
+          <OwnerControl skill={skill} ownerTeams={ownerTeams} me={me} onChange={onChangeOwner} canChange={canChangeOwner} />
+        </span>
+      </div>
+      <div className="prop">
+        <span className="prop__label">
           <Icon name={meta.icon} size={14} />
-          Visibility
+          Shared with
         </span>
         <span className="prop__value">
           <VisibilityControl skill={skill} teams={teams} onChange={onChangeVisibility} canChange={canChangeVisibility} />
@@ -206,16 +376,6 @@ export function PropList({
           <span className="mono" style={{ color: "var(--color-fg)" }}>
             {skill.version ?? "—"}
           </span>
-        </span>
-      </div>
-      <div className="prop">
-        <span className="prop__label">
-          <Icon name="user" size={14} />
-          Owner
-        </span>
-        <span className="prop__value">
-          <Avatar initials={skill.owner.initials} />
-          {skill.owner.name}
         </span>
       </div>
       <div className="prop">
@@ -365,8 +525,12 @@ export function PropList({
 export function DetailMeta({
   skill,
   teams,
+  ownerTeams,
+  me,
   onChangeVisibility,
   canChangeVisibility,
+  onChangeOwner,
+  canChangeOwner,
   requiresN,
   usedByN,
   depFlag,
@@ -374,8 +538,12 @@ export function DetailMeta({
 }: {
   skill: SkillVM;
   teams: TeamVM[];
+  ownerTeams: TeamVM[];
+  me: MeVM;
   onChangeVisibility: (visibility: SkillVisibilityInput) => void;
   canChangeVisibility: boolean;
+  onChangeOwner: (ownerTeam: string | null) => void;
+  canChangeOwner: boolean;
   requiresN?: number;
   usedByN?: number;
   depFlag?: { n: number; blocked: boolean } | null;
@@ -389,6 +557,10 @@ export function DetailMeta({
 
   return (
     <div className="linmeta">
+      <OwnerControl skill={skill} ownerTeams={ownerTeams} me={me} onChange={onChangeOwner} canChange={canChangeOwner} />
+      <span className="linmeta__sep" aria-hidden="true">
+        ·
+      </span>
       <VisibilityControl skill={skill} teams={teams} onChange={onChangeVisibility} canChange={canChangeVisibility} />
       <span className="linmeta__sep" aria-hidden="true">
         ·
@@ -396,13 +568,6 @@ export function DetailMeta({
       <span className="linmeta__item">
         <Icon name="tag" size={11} />
         <span className="mono">{skill.version ?? "—"}</span>
-      </span>
-      <span className="linmeta__sep" aria-hidden="true">
-        ·
-      </span>
-      <span className="linmeta__item linmeta__item--owner">
-        <Avatar initials={skill.owner.initials} size={16} />
-        <span className="linmeta__truncate">{skill.owner.name}</span>
       </span>
       <span className="linmeta__sep" aria-hidden="true">
         ·

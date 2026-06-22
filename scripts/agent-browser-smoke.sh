@@ -169,7 +169,7 @@ agent-browser find role button click --name "Filter"
 agent-browser wait 300
 assert_body_contains "Visibility"
 assert_body_contains "Everyone"
-assert_body_contains "Team shares"
+assert_body_contains "Team"
 agent-browser press Escape
 
 log "Checking detail view"

@@ -10,24 +10,38 @@ export const VISIBILITY_ICON: Record<string, string> = {
 
 export function visibilityKind(s: SkillVM): VisibilityFilter {
   if (s.visibility.everyone) return "everyone";
-  if (s.visibility.teams.length) return "team";
+  // A team-owned skill is always visible to its owning team, so it is never "private".
+  if (s.owner.kind === "team" || s.visibility.teams.length) return "team";
   return "private";
 }
 
 export function visibilityMeta(s: SkillVM): { icon: string; label: string } {
-  const teams = s.visibility.teams;
+  const teams = s.visibility.teams; // additional team shares (never includes the owning team)
+  // Everyone (optionally stacked with extra team shares).
   if (s.visibility.everyone && teams.length > 0) {
     return { icon: "building-2", label: `Everyone + ${teams.length} team${teams.length === 1 ? "" : "s"}` };
   }
   if (s.visibility.everyone) return { icon: "building-2", label: "Everyone" };
+  // Team-owned: the owning team is the home audience; extra shares stack on top.
+  if (s.owner.kind === "team") {
+    if (teams.length > 0) {
+      return {
+        icon: "users",
+        label: `Team · ${s.owner.name} + ${teams.length} team${teams.length === 1 ? "" : "s"}`,
+      };
+    }
+    return { icon: "users", label: `Team · ${s.owner.name}` };
+  }
+  // User-owned but shared with one or more teams.
   if (teams.length === 1) return { icon: "users", label: teams[0]!.name };
   if (teams.length > 1) return { icon: "users", label: `${teams.length} teams` };
+  // User-owned, unshared, not everyone → the only true "Private".
   return { icon: "lock", label: "Private" };
 }
 
 export const VISIBILITY_DESC: Record<VisibilityFilter, string> = {
   private: "only you",
-  team: "selected teams",
+  team: "owning team + selected teams",
   everyone: "everyone in the workspace",
 };
 export const VISIBILITY_ORDER: VisibilityFilter[] = ["everyone", "team", "private"];

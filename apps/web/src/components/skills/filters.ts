@@ -25,14 +25,17 @@ export function filtersKey(fs: Filter[]): string {
 function matchOne(s: SkillVM, type: string, v: string): boolean {
   if (type === "visibility") {
     if (v === "everyone") return s.visibility.everyone;
-    if (v === "team") return s.visibility.teams.length > 0;
-    if (v === "private") return !s.visibility.everyone && s.visibility.teams.length === 0;
+    // Team-owned skills are always visible to their owning team, so they count as "team".
+    if (v === "team") return s.owner.kind === "team" || s.visibility.teams.length > 0;
+    if (v === "private")
+      return s.owner.kind !== "team" && !s.visibility.everyone && s.visibility.teams.length === 0;
     return false;
   }
   if (type === "status") return s.validation === v;
   if (type === "starred") return s.starred === true;
   if (type === "owner") return s.owner.name === v;
-  if (type === "team") return s.teamSlugs.includes(v);
+  // A team sees a skill it owns (handle = owner-team slug) as well as ones explicitly shared with it.
+  if (type === "team") return s.teamSlugs.includes(v) || (s.owner.kind === "team" && s.owner.handle === v);
   if (type === "deps") {
     if (v === "has") return s.requiresCount > 0;
     if (v === "used") return s.usedByCount > 0;
