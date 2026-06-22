@@ -334,11 +334,22 @@ export function DetailView({
 
   const addComment = (
     body: string,
-    opts: { parentId?: string | null; versionId?: string | null },
+    opts: { parentId?: string | null; versionId?: string | null; images?: File[] },
   ) => {
     const parentId = opts.parentId ?? null;
     const versionId = opts.versionId ?? null;
-    const tmpId = `tmp-${Date.now()}`;
+    const images = opts.images ?? [];
+    // Unique even when two comments (e.g. a thread + a reply) are sent within the same millisecond.
+    const tmpId = `tmp-${crypto.randomUUID()}`;
+    // Local object-URL previews so the attachments render instantly; revoked once the row is settled.
+    const previews = images.map((file, i) => ({
+      id: `tmp-img-${i}`,
+      content_type: file.type,
+      byte_size: file.size,
+      position: i,
+      url: URL.createObjectURL(file),
+    }));
+    const revokePreviews = () => previews.forEach((p) => URL.revokeObjectURL(p.url));
     const optimistic: SkillCommentRow = {
       id: tmpId,
       skill_id: skill.uuid,
@@ -351,22 +362,28 @@ export function DetailView({
       version_id: versionId,
       version: versionId ? (versions.find((v) => v.id === versionId)?.version ?? null) : null,
       deprecated: false,
+      images: previews,
     };
     setComments((c) => [...c, optimistic]);
-    addCommentRpc(skill.id, body, { parentId, versionId })
-      .then((row) =>
+    addCommentRpc(skill.id, body, { parentId, versionId, images })
+      .then((row) => {
+        revokePreviews();
         setComments((c) =>
           c.map((x) =>
             x.id === tmpId
-              ? { ...row, author_name: me.name, author_initials: me.initials }
+              ? // Server row carries persistent image urls; keep our display name/initials.
+                { ...row, author_name: me.name, author_initials: me.initials }
               : // Re-point any optimistic reply that targeted this still-pending root.
                 x.parent_id === tmpId
                 ? { ...x, parent_id: row.id }
                 : x,
           ),
-        ),
-      )
-      .catch(() => setComments((c) => c.filter((x) => x.id !== tmpId)));
+        );
+      })
+      .catch(() => {
+        revokePreviews();
+        setComments((c) => c.filter((x) => x.id !== tmpId));
+      });
   };
 
   const toggleDeprecated = (id: string, next: boolean) => {

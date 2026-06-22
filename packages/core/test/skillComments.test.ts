@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Db } from "@companion/db";
-import { addComment, setCommentDeprecated, type ActorContext } from "../src/services";
+import { addComment, getCommentImageAsset, setCommentDeprecated, type ActorContext } from "../src/services";
 
 /**
  * These suites exercise the comment-thread service layer (RBAC for deprecate/restore and the
@@ -35,6 +35,8 @@ interface FakeOptions {
   version?: Record<string, unknown> | null;
   /** Author profile row returned by `profiles.findFirst` (re-joined into the deprecate result). */
   authorProfile?: Record<string, unknown> | null;
+  /** The image row returned by `skillCommentImages.findFirst` (comment-image serve gate). */
+  image?: Record<string, unknown> | null;
 }
 
 /** A select(...) chain that ignores every intermediate call and resolves to `rows` when awaited. */
@@ -91,6 +93,9 @@ function fakeDb(opts: FakeOptions = {}) {
     select: vi.fn(() => selectChain(skillRows)),
     insert: vi.fn(() => ({ values: insertValues })),
     update: vi.fn(() => ({ set: updateSet })),
+    // addComment wraps its comment + image inserts in a transaction; run the callback inline against
+    // this same stub (the real impl nests a savepoint inside the caller's withTenantContext tx).
+    transaction: vi.fn(async (cb: (tx: unknown) => unknown) => cb(database)),
     query: {
       memberships: {
         findFirst: vi.fn(async () => (orgRole === null ? null : { orgRole })),
@@ -100,6 +105,9 @@ function fakeDb(opts: FakeOptions = {}) {
       },
       skillComments: {
         findFirst: vi.fn(async () => opts.comment ?? null),
+      },
+      skillCommentImages: {
+        findFirst: vi.fn(async () => opts.image ?? null),
       },
       profiles: {
         findFirst: vi.fn(async () => opts.authorProfile ?? null),
@@ -284,5 +292,138 @@ describe("addComment — cross-skill version_id rejection", () => {
         database,
       }),
     ).rejects.toThrow("invalid parent comment");
+  });
+});
+
+describe("addComment — image attachments", () => {
+  it("persists uploaded images and returns them ordered with built serve urls", async () => {
+    const inserted = {
+      id: "comment-img",
+      orgId: ORG,
+      skillId: SKILL_ID,
+      authorId: author.id,
+      body: "look at this",
+      parentId: null,
+      versionId: null,
+      deprecated: false,
+      createdAt: new Date(),
+    };
+    const { database, insertValues } = fakeDb({ orgRole: "developer", comment: inserted });
+    const row = await addComment({
+      actor: author,
+      orgId: ORG,
+      slug: "demo-skill",
+      body: "look at this",
+      images: [
+        { id: "img-1", storageKey: `${ORG}/comments/img-1`, contentType: "image/png", byteSize: 1234 },
+        { id: "img-2", storageKey: `${ORG}/comments/img-2`, contentType: "image/jpeg", byteSize: 5678 },
+      ],
+      database,
+    });
+    expect(row.images).toHaveLength(2);
+    expect(row.images[0]).toMatchObject({ id: "img-1", content_type: "image/png", byte_size: 1234, position: 0 });
+    expect(row.images[0]?.url).toBe("/v1/skills/demo-skill/comments/comment-img/images/img-1");
+    expect(row.images[1]).toMatchObject({ id: "img-2", position: 1 });
+    // The image rows are actually inserted (org/comment/skill scoped, positioned, with the storage key).
+    expect(insertValues).toHaveBeenCalledWith(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "img-1",
+          orgId: ORG,
+          commentId: "comment-img",
+          skillId: SKILL_ID,
+          storageKey: `${ORG}/comments/img-1`,
+          contentType: "image/png",
+          byteSize: 1234,
+          position: 0,
+        }),
+        expect.objectContaining({ id: "img-2", position: 1, contentType: "image/jpeg" }),
+      ]),
+    );
+  });
+
+  it("enforces the attachment invariants in the service layer (count / type / size)", async () => {
+    const img = { id: "i", storageKey: "k", contentType: "image/png", byteSize: 10 };
+    const tooMany = Array.from({ length: 7 }, (_, i) => ({ ...img, id: `i${i}`, storageKey: `k${i}` }));
+    await expect(
+      addComment({ actor: author, orgId: ORG, slug: "demo-skill", body: "x", images: tooMany, database: fakeDb({ orgRole: "developer" }).database }),
+    ).rejects.toThrow("at most 6 images");
+    await expect(
+      addComment({
+        actor: author, orgId: ORG, slug: "demo-skill", body: "x",
+        images: [{ ...img, contentType: "image/svg+xml" }],
+        database: fakeDb({ orgRole: "developer" }).database,
+      }),
+    ).rejects.toThrow("unsupported comment image type");
+    await expect(
+      addComment({
+        actor: author, orgId: ORG, slug: "demo-skill", body: "x",
+        images: [{ ...img, byteSize: 11 * 1024 * 1024 }],
+        database: fakeDb({ orgRole: "developer" }).database,
+      }),
+    ).rejects.toThrow("exceeds the size limit");
+  });
+
+  it("returns an empty images array when no attachments are provided", async () => {
+    const inserted = {
+      id: "comment-plain",
+      orgId: ORG,
+      skillId: SKILL_ID,
+      authorId: author.id,
+      body: "text only",
+      parentId: null,
+      versionId: null,
+      deprecated: false,
+      createdAt: new Date(),
+    };
+    const { database } = fakeDb({ orgRole: "developer", comment: inserted });
+    const row = await addComment({ actor: author, orgId: ORG, slug: "demo-skill", body: "text only", database });
+    expect(row.images).toEqual([]);
+  });
+});
+
+describe("getCommentImageAsset — visibility gate", () => {
+  it("denies a cross-tenant actor before the image is read (fails closed on membership)", async () => {
+    const { database } = fakeDb({ orgRole: null });
+    await expect(
+      getCommentImageAsset({
+        actor: other,
+        orgId: ORG,
+        slug: "demo-skill",
+        commentId: "comment-1",
+        imageId: "img-1",
+        database,
+      }),
+    ).rejects.toThrow("not a member of this organization");
+  });
+
+  it("throws when the image does not exist under this org+skill+comment", async () => {
+    const { database } = fakeDb({ orgRole: "developer", image: null });
+    await expect(
+      getCommentImageAsset({
+        actor: author,
+        orgId: ORG,
+        slug: "demo-skill",
+        commentId: "comment-1",
+        imageId: "missing",
+        database,
+      }),
+    ).rejects.toThrow("image not found");
+  });
+
+  it("returns the storage key + content type for a visible image", async () => {
+    const { database } = fakeDb({
+      orgRole: "developer",
+      image: { storageKey: `${ORG}/comments/img-1`, contentType: "image/webp" },
+    });
+    const asset = await getCommentImageAsset({
+      actor: author,
+      orgId: ORG,
+      slug: "demo-skill",
+      commentId: "comment-1",
+      imageId: "img-1",
+      database,
+    });
+    expect(asset).toEqual({ storageKey: `${ORG}/comments/img-1`, contentType: "image/webp" });
   });
 });

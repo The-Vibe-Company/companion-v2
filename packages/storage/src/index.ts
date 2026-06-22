@@ -49,6 +49,15 @@ export function orgLogoKey(orgId: string): string {
   return `orgs/${orgId}/logo`;
 }
 
+/**
+ * Stored comment image attachment. `imageId` is globally unique (the `skill_comment_images.id`),
+ * so the key needs no comment/skill segment. Content-type is kept on the object. Uploaded with the
+ * generic `putSkillArchive` / read with `getSkillArchive` / removed with `deleteSkillArchive`.
+ */
+export function commentImageKey(input: { orgId: string; imageId: string }): string {
+  return `${input.orgId}/comments/${input.imageId}`;
+}
+
 export async function putOrgLogo(input: {
   orgId: string;
   body: Uint8Array;

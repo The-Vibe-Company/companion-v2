@@ -31,6 +31,7 @@ import {
   getSkillFilterPreferences,
   getOrgSettings,
   getDownloadVersion,
+  getCommentImageAsset,
   getOrgLogoAsset,
   issueApiToken,
   joinOrgByDomain,
@@ -84,12 +85,17 @@ import {
   updateOrgInputSchema,
   updateTeamInputSchema,
   resolveOrgLogoContentType,
+  resolveCommentImageContentType,
+  sniffCommentImageMime,
+  MAX_COMMENT_IMAGES,
+  MAX_COMMENT_IMAGE_BYTES,
   updateUserProfileInputSchema,
   type CompanionManifest,
   type SkillVisibilityInput,
   type SkillFrontmatter,
 } from "@companion/contracts";
 import {
+  commentImageKey,
   deleteSkillArchive,
   getSkillArchive,
   getOrgLogo,
@@ -966,24 +972,117 @@ app.get("/v1/skills/:slug/comments", async (c) => {
   }
 });
 
-app.post("/v1/skills/:slug/comments", async (c) => {
+app.post(
+  "/v1/skills/:slug/comments",
+  // 6 images x 10 MB + form overhead. Text-only comments come through the JSON branch well under this.
+  bodyLimit({ maxSize: 64 * 1024 * 1024, onError: (c) => jsonError(c, "comment exceeds the 64 MB upload limit", 413) }),
+  async (c) => {
+    try {
+      const slug = c.req.param("slug");
+      const contentType = c.req.header("content-type") ?? "";
+
+      // Multipart: a comment with image attachments.
+      if (contentType.includes("multipart/form-data")) {
+        // Authenticate + resolve the tenant BEFORE buffering/parsing the (up to 64 MB) body, so an
+        // unauthenticated caller can't force the server to parse a large upload.
+        const actor = actorFromContext(c);
+        const orgId = await orgIdFromContext(c);
+
+        const form = await c.req.formData();
+        const rawBody = form.get("body");
+        const body = typeof rawBody === "string" ? rawBody : "";
+        const rawParent = form.get("parent_id");
+        const parentId = typeof rawParent === "string" && rawParent.length ? rawParent : null;
+        const rawVersion = form.get("version_id");
+        const versionId = typeof rawVersion === "string" && rawVersion.length ? rawVersion : null;
+        // File entries only (the other branch of FormDataEntryValue is `string`).
+        const files = form.getAll("image").filter((f): f is Exclude<typeof f, string> => typeof f !== "string");
+
+        if (files.length > MAX_COMMENT_IMAGES) {
+          throw new Error(`a comment can have at most ${MAX_COMMENT_IMAGES} images`);
+        }
+        if (!body.trim() && files.length === 0) throw new Error("comment body is required");
+        for (const file of files) {
+          if (!resolveCommentImageContentType(file)) throw new Error("images must be PNG, JPEG, WebP, or GIF");
+          if (file.size === 0) throw new Error("an image file is empty");
+          if (file.size > MAX_COMMENT_IMAGE_BYTES) throw new Error("each image must be 10 MB or smaller");
+        }
+
+        // Upload the bytes to object storage OUTSIDE any DB transaction (slow uploads must not hold a
+        // pooled connection idle-in-transaction); the transaction below only persists metadata.
+        const uploadedKeys: string[] = [];
+        const images: Array<{ id: string; storageKey: string; contentType: string; byteSize: number }> = [];
+        try {
+          for (const file of files) {
+            const buf = Buffer.from(await file.arrayBuffer());
+            // The stored content type comes from the actual file bytes, not the client-declared
+            // MIME/extension, so disguised non-images are rejected and never stored or served back.
+            const ct = sniffCommentImageMime(buf);
+            if (!ct) throw new Error("images must be valid PNG, JPEG, WebP, or GIF files");
+            const imageId = randomUUID();
+            const key = commentImageKey({ orgId, imageId });
+            await putSkillArchive({ key, body: buf, contentType: ct });
+            uploadedKeys.push(key);
+            images.push({ id: imageId, storageKey: key, contentType: ct, byteSize: buf.length });
+          }
+          return c.json(
+            await withTenantContext({ orgId, userId: actor.id }, (database) =>
+              addComment({ actor, orgId, slug, body, parentId, versionId, images, database }),
+            ),
+          );
+        } catch (e) {
+          // The comment insert rolled back (or upload failed); drop any objects we stored so they don't orphan.
+          await Promise.allSettled(uploadedKeys.map((key) => deleteSkillArchive({ key })));
+          throw e;
+        }
+      }
+
+      // JSON: a text-only comment (unchanged contract).
+      const input = addCommentInputSchema.parse(await c.req.json());
+      return c.json(
+        await withTenant(c, ({ actor, orgId, database }) =>
+          addComment({
+            actor,
+            orgId,
+            slug,
+            body: input.body,
+            parentId: input.parent_id ?? null,
+            versionId: input.version_id ?? null,
+            database,
+          }),
+        ),
+      );
+    } catch (error) {
+      return jsonError(c, error);
+    }
+  },
+);
+
+/** Serve a comment image attachment to viewers who can see the skill. */
+app.get("/v1/skills/:slug/comments/:commentId/images/:imageId", async (c) => {
   try {
-    const input = addCommentInputSchema.parse(await c.req.json());
-    return c.json(
-      await withTenant(c, ({ actor, orgId, database }) =>
-        addComment({
-          actor,
-          orgId,
-          slug: c.req.param("slug"),
-          body: input.body,
-          parentId: input.parent_id ?? null,
-          versionId: input.version_id ?? null,
-          database,
-        }),
-      ),
+    const asset = await withTenant(c, ({ actor, orgId, database }) =>
+      getCommentImageAsset({
+        actor,
+        orgId,
+        slug: c.req.param("slug"),
+        commentId: c.req.param("commentId"),
+        imageId: c.req.param("imageId"),
+        database,
+      }),
     );
+    const body = await getSkillArchive({ key: asset.storageKey });
+    return new Response(body, {
+      headers: {
+        "Content-Type": asset.contentType,
+        "Cache-Control": "private, max-age=3600",
+        // User-uploaded bytes: never let the browser sniff them into an executable type.
+        "X-Content-Type-Options": "nosniff",
+      },
+    });
   } catch (error) {
-    return jsonError(c, error);
+    // Not-visible skill / unknown image / cross-tenant all surface as a 404 for the <img> request.
+    return jsonError(c, error, 404);
   }
 });
 

@@ -59,7 +59,7 @@ cli/          # companion CLI
 Better Auth owns the core `user`, `session`, `account`, and `verification` tables. Companion
 adds `profiles`, `organizations`, `memberships`, `teams`, `team_memberships`, `invitations`,
 `skills`, `skill_versions`, `skill_version_dependencies`, `skill_stars`, `skill_filter_preferences`,
-`skill_comments`, `local_skill_installs`, `api_tokens`, and `audit_log`.
+`skill_comments`, `skill_comment_images`, `local_skill_installs`, `api_tokens`, and `audit_log`.
 
 Every tenant-owned table carries `org_id`. Skills keep ownership, visibility, and provenance
 separate: `owner_id` / `owner_team_id`, `everyone`, `skill_team_shares`, and `creator_id`.
@@ -140,6 +140,15 @@ thread is linked to that version), and `deprecated` (threads are greyed/struck-t
 Cross-skill integrity for `parent_id`/`version_id` is not FK-enforceable and is validated in the service
 layer; a reply inherits its thread context (its `version_id` is forced `null`). Marking a thread
 deprecated is allowed for the comment author, an org admin, or the skill owner.
+
+`skill_comment_images` holds image attachments on a comment (one row per image, ordered by `position`,
+tenant-scoped with RLS, cascade-deleted with the parent comment). Only metadata lives in the row
+(`storage_key`, `content_type`, `byte_size`); the bytes are stored in object storage under
+`${orgId}/comments/${id}`. A comment `POST` switches to `multipart/form-data` when it carries images
+(text-only comments stay JSON); the API validates each file (PNG/JPEG/WebP/GIF, ≤ 10 MB, ≤ 6 per comment),
+uploads the bytes, then persists the comment + image rows. Attachments are served by
+`GET /v1/skills/:slug/comments/:commentId/images/:imageId`, gated by skill visibility and streamed with
+`X-Content-Type-Options: nosniff`.
 
 Onboarding adds cosmetic `organizations.color`/`logo_url` and `teams.color`/`teams.icon`.
 `teams.description` holds an optional free-text summary shown on the team's settings page.
@@ -236,7 +245,9 @@ directly to Postgres.
   `GET /v1/skills/:slug/versions/:version/files` (read a version's package contents for the in-app
   file explorer — text files are returned UTF-8-decoded and capped, binaries carry `content: null`).
   Threaded discussion: `GET`/`POST /v1/skills/:slug/comments` (a `POST` may carry `parent_id` for a
-  reply and `version_id` to link the thread to a version) and
+  reply and `version_id` to link the thread to a version; a `multipart/form-data` `POST` may also carry
+  up to 6 image attachments),
+  `GET /v1/skills/:slug/comments/:commentId/images/:imageId` (serve an attachment, visibility-gated), and
   `PATCH /v1/skills/:slug/comments/:id` (deprecate / restore a thread).
   Dependencies & archive: `GET /v1/skills/:slug/dependencies?version=` (the Requires + Used by graph
   with live statuses), `POST /v1/skills/:slug/archive` (optional `{reason}`) and
