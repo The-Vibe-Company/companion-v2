@@ -108,7 +108,6 @@ export function Sidebar({
         >
           <Icon name="search" size={14} />
         </button>
-        <NotificationBell onOpenSkill={(slug) => runAndClose(() => onOpenSkill(slug))} />
       </div>
       <nav className="side__nav" aria-label="Primary">
         <button
@@ -123,6 +122,7 @@ export function Sidebar({
           <span className="navitem__label">My skills</span>
           <span className="navitem__count tnum">{myCount}</span>
         </button>
+        <NotificationBell onOpenSkill={(slug) => runAndClose(() => onOpenSkill(slug))} />
 
         <div className="side__grouplabel">Workspace</div>
         <button

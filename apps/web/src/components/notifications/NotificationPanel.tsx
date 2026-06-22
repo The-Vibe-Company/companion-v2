@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, type CSSProperties } from "react";
 import type { NotificationRow } from "@companion/contracts";
 import { Icon } from "../Icon";
 import { notificationSnippet, notificationText, relativeTime } from "./notificationCopy";
@@ -16,10 +16,13 @@ export function NotificationPanel({
   notifications,
   loading,
   onOpenItem,
+  style,
 }: {
   notifications: NotificationRow[];
   loading: boolean;
   onOpenItem: (n: NotificationRow) => void;
+  /** Fixed-position coordinates (the panel escapes the sidebar nav's `overflow-y: auto` clipping). */
+  style?: CSSProperties;
 }) {
   // Stamp "now" once on mount so relative times don't recompute every render (and stay SSR-safe).
   const [now, setNow] = useState<number>(() => Date.now());
@@ -29,7 +32,7 @@ export function NotificationPanel({
   }, []);
 
   return (
-    <div className="notif-panel" role="region" aria-label="Notifications">
+    <div className="notif-panel" role="region" aria-label="Notifications" style={style}>
       <div className="notif-panel__head">Notifications</div>
       {loading && notifications.length === 0 ? (
         <div className="notif-panel__empty">Loading…</div>

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import type { NotificationRow } from "@companion/contracts";
 import { fetchNotifications, fetchUnreadNotificationCount, markNotificationsRead } from "@/lib/queries";
 import { Icon } from "../Icon";
@@ -9,8 +9,10 @@ import { NotificationPanel } from "./NotificationPanel";
 const POLL_MS = 60_000;
 
 /**
- * Bell + unread badge in the sidebar brand row. There are no websockets in this stack, so the count
- * is polled every 60s (and refreshed on window focus and on open). Opening the panel loads the latest
+ * "Notifications" sidebar nav entry (below My skills) + unread badge. There are no websockets in this
+ * stack, so the count is polled every 60s (and refreshed on window focus and on open). The dropdown is
+ * rendered `position: fixed`, anchored to the nav item, because the sidebar nav has `overflow-y: auto`
+ * which would otherwise clip an absolutely-positioned panel. Opening the panel loads the latest
  * notifications and marks the shown unread ones read.
  */
 export function NotificationBell({ onOpenSkill }: { onOpenSkill: (slug: string) => void }) {
@@ -18,7 +20,9 @@ export function NotificationBell({ onOpenSkill }: { onOpenSkill: (slug: string) 
   const [count, setCount] = useState(0);
   const [items, setItems] = useState<NotificationRow[]>([]);
   const [loading, setLoading] = useState(false);
+  const [panelPos, setPanelPos] = useState<CSSProperties>({});
   const rootRef = useRef<HTMLDivElement>(null);
+  const btnRef = useRef<HTMLButtonElement>(null);
   const mountedRef = useRef(true);
   useEffect(() => {
     mountedRef.current = true;
@@ -49,7 +53,13 @@ export function NotificationBell({ onOpenSkill }: { onOpenSkill: (slug: string) 
     };
   }, [refreshCount]);
 
-  // Close on outside click / Escape.
+  // Anchor the fixed panel just below the nav item, opening rightward from its left edge.
+  const positionPanel = useCallback(() => {
+    const rect = btnRef.current?.getBoundingClientRect();
+    if (rect) setPanelPos({ top: Math.round(rect.bottom + 6), left: Math.round(rect.left) });
+  }, []);
+
+  // Close on outside click / Escape; reposition while open if the viewport changes.
   useEffect(() => {
     if (!open) return;
     const onDown = (e: MouseEvent) => {
@@ -58,15 +68,19 @@ export function NotificationBell({ onOpenSkill }: { onOpenSkill: (slug: string) 
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") setOpen(false);
     };
+    const onResize = () => positionPanel();
     document.addEventListener("mousedown", onDown);
     document.addEventListener("keydown", onKey);
+    window.addEventListener("resize", onResize);
     return () => {
       document.removeEventListener("mousedown", onDown);
       document.removeEventListener("keydown", onKey);
+      window.removeEventListener("resize", onResize);
     };
-  }, [open]);
+  }, [open, positionPanel]);
 
   const openPanel = useCallback(async () => {
+    positionPanel();
     setOpen(true);
     setLoading(true);
     try {
@@ -85,7 +99,7 @@ export function NotificationBell({ onOpenSkill }: { onOpenSkill: (slug: string) 
     } finally {
       setLoading(false);
     }
-  }, [refreshCount]);
+  }, [positionPanel, refreshCount]);
 
   const toggle = useCallback(() => {
     if (open) setOpen(false);
@@ -103,17 +117,23 @@ export function NotificationBell({ onOpenSkill }: { onOpenSkill: (slug: string) 
   return (
     <div className="notif" ref={rootRef}>
       <button
+        ref={btnRef}
         type="button"
-        className="notif-bell"
+        className={"navitem notif-nav" + (open ? " navitem--active" : "")}
         onClick={toggle}
-        aria-label={count > 0 ? `Notifications (${count} unread)` : "Notifications"}
         aria-expanded={open}
+        aria-label={count > 0 ? `Notifications (${count} unread)` : "Notifications"}
         title="Notifications"
       >
-        <Icon name="bell" size={14} />
-        {count > 0 ? <span className="notif-badge">{count > 9 ? "9+" : count}</span> : null}
+        <span className="navitem__ico">
+          <Icon name="bell" />
+        </span>
+        <span className="navitem__label">Notifications</span>
+        {count > 0 ? <span className="notif-navcount">{count > 99 ? "99+" : count}</span> : null}
       </button>
-      {open ? <NotificationPanel notifications={items} loading={loading} onOpenItem={onOpenItem} /> : null}
+      {open ? (
+        <NotificationPanel notifications={items} loading={loading} onOpenItem={onOpenItem} style={panelPos} />
+      ) : null}
     </div>
   );
 }
