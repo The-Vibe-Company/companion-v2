@@ -42,7 +42,14 @@ Companion PAT. Use them only when the caller is operating with a valid session c
 | Read comments | `GET /skills/{slug}/comments` | Session |
 | Add a comment | `POST /skills/{slug}/comments` | Session |
 | Deprecate/restore a comment | `PATCH /skills/{slug}/comments/{id}` | Session |
+| Read a comment image | `GET /skills/{slug}/comments/{commentId}/images/{imageId}` | Session |
 | Toggle star | `POST /skills/{slug}/star` | Session |
+
+A comment row includes an `images` array; each image carries `id`, `content_type`, `byte_size`,
+`position`, and a `url` (the session-gated path above) for display. To attach images when adding a
+comment, send `POST /skills/{slug}/comments` as `multipart/form-data` with the `body` field plus up to
+six `image` files (PNG, JPEG, WebP, or GIF, 10 MB each); the content type is verified from the file
+bytes. Text-only comments may still be sent as JSON.
 
 Do not use this skill for workspace members, teams, invitations, org settings, or token management.
 Those are outside the skills-only management surface.

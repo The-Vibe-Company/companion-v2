@@ -3,7 +3,7 @@ name: companion
 description: "Use when managing local SKILL.md packages with Companion: validate, publish, update, resolve skill dependencies, declare the secrets and environment variables a skill needs, install updates, audit skills, check workspace versions, or self-update this Companion skill through the Companion workspace API."
 license: MIT
 metadata:
-  companion_version: 1.5.0
+  companion_version: 1.6.0
 allowed-tools: read_file write_file run_shell
 ---
 
@@ -367,7 +367,10 @@ Allowed skills API tasks:
 - Change a skill's visibility with `PUT /skills/$SLUG/visibility` (see "Change a skill's
   visibility"). Works with a `skills:write` token.
 - Read or write skill comments and stars only when the caller has a valid signed-in session for
-  those routes. Do not assume a `cmp_pat_...` token can call session-only endpoints.
+  those routes. Do not assume a `cmp_pat_...` token can call session-only endpoints. A comment may
+  carry up to six image attachments: add them by sending `POST /skills/$SLUG/comments` as
+  `multipart/form-data` (a `body` field plus `image` files), and read a stored image from the
+  `url` on each entry of the comment's `images` array.
 
 For token-authenticated automation, prefer the documented read/write package endpoints in
 `reference/api.md`.

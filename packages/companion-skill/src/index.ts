@@ -64,6 +64,13 @@ export const COMPANION_SKILL_MANIFEST: CompanionSkillManifest = {
   ],
   changelog: [
     {
+      version: "1.6.0",
+      changes: [
+        "Documents comment image attachments: POST /skills/{slug}/comments accepts multipart/form-data with up to six image files.",
+        "Adds the session-gated GET /skills/{slug}/comments/{commentId}/images/{imageId} endpoint and the images array on comment rows.",
+      ],
+    },
+    {
       version: "1.5.0",
       changes: [
         "Moves Companion-specific package data into companion.json: display copy, dependencies, and setup requirements.",
