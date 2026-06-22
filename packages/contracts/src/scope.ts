@@ -1,10 +1,10 @@
 import { z } from "zod";
 
 /**
- * Derived skill visibility filters. The persisted skill model is `everyone` plus
- * zero or more team shares; `private` is derived from neither being present.
+ * Skill owner filters. A skill is owned by a user (`personal`, private to that user) or a team
+ * (`team`, readable by the whole workspace). The owner is the single access axis.
  */
-export const visibilityFilterSchema = z.enum(["private", "team", "everyone"]);
+export const visibilityFilterSchema = z.enum(["personal", "team"]);
 export type VisibilityFilter = z.infer<typeof visibilityFilterSchema>;
 
 /** Org roles, most-privileged first. */
@@ -21,7 +21,7 @@ export type ValidationState = z.infer<typeof validationStateSchema>;
 
 export const ORG_ROLES: readonly OrgRole[] = ["owner", "admin", "developer"] as const;
 export const TEAM_ROLES: readonly TeamRole[] = ["admin", "editor", "reader"] as const;
-export const VISIBILITY_FILTERS: readonly VisibilityFilter[] = ["private", "team", "everyone"] as const;
+export const VISIBILITY_FILTERS: readonly VisibilityFilter[] = ["personal", "team"] as const;
 
 /** Lifecycle of a membership invitation. */
 export const inviteStatusSchema = z.enum(["pending", "accepted", "revoked", "expired"]);

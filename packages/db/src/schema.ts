@@ -233,11 +233,13 @@ export const skills = pgTable(
     ownerId: text("owner_id")
       .notNull()
       .references(() => user.id, { onDelete: "cascade" }),
+    // Owner = the single access axis. `owner_team_id` NULL => Personal (private to `owner_id`);
+    // set => owned by that team and readable by the whole workspace. `owner_id` always holds the
+    // creator/principal (drives the profile join) even for team-owned skills.
     ownerTeamId: uuid("owner_team_id").references(() => teams.id, { onDelete: "set null" }),
     creatorId: text("creator_id")
       .notNull()
       .references(() => user.id, { onDelete: "cascade" }),
-    everyone: boolean("everyone").notNull().default(false),
     currentVersionId: uuid("current_version_id"),
     validation: validationStateEnum("validation").notNull().default("valid"),
     validationError: text("validation_error"),
@@ -257,40 +259,8 @@ export const skills = pgTable(
       foreignColumns: [teams.orgId, teams.id],
       name: "skills_owner_team_org_fk",
     }),
-    byEveryone: index("skills_everyone_idx").on(t.orgId, t.everyone),
     byOwnerTeam: index("skills_owner_team_idx").on(t.orgId, t.ownerTeamId),
     byArchived: index("skills_archived_idx").on(t.orgId, t.archivedAt),
-  }),
-);
-
-export const skillTeamShares = pgTable(
-  "skill_team_shares",
-  {
-    orgId: uuid("org_id")
-      .notNull()
-      .references(() => organizations.id, { onDelete: "cascade" }),
-    skillId: uuid("skill_id")
-      .notNull()
-      .references(() => skills.id, { onDelete: "cascade" }),
-    teamId: uuid("team_id")
-      .notNull()
-      .references(() => teams.id, { onDelete: "cascade" }),
-    createdAt: now(),
-  },
-  (t) => ({
-    pk: primaryKey({ columns: [t.skillId, t.teamId] }),
-    skillOrgFk: foreignKey({
-      columns: [t.orgId, t.skillId],
-      foreignColumns: [skills.orgId, skills.id],
-      name: "skill_team_shares_skill_org_fk",
-    }).onDelete("cascade"),
-    teamOrgFk: foreignKey({
-      columns: [t.orgId, t.teamId],
-      foreignColumns: [teams.orgId, teams.id],
-      name: "skill_team_shares_team_org_fk",
-    }).onDelete("cascade"),
-    byOrgSkill: index("skill_team_shares_org_skill_idx").on(t.orgId, t.skillId),
-    byOrgTeam: index("skill_team_shares_org_team_idx").on(t.orgId, t.teamId),
   }),
 );
 

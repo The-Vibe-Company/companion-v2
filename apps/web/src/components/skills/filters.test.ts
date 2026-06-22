@@ -2,28 +2,42 @@ import { describe, expect, it } from "vitest";
 import type { SkillVM } from "@/lib/types";
 import { BUILTIN_VIEWS, filtersKey, makeFilter, matchFilters, type Filter } from "./filters";
 
-const platform = { id: "team-platform", slug: "platform", name: "Platform" };
-const data = { id: "team-data", slug: "data", name: "Data" };
+function userOwner(p: { id?: string; name?: string; initials?: string; handle?: string | null }): SkillVM["owner"] {
+  return {
+    kind: "user",
+    id: p.id ?? "user-1",
+    userId: p.id ?? "user-1",
+    teamId: null,
+    name: p.name ?? "Alice Nardon",
+    initials: p.initials ?? "AN",
+    handle: p.handle ?? "alice",
+    team: null,
+  };
+}
+
+function teamOwner(p: { id: string; name: string; handle: string }): SkillVM["owner"] {
+  return {
+    kind: "team",
+    id: p.id,
+    userId: "user-1",
+    teamId: p.id,
+    name: p.name,
+    initials: p.name.slice(0, 2).toUpperCase(),
+    handle: p.handle,
+    team: p.name,
+  };
+}
 
 function mk(p: Partial<SkillVM> & { id: string }): SkillVM {
+  const owner = p.owner ?? userOwner({});
   return {
     uuid: p.id,
-    ownerId: "user-1",
-    visibility: { everyone: true, teams: [] },
+    ownerId: owner.id,
     version: "1.0.0",
     validation: "valid",
     description: "",
     error: null,
-    owner: {
-      kind: "user",
-      id: "user-1",
-      userId: "user-1",
-      teamId: null,
-      name: "Alice Nardon",
-      initials: "AN",
-      handle: "alice",
-      team: null,
-    },
+    owner,
     tools: [],
     requirements: [],
     size: "1 KB",
@@ -35,8 +49,7 @@ function mk(p: Partial<SkillVM> & { id: string }): SkillVM {
     starred: false,
     installStatus: "none",
     installedVersion: null,
-    teams: [],
-    teamSlugs: [],
+    teamSlugs: owner.kind === "team" && owner.handle ? [owner.handle] : [],
     requiresCount: 0,
     usedByCount: 0,
     depWarn: false,
@@ -48,45 +61,19 @@ function mk(p: Partial<SkillVM> & { id: string }): SkillVM {
 }
 
 const registry: SkillVM[] = [
-  mk({ id: "jira-triage", visibility: { everyone: false, teams: [platform] }, teams: [platform], teamSlugs: ["platform"] }),
+  mk({ id: "jira-triage", owner: teamOwner({ id: "team-platform", name: "Platform", handle: "platform" }) }),
+  mk({ id: "k8s-logs", owner: teamOwner({ id: "team-platform", name: "Platform", handle: "platform" }) }),
   mk({
-    id: "k8s-logs",
-    visibility: { everyone: false, teams: [platform, data] },
-    teams: [platform, data],
-    teamSlugs: ["platform", "data"],
+    id: "sql-query",
+    owner: teamOwner({ id: "team-data", name: "Data", handle: "data" }),
+    validation: "validating",
   }),
-  mk({ id: "sql-query", visibility: { everyone: false, teams: [data] }, teams: [data], teamSlugs: ["data"], validation: "validating" }),
-  mk({ id: "pdf-extract", visibility: { everyone: true, teams: [] }, starred: true }),
-  mk({
-    id: "web-fetch",
-    visibility: { everyone: true, teams: [platform] },
-    teams: [platform],
-    teamSlugs: ["platform"],
-    owner: {
-      kind: "user",
-      id: "user-2",
-      userId: "user-2",
-      teamId: null,
-      name: "Marek Doan",
-      initials: "MD",
-      handle: "marek",
-      team: null,
-    },
-  }),
+  mk({ id: "pdf-extract", starred: true }),
+  mk({ id: "web-fetch", owner: userOwner({ id: "user-2", name: "Marek Doan", initials: "MD", handle: "marek" }) }),
   mk({
     id: "image-ocr",
-    visibility: { everyone: false, teams: [] },
     validation: "invalid",
-    owner: {
-      kind: "user",
-      id: "user-3",
-      userId: "user-3",
-      teamId: null,
-      name: "Tomas Okabe",
-      initials: "TO",
-      handle: "tomas",
-      team: null,
-    },
+    owner: userOwner({ id: "user-3", name: "Tomas Okabe", initials: "TO", handle: "tomas" }),
   }),
 ];
 
@@ -97,30 +84,29 @@ describe("matchFilters — teams", () => {
     expect(run([]).length).toBe(registry.length);
   });
 
-  it("team filter matches any assigned team slug", () => {
-    expect(run([{ type: "team", value: "platform" }])).toEqual(["jira-triage", "k8s-logs", "web-fetch"]);
-    expect(run([{ type: "team", value: "data" }])).toEqual(["k8s-logs", "sql-query"]);
+  it("team filter matches the owning team slug", () => {
+    expect(run([{ type: "team", value: "platform" }])).toEqual(["jira-triage", "k8s-logs"]);
+    expect(run([{ type: "team", value: "data" }])).toEqual(["sql-query"]);
   });
 
-  it("a team filter excludes other teams and non-team skills", () => {
+  it("a team filter excludes other teams and personal skills", () => {
     const platform = run([{ type: "team", value: "platform" }]);
     expect(platform).not.toContain("sql-query"); // data team
-    expect(platform).not.toContain("pdf-extract"); // everyone, no team
+    expect(platform).not.toContain("pdf-extract"); // personal, no team
   });
 
   it("multiple team values are OR-ed within the team type", () => {
     expect(run([
       { type: "team", value: "platform" },
       { type: "team", value: "data" },
-    ]).sort()).toEqual(["jira-triage", "k8s-logs", "sql-query", "web-fetch"]);
+    ]).sort()).toEqual(["jira-triage", "k8s-logs", "sql-query"]);
   });
 });
 
 describe("matchFilters — other dimensions", () => {
-  it("visibility", () => {
-    expect(run([{ type: "visibility", value: "everyone" }])).toEqual(["pdf-extract", "web-fetch"]);
-    expect(run([{ type: "visibility", value: "team" }])).toEqual(["jira-triage", "k8s-logs", "sql-query", "web-fetch"]);
-    expect(run([{ type: "visibility", value: "private" }])).toEqual(["image-ocr"]);
+  it("visibility (owner kind)", () => {
+    expect(run([{ type: "visibility", value: "team" }])).toEqual(["jira-triage", "k8s-logs", "sql-query"]);
+    expect(run([{ type: "visibility", value: "personal" }])).toEqual(["pdf-extract", "web-fetch", "image-ocr"]);
   });
   it("status", () => {
     expect(run([{ type: "status", value: "invalid" }])).toEqual(["image-ocr"]);
@@ -128,8 +114,10 @@ describe("matchFilters — other dimensions", () => {
   it("starred", () => {
     expect(run([{ type: "starred", value: "true" }])).toEqual(["pdf-extract"]);
   });
-  it("owner", () => {
-    expect(run([{ type: "owner", value: "Marek Doan" }])).toEqual(["web-fetch"]);
+  it("owner matches by principal id", () => {
+    expect(run([{ type: "owner", value: "user-2" }])).toEqual(["web-fetch"]);
+    // Team-owned skills are keyed by the team principal id.
+    expect(run([{ type: "owner", value: "team-platform" }])).toEqual(["jira-triage", "k8s-logs"]);
   });
   it("different types are AND-ed (team AND status)", () => {
     expect(run([
@@ -156,17 +144,17 @@ describe("built-in views", () => {
       ]).sort(),
     ).toEqual(["image-ocr", "sql-query"]);
   });
-  it("Everyone view = visibility everyone", () => {
-    expect(run([{ type: "visibility", value: "everyone" }])).toEqual(["pdf-extract", "web-fetch"]);
+  it("Team view = visibility team", () => {
+    expect(run([{ type: "visibility", value: "team" }])).toEqual(["jira-triage", "k8s-logs", "sql-query"]);
   });
   it("filtersKey is order-independent", () => {
     expect(filtersKey([
-      { type: "visibility", value: "everyone" },
+      { type: "visibility", value: "team" },
       { type: "team", value: "platform" },
     ])).toBe(
       filtersKey([
         { type: "team", value: "platform" },
-        { type: "visibility", value: "everyone" },
+        { type: "visibility", value: "team" },
       ]),
     );
   });
@@ -174,12 +162,12 @@ describe("built-in views", () => {
 
 describe("makeFilter", () => {
   it("returns typed filters for valid pairs", () => {
-    expect(makeFilter("visibility", "everyone")).toEqual({ type: "visibility", value: "everyone" });
+    expect(makeFilter("visibility", "team")).toEqual({ type: "visibility", value: "team" });
     expect(makeFilter("starred", "true")).toEqual({ type: "starred", value: "true" });
   });
 
   it("rejects invalid type/value pairs", () => {
-    expect(makeFilter("visibility", "public")).toBeNull();
+    expect(makeFilter("visibility", "everyone")).toBeNull();
     expect(makeFilter("starred", "false")).toBeNull();
   });
 });

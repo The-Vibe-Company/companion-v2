@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type MutableRefObject } from "react";
 import { useRouter } from "next/navigation";
-import type { LocalSkillRow, SkillFilterPreferences, SkillVisibilityInput } from "@companion/contracts";
+import type { LocalSkillRow, SkillFilterPreferences } from "@companion/contracts";
 import {
   archiveSkill as archiveSkillRpc,
   fetchArchivedSkills,
@@ -10,7 +10,7 @@ import {
   markSkillUninstalled,
   restoreSkill as restoreSkillRpc,
   saveSkillFilterPreferences,
-  setSkillVisibility,
+  setSkillOwner,
   toggleStar as toggleStarRpc,
 } from "@/lib/queries";
 import { fetchSettingsAppData } from "@/lib/settingsClient";
@@ -22,7 +22,6 @@ import { DetailView } from "./DetailView";
 import { LocalSkillsView } from "./LocalSkillsView";
 import { CommandPalette } from "./CommandPalette";
 import { UploadDialog, InstallDialog } from "./UploadDialog";
-import { VisibilityWarningDialog, type VisWarnDirection } from "./VisibilityWarningDialog";
 import {
   parseSkillsRoute,
   skillsRouteHref,
@@ -100,9 +99,15 @@ function settingsErrorMessage(error: unknown): string {
   return error instanceof Error && error.message ? error.message : SETTINGS_LOAD_ERROR;
 }
 
-function mineOwnerNamesFor(me: MeVM, teams: TeamVM[]): string[] {
-  const editableTeams = teams.filter((team) => team.role === "admin" || team.role === "editor");
-  return [...new Set([me.name, ...editableTeams.map((team) => team.name)])];
+// "Mine" = skills I can edit, keyed by the owner PRINCIPAL id (my user id + the ids of teams I
+// admin/edit) — never display names, so two people with the same name can't collide into each
+// other's "My skills". Maps to owner filters whose value is `SkillOwnerVM.id`.
+function mineOwnerIdsFor(me: MeVM, teams: TeamVM[]): string[] {
+  const editableTeamIds = teams
+    .filter((team) => team.role === "admin" || team.role === "editor")
+    .map((team) => team.dbId)
+    .filter((id): id is string => !!id);
+  return [...new Set([me.id, ...editableTeamIds])];
 }
 
 function normalizeSkillsRoute(route: SkillsRoute, teams: TeamVM[]): SkillsRoute {
@@ -110,8 +115,8 @@ function normalizeSkillsRoute(route: SkillsRoute, teams: TeamVM[]): SkillsRoute 
   return teams.some((team) => team.id === route.team) ? route : { kind: "all", skill: route.skill };
 }
 
-function filtersForSkillsRoute(route: SkillsRoute, mineOwnerNames: string[]): Filter[] {
-  if (route.kind === "mine") return mineOwnerNames.map((name) => ({ type: "owner", value: name }));
+function filtersForSkillsRoute(route: SkillsRoute, mineOwnerIds: string[]): Filter[] {
+  if (route.kind === "mine") return mineOwnerIds.map((id) => ({ type: "owner", value: id }));
   if (route.kind === "team") return [{ type: "team", value: route.team }];
   return [];
 }
@@ -126,22 +131,22 @@ function skillsViewForRoute(route: SkillsRoute): SkillsView {
 
 function applyRouteFilters(
   route: SkillsRoute,
-  mineOwnerNames: string[],
+  mineOwnerIds: string[],
   setFilters: (filters: Filter[]) => void,
   skipNextDebouncedPersistRef: MutableRefObject<boolean>,
 ) {
   skipNextDebouncedPersistRef.current = true;
-  setFilters(filtersForSkillsRoute(route, mineOwnerNames));
+  setFilters(filtersForSkillsRoute(route, mineOwnerIds));
 }
 
 function initialFiltersForSkillsRoute(
   route: SkillsRoute,
   routeSource: SkillsRouteSource,
-  mineOwnerNames: string[],
+  mineOwnerIds: string[],
   savedFilters: Filter[],
 ): Filter[] {
   if (routeSource === "default" && route.kind === "all") return savedFilters;
-  return filtersForSkillsRoute(route, mineOwnerNames);
+  return filtersForSkillsRoute(route, mineOwnerIds);
 }
 
 export function SkillsApp({
@@ -169,7 +174,7 @@ export function SkillsApp({
   const orgActions = useOrgActions();
   const settingsWarmupRef = useRef<{ orgId: string; promise: Promise<SettingsAppData> } | null>(null);
   const initialNormalizedRoute = normalizeSkillsRoute(initialRoute, initialTeams);
-  const initialMineOwnerNames = mineOwnerNamesFor(me, initialTeams);
+  const initialMineOwnerNames = mineOwnerIdsFor(me, initialTeams);
   const [localSettings, setLocalSettings] = useState<LocalSettingsSurface | null>(null);
   const [skills, setSkills] = useState<SkillVM[]>(initialSkills);
   const [teams, setTeams] = useState<TeamVM[]>(initialTeams);
@@ -276,8 +281,6 @@ export function SkillsApp({
   const [isNarrowViewport, setIsNarrowViewport] = useState(false);
   const [updateSkill, setUpdateSkill] = useState<SkillVM | null>(null);
   const [installSkill, setInstallSkill] = useState<SkillVM | null>(null);
-  // A visibility change that would break the dependency cover invariant — offer to cascade it.
-  const [visWarn, setVisWarn] = useState<{ slug: string; visibility: SkillVisibilityInput; direction: VisWarnDirection } | null>(null);
   const [visNotice, setVisNotice] = useState<string | null>(null);
   const [openId, setOpenId] = useState<string | null>(() =>
     initialNormalizedRoute.kind === "local" ? null : initialNormalizedRoute.skill ?? null,
@@ -337,7 +340,7 @@ export function SkillsApp({
     const routeFilters = initialFiltersForSkillsRoute(
       route,
       initialRouteSource,
-      mineOwnerNamesFor(me, initialTeams),
+      mineOwnerIdsFor(me, initialTeams),
       initialFilterPreferences.active_filters,
     );
     if (initialRouteSource === "default" && route.kind === "all") {
@@ -436,47 +439,68 @@ export function SkillsApp({
     });
   }, []);
 
-  // Optimistically set a skill's visibility, persist it (optionally cascading to dependencies), and
-  // revert + rethrow on failure so the caller can react (e.g. open the cascade warning dialog).
-  const commitVisibility = useCallback(
-    (id: string, visibility: SkillVisibilityInput, cascade = false): Promise<{ cascaded: string[] }> => {
-      let prev: SkillVM["visibility"] | null = null;
+  // Optimistically move a skill between Personal and a Team, persist it, and revert + toast on
+  // failure. The owner is the single access axis, so this is the one "share / unshare" action.
+  const changeOwner = useCallback(
+    (id: string, ownerTeam: string | null) => {
+      let prev: SkillVM["owner"] | null = null;
+      const team = ownerTeam ? teams.find((t) => t.id === ownerTeam) : null;
       setSkills((arr) =>
         arr.map((s) => {
-          if (s.id === id) {
-            prev = s.visibility;
-            const nextTeams = visibility.teams.map((slug) => {
-              const existing = s.teams.find((team) => team.slug === slug);
-              const team = teams.find((t) => t.id === slug);
-              return existing ?? { id: slug, slug, name: team?.name ?? slug, color: team?.color ?? null, icon: team?.icon ?? null };
-            });
-            return { ...s, visibility: { everyone: visibility.everyone, teams: nextTeams }, teams: nextTeams, teamSlugs: nextTeams.map((team) => team.slug) };
-          }
-          return s;
+          if (s.id !== id) return s;
+          prev = s.owner;
+          const nextOwner: SkillVM["owner"] = ownerTeam
+            ? {
+                kind: "team",
+                id: team?.dbId ?? ownerTeam,
+                userId: s.owner.userId,
+                teamId: team?.dbId ?? null,
+                name: team?.name ?? ownerTeam,
+                initials: (team?.name ?? ownerTeam).slice(0, 2).toUpperCase(),
+                handle: ownerTeam,
+                team: team?.name ?? ownerTeam,
+              }
+            : {
+                kind: "user",
+                // "Personal" = private to the actor: making a skill Personal transfers ownership to
+                // the person performing the change (mirrors setSkillOwner on the server).
+                id: me.id,
+                userId: me.id,
+                teamId: null,
+                name: me.name,
+                initials: me.initials,
+                handle: null,
+                team: null,
+              };
+          return { ...s, owner: nextOwner, ownerId: nextOwner.id, teamSlugs: ownerTeam ? [ownerTeam] : [] };
         }),
       );
-      // Keep the open skill visible if an active visibility filter would now hide it.
+      // Keep the open skill visible if an active owner-kind filter would now hide it.
       if (id === openIdRef.current) {
         setFilters((fs) => {
-          const nextVisibility = new Set<string>();
-          if (visibility.everyone) nextVisibility.add("everyone");
-          if (visibility.teams.length) nextVisibility.add("team");
-          if (!visibility.everyone && visibility.teams.length === 0) nextVisibility.add("private");
+          const nextKind = ownerTeam ? "team" : "personal";
           const hasVisibility = fs.some((f) => f.type === "visibility");
-          if (hasVisibility && !fs.some((f) => f.type === "visibility" && nextVisibility.has(f.value))) {
+          if (hasVisibility && !fs.some((f) => f.type === "visibility" && f.value === nextKind)) {
             return fs.filter((f) => f.type !== "visibility");
           }
           return fs;
         });
       }
-      return setSkillVisibility(id, visibility, { cascade }).catch((err) => {
+      return setSkillOwner(id, ownerTeam).catch((err: unknown) => {
         if (prev) {
-          setSkills((arr) => arr.map((s) => (s.id === id ? { ...s, visibility: prev!, teams: prev!.teams, teamSlugs: prev!.teams.map((team) => team.slug) } : s)));
+          const restored = prev;
+          setSkills((arr) =>
+            arr.map((s) =>
+              s.id === id
+                ? { ...s, owner: restored, ownerId: restored.id, teamSlugs: restored.kind === "team" && restored.handle ? [restored.handle] : [] }
+                : s,
+            ),
+          );
         }
-        throw err;
+        setVisNotice(err instanceof Error ? err.message : "Could not change the owner.");
       });
     },
-    [teams],
+    [teams, me],
   );
 
   // Mark a published skill installed / not installed for the current user. Optimistic, with rollback;
@@ -531,36 +555,6 @@ export function SkillsApp({
     const timer = setTimeout(() => setToast(null), 3000);
     return () => clearTimeout(timer);
   }, [toast]);
-
-  const changeVisibility = useCallback(
-    (id: string, visibility: SkillVisibilityInput) => {
-      commitVisibility(id, visibility, false).catch((err: unknown) => {
-        const msg = err instanceof Error ? err.message : "Could not change visibility.";
-        // A cover-invariant break → offer to cascade the change to the affected skills.
-        if (/^cannot broaden visibility/.test(msg)) setVisWarn({ slug: id, visibility, direction: "broaden" });
-        else if (/^cannot narrow visibility/.test(msg)) setVisWarn({ slug: id, visibility, direction: "narrow" });
-        else setVisNotice(msg);
-      });
-    },
-    [commitVisibility],
-  );
-
-  // Confirm a cascade: re-apply the change with cascade=true (the skill itself updates optimistically
-  // via commitVisibility), then re-sync from the server so every cascaded skill — including
-  // transitive ones and any implicit owner-team shares — reflects authoritative state.
-  const confirmCascade = useCallback(async () => {
-    if (!visWarn) return;
-    const { slug, visibility, direction } = visWarn;
-    const { cascaded } = await commitVisibility(slug, visibility, true);
-    if (cascaded.length) router.refresh();
-    setVisWarn(null);
-    const noun = direction === "broaden" ? "sub-skill" : "dependent skill";
-    setVisNotice(
-      cascaded.length
-        ? `Updated ${cascaded.length} ${noun}${cascaded.length === 1 ? "" : "s"} to match.`
-        : "Visibility updated.",
-    );
-  }, [visWarn, commitVisibility, router]);
 
   // Auto-dismiss the visibility notice toast.
   useEffect(() => {
@@ -630,7 +624,13 @@ export function SkillsApp({
   );
 
   // --- Derived ---------------------------------------------------------------
-  const owners = useMemo(() => [...new Set(skills.map((s) => s.owner.name))].sort(), [skills]);
+  // Distinct skill owners, keyed by principal id (so same-named owners stay separate), label = name.
+  const owners = useMemo(() => {
+    const byId = new Map<string, string>();
+    for (const s of skills) if (!byId.has(s.owner.id)) byId.set(s.owner.id, s.owner.name);
+    return [...byId.entries()].map(([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name));
+  }, [skills]);
+  const ownerNameById = useMemo(() => Object.fromEntries(owners.map((o) => [o.id, o.name])), [owners]);
   const teamCounts = useMemo(() => {
     const c: Record<string, number> = {};
     skills.forEach((s) => {
@@ -658,11 +658,11 @@ export function SkillsApp({
     () => teams.filter((team) => team.role === "admin" || team.role === "editor"),
     [teams],
   );
-  const mineOwnerNames = useMemo(
-    () => mineOwnerNamesFor(me, teams),
+  const mineOwnerIds = useMemo(
+    () => mineOwnerIdsFor(me, teams),
     [me, teams],
   );
-  const mineOwnerKey = useMemo(() => filtersKey(mineOwnerNames.map((name) => ({ type: "owner", value: name }))), [mineOwnerNames]);
+  const mineOwnerKey = useMemo(() => filtersKey(mineOwnerIds.map((name) => ({ type: "owner", value: name }))), [mineOwnerIds]);
   const isMine = filters.length > 0 && filters.every((f) => f.type === "owner") && filtersKey(filters) === mineOwnerKey;
   const routeForCurrentSurface = useCallback(
     (skillId?: string): SkillsRoute => {
@@ -784,7 +784,7 @@ export function SkillsApp({
     (route: SkillsRoute, history: "push" | "replace" | "none") => {
       const normalized = normalizeSkillsRoute(route, teams);
       setCurrentView(skillsViewForRoute(normalized));
-      applyRouteFilters(normalized, mineOwnerNames, setFilters, skipNextDebouncedPersistRef);
+      applyRouteFilters(normalized, mineOwnerIds, setFilters, skipNextDebouncedPersistRef);
       const nextOpenId = normalized.kind === "local" ? null : normalized.skill ?? null;
       setOpenId(nextOpenId);
       setLastId(nextOpenId);
@@ -795,7 +795,7 @@ export function SkillsApp({
       if (history === "push") window.history.pushState(window.history.state, "", href);
       else window.history.replaceState(window.history.state, "", href);
     },
-    [mineOwnerNames, teams],
+    [mineOwnerIds, teams],
   );
   const selectTeam = useCallback((teamId: string) => {
     applySkillsRoute({ kind: "team", team: teamId }, "push");
@@ -954,12 +954,20 @@ export function SkillsApp({
       );
       setSkills((rows) =>
         rows.map((skill) => {
-          const nextTeams = skill.teams.map((team) =>
-            team.id === detail.id || team.slug === detail.slug
-              ? { ...team, id: detail.id, slug: detail.slug, name: detail.name, color: detail.color, icon: detail.icon }
-              : team,
-          );
-          return { ...skill, visibility: { ...skill.visibility, teams: nextTeams }, teams: nextTeams, teamSlugs: nextTeams.map((team) => team.slug) };
+          // Owner is the single access axis: only team-owned skills track a team slug/name to update.
+          if (skill.owner.kind !== "team") return skill;
+          const matches =
+            skill.owner.teamId === detail.id ||
+            (previousSlug ? skill.owner.handle === previousSlug : skill.owner.handle === detail.slug);
+          if (!matches) return skill;
+          const nextOwner: SkillVM["owner"] = {
+            ...skill.owner,
+            teamId: detail.id,
+            handle: detail.slug,
+            name: detail.name,
+            team: detail.name,
+          };
+          return { ...skill, owner: nextOwner, ownerId: nextOwner.id, teamSlugs: [detail.slug] };
         }),
       );
       setFilters((rows) =>
@@ -1110,7 +1118,7 @@ export function SkillsApp({
             onNext={() => go(1)}
             onToggleStar={() => toggleStar(skill.id)}
             onToggleInstalled={() => setInstalled(skill.id, skill.installStatus === "none")}
-            onChangeVisibility={(sc) => changeVisibility(skill.id, sc)}
+            onChangeOwner={(ownerTeam) => changeOwner(skill.id, ownerTeam)}
             onInstall={() => setInstallSkill(skill)}
             onUpdate={() => setUpdateSkill(skill)}
             onOpenSkill={openSkillBySlug}
@@ -1145,6 +1153,7 @@ export function SkillsApp({
             preferenceStatus={preferenceStatus}
             onRetryPreferences={retryPreferenceSave}
             owners={owners}
+            ownerNameById={ownerNameById}
             teams={teams}
             viewCounts={viewCounts}
           />
@@ -1165,6 +1174,7 @@ export function SkillsApp({
         <UploadDialog
           mode="create"
           teams={teams}
+          defaultOwnerTeam={activeTeam}
           onClose={closeUpload}
           onPublished={() => router.refresh()}
         />
@@ -1180,16 +1190,6 @@ export function SkillsApp({
       )}
       {installSkill && (
         <InstallDialog skill={installSkill} onClose={() => setInstallSkill(null)} />
-      )}
-      {visWarn && (
-        <VisibilityWarningDialog
-          slug={visWarn.slug}
-          visibility={visWarn.visibility}
-          direction={visWarn.direction}
-          teams={teams}
-          onCancel={() => setVisWarn(null)}
-          onConfirm={confirmCascade}
-        />
       )}
       {visNotice && (
         <div className="og-toast" role="alert" onClick={() => setVisNotice(null)}>

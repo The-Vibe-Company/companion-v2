@@ -38,27 +38,27 @@ describe("skill filter preferences", () => {
   it("validates the shared preference contract", () => {
     const parsed = skillFilterPreferencesSchema.parse({
       active_filters: [
-        { type: "visibility", value: "everyone" },
+        { type: "visibility", value: "team" },
         { type: "status", value: "invalid" },
         { type: "starred", value: "true" },
-        { type: "owner", value: "Alice Nardon" },
+        { type: "owner", value: "user-42" },
         { type: "team", value: "platform" },
       ],
       custom_views: [
         {
           id: "view-1",
-          name: "Everyone",
+          name: "Team-owned",
           icon: "bookmark",
           custom: true,
-          filters: [{ type: "visibility", value: "everyone" }],
+          filters: [{ type: "visibility", value: "team" }],
         },
       ],
     });
-    expect(parsed.active_filters).toContainEqual({ type: "visibility", value: "everyone" });
+    expect(parsed.active_filters).toContainEqual({ type: "visibility", value: "team" });
     expect(parsed.custom_views[0]?.id).toBe("view-1");
     expect(skillFilterPreferencesSchema.parse({})).toEqual({ active_filters: [], custom_views: [] });
-    expect(() => skillFilterPreferencesSchema.parse({ active_filters: [{ type: "unknown", value: "everyone" }], custom_views: [] })).toThrow();
-    expect(() => skillFilterPreferencesSchema.parse({ active_filters: [{ type: "visibility", value: "public" }], custom_views: [] })).toThrow();
+    expect(() => skillFilterPreferencesSchema.parse({ active_filters: [{ type: "unknown", value: "team" }], custom_views: [] })).toThrow();
+    expect(() => skillFilterPreferencesSchema.parse({ active_filters: [{ type: "visibility", value: "everyone" }], custom_views: [] })).toThrow();
     expect(() => skillFilterPreferencesSchema.parse({ active_filters: [{ type: "starred", value: "false" }], custom_views: [] })).toThrow();
   });
 
@@ -74,36 +74,37 @@ describe("skill filter preferences", () => {
   it("parses an existing preference row", async () => {
     const { database } = fakeDb({
       existing: {
-        activeFilters: [{ type: "visibility", value: "everyone" }],
+        activeFilters: [{ type: "visibility", value: "team" }],
         customViews: [
           {
             id: "view-1",
-            name: "Everyone",
+            name: "Team-owned",
             icon: "bookmark",
             custom: true,
-            filters: [{ type: "visibility", value: "everyone" }],
+            filters: [{ type: "visibility", value: "team" }],
           },
         ],
       },
     });
 
     await expect(getSkillFilterPreferences({ actor, orgId: "00000000-0000-0000-0000-000000000001", database })).resolves.toEqual({
-      active_filters: [{ type: "visibility", value: "everyone" }],
+      active_filters: [{ type: "visibility", value: "team" }],
       custom_views: [
         {
           id: "view-1",
-          name: "Everyone",
+          name: "Team-owned",
           icon: "bookmark",
           custom: true,
-          filters: [{ type: "visibility", value: "everyone" }],
+          filters: [{ type: "visibility", value: "team" }],
         },
       ],
     });
   });
 
-  it("normalizes old persisted scope filters before parsing", async () => {
+  it("collapses old persisted scope/visibility filters onto the owner-kind set", async () => {
     const { database } = fakeDb({
       existing: {
+        // Legacy workspace-wide values ("public"/"everyone") drop; "team" → team, "private" → personal.
         activeFilters: [{ type: "scope", value: "public" }],
         customViews: [
           {
@@ -113,6 +114,7 @@ describe("skill filter preferences", () => {
             custom: true,
             filters: [
               { type: "scope", value: "team" },
+              { type: "visibility", value: "private" },
               { type: "status", value: "valid" },
             ],
           },
@@ -121,7 +123,7 @@ describe("skill filter preferences", () => {
     });
 
     await expect(getSkillFilterPreferences({ actor, orgId: "00000000-0000-0000-0000-000000000001", database })).resolves.toEqual({
-      active_filters: [{ type: "visibility", value: "everyone" }],
+      active_filters: [],
       custom_views: [
         {
           id: "view-1",
@@ -130,6 +132,7 @@ describe("skill filter preferences", () => {
           custom: true,
           filters: [
             { type: "visibility", value: "team" },
+            { type: "visibility", value: "personal" },
             { type: "status", value: "valid" },
           ],
         },

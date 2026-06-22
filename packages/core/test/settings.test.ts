@@ -78,8 +78,6 @@ interface FakeDbOptions {
   emailVerified?: boolean;
   /** Rows returned by an `update(...).returning(...)`. */
   updateReturning?: Array<Record<string, unknown>>;
-  /** Skill share rows affected by deleteTeam. */
-  teamSkillShares?: Array<{ skillId: string }>;
   /** Team-owned skill rows affected by deleteTeam's owner_team_id SET NULL. */
   teamOwnedSkills?: Array<{ skillId: string }>;
 }
@@ -163,7 +161,8 @@ function fakeDb(options: FakeDbOptions = {}) {
     const isSkillShareSelect = "skillId" in cols;
     const skillRows = () => {
       skillSelectCalls += 1;
-      return skillSelectCalls === 1 ? (options.teamSkillShares ?? []) : (options.teamOwnedSkills ?? []);
+      // deleteTeam now makes a single skill select: the team-owned skills it reverts to Personal.
+      return options.teamOwnedSkills ?? [];
     };
     const builder: Record<string, unknown> = {
       from() {
@@ -561,7 +560,7 @@ describe("deleteTeam", () => {
     expect(txHandle.delete).not.toHaveBeenCalled();
   });
 
-  it("deletes the team without touching skills when it has no skill shares", async () => {
+  it("deletes the team without touching skills when it owns none", async () => {
     const { database, calls } = fakeDb({ role: "owner", team: { id: TEAM_1, orgId: ORG_A }, teamCount: 3 });
 
     await deleteTeam({ actor: owner, orgId: ORG_A, teamId: TEAM_1, database });
@@ -570,21 +569,7 @@ describe("deleteTeam", () => {
     expect(calls.txPatch).toBeUndefined();
   });
 
-  it("touches affected skills before deleting a team whose shares cascade", async () => {
-    const { database, calls } = fakeDb({
-      role: "owner",
-      team: { id: TEAM_1, orgId: ORG_A },
-      teamCount: 3,
-      teamSkillShares: [{ skillId: "skill-1" }],
-    });
-
-    await deleteTeam({ actor: owner, orgId: ORG_A, teamId: TEAM_1, database });
-
-    expect(calls.txSequence).toEqual(["update", "delete"]);
-    expect(calls.txPatch?.updatedAt).toBeInstanceOf(Date);
-  });
-
-  it("touches affected skills before deleting their owner team", async () => {
+  it("reverts the team's owned skills to Personal before deleting it", async () => {
     const { database, calls } = fakeDb({
       role: "owner",
       team: { id: TEAM_1, orgId: ORG_A },
@@ -594,7 +579,8 @@ describe("deleteTeam", () => {
 
     await deleteTeam({ actor: owner, orgId: ORG_A, teamId: TEAM_1, database });
 
-    expect(calls.txSequence).toEqual(["update", "update", "delete"]);
+    // A single update (owner_team_id → null) then the delete — no separate share-cascade pass.
+    expect(calls.txSequence).toEqual(["update", "delete"]);
     expect(calls.txPatch?.updatedAt).toBeInstanceOf(Date);
     expect(calls.txPatch?.ownerTeamId).toBeNull();
   });

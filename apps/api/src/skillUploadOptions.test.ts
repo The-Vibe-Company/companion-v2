@@ -12,7 +12,6 @@ describe("buildSkillUploadOptions", () => {
     ).toEqual({
       defaults: {
         owner_team: null,
-        visibility: { everyone: false, teams: [] },
       },
       teams: [
         {

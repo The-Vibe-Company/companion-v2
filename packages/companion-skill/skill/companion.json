@@ -2,7 +2,7 @@
   "display": {
     "name": "Companion",
     "summary": "Manage local SKILL.md packages with Companion.",
-    "description": "Validate, publish, update, resolve dependencies, declare setup requirements, choose owner teams and visibility, audit versions, install updates, and self-update the bundled Companion skill through the workspace API."
+    "description": "Validate, publish, update, resolve dependencies, declare setup requirements, choose a skill owner (Personal or team), audit versions, install updates, and self-update the bundled Companion skill through the workspace API."
   },
   "requirements": [
     {

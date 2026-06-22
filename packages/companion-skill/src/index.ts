@@ -38,21 +38,21 @@ export const COMPANION_SKILL_MANIFEST: CompanionSkillManifest = {
   key: COMPANION_SKILL_KEY,
   name: "Companion",
   description:
-    "Manage local SKILL.md packages with Companion: validate, publish, update, resolve skill dependencies, choose owner teams and visibility, install updates, audit skills, check workspace versions, and self-update this Companion skill.",
+    "Manage local SKILL.md packages with Companion: validate, publish, update, resolve skill dependencies, choose the skill owner (Personal or a team), install updates, audit skills, check workspace versions, and self-update this Companion skill.",
   what:
-    "The Companion skill gives your assistant everything it needs to look after your skills on this machine. It can validate them, publish new ones, push updates, choose owner teams and visibility, and check that everything is current. It always confirms a change with you before anything is published.",
+    "The Companion skill gives your assistant everything it needs to look after your skills on this machine. It can validate them, publish new ones, push updates, set the skill owner, and check that everything is current. It always confirms a change with you before anything is published.",
   uses:
     "Your assistant uses it whenever you ask to publish, update, validate, or check your skills, so the steps stay consistent and safe.",
   why: [
     "Reads only the skills you point it at. Nothing else on your machine.",
     "Always validates and confirms with you before it publishes anything.",
-    "Keeps ownership and visibility explicit, including team-owned uploads and private or Everyone sharing.",
+    "Keeps ownership explicit: a skill is Personal (private to you) or owned by a team (visible to the whole workspace).",
     "Every publish and update is recorded in the workspace history.",
   ],
   commands: [
-    { name: "Publish a skill", desc: "Validate a skill, choose owner/visibility, and publish it safely." },
-    { name: "Update a skill", desc: "Push a new version with targeted identity and visibility checks." },
-    { name: "Change visibility", desc: "Re-share a published skill; cascade to dependencies or dependents." },
+    { name: "Publish a skill", desc: "Validate a skill, choose its owner (Personal or a team), and publish it safely." },
+    { name: "Update a skill", desc: "Push a new version with targeted identity and owner checks." },
+    { name: "Change owner", desc: "Move a published skill between Personal and a team." },
     { name: "Resolve dependencies", desc: "Analyze packages and sync companion.json before upload." },
     { name: "Sync companion.json", desc: "Detect dependencies, setup requirements, and display copy and record them in the skill manifest." },
     { name: "Manage skill API calls", desc: "Use the supported skills API surface without crossing into workspace admin." },
@@ -63,6 +63,14 @@ export const COMPANION_SKILL_MANIFEST: CompanionSkillManifest = {
     { name: "Manage your skills", desc: "List and organize the skills on this machine." },
   ],
   changelog: [
+    {
+      version: "1.7.0",
+      changes: [
+        "Replaces skill visibility with a single Owner: a skill is owned by you (Personal, private) or by a team (visible to the whole workspace).",
+        "Renames PUT /skills/{slug}/visibility to PUT /skills/{slug}/owner with body { owner_team } (null = Personal, slug = that team).",
+        "Upload accepts owner_team only — the everyone and team fields are gone, and skills must not declare visibility.",
+      ],
+    },
     {
       version: "1.6.0",
       changes: [

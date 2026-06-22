@@ -29,11 +29,16 @@ export interface ResourceCtx {
   isOwner: boolean;
 }
 
-export interface VisibilityTarget {
-  everyone: boolean;
-  teamCount: number;
-  /** True when the actor belongs to every targeted team. */
-  memberOfAllTargetTeams?: boolean;
+/**
+ * The owner context of a skill — the single access axis. A skill is owned by a user (Personal,
+ * `ownerKind: "user"`) or a team (`ownerKind: "team"`).
+ */
+export interface SkillOwnerCtx {
+  ownerKind: "user" | "team";
+  /** Personal skills: is the actor the owning user? */
+  isOwnerUser: boolean;
+  /** Team-owned skills: the actor's role in the owning team (null when not a member). */
+  ownerTeamRole?: TeamRole | null;
 }
 
 const ORG_ADMINS: ReadonlySet<OrgRole> = new Set<OrgRole>(["owner", "admin"]);
@@ -43,14 +48,16 @@ export function isOrgAdmin(role: OrgRole): boolean {
 }
 
 /**
- * Who may CREATE or PUBLISH a resource at a given visibility target.
- * - org admins (owner/admin): any visibility.
- * - developers: private always, everyone always, team shares only for teams they belong to.
+ * Who may EDIT a skill (update / delete / publish a new version / change its owner). The owner is
+ * the single gate:
+ * - org admins (owner/admin): any skill.
+ * - team-owned: the owning team's admins & editors.
+ * - personal: the owning user only.
  */
-export function canActAtVisibility(actor: Actor, target: VisibilityTarget): boolean {
+export function canEditSkill(actor: Actor, owner: SkillOwnerCtx): boolean {
   if (isOrgAdmin(actor.orgRole)) return true;
-  if (target.teamCount === 0) return true;
-  return target.memberOfAllTargetTeams === true;
+  if (owner.ownerKind === "team") return owner.ownerTeamRole === "admin" || owner.ownerTeamRole === "editor";
+  return owner.isOwnerUser === true;
 }
 
 /** Who may MODIFY (update/delete/publish a new version of) an existing resource. */
@@ -96,7 +103,7 @@ export function canPerform(actor: Actor, action: SkillAction, res: ResourceCtx):
     case "skill.read":
       return true; // visibility gate (RLS) decides what is readable
     case "skill.create":
-      return canActAtVisibility(actor, { everyone: false, teamCount: 0 });
+      return true; // anyone may create; the chosen owner (Personal/Team) is authorized on resolve
     case "skill.publish":
       return canModify(actor, res);
     case "skill.update":

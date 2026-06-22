@@ -12,7 +12,6 @@ const skill: SkillVM = {
   uuid: "skill-1",
   id: "manifest-demo",
   ownerId: "user-1",
-  visibility: { everyone: false, teams: [{ id: "team-1", slug: "engineering", name: "Engineering", color: null, icon: null }] },
   version: "1.2.3",
   validation: "valid",
   description: "Demo skill.",
@@ -46,7 +45,6 @@ const skill: SkillVM = {
   starred: false,
   installStatus: "none",
   installedVersion: null,
-  teams: [{ id: "team-1", slug: "engineering", name: "Engineering", color: null, icon: null }],
   teamSlugs: ["engineering"],
   requiresCount: 0,
   usedByCount: 0,
@@ -65,8 +63,8 @@ describe("PropList manifest rendering", () => {
       React.createElement(PropList, {
         skill,
         teams,
-        onChangeVisibility: vi.fn(),
-        canChangeVisibility: true,
+        onChangeOwner: vi.fn(),
+        canChangeOwner: true,
       }),
     );
     expect(html).toContain("Compatibility");

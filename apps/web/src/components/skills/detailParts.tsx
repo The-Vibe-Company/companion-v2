@@ -1,14 +1,14 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import type { SkillCommentRow, SkillVisibilityInput, SkillVersionRow } from "@companion/contracts";
+import type { SkillCommentRow, SkillVersionRow } from "@companion/contracts";
 import { Icon } from "../Icon";
 import { TeamAvatar } from "../org/TeamAvatar";
 import { relativeTime } from "@/lib/format";
 import type { MeVM, SkillVM, TeamVM } from "@/lib/types";
 import { Avatar, visibilityMeta } from "./blocks";
 
-export type DetailPanel = "dependencies" | "requirements" | "files" | "activity" | "manifest" | "checksum";
+export type DetailPanel = "dependencies" | "requirements" | "files" | "activity";
 export type DetailPanelItem = {
   id: DetailPanel;
   label: string;
@@ -20,7 +20,7 @@ function metadataKeyLabel(key: string): string {
   return key.startsWith("companion_") ? key.slice("companion_".length).replaceAll("_", " ") : key;
 }
 
-export function VisibilityControl({
+export function OwnerControl({
   skill,
   teams,
   onChange,
@@ -28,7 +28,8 @@ export function VisibilityControl({
 }: {
   skill: SkillVM;
   teams: TeamVM[];
-  onChange: (visibility: SkillVisibilityInput) => void;
+  /** `null` = Personal (private to the owner); a team slug = owned by that team (workspace-visible). */
+  onChange: (ownerTeam: string | null) => void;
   canChange: boolean;
 }) {
   const [open, setOpen] = useState(false);
@@ -37,13 +38,12 @@ export function VisibilityControl({
   const btnRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const meta = visibilityMeta(skill);
-  const selected = new Set(skill.teamSlugs);
-  const commit = (everyone: boolean, nextTeams: string[]) => onChange({ everyone, teams: nextTeams });
-  const toggleTeam = (slug: string) => {
-    const next = new Set(selected);
-    if (next.has(slug)) next.delete(slug);
-    else next.add(slug);
-    commit(skill.visibility.everyone, [...next]);
+  // Only teams the actor can own for (admin/editor) are assignable targets.
+  const ownerTeams = teams.filter((team) => team.role === "admin" || team.role === "editor");
+  const currentTeam = skill.owner.kind === "team" ? skill.owner.handle : null;
+  const choose = (ownerTeam: string | null) => {
+    setOpen(false);
+    if (ownerTeam !== currentTeam) onChange(ownerTeam);
   };
   useEffect(() => {
     if (!open) return;
@@ -86,7 +86,7 @@ export function VisibilityControl({
   };
   if (!canChange) {
     return (
-      <span className="vis__btn vis__btn--readonly" title="Only the owner can change visibility" aria-label={`Visibility: ${meta.label}`}>
+      <span className="vis__btn vis__btn--readonly" title="Only the owner or an org admin can change this" aria-label={`Owner: ${meta.label}`}>
         <span className="lead">
           <Icon name={meta.icon} size={11} />
         </span>
@@ -116,37 +116,37 @@ export function VisibilityControl({
       </button>
       {open && (
         <div className="menu menu--fixed" role="menu" ref={menuRef}>
-          <div className="menu__head">Visibility</div>
+          <div className="menu__head">Owner</div>
           <button
-            role="menuitemcheckbox"
-            aria-checked={skill.visibility.everyone}
-            className={"menu__item" + (skill.visibility.everyone ? " is-sel" : "")}
-            onClick={() => commit(!skill.visibility.everyone, skill.teamSlugs)}
+            role="menuitemradio"
+            aria-checked={skill.owner.kind === "user"}
+            className={"menu__item" + (skill.owner.kind === "user" ? " is-sel" : "")}
+            onClick={() => choose(null)}
           >
             <span className="ico">
-              <Icon name="building-2" size={14} />
+              <Icon name="lock" size={14} />
             </span>
-            <span className="menu__label">Everyone</span>
-            <span className="menu__desc">whole workspace</span>
-            {skill.visibility.everyone && (
+            <span className="menu__label">Personal</span>
+            <span className="menu__desc">private to you</span>
+            {skill.owner.kind === "user" && (
               <span className="menu__check">
                 <Icon name="check" size={13} />
               </span>
             )}
           </button>
-          {teams.length > 0 && <div className="menu__head">Teams</div>}
-          {teams.map((team) => (
+          {ownerTeams.length > 0 && <div className="menu__head">Teams</div>}
+          {ownerTeams.map((team) => (
             <button
               key={team.id}
-              role="menuitemcheckbox"
-              aria-checked={selected.has(team.id)}
-              className={"menu__item" + (selected.has(team.id) ? " is-sel" : "")}
-              onClick={() => toggleTeam(team.id)}
+              role="menuitemradio"
+              aria-checked={currentTeam === team.id}
+              className={"menu__item" + (currentTeam === team.id ? " is-sel" : "")}
+              onClick={() => choose(team.id)}
             >
               <TeamAvatar team={team} className="ico menu__teamav" />
               <span className="menu__label">{team.name}</span>
-              <span className="menu__desc">team</span>
-              {selected.has(team.id) && (
+              <span className="menu__desc">visible to all</span>
+              {currentTeam === team.id && (
                 <span className="menu__check">
                   <Icon name="check" size={13} />
                 </span>
@@ -162,8 +162,8 @@ export function VisibilityControl({
 export function PropList({
   skill,
   teams,
-  onChangeVisibility,
-  canChangeVisibility,
+  onChangeOwner,
+  canChangeOwner,
   requiresN,
   usedByN,
   depFlag,
@@ -171,8 +171,8 @@ export function PropList({
 }: {
   skill: SkillVM;
   teams: TeamVM[];
-  onChangeVisibility: (visibility: SkillVisibilityInput) => void;
-  canChangeVisibility: boolean;
+  onChangeOwner: (ownerTeam: string | null) => void;
+  canChangeOwner: boolean;
   /** Dependency counts for the rail (fall back to the list-row counts before the graph loads). */
   requiresN?: number;
   usedByN?: number;
@@ -180,8 +180,6 @@ export function PropList({
   depFlag?: { n: number; blocked: boolean } | null;
   onOpenDeps?: () => void;
 }) {
-  const meta = visibilityMeta(skill);
-  const teamNames = skill.teams.map((team) => team.name).join(", ");
   const reqN = requiresN ?? skill.requiresCount;
   const usedN = usedByN ?? skill.usedByCount;
   const flag = depFlag ?? (skill.depWarn ? { n: 0, blocked: false } : null);
@@ -190,11 +188,11 @@ export function PropList({
     <div className="props">
       <div className="prop">
         <span className="prop__label">
-          <Icon name={meta.icon} size={14} />
-          Visibility
+          <Icon name="shield" size={14} />
+          Owner
         </span>
         <span className="prop__value">
-          <VisibilityControl skill={skill} teams={teams} onChange={onChangeVisibility} canChange={canChangeVisibility} />
+          <OwnerControl skill={skill} teams={teams} onChange={onChangeOwner} canChange={canChangeOwner} />
         </span>
       </div>
       <div className="prop">
@@ -206,25 +204,6 @@ export function PropList({
           <span className="mono" style={{ color: "var(--color-fg)" }}>
             {skill.version ?? "—"}
           </span>
-        </span>
-      </div>
-      <div className="prop">
-        <span className="prop__label">
-          <Icon name="user" size={14} />
-          Owner
-        </span>
-        <span className="prop__value">
-          <Avatar initials={skill.owner.initials} />
-          {skill.owner.name}
-        </span>
-      </div>
-      <div className="prop">
-        <span className="prop__label">
-          <Icon name="users" size={14} />
-          Teams
-        </span>
-        <span className="prop__value">
-          <span className="mono" title={teamNames || undefined}>{teamNames || "—"}</span>
         </span>
       </div>
       <div className="divider" />
@@ -365,8 +344,8 @@ export function PropList({
 export function DetailMeta({
   skill,
   teams,
-  onChangeVisibility,
-  canChangeVisibility,
+  onChangeOwner,
+  canChangeOwner,
   requiresN,
   usedByN,
   depFlag,
@@ -374,8 +353,8 @@ export function DetailMeta({
 }: {
   skill: SkillVM;
   teams: TeamVM[];
-  onChangeVisibility: (visibility: SkillVisibilityInput) => void;
-  canChangeVisibility: boolean;
+  onChangeOwner: (ownerTeam: string | null) => void;
+  canChangeOwner: boolean;
   requiresN?: number;
   usedByN?: number;
   depFlag?: { n: number; blocked: boolean } | null;
@@ -389,7 +368,7 @@ export function DetailMeta({
 
   return (
     <div className="linmeta">
-      <VisibilityControl skill={skill} teams={teams} onChange={onChangeVisibility} canChange={canChangeVisibility} />
+      <OwnerControl skill={skill} teams={teams} onChange={onChangeOwner} canChange={canChangeOwner} />
       <span className="linmeta__sep" aria-hidden="true">
         ·
       </span>
@@ -509,111 +488,6 @@ export function DetailRail({
             <b>{item.count}</b>
           </button>
         ))}
-      </div>
-    </div>
-  );
-}
-
-export function ManifestDetails({ skill }: { skill: SkillVM }) {
-  const metadataEntries = Object.entries(skill.metadata).sort(([a], [b]) => a.localeCompare(b));
-  return (
-    <div className="dblocks dblocks--panel">
-      <div>
-        <p className="seclabel">
-          <Icon name="braces" size={14} />
-          Manifest
-        </p>
-        <p className="ov__lead" style={{ marginBottom: 18 }}>
-          Runtime declarations from the published skill package. These values are inspectable, not
-          marketing copy.
-        </p>
-        <div className="manifeststack">
-          <div className="manifestrow">
-            <span className="manifestrow__label">
-              <Icon name="layers" size={13} />
-              Compatibility
-            </span>
-            <span className="manifestrow__value mono">{skill.compatibility ?? "—"}</span>
-          </div>
-          <div className="manifestrow manifestrow--stack">
-            <span className="manifestrow__label">
-              <Icon name="shield" size={13} />
-              Allowed tools
-              <b>{skill.tools.length}</b>
-            </span>
-            <span className="manifestrow__value">
-              {skill.tools.length ? (
-                <span className="chips">
-                  {skill.tools.map((tool) => (
-                    <span className="chip" key={tool}>{tool}</span>
-                  ))}
-                </span>
-              ) : (
-                <span className="muted">None declared</span>
-              )}
-            </span>
-          </div>
-          <div className="manifestrow">
-            <span className="manifestrow__label">
-              <Icon name="file-text" size={13} />
-              License
-            </span>
-            <span className="manifestrow__value mono">{skill.license ?? "—"}</span>
-          </div>
-          <div className="manifestrow manifestrow--stack">
-            <span className="manifestrow__label">
-              <Icon name="braces" size={13} />
-              Metadata
-              <b>{metadataEntries.length}</b>
-            </span>
-            <span className="manifestrow__value">
-              {metadataEntries.length ? (
-                <span className="kvlist">
-                  {metadataEntries.map(([key, value]) => (
-                    <span className="kv" key={key}>
-                      <span className="kv__k" title={key} aria-label={key}>
-                        {metadataKeyLabel(key)}
-                      </span>
-                      <span className="kv__v">{value}</span>
-                    </span>
-                  ))}
-                </span>
-              ) : (
-                <span className="muted">None declared</span>
-              )}
-            </span>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-export function ChecksumDetails({ checksum }: { checksum: string | null }) {
-  return (
-    <div className="dblocks dblocks--panel">
-      <div>
-        <p className="seclabel">
-          <Icon name="hash" size={14} />
-          Checksum
-        </p>
-        <p className="ov__lead" style={{ marginBottom: 18 }}>
-          Digest for the current published package. Use it to verify the package downloaded from
-          the registry.
-        </p>
-        <div className="checksumcard">
-          <code>{checksum ?? "No checksum recorded"}</code>
-          {checksum && (
-            <button
-              className="iconbtn"
-              title="Copy checksum"
-              aria-label="Copy checksum"
-              onClick={() => navigator.clipboard?.writeText(checksum).catch(() => {})}
-            >
-              <Icon name="copy" size={13} />
-            </button>
-          )}
-        </div>
       </div>
     </div>
   );

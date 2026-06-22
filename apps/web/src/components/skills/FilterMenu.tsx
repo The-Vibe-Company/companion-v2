@@ -8,9 +8,8 @@ import { VISIBILITY_ICON, VISIBILITY_ORDER } from "./blocks";
 import type { Filter } from "./filters";
 
 const VISIBILITY_LABEL: Record<string, string> = {
-  everyone: "Everyone",
-  team: "Team shares",
-  private: "Private",
+  team: "Team-owned",
+  personal: "Personal",
 };
 
 function FilterMenuPopover({
@@ -20,7 +19,7 @@ function FilterMenuPopover({
   onToggle,
   onClose,
 }: {
-  owners: string[];
+  owners: { id: string; name: string }[];
   teams: TeamVM[];
   filters: Filter[];
   onToggle: (type: Filter["type"], value: string) => void;
@@ -117,7 +116,7 @@ function FilterMenuPopover({
           <div className="fmenu__divider" />
           <div className="fmenu__grouphead">Owner</div>
           {owners.map((o) => (
-            <Item key={o} type="owner" value={o} icon="user" label={o} />
+            <Item key={o.id} type="owner" value={o.id} icon="user" label={o.name} />
           ))}
         </>
       )}
@@ -131,7 +130,7 @@ export function FilterAdd({
   filters,
   onToggle,
 }: {
-  owners: string[];
+  owners: { id: string; name: string }[];
   teams: TeamVM[];
   filters: Filter[];
   onToggle: (type: Filter["type"], value: string) => void;

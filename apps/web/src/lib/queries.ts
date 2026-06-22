@@ -12,7 +12,6 @@ import type {
   SkillFilesResponse,
   SkillFilterPreferences,
   SkillListRow,
-  SkillVisibilityInput,
   SkillVersionRow,
   TokenScope,
   ValidationResult,
@@ -54,7 +53,6 @@ export async function publishSkillPackage(
   file: File,
   opts: {
     ownerTeam?: string | null;
-    visibility: SkillVisibilityInput;
     version?: string;
     expectSlug?: string;
     expectSkillId?: string;
@@ -64,9 +62,7 @@ export async function publishSkillPackage(
   const fd = new FormData();
   fd.append("file", file);
   fd.append("action", "publish");
-  fd.append("everyone", String(opts.visibility.everyone));
   if (opts.ownerTeam) fd.append("owner_team", opts.ownerTeam);
-  for (const team of opts.visibility.teams) fd.append("team", team);
   if (opts.version) fd.append("version", opts.version);
   // In update mode, bind the upload to the skill being updated (server rejects a mismatch).
   if (opts.expectSlug) fd.append("expect_slug", opts.expectSlug);
@@ -87,8 +83,7 @@ export async function validateSkillPackage(
     expectSlug?: string;
     expectSkillId?: string;
     dependencies?: string[];
-    /** Pass the selected visibility so the dependency plan's visibility checks match publish. */
-    visibility?: SkillVisibilityInput;
+    /** Pass the selected owner so the dependency plan's owner-cover checks match publish. */
     ownerTeam?: string | null;
   } = {},
 ): Promise<{ result: ValidationResult; dependencyPlan: DependencyPlan | null }> {
@@ -99,10 +94,6 @@ export async function validateSkillPackage(
   if (opts.expectSlug) fd.append("expect_slug", opts.expectSlug);
   if (opts.expectSkillId) fd.append("expect_skill_id", opts.expectSkillId);
   for (const dep of opts.dependencies ?? []) fd.append("dependency", dep);
-  if (opts.visibility) {
-    fd.append("everyone", String(opts.visibility.everyone));
-    for (const team of opts.visibility.teams) fd.append("team", team);
-  }
   if (opts.ownerTeam) fd.append("owner_team", opts.ownerTeam);
   const data = await apiFetch<{ result: ValidationResult; dependency_plan?: DependencyPlan }>("/v1/skills", {
     method: "POST",
@@ -117,7 +108,6 @@ export async function createSkillInline(input: {
   description: string;
   body: string;
   owner_team?: string | null;
-  visibility: SkillVisibilityInput;
 }): Promise<PublishResult> {
   return apiFetch<PublishResult>("/v1/skills/create", {
     method: "POST",
@@ -221,20 +211,12 @@ export async function fetchSkillDownloadUrl(slug: string, version: string | null
   return data.url;
 }
 
-/**
- * Change a skill's visibility. With `cascade`, the server also raises the skill's (transitive)
- * dependencies so they stay at least as visible — returns the slugs it raised.
- */
-export async function setSkillVisibility(
-  slug: string,
-  visibility: SkillVisibilityInput,
-  opts: { cascade?: boolean } = {},
-): Promise<{ cascaded: string[] }> {
-  const res = await apiFetch<{ ok: true; cascaded: string[] }>(`/v1/skills/${slug}/visibility`, {
+/** Change a skill's owner: `null` = Personal (private to you); a team slug = owned by that team. */
+export async function setSkillOwner(slug: string, ownerTeam: string | null): Promise<void> {
+  await apiFetch<{ ok: true }>(`/v1/skills/${slug}/owner`, {
     method: "PUT",
-    body: JSON.stringify({ ...visibility, cascade: opts.cascade ?? false }),
+    body: JSON.stringify({ owner_team: ownerTeam }),
   });
-  return { cascaded: res.cascaded ?? [] };
 }
 
 export async function saveSkillFilterPreferences(

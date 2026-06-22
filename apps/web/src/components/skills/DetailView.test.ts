@@ -13,7 +13,6 @@ const skill: SkillVM = {
   uuid: "skill-1",
   id: "linear-demo",
   ownerId: "user-1",
-  visibility: { everyone: true, teams: [] },
   version: "1.2.3",
   validation: "valid",
   description: "A focused skill for incident handoffs.",
@@ -41,7 +40,6 @@ const skill: SkillVM = {
   starred: true,
   installStatus: "installed",
   installedVersion: "1.2.3",
-  teams: [],
   teamSlugs: [],
   requiresCount: 1,
   usedByCount: 2,
@@ -63,7 +61,7 @@ function renderDetail(initialPanel?: React.ComponentProps<typeof DetailView>["in
       onNext: vi.fn(),
       onToggleStar: vi.fn(),
       onToggleInstalled: vi.fn(),
-      onChangeVisibility: vi.fn(),
+      onChangeOwner: vi.fn(),
       onInstall: vi.fn(),
       onUpdate: vi.fn(),
       onOpenSkill: vi.fn(),
@@ -88,7 +86,7 @@ function renderDetailFor(nextSkill: SkillVM) {
       onNext: vi.fn(),
       onToggleStar: vi.fn(),
       onToggleInstalled: vi.fn(),
-      onChangeVisibility: vi.fn(),
+      onChangeOwner: vi.fn(),
       onInstall: vi.fn(),
       onUpdate: vi.fn(),
       onOpenSkill: vi.fn(),
@@ -104,7 +102,7 @@ describe("DetailView linear dense layout", () => {
 
     expect(html).toContain("linear-demo");
     expect(html).toContain("A focused skill for incident handoffs.");
-    expect(html).toContain("Everyone");
+    expect(html).toContain("Personal");
     expect(html).toContain("1.2.3");
     expect(html).toContain("Ada Lovelace");
     expect(html).toContain("Dependencies: 1 required, 2 used by");
@@ -136,9 +134,7 @@ describe("DetailView linear dense layout", () => {
     expect(html).toContain("More");
     expect(html).toContain("Files");
     expect(html).toContain("Setup &amp; secrets");
-    expect(html).toContain("Activity");
-    expect(html).toContain("Manifest");
-    expect(html).toContain("Checksum");
+    expect(html).toContain("History");
     expect(html).not.toContain("Skill detail sections");
     expect(html).not.toContain("Package contents");
     expect(html).not.toContain("Allowed tools");
@@ -154,8 +150,7 @@ describe("DetailView linear dense layout", () => {
     expect(html).toContain('aria-current="page"');
     expect(html).toContain("Dependencies");
     expect(html).toContain("Setup &amp; secrets");
-    expect(html).toContain("Manifest");
-    expect(html).toContain("Checksum");
+    expect(html).toContain("History");
   });
 
   it("shows the shared drawer navigation when Dependencies is open", () => {
@@ -165,7 +160,7 @@ describe("DetailView linear dense layout", () => {
     expect(html).toContain('aria-label="More sections"');
     expect(html).toContain("dpanel__navitem is-active");
     expect(html).toContain("Files");
-    expect(html).toContain("Checksum");
+    expect(html).toContain("History");
   });
 
   it("renders the Files panel through the drawer-aware file explorer", () => {

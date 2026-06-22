@@ -21,10 +21,10 @@ function render(view: ViewDef, active = false) {
 
 const customView: ViewDef = {
   id: "view-1",
-  name: "My Everyone Skills",
+  name: "My Team Skills",
   icon: "bookmark",
   custom: true,
-  filters: [{ type: "visibility", value: "everyone" }],
+  filters: [{ type: "visibility", value: "team" }],
 };
 
 const allView: ViewDef = { id: "all", name: "All", icon: "layers", filters: [] };
@@ -33,7 +33,7 @@ describe("ViewTab", () => {
   it("renders a custom view as a menu-bearing tab", () => {
     const html = render(customView, true);
     expect(html).toContain('role="tab"');
-    expect(html).toContain("My Everyone Skills");
+    expect(html).toContain("My Team Skills");
     expect(html).toContain("vtab--custom");
     // Custom tabs advertise the right-click / keyboard context menu.
     expect(html).toContain('aria-haspopup="menu"');

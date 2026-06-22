@@ -1,42 +1,22 @@
 "use client";
 
 import { Icon } from "../Icon";
-import { TeamAvatar } from "../org/TeamAvatar";
 import type { SkillVM, TeamVM } from "@/lib/types";
 import { visibilityMeta, vdot, InstallMark } from "./blocks";
 import { chipParts, type Filter, type ViewDef } from "./filters";
 import { FilterAdd } from "./FilterMenu";
 import { ViewTab } from "./ViewTab";
 
-function VisibilityCell({ skill }: { skill: SkillVM }) {
+function OwnerCell({ skill }: { skill: SkillVM }) {
   const meta = visibilityMeta(skill);
-  const teams = skill.visibility.teams;
-  const shownTeams = teams.slice(0, 3);
-  const extraTeams = teams.length - shownTeams.length;
-  const teamNames = teams.map((team) => team.name).join(", ");
   const label =
-    teams.length > 0
-      ? skill.visibility.everyone
-        ? `Everyone; teams: ${teamNames}`
-        : `Teams: ${teamNames}`
-      : meta.label;
+    skill.owner.kind === "team"
+      ? `Owned by ${meta.label} — visible to the whole workspace`
+      : "Personal — private to you";
   return (
     <span className="crow__scope" title={label} aria-label={label}>
       <Icon name={meta.icon} size={11} />
-      {teams.length > 0 ? (
-        <>
-          {skill.visibility.everyone && <span className="crow__scopeText crow__scopeText--base">Everyone</span>}
-          <span className="crow__teampile" aria-hidden="true">
-            {shownTeams.map((team) => (
-              <TeamAvatar className="crow__teamdot" key={team.slug} team={team} />
-            ))}
-            {extraTeams > 0 && <span className="crow__teamdot crow__teamdot--more">+{extraTeams}</span>}
-          </span>
-          <span className="sr-only">{label}</span>
-        </>
-      ) : (
-        <span className="crow__scopeText">{meta.label}</span>
-      )}
+      <span className="crow__scopeText">{meta.label}</span>
     </span>
   );
 }
@@ -61,6 +41,7 @@ export function ListView({
   preferenceStatus,
   onRetryPreferences,
   owners,
+  ownerNameById,
   teams,
   viewCounts,
 }: {
@@ -82,10 +63,15 @@ export function ListView({
   onClearFilters: () => void;
   preferenceStatus: "idle" | "saving" | "saved" | "error";
   onRetryPreferences: () => void;
-  owners: string[];
+  owners: { id: string; name: string }[];
+  ownerNameById: Record<string, string>;
   teams: TeamVM[];
   viewCounts: Record<string, number>;
 }) {
+  // When viewing a single team, make the upload button contextual ("Add skill to <Team>") so the
+  // new skill defaults to that team's ownership.
+  const teamFilter = filters.length === 1 && filters[0]?.type === "team" ? filters[0].value : null;
+  const activeTeamName = teamFilter ? teams.find((t) => t.id === teamFilter)?.name ?? null : null;
   return (
     <>
       <header className="sh">
@@ -94,7 +80,7 @@ export function ListView({
         <span className="sh__spacer" />
         <button className="btn-primary" onClick={onUpload}>
           <Icon name="upload" size={14} />
-          Upload skill
+          {activeTeamName ? `Add skill to ${activeTeamName}` : "Upload skill"}
         </button>
       </header>
 
@@ -116,13 +102,15 @@ export function ListView({
         <FilterAdd owners={owners} teams={teams} filters={filters} onToggle={onToggleFilter} />
         {filters.map((f) => {
           const p = chipParts(f);
+          // Owner filters carry the principal id; show the resolved display name in the chip.
+          const val = f.type === "owner" ? ownerNameById[f.value] ?? p.val : p.val;
           return (
             <span className="fchip" key={f.type + f.value}>
               <span className="lead">
                 <Icon name={p.icon} size={12} />
               </span>
               {p.key && <span className="fchip__key">{p.key}:</span>}
-              <span className="fchip__val">{p.val}</span>
+              <span className="fchip__val">{val}</span>
               <button className="fchip__x" onClick={() => onRemoveFilter(f)} aria-label="Remove filter">
                 <Icon name="x" size={12} />
               </button>
@@ -161,7 +149,7 @@ export function ListView({
         <div className="chead">
           <span></span>
           <span>Skill</span>
-          <span>Visibility</span>
+          <span>Owner</span>
           <span>Version</span>
           <span>Deps</span>
           <span className="r">Stars</span>
@@ -186,7 +174,7 @@ export function ListView({
               )}
               <InstallMark state={s.installStatus} />
             </span>
-            <VisibilityCell skill={s} />
+            <OwnerCell skill={s} />
             <span className="ver">{s.version ?? "—"}</span>
             <span className="crow__deps">
               {s.requiresCount > 0 ? (

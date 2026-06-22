@@ -2,35 +2,26 @@ import type { ValidationState, VisibilityFilter } from "@companion/contracts";
 import type { SkillVM } from "@/lib/types";
 import { Icon } from "../Icon";
 
+// Owner is the single access axis: Personal (private to the owner) vs Team (workspace-visible).
 export const VISIBILITY_ICON: Record<string, string> = {
-  private: "lock",
+  personal: "lock",
   team: "users",
-  everyone: "building-2",
 };
 
 export function visibilityKind(s: SkillVM): VisibilityFilter {
-  if (s.visibility.everyone) return "everyone";
-  if (s.visibility.teams.length) return "team";
-  return "private";
+  return s.owner.kind === "team" ? "team" : "personal";
 }
 
 export function visibilityMeta(s: SkillVM): { icon: string; label: string } {
-  const teams = s.visibility.teams;
-  if (s.visibility.everyone && teams.length > 0) {
-    return { icon: "building-2", label: `Everyone + ${teams.length} team${teams.length === 1 ? "" : "s"}` };
-  }
-  if (s.visibility.everyone) return { icon: "building-2", label: "Everyone" };
-  if (teams.length === 1) return { icon: "users", label: teams[0]!.name };
-  if (teams.length > 1) return { icon: "users", label: `${teams.length} teams` };
-  return { icon: "lock", label: "Private" };
+  if (s.owner.kind === "team") return { icon: "users", label: s.owner.team ?? s.owner.name };
+  return { icon: "lock", label: "Personal" };
 }
 
 export const VISIBILITY_DESC: Record<VisibilityFilter, string> = {
-  private: "only you",
-  team: "selected teams",
-  everyone: "everyone in the workspace",
+  personal: "private to you",
+  team: "owned by a team — visible to the whole workspace",
 };
-export const VISIBILITY_ORDER: VisibilityFilter[] = ["everyone", "team", "private"];
+export const VISIBILITY_ORDER: VisibilityFilter[] = ["team", "personal"];
 
 export function vdot(v: ValidationState): "ok" | "down" | "unknown" {
   return v === "valid" ? "ok" : v === "invalid" ? "down" : "unknown";

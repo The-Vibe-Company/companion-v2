@@ -5,17 +5,57 @@ import { describe, expect, it } from "vitest";
 import type { LockedSkill } from "@companion/contracts";
 import { packDir } from "@companion/skills";
 import { loadLockfile } from "../lib/lockfile";
+import type { SkillListRow } from "@companion/contracts";
 import {
   assertCanReplaceExistingInstall,
   buildPublishFormData,
-  lockfileVisibility,
   parseVisibilityFilter,
+  resolvePushOwner,
   resolvePushVersion,
-  resolvePushVisibility,
-  splitTeams,
   verifyDownloadedArchive,
 } from "./skills";
 import { classify, type RegistryInfo } from "../lib/registry";
+
+/** A minimal published registry row; only owner fields drive `resolvePushOwner`. */
+function registryRow(over: Partial<SkillListRow> = {}): SkillListRow {
+  return {
+    id: "skill-1",
+    org_id: "org-1",
+    slug: "demo",
+    description: "Demo skill",
+    display: {},
+    validation: "valid",
+    validation_error: null,
+    owner_kind: "user",
+    owner_id: "user-1",
+    owner_user_id: "user-1",
+    owner_team_id: null,
+    owner_name: "User One",
+    owner_handle: null,
+    owner_initials: "UO",
+    current_version: "1.0.0",
+    license: null,
+    compatibility: null,
+    metadata: {},
+    checksum: null,
+    size_bytes: 10,
+    tools: [],
+    requirements: [],
+    star_count: 0,
+    starred: false,
+    installed: false,
+    installed_version: null,
+    install_status: "none",
+    requires_count: 0,
+    used_by_count: 0,
+    dep_warn: false,
+    archived: false,
+    referenced: false,
+    created_at: "2026-06-09T12:00:00.000Z",
+    updated_at: "2026-06-09T12:00:00.000Z",
+    ...over,
+  };
+}
 
 async function withSkillDir(fn: (dir: string) => Promise<void>) {
   const dir = await mkdtemp(join(tmpdir(), "companion-cli-test-"));
@@ -66,165 +106,100 @@ describe("skills pull safeguards", () => {
   });
 });
 
-describe("skills visibility helpers", () => {
-  it("parses repeatable and comma-separated team flags", () => {
-    expect(splitTeams(["platform,data", "platform", " security "])).toEqual(["platform", "data", "security"]);
-  });
+describe("skills owner helpers", () => {
+  const missing: RegistryInfo = { exists: false, id: null, currentVersion: null, versions: [] };
 
   it("validates list visibility filters locally", () => {
-    expect(parseVisibilityFilter("everyone")).toBe("everyone");
+    expect(parseVisibilityFilter("personal")).toBe("personal");
     expect(parseVisibilityFilter("team")).toBe("team");
     expect(parseVisibilityFilter(undefined)).toBeUndefined();
-    expect(() => parseVisibilityFilter("public")).toThrow(/visibility must be one of/);
+    expect(() => parseVisibilityFilter("public")).toThrow(/visibility must be one of: personal, team/);
   });
 
-  it("stores downloaded visibility in lockfile input shape", () => {
-    expect(
-      lockfileVisibility({
-        everyone: true,
-        teams: [
-          { id: "team-1", slug: "platform", name: "Platform" },
-          { id: "team-2", slug: "data", name: "Data" },
-        ],
-      }),
-    ).toEqual({ everyone: true, teams: ["platform", "data"] });
+  it("resolves --private to Personal (null)", () => {
+    expect(resolvePushOwner(missing, { private: true })).toBeNull();
   });
 
-  it("preserves existing registry visibility when update flags are omitted", () => {
-    expect(
-      resolvePushVisibility(
-        {
-          exists: true,
-          id: "skill-1",
-          currentVersion: "1.0.0",
-          versions: ["1.0.0"],
-          row: {
-            id: "skill-1",
-            org_id: "org-1",
-            slug: "demo",
-            description: "Demo skill",
-            display: {},
-            visibility: { everyone: true, teams: [{ id: "team-1", slug: "platform", name: "Platform" }] },
-            validation: "valid",
-            validation_error: null,
-            owner_kind: "user",
-            owner_id: "user-1",
-            owner_user_id: "user-1",
-            owner_team_id: null,
-            owner_name: "User One",
-            owner_handle: null,
-            owner_initials: "UO",
-            current_version: "1.0.0",
-            license: null,
-            compatibility: null,
-            metadata: {},
-            checksum: null,
-            size_bytes: 10,
-            tools: [],
-            requirements: [],
-            star_count: 0,
-            starred: false,
-            installed: false,
-            installed_version: null,
-            install_status: "none",
-            requires_count: 0,
-            used_by_count: 0,
-            dep_warn: false,
-            archived: false,
-            referenced: false,
-            created_at: "2026-06-09T12:00:00.000Z",
-            updated_at: "2026-06-09T12:00:00.000Z",
-          },
-        },
-        {},
-      ),
-    ).toEqual({ everyone: true, teams: ["platform"] });
+  it("resolves an explicit --owner-team to that team slug", () => {
+    expect(resolvePushOwner(missing, { ownerTeam: "platform" })).toBe("platform");
+    // Surrounding whitespace is trimmed.
+    expect(resolvePushOwner(missing, { ownerTeam: " platform " })).toBe("platform");
   });
 
-  it("can explicitly clear existing registry visibility", () => {
-    expect(
-      resolvePushVisibility(
-        {
-          exists: true,
-          id: "skill-1",
-          currentVersion: "1.0.0",
-          versions: ["1.0.0"],
-          row: {
-            id: "skill-1",
-            org_id: "org-1",
-            slug: "demo",
-            description: "Demo skill",
-            display: {},
-            visibility: { everyone: true, teams: [{ id: "team-1", slug: "platform", name: "Platform" }] },
-            validation: "valid",
-            validation_error: null,
-            owner_kind: "user",
-            owner_id: "user-1",
-            owner_user_id: "user-1",
-            owner_team_id: null,
-            owner_name: "User One",
-            owner_handle: null,
-            owner_initials: "UO",
-            current_version: "1.0.0",
-            license: null,
-            compatibility: null,
-            metadata: {},
-            checksum: null,
-            size_bytes: 10,
-            tools: [],
-            requirements: [],
-            star_count: 0,
-            starred: false,
-            installed: false,
-            installed_version: null,
-            install_status: "none",
-            requires_count: 0,
-            used_by_count: 0,
-            dep_warn: false,
-            archived: false,
-            referenced: false,
-            created_at: "2026-06-09T12:00:00.000Z",
-            updated_at: "2026-06-09T12:00:00.000Z",
-          },
-        },
-        { private: true },
-      ),
-    ).toEqual({ everyone: false, teams: [] });
+  it("keeps the registry's current owner when no owner flags are given", () => {
+    const teamReg: RegistryInfo = {
+      exists: true,
+      id: "skill-1",
+      currentVersion: "1.0.0",
+      versions: ["1.0.0"],
+      row: registryRow({ owner_kind: "team", owner_handle: "platform", owner_team_id: "team-1" }),
+    };
+    expect(resolvePushOwner(teamReg, {})).toBe("platform");
+
+    const userReg: RegistryInfo = {
+      exists: true,
+      id: "skill-1",
+      currentVersion: "1.0.0",
+      versions: ["1.0.0"],
+      row: registryRow({ owner_kind: "user", owner_handle: null }),
+    };
+    expect(resolvePushOwner(userReg, {})).toBeNull();
   });
 
-  it("rejects conflicting private and shared visibility flags", () => {
-    expect(() =>
-      resolvePushVisibility({ exists: false, id: null, currentVersion: null, versions: [] }, { private: true, everyone: true }),
-    ).toThrow(/--private cannot be combined/);
-    expect(() =>
-      resolvePushVisibility({ exists: false, id: null, currentVersion: null, versions: [] }, { private: true, team: ["platform"] }),
-    ).toThrow(/--private cannot be combined/);
+  it("defaults new skills to Personal (null) when no owner flags are given", () => {
+    expect(resolvePushOwner(missing, {})).toBeNull();
   });
 
-  it("defaults new skills to private when update flags are omitted", () => {
-    expect(resolvePushVisibility({ exists: false, id: null, currentVersion: null, versions: [] }, {})).toEqual({
-      everyone: false,
-      teams: [],
-    });
+  it("rejects conflicting --private and --owner-team flags", () => {
+    expect(() => resolvePushOwner(missing, { private: true, ownerTeam: "platform" })).toThrow(
+      /--private cannot be combined with --owner-team/,
+    );
   });
 
-  it("builds push form data with owner, everyone, and repeatable team shares", () => {
+  it("rejects an owner change on a re-publish (publish can't change ownership)", () => {
+    const teamReg: RegistryInfo = {
+      exists: true,
+      id: "skill-1",
+      currentVersion: "1.0.0",
+      versions: ["1.0.0"],
+      row: registryRow({ slug: "incident-summary", owner_kind: "team", owner_handle: "platform", owner_team_id: "team-1" }),
+    };
+    // --private would silently no-op server-side (owner is immutable) and mis-record the lockfile.
+    expect(() => resolvePushOwner(teamReg, { private: true })).toThrow(/cannot change ownership on publish/);
+    // Re-targeting to a different team is likewise rejected up front (the server would reject it too).
+    expect(() => resolvePushOwner(teamReg, { ownerTeam: "data" })).toThrow(/cannot change ownership on publish/);
+    // Re-publishing with the SAME team (or no flags) is allowed and keeps the current owner.
+    expect(resolvePushOwner(teamReg, { ownerTeam: "platform" })).toBe("platform");
+    expect(resolvePushOwner(teamReg, {})).toBe("platform");
+  });
+
+  it("builds push form data with the owner team and message", () => {
     const fd = buildPublishFormData({
       archive: Buffer.from("archive"),
       name: "demo",
       version: "1.2.3",
       ownerTeam: "platform",
-      visibility: { everyone: true, teams: splitTeams(["platform,data", "platform"]) },
       message: "release",
     });
 
     expect(fd.get("action")).toBe("publish");
-    expect(fd.get("everyone")).toBe("true");
     expect(fd.get("version")).toBe("1.2.3");
     expect(fd.get("owner_team")).toBe("platform");
-    expect(fd.getAll("team")).toEqual(["platform", "data"]);
     expect(fd.get("message")).toBe("release");
     expect(fd.get("file")).toBeInstanceOf(File);
+    // No legacy visibility fields are sent.
+    expect(fd.get("everyone")).toBeNull();
+    expect(fd.getAll("team")).toEqual([]);
+  });
+
+  it("omits owner_team from the form data for a Personal push", () => {
+    const fd = buildPublishFormData({
+      archive: Buffer.from("archive"),
+      name: "demo",
+      version: "1.2.3",
+      ownerTeam: null,
+    });
+    expect(fd.get("owner_team")).toBeNull();
   });
 });
 
