@@ -136,6 +136,10 @@ still uses Docker Compose (`scripts/dev-stack.sh`).
 - If you changed architecture, the data model, RBAC, the provider seam, or a runtime integration,
   **update [`docs/design.md`](docs/design.md)** (and this file's anchors if paths moved). Keep the docs
   and the code in agreement.
+- If you changed the public skills API surface (endpoints, or the request/response shapes for skills,
+  comments, versions, dependencies, visibility, etc.), **update the bundled Companion skill** in
+  `packages/companion-skill/skill/` (`SKILL.md` and `reference/api.md`, plus `companion.json` if the
+  capabilities changed) so the agent-facing docs match the API.
 - If you changed frontend behavior, include the `agent-browser` validation result in your handoff. The
   minimum smoke path is: signed-out redirect, login, Skills list, filters, detail view, upload drawer,
   mobile viewport, and browser errors.
