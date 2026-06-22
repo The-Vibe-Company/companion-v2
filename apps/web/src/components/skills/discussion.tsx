@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import type { SkillCommentImage, SkillCommentRow, SkillVersionRow } from "@companion/contracts";
 import {
   COMMENT_IMAGE_FILE_ACCEPT,
@@ -34,25 +35,71 @@ interface DiscussionProps {
   onToggleDeprecated: (id: string, next: boolean) => void;
 }
 
-/** A single comment thumbnail; degrades to a placeholder icon if the image fails to load. */
+/**
+ * A single comment thumbnail. Clicking enlarges it in a lightbox (flat scrim, Esc / click-outside to
+ * close, focus returns to the thumbnail). Degrades to a placeholder icon if the image fails to load.
+ */
 function CommentThumb({ img }: { img: SkillCommentImage }) {
   const [broken, setBroken] = useState(false);
+  const [open, setOpen] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const closeRef = useRef<HTMLButtonElement>(null);
+
+  // Close and restore focus to the thumbnail that opened the lightbox. Used by every close path:
+  // the close button, the backdrop, the image, and Escape.
+  const close = () => {
+    setOpen(false);
+    triggerRef.current?.focus();
+  };
+
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") close();
+    };
+    document.addEventListener("keydown", onKey);
+    closeRef.current?.focus();
+    return () => document.removeEventListener("keydown", onKey);
+    // `close` only touches stable refs/setters; rebinding solely on `open` is intentional.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
   return (
-    <a
-      className={"comment__thumb" + (broken ? " is-broken" : "")}
-      href={img.url}
-      target="_blank"
-      rel="noreferrer"
-      // The link's only content is the image, so give the link itself an accessible name.
-      aria-label={broken ? "Image attachment unavailable" : "Open image attachment"}
-      title={broken ? "Image unavailable" : undefined}
-    >
-      {broken ? (
-        <Icon name="image" size={18} />
-      ) : (
-        <img src={img.url} alt="" loading="lazy" onError={() => setBroken(true)} />
-      )}
-    </a>
+    <>
+      <button
+        ref={triggerRef}
+        type="button"
+        className={"comment__thumb" + (broken ? " is-broken" : "")}
+        aria-label={broken ? "Image attachment unavailable" : "Enlarge image attachment"}
+        title={broken ? "Image unavailable" : undefined}
+        disabled={broken}
+        onClick={() => setOpen(true)}
+      >
+        {broken ? (
+          <Icon name="image" size={18} />
+        ) : (
+          <img src={img.url} alt="" loading="lazy" onError={() => setBroken(true)} />
+        )}
+      </button>
+      {open &&
+        createPortal(
+          <div
+            className="lightbox"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Image attachment"
+            onMouseDown={(e) => {
+              if (e.target === e.currentTarget) close();
+            }}
+          >
+            <button ref={closeRef} type="button" className="lightbox__close" aria-label="Close" onClick={close}>
+              <Icon name="x" size={18} />
+            </button>
+            <img className="lightbox__img" src={img.url} alt="" onClick={close} />
+          </div>,
+          document.body,
+        )}
+    </>
   );
 }
 

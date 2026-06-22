@@ -356,6 +356,20 @@ body { background: var(--color-canvas); color: var(--color-fg); font-family: var
   border-radius: var(--radius-sm); background: var(--color-surface-sunken); }
 .comment__thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .comment__thumb.is-broken { display: inline-flex; align-items: center; justify-content: center; color: var(--color-faint); }
+.comment__thumb:not(.is-broken) { cursor: zoom-in; padding: 0; }
+
+/* Lightbox: click a thumbnail to enlarge it over a flat scrim (Esc / click-outside to close). */
+.lightbox { position: fixed; inset: 0; z-index: 100; background: var(--color-scrim); display: flex; align-items: center;
+  justify-content: center; padding: 24px; }
+.lightbox__img { max-width: 92vw; max-height: 92vh; object-fit: contain; border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg); background: var(--color-surface); cursor: zoom-out; }
+.lightbox__close { position: fixed; top: 16px; right: 16px; z-index: 1; display: inline-flex; align-items: center;
+  justify-content: center; width: 34px; height: 34px; padding: 0; border: 1px solid var(--color-line);
+  border-radius: var(--radius-md); background: var(--color-surface); color: var(--color-muted); cursor: pointer;
+  box-shadow: var(--shadow-md); }
+.lightbox__close:hover { color: var(--color-fg); background: var(--color-surface-raised); }
+@media (prefers-reduced-motion: no-preference) { .lightbox { animation: lightboxIn var(--duration-base) var(--ease-out-quint); } }
+@keyframes lightboxIn { from { opacity: 0; } to { opacity: 1; } }
 
 /* Composer attachments: attach button, drag-over state, and the pending preview strip. */
 .composer__box.is-dragover { border-color: var(--color-line-strong); background: var(--color-surface-raised); }
