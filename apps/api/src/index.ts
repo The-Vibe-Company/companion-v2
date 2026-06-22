@@ -52,6 +52,7 @@ import {
   setMemberRole,
   setSkillFilterPreferences,
   setSkillVisibility,
+  transferSkillOwnership,
   setTeamMemberRole,
   setOrgLogoFromUpload,
   orgLogoPublicPath,
@@ -76,6 +77,7 @@ import {
   reportSkillInstallInputSchema,
   setCommentDeprecatedInputSchema,
   setSkillVisibilityInputSchema,
+  transferSkillOwnershipInputSchema,
   skillFrontmatterSchema,
   skillVisibilityInputSchema,
   visibilityFilterSchema,
@@ -1095,6 +1097,31 @@ app.put("/v1/skills/:slug/visibility", async (c) => {
       true,
     );
     return c.json({ ok: true, cascaded });
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
+/** Transfer a skill's ownership between a user and a team, or between teams. Session or skills:write PAT. */
+app.put("/v1/skills/:slug/owner", async (c) => {
+  try {
+    actorFromContext(c, true);
+    requireScope(c, "skills:write");
+    const { owner_team, cascade } = transferSkillOwnershipInputSchema.parse(await c.req.json());
+    const result = await withTenant(
+      c,
+      ({ actor, orgId, database }) =>
+        transferSkillOwnership({
+          actor,
+          orgId,
+          slug: c.req.param("slug"),
+          ownerTeam: owner_team ?? null,
+          cascade,
+          database,
+        }),
+      true,
+    );
+    return c.json({ ok: true, ...result });
   } catch (error) {
     return jsonError(c, error);
   }

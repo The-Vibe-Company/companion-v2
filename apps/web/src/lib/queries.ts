@@ -228,6 +228,30 @@ export async function setSkillVisibility(
   return { cascaded: res.cascaded ?? [] };
 }
 
+/** Transfer a skill's ownership to a team (slug) or back to the caller (`ownerTeam = null`). */
+export async function transferSkillOwnership(
+  slug: string,
+  ownerTeam: string | null,
+  opts: { cascade?: boolean } = {},
+): Promise<{ owner_kind: "user" | "team"; owner_team_id: string | null; owner_id: string; cascaded: string[] }> {
+  const res = await apiFetch<{
+    ok: true;
+    owner_kind: "user" | "team";
+    owner_team_id: string | null;
+    owner_id: string;
+    cascaded: string[];
+  }>(`/v1/skills/${slug}/owner`, {
+    method: "PUT",
+    body: JSON.stringify({ owner_team: ownerTeam, cascade: opts.cascade ?? false }),
+  });
+  return {
+    owner_kind: res.owner_kind,
+    owner_team_id: res.owner_team_id,
+    owner_id: res.owner_id,
+    cascaded: res.cascaded ?? [],
+  };
+}
+
 export async function saveSkillFilterPreferences(
   preferences: SkillFilterPreferences,
 ): Promise<SkillFilterPreferences> {

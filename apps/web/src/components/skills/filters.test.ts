@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { SkillVM } from "@/lib/types";
 import { BUILTIN_VIEWS, filtersKey, makeFilter, matchFilters, type Filter } from "./filters";
+import { visibilityMeta } from "./blocks";
 
 const platform = { id: "team-platform", slug: "platform", name: "Platform" };
 const data = { id: "team-data", slug: "data", name: "Data" };
@@ -169,6 +170,43 @@ describe("built-in views", () => {
         { type: "visibility", value: "everyone" },
       ]),
     );
+  });
+});
+
+describe("team-owned classification", () => {
+  const teamOwned = mk({
+    id: "platform-runbook",
+    visibility: { everyone: false, teams: [] }, // owned by a team, no extra shares
+    owner: {
+      kind: "team",
+      id: "team-platform",
+      userId: "creator-1",
+      teamId: "team-platform",
+      name: "Platform",
+      initials: "PL",
+      handle: "platform",
+      team: "Platform",
+    },
+  });
+
+  it("a team-owned skill with no extra shares reads as 'team', never 'private'", () => {
+    expect(matchFilters(teamOwned, [{ type: "visibility", value: "team" }])).toBe(true);
+    expect(matchFilters(teamOwned, [{ type: "visibility", value: "private" }])).toBe(false);
+    expect(matchFilters(teamOwned, [{ type: "visibility", value: "everyone" }])).toBe(false);
+  });
+
+  it("matches the owning team's filter even with no explicit shares", () => {
+    expect(matchFilters(teamOwned, [{ type: "team", value: "platform" }])).toBe(true);
+    expect(matchFilters(teamOwned, [{ type: "team", value: "data" }])).toBe(false);
+  });
+
+  it("labels a team-owned-unshared skill 'Team · {name}', not 'Private'", () => {
+    expect(visibilityMeta(teamOwned)).toEqual({ icon: "users", label: "Team · Platform" });
+  });
+
+  it("still labels a personal unshared skill 'Private'", () => {
+    const personal = mk({ id: "scratch", visibility: { everyone: false, teams: [] } });
+    expect(visibilityMeta(personal)).toEqual({ icon: "lock", label: "Private" });
   });
 });
 

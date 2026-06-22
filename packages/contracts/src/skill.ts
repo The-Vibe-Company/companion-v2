@@ -71,6 +71,31 @@ export type SkillOwnerKind = z.infer<typeof skillOwnerKindSchema>;
 export const skillOwnerTeamInputSchema = z.string().min(1).max(128).nullable().optional();
 
 /**
+ * Body of `PUT /v1/skills/:slug/owner`. `owner_team` is the destination team slug, or null to transfer
+ * the skill to the caller as a personal (user-owned) skill. Ownership is orthogonal to visibility, but
+ * the owning team is always part of the audience — `cascade` opts into adjusting dependencies/dependents
+ * so the visibility-cover invariant holds, mirroring the visibility-change cascade.
+ */
+export const transferSkillOwnershipInputSchema = z.object({
+  // Required (but nullable): a transfer must state its destination explicitly — `null` for personal
+  // (the caller) or a team slug. An omitted field is rejected so a malformed body can't silently
+  // reassign ownership to the caller.
+  owner_team: z.string().min(1).max(128).nullable(),
+  cascade: z.boolean().default(false),
+});
+export type TransferSkillOwnershipInput = z.infer<typeof transferSkillOwnershipInputSchema>;
+
+/** Result of an ownership transfer: the new owner + slugs of any skills cascaded to keep cover. */
+export const transferSkillOwnershipResultSchema = z.object({
+  ok: z.literal(true),
+  owner_kind: skillOwnerKindSchema,
+  owner_team_id: z.string().nullable(),
+  owner_id: z.string(),
+  cascaded: z.array(z.string()),
+});
+export type TransferSkillOwnershipResult = z.infer<typeof transferSkillOwnershipResultSchema>;
+
+/**
  * Live status of a single skill→skill dependency edge, computed from current state on every read.
  * Dependencies are un-versioned (pure skill→skill links): there is deliberately no "update
  * available" status — versions are a skill's own publish concern, not the dependency graph's.

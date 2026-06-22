@@ -100,6 +100,7 @@ describe("skill update flow", () => {
         onToggleStar: vi.fn(),
         onToggleInstalled: vi.fn(),
         onChangeVisibility: vi.fn(),
+        onChangeOwner: vi.fn(),
         onInstall: vi.fn(),
         onUpdate: vi.fn(),
         onOpenSkill: vi.fn(),

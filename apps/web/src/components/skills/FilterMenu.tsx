@@ -9,7 +9,7 @@ import type { Filter } from "./filters";
 
 const VISIBILITY_LABEL: Record<string, string> = {
   everyone: "Everyone",
-  team: "Team shares",
+  team: "Team",
   private: "Private",
 };
 

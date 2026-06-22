@@ -11,6 +11,7 @@ import {
   restoreSkill as restoreSkillRpc,
   saveSkillFilterPreferences,
   setSkillVisibility,
+  transferSkillOwnership,
   toggleStar as toggleStarRpc,
 } from "@/lib/queries";
 import { fetchSettingsAppData } from "@/lib/settingsClient";
@@ -276,8 +277,14 @@ export function SkillsApp({
   const [isNarrowViewport, setIsNarrowViewport] = useState(false);
   const [updateSkill, setUpdateSkill] = useState<SkillVM | null>(null);
   const [installSkill, setInstallSkill] = useState<SkillVM | null>(null);
-  // A visibility change that would break the dependency cover invariant — offer to cascade it.
-  const [visWarn, setVisWarn] = useState<{ slug: string; visibility: SkillVisibilityInput; direction: VisWarnDirection } | null>(null);
+  // A visibility change (or an ownership transfer, which shifts the home audience) that would break the
+  // dependency cover invariant — offer to cascade it. `ownerTransfer` set ⇒ confirm re-issues a transfer.
+  const [visWarn, setVisWarn] = useState<{
+    slug: string;
+    visibility: SkillVisibilityInput;
+    direction: VisWarnDirection;
+    ownerTransfer?: { ownerTeam: string | null };
+  } | null>(null);
   const [visNotice, setVisNotice] = useState<string | null>(null);
   const [openId, setOpenId] = useState<string | null>(() =>
     initialNormalizedRoute.kind === "local" ? null : initialNormalizedRoute.skill ?? null,
@@ -441,10 +448,12 @@ export function SkillsApp({
   const commitVisibility = useCallback(
     (id: string, visibility: SkillVisibilityInput, cascade = false): Promise<{ cascaded: string[] }> => {
       let prev: SkillVM["visibility"] | null = null;
+      let ownerKind: SkillVM["owner"]["kind"] = "user";
       setSkills((arr) =>
         arr.map((s) => {
           if (s.id === id) {
             prev = s.visibility;
+            ownerKind = s.owner.kind;
             const nextTeams = visibility.teams.map((slug) => {
               const existing = s.teams.find((team) => team.slug === slug);
               const team = teams.find((t) => t.id === slug);
@@ -460,8 +469,10 @@ export function SkillsApp({
         setFilters((fs) => {
           const nextVisibility = new Set<string>();
           if (visibility.everyone) nextVisibility.add("everyone");
-          if (visibility.teams.length) nextVisibility.add("team");
-          if (!visibility.everyone && visibility.teams.length === 0) nextVisibility.add("private");
+          // A team-owned skill is always "team" (visible to its owning team) regardless of shares.
+          if (ownerKind === "team" || visibility.teams.length) nextVisibility.add("team");
+          if (ownerKind !== "team" && !visibility.everyone && visibility.teams.length === 0)
+            nextVisibility.add("private");
           const hasVisibility = fs.some((f) => f.type === "visibility");
           if (hasVisibility && !fs.some((f) => f.type === "visibility" && nextVisibility.has(f.value))) {
             return fs.filter((f) => f.type !== "visibility");
@@ -545,22 +556,132 @@ export function SkillsApp({
     [commitVisibility],
   );
 
+  // Optimistically transfer a skill's ownership, persist it (optionally cascading dependents), and
+  // revert + rethrow on failure so the caller can surface the cover-warning dialog.
+  const commitTransfer = useCallback(
+    (id: string, ownerTeam: string | null, cascade = false): Promise<{ cascaded: string[] }> => {
+      let prev: Pick<SkillVM, "owner" | "ownerId" | "visibility" | "teams" | "teamSlugs"> | null = null;
+      // Captured for filter retention: a transfer changes both owner and visibility classification.
+      let newKind: "everyone" | "team" | "private" = "private";
+      let newOwnerName = me.name;
+      setSkills((arr) =>
+        arr.map((s) => {
+          if (s.id !== id) return s;
+          prev = { owner: s.owner, ownerId: s.ownerId, visibility: s.visibility, teams: s.teams, teamSlugs: s.teamSlugs };
+          const team = ownerTeam ? teams.find((t) => t.id === ownerTeam) : null;
+          const nextOwner: SkillVM["owner"] = team
+            ? {
+                kind: "team",
+                id: team.dbId ?? team.id,
+                userId: s.owner.userId,
+                teamId: team.dbId ?? team.id,
+                name: team.name,
+                initials: team.initial,
+                handle: team.id,
+                team: team.name,
+              }
+            : {
+                kind: "user",
+                id: me.id,
+                userId: me.id,
+                teamId: null,
+                name: me.name,
+                initials: me.initials,
+                handle: null,
+                team: null,
+              };
+          // The owning team's audience comes from ownership, not a share row — drop any redundant
+          // explicit share for the new owner team (mirrors the server).
+          const nextTeams = ownerTeam ? s.teams.filter((t) => t.slug !== ownerTeam) : s.teams;
+          newOwnerName = nextOwner.name;
+          newKind = s.visibility.everyone ? "everyone" : team || nextTeams.length ? "team" : "private";
+          return {
+            ...s,
+            owner: nextOwner,
+            ownerId: nextOwner.id,
+            visibility: { ...s.visibility, teams: nextTeams },
+            teams: nextTeams,
+            teamSlugs: nextTeams.map((t) => t.slug),
+          };
+        }),
+      );
+      // Keep the open skill on screen if an active visibility/owner filter would now exclude it (a
+      // transfer flips both classifications). Mirrors commitVisibility's retention for visibility.
+      let prevFilters: Filter[] | null = null;
+      if (id === openIdRef.current) {
+        setFilters((fs) => {
+          prevFilters = fs;
+          return fs.filter((f) =>
+            f.type === "visibility" ? f.value === newKind : f.type === "owner" ? f.value === newOwnerName : true,
+          );
+        });
+      }
+      return transferSkillOwnership(id, ownerTeam, { cascade })
+        .then((res) => ({ cascaded: res.cascaded }))
+        .catch((err: unknown) => {
+          // The transfer did not happen — restore both the optimistic owner change and any filters we
+          // pruned, so a permission/network failure or cascade rejection leaves state untouched.
+          if (prev) {
+            const snap = prev;
+            setSkills((arr) => arr.map((s) => (s.id === id ? { ...s, ...snap } : s)));
+          }
+          if (prevFilters) setFilters(prevFilters);
+          throw err;
+        });
+    },
+    [teams, me],
+  );
+
+  // Transfer ownership; on a plain success the optimistic update stands (no refresh, so the open detail
+  // stays put). A cover-invariant break surfaces the cascade dialog (which refreshes after cascading).
+  const changeOwner = useCallback(
+    (id: string, ownerTeam: string | null) => {
+      commitTransfer(id, ownerTeam, false).catch((err: unknown) => {
+        const msg = err instanceof Error ? err.message : "Could not transfer ownership.";
+        // The transfer's resulting audience (everyone + existing shares + the new owning team) drives
+        // the cover-warning preview; the old owning team falls away because it was never in `teams`.
+        const target = skills.find((s) => s.id === id);
+        const audience: SkillVisibilityInput = {
+          everyone: target?.visibility.everyone ?? false,
+          teams: [...(target?.teamSlugs ?? []), ...(ownerTeam ? [ownerTeam] : [])],
+        };
+        if (/^cannot broaden visibility/.test(msg))
+          setVisWarn({ slug: id, visibility: audience, direction: "broaden", ownerTransfer: { ownerTeam } });
+        else if (/^cannot narrow visibility/.test(msg))
+          setVisWarn({ slug: id, visibility: audience, direction: "narrow", ownerTransfer: { ownerTeam } });
+        else setVisNotice(msg);
+      });
+    },
+    [commitTransfer, skills],
+  );
+
   // Confirm a cascade: re-apply the change with cascade=true (the skill itself updates optimistically
   // via commitVisibility), then re-sync from the server so every cascaded skill — including
   // transitive ones and any implicit owner-team shares — reflects authoritative state.
   const confirmCascade = useCallback(async () => {
     if (!visWarn) return;
-    const { slug, visibility, direction } = visWarn;
+    const { slug, visibility, direction, ownerTransfer } = visWarn;
+    const noun = direction === "broaden" ? "sub-skill" : "dependent skill";
+    if (ownerTransfer) {
+      const { cascaded } = await commitTransfer(slug, ownerTransfer.ownerTeam, true);
+      router.refresh();
+      setVisWarn(null);
+      setVisNotice(
+        cascaded.length
+          ? `Updated ${cascaded.length} ${noun}${cascaded.length === 1 ? "" : "s"} to match.`
+          : "Ownership transferred.",
+      );
+      return;
+    }
     const { cascaded } = await commitVisibility(slug, visibility, true);
     if (cascaded.length) router.refresh();
     setVisWarn(null);
-    const noun = direction === "broaden" ? "sub-skill" : "dependent skill";
     setVisNotice(
       cascaded.length
         ? `Updated ${cascaded.length} ${noun}${cascaded.length === 1 ? "" : "s"} to match.`
         : "Visibility updated.",
     );
-  }, [visWarn, commitVisibility, router]);
+  }, [visWarn, commitVisibility, commitTransfer, router]);
 
   // Auto-dismiss the visibility notice toast.
   useEffect(() => {
@@ -634,7 +755,10 @@ export function SkillsApp({
   const teamCounts = useMemo(() => {
     const c: Record<string, number> = {};
     skills.forEach((s) => {
-      for (const slug of s.teamSlugs) c[slug] = (c[slug] || 0) + 1;
+      // Count a skill under its owning team (audience via ownership) as well as its explicit shares.
+      const slugs = new Set(s.teamSlugs);
+      if (s.owner.kind === "team" && s.owner.handle) slugs.add(s.owner.handle);
+      for (const slug of slugs) c[slug] = (c[slug] || 0) + 1;
     });
     return c;
   }, [skills]);
@@ -1111,6 +1235,7 @@ export function SkillsApp({
             onToggleStar={() => toggleStar(skill.id)}
             onToggleInstalled={() => setInstalled(skill.id, skill.installStatus === "none")}
             onChangeVisibility={(sc) => changeVisibility(skill.id, sc)}
+            onChangeOwner={(ownerTeam) => changeOwner(skill.id, ownerTeam)}
             onInstall={() => setInstallSkill(skill)}
             onUpdate={() => setUpdateSkill(skill)}
             onOpenSkill={openSkillBySlug}
