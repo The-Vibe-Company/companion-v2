@@ -441,6 +441,36 @@ export const skillComments = pgTable(
 );
 
 /**
+ * Image attachments on a comment. One row per image, ordered by `position`. The bytes live in
+ * object storage (key = `${orgId}/comments/${id}`); only metadata is kept here. Tenant-scoped and
+ * cascade-deleted with the parent comment / skill / org.
+ */
+export const skillCommentImages = pgTable(
+  "skill_comment_images",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    commentId: uuid("comment_id")
+      .notNull()
+      .references(() => skillComments.id, { onDelete: "cascade" }),
+    skillId: uuid("skill_id")
+      .notNull()
+      .references(() => skills.id, { onDelete: "cascade" }),
+    storageKey: text("storage_key").notNull(),
+    contentType: text("content_type").notNull(),
+    byteSize: integer("byte_size").notNull(),
+    position: integer("position").notNull().default(0),
+    createdAt: now(),
+  },
+  (t) => ({
+    byComment: index("skill_comment_images_comment_idx").on(t.commentId),
+    byOrg: index("skill_comment_images_org_idx").on(t.orgId),
+  }),
+);
+
+/**
  * Personal access tokens for programmatic publish/install over the API. The plaintext
  * `cmp_pat_<hex>` is shown to the caller once; only its sha256 `token_hash` is stored.
  * `scopes` gates capability (`skills:read` / `skills:write`); tokens expire

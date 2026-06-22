@@ -231,6 +231,16 @@ export const skillListRowSchema = z.object({
 });
 export type SkillListRow = z.infer<typeof skillListRowSchema>;
 
+/** An image attached to a comment. `url` is the auth-checked serve path for the stored object. */
+export const skillCommentImageSchema = z.object({
+  id: z.string(),
+  content_type: z.string(),
+  byte_size: z.number(),
+  position: z.number(),
+  url: z.string(),
+});
+export type SkillCommentImage = z.infer<typeof skillCommentImageSchema>;
+
 /** A comment on a skill (with the author's display fields joined in). */
 export const skillCommentRowSchema = z.object({
   id: z.string(),
@@ -247,6 +257,8 @@ export const skillCommentRowSchema = z.object({
   /** Joined `X.Y.Z` label for the version chip (null when global or unknown). */
   version: z.string().nullable(),
   deprecated: z.boolean(),
+  /** Image attachments, ordered by `position` (empty when the comment has none). */
+  images: z.array(skillCommentImageSchema).default([]),
 });
 export type SkillCommentRow = z.infer<typeof skillCommentRowSchema>;
 
@@ -257,6 +269,69 @@ export const addCommentInputSchema = z.object({
   version_id: z.string().nullable().optional(),
 });
 export type AddCommentInput = z.infer<typeof addCommentInputSchema>;
+
+/** Allowed comment image attachments (PNG, JPEG, WebP, GIF). */
+export const COMMENT_IMAGE_MIME_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"] as const;
+export type CommentImageMimeType = (typeof COMMENT_IMAGE_MIME_TYPES)[number];
+
+const COMMENT_IMAGE_EXTENSION_TO_MIME: Record<string, CommentImageMimeType> = {
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".webp": "image/webp",
+  ".gif": "image/gif",
+};
+
+/** `accept` value for `<input type="file">` — extensions only (Finder ignores mixed MIME filters). */
+export const COMMENT_IMAGE_FILE_ACCEPT = Object.keys(COMMENT_IMAGE_EXTENSION_TO_MIME).join(",");
+
+/** Per-comment attachment limits, enforced on both the client and the API. */
+export const MAX_COMMENT_IMAGES = 6;
+export const MAX_COMMENT_IMAGE_BYTES = 10 * 1024 * 1024;
+
+/** Resolve a file's stored content type, falling back to its extension; null when not an allowed image. */
+export function resolveCommentImageContentType(file: { type: string; name: string }): CommentImageMimeType | null {
+  if ((COMMENT_IMAGE_MIME_TYPES as readonly string[]).includes(file.type)) {
+    return file.type as CommentImageMimeType;
+  }
+  const ext = file.name.toLowerCase().match(/\.[^.]+$/)?.[0];
+  if (ext && ext in COMMENT_IMAGE_EXTENSION_TO_MIME) return COMMENT_IMAGE_EXTENSION_TO_MIME[ext]!;
+  return null;
+}
+
+export function isAllowedCommentImageFile(file: { type: string; name: string }): boolean {
+  return resolveCommentImageContentType(file) !== null;
+}
+
+/**
+ * Sniff an image's real format from its leading bytes (magic numbers), independent of the
+ * client-declared MIME/extension. Returns the matched allowed type, or null when the bytes are not a
+ * recognized PNG/JPEG/GIF/WebP — used to reject non-images disguised with a fake extension or header.
+ */
+export function sniffCommentImageMime(bytes: Uint8Array): CommentImageMimeType | null {
+  const b = bytes;
+  // PNG: 89 50 4E 47 0D 0A 1A 0A
+  if (
+    b.length >= 8 &&
+    b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47 &&
+    b[4] === 0x0d && b[5] === 0x0a && b[6] === 0x1a && b[7] === 0x0a
+  ) return "image/png";
+  // JPEG: FF D8 FF
+  if (b.length >= 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return "image/jpeg";
+  // GIF: "GIF87a" / "GIF89a"
+  if (
+    b.length >= 6 &&
+    b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x38 &&
+    (b[4] === 0x37 || b[4] === 0x39) && b[5] === 0x61
+  ) return "image/gif";
+  // WebP: "RIFF" .... "WEBP"
+  if (
+    b.length >= 12 &&
+    b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46 &&
+    b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50
+  ) return "image/webp";
+  return null;
+}
 
 /** Body of `PATCH /v1/skills/:slug/comments/:id` — deprecate or restore a comment thread. */
 export const setCommentDeprecatedInputSchema = z.object({

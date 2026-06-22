@@ -65,7 +65,7 @@ describe("companion skill package + row", () => {
       desc: "Detect dependencies, setup requirements, and display copy and record them in the skill manifest.",
     });
     expect(row.changes).toContain(
-      "Moves Companion-specific package data into companion.json: display copy, dependencies, and setup requirements.",
+      "Documents comment image attachments: POST /skills/{slug}/comments accepts multipart/form-data with up to six image files.",
     );
     // The install prompt drives the report-back call and leaves placeholders for the client.
     expect(row.prompts.install).toContain("/local-skills/companion/package");

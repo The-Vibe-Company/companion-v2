@@ -182,8 +182,17 @@ export async function fetchSkillVersionFiles(
 export async function addComment(
   slug: string,
   body: string,
-  opts?: { parentId?: string | null; versionId?: string | null },
+  opts?: { parentId?: string | null; versionId?: string | null; images?: File[] },
 ): Promise<SkillCommentRow> {
+  // With attachments the request is multipart (the browser sets the boundary); otherwise plain JSON.
+  if (opts?.images?.length) {
+    const fd = new FormData();
+    fd.append("body", body);
+    fd.append("parent_id", opts.parentId ?? "");
+    fd.append("version_id", opts.versionId ?? "");
+    for (const file of opts.images) fd.append("image", file);
+    return apiFetch<SkillCommentRow>(`/v1/skills/${slug}/comments`, { method: "POST", body: fd });
+  }
   return apiFetch<SkillCommentRow>(`/v1/skills/${slug}/comments`, {
     method: "POST",
     body: JSON.stringify({

@@ -8,6 +8,7 @@ import type {
   OrgSettingsDomainJoin,
   OrgSettingsInvitation,
   OrgSettingsOrg,
+  SkillCommentImage,
   SkillCommentRow,
   SkillDependenciesResponse,
   SkillDependencyRow,
@@ -24,6 +25,9 @@ import type {
 } from "@companion/contracts";
 import {
   API_TOKEN_PREFIX,
+  COMMENT_IMAGE_MIME_TYPES,
+  MAX_COMMENT_IMAGES,
+  MAX_COMMENT_IMAGE_BYTES,
   companionManifestSchema,
   fallbackCompanionManifest,
   parseAllowedTools,
@@ -339,6 +343,11 @@ export async function updateOrg(input: {
 
 export function orgLogoPublicPath(orgId: string): string {
   return `/v1/orgs/${orgId}/logo`;
+}
+
+/** Auth-checked serve path for a comment image attachment (carries the session cookie via the proxy). */
+export function commentImagePublicPath(slug: string, commentId: string, imageId: string): string {
+  return `/v1/skills/${encodeURIComponent(slug)}/comments/${commentId}/images/${imageId}`;
 }
 
 /**
@@ -1454,6 +1463,58 @@ export async function listSkillVersions(input: {
   });
 }
 
+/** Shape a stored `skill_comment_images` row into the API/view-model image (with its serve `url`). */
+function toCommentImage(
+  slug: string,
+  commentId: string,
+  img: { id: string; contentType: string; byteSize: number; position: number },
+): SkillCommentImage {
+  return {
+    id: img.id,
+    content_type: img.contentType,
+    byte_size: img.byteSize,
+    position: img.position,
+    url: commentImagePublicPath(slug, commentId, img.id),
+  };
+}
+
+/** Fetch every comment image for the given comment ids, grouped by `comment_id` and ordered. */
+async function loadCommentImages(
+  database: Db,
+  orgId: string,
+  slug: string,
+  commentIds: string[],
+): Promise<Map<string, SkillCommentImage[]>> {
+  const byComment = new Map<string, SkillCommentImage[]>();
+  if (commentIds.length === 0) return byComment;
+  const rows = await database
+    .select({
+      id: schema.skillCommentImages.id,
+      commentId: schema.skillCommentImages.commentId,
+      contentType: schema.skillCommentImages.contentType,
+      byteSize: schema.skillCommentImages.byteSize,
+      position: schema.skillCommentImages.position,
+    })
+    .from(schema.skillCommentImages)
+    .where(
+      and(
+        eq(schema.skillCommentImages.orgId, orgId),
+        inArray(schema.skillCommentImages.commentId, commentIds),
+      ),
+    )
+    // Group key first, then intra-comment order, so each comment's images come out 0..n-1.
+    .orderBy(asc(schema.skillCommentImages.commentId), asc(schema.skillCommentImages.position));
+  // Defensive against hand-rolled fakeDbs that may not return an array for this extra query.
+  if (!Array.isArray(rows)) return byComment;
+  for (const r of rows) {
+    const list = byComment.get(r.commentId);
+    const img = toCommentImage(slug, r.commentId, r);
+    if (list) list.push(img);
+    else byComment.set(r.commentId, [img]);
+  }
+  return byComment;
+}
+
 export async function listSkillComments(input: {
   actor: ActorContext;
   orgId: string;
@@ -1482,11 +1543,18 @@ export async function listSkillComments(input: {
     .leftJoin(schema.skillVersions, eq(schema.skillVersions.id, schema.skillComments.versionId))
     .where(and(eq(schema.skillComments.orgId, input.orgId), eq(schema.skillComments.skillId, skill.id)))
     .orderBy(asc(schema.skillComments.createdAt));
+  const imagesByComment = await loadCommentImages(
+    database,
+    input.orgId,
+    input.slug,
+    rows.map((r) => r.id),
+  );
   return rows.map((r) => ({
     ...r,
     created_at: r.created_at.toISOString(),
     // A null version_id is always global; otherwise the leftJoin label (null if the version is gone).
     version: r.version_id ? r.version : null,
+    images: imagesByComment.get(r.id) ?? [],
   }));
 }
 
@@ -1522,24 +1590,33 @@ export async function toggleStar(input: {
   return true;
 }
 
-export async function addComment(input: {
+/**
+ * Validate that a new comment / reply targets an accessible skill and a valid (same-skill) version or
+ * parent thread, without writing anything. Returns the resolved skill plus the effective version id
+ * and label. Shared by `addComment` and the API multipart path, which validates the target BEFORE
+ * uploading any image bytes (so an inaccessible/invalid target never triggers object writes).
+ * Cross-skill / cross-tenant integrity is not FK-enforceable, so it is checked here.
+ */
+export async function assertCommentTarget(input: {
   actor: ActorContext;
   orgId: string;
   slug: string;
-  body: string;
   parentId?: string | null;
   versionId?: string | null;
   database?: Db;
-}): Promise<SkillCommentRow> {
+}): Promise<{
+  skill: NonNullable<Awaited<ReturnType<typeof getSkillBySlug>>>;
+  versionId: string | null;
+  versionLabel: string | null;
+}> {
   const database = input.database ?? db;
   const skill = await getSkillBySlug(input);
   if (!skill) throw new Error("skill not found");
 
   // A reply inherits its thread context, so any caller-supplied versionId is ignored for replies.
-  let versionId = input.parentId ? null : input.versionId ?? null;
+  const versionId = input.parentId ? null : input.versionId ?? null;
   let versionLabel: string | null = null;
 
-  // Cross-skill / cross-tenant integrity is not FK-enforceable — validate it here.
   if (versionId) {
     const version = await database.query.skillVersions.findFirst({
       where: and(
@@ -1564,18 +1641,81 @@ export async function addComment(input: {
     if (!parent || parent.parentId !== null) throw new Error("invalid parent comment");
   }
 
-  const [row] = await database
-    .insert(schema.skillComments)
-    .values({
-      orgId: input.orgId,
-      skillId: skill.id,
-      authorId: input.actor.id,
-      body: input.body,
-      parentId: input.parentId ?? null,
-      versionId,
-    })
-    .returning();
-  if (!row) throw new Error("could not add comment");
+  return { skill, versionId, versionLabel };
+}
+
+export async function addComment(input: {
+  actor: ActorContext;
+  orgId: string;
+  slug: string;
+  body: string;
+  parentId?: string | null;
+  versionId?: string | null;
+  /** Already-uploaded image attachments (the API stores the bytes in S3 before calling this). */
+  images?: Array<{ id: string; storageKey: string; contentType: string; byteSize: number }>;
+  database?: Db;
+}): Promise<SkillCommentRow> {
+  const database = input.database ?? db;
+  const { skill, versionId, versionLabel } = await assertCommentTarget(input);
+
+  const attachments = input.images ?? [];
+
+  // Enforce the attachment invariants here, in the canonical write path, so every caller (web, REST,
+  // future workers) shares one guard rather than relying on each route handler to re-check.
+  if (attachments.length > MAX_COMMENT_IMAGES) {
+    throw new Error(`a comment can have at most ${MAX_COMMENT_IMAGES} images`);
+  }
+  for (const img of attachments) {
+    if (!(COMMENT_IMAGE_MIME_TYPES as readonly string[]).includes(img.contentType)) {
+      throw new Error("unsupported comment image type");
+    }
+    if (img.byteSize <= 0 || img.byteSize > MAX_COMMENT_IMAGE_BYTES) {
+      throw new Error("comment image exceeds the size limit");
+    }
+  }
+
+  // Insert the comment and its image metadata atomically: a failed image insert must not leave a
+  // text-only comment behind (callers also wrap this in withTenantContext, so the inner tx nests as
+  // a savepoint). The bytes are already in object storage; only metadata is persisted here.
+  const row = await database.transaction(async (tx) => {
+    const [created] = await tx
+      .insert(schema.skillComments)
+      .values({
+        orgId: input.orgId,
+        skillId: skill.id,
+        authorId: input.actor.id,
+        body: input.body,
+        parentId: input.parentId ?? null,
+        versionId,
+      })
+      .returning();
+    if (!created) throw new Error("could not add comment");
+    if (attachments.length) {
+      await tx.insert(schema.skillCommentImages).values(
+        attachments.map((img, i) => ({
+          id: img.id,
+          orgId: input.orgId,
+          commentId: created.id,
+          skillId: skill.id,
+          storageKey: img.storageKey,
+          contentType: img.contentType,
+          byteSize: img.byteSize,
+          position: i,
+        })),
+      );
+    }
+    return created;
+  });
+
+  const images: SkillCommentImage[] = attachments.map((img, i) =>
+    toCommentImage(input.slug, row.id, {
+      id: img.id,
+      contentType: img.contentType,
+      byteSize: img.byteSize,
+      position: i,
+    }),
+  );
+
   return {
     id: row.id,
     skill_id: row.skillId,
@@ -1586,6 +1726,7 @@ export async function addComment(input: {
     version_id: row.versionId,
     version: versionLabel,
     deprecated: row.deprecated,
+    images,
   };
 }
 
@@ -1647,6 +1788,7 @@ export async function setCommentDeprecated(input: {
     });
     versionLabel = version?.version ?? null;
   }
+  const imagesByComment = await loadCommentImages(database, input.orgId, input.slug, [updated.id]);
   return {
     id: updated.id,
     skill_id: updated.skillId,
@@ -1659,7 +1801,36 @@ export async function setCommentDeprecated(input: {
     version_id: updated.versionId,
     version: versionLabel,
     deprecated: updated.deprecated,
+    images: imagesByComment.get(updated.id) ?? [],
   };
+}
+
+/**
+ * Resolve a comment image attachment for serving. Gated by skill visibility (an invisible skill
+ * resolves to "skill not found") and scoped to the (org, skill, comment) the image belongs to.
+ * Returns the storage key + content type so the API can stream the object.
+ */
+export async function getCommentImageAsset(input: {
+  actor: ActorContext;
+  orgId: string;
+  slug: string;
+  commentId: string;
+  imageId: string;
+  database?: Db;
+}): Promise<{ storageKey: string; contentType: string }> {
+  const database = input.database ?? db;
+  const skill = await getSkillBySlug(input);
+  if (!skill) throw new Error("skill not found");
+  const image = await database.query.skillCommentImages.findFirst({
+    where: and(
+      eq(schema.skillCommentImages.id, input.imageId),
+      eq(schema.skillCommentImages.commentId, input.commentId),
+      eq(schema.skillCommentImages.orgId, input.orgId),
+      eq(schema.skillCommentImages.skillId, skill.id),
+    ),
+  });
+  if (!image) throw new Error("image not found");
+  return { storageKey: image.storageKey, contentType: image.contentType };
 }
 
 export async function setSkillVisibility(input: {
