@@ -16,7 +16,7 @@ These are the skills endpoints a personal access token (`skills:read` + `skills:
 
 | Action | Method & path | Scope |
 | --- | --- | --- |
-| Upload owner/visibility choices | `GET /skills/upload-options` | `skills:write` |
+| Upload owner choices | `GET /skills/upload-options` | `skills:write` |
 | Current published version + checksum | `GET /skills/{slug}/download` | `skills:read` |
 | Download a version package | `GET /skills/{slug}/versions/{version}/package` | `skills:read` |
 | Browse a version's files | `GET /skills/{slug}/versions/{version}/files` | `skills:read` |
@@ -24,7 +24,7 @@ These are the skills endpoints a personal access token (`skills:read` + `skills:
 | Publish a new skill | `POST /skills` | `skills:write` |
 | Update a skill | `POST /skills?expect_slug={slug}&expect_skill_id={id}` | `skills:write` |
 | Inspect a skill's dependency graph | `GET /skills/{slug}/dependencies` | `skills:read` |
-| Change a skill's visibility | `PUT /skills/{slug}/visibility` | `skills:write` |
+| Change a skill's owner | `PUT /skills/{slug}/owner` | `skills:write` |
 | Archive a skill | `POST /skills/{slug}/archive` | `skills:write` |
 | Restore an archived skill | `POST /skills/{slug}/restore` | `skills:write` |
 | Current bundled Companion skill status | `GET /local-skills/companion` | `skills:read` |
@@ -63,7 +63,7 @@ workspace's **Companion skills** section, use only the `/local-skills/companion`
 
 ## Upload bodies and ownership
 
-Before asking the user to choose ownership or visibility, fetch the available choices:
+Before asking the user to choose an owner, fetch the available choices:
 
 ```http
 GET /skills/upload-options
@@ -74,8 +74,7 @@ The response shape is:
 ```json
 {
   "defaults": {
-    "owner_team": null,
-    "visibility": { "everyone": false, "teams": [] }
+    "owner_team": null
   },
   "teams": [
     {
@@ -91,14 +90,14 @@ The response shape is:
 }
 ```
 
-Present "Personal" plus `canOwn=true` teams as owner choices. Present "Private", "Everyone", and
-optional team shares from `teams` as visibility choices. For a new publish, keep the response
-defaults unless the user chooses otherwise.
+Owner is the single access choice — present one picker: "Personal" (private to the user) plus
+`canOwn=true` teams (a team-owned skill is readable by every workspace member). For a new publish,
+keep the response defaults (`owner_team: null`, i.e. Personal) unless the user chooses otherwise.
 
 `POST /skills` accepts either:
 
-- `multipart/form-data` with a `file` field (and `owner_team` / `everyone` / `team` / `version` /
-  `message` / `expect_slug` / `expect_skill_id` / `dependency` fields), or
+- `multipart/form-data` with a `file` field (and `owner_team` / `version` / `message` /
+  `expect_slug` / `expect_skill_id` / `dependency` fields), or
 - a raw `application/zip` or `application/gzip` body (the archive itself), with the same options as
   query params.
 
@@ -110,25 +109,27 @@ dependency list, synchronize `companion.json` to the confirmed final list, and o
 send the archive. Set `action=validate` to run every package and identity check without publishing;
 the validate response is `{ "result": <validation>, "dependency_plan": <plan> }`.
 
-Ownership and visibility are separate:
+Owner is the single access axis — there is no separate visibility:
 
-- `owner_team=<team-slug>` uploads the skill under that team. The actor must be an organization
-  Owner/Admin, or an Admin/Editor of that team. Team Readers cannot upload or update for the team.
-- Omit `owner_team` for personal ownership.
-- Private visibility is `everyone=false` with no `team` values.
-- Workspace-wide visibility is `everyone=true`.
-- `team=<team-slug>` or repeated `team=` values grant read visibility only. Visibility team shares
-  never grant edit rights.
+- `owner_team=<team-slug>` makes the skill **Team-owned**: readable by every member of the workspace
+  and editable by that team's Admins/Editors (plus org Owners/Admins). The actor must be an
+  organization Owner/Admin, or an Admin/Editor of that team. Team Readers cannot upload or update for
+  the team.
+- Omit `owner_team` for **Personal** ownership: the skill is private to the owning user (only they and
+  org admins can read or edit it).
+- "Sharing broadly" means assigning the skill to a team — all team skills are workspace-visible. There
+  is no separate "Everyone" share, and a skill must not declare visibility in its `SKILL.md`.
+- Sending legacy `everyone`, `team`, `teams`, `scope`, or `visibility` parameters is rejected.
 
 Examples:
 
 ```http
-POST /skills?owner_team=platform&everyone=false
+POST /skills?owner_team=platform
 Content-Type: application/zip
 ```
 
 ```http
-POST /skills?owner_team=platform&everyone=true&team=research
+POST /skills
 Content-Type: application/zip
 ```
 
@@ -139,15 +140,10 @@ rejects the upload if the package's frontmatter `name` differs from `expect_slug
 `metadata.companion_skill_id` points at a different skill. This makes it impossible for an edit to
 silently retarget another skill.
 
-If you include `owner_team` on an update, it must match the skill's current owner team. Publishing a
-new version cannot move a skill between personal and team ownership, or from one owner team to
-another.
-
-For updates, keep existing settings as the default. Read `GET /skills/{slug}/download`, use its
-returned `visibility` as the default, and include that visibility in the upload query. Do not omit
-`everyone`/`team` on updates: omitted visibility fields mean Private (`everyone=false`, no team
-shares), not "preserve existing". Omit `owner_team` unless the user explicitly chooses a team owner
-that already owns the skill.
+The owner is **immutable on update**. Omit `owner_team` and the skill's current owner is kept. If you
+do include `owner_team`, it must match the skill's current owner team. Publishing a new version cannot
+move a skill between Personal and team ownership, or from one owner team to another — use
+`PUT /skills/{slug}/owner` for that.
 
 ## Dependencies & archive
 
@@ -168,15 +164,21 @@ truth.
   "upload": [{ "slug": "timeline-fmt", "msg": "declared in the new SKILL.md, not in the registry" }],
   "removed": ["csv-export"],
   "archive_candidates": [{ "slug": "csv-export", "reason": "no published skill requires it anymore" }],
-  "blocked": [{ "slug": "secret-helper", "status": "visibility", "msg": "secret-helper is less visible than incident-summary" }]
+  "blocked": [{ "slug": "secret-helper", "status": "visibility", "msg": "secret-helper is Personal and not visible to everyone who can see incident-summary" }]
 }
 ```
 
 A publish whose dependencies are missing, cyclic, or less visible than the skill is rejected with
-`422` and the same `dependency_plan` (look at `blocked`). Publish dependencies in `upload` first,
-in topological order. `GET /skills/{slug}/dependencies?version=` returns the resolved Requires + Used
-by graph with each edge's live status (`satisfied` / `missing` / `archived` / `visibility` /
-`cycle`).
+`422` and the same `dependency_plan` (look at `blocked`). The owner-cover rule: a team-owned target
+covers any dependent; a Personal target only covers a dependent that is Personal **and** owned by the
+same user. So a Personal dependency under a Team-owned dependent (visible to everyone) is a
+`visibility` mismatch. Publish dependencies in `upload` first, in topological order.
+
+`GET /skills/{slug}/dependencies?version=` returns the resolved Requires + Used by graph. Each row
+carries an `owner_kind` (`"user"` | `"team"` | `null`) describing how the dependency is owned, and
+each edge keeps a live status (`satisfied` / `missing` / `archived` / `visibility` / `cycle`); the
+`visibility` status flags a Personal dependency that is not visible to everyone who can see the
+dependent.
 
 Archiving hides a skill from the normal lists but keeps it viewable, restorable, and downloadable
 while a published version still references it. `POST /skills/{slug}/archive` accepts an optional
@@ -184,30 +186,29 @@ while a published version still references it. `POST /skills/{slug}/archive` acc
 as modifying the skill. Only archive a removed dependency after the user confirms, and never when
 another published skill still requires it.
 
-## Change visibility
+## Change owner
 
-`PUT /skills/{slug}/visibility` re-shares an existing skill without uploading a new version. JSON body:
+`PUT /skills/{slug}/owner` moves an existing skill between Personal and a team without uploading a new
+version. Owner is the single access axis, so this changes who can read **and** edit the skill. JSON
+body:
 
 ```json
-{ "everyone": true, "teams": ["research"], "cascade": false }
+{ "owner_team": "research" }
 ```
 
-- `everyone` — workspace-wide read access.
-- `teams` — team **slugs** to grant read access to (combinable with `everyone`). Send the full target
-  visibility; omitted fields mean Private, not "preserve existing".
-- `cascade` — when the change would break the cover invariant, `true` also updates the affected skills
-  (transitively) instead of rejecting.
+- `owner_team: "<team-slug>"` makes the skill **Team-owned** (readable by every workspace member,
+  editable by that team's Admins/Editors plus org Owners/Admins).
+- `owner_team: null` makes the skill **Personal** (private to the owning user; only they and org
+  admins can read or edit it).
 
-The cover invariant (a skill is never more visible than what it depends on) is enforced here too:
+There is no `cascade` flag and no `teams` array. The response is `{ "ok": true }`.
 
-- Broadening past a less-visible dependency is rejected unless `cascade=true`. With cascade the server
-  raises every transitive dependency to cover the new audience.
-- Narrowing below a more-visible dependent is rejected unless `cascade=true`. With cascade the server
-  reduces every transitive dependent to fit the new audience; a dependent owned by a team that would
-  still see it cannot be reduced, so that narrow is rejected even with cascade.
-
-Either way the response lists the changed slugs (`{ "ok": true, "cascaded": ["log-parser"] }`) and the
-whole change is rejected if the caller cannot modify one of the affected skills.
+The cover invariant (a skill is never more visible than what it depends on) is enforced here too. A
+team-owned target covers any dependent; a Personal target only covers a dependent that is Personal
+**and** owned by the same user. Moving a skill to a team makes it visible to everyone, so each of its
+transitive dependencies must already cover that audience — if a dependency would end up less visible
+(Personal under a now-team-owned skill), the change is rejected. Raise the dependency's owner first
+(move it to a team). The whole change is rejected if the caller cannot modify the skill.
 
 ## Versions & checksums
 

@@ -4,71 +4,47 @@ import { SKILL_NAME_RE, SEMVER_RE, skillRequirementSchema } from "./frontmatter"
 import { companionDisplaySchema } from "./companionManifest";
 import { localSkillStatusSchema } from "./localSkills";
 
-export const teamVisibilitySchema = z.object({
-  id: z.string(),
-  slug: z.string(),
-  name: z.string(),
-  color: z.string().nullable().optional(),
-  icon: z.string().nullable().optional(),
-});
-export type TeamVisibility = z.infer<typeof teamVisibilitySchema>;
-
-export const skillVisibilitySchema = z.object({
-  everyone: z.boolean(),
-  teams: z.array(teamVisibilitySchema),
-});
-export type SkillVisibility = z.infer<typeof skillVisibilitySchema>;
-
-export const skillVisibilityInputSchema = z.object({
-  everyone: z.boolean().default(false),
-  teams: z.array(z.string().min(1).max(128)).default([]),
-});
-export type SkillVisibilityInput = z.infer<typeof skillVisibilityInputSchema>;
-
 /**
- * Body of `PUT /v1/skills/:slug/visibility`. `cascade` opts into also raising the skill's
- * (transitive) dependencies so they stay at least as visible as the skill — without it, a
- * broadening change that would leave a dependency less visible is rejected.
+ * A skill has exactly one Owner, encoded by `owner_team`: `null` = **Personal** (private to the
+ * owning user); a team slug = **Team** (owned by that team, readable by every workspace member).
+ * The Owner is the single access axis — it decides both who can read and who can edit. There is no
+ * separate visibility flag and no per-team read sharing.
  */
-export const setSkillVisibilityInputSchema = skillVisibilityInputSchema.extend({
-  cascade: z.boolean().default(false),
-});
-export type SetSkillVisibilityInput = z.infer<typeof setSkillVisibilityInputSchema>;
-
-/** Result of a visibility change: the slugs of dependencies raised to cover the new audience. */
-export const setSkillVisibilityResultSchema = z.object({
-  ok: z.literal(true),
-  cascaded: z.array(z.string()),
-});
-export type SetSkillVisibilityResult = z.infer<typeof setSkillVisibilityResultSchema>;
-
-/**
- * The visibility-cover rule: can everyone who sees `dependent` also see `target`? A skill must
- * never be more visible than the dependencies it pulls in. Pure + shared by core (enforcement),
- * the API, and the web app (pre-flight warning) so the rule has one source of truth.
- *
- * - target Everyone → always covers.
- * - dependent Everyone but target not → mismatch.
- * - dependent private (no teams) → owner-managed, always covered.
- * - otherwise dependent's teams must be a subset of target's teams.
- *
- * `teams` are opaque identifiers; callers must compare like-for-like (all slugs or all ids).
- */
-export function visibilityCovers(
-  dependent: { everyone: boolean; teams: string[] },
-  target: { everyone: boolean; teams: string[] },
-): boolean {
-  if (target.everyone) return true;
-  if (dependent.everyone) return false;
-  if (dependent.teams.length === 0) return true;
-  const targetTeams = new Set(target.teams);
-  return dependent.teams.every((team) => targetTeams.has(team));
-}
-
 export const skillOwnerKindSchema = z.enum(["user", "team"]);
 export type SkillOwnerKind = z.infer<typeof skillOwnerKindSchema>;
 
+/** Owner on publish/create: omitted = keep current / Personal; `null` = Personal; slug = Team. */
 export const skillOwnerTeamInputSchema = z.string().min(1).max(128).nullable().optional();
+
+/**
+ * Body of `PUT /v1/skills/:slug/owner` — move a skill between Personal and a Team. `null` makes it
+ * Personal (private to its owner); a team slug makes that team the owner (workspace-visible).
+ */
+export const setSkillOwnerInputSchema = z.object({
+  owner_team: z.string().min(1).max(128).nullable(),
+});
+export type SetSkillOwnerInput = z.infer<typeof setSkillOwnerInputSchema>;
+
+/** Result of an owner change. */
+export const setSkillOwnerResultSchema = z.object({
+  ok: z.literal(true),
+});
+export type SetSkillOwnerResult = z.infer<typeof setSkillOwnerResultSchema>;
+
+/**
+ * The owner-cover rule: can everyone who can see `dependent` also see `target`? A skill must never
+ * be more widely visible than the dependencies it pulls in. Team-owned skills are visible to the
+ * whole workspace, so a team-owned target covers any dependent. A Personal target (private to its
+ * owner) only covers a dependent that is Personal and owned by the same user. Pure + shared by core
+ * (enforcement) and the web app so the rule has one source of truth.
+ */
+export function ownerCovers(
+  dependent: { ownerKind: SkillOwnerKind; ownerUserId: string },
+  target: { ownerKind: SkillOwnerKind; ownerUserId: string },
+): boolean {
+  if (target.ownerKind === "team") return true;
+  return dependent.ownerKind === "user" && dependent.ownerUserId === target.ownerUserId;
+}
 
 /**
  * Live status of a single skill→skill dependency edge, computed from current state on every read.
@@ -88,8 +64,8 @@ export type SkillDependencyStatus = z.infer<typeof skillDependencyStatusSchema>;
 export const skillDependencyRowSchema = z.object({
   slug: z.string(),
   status: skillDependencyStatusSchema,
-  /** The resolved target's visibility (null when missing/unpublished). */
-  visibility: skillVisibilitySchema.nullable(),
+  /** The resolved target's owner kind (null when missing/unpublished) — drives the access pill. */
+  owner_kind: skillOwnerKindSchema.nullable(),
   /** Short human note (e.g. "not published to this workspace", cycle hint). */
   note: z.string().nullable(),
   /** True when the target exists and is visible to the actor (the slug links to its detail). */
@@ -101,7 +77,7 @@ export type SkillDependencyRow = z.infer<typeof skillDependencyRowSchema>;
 export const skillDependentRowSchema = z.object({
   slug: z.string(),
   status: skillDependencyStatusSchema,
-  visibility: skillVisibilitySchema,
+  owner_kind: skillOwnerKindSchema,
   archived: z.boolean(),
   note: z.string().nullable(),
   can_open: z.boolean(),
@@ -189,7 +165,6 @@ export const skillListRowSchema = z.object({
   description: z.string(),
   /** Human display fields normalized from companion.json, with SKILL.md fallbacks. */
   display: companionDisplaySchema.default({}),
-  visibility: skillVisibilitySchema,
   validation: validationStateSchema,
   validation_error: z.string().nullable(),
   owner_kind: skillOwnerKindSchema,
@@ -384,7 +359,6 @@ export const publishSkillInputSchema = z.object({
   skill_id: z.string().uuid().optional(),
   slug: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/),
   owner_team: skillOwnerTeamInputSchema,
-  visibility: skillVisibilityInputSchema,
   version: z.string(),
   description: z.string(),
   checksum: z.string().regex(/^sha256:[0-9a-f]{64}$/),
@@ -407,13 +381,12 @@ export type PublishSkillInput = z.infer<typeof publishSkillInputSchema>;
 /**
  * Body of `POST /v1/skills/create` — author a SKILL.md inline ("Create in the browser").
  * The server assembles the standard frontmatter (`name` + `description`) and the body, packs
- * it, and publishes a new version. Visibility is applied on the request, never in the skill.
+ * it, and publishes a new version. The owner is applied on the request, never in the skill.
  */
 export const createSkillInputSchema = z.object({
   id: z.string().regex(SKILL_NAME_RE, "id must be kebab-case (lowercase letters, digits, hyphens)"),
   description: z.string().min(1, "description is required").max(1024),
   body: z.string().max(1024 * 1024, "body is too large").default(""),
   owner_team: skillOwnerTeamInputSchema,
-  visibility: skillVisibilityInputSchema,
 });
 export type CreateSkillInput = z.infer<typeof createSkillInputSchema>;

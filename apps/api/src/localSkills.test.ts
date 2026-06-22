@@ -54,7 +54,7 @@ describe("companion skill package + row", () => {
     expect(row.commands.length).toBeGreaterThan(0);
     expect(row.commands).toContainEqual({
       name: "Publish a skill",
-      desc: "Validate a skill, choose owner/visibility, and publish it safely.",
+      desc: "Validate a skill, choose its owner (Personal or a team), and publish it safely.",
     });
     expect(row.commands).toContainEqual({
       name: "Manage skill API calls",
@@ -65,7 +65,7 @@ describe("companion skill package + row", () => {
       desc: "Detect dependencies, setup requirements, and display copy and record them in the skill manifest.",
     });
     expect(row.changes).toContain(
-      "Documents comment image attachments: POST /skills/{slug}/comments accepts multipart/form-data with up to six image files.",
+      "Replaces skill visibility with a single Owner: a skill is owned by you (Personal, private) or by a team (visible to the whole workspace).",
     );
     // The install prompt drives the report-back call and leaves placeholders for the client.
     expect(row.prompts.install).toContain("/local-skills/companion/package");

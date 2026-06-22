@@ -61,12 +61,13 @@ adds `profiles`, `organizations`, `memberships`, `teams`, `team_memberships`, `i
 `skills`, `skill_versions`, `skill_version_dependencies`, `skill_stars`, `skill_filter_preferences`,
 `skill_comments`, `skill_comment_images`, `local_skill_installs`, `api_tokens`, and `audit_log`.
 
-Every tenant-owned table carries `org_id`. Skills keep ownership, visibility, and provenance
-separate: `owner_id` / `owner_team_id`, `everyone`, `skill_team_shares`, and `creator_id`.
-`owner_team_id` means the skill is owned by a team; admin/editor members of that owner team can
-modify it. `everyone=true` means every member of the current workspace can see the skill. Team
-visibility is zero or more rows in `skill_team_shares`; those rows grant read access only. Private
-is derived from `everyone=false` and no team shares. A version's declared tools
+Every tenant-owned table carries `org_id`. The **owner is the single access axis** for a skill:
+`owner_id` is the principal/creator (always set) and `owner_team_id` selects the owner kind.
+`owner_team_id IS NULL` = **Personal** — private to `owner_id` (only that user, plus org admins, can
+read or edit it). `owner_team_id` set = **Team-owned** — readable by every member of the workspace
+and editable by that team's admins/editors. There is no separate `everyone` flag and no
+`skill_team_shares` table; "sharing" a skill is moving it to a team (`PUT /v1/skills/:slug/owner`).
+`creator_id` records who acted (provenance), distinct from who can edit. A version's declared tools
 (`skill_versions.tools`) come from the Agent Skills `allowed-tools` frontmatter string.
 Companion-specific package data lives in root `companion.json`, not `SKILL.md`: `display` (human
 name, short summary, long description), `requirements` (declared secrets and environment variables,
@@ -83,8 +84,8 @@ frontmatter names and any present `metadata.companion_skill_id` that points at a
 On re-publish of an existing Companion package, reserved version metadata is treated as provenance; the API/CLI still assigns the
 next registry version unless the caller passes an explicit version. Legacy top-level `version`,
 `tools`, and unknown fields are warnings and are not preserved as top-level fields in newly stored
-packages; top-level `scope` or `visibility` is rejected because visibility belongs to the publish
-request.
+packages; top-level `scope` or `visibility` is rejected because access is governed by the skill's
+owner (set on the publish request via `owner_team`), never declared inside the package.
 
 **Skill dependencies (un-versioned skill→skill links).** A skill version can declare that it
 requires other skills. Edges live in `skill_version_dependencies` (`(skill_version_id,
@@ -94,9 +95,10 @@ keeps its exact graph. Dependencies are **un-versioned**: there are no semver ra
 version pins, and no "update available" status — versions are a skill's own publish concern, not the
 dependency graph's. Each edge's status is computed live on read from current state: **Satisfied**,
 **Missing** (target unpublished), **Archived** (target archived), **Visibility mismatch** (the
-target's audience does not cover the dependent's — everyone⇒everyone, team-scoped⇒target everyone or
-team-superset), or **Cycle blocked** (the edge sits in a directed cycle). Publishing **hard-blocks**
-declared dependencies that are missing, cyclic, or visibility-mismatched; edges are written in the
+target's owner does not cover the dependent's — a Team-owned target covers any dependent; a Personal
+target only covers a dependent that is Personal and owned by the same user), or **Cycle blocked**
+(the edge sits in a directed cycle). Publishing **hard-blocks**
+declared dependencies that are missing, cyclic, or owner-cover-mismatched; edges are written in the
 same transaction as the version. `POST /v1/skills?action=validate` returns a `dependencyPlan`
 (declared / already-published / must-upload / removed-since-previous / archival candidates) that
 drives the upload dialog's **Dependency preflight** step. In this slice declared dependencies are
@@ -217,8 +219,8 @@ requires the admin's own verified corporate email domain to match the requested 
 
 The service layer in `packages/core` is the primary enforcement point. It applies:
 
-- visibility gate: user owner, org admin, `everyone=true`, or membership in any shared team; owner-team admin/editor membership is also sufficient to read the skill so those owners can manage it;
-- capability gate: org admin, user owner, owner-team admin/editor, and visibility-target action checks; owner-team readers do not gain edit rights;
+- visibility gate (derived from the owner): org admins see everything; everyone else sees team-owned skills (`owner_team_id IS NOT NULL`) plus their own Personal skills (`owner_id = me`);
+- capability gate (`canEditSkill`): org admin → any skill; team-owned → that team's admin/editor; Personal → the owning user. There is no separate visibility-target check — choosing the owner *is* the access decision;
 - tenant gate: all service queries are scoped to the selected `org_id`.
 
 Postgres RLS may be added later as defense-in-depth, but browser and CLI clients never connect
@@ -238,8 +240,9 @@ directly to Postgres.
   plaintext returned once), `DELETE /v1/tokens/:id` (an org admin may revoke any token by id).
   Session-authenticated only — a token cannot mint another.
 - Skills: `/v1/skills`, `/v1/skills/:slug`, `/v1/skills/:slug/versions`,
-  `/v1/skills/:slug/download`, `/v1/skills/:slug/visibility`, `/v1/skill-filter-preferences`,
-  `GET /v1/skills/upload-options` (skills-token upload owner/visibility choices),
+  `/v1/skills/:slug/download`, `PUT /v1/skills/:slug/owner` (move between Personal and a team; body
+  `{ owner_team }`), `/v1/skill-filter-preferences`,
+  `GET /v1/skills/upload-options` (skills-token upload owner choices),
   `POST /v1/skills/create` (author a SKILL.md inline),
   `GET /v1/skills/:slug/versions/:version/package` (download a version as `.zip`), and
   `GET /v1/skills/:slug/versions/:version/files` (read a version's package contents for the in-app
@@ -277,7 +280,8 @@ and downloading its package require `skills:read`; the install callback
 (`POST /v1/local-skills/:key/installed`) mutates state and writes an audit row, so it requires
 `skills:write` — the read+write token the install prompt mints satisfies
 both, while a read-only token cannot spoof an install. `POST /v1/skills` accepts a multipart `file` (browser/CLI) or a raw
-`application/zip` / `application/gzip` body with `everyone`/`team`/`version` query params. Setting
+`application/zip` / `application/gzip` body with `owner_team`/`version` query params (the owner is
+immutable on a re-publish — omit `owner_team` to keep it; move it later via `PUT /v1/skills/:slug/owner`). Setting
 `action=validate` runs the same package checks without publishing; targeted updates also accept
 `expect_slug` and `expect_skill_id` in form fields or query params for both validation and
 publication. Uploads accept `.zip` or `.tar.gz`; the canonical stored, checksummed format is `.tar.gz`.

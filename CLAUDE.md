@@ -27,13 +27,13 @@ Read these before making non-trivial changes:
 1. **Hermès Agents** — agents on the **Hermes** runtime, with **Granite** memory and **OpenRouter** model
    routing.
 2. **Curated Container Catalog** — org-admin-approved images/templates, deployed 1-click.
-3. **Skills Hub** — versioned `SKILL.md` packages, shared via Everyone/team visibility and attached opt-in to agents.
+3. **Skills Hub** — versioned `SKILL.md` packages, owned by a user (Personal/private) or a team (workspace-visible), attached opt-in to agents.
 
 Canonical terms — **do not invent synonyms**:
 - Hierarchy: **Organization → Team → User**.
 - Org roles: **Owner, Admin, Developer**. Team roles: **Admin, Editor, Reader**.
-- Skill visibility: **Private** is derived from `everyone=false` and no team shares; **Everyone** means every member of the current workspace; team shares are explicit and can be combined with Everyone.
-- Skill ownership: a skill is owned by a user unless `owner_team_id` is set; owner-team Admins/Editors can modify that skill. Team visibility shares do not grant write access.
+- **Owner is the single access axis.** A skill is owned by a user (**Personal** — private to that user) or a team (**Team-owned** — readable by every member of the workspace), encoded by `owner_team_id` (NULL = Personal, set = Team). There is no separate visibility flag and no per-team read sharing.
+- Skill edit rights derive from the owner: **Personal** → the owning user; **Team-owned** → that team's Admins/Editors. **Org Admins** (Owner/Admin) can edit any skill. To "share" a skill, change its Owner (`PUT /v1/skills/:slug/owner`).
 - Deploy targets are **providers**: **Docker (local), Fly, Kubernetes, Modal**.
 
 ## Target repository layout
@@ -58,7 +58,7 @@ docs/         # vision / product / design / PRD
 ```
 
 **Anchor files** (the contracts the system hinges on — see `docs/design.md`):
-- `packages/db/schema.ts` — all entities + the `org_id` / visibility / `owner_id` columns and team-share tables.
+- `packages/db/schema.ts` — all entities + the `org_id` / `owner_id` / `owner_team_id` columns (the owner is the access axis; no separate visibility column or team-share table).
 - `packages/auth/policy.ts` — typed RBAC: visibility gate + capability gate; the "deploy for" logic.
 - `packages/providers/port.ts` — the `DeploymentProvider` interface + neutral `DeploySpec`.
 - `apps/worker/reconcile.ts` — observe → diff → apply → drift loop.
@@ -75,12 +75,14 @@ docs/         # vision / product / design / PRD
   them directly.
 - **One source of truth for types:** entities live in `packages/db`; shared contracts in
   `packages/contracts`. Don't redefine shapes ad hoc.
-- **Visibility × role are orthogonal.** Authorization = a **visibility gate** (can the actor see it?) **plus**
-  a **capability gate** (can the actor do it?). Enforce in the **service layer** (`packages/core`) so
+- **Access × role are orthogonal.** Authorization = a **visibility gate** (can the actor see it?) **plus**
+  a **capability gate** (can the actor do it?). For skills the visibility gate is derived from the owner
+  (team-owned → all members; Personal → the owner). Enforce in the **service layer** (`packages/core`) so
   web, REST, and the worker share one path — never only in route handlers.
-- **"Deploy for" semantics:** keep ownership, visibility, and provenance distinct:
-  `owner_id` / `owner_team_id` (who can edit), visibility state/share rows (who can read), and
-  creator/audit (who acted).
+- **"Deploy for" semantics:** keep ownership and provenance distinct:
+  `owner_id` / `owner_team_id` (the owner = who can edit AND, derived, who can read) and
+  creator/audit (who acted). For skills the owner is the single access axis — there is no separate
+  read-visibility state.
 - **Desired-state:** every deployable is a row of declared intent; the reconciler converges reality and
   heals drift. Provisioning is **idempotent** (keyed so retries never double-provision).
 - **Secrets** are envelope-encrypted, **write-only** over the API, referenced by id, and injected by the

@@ -26,7 +26,7 @@ const queryMocks = vi.hoisted(() => ({
   restoreSkill: vi.fn(),
   saveSkillFilterPreferences: vi.fn(),
   setCommentDeprecated: vi.fn(),
-  setSkillVisibility: vi.fn(),
+  setSkillOwner: vi.fn(),
   toggleStar: vi.fn(),
   validateSkillPackage: vi.fn(),
 }));
@@ -62,7 +62,6 @@ function skill(overrides: Partial<SkillVM>): SkillVM {
     uuid: "skill-" + (overrides.id ?? "base"),
     id: "base",
     ownerId: "user-1",
-    visibility: { everyone: false, teams: [] },
     version: "1.0.0",
     validation: "valid",
     description: "Test skill",
@@ -90,7 +89,6 @@ function skill(overrides: Partial<SkillVM>): SkillVM {
     starred: false,
     installStatus: "none",
     installedVersion: null,
-    teams: [],
     teamSlugs: [],
     requiresCount: 0,
     usedByCount: 0,
@@ -112,7 +110,6 @@ function skillRowFromVM(vm: SkillVM): SkillListRow {
     owner_name: vm.owner.name,
     owner_initials: vm.owner.initials,
     owner_handle: vm.owner.handle,
-    visibility: vm.visibility,
     current_version: vm.version,
     validation: vm.validation,
     description: vm.description,
@@ -181,12 +178,7 @@ function appProps(
         handle: "engineering",
         team: "Engineering",
       },
-      teams: [{ id: "team-1", slug: "engineering", name: "Engineering", color: null, icon: null }],
       teamSlugs: ["engineering"],
-      visibility: {
-        everyone: false,
-        teams: [{ id: "team-1", slug: "engineering", name: "Engineering", color: null, icon: null }],
-      },
     }),
     skill({ id: "other-skill", ownerId: "user-2", owner: { ...skill({}).owner, id: "user-2", userId: "user-2", name: "Grace Hopper" } }),
   ];
@@ -275,7 +267,7 @@ beforeEach(() => {
   queryMocks.restoreSkill.mockResolvedValue(undefined);
   queryMocks.saveSkillFilterPreferences.mockResolvedValue(undefined);
   queryMocks.setCommentDeprecated.mockResolvedValue(null);
-  queryMocks.setSkillVisibility.mockResolvedValue({ cascaded: [] });
+  queryMocks.setSkillOwner.mockResolvedValue(undefined);
   queryMocks.toggleStar.mockResolvedValue(true);
   queryMocks.validateSkillPackage.mockResolvedValue({ result: { ok: true }, dependencyPlan: null });
   mountedRoots = [];

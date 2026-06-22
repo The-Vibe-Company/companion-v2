@@ -4,7 +4,6 @@ import type {
   SkillListRow,
   SkillOwnerKind,
   SkillRequirement,
-  SkillVisibility,
   TeamRole,
   ValidationState,
 } from "@companion/contracts";
@@ -26,7 +25,6 @@ export interface SkillVM {
   uuid: string; // db id
   id: string; // slug (the displayed machine name)
   ownerId: string; // effective owner principal (user id or team id)
-  visibility: SkillVisibility;
   version: string | null;
   validation: ValidationState;
   description: string;
@@ -46,8 +44,7 @@ export interface SkillVM {
   starred: boolean;
   installStatus: "none" | "installed" | "update"; // caller's install state for this skill
   installedVersion: string | null; // version the caller recorded installing, if any
-  teams: SkillVisibility["teams"];
-  teamSlugs: string[]; // team slugs (for filtering)
+  teamSlugs: string[]; // owning team slug (team-owned only), for the "team" filter
   requiresCount: number; // dependencies the current version declares
   usedByCount: number; // other skills (current versions) that depend on this one
   depWarn: boolean; // any declared dependency is not satisfied
@@ -61,7 +58,6 @@ export function mapSkill(row: SkillListRow): SkillVM {
     uuid: row.id,
     id: row.slug,
     ownerId: row.owner_id,
-    visibility: row.visibility,
     version: row.current_version,
     validation: row.validation,
     description: row.description,
@@ -90,8 +86,7 @@ export function mapSkill(row: SkillListRow): SkillVM {
     starred: row.starred,
     installStatus: row.install_status ?? "none",
     installedVersion: row.installed_version ?? null,
-    teams: row.visibility.teams,
-    teamSlugs: row.visibility.teams.map((team) => team.slug),
+    teamSlugs: row.owner_kind === "team" && row.owner_handle ? [row.owner_handle] : [],
     requiresCount: row.requires_count ?? 0,
     usedByCount: row.used_by_count ?? 0,
     depWarn: row.dep_warn ?? false,

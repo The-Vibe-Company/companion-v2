@@ -1,22 +1,21 @@
 import { describe, expect, it } from "vitest";
-import type { SkillDependencyStatus } from "@companion/contracts";
-import { dependencyStatusFromFlags, visibilityCovers } from "../src/services";
+import type { SkillDependencyStatus, SkillOwnerKind } from "@companion/contracts";
+import { dependencyStatusFromFlags, ownerCovers } from "../src/services";
 
-describe("visibilityCovers (dependency visibility-cover rule)", () => {
-  type V = { everyone: boolean; teams: string[] };
-  const cases: Array<[string, V, V, boolean]> = [
+describe("ownerCovers (dependency owner-cover rule)", () => {
+  type O = { ownerKind: SkillOwnerKind; ownerUserId: string };
+  const team = (u = "u1"): O => ({ ownerKind: "team", ownerUserId: u });
+  const mine = (u = "u1"): O => ({ ownerKind: "user", ownerUserId: u });
+  const cases: Array<[string, O, O, boolean]> = [
     // [name, dependent, target, covered]
-    ["everyone target covers everything", { everyone: false, teams: ["a"] }, { everyone: true, teams: [] }, true],
-    ["everyone dependent needs everyone target", { everyone: true, teams: [] }, { everyone: false, teams: ["a"] }, false],
-    ["everyone → everyone", { everyone: true, teams: [] }, { everyone: true, teams: [] }, true],
-    ["private dependent is owner-managed", { everyone: false, teams: [] }, { everyone: false, teams: ["a"] }, true],
-    ["same team is covered", { everyone: false, teams: ["a"] }, { everyone: false, teams: ["a"] }, true],
-    ["disjoint team is a mismatch", { everyone: false, teams: ["a"] }, { everyone: false, teams: ["b"] }, false],
-    ["target must be a superset", { everyone: false, teams: ["a", "b"] }, { everyone: false, teams: ["a"] }, false],
-    ["subset dependent is covered", { everyone: false, teams: ["a"] }, { everyone: false, teams: ["a", "b"] }, true],
+    ["team target covers a personal dependent", mine(), team(), true],
+    ["team target covers a team dependent", team(), team(), true],
+    ["personal target covers same-owner personal dependent", mine("u1"), mine("u1"), true],
+    ["personal target does NOT cover a different owner's personal dependent", mine("u2"), mine("u1"), false],
+    ["personal target does NOT cover a team dependent (visible to all)", team(), mine("u1"), false],
   ];
   it.each(cases)("%s", (_name, dependent, target, expected) => {
-    expect(visibilityCovers(dependent, target)).toBe(expected);
+    expect(ownerCovers(dependent, target)).toBe(expected);
   });
 });
 

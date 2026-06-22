@@ -11,9 +11,10 @@ export interface UploadOptionTeam {
 
 export function buildSkillUploadOptions(teams: UploadOptionTeam[]) {
   return {
+    // The owner is the single access axis: `owner_team` null = Personal (private); a team slug =
+    // owned by that team (workspace-visible). Default to Personal.
     defaults: {
-      owner_team: null,
-      visibility: { everyone: false, teams: [] as string[] },
+      owner_team: null as string | null,
     },
     teams: teams.map((team) => ({
       id: team.id,

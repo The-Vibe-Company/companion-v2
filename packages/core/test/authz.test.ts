@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { OrgRole, TeamRole } from "@companion/contracts";
 import {
-  canActAtVisibility,
+  canEditSkill,
   canManageOrg,
   canManageTeam,
   canModify,
@@ -18,22 +18,28 @@ const actor = (orgRole: OrgRole, teamRole?: TeamRole | null): Actor => ({
   teamRole,
 });
 
-describe("canActAtVisibility (create/publish target visibility)", () => {
-  const cases: Array<[OrgRole, boolean, number, boolean | undefined, boolean]> = [
-    // role, everyone, teamCount, memberOfAllTargetTeams, expected
-    ["owner", true, 2, false, true],
-    ["admin", false, 1, false, true],
-    ["developer", true, 0, undefined, true],
-    ["developer", false, 0, undefined, true],
-    ["developer", false, 1, true, true],
-    ["developer", true, 2, true, true],
-    ["developer", false, 1, false, false],
-    ["developer", true, 2, false, false],
+describe("canEditSkill — the single owner gate", () => {
+  // role, ownerKind, isOwnerUser, ownerTeamRole, expected
+  const cases: Array<[OrgRole, "user" | "team", boolean, TeamRole | null, boolean]> = [
+    // Org admins edit anything.
+    ["owner", "user", false, null, true],
+    ["admin", "team", false, "reader", true],
+    ["admin", "user", false, null, true],
+    // Personal skills: only the owning user.
+    ["developer", "user", true, null, true],
+    ["developer", "user", false, null, false],
+    // Team-owned skills: that team's admins & editors only.
+    ["developer", "team", false, "admin", true],
+    ["developer", "team", false, "editor", true],
+    ["developer", "team", false, "reader", false],
+    ["developer", "team", false, null, false], // not a member of the owning team
+    // Being the personal owner doesn't help on a team-owned skill if you're not admin/editor.
+    ["developer", "team", true, "reader", false],
   ];
   it.each(cases)(
-    "%s everyone=%s teams=%s ownTeams=%s -> %s",
-    (role, everyone, teamCount, memberOfAllTargetTeams, expected) => {
-      expect(canActAtVisibility(actor(role), { everyone, teamCount, memberOfAllTargetTeams })).toBe(expected);
+    "org=%s ownerKind=%s isOwnerUser=%s ownerTeamRole=%s -> %s",
+    (orgRole, ownerKind, isOwnerUser, ownerTeamRole, expected) => {
+      expect(canEditSkill(actor(orgRole), { ownerKind, isOwnerUser, ownerTeamRole })).toBe(expected);
     },
   );
 });

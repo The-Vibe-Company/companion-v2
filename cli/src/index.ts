@@ -75,7 +75,7 @@ addGlobalOpts(
   skillsCmd
     .command("list")
     .description("list registry skills you can see")
-    .option("--visibility <visibility>", "filter by visibility (private|team|everyone)")
+    .option("--visibility <visibility>", "filter by owner (personal|team)")
     .option("--mine", "only skills you own", false),
 ).action((opts, cmd: Command) =>
   runAction(cmd, (g) => skills.list({ visibility: opts.visibility, mine: opts.mine }, g)),
@@ -97,13 +97,8 @@ addGlobalOpts(
   skillsCmd
     .command("push <dir>")
     .description("validate, package, and publish a new version")
-    .option("--private", "clear everyone and team shares")
-    .option("--owner-team <slug>", "team slug that owns the skill and can edit it")
-    .option("--everyone", "share with everyone in the workspace")
-    .option("--team <slug>", "team slug to share with (repeatable, comma-separated)", (value, previous: string[] = []) => [
-      ...previous,
-      value,
-    ], [])
+    .option("--private", "make the skill Personal (private to you)")
+    .option("--owner-team <slug>", "team slug that owns the skill (workspace-visible, team admins/editors can edit)")
     .option("--bump <kind>", "bump from the registry's current version (patch|minor|major)")
     .option("--set-version <semver>", "publish an explicit version")
     .option("--message <text>", "version note")
@@ -113,10 +108,8 @@ addGlobalOpts(
     skills.push(
       dir,
       {
-        everyone: opts.everyone,
         private: opts.private,
         ownerTeam: opts.ownerTeam,
-        team: opts.team,
         bump: opts.bump,
         setVersion: opts.setVersion,
         message: opts.message,

@@ -3,7 +3,6 @@
 import { useEffect, useRef, useState } from "react";
 import type {
   OrgRole,
-  SkillVisibilityInput,
   SkillCommentRow,
   SkillDependenciesResponse,
   SkillFile,
@@ -22,11 +21,9 @@ import type { MeVM, SkillVM, TeamVM } from "@/lib/types";
 import { StarButton } from "./blocks";
 import {
   Activity,
-  ChecksumDetails,
   DetailMeta,
   DetailPanelNav,
   DetailRail,
-  ManifestDetails,
   Requirements,
   type DetailPanel,
   type DetailPanelItem,
@@ -191,7 +188,7 @@ export function DetailView({
   onNext,
   onToggleStar,
   onToggleInstalled,
-  onChangeVisibility,
+  onChangeOwner,
   onInstall,
   onUpdate,
   onOpenSkill,
@@ -210,7 +207,7 @@ export function DetailView({
   onNext: () => void;
   onToggleStar: () => void;
   onToggleInstalled: () => void;
-  onChangeVisibility: (visibility: SkillVisibilityInput) => void;
+  onChangeOwner: (ownerTeam: string | null) => void;
   onInstall: () => void;
   onUpdate: () => void;
   onOpenSkill: (slug: string) => void;
@@ -420,10 +417,11 @@ export function DetailView({
   };
   const morePanelItems: DetailPanelItem[] = [
     { id: "files", label: "Files", icon: "package-open", count: files.length },
-    { id: "requirements", label: "Setup & secrets", icon: "key-round", count: skill.requirements.length },
-    { id: "activity", label: "Activity", icon: "activity", count: versions.length },
-    { id: "manifest", label: "Manifest", icon: "braces", count: skill.tools.length + Object.keys(skill.metadata).length },
-    { id: "checksum", label: "Checksum", icon: "hash", count: skill.checksum ? "set" : "—" },
+    // Hide Setup & secrets when the skill declares none (don't show empty sections).
+    ...(skill.requirements.length > 0
+      ? [{ id: "requirements" as const, label: "Setup & secrets", icon: "key-round", count: skill.requirements.length }]
+      : []),
+    { id: "activity", label: "History", icon: "history", count: versions.length },
   ];
   const panelItems = [dependencyPanel, ...morePanelItems];
   const currentPanel = panel ? panelItems.find((item) => item.id === panel) ?? dependencyPanel : null;
@@ -497,8 +495,8 @@ export function DetailView({
             <DetailMeta
               skill={skill}
               teams={teams}
-              onChangeVisibility={onChangeVisibility}
-              canChangeVisibility={canModifySkill}
+              onChangeOwner={onChangeOwner}
+              canChangeOwner={canModifySkill}
               requiresN={reqN}
               usedByN={usedN}
               depFlag={depFlag}
@@ -567,7 +565,7 @@ export function DetailView({
                 </div>
               ) : panel === "files" ? (
                 <FileExplorer files={files} requestedPath={null} panelMode />
-              ) : panel === "activity" ? (
+              ) : (
                 <div className="dpanel__inner">
                   <div className="dblocks dblocks--panel">
                     <div>
@@ -577,14 +575,6 @@ export function DetailView({
                       <Activity versions={versions} ownerName={skill.owner.name} />
                     </div>
                   </div>
-                </div>
-              ) : panel === "manifest" ? (
-                <div className="dpanel__inner">
-                  <ManifestDetails skill={skill} />
-                </div>
-              ) : (
-                <div className="dpanel__inner">
-                  <ChecksumDetails checksum={skill.checksum} />
                 </div>
               )}
               </div>

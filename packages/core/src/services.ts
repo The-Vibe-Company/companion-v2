@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { and, asc, count, desc, eq, exists, gt, inArray, isNull, ne, not, or, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, exists, gt, inArray, isNotNull, isNull, ne, not, or, sql } from "drizzle-orm";
 import type {
   ApiTokenRow,
   DependencyPlan,
@@ -16,8 +16,7 @@ import type {
   SkillDependentRow,
   SkillFilterPreferences,
   SkillListRow,
-  SkillVisibility,
-  SkillVisibilityInput,
+  SkillOwnerKind,
   SkillVersionRow,
   TeamRole,
   TokenScope,
@@ -35,21 +34,20 @@ import {
   publishSkillInputSchema,
   skillFilterPreferencesSchema,
   TEAM_BRAND_COLORS,
-  visibilityCovers,
+  ownerCovers,
   type CompanionManifest,
   type PublishSkillInput,
 } from "@companion/contracts";
 
-// Re-exported so existing importers (tests, callers) keep `visibilityCovers` from core; the rule
-// itself now lives in @companion/contracts as the single source of truth shared with the web app.
-export { visibilityCovers } from "@companion/contracts";
+// Re-exported so existing importers (tests, callers) keep `ownerCovers` from core; the rule itself
+// now lives in @companion/contracts as the single source of truth shared with the web app.
+export { ownerCovers } from "@companion/contracts";
 import { compareSemver } from "@companion/skills";
 import { db, schema, type Db } from "@companion/db";
 import { initialsFor, slugify } from "@companion/db/ids";
 import { listOrgAccessDomains } from "./domainAccess";
 import { classifyEmailDomain } from "./email-domains";
 import {
-  canActAtVisibility,
   canManageOrg,
   canManageTeam,
   canModify,
@@ -685,9 +683,8 @@ export async function updateTeam(input: {
 
 /**
  * Delete a team. Requires an org admin (`canManageOrg`), and the org must keep at least one team.
- * Skill team shares cascade through `skill_team_shares`, so deleting a team only removes that team's
- * visibility grant; a skill becomes private if it is not shared with Everyone and has no teams left.
- * Team-owned skills fall back to their stored user owner when `owner_team_id` is set null by the FK.
+ * Skills owned by the team fall back to their stored user owner (`owner_team_id` set null), which
+ * makes them Personal (private to that owner) until an admin re-homes them.
  */
 export async function deleteTeam(input: {
   actor: ActorContext;
@@ -712,23 +709,14 @@ export async function deleteTeam(input: {
       .from(schema.teams)
       .where(eq(schema.teams.orgId, input.orgId));
     if (Number(teamCount?.value ?? 0) <= 1) throw new Error("organization must keep at least one team");
-    const affectedShares = await tx
-      .select({ skillId: schema.skillTeamShares.skillId })
-      .from(schema.skillTeamShares)
-      .where(and(eq(schema.skillTeamShares.orgId, input.orgId), eq(schema.skillTeamShares.teamId, input.teamId)));
     const ownedSkills = await tx
       .select({ skillId: schema.skills.id })
       .from(schema.skills)
       .where(and(eq(schema.skills.orgId, input.orgId), eq(schema.skills.ownerTeamId, input.teamId)));
-    const affectedSkillIds = [...new Set([...affectedShares.map((share) => share.skillId), ...ownedSkills.map((skill) => skill.skillId)])];
-    if (affectedSkillIds.length) {
-      await tx
-        .update(schema.skills)
-        .set({ updatedAt: new Date() })
-        .where(and(eq(schema.skills.orgId, input.orgId), inArray(schema.skills.id, affectedSkillIds)));
-    }
     const ownedSkillIds = ownedSkills.map((skill) => skill.skillId);
     if (ownedSkillIds.length) {
+      // Reverts to Personal (owner_team_id null) — same as the FK's onDelete: set null, done
+      // explicitly so updated_at moves and the change is observable.
       await tx
         .update(schema.skills)
         .set({ ownerTeamId: null, updatedAt: new Date() })
@@ -919,32 +907,12 @@ async function visibleSkillPredicate(database: Db, actor: ActorContext, orgId: s
   const orgRole = await getOrgRole(orgId, actor.id, database);
   if (!orgRole) throw new Error("not a member of this organization");
   if (orgRole && canManageOrg(orgRole)) return eq(schema.skills.orgId, orgId);
-  const teamsForActor = database
-    .select({ teamId: schema.teamMemberships.teamId })
-    .from(schema.teamMemberships)
-    .where(and(eq(schema.teamMemberships.orgId, orgId), eq(schema.teamMemberships.userId, actor.id)));
-  const teamSharedSkillsForActor = database
-    .select({ skillId: schema.skillTeamShares.skillId })
-    .from(schema.skillTeamShares)
-    .where(and(eq(schema.skillTeamShares.orgId, orgId), inArray(schema.skillTeamShares.teamId, teamsForActor)));
-  const editableOwnerTeamsForActor = database
-    .select({ teamId: schema.teamMemberships.teamId })
-    .from(schema.teamMemberships)
-    .where(
-      and(
-        eq(schema.teamMemberships.orgId, orgId),
-        eq(schema.teamMemberships.userId, actor.id),
-        inArray(schema.teamMemberships.teamRole, ["admin", "editor"]),
-      ),
-    );
+  // Owner is the single access axis: team-owned skills are readable by every workspace member;
+  // personal skills (no owner team) are private to their owner. (A team-owned skill whose creator
+  // is the actor is already covered by the team-owned branch.)
   return and(
     eq(schema.skills.orgId, orgId),
-    or(
-      eq(schema.skills.everyone, true),
-      and(isNull(schema.skills.ownerTeamId), eq(schema.skills.ownerId, actor.id)),
-      inArray(schema.skills.ownerTeamId, editableOwnerTeamsForActor),
-      inArray(schema.skills.id, teamSharedSkillsForActor),
-    ),
+    or(isNotNull(schema.skills.ownerTeamId), eq(schema.skills.ownerId, actor.id)),
   );
 }
 
@@ -954,15 +922,6 @@ async function visibleSkillIds(database: Db, actor: ActorContext, orgId: string)
   const rows = await database.select({ id: schema.skills.id }).from(schema.skills).where(predicate);
   // Defensive (mocked DBs in tests may return a non-array for this shape) — see loadDepGraph.
   return new Set((Array.isArray(rows) ? rows : []).map((r) => r.id));
-}
-
-function skillHasTeamShare(database: Db, orgId: string) {
-  return exists(
-    database
-      .select({ one: sql`1` })
-      .from(schema.skillTeamShares)
-      .where(and(eq(schema.skillTeamShares.orgId, orgId), eq(schema.skillTeamShares.skillId, schema.skills.id))),
-  );
 }
 
 /**
@@ -1002,11 +961,9 @@ export async function listSkills(input: {
   if (!input.includeArchived) {
     predicates.push(input.archived ? not(isNull(schema.skills.archivedAt)) : isNull(schema.skills.archivedAt));
   }
-  if (input.visibility === "everyone") predicates.push(eq(schema.skills.everyone, true));
-  if (input.visibility === "team") predicates.push(skillHasTeamShare(database, input.orgId));
-  if (input.visibility === "private") {
-    predicates.push(and(eq(schema.skills.everyone, false), not(skillHasTeamShare(database, input.orgId))));
-  }
+  // Owner filter: personal (no owner team) vs team-owned.
+  if (input.visibility === "personal") predicates.push(isNull(schema.skills.ownerTeamId));
+  if (input.visibility === "team") predicates.push(isNotNull(schema.skills.ownerTeamId));
   if (input.mine) {
     const editableOwnerTeamsForActor = database
       .select({ teamId: schema.teamMemberships.teamId })
@@ -1055,7 +1012,6 @@ export async function listSkills(input: {
       org_id: schema.skills.orgId,
       slug: schema.skills.slug,
       description: schema.skills.description,
-      everyone: schema.skills.everyone,
       validation: schema.skills.validation,
       validation_error: schema.skills.validationError,
       owner_kind: sql<"user" | "team">`case when ${schema.skills.ownerTeamId} is null then 'user' else 'team' end`,
@@ -1114,29 +1070,6 @@ export async function listSkills(input: {
     ? baseQuery.orderBy(desc(searchRank), desc(schema.skills.updatedAt)).limit(input.limit ?? 20)
     : baseQuery.orderBy(desc(schema.skills.updatedAt)));
 
-  const skillIds = rows.map((r) => r.id);
-  const sharesBySkill = new Map<string, SkillVisibility["teams"]>();
-  if (skillIds.length) {
-    const shareRows = await database
-      .select({
-        skill_id: schema.skillTeamShares.skillId,
-        id: schema.teams.id,
-        slug: schema.teams.slug,
-        name: schema.teams.name,
-        color: schema.teams.color,
-        icon: schema.teams.icon,
-      })
-      .from(schema.skillTeamShares)
-      .innerJoin(schema.teams, eq(schema.teams.id, schema.skillTeamShares.teamId))
-      .where(and(eq(schema.skillTeamShares.orgId, input.orgId), inArray(schema.skillTeamShares.skillId, skillIds)))
-      .orderBy(asc(schema.teams.name));
-    for (const row of shareRows) {
-      const list = sharesBySkill.get(row.skill_id) ?? [];
-      list.push({ id: row.id, slug: row.slug, name: row.name, color: row.color, icon: row.icon });
-      sharesBySkill.set(row.skill_id, list);
-    }
-  }
-
   // Dependency counts + warn flag, computed from the org's current-version dependency graph.
   const graph = await loadDepGraph(database, input.orgId);
   // Used-by counts must not leak dependents the actor cannot read — scope to the visibility gate.
@@ -1191,7 +1124,6 @@ export async function listSkills(input: {
       slug: r.slug,
       description: summary,
       display: companion.display,
-      visibility: { everyone: r.everyone, teams: sharesBySkill.get(r.id) ?? [] },
       validation: r.validation,
       validation_error: r.validation_error,
       owner_kind: r.owner_kind,
@@ -1241,23 +1173,29 @@ const EMPTY_SKILL_FILTER_PREFERENCES: SkillFilterPreferences = {
   custom_views: [],
 };
 
-function normalizePersistedSkillFilter(value: unknown): unknown {
+function normalizePersistedSkillFilter(value: unknown): unknown | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return value;
   const filter = value as Record<string, unknown>;
-  if (filter.type !== "scope") return value;
-  if (filter.value === "public") return { type: "visibility", value: "everyone" };
-  if (filter.value === "team" || filter.value === "private") return { type: "visibility", value: filter.value };
+  // Legacy "scope" filters (pre-0011) and "visibility" filters (pre-0020) collapse onto the
+  // owner-kind filter set {personal, team}. The old workspace-wide value drops — every team-owned
+  // skill is now workspace-visible, so there is no distinct "everyone"/"public" filter.
+  if (filter.type === "scope" || filter.type === "visibility") {
+    if (filter.value === "private" || filter.value === "personal") return { type: "visibility", value: "personal" };
+    if (filter.value === "team") return { type: "visibility", value: "team" };
+    return null;
+  }
   return value;
 }
 
 function normalizePersistedSkillPreferences(input: { activeFilters: unknown[]; customViews: unknown[] }) {
+  const norm = (arr: unknown[]) => arr.map(normalizePersistedSkillFilter).filter((f) => f != null);
   return {
-    active_filters: input.activeFilters.map(normalizePersistedSkillFilter),
+    active_filters: norm(input.activeFilters),
     custom_views: input.customViews.map((view) => {
       if (!view || typeof view !== "object" || Array.isArray(view)) return view;
       const record = view as Record<string, unknown>;
       if (!Array.isArray(record.filters)) return view;
-      return { ...record, filters: record.filters.map(normalizePersistedSkillFilter) };
+      return { ...record, filters: norm(record.filters) };
     }),
   };
 }
@@ -1320,13 +1258,6 @@ export async function getSkillBySlug(input: {
   return rows.find((r) => r.slug === input.slug) ?? null;
 }
 
-function normalizeVisibility(input: SkillVisibilityInput): SkillVisibilityInput {
-  return {
-    everyone: input.everyone,
-    teams: [...new Set(input.teams.map((t) => t.trim()).filter(Boolean))],
-  };
-}
-
 async function ownerTeamRole(input: {
   database: Db;
   orgId: string;
@@ -1385,42 +1316,6 @@ async function resolveOwnerTeam(input: {
   });
   if (!canEditOwnerTeam(role)) throw new Error("not allowed to create skills for this team");
   return { id: team.id, slug: team.slug, name: team.name };
-}
-
-async function resolveVisibilityTeams(input: {
-  actor: ActorContext;
-  orgId: string;
-  visibility: SkillVisibilityInput;
-  orgRole: OrgRole;
-  database: Db;
-}): Promise<{
-  visibility: SkillVisibilityInput;
-  teams: Array<{ id: string; slug: string; name: string }>;
-  memberOfAllTargetTeams: boolean;
-}> {
-  const database = input.database;
-  const visibility = normalizeVisibility(input.visibility);
-  if (!visibility.teams.length) return { visibility, teams: [], memberOfAllTargetTeams: true };
-
-  const teams = await database
-    .select({ id: schema.teams.id, slug: schema.teams.slug, name: schema.teams.name })
-    .from(schema.teams)
-    .where(and(eq(schema.teams.orgId, input.orgId), inArray(schema.teams.slug, visibility.teams)));
-  if (teams.length !== visibility.teams.length) throw new Error("visibility teams must exist");
-
-  if (canManageOrg(input.orgRole)) return { visibility, teams, memberOfAllTargetTeams: true };
-
-  const memberships = await database
-    .select({ teamId: schema.teamMemberships.teamId })
-    .from(schema.teamMemberships)
-    .where(
-      and(
-        eq(schema.teamMemberships.orgId, input.orgId),
-        eq(schema.teamMemberships.userId, input.actor.id),
-        inArray(schema.teamMemberships.teamId, teams.map((t) => t.id)),
-      ),
-    );
-  return { visibility, teams, memberOfAllTargetTeams: memberships.length === teams.length };
 }
 
 export async function listSkillVersions(input: {
@@ -1833,31 +1728,31 @@ export async function getCommentImageAsset(input: {
   return { storageKey: image.storageKey, contentType: image.contentType };
 }
 
-export async function setSkillVisibility(input: {
+/**
+ * Move a skill between Personal (private to its owner) and a Team (workspace-visible). The owner is
+ * the single access axis, so this is the one "share / unshare" action. Requires edit rights on the
+ * skill as it stands today, plus the right to assign the new owner team.
+ *
+ * Owner-cover invariant: a skill must never be more widely visible than the dependencies its current
+ * version pulls in, and its dependents must keep access. The only changes that can break this are
+ * making a skill Personal while a workspace-visible (or other-owner) skill depends on it, or making a
+ * skill team-owned while it still depends on someone's Personal skill. Both are rejected (no cascade).
+ */
+export async function setSkillOwner(input: {
   actor: ActorContext;
   orgId: string;
   slug: string;
-  visibility: SkillVisibilityInput;
-  /**
-   * When the new visibility would leave a dependency less visible than the skill, also raise that
-   * dependency (transitively) to cover the new audience instead of rejecting. All raised skills are
-   * authorized individually; if the actor cannot modify one, the whole change is rejected.
-   */
-  cascade?: boolean;
+  /** New owner: a team slug = owned by that team (workspace-visible); null = Personal (private). */
+  ownerTeam: string | null;
   database?: Db;
-}): Promise<{ cascaded: string[] }> {
+}): Promise<void> {
   const database = input.database ?? db;
   const skill = await getSkillBySlug(input);
   if (!skill) throw new Error("skill not found");
   const orgRole = await getOrgRole(input.orgId, input.actor.id, database);
   if (!orgRole) throw new Error("not a member of this organization");
-  const resolved = await resolveVisibilityTeams({
-    actor: input.actor,
-    orgId: input.orgId,
-    visibility: input.visibility,
-    orgRole,
-    database,
-  });
+
+  // Must be able to edit the skill as it stands to move it.
   const canModifyExisting = await canModifySkill({
     database,
     orgId: input.orgId,
@@ -1866,210 +1761,53 @@ export async function setSkillVisibility(input: {
     ownerUserId: skill.owner_user_id,
     ownerTeamId: skill.owner_team_id,
   });
-  if (
-    !canModify({ orgRole }, { isOwner: canModifyExisting }) ||
-    !canActAtVisibility(
-      { orgRole },
-      {
-        everyone: resolved.visibility.everyone,
-        teamCount: resolved.teams.length,
-        memberOfAllTargetTeams: resolved.memberOfAllTargetTeams,
-      },
-    )
-  ) {
-    throw new Error("not allowed to change this skill");
-  }
+  if (!canModify({ orgRole }, { isOwner: canModifyExisting })) throw new Error("not allowed to change this skill");
 
-  // Changing visibility must not break the dependency visibility-cover invariant: a skill cannot
-  // become more visible than the dependencies its current version pulls in (e.g. team → Everyone
-  // while it requires a team-only skill). Re-check the current version's edges against the new audience.
+  // Resolve + authorize the new owner team (null = Personal). resolveOwnerTeam enforces that a
+  // non-admin actor can only assign a team they are an admin/editor of.
+  const newOwnerTeam = await resolveOwnerTeam({
+    actor: input.actor,
+    orgId: input.orgId,
+    ownerTeam: input.ownerTeam,
+    orgRole,
+    database,
+  });
+  const newOwnerTeamId = newOwnerTeam?.id ?? null;
+  if (newOwnerTeamId === skill.owner_team_id) return; // no-op
+
+  // Re-check the owner-cover invariant for the skill's current-version edges against the new owner.
+  // Making a skill Personal means "private to YOU" — the actor becomes the owner, so the person who
+  // performed the change keeps access (a team editor who isn't the original creator must not end up
+  // handing the skill to someone else). Moving to a team keeps the original creator as provenance;
+  // edit rights then come from the team role.
+  const newOwnerId = newOwnerTeamId === null ? input.actor.id : skill.owner_user_id;
+  const after = ownerNode(newOwnerTeamId, newOwnerId);
   const graph = await loadDepGraph(database, input.orgId);
   const self = graph.bySlug.get(skill.slug);
-  const currentEdges = self ? (graph.requiresBySkill.get(self.id) ?? []) : [];
-  const dependents = self ? (graph.dependentsByTarget.get(self.id) ?? []) : [];
-  const newAudienceTeamIds = new Set(resolved.teams.map((t) => t.id));
-  if (skill.owner_team_id) newAudienceTeamIds.add(skill.owner_team_id);
-  const newAudience = { everyone: resolved.visibility.everyone, teams: [...newAudienceTeamIds] };
-
-  // The new audience the skill itself will have, as plain team ids (owner team is always included).
-  type Change = { id: string; slug: string; everyone: boolean; teamIds: string[] };
-
-  // Outgoing (broadening): dependencies (transitively) the new audience would NOT cover must be
-  // raised. Each gets the new audience unioned onto its own — adding the same audience everywhere
-  // preserves cover on every edge between dependencies (orig v ⊇ orig u ⇒ v∪P ⊇ u∪P).
-  const raises: Change[] = [];
-  if (self && currentEdges.length) {
-    for (const dep of collectReachableDependencies(graph, self.id)) {
-      const depAudience = { everyone: dep.everyone, teams: [...dep.audienceTeams] };
-      if (visibilityCovers(newAudience, depAudience)) continue; // already visible enough
-      if (!input.cascade) {
-        throw new Error(
-          `cannot broaden visibility: dependency ${dep.slug} would be less visible than this skill`,
-        );
+  if (self) {
+    for (const edge of graph.requiresBySkill.get(self.id) ?? []) {
+      const dep = graph.bySlug.get(edge.dependsOnSlug);
+      if (dep && !ownerCovers(after, ownerNode(dep.ownerTeamId, dep.ownerId))) {
+        throw new Error(`cannot make this skill more widely visible than its dependency ${dep.slug} (which is Personal)`);
       }
-      // Team shares exclude the dep's own owner team (that audience comes from the
-      // skills.owner_team_id column, not a share row).
-      const raisedTeamIds = new Set<string>([...dep.audienceTeams, ...newAudienceTeamIds]);
-      if (dep.ownerTeamId) raisedTeamIds.delete(dep.ownerTeamId);
-      raises.push({ id: dep.id, slug: dep.slug, everyone: dep.everyone || newAudience.everyone, teamIds: [...raisedTeamIds] });
     }
-  }
-
-  // Incoming (narrowing): dependents (transitively) that the new audience would NOT cover would lose
-  // access. Without cascade this is a hard block; with cascade we restrict each to the intersection
-  // with the new audience (the mirror of the raise — restricting everywhere preserves every edge).
-  const restricts: Change[] = [];
-  if (self && dependents.length) {
-    for (const dep of collectReachableDependents(graph, self.id)) {
-      const depAudience = { everyone: dep.everyone, teams: [...dep.audienceTeams] };
-      // A dependent always stays visible to its own owner (a user or a team), so that owner must be
-      // able to see the narrowed target too. visibilityCovers() alone treats a private dependent as
-      // covered — true only when the same owner manages both — so the owner is part of "still covered":
-      // a cross-owned private dependent must NOT be skipped.
-      const ownerCovered =
-        newAudience.everyone ||
-        (dep.ownerTeamId
-          ? newAudienceTeamIds.has(dep.ownerTeamId)
-          : dep.ownerId === skill.owner_user_id ||
-            (await userInAnyTeam(database, input.orgId, dep.ownerId, [...newAudienceTeamIds])));
-      if (visibilityCovers(depAudience, newAudience) && ownerCovered) continue; // genuinely still covered
-      if (!input.cascade) {
-        throw new Error(
-          `cannot narrow visibility: ${dep.slug} depends on this skill and would lose access`,
-        );
-      }
-      // Reducing team shares can't drop the dependent's own owner, so if that owner is outside the new
-      // audience the dependent can never be covered — narrowing is impossible.
-      if (!ownerCovered) {
-        throw new Error(
-          `cannot narrow visibility: ${dep.slug} would stay visible to an owner outside the new audience`,
-        );
-      }
-      const restricted = restrictAudience(depAudience, newAudience);
-      const restrictedTeamIds = new Set(restricted.teams);
-      if (dep.ownerTeamId) restrictedTeamIds.delete(dep.ownerTeamId);
-      restricts.push({ id: dep.id, slug: dep.slug, everyone: restricted.everyone, teamIds: [...restrictedTeamIds] });
-    }
-  }
-
-  // Every cascaded skill (raised or restricted) must pass BOTH authorization gates the primary skill
-  // does: the capability gate (can the actor modify it?) and the visibility gate (may the actor target
-  // the audience it gains?). The visibility gate is checked against the teams a change *adds* — those
-  // are always a subset of the new audience the actor already proved they can target, so legitimate
-  // cascades pass while any future widening beyond that audience is rejected.
-  const changes = [...raises, ...restricts];
-  const forbidden: string[] = [];
-  for (const change of changes) {
-    const dep = graph.byId.get(change.id)!;
-    const canModifyDep = await canModifySkill({
-      database,
-      orgId: input.orgId,
-      actor: input.actor,
-      orgRole,
-      ownerUserId: dep.ownerId,
-      ownerTeamId: dep.ownerTeamId,
-    });
-    const originalShares = new Set([...dep.audienceTeams].filter((t) => t !== dep.ownerTeamId));
-    const addedTeams = change.teamIds.filter((t) => !originalShares.has(t));
-    const canTargetAudience = canActAtVisibility(
-      { orgRole },
-      {
-        everyone: change.everyone && !dep.everyone,
-        teamCount: addedTeams.length,
-        memberOfAllTargetTeams: resolved.memberOfAllTargetTeams,
-      },
-    );
-    if (!canModifyDep || !canTargetAudience) forbidden.push(dep.slug);
-  }
-  if (forbidden.length) {
-    throw new Error(
-      `cannot update sub-skill${forbidden.length > 1 ? "s" : ""} ${forbidden.join(", ")}: you do not have permission to change ${forbidden.length > 1 ? "their" : "its"} visibility`,
-    );
-  }
-
-  await database.transaction(async (tx) => {
-    const writeVisibility = async (skillId: string, everyone: boolean, teamIds: string[]) => {
-      await tx
-        .update(schema.skills)
-        .set({ everyone, updatedAt: new Date() })
-        .where(eq(schema.skills.id, skillId));
-      await tx
-        .delete(schema.skillTeamShares)
-        .where(and(eq(schema.skillTeamShares.orgId, input.orgId), eq(schema.skillTeamShares.skillId, skillId)));
-      if (teamIds.length) {
-        await tx.insert(schema.skillTeamShares).values(
-          teamIds.map((teamId) => ({ orgId: input.orgId, skillId, teamId })),
-        );
-      }
-    };
-    await writeVisibility(skill.id, resolved.visibility.everyone, resolved.teams.map((t) => t.id));
-    for (const change of changes) await writeVisibility(change.id, change.everyone, change.teamIds);
-  });
-
-  return { cascaded: changes.map((c) => c.slug).sort() };
-}
-
-/** Skills reachable from `fromId` over current-version dependency edges (resolved by slug, cycle-safe). */
-function collectReachableDependencies(graph: DepGraph, fromId: string): DepGraphSkill[] {
-  const out: DepGraphSkill[] = [];
-  const seen = new Set<string>([fromId]);
-  const stack = [fromId];
-  while (stack.length) {
-    const id = stack.pop()!;
-    for (const edge of graph.requiresBySkill.get(id) ?? []) {
-      const target = graph.bySlug.get(edge.dependsOnSlug);
-      if (!target || seen.has(target.id)) continue;
-      seen.add(target.id);
-      out.push(target);
-      stack.push(target.id);
-    }
-  }
-  return out;
-}
-
-/** Whether `userId` belongs to any of `teamIds` in the org (used to check owner coverage on narrow). */
-async function userInAnyTeam(database: Db, orgId: string, userId: string, teamIds: string[]): Promise<boolean> {
-  if (!teamIds.length) return false;
-  const row = await database.query.teamMemberships.findFirst({
-    where: and(
-      eq(schema.teamMemberships.orgId, orgId),
-      eq(schema.teamMemberships.userId, userId),
-      inArray(schema.teamMemberships.teamId, teamIds),
-    ),
-  });
-  return !!row;
-}
-
-/** Skills that transitively depend on `fromId` over current-version edges (the reverse graph). */
-function collectReachableDependents(graph: DepGraph, fromId: string): DepGraphSkill[] {
-  const out: DepGraphSkill[] = [];
-  const seen = new Set<string>([fromId]);
-  const stack = [fromId];
-  while (stack.length) {
-    const id = stack.pop()!;
-    for (const ref of graph.dependentsByTarget.get(id) ?? []) {
+    for (const ref of graph.dependentsByTarget.get(self.id) ?? []) {
       const dependent = graph.byId.get(ref.dependentId);
-      if (!dependent || seen.has(dependent.id)) continue;
-      seen.add(dependent.id);
-      out.push(dependent);
-      stack.push(dependent.id);
+      if (dependent && !ownerCovers(ownerNode(dependent.ownerTeamId, dependent.ownerId), after)) {
+        throw new Error(`cannot make this skill Personal: ${dependent.slug} depends on it and would lose access`);
+      }
     }
   }
-  return out;
+
+  await database
+    .update(schema.skills)
+    .set({ ownerTeamId: newOwnerTeamId, ownerId: newOwnerId, updatedAt: new Date() })
+    .where(and(eq(schema.skills.orgId, input.orgId), eq(schema.skills.id, skill.id)));
 }
 
-/**
- * Reduce `dependent`'s audience to the most it can keep while staying covered by `target` (used when
- * narrowing a skill cascades to its dependents). Mirror of the union used when broadening.
- */
-function restrictAudience(
-  dependent: { everyone: boolean; teams: string[] },
-  target: { everyone: boolean; teams: string[] },
-): { everyone: boolean; teams: string[] } {
-  if (target.everyone) return { everyone: dependent.everyone, teams: [...dependent.teams] };
-  const allowed = new Set(target.teams);
-  const teams = dependent.everyone ? [...target.teams] : dependent.teams.filter((t) => allowed.has(t));
-  return { everyone: false, teams };
+/** Owner descriptor for the cover rule: team-owned (any user) vs Personal (private to the user). */
+function ownerNode(ownerTeamId: string | null, ownerUserId: string): { ownerKind: SkillOwnerKind; ownerUserId: string } {
+  return { ownerKind: ownerTeamId ? "team" : "user", ownerUserId };
 }
 
 export async function publishSkillVersion(input: {
@@ -2082,23 +1820,18 @@ export async function publishSkillVersion(input: {
   const database = input.database ?? db;
   const payload = publishSkillInputSchema.parse({ ...input.payload, storage_path: input.archiveKey });
   const ownerTeam = await assertCanPublishSkillVersion({ actor: input.actor, orgId: input.orgId, payload, database });
-  // Required dependencies must resolve (no missing/cycle/visibility) before we write anything.
+  // Required dependencies must resolve (no missing/cycle/owner-cover) before we write anything. A
+  // publish never changes the skill's owner, so a re-publish can't broaden the skill's audience —
+  // existing dependents stay covered and need no separate check here. Pass the requested owner
+  // (`undefined` when the client omits it on a re-publish) so the cover check models the skill at its
+  // ACTUAL owner: `assertCanPublishSkillVersion` returns null for existing skills, so deriving the
+  // owner from its result would wrongly model every re-publish as Personal.
   await assertDependenciesResolvable({
     actor: input.actor,
     orgId: input.orgId,
     slug: payload.slug,
     dependencies: payload.dependencies,
-    visibility: payload.visibility,
-    ownerTeamSlug: ownerTeam?.slug ?? null,
-    database,
-  });
-  // Re-publishing can change this skill's visibility — narrowing it must not strand skills that
-  // already depend on it (the incoming-edge mirror of the dependency cover check).
-  await assertDependentsRemainCovered({
-    orgId: input.orgId,
-    slug: payload.slug,
-    visibility: payload.visibility,
-    ownerTeamSlug: ownerTeam?.slug ?? null,
+    ownerTeam: payload.owner_team,
     database,
   });
 
@@ -2125,13 +1858,8 @@ export async function assertCanPublishSkillVersion(input: {
   const payload = publishSkillInputSchema.parse(input.payload);
   const orgRole = await getOrgRole(input.orgId, input.actor.id, database);
   if (!orgRole) throw new Error("not a member of this organization");
-  const resolved = await resolveVisibilityTeams({
-    actor: input.actor,
-    orgId: input.orgId,
-    visibility: payload.visibility,
-    orgRole,
-    database,
-  });
+  // Resolve + authorize the requested owner team (null = Personal). resolveOwnerTeam enforces that a
+  // non-admin actor can only assign a team they admin/edit.
   const ownerTeam = await resolveOwnerTeam({
     actor: input.actor,
     orgId: input.orgId,
@@ -2151,6 +1879,7 @@ export async function assertCanPublishSkillVersion(input: {
       database,
     });
     if (!existingSkill) throw new Error("not allowed to publish this skill");
+    // The owner is immutable on publish — move it explicitly via setSkillOwner instead.
     if (payload.owner_team !== undefined) {
       const requestedOwnerTeamId = ownerTeam?.id ?? null;
       if (requestedOwnerTeamId !== existing.ownerTeamId) throw new Error("skill owner cannot be changed by publish");
@@ -2169,18 +1898,6 @@ export async function assertCanPublishSkillVersion(input: {
     if (payload.skill_id && payload.skill_id !== existing.id) {
       throw new Error("skill_id does not match existing skill");
     }
-    if (
-      !canActAtVisibility(
-        { orgRole },
-        {
-          everyone: resolved.visibility.everyone,
-          teamCount: resolved.teams.length,
-          memberOfAllTargetTeams: resolved.memberOfAllTargetTeams,
-        },
-      )
-    ) {
-      throw new Error("not allowed to publish at this visibility");
-    }
     const versions = await database
       .select({ version: schema.skillVersions.version })
       .from(schema.skillVersions)
@@ -2191,18 +1908,6 @@ export async function assertCanPublishSkillVersion(input: {
     return null;
   }
 
-  if (
-    !canActAtVisibility(
-      { orgRole },
-      {
-        everyone: resolved.visibility.everyone,
-        teamCount: resolved.teams.length,
-        memberOfAllTargetTeams: resolved.memberOfAllTargetTeams,
-      },
-    )
-  ) {
-    throw new Error("not allowed to publish at this visibility");
-  }
   return ownerTeam;
 }
 
@@ -2218,13 +1923,6 @@ async function writeSkillVersion(input: {
   const payload = input.payload;
   const orgRole = await getOrgRole(input.orgId, input.actor.id, database);
   if (!orgRole) throw new Error("not a member of this organization");
-  const resolved = await resolveVisibilityTeams({
-    actor: input.actor,
-    orgId: input.orgId,
-    visibility: payload.visibility,
-    orgRole,
-    database,
-  });
   const existing = await database.query.skills.findFirst({
     where: and(eq(schema.skills.orgId, input.orgId), eq(schema.skills.slug, payload.slug)),
   });
@@ -2232,12 +1930,12 @@ async function writeSkillVersion(input: {
     throw new Error("skill_id does not match existing skill");
   }
 
+  // Owner is immutable on publish (assertCanPublishSkillVersion enforced it); set it only on insert.
   const [skill] = existing
     ? await database
         .update(schema.skills)
         .set({
           description: payload.description,
-          everyone: resolved.visibility.everyone,
           validation: "valid",
           validationError: null,
           updatedAt: new Date(),
@@ -2254,24 +1952,10 @@ async function writeSkillVersion(input: {
           ownerId: input.actor.id,
           ownerTeamId: input.ownerTeam?.id ?? null,
           creatorId: input.actor.id,
-          everyone: resolved.visibility.everyone,
           validation: "valid",
         })
         .returning();
   if (!skill) throw new Error("could not write skill");
-
-  await database
-    .delete(schema.skillTeamShares)
-    .where(and(eq(schema.skillTeamShares.orgId, input.orgId), eq(schema.skillTeamShares.skillId, skill.id)));
-  if (resolved.teams.length) {
-    await database.insert(schema.skillTeamShares).values(
-      resolved.teams.map((team) => ({
-        orgId: input.orgId,
-        skillId: skill.id,
-        teamId: team.id,
-      })),
-    );
-  }
 
   const [version] = await database
     .insert(schema.skillVersions)
@@ -2328,7 +2012,7 @@ async function writeSkillVersion(input: {
     action: "skill.publish",
     targetType: "skill",
     targetId: skill.id,
-    metadata: { slug: payload.slug, version: payload.version, visibility: resolved.visibility, dependencies: payload.dependencies },
+    metadata: { slug: payload.slug, version: payload.version, owner_team: input.ownerTeam?.slug ?? null, dependencies: payload.dependencies },
   });
   return { id: skill.id, version: version.version };
 }
@@ -2399,7 +2083,8 @@ export async function getDownloadVersion(input: {
   version: string;
   checksum: string;
   sizeBytes: number;
-  visibility: SkillVisibility;
+  /** Owning team slug (null = Personal) — the lockfile records who owns the resolved skill. */
+  owner_team: string | null;
   dependencies: string[];
 }> {
   const database = input.database ?? db;
@@ -2441,7 +2126,7 @@ export async function getDownloadVersion(input: {
     version: row.version,
     checksum: row.checksum,
     sizeBytes: row.size_bytes,
-    visibility: visible.visibility,
+    owner_team: visible.owner_kind === "team" ? visible.owner_handle : null,
     dependencies: depRows.map((d) => d.slug),
   };
 }
@@ -2451,15 +2136,13 @@ export async function getDownloadVersion(input: {
 interface DepGraphSkill {
   id: string;
   slug: string;
-  everyone: boolean;
   archivedAt: Date | null;
   currentVersionId: string | null;
   /** Current published version string (null when no version), for org-wide update comparisons. */
   currentVersion: string | null;
+  /** Owner = the access axis: `ownerTeamId` set => workspace-visible; null => Personal to `ownerId`. */
   ownerId: string;
   ownerTeamId: string | null;
-  /** Teams that can see this skill = its team shares plus its owning team. */
-  audienceTeams: Set<string>;
 }
 
 interface DepEdge {
@@ -2487,7 +2170,6 @@ async function loadDepGraph(database: Db, orgId: string): Promise<DepGraph> {
     .select({
       id: schema.skills.id,
       slug: schema.skills.slug,
-      everyone: schema.skills.everyone,
       archivedAt: schema.skills.archivedAt,
       currentVersionId: schema.skills.currentVersionId,
       currentVersion: schema.skillVersions.version,
@@ -2506,24 +2188,15 @@ async function loadDepGraph(database: Db, orgId: string): Promise<DepGraph> {
     const entry: DepGraphSkill = {
       id: s.id,
       slug: s.slug,
-      everyone: s.everyone,
       archivedAt: s.archivedAt,
       currentVersionId: s.currentVersionId,
       currentVersion: s.currentVersion ?? null,
       ownerId: s.ownerId,
       ownerTeamId: s.ownerTeamId,
-      audienceTeams: new Set(s.ownerTeamId ? [s.ownerTeamId] : []),
     };
     byId.set(s.id, entry);
     bySlug.set(s.slug, entry);
   }
-
-  const shareRowsRaw = await database
-    .select({ skillId: schema.skillTeamShares.skillId, teamId: schema.skillTeamShares.teamId })
-    .from(schema.skillTeamShares)
-    .where(eq(schema.skillTeamShares.orgId, orgId));
-  const shareRows = Array.isArray(shareRowsRaw) ? shareRowsRaw : [];
-  for (const share of shareRows) byId.get(share.skillId)?.audienceTeams.add(share.teamId);
 
   const edgeRowsRaw = await database
     .select({
@@ -2579,9 +2252,9 @@ export function dependencyStatusFromFlags(flags: {
 }
 
 function audienceCovers(dependent: DepGraphSkill, target: DepGraphSkill): boolean {
-  return visibilityCovers(
-    { everyone: dependent.everyone, teams: [...dependent.audienceTeams] },
-    { everyone: target.everyone, teams: [...target.audienceTeams] },
+  return ownerCovers(
+    ownerNode(dependent.ownerTeamId, dependent.ownerId),
+    ownerNode(target.ownerTeamId, target.ownerId),
   );
 }
 
@@ -2680,7 +2353,7 @@ export async function getSkillDependencies(input: {
     return {
       slug: row.dependsOnSlug,
       status,
-      visibility: targetRow ? targetRow.visibility : null,
+      owner_kind: targetRow ? targetRow.owner_kind : null,
       note: depNote(status, row.dependsOnSlug, skill.slug),
       can_open: canOpen,
     };
@@ -2697,7 +2370,7 @@ export async function getSkillDependencies(input: {
     usedBy.push({
       slug: dependent.slug,
       status,
-      visibility: dependentRow.visibility,
+      owner_kind: dependentRow.owner_kind,
       archived: dependent.archivedAt != null,
       note,
       can_open: true,
@@ -2725,10 +2398,8 @@ export async function buildDependencyPlan(input: {
   orgId: string;
   slug: string;
   declaredSlugs: string[];
-  /** Requested visibility (team values are slugs). Used for the publish-time visibility-cover check. */
-  visibility?: SkillVisibilityInput;
-  /** Owning team slug (its members can see the skill). */
-  ownerTeamSlug?: string | null;
+  /** Requested owner team slug (null = Personal). Used for the publish-time owner-cover check. */
+  ownerTeam?: string | null;
   database?: Db;
 }): Promise<DependencyPlan> {
   const database = input.database ?? db;
@@ -2744,7 +2415,8 @@ export async function buildDependencyPlan(input: {
   };
   const declared = [...new Set(input.declaredSlugs)].filter((s) => s !== input.slug);
   const existing = graph.bySlug.get(input.slug);
-  const dependentTeamIds = await resolveAudienceTeamIds(database, input.orgId, input.visibility?.teams, input.ownerTeamSlug);
+  const dependentOwnerTeamId =
+    input.ownerTeam !== undefined ? await resolveOwnerTeamId(database, input.orgId, input.ownerTeam) : undefined;
 
   const ready = declared.filter((s) => isVisible(s) && !graph.bySlug.get(s)!.archivedAt);
   const upload = declared
@@ -2796,12 +2468,12 @@ export async function buildDependencyPlan(input: {
       .map((t) => ({ slug: t.slug, reason: "no published skill requires it anymore" }));
   }
 
-  // Blocking check: model the publishing skill as a dependent at its requested visibility.
+  // Blocking check: model the publishing skill as a dependent at its requested owner.
   const dependent = depGraphDependentFor({
     graph,
     slug: input.slug,
-    everyone: input.visibility?.everyone,
-    audienceTeamIds: dependentTeamIds,
+    actorId: input.actor.id,
+    ownerTeamId: dependentOwnerTeamId,
   });
   // Register the prospective skill + its declared edges in the graph so existing edges that declare
   // this slug (including ones currently unresolved/"missing") resolve to it — catching a cycle that
@@ -2826,57 +2498,45 @@ export async function buildDependencyPlan(input: {
     // Temporarily register the prospective dependent + edge for an accurate cycle probe.
     const status = depEdgeStatusWithDependent(graph, dependent, edge);
     if (status === "cycle") blocked.push({ slug: s, status, msg: `${s} would form a dependency cycle` });
-    else if (status === "visibility") blocked.push({ slug: s, status, msg: `${s} is less visible than ${input.slug}` });
+    else if (status === "visibility") blocked.push({ slug: s, status, msg: `${s} is not visible to everyone who can see ${input.slug}` });
     else if (status === "archived") blocked.push({ slug: s, status, msg: `${s} is archived — restore it or drop the dependency` });
   }
 
   return { declared, ready, upload, removed, archive_candidates, blocked };
 }
 
-/** Resolve a visibility's team slugs + owner-team slug to the team ids that form a skill's audience. */
-async function resolveAudienceTeamIds(
+/** Resolve a single owner-team slug to its id (null when none / not found). */
+async function resolveOwnerTeamId(
   database: Db,
   orgId: string,
-  teamSlugs: string[] | undefined,
   ownerTeamSlug: string | null | undefined,
-): Promise<string[]> {
-  const slugs = [...new Set([...(teamSlugs ?? []), ...(ownerTeamSlug ? [ownerTeamSlug] : [])])];
-  if (!slugs.length) return [];
-  const rows = await database
-    .select({ id: schema.teams.id, slug: schema.teams.slug })
-    .from(schema.teams)
-    .where(and(eq(schema.teams.orgId, orgId), inArray(schema.teams.slug, slugs)));
-  return rows.map((r) => r.id);
+): Promise<string | null> {
+  if (!ownerTeamSlug) return null;
+  const row = await database.query.teams.findFirst({
+    where: and(eq(schema.teams.orgId, orgId), eq(schema.teams.slug, ownerTeamSlug)),
+  });
+  return row?.id ?? null;
 }
 
 /** A prospective dependent (the skill being published), inserted into the graph for status probes. */
 function depGraphDependentFor(input: {
   graph: DepGraph;
   slug: string;
-  everyone?: boolean;
-  audienceTeamIds?: string[];
+  actorId: string;
+  /** Resolved new owner team id; `undefined` = keep the existing owner (publish can't change it). */
+  ownerTeamId?: string | null;
 }): DepGraphSkill {
   const existing = input.graph.bySlug.get(input.slug);
-  const everyone = input.everyone ?? existing?.everyone ?? false;
-  // An explicitly-provided audience (even an empty one, i.e. narrowing to private) must be honored;
-  // only fall back to the existing audience when no audience was requested at all.
-  const teams =
-    input.audienceTeamIds !== undefined
-      ? new Set(input.audienceTeamIds)
-      : new Set<string>(existing?.audienceTeams ?? []);
-  // The owning team can always see/install the skill, so it is always part of the audience — even
-  // when a re-publish of an existing team-owned skill does not re-send owner_team.
-  if (existing?.ownerTeamId) teams.add(existing.ownerTeamId);
+  const ownerTeamId = input.ownerTeamId !== undefined ? input.ownerTeamId : (existing?.ownerTeamId ?? null);
   return {
     id: existing?.id ?? `prospective:${input.slug}`,
     slug: input.slug,
-    everyone,
     archivedAt: null,
     currentVersionId: existing?.currentVersionId ?? null,
     currentVersion: existing?.currentVersion ?? null,
-    ownerId: existing?.ownerId ?? "",
-    ownerTeamId: existing?.ownerTeamId ?? null,
-    audienceTeams: teams,
+    // The Personal owner used for the cover check: the existing owner, else the publisher.
+    ownerId: existing?.ownerId || input.actorId,
+    ownerTeamId,
   };
 }
 
@@ -2906,8 +2566,8 @@ export async function assertDependenciesResolvable(input: {
   orgId: string;
   slug: string;
   dependencies: string[];
-  visibility?: SkillVisibilityInput;
-  ownerTeamSlug?: string | null;
+  /** Requested owner team slug (null = Personal), for the owner-cover check. */
+  ownerTeam?: string | null;
   database?: Db;
 }): Promise<void> {
   if (!input.dependencies.length) return;
@@ -2916,41 +2576,10 @@ export async function assertDependenciesResolvable(input: {
     orgId: input.orgId,
     slug: input.slug,
     declaredSlugs: input.dependencies,
-    visibility: input.visibility,
-    ownerTeamSlug: input.ownerTeamSlug,
+    ownerTeam: input.ownerTeam,
     database: input.database,
   });
   if (plan.blocked.length || plan.upload.length) throw new DependencyPublishError(plan);
-}
-
-/**
- * Assert that changing `slug`'s visibility to the given audience does not strand any skill that
- * currently depends on it (an Everyone/broader dependent must still be able to see this skill).
- * Shared by publish (which can narrow a dependency target's visibility) and setSkillVisibility.
- */
-export async function assertDependentsRemainCovered(input: {
-  orgId: string;
-  slug: string;
-  visibility: SkillVisibilityInput;
-  ownerTeamSlug?: string | null;
-  database?: Db;
-}): Promise<void> {
-  const database = input.database ?? db;
-  const graph = await loadDepGraph(database, input.orgId);
-  const self = graph.bySlug.get(input.slug);
-  if (!self) return;
-  const dependents = graph.dependentsByTarget.get(self.id) ?? [];
-  if (!dependents.length) return;
-  const teamIds = new Set(await resolveAudienceTeamIds(database, input.orgId, input.visibility.teams, input.ownerTeamSlug));
-  if (self.ownerTeamId) teamIds.add(self.ownerTeamId); // owner team can always see it
-  const newAudience = { everyone: input.visibility.everyone, teams: [...teamIds] };
-  for (const ref of dependents) {
-    const dependent = graph.byId.get(ref.dependentId);
-    if (!dependent) continue;
-    if (!visibilityCovers({ everyone: dependent.everyone, teams: [...dependent.audienceTeams] }, newAudience)) {
-      throw new Error(`cannot narrow visibility: ${dependent.slug} depends on this skill and would lose access`);
-    }
-  }
 }
 
 export async function archiveSkill(input: {

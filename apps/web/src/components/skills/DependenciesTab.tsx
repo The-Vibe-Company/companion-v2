@@ -3,7 +3,7 @@ import type {
   SkillDependencyRow,
   SkillDependencyStatus,
   SkillDependentRow,
-  SkillVisibility,
+  SkillOwnerKind,
 } from "@companion/contracts";
 import { Icon } from "../Icon";
 
@@ -25,12 +25,10 @@ const SUMMARY_DOT: Record<SkillDependencyStatus, "ok" | "warn" | "down" | "muted
 };
 const SUMMARY_ORDER: SkillDependencyStatus[] = ["satisfied", "visibility", "missing", "archived", "cycle"];
 
-function depVisMeta(v: SkillVisibility | null): { icon: string; label: string } {
-  if (!v) return { icon: "circle-x", label: "—" };
-  if (v.everyone) return { icon: "building-2", label: "Everyone" };
-  if (v.teams.length === 1) return { icon: "users", label: v.teams[0]!.name };
-  if (v.teams.length > 1) return { icon: "users", label: `${v.teams.length} teams` };
-  return { icon: "lock", label: "Private" };
+function depOwnerMeta(kind: SkillOwnerKind | null): { icon: string; label: string } {
+  if (kind === "team") return { icon: "users", label: "Team-owned" };
+  if (kind === "user") return { icon: "lock", label: "Personal" };
+  return { icon: "circle-x", label: "—" };
 }
 
 function StatusBadge({ status }: { status: SkillDependencyStatus }) {
@@ -44,15 +42,15 @@ function StatusBadge({ status }: { status: SkillDependencyStatus }) {
 }
 
 function MetaLine({
-  visibility,
+  ownerKind,
   note,
   warnVis,
 }: {
-  visibility: SkillVisibility | null;
+  ownerKind: SkillOwnerKind | null;
   note: string | null;
   warnVis: boolean;
 }) {
-  const vm = depVisMeta(visibility);
+  const vm = depOwnerMeta(ownerKind);
   return (
     <div className="dpmeta">
       <span className={"dpvis" + (warnVis ? " dpvis--warn" : "")}>
@@ -93,7 +91,7 @@ function RequiresRow({ row, onOpen }: { row: SkillDependencyRow; onOpen: (slug: 
           </span>
           <StatusBadge status={row.status} />
         </div>
-        <MetaLine visibility={row.visibility} note={row.note} warnVis={row.status === "visibility"} />
+        <MetaLine ownerKind={row.owner_kind} note={row.note} warnVis={row.status === "visibility"} />
       </div>
     </div>
   );
@@ -120,7 +118,7 @@ function UsedByRow({ row, onOpen }: { row: SkillDependentRow; onOpen: (slug: str
           </span>
           <StatusBadge status={row.status} />
         </div>
-        <MetaLine visibility={row.visibility} note={row.note} warnVis={row.status === "visibility"} />
+        <MetaLine ownerKind={row.owner_kind} note={row.note} warnVis={row.status === "visibility"} />
       </div>
     </div>
   );

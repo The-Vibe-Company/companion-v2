@@ -3,7 +3,7 @@ name: companion
 description: "Use when managing local SKILL.md packages with Companion: validate, publish, update, resolve skill dependencies, declare the secrets and environment variables a skill needs, install updates, audit skills, check workspace versions, or self-update this Companion skill through the Companion workspace API."
 license: MIT
 metadata:
-  companion_version: 1.6.0
+  companion_version: 1.7.0
 allowed-tools: read_file write_file run_shell
 ---
 
@@ -110,7 +110,8 @@ as enough evidence by itself:
 Package the skill only after `companion.json` matches the confirmed list. New clients do not need
 extra upload parameters for dependencies; legacy `dependency=` query parameters are only a fallback
 when a package has no `companion.json`. The server records the graph and blocks a publish whose
-dependencies are missing, cyclic, or less visible than the skill itself.
+dependencies are missing, cyclic, or less visible than the skill itself (a Personal dependency under
+a Team-owned skill).
 
 ## Capabilities
 
@@ -158,8 +159,9 @@ graph:
 - `archive_candidates` — removed dependencies that no published skill references anymore. After the
   main publish, offer to archive each one (`POST /skills/$SLUG/archive`); never archive automatically.
 - `blocked` — dependencies that are missing, cyclic (`A → B → A`), or less visible than the skill
-  (e.g. an Everyone skill that requires a Private one). **Stop**: a publish with blockers is rejected
-  with 422 and this same plan. Explain the blockers and help the user fix them before retrying.
+  (a Personal dependency under a Team-owned skill: the dependent is visible to everyone but the
+  dependency stays private). **Stop**: a publish with blockers is rejected with 422 and this same
+  plan. Explain the blockers and help the user fix them before retrying.
 
 Present the plan to the user as a short summary (local diff / confirmed dependencies / already
 published / must upload too / removed / archival candidates / blocked) and get confirmation before
@@ -222,8 +224,8 @@ After a clean validation **and** a resolved dependency plan, and after the user 
 brand-new skill. If the local analysis found dependencies that differ from `companion.json`, create
 or update `companion.json` with the confirmed final list before packaging; do not upload a package
 with a stale dependency manifest. If the plan listed dependencies under `upload`, analyze and
-publish those first (topological order). Ask the user where the skill should be owned and who should
-be able to read it before you upload. Do not ask for a raw team slug first: fetch upload options and
+publish those first (topological order). Ask the user who should own the skill before you upload —
+owner is the single access choice. Do not ask for a raw team slug first: fetch upload options and
 propose the available choices.
 
 ```sh
@@ -231,45 +233,45 @@ curl -s "$COMPANION_API_URL/skills/upload-options" \
   -H "Authorization: Bearer $COMPANION_TOKEN"
 ```
 
-The response contains `defaults` and `teams`. Present:
+The response contains `defaults` and `teams`. Present one picker — the owner choices:
 
-- Owner choices: "Personal" plus teams where `canOwn=true`.
-- Visibility choices: "Private", "Everyone", and optional team shares from `teams`.
+- "Personal" (private to you), plus
+- teams where `canOwn=true` (a team-owned skill is readable by every member of the workspace).
 
 Keep the current defaults unless the user chooses otherwise. For a brand-new publish, default to the
-response defaults: personal owner (`owner_team` omitted) and Private (`everyone=false`, no `team`).
+response defaults: personal owner (`owner_team` omitted), which is private to you.
 
-Ownership is separate from visibility:
+Owner is the single access axis — there is no separate visibility:
 
-- `owner_team=<team-slug>` uploads the skill under that team. A user can do this only when they are
-  an organization Owner/Admin, or an Admin/Editor of that team. Team Readers cannot upload or update
-  skills for that team.
-- Omit `owner_team` to keep the skill personally owned by the user.
-- `everyone=false` with no `team` values means Private.
-- `everyone=true` means every member of the current workspace can read the skill.
-- `team=<team-slug>` shares read visibility with a team. Team visibility does **not** grant edit
-  rights; only direct ownership, owner-team Admin/Editor, or org Owner/Admin can modify a skill.
+- Omit `owner_team` for **Personal** ownership: the skill is private to you (only you and org admins
+  can read or edit it).
+- `owner_team=<team-slug>` makes the skill **Team-owned**: readable by every member of the workspace
+  and editable by that team's Admins/Editors (plus org Owners/Admins). You can set this only when you
+  are an organization Owner/Admin, or an Admin/Editor of that team. Team Readers cannot upload or
+  update skills for that team.
+- "Sharing broadly" just means assigning the skill to a team — all team skills are workspace-visible.
+  There is no separate "Everyone" share, and a skill must not declare visibility in its `SKILL.md`.
 
 Make sure `companion.json.dependencies` contains the same confirmed dependencies you validated with
-so the dependency graph is recorded:
+so the dependency graph is recorded. For a team-owned (workspace-visible) skill, pass `owner_team`:
 
 ```sh
-curl -s "$COMPANION_API_URL/skills?owner_team=platform&everyone=false" \
+curl -s "$COMPANION_API_URL/skills?owner_team=platform" \
   -H "Authorization: Bearer $COMPANION_TOKEN" \
   -H "Content-Type: application/zip" \
   --data-binary @../skill.zip
 ```
 
-For a workspace-wide skill owned by a team, use `everyone=true`:
+For Personal ownership (private to you), omit `owner_team` entirely:
 
 ```sh
-curl -s "$COMPANION_API_URL/skills?owner_team=platform&everyone=true" \
+curl -s "$COMPANION_API_URL/skills" \
   -H "Authorization: Bearer $COMPANION_TOKEN" \
   -H "Content-Type: application/zip" \
   --data-binary @../skill.zip
 ```
 
-For private personal ownership, omit `owner_team`, set `everyone=false`, and do not send `team`.
+Sending legacy `everyone`, `team`, `teams`, `scope`, or `visibility` parameters is rejected.
 The response contains the assigned `id`, `version`, and `checksum`. Write the returned
 `companion_skill_id` and `companion_version` back into the folder's `SKILL.md` `metadata` so the
 folder stays linked to the workspace skill.
@@ -278,22 +280,15 @@ folder stays linked to the workspace skill.
 
 When the user changed a skill that already exists in the workspace, bind the upload to that exact
 skill so an edit can never retarget another one. Pass `expect_slug` and `expect_skill_id` (read them
-from the folder's `metadata`). Keep existing settings as the default: first read the current
-published settings, present them to the user, and only change them when the user explicitly asks.
+from the folder's `metadata`).
+
+The owner is **immutable on update**: omit `owner_team` and the skill's current owner is kept. If you
+do pass `owner_team`, it must equal the skill's current owner team, or the server rejects the upload.
+To move a skill between Personal and a team, use `PUT /skills/$SLUG/owner` instead (see "Change a
+skill's owner"); a re-publish can never change ownership.
 
 ```sh
-curl -s "$COMPANION_API_URL/skills/$SLUG/download" \
-  -H "Authorization: Bearer $COMPANION_TOKEN"
-```
-
-Use the returned `visibility` as the default visibility and include it in the upload query. Do not
-omit `everyone`/`team` on updates: omitted visibility fields mean Private (`everyone=false`, no
-team shares), not "preserve existing". Omit `owner_team` by default so the current owner stays
-unchanged. If you pass `owner_team`, it must be the skill's current owner team, or the server
-rejects the upload.
-
-```sh
-curl -s "$COMPANION_API_URL/skills?expect_slug=$SLUG&expect_skill_id=$SKILL_ID&owner_team=platform&everyone=true&team=research" \
+curl -s "$COMPANION_API_URL/skills?expect_slug=$SLUG&expect_skill_id=$SKILL_ID" \
   -H "Authorization: Bearer $COMPANION_TOKEN" \
   -H "Content-Type: application/zip" \
   --data-binary @../skill.zip
@@ -308,43 +303,39 @@ candidate (`POST /skills/$SLUG/archive`) — only with the user's confirmation, 
 skill still requires it. The server assigns the next version unless you pass an explicit `version=`.
 Summarize what changed and confirm before sending.
 
-### Change a skill's visibility
+### Change a skill's owner
 
-Use this to re-share an already-published skill without uploading a new version. It changes who can
-read the skill, never its ownership or contents.
+Use this to move an already-published skill between Personal and a team without uploading a new
+version. Owner is the single access axis, so this changes who can read **and** edit the skill (a
+team-owned skill becomes workspace-visible and editable by that team's Admins/Editors; a Personal
+skill becomes private to the owning user).
 
 ```sh
-curl -s -X PUT "$COMPANION_API_URL/skills/$SLUG/visibility" \
+curl -s -X PUT "$COMPANION_API_URL/skills/$SLUG/owner" \
   -H "Authorization: Bearer $COMPANION_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"everyone":true,"teams":[],"cascade":false}'
+  -d '{"owner_team":"platform"}'
 ```
 
-The JSON body is the target visibility plus a cascade flag:
+The JSON body is just the target owner:
 
-- `everyone` — `true` makes every workspace member able to read the skill.
-- `teams` — array of team **slugs** to share read access with (combine with `everyone` or use alone).
-  Omitting both `everyone` and `teams` makes the skill Private. As with updates, omitted fields are
-  not "preserve existing": send the full target visibility every time.
-- `cascade` — see below; defaults to `false`.
+- `owner_team: "<team-slug>"` makes the skill **Team-owned** (readable by every workspace member,
+  editable by that team's Admins/Editors plus org Owners/Admins).
+- `owner_team: null` makes the skill **Personal** (private to the owning user; only they and org
+  admins can read or edit it).
+
+There is no `cascade` flag and no `teams` array. The response is `{ "ok": true }`.
 
 A skill must never be more visible than the skills it depends on, or someone could install it but not
-its sub-skills. So:
+its sub-skills. Moving a Personal skill to a team makes it visible to everyone, so each of its
+(transitive) dependencies must already cover that audience — a team-owned target covers any dependent,
+but a Personal target only covers a dependent that is Personal **and** owned by the same user. If a
+dependency would end up less visible than the skill, the change is rejected; raise that dependency's
+owner first (move it to a team).
 
-- **Broadening** a skill (e.g. team → Everyone) while it requires a less-visible dependency is
-  **rejected** unless you pass `"cascade": true`. With `cascade`, the server also raises every
-  (transitive) dependency to at least the skill's new audience, in one atomic change.
-- **Narrowing** a skill (e.g. Everyone → team, or team → Private) that a more-visible skill depends
-  on is **rejected** unless you pass `"cascade": true`. With `cascade`, the server reduces every
-  (transitive) dependent to fit the skill's new audience. A dependent owned by a team that would
-  still see it cannot be reduced, so that narrow is rejected even with `cascade`.
-
-Either way the response lists what it changed: `{ "ok": true, "cascaded": ["log-parser"] }`, and the
-cascade is rejected as a whole if the caller lacks permission to change any affected skill.
-
-Always confirm the change with the user before sending, and tell them which other skills the cascade
-will make more (or less) visible. Inspect the graph first with `GET /skills/$SLUG/dependencies` if you
-are unsure what the skill pulls in or what depends on it.
+Always confirm the change with the user before sending, and tell them how it affects who can see and
+edit the skill. Inspect the graph first with `GET /skills/$SLUG/dependencies` if you are unsure what
+the skill pulls in or what depends on it.
 
 ### Manage skill API calls
 
@@ -353,8 +344,7 @@ members, teams, invitations, org settings, or tokens.
 
 Allowed skills API tasks:
 
-- Fetch upload owner/visibility choices with `GET /skills/upload-options` using a `skills:write`
-  token.
+- Fetch upload owner choices with `GET /skills/upload-options` using a `skills:write` token.
 - Validate, publish, or update a skill with `POST /skills` after full local analysis and a synced
   `companion.json`. Use `dependency=` parameters only for old packages that have no manifest yet.
 - Inspect a skill's dependency graph with `GET /skills/$SLUG/dependencies`.
@@ -364,8 +354,8 @@ Allowed skills API tasks:
   the current version's required slugs).
 - Download packages with `GET /skills/$SLUG/versions/$VERSION/package`.
 - Browse version files with `GET /skills/$SLUG/versions/$VERSION/files`.
-- Change a skill's visibility with `PUT /skills/$SLUG/visibility` (see "Change a skill's
-  visibility"). Works with a `skills:write` token.
+- Change a skill's owner with `PUT /skills/$SLUG/owner` (see "Change a skill's owner"). Works with a
+  `skills:write` token.
 - Read or write skill comments and stars only when the caller has a valid signed-in session for
   those routes. Do not assume a `cmp_pat_...` token can call session-only endpoints. A comment may
   carry up to six image attachments: add them by sending `POST /skills/$SLUG/comments` as

@@ -1,4 +1,4 @@
-import type { SkillRequirement, SkillVisibilityInput } from "@companion/contracts";
+import type { SkillRequirement } from "@companion/contracts";
 import { fallbackCompanionManifest } from "@companion/contracts";
 import {
   createOrg,
@@ -81,7 +81,8 @@ interface SeedSkillSpec {
   version: string;
   description: string;
   body: string;
-  visibility: SkillVisibilityInput;
+  /** Owner: a team slug = owned by that team (workspace-visible); null = Personal (private). */
+  ownerTeam: string | null;
   tools?: string[];
   license?: string;
   /** Declared required dependencies (must resolve cleanly — published earlier in the list). */
@@ -124,7 +125,7 @@ async function seedSkill(actor: ActorContext, orgId: string, spec: SeedSkillSpec
     const key = skillArchiveKey({ orgId, slug: fm.name, version: spec.version });
     const payload = {
       slug: fm.name,
-      visibility: spec.visibility,
+      owner_team: spec.ownerTeam,
       version: spec.version,
       description: fm.description,
       checksum: canonical.checksum,
@@ -181,7 +182,7 @@ async function seedDemoContent(actor: ActorContext): Promise<void> {
       version: "2.1.0",
       description: "Render structured findings into a clean Markdown report.",
       body: "# markdown-report\n\nRenders structured findings into a clean Markdown report.",
-      visibility: { everyone: true, teams: [] },
+      ownerTeam: teamSlug,
       tools: ["read_file"],
       license: "MIT",
     },
@@ -190,7 +191,7 @@ async function seedDemoContent(actor: ActorContext): Promise<void> {
       version: "1.4.0",
       description: "Parse heterogeneous log formats into a normalized event stream.",
       body: "# log-parser\n\nParses heterogeneous log formats into a normalized event stream.",
-      visibility: { everyone: true, teams: [] },
+      ownerTeam: teamSlug,
       tools: ["read_file"],
       license: "MIT",
     },
@@ -199,7 +200,7 @@ async function seedDemoContent(actor: ActorContext): Promise<void> {
       version: "0.9.4",
       description: "Compute and present structured diffs across files and revisions.",
       body: "# diff-tools\n\nComputes and presents structured diffs across files and revisions.",
-      visibility: { everyone: true, teams: [] },
+      ownerTeam: teamSlug,
       tools: ["read_file"],
       license: "MIT",
     },
@@ -208,7 +209,7 @@ async function seedDemoContent(actor: ActorContext): Promise<void> {
       version: "1.1.0",
       description: "Post a formatted notification to a Slack channel.",
       body: "# slack-notify\n\nPosts a formatted notification to a Slack channel.",
-      visibility: { everyone: false, teams: [teamSlug] },
+      ownerTeam: null,
       tools: ["run_python"],
       license: "MIT",
       requirements: [
@@ -231,7 +232,7 @@ async function seedDemoContent(actor: ActorContext): Promise<void> {
       version: "1.3.0",
       description: "Maintain a searchable index over a Granite memory vault.",
       body: "# vault-index\n\nMaintains a searchable index over a Granite memory vault.",
-      visibility: { everyone: true, teams: [] },
+      ownerTeam: teamSlug,
       tools: ["read_file"],
       license: "MIT",
     },
@@ -240,7 +241,7 @@ async function seedDemoContent(actor: ActorContext): Promise<void> {
       version: "1.0.0",
       description: "Recall relevant memories from a Granite vault for a given query.",
       body: "# granite-recall\n\nRecalls relevant memories from a Granite vault for a query.",
-      visibility: { everyone: true, teams: [] },
+      ownerTeam: teamSlug,
       tools: ["read_file"],
       license: "MIT",
     },
@@ -249,7 +250,7 @@ async function seedDemoContent(actor: ActorContext): Promise<void> {
       version: "0.2.0",
       description: "Capture a rendered screenshot of a page region.",
       body: "# screenshot-grab\n\nCaptures a rendered screenshot of a page region.",
-      visibility: { everyone: true, teams: [] },
+      ownerTeam: teamSlug,
       tools: ["run_python"],
       license: "MIT",
     },
@@ -258,7 +259,7 @@ async function seedDemoContent(actor: ActorContext): Promise<void> {
       version: "1.0.0",
       description: "Export a report to a standalone HTML file. Superseded by markdown-report.",
       body: "# html-export\n\nExports a report to a standalone HTML file.",
-      visibility: { everyone: true, teams: [] },
+      ownerTeam: teamSlug,
       tools: ["read_file"],
       license: "MIT",
     },
@@ -267,7 +268,7 @@ async function seedDemoContent(actor: ActorContext): Promise<void> {
       version: "0.1.8",
       description: "Summarize an incident timeline from logs into a concise postmortem draft.",
       body: "# incident-summary\n\nReads a directory of log excerpts and produces a terse incident summary.",
-      visibility: { everyone: true, teams: [] },
+      ownerTeam: teamSlug,
       tools: ["read_file", "run_python"],
       license: "MIT",
       dependencies: ["log-parser", "markdown-report"],
@@ -277,7 +278,7 @@ async function seedDemoContent(actor: ActorContext): Promise<void> {
       version: "1.2.0",
       description: "Compile a daily digest of activity into a short formatted email.",
       body: "# email-digest\n\nCompiles a daily digest of activity into a short formatted email.",
-      visibility: { everyone: true, teams: [] },
+      ownerTeam: teamSlug,
       tools: ["read_file"],
       license: "MIT",
       dependencies: ["markdown-report"],

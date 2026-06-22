@@ -13,14 +13,14 @@ describe("skill dependency contracts", () => {
       slug: "incident-summary",
       version: "0.1.8",
       requires: [
-        { slug: "log-parser", status: "satisfied", visibility: { everyone: true, teams: [] }, note: null, can_open: true },
-        { slug: "html-sanitize", status: "missing", visibility: null, note: "not published to this workspace", can_open: false },
+        { slug: "log-parser", status: "satisfied", owner_kind: "team", note: null, can_open: true },
+        { slug: "html-sanitize", status: "missing", owner_kind: null, note: "not published to this workspace", can_open: false },
       ],
       used_by: [
         {
           slug: "ops-runbook",
           status: "satisfied",
-          visibility: { everyone: false, teams: [{ id: "t1", slug: "platform", name: "Platform" }] },
+          owner_kind: "team",
           archived: false,
           note: null,
           can_open: true,
@@ -38,7 +38,7 @@ describe("skill dependency contracts", () => {
       skillDependenciesResponseSchema.parse({
         slug: "x",
         version: null,
-        requires: [{ slug: "y", status: "update", visibility: null, note: null, can_open: false }],
+        requires: [{ slug: "y", status: "update", owner_kind: null, note: null, can_open: false }],
         used_by: [],
         requires_n: 1,
         used_by_n: 0,
@@ -65,7 +65,7 @@ describe("skill dependency contracts", () => {
 
     const published = publishSkillInputSchema.parse({
       slug: "incident-summary",
-      visibility: { everyone: true, teams: [] },
+      owner_team: "platform",
       version: "1.0.0",
       description: "x",
       checksum: `sha256:${"a".repeat(64)}`,

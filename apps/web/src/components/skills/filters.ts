@@ -24,14 +24,16 @@ export function filtersKey(fs: Filter[]): string {
 
 function matchOne(s: SkillVM, type: string, v: string): boolean {
   if (type === "visibility") {
-    if (v === "everyone") return s.visibility.everyone;
-    if (v === "team") return s.visibility.teams.length > 0;
-    if (v === "private") return !s.visibility.everyone && s.visibility.teams.length === 0;
+    // Owner kind is the access axis: team-owned (workspace-visible) vs personal (private).
+    if (v === "team") return s.owner.kind === "team";
+    if (v === "personal") return s.owner.kind === "user";
     return false;
   }
   if (type === "status") return s.validation === v;
   if (type === "starred") return s.starred === true;
-  if (type === "owner") return s.owner.name === v;
+  // Owner is matched by the principal id (user id for Personal, team id for Team-owned), NOT the
+  // display name — two people with the same name no longer collide into each other's "mine".
+  if (type === "owner") return s.owner.id === v;
   if (type === "team") return s.teamSlugs.includes(v);
   if (type === "deps") {
     if (v === "has") return s.requiresCount > 0;

@@ -53,7 +53,7 @@ import {
   setCommentDeprecated,
   setMemberRole,
   setSkillFilterPreferences,
-  setSkillVisibility,
+  setSkillOwner,
   setTeamMemberRole,
   setOrgLogoFromUpload,
   orgLogoPublicPath,
@@ -77,9 +77,8 @@ import {
   reportLocalSkillInstallInputSchema,
   reportSkillInstallInputSchema,
   setCommentDeprecatedInputSchema,
-  setSkillVisibilityInputSchema,
+  setSkillOwnerInputSchema,
   skillFrontmatterSchema,
-  skillVisibilityInputSchema,
   visibilityFilterSchema,
   skillFilterPreferencesSchema,
   fallbackCompanionManifest,
@@ -92,7 +91,6 @@ import {
   MAX_COMMENT_IMAGE_BYTES,
   updateUserProfileInputSchema,
   type CompanionManifest,
-  type SkillVisibilityInput,
   type SkillFrontmatter,
 } from "@companion/contracts";
 import {
@@ -257,8 +255,14 @@ function parseTeamValues(values: Array<string | undefined>): string[] {
 }
 
 function rejectLegacySkillVisibilityInput(hasField: (name: string) => boolean): void {
-  if (hasField("scope") || hasField("visibility")) {
-    throw new Error("legacy skill scope/visibility inputs are not supported; use everyone and team fields");
+  if (
+    hasField("scope") ||
+    hasField("visibility") ||
+    hasField("everyone") ||
+    hasField("team") ||
+    hasField("teams")
+  ) {
+    throw new Error("legacy skill scope/visibility/everyone/team inputs are not supported; use owner_team");
   }
 }
 
@@ -274,21 +278,19 @@ async function publishCanonical(input: {
   companionManifest: CompanionManifest;
   skillId: string;
   ownerTeam?: string | null;
-  visibility: SkillVisibilityInput;
   version: string;
   note: string;
   /** SKILL.md markdown body — persisted server-side to power full-text content search. */
   body: string;
   dependencies?: string[];
 }): Promise<{ id: string; slug: string; version: string; checksum: string; sizeBytes: number }> {
-  const { actor, orgId, canonical, fm, companionManifest, skillId, ownerTeam, visibility, version, note, body, dependencies } = input;
+  const { actor, orgId, canonical, fm, companionManifest, skillId, ownerTeam, version, note, body, dependencies } = input;
   if (!isValidSemver(version)) throw new Error(`invalid semver: ${version}`);
   const key = skillArchiveKey({ orgId, slug: fm.name, version });
   const payload = publishSkillInputSchema.parse({
     skill_id: skillId,
     slug: fm.name,
     owner_team: ownerTeam,
-    visibility,
     version,
     description: skillSummary(fm, companionManifest),
     checksum: canonical.checksum,
@@ -1195,25 +1197,24 @@ app.delete("/v1/skills/:slug/install", async (c) => {
   }
 });
 
-app.put("/v1/skills/:slug/visibility", async (c) => {
+app.put("/v1/skills/:slug/owner", async (c) => {
   try {
     actorFromContext(c, true);
     requireScope(c, "skills:write");
-    const { cascade, ...visibility } = setSkillVisibilityInputSchema.parse(await c.req.json());
-    const { cascaded } = await withTenant(
+    const { owner_team } = setSkillOwnerInputSchema.parse(await c.req.json());
+    await withTenant(
       c,
       ({ actor, orgId, database }) =>
-        setSkillVisibility({
+        setSkillOwner({
           actor,
           orgId,
           slug: c.req.param("slug"),
-          visibility,
-          cascade,
+          ownerTeam: owner_team,
           database,
         }),
       true,
     );
-    return c.json({ ok: true, cascaded });
+    return c.json({ ok: true });
   } catch (error) {
     return jsonError(c, error);
   }
@@ -1290,8 +1291,6 @@ app.post("/v1/skills", bodyLimit({ maxSize: 32 * 1024 * 1024, onError: (c) => js
 
     let archive: Buffer;
     let action: string;
-    let everyoneRaw: string | undefined;
-    let teamValues: string[] = [];
     let versionRaw: string | undefined;
     let messageRaw: string | undefined;
     let expectSlug: string | undefined;
@@ -1310,8 +1309,6 @@ app.post("/v1/skills", bodyLimit({ maxSize: 32 * 1024 * 1024, onError: (c) => js
         return v != null && String(v) !== "" ? String(v) : undefined;
       };
       action = field("action") ?? "publish";
-      everyoneRaw = field("everyone");
-      teamValues = parseTeamValues([...form.getAll("team"), ...form.getAll("teams")].map((v) => String(v)));
       versionRaw = field("version");
       messageRaw = field("message");
       expectSlug = field("expect_slug");
@@ -1324,8 +1321,6 @@ app.post("/v1/skills", bodyLimit({ maxSize: 32 * 1024 * 1024, onError: (c) => js
       archive = Buffer.from(await c.req.arrayBuffer());
       if (!archive.length) throw new Error("request body is empty");
       action = c.req.query("action") ?? "publish";
-      everyoneRaw = c.req.query("everyone");
-      teamValues = parseTeamValues([...url.searchParams.getAll("team"), ...url.searchParams.getAll("teams")]);
       versionRaw = c.req.query("version");
       messageRaw = c.req.query("message");
       expectSlug = c.req.query("expect_slug");
@@ -1373,19 +1368,20 @@ app.post("/v1/skills", bodyLimit({ maxSize: 32 * 1024 * 1024, onError: (c) => js
       companionManifestPath: result.companion_manifest_path,
       companionManifest: result.companion_manifest,
     });
-    const visibility = skillVisibilityInputSchema.parse({ everyone: parseBoolean(everyoneRaw), teams: teamValues });
     // Dependency preflight: which declared deps are published / must be uploaded / dropped, plus any
-    // blockers (missing / cycle / visibility). Computed for both validate (preview) and publish.
+    // blockers (missing / cycle / owner-cover). Computed for both validate (preview) and publish.
     const dependencyPlan = await withTenant(
       c,
       ({ actor: a, orgId: o, database }) =>
         buildDependencyPlan({
           actor: a,
           orgId: o,
+          // `undefined` (owner_team omitted) = keep the existing owner — must NOT collapse to `null`
+          // (Personal), or the preflight would model a re-published team-owned skill as Personal and
+          // produce a dependency plan against the wrong owner.
           slug: fm.name,
           declaredSlugs: dependencyValues,
-          visibility,
-          ownerTeamSlug: ownerTeamRaw ?? null,
+          ownerTeam: ownerTeamRaw,
           database,
         }),
       true,
@@ -1418,7 +1414,6 @@ app.post("/v1/skills", bodyLimit({ maxSize: 32 * 1024 * 1024, onError: (c) => js
         companionManifest: normalized.companionManifest,
         skillId: target.skillId,
         ownerTeam: ownerTeamRaw,
-        visibility,
         version: target.version,
         note: messageRaw ?? "",
         body: normalizedResult.body ?? "",
@@ -1490,7 +1485,6 @@ app.post("/v1/skills/create", bodyLimit({ maxSize: 2 * 1024 * 1024, onError: (c)
         companionManifest,
         skillId: target.skillId,
         ownerTeam: input.owner_team,
-        visibility: input.visibility,
         version: target.version,
         note: "",
         body: result.body ?? "",

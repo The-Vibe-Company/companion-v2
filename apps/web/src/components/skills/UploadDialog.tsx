@@ -5,7 +5,6 @@ import type { CSSProperties } from "react";
 import type {
   DependencyPlan,
   SkillDependenciesResponse,
-  SkillVisibilityInput,
   ValidationResult,
 } from "@companion/contracts";
 import type { SkillVM, TeamVM } from "@/lib/types";
@@ -24,22 +23,23 @@ import { TeamAvatar } from "../org/TeamAvatar";
 
 /* ------------------------------------------------------------------ helpers */
 
-/** Ownership and visibility are applied on the upload request, never written into SKILL.md. */
-function visQuery(visibility: SkillVisibilityInput, ownerTeam?: string | null): string {
+/**
+ * The owner is the single access axis, applied on the upload request and never written into
+ * SKILL.md: no `owner_team` = Personal (private to you); a team slug = owned by that team and
+ * visible to the whole workspace.
+ */
+function ownerQuery(ownerTeam?: string | null): string {
   const qs = new URLSearchParams();
   if (ownerTeam) qs.set("owner_team", ownerTeam);
-  if (visibility.everyone) qs.set("everyone", "true");
-  for (const team of visibility.teams) qs.append("team", team);
-  return qs.toString() || "everyone=false";
+  return qs.toString();
 }
 
 function skillUploadQuery(
-  visibility: SkillVisibilityInput,
   ownerTeam: string | null | undefined,
   target?: { slug: string; skillId: string; version?: string },
   action?: "validate",
 ): string {
-  const qs = new URLSearchParams(visQuery(visibility, ownerTeam));
+  const qs = new URLSearchParams(ownerQuery(ownerTeam));
   if (action) qs.set("action", action);
   if (target) {
     qs.set("expect_slug", target.slug);
@@ -47,14 +47,6 @@ function skillUploadQuery(
     if (target.version) qs.set("version", target.version);
   }
   return qs.toString();
-}
-function visibilityLabel(visibility: SkillVisibilityInput, teams: TeamVM[]): string {
-  const names = visibility.teams.map((slug) => teams.find((team) => team.id === slug)?.name ?? slug);
-  if (visibility.everyone && names.length) return `Everyone + ${names.length} team${names.length === 1 ? "" : "s"}`;
-  if (visibility.everyone) return "Everyone";
-  if (names.length === 1) return names[0]!;
-  if (names.length > 1) return `${names.length} teams`;
-  return "Private";
 }
 
 function ownerLabel(ownerTeam: string | null, teams: TeamVM[]): string {
@@ -174,89 +166,6 @@ function ValidationList({ result }: { result: ValidationResult }) {
   );
 }
 
-function TeamMultiSelect({
-  teams,
-  value,
-  onChange,
-}: {
-  teams: TeamVM[];
-  value: string[];
-  onChange: (ids: string[]) => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLSpanElement>(null);
-  const selected = new Set(value);
-  const label = value.length === 0 ? "No teams" : value.length === 1 ? teams.find((t) => t.id === value[0])?.name ?? value[0] : `${value.length} teams`;
-  const toggleTeam = (id: string) => {
-    const next = new Set(selected);
-    if (next.has(id)) next.delete(id);
-    else next.add(id);
-    onChange([...next]);
-  };
-  useEffect(() => {
-    if (!open) return;
-    const h = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
-    };
-    document.addEventListener("click", h);
-    return () => document.removeEventListener("click", h);
-  }, [open]);
-  return (
-    <span
-      className="up-teamsel"
-      ref={ref}
-      data-modal-menu-open={open ? "true" : undefined}
-      onKeyDown={(event) => {
-        if (!open || event.key !== "Escape") return;
-        event.preventDefault();
-        event.stopPropagation();
-        setOpen(false);
-        ref.current?.querySelector("button")?.focus();
-      }}
-    >
-      <button
-        className="up-teamsel__btn"
-        type="button"
-        onClick={() => setOpen((o) => !o)}
-        aria-haspopup="menu"
-        aria-expanded={open}
-      >
-        <span className="up-teamav">{value.length || "0"}</span>
-        <span className="up-teamsel__name">{label}</span>
-        <Icon name="chevron-down" size={13} style={{ color: "var(--color-faint)" }} />
-      </button>
-      {open && (
-        <div className="up-teamsel__menu" role="menu">
-          <div className="up-teamsel__head">Share with teams</div>
-          {teams.map((t) => (
-            <button
-              key={t.id}
-              type="button"
-              role="menuitemcheckbox"
-              aria-checked={selected.has(t.id)}
-              className={"up-teamsel__item" + (selected.has(t.id) ? " is-sel" : "")}
-              onMouseDown={(event) => {
-                event.preventDefault();
-                event.stopPropagation();
-                toggleTeam(t.id);
-              }}
-              onClick={(event) => {
-                if (event.detail === 0) toggleTeam(t.id);
-              }}
-            >
-              <TeamAvatar team={t} className="up-teamav" />
-              <span className="up-teamsel__iname">{t.name}</span>
-              {selected.has(t.id) && (
-                <Icon name="check" size={14} style={{ marginLeft: "auto", color: "var(--color-fg)" }} />
-              )}
-            </button>
-          ))}
-        </div>
-      )}
-    </span>
-  );
-}
-
 function OwnerPicker({
   value,
   onChange,
@@ -358,45 +267,6 @@ function OwnerPicker({
         </div>
       )}
     </span>
-  );
-}
-
-/** Shared visibility selector: workspace-wide toggle plus team shares. */
-function VisibilityPicker({
-  value,
-  onChange,
-  teams,
-}: {
-  value: SkillVisibilityInput;
-  onChange: (visibility: SkillVisibilityInput) => void;
-  teams: TeamVM[];
-}) {
-  return (
-    <div className="up-vis">
-      <div className="up-seg" role="group" aria-label="Visibility">
-        <button
-          type="button"
-          aria-pressed={!value.everyone && value.teams.length === 0}
-          className={!value.everyone && value.teams.length === 0 ? "is-on" : ""}
-          onClick={() => onChange({ everyone: false, teams: [] })}
-        >
-          <Icon name="lock" size={12} />
-          Private
-        </button>
-        <button
-          type="button"
-          aria-pressed={value.everyone}
-          className={value.everyone ? "is-on" : ""}
-          onClick={() => onChange({ ...value, everyone: !value.everyone })}
-        >
-          <Icon name="building-2" size={12} />
-          Everyone
-        </button>
-      </div>
-      {teams.length > 0 && (
-        <TeamMultiSelect teams={teams} value={value.teams} onChange={(teamIds) => onChange({ ...value, teams: teamIds })} />
-      )}
-    </div>
   );
 }
 
@@ -577,8 +447,6 @@ type UploadMethod = (typeof UP_METHODS)[number]["id"];
 function PromptPanel({
   ownerTeam,
   setOwnerTeam,
-  visibility,
-  setVisibility,
   teams,
   token,
   ensure,
@@ -588,8 +456,6 @@ function PromptPanel({
 }: {
   ownerTeam: string | null;
   setOwnerTeam: (ownerTeam: string | null) => void;
-  visibility: SkillVisibilityInput;
-  setVisibility: (visibility: SkillVisibilityInput) => void;
   teams: TeamVM[];
   token: string | null;
   ensure: () => Promise<string>;
@@ -604,17 +470,8 @@ function PromptPanel({
 }) {
   const base = apiBase();
   const queryTarget = target ? { slug: target.slug, skillId: target.skillId, version: target.nextVersion } : undefined;
-  const validateQuery = skillUploadQuery(
-    visibility,
-    lockedOwner ? null : ownerTeam,
-    queryTarget,
-    "validate",
-  );
-  const publishQuery = skillUploadQuery(
-    visibility,
-    lockedOwner ? null : ownerTeam,
-    queryTarget,
-  );
+  const validateQuery = skillUploadQuery(lockedOwner ? null : ownerTeam, queryTarget, "validate");
+  const publishQuery = skillUploadQuery(lockedOwner ? null : ownerTeam, queryTarget);
   const validateUrl = `${base}/skills?${validateQuery}`;
   const publishUrl = `${base}/skills?${publishQuery}`;
   const buildPrompt = (tok: string) =>
@@ -683,18 +540,14 @@ Workflow:
       <div className="up-step">
         <StepLabel n="2">Owner</StepLabel>
         <OwnerPicker value={ownerTeam} onChange={setOwnerTeam} teams={teams} disabled={lockedOwner} />
-        <p className="up-seg-note">Owner: <span className="mono">{ownerLabel(ownerTeam, teams)}</span>.</p>
-      </div>
-      <div className="up-step">
-        <StepLabel n="3">Visibility</StepLabel>
-        <VisibilityPicker value={visibility} onChange={setVisibility} teams={teams} />
         <p className="up-seg-note">
-          Validates with <span className="mono">?{validateQuery}</span>, then publishes with{" "}
-          <span className="mono">?{publishQuery}</span>.
+          <span className="mono">{ownerLabel(ownerTeam, teams)}</span> —{" "}
+          {ownerTeam ? "owned by the team and visible to the whole workspace" : "private to you"}. Validates with{" "}
+          <span className="mono">?{validateQuery}</span>, then publishes with <span className="mono">?{publishQuery}</span>.
         </p>
       </div>
       <div className="up-step">
-        <StepLabel n="4">Prompt</StepLabel>
+        <StepLabel n="3">Prompt</StepLabel>
         <CodeBlock
           text={displayPrompt}
           scroll
@@ -709,8 +562,6 @@ Workflow:
 function ZipPanel({
   ownerTeam,
   setOwnerTeam,
-  visibility,
-  setVisibility,
   teams,
   file,
   setFile,
@@ -721,8 +572,6 @@ function ZipPanel({
 }: {
   ownerTeam: string | null;
   setOwnerTeam: (ownerTeam: string | null) => void;
-  visibility: SkillVisibilityInput;
-  setVisibility: (visibility: SkillVisibilityInput) => void;
   teams: TeamVM[];
   file: File | null;
   setFile: (f: File | null) => void;
@@ -809,11 +658,10 @@ function ZipPanel({
       <div className="up-step">
         <StepLabel n="1">Owner</StepLabel>
         <OwnerPicker value={ownerTeam} onChange={setOwnerTeam} teams={teams} disabled={lockedOwner} />
-      </div>
-      <div className="up-step">
-        <StepLabel n="2">Visibility</StepLabel>
-        <VisibilityPicker value={visibility} onChange={setVisibility} teams={teams} />
-        <p className="up-seg-note">Set on upload. Companion does not read visibility from the package.</p>
+        <p className="up-seg-note">
+          {ownerTeam ? "Owned by the team — visible to the whole workspace." : "Personal — private to you."} Set on
+          upload; Companion does not read the owner from the package.
+        </p>
       </div>
     </>
   );
@@ -840,8 +688,6 @@ interface CreateForm {
 function CreatePanel({
   ownerTeam,
   setOwnerTeam,
-  visibility,
-  setVisibility,
   teams,
   form,
   setForm,
@@ -849,8 +695,6 @@ function CreatePanel({
 }: {
   ownerTeam: string | null;
   setOwnerTeam: (ownerTeam: string | null) => void;
-  visibility: SkillVisibilityInput;
-  setVisibility: (visibility: SkillVisibilityInput) => void;
   teams: TeamVM[];
   form: CreateForm;
   setForm: (f: (prev: CreateForm) => CreateForm) => void;
@@ -894,16 +738,13 @@ function CreatePanel({
           <div className="up-field">
             <label className="up-field__label">Owner</label>
             <OwnerPicker value={ownerTeam} onChange={setOwnerTeam} teams={teams} disabled={locked} />
-            <span className="up-field__hint">{locked ? "Locked for updates." : `${ownerLabel(ownerTeam, teams)} can edit.`}</span>
-          </div>
-          <div className="up-field">
-            <label className="up-field__label">Visibility</label>
-            <VisibilityPicker
-              value={visibility}
-              onChange={setVisibility}
-              teams={teams}
-            />
-            <span className="up-field__hint">{visibilityLabel(visibility, teams)}.</span>
+            <span className="up-field__hint">
+              {locked
+                ? "Locked for updates."
+                : ownerTeam
+                  ? "Owned by the team — visible to the whole workspace; its admins/editors can edit."
+                  : "Personal — private to you; only you can edit."}
+            </span>
           </div>
         </div>
       </div>
@@ -950,14 +791,14 @@ function CreatePanel({
 interface PublishOutcome {
   id: string;
   version: string;
-  visibility: SkillVisibilityInput;
+  ownerTeam: string | null;
   via: string;
   /** Non-fatal note when archive-on-publish could not archive some candidates (e.g. permissions). */
   archiveWarning?: string;
 }
 
 function DonePanel({ result, update, teams }: { result: PublishOutcome; update: boolean; teams: TeamVM[] }) {
-  const visLabel = visibilityLabel(result.visibility, teams);
+  const ownerName = ownerLabel(result.ownerTeam, teams);
   return (
     <div className="up-done">
       <span className="up-done__badge">
@@ -983,10 +824,10 @@ function DonePanel({ result, update, teams }: { result: PublishOutcome; update: 
           <span className="up-done__v">{result.version}</span>
         </div>
         <div className="up-done__row">
-          <span className="up-done__k">Visibility</span>
+          <span className="up-done__k">Owner</span>
           <span className="up-done__v">
-            <Icon name={result.visibility.everyone ? "building-2" : result.visibility.teams.length ? "users" : "lock"} size={13} />
-            {visLabel}
+            <Icon name={result.ownerTeam ? "users" : "lock"} size={13} />
+            {ownerName}
           </span>
         </div>
         <div className="up-done__row">
@@ -1194,27 +1035,32 @@ export function UploadDialog({
   mode = "create",
   skill = null,
   teams,
+  defaultOwnerTeam = null,
   onClose,
   onPublished,
 }: {
   mode?: "create" | "update";
   skill?: SkillVM | null;
   teams: TeamVM[];
+  /** Preselect this team as the owner for a new skill (e.g. opened from a team view). Slug. */
+  defaultOwnerTeam?: string | null;
   onClose: () => void;
   onPublished: () => void;
 }) {
   const isUpdate = mode === "update" && !!skill;
-  const initialOwnerTeam =
-    isUpdate && skill!.owner.kind === "team"
+  // On update the owner is locked to the skill's current owner; on create, preselect the team the
+  // user opened the dialog from — but only when they can actually own for it (admin/editor).
+  const canOwnDefault =
+    !!defaultOwnerTeam && teams.some((t) => t.id === defaultOwnerTeam && (t.role === "admin" || t.role === "editor"));
+  const initialOwnerTeam = isUpdate
+    ? skill!.owner.kind === "team"
       ? (skill!.owner.handle ?? teams.find((team) => team.dbId === skill!.owner.teamId)?.id ?? null)
+      : null
+    : canOwnDefault
+      ? defaultOwnerTeam
       : null;
   const [method, setMethod] = useState<UploadMethod>("prompt");
   const [ownerTeam, setOwnerTeam] = useState<string | null>(initialOwnerTeam);
-  const [visibility, setVisibility] = useState<SkillVisibilityInput>(
-    isUpdate
-      ? { everyone: skill!.visibility.everyone, teams: skill!.teamSlugs }
-      : { everyone: false, teams: [] },
-  );
   const [token, setToken] = useState<string | null>(null);
   const [file, setFile] = useState<File | null>(null);
   const [validation, setValidation] = useState<ValidationResult | null>(null);
@@ -1310,7 +1156,6 @@ export function UploadDialog({
     try {
       const res = await publishSkillPackage(file, {
         ownerTeam: isUpdate ? undefined : ownerTeam,
-        visibility,
         version: isUpdate ? ver : undefined,
         expectSlug: isUpdate ? skill!.id : undefined,
         expectSkillId: isUpdate ? skill!.uuid : undefined,
@@ -1332,7 +1177,7 @@ export function UploadDialog({
       finishPublish({
         id: res.slug || idFromZip,
         version: res.version,
-        visibility,
+        ownerTeam: isUpdate ? initialOwnerTeam : ownerTeam,
         via: isUpdate ? "Updated from zip" : "Uploaded from zip",
         archiveWarning,
       });
@@ -1350,8 +1195,8 @@ export function UploadDialog({
       dependencyPlan.removed.length > 0 ||
       dependencyPlan.archive_candidates.length > 0);
 
-  // Re-validate with the SELECTED visibility/owner before showing the preflight, so the plan's
-  // visibility checks match what publish will enforce (avoids a clean preview that then 422s).
+  // Re-validate with the SELECTED owner before showing the preflight, so the plan's owner-cover
+  // checks match what publish will enforce (avoids a clean preview that then 422s).
   const openPreflight = async () => {
     if (!file) return;
     setBusy(true);
@@ -1359,7 +1204,6 @@ export function UploadDialog({
     try {
       const next = await validateSkillPackage(file, {
         ...(isUpdate ? { version: ver, expectSlug: skill!.id, expectSkillId: skill!.uuid } : {}),
-        visibility,
         ownerTeam: isUpdate ? undefined : ownerTeam,
         dependencies: dependencyPlan?.declared ?? [],
       });
@@ -1384,12 +1228,11 @@ export function UploadDialog({
         description: form.description.trim(),
         body: form.body,
         owner_team: isUpdate ? undefined : ownerTeam,
-        visibility,
       });
       finishPublish({
         id: res.slug || id,
         version: res.version,
-        visibility,
+        ownerTeam: isUpdate ? initialOwnerTeam : ownerTeam,
         via: isUpdate ? "Edited and published" : "Created in the browser",
       });
     } catch (e) {
@@ -1582,8 +1425,6 @@ export function UploadDialog({
                   <PromptPanel
                     ownerTeam={ownerTeam}
                     setOwnerTeam={setOwnerTeam}
-                    visibility={visibility}
-                    setVisibility={setVisibility}
                     teams={teams}
                     token={token}
                     ensure={ensureToken}
@@ -1605,8 +1446,6 @@ export function UploadDialog({
                   <ZipPanel
                     ownerTeam={ownerTeam}
                     setOwnerTeam={setOwnerTeam}
-                    visibility={visibility}
-                    setVisibility={setVisibility}
                     teams={teams}
                     file={file}
                     setFile={setFile}
@@ -1620,8 +1459,6 @@ export function UploadDialog({
                   <CreatePanel
                     ownerTeam={ownerTeam}
                     setOwnerTeam={setOwnerTeam}
-                    visibility={visibility}
-                    setVisibility={setVisibility}
                     teams={teams}
                     form={form}
                     setForm={setForm}

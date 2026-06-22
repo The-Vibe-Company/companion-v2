@@ -127,7 +127,7 @@ prepare_fixtures() {
     --profile "$profile" >/dev/null
 
   pnpm --filter @companion/cli dev skills push "$PWD/examples/skills/incident-summary" \
-    --everyone \
+    --owner-team engineering \
     --profile "$profile" >/dev/null 2>&1 || true
 }
 
@@ -168,8 +168,8 @@ log "Checking filter menu"
 agent-browser find role button click --name "Filter"
 agent-browser wait 300
 assert_body_contains "Visibility"
-assert_body_contains "Everyone"
-assert_body_contains "Team shares"
+assert_body_contains "Team-owned"
+assert_body_contains "Personal"
 agent-browser press Escape
 
 log "Checking detail view"
