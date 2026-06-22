@@ -1590,26 +1590,33 @@ export async function toggleStar(input: {
   return true;
 }
 
-export async function addComment(input: {
+/**
+ * Validate that a new comment / reply targets an accessible skill and a valid (same-skill) version or
+ * parent thread, without writing anything. Returns the resolved skill plus the effective version id
+ * and label. Shared by `addComment` and the API multipart path, which validates the target BEFORE
+ * uploading any image bytes (so an inaccessible/invalid target never triggers object writes).
+ * Cross-skill / cross-tenant integrity is not FK-enforceable, so it is checked here.
+ */
+export async function assertCommentTarget(input: {
   actor: ActorContext;
   orgId: string;
   slug: string;
-  body: string;
   parentId?: string | null;
   versionId?: string | null;
-  /** Already-uploaded image attachments (the API stores the bytes in S3 before calling this). */
-  images?: Array<{ id: string; storageKey: string; contentType: string; byteSize: number }>;
   database?: Db;
-}): Promise<SkillCommentRow> {
+}): Promise<{
+  skill: NonNullable<Awaited<ReturnType<typeof getSkillBySlug>>>;
+  versionId: string | null;
+  versionLabel: string | null;
+}> {
   const database = input.database ?? db;
   const skill = await getSkillBySlug(input);
   if (!skill) throw new Error("skill not found");
 
   // A reply inherits its thread context, so any caller-supplied versionId is ignored for replies.
-  let versionId = input.parentId ? null : input.versionId ?? null;
+  const versionId = input.parentId ? null : input.versionId ?? null;
   let versionLabel: string | null = null;
 
-  // Cross-skill / cross-tenant integrity is not FK-enforceable — validate it here.
   if (versionId) {
     const version = await database.query.skillVersions.findFirst({
       where: and(
@@ -1633,6 +1640,23 @@ export async function addComment(input: {
     // Single-level nesting only: a reply must target an existing same-skill root thread.
     if (!parent || parent.parentId !== null) throw new Error("invalid parent comment");
   }
+
+  return { skill, versionId, versionLabel };
+}
+
+export async function addComment(input: {
+  actor: ActorContext;
+  orgId: string;
+  slug: string;
+  body: string;
+  parentId?: string | null;
+  versionId?: string | null;
+  /** Already-uploaded image attachments (the API stores the bytes in S3 before calling this). */
+  images?: Array<{ id: string; storageKey: string; contentType: string; byteSize: number }>;
+  database?: Db;
+}): Promise<SkillCommentRow> {
+  const database = input.database ?? db;
+  const { skill, versionId, versionLabel } = await assertCommentTarget(input);
 
   const attachments = input.images ?? [];
 

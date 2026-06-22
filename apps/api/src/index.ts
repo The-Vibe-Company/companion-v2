@@ -11,6 +11,7 @@ import { setCookie } from "hono/cookie";
 import {
   acceptInvitation,
   addComment,
+  assertCommentTarget,
   addOrgAccessDomain,
   addTeamMember,
   archiveSkill,
@@ -974,6 +975,16 @@ app.get("/v1/skills/:slug/comments", async (c) => {
 
 app.post(
   "/v1/skills/:slug/comments",
+  // Authenticate before the body-reading bodyLimit middleware, so an unauthenticated caller can't make
+  // the server read or measure a large upload body.
+  async (c, next) => {
+    try {
+      actorFromContext(c);
+    } catch (error) {
+      return jsonError(c, error, 401);
+    }
+    await next();
+  },
   // 6 images x 10 MB + form overhead. Text-only comments come through the JSON branch well under this.
   bodyLimit({ maxSize: 64 * 1024 * 1024, onError: (c) => jsonError(c, "comment exceeds the 64 MB upload limit", 413) }),
   async (c) => {
@@ -1007,6 +1018,13 @@ app.post(
           if (file.size === 0) throw new Error("an image file is empty");
           if (file.size > MAX_COMMENT_IMAGE_BYTES) throw new Error("each image must be 10 MB or smaller");
         }
+
+        // Validate the comment target (skill visibility + parent / version) BEFORE writing any object
+        // bytes, so an inaccessible or invalid target never triggers S3 uploads. addComment re-checks
+        // this in its write transaction; the duplicate read is cheap and keeps the service self-guarding.
+        await withTenantContext({ orgId, userId: actor.id }, (database) =>
+          assertCommentTarget({ actor, orgId, slug, parentId, versionId, database }),
+        );
 
         // Upload the bytes to object storage OUTSIDE any DB transaction (slow uploads must not hold a
         // pooled connection idle-in-transaction); the transaction below only persists metadata.
@@ -1075,7 +1093,9 @@ app.get("/v1/skills/:slug/comments/:commentId/images/:imageId", async (c) => {
     return new Response(body, {
       headers: {
         "Content-Type": asset.contentType,
-        "Cache-Control": "private, max-age=3600",
+        // Private + revalidate (matches the workspace-logo endpoint): the visibility check re-runs on
+        // every request, so a cached copy can't outlive the viewer's access after logout / revocation.
+        "Cache-Control": "private, no-cache",
         // User-uploaded bytes: never let the browser sniff them into an executable type.
         "X-Content-Type-Options": "nosniff",
       },
