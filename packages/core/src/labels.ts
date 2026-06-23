@@ -359,9 +359,10 @@ export async function renameLabel(input: {
 
     const matchPrefix = (col: ReturnType<typeof sql>) =>
       sql`(${col} = ${from} or ${col} like ${`${fromPrefix}%`})`;
-    // Rewrite: `to` for the exact path, else `to || substr(path, fromLen+1)` for descendants.
+    // Rewrite: `to` for the exact path, else `to || suffix` for descendants. The explicit CASE keeps
+    // the exact-row update non-null even if a database treats the descendant suffix differently.
     const rewrite = (col: ReturnType<typeof sql>) =>
-      sql`${to} || substring(${col} from ${fromLen + 1})`;
+      sql`case when ${col} = ${from} then ${to} else ${to} || substring(${col} from ${fromLen + 1}) end`;
 
     await tx
       .update(schema.labels)

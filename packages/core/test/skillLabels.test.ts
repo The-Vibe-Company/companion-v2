@@ -252,16 +252,17 @@ function fakeDb(opts: FakeOptions = {}) {
     select: selectBuilder,
     delete: deleteBuilder,
     update: (table: unknown) => {
-      let target: string | null = null;
+      let rewritePaths: string[] = [];
       const api: Record<string, unknown> = {
         set(patch: Record<string, unknown>) {
-          // The rewrite `set({ path: sql`${to} || substring(...)` })` carries `to` (+ a fromLen number).
-          target = pathParams(patch)[0] ?? null;
+          // The rewrite CASE carries `from` and `to`; the where clause supplies the moved base path.
+          rewritePaths = pathParams(patch);
           return api;
         },
         where(expr: unknown) {
           const base = prefixBase(expr);
           const org = orgParam(expr);
+          const target = rewritePaths.find((p) => p !== base) ?? rewritePaths[0] ?? null;
           if (base != null && target != null) {
             const store = table === schema.labels ? labels : table === schema.skillLabels ? skillLabels : null;
             if (store) {
@@ -448,12 +449,45 @@ describe("renameLabel — prefix cascade + collision reject", () => {
       ],
       skillLabels: [
         { orgId: ORG, skillId: "s1", path: "marketing" },
-        { orgId: ORG, skillId: "s2", path: "marketing/seo" },
+        { orgId: ORG, skillId: "s2", path: "marketing" },
+        { orgId: ORG, skillId: "s3", path: "marketing/seo" },
+        { orgId: ORG, skillId: "s4", path: "marketing/seo" },
       ],
     });
     await renameLabel({ actor, orgId: ORG, from: "marketing", to: "growth", database });
     expect(labels.map((l) => l.path).sort()).toEqual(["growth", "growth/seo"]);
-    expect(skillLabels.map((l) => l.path).sort()).toEqual(["growth", "growth/seo"]);
+    expect(labels.some((l) => l.path === "marketing" || l.path === "marketing/seo")).toBe(false);
+    expect(skillLabels.map((l) => `${l.skillId}:${l.path}`).sort()).toEqual([
+      "s1:growth",
+      "s2:growth",
+      "s3:growth/seo",
+      "s4:growth/seo",
+    ]);
+    expect(skillLabels.some((l) => l.path === "marketing" || l.path === "marketing/seo")).toBe(false);
+  });
+
+  it("renames a nested label with direct and descendant skill assignments", async () => {
+    const { database, labels, skillLabels } = fakeDb({
+      labels: [
+        { orgId: ORG, path: "marketing", color: null, icon: null },
+        { orgId: ORG, path: "marketing/seo", color: null, icon: null },
+        { orgId: ORG, path: "marketing/seo/local", color: null, icon: null },
+      ],
+      skillLabels: [
+        { orgId: ORG, skillId: "s1", path: "marketing" },
+        { orgId: ORG, skillId: "s2", path: "marketing/seo" },
+        { orgId: ORG, skillId: "s3", path: "marketing/seo/local" },
+      ],
+    });
+    await renameLabel({ actor, orgId: ORG, from: "marketing/seo", to: "marketing/growth", database });
+    expect(labels.map((l) => l.path).sort()).toEqual(["marketing", "marketing/growth", "marketing/growth/local"]);
+    expect(labels.some((l) => l.path === "marketing/seo" || l.path === "marketing/seo/local")).toBe(false);
+    expect(skillLabels.map((l) => `${l.skillId}:${l.path}`).sort()).toEqual([
+      "s1:marketing",
+      "s2:marketing/growth",
+      "s3:marketing/growth/local",
+    ]);
+    expect(skillLabels.some((l) => l.path === "marketing/seo" || l.path === "marketing/seo/local")).toBe(false);
   });
 
   it("rejects a rename whose target already exists (no silent merge)", async () => {
