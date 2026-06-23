@@ -254,10 +254,11 @@ curl -s "$COMPANION_API_URL/skills" \
 ```
 
 A label path is slash-separated, lower-case kebab segments (`[a-z0-9]+(?:-[a-z0-9]+)*`), with no
-leading, trailing, or empty segment. URL-encode the slashes (`%2F`) when you pass `label` as a query
-parameter. Sending legacy `owner_team`, `everyone`, `team`, `teams`, `scope`, `visibility`, or
-`private` parameters is rejected, and a skill must not declare `scope` or `visibility` in its
-`SKILL.md` frontmatter.
+leading, trailing, or empty segment. Label routes may also carry an optional human-facing
+`displayName` such as `Dev`; the path remains the canonical identifier (`dev`). URL-encode the
+slashes (`%2F`) when you pass `label` as a query parameter. Sending legacy `owner_team`, `everyone`,
+`team`, `teams`, `scope`, `visibility`, or `private` parameters is rejected, and a skill must not
+declare `scope` or `visibility` in its `SKILL.md` frontmatter.
 
 The response contains the assigned `id`, `version`, and `checksum`. Write the returned
 `companion_skill_id` and `companion_version` back into the folder's `SKILL.md` `metadata` so the
@@ -292,16 +293,16 @@ Summarize what changed and confirm before sending.
 ### Organize skills with labels
 
 Labels (folders) are how skills are organized — there is no owner and no visibility. A label is an
-org-wide, **shared** path of slash-separated, lower-case kebab segments such as `marketing/seo`. The
-whole org sees the same folder tree; every skill is visible to every member regardless of its labels.
-A skill can hold several labels at once, folders may be empty, and any member can create, assign,
-rename, recolor, or delete a label.
+org-wide, **shared** path of slash-separated, lower-case kebab segments such as `marketing/seo`, with
+an optional human-facing `displayName` such as `SEO`. The whole org sees the same folder tree; every
+skill is visible to every member regardless of its labels. A skill can hold several labels at once,
+folders may be empty, and any member can create, assign, rename, recolor, or delete a label.
 
 The path is always sent in the **request body or query**, never as a URL path segment, so that the
 slashes inside a path survive routing. Confirm any rename or delete with the user first, because both
 cascade across descendant folders for the whole organization.
 
-List the folder tree (roll-up counts plus each path's color and icon):
+List the folder tree (roll-up counts plus each path's display name, color, and icon):
 
 ```sh
 curl -s "$COMPANION_API_URL/labels" -H "Authorization: Bearer $COMPANION_TOKEN"
@@ -309,15 +310,16 @@ curl -s "$COMPANION_API_URL/labels" -H "Authorization: Bearer $COMPANION_TOKEN"
 
 The response is `{ "tree": [...], "flat": [...] }`: `tree` is the nested folder hierarchy with a
 roll-up `count` per node (skills at that path or any descendant, de-duplicated), and `flat` is the
-list of canonical `{ path, color, icon }` rows.
+list of canonical `{ path, displayName, color, icon }` rows. `displayName` is nullable and falls back
+to the path leaf when absent.
 
-Create a folder (it may stay empty), optionally with a color and icon:
+Create a folder (it may stay empty), optionally with a display name, color, and icon:
 
 ```sh
 curl -s -X POST "$COMPANION_API_URL/labels" \
   -H "Authorization: Bearer $COMPANION_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"path":"marketing/seo","color":null,"icon":null}'
+  -d '{"path":"marketing/seo","displayName":"SEO","color":null,"icon":null}'
 ```
 
 File a skill into a folder (or remove it) without uploading a new version:
@@ -341,7 +343,7 @@ is rejected if it collides with an existing path):
 curl -s -X PUT "$COMPANION_API_URL/labels/rename" \
   -H "Authorization: Bearer $COMPANION_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"from":"marketing","to":"growth"}'
+  -d '{"from":"marketing","to":"growth","displayName":"Growth"}'
 
 curl -s -X PUT "$COMPANION_API_URL/labels/color" \
   -H "Authorization: Bearer $COMPANION_TOKEN" \

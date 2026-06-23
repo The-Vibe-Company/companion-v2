@@ -110,6 +110,7 @@ function settingsErrorMessage(error: unknown): string {
 export interface TreeRow {
   path: string;
   leafName: string;
+  displayName: string | null;
   depth: number;
   count: number; // de-duped roll-up of skills filed at this path OR any descendant
   color: LabelColor | null;
@@ -128,7 +129,7 @@ type Selection = { kind: ScopeKind; label?: string };
  * order regardless of insertion order.
  */
 function deriveTreeRows(skills: SkillVM[], labels: LabelVM[]): TreeRow[] {
-  const appearance = new Map<string, { color: LabelColor | null; icon: LabelIcon | null }>();
+  const appearance = new Map<string, { displayName: string | null; color: LabelColor | null; icon: LabelIcon | null }>();
   const paths = new Set<string>();
   const childPaths = new Set<string>(); // any path that has at least one child (for chevrons)
   // Per-path set of skill ids contributing to its roll-up count (de-dupe across descendants).
@@ -144,7 +145,7 @@ function deriveTreeRows(skills: SkillVM[], labels: LabelVM[]): TreeRow[] {
   };
 
   for (const label of labels) {
-    appearance.set(label.path, { color: label.color, icon: label.icon });
+    appearance.set(label.path, { displayName: label.displayName, color: label.color, icon: label.icon });
     ensureAncestors(label.path);
   }
   for (const skill of skills) {
@@ -169,6 +170,7 @@ function deriveTreeRows(skills: SkillVM[], labels: LabelVM[]): TreeRow[] {
       return {
         path,
         leafName: segs[segs.length - 1] ?? path,
+        displayName: appr?.displayName ?? null,
         depth: segs.length - 1,
         count: counts.get(path)?.size ?? 0,
         color: appr?.color ?? null,
@@ -554,7 +556,7 @@ export function SkillsApp({
       ),
     );
     if (newFolders.length) {
-      setLabels((arr) => [...arr, ...newFolders.map((p) => ({ path: p, color: null, icon: null }))]);
+      setLabels((arr) => [...arr, ...newFolders.map((p) => ({ path: p, displayName: null, color: null, icon: null }))]);
     }
     const rpc = had ? unassignSkillLabel(skillId, path) : assignSkillLabel(skillId, path);
     rpc.catch((err: unknown) => {
@@ -575,13 +577,13 @@ export function SkillsApp({
 
   // Create an empty folder (explicit `labels` row) and select it.
   const createLabelPath = useCallback(
-    (path: string) => {
+    (path: string, displayName?: string) => {
       if (labelsRef.current.some((l) => l.path === path)) {
         setSelection({ kind: "label", label: path });
         replaceSkillsUrl({ kind: "label", label: path });
         return;
       }
-      const optimistic: LabelVM = { path, color: null, icon: null };
+      const optimistic: LabelVM = { path, displayName: displayName ?? null, color: null, icon: null };
       setLabels((arr) => [...arr, optimistic]);
       setSelection({ kind: "label", label: path });
       setOpenId(null);
@@ -592,7 +594,7 @@ export function SkillsApp({
         return next;
       });
       replaceSkillsUrl({ kind: "label", label: path });
-      createLabelRpc(path).catch((err: unknown) => {
+      createLabelRpc(path, { displayName }).catch((err: unknown) => {
         setLabels((arr) => arr.filter((l) => l.path !== path));
         setLabelNotice(err instanceof Error ? err.message : "Could not create the folder.");
       });
@@ -607,7 +609,7 @@ export function SkillsApp({
       const exists = arr.some((l) => l.path === path);
       return exists
         ? arr.map((l) => (l.path === path ? { ...l, color } : l))
-        : [...arr, { path, color, icon: null }];
+        : [...arr, { path, displayName: null, color, icon: null }];
     });
     setLabelColorRpc(path, color).catch((err: unknown) => {
       setLabels((arr) => arr.map((l) => (l.path === path ? { ...l, color: prevColor } : l)));
@@ -622,7 +624,7 @@ export function SkillsApp({
       const exists = arr.some((l) => l.path === path);
       return exists
         ? arr.map((l) => (l.path === path ? { ...l, icon } : l))
-        : [...arr, { path, color: null, icon }];
+        : [...arr, { path, displayName: null, color: null, icon }];
     });
     setLabelIconRpc(path, icon).catch((err: unknown) => {
       setLabels((arr) => arr.map((l) => (l.path === path ? { ...l, icon: prevIcon } : l)));
@@ -631,13 +633,19 @@ export function SkillsApp({
   }, []);
 
   const renameLabelPath = useCallback(
-    (from: string, to: string) => {
-      if (from === to) return;
+    (from: string, to: string, displayName?: string) => {
+      if (from === to && displayName === undefined) return;
       const prevLabels = labelsRef.current;
       const prevSkills = skillsRef.current;
       const within = (p: string) => p === from || p.startsWith(from + "/");
       const remap = (p: string) => (within(p) ? to + p.slice(from.length) : p);
-      setLabels((arr) => arr.map((l) => ({ ...l, path: remap(l.path) })));
+      setLabels((arr) =>
+        arr.map((l) => ({
+          ...l,
+          path: remap(l.path),
+          displayName: displayName !== undefined && l.path === from ? displayName : l.displayName,
+        })),
+      );
       setSkills((arr) => arr.map((s) => ({ ...s, labels: s.labels.map(remap) })));
       setSelection((sel) =>
         sel.kind === "label" && sel.label && within(sel.label)
@@ -651,7 +659,7 @@ export function SkillsApp({
           routeFromSelection({ kind: "label", label: remap(selection.label) }, openIdRef.current ?? undefined),
         );
       }
-      renameLabelRpc(from, to).catch((err: unknown) => {
+      renameLabelRpc(from, to, { displayName }).catch((err: unknown) => {
         setLabels(prevLabels);
         setSkills(prevSkills);
         setLabelNotice(err instanceof Error ? err.message : "Could not rename the folder.");

@@ -321,6 +321,8 @@ export const labels = pgTable(
       .notNull()
       .references(() => organizations.id, { onDelete: "cascade" }),
     path: text("path").notNull(),
+    /** Human-facing segment name for this exact path; null falls back to the path leaf. */
+    displayName: text("display_name"),
     /** Per-path swatch (CSS color string); null = the default/inherited appearance. */
     color: text("color"),
     /** Per-path icon key (lucide glyph name); null = the default folder icon. */

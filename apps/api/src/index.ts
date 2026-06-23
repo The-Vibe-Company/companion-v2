@@ -851,7 +851,15 @@ app.post("/v1/labels", async (c) => {
     await withTenant(
       c,
       ({ actor, orgId, database }) =>
-        createLabel({ actor, orgId, path: input.path, color: input.color, icon: input.icon, database }),
+        createLabel({
+          actor,
+          orgId,
+          path: input.path,
+          displayName: input.displayName,
+          color: input.color,
+          icon: input.icon,
+          database,
+        }),
       true,
     );
     return c.json({ ok: true as const });
@@ -867,7 +875,15 @@ app.put("/v1/labels/rename", async (c) => {
     const input = renameLabelInputSchema.parse(await c.req.json());
     await withTenant(
       c,
-      ({ actor, orgId, database }) => renameLabel({ actor, orgId, from: input.from, to: input.to, database }),
+      ({ actor, orgId, database }) =>
+        renameLabel({
+          actor,
+          orgId,
+          from: input.from,
+          to: input.to,
+          displayName: input.displayName,
+          database,
+        }),
       true,
     );
     return c.json({ ok: true as const });

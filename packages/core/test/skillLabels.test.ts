@@ -32,6 +32,7 @@ const actor: ActorContext = { id: "user-1", email: "user@example.com", name: "Us
 interface LabelRow {
   orgId: string;
   path: string;
+  displayName?: string | null;
   color: string | null;
   icon: string | null;
 }
@@ -45,6 +46,8 @@ interface SkillLabelRow {
 const PARAM_NOISE = new Set([
   "org_id",
   "path",
+  "display_name",
+  "displayName",
   "color",
   "icon",
   "created_by",
@@ -140,11 +143,13 @@ function fakeDb(opts: FakeOptions = {}) {
         const base = "color" in cols ? null : prefixBase(where);
         const all = labels.filter((l) => sameOrg(l.orgId, org));
         const scoped = base == null ? all : all.filter((l) => underPrefix(l.path, base));
-        return scoped.map((l) => ({ path: l.path, color: l.color, icon: l.icon }));
+        return scoped.map((l) => ({ path: l.path, displayName: l.displayName, color: l.color, icon: l.icon }));
       }
       // Mirrors the production innerJoin(skills) + isNull(archived_at): archived skills drop out of counts.
+      const params = pathParams(where);
+      const base = params.some((p) => p.includes("%")) ? prefixBase(where) : null;
       return skillLabels
-        .filter((l) => sameOrg(l.orgId, org) && !archivedSet.has(l.skillId))
+        .filter((l) => sameOrg(l.orgId, org) && !archivedSet.has(l.skillId) && (base == null || underPrefix(l.path, base)))
         .map((l) => ({ skillId: l.skillId, path: l.path }));
     };
     const builder: Record<string, unknown> = {
@@ -182,6 +187,7 @@ function fakeDb(opts: FakeOptions = {}) {
           labels.push({
             orgId: pending.orgId as string,
             path: pending.path as string,
+            displayName: (pending.displayName as string | undefined) ?? null,
             color: (pending.color as string | undefined) ?? null,
             icon: (pending.icon as string | undefined) ?? null,
           });
@@ -205,10 +211,14 @@ function fakeDb(opts: FakeOptions = {}) {
           if (existing) {
             if (conf.set && "color" in conf.set) existing.color = (conf.set.color as string | null) ?? null;
             if (conf.set && "icon" in conf.set) existing.icon = (conf.set.icon as string | null) ?? null;
+            if (conf.set && "displayName" in conf.set) {
+              existing.displayName = (conf.set.displayName as string | null) ?? null;
+            }
           } else {
             labels.push({
               orgId: pending.orgId as string,
               path: pending.path as string,
+              displayName: (pending.displayName as string | undefined) ?? null,
               color: (pending.color as string | undefined) ?? null,
               icon: (pending.icon as string | undefined) ?? null,
             });
@@ -250,26 +260,42 @@ function fakeDb(opts: FakeOptions = {}) {
   // ---- transaction handle (rename + delete cascades) ---------------------------------------------
   const txHandle = {
     select: selectBuilder,
+    insert: insertBuilder,
     delete: deleteBuilder,
     update: (table: unknown) => {
       let rewritePaths: string[] = [];
+      let patch: Record<string, unknown> = {};
       const api: Record<string, unknown> = {
-        set(patch: Record<string, unknown>) {
+        set(p: Record<string, unknown>) {
           // The rewrite CASE carries `from` and `to`; the where clause supplies the moved base path.
+          patch = p;
           rewritePaths = pathParams(patch);
           return api;
         },
         where(expr: unknown) {
-          const base = prefixBase(expr);
+          const params = pathParams(expr);
+          const whereParams = params.filter((p) => !p.includes("%"));
+          const likeParam = params.find((p) => p.includes("%"));
+          const hasPrefix = likeParam != null;
+          const base = hasPrefix ? likeParam.replace(/\/?%$/, "") : whereParams[whereParams.length - 1] ?? null;
           const org = orgParam(expr);
           const target = rewritePaths.find((p) => p !== base) ?? rewritePaths[0] ?? null;
           if (base != null && target != null) {
             const store = table === schema.labels ? labels : table === schema.skillLabels ? skillLabels : null;
             if (store) {
               for (const row of store as Array<{ orgId: string; path: string }>) {
-                if (sameOrg(row.orgId, org) && underPrefix(row.path, base)) {
-                  row.path = target + row.path.slice(base.length);
+                const matches = hasPrefix ? underPrefix(row.path, base) : row.path === base;
+                if (sameOrg(row.orgId, org) && matches) {
+                  row.path = hasPrefix ? target + row.path.slice(base.length) : target;
                 }
+              }
+            }
+          }
+          if (table === schema.labels && base != null && "displayName" in patch) {
+            const displayPath = typeof patch.path === "string" ? patch.path : base;
+            for (const row of labels) {
+              if (sameOrg(row.orgId, org) && row.path === displayPath) {
+                row.displayName = (patch.displayName as string | null) ?? null;
               }
             }
           }
@@ -346,7 +372,7 @@ describe("listLabels — tree derivation + roll-up counts", () => {
     const { database } = fakeDb({ labels: [{ orgId: ORG, path: "growth", color: null, icon: null }] });
     const { tree, flat } = await listLabels({ actor, orgId: ORG, database });
     expect(nodesByPath(tree).get("growth")).toMatchObject({ count: 0, explicit: true });
-    expect(flat).toEqual([{ path: "growth", color: null, icon: null }]);
+    expect(flat).toEqual([{ path: "growth", displayName: null, color: null, icon: null }]);
   });
 
   it("excludes archived skills from roll-up counts (matches the folder list)", async () => {
@@ -375,6 +401,12 @@ describe("createLabel — upsert path + ancestors", () => {
     const { database, labels } = fakeDb();
     await createLabel({ actor, orgId: ORG, path: "marketing/seo/local", database });
     expect(labels.map((l) => l.path).sort()).toEqual(["marketing", "marketing/seo", "marketing/seo/local"]);
+  });
+
+  it("stores a display name on the explicitly created label", async () => {
+    const { database, labels } = fakeDb();
+    await createLabel({ actor, orgId: ORG, path: "dev", displayName: "Dev", database });
+    expect(labels.find((l) => l.path === "dev")!.displayName).toBe("Dev");
   });
 
   it("only overwrites appearance fields that are supplied", async () => {
@@ -488,6 +520,46 @@ describe("renameLabel — prefix cascade + collision reject", () => {
       "s3:marketing/growth/local",
     ]);
     expect(skillLabels.some((l) => l.path === "marketing/seo" || l.path === "marketing/seo/local")).toBe(false);
+  });
+
+  it("renames a nested label path and stores the moved root display name", async () => {
+    const { database, labels, skillLabels } = fakeDb({
+      labels: [
+        { orgId: ORG, path: "marketing", color: null, icon: null },
+        { orgId: ORG, path: "marketing/seo", color: null, icon: null },
+        { orgId: ORG, path: "marketing/seo/local", color: null, icon: null },
+      ],
+      skillLabels: [{ orgId: ORG, skillId: "s1", path: "marketing/seo/local" }],
+    });
+    await renameLabel({
+      actor,
+      orgId: ORG,
+      from: "marketing/seo",
+      to: "marketing/growth-team",
+      displayName: "Growth Team",
+      database,
+    });
+    expect(labels.find((l) => l.path === "marketing/growth-team")!.displayName).toBe("Growth Team");
+    expect(labels.map((l) => l.path).sort()).toEqual(["marketing", "marketing/growth-team", "marketing/growth-team/local"]);
+    expect(skillLabels.map((l) => l.path)).toEqual(["marketing/growth-team/local"]);
+  });
+
+  it("stores a display name when renaming an implicit label", async () => {
+    const { database, labels, skillLabels } = fakeDb({
+      labels: [],
+      skillLabels: [{ orgId: ORG, skillId: "s1", path: "engineering/tools" }],
+    });
+    await renameLabel({ actor, orgId: ORG, from: "engineering", to: "dev", displayName: "Dev", database });
+    expect(labels).toContainEqual({ orgId: ORG, path: "dev", displayName: "Dev", color: null, icon: null });
+    expect(skillLabels.map((l) => l.path)).toEqual(["dev/tools"]);
+  });
+
+  it("updates the display name when the canonical path is unchanged", async () => {
+    const { database, labels } = fakeDb({
+      labels: [{ orgId: ORG, path: "dev", color: null, icon: null }],
+    });
+    await renameLabel({ actor, orgId: ORG, from: "dev", to: "dev", displayName: "Dev", database });
+    expect(labels.find((l) => l.path === "dev")!.displayName).toBe("Dev");
   });
 
   it("rejects a rename whose target already exists (no silent merge)", async () => {
