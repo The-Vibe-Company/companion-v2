@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { and, asc, count, desc, eq, exists, gt, inArray, isNotNull, isNull, ne, not, or, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, exists, gt, inArray, isNull, ne, not, sql } from "drizzle-orm";
 import type {
   ApiTokenRow,
   DependencyPlan,
@@ -16,11 +16,8 @@ import type {
   SkillDependentRow,
   SkillFilterPreferences,
   SkillListRow,
-  SkillOwnerKind,
   SkillVersionRow,
-  TeamRole,
   TokenScope,
-  VisibilityFilter,
 } from "@companion/contracts";
 import {
   API_TOKEN_PREFIX,
@@ -33,29 +30,31 @@ import {
   parseStoredSkillFrontmatter,
   publishSkillInputSchema,
   skillFilterPreferencesSchema,
-  TEAM_BRAND_COLORS,
-  ownerCovers,
   type CompanionManifest,
   type PublishSkillInput,
 } from "@companion/contracts";
 
-// Re-exported so existing importers (tests, callers) keep `ownerCovers` from core; the rule itself
-// now lives in @companion/contracts as the single source of truth shared with the web app.
-export { ownerCovers } from "@companion/contracts";
 import { compareSemver } from "@companion/skills";
 import { db, schema, type Db } from "@companion/db";
 import { initialsFor, slugify } from "@companion/db/ids";
 import { listOrgAccessDomains } from "./domainAccess";
 import { classifyEmailDomain } from "./email-domains";
-import {
-  canManageOrg,
-  canManageTeam,
-  canModify,
-  canTouchOwner,
-  isLastOwner,
-  isLastTeamAdmin,
-  isOrgAdmin,
-} from "./authz";
+import { canManageOrg, canTouchOwner, isLastOwner } from "./authz";
+
+// Org-wide shared label ("folder") services. Re-exported so callers keep importing everything from
+// `@companion/core/services`. `labels.ts` imports `getOrgRole`/`ActorContext` from here (both hoisted
+// / type-only), so the cycle is load-order safe.
+export {
+  listLabels,
+  createLabel,
+  addSublabel,
+  assignLabel,
+  unassignLabel,
+  setLabelColor,
+  setLabelIcon,
+  renameLabel,
+  deleteLabel,
+} from "./labels";
 
 // Domain-driven onboarding services (create/join/context). Re-exported so callers keep importing
 // everything from `@companion/core/services`. `onboarding.ts` only imports `uniqueSlug` (a hoisted
@@ -100,24 +99,19 @@ export interface OrgSettingsMember {
   initials: string;
 }
 
-export interface OrgSettingsTeam {
-  id: string;
-  slug: string;
-  name: string;
-  description: string | null;
-  color: string | null;
-  icon: string | null;
-  members: Array<{
-    userId: string;
-    role: TeamRole;
-    name: string;
-    email: string;
-    initials: string;
-  }>;
-}
-
 export function uniqueSlug(base: string, suffix: string): string {
   return `${slugify(base)}-${suffix.slice(0, 8).toLowerCase()}`;
+}
+
+/**
+ * Assert the actor is a member of `orgId`; returns their org role, or throws. Skills are flat —
+ * every member may read/write every skill — so the visibility gate for skills collapses to
+ * `eq(skills.orgId, orgId)` and membership is the only check. (Role still gates org governance.)
+ */
+export async function assertMember(database: Db, actor: ActorContext, orgId: string): Promise<OrgRole> {
+  const role = await getOrgRole(orgId, actor.id, database);
+  if (!role) throw new Error("not a member of this organization");
+  return role;
 }
 
 /** True when an error is a Postgres unique-constraint violation (SQLSTATE 23505). */
@@ -371,50 +365,6 @@ export async function getOrgLogoAsset(input: {
   if (!role) throw new Error("not a member of this organization");
 }
 
-export async function listTeamsForUser(input: {
-  actor: ActorContext;
-  orgId: string;
-  database?: Db;
-}): Promise<Array<{ id: string; slug: string; name: string; color: string | null; icon: string | null; teamRole: TeamRole }>> {
-  const database = input.database ?? db;
-  const orgRole = await getOrgRole(input.orgId, input.actor.id, database);
-  if (!orgRole) throw new Error("not a member of this organization");
-  if (canManageOrg(orgRole)) {
-    return database
-      .select({
-        id: schema.teams.id,
-        slug: schema.teams.slug,
-        name: schema.teams.name,
-        color: schema.teams.color,
-        icon: schema.teams.icon,
-        teamRole: sql<TeamRole>`'admin'::team_role`,
-      })
-      .from(schema.teams)
-      .where(eq(schema.teams.orgId, input.orgId))
-      .orderBy(asc(schema.teams.name));
-  }
-  const rows = await database
-    .select({
-      id: schema.teams.id,
-      slug: schema.teams.slug,
-      name: schema.teams.name,
-      color: schema.teams.color,
-      icon: schema.teams.icon,
-      teamRole: schema.teamMemberships.teamRole,
-    })
-    .from(schema.teams)
-    .innerJoin(schema.teamMemberships, eq(schema.teamMemberships.teamId, schema.teams.id))
-    .where(
-      and(
-        eq(schema.teams.orgId, input.orgId),
-        eq(schema.teamMemberships.orgId, input.orgId),
-        eq(schema.teamMemberships.userId, input.actor.id),
-      ),
-    )
-    .orderBy(asc(schema.teams.name));
-  return rows;
-}
-
 export async function getOrgSettings(input: {
   actor: ActorContext;
   orgId: string;
@@ -423,7 +373,6 @@ export async function getOrgSettings(input: {
   org: OrgSettingsOrg;
   domainJoin: OrgSettingsDomainJoin;
   members: OrgSettingsMember[];
-  teams: OrgSettingsTeam[];
   invitations: OrgSettingsInvitation[];
 }> {
   const database = input.database ?? db;
@@ -517,215 +466,7 @@ export async function getOrgSettings(input: {
     }
   }
 
-  const teamRows = await database
-    .select({
-      id: schema.teams.id,
-      slug: schema.teams.slug,
-      name: schema.teams.name,
-      description: schema.teams.description,
-      color: schema.teams.color,
-      icon: schema.teams.icon,
-    })
-    .from(schema.teams)
-    .where(eq(schema.teams.orgId, input.orgId))
-    .orderBy(asc(schema.teams.name));
-
-  const teams: OrgSettingsTeam[] = [];
-  for (const team of teamRows) {
-    const teamMembers = await database
-      .select({
-        userId: schema.teamMemberships.userId,
-        role: schema.teamMemberships.teamRole,
-        name: schema.profiles.name,
-        email: schema.profiles.email,
-        initials: schema.profiles.initials,
-      })
-      .from(schema.teamMemberships)
-      .innerJoin(schema.profiles, eq(schema.profiles.id, schema.teamMemberships.userId))
-      .where(eq(schema.teamMemberships.teamId, team.id))
-      .orderBy(asc(schema.profiles.name));
-    teams.push({
-      id: team.id,
-      slug: team.slug,
-      name: team.name,
-      description: team.description,
-      color: team.color,
-      icon: team.icon,
-      members: teamMembers.map((m) => ({
-        userId: m.userId,
-        role: m.role as TeamRole,
-        name: m.name,
-        email: m.email,
-        initials: m.initials,
-      })),
-    });
-  }
-
-  return { org, domainJoin, members, teams, invitations };
-}
-
-export async function createTeam(input: {
-  actor: ActorContext;
-  orgId: string;
-  name: string;
-  database?: Db;
-}): Promise<{ id: string; slug: string }> {
-  const database = input.database ?? db;
-  const role = await getOrgRole(input.orgId, input.actor.id, database);
-  if (!role || !canManageOrg(role)) throw new Error("not allowed to create teams");
-  const slug = uniqueSlug(input.name, crypto.randomUUID());
-  const [team] = await database
-    .insert(schema.teams)
-    .values({ orgId: input.orgId, name: input.name, slug })
-    .returning();
-  if (!team) throw new Error("could not create team");
-  await database.insert(schema.teamMemberships).values({
-    orgId: input.orgId,
-    teamId: team.id,
-    userId: input.actor.id,
-    teamRole: "admin",
-  });
-  return { id: team.id, slug: team.slug };
-}
-
-/**
- * Rename, re-slug, and/or edit a team's description. Allowed for an org admin OR a team admin (reuses
- * `assertCanManageTeam`). The slug is normalized and unique per-org (`org_id` + `slug`); description is
- * trimmed and an empty string collapses to `null`.
- */
-export async function updateTeam(input: {
-  actor: ActorContext;
-  orgId: string;
-  teamId: string;
-  name?: string;
-  slug?: string;
-  description?: string | null;
-  color?: string | null;
-  icon?: string | null;
-  database?: Db;
-}): Promise<{ id: string; name: string; slug: string; description: string | null; color: string | null; icon: string | null }> {
-  const database = input.database ?? db;
-  await assertCanManageTeam({ actor: input.actor, orgId: input.orgId, teamId: input.teamId, database });
-
-  const patch: {
-    name?: string;
-    slug?: string;
-    description?: string | null;
-    color?: string | null;
-    icon?: string | null;
-    updatedAt: Date;
-  } = {
-    updatedAt: new Date(),
-  };
-  if (input.name !== undefined) {
-    const name = input.name.trim();
-    if (!name) throw new Error("name is required");
-    patch.name = name;
-  }
-  if (input.slug !== undefined) {
-    const slug = slugify(input.slug);
-    const conflict = await database.query.teams.findFirst({
-      where: and(
-        eq(schema.teams.orgId, input.orgId),
-        eq(schema.teams.slug, slug),
-        ne(schema.teams.id, input.teamId),
-      ),
-    });
-    if (conflict) throw new Error("that team URL is already taken");
-    patch.slug = slug;
-  }
-  if (input.description !== undefined) {
-    const description = input.description?.trim() ?? "";
-    patch.description = description ? description : null;
-  }
-  if (input.color !== undefined) {
-    const color = input.color?.trim() ?? "";
-    if (color && !(TEAM_BRAND_COLORS as readonly string[]).includes(color)) {
-      throw new Error("invalid team color");
-    }
-    patch.color = color ? color : null;
-  }
-  if (input.icon !== undefined) {
-    const icon = input.icon?.trim() ?? "";
-    patch.icon = icon ? icon : null;
-  }
-  if (
-    patch.name === undefined &&
-    patch.slug === undefined &&
-    patch.description === undefined &&
-    patch.color === undefined &&
-    patch.icon === undefined
-  ) {
-    throw new Error("nothing to update");
-  }
-
-  let row;
-  try {
-    [row] = await database
-      .update(schema.teams)
-      .set(patch)
-      .where(and(eq(schema.teams.orgId, input.orgId), eq(schema.teams.id, input.teamId)))
-      .returning({
-        id: schema.teams.id,
-        name: schema.teams.name,
-        slug: schema.teams.slug,
-        description: schema.teams.description,
-        color: schema.teams.color,
-        icon: schema.teams.icon,
-      });
-  } catch (error) {
-    if (isUniqueViolation(error)) throw new Error("that team URL is already taken");
-    throw error;
-  }
-  if (!row) throw new Error("team not found");
-  return row;
-}
-
-/**
- * Delete a team. Requires an org admin (`canManageOrg`), and the org must keep at least one team.
- * Skills owned by the team fall back to their stored user owner (`owner_team_id` set null), which
- * makes them Personal (private to that owner) until an admin re-homes them.
- */
-export async function deleteTeam(input: {
-  actor: ActorContext;
-  orgId: string;
-  teamId: string;
-  database?: Db;
-}): Promise<void> {
-  const database = input.database ?? db;
-  const role = await getOrgRole(input.orgId, input.actor.id, database);
-  if (!role || !canManageOrg(role)) throw new Error("not allowed to delete teams");
-  const team = await database.query.teams.findFirst({
-    where: and(eq(schema.teams.orgId, input.orgId), eq(schema.teams.id, input.teamId)),
-  });
-  if (!team) throw new Error("team not found");
-
-  await database.transaction(async (tx) => {
-    // Serialize concurrent deletes for this org so the "keep at least one team" invariant can't be
-    // raced (two deletes both seeing count > 1 and leaving zero teams). Mirrors the org-owner guard.
-    await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`companion:org-teams:${input.orgId}`}))`);
-    const [teamCount] = await tx
-      .select({ value: count() })
-      .from(schema.teams)
-      .where(eq(schema.teams.orgId, input.orgId));
-    if (Number(teamCount?.value ?? 0) <= 1) throw new Error("organization must keep at least one team");
-    const ownedSkills = await tx
-      .select({ skillId: schema.skills.id })
-      .from(schema.skills)
-      .where(and(eq(schema.skills.orgId, input.orgId), eq(schema.skills.ownerTeamId, input.teamId)));
-    const ownedSkillIds = ownedSkills.map((skill) => skill.skillId);
-    if (ownedSkillIds.length) {
-      // Reverts to Personal (owner_team_id null) — same as the FK's onDelete: set null, done
-      // explicitly so updated_at moves and the change is observable.
-      await tx
-        .update(schema.skills)
-        .set({ ownerTeamId: null, updatedAt: new Date() })
-        .where(and(eq(schema.skills.orgId, input.orgId), inArray(schema.skills.id, ownedSkillIds)));
-    }
-    await tx
-      .delete(schema.teams)
-      .where(and(eq(schema.teams.orgId, input.orgId), eq(schema.teams.id, input.teamId)));
-  });
+  return { org, domainJoin, members, invitations };
 }
 
 export async function revokeInvitation(input: {
@@ -798,125 +539,21 @@ export async function removeMember(input: {
   if (isLastOwner(await ownerCount(input.orgId, database), targetRole === "owner")) {
     throw new Error("organization must keep at least one owner");
   }
-  await database.transaction(async (tx) => {
-    await tx
-      .delete(schema.teamMemberships)
-      .where(and(eq(schema.teamMemberships.orgId, input.orgId), eq(schema.teamMemberships.userId, input.userId)));
-    await tx
-      .delete(schema.memberships)
-      .where(and(eq(schema.memberships.orgId, input.orgId), eq(schema.memberships.userId, input.userId)));
-  });
-}
-
-async function assertCanManageTeam(input: {
-  actor: ActorContext;
-  orgId: string;
-  teamId: string;
-  database: Db;
-}): Promise<void> {
-  const orgRole = await getOrgRole(input.orgId, input.actor.id, input.database);
-  if (!orgRole) throw new Error("not a member of this organization");
-  const team = await input.database.query.teams.findFirst({
-    where: and(eq(schema.teams.orgId, input.orgId), eq(schema.teams.id, input.teamId)),
-  });
-  if (!team) throw new Error("team not found");
-  const teamMembership = await input.database.query.teamMemberships.findFirst({
-    where: and(eq(schema.teamMemberships.teamId, input.teamId), eq(schema.teamMemberships.userId, input.actor.id)),
-  });
-  if (!canManageTeam({ orgRole, teamRole: teamMembership?.teamRole as TeamRole | null })) {
-    throw new Error("not allowed to manage team members");
-  }
-}
-
-async function teamAdminCount(teamId: string, database: Db): Promise<number> {
-  const [row] = await database
-    .select({ value: count() })
-    .from(schema.teamMemberships)
-    .where(and(eq(schema.teamMemberships.teamId, teamId), eq(schema.teamMemberships.teamRole, "admin")));
-  return Number(row?.value ?? 0);
-}
-
-export async function addTeamMember(input: {
-  actor: ActorContext;
-  orgId: string;
-  teamId: string;
-  userId: string;
-  role: TeamRole;
-  database?: Db;
-}): Promise<void> {
-  const database = input.database ?? db;
-  await assertCanManageTeam({ actor: input.actor, orgId: input.orgId, teamId: input.teamId, database });
-  const orgMembership = await database.query.memberships.findFirst({
-    where: and(eq(schema.memberships.orgId, input.orgId), eq(schema.memberships.userId, input.userId)),
-  });
-  if (!orgMembership) throw new Error("member not found in organization");
   await database
-    .insert(schema.teamMemberships)
-    .values({ orgId: input.orgId, teamId: input.teamId, userId: input.userId, teamRole: input.role })
-    .onConflictDoUpdate({
-      target: [schema.teamMemberships.teamId, schema.teamMemberships.userId],
-      set: { teamRole: input.role, updatedAt: new Date() },
-    });
+    .delete(schema.memberships)
+    .where(and(eq(schema.memberships.orgId, input.orgId), eq(schema.memberships.userId, input.userId)));
 }
 
-export async function setTeamMemberRole(input: {
-  actor: ActorContext;
-  orgId: string;
-  teamId: string;
-  userId: string;
-  role: TeamRole;
-  database?: Db;
-}): Promise<void> {
-  const database = input.database ?? db;
-  await assertCanManageTeam({ actor: input.actor, orgId: input.orgId, teamId: input.teamId, database });
-  const target = await database.query.teamMemberships.findFirst({
-    where: and(eq(schema.teamMemberships.teamId, input.teamId), eq(schema.teamMemberships.userId, input.userId)),
-  });
-  if (!target) throw new Error("team member not found");
-  if (isLastTeamAdmin(await teamAdminCount(input.teamId, database), target.teamRole === "admin") && input.role !== "admin") {
-    throw new Error("team must keep at least one admin");
-  }
-  await database
-    .update(schema.teamMemberships)
-    .set({ teamRole: input.role, updatedAt: new Date() })
-    .where(and(eq(schema.teamMemberships.teamId, input.teamId), eq(schema.teamMemberships.userId, input.userId)));
-}
-
-export async function removeTeamMember(input: {
-  actor: ActorContext;
-  orgId: string;
-  teamId: string;
-  userId: string;
-  database?: Db;
-}): Promise<void> {
-  const database = input.database ?? db;
-  await assertCanManageTeam({ actor: input.actor, orgId: input.orgId, teamId: input.teamId, database });
-  const target = await database.query.teamMemberships.findFirst({
-    where: and(eq(schema.teamMemberships.teamId, input.teamId), eq(schema.teamMemberships.userId, input.userId)),
-  });
-  if (!target) throw new Error("team member not found");
-  if (isLastTeamAdmin(await teamAdminCount(input.teamId, database), target.teamRole === "admin")) {
-    throw new Error("team must keep at least one admin");
-  }
-  await database
-    .delete(schema.teamMemberships)
-    .where(and(eq(schema.teamMemberships.teamId, input.teamId), eq(schema.teamMemberships.userId, input.userId)));
-}
-
+/**
+ * Skills are flat: the visibility gate is just org membership + the tenant scope `eq(orgId)`. This
+ * asserts membership and returns the org-scoped predicate every skill read/write shares.
+ */
 async function visibleSkillPredicate(database: Db, actor: ActorContext, orgId: string) {
-  const orgRole = await getOrgRole(orgId, actor.id, database);
-  if (!orgRole) throw new Error("not a member of this organization");
-  if (orgRole && canManageOrg(orgRole)) return eq(schema.skills.orgId, orgId);
-  // Owner is the single access axis: team-owned skills are readable by every workspace member;
-  // personal skills (no owner team) are private to their owner. (A team-owned skill whose creator
-  // is the actor is already covered by the team-owned branch.)
-  return and(
-    eq(schema.skills.orgId, orgId),
-    or(isNotNull(schema.skills.ownerTeamId), eq(schema.skills.ownerId, actor.id)),
-  );
+  await assertMember(database, actor, orgId);
+  return eq(schema.skills.orgId, orgId);
 }
 
-/** The set of skill ids (live + archived) the actor may read — the tenant visibility gate as a Set. */
+/** The set of skill ids (live + archived) in the org — every member can read every skill. */
 async function visibleSkillIds(database: Db, actor: ActorContext, orgId: string): Promise<Set<string>> {
   const predicate = await visibleSkillPredicate(database, actor, orgId);
   const rows = await database.select({ id: schema.skills.id }).from(schema.skills).where(predicate);
@@ -938,15 +575,17 @@ export function toPrefixTsQuery(raw: string): string | null {
 export async function listSkills(input: {
   actor: ActorContext;
   orgId: string;
-  visibility?: VisibilityFilter;
-  mine?: boolean;
+  /** Filter to skills filed under this label path OR any descendant of it. */
+  label?: string;
+  /** Filter to skills filed under no label at all. */
+  nolabel?: boolean;
   /** Return ONLY archived skills (the Archived view). Ignored when `includeArchived` is set. */
   archived?: boolean;
   /** Include both archived and live skills (detail / dependency / download resolution). */
   includeArchived?: boolean;
   /**
    * Free-text query. When set, results are filtered to full-text matches across slug, description,
-   * tools, owner name, and the SKILL.md body, and ordered by relevance (`ts_rank`) instead of recency.
+   * tools, and the SKILL.md body, and ordered by relevance (`ts_rank`) instead of recency.
    */
   query?: string;
   /** Cap the number of rows (used by the relevance-ranked search path). */
@@ -961,31 +600,24 @@ export async function listSkills(input: {
   if (!input.includeArchived) {
     predicates.push(input.archived ? not(isNull(schema.skills.archivedAt)) : isNull(schema.skills.archivedAt));
   }
-  // Owner filter: personal (no owner team) vs team-owned.
-  if (input.visibility === "personal") predicates.push(isNull(schema.skills.ownerTeamId));
-  if (input.visibility === "team") predicates.push(isNotNull(schema.skills.ownerTeamId));
-  if (input.mine) {
-    const editableOwnerTeamsForActor = database
-      .select({ teamId: schema.teamMemberships.teamId })
-      .from(schema.teamMemberships)
-      .where(
-        and(
-          eq(schema.teamMemberships.orgId, input.orgId),
-          eq(schema.teamMemberships.userId, input.actor.id),
-          inArray(schema.teamMemberships.teamRole, ["admin", "editor"]),
-        ),
-      );
+  // Label filter: filed under the exact path OR any descendant (`path/...`). Bound params; `_`/`%`
+  // can't appear in a validated kebab path, so no LIKE escaping is needed.
+  if (input.label) {
+    const labelPrefix = `${input.label}/%`;
     predicates.push(
-      or(
-        and(isNull(schema.skills.ownerTeamId), eq(schema.skills.ownerId, input.actor.id)),
-        inArray(schema.skills.ownerTeamId, editableOwnerTeamsForActor),
-      ),
+      sql`exists (select 1 from ${schema.skillLabels} sl where sl.org_id = ${input.orgId} and sl.skill_id = ${schema.skills.id} and (sl.path = ${input.label} or sl.path like ${labelPrefix}))`,
+    );
+  }
+  // "No label" pseudo-filter: skills carrying no assignment at all.
+  if (input.nolabel) {
+    predicates.push(
+      sql`not exists (select 1 from ${schema.skillLabels} sl where sl.org_id = ${input.orgId} and sl.skill_id = ${schema.skills.id})`,
     );
   }
 
   // Relevance-ranked full-text search. Active only when a non-empty query is supplied, so the default
   // list path (and every hand-rolled fakeDb in the tests) is left untouched. Fields are weighted
-  // slug (A) > description (B) > tools/owner (C) > SKILL.md body (D) so the strongest signal wins.
+  // slug (A) > description (B) > tools (C) > SKILL.md body (D) so the strongest signal wins.
   const doSearch = !!input.query && input.query.trim().length > 0;
   const tsQueryStr = doSearch ? toPrefixTsQuery(input.query!) : null;
   // A query with no usable term (e.g. only punctuation) can never match: return nothing rather than all.
@@ -993,15 +625,14 @@ export async function listSkills(input: {
   // The body vector is written exactly as the `skill_versions_body_tsv_idx` GIN index expression
   // (`to_tsvector('simple', body)` — body is NOT NULL) so the `@@` filter below can use that index.
   const bodyTsv = sql`to_tsvector('simple', ${schema.skillVersions.body})`;
-  // The remaining fields are short, live on the skills/owner rows, and aren't worth their own index.
+  // The remaining fields are short, live on the skills rows, and aren't worth their own index.
   const headTsv = sql`(
     setweight(to_tsvector('simple', coalesce(${schema.skills.slug}, '')), 'A') ||
     setweight(to_tsvector('simple', coalesce(${schema.skills.description}, '')), 'B') ||
-    setweight(to_tsvector('simple', coalesce(${schema.skillVersions.tools}::text, '')), 'C') ||
-    setweight(to_tsvector('simple', coalesce(${schema.teams.name}, ${schema.profiles.name}, '')), 'C')
+    setweight(to_tsvector('simple', coalesce(${schema.skillVersions.tools}::text, '')), 'C')
   )`;
   const tsQuery = sql`to_tsquery('simple', ${tsQueryStr})`;
-  // Rank over the full weighted vector (slug A > description B > tools/owner C > body D).
+  // Rank over the full weighted vector (slug A > description B > tools C > body D).
   const searchRank = doSearch ? sql<number>`ts_rank(${headTsv} || setweight(${bodyTsv}, 'D'), ${tsQuery})` : null;
   // Filter with `@@` (short-circuits, and the body branch is index-eligible) rather than `ts_rank > 0`.
   if (doSearch) predicates.push(sql`(${bodyTsv} @@ ${tsQuery} or ${headTsv} @@ ${tsQuery})`);
@@ -1014,13 +645,14 @@ export async function listSkills(input: {
       description: schema.skills.description,
       validation: schema.skills.validation,
       validation_error: schema.skills.validationError,
-      owner_kind: sql<"user" | "team">`case when ${schema.skills.ownerTeamId} is null then 'user' else 'team' end`,
-      owner_id: sql<string>`coalesce(${schema.skills.ownerTeamId}::text, ${schema.skills.ownerId})`,
-      owner_user_id: schema.skills.ownerId,
-      owner_team_id: schema.skills.ownerTeamId,
-      owner_name: sql<string>`coalesce(${schema.teams.name}, ${schema.profiles.name})`,
-      owner_handle: sql<string | null>`case when ${schema.skills.ownerTeamId} is null then ${schema.profiles.handle} else ${schema.teams.slug} end`,
-      owner_initials: sql<string>`case when ${schema.skills.ownerTeamId} is null then ${schema.profiles.initials} else upper(left(${schema.teams.name}, 2)) end`,
+      creator_id: schema.skills.creatorId,
+      creator_name: schema.profiles.name,
+      creator_initials: schema.profiles.initials,
+      // Correlated array_agg of the skill's label paths, sorted. A RAW sql subquery (NOT a
+      // database.select().limit, which breaks the hand-rolled fakeDbs in tests); empty → '{}'.
+      labels: sql<
+        string[]
+      >`coalesce((select array_agg(sl.path order by sl.path) from ${schema.skillLabels} sl where sl.org_id = ${input.orgId} and sl.skill_id = ${schema.skills.id}), '{}')`,
       current_version: schema.skillVersions.version,
       license: schema.skillVersions.license,
       frontmatter: schema.skillVersions.frontmatter,
@@ -1057,12 +689,11 @@ export async function listSkills(input: {
       updated_at: schema.skills.updatedAt,
     })
     .from(schema.skills)
-    .innerJoin(schema.profiles, eq(schema.profiles.id, schema.skills.ownerId))
-    .leftJoin(schema.teams, and(eq(schema.teams.orgId, input.orgId), eq(schema.teams.id, schema.skills.ownerTeamId)))
+    .innerJoin(schema.profiles, eq(schema.profiles.id, schema.skills.creatorId))
     .leftJoin(schema.skillVersions, eq(schema.skillVersions.id, schema.skills.currentVersionId))
     .leftJoin(schema.skillStars, eq(schema.skillStars.skillId, schema.skills.id))
     .where(and(...predicates))
-    .groupBy(schema.skills.id, schema.profiles.id, schema.teams.id, schema.skillVersions.id);
+    .groupBy(schema.skills.id, schema.profiles.id, schema.skillVersions.id);
 
   // Search path orders by relevance then recency and caps the result count; the default list path keeps
   // its recency-only ordering and never calls `.limit()` (so the fakeDb query mocks stay untouched).
@@ -1126,13 +757,10 @@ export async function listSkills(input: {
       display: companion.display,
       validation: r.validation,
       validation_error: r.validation_error,
-      owner_kind: r.owner_kind,
-      owner_id: r.owner_id,
-      owner_user_id: r.owner_user_id,
-      owner_team_id: r.owner_team_id,
-      owner_name: r.owner_name,
-      owner_handle: r.owner_handle,
-      owner_initials: r.owner_initials,
+      labels: (Array.isArray(r.labels) ? r.labels : []).slice().sort((a, b) => a.localeCompare(b)),
+      creator_id: r.creator_id,
+      creator_name: r.creator_name,
+      creator_initials: r.creator_initials,
       current_version: r.current_version,
       compatibility: manifest?.compatibility ?? null,
       metadata: manifest?.metadata ?? {},
@@ -1170,34 +798,25 @@ export async function listSkills(input: {
 
 const EMPTY_SKILL_FILTER_PREFERENCES: SkillFilterPreferences = {
   active_filters: [],
-  custom_views: [],
 };
 
+/**
+ * Drop persisted filters that no longer exist in the flat model: legacy "scope" / "visibility" /
+ * "owner" / "team" filters all referenced the removed owner axis and have no replacement (skills are
+ * flat). Surviving filter types are passed through; the zod schema validates the result.
+ */
 function normalizePersistedSkillFilter(value: unknown): unknown | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return value;
   const filter = value as Record<string, unknown>;
-  // Legacy "scope" filters (pre-0011) and "visibility" filters (pre-0020) collapse onto the
-  // owner-kind filter set {personal, team}. The old workspace-wide value drops — every team-owned
-  // skill is now workspace-visible, so there is no distinct "everyone"/"public" filter.
-  if (filter.type === "scope" || filter.type === "visibility") {
-    if (filter.value === "private" || filter.value === "personal") return { type: "visibility", value: "personal" };
-    if (filter.value === "team") return { type: "visibility", value: "team" };
+  if (filter.type === "scope" || filter.type === "visibility" || filter.type === "owner" || filter.type === "team") {
     return null;
   }
   return value;
 }
 
-function normalizePersistedSkillPreferences(input: { activeFilters: unknown[]; customViews: unknown[] }) {
+function normalizePersistedSkillPreferences(input: { activeFilters: unknown[] }) {
   const norm = (arr: unknown[]) => arr.map(normalizePersistedSkillFilter).filter((f) => f != null);
-  return {
-    active_filters: norm(input.activeFilters),
-    custom_views: input.customViews.map((view) => {
-      if (!view || typeof view !== "object" || Array.isArray(view)) return view;
-      const record = view as Record<string, unknown>;
-      if (!Array.isArray(record.filters)) return view;
-      return { ...record, filters: norm(record.filters) };
-    }),
-  };
+  return { active_filters: norm(input.activeFilters) };
 }
 
 export async function getSkillFilterPreferences(input: {
@@ -1206,8 +825,7 @@ export async function getSkillFilterPreferences(input: {
   database?: Db;
 }): Promise<SkillFilterPreferences> {
   const database = input.database ?? db;
-  const orgRole = await getOrgRole(input.orgId, input.actor.id, database);
-  if (!orgRole) throw new Error("not a member of this organization");
+  await assertMember(database, input.actor, input.orgId);
   const row = await database.query.skillFilterPreferences.findFirst({
     where: and(
       eq(schema.skillFilterPreferences.orgId, input.orgId),
@@ -1225,8 +843,7 @@ export async function setSkillFilterPreferences(input: {
   database?: Db;
 }): Promise<SkillFilterPreferences> {
   const database = input.database ?? db;
-  const orgRole = await getOrgRole(input.orgId, input.actor.id, database);
-  if (!orgRole) throw new Error("not a member of this organization");
+  await assertMember(database, input.actor, input.orgId);
   const preferences = skillFilterPreferencesSchema.parse(input.preferences);
   await database
     .insert(schema.skillFilterPreferences)
@@ -1234,13 +851,11 @@ export async function setSkillFilterPreferences(input: {
       orgId: input.orgId,
       userId: input.actor.id,
       activeFilters: preferences.active_filters,
-      customViews: preferences.custom_views,
     })
     .onConflictDoUpdate({
       target: [schema.skillFilterPreferences.orgId, schema.skillFilterPreferences.userId],
       set: {
         activeFilters: preferences.active_filters,
-        customViews: preferences.custom_views,
         updatedAt: new Date(),
       },
     });
@@ -1256,66 +871,6 @@ export async function getSkillBySlug(input: {
   // Resolve by slug across both live and archived skills — archived ones stay viewable.
   const rows = await listSkills({ ...input, includeArchived: true, database: input.database ?? db });
   return rows.find((r) => r.slug === input.slug) ?? null;
-}
-
-async function ownerTeamRole(input: {
-  database: Db;
-  orgId: string;
-  actor: ActorContext;
-  ownerTeamId: string | null;
-}): Promise<TeamRole | null> {
-  if (!input.ownerTeamId) return null;
-  const row = await input.database.query.teamMemberships.findFirst({
-    where: and(
-      eq(schema.teamMemberships.orgId, input.orgId),
-      eq(schema.teamMemberships.teamId, input.ownerTeamId),
-      eq(schema.teamMemberships.userId, input.actor.id),
-    ),
-  });
-  return row?.teamRole ?? null;
-}
-
-function canEditOwnerTeam(role: TeamRole | null): boolean {
-  return role === "admin" || role === "editor";
-}
-
-async function canModifySkill(input: {
-  database: Db;
-  orgId: string;
-  orgRole: OrgRole;
-  actor: ActorContext;
-  ownerUserId: string;
-  ownerTeamId: string | null;
-}): Promise<boolean> {
-  if (isOrgAdmin(input.orgRole)) return true;
-  if (input.ownerTeamId) {
-    return canEditOwnerTeam(await ownerTeamRole(input));
-  }
-  return input.ownerUserId === input.actor.id;
-}
-
-async function resolveOwnerTeam(input: {
-  actor: ActorContext;
-  orgId: string;
-  ownerTeam: string | null | undefined;
-  orgRole: OrgRole;
-  database: Db;
-}): Promise<{ id: string; slug: string; name: string } | null> {
-  const slug = input.ownerTeam?.trim();
-  if (!slug) return null;
-  const team = await input.database.query.teams.findFirst({
-    where: and(eq(schema.teams.orgId, input.orgId), eq(schema.teams.slug, slug)),
-  });
-  if (!team) throw new Error("owner team must exist");
-  if (canManageOrg(input.orgRole)) return { id: team.id, slug: team.slug, name: team.name };
-  const role = await ownerTeamRole({
-    database: input.database,
-    orgId: input.orgId,
-    actor: input.actor,
-    ownerTeamId: team.id,
-  });
-  if (!canEditOwnerTeam(role)) throw new Error("not allowed to create skills for this team");
-  return { id: team.id, slug: team.slug, name: team.name };
 }
 
 export async function listSkillVersions(input: {
@@ -1627,8 +1182,8 @@ export async function addComment(input: {
 
 /**
  * Deprecate (or restore) a comment thread. Threads are never deleted — a deprecated thread is
- * greyed/struck-through. Allowed iff the actor authored the comment, is an org admin, or owns the
- * skill. Returns the updated extended row (author display fields + version label re-joined).
+ * greyed/struck-through. Skills are flat: any org member may deprecate/restore any thread (the
+ * skill carries no owner). Returns the updated extended row (author display fields + version label).
  */
 export async function setCommentDeprecated(input: {
   actor: ActorContext;
@@ -1651,20 +1206,7 @@ export async function setCommentDeprecated(input: {
   });
   if (!comment) throw new Error("comment not found");
 
-  const orgRole = await getOrgRole(input.orgId, input.actor.id, database);
-  if (!orgRole) throw new Error("not a member of this organization");
-  const canModifyExisting = await canModifySkill({
-    database,
-    orgId: input.orgId,
-    orgRole,
-    actor: input.actor,
-    ownerUserId: skill.owner_user_id,
-    ownerTeamId: skill.owner_team_id,
-  });
-  const allowed =
-    comment.authorId === input.actor.id ||
-    canModify({ orgRole }, { isOwner: canModifyExisting });
-  if (!allowed) throw new Error("not allowed to change this comment");
+  await assertMember(database, input.actor, input.orgId);
 
   const [updated] = await database
     .update(schema.skillComments)
@@ -1728,88 +1270,6 @@ export async function getCommentImageAsset(input: {
   return { storageKey: image.storageKey, contentType: image.contentType };
 }
 
-/**
- * Move a skill between Personal (private to its owner) and a Team (workspace-visible). The owner is
- * the single access axis, so this is the one "share / unshare" action. Requires edit rights on the
- * skill as it stands today, plus the right to assign the new owner team.
- *
- * Owner-cover invariant: a skill must never be more widely visible than the dependencies its current
- * version pulls in, and its dependents must keep access. The only changes that can break this are
- * making a skill Personal while a workspace-visible (or other-owner) skill depends on it, or making a
- * skill team-owned while it still depends on someone's Personal skill. Both are rejected (no cascade).
- */
-export async function setSkillOwner(input: {
-  actor: ActorContext;
-  orgId: string;
-  slug: string;
-  /** New owner: a team slug = owned by that team (workspace-visible); null = Personal (private). */
-  ownerTeam: string | null;
-  database?: Db;
-}): Promise<void> {
-  const database = input.database ?? db;
-  const skill = await getSkillBySlug(input);
-  if (!skill) throw new Error("skill not found");
-  const orgRole = await getOrgRole(input.orgId, input.actor.id, database);
-  if (!orgRole) throw new Error("not a member of this organization");
-
-  // Must be able to edit the skill as it stands to move it.
-  const canModifyExisting = await canModifySkill({
-    database,
-    orgId: input.orgId,
-    actor: input.actor,
-    orgRole,
-    ownerUserId: skill.owner_user_id,
-    ownerTeamId: skill.owner_team_id,
-  });
-  if (!canModify({ orgRole }, { isOwner: canModifyExisting })) throw new Error("not allowed to change this skill");
-
-  // Resolve + authorize the new owner team (null = Personal). resolveOwnerTeam enforces that a
-  // non-admin actor can only assign a team they are an admin/editor of.
-  const newOwnerTeam = await resolveOwnerTeam({
-    actor: input.actor,
-    orgId: input.orgId,
-    ownerTeam: input.ownerTeam,
-    orgRole,
-    database,
-  });
-  const newOwnerTeamId = newOwnerTeam?.id ?? null;
-  if (newOwnerTeamId === skill.owner_team_id) return; // no-op
-
-  // Re-check the owner-cover invariant for the skill's current-version edges against the new owner.
-  // Making a skill Personal means "private to YOU" — the actor becomes the owner, so the person who
-  // performed the change keeps access (a team editor who isn't the original creator must not end up
-  // handing the skill to someone else). Moving to a team keeps the original creator as provenance;
-  // edit rights then come from the team role.
-  const newOwnerId = newOwnerTeamId === null ? input.actor.id : skill.owner_user_id;
-  const after = ownerNode(newOwnerTeamId, newOwnerId);
-  const graph = await loadDepGraph(database, input.orgId);
-  const self = graph.bySlug.get(skill.slug);
-  if (self) {
-    for (const edge of graph.requiresBySkill.get(self.id) ?? []) {
-      const dep = graph.bySlug.get(edge.dependsOnSlug);
-      if (dep && !ownerCovers(after, ownerNode(dep.ownerTeamId, dep.ownerId))) {
-        throw new Error(`cannot make this skill more widely visible than its dependency ${dep.slug} (which is Personal)`);
-      }
-    }
-    for (const ref of graph.dependentsByTarget.get(self.id) ?? []) {
-      const dependent = graph.byId.get(ref.dependentId);
-      if (dependent && !ownerCovers(ownerNode(dependent.ownerTeamId, dependent.ownerId), after)) {
-        throw new Error(`cannot make this skill Personal: ${dependent.slug} depends on it and would lose access`);
-      }
-    }
-  }
-
-  await database
-    .update(schema.skills)
-    .set({ ownerTeamId: newOwnerTeamId, ownerId: newOwnerId, updatedAt: new Date() })
-    .where(and(eq(schema.skills.orgId, input.orgId), eq(schema.skills.id, skill.id)));
-}
-
-/** Owner descriptor for the cover rule: team-owned (any user) vs Personal (private to the user). */
-function ownerNode(ownerTeamId: string | null, ownerUserId: string): { ownerKind: SkillOwnerKind; ownerUserId: string } {
-  return { ownerKind: ownerTeamId ? "team" : "user", ownerUserId };
-}
-
 export async function publishSkillVersion(input: {
   actor: ActorContext;
   orgId: string;
@@ -1819,19 +1279,14 @@ export async function publishSkillVersion(input: {
 }): Promise<{ id: string; version: string }> {
   const database = input.database ?? db;
   const payload = publishSkillInputSchema.parse({ ...input.payload, storage_path: input.archiveKey });
-  const ownerTeam = await assertCanPublishSkillVersion({ actor: input.actor, orgId: input.orgId, payload, database });
-  // Required dependencies must resolve (no missing/cycle/owner-cover) before we write anything. A
-  // publish never changes the skill's owner, so a re-publish can't broaden the skill's audience —
-  // existing dependents stay covered and need no separate check here. Pass the requested owner
-  // (`undefined` when the client omits it on a re-publish) so the cover check models the skill at its
-  // ACTUAL owner: `assertCanPublishSkillVersion` returns null for existing skills, so deriving the
-  // owner from its result would wrongly model every re-publish as Personal.
+  await assertCanPublishSkillVersion({ actor: input.actor, orgId: input.orgId, payload, database });
+  // Required dependencies must resolve (no missing/cycle) before we write anything. Skills are flat,
+  // so there is no owner-cover constraint — only existence + cycle checks remain.
   await assertDependenciesResolvable({
     actor: input.actor,
     orgId: input.orgId,
     slug: payload.slug,
     dependencies: payload.dependencies,
-    ownerTeam: payload.owner_team,
     database,
   });
 
@@ -1842,7 +1297,6 @@ export async function publishSkillVersion(input: {
       orgId: input.orgId,
       payload: publishPayload,
       archiveKey: input.archiveKey,
-      ownerTeam,
       database: tx as unknown as Db,
     });
   });
@@ -1853,48 +1307,16 @@ export async function assertCanPublishSkillVersion(input: {
   orgId: string;
   payload: PublishSkillInput;
   database?: Db;
-}): Promise<{ id: string; slug: string; name: string } | null> {
+}): Promise<void> {
   const database = input.database ?? db;
   const payload = publishSkillInputSchema.parse(input.payload);
-  const orgRole = await getOrgRole(input.orgId, input.actor.id, database);
-  if (!orgRole) throw new Error("not a member of this organization");
-  // Resolve + authorize the requested owner team (null = Personal). resolveOwnerTeam enforces that a
-  // non-admin actor can only assign a team they admin/edit.
-  const ownerTeam = await resolveOwnerTeam({
-    actor: input.actor,
-    orgId: input.orgId,
-    ownerTeam: payload.owner_team,
-    orgRole,
-    database,
-  });
+  // Skills are flat: any member may create OR re-publish any skill. Membership is the only gate.
+  await assertMember(database, input.actor, input.orgId);
 
   const existing = await database.query.skills.findFirst({
     where: and(eq(schema.skills.orgId, input.orgId), eq(schema.skills.slug, payload.slug)),
   });
   if (existing) {
-    const existingSkill = await getSkillBySlug({
-      actor: input.actor,
-      orgId: input.orgId,
-      slug: payload.slug,
-      database,
-    });
-    if (!existingSkill) throw new Error("not allowed to publish this skill");
-    // The owner is immutable on publish — move it explicitly via setSkillOwner instead.
-    if (payload.owner_team !== undefined) {
-      const requestedOwnerTeamId = ownerTeam?.id ?? null;
-      if (requestedOwnerTeamId !== existing.ownerTeamId) throw new Error("skill owner cannot be changed by publish");
-    }
-    const canModifyExisting = await canModifySkill({
-      database,
-      orgId: input.orgId,
-      actor: input.actor,
-      orgRole,
-      ownerUserId: existing.ownerId,
-      ownerTeamId: existing.ownerTeamId,
-    });
-    if (!canModify({ orgRole }, { isOwner: canModifyExisting })) {
-      throw new Error("not allowed to publish this skill");
-    }
     if (payload.skill_id && payload.skill_id !== existing.id) {
       throw new Error("skill_id does not match existing skill");
     }
@@ -1905,10 +1327,7 @@ export async function assertCanPublishSkillVersion(input: {
     if (versions.some((v) => v.version === payload.version)) throw new Error("version already exists");
     const latest = versions.map((v) => v.version).sort((a, b) => compareSemver(b, a))[0];
     if (latest && compareSemver(payload.version, latest) <= 0) throw new Error("version must increase monotonically");
-    return null;
   }
-
-  return ownerTeam;
 }
 
 async function writeSkillVersion(input: {
@@ -1916,13 +1335,11 @@ async function writeSkillVersion(input: {
   orgId: string;
   payload: PublishSkillInput;
   archiveKey: string;
-  ownerTeam: { id: string; slug: string; name: string } | null;
   database: Db;
 }): Promise<{ id: string; version: string }> {
   const database = input.database;
   const payload = input.payload;
-  const orgRole = await getOrgRole(input.orgId, input.actor.id, database);
-  if (!orgRole) throw new Error("not a member of this organization");
+  await assertMember(database, input.actor, input.orgId);
   const existing = await database.query.skills.findFirst({
     where: and(eq(schema.skills.orgId, input.orgId), eq(schema.skills.slug, payload.slug)),
   });
@@ -1930,7 +1347,7 @@ async function writeSkillVersion(input: {
     throw new Error("skill_id does not match existing skill");
   }
 
-  // Owner is immutable on publish (assertCanPublishSkillVersion enforced it); set it only on insert.
+  // `creator_id` (provenance/Activity) is set only on insert — it never changes on re-publish.
   const [skill] = existing
     ? await database
         .update(schema.skills)
@@ -1949,13 +1366,37 @@ async function writeSkillVersion(input: {
           orgId: input.orgId,
           slug: payload.slug,
           description: payload.description,
-          ownerId: input.actor.id,
-          ownerTeamId: input.ownerTeam?.id ?? null,
           creatorId: input.actor.id,
           validation: "valid",
         })
         .returning();
   if (!skill) throw new Error("could not write skill");
+
+  // Apply the requested label paths on CREATE only (re-publish never re-files an existing skill).
+  // Materialize each path + its ancestors into `labels` so the folder exists in the tree, then add
+  // the `skill_labels` assignment edges. Idempotent inserts; ancestor rows are no-ops if present.
+  if (!existing && payload.labels.length) {
+    const paths = [...new Set(payload.labels)];
+    const folderPaths = new Set<string>();
+    for (const path of paths) {
+      const segments = path.split("/");
+      for (let i = 1; i <= segments.length; i++) folderPaths.add(segments.slice(0, i).join("/"));
+    }
+    for (const path of folderPaths) {
+      await database
+        .insert(schema.labels)
+        .values({ orgId: input.orgId, path, createdBy: input.actor.id })
+        .onConflictDoNothing({ target: [schema.labels.orgId, schema.labels.path] });
+    }
+    await database
+      .insert(schema.skillLabels)
+      .values(
+        paths.map((path) => ({ orgId: input.orgId, skillId: skill.id, path, createdBy: input.actor.id })),
+      )
+      .onConflictDoNothing({
+        target: [schema.skillLabels.orgId, schema.skillLabels.skillId, schema.skillLabels.path],
+      });
+  }
 
   const [version] = await database
     .insert(schema.skillVersions)
@@ -2012,7 +1453,7 @@ async function writeSkillVersion(input: {
     action: "skill.publish",
     targetType: "skill",
     targetId: skill.id,
-    metadata: { slug: payload.slug, version: payload.version, owner_team: input.ownerTeam?.slug ?? null, dependencies: payload.dependencies },
+    metadata: { slug: payload.slug, version: payload.version, labels: payload.labels, dependencies: payload.dependencies },
   });
   return { id: skill.id, version: version.version };
 }
@@ -2083,8 +1524,6 @@ export async function getDownloadVersion(input: {
   version: string;
   checksum: string;
   sizeBytes: number;
-  /** Owning team slug (null = Personal) — the lockfile records who owns the resolved skill. */
-  owner_team: string | null;
   dependencies: string[];
 }> {
   const database = input.database ?? db;
@@ -2126,7 +1565,6 @@ export async function getDownloadVersion(input: {
     version: row.version,
     checksum: row.checksum,
     sizeBytes: row.size_bytes,
-    owner_team: visible.owner_kind === "team" ? visible.owner_handle : null,
     dependencies: depRows.map((d) => d.slug),
   };
 }
@@ -2140,9 +1578,6 @@ interface DepGraphSkill {
   currentVersionId: string | null;
   /** Current published version string (null when no version), for org-wide update comparisons. */
   currentVersion: string | null;
-  /** Owner = the access axis: `ownerTeamId` set => workspace-visible; null => Personal to `ownerId`. */
-  ownerId: string;
-  ownerTeamId: string | null;
 }
 
 interface DepEdge {
@@ -2161,9 +1596,9 @@ interface DepGraph {
 }
 
 /**
- * Load the org's *current-version* dependency graph once: every skill (live + archived), its
- * audience teams, and the dependency edges declared by each skill's current version. Used to
- * derive live statuses (satisfied / missing / archived / visibility / cycle) and counts.
+ * Load the org's *current-version* dependency graph once: every skill (live + archived) and the
+ * dependency edges declared by each skill's current version. Used to derive live statuses
+ * (satisfied / missing / archived / cycle) and counts. Skills are flat — no owner/visibility axis.
  */
 async function loadDepGraph(database: Db, orgId: string): Promise<DepGraph> {
   const skillRowsRaw = await database
@@ -2173,8 +1608,6 @@ async function loadDepGraph(database: Db, orgId: string): Promise<DepGraph> {
       archivedAt: schema.skills.archivedAt,
       currentVersionId: schema.skills.currentVersionId,
       currentVersion: schema.skillVersions.version,
-      ownerId: schema.skills.ownerId,
-      ownerTeamId: schema.skills.ownerTeamId,
     })
     .from(schema.skills)
     .leftJoin(schema.skillVersions, eq(schema.skillVersions.id, schema.skills.currentVersionId))
@@ -2191,8 +1624,6 @@ async function loadDepGraph(database: Db, orgId: string): Promise<DepGraph> {
       archivedAt: s.archivedAt,
       currentVersionId: s.currentVersionId,
       currentVersion: s.currentVersion ?? null,
-      ownerId: s.ownerId,
-      ownerTeamId: s.ownerTeamId,
     };
     byId.set(s.id, entry);
     bySlug.set(s.slug, entry);
@@ -2237,25 +1668,16 @@ async function loadDepGraph(database: Db, orgId: string): Promise<DepGraph> {
 }
 
 
-/** Precedence for an edge's status given its computed flags (missing → cycle → archived → visibility). */
+/** Precedence for an edge's status given its computed flags (missing → cycle → archived). */
 export function dependencyStatusFromFlags(flags: {
   resolved: boolean;
   cycle: boolean;
   archived: boolean;
-  covered: boolean;
 }): SkillDependencyStatus {
   if (!flags.resolved) return "missing";
   if (flags.cycle) return "cycle";
   if (flags.archived) return "archived";
-  if (!flags.covered) return "visibility";
   return "satisfied";
-}
-
-function audienceCovers(dependent: DepGraphSkill, target: DepGraphSkill): boolean {
-  return ownerCovers(
-    ownerNode(dependent.ownerTeamId, dependent.ownerId),
-    ownerNode(target.ownerTeamId, target.ownerId),
-  );
 }
 
 /** Does `fromId` transitively depend on `targetId` over current-version edges? (cycle probe) */
@@ -2281,7 +1703,6 @@ function depEdgeStatus(graph: DepGraph, dependentId: string, edge: DepEdge): Ski
     resolved: !!target,
     cycle: !!target && !!dependent && depReaches(graph, target.id, dependentId, new Set()),
     archived: !!target?.archivedAt,
-    covered: !target || !dependent || audienceCovers(dependent, target),
   });
 }
 
@@ -2291,8 +1712,6 @@ function depNote(status: SkillDependencyStatus, targetSlug: string, dependentSlu
       return "not published to this workspace";
     case "archived":
       return "publisher archived this skill";
-    case "visibility":
-      return `not visible to everyone who can install ${dependentSlug}`;
     case "cycle":
       return `${targetSlug} already requires ${dependentSlug}`;
     default:
@@ -2302,7 +1721,7 @@ function depNote(status: SkillDependencyStatus, targetSlug: string, dependentSlu
 
 /**
  * Resolve the Requires + Used by graph for one skill (optionally a specific version), with each
- * edge's live status. Tenant + visibility scoped: only actor-visible targets/dependents are linkable.
+ * edge's live status. Every member can read every skill, so targets/dependents are always linkable.
  */
 export async function getSkillDependencies(input: {
   actor: ActorContext;
@@ -2353,7 +1772,6 @@ export async function getSkillDependencies(input: {
     return {
       slug: row.dependsOnSlug,
       status,
-      owner_kind: targetRow ? targetRow.owner_kind : null,
       note: depNote(status, row.dependsOnSlug, skill.slug),
       can_open: canOpen,
     };
@@ -2370,7 +1788,6 @@ export async function getSkillDependencies(input: {
     usedBy.push({
       slug: dependent.slug,
       status,
-      owner_kind: dependentRow.owner_kind,
       archived: dependent.archivedAt != null,
       note,
       can_open: true,
@@ -2391,23 +1808,19 @@ export async function getSkillDependencies(input: {
 /**
  * Build the dependency preflight for publishing `slug` with `declaredSlugs`: which dependencies are
  * already published, which must be uploaded, which were dropped vs the previous version, which become
- * archival candidates, and which are blocking (missing/cycle/visibility).
+ * archival candidates, and which are blocking (missing/cycle).
  */
 export async function buildDependencyPlan(input: {
   actor: ActorContext;
   orgId: string;
   slug: string;
   declaredSlugs: string[];
-  /** Requested owner team slug (null = Personal). Used for the publish-time owner-cover check. */
-  ownerTeam?: string | null;
   database?: Db;
 }): Promise<DependencyPlan> {
   const database = input.database ?? db;
   const graph = await loadDepGraph(database, input.orgId);
-  // Resolve declared dependencies against the actor's visibility gate, not the org-wide graph: a
-  // skill the actor cannot read must be indistinguishable from one that does not exist (no existence
-  // leak) and cannot be bound as a dependency. So "visible & published" → ready; everything else →
-  // must-upload / missing.
+  // Every member can read every skill, so "published in the org" → ready; an unpublished slug →
+  // must-upload / missing. `visibleSkillIds` is just the org's full skill-id set.
   const visibleIds = await visibleSkillIds(database, input.actor, input.orgId);
   const isVisible = (s: string) => {
     const t = graph.bySlug.get(s);
@@ -2415,8 +1828,6 @@ export async function buildDependencyPlan(input: {
   };
   const declared = [...new Set(input.declaredSlugs)].filter((s) => s !== input.slug);
   const existing = graph.bySlug.get(input.slug);
-  const dependentOwnerTeamId =
-    input.ownerTeam !== undefined ? await resolveOwnerTeamId(database, input.orgId, input.ownerTeam) : undefined;
 
   const ready = declared.filter((s) => isVisible(s) && !graph.bySlug.get(s)!.archivedAt);
   const upload = declared
@@ -2468,13 +1879,8 @@ export async function buildDependencyPlan(input: {
       .map((t) => ({ slug: t.slug, reason: "no published skill requires it anymore" }));
   }
 
-  // Blocking check: model the publishing skill as a dependent at its requested owner.
-  const dependent = depGraphDependentFor({
-    graph,
-    slug: input.slug,
-    actorId: input.actor.id,
-    ownerTeamId: dependentOwnerTeamId,
-  });
+  // Blocking check: model the publishing skill as a prospective dependent in the graph.
+  const dependent = depGraphDependentFor({ graph, slug: input.slug });
   // Register the prospective skill + its declared edges in the graph so existing edges that declare
   // this slug (including ones currently unresolved/"missing") resolve to it — catching a cycle that
   // publishing this slug would introduce, not just cycles already present.
@@ -2498,45 +1904,21 @@ export async function buildDependencyPlan(input: {
     // Temporarily register the prospective dependent + edge for an accurate cycle probe.
     const status = depEdgeStatusWithDependent(graph, dependent, edge);
     if (status === "cycle") blocked.push({ slug: s, status, msg: `${s} would form a dependency cycle` });
-    else if (status === "visibility") blocked.push({ slug: s, status, msg: `${s} is not visible to everyone who can see ${input.slug}` });
     else if (status === "archived") blocked.push({ slug: s, status, msg: `${s} is archived — restore it or drop the dependency` });
   }
 
   return { declared, ready, upload, removed, archive_candidates, blocked };
 }
 
-/** Resolve a single owner-team slug to its id (null when none / not found). */
-async function resolveOwnerTeamId(
-  database: Db,
-  orgId: string,
-  ownerTeamSlug: string | null | undefined,
-): Promise<string | null> {
-  if (!ownerTeamSlug) return null;
-  const row = await database.query.teams.findFirst({
-    where: and(eq(schema.teams.orgId, orgId), eq(schema.teams.slug, ownerTeamSlug)),
-  });
-  return row?.id ?? null;
-}
-
 /** A prospective dependent (the skill being published), inserted into the graph for status probes. */
-function depGraphDependentFor(input: {
-  graph: DepGraph;
-  slug: string;
-  actorId: string;
-  /** Resolved new owner team id; `undefined` = keep the existing owner (publish can't change it). */
-  ownerTeamId?: string | null;
-}): DepGraphSkill {
+function depGraphDependentFor(input: { graph: DepGraph; slug: string }): DepGraphSkill {
   const existing = input.graph.bySlug.get(input.slug);
-  const ownerTeamId = input.ownerTeamId !== undefined ? input.ownerTeamId : (existing?.ownerTeamId ?? null);
   return {
     id: existing?.id ?? `prospective:${input.slug}`,
     slug: input.slug,
     archivedAt: null,
     currentVersionId: existing?.currentVersionId ?? null,
     currentVersion: existing?.currentVersion ?? null,
-    // The Personal owner used for the cover check: the existing owner, else the publisher.
-    ownerId: existing?.ownerId || input.actorId,
-    ownerTeamId,
   };
 }
 
@@ -2548,7 +1930,6 @@ function depEdgeStatusWithDependent(graph: DepGraph, dependent: DepGraphSkill, e
     // Cycle: does the target transitively depend back on this dependent's existing skill id?
     cycle: !!target && graph.byId.has(dependent.id) && depReaches(graph, target.id, dependent.id, new Set()),
     archived: !!target?.archivedAt,
-    covered: !target || audienceCovers(dependent, target),
   });
 }
 
@@ -2560,14 +1941,12 @@ export class DependencyPublishError extends Error {
   }
 }
 
-/** Throw a DependencyPublishError if any declared dependency is missing / cyclic / visibility-mismatched. */
+/** Throw a DependencyPublishError if any declared dependency is missing / cyclic / archived. */
 export async function assertDependenciesResolvable(input: {
   actor: ActorContext;
   orgId: string;
   slug: string;
   dependencies: string[];
-  /** Requested owner team slug (null = Personal), for the owner-cover check. */
-  ownerTeam?: string | null;
   database?: Db;
 }): Promise<void> {
   if (!input.dependencies.length) return;
@@ -2576,7 +1955,6 @@ export async function assertDependenciesResolvable(input: {
     orgId: input.orgId,
     slug: input.slug,
     declaredSlugs: input.dependencies,
-    ownerTeam: input.ownerTeam,
     database: input.database,
   });
   if (plan.blocked.length || plan.upload.length) throw new DependencyPublishError(plan);
@@ -2631,24 +2009,14 @@ export async function restoreSkill(input: {
   });
 }
 
-/** Shared modify gate (owner / owner-team admin-editor / org admin) for a resolved skill row. */
+/** Shared modify gate for a resolved skill row. Skills are flat: any org member may modify any skill. */
 async function assertCanModifySkillRow(input: {
   actor: ActorContext;
   orgId: string;
   skill: SkillListRow;
   database: Db;
 }): Promise<void> {
-  const orgRole = await getOrgRole(input.orgId, input.actor.id, input.database);
-  if (!orgRole) throw new Error("not a member of this organization");
-  const canModifyExisting = await canModifySkill({
-    database: input.database,
-    orgId: input.orgId,
-    actor: input.actor,
-    orgRole,
-    ownerUserId: input.skill.owner_user_id,
-    ownerTeamId: input.skill.owner_team_id,
-  });
-  if (!canModify({ orgRole }, { isOwner: canModifyExisting })) throw new Error("not allowed to modify this skill");
+  await assertMember(input.database, input.actor, input.orgId);
 }
 
 /* ---- Personal access tokens (programmatic publish / install) --------------- */

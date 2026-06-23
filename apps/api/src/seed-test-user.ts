@@ -2,11 +2,9 @@ import type { SkillRequirement } from "@companion/contracts";
 import { fallbackCompanionManifest } from "@companion/contracts";
 import {
   createOrg,
-  createTeam,
   ensureUserBootstrap,
   listOrgs,
   listSkills,
-  listTeamsForUser,
   markOnboarded,
   publishSkillVersion,
   type ActorContext,
@@ -65,8 +63,6 @@ function createdMessage(email: string, password: string): string {
   return `Seeded local test user ${email} / ${password}`;
 }
 
-const SEED_TEAM_NAME = "Engineering";
-
 function storageConfigured(): boolean {
   return Boolean(
     process.env.S3_ENDPOINT &&
@@ -81,8 +77,8 @@ interface SeedSkillSpec {
   version: string;
   description: string;
   body: string;
-  /** Owner: a team slug = owned by that team (workspace-visible); null = Personal (private). */
-  ownerTeam: string | null;
+  /** Initial label paths to file the skill under (org-wide shared folders). */
+  labels?: string[];
   tools?: string[];
   license?: string;
   /** Declared required dependencies (must resolve cleanly — published earlier in the list). */
@@ -125,7 +121,7 @@ async function seedSkill(actor: ActorContext, orgId: string, spec: SeedSkillSpec
     const key = skillArchiveKey({ orgId, slug: fm.name, version: spec.version });
     const payload = {
       slug: fm.name,
-      owner_team: spec.ownerTeam,
+      labels: spec.labels ?? [],
       version: spec.version,
       description: fm.description,
       checksum: canonical.checksum,
@@ -157,12 +153,8 @@ async function seedDemoContent(actor: ActorContext): Promise<void> {
   if (orgs.length === 0) return;
   const orgId = orgs[0]!.org_id;
 
-  let teamSlug = (await listTeamsForUser({ actor, orgId }))[0]?.slug;
-  if (!teamSlug) {
-    const created = await createTeam({ actor, orgId, name: SEED_TEAM_NAME });
-    teamSlug = created.slug;
-    console.log(`Seeded team "${SEED_TEAM_NAME}" (${teamSlug})`);
-  }
+  // Seed one empty label so the folder tree has a non-trivial, skill-less node out of the box.
+  await db.insert(schema.labels).values({ orgId, path: "growth", createdBy: actor.id }).onConflictDoNothing();
 
   if (!storageConfigured()) {
     console.warn("Skipping demo skills: S3 storage is not configured (S3_ENDPOINT and related env vars)");
@@ -174,15 +166,15 @@ async function seedDemoContent(actor: ActorContext): Promise<void> {
     (await listSkills({ actor, orgId, includeArchived: true })).map((skill) => skill.slug),
   );
   // Ordered so every declared dependency is published before its dependents (publish blocks
-  // missing/cycle/visibility). The showcase edges below (missing/cycle/visibility/archived) are
-  // inserted directly afterwards, since those states cannot pass the publish-time check.
+  // missing/cycle). The showcase edges below (missing/cycle/archived) are inserted directly
+  // afterwards, since those states cannot pass the publish-time check.
   const specs: SeedSkillSpec[] = [
     {
       slug: "markdown-report",
       version: "2.1.0",
       description: "Render structured findings into a clean Markdown report.",
       body: "# markdown-report\n\nRenders structured findings into a clean Markdown report.",
-      ownerTeam: teamSlug,
+      labels: ["reporting", "engineering/tools"],
       tools: ["read_file"],
       license: "MIT",
     },
@@ -191,7 +183,7 @@ async function seedDemoContent(actor: ActorContext): Promise<void> {
       version: "1.4.0",
       description: "Parse heterogeneous log formats into a normalized event stream.",
       body: "# log-parser\n\nParses heterogeneous log formats into a normalized event stream.",
-      ownerTeam: teamSlug,
+      labels: ["engineering/tools"],
       tools: ["read_file"],
       license: "MIT",
     },
@@ -200,7 +192,7 @@ async function seedDemoContent(actor: ActorContext): Promise<void> {
       version: "0.9.4",
       description: "Compute and present structured diffs across files and revisions.",
       body: "# diff-tools\n\nComputes and presents structured diffs across files and revisions.",
-      ownerTeam: teamSlug,
+      labels: ["engineering/tools"],
       tools: ["read_file"],
       license: "MIT",
     },
@@ -209,7 +201,7 @@ async function seedDemoContent(actor: ActorContext): Promise<void> {
       version: "1.1.0",
       description: "Post a formatted notification to a Slack channel.",
       body: "# slack-notify\n\nPosts a formatted notification to a Slack channel.",
-      ownerTeam: null,
+      labels: ["notifications"],
       tools: ["run_python"],
       license: "MIT",
       requirements: [
@@ -232,7 +224,7 @@ async function seedDemoContent(actor: ActorContext): Promise<void> {
       version: "1.3.0",
       description: "Maintain a searchable index over a Granite memory vault.",
       body: "# vault-index\n\nMaintains a searchable index over a Granite memory vault.",
-      ownerTeam: teamSlug,
+      labels: ["memory"],
       tools: ["read_file"],
       license: "MIT",
     },
@@ -241,7 +233,7 @@ async function seedDemoContent(actor: ActorContext): Promise<void> {
       version: "1.0.0",
       description: "Recall relevant memories from a Granite vault for a given query.",
       body: "# granite-recall\n\nRecalls relevant memories from a Granite vault for a query.",
-      ownerTeam: teamSlug,
+      labels: ["memory"],
       tools: ["read_file"],
       license: "MIT",
     },
@@ -250,7 +242,7 @@ async function seedDemoContent(actor: ActorContext): Promise<void> {
       version: "0.2.0",
       description: "Capture a rendered screenshot of a page region.",
       body: "# screenshot-grab\n\nCaptures a rendered screenshot of a page region.",
-      ownerTeam: teamSlug,
+      // Intentionally unlabeled — exercises the "No label" filter.
       tools: ["run_python"],
       license: "MIT",
     },
@@ -259,7 +251,7 @@ async function seedDemoContent(actor: ActorContext): Promise<void> {
       version: "1.0.0",
       description: "Export a report to a standalone HTML file. Superseded by markdown-report.",
       body: "# html-export\n\nExports a report to a standalone HTML file.",
-      ownerTeam: teamSlug,
+      labels: ["reporting"],
       tools: ["read_file"],
       license: "MIT",
     },
@@ -268,7 +260,7 @@ async function seedDemoContent(actor: ActorContext): Promise<void> {
       version: "0.1.8",
       description: "Summarize an incident timeline from logs into a concise postmortem draft.",
       body: "# incident-summary\n\nReads a directory of log excerpts and produces a terse incident summary.",
-      ownerTeam: teamSlug,
+      labels: ["reporting", "engineering/tools"],
       tools: ["read_file", "run_python"],
       license: "MIT",
       dependencies: ["log-parser", "markdown-report"],
@@ -278,7 +270,7 @@ async function seedDemoContent(actor: ActorContext): Promise<void> {
       version: "1.2.0",
       description: "Compile a daily digest of activity into a short formatted email.",
       body: "# email-digest\n\nCompiles a daily digest of activity into a short formatted email.",
-      ownerTeam: teamSlug,
+      labels: ["notifications", "reporting"],
       tools: ["read_file"],
       license: "MIT",
       dependencies: ["markdown-report"],
@@ -300,7 +292,7 @@ async function seedDemoContent(actor: ActorContext): Promise<void> {
 }
 
 /**
- * Insert the showcase dependency states (missing / visibility / cycle / archived) directly, since
+ * Insert the showcase dependency states (missing / cycle / archived) directly, since
  * these deliberately cannot pass the publish-time check. Idempotent: edges use onConflictDoNothing
  * and archive flags are set unconditionally.
  */
@@ -328,8 +320,6 @@ async function seedDependencyShowcase(actor: ActorContext, orgId: string): Promi
     // Cycle: vault-index ↔ granite-recall.
     edge("vault-index", "granite-recall"),
     edge("granite-recall", "vault-index"),
-    // Visibility mismatch: an Everyone skill requiring a team-only dependency.
-    edge("email-digest", "slack-notify"),
     // Missing: a declared dependency that was never published to the workspace.
     edge("incident-summary", "html-sanitize"),
     // Archived dependency, still referenced by a live version (keeps it downloadable).
@@ -348,7 +338,7 @@ async function seedDependencyShowcase(actor: ActorContext, orgId: string): Promi
       .set({ archivedAt: new Date(), archivedBy: actor.id, archiveReason: "Superseded — seeded archive demo" })
       .where(and(eq(schema.skills.orgId, orgId), inArray(schema.skills.id, toArchive)));
   }
-  console.log("Seeded dependency showcase (cycle, visibility, missing, archived)");
+  console.log("Seeded dependency showcase (cycle, missing, archived)");
 }
 
 async function createAuthUser(input: { email: string; password: string; name: string }): Promise<void> {

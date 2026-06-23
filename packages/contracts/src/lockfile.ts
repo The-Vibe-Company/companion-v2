@@ -1,11 +1,8 @@
 import { z } from "zod";
-import { skillOwnerTeamInputSchema } from "./skill";
 
 /** One tracked skill in `companion.lock`. */
 export const lockedSkillSchema = z.object({
   name: z.string(),
-  /** Owner: `null`/absent = Personal; a team slug = owned by that team. */
-  owner_team: skillOwnerTeamInputSchema,
   /** User intent: exact ("1.4.0"), a range ("^1.4.0"), or null (float to current). */
   pinned: z.string().nullable(),
   /** The version actually on disk. */

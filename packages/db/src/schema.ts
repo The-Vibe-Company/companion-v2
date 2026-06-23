@@ -18,7 +18,6 @@ import {
 import { sql } from "drizzle-orm";
 
 export const orgRoleEnum = pgEnum("org_role", ["owner", "admin", "developer"]);
-export const teamRoleEnum = pgEnum("team_role", ["admin", "editor", "reader"]);
 export const validationStateEnum = pgEnum("validation_state", ["valid", "validating", "invalid"]);
 export const orgKindEnum = pgEnum("org_kind", ["personal", "team"]);
 export const orgPlanEnum = pgEnum("org_plan", ["free", "team"]);
@@ -154,51 +153,6 @@ export const memberships = pgTable(
   }),
 );
 
-export const teams = pgTable(
-  "teams",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    orgId: uuid("org_id")
-      .notNull()
-      .references(() => organizations.id, { onDelete: "cascade" }),
-    slug: text("slug").notNull(),
-    name: text("name").notNull(),
-    description: text("description"),
-    /** Team color (CSS color string) chosen during onboarding; cosmetic. */
-    color: text("color"),
-    /** Team icon: a single emoji rendered monochrome and tinted with `color`; null = use initials. */
-    icon: text("icon"),
-    createdAt: now(),
-    updatedAt: updatedAt(),
-  },
-  (t) => ({
-    uniqueOrgSlug: unique("teams_org_slug_uq").on(t.orgId, t.slug),
-    uniqueOrgId: unique("teams_org_id_id_uq").on(t.orgId, t.id),
-  }),
-);
-
-export const teamMemberships = pgTable(
-  "team_memberships",
-  {
-    orgId: uuid("org_id")
-      .notNull()
-      .references(() => organizations.id, { onDelete: "cascade" }),
-    teamId: uuid("team_id")
-      .notNull()
-      .references(() => teams.id, { onDelete: "cascade" }),
-    userId: text("user_id")
-      .notNull()
-      .references(() => user.id, { onDelete: "cascade" }),
-    teamRole: teamRoleEnum("team_role").notNull().default("reader"),
-    createdAt: now(),
-    updatedAt: updatedAt(),
-  },
-  (t) => ({
-    pk: primaryKey({ columns: [t.teamId, t.userId] }),
-    byUser: index("team_memberships_user_idx").on(t.userId),
-  }),
-);
-
 export const invitations = pgTable(
   "invitations",
   {
@@ -230,13 +184,8 @@ export const skills = pgTable(
       .references(() => organizations.id, { onDelete: "cascade" }),
     slug: text("slug").notNull(),
     description: text("description").notNull(),
-    ownerId: text("owner_id")
-      .notNull()
-      .references(() => user.id, { onDelete: "cascade" }),
-    // Owner = the single access axis. `owner_team_id` NULL => Personal (private to `owner_id`);
-    // set => owned by that team and readable by the whole workspace. `owner_id` always holds the
-    // creator/principal (drives the profile join) even for team-owned skills.
-    ownerTeamId: uuid("owner_team_id").references(() => teams.id, { onDelete: "set null" }),
+    // Every skill is visible to every member of its org; there is no owner/visibility axis.
+    // `creator_id` records who first published the skill (provenance/Activity, drives the profile join).
     creatorId: text("creator_id")
       .notNull()
       .references(() => user.id, { onDelete: "cascade" }),
@@ -254,12 +203,6 @@ export const skills = pgTable(
   (t) => ({
     uniqueOrgSlug: unique("skills_org_slug_uq").on(t.orgId, t.slug),
     uniqueOrgId: unique("skills_org_id_id_uq").on(t.orgId, t.id),
-    ownerTeamOrgFk: foreignKey({
-      columns: [t.orgId, t.ownerTeamId],
-      foreignColumns: [teams.orgId, teams.id],
-      name: "skills_owner_team_org_fk",
-    }),
-    byOwnerTeam: index("skills_owner_team_idx").on(t.orgId, t.ownerTeamId),
     byArchived: index("skills_archived_idx").on(t.orgId, t.archivedAt),
   }),
 );
@@ -305,8 +248,8 @@ export const skillVersions = pgTable(
  * (so each version keeps its exact dependency graph). Dependencies are un-versioned: a row
  * records the declared target *slug* and a resolved target skill id. `dependsOnSkillId` is null
  * when the slug is not published in the workspace (a "missing" dependency). Statuses
- * (satisfied / missing / archived / visibility / cycle) are computed live at read time from
- * current skill state — never stored.
+ * (satisfied / missing / archived / cycle) are computed live at read time from current skill
+ * state — never stored.
  */
 export const skillVersionDependencies = pgTable(
   "skill_version_dependencies",
@@ -328,8 +271,8 @@ export const skillVersionDependencies = pgTable(
     pk: primaryKey({ columns: [t.skillVersionId, t.dependsOnSlug] }),
     bySkill: index("skill_version_deps_skill_idx").on(t.orgId, t.skillId),
     byTarget: index("skill_version_deps_target_idx").on(t.orgId, t.dependsOnSkillId),
-    // Org-scoped composite FKs (like skill_team_shares) guarantee the row's org matches the rows it
-    // references, so a service/seed/import bug can never persist a cross-tenant dependency edge.
+    // Org-scoped composite FKs guarantee the row's org matches the rows it references, so a
+    // service/seed/import bug can never persist a cross-tenant dependency edge.
     versionOrgFk: foreignKey({
       columns: [t.orgId, t.skillVersionId],
       foreignColumns: [skillVersions.orgId, skillVersions.id],
@@ -363,6 +306,64 @@ export const skillStars = pgTable(
   }),
 );
 
+/**
+ * The org-wide shared label ("folder") tree. The canonical set of paths plus their per-path
+ * appearance (color + icon). A row here is what lets an **empty** folder exist (a path with no
+ * assigned skills). `path` is slash-separated kebab segments (`marketing/seo`); intermediate parents
+ * are derived in the service by splitting on `/`, not stored explicitly. Org-scoped + RLS-tenanted;
+ * any member may create/rename/recolor/delete. The `(org_id, path)` index uses `text_pattern_ops`
+ * so prefix `LIKE path || '/%'` lookups (roll-up counts, rename/delete cascade) stay index-friendly.
+ */
+export const labels = pgTable(
+  "labels",
+  {
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    path: text("path").notNull(),
+    /** Per-path swatch (CSS color string); null = the default/inherited appearance. */
+    color: text("color"),
+    /** Per-path icon key (lucide glyph name); null = the default folder icon. */
+    icon: text("icon"),
+    createdBy: text("created_by").references(() => user.id, { onDelete: "set null" }),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.orgId, t.path] }),
+    byPath: index("labels_org_path_idx").using("btree", t.orgId, t.path.asc().op("text_pattern_ops")),
+  }),
+);
+
+/**
+ * The assignment edge: a skill is "filed in" N label paths. One row per (skill, path). The path
+ * string is stored here directly (no FK to a label id) so a rename is a prefix `UPDATE` and a delete
+ * is a prefix `DELETE` across both tables, and roll-up counts need no join. Org-scoped composite FK
+ * `(org_id, skill_id) → skills(org_id, id)` cascades on skill/org delete and guarantees the edge's
+ * org matches the skill's. `text_pattern_ops` index on `(org_id, path)` for the prefix lookups.
+ */
+export const skillLabels = pgTable(
+  "skill_labels",
+  {
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    skillId: uuid("skill_id").notNull(),
+    path: text("path").notNull(),
+    createdBy: text("created_by").references(() => user.id, { onDelete: "set null" }),
+    createdAt: now(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.orgId, t.skillId, t.path] }),
+    byPath: index("skill_labels_org_path_idx").using("btree", t.orgId, t.path.asc().op("text_pattern_ops")),
+    skillOrgFk: foreignKey({
+      columns: [t.orgId, t.skillId],
+      foreignColumns: [skills.orgId, skills.id],
+      name: "skill_labels_skill_org_fk",
+    }).onDelete("cascade"),
+  }),
+);
+
 export const skillFilterPreferences = pgTable(
   "skill_filter_preferences",
   {
@@ -373,7 +374,6 @@ export const skillFilterPreferences = pgTable(
       .notNull()
       .references(() => user.id, { onDelete: "cascade" }),
     activeFilters: jsonb("active_filters").$type<unknown[]>().notNull().default([]),
-    customViews: jsonb("custom_views").$type<unknown[]>().notNull().default([]),
     createdAt: now(),
     updatedAt: updatedAt(),
   },

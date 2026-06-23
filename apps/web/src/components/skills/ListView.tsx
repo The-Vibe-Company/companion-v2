@@ -1,116 +1,134 @@
 "use client";
 
+import { useMemo, useState } from "react";
 import { Icon } from "../Icon";
-import type { SkillVM, TeamVM } from "@/lib/types";
-import { visibilityMeta, vdot, InstallMark } from "./blocks";
-import { chipParts, type Filter, type ViewDef } from "./filters";
+import type { SkillVM } from "@/lib/types";
+import { vdot, InstallMark } from "./blocks";
+import { chipParts, type Filter } from "./filters";
 import { FilterAdd } from "./FilterMenu";
-import { ViewTab } from "./ViewTab";
 
-function OwnerCell({ skill }: { skill: SkillVM }) {
-  const meta = visibilityMeta(skill);
-  const label =
-    skill.owner.kind === "team"
-      ? `Owned by ${meta.label} — visible to the whole workspace`
-      : "Personal — private to you";
-  return (
-    <span className="crow__scope" title={label} aria-label={label}>
-      <Icon name={meta.icon} size={11} />
-      <span className="crow__scopeText">{meta.label}</span>
-    </span>
-  );
-}
+type SortKey = "default" | "name" | "stars";
+
+const SORT_OPTIONS: { key: SortKey; label: string }[] = [
+  // "default" preserves the server order (most recently updated first).
+  { key: "default", label: "Recently updated" },
+  { key: "name", label: "Name (A–Z)" },
+  { key: "stars", label: "Most starred" },
+];
 
 export function ListView({
   skills,
+  breadcrumb,
+  activeLabel,
   onOpen,
   onToggleStar,
   onUpload,
   lastId,
-  views,
-  activeViewId,
-  onSelectView,
-  onRenameView,
-  onDeleteView,
   filters,
   onToggleFilter,
   onRemoveFilter,
-  canSaveView,
-  onSaveView,
   onClearFilters,
   preferenceStatus,
   onRetryPreferences,
-  owners,
-  ownerNameById,
-  teams,
-  viewCounts,
 }: {
   skills: SkillVM[];
+  /** Folder breadcrumb for the active sidebar selection (e.g. ["marketing", "seo"]). */
+  breadcrumb: string[];
+  /** The active label path, or null when viewing All / Starred / No-folder. */
+  activeLabel: string | null;
   onOpen: (id: string) => void;
   onToggleStar: (id: string) => void;
   onUpload: () => void;
   lastId: string | null;
-  views: ViewDef[];
-  activeViewId: string | null;
-  onSelectView: (id: string) => void;
-  onRenameView: (id: string, name: string) => void;
-  onDeleteView: (id: string) => void;
   filters: Filter[];
   onToggleFilter: (type: Filter["type"], value: string) => void;
   onRemoveFilter: (f: Filter) => void;
-  canSaveView: boolean;
-  onSaveView: () => void;
   onClearFilters: () => void;
   preferenceStatus: "idle" | "saving" | "saved" | "error";
   onRetryPreferences: () => void;
-  owners: { id: string; name: string }[];
-  ownerNameById: Record<string, string>;
-  teams: TeamVM[];
-  viewCounts: Record<string, number>;
 }) {
-  // When viewing a single team, make the upload button contextual ("Add skill to <Team>") so the
-  // new skill defaults to that team's ownership.
-  const teamFilter = filters.length === 1 && filters[0]?.type === "team" ? filters[0].value : null;
-  const activeTeamName = teamFilter ? teams.find((t) => t.id === teamFilter)?.name ?? null : null;
+  // Search + sort are local list-view affordances (label/status filtering lives in the sidebar / chips).
+  const [q, setQ] = useState("");
+  const [sort, setSort] = useState<SortKey>("default");
+
+  const title = breadcrumb[breadcrumb.length - 1] ?? "All skills";
+
+  const shown = useMemo(() => {
+    const needle = q.trim().toLowerCase();
+    const matched = needle
+      ? skills.filter(
+          (s) => s.id.toLowerCase().includes(needle) || s.description.toLowerCase().includes(needle),
+        )
+      : skills;
+    if (sort === "default") return matched;
+    const out = [...matched];
+    if (sort === "name") out.sort((a, b) => a.id.localeCompare(b.id));
+    else if (sort === "stars") out.sort((a, b) => b.stars - a.stars || a.id.localeCompare(b.id));
+    return out;
+  }, [skills, q, sort]);
+
   return (
     <>
       <header className="sh">
-        <h2 className="sh__title">Skills</h2>
+        <nav className="sh__crumb" aria-label="Folder">
+          {/* Ancestors only — the leaf segment is the <h2> title, so don't repeat it here. */}
+          {breadcrumb.slice(0, -1).map((seg, i) => (
+            <span className="sh__crumbseg" key={i}>
+              {i > 0 && <Icon name="chevron-right" size={12} />}
+              <span className="sh__crumbpar">{seg}</span>
+            </span>
+          ))}
+        </nav>
+        <h2 className="sh__title">{title}</h2>
         <span className="sh__count tnum">{skills.length}</span>
         <span className="sh__spacer" />
         <button className="btn-primary" onClick={onUpload}>
           <Icon name="upload" size={14} />
-          {activeTeamName ? `Add skill to ${activeTeamName}` : "Upload skill"}
+          {activeLabel ? `Upload to ${title}` : "Upload skill"}
         </button>
       </header>
 
-      <div className="viewbar" role="tablist" aria-label="Views">
-        {views.map((v) => (
-          <ViewTab
-            key={v.id}
-            view={v}
-            active={activeViewId === v.id}
-            count={viewCounts[v.id] ?? 0}
-            onSelect={onSelectView}
-            onRename={onRenameView}
-            onDelete={onDeleteView}
+      <div className="listbar">
+        <span className="listbar__search">
+          <Icon name="search" size={14} />
+          <input
+            className="listbar__input"
+            type="search"
+            placeholder="Search skills"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            aria-label="Search skills in this view"
           />
-        ))}
+        </span>
+        <span className="listbar__spacer" />
+        <label className="listbar__sort">
+          <Icon name="chevrons-up-down" size={13} />
+          <select
+            className="listbar__sortsel"
+            value={sort}
+            onChange={(e) => setSort(e.target.value as SortKey)}
+            aria-label="Sort skills"
+          >
+            {SORT_OPTIONS.map((o) => (
+              <option key={o.key} value={o.key}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+        </label>
       </div>
 
       <div className="filterbar">
-        <FilterAdd owners={owners} teams={teams} filters={filters} onToggle={onToggleFilter} />
+        <FilterAdd filters={filters} onToggle={onToggleFilter} />
         {filters.map((f) => {
           const p = chipParts(f);
-          // Owner filters carry the principal id; show the resolved display name in the chip.
-          const val = f.type === "owner" ? ownerNameById[f.value] ?? p.val : p.val;
           return (
             <span className="fchip" key={f.type + f.value}>
               <span className="lead">
                 <Icon name={p.icon} size={12} />
               </span>
               {p.key && <span className="fchip__key">{p.key}:</span>}
-              <span className="fchip__val">{val}</span>
+              <span className="fchip__val">{p.val}</span>
               <button className="fchip__x" onClick={() => onRemoveFilter(f)} aria-label="Remove filter">
                 <Icon name="x" size={12} />
               </button>
@@ -123,12 +141,6 @@ export function ListView({
           </button>
         )}
         <span className="filterbar__spacer" />
-        {canSaveView && (
-          <button className="saveview" onClick={onSaveView}>
-            <Icon name="bookmark-plus" size={13} />
-            Save view
-          </button>
-        )}
         {preferenceStatus !== "idle" && (
           <span className={"prefstatus prefstatus--" + preferenceStatus} role="status" aria-live="polite">
             {preferenceStatus === "saving" && "Saving"}
@@ -149,13 +161,12 @@ export function ListView({
         <div className="chead">
           <span></span>
           <span>Skill</span>
-          <span>Owner</span>
           <span>Version</span>
           <span>Deps</span>
           <span className="r">Stars</span>
           <span className="r">Updated</span>
         </div>
-        {skills.map((s) => (
+        {shown.map((s) => (
           <div key={s.id} className={"crow" + (lastId === s.id ? " is-active" : "")}>
             <button
               type="button"
@@ -172,9 +183,9 @@ export function ListView({
                   invalid
                 </span>
               )}
+              {s.description ? <span className="crow__desc">{s.description}</span> : null}
               <InstallMark state={s.installStatus} />
             </span>
-            <OwnerCell skill={s} />
             <span className="ver">{s.version ?? "—"}</span>
             <span className="crow__deps">
               {s.requiresCount > 0 ? (
@@ -207,12 +218,14 @@ export function ListView({
             <span className="r when">{s.updated}</span>
           </div>
         ))}
-        {!skills.length && (
+        {!shown.length && (
           <div className="empty">
             <Icon name="search-x" size={22} style={{ color: "var(--color-faint)" }} />
             <div className="empty__title">No skills match</div>
             <div className="empty__desc">
-              No skills match this view. Clear the filters to see the full registry.
+              {q.trim()
+                ? "No skills match your search. Clear the search or filters to see the full registry."
+                : "No skills match this view. Clear the filters to see the full registry."}
             </div>
           </div>
         )}

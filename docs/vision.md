@@ -8,10 +8,10 @@ Companion v2 makes an entire organization's AI agents, curated tools, and skills
 govern, and share as a Git repository — **open-source, self-hostable, and permissioned from day one.**
 It takes the engine that powered one operator's personal agent fleet in v1 (the Hermes runtime,
 Granite memory, OpenRouter model routing, and pluggable infrastructure) and wraps it in a
-multi-tenant web portal where an **Organization → Team → User** hierarchy with RBAC governs every
+multi-tenant web portal where an **Organization → User** hierarchy with RBAC governs every
 resource. A builder publishes a versioned `SKILL.md` package once; an admin approves a Postgres or
-MCP-server container once; a team defines a Hermès agent once — and the right people across the org
-get **one-click, governed access**, with no shell, no TOML, and no infrastructure tickets.
+MCP-server container once; a builder defines a Hermès agent once — and everyone across the org
+gets **one-click, governed access**, with no shell, no TOML, and no infrastructure tickets.
 
 ## Why now
 
@@ -22,7 +22,7 @@ get **one-click, governed access**, with no shell, no TOML, and no infrastructur
   Teams want a **vetted, one-click catalog**, not a pile of `docker run` commands in a wiki.
 - **Agents outgrew the solo operator.** Companion v1 (2.4k★, MIT) was built for one person and
   explicitly has no teams, orgs, or permissions. The community is hitting the multi-user wall right
-  now. v2 is the answer to "great — how does my *team* use this?"
+  now. v2 is the answer to "great — how does my *org* use this?"
 
 ## The 10x bet
 
@@ -45,13 +45,14 @@ team stops being an ops project and becomes a self-serve workflow.
    comes, is the same artifacts behind a control plane — never a fork that leaves self-hosters behind.
 2. **Open standards over lock-in.** `SKILL.md`, MCP, OpenRouter, OCI images. Companion is the hub that
    connects open pieces, not a walled garden.
-3. **Governed by default.** Every resource has an owner, explicit visibility, and an audit trail.
-   Sharing is explicit; access is always attributable.
+3. **Governed by default.** Every action is permissioned by org role and recorded in an audit trail;
+   access is always attributable. Skills are shared org-wide and organized by labels, not gated per
+   resource — governance lives at the org membership boundary, not in per-skill visibility flags.
 4. **Desired-state everywhere.** Every deployable is a declared intent; a reconciler converges
-   reality and heals drift. The v1 plan/apply discipline, re-homed for teams.
-5. **Ownership, visibility, and role are orthogonal.** *Who can edit a thing* (user owner, owner
-   team Admin/Editor, or org admin), *who can see it* (Everyone or shared teams), and *what role the
-   actor has* are separate axes that compose into one clear decision.
+   reality and heals drift. The v1 plan/apply discipline, re-homed for orgs.
+5. **Membership and role compose into one decision.** *Is the actor a member of this org* and *what
+   org role do they hold* are the two axes of every permission. Skills add no third axis: every member
+   can read and modify every skill; labels organize them without restricting access.
 6. **Provider-agnostic.** Where a resource runs — local Docker, Fly, Kubernetes, Modal — is a choice,
    not a constraint baked into the product.
 
@@ -60,8 +61,7 @@ team stops being an ops project and becomes a self-serve workflow.
 Companion v2 serves the whole chain of people around team AI infrastructure:
 
 - **Platform owners / Org Admins** who need governance, security, and a single source of truth.
-- **Team leads** who want a self-serve space for their team without filing tickets.
-- **Builders & developers** who publish skills, define agents, and ship containers.
+- **Builders & developers** who publish skills, define agents, and ship containers without filing tickets.
 - **Members** who just want to *use* the right agent or tool — from a UI, with no shell.
 
 See [`product.md`](product.md) for detailed personas and journeys.
@@ -80,8 +80,8 @@ To stay sharp, Companion v2 is deliberately **not**:
 
 ## The north star
 
-If Companion v2 works, the signal is simple: **shared resources in active use across a team or org
-boundary** — agents, containers, and skills being used by people who didn't create them. That single
+If Companion v2 works, the signal is simple: **shared resources in active use across an org** —
+agents, containers, and skills being used by people who didn't create them. That single
 metric captures the whole thesis at once: things get **deployed**, they're **governed** enough to
 trust, and they're **shared** enough to matter. See [`PRD.md`](PRD.md#8-success-metrics) for how we
 measure it.

@@ -13,14 +13,14 @@ import {
   addComment,
   assertCommentTarget,
   addOrgAccessDomain,
-  addTeamMember,
   archiveSkill,
+  assignLabel,
   buildDependencyPlan,
   completeOnboarding,
   createInvitation,
+  createLabel,
   createOrg,
-  createTeam,
-  deleteTeam,
+  deleteLabel,
   DependencyPublishError,
   computeLocalSkillStatus,
   getLocalSkillInstall,
@@ -37,53 +37,57 @@ import {
   issueApiToken,
   joinOrgByDomain,
   listApiTokens,
+  listLabels,
   listOrgs,
   listSkillComments,
   listSkills,
   listSkillVersions,
-  listTeamsForUser,
   publishSkillVersion,
   assertCanPublishSkillVersion,
+  renameLabel,
   reportLocalSkillInstall,
   removeOrgAccessDomain,
   removeMember,
-  removeTeamMember,
   revokeApiToken,
   revokeInvitation,
   setCommentDeprecated,
+  setLabelColor,
+  setLabelIcon,
   setMemberRole,
   setSkillFilterPreferences,
-  setSkillOwner,
-  setTeamMemberRole,
   setOrgLogoFromUpload,
   orgLogoPublicPath,
   toggleStar,
   installSkill,
+  unassignLabel,
   uninstallSkill,
   updateOrg,
-  updateTeam,
   updateUserProfile,
 } from "@companion/core/services";
 import {
   addCommentInputSchema,
   addOrgAccessDomainInputSchema,
   archiveSkillInputSchema,
+  assignLabelInputSchema,
   completeOnboardingInputSchema,
+  createLabelInputSchema,
   createSkillInputSchema,
+  deleteLabelInputSchema,
   issueTokenInputSchema,
   joinOnboardingOrgInputSchema,
+  labelPathSchema,
   orgSettingsResponseSchema,
   publishSkillInputSchema,
+  renameLabelInputSchema,
   reportLocalSkillInstallInputSchema,
   reportSkillInstallInputSchema,
   setCommentDeprecatedInputSchema,
-  setSkillOwnerInputSchema,
+  setLabelColorInputSchema,
+  setLabelIconInputSchema,
   skillFrontmatterSchema,
-  visibilityFilterSchema,
   skillFilterPreferencesSchema,
   fallbackCompanionManifest,
   updateOrgInputSchema,
-  updateTeamInputSchema,
   resolveOrgLogoContentType,
   resolveCommentImageContentType,
   sniffCommentImageMime,
@@ -133,7 +137,6 @@ import {
 import { appRouter } from "./trpc";
 import { assertTargetedSkillUpdate, parseSkillPublishAction } from "./skillPublishGuards";
 import { buildInlineCompanionManifest, uploadDependencyValues } from "./skillCompanionManifest";
-import { buildSkillUploadOptions } from "./skillUploadOptions";
 import { buildCompanionSkillRow, getCompanionSkillPackage } from "./companionSkillPackage";
 import { COMPANION_SKILL_KEY } from "@companion/companion-skill";
 
@@ -242,7 +245,8 @@ function parseBoolean(value: string | undefined): boolean {
   throw new Error("everyone must be true or false");
 }
 
-function parseTeamValues(values: Array<string | undefined>): string[] {
+/** Collect a repeatable form/query field into a de-duped, comma-splittable string list. */
+function parseMultiValues(values: Array<string | undefined>): string[] {
   return [
     ...new Set(
       values
@@ -260,9 +264,13 @@ function rejectLegacySkillVisibilityInput(hasField: (name: string) => boolean): 
     hasField("visibility") ||
     hasField("everyone") ||
     hasField("team") ||
-    hasField("teams")
+    hasField("teams") ||
+    hasField("owner_team") ||
+    hasField("private")
   ) {
-    throw new Error("legacy skill scope/visibility/everyone/team inputs are not supported; use owner_team");
+    throw new Error(
+      "legacy skill scope/visibility/owner inputs are not supported; skills are visible to every org member — use labels to organize them",
+    );
   }
 }
 
@@ -277,20 +285,21 @@ async function publishCanonical(input: {
   fm: SkillFrontmatter;
   companionManifest: CompanionManifest;
   skillId: string;
-  ownerTeam?: string | null;
+  /** Org-wide shared label paths to file the skill under (applied on create). */
+  labels?: string[];
   version: string;
   note: string;
   /** SKILL.md markdown body — persisted server-side to power full-text content search. */
   body: string;
   dependencies?: string[];
 }): Promise<{ id: string; slug: string; version: string; checksum: string; sizeBytes: number }> {
-  const { actor, orgId, canonical, fm, companionManifest, skillId, ownerTeam, version, note, body, dependencies } = input;
+  const { actor, orgId, canonical, fm, companionManifest, skillId, labels, version, note, body, dependencies } = input;
   if (!isValidSemver(version)) throw new Error(`invalid semver: ${version}`);
   const key = skillArchiveKey({ orgId, slug: fm.name, version });
   const payload = publishSkillInputSchema.parse({
     skill_id: skillId,
     slug: fm.name,
-    owner_team: ownerTeam,
+    labels: labels ?? [],
     version,
     description: skillSummary(fm, companionManifest),
     checksum: canonical.checksum,
@@ -712,94 +721,6 @@ app.get("/v1/orgs/:orgId/logo", async (c) => {
   }
 });
 
-app.get("/v1/teams", async (c) => {
-  try {
-    return c.json(await withTenant(c, ({ actor, orgId, database }) => listTeamsForUser({ actor, orgId, database })));
-  } catch (error) {
-    return jsonError(c, error, 401);
-  }
-});
-
-app.post("/v1/teams", async (c) => {
-  try {
-    const body = await c.req.json<{ name: string }>();
-    return c.json(await withTenant(c, ({ actor, orgId, database }) => createTeam({ actor, orgId, name: body.name, database })));
-  } catch (error) {
-    return jsonError(c, error);
-  }
-});
-
-app.put("/v1/teams/:teamId", async (c) => {
-  try {
-    if (isTokenRequest(c)) throw new Error("personal access tokens cannot update teams");
-    const input = updateTeamInputSchema.parse(await c.req.json());
-    return c.json(
-      await withTenant(c, ({ actor, orgId, database }) =>
-        updateTeam({
-          actor,
-          orgId,
-          teamId: c.req.param("teamId"),
-          name: input.name,
-          slug: input.slug,
-          description: input.description,
-          color: input.color,
-          icon: input.icon,
-          database,
-        }),
-      ),
-    );
-  } catch (error) {
-    return jsonError(c, error);
-  }
-});
-
-app.delete("/v1/teams/:teamId", async (c) => {
-  try {
-    if (isTokenRequest(c)) throw new Error("personal access tokens cannot delete teams");
-    await withTenant(c, ({ actor, orgId, database }) =>
-      deleteTeam({ actor, orgId, teamId: c.req.param("teamId"), database }),
-    );
-    return c.json({ ok: true });
-  } catch (error) {
-    return jsonError(c, error);
-  }
-});
-
-app.post("/v1/teams/:teamId/members", async (c) => {
-  try {
-    const body = await c.req.json<{ userId: string; role?: "admin" | "editor" | "reader" }>();
-    await withTenant(c, ({ actor, orgId, database }) =>
-      addTeamMember({ actor, orgId, teamId: c.req.param("teamId"), userId: body.userId, role: body.role ?? "reader", database }),
-    );
-    return c.json({ ok: true });
-  } catch (error) {
-    return jsonError(c, error);
-  }
-});
-
-app.patch("/v1/teams/:teamId/members/:userId", async (c) => {
-  try {
-    const body = await c.req.json<{ role: "admin" | "editor" | "reader" }>();
-    await withTenant(c, ({ actor, orgId, database }) =>
-      setTeamMemberRole({ actor, orgId, teamId: c.req.param("teamId"), userId: c.req.param("userId"), role: body.role, database }),
-    );
-    return c.json({ ok: true });
-  } catch (error) {
-    return jsonError(c, error);
-  }
-});
-
-app.delete("/v1/teams/:teamId/members/:userId", async (c) => {
-  try {
-    await withTenant(c, ({ actor, orgId, database }) =>
-      removeTeamMember({ actor, orgId, teamId: c.req.param("teamId"), userId: c.req.param("userId"), database }),
-    );
-    return c.json({ ok: true });
-  } catch (error) {
-    return jsonError(c, error);
-  }
-});
-
 app.post("/v1/invitations", async (c) => {
   let createdInvite: { id: string; token: string } | null = null;
   let createdOrgId: string | null = null;
@@ -882,20 +803,124 @@ app.delete("/v1/orgs/current/members/:userId", async (c) => {
 
 app.get("/v1/skills", async (c) => {
   try {
-    const visibilityRaw = c.req.query("visibility");
-    const visibility = visibilityRaw ? visibilityFilterSchema.parse(visibilityRaw) : undefined;
-    const mine = c.req.query("mine") === "true";
+    // `?label=marketing/seo` filters to skills filed under that path OR any descendant; `?nolabel=true`
+    // filters to skills filed under no label at all. Every skill is visible to every member.
+    const labelRaw = c.req.query("label")?.trim();
+    // A label may only reach the LIKE-prefix filter if it is a well-formed path. A malformed/typo
+    // `?label=` (e.g. `%`) can't match any validated stored path, so it returns an EMPTY folder —
+    // never a SQL wildcard leaking into the LIKE, and never a silent broadening to the whole org list.
+    const labelValid = !labelRaw || labelPathSchema.safeParse(labelRaw).success;
+    const label = labelRaw || undefined;
+    const nolabel = c.req.query("nolabel") === "true";
     const archived = c.req.query("archived") === "true";
-    // `?q=` turns this into a relevance-ranked full-text search (slug, description, tools, owner, and
-    // the SKILL.md body). Folded into the list endpoint so no path can shadow a valid `search` slug.
+    // `?q=` turns this into a relevance-ranked full-text search (slug, description, tools, and the
+    // SKILL.md body). Folded into the list endpoint so no path can shadow a valid `search` slug.
     const query = c.req.query("q")?.trim() || undefined;
     return c.json(
       await withTenant(c, ({ actor, orgId, database }) =>
-        listSkills({ actor, orgId, visibility, mine, archived, query, limit: query ? 20 : undefined, database }),
+        labelValid
+          ? listSkills({ actor, orgId, label, nolabel, archived, query, limit: query ? 20 : undefined, database })
+          : Promise.resolve([] as Awaited<ReturnType<typeof listSkills>>),
       ),
     );
   } catch (error) {
     return jsonError(c, error, 401);
+  }
+});
+
+/**
+ * Org-wide shared labels ("folders"). The path always lives in the request body/query (never a URL
+ * segment) so a slash-separated path like `marketing/seo` survives. Any member may read or mutate
+ * labels (`withTenant` membership-gated); the service enforces `assertMember`.
+ */
+app.get("/v1/labels", async (c) => {
+  try {
+    actorFromContext(c, true);
+    requireScope(c, "skills:read");
+    return c.json(await withTenant(c, ({ actor, orgId, database }) => listLabels({ actor, orgId, database }), true));
+  } catch (error) {
+    return jsonError(c, error, 401);
+  }
+});
+
+app.post("/v1/labels", async (c) => {
+  try {
+    actorFromContext(c, true);
+    requireScope(c, "skills:write");
+    const input = createLabelInputSchema.parse(await c.req.json());
+    await withTenant(
+      c,
+      ({ actor, orgId, database }) =>
+        createLabel({ actor, orgId, path: input.path, color: input.color, icon: input.icon, database }),
+      true,
+    );
+    return c.json({ ok: true as const });
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
+app.put("/v1/labels/rename", async (c) => {
+  try {
+    actorFromContext(c, true);
+    requireScope(c, "skills:write");
+    const input = renameLabelInputSchema.parse(await c.req.json());
+    await withTenant(
+      c,
+      ({ actor, orgId, database }) => renameLabel({ actor, orgId, from: input.from, to: input.to, database }),
+      true,
+    );
+    return c.json({ ok: true as const });
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
+app.put("/v1/labels/color", async (c) => {
+  try {
+    actorFromContext(c, true);
+    requireScope(c, "skills:write");
+    const input = setLabelColorInputSchema.parse(await c.req.json());
+    await withTenant(
+      c,
+      ({ actor, orgId, database }) => setLabelColor({ actor, orgId, path: input.path, color: input.color, database }),
+      true,
+    );
+    return c.json({ ok: true as const });
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
+app.put("/v1/labels/icon", async (c) => {
+  try {
+    actorFromContext(c, true);
+    requireScope(c, "skills:write");
+    const input = setLabelIconInputSchema.parse(await c.req.json());
+    await withTenant(
+      c,
+      ({ actor, orgId, database }) => setLabelIcon({ actor, orgId, path: input.path, icon: input.icon, database }),
+      true,
+    );
+    return c.json({ ok: true as const });
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
+app.delete("/v1/labels", async (c) => {
+  try {
+    actorFromContext(c, true);
+    requireScope(c, "skills:write");
+    const input = deleteLabelInputSchema.parse(await c.req.json());
+    await withTenant(
+      c,
+      ({ actor, orgId, database }) => deleteLabel({ actor, orgId, path: input.path, database }),
+      true,
+    );
+    return c.json({ ok: true as const });
+  } catch (error) {
+    return jsonError(c, error);
   }
 });
 
@@ -920,26 +945,6 @@ app.put("/v1/skill-filter-preferences", async (c) => {
         setSkillFilterPreferences({ actor, orgId, preferences: body, database }),
       ),
     );
-  } catch (error) {
-    return jsonError(c, error, 401);
-  }
-});
-
-/**
- * Skills-scoped upload choices for assistants. This deliberately lives under `/skills` rather than
- * opening the general team-management surface to PATs: a read/write skill token can list the teams
- * it may present as owner/share choices, but cannot manage those teams.
- */
-app.get("/v1/skills/upload-options", async (c) => {
-  try {
-    actorFromContext(c, true);
-    requireScope(c, "skills:write");
-    const teams = await withTenant(
-      c,
-      ({ actor, orgId, database }) => listTeamsForUser({ actor, orgId, database }),
-      true,
-    );
-    return c.json(buildSkillUploadOptions(teams));
   } catch (error) {
     return jsonError(c, error, 401);
   }
@@ -1197,24 +1202,35 @@ app.delete("/v1/skills/:slug/install", async (c) => {
   }
 });
 
-app.put("/v1/skills/:slug/owner", async (c) => {
+/** File a skill under a label path (org-wide shared folder). Path in the body so slashes survive. */
+app.post("/v1/skills/:slug/labels", async (c) => {
   try {
     actorFromContext(c, true);
     requireScope(c, "skills:write");
-    const { owner_team } = setSkillOwnerInputSchema.parse(await c.req.json());
+    const { path } = assignLabelInputSchema.parse(await c.req.json());
     await withTenant(
       c,
-      ({ actor, orgId, database }) =>
-        setSkillOwner({
-          actor,
-          orgId,
-          slug: c.req.param("slug"),
-          ownerTeam: owner_team,
-          database,
-        }),
+      ({ actor, orgId, database }) => assignLabel({ actor, orgId, slug: c.req.param("slug"), path, database }),
       true,
     );
-    return c.json({ ok: true });
+    return c.json({ ok: true as const });
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
+/** Remove a label path from a skill. Path in the body so slashes survive. */
+app.delete("/v1/skills/:slug/labels", async (c) => {
+  try {
+    actorFromContext(c, true);
+    requireScope(c, "skills:write");
+    const { path } = assignLabelInputSchema.parse(await c.req.json());
+    await withTenant(
+      c,
+      ({ actor, orgId, database }) => unassignLabel({ actor, orgId, slug: c.req.param("slug"), path, database }),
+      true,
+    );
+    return c.json({ ok: true as const });
   } catch (error) {
     return jsonError(c, error);
   }
@@ -1275,9 +1291,9 @@ app.post("/v1/skills/:slug/restore", async (c) => {
 
 /**
  * Publish a packaged skill. Two body shapes:
- *  - multipart/form-data (browser dropzone / CLI): `file` + `action`/`everyone`/`team`/`version`/`message`.
+ *  - multipart/form-data (browser dropzone / CLI): `file` + `action`/`label`/`version`/`message`.
  *  - raw `application/zip` or `application/gzip` (guided assistant + Bearer token): the body IS the
- *    archive; `everyone`/`team`/`version`/`message` come from query params.
+ *    archive; `label`/`version`/`message` come from query params (repeatable `label`).
  * `action=validate` runs the same package and targeted identity checks without publishing.
  * Accepts `.zip` or `.tar.gz`. Requires the `skills:write` scope for token-authed requests.
  * Bodies above 32 MB are rejected with 413 before buffering (just over the 25 MB archive cap).
@@ -1295,7 +1311,7 @@ app.post("/v1/skills", bodyLimit({ maxSize: 32 * 1024 * 1024, onError: (c) => js
     let messageRaw: string | undefined;
     let expectSlug: string | undefined;
     let expectSkillId: string | undefined;
-    let ownerTeamRaw: string | undefined;
+    let labelValues: string[] = [];
     let dependencyValues: string[] = [];
 
     if (contentType.includes("multipart/form-data")) {
@@ -1313,8 +1329,8 @@ app.post("/v1/skills", bodyLimit({ maxSize: 32 * 1024 * 1024, onError: (c) => js
       messageRaw = field("message");
       expectSlug = field("expect_slug");
       expectSkillId = field("expect_skill_id");
-      ownerTeamRaw = field("owner_team");
-      dependencyValues = parseTeamValues([...form.getAll("dependency"), ...form.getAll("dependencies")].map((v) => String(v)));
+      labelValues = parseMultiValues([...form.getAll("label"), ...form.getAll("labels")].map((v) => String(v)));
+      dependencyValues = parseMultiValues([...form.getAll("dependency"), ...form.getAll("dependencies")].map((v) => String(v)));
     } else {
       const url = new URL(c.req.url);
       rejectLegacySkillVisibilityInput((name) => url.searchParams.has(name));
@@ -1325,8 +1341,8 @@ app.post("/v1/skills", bodyLimit({ maxSize: 32 * 1024 * 1024, onError: (c) => js
       messageRaw = c.req.query("message");
       expectSlug = c.req.query("expect_slug");
       expectSkillId = c.req.query("expect_skill_id");
-      ownerTeamRaw = c.req.query("owner_team");
-      dependencyValues = parseTeamValues([...url.searchParams.getAll("dependency"), ...url.searchParams.getAll("dependencies")]);
+      labelValues = parseMultiValues([...url.searchParams.getAll("label"), ...url.searchParams.getAll("labels")]);
+      dependencyValues = parseMultiValues([...url.searchParams.getAll("dependency"), ...url.searchParams.getAll("dependencies")]);
     }
 
     let parsedAction;
@@ -1369,19 +1385,16 @@ app.post("/v1/skills", bodyLimit({ maxSize: 32 * 1024 * 1024, onError: (c) => js
       companionManifest: result.companion_manifest,
     });
     // Dependency preflight: which declared deps are published / must be uploaded / dropped, plus any
-    // blockers (missing / cycle / owner-cover). Computed for both validate (preview) and publish.
+    // blockers (missing / cycle). Skills are flat — there is no owner-cover constraint. Computed for
+    // both validate (preview) and publish.
     const dependencyPlan = await withTenant(
       c,
       ({ actor: a, orgId: o, database }) =>
         buildDependencyPlan({
           actor: a,
           orgId: o,
-          // `undefined` (owner_team omitted) = keep the existing owner — must NOT collapse to `null`
-          // (Personal), or the preflight would model a re-published team-owned skill as Personal and
-          // produce a dependency plan against the wrong owner.
           slug: fm.name,
           declaredSlugs: dependencyValues,
-          ownerTeam: ownerTeamRaw,
           database,
         }),
       true,
@@ -1413,14 +1426,14 @@ app.post("/v1/skills", bodyLimit({ maxSize: 32 * 1024 * 1024, onError: (c) => js
         fm: normalized.frontmatter,
         companionManifest: normalized.companionManifest,
         skillId: target.skillId,
-        ownerTeam: ownerTeamRaw,
+        labels: labelValues,
         version: target.version,
         note: messageRaw ?? "",
         body: normalizedResult.body ?? "",
         dependencies: normalized.companionManifest.dependencies,
       });
     } catch (error) {
-      // Unresolved dependencies (missing / cycle / visibility) — surface the plan, don't 500.
+      // Unresolved dependencies (missing / cycle) — surface the plan, don't 500.
       if (error instanceof DependencyPublishError) {
         return c.json({ error: error.message, dependency_plan: error.plan }, 422);
       }
@@ -1484,7 +1497,7 @@ app.post("/v1/skills/create", bodyLimit({ maxSize: 2 * 1024 * 1024, onError: (c)
         fm: result.frontmatter,
         companionManifest,
         skillId: target.skillId,
-        ownerTeam: input.owner_team,
+        labels: input.labels,
         version: target.version,
         note: "",
         body: result.body ?? "",

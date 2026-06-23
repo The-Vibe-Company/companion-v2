@@ -1,45 +1,22 @@
 import { describe, expect, it } from "vitest";
 import type { SkillVM } from "@/lib/types";
-import { BUILTIN_VIEWS, filtersKey, makeFilter, matchFilters, type Filter } from "./filters";
-
-function userOwner(p: { id?: string; name?: string; initials?: string; handle?: string | null }): SkillVM["owner"] {
-  return {
-    kind: "user",
-    id: p.id ?? "user-1",
-    userId: p.id ?? "user-1",
-    teamId: null,
-    name: p.name ?? "Alice Nardon",
-    initials: p.initials ?? "AN",
-    handle: p.handle ?? "alice",
-    team: null,
-  };
-}
-
-function teamOwner(p: { id: string; name: string; handle: string }): SkillVM["owner"] {
-  return {
-    kind: "team",
-    id: p.id,
-    userId: "user-1",
-    teamId: p.id,
-    name: p.name,
-    initials: p.name.slice(0, 2).toUpperCase(),
-    handle: p.handle,
-    team: p.name,
-  };
-}
+import { chipParts, filtersKey, makeFilter, matchFilters, type Filter } from "./filters";
 
 function mk(p: Partial<SkillVM> & { id: string }): SkillVM {
-  const owner = p.owner ?? userOwner({});
   return {
     uuid: p.id,
-    ownerId: owner.id,
     version: "1.0.0",
     validation: "valid",
     description: "",
     error: null,
-    owner,
+    labels: [],
+    authorId: "user-1",
+    authorName: "Alice Nardon",
+    authorInitials: "AN",
     tools: [],
     requirements: [],
+    compatibility: null,
+    metadata: {},
     size: "1 KB",
     license: null,
     checksum: null,
@@ -49,94 +26,48 @@ function mk(p: Partial<SkillVM> & { id: string }): SkillVM {
     starred: false,
     installStatus: "none",
     installedVersion: null,
-    teamSlugs: owner.kind === "team" && owner.handle ? [owner.handle] : [],
     requiresCount: 0,
     usedByCount: 0,
     depWarn: false,
     archived: false,
     ...p,
-    compatibility: p.compatibility ?? null,
-    metadata: p.metadata ?? {},
   };
 }
 
 const registry: SkillVM[] = [
-  mk({ id: "jira-triage", owner: teamOwner({ id: "team-platform", name: "Platform", handle: "platform" }) }),
-  mk({ id: "k8s-logs", owner: teamOwner({ id: "team-platform", name: "Platform", handle: "platform" }) }),
-  mk({
-    id: "sql-query",
-    owner: teamOwner({ id: "team-data", name: "Data", handle: "data" }),
-    validation: "validating",
-  }),
+  mk({ id: "jira-triage", requiresCount: 2 }),
+  mk({ id: "k8s-logs", usedByCount: 3 }),
+  mk({ id: "sql-query", validation: "validating" }),
   mk({ id: "pdf-extract", starred: true }),
-  mk({ id: "web-fetch", owner: userOwner({ id: "user-2", name: "Marek Doan", initials: "MD", handle: "marek" }) }),
-  mk({
-    id: "image-ocr",
-    validation: "invalid",
-    owner: userOwner({ id: "user-3", name: "Tomas Okabe", initials: "TO", handle: "tomas" }),
-  }),
+  mk({ id: "web-fetch" }),
+  mk({ id: "image-ocr", validation: "invalid" }),
 ];
 
 const run = (filters: Filter[]) => registry.filter((s) => matchFilters(s, filters)).map((s) => s.id);
 
-describe("matchFilters — teams", () => {
+describe("matchFilters", () => {
   it("no filters returns everything", () => {
     expect(run([]).length).toBe(registry.length);
   });
 
-  it("team filter matches the owning team slug", () => {
-    expect(run([{ type: "team", value: "platform" }])).toEqual(["jira-triage", "k8s-logs"]);
-    expect(run([{ type: "team", value: "data" }])).toEqual(["sql-query"]);
-  });
-
-  it("a team filter excludes other teams and personal skills", () => {
-    const platform = run([{ type: "team", value: "platform" }]);
-    expect(platform).not.toContain("sql-query"); // data team
-    expect(platform).not.toContain("pdf-extract"); // personal, no team
-  });
-
-  it("multiple team values are OR-ed within the team type", () => {
-    expect(run([
-      { type: "team", value: "platform" },
-      { type: "team", value: "data" },
-    ]).sort()).toEqual(["jira-triage", "k8s-logs", "sql-query"]);
-  });
-});
-
-describe("matchFilters — other dimensions", () => {
-  it("visibility (owner kind)", () => {
-    expect(run([{ type: "visibility", value: "team" }])).toEqual(["jira-triage", "k8s-logs", "sql-query"]);
-    expect(run([{ type: "visibility", value: "personal" }])).toEqual(["pdf-extract", "web-fetch", "image-ocr"]);
-  });
-  it("status", () => {
+  it("status narrows by validation state", () => {
     expect(run([{ type: "status", value: "invalid" }])).toEqual(["image-ocr"]);
+    expect(run([{ type: "status", value: "validating" }])).toEqual(["sql-query"]);
   });
-  it("starred", () => {
+
+  it("starred selects starred skills", () => {
     expect(run([{ type: "starred", value: "true" }])).toEqual(["pdf-extract"]);
   });
-  it("owner matches by principal id", () => {
-    expect(run([{ type: "owner", value: "user-2" }])).toEqual(["web-fetch"]);
-    // Team-owned skills are keyed by the team principal id.
-    expect(run([{ type: "owner", value: "team-platform" }])).toEqual(["jira-triage", "k8s-logs"]);
-  });
-  it("different types are AND-ed (team AND status)", () => {
-    expect(run([
-      { type: "team", value: "data" },
-      { type: "status", value: "validating" },
-    ])).toEqual(["sql-query"]);
-    expect(run([
-      { type: "team", value: "platform" },
-      { type: "status", value: "validating" },
-    ])).toEqual([]); // platform skills are valid, not validating
-  });
-});
 
-describe("built-in views", () => {
-  it("only ships the All view", () => {
-    expect(BUILTIN_VIEWS.map((v) => v.id)).toEqual(["all"]);
-    expect(BUILTIN_VIEWS[0]?.filters).toEqual([]);
+  it("deps 'has' matches skills that declare dependencies", () => {
+    expect(run([{ type: "deps", value: "has" }])).toEqual(["jira-triage"]);
   });
-  it("Needs attention = invalid OR validating", () => {
+
+  it("deps 'used' matches skills depended on by others", () => {
+    expect(run([{ type: "deps", value: "used" }])).toEqual(["k8s-logs"]);
+  });
+
+  it("the same type is OR-ed", () => {
     expect(
       run([
         { type: "status", value: "invalid" },
@@ -144,30 +75,65 @@ describe("built-in views", () => {
       ]).sort(),
     ).toEqual(["image-ocr", "sql-query"]);
   });
-  it("Team view = visibility team", () => {
-    expect(run([{ type: "visibility", value: "team" }])).toEqual(["jira-triage", "k8s-logs", "sql-query"]);
+
+  it("different types are AND-ed", () => {
+    expect(
+      run([
+        { type: "deps", value: "has" },
+        { type: "status", value: "valid" },
+      ]),
+    ).toEqual(["jira-triage"]);
+    expect(
+      run([
+        { type: "deps", value: "has" },
+        { type: "status", value: "invalid" },
+      ]),
+    ).toEqual([]);
   });
-  it("filtersKey is order-independent", () => {
-    expect(filtersKey([
-      { type: "visibility", value: "team" },
-      { type: "team", value: "platform" },
-    ])).toBe(
+});
+
+describe("filtersKey", () => {
+  it("is order-independent", () => {
+    expect(
       filtersKey([
-        { type: "team", value: "platform" },
-        { type: "visibility", value: "team" },
+        { type: "status", value: "valid" },
+        { type: "starred", value: "true" },
+      ]),
+    ).toBe(
+      filtersKey([
+        { type: "starred", value: "true" },
+        { type: "status", value: "valid" },
       ]),
     );
   });
 });
 
+describe("chipParts", () => {
+  it("renders status / starred / deps chips", () => {
+    expect(chipParts({ type: "status", value: "invalid" })).toEqual({
+      icon: "alert-triangle",
+      key: "status",
+      val: "invalid",
+    });
+    expect(chipParts({ type: "starred", value: "true" })).toEqual({ icon: "star", key: "", val: "starred" });
+    expect(chipParts({ type: "deps", value: "used" })).toEqual({
+      icon: "corner-down-right",
+      key: "deps",
+      val: "used as dependency",
+    });
+  });
+});
+
 describe("makeFilter", () => {
   it("returns typed filters for valid pairs", () => {
-    expect(makeFilter("visibility", "team")).toEqual({ type: "visibility", value: "team" });
+    expect(makeFilter("status", "valid")).toEqual({ type: "status", value: "valid" });
     expect(makeFilter("starred", "true")).toEqual({ type: "starred", value: "true" });
+    expect(makeFilter("deps", "has")).toEqual({ type: "deps", value: "has" });
   });
 
   it("rejects invalid type/value pairs", () => {
-    expect(makeFilter("visibility", "everyone")).toBeNull();
+    expect(makeFilter("status", "everyone")).toBeNull();
     expect(makeFilter("starred", "false")).toBeNull();
+    expect(makeFilter("deps", "nope")).toBeNull();
   });
 });

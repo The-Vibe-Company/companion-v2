@@ -5,6 +5,11 @@ import { err, type GlobalOpts } from "./lib/output";
 import * as auth from "./commands/auth";
 import * as skills from "./commands/skills";
 
+/** Accumulate a repeatable string option (e.g. `--label a --label b` → `["a", "b"]`). */
+function collect(value: string, previous: string[]): string[] {
+  return [...previous, value];
+}
+
 function addGlobalOpts(cmd: Command): Command {
   return cmd
     .option("--profile <name>", "config profile", "default")
@@ -74,11 +79,10 @@ const skillsCmd = program.command("skills").alias("skill").description("manage s
 addGlobalOpts(
   skillsCmd
     .command("list")
-    .description("list registry skills you can see")
-    .option("--visibility <visibility>", "filter by owner (personal|team)")
-    .option("--mine", "only skills you own", false),
+    .description("list registry skills (every skill in the org is visible to every member)")
+    .option("--label <path>", "only skills filed under this folder path or a descendant"),
 ).action((opts, cmd: Command) =>
-  runAction(cmd, (g) => skills.list({ visibility: opts.visibility, mine: opts.mine }, g)),
+  runAction(cmd, (g) => skills.list({ label: opts.label }, g)),
 );
 
 addGlobalOpts(
@@ -97,8 +101,12 @@ addGlobalOpts(
   skillsCmd
     .command("push <dir>")
     .description("validate, package, and publish a new version")
-    .option("--private", "make the skill Personal (private to you)")
-    .option("--owner-team <slug>", "team slug that owns the skill (workspace-visible, team admins/editors can edit)")
+    .option(
+      "--label <path>",
+      "file the skill under an org-wide shared folder path (repeatable; applied when first published)",
+      collect,
+      [] as string[],
+    )
     .option("--bump <kind>", "bump from the registry's current version (patch|minor|major)")
     .option("--set-version <semver>", "publish an explicit version")
     .option("--message <text>", "version note")
@@ -108,8 +116,7 @@ addGlobalOpts(
     skills.push(
       dir,
       {
-        private: opts.private,
-        ownerTeam: opts.ownerTeam,
+        label: opts.label,
         bump: opts.bump,
         setVersion: opts.setVersion,
         message: opts.message,

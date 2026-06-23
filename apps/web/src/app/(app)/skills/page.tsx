@@ -1,13 +1,20 @@
 import { redirect } from "next/navigation";
-import type { LocalSkillRow, SkillFilterPreferences, SkillListRow } from "@companion/contracts";
+import type {
+  LabelsResponse,
+  LocalSkillRow,
+  SkillFilterPreferences,
+  SkillListRow,
+} from "@companion/contracts";
 import { loadOrgContext } from "@/lib/currentOrg";
 import { serverApiFetch } from "@/lib/apiServer";
 import { SkillsApp } from "@/components/skills/SkillsApp";
 import { parseSkillsRoute, skillsRouteSource } from "@/components/skills/route";
 import { WorkspaceLoadError } from "@/components/org/WorkspaceLoadError";
-import { mapSkill, type MeVM, type TeamVM } from "@/lib/types";
+import { mapSkill, type MeVM } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
+
+const EMPTY_LABELS: LabelsResponse = { tree: [], flat: [] };
 
 export default async function SkillsPage({
   searchParams,
@@ -30,26 +37,15 @@ export default async function SkillsPage({
   if (!current) redirect("/onboarding");
   const orgHeaders = { "x-companion-org": current.id };
 
-  const [skillsResult, filterPreferences, teamsResult, localSkillsResult] = await Promise.all([
+  const [skillsResult, filterPreferences, labelsResult, localSkillsResult] = await Promise.all([
     serverApiFetch<SkillListRow[]>("/v1/skills", { headers: orgHeaders }).catch(() => null),
     serverApiFetch<SkillFilterPreferences>("/v1/skill-filter-preferences", { headers: orgHeaders }).catch(() => null),
-    serverApiFetch<
-      Array<{
-        id: string;
-        slug: string;
-        name: string;
-        color: string | null;
-        icon: string | null;
-        teamRole: "admin" | "editor" | "reader";
-      }>
-    >(
-      "/v1/teams",
-      { headers: orgHeaders },
-    ).catch(() => null),
+    // Best-effort: the label tree degrades gracefully to empty if this fails.
+    serverApiFetch<LabelsResponse>("/v1/labels", { headers: orgHeaders }).catch(() => EMPTY_LABELS),
     // Best-effort: the Companion skills section degrades gracefully if this fails.
     serverApiFetch<LocalSkillRow[]>("/v1/local-skills", { headers: orgHeaders }).catch(() => [] as LocalSkillRow[]),
   ]);
-  if (!skillsResult || !filterPreferences || !teamsResult) return <WorkspaceLoadError />;
+  if (!skillsResult || !filterPreferences) return <WorkspaceLoadError />;
   const skills = skillsResult.map(mapSkill);
 
   const me: MeVM = {
@@ -59,23 +55,13 @@ export default async function SkillsPage({
     initials: (whoami.name?.[0] ?? whoami.email?.[0] ?? "?").toUpperCase(),
   };
 
-  const teams: TeamVM[] = teamsResult.map((t) => ({
-    id: t.slug,
-    dbId: t.id,
-    name: t.name,
-    initial: (t.name[0] ?? "T").toUpperCase(),
-    color: t.color,
-    icon: t.icon,
-    role: t.teamRole,
-  }));
-
   return (
     <SkillsApp
       initialSkills={skills}
       initialLocalSkills={localSkillsResult ?? []}
       initialFilterPreferences={filterPreferences}
+      initialLabels={labelsResult ?? EMPTY_LABELS}
       me={me}
-      teams={teams}
       orgs={orgs}
       currentOrg={current}
       initialRoute={initialRoute}

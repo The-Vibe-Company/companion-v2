@@ -1,27 +1,5 @@
-import type { ValidationState, VisibilityFilter } from "@companion/contracts";
-import type { SkillVM } from "@/lib/types";
+import type { ValidationState } from "@companion/contracts";
 import { Icon } from "../Icon";
-
-// Owner is the single access axis: Personal (private to the owner) vs Team (workspace-visible).
-export const VISIBILITY_ICON: Record<string, string> = {
-  personal: "lock",
-  team: "users",
-};
-
-export function visibilityKind(s: SkillVM): VisibilityFilter {
-  return s.owner.kind === "team" ? "team" : "personal";
-}
-
-export function visibilityMeta(s: SkillVM): { icon: string; label: string } {
-  if (s.owner.kind === "team") return { icon: "users", label: s.owner.team ?? s.owner.name };
-  return { icon: "lock", label: "Personal" };
-}
-
-export const VISIBILITY_DESC: Record<VisibilityFilter, string> = {
-  personal: "private to you",
-  team: "owned by a team — visible to the whole workspace",
-};
-export const VISIBILITY_ORDER: VisibilityFilter[] = ["team", "personal"];
 
 export function vdot(v: ValidationState): "ok" | "down" | "unknown" {
   return v === "valid" ? "ok" : v === "invalid" ? "down" : "unknown";
@@ -40,16 +18,6 @@ export function Avatar({ initials, size = 18 }: { initials: string; size?: numbe
       style={{ width: size, height: size, fontSize: size <= 18 ? 8 : 9 }}
     >
       {initials}
-    </span>
-  );
-}
-
-export function VisibilityChip({ skill }: { skill: SkillVM }) {
-  const meta = visibilityMeta(skill);
-  return (
-    <span className="scopechip">
-      <Icon name={meta.icon} size={11} />
-      {meta.label}
     </span>
   );
 }

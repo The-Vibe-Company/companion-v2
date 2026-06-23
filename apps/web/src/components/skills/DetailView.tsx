@@ -17,16 +17,15 @@ import {
   fetchSkillVersionFiles,
   setCommentDeprecated as setCommentDeprecatedRpc,
 } from "@/lib/queries";
-import type { MeVM, SkillVM, TeamVM } from "@/lib/types";
-import { StarButton } from "./blocks";
+import type { MeVM, SkillVM } from "@/lib/types";
+import { Avatar, StarButton } from "./blocks";
 import {
   Activity,
-  DetailMeta,
-  DetailPanelNav,
-  DetailRail,
+  FiledIn,
+  ManifestRows,
   Requirements,
-  type DetailPanel,
-  type DetailPanelItem,
+  Section,
+  StatusCard,
 } from "./detailParts";
 import { DependenciesTab } from "./DependenciesTab";
 import { FileExplorer } from "./fileview";
@@ -183,43 +182,43 @@ export function DetailView({
   total,
   me,
   myRole,
+  allLabels,
   onBack,
   onPrev,
   onNext,
   onToggleStar,
   onToggleInstalled,
-  onChangeOwner,
+  onToggleLabel,
+  onSelectLabel,
   onInstall,
   onUpdate,
   onOpenSkill,
   onRestore,
   onArchive,
-  teams,
-  initialPanel = null,
 }: {
   skill: SkillVM;
   index: number;
   total: number;
   me: MeVM;
   myRole: OrgRole;
+  /** Every label path that exists org-wide (for the "Add to folder" picker). */
+  allLabels: string[];
   onBack: () => void;
   onPrev: () => void;
   onNext: () => void;
   onToggleStar: () => void;
   onToggleInstalled: () => void;
-  onChangeOwner: (ownerTeam: string | null) => void;
+  /** Assign / unassign a folder path on this skill (toggle). */
+  onToggleLabel: (path: string) => void;
+  /** Navigate to a folder's scope (chip click). */
+  onSelectLabel: (path: string) => void;
   onInstall: () => void;
   onUpdate: () => void;
   onOpenSkill: (slug: string) => void;
   onRestore: () => void;
   onArchive: () => void;
-  teams: TeamVM[];
-  initialPanel?: DetailPanel | null;
 }) {
   const invalid = skill.validation === "invalid";
-  const [panel, setPanel] = useState<DetailPanel | null>(initialPanel);
-  const [panelNavOpen, setPanelNavOpen] = useState(false);
-  const [compactPanelNav, setCompactPanelNav] = useState(false);
   const [versions, setVersions] = useState<SkillVersionRow[]>([]);
   const [comments, setComments] = useState<SkillCommentRow[]>([]);
   const [files, setFiles] = useState<SkillFile[]>([]);
@@ -227,7 +226,6 @@ export function DetailView({
 
   useEffect(() => {
     let active = true;
-    setPanel(initialPanel);
     setFiles([]);
     // Clear the previous skill's discussion/versions so they don't flash under the new title.
     setComments([]);
@@ -242,42 +240,7 @@ export function DetailView({
     return () => {
       active = false;
     };
-  }, [skill.id, skill.version, initialPanel]);
-
-  useEffect(() => {
-    const query = window.matchMedia("(max-width: 820px)");
-    const sync = () => {
-      setCompactPanelNav(query.matches);
-      if (!query.matches) setPanelNavOpen(false);
-    };
-    sync();
-    query.addEventListener("change", sync);
-    return () => query.removeEventListener("change", sync);
-  }, []);
-
-  useEffect(() => {
-    if (!panel) setPanelNavOpen(false);
-  }, [panel]);
-
-  useEffect(() => {
-    if (!panel) return;
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      if (panelNavOpen && compactPanelNav) {
-        event.preventDefault();
-        event.stopPropagation();
-        event.stopImmediatePropagation();
-        setPanelNavOpen(false);
-        return;
-      }
-      event.preventDefault();
-      event.stopPropagation();
-      event.stopImmediatePropagation();
-      setPanel(null);
-    };
-    window.addEventListener("keydown", onKey, { capture: true });
-    return () => window.removeEventListener("keydown", onKey, { capture: true });
-  }, [panel, panelNavOpen, compactPanelNav]);
+  }, [skill.id, skill.version]);
 
   // Eagerly load the package file list once per (slug, version); the archive has
   // no random access, so one fetch beats lazily re-streaming per file.
@@ -316,14 +279,8 @@ export function DetailView({
     window.location.href = url;
   };
 
-  const ownerTeam = skill.owner.teamId
-    ? teams.find((team) => team.dbId === skill.owner.teamId || team.id === skill.owner.handle)
-    : null;
-  const canModifySkill =
-    myRole === "admin" ||
-    myRole === "owner" ||
-    (skill.owner.kind === "user" && skill.owner.userId === me.id) ||
-    (skill.owner.kind === "team" && (ownerTeam?.role === "admin" || ownerTeam?.role === "editor"));
+  // Flat model: skills carry no owner/visibility axis — every member can do anything to any skill.
+  const canModifySkill = true;
   const canDeprecate = (c: SkillCommentRow): boolean =>
     // Hide the control on a still-optimistic row (a PATCH to a tmp id would 404).
     !c.id.startsWith("tmp-") &&
@@ -402,29 +359,7 @@ export function DetailView({
 
   const reqN = deps?.requires_n ?? skill.requiresCount;
   const usedN = deps?.used_by_n ?? skill.usedByCount;
-  const reqIssues = (deps?.requires ?? []).filter((r) => r.status !== "satisfied");
-  const depFlag = deps
-    ? reqIssues.length > 0
-      ? { n: reqIssues.length, blocked: reqIssues.some((r) => r.status === "cycle" || r.status === "missing") }
-      : null
-    : undefined;
-
-  const dependencyPanel: DetailPanelItem = {
-    id: "dependencies",
-    label: "Dependencies",
-    icon: "git-branch",
-    count: reqN + usedN,
-  };
-  const morePanelItems: DetailPanelItem[] = [
-    { id: "files", label: "Files", icon: "package-open", count: files.length },
-    // Hide Setup & secrets when the skill declares none (don't show empty sections).
-    ...(skill.requirements.length > 0
-      ? [{ id: "requirements" as const, label: "Setup & secrets", icon: "key-round", count: skill.requirements.length }]
-      : []),
-    { id: "activity", label: "History", icon: "history", count: versions.length },
-  ];
-  const panelItems = [dependencyPanel, ...morePanelItems];
-  const currentPanel = panel ? panelItems.find((item) => item.id === panel) ?? dependencyPanel : null;
+  const description = skill.display?.description ?? skill.description;
 
   return (
     <div className="dpage">
@@ -483,35 +418,84 @@ export function DetailView({
         />
       </div>
 
-      <div className={"dbody dbody--linear" + (panel ? " dbody--panel-open" : "")}>
-        <div className="dcontent dcontent--linear">
-          <div className="dcontent__inner dcontent__inner--linear">
-            <p className="lin-eyebrow">
-              <Icon name="package" size={13} />
-              Skill package
-            </p>
-            <h1 className="dtitle dtitle--linear">{skill.display?.name ?? skill.id}</h1>
-            {skill.display?.name ? <p className="dslug mono">{skill.id}</p> : null}
-            <DetailMeta
-              skill={skill}
-              teams={teams}
-              onChangeOwner={onChangeOwner}
-              canChangeOwner={canModifySkill}
-              requiresN={reqN}
-              usedByN={usedN}
-              depFlag={depFlag}
-              onOpenDependencies={() => setPanel("dependencies")}
-            />
-            <p className="ov__lead ov__lead--linear">{skill.display?.description ?? skill.description}</p>
-            {invalid && skill.error && (
-              <div className="lin-alert">
-                <p className="seclabel" style={{ color: "var(--color-danger)", marginBottom: 8 }}>
-                  Validation error
-                </p>
-                <div className="errblock">{skill.error}</div>
-              </div>
+      <div className="dbody dbody--doc">
+        <div className="ddoc">
+          <div className="dhead">
+            <div className="dhead__main">
+              <p className="lin-eyebrow">
+                <Icon name="package" size={13} />
+                Skill package
+              </p>
+              <h1 className="dtitle dtitle--linear">{skill.display?.name ?? skill.id}</h1>
+              {skill.display?.name ? <p className="dslug mono">{skill.id}</p> : null}
+              <p className="ov__lead ov__lead--linear">{description}</p>
+              <p className="dbyline">
+                <Avatar initials={skill.authorInitials} size={16} />
+                <span>
+                  by <span className="dbyline__name">{skill.authorName}</span>
+                </span>
+              </p>
+              <FiledIn
+                skill={skill}
+                allLabels={allLabels}
+                onToggleLabel={onToggleLabel}
+                onSelectLabel={onSelectLabel}
+              />
+            </div>
+            <div className="dhead__aside">
+              <StatusCard skill={skill} />
+            </div>
+          </div>
+
+          {invalid && skill.error && (
+            <div className="lin-alert">
+              <p className="seclabel" style={{ color: "var(--color-danger)", marginBottom: 8 }}>
+                Validation error
+              </p>
+              <div className="errblock">{skill.error}</div>
+            </div>
+          )}
+
+          <div className="dsections">
+            <Section label="What it does" defaultOpen>
+              <p className="ov__lead ov__lead--linear" style={{ marginTop: 0 }}>
+                {description} It is delivered as a versioned SKILL.md package and runs against the
+                agent&apos;s declared tools on its next reconcile.
+              </p>
+            </Section>
+
+            {skill.requirements.length > 0 && (
+              <Section label="Setup & secrets" count={skill.requirements.length} defaultOpen>
+                <Requirements requirements={skill.requirements} />
+              </Section>
             )}
-            <div className="lin-discussion">
+
+            <Section label="Package" count={files.length} defaultOpen>
+              <FileExplorer files={files} requestedPath={null} panelMode />
+            </Section>
+
+            {reqN + usedN > 0 && (
+              <Section label="Dependencies" count={reqN + usedN} defaultOpen>
+                <DependenciesTab
+                  slug={skill.id}
+                  version={skill.version}
+                  deps={deps}
+                  onOpenSkill={onOpenSkill}
+                />
+              </Section>
+            )}
+
+            <Section label="Manifest">
+              <div className="props">
+                <ManifestRows skill={skill} />
+              </div>
+            </Section>
+
+            <Section label="Activity" count={versions.length}>
+              <Activity versions={versions} authorName={skill.authorName} />
+            </Section>
+
+            <Section label="Discussion" defaultOpen>
               <Discussion
                 comments={comments}
                 versions={versions}
@@ -520,67 +504,9 @@ export function DetailView({
                 onAdd={addComment}
                 onToggleDeprecated={toggleDeprecated}
               />
-            </div>
-            <div className="lin-more lin-more--mobile">
-              <DetailRail panelItems={panelItems} onOpenPanel={setPanel} inline />
-            </div>
+            </Section>
           </div>
         </div>
-        <aside className="dsidebar dsidebar--linear">
-          <DetailRail panelItems={panelItems} onOpenPanel={setPanel} />
-        </aside>
-        {panel && currentPanel && (
-          <aside className="dpanel" aria-label={currentPanel.label}>
-            <div className="dpanel__head">
-              <span className="dpanel__title">
-                <Icon name={currentPanel.icon} size={14} />
-                {currentPanel.label}
-              </span>
-              <button className="iconbtn" onClick={() => setPanel(null)} aria-label="Close panel" title="Close panel">
-                <Icon name="x" size={14} />
-              </button>
-            </div>
-            <div className={"dpanel__shell" + (panelNavOpen && compactPanelNav ? " dpanel__shell--nav-open" : "")}>
-              <DetailPanelNav
-                panelItems={panelItems}
-                panel={panel}
-                navOpen={panelNavOpen}
-                onToggleNav={() => setPanelNavOpen((open) => !open)}
-                onSelectPanel={setPanel}
-                onCloseNav={() => setPanelNavOpen(false)}
-              />
-              <div className={"dpanel__body" + (panel === "files" ? " dpanel__body--flush" : "")}>
-              {panel === "dependencies" ? (
-                <div className="dpanel__inner dpanel__inner--wide">
-                  <DependenciesTab
-                    slug={skill.id}
-                    version={skill.version}
-                    deps={deps}
-                    onOpenSkill={onOpenSkill}
-                  />
-                </div>
-              ) : panel === "requirements" ? (
-                <div className="dpanel__inner">
-                  <Requirements requirements={skill.requirements} />
-                </div>
-              ) : panel === "files" ? (
-                <FileExplorer files={files} requestedPath={null} panelMode />
-              ) : (
-                <div className="dpanel__inner">
-                  <div className="dblocks dblocks--panel">
-                    <div>
-                      <p className="seclabel">
-                        Versions <span className="seclabel__n">{versions.length}</span>
-                      </p>
-                      <Activity versions={versions} ownerName={skill.owner.name} />
-                    </div>
-                  </div>
-                </div>
-              )}
-              </div>
-            </div>
-          </aside>
-        )}
       </div>
     </div>
   );

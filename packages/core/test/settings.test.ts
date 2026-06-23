@@ -4,20 +4,16 @@ import { apiTokenRowSchema, TEAM_BRAND_COLORS } from "@companion/contracts";
 import {
   API_TOKEN_TTL_MS,
   addOrgAccessDomain,
-  deleteTeam,
   issueApiToken,
   listApiTokens,
   removeOrgAccessDomain,
   updateOrg,
-  updateTeam,
   updateUserProfile,
   type ActorContext,
 } from "../src/services";
 
 const ORG_A = "00000000-0000-0000-0000-00000000000a";
 const ORG_B = "00000000-0000-0000-0000-00000000000b";
-const TEAM_1 = "00000000-0000-0000-0000-0000000000t1";
-const TEAM_2 = "00000000-0000-0000-0000-0000000000t2";
 
 const owner: ActorContext = { id: "user-owner", email: "owner@a.dev", name: "Olivia Owner" };
 const admin: ActorContext = { id: "user-admin", email: "admin@a.dev", name: "Adam Admin" };
@@ -62,14 +58,6 @@ interface FakeDbOptions {
   org?: Record<string, unknown> | null;
   /** Result of the second `query.organizations.findFirst` (slug-conflict probe). */
   orgConflict?: Record<string, unknown> | null;
-  /** Result of `query.teams.findFirst` (team slug-conflict / team lookup). */
-  team?: Record<string, unknown> | null;
-  /** Result of `query.teams.findFirst` used as a slug conflict (overrides `team` for the 2nd call). */
-  teamConflict?: Record<string, unknown> | null;
-  /** Result of `query.teamMemberships.findFirst` (the actor's team role; `null` => not on the team). */
-  teamMembership?: Record<string, unknown> | null;
-  /** Number of teams in the org (deleteTeam last-team guard). */
-  teamCount?: number;
   /** Rows returned for the `apiTokens` select (listApiTokens). */
   tokenRows?: Array<Record<string, unknown>>;
   /** Rows returned by an `insert(...).returning(...)`. */
@@ -78,8 +66,6 @@ interface FakeDbOptions {
   emailVerified?: boolean;
   /** Rows returned by an `update(...).returning(...)`. */
   updateReturning?: Array<Record<string, unknown>>;
-  /** Team-owned skill rows affected by deleteTeam's owner_team_id SET NULL. */
-  teamOwnedSkills?: Array<{ skillId: string }>;
 }
 
 function fakeDb(options: FakeDbOptions = {}) {
@@ -88,20 +74,11 @@ function fakeDb(options: FakeDbOptions = {}) {
     updates: [] as Array<{ table: unknown; patch?: Record<string, unknown>; where?: unknown }>,
     /** every `delete(table)` call. */
     deletes: [] as Array<{ table: unknown; where?: unknown }>,
-    /** ordered "update"/"delete" markers emitted inside `transaction(...)` (deleteTeam ordering). */
-    txSequence: [] as string[],
-    /** the most recent `.set` patch applied inside `transaction(...)`. */
-    txPatch: undefined as Record<string, unknown> | undefined,
     /** the `.where` expr captured from the most recent token select. */
     tokenWhere: undefined as unknown,
     /** every `insert(table).values(...)` call, in order. */
     inserts: [] as Array<{ table: unknown; values?: Record<string, unknown> }>,
   };
-  // `query.teams.findFirst` may be called twice (slug-conflict probe then guard lookup). We pop
-  // through configured results: first `teamConflict` (if set) else `team`, then `team`.
-  const teamFindResults: Array<Record<string, unknown> | null | undefined> = [];
-  if (options.teamConflict !== undefined) teamFindResults.push(options.teamConflict);
-  teamFindResults.push(options.team ?? null);
 
   const orgFindResults: Array<Record<string, unknown> | null | undefined> = [
     options.org === undefined
@@ -133,9 +110,7 @@ function fakeDb(options: FakeDbOptions = {}) {
         return api;
       },
       returning() {
-        return Promise.resolve(
-          options.updateReturning ?? [{ ...defaultOrgUpdateRow }],
-        );
+        return Promise.resolve(options.updateReturning ?? [{ ...defaultOrgUpdateRow }]);
       },
       then(resolve: (v: unknown) => unknown) {
         return Promise.resolve(undefined).then(resolve);
@@ -155,15 +130,8 @@ function fakeDb(options: FakeDbOptions = {}) {
     };
   };
 
-  let skillSelectCalls = 0;
   const selectBuilder = (cols: Record<string, unknown>) => {
     const isCount = "value" in cols;
-    const isSkillShareSelect = "skillId" in cols;
-    const skillRows = () => {
-      skillSelectCalls += 1;
-      // deleteTeam now makes a single skill select: the team-owned skills it reverts to Personal.
-      return options.teamOwnedSkills ?? [];
-    };
     const builder: Record<string, unknown> = {
       from() {
         return builder;
@@ -172,20 +140,15 @@ function fakeDb(options: FakeDbOptions = {}) {
         return builder;
       },
       where(expr: unknown) {
-        if (!isCount && !isSkillShareSelect) calls.tokenWhere = expr;
+        if (!isCount) calls.tokenWhere = expr;
         return builder;
       },
       orderBy() {
-        if (isCount) return Promise.resolve([{ value: options.teamCount ?? 1 }]);
-        if (isSkillShareSelect) return Promise.resolve(skillRows());
+        if (isCount) return Promise.resolve([{ value: 1 }]);
         return Promise.resolve(options.tokenRows ?? []);
       },
       then(resolve: (v: unknown) => unknown) {
-        const rows = isCount
-          ? [{ value: options.teamCount ?? 1 }]
-          : isSkillShareSelect
-            ? skillRows()
-            : (options.tokenRows ?? []);
+        const rows = isCount ? [{ value: 1 }] : (options.tokenRows ?? []);
         return Promise.resolve(rows).then(resolve);
       },
     };
@@ -208,32 +171,6 @@ function fakeDb(options: FakeDbOptions = {}) {
     return api;
   };
 
-  // The transaction handle records an ordered marker sequence so the deleteTeam tests can assert
-  // skill visibility metadata is touched before the team row deletion when shares are affected.
-  const txUpdate = vi.fn(() => {
-    calls.txSequence.push("update");
-    const api = {
-      set(patch: Record<string, unknown>) {
-        calls.txPatch = patch;
-        return api;
-      },
-      where() {
-        return api;
-      },
-      returning() {
-        return Promise.resolve(options.updateReturning ?? [{ ...defaultOrgUpdateRow }]);
-      },
-    };
-    return api;
-  });
-  const txDelete = vi.fn(() => {
-    calls.txSequence.push("delete");
-    return { where: () => Promise.resolve(undefined) };
-  });
-  // deleteTeam now takes an advisory lock and counts teams INSIDE the transaction, so the tx
-  // handle must also answer execute()/select() (the count reuses the same select builder).
-  const txHandle = { update: txUpdate, delete: txDelete, select: vi.fn(selectBuilder), execute: vi.fn(async () => undefined) };
-
   const database = {
     query: {
       memberships: {
@@ -245,21 +182,15 @@ function fakeDb(options: FakeDbOptions = {}) {
       user: {
         findFirst: vi.fn(async () => ({ emailVerified: options.emailVerified ?? true })),
       },
-      teams: {
-        findFirst: vi.fn(async () => (teamFindResults.length ? teamFindResults.shift() ?? null : options.team ?? null)),
-      },
-      teamMemberships: {
-        findFirst: vi.fn(async () => options.teamMembership ?? null),
-      },
     },
     insert: vi.fn(insertBuilder),
     update: vi.fn(updateBuilder),
     delete: vi.fn(deleteBuilder),
     select: vi.fn(selectBuilder),
-    transaction: vi.fn(async (cb: (tx: unknown) => Promise<unknown>) => cb(txHandle)),
+    transaction: vi.fn(async (cb: (tx: unknown) => Promise<unknown>) => cb(database)),
   };
 
-  return { database: database as unknown as Db, calls, txHandle };
+  return { database: database as unknown as Db, calls };
 }
 
 /* ---- updateOrg ------------------------------------------------------------- */
@@ -435,161 +366,6 @@ describe("organization access domains", () => {
 
     await expect(removeOrgAccessDomain({ actor: owner, orgId: ORG_A, domainId: "domain-1", database })).resolves.toBeUndefined();
     expect(calls.deletes).toHaveLength(1);
-  });
-});
-
-/* ---- updateTeam ------------------------------------------------------------ */
-
-describe("updateTeam", () => {
-  it("allows an org admin (not on the team)", async () => {
-    const { database } = fakeDb({
-      role: "admin",
-      team: { id: TEAM_1, orgId: ORG_A },
-      updateReturning: [{ id: TEAM_1, name: "Platform", slug: "platform", description: null }],
-    });
-    await expect(updateTeam({ actor: admin, orgId: ORG_A, teamId: TEAM_1, name: "Platform", database })).resolves.toEqual(
-      { id: TEAM_1, name: "Platform", slug: "platform", description: null },
-    );
-  });
-
-  it("allows a team admin who is not an org admin", async () => {
-    // org role "developer" + team role "admin" => assertCanManageTeam passes.
-    const { database } = fakeDb({
-      role: "developer",
-      team: { id: TEAM_1, orgId: ORG_A },
-      teamMembership: { teamRole: "admin" },
-      updateReturning: [{ id: TEAM_1, name: "Platform", slug: "platform", description: null }],
-    });
-    await expect(
-      updateTeam({ actor: developer, orgId: ORG_A, teamId: TEAM_1, name: "Platform", database }),
-    ).resolves.toMatchObject({ id: TEAM_1 });
-  });
-
-  it("denies a developer who is not a team admin", async () => {
-    const { database } = fakeDb({
-      role: "developer",
-      team: { id: TEAM_1, orgId: ORG_A },
-      teamMembership: { teamRole: "editor" },
-    });
-    await expect(
-      updateTeam({ actor: developer, orgId: ORG_A, teamId: TEAM_1, name: "Platform", database }),
-    ).rejects.toThrow("not allowed to manage team members");
-  });
-
-  it("rejects a per-org duplicate slug", async () => {
-    const { database } = fakeDb({
-      role: "admin",
-      team: { id: TEAM_1, orgId: ORG_A },
-      teamConflict: { id: TEAM_2 },
-    });
-    await expect(
-      updateTeam({ actor: admin, orgId: ORG_A, teamId: TEAM_1, slug: "taken", database }),
-    ).rejects.toThrow("that team URL is already taken");
-  });
-
-  it("collapses an empty description to null", async () => {
-    const { database, calls } = fakeDb({
-      role: "admin",
-      team: { id: TEAM_1, orgId: ORG_A },
-      updateReturning: [{ id: TEAM_1, name: "Platform", slug: "platform", description: null }],
-    });
-    await updateTeam({ actor: admin, orgId: ORG_A, teamId: TEAM_1, description: "   ", database });
-    const teamUpdate = calls.updates.at(-1);
-    expect(teamUpdate?.patch).toMatchObject({ description: null });
-  });
-
-  it("rejects an invalid team color", async () => {
-    const { database } = fakeDb({
-      role: "admin",
-      team: { id: TEAM_1, orgId: ORG_A },
-    });
-    await expect(
-      updateTeam({ actor: admin, orgId: ORG_A, teamId: TEAM_1, color: "url(https://evil.test/x.png)", database }),
-    ).rejects.toThrow("invalid team color");
-  });
-
-  it("accepts a palette team color", async () => {
-    const color = TEAM_BRAND_COLORS[0]!;
-    const { database } = fakeDb({
-      role: "admin",
-      team: { id: TEAM_1, orgId: ORG_A },
-      updateReturning: [{ id: TEAM_1, name: "Platform", slug: "platform", description: null, color, icon: null }],
-    });
-    await expect(updateTeam({ actor: admin, orgId: ORG_A, teamId: TEAM_1, color, database })).resolves.toMatchObject({
-      color,
-    });
-  });
-
-  it("throws when the team is not found", async () => {
-    const { database } = fakeDb({ role: "admin", team: null });
-    await expect(
-      updateTeam({ actor: admin, orgId: ORG_A, teamId: TEAM_1, name: "Platform", database }),
-    ).rejects.toThrow("team not found");
-  });
-});
-
-/* ---- deleteTeam ------------------------------------------------------------ */
-
-describe("deleteTeam", () => {
-  it("allows an org admin", async () => {
-    const { database, txHandle } = fakeDb({ role: "admin", team: { id: TEAM_1, orgId: ORG_A }, teamCount: 2 });
-    await expect(deleteTeam({ actor: admin, orgId: ORG_A, teamId: TEAM_1, database })).resolves.toBeUndefined();
-    expect(txHandle.update).not.toHaveBeenCalled();
-    expect(txHandle.delete).toHaveBeenCalled();
-  });
-
-  it("denies a developer", async () => {
-    const { database } = fakeDb({ role: "developer", team: { id: TEAM_1, orgId: ORG_A }, teamCount: 2 });
-    await expect(deleteTeam({ actor: developer, orgId: ORG_A, teamId: TEAM_1, database })).rejects.toThrow(
-      "not allowed to delete teams",
-    );
-  });
-
-  it("denies a member of another org (cross-tenant)", async () => {
-    const { database } = fakeDb({ role: null, team: { id: TEAM_1, orgId: ORG_A }, teamCount: 2 });
-    await expect(deleteTeam({ actor: stranger, orgId: ORG_A, teamId: TEAM_1, database })).rejects.toThrow(
-      "not allowed to delete teams",
-    );
-  });
-
-  it("rejects deleting the last team (<= 1 team guard)", async () => {
-    const { database, txHandle } = fakeDb({ role: "admin", team: { id: TEAM_1, orgId: ORG_A }, teamCount: 1 });
-    await expect(deleteTeam({ actor: admin, orgId: ORG_A, teamId: TEAM_1, database })).rejects.toThrow(
-      "organization must keep at least one team",
-    );
-    expect(txHandle.delete).not.toHaveBeenCalled();
-  });
-
-  it("deletes the team without touching skills when it owns none", async () => {
-    const { database, calls } = fakeDb({ role: "owner", team: { id: TEAM_1, orgId: ORG_A }, teamCount: 3 });
-
-    await deleteTeam({ actor: owner, orgId: ORG_A, teamId: TEAM_1, database });
-
-    expect(calls.txSequence).toEqual(["delete"]);
-    expect(calls.txPatch).toBeUndefined();
-  });
-
-  it("reverts the team's owned skills to Personal before deleting it", async () => {
-    const { database, calls } = fakeDb({
-      role: "owner",
-      team: { id: TEAM_1, orgId: ORG_A },
-      teamCount: 3,
-      teamOwnedSkills: [{ skillId: "skill-owned-by-team" }],
-    });
-
-    await deleteTeam({ actor: owner, orgId: ORG_A, teamId: TEAM_1, database });
-
-    // A single update (owner_team_id → null) then the delete — no separate share-cascade pass.
-    expect(calls.txSequence).toEqual(["update", "delete"]);
-    expect(calls.txPatch?.updatedAt).toBeInstanceOf(Date);
-    expect(calls.txPatch?.ownerTeamId).toBeNull();
-  });
-
-  it("throws when the team is not found", async () => {
-    const { database } = fakeDb({ role: "admin", team: null, teamCount: 2 });
-    await expect(deleteTeam({ actor: admin, orgId: ORG_A, teamId: TEAM_1, database })).rejects.toThrow(
-      "team not found",
-    );
   });
 });
 

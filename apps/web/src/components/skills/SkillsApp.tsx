@@ -1,20 +1,33 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, type MutableRefObject } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import type { LocalSkillRow, SkillFilterPreferences } from "@companion/contracts";
+import type {
+  LabelColor,
+  LabelIcon,
+  LabelsResponse,
+  LabelVM,
+  LocalSkillRow,
+  SkillFilterPreferences,
+} from "@companion/contracts";
 import {
   archiveSkill as archiveSkillRpc,
+  assignSkillLabel,
+  createLabel as createLabelRpc,
+  deleteLabel as deleteLabelRpc,
   fetchArchivedSkills,
   markSkillInstalled,
   markSkillUninstalled,
+  renameLabel as renameLabelRpc,
   restoreSkill as restoreSkillRpc,
   saveSkillFilterPreferences,
-  setSkillOwner,
+  setLabelColor as setLabelColorRpc,
+  setLabelIcon as setLabelIconRpc,
   toggleStar as toggleStarRpc,
+  unassignSkillLabel,
 } from "@/lib/queries";
 import { fetchSettingsAppData } from "@/lib/settingsClient";
-import { mapSkill, type MeVM, type OrgVM, type SkillVM, type TeamVM } from "@/lib/types";
+import { mapSkill, type MeVM, type OrgVM, type SkillVM } from "@/lib/types";
 import { Sidebar } from "./Sidebar";
 import { ListView } from "./ListView";
 import { ArchivedListView } from "./ArchivedListView";
@@ -37,15 +50,7 @@ import { settingsHref } from "../org/SettingsApp";
 import { SettingsDrawer, SettingsDrawerError } from "../org/SettingsDrawer";
 import { useOrgActions } from "../org/useOrgActions";
 import type { SettingsAppData, SettingsDialog, SettingsIntent, SettingsRoute, SettingsView } from "../org/model";
-import {
-  BUILTIN_VIEWS,
-  chipParts,
-  filtersKey,
-  makeFilter,
-  matchFilters,
-  type Filter,
-  type ViewDef,
-} from "./filters";
+import { matchFilters, type Filter } from "./filters";
 
 const SETTINGS_LOAD_ERROR =
   "Refresh the page to try again. If the problem continues, check that the API and database are reachable.";
@@ -66,8 +71,6 @@ const SETTINGS_VIEWS: readonly SettingsView[] = [
   "general",
   "members",
   "invitations",
-  "team-general",
-  "team-members",
 ];
 
 function isSettingsView(value: string | null): value is SettingsView {
@@ -75,10 +78,9 @@ function isSettingsView(value: string | null): value is SettingsView {
 }
 
 function settingsStateFromIntent(intent?: SettingsIntent): SettingsState {
-  const view: SettingsView = intent?.view ?? (intent?.dialog === "team" ? "general" : "profile");
-  const teamId = view.startsWith("team-") ? intent?.teamId : undefined;
+  const view: SettingsView = intent?.view ?? "profile";
   return {
-    initialRoute: { view, teamId },
+    initialRoute: { view },
     initialDialog: intent?.dialog ?? null,
   };
 }
@@ -87,11 +89,10 @@ function settingsStateFromSearch(search: string): SettingsState {
   const params = new URLSearchParams(search);
   const viewRaw = params.get("view");
   const view: SettingsView = isSettingsView(viewRaw) ? viewRaw : "profile";
-  const teamId = view.startsWith("team-") ? params.get("team") ?? undefined : undefined;
   const dialogRaw = params.get("dialog");
   return {
-    initialRoute: { view, teamId },
-    initialDialog: dialogRaw === "invite" || dialogRaw === "team" ? dialogRaw : null,
+    initialRoute: { view },
+    initialDialog: dialogRaw === "invite" ? dialogRaw : null,
   };
 }
 
@@ -99,29 +100,105 @@ function settingsErrorMessage(error: unknown): string {
   return error instanceof Error && error.message ? error.message : SETTINGS_LOAD_ERROR;
 }
 
-// "Mine" = skills I can edit, keyed by the owner PRINCIPAL id (my user id + the ids of teams I
-// admin/edit) — never display names, so two people with the same name can't collide into each
-// other's "My skills". Maps to owner filters whose value is `SkillOwnerVM.id`.
-function mineOwnerIdsFor(me: MeVM, teams: TeamVM[]): string[] {
-  const editableTeamIds = teams
-    .filter((team) => team.role === "admin" || team.role === "editor")
-    .map((team) => team.dbId)
-    .filter((id): id is string => !!id);
-  return [...new Set([me.id, ...editableTeamIds])];
+/* --- Label tree derivation -------------------------------------------------- */
+
+/**
+ * One flattened node of the derived label tree (depth-ordered, stable lexicographic sort). Derived
+ * in the client from skills + explicit `labels` rows so optimistic assigns / renames re-derive
+ * without a refetch.
+ */
+export interface TreeRow {
+  path: string;
+  leafName: string;
+  depth: number;
+  count: number; // de-duped roll-up of skills filed at this path OR any descendant
+  color: LabelColor | null;
+  icon: LabelIcon | null;
+  hasChildren: boolean;
 }
 
-function normalizeSkillsRoute(route: SkillsRoute, teams: TeamVM[]): SkillsRoute {
-  if (route.kind !== "team") return route;
-  return teams.some((team) => team.id === route.team) ? route : { kind: "all", skill: route.skill };
+const SCOPE_KINDS = ["all", "starred", "nolabel", "label"] as const;
+type ScopeKind = (typeof SCOPE_KINDS)[number];
+type Selection = { kind: ScopeKind; label?: string };
+
+/**
+ * Derive the flattened label tree from the live skills + explicit label appearances. Intermediate
+ * parents are synthesized; roll-up counts are de-duped per skill (a skill filed under `a/b` counts
+ * once for `a` and once for `a/b`). Sorted lexicographically by path for a stable (hydration-safe)
+ * order regardless of insertion order.
+ */
+function deriveTreeRows(skills: SkillVM[], labels: LabelVM[]): TreeRow[] {
+  const appearance = new Map<string, { color: LabelColor | null; icon: LabelIcon | null }>();
+  const paths = new Set<string>();
+  const childPaths = new Set<string>(); // any path that has at least one child (for chevrons)
+  // Per-path set of skill ids contributing to its roll-up count (de-dupe across descendants).
+  const counts = new Map<string, Set<string>>();
+
+  const ensureAncestors = (path: string) => {
+    const segs = path.split("/");
+    for (let i = 1; i <= segs.length; i += 1) {
+      const p = segs.slice(0, i).join("/");
+      paths.add(p);
+      if (i < segs.length) childPaths.add(p);
+    }
+  };
+
+  for (const label of labels) {
+    appearance.set(label.path, { color: label.color, icon: label.icon });
+    ensureAncestors(label.path);
+  }
+  for (const skill of skills) {
+    for (const raw of skill.labels ?? []) {
+      if (!raw) continue;
+      ensureAncestors(raw);
+      const segs = raw.split("/");
+      for (let i = 1; i <= segs.length; i += 1) {
+        const p = segs.slice(0, i).join("/");
+        let set = counts.get(p);
+        if (!set) counts.set(p, (set = new Set()));
+        set.add(skill.uuid);
+      }
+    }
+  }
+
+  return [...paths]
+    .sort((a, b) => a.localeCompare(b))
+    .map((path) => {
+      const segs = path.split("/");
+      const appr = appearance.get(path);
+      return {
+        path,
+        leafName: segs[segs.length - 1] ?? path,
+        depth: segs.length - 1,
+        count: counts.get(path)?.size ?? 0,
+        color: appr?.color ?? null,
+        icon: appr?.icon ?? null,
+        hasChildren: childPaths.has(path),
+      };
+    });
 }
 
-function filtersForSkillsRoute(route: SkillsRoute, mineOwnerIds: string[]): Filter[] {
-  if (route.kind === "mine") return mineOwnerIds.map((id) => ({ type: "owner", value: id }));
-  if (route.kind === "team") return [{ type: "team", value: route.team }];
-  return [];
+/** Whether a skill is filed under `path` OR any descendant of it. */
+function skillUnderLabel(skill: SkillVM, path: string): boolean {
+  return (skill.labels ?? []).some((p) => p === path || p.startsWith(path + "/"));
+}
+
+/** Does a skill belong to the active org-wide scope (sidebar selection)? */
+function skillInSelection(skill: SkillVM, selection: Selection): boolean {
+  if (selection.kind === "starred") return skill.starred;
+  if (selection.kind === "nolabel") return (skill.labels ?? []).length === 0;
+  if (selection.kind === "label") return selection.label ? skillUnderLabel(skill, selection.label) : true;
+  return true;
 }
 
 type SkillsView = "workspace" | "local" | "archived";
+
+function selectionFromRoute(route: SkillsRoute): Selection {
+  if (route.kind === "starred") return { kind: "starred" };
+  if (route.kind === "nolabel") return { kind: "nolabel" };
+  if (route.kind === "label") return { kind: "label", label: route.label };
+  return { kind: "all" };
+}
 
 function skillsViewForRoute(route: SkillsRoute): SkillsView {
   if (route.kind === "local") return "local";
@@ -129,32 +206,21 @@ function skillsViewForRoute(route: SkillsRoute): SkillsView {
   return "workspace";
 }
 
-function applyRouteFilters(
-  route: SkillsRoute,
-  mineOwnerIds: string[],
-  setFilters: (filters: Filter[]) => void,
-  skipNextDebouncedPersistRef: MutableRefObject<boolean>,
-) {
-  skipNextDebouncedPersistRef.current = true;
-  setFilters(filtersForSkillsRoute(route, mineOwnerIds));
-}
-
-function initialFiltersForSkillsRoute(
-  route: SkillsRoute,
-  routeSource: SkillsRouteSource,
-  mineOwnerIds: string[],
-  savedFilters: Filter[],
-): Filter[] {
-  if (routeSource === "default" && route.kind === "all") return savedFilters;
-  return filtersForSkillsRoute(route, mineOwnerIds);
+function routeFromSelection(selection: Selection, skill?: string): SkillsRoute {
+  let route: SkillsRoute;
+  if (selection.kind === "starred") route = { kind: "starred" };
+  else if (selection.kind === "nolabel") route = { kind: "nolabel" };
+  else if (selection.kind === "label" && selection.label) route = { kind: "label", label: selection.label };
+  else route = { kind: "all" };
+  return skill ? skillsRouteWithSkill(route, skill) : route;
 }
 
 export function SkillsApp({
   initialSkills,
   initialLocalSkills,
   initialFilterPreferences,
+  initialLabels,
   me,
-  teams: initialTeams,
   orgs,
   currentOrg,
   initialRoute,
@@ -163,8 +229,8 @@ export function SkillsApp({
   initialSkills: SkillVM[];
   initialLocalSkills: LocalSkillRow[];
   initialFilterPreferences: SkillFilterPreferences;
+  initialLabels: LabelsResponse;
   me: MeVM;
-  teams: TeamVM[];
   orgs: OrgVM[];
   currentOrg: OrgVM;
   initialRoute: SkillsRoute;
@@ -173,27 +239,26 @@ export function SkillsApp({
   const router = useRouter();
   const orgActions = useOrgActions();
   const settingsWarmupRef = useRef<{ orgId: string; promise: Promise<SettingsAppData> } | null>(null);
-  const initialNormalizedRoute = normalizeSkillsRoute(initialRoute, initialTeams);
-  const initialMineOwnerNames = mineOwnerIdsFor(me, initialTeams);
   const [localSettings, setLocalSettings] = useState<LocalSettingsSurface | null>(null);
   const [skills, setSkills] = useState<SkillVM[]>(initialSkills);
-  const [teams, setTeams] = useState<TeamVM[]>(initialTeams);
+  const [labels, setLabels] = useState<LabelVM[]>(initialLabels.flat);
   const [localSkills, setLocalSkills] = useState<LocalSkillRow[]>(initialLocalSkills);
-  const [currentView, setCurrentView] = useState<SkillsView>(() =>
-    skillsViewForRoute(initialNormalizedRoute),
-  );
+  const [currentView, setCurrentView] = useState<SkillsView>(() => skillsViewForRoute(initialRoute));
   const [archivedSkills, setArchivedSkills] = useState<SkillVM[]>([]);
   const [archivedLoaded, setArchivedLoaded] = useState(false);
-  const [filters, setFilters] = useState<Filter[]>(() =>
-    initialFiltersForSkillsRoute(
-      initialNormalizedRoute,
-      initialRouteSource,
-      initialMineOwnerNames,
-      initialFilterPreferences.active_filters,
-    ),
-  );
+  const [selection, setSelection] = useState<Selection>(() => selectionFromRoute(initialRoute));
+  const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
+  const [filters, setFilters] = useState<Filter[]>(() => initialFilterPreferences.active_filters);
+
+  // Synchronous mirrors for optimistic handlers (StrictMode-safe: read current state via the ref,
+  // never gate an RPC on a flag set inside a setState updater — the double-invoke would drop it).
+  const skillsRef = useRef<SkillVM[]>(initialSkills);
+  const labelsRef = useRef<LabelVM[]>(initialLabels.flat);
+  skillsRef.current = skills;
+  labelsRef.current = labels;
+
   useEffect(() => setSkills(initialSkills), [initialSkills]);
-  useEffect(() => setTeams(initialTeams), [initialTeams]);
+  useEffect(() => setLabels(initialLabels.flat), [initialLabels]);
   useEffect(() => setLocalSkills(initialLocalSkills), [initialLocalSkills]);
   useEffect(() => {
     document.cookie = `companion_org=${encodeURIComponent(currentOrg.id)}; path=/; SameSite=Lax`;
@@ -272,25 +337,20 @@ export function SkillsApp({
     setLocalSettings(null);
   }, [currentOrg.id]);
 
-  const [customViews, setCustomViews] = useState<ViewDef[]>(() =>
-    initialFilterPreferences.custom_views.map((v) => ({ ...v, custom: true })),
-  );
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [uploadOpen, setUploadOpen] = useState(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
-  const [isNarrowViewport, setIsNarrowViewport] = useState(false);
   const [updateSkill, setUpdateSkill] = useState<SkillVM | null>(null);
   const [installSkill, setInstallSkill] = useState<SkillVM | null>(null);
-  const [visNotice, setVisNotice] = useState<string | null>(null);
+  const [labelNotice, setLabelNotice] = useState<string | null>(null);
   const [openId, setOpenId] = useState<string | null>(() =>
-    initialNormalizedRoute.kind === "local" ? null : initialNormalizedRoute.skill ?? null,
+    initialRoute.kind === "local" ? null : initialRoute.skill ?? null,
   );
   const [lastId, setLastId] = useState<string | null>(() =>
-    initialNormalizedRoute.kind === "local" ? null : initialNormalizedRoute.skill ?? null,
+    initialRoute.kind === "local" ? null : initialRoute.skill ?? null,
   );
   const [preferenceStatus, setPreferenceStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [toast, setToast] = useState<string | null>(null);
-  const viewSeq = useRef(0);
   const openIdRef = useRef<string | null>(null);
   const uploadReturnRef = useRef<HTMLElement | null>(null);
   const didInitializePersistenceRef = useRef(false);
@@ -300,6 +360,7 @@ export function SkillsApp({
   const skipNextDebouncedPersistRef = useRef(false);
   const preferenceKey = JSON.stringify(initialFilterPreferences);
   const initialRouteKey = skillsRouteKey(initialRoute);
+
   const writeSkillsUrl = useCallback((route: SkillsRoute, history: "push" | "replace") => {
     if (typeof window === "undefined" || window.location.pathname !== "/skills") return;
     const href = skillsRouteHref(route);
@@ -327,7 +388,6 @@ export function SkillsApp({
   useEffect(() => {
     const query = window.matchMedia("(max-width: 820px)");
     const sync = () => {
-      setIsNarrowViewport(query.matches);
       if (!query.matches) setMobileSidebarOpen(false);
     };
     sync();
@@ -335,30 +395,19 @@ export function SkillsApp({
     return () => query.removeEventListener("change", sync);
   }, []);
 
+  // Re-derive selection / open skill / view when the server route (or org) changes.
   useEffect(() => {
-    const route = normalizeSkillsRoute(initialRoute, initialTeams);
-    const routeFilters = initialFiltersForSkillsRoute(
-      route,
-      initialRouteSource,
-      mineOwnerIdsFor(me, initialTeams),
-      initialFilterPreferences.active_filters,
-    );
-    if (initialRouteSource === "default" && route.kind === "all") {
-      setFilters(routeFilters);
-    } else {
-      skipNextDebouncedPersistRef.current = true;
-      setFilters(routeFilters);
-    }
-    setCustomViews(initialFilterPreferences.custom_views.map((v) => ({ ...v, custom: true })));
+    setFilters(initialFilterPreferences.active_filters);
+    setSelection(selectionFromRoute(initialRoute));
     didInitializePersistenceRef.current = false;
     setPreferenceStatus("idle");
-    setOpenId(route.kind === "local" ? null : route.skill ?? null);
-    setLastId(route.kind === "local" ? null : route.skill ?? null);
-    setCurrentView(skillsViewForRoute(route));
+    setOpenId(initialRoute.kind === "local" ? null : initialRoute.skill ?? null);
+    setLastId(initialRoute.kind === "local" ? null : initialRoute.skill ?? null);
+    setCurrentView(skillsViewForRoute(initialRoute));
     if (typeof window !== "undefined" && window.location.pathname === "/skills") {
-      replaceSkillsUrl(route);
+      replaceSkillsUrl(initialRoute);
     }
-  }, [currentOrg.id, preferenceKey, initialFilterPreferences, initialRoute, initialRouteKey, initialRouteSource, initialTeams, me, replaceSkillsUrl]);
+  }, [currentOrg.id, preferenceKey, initialFilterPreferences, initialRoute, initialRouteKey, replaceSkillsUrl]);
 
   const flushPreferenceQueue = useCallback(async () => {
     if (persistInFlightRef.current) return;
@@ -383,16 +432,9 @@ export function SkillsApp({
     }
   }, []);
 
-  const persistPreferences = useCallback((activeFilters: Filter[], savedViews: ViewDef[]) => {
+  const persistPreferences = useCallback((activeFilters: Filter[]) => {
     queuedPreferencesRef.current = {
       active_filters: activeFilters.map((f) => ({ ...f })),
-      custom_views: savedViews.map((v) => ({
-        id: v.id,
-        name: v.name,
-        icon: v.icon,
-        filters: v.filters.map((f) => ({ ...f })),
-        custom: true,
-      })),
     };
     void flushPreferenceQueue();
   }, [flushPreferenceQueue]);
@@ -407,11 +449,11 @@ export function SkillsApp({
       return;
     }
     if (persistTimerRef.current) clearTimeout(persistTimerRef.current);
-    persistTimerRef.current = setTimeout(() => persistPreferences(filters, customViews), 350);
+    persistTimerRef.current = setTimeout(() => persistPreferences(filters), 350);
     return () => {
       if (persistTimerRef.current) clearTimeout(persistTimerRef.current);
     };
-  }, [filters, customViews, persistPreferences]);
+  }, [filters, persistPreferences]);
 
   const openUpload = useCallback(() => {
     uploadReturnRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -422,7 +464,7 @@ export function SkillsApp({
     queueMicrotask(() => uploadReturnRef.current?.focus());
   }, []);
 
-  // --- Optimistic mutations --------------------------------------------------
+  // --- Optimistic mutations: stars / install ---------------------------------
   const toggleStar = useCallback((id: string) => {
     setSkills((arr) =>
       arr.map((s) =>
@@ -430,7 +472,6 @@ export function SkillsApp({
       ),
     );
     toggleStarRpc(id).catch(() => {
-      // revert
       setSkills((arr) =>
         arr.map((s) =>
           s.id === id ? { ...s, starred: !s.starred, stars: s.stars + (s.starred ? -1 : 1) } : s,
@@ -439,78 +480,9 @@ export function SkillsApp({
     });
   }, []);
 
-  // Optimistically move a skill between Personal and a Team, persist it, and revert + toast on
-  // failure. The owner is the single access axis, so this is the one "share / unshare" action.
-  const changeOwner = useCallback(
-    (id: string, ownerTeam: string | null) => {
-      let prev: SkillVM["owner"] | null = null;
-      const team = ownerTeam ? teams.find((t) => t.id === ownerTeam) : null;
-      setSkills((arr) =>
-        arr.map((s) => {
-          if (s.id !== id) return s;
-          prev = s.owner;
-          const nextOwner: SkillVM["owner"] = ownerTeam
-            ? {
-                kind: "team",
-                id: team?.dbId ?? ownerTeam,
-                userId: s.owner.userId,
-                teamId: team?.dbId ?? null,
-                name: team?.name ?? ownerTeam,
-                initials: (team?.name ?? ownerTeam).slice(0, 2).toUpperCase(),
-                handle: ownerTeam,
-                team: team?.name ?? ownerTeam,
-              }
-            : {
-                kind: "user",
-                // "Personal" = private to the actor: making a skill Personal transfers ownership to
-                // the person performing the change (mirrors setSkillOwner on the server).
-                id: me.id,
-                userId: me.id,
-                teamId: null,
-                name: me.name,
-                initials: me.initials,
-                handle: null,
-                team: null,
-              };
-          return { ...s, owner: nextOwner, ownerId: nextOwner.id, teamSlugs: ownerTeam ? [ownerTeam] : [] };
-        }),
-      );
-      // Keep the open skill visible if an active owner-kind filter would now hide it.
-      if (id === openIdRef.current) {
-        setFilters((fs) => {
-          const nextKind = ownerTeam ? "team" : "personal";
-          const hasVisibility = fs.some((f) => f.type === "visibility");
-          if (hasVisibility && !fs.some((f) => f.type === "visibility" && f.value === nextKind)) {
-            return fs.filter((f) => f.type !== "visibility");
-          }
-          return fs;
-        });
-      }
-      return setSkillOwner(id, ownerTeam).catch((err: unknown) => {
-        if (prev) {
-          const restored = prev;
-          setSkills((arr) =>
-            arr.map((s) =>
-              s.id === id
-                ? { ...s, owner: restored, ownerId: restored.id, teamSlugs: restored.kind === "team" && restored.handle ? [restored.handle] : [] }
-                : s,
-            ),
-          );
-        }
-        setVisNotice(err instanceof Error ? err.message : "Could not change the owner.");
-      });
-    },
-    [teams, me],
-  );
-
-  // Mark a published skill installed / not installed for the current user. Optimistic, with rollback;
-  // on success it reconciles with the server's computed status (so "update" stays accurate).
   const setInstalled = useCallback(
     (id: string, installed: boolean) => {
-      // Derive from the current render snapshot, not from a side effect inside the state updater.
-      const target = skills.find((s) => s.id === id);
-      // Marking installed records the current published version, so a later release surfaces an
-      // "update available" hint (and the persisted state matches this optimistic update).
+      const target = skillsRef.current.find((s) => s.id === id);
       const markVersion = target?.version ?? null;
       const prev = target ? { status: target.installStatus, version: target.installedVersion } : null;
       setSkills((arr) =>
@@ -525,7 +497,6 @@ export function SkillsApp({
       const request = installed ? markSkillInstalled(id, markVersion) : markSkillUninstalled(id);
       request
         .then((res) => {
-          // res.installed discriminates the union: true → install result (carries the computed status).
           if (res.installed) {
             setSkills((arr) =>
               arr.map((s) =>
@@ -546,22 +517,182 @@ export function SkillsApp({
           orgActions.setError((e as Error).message);
         });
     },
-    [orgActions, skills],
+    [orgActions],
   );
 
-  // Auto-dismiss the success toast.
+  // --- Optimistic label mutations --------------------------------------------
+  // Every handler captures the previous value, reads current state from a SYNCHRONOUS ref, applies
+  // the optimistic setState, fires the RPC, and reverts on failure. No router.refresh() on success
+  // (it re-derives the route and would close the open detail). Counts re-derive from `skills` in the
+  // tree memo, so adding/removing a label assignment automatically adjusts the roll-up.
+
+  // Assign or unassign a label path on a skill (toggle). The detail "Add to folder" calls this.
+  const toggleSkillLabel = useCallback((skillId: string, path: string) => {
+    const current = skillsRef.current.find((s) => s.id === skillId);
+    if (!current) return;
+    const had = (current.labels ?? []).includes(path);
+    // The server's assignLabel upserts the path AND its ancestors as explicit `labels` rows, so a
+    // newly-assigned folder must persist in the tree even after its last skill is unfiled. Mirror that:
+    // on assign, register any not-yet-known ancestor as an explicit folder (and revert those on failure).
+    const newFolders: string[] = [];
+    if (!had) {
+      const known = new Set(labelsRef.current.map((l) => l.path));
+      const segs = path.split("/");
+      for (let i = 1; i <= segs.length; i += 1) {
+        const p = segs.slice(0, i).join("/");
+        if (!known.has(p)) newFolders.push(p);
+      }
+    }
+    setSkills((arr) =>
+      arr.map((s) =>
+        s.id === skillId
+          ? {
+              ...s,
+              labels: had ? s.labels.filter((p) => p !== path) : [...s.labels, path],
+            }
+          : s,
+      ),
+    );
+    if (newFolders.length) {
+      setLabels((arr) => [...arr, ...newFolders.map((p) => ({ path: p, color: null, icon: null }))]);
+    }
+    const rpc = had ? unassignSkillLabel(skillId, path) : assignSkillLabel(skillId, path);
+    rpc.catch((err: unknown) => {
+      setSkills((arr) =>
+        arr.map((s) =>
+          s.id === skillId
+            ? { ...s, labels: had ? [...s.labels, path] : s.labels.filter((p) => p !== path) }
+            : s,
+        ),
+      );
+      if (newFolders.length) {
+        const remove = new Set(newFolders);
+        setLabels((arr) => arr.filter((l) => !remove.has(l.path)));
+      }
+      setLabelNotice(err instanceof Error ? err.message : "Could not update the skill's folders.");
+    });
+  }, []);
+
+  // Create an empty folder (explicit `labels` row) and select it.
+  const createLabelPath = useCallback(
+    (path: string) => {
+      if (labelsRef.current.some((l) => l.path === path)) {
+        setSelection({ kind: "label", label: path });
+        replaceSkillsUrl({ kind: "label", label: path });
+        return;
+      }
+      const optimistic: LabelVM = { path, color: null, icon: null };
+      setLabels((arr) => [...arr, optimistic]);
+      setSelection({ kind: "label", label: path });
+      setOpenId(null);
+      setExpanded((prev) => {
+        const next = new Set(prev);
+        const segs = path.split("/");
+        for (let i = 1; i < segs.length; i += 1) next.add(segs.slice(0, i).join("/"));
+        return next;
+      });
+      replaceSkillsUrl({ kind: "label", label: path });
+      createLabelRpc(path).catch((err: unknown) => {
+        setLabels((arr) => arr.filter((l) => l.path !== path));
+        setLabelNotice(err instanceof Error ? err.message : "Could not create the folder.");
+      });
+    },
+    [replaceSkillsUrl],
+  );
+
+  const setLabelColorPath = useCallback((path: string, color: LabelColor | null) => {
+    const prev = labelsRef.current.find((l) => l.path === path);
+    const prevColor = prev?.color ?? null;
+    setLabels((arr) => {
+      const exists = arr.some((l) => l.path === path);
+      return exists
+        ? arr.map((l) => (l.path === path ? { ...l, color } : l))
+        : [...arr, { path, color, icon: null }];
+    });
+    setLabelColorRpc(path, color).catch((err: unknown) => {
+      setLabels((arr) => arr.map((l) => (l.path === path ? { ...l, color: prevColor } : l)));
+      setLabelNotice(err instanceof Error ? err.message : "Could not change the folder color.");
+    });
+  }, []);
+
+  const setLabelIconPath = useCallback((path: string, icon: LabelIcon | null) => {
+    const prev = labelsRef.current.find((l) => l.path === path);
+    const prevIcon = prev?.icon ?? null;
+    setLabels((arr) => {
+      const exists = arr.some((l) => l.path === path);
+      return exists
+        ? arr.map((l) => (l.path === path ? { ...l, icon } : l))
+        : [...arr, { path, color: null, icon }];
+    });
+    setLabelIconRpc(path, icon).catch((err: unknown) => {
+      setLabels((arr) => arr.map((l) => (l.path === path ? { ...l, icon: prevIcon } : l)));
+      setLabelNotice(err instanceof Error ? err.message : "Could not change the folder icon.");
+    });
+  }, []);
+
+  const renameLabelPath = useCallback(
+    (from: string, to: string) => {
+      if (from === to) return;
+      const prevLabels = labelsRef.current;
+      const prevSkills = skillsRef.current;
+      const within = (p: string) => p === from || p.startsWith(from + "/");
+      const remap = (p: string) => (within(p) ? to + p.slice(from.length) : p);
+      setLabels((arr) => arr.map((l) => ({ ...l, path: remap(l.path) })));
+      setSkills((arr) => arr.map((s) => ({ ...s, labels: s.labels.map(remap) })));
+      setSelection((sel) =>
+        sel.kind === "label" && sel.label && within(sel.label)
+          ? { kind: "label", label: remap(sel.label) }
+          : sel,
+      );
+      // Keep the URL in sync when the active folder (or an ancestor of it) is the one being renamed,
+      // preserving any open skill so reload/back re-opens it under the new path. Mirrors deleteLabelPath.
+      if (selection.kind === "label" && selection.label && within(selection.label)) {
+        replaceSkillsUrl(
+          routeFromSelection({ kind: "label", label: remap(selection.label) }, openIdRef.current ?? undefined),
+        );
+      }
+      renameLabelRpc(from, to).catch((err: unknown) => {
+        setLabels(prevLabels);
+        setSkills(prevSkills);
+        setLabelNotice(err instanceof Error ? err.message : "Could not rename the folder.");
+      });
+    },
+    [replaceSkillsUrl, selection],
+  );
+
+  const deleteLabelPath = useCallback(
+    (path: string) => {
+      const prevLabels = labelsRef.current;
+      const prevSkills = skillsRef.current;
+      const within = (p: string) => p === path || p.startsWith(path + "/");
+      setLabels((arr) => arr.filter((l) => !within(l.path)));
+      setSkills((arr) => arr.map((s) => ({ ...s, labels: s.labels.filter((p) => !within(p)) })));
+      setSelection((sel) =>
+        sel.kind === "label" && sel.label && within(sel.label) ? { kind: "all" } : sel,
+      );
+      if (selection.kind === "label" && selection.label && within(selection.label)) {
+        replaceSkillsUrl({ kind: "all" });
+      }
+      deleteLabelRpc(path).catch((err: unknown) => {
+        setLabels(prevLabels);
+        setSkills(prevSkills);
+        setLabelNotice(err instanceof Error ? err.message : "Could not delete the folder.");
+      });
+    },
+    [replaceSkillsUrl, selection],
+  );
+
+  // Auto-dismiss toasts.
   useEffect(() => {
     if (!toast) return;
     const timer = setTimeout(() => setToast(null), 3000);
     return () => clearTimeout(timer);
   }, [toast]);
-
-  // Auto-dismiss the visibility notice toast.
   useEffect(() => {
-    if (!visNotice) return;
-    const t = setTimeout(() => setVisNotice(null), 5000);
+    if (!labelNotice) return;
+    const t = setTimeout(() => setLabelNotice(null), 5000);
     return () => clearTimeout(t);
-  }, [visNotice]);
+  }, [labelNotice]);
 
   // --- Archived skills -------------------------------------------------------
   const loadArchived = useCallback(async () => {
@@ -577,7 +708,6 @@ export function SkillsApp({
     }
   }, []);
 
-  // Load the archived list once for the sidebar count (and refresh whenever the org changes).
   useEffect(() => {
     setArchivedSkills([]);
     setArchivedLoaded(false);
@@ -586,8 +716,6 @@ export function SkillsApp({
 
   const archiveSkillById = useCallback(
     (id: string) => {
-      // Optimistically drop it from the normal list so it disappears before the server round-trip;
-      // router.refresh() re-syncs `skills` from props (and restores it on failure).
       setSkills((arr) => arr.filter((s) => s.id !== id));
       setOpenId((cur) => {
         if (cur !== id) return cur;
@@ -606,7 +734,6 @@ export function SkillsApp({
 
   const restoreSkillById = useCallback(
     (id: string) => {
-      // Optimistically drop it from the archived list; refresh both lists from the server.
       setArchivedSkills((arr) => arr.filter((s) => s.id !== id));
       setOpenId((cur) => {
         if (cur !== id) return cur;
@@ -624,195 +751,107 @@ export function SkillsApp({
   );
 
   // --- Derived ---------------------------------------------------------------
-  // Distinct skill owners, keyed by principal id (so same-named owners stay separate), label = name.
-  const owners = useMemo(() => {
-    const byId = new Map<string, string>();
-    for (const s of skills) if (!byId.has(s.owner.id)) byId.set(s.owner.id, s.owner.name);
-    return [...byId.entries()].map(([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name));
-  }, [skills]);
-  const ownerNameById = useMemo(() => Object.fromEntries(owners.map((o) => [o.id, o.name])), [owners]);
-  const teamCounts = useMemo(() => {
-    const c: Record<string, number> = {};
-    skills.forEach((s) => {
-      for (const slug of s.teamSlugs) c[slug] = (c[slug] || 0) + 1;
-    });
-    return c;
-  }, [skills]);
+  const treeRows = useMemo(() => deriveTreeRows(skills, labels), [skills, labels]);
+  const starredCount = useMemo(() => skills.filter((s) => s.starred).length, [skills]);
 
-  const views = useMemo(() => [...BUILTIN_VIEWS, ...customViews], [customViews]);
-  const viewCounts = useMemo(() => {
-    const c: Record<string, number> = {};
-    views.forEach((v) => {
-      c[v.id] = skills.filter((s) => matchFilters(s, v.filters)).length;
-    });
-    return c;
-  }, [views, skills]);
+  // The active scope + the in-list filter chips both gate the list.
+  const filtered = useMemo(
+    () => skills.filter((s) => skillInSelection(s, selection) && matchFilters(s, filters)),
+    [skills, selection, filters],
+  );
 
-  const filtered = useMemo(() => skills.filter((s) => matchFilters(s, filters)), [skills, filters]);
-  const key = filtersKey(filters);
-  const activeViewId = views.find((v) => filtersKey(v.filters) === key)?.id ?? null;
-  const canSaveView = filters.length > 0 && !activeViewId;
-  const activeTeam = filters.find((f) => f.type === "team")?.value ?? null;
-  const isAll = filters.length === 0;
-  const editableTeams = useMemo(
-    () => teams.filter((team) => team.role === "admin" || team.role === "editor"),
-    [teams],
-  );
-  const mineOwnerIds = useMemo(
-    () => mineOwnerIdsFor(me, teams),
-    [me, teams],
-  );
-  const mineOwnerKey = useMemo(() => filtersKey(mineOwnerIds.map((name) => ({ type: "owner", value: name }))), [mineOwnerIds]);
-  const isMine = filters.length > 0 && filters.every((f) => f.type === "owner") && filtersKey(filters) === mineOwnerKey;
+  const activeLabel = selection.kind === "label" ? selection.label ?? null : null;
+  const breadcrumb = useMemo(() => {
+    if (selection.kind === "starred") return ["Starred"];
+    if (selection.kind === "nolabel") return ["No folder"];
+    if (selection.kind === "label" && selection.label) return selection.label.split("/");
+    return ["All skills"];
+  }, [selection]);
+
   const routeForCurrentSurface = useCallback(
     (skillId?: string): SkillsRoute => {
-      const teamFilter = filters.length === 1 && filters[0]?.type === "team" ? filters[0].value : null;
-      const route: SkillsRoute =
-        currentView === "archived"
-          ? { kind: "archived" }
-          : currentView === "workspace" && isMine
-            ? { kind: "mine" }
-            : currentView === "workspace" && teamFilter
-              ? { kind: "team", team: teamFilter }
-              : { kind: "all" };
-      return skillId ? skillsRouteWithSkill(route, skillId) : route;
+      if (currentView === "archived") {
+        return skillId ? { kind: "archived", skill: skillId } : { kind: "archived" };
+      }
+      return routeFromSelection(selection, skillId);
     },
-    [currentView, filters, isMine],
-  );
-  const myCount = useMemo(
-    () =>
-      skills.filter((s) =>
-        s.owner.kind === "user"
-          ? s.owner.userId === me.id
-          : editableTeams.some((team) => team.dbId === s.owner.teamId || team.id === s.owner.handle),
-      ).length,
-    [skills, me.id, editableTeams],
+    [currentView, selection],
   );
 
-  // --- View / filter actions -------------------------------------------------
-  const selectView = useCallback(
-    (id: string) => {
-      const v = [...BUILTIN_VIEWS, ...customViews].find((x) => x.id === id);
-      if (v) {
-        setCurrentView("workspace");
-        setFilters(v.filters.map((f) => ({ ...f })));
-        setOpenId(null);
-        replaceSkillsUrl({ kind: "all" });
-      }
-    },
-    [customViews, replaceSkillsUrl],
-  );
+  // --- Filter actions (in-list bar: status / deps / starred) -----------------
   const toggleFilter = useCallback((type: Filter["type"], value: string) => {
-    setCurrentView("workspace");
-    setOpenId(null);
-    replaceSkillsUrl({ kind: "all" });
     setFilters((fs) =>
       fs.some((f) => f.type === type && f.value === value)
         ? fs.filter((f) => !(f.type === type && f.value === value))
-        : (() => {
-            const next = makeFilter(type, value);
-            return next ? [...fs, next] : fs;
-          })(),
+        : ([...fs, { type, value }] as Filter[]),
     );
-  }, [replaceSkillsUrl]);
-  const removeFilter = useCallback(
-    (f: Filter) => {
-      setCurrentView("workspace");
-      setOpenId(null);
-      replaceSkillsUrl({ kind: "all" });
-      setFilters((fs) => fs.filter((x) => !(x.type === f.type && x.value === f.value)));
-    },
-    [replaceSkillsUrl],
-  );
-  const clearFilters = useCallback(() => {
-    setCurrentView("workspace");
-    setOpenId(null);
-    replaceSkillsUrl({ kind: "all" });
-    setFilters([]);
-  }, [replaceSkillsUrl]);
-  const saveView = useCallback(() => {
-    const name =
-      filters
-        .map((f) => chipParts(f).val)
-        .map((v) => v[0]?.toUpperCase() + v.slice(1))
-        .join(" · ") || "View";
-    viewSeq.current += 1;
-    const view = {
-      id: `view-${Date.now()}-${viewSeq.current}`,
-      name,
-      icon: "bookmark",
-      custom: true,
-      filters: filters.map((f) => ({ ...f })),
-    } satisfies ViewDef;
-    const nextCustomViews = [...customViews, view];
-    skipNextDebouncedPersistRef.current = true;
-    setCustomViews(nextCustomViews);
-    persistPreferences(filters, nextCustomViews);
-  }, [customViews, filters, persistPreferences]);
-  const renameView = useCallback(
-    (id: string, name: string) => {
-      const trimmed = name.trim().slice(0, 128);
-      if (!trimmed) return;
-      const next = customViews.map((v) => (v.id === id ? { ...v, name: trimmed } : v));
-      skipNextDebouncedPersistRef.current = true;
-      setCustomViews(next);
-      persistPreferences(filters, next);
-    },
-    [customViews, filters, persistPreferences],
-  );
-  const deleteView = useCallback(
-    (id: string) => {
-      const target = customViews.find((v) => v.id === id);
-      const next = customViews.filter((v) => v.id !== id);
-      const wasActive = !!target && filtersKey(target.filters) === filtersKey(filters);
-      if (wasActive) {
-        setFilters([]);
-        setOpenId(null);
-        replaceSkillsUrl({ kind: "all" });
-      }
-      skipNextDebouncedPersistRef.current = true;
-      setCustomViews(next);
-      persistPreferences(wasActive ? [] : filters, next);
-    },
-    [customViews, filters, persistPreferences, replaceSkillsUrl],
-  );
+  }, []);
+  const removeFilter = useCallback((f: Filter) => {
+    setFilters((fs) => fs.filter((x) => !(x.type === f.type && x.value === f.value)));
+  }, []);
+  const clearFilters = useCallback(() => setFilters([]), []);
   const retryPreferenceSave = useCallback(() => {
-    if (!queuedPreferencesRef.current) persistPreferences(filters, customViews);
+    if (!queuedPreferencesRef.current) persistPreferences(filters);
     else void flushPreferenceQueue();
-  }, [customViews, filters, flushPreferenceQueue, persistPreferences]);
+  }, [filters, flushPreferenceQueue, persistPreferences]);
+
+  // --- Selection / navigation ------------------------------------------------
   const applySkillsRoute = useCallback(
     (route: SkillsRoute, history: "push" | "replace" | "none") => {
-      const normalized = normalizeSkillsRoute(route, teams);
-      setCurrentView(skillsViewForRoute(normalized));
-      applyRouteFilters(normalized, mineOwnerIds, setFilters, skipNextDebouncedPersistRef);
-      const nextOpenId = normalized.kind === "local" ? null : normalized.skill ?? null;
+      setCurrentView(skillsViewForRoute(route));
+      setSelection(selectionFromRoute(route));
+      const nextOpenId = route.kind === "local" ? null : route.skill ?? null;
       setOpenId(nextOpenId);
       setLastId(nextOpenId);
       if (history === "none" || typeof window === "undefined") return;
-      const href = skillsRouteHref(normalized);
+      const href = skillsRouteHref(route);
       const currentHref = `${window.location.pathname}${window.location.search}`;
       if (currentHref === href) return;
       if (history === "push") window.history.pushState(window.history.state, "", href);
       else window.history.replaceState(window.history.state, "", href);
     },
-    [mineOwnerIds, teams],
+    [],
   );
-  const selectTeam = useCallback((teamId: string) => {
-    applySkillsRoute({ kind: "team", team: teamId }, "push");
-  }, [applySkillsRoute]);
-  const selectAll = useCallback(() => {
-    applySkillsRoute({ kind: "all" }, "push");
-  }, [applySkillsRoute]);
-  const selectMine = useCallback(() => {
-    applySkillsRoute({ kind: "mine" }, "push");
-  }, [applySkillsRoute]);
-  const selectLocal = useCallback(() => {
-    applySkillsRoute({ kind: "local" }, "push");
-  }, [applySkillsRoute]);
+  const selectAll = useCallback(() => applySkillsRoute({ kind: "all" }, "push"), [applySkillsRoute]);
+  const selectStarred = useCallback(() => applySkillsRoute({ kind: "starred" }, "push"), [applySkillsRoute]);
+  const selectLabel = useCallback(
+    (path: string) => applySkillsRoute({ kind: "label", label: path }, "push"),
+    [applySkillsRoute],
+  );
+  const selectLocal = useCallback(() => applySkillsRoute({ kind: "local" }, "push"), [applySkillsRoute]);
   const selectArchived = useCallback(() => {
     loadArchived();
     applySkillsRoute({ kind: "archived" }, "push");
   }, [applySkillsRoute, loadArchived]);
+
+  const toggleExpand = useCallback((path: string) => {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  }, []);
+
+  // Selecting a label auto-expands its ancestors so the row is reachable in the tree.
+  useEffect(() => {
+    if (selection.kind !== "label" || !selection.label) return;
+    const segs = selection.label.split("/");
+    if (segs.length < 2) return;
+    setExpanded((prev) => {
+      let changed = false;
+      const next = new Set(prev);
+      for (let i = 1; i < segs.length; i += 1) {
+        const p = segs.slice(0, i).join("/");
+        if (!next.has(p)) {
+          next.add(p);
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [selection]);
+
   const localUpdateCount = useMemo(
     () => localSkills.filter((s) => s.status === "update").length,
     [localSkills],
@@ -824,9 +863,6 @@ export function SkillsApp({
         showLocalSettings(settingsStateFromSearch(window.location.search), false);
         return;
       }
-      // Closing the drawer drops the warmed snapshot so the next open re-fetches current server
-      // state (a hover re-warms it). Otherwise optimistic in-drawer mutations wouldn't survive a
-      // close/reopen until a full page refresh.
       settingsWarmupRef.current = null;
       setLocalSettings(null);
       if (window.location.pathname === "/skills") {
@@ -834,6 +870,7 @@ export function SkillsApp({
         const source = skillsRouteSource(window.location.search);
         if (source === "default" && route.kind === "all") {
           setCurrentView("workspace");
+          setSelection({ kind: "all" });
           if (!openIdRef.current) setFilters(initialFilterPreferences.active_filters);
           setOpenId(null);
           setLastId(null);
@@ -848,7 +885,6 @@ export function SkillsApp({
   }, [applySkillsRoute, initialFilterPreferences.active_filters, loadArchived, showLocalSettings]);
 
   // --- Open / navigate -------------------------------------------------------
-  // The detail view draws from the archived list when that view is active, else the filtered list.
   const detailPool = currentView === "archived" ? archivedSkills : filtered;
   const index = openId ? detailPool.findIndex((s) => s.id === openId) : -1;
   const skill = index >= 0 ? detailPool[index] : null;
@@ -856,10 +892,7 @@ export function SkillsApp({
 
   const open = useCallback((id: string) => {
     const openingFromWorkspace = currentView === "workspace";
-    if (!openingFromWorkspace) {
-      setCurrentView("workspace");
-      setFilters([]);
-    }
+    if (!openingFromWorkspace) setCurrentView("workspace");
     setUploadOpen(false);
     setOpenId(id);
     setLastId(id);
@@ -874,16 +907,12 @@ export function SkillsApp({
     pushSkillsUrl({ kind: "archived", skill: id });
   }, [pushSkillsUrl]);
 
-  // Open a skill by slug from a dependency link. A visible dependency target is always in exactly
-  // one list: if it is not in the live workspace list it is archived (archived skills stay viewable).
-  // For an archived target we fetch the archived list and await it BEFORE setting openId, so the
-  // detail pool already contains the skill and the "drop out of filter" effect can't close it first.
   const openSkillBySlug = useCallback(
     async (slug: string) => {
       setUploadOpen(false);
-      if (skills.some((s) => s.id === slug)) {
+      if (skillsRef.current.some((s) => s.id === slug)) {
         setCurrentView("workspace");
-        setFilters([]);
+        setSelection({ kind: "all" });
         setOpenId(slug);
         setLastId(slug);
         pushSkillsUrl({ kind: "all", skill: slug });
@@ -895,7 +924,7 @@ export function SkillsApp({
       setLastId(slug);
       pushSkillsUrl({ kind: "archived", skill: slug });
     },
-    [loadArchived, pushSkillsUrl, skills],
+    [loadArchived, pushSkillsUrl],
   );
   const back = useCallback(() => {
     if (
@@ -926,75 +955,13 @@ export function SkillsApp({
     [detailPool, replaceSkillsUrl, routeForCurrentSurface],
   );
 
-  // If the open skill drops out of the filter, fall back to the list.
+  // If the open skill drops out of the filtered slice, fall back to the list.
   useEffect(() => {
     if (!openId || index >= 0) return;
     if (currentView === "archived" && !archivedLoaded) return;
     setOpenId(null);
     replaceSkillsUrl(routeForCurrentSurface());
   }, [archivedLoaded, currentView, index, openId, replaceSkillsUrl, routeForCurrentSurface]);
-
-  useEffect(() => {
-    const onTeamUpdated = (event: Event) => {
-      const detail = (event as CustomEvent<{
-        id: string;
-        slug: string;
-        name: string;
-        color: string | null;
-        icon: string | null;
-      }>).detail;
-      if (!detail?.id || !detail.slug) return;
-      const previousSlug = teams.find((team) => team.dbId === detail.id || team.id === detail.slug)?.id;
-      setTeams((rows) =>
-        rows.map((team) =>
-          team.dbId === detail.id || team.id === detail.slug
-            ? { ...team, id: detail.slug, dbId: detail.id, name: detail.name, color: detail.color, icon: detail.icon }
-            : team,
-        ),
-      );
-      setSkills((rows) =>
-        rows.map((skill) => {
-          // Owner is the single access axis: only team-owned skills track a team slug/name to update.
-          if (skill.owner.kind !== "team") return skill;
-          const matches =
-            skill.owner.teamId === detail.id ||
-            (previousSlug ? skill.owner.handle === previousSlug : skill.owner.handle === detail.slug);
-          if (!matches) return skill;
-          const nextOwner: SkillVM["owner"] = {
-            ...skill.owner,
-            teamId: detail.id,
-            handle: detail.slug,
-            name: detail.name,
-            team: detail.name,
-          };
-          return { ...skill, owner: nextOwner, ownerId: nextOwner.id, teamSlugs: [detail.slug] };
-        }),
-      );
-      setFilters((rows) =>
-        rows.map((filter) =>
-          filter.type === "team" && previousSlug && filter.value === previousSlug && previousSlug !== detail.slug
-            ? { ...filter, value: detail.slug }
-            : filter,
-        ),
-      );
-      setCustomViews((rows) =>
-        rows.map((view) => ({
-          ...view,
-          filters: view.filters.map((filter) =>
-            filter.type === "team" && previousSlug && filter.value === previousSlug && previousSlug !== detail.slug
-              ? { ...filter, value: detail.slug }
-              : filter,
-          ),
-        })),
-      );
-      const route = parseSkillsRoute(window.location.search);
-      if (route.kind === "team" && previousSlug && route.team === previousSlug && previousSlug !== detail.slug) {
-        replaceSkillsUrl({ kind: "team", team: detail.slug, skill: route.skill });
-      }
-    };
-    window.addEventListener("companion:team-updated", onTeamUpdated);
-    return () => window.removeEventListener("companion:team-updated", onTeamUpdated);
-  }, [replaceSkillsUrl, teams]);
 
   useEffect(() => {
     if (!mobileSidebarOpen) return;
@@ -1030,7 +997,6 @@ export function SkillsApp({
   // Keyboard: ⌘K toggles palette; Esc back to list; ↑/↓ move between skills.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      // Modal dialogs own the keyboard while open (their own Esc closes them).
       if (uploadOpen || updateSkill || installSkill) return;
       if (mobileSidebarOpen && e.key === "Escape") {
         e.preventDefault();
@@ -1061,6 +1027,9 @@ export function SkillsApp({
     return () => window.removeEventListener("keydown", onKey);
   }, [openId, paletteOpen, mobileSidebarOpen, uploadOpen, updateSkill, installSkill, back, go]);
 
+  const localActive = currentView === "local";
+  const archivedActive = currentView === "archived";
+
   return (
     <div className={"app app--skills" + (mobileSidebarOpen ? " app--side-open" : "")}>
       <Sidebar
@@ -1072,25 +1041,28 @@ export function SkillsApp({
         onWarmSettings={() => {
           void warmSettings();
         }}
-        teams={teams}
+        treeRows={treeRows}
+        expanded={expanded}
+        onToggleExpand={toggleExpand}
+        selection={currentView === "workspace" ? selection : { kind: "all" }}
         totalCount={skills.length}
-        myCount={myCount}
-        teamCounts={teamCounts}
-        activeTeam={currentView === "workspace" ? activeTeam : null}
-        isMine={currentView === "workspace" && isMine}
-        workspaceActive={currentView === "workspace" && isAll}
+        starredCount={starredCount}
         onOpenPalette={() => setPaletteOpen(true)}
-        onSelectMine={selectMine}
         onSelectAll={selectAll}
-        onSelectTeam={selectTeam}
+        onSelectStarred={selectStarred}
+        onSelectLabel={selectLabel}
+        onCreateLabel={createLabelPath}
+        onSetLabelColor={setLabelColorPath}
+        onSetLabelIcon={setLabelIconPath}
+        onRenameLabel={renameLabelPath}
+        onDeleteLabel={deleteLabelPath}
         onSelectLocal={selectLocal}
         onSelectArchived={selectArchived}
-        localActive={currentView === "local"}
+        localActive={localActive}
         localUpdateCount={localUpdateCount}
-        archivedActive={currentView === "archived"}
+        archivedActive={archivedActive}
         archivedCount={archivedSkills.length}
         mobileOpen={mobileSidebarOpen}
-        compactRail={isNarrowViewport && !mobileSidebarOpen}
         onToggleMobile={() => setMobileSidebarOpen((open) => !open)}
         onCloseMobile={() => setMobileSidebarOpen(false)}
       />
@@ -1112,13 +1084,14 @@ export function SkillsApp({
             total={detailPool.length}
             me={me}
             myRole={currentOrg.myRole}
-            teams={teams}
+            allLabels={treeRows.map((r) => r.path)}
             onBack={back}
             onPrev={() => go(-1)}
             onNext={() => go(1)}
             onToggleStar={() => toggleStar(skill.id)}
             onToggleInstalled={() => setInstalled(skill.id, skill.installStatus === "none")}
-            onChangeOwner={(ownerTeam) => changeOwner(skill.id, ownerTeam)}
+            onToggleLabel={(path) => toggleSkillLabel(skill.id, path)}
+            onSelectLabel={selectLabel}
             onInstall={() => setInstallSkill(skill)}
             onUpdate={() => setUpdateSkill(skill)}
             onOpenSkill={openSkillBySlug}
@@ -1135,27 +1108,18 @@ export function SkillsApp({
         ) : (
           <ListView
             skills={filtered}
+            breadcrumb={breadcrumb}
+            activeLabel={activeLabel}
             onOpen={open}
             onToggleStar={toggleStar}
             onUpload={openUpload}
             lastId={lastId}
-            views={views}
-            activeViewId={activeViewId}
-            onSelectView={selectView}
-            onRenameView={renameView}
-            onDeleteView={deleteView}
             filters={filters}
             onToggleFilter={toggleFilter}
             onRemoveFilter={removeFilter}
-            canSaveView={canSaveView}
-            onSaveView={saveView}
             onClearFilters={clearFilters}
             preferenceStatus={preferenceStatus}
             onRetryPreferences={retryPreferenceSave}
-            owners={owners}
-            ownerNameById={ownerNameById}
-            teams={teams}
-            viewCounts={viewCounts}
           />
         )}
       </div>
@@ -1173,8 +1137,8 @@ export function SkillsApp({
       {uploadOpen && (
         <UploadDialog
           mode="create"
-          teams={teams}
-          defaultOwnerTeam={activeTeam}
+          allLabels={treeRows.map((r) => r.path)}
+          defaultLabels={activeLabel ? [activeLabel] : []}
           onClose={closeUpload}
           onPublished={() => router.refresh()}
         />
@@ -1183,7 +1147,7 @@ export function SkillsApp({
         <UploadDialog
           mode="update"
           skill={updateSkill}
-          teams={teams}
+          allLabels={treeRows.map((r) => r.path)}
           onClose={() => setUpdateSkill(null)}
           onPublished={() => router.refresh()}
         />
@@ -1191,9 +1155,9 @@ export function SkillsApp({
       {installSkill && (
         <InstallDialog skill={installSkill} onClose={() => setInstallSkill(null)} />
       )}
-      {visNotice && (
-        <div className="og-toast" role="alert" onClick={() => setVisNotice(null)}>
-          {visNotice}
+      {labelNotice && (
+        <div className="og-toast" role="alert" onClick={() => setLabelNotice(null)}>
+          {labelNotice}
         </div>
       )}
       {orgActions.onboarding && (

@@ -19,16 +19,15 @@ const richGraph: SkillDependenciesResponse = {
   slug: "web-archiver",
   version: "0.4.2",
   requires: [
-    { slug: "log-parser", status: "satisfied", owner_kind: "team", note: null, can_open: true },
-    { slug: "html-sanitize", status: "missing", owner_kind: null, note: "not published to this workspace", can_open: false },
-    { slug: "screenshot-grab", status: "archived", owner_kind: "team", note: "publisher archived this skill", can_open: true },
-    { slug: "slack-notify", status: "visibility", owner_kind: "user", note: "not visible to everyone who can install web-archiver", can_open: true },
-    { slug: "granite-recall", status: "cycle", owner_kind: "team", note: "granite-recall already requires web-archiver", can_open: true },
+    { slug: "log-parser", status: "satisfied", note: null, can_open: true },
+    { slug: "html-sanitize", status: "missing", note: "not published to this workspace", can_open: false },
+    { slug: "screenshot-grab", status: "archived", note: "publisher archived this skill", can_open: true },
+    { slug: "granite-recall", status: "cycle", note: "granite-recall already requires web-archiver", can_open: true },
   ],
   used_by: [
-    { slug: "ops-runbook", status: "satisfied", owner_kind: "team", archived: false, note: null, can_open: true },
+    { slug: "ops-runbook", status: "satisfied", archived: false, note: null, can_open: true },
   ],
-  requires_n: 5,
+  requires_n: 4,
   used_by_n: 1,
 };
 
@@ -38,7 +37,6 @@ describe("DependenciesTab", () => {
     expect(html).toContain("Satisfied");
     expect(html).toContain("Missing");
     expect(html).toContain("Archived");
-    expect(html).toContain("Visibility mismatch");
     expect(html).toContain("Cycle blocked");
     // A cycle row is flagged as blocked.
     expect(html).toContain("dprow--blocked");

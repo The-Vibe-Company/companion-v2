@@ -1,34 +1,31 @@
 import { z } from "zod";
-import { validationStateSchema, visibilityFilterSchema } from "./scope";
+import { validationStateSchema } from "./scope";
+import { labelPathSchema } from "./labels";
 
-export const skillFilterTypeSchema = z.enum(["visibility", "status", "starred", "owner", "team", "deps"]);
+/**
+ * The active skill filters a member has applied. Skills are flat and org-wide, so the only axes are
+ * validation status, starred, dependency relationships, and the org-wide label folders (a specific
+ * label path, or the "no label" pseudo-filter).
+ */
+export const skillFilterTypeSchema = z.enum(["status", "starred", "deps", "label", "nolabel"]);
 export type SkillFilterType = z.infer<typeof skillFilterTypeSchema>;
 
 export const depsFilterSchema = z.enum(["has", "used"]);
 export type DepsFilter = z.infer<typeof depsFilterSchema>;
 
 export const skillFilterSchema = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("visibility"), value: visibilityFilterSchema }),
   z.object({ type: z.literal("status"), value: validationStateSchema }),
   z.object({ type: z.literal("starred"), value: z.literal("true") }),
-  z.object({ type: z.literal("owner"), value: z.string().min(1).max(256) }),
-  z.object({ type: z.literal("team"), value: z.string().min(1).max(128) }),
   // "has" = declares dependencies; "used" = depended on by another skill.
   z.object({ type: z.literal("deps"), value: depsFilterSchema }),
+  // Filed under a specific label path (or any descendant of it).
+  z.object({ type: z.literal("label"), value: labelPathSchema }),
+  // Filed under no label at all.
+  z.object({ type: z.literal("nolabel"), value: z.literal("true") }),
 ]);
 export type SkillFilter = z.infer<typeof skillFilterSchema>;
 
-export const skillSavedViewSchema = z.object({
-  id: z.string().min(1).max(128),
-  name: z.string().min(1).max(128),
-  icon: z.string().min(1).max(64),
-  filters: z.array(skillFilterSchema).max(20),
-  custom: z.literal(true).optional(),
-});
-export type SkillSavedView = z.infer<typeof skillSavedViewSchema>;
-
 export const skillFilterPreferencesSchema = z.object({
   active_filters: z.array(skillFilterSchema).max(20).default([]),
-  custom_views: z.array(skillSavedViewSchema).max(50).default([]),
 });
 export type SkillFilterPreferences = z.infer<typeof skillFilterPreferencesSchema>;

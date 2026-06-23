@@ -17,14 +17,11 @@ describe("SettingsController", () => {
     const { settingsHref } = await import("./SettingsApp");
 
     expect(settingsHref({ view: "general" }, null)).toBe("/settings?view=general");
-    expect(settingsHref({ view: "team-general", teamId: "team_1" }, "team")).toBe(
-      "/settings?view=team-general&team=team_1&dialog=team",
-    );
-    // `team` is only serialized for team panes.
-    expect(settingsHref({ view: "profile", teamId: "team_1" }, null)).toBe("/settings?view=profile");
+    expect(settingsHref({ view: "members" }, "invite")).toBe("/settings?view=members&dialog=invite");
+    expect(settingsHref({ view: "profile" }, null)).toBe("/settings?view=profile");
   });
 
-  it("normalizes malformed member and team collections before rendering", async () => {
+  it("normalizes malformed member collections before rendering", async () => {
     const { SettingsController } = await import("./SettingsApp");
     const data = {
       me: { id: "user_1", name: "Admin", email: "admin@tvc.dev", initials: "A" },
@@ -46,7 +43,6 @@ describe("SettingsController", () => {
         domainAutoJoin: false,
         accessDomains: [],
         members: {},
-        teams: [{ id: "team_1", slug: "platform", name: "Platform", description: "", color: null, icon: null, members: {} }],
       },
     } as unknown as SettingsAppData;
 

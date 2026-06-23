@@ -12,10 +12,10 @@
 ## 1. Summary
 
 Companion v2 is an open-source, self-hostable, multi-tenant portal to **deploy, govern, and share** AI
-agents, curated containers, and skills across an organization and its teams. It turns the
+agents, curated containers, and skills across an organization. It turns the
 single-operator Companion v1 engine (Hermes runtime, Granite memory, OpenRouter, pluggable infra) into
-a collaborative web product with an **Organization → Team → User** hierarchy, **RBAC**, and per-resource
-**workspace visibility** (Private / team shares / Everyone).
+a collaborative web product with an **Organization → User** hierarchy, **RBAC**, and org-wide skills
+organized by **shared labels** (no per-resource visibility flags).
 
 ## 2. Problem
 
@@ -43,23 +43,22 @@ one person. There is no open, self-hostable answer for a **team**.
 
 ## 4. MVP definition (V0)
 
-> **The thinnest genuinely-useful slice:** a self-hosted Companion v2 where a team can deploy a real
-> Hermès agent, deploy one approved container from a curated catalog, and upload + attach one versioned
-> skill — all under **Org → Team → User** RBAC with workspace-local visibility, on **one** deployment
-> provider.
+> **The thinnest genuinely-useful slice:** a self-hosted Companion v2 where an org can deploy a real
+> Hermès agent, deploy one approved container from a curated catalog, and upload + label one versioned
+> skill — all under **Org → User** RBAC with org-wide skills, on **one** deployment provider.
 
 ### In scope (V0)
 
 | Area | Included |
 |---|---|
 | **Install** | Single `docker compose up` bundle: Postgres, object storage (MinIO), Mailpit for local email, web portal, and API. First user becomes Org Owner. Temporal is prepared but deferred. |
-| **Identity & access** | Organization → Team → User; email invitations; RBAC roles (Org Owner/Admin/Developer, Team Admin/Editor/Reader); user/team ownership; visibility through Private, team shares, and Everyone. |
+| **Identity & access** | Organization → User; email invitations; RBAC roles (Org Owner/Admin/Developer); skills are org-wide (no owner, no visibility flags) and organized with shared labels. |
 | **Providers** | **Local Docker** provider behind the pluggable interface; **Fly.io Machines** as fast-follow. (Kubernetes & Modal deferred to V1.) |
 | **Pillar 1 — Agents** | Deploy ≥1 Hermès agent template; choose model via OpenRouter; attach skills; attach a Granite vault; chat surface. |
 | **Pillar 2 — Containers** | Org-admin **approval** of images into the catalog; **1-click deploy** of ≥1 container; surface connection details/secrets. |
-| **Pillar 3 — Skills** | Upload + **validate** + **version** ≥1 `SKILL.md` package; set visibility; **attach** to an agent; sync into the runtime. |
+| **Pillar 3 — Skills** | Upload + **validate** + **version** ≥1 `SKILL.md` package; organize with shared labels; **attach** to an agent; sync into the runtime. |
 | **Memory** | **Granite** vault provisioned and mounted for the agent (concrete V0 integration). |
-| **Dashboard** | Basic list/detail views of agents, containers, and skills filtered by visibility; deployment status & logs. |
+| **Dashboard** | Basic list/detail views of agents, containers, and skills (skills filterable by label, status, dependencies, and stars); deployment status & logs. |
 | **Secrets** | Encrypted, write-only secret storage; OpenRouter and provider credentials referenced, never inlined. |
 | **Audit** | Append-only audit log of mutating, deploy, and exec actions (in-app view minimal). |
 
@@ -77,47 +76,44 @@ networking parity with v1.
 Each requirement has user stories with acceptance criteria. Priorities: **P0** = MVP, **P1** = V1,
 **P2** = V2.
 
-### 5.1 Organizations, teams & membership (P0)
+### 5.1 Organizations & membership (P0)
 - As an operator, on first run I become **Org Owner** so I can configure the org. *AC:* first
   authenticated user is granted `owner`; subsequent users join via invitation.
-- As an Org Admin, I can **create teams** and **invite users** by email with an org role and optional
-  team membership. *AC:* invitee receives a tokenized link; accepting creates the membership rows;
-  expired/revoked tokens are rejected.
+- As an Org Admin, I can **invite users** by email with an org role. *AC:* invitee receives a tokenized
+  link; accepting creates the membership row; expired/revoked tokens are rejected.
 - As an Org Admin, I can **change roles** and **remove members**. *AC:* role changes take effect on the
-  next request; removing a member revokes visibility immediately.
+  next request; removing a member revokes access immediately.
 
-### 5.2 RBAC & visibility (P0)
-- As any actor, I can only **see** resources whose visibility I satisfy (owner, Everyone, or any shared team), with
-  Org Owner/Admin able to see everything in the tenant. *AC:* list/detail endpoints are visibility-filtered;
-  cross-tenant access is impossible (verified by tests).
-- As an Org Admin or Team Admin/Editor, I can **own a skill as** a specific user or editable team, then
-  choose separate read visibility for teams and/or Everyone. *AC:* team ownership grants write access
-  only to that owner team's Admins/Editors; team visibility shares grant read access only; the acting
-  admin is recorded as creator in the audit log.
+### 5.2 RBAC (P0)
+- As any actor, I can only act within orgs I'm a **member** of; Org Owner/Admin hold elevated org
+  capabilities. *AC:* every endpoint is membership-gated and tenant-scoped; cross-tenant access is
+  impossible (verified by tests).
+- As any member, I can **read and modify every skill** in my org — there is no per-skill owner or
+  visibility flag. *AC:* create/edit/publish/archive/delete are allowed for any member of the org and
+  denied for non-members; the acting user is recorded as the skill's creator for audit.
 
 ### 5.3 Skills Hub (P0)
 - As a Builder, I can **upload a `SKILL.md` package** and have it validated and versioned. *AC:*
   invalid frontmatter, path traversal, or oversize archives are rejected with a clear error; a valid
   upload produces an immutable, checksummed `skill_versions` record with a semver.
-- As a Builder, I can set a skill to Private, Everyone, one team, multiple teams, or Everyone plus teams, and **browse** skills I'm permitted to see.
-- As an agent owner, I can **attach/detach a specific skill version** to an agent I can edit. *AC:*
-  attaching triggers a reconcile that syncs the bundle into the running agent; `synced_at` reflects
-  convergence; a private skill cannot be attached to an agent with broader visibility without promotion.
+- As any member, I can **file a skill under one or more labels** (org-wide shared folders) and **browse,
+  filter, and search** all skills in the org. *AC:* labels are slash-separated paths with per-path color
+  and icon; assigning, renaming, recoloring, or deleting a label is allowed for any member and reflected
+  org-wide.
+- As any member, I can **attach/detach a specific skill version** to an agent. *AC:* attaching triggers
+  a reconcile that syncs the bundle into the running agent; `synced_at` reflects convergence.
 
 ### 5.4 Hermès Agents (P0)
 - As a Builder, I can **create and deploy an agent** from a template with a model route (OpenRouter), a
-  system prompt, an optional Granite vault, attached skills, a provider, and visibility. *AC:* the agent
-  reaches `running`, exposes a chat surface, and uses the attached skills and vault.
-- As a permitted member, I can **open a chat** with an agent I can see and **stop/redeploy** agents I
-  control.
+  system prompt, an optional Granite vault, attached skills, and a provider. *AC:* the agent reaches
+  `running`, exposes a chat surface, and uses the attached skills and vault.
+- As a member, I can **open a chat** with any agent in the org and **stop/redeploy** agents.
 
 ### 5.5 Curated Container Catalog (P0)
 - As an Org Admin, I can **approve an image/template** into the catalog (digest-pinned, with resource
-  limits, required secrets, default visibility). *AC:* only approved items are deployable; image is pinned by
-  digest.
-- As a member, I can **1-click deploy** a catalog item to a chosen visibility and see its status, logs, and
-  connection details. *AC:* deployment is created with my chosen owner/visibility; secrets are injected at
-  runtime, never exposed in config.
+  limits and required secrets). *AC:* only approved items are deployable; image is pinned by digest.
+- As a member, I can **1-click deploy** a catalog item and see its status, logs, and connection details.
+  *AC:* the deployment records me as creator; secrets are injected at runtime, never exposed in config.
 
 ### 5.6 Providers & deployment lifecycle (P0)
 - As an Org Admin, I can **register and test a provider** (local Docker for MVP) and store its
@@ -129,7 +125,7 @@ Each requirement has user stories with acceptance criteria. Priorities: **P0** =
 ### 5.7 Secrets & audit (P0)
 - As an Org Admin, I can **set secrets** (write-only) that resources reference. *AC:* secret values are
   never returned by the API and never persisted in plaintext.
-- As an Org Admin, I can **view an audit log** of who did what, to which resource, and with which visibility.
+- As an Org Admin, I can **view an audit log** of who did what and to which resource.
 
 ---
 
@@ -142,8 +138,8 @@ Each requirement has user stories with acceptance criteria. Priorities: **P0** =
   first deploy "just works."
 - **Reliability:** reconcile loop converges within a bounded interval; transient provider errors retry
   with backoff; deployments report `degraded`/`error` clearly.
-- **Performance:** visibility-filtered lists return quickly at team/workspace scale (indexed `skills.everyone`
-  and `skill_team_shares` access).
+- **Performance:** org-scoped skill lists return quickly at org scale (indexed `skills.org_id` and
+  `skill_labels` lookups, with index-friendly label-prefix filtering).
 - **Observability:** structured logs + deployment status/log streaming in the UI (minimal in V0).
 - **Internationalization-ready:** UI strings externalized from day one (English default).
 
@@ -153,7 +149,7 @@ Each requirement has user stories with acceptance criteria. Priorities: **P0** =
 
 | Phase | Theme | Headline capabilities |
 |---|---|---|
-| **V0 — MVP** | Self-host + 3 thin pillars + RBAC | Org/Team/User + RBAC + workspace visibility · Local Docker (Fly fast-follow) · deploy Hermès agent · curated container 1-click · `SKILL.md` upload/version/attach · Granite + OpenRouter concrete · basic dashboard |
+| **V0 — MVP** | Self-host + 3 thin pillars + RBAC | Org/User + RBAC + org-wide skills with shared labels · Local Docker (Fly fast-follow) · deploy Hermès agent · curated container 1-click · `SKILL.md` upload/version/label/attach · Granite + OpenRouter concrete · basic dashboard |
 | **V1 — Collaboration & trust** | Make teams productive & observable | **Kubernetes** + **Modal** providers · **SSO/SAML** · **in-app audit** & usage · agent observability/logs · skill ratings/reviews + dependency pinning · private networking (Tailscale-style) · **pluggable runtime** beyond Hermes |
 | **V2 — Scale & ecosystem** | Marketplace, monetization, compliance | Community **marketplace** (skills, agent + container templates) · **billing + quotas/cost controls** · **compliance** (audit export, SCIM, SOC2-ready, retention) · optional **managed cloud** · multi-org / federation |
 
@@ -165,15 +161,15 @@ Marketplace → **V2**. Billing → **V2**. Kubernetes & Modal → **V1**.
 ## 8. Success metrics
 
 ### North Star
-**Weekly active shared resources** — the number of agents + containers + skills used across a team/org
-boundary (i.e., by someone other than their creator) per week. It captures the whole thesis at once:
+**Weekly active shared resources** — the number of agents + containers + skills used within an org
+(i.e., by someone other than their creator) per week. It captures the whole thesis at once:
 **deployment × governance × sharing.**
 
 | Category | Metrics |
 |---|---|
 | **Activation** | Time-to-first-deploy (install → first running agent); % of new orgs that deploy in all 3 pillars within 7 days |
 | **Engagement** | Agent messages/week; running container instances; weekly active deployers |
-| **Collaboration** | % of resources shared with teams or Everyone (vs private); cross-creator usage rate; skills attached across teams |
+| **Collaboration** | Cross-creator usage rate (resources used by non-creators); skills attached to agents by non-creators; labels in active use |
 | **OSS / adoption** | GitHub stars growth; self-host installs (opt-in telemetry); skills published; external contributors/PRs; v1→v2 migrations |
 
 ---

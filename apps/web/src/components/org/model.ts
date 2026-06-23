@@ -1,4 +1,4 @@
-import type { OrgRole, TeamRole } from "@companion/contracts";
+import type { OrgRole } from "@companion/contracts";
 import type { MeVM } from "@/lib/types";
 
 /** Display fields for any user referenced by a membership. */
@@ -19,28 +19,13 @@ export interface OrgMember {
   inviteToken?: string; // shareable token (pending only)
 }
 
-export interface OrgTeamMember {
-  userId: string;
-  role: TeamRole;
-}
-
-export interface OrgTeam {
-  id: string; // teams.id
-  slug: string;
-  name: string;
-  description: string; // team description ("" when unset)
-  color: string | null;
-  icon: string | null;
-  members: OrgTeamMember[];
-}
-
 export interface OrgAccessDomain {
   id: string;
   domain: string;
   createdAt: string;
 }
 
-/** The current org with its full membership + team graph (powers the settings panes). */
+/** The current org with its full membership (powers the settings panes). */
 export interface OrgFull {
   id: string;
   name: string;
@@ -55,7 +40,6 @@ export interface OrgFull {
   color: string | null;
   logoUrl: string | null;
   members: OrgMember[];
-  teams: OrgTeam[];
 }
 
 /** Signed-in actor context for the domain access editor. */
@@ -95,29 +79,25 @@ export interface SettingsAppData {
   apiKeys: ApiKeyVM[];
 }
 
-/** Which settings pane is mounted. Team panes also carry a `teamId` (see SettingsRoute). */
+/** Which settings pane is mounted. */
 export type SettingsView =
   | "profile"
   | "preferences"
   | "apikeys"
   | "general"
   | "members"
-  | "invitations"
-  | "team-general"
-  | "team-members";
+  | "invitations";
 
-/** A resolved settings destination — a pane plus, for team panes, the team it targets. */
+/** A resolved settings destination — a pane. */
 export interface SettingsRoute {
   view: SettingsView;
-  teamId?: string;
 }
 
 /** Top-level dialogs the shell owns. Key create/reveal dialogs are local to ApiKeysPane. */
-export type SettingsDialog = null | "invite" | "team";
+export type SettingsDialog = null | "invite";
 /** Where a sidebar affordance wants to land the user inside Settings. */
 export interface SettingsIntent {
   view?: SettingsView;
-  teamId?: string;
   dialog?: Exclude<SettingsDialog, null>;
 }
 
@@ -150,18 +130,12 @@ export interface OrgCtx {
   addAccessDomain: (domain: string) => Promise<void>;
   removeAccessDomain: (domainId: string) => Promise<void>;
   uploadWorkspaceLogo: (file: File) => Promise<void>;
-  updateTeam: (teamId: string, patch: { name?: string; slug?: string; description?: string; color?: string | null; icon?: string | null }) => void;
-  deleteTeam: (teamId: string) => void;
   createApiKey: (name: string, scope: "read" | "write") => Promise<string>;
   revokeApiKey: (id: string) => void;
   setMemberRole: (orgId: string, userId: string, role: OrgRole) => void;
   removeMember: (orgId: string, userId: string) => void;
   inviteMember: (orgId: string, email: string, role: OrgRole) => Promise<string>;
   revokeInvite: (orgId: string, inviteId: string) => void;
-  setTeamMemberRole: (orgId: string, teamId: string, userId: string, role: TeamRole) => void;
-  removeTeamMember: (orgId: string, teamId: string, userId: string) => void;
-  addTeamMember: (orgId: string, teamId: string, userId: string, role: TeamRole) => void;
-  createTeam: (orgId: string, name: string) => Promise<void>;
   error: string | null;
   setError: (msg: string | null) => void;
   busy: boolean;

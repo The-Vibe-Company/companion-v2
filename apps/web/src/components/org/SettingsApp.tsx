@@ -2,25 +2,19 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import type { OrgRole, TeamRole } from "@companion/contracts";
+import type { OrgRole } from "@companion/contracts";
 import {
   addAccessDomain as addAccessDomainRpc,
-  addTeamMember as addTeamMemberRpc,
-  createTeam as createTeamRpc,
-  deleteTeam as deleteTeamRpc,
   inviteMember as inviteMemberRpc,
   issueToken as issueTokenRpc,
   listTokens as listTokensRpc,
   removeMember as removeMemberRpc,
   removeAccessDomain as removeAccessDomainRpc,
-  removeTeamMember as removeTeamMemberRpc,
   revokeInvite as revokeInviteRpc,
   revokeToken as revokeTokenRpc,
   setMemberRole as setMemberRoleRpc,
-  setTeamMemberRole as setTeamMemberRoleRpc,
   updateMe as updateMeRpc,
   updateOrg as updateOrgRpc,
-  updateTeam as updateTeamRpc,
   uploadWorkspaceLogo as uploadWorkspaceLogoRpc,
 } from "@/lib/org";
 import {
@@ -53,22 +47,13 @@ import type {
 function normalizeOrgFull(org: OrgFull): OrgFull {
   const members = Array.isArray(org.members) ? org.members : [];
   const accessDomains = Array.isArray(org.accessDomains) ? org.accessDomains : [];
-  const teams = Array.isArray(org.teams)
-    ? org.teams.map((team) => ({
-        ...team,
-        members: Array.isArray(team.members) ? team.members : [],
-      }))
-    : [];
-  return { ...org, accessDomains, members, teams };
+  return { ...org, accessDomains, members };
 }
 
-/** Build the canonical settings URL: `?view=` (+ `&team=` for team panes, `&dialog=`). */
+/** Build the canonical settings URL: `?view=` (+ `&dialog=`). */
 export function settingsHref(route: SettingsRoute, dialog: SettingsDialog): string {
   const qs = new URLSearchParams();
   qs.set("view", route.view);
-  if (route.teamId && (route.view === "team-general" || route.view === "team-members")) {
-    qs.set("team", route.teamId);
-  }
   if (dialog) qs.set("dialog", dialog);
   return `/settings?${qs.toString()}`;
 }
@@ -112,13 +97,6 @@ export function SettingsController({
 
   const [route, setRoute] = useState<SettingsRoute>(initialRoute);
   const [dialog, setDialog] = useState<SettingsDialog>(initialDialog);
-  const [expanded, setExpanded] = useState<Set<string>>(() => {
-    const open = new Set<string>();
-    if (initialRoute.teamId) open.add(initialRoute.teamId);
-    const first = data.current.teams[0];
-    if (first) open.add(first.id);
-    return open;
-  });
   useEffect(() => setRoute(initialRoute), [initialRoute]);
   useEffect(() => setDialog(initialDialog), [initialDialog]);
 
@@ -171,14 +149,6 @@ export function SettingsController({
   // Follow the OS color scheme while theme === "system" (light/dark are applied
   // eagerly by setTheme; first paint is handled by the inline script).
   useEffect(() => subscribeSystemTheme(prefs.theme), [prefs.theme]);
-
-  const toggleTeam = (id: string) =>
-    setExpanded((s) => {
-      const n = new Set(s);
-      if (n.has(id)) n.delete(id);
-      else n.add(id);
-      return n;
-    });
 
   const setErr = actions.setError;
   const refreshSettingsData = async () => {
@@ -321,60 +291,6 @@ export function SettingsController({
         setBusy(false);
       }
     },
-    updateTeam: (teamId, patch) => {
-      setCurrent((c) => ({
-        ...c,
-        teams: c.teams.map((t) => (t.id === teamId ? { ...t, ...patch } : t)),
-      }));
-      setBusy(true);
-      updateTeamRpc(teamId, patch)
-        .then((res) => {
-          setCurrent((c) => ({
-            ...c,
-            teams: c.teams.map((t) =>
-              t.id === teamId
-                ? {
-                    ...t,
-                    name: res.name,
-                    slug: res.slug,
-                    description: res.description ?? "",
-                    color: res.color ?? null,
-                    icon: res.icon ?? null,
-                  }
-                : t,
-            ),
-          }));
-          window.dispatchEvent(
-            new CustomEvent("companion:team-updated", {
-              detail: {
-                id: res.id,
-                slug: res.slug,
-                name: res.name,
-                color: res.color ?? null,
-                icon: res.icon ?? null,
-              },
-            }),
-          );
-        })
-        .catch((e: Error) => {
-          setErr(e.message);
-          void refreshSettingsData();
-        })
-        .finally(() => setBusy(false));
-    },
-    deleteTeam: (teamId) =>
-      optimistic(
-        { ...current, teams: current.teams.filter((t) => t.id !== teamId) },
-        () => deleteTeamRpc(teamId),
-        () => {
-          setExpanded((s) => {
-            const n = new Set(s);
-            n.delete(teamId);
-            return n;
-          });
-          navigate({ view: "general" });
-        },
-      ),
     createApiKey: async (name, scope) => {
       setBusy(true);
       try {
@@ -415,7 +331,6 @@ export function SettingsController({
         {
           ...current,
           members: current.members.filter((m) => m.userId !== userId),
-          teams: current.teams.map((t) => ({ ...t, members: t.members.filter((x) => x.userId !== userId) })),
         },
         () => removeMemberRpc(orgId, userId),
         userId === me.id
@@ -451,49 +366,6 @@ export function SettingsController({
         })
         .finally(() => setBusy(false));
     },
-    setTeamMemberRole: (_orgId, teamId, userId, role: TeamRole) =>
-      optimistic(
-        {
-          ...current,
-          teams: current.teams.map((t) =>
-            t.id === teamId ? { ...t, members: t.members.map((m) => (m.userId === userId ? { ...m, role } : m)) } : t,
-          ),
-        },
-        () => setTeamMemberRoleRpc(teamId, userId, role),
-      ),
-    removeTeamMember: (_orgId, teamId, userId) =>
-      optimistic(
-        {
-          ...current,
-          teams: current.teams.map((t) =>
-            t.id === teamId ? { ...t, members: t.members.filter((m) => m.userId !== userId) } : t,
-          ),
-        },
-        () => removeTeamMemberRpc(teamId, userId),
-      ),
-    addTeamMember: (orgId, teamId, userId, role: TeamRole) =>
-      optimistic(
-        {
-          ...current,
-          teams: current.teams.map((t) =>
-            t.id === teamId ? { ...t, members: [...t.members, { userId, role }] } : t,
-          ),
-        },
-        () => addTeamMemberRpc(orgId, teamId, userId, role),
-      ),
-    createTeam: async (orgId, name) => {
-      setBusy(true);
-      try {
-        const { id } = await createTeamRpc(orgId, name);
-        await refreshSettingsData();
-        setExpanded((s) => new Set([...s, id]));
-        navigate({ view: "team-general", teamId: id });
-      } catch (e) {
-        setErr((e as Error).message);
-      } finally {
-        setBusy(false);
-      }
-    },
     error: actions.error,
     setError: actions.setError,
     busy: busy || actions.busy,
@@ -513,10 +385,8 @@ export function SettingsController({
         dialog={dialog}
         apiKeys={apiKeys}
         invites={invites}
-        expanded={expanded}
         onView={onView}
         onDialog={onDialog}
-        onToggleTeam={toggleTeam}
         onClose={onClose}
       />
       {actions.onboarding && (

@@ -4,7 +4,7 @@ import {
   orgSettingsResponseSchema,
   ORG_LOGO_FILE_ACCEPT,
   resolveOrgLogoContentType,
-  updateTeamInputSchema,
+  updateOrgInputSchema,
 } from "../src/orgSettings";
 
 const org = {
@@ -26,6 +26,8 @@ const domainJoin = {
   actorDomainIsPersonal: false,
 };
 
+// Teams were removed product-wide (Org → User): the org-settings payload is org + members +
+// invitations only, with no team blocks.
 const validPayload = {
   org,
   domainJoin,
@@ -40,25 +42,6 @@ const validPayload = {
       initials: "SG",
     },
   ],
-  teams: [
-    {
-      id: "team_1",
-      slug: "platform",
-      name: "Platform",
-      description: null,
-      color: null,
-      icon: null,
-      members: [
-        {
-          userId: "user_1",
-          role: "admin",
-          name: "Stan Girard",
-          email: "stan@example.com",
-          initials: "SG",
-        },
-      ],
-    },
-  ],
   invitations: [],
 };
 
@@ -67,39 +50,22 @@ describe("orgSettingsResponseSchema", () => {
     expect(orgSettingsResponseSchema.parse(validPayload)).toEqual(validPayload);
   });
 
-  it("defaults missing teams and invitations to empty arrays", () => {
-    const parsed = orgSettingsResponseSchema.parse({ org, domainJoin, members: validPayload.members });
-    expect(parsed.teams).toEqual([]);
+  it("defaults missing members and invitations to empty arrays", () => {
+    const parsed = orgSettingsResponseSchema.parse({ org, domainJoin });
+    expect(parsed.members).toEqual([]);
     expect(parsed.invitations).toEqual([]);
   });
 
-  it("defaults missing team members to an empty array and team description to null", () => {
-    const parsed = orgSettingsResponseSchema.parse({
-      org,
-      domainJoin,
-      members: validPayload.members,
-      teams: [{ id: "team_1", slug: "platform", name: "Platform" }],
-    });
-    expect(parsed.teams[0]?.members).toEqual([]);
-    expect(parsed.teams[0]?.description).toBeNull();
-    expect(parsed.teams[0]?.color).toBeNull();
-    expect(parsed.teams[0]?.icon).toBeNull();
+  it("has no teams field on the response shape", () => {
+    const parsed = orgSettingsResponseSchema.parse(validPayload);
+    expect("teams" in parsed).toBe(false);
   });
 
-  it("safeParse succeeds on a payload with org, invitations, and a team description", () => {
+  it("safeParse succeeds on a payload with org, members, and invitations", () => {
     const result = orgSettingsResponseSchema.safeParse({
       org,
       domainJoin,
       members: validPayload.members,
-      teams: [
-        {
-          id: "team_1",
-          slug: "platform",
-          name: "Platform",
-          description: "Owns the deployment control plane.",
-          members: [],
-        },
-      ],
       invitations: [
         {
           id: "invite_1",
@@ -114,31 +80,30 @@ describe("orgSettingsResponseSchema", () => {
     });
     expect(result.success).toBe(true);
     expect(result.success && result.data.invitations[0]?.email).toBe("newbie@example.com");
-    expect(result.success && result.data.teams[0]?.description).toBe("Owns the deployment control plane.");
   });
 
   it("rejects a payload missing the org identity", () => {
-    expect(() => orgSettingsResponseSchema.parse({ members: validPayload.members, teams: [] })).toThrow();
+    expect(() => orgSettingsResponseSchema.parse({ members: validPayload.members })).toThrow();
   });
 
   it("rejects a non-array members field", () => {
-    expect(() => orgSettingsResponseSchema.parse({ org, domainJoin, members: {}, teams: [] })).toThrow();
-  });
-
-  it("rejects a non-array teams field", () => {
-    expect(() => orgSettingsResponseSchema.parse({ org, domainJoin, members: [], teams: {} })).toThrow();
+    expect(() => orgSettingsResponseSchema.parse({ org, domainJoin, members: {} })).toThrow();
   });
 });
 
-describe("updateTeamInputSchema", () => {
+describe("updateOrgInputSchema (workspace branding survives; team brand colors reused)", () => {
   it("rejects arbitrary CSS in color", () => {
-    expect(() => updateTeamInputSchema.parse({ color: "url(https://evil.test/x.png)" })).toThrow();
+    expect(() => updateOrgInputSchema.parse({ color: "url(https://evil.test/x.png)" })).toThrow();
   });
 
   it("accepts a palette color", () => {
-    expect(updateTeamInputSchema.parse({ color: "oklch(0.56 0.13 250)" })).toEqual({
+    expect(updateOrgInputSchema.parse({ color: "oklch(0.56 0.13 250)" })).toMatchObject({
       color: "oklch(0.56 0.13 250)",
     });
+  });
+
+  it("requires at least one field to update", () => {
+    expect(() => updateOrgInputSchema.parse({})).toThrow();
   });
 });
 

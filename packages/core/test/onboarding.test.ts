@@ -5,15 +5,18 @@ import { completeOnboarding, getOnboardingContext, joinOrgByDomain, type Complet
 
 const actor = { id: "user-1", email: "owner@acme.test", name: "Owner" };
 
+/**
+ * Teams were removed product-wide (Org → User). Onboarding creates only the org + the owner
+ * membership (+ optional domain-access + invitations); no team row is written. The `team` field is
+ * kept on the input shape (optional, ignored) so existing API/web callers still type-check.
+ */
 function input(patch: Partial<CompleteOnboardingInput> = {}): CompleteOnboardingInput {
   const base: CompleteOnboardingInput = {
     org: { name: "Acme", domain: "acme.test", autoJoin: false, color: null, logoUrl: null },
-    team: { name: "Engineering", color: null, icon: null },
     invites: [],
   };
   return {
     org: { ...base.org, ...patch.org },
-    team: { ...base.team, ...patch.team },
     invites: patch.invites ?? base.invites,
   };
 }
@@ -32,29 +35,14 @@ describe("completeOnboarding", () => {
     expect(database.transaction).not.toHaveBeenCalled();
   });
 
-  it("rejects arbitrary team colors before writing", async () => {
-    const database = { transaction: vi.fn() } as unknown as Db;
-
-    await expect(
-      completeOnboarding(
-        actor,
-        input({ team: { name: "Engineering", color: "url(https://evil.test/x.png)" } }),
-        database,
-      ),
-    ).rejects.toThrow("invalid team color");
-    expect(database.transaction).not.toHaveBeenCalled();
-  });
-
-  it("accepts palette colors", async () => {
+  it("accepts palette colors and creates only the org + owner membership (no team)", async () => {
     const color = TEAM_BRAND_COLORS[0]!;
     const tx = {
       execute: vi.fn(async () => undefined),
       insert: vi
         .fn()
-        .mockReturnValueOnce({ values: () => ({ returning: async () => [{ id: "org-1" }] }) })
-        .mockReturnValueOnce({ values: () => undefined })
-        .mockReturnValueOnce({ values: () => ({ returning: async () => [{ id: "team-1" }] }) })
-        .mockReturnValueOnce({ values: () => undefined }),
+        .mockReturnValueOnce({ values: () => ({ returning: async () => [{ id: "org-1" }] }) }) // organizations
+        .mockReturnValueOnce({ values: () => undefined }), // owner membership
       update: vi.fn(() => ({ set: () => ({ where: async () => undefined }) })),
     };
     const database = {
@@ -62,28 +50,20 @@ describe("completeOnboarding", () => {
     } as unknown as Db;
 
     await expect(
-      completeOnboarding(
-        actor,
-        input({
-          org: { name: "Acme", color },
-          team: { name: "Engineering", color },
-        }),
-        database,
-      ),
+      completeOnboarding(actor, input({ org: { name: "Acme", color } }), database),
     ).resolves.toEqual({ orgId: "org-1", inviteTokens: [] });
 
-    expect(tx.insert).toHaveBeenCalledTimes(4);
+    // org + membership only — no team and no team membership inserts.
+    expect(tx.insert).toHaveBeenCalledTimes(2);
   });
 
   it("creates a domain access row when the owner enables domain access", async () => {
     const tx = {
       insert: vi
         .fn()
-        .mockReturnValueOnce({ values: () => ({ returning: async () => [{ id: "org-1" }] }) })
-        .mockReturnValueOnce({ values: () => ({ onConflictDoNothing: async () => undefined }) })
-        .mockReturnValueOnce({ values: () => undefined })
-        .mockReturnValueOnce({ values: () => ({ returning: async () => [{ id: "team-1" }] }) })
-        .mockReturnValueOnce({ values: () => undefined }),
+        .mockReturnValueOnce({ values: () => ({ returning: async () => [{ id: "org-1" }] }) }) // organizations
+        .mockReturnValueOnce({ values: () => ({ onConflictDoNothing: async () => undefined }) }) // organization domain
+        .mockReturnValueOnce({ values: () => undefined }), // owner membership
       update: vi.fn(() => ({ set: () => ({ where: async () => undefined }) })),
     };
     const database = {
@@ -96,17 +76,19 @@ describe("completeOnboarding", () => {
       inviteTokens: [],
     });
 
-    expect(tx.insert).toHaveBeenCalledTimes(5);
+    // organizations + organization domain + owner membership — still no team.
+    expect(tx.insert).toHaveBeenCalledTimes(3);
   });
 });
 
 describe("domain onboarding context", () => {
-  it("returns multiple organizations for the actor's corporate domain", async () => {
+  it("returns multiple organizations for the actor's corporate domain (teamCount always 0)", async () => {
     const domainRows = [
       { orgId: "org-1", name: "Client A", domain: "acme.test" },
       { orgId: "org-2", name: "Client B", domain: "acme.test" },
     ];
-    const counts = [{ value: 2 }, { value: 1 }, { value: 4 }, { value: 3 }];
+    // One member-count query per matched org (team counts were removed).
+    const counts = [{ value: 2 }, { value: 4 }];
     const database = {
       select: vi.fn((cols: Record<string, unknown>) => {
         const rows = "orgId" in cols ? domainRows : [counts.shift() ?? { value: 0 }];
@@ -124,8 +106,8 @@ describe("domain onboarding context", () => {
     await expect(getOnboardingContext(actor, database)).resolves.toMatchObject({
       domain: "acme.test",
       matchedOrgs: [
-        { id: "org-1", name: "Client A", memberCount: 2, teamCount: 1 },
-        { id: "org-2", name: "Client B", memberCount: 4, teamCount: 3 },
+        { id: "org-1", name: "Client A", memberCount: 2, teamCount: 0 },
+        { id: "org-2", name: "Client B", memberCount: 4, teamCount: 0 },
       ],
     });
   });

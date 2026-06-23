@@ -22,6 +22,16 @@ async function main(): Promise<void> {
     .returning({ id: schema.organizations.id });
   if (org) {
     await db.insert(schema.organizationDomains).values({ orgId: org.id, domain: "acme.com" }).onConflictDoNothing();
+    // Seed one empty label so the folder tree is non-trivial before any skill is filed. Empty
+    // folders are first-class: a `labels` row with no matching `skill_labels` still shows in the tree.
+    await db
+      .insert(schema.labels)
+      .values([
+        { orgId: org.id, path: "growth" },
+        { orgId: org.id, path: "marketing" },
+        { orgId: org.id, path: "marketing/seo" },
+      ])
+      .onConflictDoNothing();
   }
 
   console.log("Seeded Acme workspace placeholder. Create the first user through the UI or CLI.");

@@ -3,7 +3,6 @@ import type {
   SkillDependencyRow,
   SkillDependencyStatus,
   SkillDependentRow,
-  SkillOwnerKind,
 } from "@companion/contracts";
 import { Icon } from "../Icon";
 
@@ -12,24 +11,16 @@ const DEP_STATUS: Record<SkillDependencyStatus, { label: string; cls: string; ic
   satisfied: { label: "Satisfied", cls: "satisfied", icon: "circle-check" },
   missing: { label: "Missing", cls: "missing", icon: "alert-triangle" },
   archived: { label: "Archived", cls: "archived", icon: "archive" },
-  visibility: { label: "Visibility mismatch", cls: "visibility", icon: "eye-off" },
   cycle: { label: "Cycle blocked", cls: "cycle", icon: "ban" },
 };
 
 const SUMMARY_DOT: Record<SkillDependencyStatus, "ok" | "warn" | "down" | "muted"> = {
   satisfied: "ok",
-  visibility: "warn",
   missing: "down",
   archived: "muted",
   cycle: "down",
 };
-const SUMMARY_ORDER: SkillDependencyStatus[] = ["satisfied", "visibility", "missing", "archived", "cycle"];
-
-function depOwnerMeta(kind: SkillOwnerKind | null): { icon: string; label: string } {
-  if (kind === "team") return { icon: "users", label: "Team-owned" };
-  if (kind === "user") return { icon: "lock", label: "Personal" };
-  return { icon: "circle-x", label: "—" };
-}
+const SUMMARY_ORDER: SkillDependencyStatus[] = ["satisfied", "missing", "archived", "cycle"];
 
 function StatusBadge({ status }: { status: SkillDependencyStatus }) {
   const meta = DEP_STATUS[status];
@@ -41,27 +32,11 @@ function StatusBadge({ status }: { status: SkillDependencyStatus }) {
   );
 }
 
-function MetaLine({
-  ownerKind,
-  note,
-  warnVis,
-}: {
-  ownerKind: SkillOwnerKind | null;
-  note: string | null;
-  warnVis: boolean;
-}) {
-  const vm = depOwnerMeta(ownerKind);
+function MetaLine({ note }: { note: string | null }) {
+  if (!note) return null;
   return (
     <div className="dpmeta">
-      <span className={"dpvis" + (warnVis ? " dpvis--warn" : "")}>
-        <Icon name={vm.icon} size={11} />
-        {vm.label}
-      </span>
-      {note && (
-        <>
-          <span className="dpmeta__sep">·</span> <span className="dpnote">{note}</span>
-        </>
-      )}
+      <span className="dpnote">{note}</span>
     </div>
   );
 }
@@ -91,7 +66,7 @@ function RequiresRow({ row, onOpen }: { row: SkillDependencyRow; onOpen: (slug: 
           </span>
           <StatusBadge status={row.status} />
         </div>
-        <MetaLine ownerKind={row.owner_kind} note={row.note} warnVis={row.status === "visibility"} />
+        <MetaLine note={row.note} />
       </div>
     </div>
   );
@@ -118,7 +93,7 @@ function UsedByRow({ row, onOpen }: { row: SkillDependentRow; onOpen: (slug: str
           </span>
           <StatusBadge status={row.status} />
         </div>
-        <MetaLine ownerKind={row.owner_kind} note={row.note} warnVis={row.status === "visibility"} />
+        <MetaLine note={row.note} />
       </div>
     </div>
   );
@@ -244,9 +219,6 @@ export function DependenciesTab({
           </span>
           <span className="deplegend__item">
             <span className="deplegend__sw" style={{ background: "var(--color-unknown)" }} /> Archived
-          </span>
-          <span className="deplegend__item">
-            <span className="deplegend__sw" style={{ background: "var(--color-warn)" }} /> Visibility mismatch
           </span>
           <span className="deplegend__item">
             <span className="deplegend__sw" style={{ background: "var(--color-danger)" }} /> Cycle blocked

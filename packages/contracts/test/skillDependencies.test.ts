@@ -4,33 +4,32 @@ import {
   dependencyPlanSchema,
   publishSkillInputSchema,
   skillDependenciesResponseSchema,
+  skillDependencyStatusSchema,
   skillFilterSchema,
 } from "../src/index";
 
 describe("skill dependency contracts", () => {
-  it("parses a dependencies response with the un-versioned status set", () => {
+  it("exposes the flat status set (no owner / visibility axis)", () => {
+    expect(skillDependencyStatusSchema.options).toEqual(["satisfied", "missing", "archived", "cycle"]);
+    expect(skillDependencyStatusSchema.options).not.toContain("visibility");
+  });
+
+  it("parses a dependencies response without an owner_kind field", () => {
     const parsed = skillDependenciesResponseSchema.parse({
       slug: "incident-summary",
       version: "0.1.8",
       requires: [
-        { slug: "log-parser", status: "satisfied", owner_kind: "team", note: null, can_open: true },
-        { slug: "html-sanitize", status: "missing", owner_kind: null, note: "not published to this workspace", can_open: false },
+        { slug: "log-parser", status: "satisfied", note: null, can_open: true },
+        { slug: "html-sanitize", status: "missing", note: "not published to this workspace", can_open: false },
       ],
-      used_by: [
-        {
-          slug: "ops-runbook",
-          status: "satisfied",
-          owner_kind: "team",
-          archived: false,
-          note: null,
-          can_open: true,
-        },
-      ],
+      used_by: [{ slug: "ops-runbook", status: "satisfied", archived: false, note: null, can_open: true }],
       requires_n: 2,
       used_by_n: 1,
     });
     expect(parsed.requires).toHaveLength(2);
     expect(parsed.requires[1]!.status).toBe("missing");
+    expect("owner_kind" in parsed.requires[0]!).toBe(false);
+    expect("owner_kind" in parsed.used_by[0]!).toBe(false);
   });
 
   it("rejects a removed version-based status", () => {
@@ -38,7 +37,20 @@ describe("skill dependency contracts", () => {
       skillDependenciesResponseSchema.parse({
         slug: "x",
         version: null,
-        requires: [{ slug: "y", status: "update", owner_kind: null, note: null, can_open: false }],
+        requires: [{ slug: "y", status: "update", note: null, can_open: false }],
+        used_by: [],
+        requires_n: 1,
+        used_by_n: 0,
+      }),
+    ).toThrow();
+  });
+
+  it("rejects the removed visibility status", () => {
+    expect(() =>
+      skillDependenciesResponseSchema.parse({
+        slug: "x",
+        version: null,
+        requires: [{ slug: "y", status: "visibility", note: null, can_open: false }],
         used_by: [],
         requires_n: 1,
         used_by_n: 0,
@@ -58,14 +70,13 @@ describe("skill dependency contracts", () => {
     expect(plan.declared).toEqual(["log-parser", "timeline-fmt"]);
   });
 
-  it("accepts the deps filter variants and defaults dependencies on publish", () => {
+  it("accepts the deps filter variants and defaults dependencies + labels on publish", () => {
     expect(skillFilterSchema.parse({ type: "deps", value: "has" })).toEqual({ type: "deps", value: "has" });
     expect(skillFilterSchema.parse({ type: "deps", value: "used" })).toEqual({ type: "deps", value: "used" });
     expect(() => skillFilterSchema.parse({ type: "deps", value: "nope" })).toThrow();
 
     const published = publishSkillInputSchema.parse({
       slug: "incident-summary",
-      owner_team: "platform",
       version: "1.0.0",
       description: "x",
       checksum: `sha256:${"a".repeat(64)}`,
@@ -75,6 +86,9 @@ describe("skill dependency contracts", () => {
       tools: [],
     });
     expect(published.dependencies).toEqual([]);
+    expect(published.labels).toEqual([]);
+    // owner_team is gone from the publish input.
+    expect("owner_team" in published).toBe(false);
   });
 
   it("parses an archive input with an optional reason", () => {

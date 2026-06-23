@@ -5,10 +5,10 @@ Guidance for Claude Code agents and human contributors working in this repositor
 ## Project overview
 
 **Companion v2** is an open-source (MIT), self-hostable, multi-tenant **portal** to deploy, govern, and
-share AI agents, curated containers, and skills across an organization and its teams. It is the team
+share AI agents, curated containers, and skills across an organization. It is the team
 version of [Companion v1](https://github.com/The-Vibe-Company/companion) (a single-operator CLI/IaC tool
-for personal agent fleets), built around an **Organization → Team → User** hierarchy with RBAC and
-workspace-local resource visibility.
+for personal agent fleets), built around an **Organization → User** hierarchy with RBAC and
+org-wide resource sharing.
 
 Read these before making non-trivial changes:
 - [`docs/vision.md`](docs/vision.md) — why this exists, principles, non-goals.
@@ -27,13 +27,13 @@ Read these before making non-trivial changes:
 1. **Hermès Agents** — agents on the **Hermes** runtime, with **Granite** memory and **OpenRouter** model
    routing.
 2. **Curated Container Catalog** — org-admin-approved images/templates, deployed 1-click.
-3. **Skills Hub** — versioned `SKILL.md` packages, owned by a user (Personal/private) or a team (workspace-visible), attached opt-in to agents.
+3. **Skills Hub** — versioned `SKILL.md` packages, visible to every org member and organized by org-wide shared **labels** ("folders"), attached opt-in to agents.
 
 Canonical terms — **do not invent synonyms**:
-- Hierarchy: **Organization → Team → User**.
-- Org roles: **Owner, Admin, Developer**. Team roles: **Admin, Editor, Reader**.
-- **Owner is the single access axis.** A skill is owned by a user (**Personal** — private to that user) or a team (**Team-owned** — readable by every member of the workspace), encoded by `owner_team_id` (NULL = Personal, set = Team). There is no separate visibility flag and no per-team read sharing.
-- Skill edit rights derive from the owner: **Personal** → the owning user; **Team-owned** → that team's Admins/Editors. **Org Admins** (Owner/Admin) can edit any skill. To "share" a skill, change its Owner (`PUT /v1/skills/:slug/owner`).
+- Hierarchy: **Organization → User**. There are no teams.
+- Org roles: **Owner, Admin, Developer**.
+- **Skills are flat and org-wide.** A skill is a plain org-scoped row with no owner and no visibility flag: every member of the org can read it, and **any** member can create, edit, publish, archive, or delete **any** skill. `creator_id` records who authored the row (provenance/Activity), never an access right.
+- **Labels are the only organizing axis.** Skills are organized by an org-wide **shared** tree of slash-separated **labels** (e.g. `marketing/seo`) — multi-assigned per skill, with per-path color + icon, and empty folders allowed. Any member can create, assign, rename, recolor, or delete labels (`/v1/labels`, `/v1/skills/:slug/labels`).
 - Deploy targets are **providers**: **Docker (local), Fly, Kubernetes, Modal**.
 
 ## Target repository layout
@@ -58,8 +58,8 @@ docs/         # vision / product / design / PRD
 ```
 
 **Anchor files** (the contracts the system hinges on — see `docs/design.md`):
-- `packages/db/schema.ts` — all entities + the `org_id` / `owner_id` / `owner_team_id` columns (the owner is the access axis; no separate visibility column or team-share table).
-- `packages/auth/policy.ts` — typed RBAC: visibility gate + capability gate; the "deploy for" logic.
+- `packages/db/schema.ts` — all entities + the `org_id` tenant column and `creator_id` provenance column on skills (no owner or visibility column); the `labels` + `skill_labels` tables (the only skill-organizing axis).
+- `packages/auth/policy.ts` — typed RBAC: tenant/membership gate + org-role capability gate; the "deploy for" logic (skills themselves carry no per-resource access gate — any member can do anything to any skill).
 - `packages/providers/port.ts` — the `DeploymentProvider` interface + neutral `DeploySpec`.
 - `apps/worker/reconcile.ts` — observe → diff → apply → drift loop.
 - `packages/hermes/configBuilder.ts` — agent + skills + vault + model + secrets → `DeploySpec`.
@@ -75,14 +75,14 @@ docs/         # vision / product / design / PRD
   them directly.
 - **One source of truth for types:** entities live in `packages/db`; shared contracts in
   `packages/contracts`. Don't redefine shapes ad hoc.
-- **Access × role are orthogonal.** Authorization = a **visibility gate** (can the actor see it?) **plus**
-  a **capability gate** (can the actor do it?). For skills the visibility gate is derived from the owner
-  (team-owned → all members; Personal → the owner). Enforce in the **service layer** (`packages/core`) so
-  web, REST, and the worker share one path — never only in route handlers.
-- **"Deploy for" semantics:** keep ownership and provenance distinct:
-  `owner_id` / `owner_team_id` (the owner = who can edit AND, derived, who can read) and
-  creator/audit (who acted). For skills the owner is the single access axis — there is no separate
-  read-visibility state.
+- **Authorization = tenant + role.** A permission decision is a **tenant/membership gate** (is the actor a
+  member of this org?) **plus** a **capability gate** (does the actor's org role permit the action?).
+  Skills carry **no per-resource access gate**: every org member can read every skill in the org, and
+  any member can create/edit/publish/archive/delete any skill. Enforce in the **service layer**
+  (`packages/core`) so web, REST, and the worker share one path — never only in route handlers.
+- **Provenance, not ownership:** a skill records `creator_id` (who authored the row, for Activity/audit)
+  but has no owner and no read-visibility state. Organize skills with **labels** (org-wide shared
+  folders), never with access flags.
 - **Desired-state:** every deployable is a row of declared intent; the reconciler converges reality and
   heals drift. Provisioning is **idempotent** (keyed so retries never double-provision).
 - **Secrets** are envelope-encrypted, **write-only** over the API, referenced by id, and injected by the
@@ -101,7 +101,7 @@ docs/         # vision / product / design / PRD
 ```bash
 pnpm compose:up             # postgres + minio + mailpit for manual local dev
 pnpm db:migrate             # apply Drizzle migrations
-pnpm db:seed                # seed an org/team/user for local dev
+pnpm db:seed                # seed an org + user (and a few labels) for local dev
 pnpm dev                    # run API + web in watch mode
 ```
 
@@ -119,8 +119,8 @@ still uses Docker Compose (`scripts/dev-stack.sh`).
 
 ## Tests & quality gates
 
-- **RBAC is table-driven and exhaustive.** Add cases to the role × visibility × action matrix whenever you
-  touch authorization; assert cross-tenant access is denied.
+- **RBAC is table-driven and exhaustive.** Add cases to the membership × org-role × action matrix whenever
+  you touch authorization; assert that non-members and cross-tenant access are denied.
 - **Frontend browser validation is required after frontend changes.** After any UI, route, auth, style,
   component, or browser-facing behavior change, run the app and validate it with `agent-browser` before
   finishing. Use the automated shortcut `APP_URL=http://127.0.0.1:<port> pnpm browser:smoke` for the
@@ -139,7 +139,7 @@ still uses Docker Compose (`scripts/dev-stack.sh`).
   **update [`docs/design.md`](docs/design.md)** (and this file's anchors if paths moved). Keep the docs
   and the code in agreement.
 - If you changed the public skills API surface (endpoints, or the request/response shapes for skills,
-  comments, versions, dependencies, visibility, etc.), **update the bundled Companion skill** in
+  comments, versions, dependencies, labels, etc.), **update the bundled Companion skill** in
   `packages/companion-skill/skill/` (`SKILL.md` and `reference/api.md`, plus `companion.json` if the
   capabilities changed) so the agent-facing docs match the API.
 - If you changed frontend behavior, include the `agent-browser` validation result in your handoff. The
