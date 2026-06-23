@@ -57,17 +57,17 @@ cli/          # companion CLI
 ## Data Model
 
 Better Auth owns the core `user`, `session`, `account`, and `verification` tables. Companion
-adds `profiles`, `organizations`, `memberships`, `teams`, `team_memberships`, `invitations`,
-`skills`, `skill_versions`, `skill_version_dependencies`, `skill_stars`, `skill_filter_preferences`,
-`skill_comments`, `skill_comment_images`, `local_skill_installs`, `api_tokens`, and `audit_log`.
+adds `profiles`, `organizations`, `memberships`, `invitations`,
+`skills`, `skill_versions`, `skill_version_dependencies`, `skill_stars`, `labels`, `skill_labels`,
+`skill_filter_preferences`, `skill_comments`, `skill_comment_images`, `local_skill_installs`,
+`api_tokens`, and `audit_log`. There are **no teams**: the hierarchy is `Organization → User`.
 
-Every tenant-owned table carries `org_id`. The **owner is the single access axis** for a skill:
-`owner_id` is the principal/creator (always set) and `owner_team_id` selects the owner kind.
-`owner_team_id IS NULL` = **Personal** — private to `owner_id` (only that user, plus org admins, can
-read or edit it). `owner_team_id` set = **Team-owned** — readable by every member of the workspace
-and editable by that team's admins/editors. There is no separate `everyone` flag and no
-`skill_team_shares` table; "sharing" a skill is moving it to a team (`PUT /v1/skills/:slug/owner`).
-`creator_id` records who acted (provenance), distinct from who can edit. A version's declared tools
+Every tenant-owned table carries `org_id`. A skill is a **flat, org-wide** row with **no owner and no
+visibility flag**: every member of the org can read every skill, and any member can create, edit,
+publish, archive, or delete any skill. The only principal recorded on a skill is `creator_id` — who
+authored the row, for Activity and audit; it grants no special access. There is no `owner_id`,
+`owner_team_id`, `everyone` flag, `skill_team_shares` table, or `PUT /v1/skills/:slug/owner` endpoint —
+they were removed. A version's declared tools
 (`skill_versions.tools`) come from the Agent Skills `allowed-tools` frontmatter string.
 Companion-specific package data lives in root `companion.json`, not `SKILL.md`: `display` (human
 name, short summary, long description), `requirements` (declared secrets and environment variables,
@@ -84,8 +84,29 @@ frontmatter names and any present `metadata.companion_skill_id` that points at a
 On re-publish of an existing Companion package, reserved version metadata is treated as provenance; the API/CLI still assigns the
 next registry version unless the caller passes an explicit version. Legacy top-level `version`,
 `tools`, and unknown fields are warnings and are not preserved as top-level fields in newly stored
-packages; top-level `scope` or `visibility` is rejected because access is governed by the skill's
-owner (set on the publish request via `owner_team`), never declared inside the package.
+packages; top-level `scope` or `visibility` is still rejected because a skill never self-declares
+access — every skill is org-wide, and organization is by **labels** (assigned on the publish request
+via repeatable `label` values), never declared inside the package.
+
+**Labels (org-wide shared folders).** Skills are organized — never gated — by an org-wide shared tree
+of slash-separated **label** paths (e.g. `marketing/seo`). Two org-scoped, RLS-tenanted tables hold the
+model, and the path string is stored **on the junction** (no FK to a label id) so rename is a prefix
+`UPDATE`, delete is a prefix `DELETE`, and roll-up counts need no join:
+
+- `labels` — the canonical path set plus per-path appearance, and what lets an **empty** folder exist:
+  `(org_id, path, color, icon, created_by, created_at, updated_at)`, PK `(org_id, path)`.
+- `skill_labels` — the assignment edge (a skill has N paths): `(org_id, skill_id, path, created_by,
+  created_at)`, PK `(org_id, skill_id, path)`, with an org-scoped composite FK
+  `(org_id, skill_id) → skills(org_id, id)` cascade.
+
+The tree is **derived** in the service by splitting paths on `/` (intermediate parents are derived;
+nodes are `labels` ∪ distinct `skill_labels.path`). A node's roll-up count = skills whose assigned path
+`= node` OR `LIKE node || '/%'`, de-duped per skill. A `text_pattern_ops` index on `(org_id, path)`
+keeps the prefix `LIKE` index-friendly. Rename and delete cascade over `path = $p OR path LIKE $p ||
+'/%'` across **both** tables in one transaction; rename rejects a collision with an existing path. Paths
+validate as slash-separated kebab segments (`[a-z0-9]+(?:-[a-z0-9]+)*`), no empty/leading/trailing
+slash, bounded length. There is no owner and no per-label permission: **any** member can create, assign,
+unassign, rename, recolor, re-icon, or delete labels, including empty folders.
 
 **Skill dependencies (un-versioned skill→skill links).** A skill version can declare that it
 requires other skills. Edges live in `skill_version_dependencies` (`(skill_version_id,
@@ -94,11 +115,10 @@ that is `null` when the declared slug is not published — a *missing* dependenc
 keeps its exact graph. Dependencies are **un-versioned**: there are no semver ranges, no resolved
 version pins, and no "update available" status — versions are a skill's own publish concern, not the
 dependency graph's. Each edge's status is computed live on read from current state: **Satisfied**,
-**Missing** (target unpublished), **Archived** (target archived), **Visibility mismatch** (the
-target's owner does not cover the dependent's — a Team-owned target covers any dependent; a Personal
-target only covers a dependent that is Personal and owned by the same user), or **Cycle blocked**
-(the edge sits in a directed cycle). Publishing **hard-blocks**
-declared dependencies that are missing, cyclic, or owner-cover-mismatched; edges are written in the
+**Missing** (target unpublished), **Archived** (target archived), or **Cycle blocked**
+(the edge sits in a directed cycle). Because every skill is org-wide-visible, there is no
+visibility/owner-cover status. Publishing **hard-blocks**
+declared dependencies that are missing or cyclic; edges are written in the
 same transaction as the version. `POST /v1/skills?action=validate` returns a `dependencyPlan`
 (declared / already-published / must-upload / removed-since-previous / archival candidates) that
 drives the upload dialog's **Dependency preflight** step. In this slice declared dependencies are
@@ -106,10 +126,10 @@ read from package `companion.json`; legacy `dependency=` upload parameters are a
 package has no Companion manifest.
 
 **Skill archive.** `skills.archived_at` / `archived_by` / `archive_reason` soft-hide a skill: archived
-skills drop out of the normal workspace/team/search lists but stay viewable, **restorable**, and
+skills drop out of the normal org-wide and search lists but stay viewable, **restorable**, and
 **downloadable while a published version still references them** (so existing installs never break).
-They surface in a dedicated **Archived skills** view; `archiveSkill`/`restoreSkill` carry the same
-capability gate as modifying a skill and write `skill.archive` / `skill.restore` audit entries.
+They surface in a dedicated **Archived skills** view; `archiveSkill`/`restoreSkill` are allowed for any
+org member (like every skill mutation) and write `skill.archive` / `skill.restore` audit entries.
 `listSkills` excludes archived by default, with an `archived`-only mode and an `includeArchived` mode
 (detail / dependency / download resolution).
 
@@ -132,8 +152,9 @@ Only the `sha256` `token_hash` is stored (the plaintext `cmp_pat_…` is shown o
 `scopes` (`skills:read` / `skills:write`), an `expires_at` (90-day default), and `revoked_at`.
 
 `skill_filter_preferences` stores the current user's Skills Hub filter state for one organization.
-The row is keyed by `(org_id, user_id)` and contains `active_filters` plus `custom_views` JSONB.
-It is personal UI state, not a shared organization resource.
+The row is keyed by `(org_id, user_id)` and contains `active_filters` JSONB (the status / starred /
+dependency / label filter chips). Saved custom views were removed, so there is no `custom_views`
+column. It is personal UI state, not a shared organization resource.
 
 `skill_comments` powers the threaded **Discussion** on a skill's detail page. Beyond `body`/`author_id`
 it carries `parent_id` (a self-FK — `null` is a root thread, non-null is a reply; single-level nesting),
@@ -141,7 +162,7 @@ it carries `parent_id` (a self-FK — `null` is a root thread, non-null is a rep
 thread is linked to that version), and `deprecated` (threads are greyed/struck-through, never deleted).
 Cross-skill integrity for `parent_id`/`version_id` is not FK-enforceable and is validated in the service
 layer; a reply inherits its thread context (its `version_id` is forced `null`). Marking a thread
-deprecated is allowed for the comment author, an org admin, or the skill owner.
+deprecated is allowed for the comment author or any org member (every member can modify any skill).
 
 `skill_comment_images` holds image attachments on a comment (one row per image, ordered by `position`,
 tenant-scoped with RLS, cascade-deleted with the parent comment). Only metadata lives in the row
@@ -149,11 +170,10 @@ tenant-scoped with RLS, cascade-deleted with the parent comment). Only metadata 
 `${orgId}/comments/${id}`. A comment `POST` switches to `multipart/form-data` when it carries images
 (text-only comments stay JSON); the API validates each file (PNG/JPEG/WebP/GIF, ≤ 10 MB, ≤ 6 per comment),
 uploads the bytes, then persists the comment + image rows. Attachments are served by
-`GET /v1/skills/:slug/comments/:commentId/images/:imageId`, gated by skill visibility and streamed with
+`GET /v1/skills/:slug/comments/:commentId/images/:imageId`, gated by org membership and streamed with
 `X-Content-Type-Options: nosniff`.
 
-Onboarding adds cosmetic `organizations.color`/`logo_url` and `teams.color`/`teams.icon`.
-`teams.description` holds an optional free-text summary shown on the team's settings page.
+Onboarding adds cosmetic `organizations.color`/`logo_url`.
 `profiles.onboarded_at` records that a user has finished onboarding. Domain-based discovery and
 self-serve joining live in `organization_domains`: each row belongs to one org, stores a normalized
 email domain, and is unique only within that org (`org_id`, `lower(domain)`). Multiple orgs may share
@@ -204,10 +224,10 @@ drives the flow:
 - A **corporate** domain that matches one or more `organization_domains` rows → the user is offered the
   matching org list and chooses one. The selected org id is revalidated server-side against the actor's
   verified email domain before membership is created.
-- Otherwise the user creates an org (name, optional website + best-effort logo/brand color, a first team
-  with a color + emoji icon, and teammate invites).
+- Otherwise the user creates an org (name, optional website + best-effort logo/brand color, and
+  teammate invites).
 
-`completeOnboarding` writes the org, first team, invitations, and `onboarded_at` in one transaction;
+`completeOnboarding` writes the org, invitations, and `onboarded_at` in one transaction;
 `joinOrgByDomain` adds the membership and stamps `onboarded_at`; `acceptInvitation` stamps it too.
 Onboarding-created domain access is only honored for the actor's **own** corporate domain, and joining
 requires a verified email when `COMPANION_REQUIRE_VERIFIED_DOMAIN_JOIN` is on (default: production).
@@ -219,12 +239,16 @@ requires the admin's own verified corporate email domain to match the requested 
 
 The service layer in `packages/core` is the primary enforcement point. It applies:
 
-- visibility gate (derived from the owner): org admins see everything; everyone else sees team-owned skills (`owner_team_id IS NOT NULL`) plus their own Personal skills (`owner_id = me`);
-- capability gate (`canEditSkill`): org admin → any skill; team-owned → that team's admin/editor; Personal → the owning user. There is no separate visibility-target check — choosing the owner *is* the access decision;
-- tenant gate: all service queries are scoped to the selected `org_id`.
+- tenant/membership gate (`assertMember`): every service call resolves the actor's org role or throws;
+  all queries are scoped to the selected `org_id`. Skill visibility collapses to `eq(skills.org_id,
+  orgId)` — every member sees every skill in the org;
+- capability gate (org role): skill actions (read/create/update/delete/publish, archive/restore, and
+  all label create/assign/rename/recolor/delete operations) are allowed for **any** member; the org-role
+  gate (`isOrgAdmin` / `canManageOrg`) still governs org-level actions like member management, role
+  changes, and token revocation. There is no per-skill owner or visibility check.
 
-Postgres RLS may be added later as defense-in-depth, but browser and CLI clients never connect
-directly to Postgres.
+Postgres RLS scopes the new `labels` / `skill_labels` tables (and the others) by the `app.org_id` GUC
+as defense-in-depth, but browser and CLI clients never connect directly to Postgres.
 
 ## Public API
 
@@ -234,15 +258,14 @@ directly to Postgres.
 - Onboarding: `GET /v1/onboarding/context` (email-domain classification + `matched_orgs[]` for
   domain-access orgs), `POST /v1/onboarding/join` (join a selected org after server-side domain
   revalidation),
-  `POST /v1/onboarding/create` (create org + first team + invites, finish onboarding).
+  `POST /v1/onboarding/create` (create org + invites, finish onboarding).
 - Tokens: `GET /v1/tokens` (list the caller's own active keys, no plaintext — it backs the personal
   Account pane, so it is caller-scoped even for admins), `POST /v1/tokens` (issue a scoped `cmp_pat_…`,
   plaintext returned once), `DELETE /v1/tokens/:id` (an org admin may revoke any token by id).
   Session-authenticated only — a token cannot mint another.
-- Skills: `/v1/skills`, `/v1/skills/:slug`, `/v1/skills/:slug/versions`,
-  `/v1/skills/:slug/download`, `PUT /v1/skills/:slug/owner` (move between Personal and a team; body
-  `{ owner_team }`), `/v1/skill-filter-preferences`,
-  `GET /v1/skills/upload-options` (skills-token upload owner choices),
+- Skills: `/v1/skills` (the list accepts `label` and `nolabel` filters; no `owner`/`visibility`/`mine`),
+  `/v1/skills/:slug`, `/v1/skills/:slug/versions`,
+  `/v1/skills/:slug/download`, `/v1/skill-filter-preferences`,
   `POST /v1/skills/create` (author a SKILL.md inline),
   `GET /v1/skills/:slug/versions/:version/package` (download a version as `.zip`), and
   `GET /v1/skills/:slug/versions/:version/files` (read a version's package contents for the in-app
@@ -250,38 +273,42 @@ directly to Postgres.
   Threaded discussion: `GET`/`POST /v1/skills/:slug/comments` (a `POST` may carry `parent_id` for a
   reply and `version_id` to link the thread to a version; a `multipart/form-data` `POST` may also carry
   up to 6 image attachments),
-  `GET /v1/skills/:slug/comments/:commentId/images/:imageId` (serve an attachment, visibility-gated), and
+  `GET /v1/skills/:slug/comments/:commentId/images/:imageId` (serve an attachment, membership-gated), and
   `PATCH /v1/skills/:slug/comments/:id` (deprecate / restore a thread).
   Dependencies & archive: `GET /v1/skills/:slug/dependencies?version=` (the Requires + Used by graph
   with live statuses), `POST /v1/skills/:slug/archive` (optional `{reason}`) and
   `POST /v1/skills/:slug/restore`, and `GET /v1/skills?archived=true` (the Archived view). `POST
   /v1/skills` accepts declared `dependency` fields and, on `action=validate`, returns a
   `dependency_plan`; an unresolved-dependency publish returns 422 with that plan.
+- Labels: `GET /v1/labels` (the org-wide tree + flat list with roll-up counts), `POST /v1/labels`
+  (create a path — and its ancestors — including an empty folder), `PUT /v1/labels/rename`,
+  `PUT /v1/labels/color`, `PUT /v1/labels/icon`, and `DELETE /v1/labels`. The label path travels in the
+  **body/query**, never a URL segment, so embedded slashes survive. Per-skill assignment:
+  `POST`/`DELETE /v1/skills/:slug/labels` (assign / unassign one path). Every label route is
+  session-authenticated, tenant-scoped, and allowed for any member.
 - Local skills (Companion skills): `GET /v1/local-skills` (built-in catalog with the caller's
   per-machine status), `GET /v1/local-skills/:key`, `GET /v1/local-skills/:key/package` (download the
   bundled skill as `.zip`), and `POST /v1/local-skills/:key/installed` (the install callback: the
   skill reports `{ version, agent? }` so the workspace learns it is installed and at which version).
 - Orgs & settings: `/v1/orgs`, `GET`/`POST`/`PUT /v1/orgs/current` (read/select/rename+reslug the org,
-  admin only for `PUT`), `GET /v1/orgs/current/settings` (members, invitations, teams + descriptions,
+  admin only for `PUT`), `GET /v1/orgs/current/settings` (members, invitations,
   access domains), `POST /v1/orgs/current/domains` and
   `DELETE /v1/orgs/current/domains/:domainId` (admin-only domain access list management),
-  `PUT /v1/users/me` (update display name), `/v1/teams` + `PUT`/`DELETE /v1/teams/:id` (rename/describe,
-  or delete a team — org admin; deleting a team cascades only that team's skill-share rows), and
-  `/v1/invitations`.
+  `PUT /v1/users/me` (update display name), and `/v1/invitations`. There are no `/v1/teams` endpoints.
 
 Requests authenticate by Better Auth cookie session. An `Authorization: Bearer cmp_pat_…` token is
 accepted **only** on the PAT-enabled skills endpoints (`POST /v1/skills`, `POST /v1/skills/create`,
-`GET /v1/skills/upload-options`, `GET /v1/skills/:slug/download`,
+`GET /v1/skills/:slug/download`,
 `GET /v1/skills/:slug/versions/:version/package`,
 `GET /v1/skills/:slug/versions/:version/files`, and the `/v1/local-skills*` endpoints); every other
 endpoint rejects tokens. Token requests are scope-gated (`skills:write` to publish/create,
-`skills:write` to fetch upload options, `skills:read` to download). Reading the local-skills catalog
+`skills:read` to download). Reading the local-skills catalog
 and downloading its package require `skills:read`; the install callback
 (`POST /v1/local-skills/:key/installed`) mutates state and writes an audit row, so it requires
 `skills:write` — the read+write token the install prompt mints satisfies
 both, while a read-only token cannot spoof an install. `POST /v1/skills` accepts a multipart `file` (browser/CLI) or a raw
-`application/zip` / `application/gzip` body with `owner_team`/`version` query params (the owner is
-immutable on a re-publish — omit `owner_team` to keep it; move it later via `PUT /v1/skills/:slug/owner`). Setting
+`application/zip` / `application/gzip` body with `version` and repeatable `label` query params (initial
+labels to file the skill under on publish). Setting
 `action=validate` runs the same package checks without publishing; targeted updates also accept
 `expect_slug` and `expect_skill_id` in form fields or query params for both validation and
 publication. Uploads accept `.zip` or `.tar.gz`; the canonical stored, checksummed format is `.tar.gz`.

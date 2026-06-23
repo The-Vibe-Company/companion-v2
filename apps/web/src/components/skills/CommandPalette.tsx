@@ -4,7 +4,6 @@ import { useEffect, useRef, useState } from "react";
 import { Icon } from "../Icon";
 import { mapSkill, type SkillVM } from "@/lib/types";
 import { fetchSkillSearch } from "@/lib/queries";
-import { visibilityMeta } from "./blocks";
 
 export function CommandPalette({
   allSkills,
@@ -29,7 +28,7 @@ export function CommandPalette({
 
   const ql = q.trim().toLowerCase();
   // Empty query: show the top of the already-loaded list, no network. Non-empty: debounced server-side
-  // relevance search across slug, description, tools, owner, and the SKILL.md body (ranked by the API).
+  // relevance search across slug, description, tools, and the SKILL.md body (ranked by the API).
   useEffect(() => {
     if (!ql) return;
     const controller = new AbortController();
@@ -124,7 +123,7 @@ export function CommandPalette({
           {skills.length > 0 && <div className="cpal__group">Skills</div>}
           {skills.map((s, idx) => {
             const fi = actions.length + idx;
-            const visibility = visibilityMeta(s);
+            const label = s.labels[0];
             return (
               <div
                 key={s.id}
@@ -141,10 +140,12 @@ export function CommandPalette({
                   <Icon name="star" size={11} />
                   <span className="tnum">{s.stars}</span>
                 </span>
-                <span className="cpal__scope">
-                  <Icon name={visibility.icon} size={11} />
-                  {visibility.label}
-                </span>
+                {label && (
+                  <span className="cpal__scope">
+                    <Icon name="folder" size={11} />
+                    {label}
+                  </span>
+                )}
               </div>
             );
           })}

@@ -163,13 +163,15 @@ agent-browser eval "for (const b of Array.from(document.querySelectorAll('button
 agent-browser wait 300
 assert_body_contains "$SMOKE_SKILL"
 assert_body_contains "Upload skill"
+# Shared label folder tree (replaces the old owner/visibility sidebar): the smoke skill is filed under "marketing".
+assert_body_contains "marketing"
 
 log "Checking filter menu"
 agent-browser find role button click --name "Filter"
 agent-browser wait 300
-assert_body_contains "Visibility"
-assert_body_contains "Team-owned"
-assert_body_contains "Personal"
+assert_body_contains "Status"
+assert_body_contains "Dependencies"
+assert_body_contains "Has dependencies"
 agent-browser press Escape
 
 log "Checking detail view"

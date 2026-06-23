@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { inviteStatusSchema, orgRoleSchema, teamRoleSchema } from "./scope";
+import { inviteStatusSchema, orgRoleSchema } from "./scope";
 
 export const orgSettingsMemberSchema = z.object({
   userId: z.string(),
@@ -13,26 +13,6 @@ export const orgSettingsMemberSchema = z.object({
   initials: z.string(),
 });
 export type OrgSettingsMember = z.infer<typeof orgSettingsMemberSchema>;
-
-export const orgSettingsTeamMemberSchema = z.object({
-  userId: z.string(),
-  role: teamRoleSchema,
-  name: z.string(),
-  email: z.string(),
-  initials: z.string(),
-});
-export type OrgSettingsTeamMember = z.infer<typeof orgSettingsTeamMemberSchema>;
-
-export const orgSettingsTeamSchema = z.object({
-  id: z.string(),
-  slug: z.string(),
-  name: z.string(),
-  description: z.string().nullable().default(null),
-  color: z.string().nullable().default(null),
-  icon: z.string().nullable().default(null),
-  members: z.array(orgSettingsTeamMemberSchema).default([]),
-});
-export type OrgSettingsTeam = z.infer<typeof orgSettingsTeamSchema>;
 
 /** A pending invitation, surfaced on its own Invitations pane (admins only). */
 export const orgSettingsInvitationSchema = z.object({
@@ -80,7 +60,6 @@ export const orgSettingsResponseSchema = z.object({
   org: orgSettingsOrgSchema,
   domainJoin: orgSettingsDomainJoinSchema,
   members: z.array(orgSettingsMemberSchema).default([]),
-  teams: z.array(orgSettingsTeamSchema).default([]),
   invitations: z.array(orgSettingsInvitationSchema).default([]),
 });
 export type OrgSettingsResponse = z.infer<typeof orgSettingsResponseSchema>;
@@ -91,7 +70,7 @@ export const updateUserProfileInputSchema = z.object({
 });
 export type UpdateUserProfileInput = z.infer<typeof updateUserProfileInputSchema>;
 
-/** Allowed team avatar swatches (CSS colors rendered inline in the UI). */
+/** Allowed workspace brand swatches (CSS colors rendered inline in the UI). */
 export const TEAM_BRAND_COLORS = [
   "oklch(0.56 0.13 250)", // blue
   "oklch(0.54 0.10 168)", // teal
@@ -125,26 +104,6 @@ export const addOrgAccessDomainInputSchema = z.object({
   domain: z.string().min(1).max(253),
 });
 export type AddOrgAccessDomainInput = z.infer<typeof addOrgAccessDomainInputSchema>;
-
-/** Body of `PUT /v1/teams/:teamId` — rename, re-slug, describe, and/or edit branding. */
-export const updateTeamInputSchema = z
-  .object({
-    name: z.string().min(1).max(120).optional(),
-    slug: z.string().min(1).max(120).optional(),
-    description: z.string().max(2000).nullish(),
-    color: teamBrandColorSchema.nullish(),
-    icon: z.string().max(32).nullish(),
-  })
-  .refine(
-    (v) =>
-      v.name !== undefined ||
-      v.slug !== undefined ||
-      v.description !== undefined ||
-      v.color !== undefined ||
-      v.icon !== undefined,
-    { message: "Provide at least one field to update." },
-  );
-export type UpdateTeamInput = z.infer<typeof updateTeamInputSchema>;
 
 /** Allowed workspace logo uploads (PNG, JPEG, WebP, GIF). */
 export const ORG_LOGO_MIME_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"] as const;

@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, useEffect } from "react";
+import { Fragment } from "react";
 import { Icon } from "../Icon";
 import { SettingsSidebar } from "./SettingsSidebar";
 import { ProfilePane } from "./ProfilePane";
@@ -9,15 +9,12 @@ import { ApiKeysPane } from "./ApiKeysPane";
 import { WorkspaceGeneralPane } from "./WorkspaceGeneralPane";
 import { MembersPane } from "./MembersPane";
 import { InvitationsPane } from "./InvitationsPane";
-import { TeamGeneralPane } from "./TeamGeneralPane";
-import { TeamMembersPane } from "./TeamMembersPane";
-import { InviteDialog, CreateTeamDialog } from "./dialogs";
+import { InviteDialog } from "./dialogs";
 import type { ApiKeyVM, Invite, OrgCtx, SettingsDialog, SettingsRoute } from "./model";
 
 /** Breadcrumb segments for the current route — [section, page] (ported from app.jsx). */
 function crumbFor(ctx: OrgCtx, route: SettingsRoute): string[] {
   const ws = ctx.currentOrg;
-  const team = route.teamId ? ctx.currentOrg.teams.find((t) => t.id === route.teamId) : null;
   switch (route.view) {
     case "profile":
       return ["Account", "Profile"];
@@ -31,10 +28,6 @@ function crumbFor(ctx: OrgCtx, route: SettingsRoute): string[] {
       return [ws.name, "Members"];
     case "invitations":
       return [ws.name, "Invitations"];
-    case "team-general":
-      return [team ? team.name : "Team", "General"];
-    case "team-members":
-      return [team ? team.name : "Team", "Members"];
     default:
       return [ws.name];
   }
@@ -43,8 +36,7 @@ function crumbFor(ctx: OrgCtx, route: SettingsRoute): string[] {
 /**
  * The settings surface: the `.sx` shell = collapsible sidebar + main column
  * (breadcrumb + the active pane), the workspace-level dialogs, and the shared
- * error bar. A route guard redirects team panes back to Workspace › General when
- * the targeted team disappears (e.g. after a delete or a switch).
+ * error bar.
  */
 export function SettingsView({
   ctx,
@@ -52,10 +44,8 @@ export function SettingsView({
   dialog,
   apiKeys,
   invites,
-  expanded,
   onView,
   onDialog,
-  onToggleTeam,
   onClose,
 }: {
   ctx: OrgCtx;
@@ -63,23 +53,10 @@ export function SettingsView({
   dialog: SettingsDialog;
   apiKeys: ApiKeyVM[];
   invites: Invite[];
-  expanded: Set<string>;
   onView: (route: SettingsRoute) => void;
   onDialog: (dialog: SettingsDialog) => void;
-  onToggleTeam: (teamId: string) => void;
   onClose: () => void;
 }) {
-  // Resolve the current team (team panes only) and guard against deletion.
-  const team =
-    route.view === "team-general" || route.view === "team-members"
-      ? ctx.currentOrg.teams.find((t) => t.id === route.teamId) ?? null
-      : null;
-  useEffect(() => {
-    if ((route.view === "team-general" || route.view === "team-members") && !team) {
-      onView({ view: "general" });
-    }
-  }, [route.view, team, onView]);
-
   let pane: React.ReactNode;
   if (route.view === "profile") pane = <ProfilePane ctx={ctx} />;
   else if (route.view === "preferences") pane = <PreferencesPane ctx={ctx} />;
@@ -88,10 +65,6 @@ export function SettingsView({
   else if (route.view === "members") pane = <MembersPane ctx={ctx} onInvite={() => onDialog("invite")} />;
   else if (route.view === "invitations")
     pane = <InvitationsPane ctx={ctx} invites={invites} onInvite={() => onDialog("invite")} />;
-  else if (route.view === "team-general" && team)
-    pane = <TeamGeneralPane ctx={ctx} team={team} key={team.id} />;
-  else if (route.view === "team-members" && team)
-    pane = <TeamMembersPane ctx={ctx} team={team} key={team.id} />;
   else pane = <WorkspaceGeneralPane ctx={ctx} />;
 
   const crumb = crumbFor(ctx, route);
@@ -102,9 +75,6 @@ export function SettingsView({
         ctx={ctx}
         route={route}
         go={onView}
-        expanded={expanded}
-        toggleTeam={onToggleTeam}
-        onCreateTeam={() => onDialog("team")}
         onClose={onClose}
         apiKeyCount={apiKeys.length}
         inviteCount={invites.length}
@@ -134,7 +104,6 @@ export function SettingsView({
         </div>
       </div>
       {dialog === "invite" && <InviteDialog ctx={ctx} onClose={() => onDialog(null)} />}
-      {dialog === "team" && <CreateTeamDialog ctx={ctx} onClose={() => onDialog(null)} />}
     </div>
   );
 }

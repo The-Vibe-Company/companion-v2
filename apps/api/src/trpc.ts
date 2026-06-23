@@ -1,7 +1,7 @@
 import { initTRPC } from "@trpc/server";
 import { z } from "zod";
+import { labelPathSchema } from "@companion/contracts";
 import { listOrgs, listSkills, listSkillVersions, type ActorContext } from "@companion/core/services";
-import { visibilityFilterSchema } from "@companion/contracts";
 import { withTenantContext } from "@companion/db";
 
 export interface TrpcContext {
@@ -21,11 +21,11 @@ export const appRouter = t.router({
   orgs: t.procedure.use(authed).query(({ ctx }) => listOrgs(ctx.actor)),
   skills: t.procedure
     .use(authed)
-    .input(z.object({ visibility: visibilityFilterSchema.optional() }))
+    .input(z.object({ label: labelPathSchema.optional(), nolabel: z.boolean().optional() }))
     .query(({ ctx, input }) => {
       if (!ctx.orgId) throw new Error("no organization selected");
       return withTenantContext({ orgId: ctx.orgId, userId: ctx.actor.id }, (database) =>
-        listSkills({ actor: ctx.actor, orgId: ctx.orgId!, visibility: input.visibility, database }),
+        listSkills({ actor: ctx.actor, orgId: ctx.orgId!, label: input.label, nolabel: input.nolabel, database }),
       );
     }),
   skillVersions: t.procedure

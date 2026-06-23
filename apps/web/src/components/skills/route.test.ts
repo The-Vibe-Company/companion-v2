@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   parseSkillsRoute,
   skillsRouteHref,
+  skillsRouteKey,
   skillsRouteSource,
   skillsRouteWithSkill,
   skillsRouteWithoutSkill,
@@ -13,10 +14,18 @@ describe("skills route helpers", () => {
     expect(parseSkillsRoute(new URLSearchParams())).toEqual({ kind: "all" });
   });
 
-  it("parses My skills", () => {
-    expect(parseSkillsRoute("view=mine")).toEqual({ kind: "mine" });
-    expect(parseSkillsRoute("view=mine&skill=incident-summary")).toEqual({
-      kind: "mine",
+  it("parses Starred", () => {
+    expect(parseSkillsRoute("view=starred")).toEqual({ kind: "starred" });
+    expect(parseSkillsRoute("view=starred&skill=incident-summary")).toEqual({
+      kind: "starred",
+      skill: "incident-summary",
+    });
+  });
+
+  it("parses No-label", () => {
+    expect(parseSkillsRoute("view=nolabel")).toEqual({ kind: "nolabel" });
+    expect(parseSkillsRoute("view=nolabel&skill=incident-summary")).toEqual({
+      kind: "nolabel",
       skill: "incident-summary",
     });
   });
@@ -26,24 +35,34 @@ describe("skills route helpers", () => {
     expect(parseSkillsRoute("?view=local&skill=ignored")).toEqual({ kind: "local" });
   });
 
-  it("parses team skills", () => {
-    expect(parseSkillsRoute("view=team&team=platform")).toEqual({ kind: "team", team: "platform" });
-    expect(parseSkillsRoute("view=team&team=platform&skill=incident-summary")).toEqual({
-      kind: "team",
-      team: "platform",
+  it("parses label folder routes (including nested slash paths)", () => {
+    expect(parseSkillsRoute("view=label&label=marketing")).toEqual({ kind: "label", label: "marketing" });
+    expect(parseSkillsRoute("view=label&label=marketing%2Fseo")).toEqual({
+      kind: "label",
+      label: "marketing/seo",
+    });
+    expect(parseSkillsRoute("view=label&label=marketing%2Fseo&skill=incident-summary")).toEqual({
+      kind: "label",
+      label: "marketing/seo",
       skill: "incident-summary",
     });
-    expect(parseSkillsRoute({ view: "team", team: "platform" })).toEqual({ kind: "team", team: "platform" });
-    expect(parseSkillsRoute({ view: ["team"], team: ["platform"] })).toEqual({ kind: "team", team: "platform" });
+    expect(parseSkillsRoute({ view: "label", label: "marketing/seo" })).toEqual({
+      kind: "label",
+      label: "marketing/seo",
+    });
+    expect(parseSkillsRoute({ view: ["label"], label: ["marketing/seo"] })).toEqual({
+      kind: "label",
+      label: "marketing/seo",
+    });
   });
 
-  it("falls back to workspace skills when a team route has no team", () => {
-    expect(parseSkillsRoute("view=team")).toEqual({ kind: "all" });
-    expect(parseSkillsRoute("view=team&skill=incident-summary")).toEqual({
+  it("falls back to workspace skills when a label route has no path", () => {
+    expect(parseSkillsRoute("view=label")).toEqual({ kind: "all" });
+    expect(parseSkillsRoute("view=label&skill=incident-summary")).toEqual({
       kind: "all",
       skill: "incident-summary",
     });
-    expect(parseSkillsRoute({ view: "team", team: undefined })).toEqual({ kind: "all" });
+    expect(parseSkillsRoute({ view: "label", label: undefined })).toEqual({ kind: "all" });
   });
 
   it("falls back to workspace skills for unknown views", () => {
@@ -68,32 +87,48 @@ describe("skills route helpers", () => {
     expect(skillsRouteSource({})).toBe("default");
     expect(skillsRouteSource("skill=incident-summary")).toBe("explicit");
     expect(skillsRouteSource("view=unknown")).toBe("explicit");
-    expect(skillsRouteSource({ view: ["team"], team: ["platform"] })).toBe("explicit");
+    expect(skillsRouteSource({ view: ["label"], label: ["marketing"] })).toBe("explicit");
   });
 
   it("builds canonical route URLs", () => {
     expect(skillsRouteHref({ kind: "all" })).toBe("/skills");
-    expect(skillsRouteHref({ kind: "mine" })).toBe("/skills?view=mine");
+    expect(skillsRouteHref({ kind: "starred" })).toBe("/skills?view=starred");
+    expect(skillsRouteHref({ kind: "nolabel" })).toBe("/skills?view=nolabel");
     expect(skillsRouteHref({ kind: "local" })).toBe("/skills?view=local");
     expect(skillsRouteHref({ kind: "all", skill: "incident-summary" })).toBe(
       "/skills?skill=incident-summary",
     );
-    expect(skillsRouteHref({ kind: "mine", skill: "incident-summary" })).toBe(
-      "/skills?view=mine&skill=incident-summary",
+    expect(skillsRouteHref({ kind: "starred", skill: "incident-summary" })).toBe(
+      "/skills?view=starred&skill=incident-summary",
     );
     expect(skillsRouteHref({ kind: "archived", skill: "old skill" })).toBe(
       "/skills?view=archived&skill=old%20skill",
     );
-    expect(skillsRouteHref({ kind: "team", team: "platform team" })).toBe(
-      "/skills?view=team&team=platform%20team",
+    expect(skillsRouteHref({ kind: "label", label: "marketing/seo" })).toBe(
+      "/skills?view=label&label=marketing%2Fseo",
     );
-    expect(skillsRouteHref({ kind: "team", team: "platform team", skill: "incident-summary" })).toBe(
-      "/skills?view=team&team=platform%20team&skill=incident-summary",
+    expect(skillsRouteHref({ kind: "label", label: "marketing/seo", skill: "incident-summary" })).toBe(
+      "/skills?view=label&label=marketing%2Fseo&skill=incident-summary",
     );
-    expect(parseSkillsRoute(skillsRouteHref({ kind: "team", team: "platform team" }))).toEqual({
-      kind: "team",
-      team: "platform team",
+  });
+
+  it("round-trips a nested label path (and its open skill) through href + parse", () => {
+    expect(parseSkillsRoute(skillsRouteHref({ kind: "label", label: "marketing/seo" }))).toEqual({
+      kind: "label",
+      label: "marketing/seo",
     });
+    expect(
+      parseSkillsRoute(skillsRouteHref({ kind: "label", label: "marketing/seo", skill: "incident-summary" })),
+    ).toEqual({ kind: "label", label: "marketing/seo", skill: "incident-summary" });
+  });
+
+  it("keys routes uniquely per slice + open skill", () => {
+    expect(skillsRouteKey({ kind: "all" })).toBe("all");
+    expect(skillsRouteKey({ kind: "label", label: "marketing/seo" })).toBe("label:marketing/seo");
+    expect(skillsRouteKey({ kind: "label", label: "marketing/seo", skill: "incident-summary" })).toBe(
+      "label:marketing/seo:skill:incident-summary",
+    );
+    expect(skillsRouteKey({ kind: "local" })).toBe("local");
   });
 
   it("adds and removes skill detail from routes", () => {
@@ -101,9 +136,9 @@ describe("skills route helpers", () => {
       kind: "all",
       skill: "incident-summary",
     });
-    expect(skillsRouteWithSkill({ kind: "team", team: "platform" }, "incident-summary")).toEqual({
-      kind: "team",
-      team: "platform",
+    expect(skillsRouteWithSkill({ kind: "label", label: "marketing/seo" }, "incident-summary")).toEqual({
+      kind: "label",
+      label: "marketing/seo",
       skill: "incident-summary",
     });
     expect(skillsRouteWithSkill({ kind: "local" }, "incident-summary")).toEqual({
@@ -112,6 +147,10 @@ describe("skills route helpers", () => {
     });
     expect(skillsRouteWithoutSkill({ kind: "archived", skill: "old-skill" })).toEqual({
       kind: "archived",
+    });
+    expect(skillsRouteWithoutSkill({ kind: "label", label: "marketing/seo", skill: "x" })).toEqual({
+      kind: "label",
+      label: "marketing/seo",
     });
   });
 });

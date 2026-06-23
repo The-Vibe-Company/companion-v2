@@ -7,8 +7,8 @@ import { renderToString } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SkillsApp } from "./SkillsApp";
 import { parseSkillsRoute } from "./route";
-import type { LocalSkillRow, SkillListRow } from "@companion/contracts";
-import type { MeVM, OrgVM, SkillVM, TeamVM } from "@/lib/types";
+import type { LabelsResponse, LocalSkillRow, SkillListRow } from "@companion/contracts";
+import type { MeVM, OrgVM, SkillVM } from "@/lib/types";
 
 const queryMocks = vi.hoisted(() => ({
   fetchArchivedSkills: vi.fn(),
@@ -26,9 +26,17 @@ const queryMocks = vi.hoisted(() => ({
   restoreSkill: vi.fn(),
   saveSkillFilterPreferences: vi.fn(),
   setCommentDeprecated: vi.fn(),
-  setSkillOwner: vi.fn(),
   toggleStar: vi.fn(),
   validateSkillPackage: vi.fn(),
+  // Label RPCs (org-wide shared folders).
+  fetchSkillLabels: vi.fn(),
+  assignSkillLabel: vi.fn(),
+  unassignSkillLabel: vi.fn(),
+  createLabel: vi.fn(),
+  renameLabel: vi.fn(),
+  deleteLabel: vi.fn(),
+  setLabelColor: vi.fn(),
+  setLabelIcon: vi.fn(),
 }));
 
 vi.mock("next/navigation", () => ({
@@ -52,30 +60,18 @@ const currentOrg: OrgVM = {
   color: null,
   logoUrl: null,
 };
-const teams: TeamVM[] = [
-  { id: "engineering", dbId: "team-1", name: "Engineering", initial: "E", color: null, icon: null, role: "editor" },
-  { id: "support", dbId: "team-2", name: "Support", initial: "S", color: null, icon: null, role: "reader" },
-];
 
-function skill(overrides: Partial<SkillVM>): SkillVM {
+function skill(overrides: Partial<SkillVM> & { id: string }): SkillVM {
   return {
-    uuid: "skill-" + (overrides.id ?? "base"),
-    id: "base",
-    ownerId: "user-1",
+    uuid: "skill-" + overrides.id,
     version: "1.0.0",
     validation: "valid",
     description: "Test skill",
     error: null,
-    owner: {
-      kind: "user",
-      id: "user-1",
-      userId: "user-1",
-      teamId: null,
-      name: "Ada Lovelace",
-      initials: "AL",
-      handle: "ada",
-      team: null,
-    },
+    labels: [],
+    authorId: "user-1",
+    authorName: "Ada Lovelace",
+    authorInitials: "AL",
     tools: [],
     requirements: [],
     compatibility: null,
@@ -89,7 +85,6 @@ function skill(overrides: Partial<SkillVM>): SkillVM {
     starred: false,
     installStatus: "none",
     installedVersion: null,
-    teamSlugs: [],
     requiresCount: 0,
     usedByCount: 0,
     depWarn: false,
@@ -103,13 +98,10 @@ function skillRowFromVM(vm: SkillVM): SkillListRow {
     id: vm.uuid,
     slug: vm.id,
     org_id: currentOrg.id,
-    owner_id: vm.ownerId,
-    owner_kind: vm.owner.kind,
-    owner_user_id: vm.owner.userId,
-    owner_team_id: vm.owner.teamId,
-    owner_name: vm.owner.name,
-    owner_initials: vm.owner.initials,
-    owner_handle: vm.owner.handle,
+    labels: vm.labels,
+    creator_id: vm.authorId,
+    creator_name: vm.authorName,
+    creator_initials: vm.authorInitials,
     current_version: vm.version,
     validation: vm.validation,
     description: vm.description,
@@ -126,6 +118,7 @@ function skillRowFromVM(vm: SkillVM): SkillListRow {
     updated_at: "2026-06-21T00:00:00.000Z",
     star_count: vm.stars,
     starred: vm.starred,
+    installed: vm.installStatus !== "none",
     install_status: vm.installStatus,
     installed_version: vm.installedVersion,
     requires_count: vm.requiresCount,
@@ -155,6 +148,29 @@ const localSkills: LocalSkillRow[] = [
   },
 ];
 
+// A non-trivial seeded skill set + label tree:
+//   - marketing/seo  -> seo-helper (filed in marketing/seo) + brand-kit (filed in marketing only)
+//   - growth         -> explicit EMPTY folder (a `labels` row, no skill filed)
+//   - loose-skill    -> filed nowhere (No-folder)
+function seededSkills(): SkillVM[] {
+  return [
+    skill({ id: "seo-helper", labels: ["marketing/seo"] }),
+    skill({ id: "brand-kit", labels: ["marketing"] }),
+    skill({ id: "loose-skill" }),
+  ];
+}
+
+const seededLabels: LabelsResponse = {
+  tree: [],
+  // `growth` is an explicit empty folder; the marketing/* paths are derived from assignments but we
+  // also include the explicit `marketing` appearance so its color/icon would survive.
+  flat: [{ path: "growth", color: null, icon: null }],
+};
+
+function emptyLabels(): LabelsResponse {
+  return { tree: [], flat: [] };
+}
+
 function routeSourceFor(initialRoute: React.ComponentProps<typeof SkillsApp>["initialRoute"]) {
   return initialRoute.kind === "all" && !initialRoute.skill ? "default" : "explicit";
 }
@@ -163,31 +179,14 @@ function appProps(
   initialRoute: React.ComponentProps<typeof SkillsApp>["initialRoute"],
   overrides: Partial<React.ComponentProps<typeof SkillsApp>> = {},
 ): React.ComponentProps<typeof SkillsApp> {
-  const initialSkills = [
-    skill({ id: "owned-skill" }),
-    skill({
-      id: "team-skill",
-      ownerId: "team-1",
-      owner: {
-        kind: "team",
-        id: "team-1",
-        userId: "user-1",
-        teamId: "team-1",
-        name: "Engineering",
-        initials: "EN",
-        handle: "engineering",
-        team: "Engineering",
-      },
-      teamSlugs: ["engineering"],
-    }),
-    skill({ id: "other-skill", ownerId: "user-2", owner: { ...skill({}).owner, id: "user-2", userId: "user-2", name: "Grace Hopper" } }),
-  ];
   return {
-    initialSkills,
+    initialSkills: seededSkills(),
     initialLocalSkills: localSkills,
-    initialFilterPreferences: { active_filters: [{ type: "starred", value: "true" }], custom_views: [] },
+    // Default to no saved chips so the route selection alone drives the list; individual tests pass
+    // their own `initialFilterPreferences` to exercise the saved-filter behavior.
+    initialFilterPreferences: { active_filters: [] },
+    initialLabels: seededLabels,
     me,
-    teams,
     orgs: [currentOrg],
     currentOrg,
     initialRoute,
@@ -196,10 +195,11 @@ function appProps(
   };
 }
 
-function render(initialRoute: React.ComponentProps<typeof SkillsApp>["initialRoute"]) {
-  return renderToString(
-    React.createElement(SkillsApp, appProps(initialRoute)),
-  );
+function render(
+  initialRoute: React.ComponentProps<typeof SkillsApp>["initialRoute"],
+  overrides: Partial<React.ComponentProps<typeof SkillsApp>> = {},
+) {
+  return renderToString(React.createElement(SkillsApp, appProps(initialRoute, overrides)));
 }
 
 async function mountSkillsApp(
@@ -231,13 +231,31 @@ async function mountSkillsApp(
   return { container, root };
 }
 
-function clickButton(container: HTMLElement, label: string) {
+function findButton(container: HTMLElement, label: string): HTMLButtonElement {
   const button = Array.from(container.querySelectorAll("button")).find(
-    (node) => node.getAttribute("aria-label") === label || node.textContent?.trim() === label,
+    (node) =>
+      node.getAttribute("aria-label") === label ||
+      node.getAttribute("title") === label ||
+      node.textContent?.trim() === label,
   );
   if (!button) throw new Error(`Could not find button: ${label}`);
+  return button;
+}
+
+function clickButton(container: HTMLElement, label: string) {
+  const button = findButton(container, label);
   act(() => {
     button.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  });
+}
+
+// React tracks the input value via the native setter; bypassing it (plain `.value =`) makes the
+// synthetic onChange ignore the update. Use the prototype setter so onChange fires.
+function setReactInputValue(input: HTMLInputElement, value: string) {
+  const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
+  act(() => {
+    setter?.call(input, value);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
   });
 }
 
@@ -267,9 +285,16 @@ beforeEach(() => {
   queryMocks.restoreSkill.mockResolvedValue(undefined);
   queryMocks.saveSkillFilterPreferences.mockResolvedValue(undefined);
   queryMocks.setCommentDeprecated.mockResolvedValue(null);
-  queryMocks.setSkillOwner.mockResolvedValue(undefined);
   queryMocks.toggleStar.mockResolvedValue(true);
   queryMocks.validateSkillPackage.mockResolvedValue({ result: { ok: true }, dependencyPlan: null });
+  queryMocks.fetchSkillLabels.mockResolvedValue(emptyLabels());
+  queryMocks.assignSkillLabel.mockResolvedValue(undefined);
+  queryMocks.unassignSkillLabel.mockResolvedValue(undefined);
+  queryMocks.createLabel.mockResolvedValue(undefined);
+  queryMocks.renameLabel.mockResolvedValue(undefined);
+  queryMocks.deleteLabel.mockResolvedValue(undefined);
+  queryMocks.setLabelColor.mockResolvedValue(undefined);
+  queryMocks.setLabelIcon.mockResolvedValue(undefined);
   mountedRoots = [];
 });
 
@@ -282,18 +307,52 @@ afterEach(() => {
 });
 
 describe("SkillsApp initial route", () => {
-  it("renders My skills from the initial route instead of saved filters", () => {
-    const html = render({ kind: "mine" });
-    expect(html).toContain("My skills");
-    expect(html).toContain("owned-skill");
-    expect(html).toContain("team-skill");
-    expect(html).not.toContain("other-skill");
+  it("renders All skills (every org skill, ignoring saved filters) from the default route", () => {
+    const html = render({ kind: "all" });
+    expect(html).toContain("All skills");
+    expect(html).toContain("seo-helper");
+    expect(html).toContain("brand-kit");
+    expect(html).toContain("loose-skill");
   });
 
-  it("renders a team route from the initial route", () => {
-    const html = render({ kind: "team", team: "engineering" });
-    expect(html).toContain("team-skill");
-    expect(html).not.toContain("owned-skill");
+  it("renders the Starred view from the initial route", () => {
+    const html = render({ kind: "starred", skill: undefined }, {
+      initialSkills: [
+        skill({ id: "seo-helper", labels: ["marketing/seo"], starred: true }),
+        skill({ id: "brand-kit", labels: ["marketing"] }),
+      ],
+    });
+    expect(html).toContain("Starred");
+    expect(html).toContain("seo-helper");
+    expect(html).not.toContain("brand-kit");
+  });
+
+  it("renders the No-folder view from the initial route", () => {
+    const html = render({ kind: "nolabel" });
+    // Only the skill filed in no folder shows.
+    expect(html).toContain("loose-skill");
+    expect(html).not.toContain("Open skill seo-helper");
+    expect(html).not.toContain("Open skill brand-kit");
+  });
+
+  it("renders a label folder route (skills filed under the path or any descendant)", () => {
+    const html = render({ kind: "label", label: "marketing" });
+    // marketing rolls up both its own skill and the marketing/seo descendant.
+    expect(html).toContain("seo-helper");
+    expect(html).toContain("brand-kit");
+    expect(html).not.toContain("Open skill loose-skill");
+  });
+
+  it("narrows to a nested label path", () => {
+    const html = render({ kind: "label", label: "marketing/seo" });
+    expect(html).toContain("seo-helper");
+    expect(html).not.toContain("Open skill brand-kit");
+    expect(html).not.toContain("Open skill loose-skill");
+  });
+
+  it("falls back to All skills for an unknown label route", () => {
+    const html = render({ kind: "label", label: "does-not-exist" });
+    expect(html).toContain("No skills match");
   });
 
   it("renders Companion skills from the initial route", () => {
@@ -302,52 +361,158 @@ describe("SkillsApp initial route", () => {
     expect(html).toContain("Manage skills locally.");
   });
 
-  it("falls back to workspace skills for an unknown team route", () => {
-    const html = render({ kind: "team", team: "missing" });
-    expect(html).toContain("owned-skill");
-    expect(html).toContain("team-skill");
-    expect(html).toContain("other-skill");
-  });
-
   it("renders a skill detail from a workspace skill route instead of saved filters", () => {
-    const html = render({ kind: "all", skill: "owned-skill" });
+    const html = render({ kind: "all", skill: "seo-helper" });
     expect(html).toContain("Install skill");
-    expect(html).toContain("owned-skill");
+    expect(html).toContain("seo-helper");
     expect(html).not.toContain("No skills match");
   });
 
-  it("renders a team skill detail while preserving the team route", () => {
-    const html = render({ kind: "team", team: "engineering", skill: "team-skill" });
+  it("renders a skill detail while preserving its label route", () => {
+    const html = render({ kind: "label", label: "marketing/seo", skill: "seo-helper" });
     expect(html).toContain("Install skill");
-    expect(html).toContain("team-skill");
-    expect(html).not.toContain("owned-skill");
-  });
-
-  it("preserves a skill detail when an unknown team route falls back to workspace skills", () => {
-    const html = render({ kind: "team", team: "missing", skill: "other-skill" });
-    expect(html).toContain("Install skill");
-    expect(html).toContain("other-skill");
-    expect(html).not.toContain("owned-skill");
+    expect(html).toContain("seo-helper");
+    expect(html).toContain("Filed in");
+    expect(html).not.toContain("Open skill brand-kit");
   });
 
   it("ignores skill detail on the Companion skills route", () => {
-    const html = render(parseSkillsRoute("view=local&skill=owned-skill"));
+    const html = render(parseSkillsRoute("view=local&skill=seo-helper"));
     expect(html).toContain("Companion skills");
     expect(html).toContain("Manage skills locally.");
     expect(html).not.toContain("Install skill");
   });
+});
 
+describe("SkillsApp sidebar label tree derivation", () => {
+  // The sidebar tree is derived in the client from skills + explicit labels; assertions read the
+  // rendered label rows (leaf name + roll-up count + chevron presence).
+  function labelRow(container: HTMLElement, path: string): HTMLElement {
+    const more = container.querySelector<HTMLElement>(`button[aria-label="${path} options"]`);
+    const row = more?.closest<HTMLElement>(".lblrow");
+    if (!row) throw new Error(`Could not find label row for path: ${path}`);
+    return row;
+  }
+  function rowCount(row: HTMLElement): string {
+    return row.querySelector(".lblrow__count")?.textContent?.trim() ?? "";
+  }
+
+  it("derives intermediate parents and de-duped roll-up counts", async () => {
+    const { container } = await mountSkillsApp({ kind: "all" });
+    await flushEffects();
+
+    // `marketing` is derived as a parent (only `marketing/seo` + `marketing` are assigned).
+    const marketing = labelRow(container, "marketing");
+    // Roll-up: brand-kit (marketing) + seo-helper (marketing/seo) = 2, de-duped per skill.
+    expect(rowCount(marketing)).toBe("2");
+    // The derived parent has children, so it gets a chevron.
+    expect(marketing.querySelector(".lblrow__chev:not(.lblrow__chev--leaf)")).not.toBeNull();
+    expect(marketing.querySelector(".lblrow__name")?.textContent?.trim()).toBe("marketing");
+  });
+
+  it("gates child rows behind their collapsed parent (chevron expand)", async () => {
+    const { container } = await mountSkillsApp({ kind: "all" });
+    await flushEffects();
+
+    // marketing/seo is a child of marketing; collapsed by default, so its row is hidden.
+    expect(container.querySelector('button[aria-label="marketing/seo options"]')).toBeNull();
+
+    // Expanding marketing reveals the child.
+    const marketing = labelRow(container, "marketing");
+    const chevron = marketing.querySelector<HTMLButtonElement>(".lblrow__chev:not(.lblrow__chev--leaf)");
+    act(() => chevron!.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    await flushEffects();
+
+    const seo = labelRow(container, "marketing/seo");
+    expect(seo.querySelector(".lblrow__name")?.textContent?.trim()).toBe("seo");
+    expect(rowCount(seo)).toBe("1");
+    // The leaf has no children: a leaf chevron placeholder, not an expand button.
+    expect(seo.querySelector(".lblrow__chev--leaf")).not.toBeNull();
+  });
+
+  it("renders an explicit empty folder (a `labels` row with no skills) with a zero count", async () => {
+    const { container } = await mountSkillsApp({ kind: "all" });
+    await flushEffects();
+
+    const growth = labelRow(container, "growth");
+    expect(growth.querySelector(".lblrow__name")?.textContent?.trim()).toBe("growth");
+    expect(rowCount(growth)).toBe("0");
+    // Empty leaf folder: no chevron expand button.
+    expect(growth.querySelector(".lblrow__chev--leaf")).not.toBeNull();
+  });
+
+  it("reflects All skills / Starred counts in the sidebar", async () => {
+    const { container } = await mountSkillsApp({ kind: "all" }, {
+      props: {
+        initialSkills: [
+          skill({ id: "seo-helper", labels: ["marketing/seo"], starred: true }),
+          skill({ id: "brand-kit", labels: ["marketing"] }),
+          skill({ id: "loose-skill" }),
+        ],
+      },
+    });
+    await flushEffects();
+
+    const all = findButton(container, "All skills");
+    expect(all.querySelector(".navitem__count")?.textContent?.trim()).toBe("3");
+    const starred = findButton(container, "Starred skills");
+    expect(starred.querySelector(".navitem__count")?.textContent?.trim()).toBe("1");
+  });
+});
+
+describe("SkillsApp optimistic label assignment", () => {
+  it("fires exactly one unassign RPC per detail toggle and keeps the detail open (StrictMode-safe)", async () => {
+    // From the All-skills scope the skill stays in view after unfiling, so the detail does not close.
+    const { container } = await mountSkillsApp(
+      { kind: "all", skill: "seo-helper" },
+      { url: "/skills?skill=seo-helper" },
+    );
+    await flushEffects();
+    expect(container.textContent).toContain("Install skill");
+    expect(container.textContent).toContain("Filed in");
+    expect(container.querySelector('button[aria-label="Remove from marketing/seo"]')).not.toBeNull();
+
+    // The "Filed in" chip exposes a remove control per filed folder.
+    clickButton(container, "Remove from marketing/seo");
+    await flushEffects();
+
+    // Exactly one RPC, the optimistic state removed the chip, and the detail stays open (no refresh).
+    expect(queryMocks.unassignSkillLabel).toHaveBeenCalledTimes(1);
+    expect(queryMocks.unassignSkillLabel).toHaveBeenCalledWith("seo-helper", "marketing/seo");
+    expect(queryMocks.assignSkillLabel).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("Install skill");
+    expect(container.textContent).toContain("No folders yet");
+    expect(container.querySelector('button[aria-label="Remove from marketing/seo"]')).toBeNull();
+  });
+
+  it("reverts the optimistic toggle and keeps the detail open when the RPC fails", async () => {
+    queryMocks.unassignSkillLabel.mockRejectedValueOnce(new Error("nope"));
+    const { container } = await mountSkillsApp(
+      { kind: "all", skill: "seo-helper" },
+      { url: "/skills?skill=seo-helper" },
+    );
+    await flushEffects();
+
+    clickButton(container, "Remove from marketing/seo");
+    await flushEffects();
+
+    expect(queryMocks.unassignSkillLabel).toHaveBeenCalledTimes(1);
+    // The chip is restored after the failure; the detail never closed.
+    expect(container.textContent).toContain("Install skill");
+    expect(container.querySelector('button[aria-label="Remove from marketing/seo"]')).not.toBeNull();
+  });
+});
+
+describe("SkillsApp navigation", () => {
   it("preserves unsaved filters when browser Back closes a pushed detail", async () => {
     const { container } = await mountSkillsApp({ kind: "all" });
-    expect(container.textContent).toContain("No skills match");
-
-    clickButton(container, "Clear");
     await flushEffects();
-    expect(container.textContent).toContain("owned-skill");
+    // The default route ignores the saved starred filter, so every skill shows.
+    expect(container.textContent).toContain("loose-skill");
 
-    clickButton(container, "Open skill owned-skill");
+    clickButton(container, "Open skill loose-skill");
     await flushEffects();
-    expect(window.location.search).toBe("?skill=owned-skill");
+    expect(window.location.search).toBe("?skill=loose-skill");
     expect(container.textContent).toContain("Install skill");
 
     window.history.replaceState({}, "", "/skills");
@@ -356,26 +521,28 @@ describe("SkillsApp initial route", () => {
     });
 
     expect(window.location.search).toBe("");
-    expect(container.textContent).toContain("owned-skill");
-    expect(container.textContent).not.toContain("No skills match");
+    expect(container.textContent).toContain("loose-skill");
+    expect(container.textContent).not.toContain("Install skill");
   });
 
-  it("uses browser history when the in-page back closes a pushed detail", async () => {
-    const { container } = await mountSkillsApp({ kind: "all" }, { routeSource: "explicit" });
-    clickButton(container, "Open skill owned-skill");
+  it("persists a label folder in the URL when opening a skill under it", async () => {
+    const { container } = await mountSkillsApp(
+      { kind: "label", label: "marketing/seo" },
+      { url: "/skills?view=label&label=marketing%2Fseo" },
+    );
     await flushEffects();
 
-    const backSpy = vi.spyOn(window.history, "back").mockImplementation(() => {});
-    clickButton(container, "Skills");
+    clickButton(container, "Open skill seo-helper");
+    await flushEffects();
 
-    expect(backSpy).toHaveBeenCalledTimes(1);
-    expect(window.location.search).toBe("?skill=owned-skill");
+    expect(window.location.search).toBe("?view=label&label=marketing%2Fseo&skill=seo-helper");
+    expect(container.textContent).toContain("Install skill");
   });
 
   it("falls back to replacing the URL when closing a directly loaded detail", async () => {
     const { container } = await mountSkillsApp(
-      { kind: "all", skill: "owned-skill" },
-      { url: "/skills?skill=owned-skill" },
+      { kind: "all", skill: "seo-helper" },
+      { url: "/skills?skill=seo-helper" },
     );
     await flushEffects();
     expect(container.textContent).toContain("Install skill");
@@ -384,7 +551,7 @@ describe("SkillsApp initial route", () => {
     await flushEffects();
 
     expect(window.location.pathname + window.location.search).toBe("/skills");
-    expect(container.textContent).toContain("owned-skill");
+    expect(container.textContent).toContain("seo-helper");
     expect(container.textContent).not.toContain("Install skill");
   });
 
@@ -422,29 +589,59 @@ describe("SkillsApp initial route", () => {
     expect(container.textContent).toContain("Archived skills");
     expect(container.textContent).not.toContain("missing-skill");
   });
+});
 
-  it("preserves the open skill when a team slug changes", async () => {
+describe("SkillsApp label folder creation", () => {
+  it("creates an empty folder from the org-root input and selects it (one createLabel RPC)", async () => {
+    const { container } = await mountSkillsApp({ kind: "all" });
+    await flushEffects();
+
+    clickButton(container, "New folder");
+    await flushEffects();
+
+    const input = container.querySelector<HTMLInputElement>('input[aria-label="New folder path"]');
+    expect(input).not.toBeNull();
+    setReactInputValue(input!, "campaigns");
+    await flushEffects();
+    act(() => {
+      input!.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    });
+    await flushEffects();
+
+    expect(queryMocks.createLabel).toHaveBeenCalledTimes(1);
+    expect(queryMocks.createLabel).toHaveBeenCalledWith("campaigns");
+    // The new folder is selected (its scope is now the active label route).
+    expect(window.location.search).toBe("?view=label&label=campaigns");
+  });
+
+  it("rewrites the URL when renaming the active folder, preserving the open skill", async () => {
     const { container } = await mountSkillsApp(
-      { kind: "team", team: "engineering", skill: "team-skill" },
-      { url: "/skills?view=team&team=engineering&skill=team-skill" },
+      { kind: "label", label: "marketing/seo" },
+      { url: "/skills?view=label&label=marketing%2Fseo" },
     );
     await flushEffects();
 
-    expect(container.textContent).toContain("team-skill");
-    act(() => {
-      window.dispatchEvent(
-        new CustomEvent("companion:team-updated", {
-          detail: {
-            id: "team-1",
-            slug: "platform",
-            name: "Platform",
-            color: null,
-            icon: null,
-          },
-        }),
-      );
-    });
+    // Open a skill under the active folder so the route carries both label + skill.
+    clickButton(container, "Open skill seo-helper");
+    await flushEffects();
+    expect(window.location.search).toBe("?view=label&label=marketing%2Fseo&skill=seo-helper");
 
-    expect(window.location.search).toBe("?view=team&team=platform&skill=team-skill");
+    // Rename the active leaf folder (marketing/seo → marketing/growth) via its options menu.
+    clickButton(container, "marketing/seo options");
+    await flushEffects();
+    clickButton(container, "Rename");
+    await flushEffects();
+    const input = container.querySelector<HTMLInputElement>('input[aria-label="Rename folder"]');
+    expect(input).not.toBeNull();
+    setReactInputValue(input!, "growth");
+    await flushEffects();
+    act(() => {
+      input!.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    });
+    await flushEffects();
+
+    expect(queryMocks.renameLabel).toHaveBeenCalledWith("marketing/seo", "marketing/growth");
+    // The URL round-trips the new path and keeps the detail open (reload re-opens the same skill).
+    expect(window.location.search).toBe("?view=label&label=marketing%2Fgrowth&skill=seo-helper");
   });
 });

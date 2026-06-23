@@ -1,15 +1,16 @@
-import { type OrgRole, type TeamRole } from "@companion/contracts";
+import { type OrgRole } from "@companion/contracts";
 
 /**
  * The CAPABILITY gate (the "can the actor DO it?" half of authorization). The
  * VISIBILITY gate ("can the actor SEE it?") is enforced separately by Postgres RLS.
  * Both must pass. This module is framework-free and shared by the web routes and CLI.
  *
- * Roles (design model): org = owner / admin / developer; team = admin / editor / reader.
- * These are pure mirrors of the SQL guards in the SECURITY DEFINER management RPCs —
- * the database is authoritative; these power the route layer + the table-driven tests.
- * Every role passed in is the actor's role IN A SPECIFIC org/team, so a role in org A
- * never authorizes org B (the DB re-derives per org/team; this contract documents it).
+ * Skills are FLAT: every skill is visible to every member of its org, and any member may do
+ * anything to any skill (read / create / update / delete / publish / label-*). There is no owner
+ * or visibility axis. The only gate that remains here is org governance (member/role management),
+ * which mirrors the SQL guards in the SECURITY DEFINER management RPCs — the database is
+ * authoritative; these power the route layer + the table-driven tests. Every role passed in is the
+ * actor's role IN A SPECIFIC org, so a role in org A never authorizes org B.
  */
 
 export type SkillAction =
@@ -21,24 +22,6 @@ export type SkillAction =
 
 export interface Actor {
   orgRole: OrgRole;
-  teamRole?: TeamRole | null;
-}
-
-export interface ResourceCtx {
-  /** Does the actor own this resource, either directly or through an owner team? */
-  isOwner: boolean;
-}
-
-/**
- * The owner context of a skill — the single access axis. A skill is owned by a user (Personal,
- * `ownerKind: "user"`) or a team (`ownerKind: "team"`).
- */
-export interface SkillOwnerCtx {
-  ownerKind: "user" | "team";
-  /** Personal skills: is the actor the owning user? */
-  isOwnerUser: boolean;
-  /** Team-owned skills: the actor's role in the owning team (null when not a member). */
-  ownerTeamRole?: TeamRole | null;
 }
 
 const ORG_ADMINS: ReadonlySet<OrgRole> = new Set<OrgRole>(["owner", "admin"]);
@@ -47,29 +30,9 @@ export function isOrgAdmin(role: OrgRole): boolean {
   return ORG_ADMINS.has(role);
 }
 
-/**
- * Who may EDIT a skill (update / delete / publish a new version / change its owner). The owner is
- * the single gate:
- * - org admins (owner/admin): any skill.
- * - team-owned: the owning team's admins & editors.
- * - personal: the owning user only.
- */
-export function canEditSkill(actor: Actor, owner: SkillOwnerCtx): boolean {
-  if (isOrgAdmin(actor.orgRole)) return true;
-  if (owner.ownerKind === "team") return owner.ownerTeamRole === "admin" || owner.ownerTeamRole === "editor";
-  return owner.isOwnerUser === true;
-}
-
-/** Who may MODIFY (update/delete/publish a new version of) an existing resource. */
-export function canModify(actor: Actor, res: ResourceCtx): boolean {
-  if (isOrgAdmin(actor.orgRole)) return true;
-  if (res.isOwner) return true;
-  return false;
-}
-
 /* ---- Management capability gates (mirror the SQL RPC guards) ---------------- */
 
-/** Owner or admin may manage org members & teams. */
+/** Owner or admin may manage org members. */
 export function canManageOrg(orgRole: OrgRole): boolean {
   return isOrgAdmin(orgRole);
 }
@@ -79,35 +42,16 @@ export function canTouchOwner(orgRole: OrgRole): boolean {
   return orgRole === "owner";
 }
 
-/**
- * Who may manage a team's members & roles: an org admin, or a team admin (a team admin
- * manages their own team even without org-admin rights).
- */
-export function canManageTeam(actor: { orgRole: OrgRole; teamRole?: TeamRole | null }): boolean {
-  return isOrgAdmin(actor.orgRole) || actor.teamRole === "admin";
-}
-
 /** Guard: an org must always keep at least one owner. */
 export function isLastOwner(ownerCount: number, targetIsOwner: boolean): boolean {
   return targetIsOwner && ownerCount <= 1;
 }
 
-/** Guard: a team must always keep at least one admin. */
-export function isLastTeamAdmin(adminCount: number, targetIsAdmin: boolean): boolean {
-  return targetIsAdmin && adminCount <= 1;
-}
-
-/** The single capability decision used by routes and the CLI. */
-export function canPerform(actor: Actor, action: SkillAction, res: ResourceCtx): boolean {
-  switch (action) {
-    case "skill.read":
-      return true; // visibility gate (RLS) decides what is readable
-    case "skill.create":
-      return true; // anyone may create; the chosen owner (Personal/Team) is authorized on resolve
-    case "skill.publish":
-      return canModify(actor, res);
-    case "skill.update":
-    case "skill.delete":
-      return canModify(actor, res);
-  }
+/**
+ * The single capability decision used by routes and the CLI. Skills are flat: every action is
+ * allowed for any member of the org. The visibility gate (RLS / `assertMember`) decides whether
+ * the actor is a member at all; this gate then permits the action unconditionally.
+ */
+export function canPerform(_actor: Actor, _action: SkillAction): boolean {
+  return true;
 }

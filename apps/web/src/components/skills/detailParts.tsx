@@ -1,281 +1,318 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { SkillCommentRow, SkillVersionRow } from "@companion/contracts";
 import { Icon } from "../Icon";
-import { TeamAvatar } from "../org/TeamAvatar";
 import { relativeTime } from "@/lib/format";
-import type { MeVM, SkillVM, TeamVM } from "@/lib/types";
-import { Avatar, visibilityMeta } from "./blocks";
-
-export type DetailPanel = "dependencies" | "requirements" | "files" | "activity";
-export type DetailPanelItem = {
-  id: DetailPanel;
-  label: string;
-  icon: string;
-  count: string | number;
-};
+import type { MeVM, SkillVM } from "@/lib/types";
 
 function metadataKeyLabel(key: string): string {
   return key.startsWith("companion_") ? key.slice("companion_".length).replaceAll("_", " ") : key;
 }
 
-export function OwnerControl({
-  skill,
-  teams,
-  onChange,
-  canChange,
+/* ----------------------------------------------------------- folder filing */
+
+/**
+ * "Add to folder" picker: a `position: fixed` popover (clamped at the cursor, reusing the
+ * `.menu--fixed` pattern so the scroll container never clips it) that searches existing label paths,
+ * toggles assignment with a checkbox, and lets the actor create + assign a brand-new path. Labels are
+ * org-wide shared, so every member sees and edits the same tree — there is no owner/visibility gate.
+ */
+function AddToFolder({
+  filed,
+  allLabels,
+  onToggle,
+  onCreate,
 }: {
-  skill: SkillVM;
-  teams: TeamVM[];
-  /** `null` = Personal (private to the owner); a team slug = owned by that team (workspace-visible). */
-  onChange: (ownerTeam: string | null) => void;
-  canChange: boolean;
+  filed: string[];
+  allLabels: string[];
+  onToggle: (path: string) => void;
+  onCreate: (path: string) => void;
 }) {
   const [open, setOpen] = useState(false);
-  const [menuPos, setMenuPos] = useState({ x: 0, y: 0 });
-  const ref = useRef<HTMLSpanElement>(null);
+  const [pos, setPos] = useState({ x: 0, y: 0 });
+  const [query, setQuery] = useState("");
+  const wrapRef = useRef<HTMLSpanElement>(null);
   const btnRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
-  const meta = visibilityMeta(skill);
-  // Only teams the actor can own for (admin/editor) are assignable targets.
-  const ownerTeams = teams.filter((team) => team.role === "admin" || team.role === "editor");
-  const currentTeam = skill.owner.kind === "team" ? skill.owner.handle : null;
-  const choose = (ownerTeam: string | null) => {
-    setOpen(false);
-    if (ownerTeam !== currentTeam) onChange(ownerTeam);
-  };
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const filedSet = useMemo(() => new Set(filed), [filed]);
+  const q = query.trim().toLowerCase();
+  const matches = useMemo(
+    () => allLabels.filter((p) => !q || p.toLowerCase().includes(q)).sort((a, b) => a.localeCompare(b)),
+    [allLabels, q],
+  );
+  // Offer to create the typed path only when it is a non-empty, not-yet-existing label.
+  const typed = query.trim();
+  const canCreate = typed.length > 0 && !allLabels.includes(typed) && !filedSet.has(typed);
+
+  // Clamp the fixed popover into the viewport once it has measured its own size.
   useEffect(() => {
     if (!open) return;
     const el = menuRef.current;
     if (!el) return;
     const r = el.getBoundingClientRect();
     const pad = 8;
-    let left = menuPos.x - r.width;
-    let top = menuPos.y;
-    if (left < pad) left = pad;
+    let left = pos.x;
+    let top = pos.y;
     if (left + r.width > window.innerWidth - pad) left = Math.max(pad, window.innerWidth - r.width - pad);
     if (top + r.height > window.innerHeight - pad) top = Math.max(pad, window.innerHeight - r.height - pad);
     el.style.left = `${left}px`;
     el.style.top = `${top}px`;
-  }, [open, menuPos]);
+  }, [open, pos]);
 
   useEffect(() => {
-    const h = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    if (!open) return;
+    queueMicrotask(() => inputRef.current?.focus());
+    const onDown = (e: MouseEvent) => {
+      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false);
     };
-    const k = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setOpen(false);
+        btnRef.current?.focus();
+      }
     };
-    document.addEventListener("mousedown", h);
-    document.addEventListener("keydown", k);
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
     return () => {
-      document.removeEventListener("mousedown", h);
-      document.removeEventListener("keydown", k);
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
     };
-  }, []);
+  }, [open]);
 
   const toggleMenu = () => {
     setOpen((wasOpen) => {
       if (!wasOpen) {
         const r = btnRef.current?.getBoundingClientRect();
-        if (r) setMenuPos({ x: r.right, y: r.bottom + 6 });
+        if (r) setPos({ x: r.left, y: r.bottom + 6 });
+        setQuery("");
       }
       return !wasOpen;
     });
   };
-  if (!canChange) {
-    return (
-      <span className="vis__btn vis__btn--readonly" title="Only the owner or an org admin can change this" aria-label={`Owner: ${meta.label}`}>
-        <span className="lead">
-          <Icon name={meta.icon} size={11} />
-        </span>
-        <span className="vis__label">{meta.label}</span>
-        <span className="caret">
-          <Icon name="lock" size={11} />
-        </span>
-      </span>
-    );
-  }
+
+  const create = () => {
+    if (!canCreate) return;
+    onCreate(typed);
+    setQuery("");
+  };
+
   return (
-    <span className="vis" ref={ref}>
+    <span className="addfolder" ref={wrapRef}>
       <button
         ref={btnRef}
-        className="vis__btn"
-        onClick={toggleMenu}
+        type="button"
+        className="filedin__add"
         aria-haspopup="menu"
         aria-expanded={open}
+        onClick={toggleMenu}
       >
-        <span className="lead">
-          <Icon name={meta.icon} size={11} />
-        </span>
-        <span className="vis__label">{meta.label}</span>
-        <span className="caret">
-          <Icon name="chevron-down" size={12} />
-        </span>
+        <Icon name="folder-plus" size={12} />
+        Add to folder
       </button>
       {open && (
-        <div className="menu menu--fixed" role="menu" ref={menuRef}>
-          <div className="menu__head">Owner</div>
-          <button
-            role="menuitemradio"
-            aria-checked={skill.owner.kind === "user"}
-            className={"menu__item" + (skill.owner.kind === "user" ? " is-sel" : "")}
-            onClick={() => choose(null)}
-          >
-            <span className="ico">
-              <Icon name="lock" size={14} />
-            </span>
-            <span className="menu__label">Personal</span>
-            <span className="menu__desc">private to you</span>
-            {skill.owner.kind === "user" && (
-              <span className="menu__check">
-                <Icon name="check" size={13} />
-              </span>
+        <div className="menu menu--fixed addfolder__menu" role="menu" ref={menuRef}>
+          <div className="addfolder__search">
+            <Icon name="search" size={13} />
+            <input
+              ref={inputRef}
+              className="addfolder__input"
+              placeholder="Search or create marketing/seo…"
+              value={query}
+              aria-label="Search or create a folder"
+              onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && canCreate) {
+                  e.preventDefault();
+                  create();
+                }
+              }}
+            />
+          </div>
+          <div className="addfolder__list">
+            {matches.map((path) => {
+              const on = filedSet.has(path);
+              return (
+                <button
+                  key={path}
+                  type="button"
+                  role="menuitemcheckbox"
+                  aria-checked={on}
+                  className={"addfolder__item" + (on ? " is-on" : "")}
+                  onClick={() => onToggle(path)}
+                >
+                  <span className={"addfolder__check" + (on ? " is-on" : "")}>
+                    {on && <Icon name="check" size={11} />}
+                  </span>
+                  <Icon name="folder" size={13} />
+                  <span className="addfolder__path">{path}</span>
+                </button>
+              );
+            })}
+            {matches.length === 0 && !canCreate && (
+              <div className="addfolder__empty">No matching folders.</div>
             )}
-          </button>
-          {ownerTeams.length > 0 && <div className="menu__head">Teams</div>}
-          {ownerTeams.map((team) => (
-            <button
-              key={team.id}
-              role="menuitemradio"
-              aria-checked={currentTeam === team.id}
-              className={"menu__item" + (currentTeam === team.id ? " is-sel" : "")}
-              onClick={() => choose(team.id)}
-            >
-              <TeamAvatar team={team} className="ico menu__teamav" />
-              <span className="menu__label">{team.name}</span>
-              <span className="menu__desc">visible to all</span>
-              {currentTeam === team.id && (
-                <span className="menu__check">
-                  <Icon name="check" size={13} />
-                </span>
-              )}
+          </div>
+          {canCreate && (
+            <button type="button" className="addfolder__create" role="menuitem" onClick={create}>
+              <Icon name="plus" size={13} />
+              <span>
+                Create <span className="mono">{typed}</span>
+              </span>
             </button>
-          ))}
+          )}
         </div>
       )}
     </span>
   );
 }
 
-export function PropList({
+/**
+ * The "Filed in" row: the org-wide shared folders a skill is filed under. Each chip navigates to that
+ * label's scope; the trailing control opens the "Add to folder" picker. Any member can file / unfile a
+ * skill — labels carry no access semantics.
+ */
+export function FiledIn({
   skill,
-  teams,
-  onChangeOwner,
-  canChangeOwner,
-  requiresN,
-  usedByN,
-  depFlag,
-  onOpenDeps,
+  allLabels,
+  onToggleLabel,
+  onSelectLabel,
 }: {
   skill: SkillVM;
-  teams: TeamVM[];
-  onChangeOwner: (ownerTeam: string | null) => void;
-  canChangeOwner: boolean;
-  /** Dependency counts for the rail (fall back to the list-row counts before the graph loads). */
-  requiresN?: number;
-  usedByN?: number;
-  /** Set when at least one dependency is unsatisfied; `blocked` means a missing/cycle edge. */
-  depFlag?: { n: number; blocked: boolean } | null;
-  onOpenDeps?: () => void;
+  allLabels: string[];
+  onToggleLabel: (path: string) => void;
+  onSelectLabel: (path: string) => void;
 }) {
-  const reqN = requiresN ?? skill.requiresCount;
-  const usedN = usedByN ?? skill.usedByCount;
-  const flag = depFlag ?? (skill.depWarn ? { n: 0, blocked: false } : null);
+  const filed = useMemo(() => [...skill.labels].sort((a, b) => a.localeCompare(b)), [skill.labels]);
+  return (
+    <div className="filedin">
+      <span className="filedin__lead">
+        <Icon name="folder" size={13} />
+        Filed in
+      </span>
+      <span className="filedin__chips">
+        {filed.map((path) => (
+          <span className="filedin__chip" key={path}>
+            <button
+              type="button"
+              className="filedin__chipgo"
+              onClick={() => onSelectLabel(path)}
+              title={`View ${path}`}
+            >
+              {path}
+            </button>
+            <button
+              type="button"
+              className="filedin__chipx"
+              onClick={() => onToggleLabel(path)}
+              aria-label={`Remove from ${path}`}
+              title={`Remove from ${path}`}
+            >
+              <Icon name="x" size={11} />
+            </button>
+          </span>
+        ))}
+        {filed.length === 0 && <span className="filedin__none">No folders yet</span>}
+        <AddToFolder
+          filed={skill.labels}
+          allLabels={allLabels}
+          onToggle={onToggleLabel}
+          onCreate={onToggleLabel}
+        />
+      </span>
+    </div>
+  );
+}
+
+/* --------------------------------------------------------- status + section */
+
+/** Maps the validation state to its colored badge tone + label for the status card. */
+function statusBadge(validation: SkillVM["validation"]): { tone: "ok" | "warn" | "danger"; label: string } {
+  if (validation === "invalid") return { tone: "danger", label: "Invalid" };
+  if (validation === "validating") return { tone: "warn", label: "Validating" };
+  return { tone: "ok", label: "Valid" };
+}
+
+/**
+ * The detail head's status card: Status (colored badge + dot), Version, Updated, Stars.
+ * Version/Updated/Stars live here so the stacked sections below never repeat them.
+ */
+export function StatusCard({ skill }: { skill: SkillVM }) {
+  const badge = statusBadge(skill.validation);
+  return (
+    <div className="statuscard">
+      <div className="statuscard__row">
+        <span className="statuscard__k">Status</span>
+        <span className={"statuscard__badge statuscard__badge--" + badge.tone}>
+          <span className="statuscard__dot" />
+          {badge.label}
+        </span>
+      </div>
+      <div className="statuscard__row">
+        <span className="statuscard__k">Version</span>
+        <span className="statuscard__v mono">{skill.version ?? "—"}</span>
+      </div>
+      <div className="statuscard__row">
+        <span className="statuscard__k">Updated</span>
+        <span className="statuscard__v statuscard__v--muted">{skill.updated}</span>
+      </div>
+      <div className="statuscard__row">
+        <span className="statuscard__k">Stars</span>
+        <span className="statuscard__v mono tnum">{skill.stars}</span>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * A stacked, collapsible detail section: an uppercase faint label with a chevron that rotates when
+ * open, and its content below. Owns its own open/close state, seeded by `defaultOpen`.
+ */
+export function Section({
+  label,
+  count,
+  defaultOpen = false,
+  children,
+}: {
+  label: string;
+  count?: number;
+  defaultOpen?: boolean;
+  children: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <section className={"dsection" + (open ? " is-open" : "")}>
+      <button
+        type="button"
+        className="dsection__head"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+      >
+        <span className="dsection__chev" aria-hidden="true">
+          <Icon name="chevron-right" size={14} />
+        </span>
+        <span className="dsection__label">{label}</span>
+        {count != null && <span className="dsection__count mono">{count}</span>}
+      </button>
+      {open && <div className="dsection__body">{children}</div>}
+    </section>
+  );
+}
+
+/* ----------------------------------------------------------------- manifest */
+
+/**
+ * The manifest facts — compatibility, allowed tools, license, checksum, metadata. Shared by the
+ * detail's Manifest section and the standalone `PropList`. Version/created/updated are deliberately
+ * excluded here (they live in the status card) so nothing is duplicated.
+ */
+export function ManifestRows({ skill }: { skill: SkillVM }) {
   const metadataEntries = Object.entries(skill.metadata).sort(([a], [b]) => a.localeCompare(b));
   return (
-    <div className="props">
-      <div className="prop">
-        <span className="prop__label">
-          <Icon name="shield" size={14} />
-          Owner
-        </span>
-        <span className="prop__value">
-          <OwnerControl skill={skill} teams={teams} onChange={onChangeOwner} canChange={canChangeOwner} />
-        </span>
-      </div>
-      <div className="prop">
-        <span className="prop__label">
-          <Icon name="tag" size={14} />
-          Version
-        </span>
-        <span className="prop__value">
-          <span className="mono" style={{ color: "var(--color-fg)" }}>
-            {skill.version ?? "—"}
-          </span>
-        </span>
-      </div>
-      <div className="divider" />
-      <p className="railhead railhead--sub">Dependencies</p>
-      <div className="depmeter">
-        <button className="depmeter__cell" onClick={onOpenDeps} type="button">
-          <span className="depmeter__top">
-            <span className="depmeter__lbl">
-              <Icon name="package" size={13} />
-              Requires
-            </span>
-            {flag && (
-              <span className={"depmeter__flag depmeter__flag--" + (flag.blocked ? "down" : "warn")}>
-                <Icon name="alert-triangle" size={10} />
-                {flag.n > 0 ? flag.n : null}
-              </span>
-            )}
-          </span>
-          <span className="depmeter__val">{reqN}</span>
-        </button>
-        <button className="depmeter__cell" onClick={onOpenDeps} type="button">
-          <span className="depmeter__top">
-            <span className="depmeter__lbl">
-              <Icon name="corner-down-right" size={13} />
-              Used by
-            </span>
-          </span>
-          <span className="depmeter__val">{usedN}</span>
-        </button>
-      </div>
-      <div className="divider" />
-      <div className="prop">
-        <span className="prop__label">
-          <Icon name="calendar" size={14} />
-          Created
-        </span>
-        <span className="prop__value">
-          <span className="mono">{skill.created}</span>
-        </span>
-      </div>
-      <div className="prop">
-        <span className="prop__label">
-          <Icon name="clock" size={14} />
-          Updated
-        </span>
-        <span className="prop__value" style={{ color: "var(--color-muted)" }}>
-          {skill.updated}
-        </span>
-      </div>
-      <div className="prop">
-        <span className="prop__label">
-          <Icon name="hash" size={14} />
-          Checksum
-        </span>
-        <span className="prop__value">
-          <span className="mono" style={{ color: "var(--color-muted)" }}>
-            {skill.checksum ?? "—"}
-          </span>
-          {skill.checksum && (
-            <button
-              className="iconbtn"
-              style={{ width: 22, height: 22 }}
-              title="Copy checksum"
-              onClick={() => navigator.clipboard?.writeText(skill.checksum ?? "").catch(() => {})}
-            >
-              <Icon name="copy" size={12} style={{ color: "var(--color-faint)" }} />
-            </button>
-          )}
-        </span>
-      </div>
-      <div className="divider" />
-      <p className="railhead railhead--sub">Manifest</p>
+    <>
       <div className="prop prop--stack">
         <span className="prop__label">
           <Icon name="layers" size={14} />
@@ -316,6 +353,27 @@ export function PropList({
       </div>
       <div className="prop prop--stack">
         <span className="prop__label">
+          <Icon name="hash" size={14} />
+          Checksum
+        </span>
+        <span className="prop__value">
+          <span className="mono prop__wrap" style={{ color: "var(--color-muted)" }}>
+            {skill.checksum ?? "—"}
+          </span>
+          {skill.checksum && (
+            <button
+              className="iconbtn"
+              style={{ width: 22, height: 22 }}
+              title="Copy checksum"
+              onClick={() => navigator.clipboard?.writeText(skill.checksum ?? "").catch(() => {})}
+            >
+              <Icon name="copy" size={12} style={{ color: "var(--color-faint)" }} />
+            </button>
+          )}
+        </span>
+      </div>
+      <div className="prop prop--stack prop--metadata">
+        <span className="prop__label">
           <Icon name="braces" size={14} />
           Metadata
           <span className="prop__count">{metadataEntries.length}</span>
@@ -337,158 +395,27 @@ export function PropList({
           )}
         </span>
       </div>
-    </div>
-  );
-}
-
-export function DetailMeta({
-  skill,
-  teams,
-  onChangeOwner,
-  canChangeOwner,
-  requiresN,
-  usedByN,
-  depFlag,
-  onOpenDependencies,
-}: {
-  skill: SkillVM;
-  teams: TeamVM[];
-  onChangeOwner: (ownerTeam: string | null) => void;
-  canChangeOwner: boolean;
-  requiresN?: number;
-  usedByN?: number;
-  depFlag?: { n: number; blocked: boolean } | null;
-  onOpenDependencies: () => void;
-}) {
-  const reqN = requiresN ?? skill.requiresCount;
-  const usedN = usedByN ?? skill.usedByCount;
-  const flag = depFlag ?? (skill.depWarn ? { n: 0, blocked: false } : null);
-  const depLabel = flag ? (flag.blocked ? "Blocked" : "Attention") : null;
-  const depTone = flag ? (flag.blocked ? "danger" : "warn") : "ok";
-
-  return (
-    <div className="linmeta">
-      <OwnerControl skill={skill} teams={teams} onChange={onChangeOwner} canChange={canChangeOwner} />
-      <span className="linmeta__sep" aria-hidden="true">
-        ·
-      </span>
-      <span className="linmeta__item">
-        <Icon name="tag" size={11} />
-        <span className="mono">{skill.version ?? "—"}</span>
-      </span>
-      <span className="linmeta__sep" aria-hidden="true">
-        ·
-      </span>
-      <span className="linmeta__item linmeta__item--owner">
-        <Avatar initials={skill.owner.initials} size={16} />
-        <span className="linmeta__truncate">{skill.owner.name}</span>
-      </span>
-      <span className="linmeta__sep" aria-hidden="true">
-        ·
-      </span>
-      <button
-        className={"linmeta__item linmeta__item--button linmeta__item--deps linmeta__item--deps--" + depTone}
-        onClick={onOpenDependencies}
-        type="button"
-        aria-label={`Dependencies: ${reqN} required, ${usedN} used by${depLabel ? `, ${depLabel.toLowerCase()}` : ""}`}
-      >
-        <Icon name="git-branch" size={11} />
-        {depLabel && <span className="linmeta__deps-label">{depLabel}</span>}
-        <span className="mono">
-          {reqN}/{usedN}
-        </span>
-      </button>
-      <span className="linmeta__sep" aria-hidden="true">
-        ·
-      </span>
-      <span className="linmeta__item">
-        <Icon name="clock" size={11} />
-        <span className="mono">{skill.updated}</span>
-      </span>
-    </div>
-  );
-}
-
-export function DetailPanelNav({
-  panelItems,
-  panel,
-  navOpen,
-  onToggleNav,
-  onSelectPanel,
-  onCloseNav,
-}: {
-  panelItems: DetailPanelItem[];
-  panel: DetailPanel;
-  navOpen: boolean;
-  onToggleNav: () => void;
-  onSelectPanel: (panel: DetailPanel) => void;
-  onCloseNav: () => void;
-}) {
-  return (
-    <>
-      <nav className={"dpanel__nav" + (navOpen ? " dpanel__nav--open" : "")} aria-label="More sections">
-        <button
-          type="button"
-          className="dpanel__navtoggle"
-          onClick={onToggleNav}
-          aria-label={navOpen ? "Collapse sections menu" : "Expand sections menu"}
-          aria-expanded={navOpen}
-          title={navOpen ? "Collapse sections menu" : "Expand sections menu"}
-        >
-          <Icon name={navOpen ? "panel-left-close" : "panel-left-open"} size={15} />
-        </button>
-        {panelItems.map((item) => (
-          <button
-            key={item.id}
-            className={"dpanel__navitem" + (panel === item.id ? " is-active" : "")}
-            aria-current={panel === item.id ? "page" : undefined}
-            onClick={() => {
-              onSelectPanel(item.id);
-              onCloseNav();
-            }}
-            type="button"
-            title={item.label}
-          >
-            <span className="dpanel__navitem-main">
-              <Icon name={item.icon} size={13} />
-              <span className="dpanel__navitem-label">{item.label}</span>
-            </span>
-            <b className="dpanel__navitem-count">{item.count}</b>
-          </button>
-        ))}
-      </nav>
     </>
   );
 }
 
-export function DetailRail({
-  panelItems,
-  onOpenPanel,
-  inline = false,
-}: {
-  panelItems: DetailPanelItem[];
-  onOpenPanel: (panel: DetailPanel) => void;
-  inline?: boolean;
-}) {
+export function PropList({ skill }: { skill: SkillVM }) {
   return (
-    <div className={"linrail" + (inline ? " linrail--inline" : "")}>
-      {inline ? (
-        <p className="seclabel" style={{ margin: 0 }}>
-          More
-        </p>
-      ) : (
-        <p className="railhead">More</p>
-      )}
-      <div className="linlinks">
-        {panelItems.map((item) => (
-          <button className="linlink" onClick={() => onOpenPanel(item.id)} type="button" key={item.id}>
-            <span>
-              <Icon name={item.icon} size={13} /> {item.label}
-            </span>
-            <b>{item.count}</b>
-          </button>
-        ))}
+    <div className="props">
+      <div className="prop">
+        <span className="prop__label">
+          <Icon name="tag" size={14} />
+          Version
+        </span>
+        <span className="prop__value">
+          <span className="mono" style={{ color: "var(--color-fg)" }}>
+            {skill.version ?? "—"}
+          </span>
+        </span>
       </div>
+      <div className="divider" />
+      <p className="railhead railhead--sub">Manifest</p>
+      <ManifestRows skill={skill} />
     </div>
   );
 }
@@ -497,10 +424,6 @@ export function Requirements({ requirements }: { requirements: SkillVM["requirem
   return (
     <div className="dblocks">
       <div>
-        <p className="seclabel">
-          <Icon name="key-round" size={14} />
-          Setup &amp; secrets <span className="seclabel__n">{requirements.length}</span>
-        </p>
         <p className="ov__lead" style={{ marginBottom: 18 }}>
           Secrets and environment variables this skill needs to run. Set these before using it. The
           values themselves are never stored here.
@@ -530,10 +453,10 @@ export function Requirements({ requirements }: { requirements: SkillVM["requirem
 
 export function Activity({
   versions,
-  ownerName,
+  authorName,
 }: {
   versions: SkillVersionRow[];
-  ownerName: string;
+  authorName: string;
 }) {
   return (
     <div className="feed">
@@ -547,7 +470,7 @@ export function Activity({
           </div>
           <div className="act__body">
             <div className="act__top">
-              <span className="act__who">{ownerName}</span>
+              <span className="act__who">{authorName}</span>
               <span className="act__verb">published</span>
               <span className="act__ver">v{v.version}</span>
               {i === 0 && <span className="curtag">current</span>}

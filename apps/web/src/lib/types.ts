@@ -1,36 +1,30 @@
 import type {
   OrgRole,
   CompanionDisplay,
+  LabelVM,
   SkillListRow,
-  SkillOwnerKind,
   SkillRequirement,
-  TeamRole,
   ValidationState,
 } from "@companion/contracts";
 import { formatBytes, formatDate, relativeTime } from "./format";
 
-export interface SkillOwnerVM {
-  kind: SkillOwnerKind;
-  id: string;
-  userId: string;
-  teamId: string | null;
-  name: string;
-  initials: string;
-  handle: string | null;
-  team: string | null;
-}
+export type { LabelVM };
 
 /** The UI-facing skill shape consumed by the ported direction-C+C components. */
 export interface SkillVM {
   uuid: string; // db id
   id: string; // slug (the displayed machine name)
-  ownerId: string; // effective owner principal (user id or team id)
   version: string | null;
   validation: ValidationState;
   description: string;
   display?: CompanionDisplay;
   error: string | null;
-  owner: SkillOwnerVM;
+  /** Org-wide shared label paths this skill is filed under (slash-separated folders). */
+  labels: string[];
+  /** Who first published the skill (provenance / Activity). */
+  authorId: string;
+  authorName: string;
+  authorInitials: string;
   tools: string[];
   requirements: SkillRequirement[]; // declared secrets / env vars + install notes
   compatibility: string | null;
@@ -44,7 +38,6 @@ export interface SkillVM {
   starred: boolean;
   installStatus: "none" | "installed" | "update"; // caller's install state for this skill
   installedVersion: string | null; // version the caller recorded installing, if any
-  teamSlugs: string[]; // owning team slug (team-owned only), for the "team" filter
   requiresCount: number; // dependencies the current version declares
   usedByCount: number; // other skills (current versions) that depend on this one
   depWarn: boolean; // any declared dependency is not satisfied
@@ -57,22 +50,15 @@ export function mapSkill(row: SkillListRow): SkillVM {
   return {
     uuid: row.id,
     id: row.slug,
-    ownerId: row.owner_id,
     version: row.current_version,
     validation: row.validation,
     description: row.description,
     display: row.display ?? {},
     error: row.validation_error,
-    owner: {
-      kind: row.owner_kind,
-      id: row.owner_id,
-      userId: row.owner_user_id,
-      teamId: row.owner_team_id,
-      name: row.owner_name,
-      initials: row.owner_initials,
-      handle: row.owner_handle,
-      team: row.owner_kind === "team" ? row.owner_name : null,
-    },
+    labels: row.labels ?? [],
+    authorId: row.creator_id,
+    authorName: row.creator_name,
+    authorInitials: row.creator_initials,
     tools: row.tools ?? [],
     requirements: row.requirements ?? [],
     compatibility: row.compatibility,
@@ -86,23 +72,12 @@ export function mapSkill(row: SkillListRow): SkillVM {
     starred: row.starred,
     installStatus: row.install_status ?? "none",
     installedVersion: row.installed_version ?? null,
-    teamSlugs: row.owner_kind === "team" && row.owner_handle ? [row.owner_handle] : [],
     requiresCount: row.requires_count ?? 0,
     usedByCount: row.used_by_count ?? 0,
     depWarn: row.dep_warn ?? false,
     archived: row.archived ?? false,
     referenced: row.referenced ?? false,
   };
-}
-
-export interface TeamVM {
-  id: string; // slug
-  name: string;
-  initial: string;
-  color: string | null;
-  icon: string | null;
-  role: TeamRole;
-  dbId?: string;
 }
 
 export interface MeVM {
@@ -140,30 +115,10 @@ export interface MemberVM {
   isMe: boolean;
 }
 
-export interface TeamMemberVM {
-  userId: string;
-  name: string;
-  email: string;
-  initials: string;
-  role: TeamRole;
-  isMe: boolean;
-}
-
-/** A team with its members (the Teams tab). */
-export interface TeamWithMembersVM {
-  id: string; // teams.id (for mutations)
-  slug: string;
-  name: string;
-  initial: string;
-  members: TeamMemberVM[];
-  myRole: TeamRole | null;
-}
-
 /** Everything the /settings route renders, computed server-side for the current org. */
 export interface OrgSettingsData {
   me: MeVM;
   orgs: OrgVM[]; // for the switcher
   current: OrgVM; // resolved active org
   members: MemberVM[]; // active (memberships) + pending (invitations)
-  teams: TeamWithMembersVM[];
 }

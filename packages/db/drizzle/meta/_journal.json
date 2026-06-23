@@ -148,6 +148,34 @@
       "when": 1781050900000,
       "tag": "0020_skill_owner_only",
       "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1781051000000,
+      "tag": "0021_labels",
+      "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "7",
+      "when": 1781051100000,
+      "tag": "0022_drop_skill_ownership",
+      "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1781051200000,
+      "tag": "0023_drop_teams",
+      "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1781051300000,
+      "tag": "0024_drop_owner_filter_prefs",
+      "breakpoints": true
     }
   ]
 }

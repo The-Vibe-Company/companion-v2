@@ -3,7 +3,7 @@ name: companion
 description: "Use when managing local SKILL.md packages with Companion: validate, publish, update, resolve skill dependencies, declare the secrets and environment variables a skill needs, install updates, audit skills, check workspace versions, or self-update this Companion skill through the Companion workspace API."
 license: MIT
 metadata:
-  companion_version: 1.7.0
+  companion_version: 1.8.0
 allowed-tools: read_file write_file run_shell
 ---
 
@@ -109,9 +109,9 @@ as enough evidence by itself:
 
 Package the skill only after `companion.json` matches the confirmed list. New clients do not need
 extra upload parameters for dependencies; legacy `dependency=` query parameters are only a fallback
-when a package has no `companion.json`. The server records the graph and blocks a publish whose
-dependencies are missing, cyclic, or less visible than the skill itself (a Personal dependency under
-a Team-owned skill).
+when a package has no `companion.json`. Every skill in a workspace is visible to every member, so
+there is no visibility to reconcile across a dependency edge. The server records the graph and blocks
+a publish whose dependencies are missing or cyclic.
 
 ## Capabilities
 
@@ -158,10 +158,9 @@ graph:
 - `removed` — required by the previous version and dropped from this one (update only).
 - `archive_candidates` — removed dependencies that no published skill references anymore. After the
   main publish, offer to archive each one (`POST /skills/$SLUG/archive`); never archive automatically.
-- `blocked` — dependencies that are missing, cyclic (`A → B → A`), or less visible than the skill
-  (a Personal dependency under a Team-owned skill: the dependent is visible to everyone but the
-  dependency stays private). **Stop**: a publish with blockers is rejected with 422 and this same
-  plan. Explain the blockers and help the user fix them before retrying.
+- `blocked` — dependencies that are missing or cyclic (`A → B → A`). **Stop**: a publish with
+  blockers is rejected with 422 and this same plan. Explain the blockers and help the user fix them
+  before retrying.
 
 Present the plan to the user as a short summary (local diff / confirmed dependencies / already
 published / must upload too / removed / archival candidates / blocked) and get confirmation before
@@ -224,45 +223,28 @@ After a clean validation **and** a resolved dependency plan, and after the user 
 brand-new skill. If the local analysis found dependencies that differ from `companion.json`, create
 or update `companion.json` with the confirmed final list before packaging; do not upload a package
 with a stale dependency manifest. If the plan listed dependencies under `upload`, analyze and
-publish those first (topological order). Ask the user who should own the skill before you upload —
-owner is the single access choice. Do not ask for a raw team slug first: fetch upload options and
-propose the available choices.
+publish those first (topological order).
 
-```sh
-curl -s "$COMPANION_API_URL/skills/upload-options" \
-  -H "Authorization: Bearer $COMPANION_TOKEN"
-```
+There is no owner to choose. Every skill is visible to every member of the workspace, and any member
+can read, edit, archive, or delete any skill. You organize skills with **labels** (folders) instead.
 
-The response contains `defaults` and `teams`. Present one picker — the owner choices:
-
-- "Personal" (private to you), plus
-- teams where `canOwn=true` (a team-owned skill is readable by every member of the workspace).
-
-Keep the current defaults unless the user chooses otherwise. For a brand-new publish, default to the
-response defaults: personal owner (`owner_team` omitted), which is private to you.
-
-Owner is the single access axis — there is no separate visibility:
-
-- Omit `owner_team` for **Personal** ownership: the skill is private to you (only you and org admins
-  can read or edit it).
-- `owner_team=<team-slug>` makes the skill **Team-owned**: readable by every member of the workspace
-  and editable by that team's Admins/Editors (plus org Owners/Admins). You can set this only when you
-  are an organization Owner/Admin, or an Admin/Editor of that team. Team Readers cannot upload or
-  update skills for that team.
-- "Sharing broadly" just means assigning the skill to a team — all team skills are workspace-visible.
-  There is no separate "Everyone" share, and a skill must not declare visibility in its `SKILL.md`.
+A label is an org-wide, shared, slash-separated path such as `marketing/seo`. A skill can carry
+several labels at once; labels do not affect who can see the skill, only how it is filed. To file a
+new skill under one or more folders at publish time, pass a repeatable `label` parameter (omit it to
+leave the skill unlabeled). The folders are created automatically if they do not exist yet. Suggest
+labels from the skill's purpose, then confirm the final list with the user.
 
 Make sure `companion.json.dependencies` contains the same confirmed dependencies you validated with
-so the dependency graph is recorded. For a team-owned (workspace-visible) skill, pass `owner_team`:
+so the dependency graph is recorded. To file the skill under labels at publish time, repeat `label`:
 
 ```sh
-curl -s "$COMPANION_API_URL/skills?owner_team=platform" \
+curl -s "$COMPANION_API_URL/skills?label=marketing&label=marketing%2Fseo" \
   -H "Authorization: Bearer $COMPANION_TOKEN" \
   -H "Content-Type: application/zip" \
   --data-binary @../skill.zip
 ```
 
-For Personal ownership (private to you), omit `owner_team` entirely:
+To publish without filing it under any folder, send no `label` at all:
 
 ```sh
 curl -s "$COMPANION_API_URL/skills" \
@@ -271,7 +253,12 @@ curl -s "$COMPANION_API_URL/skills" \
   --data-binary @../skill.zip
 ```
 
-Sending legacy `everyone`, `team`, `teams`, `scope`, or `visibility` parameters is rejected.
+A label path is slash-separated, lower-case kebab segments (`[a-z0-9]+(?:-[a-z0-9]+)*`), with no
+leading, trailing, or empty segment. URL-encode the slashes (`%2F`) when you pass `label` as a query
+parameter. Sending legacy `owner_team`, `everyone`, `team`, `teams`, `scope`, `visibility`, or
+`private` parameters is rejected, and a skill must not declare `scope` or `visibility` in its
+`SKILL.md` frontmatter.
+
 The response contains the assigned `id`, `version`, and `checksum`. Write the returned
 `companion_skill_id` and `companion_version` back into the folder's `SKILL.md` `metadata` so the
 folder stays linked to the workspace skill.
@@ -282,10 +269,9 @@ When the user changed a skill that already exists in the workspace, bind the upl
 skill so an edit can never retarget another one. Pass `expect_slug` and `expect_skill_id` (read them
 from the folder's `metadata`).
 
-The owner is **immutable on update**: omit `owner_team` and the skill's current owner is kept. If you
-do pass `owner_team`, it must equal the skill's current owner team, or the server rejects the upload.
-To move a skill between Personal and a team, use `PUT /skills/$SLUG/owner` instead (see "Change a
-skill's owner"); a re-publish can never change ownership.
+A re-publish keeps the skill's existing labels untouched: it does not move or remove folders. Pass
+`label` on an update only to **add** the skill to more folders. To remove a skill from a folder, use
+the label routes (see "Organize skills with labels") rather than a re-publish.
 
 ```sh
 curl -s "$COMPANION_API_URL/skills?expect_slug=$SLUG&expect_skill_id=$SKILL_ID" \
@@ -303,59 +289,105 @@ candidate (`POST /skills/$SLUG/archive`) — only with the user's confirmation, 
 skill still requires it. The server assigns the next version unless you pass an explicit `version=`.
 Summarize what changed and confirm before sending.
 
-### Change a skill's owner
+### Organize skills with labels
 
-Use this to move an already-published skill between Personal and a team without uploading a new
-version. Owner is the single access axis, so this changes who can read **and** edit the skill (a
-team-owned skill becomes workspace-visible and editable by that team's Admins/Editors; a Personal
-skill becomes private to the owning user).
+Labels (folders) are how skills are organized — there is no owner and no visibility. A label is an
+org-wide, **shared** path of slash-separated, lower-case kebab segments such as `marketing/seo`. The
+whole org sees the same folder tree; every skill is visible to every member regardless of its labels.
+A skill can hold several labels at once, folders may be empty, and any member can create, assign,
+rename, recolor, or delete a label.
+
+The path is always sent in the **request body or query**, never as a URL path segment, so that the
+slashes inside a path survive routing. Confirm any rename or delete with the user first, because both
+cascade across descendant folders for the whole organization.
+
+List the folder tree (roll-up counts plus each path's color and icon):
 
 ```sh
-curl -s -X PUT "$COMPANION_API_URL/skills/$SLUG/owner" \
-  -H "Authorization: Bearer $COMPANION_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"owner_team":"platform"}'
+curl -s "$COMPANION_API_URL/labels" -H "Authorization: Bearer $COMPANION_TOKEN"
 ```
 
-The JSON body is just the target owner:
+The response is `{ "tree": [...], "flat": [...] }`: `tree` is the nested folder hierarchy with a
+roll-up `count` per node (skills at that path or any descendant, de-duplicated), and `flat` is the
+list of canonical `{ path, color, icon }` rows.
 
-- `owner_team: "<team-slug>"` makes the skill **Team-owned** (readable by every workspace member,
-  editable by that team's Admins/Editors plus org Owners/Admins).
-- `owner_team: null` makes the skill **Personal** (private to the owning user; only they and org
-  admins can read or edit it).
+Create a folder (it may stay empty), optionally with a color and icon:
 
-There is no `cascade` flag and no `teams` array. The response is `{ "ok": true }`.
+```sh
+curl -s -X POST "$COMPANION_API_URL/labels" \
+  -H "Authorization: Bearer $COMPANION_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"path":"marketing/seo","color":null,"icon":null}'
+```
 
-A skill must never be more visible than the skills it depends on, or someone could install it but not
-its sub-skills. Moving a Personal skill to a team makes it visible to everyone, so each of its
-(transitive) dependencies must already cover that audience — a team-owned target covers any dependent,
-but a Personal target only covers a dependent that is Personal **and** owned by the same user. If a
-dependency would end up less visible than the skill, the change is rejected; raise that dependency's
-owner first (move it to a team).
+File a skill into a folder (or remove it) without uploading a new version:
 
-Always confirm the change with the user before sending, and tell them how it affects who can see and
-edit the skill. Inspect the graph first with `GET /skills/$SLUG/dependencies` if you are unsure what
-the skill pulls in or what depends on it.
+```sh
+curl -s -X POST "$COMPANION_API_URL/skills/$SLUG/labels" \
+  -H "Authorization: Bearer $COMPANION_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"path":"marketing/seo"}'
+
+curl -s -X DELETE "$COMPANION_API_URL/skills/$SLUG/labels" \
+  -H "Authorization: Bearer $COMPANION_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"path":"marketing/seo"}'
+```
+
+Rename, recolor, or set the icon of a folder (rename and delete cascade to every descendant; a rename
+is rejected if it collides with an existing path):
+
+```sh
+curl -s -X PUT "$COMPANION_API_URL/labels/rename" \
+  -H "Authorization: Bearer $COMPANION_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"from":"marketing","to":"growth"}'
+
+curl -s -X PUT "$COMPANION_API_URL/labels/color" \
+  -H "Authorization: Bearer $COMPANION_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"path":"growth/seo","color":"oklch(0.72 0.18 145)"}'
+
+curl -s -X PUT "$COMPANION_API_URL/labels/icon" \
+  -H "Authorization: Bearer $COMPANION_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"path":"growth/seo","icon":"rocket"}'
+```
+
+Delete a folder (and every descendant) for the whole org:
+
+```sh
+curl -s -X DELETE "$COMPANION_API_URL/labels" \
+  -H "Authorization: Bearer $COMPANION_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"path":"growth/seo"}'
+```
+
+Each label mutation returns `{ "ok": true }`. Deleting a folder only unfiles its skills; it never
+deletes a skill. Inspect a skill's dependency graph with `GET /skills/$SLUG/dependencies` if you are
+unsure what it pulls in or what depends on it — dependencies are independent of labels.
 
 ### Manage skill API calls
 
 Use the workspace API only for skills-management tasks. Do not use this skill to manage workspace
-members, teams, invitations, org settings, or tokens.
+members, invitations, org settings, or tokens.
 
 Allowed skills API tasks:
 
-- Fetch upload owner choices with `GET /skills/upload-options` using a `skills:write` token.
 - Validate, publish, or update a skill with `POST /skills` after full local analysis and a synced
-  `companion.json`. Use `dependency=` parameters only for old packages that have no manifest yet.
+  `companion.json`. Use `dependency=` parameters only for old packages that have no manifest yet, and
+  repeat `label=<path>` to file the skill under folders.
 - Inspect a skill's dependency graph with `GET /skills/$SLUG/dependencies`.
 - Archive or restore a skill with `POST /skills/$SLUG/archive` and `POST /skills/$SLUG/restore`
-  (same permissions as modifying the skill).
+  (any member can do this).
 - Read current published metadata with `GET /skills/$SLUG/download` (its `dependencies` array lists
   the current version's required slugs).
 - Download packages with `GET /skills/$SLUG/versions/$VERSION/package`.
 - Browse version files with `GET /skills/$SLUG/versions/$VERSION/files`.
-- Change a skill's owner with `PUT /skills/$SLUG/owner` (see "Change a skill's owner"). Works with a
-  `skills:write` token.
+- Organize skills with labels: list the tree with `GET /labels`; create, rename, recolor, set the
+  icon, or delete a folder with `POST /labels`, `PUT /labels/rename|color|icon`, and `DELETE /labels`;
+  file or unfile a skill with `POST` / `DELETE /skills/$SLUG/labels`. All work with a `skills:write`
+  token and the path always travels in the body or query (see "Organize skills with labels").
 - Read or write skill comments and stars only when the caller has a valid signed-in session for
   those routes. Do not assume a `cmp_pat_...` token can call session-only endpoints. A comment may
   carry up to six image attachments: add them by sending `POST /skills/$SLUG/comments` as
@@ -478,7 +510,7 @@ skills view shows the correct status and version. Report the version from this f
 curl -s "$COMPANION_API_URL/local-skills/companion/installed" \
   -H "Authorization: Bearer $COMPANION_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"version":"1.4.0","agent":"<your assistant name>"}'
+  -d '{"version":"1.8.0","agent":"<your assistant name>"}'
 ```
 
 A `{ "ok": true, "status": "installed" }` response confirms the workspace now knows this machine has

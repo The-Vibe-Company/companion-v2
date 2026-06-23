@@ -1,7 +1,13 @@
+/**
+ * The skills route encodes which slice of the org's skills is shown plus the open skill detail.
+ * Skills are flat and org-wide; selection is by the shared label tree (a `label` path or the
+ * `nolabel` pseudo-folder), the starred/archived views, or the Companion (local) skills section.
+ */
 export type SkillsRoute =
   | { kind: "all"; skill?: string }
-  | { kind: "mine"; skill?: string }
-  | { kind: "team"; team: string; skill?: string }
+  | { kind: "starred"; skill?: string }
+  | { kind: "nolabel"; skill?: string }
+  | { kind: "label"; label: string; skill?: string }
   | { kind: "local" }
   | { kind: "archived"; skill?: string };
 
@@ -46,45 +52,50 @@ export function parseSkillsRoute(input: SkillsSearchParams): SkillsRoute {
 
   const view = firstParam(params, "view");
   const skill = firstParam(params, "skill")?.trim() || undefined;
-  if (view === "mine") return { kind: "mine", skill };
+  if (view === "starred") return { kind: "starred", skill };
+  if (view === "nolabel") return { kind: "nolabel", skill };
   if (view === "local") return { kind: "local" };
   if (view === "archived") return { kind: "archived", skill };
-  if (view === "team") {
-    const team = firstParam(params, "team")?.trim();
-    return team ? { kind: "team", team, skill } : { kind: "all", skill };
+  if (view === "label") {
+    // The label param is a slash-separated path; URLSearchParams already decoded it.
+    const label = firstParam(params, "label")?.trim();
+    return label ? { kind: "label", label, skill } : { kind: "all", skill };
   }
   return { kind: "all", skill };
 }
 
 export function skillsRouteHref(route: SkillsRoute): string {
   const params: string[] = [];
-  if (route.kind === "mine") params.push("view=mine");
+  if (route.kind === "starred") params.push("view=starred");
+  if (route.kind === "nolabel") params.push("view=nolabel");
   if (route.kind === "local") params.push("view=local");
   if (route.kind === "archived") params.push("view=archived");
-  if (route.kind === "team") {
-    params.push("view=team", `team=${encodeURIComponent(route.team)}`);
+  if (route.kind === "label") {
+    params.push("view=label", `label=${encodeURIComponent(route.label)}`);
   }
   if (route.kind !== "local" && route.skill) params.push(`skill=${encodeURIComponent(route.skill)}`);
   return params.length ? `/skills?${params.join("&")}` : "/skills";
 }
 
 export function skillsRouteKey(route: SkillsRoute): string {
-  const base = route.kind === "team" ? `team:${route.team}` : route.kind;
+  const base = route.kind === "label" ? `label:${route.label}` : route.kind;
   return route.kind !== "local" && route.skill ? `${base}:skill:${route.skill}` : base;
 }
 
 export function skillsRouteWithoutSkill(route: SkillsRoute): SkillsRoute {
   if (route.kind === "all") return { kind: "all" };
-  if (route.kind === "mine") return { kind: "mine" };
-  if (route.kind === "team") return { kind: "team", team: route.team };
+  if (route.kind === "starred") return { kind: "starred" };
+  if (route.kind === "nolabel") return { kind: "nolabel" };
+  if (route.kind === "label") return { kind: "label", label: route.label };
   if (route.kind === "archived") return { kind: "archived" };
   return { kind: "local" };
 }
 
 export function skillsRouteWithSkill(route: SkillsRoute, skill: string): SkillsRoute {
   if (route.kind === "all") return { kind: "all", skill };
-  if (route.kind === "mine") return { kind: "mine", skill };
-  if (route.kind === "team") return { kind: "team", team: route.team, skill };
+  if (route.kind === "starred") return { kind: "starred", skill };
+  if (route.kind === "nolabel") return { kind: "nolabel", skill };
+  if (route.kind === "label") return { kind: "label", label: route.label, skill };
   if (route.kind === "archived") return { kind: "archived", skill };
   return { kind: "all", skill };
 }

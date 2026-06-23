@@ -1,32 +1,22 @@
 import React from "react";
 import { renderToString } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import type { MeVM, SkillVM, TeamVM } from "@/lib/types";
+import type { MeVM, SkillVM } from "@/lib/types";
 import { DetailView } from "./DetailView";
 
 const me: MeVM = { id: "user-1", name: "Ada Lovelace", email: "ada@example.com", initials: "AL" };
-const teams: TeamVM[] = [
-  { id: "engineering", dbId: "team-1", name: "Engineering", initial: "E", color: null, icon: null, role: "editor" },
-];
 
 const skill: SkillVM = {
   uuid: "skill-1",
   id: "linear-demo",
-  ownerId: "user-1",
   version: "1.2.3",
   validation: "valid",
   description: "A focused skill for incident handoffs.",
   error: null,
-  owner: {
-    kind: "user",
-    id: "user-1",
-    userId: "user-1",
-    teamId: null,
-    name: "Ada Lovelace",
-    initials: "AL",
-    handle: "ada",
-    team: null,
-  },
+  labels: ["marketing/seo"],
+  authorId: "user-1",
+  authorName: "Ada Lovelace",
+  authorInitials: "AL",
   tools: ["read_file"],
   requirements: [{ key: "OPENAI_API_KEY", type: "secret", required: true, note: "Required for model calls." }],
   compatibility: "Requires Node.js 22+",
@@ -40,37 +30,11 @@ const skill: SkillVM = {
   starred: true,
   installStatus: "installed",
   installedVersion: "1.2.3",
-  teamSlugs: [],
   requiresCount: 1,
   usedByCount: 2,
   depWarn: false,
   archived: false,
 };
-
-function renderDetail(initialPanel?: React.ComponentProps<typeof DetailView>["initialPanel"]) {
-  return renderToString(
-    React.createElement(DetailView, {
-      skill,
-      index: 0,
-      total: 1,
-      me,
-      myRole: "owner",
-      teams,
-      onBack: vi.fn(),
-      onPrev: vi.fn(),
-      onNext: vi.fn(),
-      onToggleStar: vi.fn(),
-      onToggleInstalled: vi.fn(),
-      onChangeOwner: vi.fn(),
-      onInstall: vi.fn(),
-      onUpdate: vi.fn(),
-      onOpenSkill: vi.fn(),
-      onRestore: vi.fn(),
-      onArchive: vi.fn(),
-      initialPanel,
-    }),
-  );
-}
 
 function renderDetailFor(nextSkill: SkillVM) {
   return renderToString(
@@ -80,13 +44,14 @@ function renderDetailFor(nextSkill: SkillVM) {
       total: 1,
       me,
       myRole: "owner",
-      teams,
+      allLabels: ["marketing", "marketing/seo", "growth"],
       onBack: vi.fn(),
       onPrev: vi.fn(),
       onNext: vi.fn(),
       onToggleStar: vi.fn(),
       onToggleInstalled: vi.fn(),
-      onChangeOwner: vi.fn(),
+      onToggleLabel: vi.fn(),
+      onSelectLabel: vi.fn(),
       onInstall: vi.fn(),
       onUpdate: vi.fn(),
       onOpenSkill: vi.fn(),
@@ -96,21 +61,40 @@ function renderDetailFor(nextSkill: SkillVM) {
   );
 }
 
-describe("DetailView linear dense layout", () => {
-  it("renders the essential skill facts and discussion by default", () => {
+function renderDetail() {
+  return renderDetailFor(skill);
+}
+
+describe("DetailView single-column document layout", () => {
+  it("renders the head facts, the status card, the filed folders, and the section stack", () => {
     const html = renderDetail();
 
     expect(html).toContain("linear-demo");
     expect(html).toContain("A focused skill for incident handoffs.");
-    expect(html).toContain("Personal");
+    // Status card facts.
+    expect(html).toContain("statuscard");
+    expect(html).toContain("Status");
+    expect(html).toContain("Valid");
     expect(html).toContain("1.2.3");
-    expect(html).toContain("Ada Lovelace");
-    expect(html).toContain("Dependencies: 1 required, 2 used by");
     expect(html).toContain("just now");
-    expect(html).toContain("More");
+    // Author provenance byline.
+    expect(html).toContain("Ada Lovelace");
+    expect(html).toContain("Filed in");
+    expect(html).toContain("marketing/seo");
+    expect(html).toContain("Add to folder");
+    // Stacked collapsible sections.
+    expect(html).toContain("What it does");
+    expect(html).toContain("Package");
+    expect(html).toContain("Dependencies");
+    expect(html).toContain("Manifest");
+    expect(html).toContain("Activity");
     expect(html).toContain("Discussion");
-    expect(html).toContain("dsidebar--linear");
-    expect(html).toContain("lin-more--mobile");
+    // The single-column doc replaces the old rail + slide-in panel chrome.
+    expect(html).not.toContain("dsidebar--linear");
+    expect(html).not.toContain("dpanel__nav");
+    expect(html).not.toContain("More sections");
+    // No owner / visibility axis on the detail anymore.
+    expect(html).not.toContain("Personal");
   });
 
   it("prefers Companion display copy for the detail title and lead", () => {
@@ -128,43 +112,37 @@ describe("DetailView linear dense layout", () => {
     expect(html).not.toContain("A focused skill for incident handoffs.");
   });
 
-  it("keeps advanced sections behind rail entries instead of first-level tabs", () => {
+  it("shows an empty filed-in state when the skill is in no folders", () => {
+    const html = renderDetailFor({ ...skill, labels: [] });
+    expect(html).toContain("No folders yet");
+    expect(html).toContain("Add to folder");
+  });
+
+  it("renders the Setup & secrets section header once when requirements exist", () => {
     const html = renderDetail();
 
-    expect(html).toContain("More");
-    expect(html).toContain("Files");
-    expect(html).toContain("Setup &amp; secrets");
-    expect(html).toContain("History");
-    expect(html).not.toContain("Skill detail sections");
-    expect(html).not.toContain("Package contents");
-    expect(html).not.toContain("Allowed tools");
-    expect(html).not.toContain("OPENAI_API_KEY");
+    // The section header provides the only "Setup & secrets" label (no doubled title in the body).
+    const matches = html.match(/Setup &amp; secrets/g) ?? [];
+    expect(matches).toHaveLength(1);
   });
 
-  it("renders drawer navigation and marks the active More panel", () => {
-    const html = renderDetail("files");
+  it("omits the Setup & secrets and Dependencies sections when there is nothing to show", () => {
+    const html = renderDetailFor({
+      ...skill,
+      requirements: [],
+      requiresCount: 0,
+      usedByCount: 0,
+    });
 
-    expect(html).toContain('aria-label="Files"');
-    expect(html).toContain('aria-label="More sections"');
-    expect(html).toContain("dpanel__navitem is-active");
-    expect(html).toContain('aria-current="page"');
-    expect(html).toContain("Dependencies");
-    expect(html).toContain("Setup &amp; secrets");
-    expect(html).toContain("History");
+    expect(html).not.toContain("Setup &amp; secrets");
+    // The Dependencies section is dropped, but the Package + Manifest sections stay.
+    expect(html).not.toContain('class="dsection__label">Dependencies');
+    expect(html).toContain("Package");
+    expect(html).toContain("Manifest");
   });
 
-  it("shows the shared drawer navigation when Dependencies is open", () => {
-    const html = renderDetail("dependencies");
-
-    expect(html).toContain('aria-label="Dependencies"');
-    expect(html).toContain('aria-label="More sections"');
-    expect(html).toContain("dpanel__navitem is-active");
-    expect(html).toContain("Files");
-    expect(html).toContain("History");
-  });
-
-  it("renders the Files panel through the drawer-aware file explorer", () => {
-    const html = renderDetail("files");
+  it("renders the Package section through the inline file explorer", () => {
+    const html = renderDetail();
 
     expect(html).toContain("fx fx--panel");
     expect(html).toContain("No files in this package.");

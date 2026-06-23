@@ -2,49 +2,13 @@ import { z } from "zod";
 import { validationStateSchema } from "./scope";
 import { SKILL_NAME_RE, SEMVER_RE, skillRequirementSchema } from "./frontmatter";
 import { companionDisplaySchema } from "./companionManifest";
+import { labelPathSchema } from "./labels";
 import { localSkillStatusSchema } from "./localSkills";
 
 /**
- * A skill has exactly one Owner, encoded by `owner_team`: `null` = **Personal** (private to the
- * owning user); a team slug = **Team** (owned by that team, readable by every workspace member).
- * The Owner is the single access axis — it decides both who can read and who can edit. There is no
- * separate visibility flag and no per-team read sharing.
+ * Skills carry no owner or visibility axis: every skill is visible to every member of its org and
+ * any member may edit it. Skills are organized only by org-wide shared labels (see `./labels`).
  */
-export const skillOwnerKindSchema = z.enum(["user", "team"]);
-export type SkillOwnerKind = z.infer<typeof skillOwnerKindSchema>;
-
-/** Owner on publish/create: omitted = keep current / Personal; `null` = Personal; slug = Team. */
-export const skillOwnerTeamInputSchema = z.string().min(1).max(128).nullable().optional();
-
-/**
- * Body of `PUT /v1/skills/:slug/owner` — move a skill between Personal and a Team. `null` makes it
- * Personal (private to its owner); a team slug makes that team the owner (workspace-visible).
- */
-export const setSkillOwnerInputSchema = z.object({
-  owner_team: z.string().min(1).max(128).nullable(),
-});
-export type SetSkillOwnerInput = z.infer<typeof setSkillOwnerInputSchema>;
-
-/** Result of an owner change. */
-export const setSkillOwnerResultSchema = z.object({
-  ok: z.literal(true),
-});
-export type SetSkillOwnerResult = z.infer<typeof setSkillOwnerResultSchema>;
-
-/**
- * The owner-cover rule: can everyone who can see `dependent` also see `target`? A skill must never
- * be more widely visible than the dependencies it pulls in. Team-owned skills are visible to the
- * whole workspace, so a team-owned target covers any dependent. A Personal target (private to its
- * owner) only covers a dependent that is Personal and owned by the same user. Pure + shared by core
- * (enforcement) and the web app so the rule has one source of truth.
- */
-export function ownerCovers(
-  dependent: { ownerKind: SkillOwnerKind; ownerUserId: string },
-  target: { ownerKind: SkillOwnerKind; ownerUserId: string },
-): boolean {
-  if (target.ownerKind === "team") return true;
-  return dependent.ownerKind === "user" && dependent.ownerUserId === target.ownerUserId;
-}
 
 /**
  * Live status of a single skill→skill dependency edge, computed from current state on every read.
@@ -52,10 +16,9 @@ export function ownerCovers(
  * available" status — versions are a skill's own publish concern, not the dependency graph's.
  */
 export const skillDependencyStatusSchema = z.enum([
-  "satisfied", // target published, not archived, visible-enough, no cycle
+  "satisfied", // target published, not archived, no cycle
   "missing", // declared slug has no published skill in the workspace
   "archived", // target exists but is archived
-  "visibility", // target's audience does not cover the dependent's audience
   "cycle", // edge participates in a directed dependency cycle
 ]);
 export type SkillDependencyStatus = z.infer<typeof skillDependencyStatusSchema>;
@@ -64,11 +27,9 @@ export type SkillDependencyStatus = z.infer<typeof skillDependencyStatusSchema>;
 export const skillDependencyRowSchema = z.object({
   slug: z.string(),
   status: skillDependencyStatusSchema,
-  /** The resolved target's owner kind (null when missing/unpublished) — drives the access pill. */
-  owner_kind: skillOwnerKindSchema.nullable(),
   /** Short human note (e.g. "not published to this workspace", cycle hint). */
   note: z.string().nullable(),
-  /** True when the target exists and is visible to the actor (the slug links to its detail). */
+  /** True when the target exists (the slug links to its detail). */
   can_open: z.boolean(),
 });
 export type SkillDependencyRow = z.infer<typeof skillDependencyRowSchema>;
@@ -77,7 +38,6 @@ export type SkillDependencyRow = z.infer<typeof skillDependencyRowSchema>;
 export const skillDependentRowSchema = z.object({
   slug: z.string(),
   status: skillDependencyStatusSchema,
-  owner_kind: skillOwnerKindSchema,
   archived: z.boolean(),
   note: z.string().nullable(),
   can_open: z.boolean(),
@@ -109,7 +69,7 @@ export const dependencyPlanSchema = z.object({
   removed: z.array(z.string()),
   /** Removed dependencies that no published skill references anymore — candidates to archive. */
   archive_candidates: z.array(z.object({ slug: z.string(), reason: z.string() })),
-  /** Blocking reasons (missing/cycle/visibility) that must be resolved before publish. */
+  /** Blocking reasons (missing/cycle) that must be resolved before publish. */
   blocked: z.array(z.object({ slug: z.string(), status: skillDependencyStatusSchema, msg: z.string() })),
 });
 export type DependencyPlan = z.infer<typeof dependencyPlanSchema>;
@@ -167,13 +127,12 @@ export const skillListRowSchema = z.object({
   display: companionDisplaySchema.default({}),
   validation: validationStateSchema,
   validation_error: z.string().nullable(),
-  owner_kind: skillOwnerKindSchema,
-  owner_id: z.string(),
-  owner_user_id: z.string(),
-  owner_team_id: z.string().nullable(),
-  owner_name: z.string(),
-  owner_handle: z.string().nullable(),
-  owner_initials: z.string(),
+  /** The label paths this skill is filed under (org-wide shared folders), sorted lexicographically. */
+  labels: z.array(z.string()).default([]),
+  /** Who first published the skill (provenance / Activity). */
+  creator_id: z.string(),
+  creator_name: z.string(),
+  creator_initials: z.string(),
   current_version: z.string().nullable(),
   license: z.string().nullable(),
   compatibility: z.string().nullable(),
@@ -358,7 +317,8 @@ export type SkillVersionRow = z.infer<typeof skillVersionRowSchema>;
 export const publishSkillInputSchema = z.object({
   skill_id: z.string().uuid().optional(),
   slug: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/),
-  owner_team: skillOwnerTeamInputSchema,
+  /** Label paths to file the skill under (org-wide shared folders). Applied on create. */
+  labels: z.array(labelPathSchema).max(64).default([]),
   version: z.string(),
   description: z.string(),
   checksum: z.string().regex(/^sha256:[0-9a-f]{64}$/),
@@ -381,12 +341,13 @@ export type PublishSkillInput = z.infer<typeof publishSkillInputSchema>;
 /**
  * Body of `POST /v1/skills/create` — author a SKILL.md inline ("Create in the browser").
  * The server assembles the standard frontmatter (`name` + `description`) and the body, packs
- * it, and publishes a new version. The owner is applied on the request, never in the skill.
+ * it, and publishes a new version. Labels are applied on the request, never in the skill.
  */
 export const createSkillInputSchema = z.object({
   id: z.string().regex(SKILL_NAME_RE, "id must be kebab-case (lowercase letters, digits, hyphens)"),
   description: z.string().min(1, "description is required").max(1024),
   body: z.string().max(1024 * 1024, "body is too large").default(""),
-  owner_team: skillOwnerTeamInputSchema,
+  /** Label paths to file the new skill under (org-wide shared folders). */
+  labels: z.array(labelPathSchema).max(64).default([]),
 });
 export type CreateSkillInput = z.infer<typeof createSkillInputSchema>;

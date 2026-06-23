@@ -1,10 +1,9 @@
 "use client";
 
 import type { ReactNode } from "react";
-import { useEffect, useId, useState } from "react";
+import { useEffect, useState } from "react";
 import { Icon } from "../Icon";
 import { WorkspaceAvatar } from "./WorkspaceAvatar";
-import { TeamAvatar } from "./TeamAvatar";
 import type { OrgCtx, SettingsRoute, SettingsView } from "./model";
 
 /** One sidebar row — either an avatar chip (Profile / Workspace) or a Lucide icon. */
@@ -39,19 +38,13 @@ function NavItem({
 }
 
 /**
- * Settings nav: three groups (Account / Workspace / Your teams). Teams are
- * collapsible blocks. Clicking a team name opens its General pane; the chevron
- * expands General + Members; the gear jumps straight to General too. "Back to
- * Skills" closes the surface; "+" creates a team (managers only). Expanded-team
- * state is owned by the parent (SettingsView).
+ * Settings nav: two groups (Account / Workspace). "Back to Skills" closes the
+ * surface.
  */
 export function SettingsSidebar({
   ctx,
   route,
   go,
-  expanded,
-  toggleTeam,
-  onCreateTeam,
   onClose,
   apiKeyCount,
   inviteCount,
@@ -59,19 +52,14 @@ export function SettingsSidebar({
   ctx: OrgCtx;
   route: SettingsRoute;
   go: (route: SettingsRoute) => void;
-  expanded: Set<string>;
-  toggleTeam: (teamId: string) => void;
-  onCreateTeam: () => void;
   onClose: () => void;
   apiKeyCount: number;
   inviteCount: number;
 }) {
   const me = ctx.user(ctx.myId);
   const ws = ctx.currentOrg;
-  const navId = useId();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
-  const is = (view: SettingsView, teamId?: string) =>
-    route.view === view && (teamId === undefined || route.teamId === teamId);
+  const is = (view: SettingsView) => route.view === view;
   const goTo = (nextRoute: SettingsRoute) => {
     go(nextRoute);
     setMobileMenuOpen(false);
@@ -176,79 +164,6 @@ export function SettingsSidebar({
               meta={inviteCount ? String(inviteCount) : undefined}
               onClick={() => goTo({ view: "invitations" })}
             />
-          </div>
-
-          <div className="sx-group">
-            <div className="sx-group__label">
-              Your teams
-              {ctx.canManage && (
-                <button type="button" className="sx-group__add" title="New team" onClick={onCreateTeam}>
-                  <Icon name="plus" size={14} />
-                </button>
-              )}
-            </div>
-            {ws.teams.map((t) => {
-              const open = expanded.has(t.id);
-              const subnavId = `${navId}-team-${t.id}-subnav`;
-              return (
-                <div key={t.id} className="sx-team-block">
-                  <div className="sx-team">
-                    <button
-                      type="button"
-                      className="sx-team__chev-btn"
-                      title={open ? "Collapse" : "Expand"}
-                      aria-expanded={open}
-                      aria-controls={subnavId}
-                      onClick={() => toggleTeam(t.id)}
-                    >
-                      <span className={"sx-team__chev" + (open ? " is-open" : "")}>
-                        <Icon name="chevron-right" size={14} />
-                      </span>
-                    </button>
-                    <button
-                      type="button"
-                      className={"sx-team__btn" + (is("team-general", t.id) || is("team-members", t.id) ? " is-active" : "")}
-                      title={t.name}
-                      onClick={() => {
-                        if (!open) toggleTeam(t.id);
-                        goTo({ view: "team-general", teamId: t.id });
-                      }}
-                    >
-                      <TeamAvatar team={t} className="sx-av" />
-                      <span className="sx-team__name">{t.name}</span>
-                    </button>
-                    <button
-                      type="button"
-                      className="sx-team__gear"
-                      title="Team settings"
-                      onClick={() => {
-                        if (!open) toggleTeam(t.id);
-                        goTo({ view: "team-general", teamId: t.id });
-                      }}
-                    >
-                      <Icon name="settings" size={14} />
-                    </button>
-                  </div>
-                  {open && (
-                    <div className="sx-sub" id={subnavId}>
-                      <NavItem
-                        active={is("team-general", t.id)}
-                        icon="settings"
-                        label="General"
-                        onClick={() => goTo({ view: "team-general", teamId: t.id })}
-                      />
-                      <NavItem
-                        active={is("team-members", t.id)}
-                        icon="users"
-                        label="Members"
-                        meta={String(t.members.length)}
-                        onClick={() => goTo({ view: "team-members", teamId: t.id })}
-                      />
-                    </div>
-                  )}
-                </div>
-              );
-            })}
           </div>
         </div>
       </nav>

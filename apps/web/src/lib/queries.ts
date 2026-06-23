@@ -3,6 +3,9 @@
 import type {
   DependencyPlan,
   IssuedToken,
+  LabelColor,
+  LabelIcon,
+  LabelsResponse,
   ReportLocalSkillInstallResult,
   ReportSkillInstallResult,
   SkillUninstallResult,
@@ -52,7 +55,8 @@ export async function issueToken(scopes: TokenScope[], name?: string): Promise<I
 export async function publishSkillPackage(
   file: File,
   opts: {
-    ownerTeam?: string | null;
+    /** Label paths to file the skill under (org-wide shared folders). Applied on create. */
+    labels?: string[];
     version?: string;
     expectSlug?: string;
     expectSkillId?: string;
@@ -62,7 +66,8 @@ export async function publishSkillPackage(
   const fd = new FormData();
   fd.append("file", file);
   fd.append("action", "publish");
-  if (opts.ownerTeam) fd.append("owner_team", opts.ownerTeam);
+  // The API parses repeatable `label` fields (one per path) into the publish `labels` payload.
+  for (const path of opts.labels ?? []) fd.append("label", path);
   if (opts.version) fd.append("version", opts.version);
   // In update mode, bind the upload to the skill being updated (server rejects a mismatch).
   if (opts.expectSlug) fd.append("expect_slug", opts.expectSlug);
@@ -83,8 +88,6 @@ export async function validateSkillPackage(
     expectSlug?: string;
     expectSkillId?: string;
     dependencies?: string[];
-    /** Pass the selected owner so the dependency plan's owner-cover checks match publish. */
-    ownerTeam?: string | null;
   } = {},
 ): Promise<{ result: ValidationResult; dependencyPlan: DependencyPlan | null }> {
   const fd = new FormData();
@@ -94,7 +97,6 @@ export async function validateSkillPackage(
   if (opts.expectSlug) fd.append("expect_slug", opts.expectSlug);
   if (opts.expectSkillId) fd.append("expect_skill_id", opts.expectSkillId);
   for (const dep of opts.dependencies ?? []) fd.append("dependency", dep);
-  if (opts.ownerTeam) fd.append("owner_team", opts.ownerTeam);
   const data = await apiFetch<{ result: ValidationResult; dependency_plan?: DependencyPlan }>("/v1/skills", {
     method: "POST",
     body: fd,
@@ -107,7 +109,8 @@ export async function createSkillInline(input: {
   id: string;
   description: string;
   body: string;
-  owner_team?: string | null;
+  /** Label paths to file the new skill under (org-wide shared folders). */
+  labels?: string[];
 }): Promise<PublishResult> {
   return apiFetch<PublishResult>("/v1/skills/create", {
     method: "POST",
@@ -211,11 +214,69 @@ export async function fetchSkillDownloadUrl(slug: string, version: string | null
   return data.url;
 }
 
-/** Change a skill's owner: `null` = Personal (private to you); a team slug = owned by that team. */
-export async function setSkillOwner(slug: string, ownerTeam: string | null): Promise<void> {
-  await apiFetch<{ ok: true }>(`/v1/skills/${slug}/owner`, {
+// --- Labels (org-wide shared folders) ------------------------------------------------------------
+
+/** Fetch the org-wide label tree (derived parents + roll-up counts) plus the flat appearance list. */
+export async function fetchSkillLabels(): Promise<LabelsResponse> {
+  return apiFetch<LabelsResponse>("/v1/labels");
+}
+
+/** Create (upsert) a label path, optionally with appearance. Intermediate ancestors are implicit. */
+export async function createLabel(
+  path: string,
+  opts?: { color?: LabelColor | null; icon?: LabelIcon | null },
+): Promise<void> {
+  await apiFetch<{ ok: true }>("/v1/labels", {
+    method: "POST",
+    body: JSON.stringify({ path, color: opts?.color, icon: opts?.icon }),
+  });
+}
+
+/** Move a label path (and its whole subtree) to a new path. Rejected on collision. */
+export async function renameLabel(from: string, to: string): Promise<void> {
+  await apiFetch<{ ok: true }>("/v1/labels/rename", {
     method: "PUT",
-    body: JSON.stringify({ owner_team: ownerTeam }),
+    body: JSON.stringify({ from, to }),
+  });
+}
+
+/** Set (or clear, with `null`) a label path's color. */
+export async function setLabelColor(path: string, color: LabelColor | null): Promise<void> {
+  await apiFetch<{ ok: true }>("/v1/labels/color", {
+    method: "PUT",
+    body: JSON.stringify({ path, color }),
+  });
+}
+
+/** Set (or clear, with `null`) a label path's icon. */
+export async function setLabelIcon(path: string, icon: LabelIcon | null): Promise<void> {
+  await apiFetch<{ ok: true }>("/v1/labels/icon", {
+    method: "PUT",
+    body: JSON.stringify({ path, icon }),
+  });
+}
+
+/** Delete a label path and its whole subtree across both tables. */
+export async function deleteLabel(path: string): Promise<void> {
+  await apiFetch<{ ok: true }>("/v1/labels", {
+    method: "DELETE",
+    body: JSON.stringify({ path }),
+  });
+}
+
+/** Assign a label path to a skill (path lives in the body so slashes survive). */
+export async function assignSkillLabel(slug: string, path: string): Promise<void> {
+  await apiFetch<{ ok: true }>(`/v1/skills/${slug}/labels`, {
+    method: "POST",
+    body: JSON.stringify({ path }),
+  });
+}
+
+/** Unassign a label path from a skill (path lives in the body so slashes survive). */
+export async function unassignSkillLabel(slug: string, path: string): Promise<void> {
+  await apiFetch<{ ok: true }>(`/v1/skills/${slug}/labels`, {
+    method: "DELETE",
+    body: JSON.stringify({ path }),
   });
 }
 
@@ -258,7 +319,7 @@ export async function fetchArchivedSkills(): Promise<SkillListRow[]> {
 }
 
 /**
- * Relevance-ranked full-text search across visible skills (slug, description, tools, owner, and the
+ * Relevance-ranked full-text search across skills (slug, description, tools, labels, and the
  * SKILL.md body). Server-ordered by relevance — render the rows as-is. Powers the ⌘K palette.
  */
 export async function fetchSkillSearch(query: string, signal?: AbortSignal): Promise<SkillListRow[]> {

@@ -80,16 +80,6 @@ export function buildSettingsAppData(input: {
       initials: member.initials || initialsOf(member.name || member.email || member.userId),
     };
   }
-  for (const team of settings.teams) {
-    for (const member of team.members) {
-      users[member.userId] = {
-        id: member.userId,
-        name: member.name,
-        email: member.email,
-        initials: member.initials || initialsOf(member.name || member.email || member.userId),
-      };
-    }
-  }
 
   const currentFull: OrgFull = {
     // Prefer the fresh settings.org payload for identity fields (name/slug/kind/plan); the
@@ -118,15 +108,6 @@ export function buildSettingsAppData(input: {
       pending: member.pending,
       inviteId: member.inviteId,
       inviteToken: member.inviteToken,
-    })),
-    teams: settings.teams.map((team) => ({
-      id: team.id,
-      slug: team.slug,
-      name: team.name,
-      description: team.description ?? "",
-      color: team.color ?? null,
-      icon: team.icon ?? null,
-      members: team.members.map((member) => ({ userId: member.userId, role: member.role })),
     })),
   };
 

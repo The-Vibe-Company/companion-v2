@@ -22,8 +22,6 @@ const SETTINGS_VIEWS: readonly SettingsView[] = [
   "general",
   "members",
   "invitations",
-  "team-general",
-  "team-members",
 ];
 
 function isSettingsView(value: string): value is SettingsView {
@@ -36,11 +34,9 @@ function parseSettingsState(sp: Record<string, string | string[] | undefined>): 
 } {
   const viewRaw = typeof sp.view === "string" ? sp.view : undefined;
   const view: SettingsView = viewRaw && isSettingsView(viewRaw) ? viewRaw : "profile";
-  // `team` is only meaningful for the per-team panes.
-  const teamId = view.startsWith("team-") && typeof sp.team === "string" ? sp.team : undefined;
   const dialogRaw = typeof sp.dialog === "string" ? sp.dialog : undefined;
-  const initialDialog: SettingsDialog = dialogRaw === "invite" || dialogRaw === "team" ? dialogRaw : null;
-  return { initialRoute: { view, teamId }, initialDialog };
+  const initialDialog: SettingsDialog = dialogRaw === "invite" ? dialogRaw : null;
+  return { initialRoute: { view }, initialDialog };
 }
 
 export async function loadSettingsPageData(searchParams: SettingsSearchParams): Promise<{

@@ -3,11 +3,9 @@ import { mkdir, rm } from "node:fs/promises";
 import { dirname, join, relative, resolve } from "node:path";
 import pc from "picocolors";
 import {
-  visibilityFilterSchema,
   type LockedSkill,
   type SkillListRow,
   type SkillVersionRow,
-  type VisibilityFilter,
 } from "@companion/contracts";
 import {
   bumpSemver,
@@ -44,61 +42,35 @@ import {
 
 const nowIso = () => new Date().toISOString();
 
-export function parseVisibilityFilter(value: string | undefined): VisibilityFilter | undefined {
-  if (!value) return undefined;
-  const parsed = visibilityFilterSchema.safeParse(value);
-  if (!parsed.success) throw new CliError("visibility must be one of: personal, team", 2);
-  return parsed.data;
-}
-
 /**
- * The owner team slug a push should use. `null` = Personal. A publish never CHANGES ownership (the
- * owner is immutable; the server keeps the current owner on a re-publish). So:
- * - new skill: `--owner-team` → that team; `--private`/default → Personal.
- * - existing skill: keep the current owner; reject a conflicting `--private`/`--owner-team` with a
- *   clear error instead of silently no-op'ing (which would record a wrong owner in the lockfile).
+ * Normalize a repeatable `--label` flag into the deduped, sorted list to file a pushed skill under.
+ * Labels are org-wide shared folder paths (e.g. `marketing/seo`); blanks are dropped. Path shape is
+ * validated server-side, so the CLI passes them through verbatim (minus surrounding whitespace).
  */
-export function resolvePushOwner(reg: RegistryInfo, opts: Pick<PushOpts, "private" | "ownerTeam">): string | null {
-  const ownerTeam = opts.ownerTeam?.trim() || undefined;
-  if (opts.private && ownerTeam) {
-    throw new CliError("--private cannot be combined with --owner-team", 2);
+export function normalizeLabels(values: string[] | undefined): string[] {
+  if (!values?.length) return [];
+  const seen = new Set<string>();
+  for (const raw of values) {
+    const path = raw.trim();
+    if (path) seen.add(path);
   }
-  if (reg.row) {
-    // owner_handle is the team slug for a team-owned skill, null for a Personal one.
-    const current = reg.row.owner_kind === "team" ? reg.row.owner_handle : null;
-    const requested = opts.private ? null : ownerTeam !== undefined ? ownerTeam : current;
-    if (requested !== current) {
-      const currentLabel = current ? `team "${current}"` : "Personal";
-      throw new CliError(
-        `cannot change ownership on publish: "${reg.row.slug}" is owned by ${currentLabel}. Move it with the web Owner control first.`,
-        2,
-      );
-    }
-    return current;
-  }
-  if (opts.private) return null;
-  return ownerTeam ?? null;
+  return [...seen].sort();
 }
 
 export function buildPublishFormData(input: {
   archive: Buffer;
   name: string;
   version: string;
-  ownerTeam: string | null;
+  labels: string[];
   message?: string;
 }): FormData {
   const fd = new FormData();
   fd.append("file", new Blob([input.archive], { type: "application/gzip" }), `${input.name}-${input.version}.tar.gz`);
   fd.append("action", "publish");
   fd.append("version", input.version);
-  if (input.ownerTeam) fd.append("owner_team", input.ownerTeam);
+  for (const label of input.labels) fd.append("label", label);
   if (input.message) fd.append("message", input.message);
   return fd;
-}
-
-/** Display label for a skill's owner: the team name, or "Personal" for a user-owned skill. */
-function ownerLabel(row: { owner_kind: "user" | "team"; owner_name: string }): string {
-  return row.owner_kind === "team" ? row.owner_name : "Personal";
 }
 
 export function verifyDownloadedArchive(name: string, version: string, archive: Buffer, expectedChecksum: string): string {
@@ -125,26 +97,25 @@ export async function assertCanReplaceExistingInstall(
 }
 
 export async function list(
-  opts: { visibility?: string; mine?: boolean },
+  opts: { label?: string },
   g: GlobalOpts,
 ): Promise<void> {
   const client = await getClient(g.profile, g.org);
   const qs = new URLSearchParams();
-  const visibility = parseVisibilityFilter(opts.visibility);
-  if (visibility) qs.set("visibility", visibility);
-  if (opts.mine) qs.set("mine", "true");
+  const label = opts.label?.trim();
+  if (label) qs.set("label", label);
   const rows = await client.request<SkillListRow[]>(`/v1/skills${qs.size ? `?${qs.toString()}` : ""}`);
   if (g.json) {
     emitJson(rows);
     return;
   }
   printTable(
-    ["skill", "owner", "version", "by", "stars", "state"],
+    ["skill", "version", "by", "labels", "stars", "state"],
     rows.map((r) => [
       r.slug,
-      ownerLabel(r),
       r.current_version ?? "-",
-      `@${r.owner_handle ?? r.owner_name}`,
+      r.creator_name,
+      r.labels.length ? r.labels.join(", ") : "-",
       String(r.star_count ?? 0),
       r.validation,
     ]),
@@ -160,7 +131,8 @@ export async function info(name: string, g: GlobalOpts): Promise<void> {
   }
   out(`${pc.bold(r.slug)}  ${pc.dim(r.current_version ?? "-")}`);
   out(r.description);
-  out(`owner      ${ownerLabel(r)} (@${r.owner_handle ?? ""})`);
+  out(`labels     ${r.labels.length ? r.labels.join(", ") : "-"}`);
+  out(`by         ${r.creator_name}`);
   out(`license    ${r.license ?? "-"}`);
   out(`checksum   ${r.checksum ?? "-"}`);
   out(`validation ${r.validation}`);
@@ -198,8 +170,8 @@ export async function validate(dir: string, g: GlobalOpts): Promise<void> {
 }
 
 export interface PushOpts {
-  private?: boolean;
-  ownerTeam?: string;
+  /** Repeatable `--label` values: org-wide shared folder paths to file the skill under (on create). */
+  label?: string[];
   bump?: "patch" | "minor" | "major";
   setVersion?: string;
   message?: string;
@@ -247,7 +219,10 @@ export async function push(dir: string, opts: PushOpts, g: GlobalOpts): Promise<
     registry: reg,
   });
 
-  const ownerTeam = resolvePushOwner(reg, opts);
+  // Labels are applied only when the skill is first created; a re-publish keeps the existing
+  // assignments (move folders from the web/CLI label commands). We still pass them on every push —
+  // the server ignores them for an existing skill.
+  const labels = normalizeLabels(opts.label);
 
   const packed = await packDir(abs);
   if (opts.dryRun) {
@@ -256,7 +231,7 @@ export async function push(dir: string, opts: PushOpts, g: GlobalOpts): Promise<
         dryRun: true,
         name: fm.name,
         version,
-        ownerTeam,
+        labels,
         checksum: packed.checksum,
         size: packed.sizeBytes,
         localChecksum: packed.checksum,
@@ -265,7 +240,7 @@ export async function push(dir: string, opts: PushOpts, g: GlobalOpts): Promise<
       });
     else
       out(
-        `would publish ${pc.bold(`${fm.name}@${version}`)}  owner=${ownerTeam ?? "Personal"}  ${packed.checksum}  ${packed.sizeBytes} bytes  ${packed.files.length} files`,
+        `would publish ${pc.bold(`${fm.name}@${version}`)}  labels=${labels.length ? labels.join(",") : "-"}  ${packed.checksum}  ${packed.sizeBytes} bytes  ${packed.files.length} files`,
       );
     return;
   }
@@ -274,7 +249,7 @@ export async function push(dir: string, opts: PushOpts, g: GlobalOpts): Promise<
     archive: packed.archive,
     name: fm.name,
     version,
-    ownerTeam,
+    labels,
     message: opts.message,
   });
 
@@ -299,7 +274,6 @@ export async function push(dir: string, opts: PushOpts, g: GlobalOpts): Promise<
   if (!lock.registry.url) lock.registry = { url: client.url, orgId };
   upsertLockedSkill(lock, {
     name: fm.name,
-    owner_team: ownerTeam,
     pinned: null,
     resolved: version,
     checksum: lockChecksum,
@@ -334,7 +308,6 @@ export async function pull(spec: string, opts: { dir?: string; dest?: string; fo
     checksum: string;
     url: string;
     sizeBytes: number;
-    owner_team: string | null;
   }>(`/v1/skills/${name}/download${qs}`);
   const res = await fetch(dl.url);
   if (!res.ok) throw new CliError(`download failed: ${res.statusText}`, 8);
@@ -362,7 +335,6 @@ export async function pull(spec: string, opts: { dir?: string; dest?: string; fo
   if (!lock.registry.url) lock.registry = { url: client.url, orgId };
   upsertLockedSkill(lock, {
     name,
-    owner_team: dl.owner_team,
     pinned: version,
     resolved: dl.version,
     checksum: dl.checksum,

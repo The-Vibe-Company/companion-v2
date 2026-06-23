@@ -24,7 +24,11 @@ export interface OnboardingContextResult {
 
 export interface CompleteOnboardingInput {
   org: { name: string; domain?: string | null; autoJoin?: boolean; color?: string | null; logoUrl?: string | null };
-  team: { name: string; color?: string | null; icon?: string | null };
+  /**
+   * Teams were removed product-wide (Org → User). The field is kept (optional) so the existing
+   * onboarding API/web callers still type-check; it is ignored — no team row is created.
+   */
+  team?: { name: string; color?: string | null; icon?: string | null };
   invites: string[];
 }
 
@@ -85,8 +89,9 @@ export async function joinOrgByDomain(actor: ActorContext, orgId: string, databa
 }
 
 /**
- * Atomically create the user's organization, first team, and invitations, and mark onboarding complete.
- * Domain access is only honored for the actor's own (verified, when gated) work domain during onboarding.
+ * Atomically create the user's organization and invitations, and mark onboarding complete. (Teams
+ * were removed product-wide — no team is created.) Domain access is only honored for the actor's own
+ * (verified, when gated) work domain during onboarding.
  */
 export async function completeOnboarding(
   actor: ActorContext,
@@ -107,7 +112,6 @@ export async function completeOnboarding(
   }
 
   const orgColor = normalizeBrandColor(input.org.color, "org");
-  const teamColor = normalizeBrandColor(input.team.color, "team");
   const inviteTokens: Array<{ email: string; token: string }> = [];
 
   const orgId = await database
@@ -135,21 +139,6 @@ export async function completeOnboarding(
       }
 
       await tx.insert(schema.memberships).values({ orgId: org.id, userId: actor.id, orgRole: "owner" });
-
-      const [team] = await tx
-        .insert(schema.teams)
-        .values({
-          orgId: org.id,
-          name: input.team.name,
-          slug: uniqueSlug(input.team.name, crypto.randomUUID()),
-          color: teamColor,
-          icon: input.team.icon ?? null,
-        })
-        .returning();
-      if (!team) throw new Error("could not create team");
-      await tx
-        .insert(schema.teamMemberships)
-        .values({ orgId: org.id, teamId: team.id, userId: actor.id, teamRole: "admin" });
 
       const seen = new Set<string>();
       const self = actor.email.toLowerCase();

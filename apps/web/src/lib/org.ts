@@ -1,6 +1,6 @@
 "use client";
 
-import type { ApiTokenRow, IssuedToken, OrgRole, TeamRole, TokenScope } from "@companion/contracts";
+import type { ApiTokenRow, IssuedToken, OrgRole, TokenScope } from "@companion/contracts";
 import { apiFetch } from "./apiClient";
 
 export async function setCurrentOrg(orgId: string): Promise<void> {
@@ -51,36 +51,6 @@ export async function leaveOrg(_orgId: string): Promise<void> {
   throw new Error("Leaving orgs is not implemented in the greenfield API yet");
 }
 
-export async function createTeam(_orgId: string, name: string): Promise<{ id: string; slug: string }> {
-  return apiFetch("/v1/teams", {
-    method: "POST",
-    body: JSON.stringify({ name }),
-  });
-}
-
-export async function addTeamMember(
-  _orgId: string,
-  teamId: string,
-  userId: string,
-  role: TeamRole,
-): Promise<void> {
-  await apiFetch(`/v1/teams/${teamId}/members`, {
-    method: "POST",
-    body: JSON.stringify({ userId, role }),
-  });
-}
-
-export async function setTeamMemberRole(teamId: string, userId: string, role: TeamRole): Promise<void> {
-  await apiFetch(`/v1/teams/${teamId}/members/${userId}`, {
-    method: "PATCH",
-    body: JSON.stringify({ role }),
-  });
-}
-
-export async function removeTeamMember(teamId: string, userId: string): Promise<void> {
-  await apiFetch(`/v1/teams/${teamId}/members/${userId}`, { method: "DELETE" });
-}
-
 export function inviteLink(token: string): string {
   const base = typeof window !== "undefined" ? window.location.origin : "";
   return `${base}/join/${token}`;
@@ -129,25 +99,6 @@ export async function addAccessDomain(domain: string): Promise<{ id: string; dom
 
 export async function removeAccessDomain(domainId: string): Promise<void> {
   await apiFetch(`/v1/orgs/current/domains/${domainId}`, { method: "DELETE" });
-}
-
-/**
- * Rename, re-slug, and/or edit a team's description. Mirrors `PUT /v1/teams/:id`.
- * Returns the server-normalized values so the caller can reconcile (the server slugifies).
- */
-export async function updateTeam(
-  id: string,
-  patch: { name?: string; slug?: string; description?: string; color?: string | null; icon?: string | null },
-): Promise<{ id: string; name: string; slug: string; description: string | null; color: string | null; icon: string | null }> {
-  return apiFetch(`/v1/teams/${id}`, {
-    method: "PUT",
-    body: JSON.stringify(patch),
-  });
-}
-
-/** Permanently delete a team; its visibility shares are removed and team-owned skills fall back. */
-export async function deleteTeam(id: string): Promise<void> {
-  await apiFetch(`/v1/teams/${id}`, { method: "DELETE" });
 }
 
 /** Upload a workspace logo image. Mirrors `POST /v1/orgs/current/logo`. */

@@ -40,12 +40,12 @@ describe("parseOrgSettingsResponse", () => {
   it("returns null for malformed iterable fields", async () => {
     const { parseOrgSettingsResponse } = await import("./settingsData");
 
-    expect(parseOrgSettingsResponse({ members: [], teams: {} })).toBeNull();
+    expect(parseOrgSettingsResponse({ members: {} })).toBeNull();
     expect(console.error).toHaveBeenCalledWith(
       "Invalid org settings response",
       expect.arrayContaining([
         expect.objectContaining({
-          path: "teams",
+          path: "members",
           message: expect.any(String),
         }),
       ]),
@@ -87,25 +87,6 @@ describe("parseOrgSettingsResponse", () => {
             initials: "A",
           },
         ],
-        teams: [
-          {
-            id: "team_1",
-            slug: "platform",
-            name: "Platform",
-            description: "Owns the deploy plane.",
-            color: null,
-            icon: null,
-            members: [
-              {
-                userId: "user_1",
-                role: "admin",
-                name: "Admin",
-                email: "admin@tvc.dev",
-                initials: "A",
-              },
-            ],
-          },
-        ],
         invitations: [
           {
             id: "inv_1",
@@ -142,14 +123,6 @@ describe("parseOrgSettingsResponse", () => {
     expect(data.current.members).toEqual([
       expect.objectContaining({ userId: "user_1", role: "owner", joined: "2026-06-09" }),
     ]);
-    expect(data.current.teams).toEqual([
-      expect.objectContaining({
-        id: "team_1",
-        slug: "platform",
-        description: "Owns the deploy plane.",
-        members: [{ userId: "user_1", role: "admin" }],
-      }),
-    ]);
     expect(data.invites).toEqual([
       expect.objectContaining({ id: "inv_1", email: "new@tvc.dev", role: "developer", by: "", token: "tok_abc" }),
     ]);
@@ -168,7 +141,7 @@ describe("parseOrgSettingsResponse", () => {
     const { loadSettingsPageData } = await import("./settingsData");
     serverApiFetch
       .mockResolvedValueOnce(whoami)
-      .mockResolvedValueOnce({ members: [], teams: {} });
+      .mockResolvedValueOnce({ members: {} });
     loadOrgContext.mockResolvedValue({ orgs: [current], current });
 
     await expect(loadSettingsPageData(Promise.resolve({}))).resolves.toBeNull();

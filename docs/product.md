@@ -12,11 +12,11 @@ For the technical design, see [`design.md`](design.md).
 
 | Dimension | Companion v1 | Companion v2 |
 |---|---|---|
-| Primary user | Single operator | Organizations & teams |
+| Primary user | Single operator | Organizations |
 | Interface | CLI + IaC (TOML, `validate`/`plan`/`apply`) | Web portal + API (+ optional CLI) |
-| Identity & access | None | Org → Team → User, RBAC, invites |
+| Identity & access | None | Org → User, RBAC, invites |
 | State | Local SQLite + TOML files | Postgres, multi-tenant |
-| Sharing | Personal fleet; manual copies | Workspace visibility: Private / team shares / Everyone |
+| Sharing | Personal fleet; manual copies | Org-wide by default; organized with shared labels |
 | Deploy targets | Fly.io (primary) | Pluggable: Docker · Fly · Kubernetes · Modal |
 | Skills | Ad-hoc, per-fleet | Versioned `SKILL.md` registry + opt-in attach |
 | Containers | Hand-defined in config | Org-admin-approved catalog, 1-click |
@@ -35,7 +35,7 @@ For the technical design, see [`design.md`](design.md).
 
 > **The wedge, in one sentence:** the only **open-source, self-hostable** portal that unifies governed
 > multi-tenant **deployment of AI agents**, a **curated container catalog**, and a **versioned
-> `SKILL.md` registry** behind one **Org → Team → User** RBAC model.
+> `SKILL.md` registry** behind one **Org → User** RBAC model.
 
 ---
 
@@ -44,91 +44,87 @@ For the technical design, see [`design.md`](design.md).
 | Persona | Goals | Pains today | Success looks like |
 |---|---|---|---|
 | **Org Admin / Platform Owner** | Stand up the org, set policy, curate the approved catalog, control providers/secrets/budget, keep it secure & self-hosted | No governance over agents; shadow AI tools; can't vet images/skills; no central audit | One portal where every resource is permissioned & attributable; approves the catalog once; sleeps at night |
-| **Team Lead** | Provision their team, manage who deploys what, share team agents/skills, watch usage | Manual per-person setup; no team sharing; no visibility into team activity | Self-serve team space; team-shared resources; activity visible without tickets |
-| **Builder / Developer** | Publish & version skills, define agent and container templates, deploy fast | Skills scattered in repos; redeploying agents is CLI/IaC toil; hard to share safely | Publish a `SKILL.md` once, version & share it; deploy a Hermès agent with attached skills in minutes |
-| **Member / Consumer** | Discover & **use** the right agents/tools; propose new skills | Doesn't know what exists or how to access it; gated behind ops; no UI | Browses a catalog, opens a chat with a permitted agent, proposes a skill — no shell required |
+| **Builder / Developer** | Publish & version skills, organize them with labels, define agent and container templates, deploy fast | Skills scattered in repos; redeploying agents is CLI/IaC toil; hard to find what already exists | Publish a `SKILL.md` once, version it, file it under a label; deploy a Hermès agent with attached skills in minutes |
+| **Member / Consumer** | Discover & **use** the right agents/tools; contribute new skills | Doesn't know what exists or how to access it; gated behind ops; no UI | Browses the org catalog, opens a chat with a permitted agent, adds a skill — no shell required |
 
 ---
 
 ## 3. The three pillars
 
-Skills carry explicit **workspace visibility**:
+Skills are **flat and org-wide**: every skill is visible to every member of the organization, and any
+member can create, edit, publish, archive, or delete any skill. There is no owner and no per-skill
+visibility flag. The platform records `creator_id` (who authored a skill) for Activity and audit — it
+is provenance, not an access right. Org-wide visibility never crosses organization boundaries.
 
-- **Private** — derived from `everyone=false` and no team shares.
-- **Team shares** — one or more teams can be attached to the skill's visibility.
-- **Everyone** — every member of the current workspace/organization can see it.
-
-Everyone is not internet-wide and never crosses organization boundaries. Ownership is separate from
-visibility: a skill can be owned by a user or a team, and a team-owned skill can be edited by that
-team's Admins and Editors. Visibility only decides who can read the skill: selected teams,
-Everyone, both, or neither. The acting admin is recorded as creator in the audit log. *Who can edit
-it*, *who can see it*, and *who created it* are independent.
+To stay organized without restricting access, skills are filed under **labels** ("folders") — an
+org-wide **shared** tree of slash-separated paths (e.g. `marketing/seo`), multi-assigned per skill,
+each path with its own color and icon, empty folders allowed. Any member can create, assign, rename,
+recolor, or delete labels.
 
 ### Pillar 1 — Hermès Agents
 Deploy curated AI agents built on the **Hermes** runtime, with **Granite** markdown memory and model
 routing via **OpenRouter**. An agent is a declared configuration — model route, system prompt, an
 optional memory vault, and a set of attached skills — that the platform deploys to a chosen provider
-and exposes as a chat surface. Agents are visible privately, to selected teams, or to everyone in the workspace.
+and exposes as a chat surface. Agents are visible to everyone in the organization.
 
 ### Pillar 2 — Curated Container Catalog
 Org Admins **approve** images and templates into a catalog — databases, MCP servers, developer tools,
 web UIs — pinned by digest, with sane resource limits and required secrets declared up front. Members
-then **deploy them in one click** to a team or for themselves. The governance gate (only approved
+then **deploy them in one click** for the organization. The governance gate (only approved
 images are deployable) is the entire point: capability without the security free-for-all.
 
 ### Pillar 3 — Skills Hub
 Anyone can upload a [`SKILL.md`](https://github.com/anthropics/skills) package (a folder with
 `SKILL.md` frontmatter plus optional `scripts/`, `references/`, `assets/`). The hub **validates** it,
-assigns a **semantic version**, and stores it in the registry. Skills are shared through **Everyone**
-and **team shares**, then **attached opt-in** to agents — an owner chooses exactly which skill versions go on which agents,
-and the agent picks them up on its next reconcile. The hub is both a **registry** (publish, version,
-browse, share) and a **binding mechanism** (attach to agents).
+assigns a **semantic version**, and stores it in the registry. Every skill is visible to the whole org;
+members file skills under **labels** to keep them organized, then **attach opt-in** to agents — anyone
+chooses exactly which skill versions go on which agents, and the agent picks them up on its next
+reconcile. The hub is both a **registry** (publish, version, browse, label) and a **binding mechanism**
+(attach to agents).
 
 ---
 
 ## 4. Core user journeys
 
-### Onboarding — create org → invite team → first deploy
+### Onboarding — create org → invite members → first deploy
 1. An operator self-hosts (single `docker compose up`). The **first user becomes Org Owner**.
-2. They create an **Organization**, create a **Team**, and invite members by email with roles.
+2. They create an **Organization** and invite members by email with org roles.
 3. They configure one **deployment provider** (local Docker by default) and **model credentials**
    (OpenRouter).
 4. From a starter template, they deploy the org's **first Hermès agent** and land in a working chat.
    *Activation milestone: time-to-first-deploy.*
 
-### Pillar 1 — deploy a Hermès agent with team skills
+### Pillar 1 — deploy a Hermès agent with skills
 A Builder picks a curated agent template → selects a provider and model (OpenRouter) → **attaches one
-or more skills** from the registry → optionally attaches a **Granite vault** for memory → sets
-visibility to selected teams → deploys. The agent appears in the team's catalog and members open a chat.
+or more skills** from the registry → optionally attaches a **Granite vault** for memory → deploys. The
+agent appears in the org catalog and any member can open a chat.
 
 ### Pillar 2 — deploy a curated container
 An Org Admin reviews and **approves** a Docker image/template into the catalog (resource limits,
-required secrets, default visibility). A Builder or Team Lead browses the approved catalog → clicks
-**1-click deploy** → a permissioned instance spins up → connection details and secrets are surfaced to
-permitted members. Only approved images are deployable.
+required secrets). A Builder browses the approved catalog → clicks **1-click deploy** → an instance
+spins up → connection details and secrets are surfaced to org members. Only approved images are
+deployable.
 
-### Pillar 3 — skills: upload → share → attach
+### Pillar 3 — skills: upload → label → attach
 A Builder uploads a `SKILL.md` package → the portal **validates** the frontmatter (`name`,
-`description`, `compatibility`, `metadata`, and `allowed-tools`) and assigns a registry version → the
-Builder chooses a personal or team owner and sets **Everyone** and/or team visibility shares → it enters
-the registry → any permitted user **attaches** it (opt-in) to an agent
-they can edit → the agent gains the skill on its next run. Versioning lets teams **pin** or **upgrade**.
+`description`, `compatibility`, `metadata`, and `allowed-tools`) and assigns a registry version → it
+enters the registry, visible to the whole org → the Builder files it under one or more **labels** to
+keep it organized → any member **attaches** it (opt-in) to an agent → the agent gains the skill on its
+next run. Versioning lets members **pin** or **upgrade**.
 
 ---
 
 ## 5. Access model (product view)
 
-**Org roles:** `Owner` (everything, incl. billing/delete) → `Admin` (members, teams, providers,
-catalog, deploy at any visibility) → `Member` (use resources, deploy privately or to allowed teams) → `Guest`
-(read-only on explicitly shared resources).
+**Org roles:** `Owner` (everything, incl. billing/delete) → `Admin` (members, providers, catalog) →
+`Developer` (publish skills, define and deploy agents and containers).
 
-**Team roles:** `Admin` (manage team membership and edit team-owned resources) →
-`Editor` (edit team-owned resources) → `Reader` (read team-owned and team-visible resources).
-
-A permission decision combines two checks: **can the actor see the resource** (the visibility rule) **and
-can the actor perform the action** (the role rule). The "admin deploys *for* X" case is handled by
-separating ownership, visibility, and provenance. Team shares are read visibility; team ownership is
-what grants team Admins/Editors write access — see [`design.md`](design.md) for the full model.
+There are **no teams** and no per-resource visibility. A permission decision combines two checks:
+**is the actor a member of this org** (the tenant rule) **and does the actor's org role permit the
+action** (the role rule). Skills are the flat case: every member can read every skill, and any member
+can create, edit, publish, archive, or delete any skill — the only thing recorded per skill is its
+creator (provenance/audit). Skills are organized, not gated, by **shared labels**. See
+[`design.md`](design.md) for the full model.
 
 ---
 

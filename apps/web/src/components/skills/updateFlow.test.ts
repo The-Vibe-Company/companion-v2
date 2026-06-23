@@ -2,41 +2,22 @@ import React from "react";
 import { renderToString } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import type { LocalSkillRow } from "@companion/contracts";
-import type { SkillVM, TeamVM } from "@/lib/types";
+import type { SkillVM } from "@/lib/types";
 import { DetailMoreMenuContent, DetailView } from "./DetailView";
 import { LocalSkillDrawer } from "./LocalSkillsView";
 import { UploadDialog } from "./UploadDialog";
 
-const teams: TeamVM[] = [
-  {
-    id: "engineering",
-    name: "Engineering",
-    initial: "EN",
-    color: null,
-    icon: null,
-    role: "editor",
-    dbId: "team-1",
-  },
-];
-
 const skill: SkillVM = {
   uuid: "skill-1",
   id: "research-agent",
-  ownerId: "user-1",
   version: "1.2.3",
   validation: "valid",
   description: "Research helper.",
   error: null,
-  owner: {
-    kind: "user",
-    id: "user-1",
-    userId: "user-1",
-    teamId: null,
-    name: "Alice Nardon",
-    initials: "AN",
-    handle: "alice",
-    team: null,
-  },
+  labels: [],
+  authorId: "user-1",
+  authorName: "Alice Nardon",
+  authorInitials: "AN",
   tools: ["read_file"],
   requirements: [],
   size: "1 KB",
@@ -48,7 +29,6 @@ const skill: SkillVM = {
   starred: false,
   installStatus: "none",
   installedVersion: null,
-  teamSlugs: ["engineering"],
   requiresCount: 0,
   usedByCount: 0,
   depWarn: false,
@@ -92,18 +72,19 @@ describe("skill update flow", () => {
         total: 1,
         me: { id: "user-1", name: "Alice Nardon", email: "alice@example.com", initials: "AN" },
         myRole: "developer",
+        allLabels: [],
         onBack: vi.fn(),
         onPrev: vi.fn(),
         onNext: vi.fn(),
         onToggleStar: vi.fn(),
         onToggleInstalled: vi.fn(),
-        onChangeOwner: vi.fn(),
+        onToggleLabel: vi.fn(),
+        onSelectLabel: vi.fn(),
         onInstall: vi.fn(),
         onUpdate: vi.fn(),
         onOpenSkill: vi.fn(),
         onRestore: vi.fn(),
         onArchive: vi.fn(),
-        teams,
       }),
     );
 
@@ -147,7 +128,6 @@ describe("skill update flow", () => {
       React.createElement(UploadDialog, {
         mode: "update",
         skill,
-        teams,
         onClose: vi.fn(),
         onPublished: vi.fn(),
       }),
@@ -171,7 +151,6 @@ describe("skill update flow", () => {
   it("renders create prompt with validation before publish", () => {
     const html = renderToString(
       React.createElement(UploadDialog, {
-        teams,
         onClose: vi.fn(),
         onPublished: vi.fn(),
       }),

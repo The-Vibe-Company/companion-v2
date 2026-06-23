@@ -1,31 +1,20 @@
 import React from "react";
 import { renderToString } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import type { SkillVM, TeamVM } from "@/lib/types";
-import { PropList, Requirements } from "./detailParts";
-
-const teams: TeamVM[] = [
-  { id: "engineering", name: "Engineering", initial: "EN", color: null, icon: null, role: "editor", dbId: "team-1" },
-];
+import type { SkillVM } from "@/lib/types";
+import { FiledIn, PropList, Requirements } from "./detailParts";
 
 const skill: SkillVM = {
   uuid: "skill-1",
   id: "manifest-demo",
-  ownerId: "user-1",
   version: "1.2.3",
   validation: "valid",
   description: "Demo skill.",
   error: null,
-  owner: {
-    kind: "user",
-    id: "user-1",
-    userId: "user-1",
-    teamId: null,
-    name: "Alice Nardon",
-    initials: "AN",
-    handle: "alice",
-    team: null,
-  },
+  labels: ["marketing", "marketing/seo"],
+  authorId: "user-1",
+  authorName: "Alice Nardon",
+  authorInitials: "AN",
   tools: ["read_file"],
   requirements: [
     {
@@ -45,7 +34,6 @@ const skill: SkillVM = {
   starred: false,
   installStatus: "none",
   installedVersion: null,
-  teamSlugs: ["engineering"],
   requiresCount: 0,
   usedByCount: 0,
   depWarn: false,
@@ -58,15 +46,8 @@ const skill: SkillVM = {
 };
 
 describe("PropList manifest rendering", () => {
-  it("renders Agent Skills manifest fields without treating registry version as manifest data", () => {
-    const html = renderToString(
-      React.createElement(PropList, {
-        skill,
-        teams,
-        onChangeOwner: vi.fn(),
-        canChangeOwner: true,
-      }),
-    );
+  it("renders Agent Skills manifest fields without an owner row or registry version", () => {
+    const html = renderToString(React.createElement(PropList, { skill }));
     expect(html).toContain("Compatibility");
     expect(html).toContain("Requires Python 3.14+ and uv with network access");
     expect(html).toContain("Allowed tools");
@@ -79,15 +60,50 @@ describe("PropList manifest rendering", () => {
     expect(html).toContain('title="companion_version"');
     expect(html).toContain(">version</span>");
     expect(html).toContain("1.2.3");
+    // No owner / visibility axis anymore.
+    expect(html).not.toContain("Owner");
+    expect(html).not.toContain("Personal");
     // Requirements live in their own tab, not the manifest rail.
     expect(html).not.toContain("AZURE_OPENAI_API_KEY");
   });
 });
 
-describe("Requirements tab rendering", () => {
+describe("FiledIn folder chips", () => {
+  it("renders a chip per filed folder plus an Add to folder control", () => {
+    const html = renderToString(
+      React.createElement(FiledIn, {
+        skill,
+        allLabels: ["marketing", "marketing/seo", "growth"],
+        onToggleLabel: vi.fn(),
+        onSelectLabel: vi.fn(),
+      }),
+    );
+    expect(html).toContain("Filed in");
+    expect(html).toContain("marketing");
+    expect(html).toContain("marketing/seo");
+    expect(html).toContain("Add to folder");
+  });
+
+  it("shows an empty state when the skill is filed nowhere", () => {
+    const html = renderToString(
+      React.createElement(FiledIn, {
+        skill: { ...skill, labels: [] },
+        allLabels: ["growth"],
+        onToggleLabel: vi.fn(),
+        onSelectLabel: vi.fn(),
+      }),
+    );
+    expect(html).toContain("No folders yet");
+    expect(html).toContain("Add to folder");
+  });
+});
+
+describe("Requirements section rendering", () => {
   it("lists declared secrets and env vars with their notes and badges", () => {
     const html = renderToString(React.createElement(Requirements, { requirements: skill.requirements }));
-    expect(html).toContain("Setup &amp; secrets");
+    // The enclosing collapsible Section now owns the "Setup & secrets" header, so the body itself
+    // no longer repeats it.
+    expect(html).not.toContain("Setup &amp; secrets");
     expect(html).toContain("AZURE_OPENAI_API_KEY");
     expect(html).toContain("secret");
     expect(html).toContain("Ask your org admin to provision an Azure OpenAI resource.");

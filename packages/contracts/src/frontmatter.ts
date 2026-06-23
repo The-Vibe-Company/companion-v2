@@ -128,7 +128,7 @@ const skillFrontmatterFields = z
     if ("scope" in value || "visibility" in value) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "skill frontmatter must not declare visibility; use upload visibility instead",
+        message: "skill frontmatter must not declare scope or visibility; skills are visible to every org member",
       });
     }
     const seen = new Set<string>();

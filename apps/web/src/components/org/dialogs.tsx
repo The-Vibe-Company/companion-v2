@@ -7,10 +7,6 @@ import { Dialog, RoleDot } from "./primitives";
 import { ORG_ROLE_ORDER, orgRole } from "./roles";
 import type { OrgCtx } from "./model";
 
-function slugify(s: string): string {
-  return s.toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
-}
-
 /**
  * Invite-to-workspace dialog. On submit it fires `ctx.inviteMember` (which routes
  * the surface to Invitations on success) and closes.
@@ -68,59 +64,6 @@ export function InviteDialog({ ctx, onClose }: { ctx: OrgCtx; onClose: () => voi
           ))}
         </div>
         <span className="og-field__hint">{orgRole(role).desc}</span>
-      </div>
-    </Dialog>
-  );
-}
-
-/**
- * Create-team dialog. On submit it fires `ctx.createTeam` (which expands the new
- * team and routes to its General pane on success) and closes.
- */
-export function CreateTeamDialog({ ctx, onClose }: { ctx: OrgCtx; onClose: () => void }) {
-  const [name, setName] = useState("");
-  const valid = name.trim().length >= 2;
-  const submit = () => {
-    if (!valid) return;
-    void ctx.createTeam(ctx.currentOrg.id, name.trim());
-    onClose();
-  };
-  return (
-    <Dialog
-      icon="layers"
-      title="New team"
-      desc="Create a team inside the workspace. You'll be its first admin."
-      onClose={onClose}
-      foot={
-        <>
-          <span className="og-spacer" />
-          <button className="btn-sec" onClick={onClose}>
-            Cancel
-          </button>
-          <button className="btn-primary" disabled={!valid} onClick={submit}>
-            <Icon name="plus" size={14} />
-            Create team
-          </button>
-        </>
-      }
-    >
-      <div className="og-field">
-        <label className="og-field__label">Team name</label>
-        <input
-          className="sx-input"
-          autoFocus
-          placeholder="Platform"
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") submit();
-          }}
-        />
-        <span className="og-field__hint">
-          {name.trim()
-            ? "Scope: team/" + slugify(name)
-            : "Scopes skills and groups members. Add people after creating it."}
-        </span>
       </div>
     </Dialog>
   );

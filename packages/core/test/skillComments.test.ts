@@ -1,6 +1,17 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Db } from "@companion/db";
-import { addComment, getCommentImageAsset, setCommentDeprecated, type ActorContext } from "../src/services";
+import type { PublishSkillInput } from "@companion/contracts";
+import {
+  addComment,
+  archiveSkill,
+  assertCanPublishSkillVersion,
+  getCommentImageAsset,
+  installSkill,
+  publishSkillVersion,
+  restoreSkill,
+  setCommentDeprecated,
+  type ActorContext,
+} from "../src/services";
 
 /**
  * These suites exercise the comment-thread service layer (RBAC for deprecate/restore and the
@@ -25,9 +36,9 @@ const owner: ActorContext = { id: "user-owner", email: "owner@example.com", name
 const other: ActorContext = { id: "user-other", email: "other@example.com", name: "Other Dev" };
 
 interface FakeOptions {
-  /** orgRole for the acting user (drives both visibility + the admin gate). `null` = not a member. */
+  /** orgRole for the acting user. `null` = not a member (the only gate that denies anything now). */
   orgRole?: "owner" | "admin" | "developer" | null;
-  /** owner_id stamped on the resolved skill (drives the skill-owner gate). */
+  /** creator_id stamped on the resolved skill (provenance only — never gates an action). */
   skillOwnerId?: string;
   /** The comment row returned by `skillComments.findFirst` (the target of deprecate / a parent). */
   comment?: Record<string, unknown> | null;
@@ -62,16 +73,13 @@ function fakeDb(opts: FakeOptions = {}) {
             org_id: ORG,
             slug: "demo-skill",
             description: "",
-            everyone: true,
             validation: "valid",
             validation_error: null,
-            owner_kind: "user",
-            owner_id: opts.skillOwnerId ?? owner.id,
-            owner_user_id: opts.skillOwnerId ?? owner.id,
-            owner_team_id: null,
-            owner_name: "Owner",
-            owner_handle: null,
-            owner_initials: "OW",
+            // Skills are flat now: provenance only (no owner / visibility axis), org-wide labels.
+            labels: [],
+            creator_id: opts.skillOwnerId ?? owner.id,
+            creator_name: "Owner",
+            creator_initials: "OW",
             current_version: "1.0.0",
             license: null,
             checksum: null,
@@ -100,6 +108,12 @@ function fakeDb(opts: FakeOptions = {}) {
       memberships: {
         findFirst: vi.fn(async () => (orgRole === null ? null : { orgRole })),
       },
+      // `assertCanPublishSkillVersion` looks up the existing skill row by (orgId, slug). The
+      // non-member cases below never reach it (membership fails closed first); a null here just
+      // models "brand-new slug" for any member-path that does get past the gate.
+      skills: {
+        findFirst: vi.fn(async () => null),
+      },
       skillVersions: {
         findFirst: vi.fn(async () => opts.version ?? null),
       },
@@ -117,7 +131,7 @@ function fakeDb(opts: FakeOptions = {}) {
   return { database: database as unknown as Db, returning, insertValues };
 }
 
-describe("setCommentDeprecated — RBAC matrix (author / admin / skill-owner allowed; others denied)", () => {
+describe("setCommentDeprecated — flat model (any member may deprecate; non-members denied)", () => {
   const targetComment = {
     id: "comment-1",
     orgId: ORG,
@@ -130,10 +144,12 @@ describe("setCommentDeprecated — RBAC matrix (author / admin / skill-owner all
     createdAt: new Date(),
   };
 
+  // Skills are flat: there is no owner / author gate on deprecate. Every member — the author, an org
+  // admin, or an unrelated developer — may toggle it; only non-membership denies.
   const allowed: Array<[string, ActorContext, FakeOptions]> = [
-    ["the comment author", author, { orgRole: "developer", skillOwnerId: owner.id }],
-    ["an org admin", admin, { orgRole: "admin", skillOwnerId: owner.id }],
-    ["the skill owner", owner, { orgRole: "developer", skillOwnerId: owner.id }],
+    ["the comment author", author, { orgRole: "developer" }],
+    ["an org admin", admin, { orgRole: "admin" }],
+    ["an unrelated developer (no owner/author privilege required)", other, { orgRole: "developer" }],
   ];
 
   it.each(allowed)("allows %s", async (_label, actor, base) => {
@@ -155,22 +171,8 @@ describe("setCommentDeprecated — RBAC matrix (author / admin / skill-owner all
     expect(row.id).toBe("comment-1");
   });
 
-  it("denies an unrelated developer (not author, not admin, not owner)", async () => {
-    const { database } = fakeDb({ orgRole: "developer", skillOwnerId: owner.id, comment: targetComment });
-    await expect(
-      setCommentDeprecated({
-        actor: other,
-        orgId: ORG,
-        slug: "demo-skill",
-        commentId: "comment-1",
-        deprecated: true,
-        database,
-      }),
-    ).rejects.toThrow("not allowed to change this comment");
-  });
-
-  it("denies a cross-tenant actor before skill visibility is evaluated", async () => {
-    // orgRole null fails closed before workspace-local Everyone/team visibility is considered.
+  it("denies a cross-tenant actor (not a member of the org)", async () => {
+    // orgRole null fails closed — membership is the only gate left.
     const { database } = fakeDb({ orgRole: null, comment: targetComment });
     await expect(
       setCommentDeprecated({
@@ -425,5 +427,65 @@ describe("getCommentImageAsset — visibility gate", () => {
       database,
     });
     expect(asset).toEqual({ storageKey: `${ORG}/comments/img-1`, contentType: "image/webp" });
+  });
+});
+
+/**
+ * Non-member / cross-tenant denial on the primary skill WRITE paths. In the flat model the ONLY gate
+ * is org membership: every path funnels through `assertMember`, which throws when `getOrgRole`
+ * resolves `null` (either a true non-member, or — equivalently — a member of a DIFFERENT org, whose
+ * role in THIS org is always `null`). `orgRole: null` in the fakeDb is exactly that resolution, so it
+ * models both. This complements the per-action *allow* matrix in `authz.test.ts` (every member ⇒
+ * every action) with the missing *deny* half for publish / archive / restore / install.
+ */
+describe("skill write paths — non-member / cross-tenant denial (membership is the only gate)", () => {
+  const ANOTHER_ORG_MEMBER: ActorContext = {
+    id: "user-other-org",
+    email: "intruder@other-org.example",
+    name: "Cross-Tenant Actor",
+  };
+
+  /** A minimal schema-valid publish payload so the call reaches `assertMember` (not a zod error). */
+  const publishPayload: PublishSkillInput = {
+    slug: "demo-skill",
+    labels: [],
+    version: "1.0.0",
+    description: "A skill",
+    checksum: `sha256:${"a".repeat(64)}`,
+    storage_path: `${ORG}/skills/demo-skill/1.0.0.zip`,
+    size_bytes: 100,
+    frontmatter: JSON.stringify({ name: "demo-skill", description: "A skill", metadata: {} }),
+    body: "",
+    tools: [],
+    note: "",
+    dependencies: [],
+  };
+
+  // Each write path, invoked with a `null`-role actor (non-member of `ORG`). The membership gate
+  // (`assertMember`) must reject BEFORE any mutation or "not found" check — fail-closed.
+  const writePaths: Array<[string, (actor: ActorContext, database: Db) => Promise<unknown>]> = [
+    [
+      "publishSkillVersion (create / re-publish)",
+      (actor, database) =>
+        publishSkillVersion({ actor, orgId: ORG, payload: publishPayload, archiveKey: publishPayload.storage_path, database }),
+    ],
+    [
+      "assertCanPublishSkillVersion (pre-flight publish gate)",
+      (actor, database) => assertCanPublishSkillVersion({ actor, orgId: ORG, payload: publishPayload, database }),
+    ],
+    ["archiveSkill", (actor, database) => archiveSkill({ actor, orgId: ORG, slug: "demo-skill", database })],
+    ["restoreSkill", (actor, database) => restoreSkill({ actor, orgId: ORG, slug: "demo-skill", database })],
+    ["installSkill", (actor, database) => installSkill({ actor, orgId: ORG, slug: "demo-skill", database })],
+  ];
+
+  it.each(writePaths)("denies a non-member on %s", async (_label, run) => {
+    const { database } = fakeDb({ orgRole: null });
+    await expect(run(other, database)).rejects.toThrow("not a member of this organization");
+  });
+
+  it.each(writePaths)("denies a cross-tenant actor (member of a different org) on %s", async (_label, run) => {
+    // The actor belongs to another org; their role in THIS org resolves to null → same fail-closed deny.
+    const { database } = fakeDb({ orgRole: null });
+    await expect(run(ANOTHER_ORG_MEMBER, database)).rejects.toThrow("not a member of this organization");
   });
 });
