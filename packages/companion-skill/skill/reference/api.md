@@ -160,10 +160,11 @@ another published skill still requires it.
 ## Labels (folders)
 
 Labels are an org-wide, **shared** folder tree — the only axis for organizing skills. A label is a
-slash-separated path of lower-case kebab segments (`marketing/seo`); a skill can carry several, folders
-may be empty, and labels never change who can see a skill. Any member can create, assign, rename,
-recolor, or delete a label. **The path always travels in the request body or query, never as a URL
-path segment**, so the slashes inside a path survive routing.
+slash-separated path of lower-case kebab segments (`marketing/seo`) with an optional human-facing
+`displayName` (`SEO`); a skill can carry several, folders may be empty, and labels never change who
+can see a skill. Any member can create, assign, rename, recolor, or delete a label. **The path always
+travels in the request body or query, never as a URL path segment**, so the slashes inside a path
+survive routing.
 
 `GET /labels` returns `{ "tree": [...], "flat": [...] }`:
 
@@ -173,32 +174,34 @@ path segment**, so the slashes inside a path survive routing.
     {
       "path": "marketing",
       "name": "marketing",
+      "displayName": "Marketing",
       "color": null,
       "icon": null,
       "count": 3,
       "explicit": true,
       "children": [
-        { "path": "marketing/seo", "name": "seo", "color": "oklch(0.72 0.18 145)", "icon": "rocket", "count": 1, "explicit": true, "children": [] }
+        { "path": "marketing/seo", "name": "seo", "displayName": "SEO", "color": "oklch(0.72 0.18 145)", "icon": "rocket", "count": 1, "explicit": true, "children": [] }
       ]
     }
   ],
   "flat": [
-    { "path": "marketing", "color": null, "icon": null },
-    { "path": "marketing/seo", "color": "oklch(0.72 0.18 145)", "icon": "rocket" }
+    { "path": "marketing", "displayName": "Marketing", "color": null, "icon": null },
+    { "path": "marketing/seo", "displayName": "SEO", "color": "oklch(0.72 0.18 145)", "icon": "rocket" }
   ]
 }
 ```
 
 `count` is the roll-up of skills at that path or any descendant, de-duplicated per skill. `explicit`
 is `true` when a canonical `labels` row exists for the path (an intermediate parent derived only from
-a child's path is `explicit: false`). `color` is one of the design swatches or `null`; `icon` is one
-of the allowed glyph names or `null`.
+a child's path is `explicit: false`). `displayName` is nullable and falls back to the path leaf when
+absent. `color` is one of the design swatches or `null`; `icon` is one of the allowed glyph names or
+`null`.
 
 Manage the tree (each returns `{ "ok": true }`):
 
 ```http
-POST /labels            { "path": "marketing/seo", "color": null, "icon": null }
-PUT  /labels/rename     { "from": "marketing", "to": "growth" }
+POST /labels            { "path": "marketing/seo", "displayName": "SEO", "color": null, "icon": null }
+PUT  /labels/rename     { "from": "marketing", "to": "growth", "displayName": "Growth" }
 PUT  /labels/color      { "path": "growth/seo", "color": "oklch(0.72 0.18 145)" }
 PUT  /labels/icon       { "path": "growth/seo", "icon": "rocket" }
 DELETE /labels          { "path": "growth/seo" }

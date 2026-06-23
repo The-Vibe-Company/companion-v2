@@ -4,10 +4,13 @@ import {
   createLabelInputSchema,
   deleteLabelInputSchema,
   LABEL_COLORS,
+  LABEL_DISPLAY_NAME_MAX,
   LABEL_ICONS,
   LABEL_PATH_MAX,
   LABEL_PATH_MAX_DEPTH,
   labelColorSchema,
+  labelDisplayNameSchema,
+  labelDisplayNameToPath,
   labelIconSchema,
   labelMutationResultSchema,
   labelPathSchema,
@@ -49,6 +52,19 @@ describe("labelPathSchema", () => {
   });
 });
 
+describe("labelDisplayNameSchema / labelDisplayNameToPath", () => {
+  it("accepts human label names and slugifies them to canonical paths", () => {
+    expect(labelDisplayNameSchema.parse("Dev")).toBe("Dev");
+    expect(labelDisplayNameToPath("Dev")).toBe("dev");
+    expect(labelDisplayNameToPath("Dev Tools/QA")).toBe("dev-tools/qa");
+  });
+
+  it("rejects empty or overlong display names", () => {
+    expect(() => labelDisplayNameSchema.parse("   ")).toThrow();
+    expect(() => labelDisplayNameSchema.parse("x".repeat(LABEL_DISPLAY_NAME_MAX + 1))).toThrow();
+  });
+});
+
 describe("labelColorSchema / labelIconSchema", () => {
   it("accepts each design swatch and null", () => {
     for (const color of LABEL_COLORS) expect(labelColorSchema.parse(color)).toBe(color);
@@ -77,9 +93,15 @@ describe("labelColorSchema / labelIconSchema", () => {
 
 describe("labelVMSchema", () => {
   it("defaults color/icon to null when omitted", () => {
-    expect(labelVMSchema.parse({ path: "marketing" })).toEqual({ path: "marketing", color: null, icon: null });
+    expect(labelVMSchema.parse({ path: "marketing" })).toEqual({
+      path: "marketing",
+      displayName: null,
+      color: null,
+      icon: null,
+    });
     expect(labelVMSchema.parse({ path: "marketing/seo", color: LABEL_COLORS[0], icon: "tag" })).toEqual({
       path: "marketing/seo",
+      displayName: null,
       color: LABEL_COLORS[0],
       icon: "tag",
     });
@@ -91,14 +113,33 @@ describe("labelTreeNodeSchema (recursive)", () => {
     const tree = labelTreeNodeSchema.parse({
       path: "marketing",
       name: "marketing",
+      displayName: "Marketing",
       color: null,
       icon: "megaphone",
       count: 3,
       explicit: true,
       children: [
-        { path: "marketing/seo", name: "seo", color: LABEL_COLORS[1], icon: null, count: 2, explicit: true, children: [] },
+        {
+          path: "marketing/seo",
+          name: "seo",
+          displayName: "SEO",
+          color: LABEL_COLORS[1],
+          icon: null,
+          count: 2,
+          explicit: true,
+          children: [],
+        },
         // Empty explicit folder: in the tree, count 0, explicit true, no children.
-        { path: "marketing/paid", name: "paid", color: null, icon: null, count: 0, explicit: true, children: [] },
+        {
+          path: "marketing/paid",
+          name: "paid",
+          displayName: null,
+          color: null,
+          icon: null,
+          count: 0,
+          explicit: true,
+          children: [],
+        },
       ],
     });
     expect(tree.children).toHaveLength(2);
@@ -107,7 +148,16 @@ describe("labelTreeNodeSchema (recursive)", () => {
 
   it("rejects a negative count", () => {
     expect(() =>
-      labelTreeNodeSchema.parse({ path: "x", name: "x", color: null, icon: null, count: -1, explicit: false, children: [] }),
+      labelTreeNodeSchema.parse({
+        path: "x",
+        name: "x",
+        displayName: null,
+        color: null,
+        icon: null,
+        count: -1,
+        explicit: false,
+        children: [],
+      }),
     ).toThrow();
   });
 });
@@ -115,8 +165,19 @@ describe("labelTreeNodeSchema (recursive)", () => {
 describe("labelsResponseSchema", () => {
   it("parses { tree, flat }", () => {
     const parsed = labelsResponseSchema.parse({
-      tree: [{ path: "growth", name: "growth", color: null, icon: null, count: 0, explicit: true, children: [] }],
-      flat: [{ path: "growth", color: null, icon: null }],
+      tree: [
+        {
+          path: "growth",
+          name: "growth",
+          displayName: "Growth",
+          color: null,
+          icon: null,
+          count: 0,
+          explicit: true,
+          children: [],
+        },
+      ],
+      flat: [{ path: "growth", displayName: "Growth", color: null, icon: null }],
     });
     expect(parsed.tree).toHaveLength(1);
     expect(parsed.flat[0]!.path).toBe("growth");
@@ -131,11 +192,19 @@ describe("label mutation inputs", () => {
       color: LABEL_COLORS[0],
       icon: "rocket",
     });
+    expect(createLabelInputSchema.parse({ path: "dev", displayName: "Dev" })).toEqual({
+      path: "dev",
+      displayName: "Dev",
+    });
     expect(() => createLabelInputSchema.parse({ path: "Bad Path" })).toThrow();
   });
 
   it("renameLabelInputSchema requires both from and to", () => {
-    expect(renameLabelInputSchema.parse({ from: "marketing", to: "growth" })).toEqual({ from: "marketing", to: "growth" });
+    expect(renameLabelInputSchema.parse({ from: "marketing", to: "growth", displayName: "Growth" })).toEqual({
+      from: "marketing",
+      to: "growth",
+      displayName: "Growth",
+    });
     expect(() => renameLabelInputSchema.parse({ from: "marketing" })).toThrow();
   });
 

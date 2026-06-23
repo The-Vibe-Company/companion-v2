@@ -164,7 +164,7 @@ const seededLabels: LabelsResponse = {
   tree: [],
   // `growth` is an explicit empty folder; the marketing/* paths are derived from assignments but we
   // also include the explicit `marketing` appearance so its color/icon would survive.
-  flat: [{ path: "growth", color: null, icon: null }],
+  flat: [{ path: "growth", displayName: null, color: null, icon: null }],
 };
 
 function emptyLabels(): LabelsResponse {
@@ -609,7 +609,7 @@ describe("SkillsApp label folder creation", () => {
     await flushEffects();
 
     expect(queryMocks.createLabel).toHaveBeenCalledTimes(1);
-    expect(queryMocks.createLabel).toHaveBeenCalledWith("campaigns");
+    expect(queryMocks.createLabel).toHaveBeenCalledWith("campaigns", { displayName: "campaigns" });
     // The new folder is selected (its scope is now the active label route).
     expect(window.location.search).toBe("?view=label&label=campaigns");
   });
@@ -640,8 +640,39 @@ describe("SkillsApp label folder creation", () => {
     });
     await flushEffects();
 
-    expect(queryMocks.renameLabel).toHaveBeenCalledWith("marketing/seo", "marketing/growth");
+    expect(queryMocks.renameLabel).toHaveBeenCalledWith("marketing/seo", "marketing/growth", { displayName: "growth" });
     // The URL round-trips the new path and keeps the detail open (reload re-opens the same skill).
     expect(window.location.search).toBe("?view=label&label=marketing%2Fgrowth&skill=seo-helper");
+  });
+
+  it("renames a folder display name while keeping the same canonical path", async () => {
+    const { container } = await mountSkillsApp(
+      { kind: "label", label: "dev" },
+      {
+        url: "/skills?view=label&label=dev",
+        props: {
+          initialSkills: [],
+          initialLabels: { tree: [], flat: [{ path: "dev", displayName: null, color: null, icon: null }] },
+        },
+      },
+    );
+    await flushEffects();
+
+    clickButton(container, "dev options");
+    await flushEffects();
+    clickButton(container, "Rename");
+    await flushEffects();
+    const input = container.querySelector<HTMLInputElement>('input[aria-label="Rename folder"]');
+    expect(input).not.toBeNull();
+    setReactInputValue(input!, "Dev");
+    await flushEffects();
+    act(() => {
+      input!.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    });
+    await flushEffects();
+
+    expect(queryMocks.renameLabel).toHaveBeenCalledWith("dev", "dev", { displayName: "Dev" });
+    expect(window.location.search).toBe("?view=label&label=dev");
+    expect(container.textContent).toContain("Dev");
   });
 });

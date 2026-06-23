@@ -224,19 +224,19 @@ export async function fetchSkillLabels(): Promise<LabelsResponse> {
 /** Create (upsert) a label path, optionally with appearance. Intermediate ancestors are implicit. */
 export async function createLabel(
   path: string,
-  opts?: { color?: LabelColor | null; icon?: LabelIcon | null },
+  opts?: { displayName?: string; color?: LabelColor | null; icon?: LabelIcon | null },
 ): Promise<void> {
   await apiFetch<{ ok: true }>("/v1/labels", {
     method: "POST",
-    body: JSON.stringify({ path, color: opts?.color, icon: opts?.icon }),
+    body: JSON.stringify({ path, displayName: opts?.displayName, color: opts?.color, icon: opts?.icon }),
   });
 }
 
 /** Move a label path (and its whole subtree) to a new path. Rejected on collision. */
-export async function renameLabel(from: string, to: string): Promise<void> {
+export async function renameLabel(from: string, to: string, opts?: { displayName?: string }): Promise<void> {
   await apiFetch<{ ok: true }>("/v1/labels/rename", {
     method: "PUT",
-    body: JSON.stringify({ from, to }),
+    body: JSON.stringify({ from, to, displayName: opts?.displayName }),
   });
 }
 

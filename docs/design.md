@@ -89,12 +89,14 @@ access — every skill is org-wide, and organization is by **labels** (assigned 
 via repeatable `label` values), never declared inside the package.
 
 **Labels (org-wide shared folders).** Skills are organized — never gated — by an org-wide shared tree
-of slash-separated **label** paths (e.g. `marketing/seo`). Two org-scoped, RLS-tenanted tables hold the
-model, and the path string is stored **on the junction** (no FK to a label id) so rename is a prefix
-`UPDATE`, delete is a prefix `DELETE`, and roll-up counts need no join:
+of slash-separated **label** paths (e.g. `marketing/seo`) with optional human-facing display names
+(e.g. `SEO`). Two org-scoped, RLS-tenanted tables hold the model, and the path string is stored **on
+the junction** (no FK to a label id) so rename is a prefix `UPDATE`, delete is a prefix `DELETE`, and
+roll-up counts need no join:
 
-- `labels` — the canonical path set plus per-path appearance, and what lets an **empty** folder exist:
-  `(org_id, path, color, icon, created_by, created_at, updated_at)`, PK `(org_id, path)`.
+- `labels` — the canonical path set plus per-path display/appearance, and what lets an **empty**
+  folder exist: `(org_id, path, display_name, color, icon, created_by, created_at, updated_at)`, PK
+  `(org_id, path)`.
 - `skill_labels` — the assignment edge (a skill has N paths): `(org_id, skill_id, path, created_by,
   created_at)`, PK `(org_id, skill_id, path)`, with an org-scoped composite FK
   `(org_id, skill_id) → skills(org_id, id)` cascade.
@@ -105,8 +107,10 @@ nodes are `labels` ∪ distinct `skill_labels.path`). A node's roll-up count = s
 keeps the prefix `LIKE` index-friendly. Rename and delete cascade over `path = $p OR path LIKE $p ||
 '/%'` across **both** tables in one transaction; rename rejects a collision with an existing path. Paths
 validate as slash-separated kebab segments (`[a-z0-9]+(?:-[a-z0-9]+)*`), no empty/leading/trailing
-slash, bounded length. There is no owner and no per-label permission: **any** member can create, assign,
-unassign, rename, recolor, re-icon, or delete labels, including empty folders.
+slash, bounded length. `display_name` is optional per explicit path and falls back to the path leaf
+when absent; renaming can set a display name such as `Dev` while moving the canonical path to its
+slugified form (`dev`). There is no owner and no per-label permission: **any** member can create,
+assign, unassign, rename, recolor, re-icon, or delete labels, including empty folders.
 
 **Skill dependencies (un-versioned skill→skill links).** A skill version can declare that it
 requires other skills. Edges live in `skill_version_dependencies` (`(skill_version_id,
@@ -281,7 +285,8 @@ as defense-in-depth, but browser and CLI clients never connect directly to Postg
   /v1/skills` accepts declared `dependency` fields and, on `action=validate`, returns a
   `dependency_plan`; an unresolved-dependency publish returns 422 with that plan.
 - Labels: `GET /v1/labels` (the org-wide tree + flat list with roll-up counts), `POST /v1/labels`
-  (create a path — and its ancestors — including an empty folder), `PUT /v1/labels/rename`,
+  (create a path — and its ancestors — including an empty folder, optional `displayName`),
+  `PUT /v1/labels/rename` (move a path/subtree, optional `displayName` for the moved root),
   `PUT /v1/labels/color`, `PUT /v1/labels/icon`, and `DELETE /v1/labels`. The label path travels in the
   **body/query**, never a URL segment, so embedded slashes survive. Per-skill assignment:
   `POST`/`DELETE /v1/skills/:slug/labels` (assign / unassign one path). Every label route is

@@ -1,6 +1,7 @@
 import { and, asc, eq, isNull, sql } from "drizzle-orm";
 import {
   labelPathSchema,
+  labelDisplayNameSchema,
   labelColorSchema,
   labelIconSchema,
   type LabelColor,
@@ -67,7 +68,12 @@ export async function listLabels(input: {
   await assertMember(database, input.actor, input.orgId);
 
   const labelRowsRaw = await database
-    .select({ path: schema.labels.path, color: schema.labels.color, icon: schema.labels.icon })
+    .select({
+      path: schema.labels.path,
+      displayName: schema.labels.displayName,
+      color: schema.labels.color,
+      icon: schema.labels.icon,
+    })
     .from(schema.labels)
     .where(eq(schema.labels.orgId, input.orgId))
     .orderBy(asc(schema.labels.path));
@@ -87,9 +93,10 @@ export async function listLabels(input: {
   const assignmentRows = Array.isArray(assignmentRowsRaw) ? assignmentRowsRaw : [];
 
   // Appearance per explicit path (only `labels` rows carry color/icon).
-  const appearance = new Map<string, { color: LabelColor | null; icon: LabelIcon | null }>();
+  const appearance = new Map<string, { displayName: string | null; color: LabelColor | null; icon: LabelIcon | null }>();
   for (const r of labelRows) {
     appearance.set(r.path, {
+      displayName: r.displayName ?? null,
       color: (r.color as LabelColor | null) ?? null,
       icon: (r.icon as LabelIcon | null) ?? null,
     });
@@ -122,6 +129,7 @@ export async function listLabels(input: {
     nodeByPath.set(path, {
       path,
       name: segments[segments.length - 1] ?? path,
+      displayName: ap?.displayName ?? null,
       color: ap?.color ?? null,
       icon: ap?.icon ?? null,
       count: skillsByNode.get(path)?.size ?? 0,
@@ -146,6 +154,7 @@ export async function listLabels(input: {
 
   const flat: LabelVM[] = labelRows.map((r) => ({
     path: r.path,
+    displayName: r.displayName ?? null,
     color: (r.color as LabelColor | null) ?? null,
     icon: (r.icon as LabelIcon | null) ?? null,
   }));
@@ -161,6 +170,7 @@ export async function createLabel(input: {
   actor: ActorContext;
   orgId: string;
   path: string;
+  displayName?: string;
   color?: LabelColor | null;
   icon?: LabelIcon | null;
   database?: Db;
@@ -168,6 +178,7 @@ export async function createLabel(input: {
   const database = input.database ?? db;
   await assertMember(database, input.actor, input.orgId);
   const path = parsePath(input.path);
+  const displayName = input.displayName !== undefined ? labelDisplayNameSchema.parse(input.displayName) : undefined;
   const color = input.color !== undefined ? labelColorSchema.parse(input.color) : undefined;
   const icon = input.icon !== undefined ? labelIconSchema.parse(input.icon) : undefined;
 
@@ -183,6 +194,7 @@ export async function createLabel(input: {
     .values({
       orgId: input.orgId,
       path,
+      ...(displayName !== undefined ? { displayName } : {}),
       ...(color !== undefined ? { color } : {}),
       ...(icon !== undefined ? { icon } : {}),
       createdBy: input.actor.id,
@@ -193,6 +205,7 @@ export async function createLabel(input: {
       set: {
         ...(color !== undefined ? { color } : {}),
         ...(icon !== undefined ? { icon } : {}),
+        ...(displayName !== undefined ? { displayName } : {}),
         updatedAt: new Date(),
       },
     });
@@ -321,13 +334,20 @@ export async function renameLabel(input: {
   orgId: string;
   from: string;
   to: string;
+  displayName?: string;
   database?: Db;
 }): Promise<void> {
   const database = input.database ?? db;
   await assertMember(database, input.actor, input.orgId);
   const from = parsePath(input.from);
   const to = parsePath(input.to);
-  if (from === to) return;
+  const displayName = input.displayName !== undefined ? labelDisplayNameSchema.parse(input.displayName) : undefined;
+  if (from === to) {
+    if (displayName !== undefined) {
+      await createLabel({ actor: input.actor, orgId: input.orgId, path: to, displayName, database });
+    }
+    return;
+  }
 
   // A move into one's own subtree (e.g. `a` → `a/b`) would recursively rewrite the rows it just
   // created — reject it outright.
@@ -357,24 +377,48 @@ export async function renameLabel(input: {
       throw new Error("a label with that name already exists");
     }
 
-    const matchPrefix = (col: ReturnType<typeof sql>) =>
-      sql`(${col} = ${from} or ${col} like ${`${fromPrefix}%`})`;
-    // Rewrite: `to` for the exact path, else `to || suffix` for descendants. The explicit CASE keeps
-    // the exact-row update non-null even if a database treats the descendant suffix differently.
-    const rewrite = (col: ReturnType<typeof sql>) =>
-      sql`case when ${col} = ${from} then ${to} else ${to} || substring(${col} from ${fromLen + 1}) end`;
+    const now = new Date();
 
     await tx
       .update(schema.labels)
-      .set({ path: sql`${rewrite(sql`${schema.labels.path}`)}`, updatedAt: new Date() })
-      .where(and(eq(schema.labels.orgId, input.orgId), matchPrefix(sql`${schema.labels.path}`)));
+      .set({
+        path: to,
+        ...(displayName !== undefined ? { displayName } : {}),
+        updatedAt: now,
+      })
+      .where(and(eq(schema.labels.orgId, input.orgId), eq(schema.labels.path, from)));
+
+    await tx
+      .update(schema.labels)
+      .set({
+        path: sql`${to}::text || substring(${schema.labels.path} from ${sql.raw(String(fromLen + 1))})`,
+        updatedAt: now,
+      })
+      .where(and(eq(schema.labels.orgId, input.orgId), sql`${schema.labels.path} like ${`${fromPrefix}%`}`));
 
     await tx
       .update(schema.skillLabels)
-      .set({ path: sql`${rewrite(sql`${schema.skillLabels.path}`)}` })
+      .set({ path: to })
+      .where(and(eq(schema.skillLabels.orgId, input.orgId), eq(schema.skillLabels.path, from)));
+
+    await tx
+      .update(schema.skillLabels)
+      .set({
+        path: sql`${to}::text || substring(${schema.skillLabels.path} from ${sql.raw(String(fromLen + 1))})`,
+      })
       .where(
-        and(eq(schema.skillLabels.orgId, input.orgId), matchPrefix(sql`${schema.skillLabels.path}`)),
+        and(eq(schema.skillLabels.orgId, input.orgId), sql`${schema.skillLabels.path} like ${`${fromPrefix}%`}`),
       );
+
+    if (displayName !== undefined) {
+      await tx
+        .insert(schema.labels)
+        .values({ orgId: input.orgId, path: to, displayName, createdBy: input.actor.id })
+        .onConflictDoUpdate({
+          target: [schema.labels.orgId, schema.labels.path],
+          set: { displayName, updatedAt: now },
+        });
+    }
   });
 }
 

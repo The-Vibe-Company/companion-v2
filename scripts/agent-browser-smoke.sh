@@ -127,8 +127,8 @@ prepare_fixtures() {
     --profile "$profile" >/dev/null
 
   pnpm --filter @companion/cli dev skills push "$PWD/examples/skills/incident-summary" \
-    --owner-team engineering \
-    --profile "$profile" >/dev/null 2>&1 || true
+    --label engineering \
+    --profile "$profile" >/dev/null
 }
 
 require_command agent-browser
@@ -163,8 +163,8 @@ agent-browser eval "for (const b of Array.from(document.querySelectorAll('button
 agent-browser wait 300
 assert_body_contains "$SMOKE_SKILL"
 assert_body_contains "Upload skill"
-# Shared label folder tree (replaces the old owner/visibility sidebar): the smoke skill is filed under "marketing".
-assert_body_contains "marketing"
+# Shared label folder tree (replaces the old owner/visibility sidebar): the smoke skill is filed under "engineering".
+assert_body_contains "engineering"
 
 log "Checking filter menu"
 agent-browser find role button click --name "Filter"

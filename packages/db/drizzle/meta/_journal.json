@@ -176,6 +176,13 @@
       "when": 1781051300000,
       "tag": "0024_drop_owner_filter_prefs",
       "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1781051400000,
+      "tag": "0025_label_display_names",
+      "breakpoints": true
     }
   ]
 }

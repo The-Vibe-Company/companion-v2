@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { LabelColor, LabelIcon } from "@companion/contracts";
-import { LABEL_COLORS, LABEL_ICONS } from "@companion/contracts";
+import { LABEL_COLORS, LABEL_ICONS, labelDisplayNameToPath } from "@companion/contracts";
 import { Icon } from "../Icon";
 import { OrgSwitcher } from "../org/OrgSwitcher";
 import { WorkspaceAvatar } from "../org/WorkspaceAvatar";
@@ -27,20 +27,30 @@ function LabelMenu({
   onSetColor: (path: string, color: LabelColor | null) => void;
   onSetIcon: (path: string, icon: LabelIcon | null) => void;
   onAddSublabel: (parentPath: string) => void;
-  onRename: (from: string, to: string) => void;
+  onRename: (from: string, to: string, displayName?: string) => void;
   onDelete: (path: string) => void;
 }) {
   const menuRef = useRef<HTMLDivElement>(null);
   const [renaming, setRenaming] = useState(false);
-  const [renameValue, setRenameValue] = useState(row.leafName);
+  const rowLabel = row.displayName ?? row.leafName;
+  const [renameValue, setRenameValue] = useState(rowLabel);
   const renameInputRef = useRef<HTMLInputElement>(null);
   const commitRename = () => {
-    const leaf = renameValue.trim();
+    const raw = renameValue.trim();
     setRenaming(false);
-    if (!leaf || leaf === row.leafName) return;
+    if (!raw) return;
     const parent = row.path.includes("/") ? row.path.slice(0, row.path.lastIndexOf("/") + 1) : "";
+    let leafPath: string;
+    try {
+      leafPath = labelDisplayNameToPath(raw);
+    } catch {
+      return;
+    }
+    const to = parent + leafPath;
+    const displayName = raw.replace(/\/+$/, "").split("/").filter(Boolean).pop()?.trim() ?? raw;
+    if (to === row.path && displayName === rowLabel) return;
     onClose();
-    onRename(row.path, parent + leaf);
+    onRename(row.path, to, displayName);
   };
   useEffect(() => {
     const el = menuRef.current;
@@ -139,7 +149,7 @@ function LabelMenu({
           className="menu__item"
           role="menuitem"
           onClick={() => {
-            setRenameValue(row.leafName);
+            setRenameValue(row.displayName ?? row.leafName);
             setRenaming(true);
             queueMicrotask(() => renameInputRef.current?.focus());
           }}
@@ -233,10 +243,10 @@ export function Sidebar({
   onSelectStarred: () => void;
   onSelectLabel: (path: string) => void;
   /** Create an empty folder and select it (the org-root `+` inline input). */
-  onCreateLabel: (path: string) => void;
+  onCreateLabel: (path: string, displayName?: string) => void;
   onSetLabelColor: (path: string, color: LabelColor | null) => void;
   onSetLabelIcon: (path: string, icon: LabelIcon | null) => void;
-  onRenameLabel: (from: string, to: string) => void;
+  onRenameLabel: (from: string, to: string, displayName?: string) => void;
   onDeleteLabel: (path: string) => void;
   onSelectLocal: () => void;
   onSelectArchived: () => void;
@@ -280,9 +290,16 @@ export function Sidebar({
     setNewFolderValue("");
   };
   const commitNewFolder = () => {
-    const path = newFolderValue.trim().replace(/\/+$/, "");
+    const raw = newFolderValue.trim().replace(/\/+$/, "");
     cancelNewFolder();
-    if (path) runAndClose(() => onCreateLabel(path));
+    if (!raw) return;
+    try {
+      const path = labelDisplayNameToPath(raw);
+      const displayName = raw.split("/").filter(Boolean).pop()?.trim() ?? raw;
+      runAndClose(() => onCreateLabel(path, displayName));
+    } catch {
+      return;
+    }
   };
 
   const labelIcon = (row: TreeRow): string => {
@@ -430,7 +447,7 @@ export function Sidebar({
                 <span className="lblrow__ico" style={row.color ? { color: row.color } : undefined}>
                   <Icon name={labelIcon(row)} size={15} />
                 </span>
-                <span className="lblrow__name">{row.leafName}</span>
+                <span className="lblrow__name">{row.displayName ?? row.leafName}</span>
                 <span className="lblrow__count tnum">{row.count}</span>
               </button>
               <button

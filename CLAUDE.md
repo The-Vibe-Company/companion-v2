@@ -33,7 +33,7 @@ Canonical terms — **do not invent synonyms**:
 - Hierarchy: **Organization → User**. There are no teams.
 - Org roles: **Owner, Admin, Developer**.
 - **Skills are flat and org-wide.** A skill is a plain org-scoped row with no owner and no visibility flag: every member of the org can read it, and **any** member can create, edit, publish, archive, or delete **any** skill. `creator_id` records who authored the row (provenance/Activity), never an access right.
-- **Labels are the only organizing axis.** Skills are organized by an org-wide **shared** tree of slash-separated **labels** (e.g. `marketing/seo`) — multi-assigned per skill, with per-path color + icon, and empty folders allowed. Any member can create, assign, rename, recolor, or delete labels (`/v1/labels`, `/v1/skills/:slug/labels`).
+- **Labels are the only organizing axis.** Skills are organized by an org-wide **shared** tree of slash-separated **labels** (e.g. `marketing/seo`) — multi-assigned per skill, with optional per-path display name, color + icon, and empty folders allowed. Any member can create, assign, rename, recolor, or delete labels (`/v1/labels`, `/v1/skills/:slug/labels`).
 - Deploy targets are **providers**: **Docker (local), Fly, Kubernetes, Modal**.
 
 ## Target repository layout

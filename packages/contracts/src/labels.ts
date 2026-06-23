@@ -13,6 +13,8 @@ import { z } from "zod";
 export const LABEL_PATH_MAX = 256;
 /** Max nesting depth (segments separated by `/`). */
 export const LABEL_PATH_MAX_DEPTH = 8;
+/** Max characters for a human-facing label segment name. */
+export const LABEL_DISPLAY_NAME_MAX = 64;
 
 /** A single path segment: kebab-case (lowercase letters, digits, single hyphens). */
 export const LABEL_SEGMENT_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
@@ -48,6 +50,38 @@ export const labelPathSchema = z
     }
   });
 export type LabelPath = z.infer<typeof labelPathSchema>;
+
+/** Human-facing label name for a single segment. The canonical path stays kebab-case. */
+export const labelDisplayNameSchema = z
+  .string()
+  .trim()
+  .min(1, "label display name is required")
+  .max(LABEL_DISPLAY_NAME_MAX, `label display name must be at most ${LABEL_DISPLAY_NAME_MAX} characters`);
+export type LabelDisplayName = z.infer<typeof labelDisplayNameSchema>;
+
+function slugifyLabelSegment(input: string): string {
+  return input
+    .trim()
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .replace(/-{2,}/g, "-");
+}
+
+/**
+ * Convert friendly label input into a canonical slash-separated label path.
+ * Each slash-separated segment is slugified independently, so `Dev Tools/QA` becomes `dev-tools/qa`.
+ */
+export function labelDisplayNameToPath(input: string): LabelPath {
+  const path = input
+    .split("/")
+    .map(slugifyLabelSegment)
+    .filter(Boolean)
+    .join("/");
+  return labelPathSchema.parse(path);
+}
 
 /**
  * The seven design swatches: six concrete colors + `null` (the default / inherited appearance).
@@ -100,6 +134,7 @@ export const labelIconSchema = z.enum(LABEL_ICONS).nullable();
  */
 export const labelVMSchema = z.object({
   path: labelPathSchema,
+  displayName: labelDisplayNameSchema.nullable().default(null),
   color: labelColorSchema.default(null),
   icon: labelIconSchema.default(null),
 });
@@ -113,6 +148,7 @@ export type LabelVM = z.infer<typeof labelVMSchema>;
 export interface LabelTreeNode {
   path: string;
   name: string;
+  displayName: string | null;
   color: LabelColor | null;
   icon: LabelIcon | null;
   count: number;
@@ -124,6 +160,7 @@ export const labelTreeNodeSchema: z.ZodType<LabelTreeNode> = z.lazy(() =>
   z.object({
     path: labelPathSchema,
     name: z.string(),
+    displayName: labelDisplayNameSchema.nullable(),
     color: labelColorSchema,
     icon: labelIconSchema,
     count: z.number().int().nonnegative(),
@@ -145,6 +182,7 @@ export type LabelsResponse = z.infer<typeof labelsResponseSchema>;
  */
 export const createLabelInputSchema = z.object({
   path: labelPathSchema,
+  displayName: labelDisplayNameSchema.optional(),
   color: labelColorSchema.optional(),
   icon: labelIconSchema.optional(),
 });
@@ -157,6 +195,7 @@ export type CreateLabelInput = z.infer<typeof createLabelInputSchema>;
 export const renameLabelInputSchema = z.object({
   from: labelPathSchema,
   to: labelPathSchema,
+  displayName: labelDisplayNameSchema.optional(),
 });
 export type RenameLabelInput = z.infer<typeof renameLabelInputSchema>;
 
