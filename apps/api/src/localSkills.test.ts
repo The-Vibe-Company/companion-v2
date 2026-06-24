@@ -1,4 +1,7 @@
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { companionSkillDir } from "@companion/companion-skill";
 import { reportLocalSkillInstallInputSchema } from "@companion/contracts";
 import { computeLocalSkillStatus } from "@companion/core/services";
 import { buildCompanionSkillRow, getCompanionSkillPackage } from "./companionSkillPackage";
@@ -38,7 +41,7 @@ describe("companion skill package + row", () => {
     const pkg = await getCompanionSkillPackage();
     expect(pkg.key).toBe("companion");
     expect(pkg.checksum).toMatch(/^sha256:[0-9a-f]{64}$/);
-    expect(pkg.version).toMatch(/^\d+\.\d+\.\d+/);
+    expect(pkg.version).toBe("1.9.1");
     expect(pkg.sizeBytes).toBeGreaterThan(0);
   });
 
@@ -54,7 +57,7 @@ describe("companion skill package + row", () => {
     expect(row.commands.length).toBeGreaterThan(0);
     expect(row.commands).toContainEqual({
       name: "Publish a skill",
-      desc: "Validate a skill, optionally file it under labels (folders), and publish it safely.",
+      desc: "Validate a skill, ask Personal vs Org and folder placement, then publish it safely.",
     });
     expect(row.commands).toContainEqual({
       name: "Manage skill API calls",
@@ -64,9 +67,11 @@ describe("companion skill package + row", () => {
       name: "Sync companion.json",
       desc: "Detect dependencies, setup requirements, and display copy and record them in the skill manifest.",
     });
-    expect(row.changes).toContain(
-      "Adds a private My Skills library: a skill is created in your personal library by default (scope=personal) and is visible only to you, organized by your own personal folders.",
-    );
+    const changelog = row.changes.join("\n");
+    expect(changelog).toContain("mandatory Companion self-update check");
+    expect(changelog).toContain("/local-skills/companion/package");
+    expect(changelog).toContain("Requires explicit publish placement");
+    expect(changelog).toContain("scope as valid on first publish only");
     // The install prompt drives the report-back call and leaves placeholders for the client.
     expect(row.prompts.install).toContain("/local-skills/companion/package");
     expect(row.prompts.install).toContain("/local-skills/companion/installed");
@@ -90,6 +95,40 @@ describe("companion skill package + row", () => {
     expect(row.prompts.update).not.toContain("Unzip it over");
     expect(row.prompts.install).toContain("/local-skills/companion/installed");
     expect(row.prompts.update).toContain("/local-skills/companion/installed");
+  });
+
+  it("bundles mandatory self-update and explicit publish placement instructions", async () => {
+    const skillMd = await readFile(join(companionSkillDir(), "SKILL.md"), "utf8");
+    const apiRef = await readFile(join(companionSkillDir(), "reference", "api.md"), "utf8");
+    expect(skillMd).toContain("companion_version: 1.9.1");
+    expect(skillMd).toContain("## Mandatory startup self-update");
+    expect(skillMd).toContain("Do not validate, publish, update, archive, label, install");
+    expect(skillMd).toContain("GET /local-skills/companion");
+    expect(skillMd).toContain("POST /local-skills/companion/installed");
+    expect(skillMd).toContain("Before any real `POST /skills` upload for a brand-new skill");
+    expect(skillMd).toContain("Personal / My Skills");
+    expect(skillMd).toContain("Org / everyone");
+    expect(skillMd).toContain("Use an existing folder/label");
+    expect(skillMd).toContain("Create/use a new folder/label");
+    expect(skillMd).toContain("No folder/label");
+    expect(skillMd).toContain("Always include `scope=personal` or `scope=org` explicitly");
+    expect(skillMd).toContain("re-publish never changes the skill's existing labels");
+    expect(skillMd).toContain("If the library is not known from the");
+    expect(skillMd).toContain("workspace URL look wrong");
+    expect(skillMd).toContain("Dependency preflight follows the workspace access model");
+    expect(skillMd).not.toContain("Publishing defaults to `org`");
+    expect(skillMd).not.toMatch(/owner_team[\s\S]{0,120}`scope`[\s\S]{0,120}parameters (?:is|are) rejected/);
+    expect(apiRef).toContain("`expect_skill_id` / `scope` / `dependency` / `label` fields");
+    expect(apiRef).toContain("The Companion skill must send `scope=personal` or `scope=org`");
+    expect(apiRef).toContain("POST /skills?scope=org&label=marketing&label=marketing%2Fseo");
+    expect(apiRef).toContain("POST /skills?scope=personal");
+    expect(apiRef).toContain("updates preserve the existing scope");
+    expect(apiRef).toContain("skill must not declare `scope` or `visibility`");
+    expect(apiRef).toContain("Re-publish never moves, adds, or removes folder labels");
+    expect(apiRef).toContain("token-supported download endpoint does not expose");
+    expect(apiRef).toContain("Personal folder routes use the same request bodies and response shapes");
+    expect(apiRef).not.toContain("defaults to `org`");
+    expect(apiRef).not.toMatch(/owner_team[\s\S]{0,120}`scope`[\s\S]{0,120}parameters (?:is|are) rejected/);
   });
 
   it("reflects an install record as installed/update", async () => {

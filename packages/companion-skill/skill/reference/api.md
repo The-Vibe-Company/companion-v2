@@ -86,9 +86,11 @@ A skill lives in one of two libraries, set by its `scope`:
   Organized with the creator's own **personal folders** (`/personal-labels`).
 
 `GET /skills?lib=mine` returns the caller's My Skills (their authored personal skills plus org skills
-they have installed); `GET /skills?lib=org` (the default) returns the org library. On publish, the
-`scope` field chooses the library on first create — it defaults to `org` for the CLI/bundled skill, so
-the existing behavior is unchanged unless you ask for `personal`. Re-publishing never changes scope;
+they have installed); `GET /skills?lib=org` (the default) returns the org library. On first publish,
+the `scope` field chooses the library. The Companion skill must send `scope=personal` or `scope=org`
+explicitly for a brand-new skill after asking the user where to publish it; do not rely on server
+defaults. Re-publishing never changes scope, so do not send `scope` on updates. Depending on server
+version, update-time `scope` may be ignored or rejected if it contradicts the existing skill.
 **`POST /skills/{slug}/share`** is the only way to move a personal skill into the org library (owner
 only, one-way). A skill name (slug) is unique across both libraries in a workspace.
 
@@ -97,7 +99,7 @@ only, one-way). A skill name (slug) is unique across both libraries in a workspa
 `POST /skills` accepts either:
 
 - `multipart/form-data` with a `file` field (and `version` / `message` / `expect_slug` /
-  `expect_skill_id` / `dependency` / `label` fields), or
+  `expect_skill_id` / `scope` / `dependency` / `label` fields), or
 - a raw `application/zip` or `application/gzip` body (the archive itself), with the same options as
   query params.
 
@@ -109,27 +111,35 @@ dependency list, synchronize `companion.json` to the confirmed final list, and o
 send the archive. Set `action=validate` to run every package and identity check without publishing;
 the validate response is `{ "result": <validation>, "dependency_plan": <plan> }`.
 
-To file the new skill under one or more folders at publish time, repeat a `label` parameter whose
-value is a label path (URL-encode the slashes, `%2F`). The folders are created if they do not exist.
-Omit `label` to leave the skill unfiled. A label path is slash-separated, lower-case kebab segments
-(`[a-z0-9]+(?:-[a-z0-9]+)*`), no empty/leading/trailing slash, and a bounded length and depth.
-Labels never affect who can see a skill — they only file it.
+Before publishing a brand-new skill, the Companion skill must ask the user for both placement
+decisions: Personal/My Skills vs Org/everyone, then existing folder, new folder, or no folder. Fetch
+the relevant tree first (`GET /personal-labels` for personal, `GET /labels` for org) and validate new
+paths as slash-separated, lower-case kebab segments (`[a-z0-9]+(?:-[a-z0-9]+)*`), with no
+empty/leading/trailing slash. Labels never affect who can see a skill — they only file it.
 
-- `scope` (`personal` | `org`) chooses the library on first create (default `org`); it is ignored
-  on re-publish. Sending legacy `owner_team`, `everyone`, `team`, `teams`, `visibility`, or `private`
-  parameters is rejected, and a skill must not declare `visibility` in its `SKILL.md`.
+For org skills, file a new skill under one or more folders at publish time by repeating a `label`
+parameter whose value is a label path (URL-encode the slashes, `%2F`). The folders are created if
+they do not exist. Omit `label` to leave the skill unfiled. For personal skills, use the API-supported
+personal-folder flow. If publish-time personal labels are not supported by the target server, publish
+with `scope=personal`, then immediately file the returned slug with `POST /skills/{slug}/personal-labels`
+using the path the user already confirmed.
+
+- `scope` (`personal` | `org`) chooses the library on first create. The Companion skill must send it
+  explicitly for new skills. Do not send it on re-publish; updates preserve the existing scope.
+  Sending legacy `owner_team`, `everyone`, `team`, `teams`, `visibility`, or `private` parameters is
+  rejected, and a skill must not declare `scope` or `visibility` in its `SKILL.md`.
 - Personal-folder endpoints mirror the org `/labels` set under `/personal-labels` and
   `/skills/{slug}/personal-labels`; they only organize your own authored personal skills.
 
 Examples:
 
 ```http
-POST /skills?label=marketing&label=marketing%2Fseo
+POST /skills?scope=org&label=marketing&label=marketing%2Fseo
 Content-Type: application/zip
 ```
 
 ```http
-POST /skills
+POST /skills?scope=personal
 Content-Type: application/zip
 ```
 
@@ -140,9 +150,15 @@ rejects the upload if the package's frontmatter `name` differs from `expect_slug
 `metadata.companion_skill_id` points at a different skill. This makes it impossible for an edit to
 silently retarget another skill.
 
-A re-publish leaves the skill's existing labels untouched. Pass `label` on an update only to **add**
-the skill to more folders; to remove a skill from a folder, call `DELETE /skills/{slug}/labels`
-instead of re-publishing.
+A re-publish preserves the skill's existing scope and labels. Do not ask Personal vs Org for updates,
+because scope is immutable. Re-publish never moves, adds, or removes folder labels. Ask only whether
+to add folders after the update; if yes, publish the new version first, then call
+`POST /skills/{slug}/labels` for org skills or `POST /skills/{slug}/personal-labels` for personal
+skills using the already-confirmed paths and the library already known from the current workflow. The
+token-supported download endpoint does not expose `scope`; if the skill's library is not known, do
+not guess or try both routes. Publish the update without folder changes and ask the user to run a
+separate organize/folder command from the skill's library context. To remove a skill from a folder,
+call the org or personal label routes separately and only after explicit user confirmation.
 
 ## Dependencies & archive
 
@@ -168,9 +184,9 @@ truth.
 ```
 
 A publish whose dependencies are missing or cyclic is rejected with `422` and the same
-`dependency_plan` (look at `blocked`). Every skill is visible to every member, so there is no
-visibility to reconcile across a dependency edge. Publish dependencies in `upload` first, in
-topological order.
+`dependency_plan` (look at `blocked`). Dependency checks use the normal access model: org skills are
+visible to every member, while personal skills are visible only to their creator. Publish dependencies
+in `upload` first, in topological order.
 
 `GET /skills/{slug}/dependencies?version=` returns the resolved Requires + Used by graph. Each edge
 keeps a live status (`satisfied` / `missing` / `archived` / `cycle`).
@@ -181,14 +197,15 @@ while a published version still references it. `POST /skills/{slug}/archive` acc
 as modifying the skill. Only archive a removed dependency after the user confirms, and never when
 another published skill still requires it.
 
-## Labels (folders)
+## Org labels (folders)
 
-Labels are an org-wide, **shared** folder tree — the only axis for organizing skills. A label is a
+Org labels are the org-wide, **shared** folder tree for org skills. Personal skills use the mirrored
+personal folder routes under `/personal-labels` and `/skills/{slug}/personal-labels`. A label is a
 slash-separated path of lower-case kebab segments (`marketing/seo`) with an optional human-facing
 `displayName` (`SEO`); a skill can carry several, folders may be empty, and labels never change who
-can see a skill. Any member can create, assign, rename, recolor, or delete a label. **The path always
-travels in the request body or query, never as a URL path segment**, so the slashes inside a path
-survive routing.
+can see a skill. Any member can create, assign, rename, recolor, or delete an org label. **The path
+always travels in the request body or query, never as a URL path segment**, so the slashes inside a
+path survive routing.
 
 `GET /labels` returns `{ "tree": [...], "flat": [...] }`:
 
@@ -247,6 +264,10 @@ DELETE /skills/{slug}/labels   { "path": "growth/seo" }
 assignment. Both return `{ "ok": true }`. All label routes require any signed-in member or a
 `skills:write` token; there is no owner check.
 
+Personal folder routes use the same request bodies and response shapes under `/personal-labels` and
+`/skills/{slug}/personal-labels`, but are scoped to the caller and only organize authored personal
+skills.
+
 ## Versions & checksums
 
 Versions are immutable. Each version row carries a `checksum` of the form `sha256:<64 hex>` over the
@@ -257,7 +278,8 @@ version you fetched.
 
 ## Update the Companion skill itself
 
-To check whether this local Companion skill is current:
+The Companion skill must check whether this local Companion skill is current at startup, before any
+other Companion task or skill mutation:
 
 ```http
 GET /local-skills/companion
@@ -287,8 +309,8 @@ built-in Companion skill. Those endpoints are for workspace-published skills.
 POST /local-skills/companion/installed
 Content-Type: application/json
 
-{ "version": "1.8.0", "agent": "Claude Code" }
+{ "version": "1.9.1", "agent": "Claude Code" }
 ```
 
 `version` must be valid semver (use this skill's `metadata.companion_version`). The response is
-`{ "ok": true, "status": "installed" | "update", "availableVersion": "1.8.0" }`.
+`{ "ok": true, "status": "installed" | "update", "availableVersion": "1.9.1" }`.
