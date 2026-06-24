@@ -143,8 +143,9 @@ function parseStoredCompanionManifest(frontmatter: string, fallbackSummary: stri
         summary: fallbackSummary,
         display: {
           ...parsed.data.display,
-          description: parsed.data.display.description ?? legacy?.description,
+          description: parsed.data.display.description ?? (parsed.data.notes ? undefined : legacy?.description),
         },
+        notes: parsed.data.notes,
         requirements: parsed.data.requirements,
         dependencies: parsed.data.dependencies,
       });
@@ -824,6 +825,7 @@ export async function listSkills(input: {
       slug: r.slug,
       description: summary,
       display: companion.display,
+      notes: companion.notes ?? null,
       scope: r.scope ?? "org",
       // `source` is only meaningful in the My-Skills (`mine`) view: 'authored' = a personal skill the
       // caller created; 'installed' = an org skill they installed, surfaced under My Skills. The org

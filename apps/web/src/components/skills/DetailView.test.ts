@@ -12,6 +12,7 @@ const skill: SkillVM = {
   version: "1.2.3",
   validation: "valid",
   description: "A focused skill for incident handoffs.",
+  notes: null,
   error: null,
   scope: "org",
   source: null,
@@ -87,15 +88,15 @@ describe("DetailView tabbed detail layout", () => {
     expect(html).toContain("marketing/seo");
     expect(html).toContain("Add to folder");
     // Tab bar: Files / Dependencies / Activity / Discussion are tabs; the Overview
-    // tab carries the descriptive "What it does" + "Manifest" sections.
+    // tab carries the Manifest section and optional notes.
     expect(html).toContain('role="tablist"');
     expect(html).toContain('id="dtab-overview"');
     expect(html).toContain('id="dtab-files"');
     expect(html).toContain('id="dtab-dependencies"');
     expect(html).toContain('id="dtab-activity"');
     expect(html).toContain('id="dtab-discussion"');
-    expect(html).toContain("What it does");
     expect(html).toContain("Manifest");
+    expect(html).not.toContain("What it does");
     // The single-column doc replaces the old rail + slide-in panel chrome.
     expect(html).not.toContain("dsidebar--linear");
     expect(html).not.toContain("dpanel__nav");
@@ -104,7 +105,7 @@ describe("DetailView tabbed detail layout", () => {
     expect(html).not.toContain("Personal");
   });
 
-  it("prefers Companion display copy for the detail title and lead", () => {
+  it("prefers Companion title and summary for the detail title and lead", () => {
     const html = renderDetailFor({
       ...skill,
       display: {
@@ -115,8 +116,42 @@ describe("DetailView tabbed detail layout", () => {
     });
 
     expect(html).toContain("Incident summary");
-    expect(html).toContain("Long human-readable setup and capability description.");
+    expect(html).toContain("Short listing summary.");
+    expect(html).not.toContain("Long human-readable setup and capability description.");
     expect(html).not.toContain("A focused skill for incident handoffs.");
+  });
+
+  it("renders Manifest V2 notes as markdown and strips a redundant opening heading", () => {
+    const html = renderDetailFor({
+      ...skill,
+      description: "Short registry description.",
+      notes:
+        "## What it does Mega Code Review reviews changes.\n\n## Safety model\n\n- Read-only review by default.\n\nUse `review.md`.",
+    });
+
+    expect(html).toContain("Short registry description.");
+    expect(html).toContain("Notes");
+    expect(html).not.toContain("What it does");
+    expect(html).toContain('<p class="md-p">Mega Code Review reviews changes.</p>');
+    expect(html).toContain('<h3 id="safety-model" class="md-h md-h2">Safety model</h3>');
+    expect(html).toContain('<ul class="md-ul">');
+    expect(html).toContain("<code>review.md</code>");
+  });
+
+  it("strips only one redundant opening notes heading", () => {
+    const html = renderDetailFor({
+      ...skill,
+      notes: "## What it does\n\n## What it has\n\n- A real inventory section.",
+    });
+
+    expect(html).not.toContain("What it does");
+    expect(html).toContain("What it has");
+    expect(html).toContain("A real inventory section.");
+  });
+
+  it("omits the Notes section when notes are absent", () => {
+    const html = renderDetailFor({ ...skill, notes: null });
+    expect(html).not.toContain("Notes");
   });
 
   it("shows an empty filed-in state when the skill is in no folders", () => {

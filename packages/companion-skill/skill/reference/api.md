@@ -86,6 +86,11 @@ comment, send `POST /skills/{slug}/comments` as `multipart/form-data` with the `
 six `image` files (PNG, JPEG, WebP, or GIF, 10 MB each); the content type is verified from the file
 bytes. Text-only comments may still be sent as JSON.
 
+Skill metadata rows returned by `GET /skills` and `GET /skills/{slug}` include both `description`
+(the short summary used in lists and detail leads) and `notes` (optional Markdown-compatible
+`companion.json` notes). Keep them distinct: do not copy setup notes or long Markdown content into
+`description`.
+
 Do not use this skill for workspace members, invitations, org settings, or token management.
 Those are outside the skills-only management surface.
 
