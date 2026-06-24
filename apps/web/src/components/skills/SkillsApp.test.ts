@@ -676,3 +676,86 @@ describe("SkillsApp label folder creation", () => {
     expect(container.textContent).toContain("Dev");
   });
 });
+
+describe("Companion skills install gate", () => {
+  // localStorage persists across happy-dom tests in the same file, so reset the dismissal flag.
+  beforeEach(() => window.localStorage.clear());
+  afterEach(() => window.localStorage.clear());
+
+  const dismissKey = "companion:companion-skills:gate-dismissed:Acme:companion";
+
+  function localSkill(status: LocalSkillRow["status"], extra: Partial<LocalSkillRow> = {}): LocalSkillRow {
+    return {
+      key: "companion",
+      name: "Companion",
+      description: "Manage skills locally.",
+      status,
+      installedVersion: status === "none" ? null : "1.7.2",
+      availableVersion: "1.8.0",
+      lastReportedAt: status === "none" ? null : "2026-06-24T00:00:00.000Z",
+      agentLabel: null,
+      what: "A local helper skill.",
+      uses: "Installs and updates skills.",
+      why: ["Keeps local skills current."],
+      commands: [],
+      changes: [],
+      prompts: { install: "install", update: "update", use: "use" },
+      ...extra,
+    };
+  }
+
+  it("opens the gate when not installed, and dismissing it reveals the install banner", async () => {
+    const { container } = await mountSkillsApp(
+      { kind: "local" },
+      { props: { initialLocalSkills: [localSkill("none")] } },
+    );
+    await flushEffects();
+
+    expect(container.textContent).toContain("Connect Companion to your assistant");
+    expect(container.textContent).toContain("Required to start");
+
+    clickButton(container, "Skip for now");
+    await flushEffects();
+
+    expect(container.textContent).not.toContain("Connect Companion to your assistant");
+    expect(container.textContent).toContain("Not connected");
+    // Dismissal persists so the gate doesn't re-nag on the next visit.
+    expect(window.localStorage.getItem(dismissKey)).toBe("1");
+  });
+
+  it("keeps the gate closed when dismissal was already persisted", async () => {
+    window.localStorage.setItem(dismissKey, "1");
+    const { container } = await mountSkillsApp(
+      { kind: "local" },
+      { props: { initialLocalSkills: [localSkill("none")] } },
+    );
+    await flushEffects();
+
+    expect(container.textContent).not.toContain("Connect Companion to your assistant");
+    expect(container.textContent).toContain("Not connected");
+  });
+
+  it("shows the update banner (and no gate) when an update is available", async () => {
+    const { container } = await mountSkillsApp(
+      { kind: "local" },
+      { props: { initialLocalSkills: [localSkill("update")] } },
+    );
+    await flushEffects();
+
+    expect(container.textContent).not.toContain("Connect Companion to your assistant");
+    expect(container.textContent).toContain("for the Companion skill");
+    expect(container.textContent).toContain("1.7.2 to 1.8.0");
+  });
+
+  it("shows no gate or banner when installed and current", async () => {
+    const { container } = await mountSkillsApp(
+      { kind: "local" },
+      { props: { initialLocalSkills: [localSkill("installed", { installedVersion: "1.8.0" })] } },
+    );
+    await flushEffects();
+
+    expect(container.textContent).not.toContain("Connect Companion to your assistant");
+    expect(container.textContent).not.toContain("Not connected");
+    expect(container.textContent).not.toContain("for the Companion skill");
+  });
+});
