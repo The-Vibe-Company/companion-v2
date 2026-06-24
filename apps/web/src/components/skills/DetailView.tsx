@@ -29,6 +29,7 @@ import {
 } from "./detailParts";
 import { DependenciesTab } from "./DependenciesTab";
 import { FileExplorer } from "./fileview";
+import { MarkdownView } from "./markdown";
 import { Discussion } from "./discussion";
 
 export function DetailMoreMenuContent({
@@ -183,6 +184,35 @@ type DetailTab = "overview" | "files" | "dependencies" | "activity" | "discussio
 // hidden). All tabs therefore point `aria-controls` at one stable panel id so no tab
 // references a missing element; the panel names its controlling tab via aria-labelledby.
 const DETAIL_PANEL_ID = "skill-detail-panel";
+
+export function normalizeSkillNotes(value: string | null | undefined): string {
+  if (!value) return "";
+  const lines = value.replace(/\r\n/g, "\n").split("\n");
+  const first = lines.findIndex((line) => line.trim().length > 0);
+  if (first < 0) return "";
+
+  const heading = lines[first]?.match(/^\s{0,3}#{1,6}\s+What it (?:does|has)\b\s*:?\s*(.*)$/i);
+  if (heading) {
+    const remainder = (heading[1] ?? "").trim();
+    if (remainder) {
+      lines[first] = remainder;
+    } else {
+      lines.splice(first, 1);
+      while (lines[first]?.trim() === "") lines.splice(first, 1);
+    }
+  }
+  return lines.join("\n").trim();
+}
+
+function SkillNotes({ value }: { value: string | null | undefined }) {
+  const notes = normalizeSkillNotes(value);
+  if (!notes) return null;
+  return (
+    <div className="skillnotes">
+      <MarkdownView content={notes} />
+    </div>
+  );
+}
 
 interface TabDef {
   id: DetailTab;
@@ -442,7 +472,8 @@ export function DetailView({
 
   const reqN = deps?.requires_n ?? skill.requiresCount;
   const usedN = deps?.used_by_n ?? skill.usedByCount;
-  const description = skill.display?.description ?? skill.description;
+  const description = skill.display?.summary ?? skill.description;
+  const hasNotes = normalizeSkillNotes(skill.notes).length > 0;
 
   const showDeps = reqN + usedN > 0;
   const tabs: TabDef[] = [
@@ -588,12 +619,11 @@ export function DetailView({
             )}
 
             <div className="dsections">
-              <Section label="What it does" defaultOpen>
-                <p className="ov__lead ov__lead--linear" style={{ marginTop: 0 }}>
-                  {description} It is delivered as a versioned SKILL.md package and runs against the
-                  agent&apos;s declared tools on its next reconcile.
-                </p>
-              </Section>
+              {hasNotes && (
+                <Section label="Notes" defaultOpen>
+                  <SkillNotes value={skill.notes} />
+                </Section>
+              )}
 
               {skill.requirements.length > 0 && (
                 <Section label="Setup & secrets" count={skill.requirements.length} defaultOpen>

@@ -23,6 +23,7 @@ function registryRow(over: Partial<SkillListRow> = {}): SkillListRow {
     slug: "demo",
     description: "Demo skill",
     display: {},
+    notes: null,
     validation: "valid",
     validation_error: null,
     scope: "org",

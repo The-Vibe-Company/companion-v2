@@ -18,6 +18,7 @@ export interface SkillVM {
   validation: ValidationState;
   description: string;
   display?: CompanionDisplay;
+  notes: string | null;
   error: string | null;
   /** Which library this row belongs to: 'org' (shared) or 'personal' (private to the creator). */
   scope: "personal" | "org";
@@ -61,6 +62,7 @@ export function mapSkill(row: SkillListRow): SkillVM {
     validation: row.validation,
     description: row.description,
     display: row.display ?? {},
+    notes: row.notes ?? null,
     error: row.validation_error,
     scope: row.scope ?? "org",
     source: row.source ?? null,
