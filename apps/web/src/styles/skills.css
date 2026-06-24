@@ -876,6 +876,10 @@ body { background: var(--color-canvas); color: var(--color-fg); font-family: var
 .ls-gate__feat-ico { flex: none; color: var(--color-accent-edge); }
 .ls-gate__promptlabel { margin: var(--space-5) 0 8px; font-size: 11px; font-weight: 600;
   text-transform: uppercase; letter-spacing: var(--tracking-wide); color: var(--color-faint); }
+.ls-gate__prompt { margin: 0; border: 1px solid var(--color-line); background: var(--color-surface-sunken);
+  border-radius: var(--radius-md); padding: 13px 14px; font-family: var(--font-mono); font-size: var(--text-xs);
+  line-height: 1.7; color: var(--color-fg); white-space: pre-wrap; word-break: break-word;
+  max-height: 280px; overflow: auto; }
 .ls-gate__foot { flex: none; display: flex; align-items: center; gap: var(--space-3);
   padding: var(--space-4) var(--space-5); border-top: 1px solid var(--color-line); background: var(--color-surface-sunken); }
 .ls-gate__foot .btn-primary { margin-left: auto; }

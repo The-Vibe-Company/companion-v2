@@ -377,12 +377,9 @@ function InstallGate({ skill, onDismiss }: { skill: LocalSkillRow; onDismiss: ()
           </div>
 
           <div className="ls-gate__promptlabel">Give this to your assistant</div>
-          <CodeBlock
-            text={displayPrompt}
-            scroll
-            copyLabel="Copy prompt"
-            resolveText={async () => buildPrompt(await ensureToken())}
-          />
+          {/* Plain pre + a single copy path (the footer button): unlike CodeBlock, this never falls
+              back to copying the masked placeholder when the on-copy token mint fails. */}
+          <pre className="ls-gate__prompt">{displayPrompt}</pre>
           <p className="ls-prompt-hint">
             A scoped skills:read + skills:write token is added when you copy. It expires in 90 days.
           </p>
