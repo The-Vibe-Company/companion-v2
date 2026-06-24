@@ -944,7 +944,8 @@ body { background: var(--color-canvas); color: var(--color-fg); font-family: var
   display: flex;
   align-items: center;
   gap: 9px;
-  padding: 7px 30px 7px 4px;
+  /* Right padding clears the always-visible count + "new folder" button. */
+  padding: 7px 52px 7px 4px;
   border: none;
   background: none;
   cursor: pointer;
@@ -959,18 +960,22 @@ body { background: var(--color-canvas); color: var(--color-fg); font-family: var
 .ml-libhead__name { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ml-libhead__count {
   position: absolute;
-  right: 12px;
+  right: 30px;
   top: 50%;
   transform: translateY(-50%);
   font-family: var(--font-mono);
   font-size: 11px;
-  color: var(--color-faint);
+  font-weight: 700;
+  color: var(--color-muted);
 }
-.ml-libhead .side__addteam { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); margin: 0; }
-.ml-libhead:hover .ml-libhead__count, .ml-libhead:focus-within .ml-libhead__count { opacity: 0; }
+/* The "new folder" button stays visible (not hover-only) so it's discoverable; the count sits to its left. */
+.ml-libhead .side__addteam { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); margin: 0; opacity: 1; }
 /* The children of a library section (Starred / Installed shortcuts + the folder tree). */
 .ml-kids { display: flex; flex-direction: column; gap: 2px; }
 .ml-kids .navitem { padding-left: 28px; }
+/* Drop the folder-row main's left padding inside a library section so the folder icons line up with
+   the Starred / Installed icons (the chevron gutter already supplies the indent). */
+.ml-kids .lblrow__main { padding-left: 0; }
 /* Amber "updates available" dot on the Installed shortcut (paired with a title/aria-label). */
 .ml-updot {
   margin-left: auto;
