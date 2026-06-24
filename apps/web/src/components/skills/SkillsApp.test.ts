@@ -676,3 +676,177 @@ describe("SkillsApp label folder creation", () => {
     expect(container.textContent).toContain("Dev");
   });
 });
+
+describe("Companion skills install gate", () => {
+  // localStorage persists across happy-dom tests in the same file, so reset the dismissal flag.
+  // localStorage and issueToken call history both leak across happy-dom tests; reset them so the
+  // "token is never minted until copy" assertions are reliable. A resolving clipboard stub lets the
+  // success path report "Copied"; individual tests can make it reject.
+  let clipboardWrite: ReturnType<typeof vi.fn>;
+  beforeEach(() => {
+    window.localStorage.clear();
+    queryMocks.issueToken.mockClear();
+    clipboardWrite = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: clipboardWrite },
+    });
+  });
+  afterEach(() => window.localStorage.clear());
+
+  const dismissKey = "companion:companion-skills:gate-dismissed:Acme:companion";
+
+  function gateCopyButton(container: HTMLElement): HTMLButtonElement {
+    const btn = container.querySelector<HTMLButtonElement>(".ls-gate__foot .btn-primary");
+    if (!btn) throw new Error("gate Copy prompt button not found");
+    return btn;
+  }
+  function clickGateCopy(container: HTMLElement) {
+    act(() => gateCopyButton(container).dispatchEvent(new MouseEvent("click", { bubbles: true })));
+  }
+
+  function localSkill(status: LocalSkillRow["status"], extra: Partial<LocalSkillRow> = {}): LocalSkillRow {
+    return {
+      key: "companion",
+      name: "Companion",
+      description: "Manage skills locally.",
+      status,
+      installedVersion: status === "none" ? null : "1.7.2",
+      availableVersion: "1.8.0",
+      lastReportedAt: status === "none" ? null : "2026-06-24T00:00:00.000Z",
+      agentLabel: null,
+      what: "A local helper skill.",
+      uses: "Installs and updates skills.",
+      why: ["Keeps local skills current."],
+      commands: [],
+      changes: [],
+      prompts: { install: "install", update: "update", use: "use" },
+      ...extra,
+    };
+  }
+
+  it("opens the gate when not installed, and dismissing it reveals the install banner", async () => {
+    const { container } = await mountSkillsApp(
+      { kind: "local" },
+      { props: { initialLocalSkills: [localSkill("none")] } },
+    );
+    await flushEffects();
+
+    expect(container.textContent).toContain("Connect Companion to your assistant");
+    expect(container.textContent).toContain("Required to start");
+    // Lazy mint: opening the gate must NOT create a credential.
+    expect(queryMocks.issueToken).not.toHaveBeenCalled();
+
+    clickButton(container, "Skip for now");
+    await flushEffects();
+
+    expect(container.textContent).not.toContain("Connect Companion to your assistant");
+    expect(container.textContent).toContain("Not connected");
+    // Skipping never mints a token, and dismissal persists so the gate doesn't re-nag.
+    expect(queryMocks.issueToken).not.toHaveBeenCalled();
+    expect(window.localStorage.getItem(dismissKey)).toBe("1");
+  });
+
+  it("mints the scoped token only when the prompt is copied", async () => {
+    const { container } = await mountSkillsApp(
+      { kind: "local" },
+      { props: { initialLocalSkills: [localSkill("none")] } },
+    );
+    await flushEffects();
+    expect(queryMocks.issueToken).not.toHaveBeenCalled();
+
+    clickGateCopy(container);
+    await flushEffects();
+    expect(queryMocks.issueToken).toHaveBeenCalledWith(["skills:read", "skills:write"]);
+    expect(container.textContent).toContain("Copied");
+  });
+
+  it("surfaces a retry path when the on-copy token mint fails", async () => {
+    queryMocks.issueToken.mockRejectedValueOnce(new Error("network down"));
+    const { container } = await mountSkillsApp(
+      { kind: "local" },
+      { props: { initialLocalSkills: [localSkill("none")] } },
+    );
+    await flushEffects();
+
+    clickGateCopy(container);
+    await flushEffects();
+    // The first mint failed: the gate stays open and surfaces the error.
+    expect(container.textContent).toContain("Could not create an access token");
+
+    // Copying again uses the default (resolving) mock and clears the error.
+    clickGateCopy(container);
+    await flushEffects();
+    expect(container.textContent).not.toContain("Could not create an access token");
+    expect(container.textContent).toContain("Copied");
+  });
+
+  it("mints at most one token for rapid copy clicks", async () => {
+    const { container } = await mountSkillsApp(
+      { kind: "local" },
+      { props: { initialLocalSkills: [localSkill("none")] } },
+    );
+    await flushEffects();
+
+    const btn = gateCopyButton(container);
+    act(() => {
+      btn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      btn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flushEffects();
+    // The in-flight mint is shared, so two clicks create only one credential.
+    expect(queryMocks.issueToken).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not claim success when the clipboard write is blocked", async () => {
+    clipboardWrite.mockRejectedValue(new Error("blocked"));
+    const { container } = await mountSkillsApp(
+      { kind: "local" },
+      { props: { initialLocalSkills: [localSkill("none")] } },
+    );
+    await flushEffects();
+
+    clickGateCopy(container);
+    await flushEffects();
+    // The token still minted, but the UI must not falsely report a copy.
+    expect(queryMocks.issueToken).toHaveBeenCalledWith(["skills:read", "skills:write"]);
+    expect(container.textContent).toContain("Select the prompt above");
+    expect(container.textContent).not.toContain("Copied");
+  });
+
+  it("keeps the gate closed when dismissal was already persisted", async () => {
+    window.localStorage.setItem(dismissKey, "1");
+    const { container } = await mountSkillsApp(
+      { kind: "local" },
+      { props: { initialLocalSkills: [localSkill("none")] } },
+    );
+    await flushEffects();
+
+    expect(container.textContent).not.toContain("Connect Companion to your assistant");
+    expect(container.textContent).toContain("Not connected");
+  });
+
+  it("shows the update banner (and no gate) when an update is available", async () => {
+    const { container } = await mountSkillsApp(
+      { kind: "local" },
+      { props: { initialLocalSkills: [localSkill("update")] } },
+    );
+    await flushEffects();
+
+    expect(container.textContent).not.toContain("Connect Companion to your assistant");
+    expect(container.textContent).toContain("for the Companion skill");
+    expect(container.textContent).toContain("1.7.2 to 1.8.0");
+  });
+
+  it("shows no gate or banner when installed and current", async () => {
+    const { container } = await mountSkillsApp(
+      { kind: "local" },
+      { props: { initialLocalSkills: [localSkill("installed", { installedVersion: "1.8.0" })] } },
+    );
+    await flushEffects();
+
+    expect(container.textContent).not.toContain("Connect Companion to your assistant");
+    expect(container.textContent).not.toContain("Not connected");
+    expect(container.textContent).not.toContain("for the Companion skill");
+  });
+});
