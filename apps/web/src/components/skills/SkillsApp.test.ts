@@ -397,14 +397,14 @@ describe("SkillsApp initial route", () => {
 
   it("renders a skill detail from a workspace skill route instead of saved filters", () => {
     const html = render({ lib: "org", kind: "all", skill: "seo-helper" });
-    expect(html).toContain("Install to My Skills");
+    expect(html).toContain("Install skill");
     expect(html).toContain("seo-helper");
     expect(html).not.toContain("No skills match");
   });
 
   it("renders a skill detail while preserving its label route", () => {
     const html = render({ lib: "org", kind: "label", label: "marketing/seo", skill: "seo-helper" });
-    expect(html).toContain("Install to My Skills");
+    expect(html).toContain("Install skill");
     expect(html).toContain("seo-helper");
     expect(html).toContain("Filed in");
     expect(html).not.toContain("Open skill brand-kit");
@@ -414,7 +414,7 @@ describe("SkillsApp initial route", () => {
     const html = render(parseSkillsRoute("view=local&skill=seo-helper"));
     expect(html).toContain("Companion skills");
     expect(html).toContain("Manage skills locally.");
-    expect(html).not.toContain("Install to My Skills");
+    expect(html).not.toContain("Install skill");
   });
 });
 
@@ -503,7 +503,7 @@ describe("SkillsApp optimistic label assignment", () => {
       { url: "/skills?lib=org&skill=seo-helper" },
     );
     await flushEffects();
-    expect(container.textContent).toContain("Install to My Skills");
+    expect(container.textContent).toContain("Install skill");
     expect(container.textContent).toContain("Filed in");
     expect(container.querySelector('button[aria-label="Remove from marketing/seo"]')).not.toBeNull();
 
@@ -515,7 +515,7 @@ describe("SkillsApp optimistic label assignment", () => {
     expect(queryMocks.unassignSkillLabel).toHaveBeenCalledTimes(1);
     expect(queryMocks.unassignSkillLabel).toHaveBeenCalledWith("seo-helper", "marketing/seo");
     expect(queryMocks.assignSkillLabel).not.toHaveBeenCalled();
-    expect(container.textContent).toContain("Install to My Skills");
+    expect(container.textContent).toContain("Install skill");
     expect(container.textContent).toContain("No folders yet");
     expect(container.querySelector('button[aria-label="Remove from marketing/seo"]')).toBeNull();
   });
@@ -533,7 +533,7 @@ describe("SkillsApp optimistic label assignment", () => {
 
     expect(queryMocks.unassignSkillLabel).toHaveBeenCalledTimes(1);
     // The chip is restored after the failure; the detail never closed.
-    expect(container.textContent).toContain("Install to My Skills");
+    expect(container.textContent).toContain("Install skill");
     expect(container.querySelector('button[aria-label="Remove from marketing/seo"]')).not.toBeNull();
   });
 });
@@ -548,7 +548,7 @@ describe("SkillsApp navigation", () => {
     clickButton(container, "Open skill loose-skill");
     await flushEffects();
     expect(window.location.search).toBe("?lib=org&skill=loose-skill");
-    expect(container.textContent).toContain("Install to My Skills");
+    expect(container.textContent).toContain("Install skill");
 
     // Browser Back returns to the org list (the entry before the pushed detail).
     window.history.replaceState({}, "", "/skills?lib=org");
@@ -558,7 +558,7 @@ describe("SkillsApp navigation", () => {
 
     expect(window.location.search).toBe("?lib=org");
     expect(container.textContent).toContain("loose-skill");
-    expect(container.textContent).not.toContain("Install to My Skills");
+    expect(container.textContent).not.toContain("Install skill");
   });
 
   it("persists a label folder in the URL when opening a skill under it", async () => {
@@ -572,7 +572,7 @@ describe("SkillsApp navigation", () => {
     await flushEffects();
 
     expect(window.location.search).toBe("?lib=org&view=label&label=marketing%2Fseo&skill=seo-helper");
-    expect(container.textContent).toContain("Install to My Skills");
+    expect(container.textContent).toContain("Install skill");
   });
 
   it("falls back to replacing the URL when closing a directly loaded detail", async () => {
@@ -581,7 +581,7 @@ describe("SkillsApp navigation", () => {
       { url: "/skills?lib=org&skill=seo-helper" },
     );
     await flushEffects();
-    expect(container.textContent).toContain("Install to My Skills");
+    expect(container.textContent).toContain("Install skill");
 
     // The detail crumb's back button is labeled by the library (the org name for an org skill).
     clickButton(container, "Acme");
@@ -589,7 +589,7 @@ describe("SkillsApp navigation", () => {
 
     expect(window.location.pathname + window.location.search).toBe("/skills?lib=org");
     expect(container.textContent).toContain("seo-helper");
-    expect(container.textContent).not.toContain("Install to My Skills");
+    expect(container.textContent).not.toContain("Install skill");
   });
 
   it("opens an archived detail after the archived list loads", async () => {

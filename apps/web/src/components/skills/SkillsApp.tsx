@@ -528,7 +528,7 @@ export function SkillsApp({
    * (and the Installed nav count + update dot react). Optimistic, with an Undo toast. No refresh.
    */
   const setInstalled = useCallback(
-    (id: string, installed: boolean, opts?: { undo?: boolean }) => {
+    (id: string, installed: boolean) => {
       const orgRow = orgSkillsRef.current.find((s) => s.id === id) ?? mineSkillsRef.current.find((s) => s.id === id);
       if (!orgRow) return;
       const markVersion = orgRow.version ?? null;
@@ -564,11 +564,7 @@ export function SkillsApp({
               arr.map((s) => (s.id === id && s.source === "installed" ? { ...s, installStatus: st, installedVersion: v } : s)),
             );
           }
-          if (opts?.undo) {
-            setToast({ msg: installed ? `Installed ${id} to My Skills` : `Removed ${id} from My Skills`, undo: () => setInstalled(id, !installed) });
-          } else {
-            setToast({ msg: installed ? `Marked ${id} as installed` : `Marked ${id} as not installed` });
-          }
+          setToast({ msg: installed ? `Marked ${id} as installed` : `Marked ${id} as not installed` });
         })
         .catch((e) => {
           setOrgSkills((arr) =>
@@ -580,9 +576,6 @@ export function SkillsApp({
     },
     [orgActions],
   );
-
-  // Install an org skill into My Skills from the detail view, with an Undo toast.
-  const installToMine = useCallback((id: string) => setInstalled(id, true, { undo: true }), [setInstalled]);
 
   // --- Optimistic label mutations (per library) ------------------------------
   // Every handler takes the target library explicitly (the stacked sidebar shows BOTH trees, so the
@@ -1288,7 +1281,6 @@ export function SkillsApp({
             onToggleLabel={(path) => toggleSkillLabel(detailLib, skill.id, path)}
             onSelectLabel={(path) => selectLabel(detailLib, path)}
             onShare={() => setShareTarget(skill)}
-            onInstallToMine={() => installToMine(skill.id)}
             onInstall={() => setInstallSkill(skill)}
             onUpdate={() => setUpdateSkill(skill)}
             onOpenSkill={openSkillBySlug}

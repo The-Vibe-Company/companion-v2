@@ -263,7 +263,6 @@ export function DetailView({
   onToggleLabel,
   onSelectLabel,
   onShare,
-  onInstallToMine,
   onInstall,
   onUpdate,
   onOpenSkill,
@@ -289,8 +288,7 @@ export function DetailView({
   onSelectLabel: (path: string) => void;
   /** Share this personal skill into the org library (owner + authored only). */
   onShare: () => void;
-  /** Install this org skill into My Skills (org skill not already installed). */
-  onInstallToMine: () => void;
+  /** Open the install flow (hands the Companion agent the prompt; the agent reports back on install). */
   onInstall: () => void;
   onUpdate: () => void;
   onOpenSkill: (slug: string) => void;
@@ -465,7 +463,6 @@ export function DetailView({
   const libLabel = inMyLibrary ? "My Skills" : orgName;
   const isInstalledCopy = skill.source === "installed";
   const canShare = skill.scope === "personal" && !skill.archived;
-  const canInstallToMine = skill.scope === "org" && skill.source !== "installed" && skill.installStatus === "none" && !skill.archived;
   const eyebrow = skill.scope === "personal" ? "Personal skill" : isInstalledCopy ? "Installed skill" : "Organization skill";
   const eyebrowIcon = skill.scope === "personal" ? "user" : isInstalledCopy ? "download" : "building-2";
 
@@ -501,11 +498,6 @@ export function DetailView({
           <button className="btn-primary" onClick={onShare} title="Share this skill to the organization">
             <Icon name="send" size={14} />
             Share to organization
-          </button>
-        ) : canInstallToMine ? (
-          <button className="btn-primary" onClick={onInstallToMine} title="Install this skill into My Skills">
-            <Icon name="download" size={14} />
-            Install to My Skills
           </button>
         ) : (
           <button

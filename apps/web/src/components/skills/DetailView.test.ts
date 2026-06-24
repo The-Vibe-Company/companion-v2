@@ -56,7 +56,6 @@ function renderDetailFor(nextSkill: SkillVM) {
       onToggleLabel: vi.fn(),
       onSelectLabel: vi.fn(),
       onShare: vi.fn(),
-      onInstallToMine: vi.fn(),
       onInstall: vi.fn(),
       onUpdate: vi.fn(),
       onOpenSkill: vi.fn(),
