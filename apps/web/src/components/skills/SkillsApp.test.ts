@@ -680,19 +680,29 @@ describe("SkillsApp label folder creation", () => {
 describe("Companion skills install gate", () => {
   // localStorage persists across happy-dom tests in the same file, so reset the dismissal flag.
   // localStorage and issueToken call history both leak across happy-dom tests; reset them so the
-  // "token is never minted until copy" assertions are reliable.
+  // "token is never minted until copy" assertions are reliable. A resolving clipboard stub lets the
+  // success path report "Copied"; individual tests can make it reject.
+  let clipboardWrite: ReturnType<typeof vi.fn>;
   beforeEach(() => {
     window.localStorage.clear();
     queryMocks.issueToken.mockClear();
+    clipboardWrite = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: clipboardWrite },
+    });
   });
   afterEach(() => window.localStorage.clear());
 
   const dismissKey = "companion:companion-skills:gate-dismissed:Acme:companion";
 
-  function clickGateCopy(container: HTMLElement) {
+  function gateCopyButton(container: HTMLElement): HTMLButtonElement {
     const btn = container.querySelector<HTMLButtonElement>(".ls-gate__foot .btn-primary");
     if (!btn) throw new Error("gate Copy prompt button not found");
-    act(() => btn.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    return btn;
+  }
+  function clickGateCopy(container: HTMLElement) {
+    act(() => gateCopyButton(container).dispatchEvent(new MouseEvent("click", { bubbles: true })));
   }
 
   function localSkill(status: LocalSkillRow["status"], extra: Partial<LocalSkillRow> = {}): LocalSkillRow {
@@ -769,6 +779,39 @@ describe("Companion skills install gate", () => {
     await flushEffects();
     expect(container.textContent).not.toContain("Could not create an access token");
     expect(container.textContent).toContain("Copied");
+  });
+
+  it("mints at most one token for rapid copy clicks", async () => {
+    const { container } = await mountSkillsApp(
+      { kind: "local" },
+      { props: { initialLocalSkills: [localSkill("none")] } },
+    );
+    await flushEffects();
+
+    const btn = gateCopyButton(container);
+    act(() => {
+      btn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      btn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flushEffects();
+    // The in-flight mint is shared, so two clicks create only one credential.
+    expect(queryMocks.issueToken).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not claim success when the clipboard write is blocked", async () => {
+    clipboardWrite.mockRejectedValue(new Error("blocked"));
+    const { container } = await mountSkillsApp(
+      { kind: "local" },
+      { props: { initialLocalSkills: [localSkill("none")] } },
+    );
+    await flushEffects();
+
+    clickGateCopy(container);
+    await flushEffects();
+    // The token still minted, but the UI must not falsely report a copy.
+    expect(queryMocks.issueToken).toHaveBeenCalledWith(["skills:read", "skills:write"]);
+    expect(container.textContent).toContain("Select the prompt above");
+    expect(container.textContent).not.toContain("Copied");
   });
 
   it("keeps the gate closed when dismissal was already persisted", async () => {

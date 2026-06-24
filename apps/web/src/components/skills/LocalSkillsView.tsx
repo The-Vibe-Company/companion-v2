@@ -295,18 +295,33 @@ function InstallGate({ skill, onDismiss }: { skill: LocalSkillRow; onDismiss: ()
   const [token, setToken] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [failed, setFailed] = useState(false);
+  const [clipFailed, setClipFailed] = useState(false);
+  const [busy, setBusy] = useState(false);
   useModalA11y(ref, onDismiss);
 
   const base = apiBase();
-  // Lazy mint: the scoped token is created only when the user actually copies the prompt, so opening
-  // this page and clicking "Skip for now" never leaves an unused 90-day credential behind. Mirrors the
-  // upload dialog's ensure()/CodeBlock.resolveText pattern.
+  // Lazy mint with in-flight de-duplication: a token is created only on copy, and concurrent clicks
+  // share one request (refs settle synchronously, unlike React state) so we never leave duplicate
+  // 90-day credentials behind. The token also lives only here, never persisted. Mirrors the upload
+  // dialog's ensure() pattern.
+  const tokenRef = useRef<string | null>(null);
+  const inflightRef = useRef<Promise<string> | null>(null);
   const ensureToken = useCallback(async () => {
-    if (token) return token;
-    const issued = await issueToken([...TOKEN_SCOPES]);
-    setToken(issued.token);
-    return issued.token;
-  }, [token]);
+    if (tokenRef.current) return tokenRef.current;
+    if (inflightRef.current) return inflightRef.current;
+    const pending = (async () => {
+      try {
+        const issued = await issueToken([...TOKEN_SCOPES]);
+        tokenRef.current = issued.token;
+        setToken(issued.token);
+        return issued.token;
+      } finally {
+        inflightRef.current = null;
+      }
+    })();
+    inflightRef.current = pending;
+    return pending;
+  }, []);
 
   const buildPrompt = useCallback(
     (tok: string) => fillPrompt(skill.prompts.install, base, tok),
@@ -317,22 +332,27 @@ function InstallGate({ skill, onDismiss }: { skill: LocalSkillRow; onDismiss: ()
 
   const copyPrompt = useCallback(async () => {
     setFailed(false);
-    let value: string;
+    setClipFailed(false);
+    setBusy(true);
     try {
-      value = buildPrompt(await ensureToken());
-    } catch {
-      setFailed(true);
-      return;
-    }
-    if (navigator.clipboard) {
+      const value = buildPrompt(await ensureToken());
+      if (!navigator.clipboard) {
+        setClipFailed(true); // no API: the prompt (now showing the real token) is selectable by hand
+        return;
+      }
       try {
         await navigator.clipboard.writeText(value);
       } catch {
-        // clipboard blocked: the prompt above is still selectable to copy by hand
+        setClipFailed(true);
+        return;
       }
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1800);
+    } catch {
+      setFailed(true); // token mint failed
+    } finally {
+      setBusy(false);
     }
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1800);
   }, [buildPrompt, ensureToken]);
 
   return (
@@ -389,13 +409,19 @@ function InstallGate({ skill, onDismiss }: { skill: LocalSkillRow; onDismiss: ()
               Could not create an access token. Check your connection, then copy again.
             </div>
           )}
+          {clipFailed && (
+            <div className="ls-copied ls-copied--warn" role="alert">
+              <Icon name="alert-triangle" size={14} />
+              Couldn&rsquo;t copy automatically. Select the prompt above and copy it.
+            </div>
+          )}
         </div>
 
         <div className="ls-gate__foot">
           <button type="button" className="ls-textbtn" onClick={onDismiss}>
             Skip for now
           </button>
-          <button type="button" className="btn-primary" onClick={copyPrompt}>
+          <button type="button" className="btn-primary" onClick={copyPrompt} disabled={busy}>
             <Icon name={copied ? "check" : "copy"} size={14} />
             {copied ? "Copied" : "Copy prompt"}
           </button>
