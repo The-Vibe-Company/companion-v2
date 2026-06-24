@@ -1,4 +1,5 @@
 import {
+  companionDependencySlugs,
   companionManifestSchema,
   fallbackCompanionManifest,
   SEMVER_RE,
@@ -95,10 +96,17 @@ function parseCompanionManifest(f: RawFindings, fallback: { summary: string; req
       };
     }
     const manifest = fallbackCompanionManifest({
-      summary: fallback.summary,
+      summary: result.data.description ?? fallback.summary,
+      name: result.data.name,
+      version: result.data.version,
+      companionSkillId: result.data.metadata.companionSkillId,
       display: result.data.display,
       requirements: result.data.requirements,
-      dependencies: result.data.dependencies,
+      environment: result.data.environment,
+      dependencies: result.data.legacyDependencySlugs.length ? companionDependencySlugs(result.data) : result.data.dependencies,
+      changelog: result.data.metadata.changelog,
+      commands: result.data.commands,
+      notes: result.data.notes,
     });
     return {
       check: {
@@ -249,7 +257,7 @@ function buildResult(f: RawFindings): ValidationResult {
     checks,
     frontmatter: fm && fm.ok ? fm.data : undefined,
     body: fm ? fm.body : (f.skillMd ?? ""),
-    companion_manifest: companion.manifest,
+      companion_manifest: companion.manifest,
     companion_manifest_path: companion.path,
     legacy: fm?.legacy,
     warnings,

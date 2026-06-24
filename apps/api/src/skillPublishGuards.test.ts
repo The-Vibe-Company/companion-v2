@@ -46,7 +46,7 @@ describe("assertTargetedSkillUpdate", () => {
         expectSkillId: "skill-1",
         expectedSkill: { id: "skill-1", slug: "research-agent" },
       }),
-    ).toThrow('metadata.companion_skill_id "skill-2" does not match the skill you are updating ("skill-1")');
+    ).toThrow('package Companion skill id "skill-2" does not match the skill you are updating ("skill-1")');
   });
 
   it("accepts old packages without Companion metadata when the targeted skill matches", () => {

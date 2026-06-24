@@ -52,9 +52,7 @@ function localSkill(status: LocalSkillRow["status"]): LocalSkillRow {
     availableVersion: status === "update" ? "1.1.0" : "1.0.0",
     lastReportedAt: null,
     agentLabel: null,
-    what: "A local helper skill.",
-    uses: "Installs and updates skills.",
-    why: ["Keeps local skills current."],
+    notes: "A local helper skill.\n\n- Keeps local skills current.",
     commands: [],
     changes: ["Refreshes the bundled helper."],
     prompts: {

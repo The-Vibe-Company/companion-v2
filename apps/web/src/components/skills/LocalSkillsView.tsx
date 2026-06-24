@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import type { LocalSkillRow, LocalSkillStatus, TokenScope } from "@companion/contracts";
 import { TOKEN_SCOPES } from "@companion/contracts";
 import { apiBase, issueToken } from "@/lib/queries";
@@ -46,6 +47,54 @@ type CopiedKind = "prompt" | "reinstall";
 
 function fillPrompt(template: string, base: string, token: string): string {
   return template.split("{base}").join(base).split("{token}").join(token);
+}
+
+function MarkdownNotes({ value }: { value: string }) {
+  const blocks: ReactNode[] = [];
+  const lines = value.split(/\r?\n/);
+  let list: string[] = [];
+  const flushList = () => {
+    if (!list.length) return;
+    const items = list;
+    list = [];
+    blocks.push(
+      <ul className="ls-md__list" key={`list-${blocks.length}`}>
+        {items.map((item) => (
+          <li key={item}>{item}</li>
+        ))}
+      </ul>,
+    );
+  };
+
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line) {
+      flushList();
+      continue;
+    }
+    const bullet = line.match(/^[-*]\s+(.+)$/);
+    if (bullet) {
+      list.push(bullet[1] ?? "");
+      continue;
+    }
+    flushList();
+    const heading = line.match(/^(#{2,3})\s+(.+)$/);
+    if (heading) {
+      blocks.push(
+        <div className="ls-md__heading" key={`h-${blocks.length}`}>
+          {heading[2]}
+        </div>,
+      );
+      continue;
+    }
+    blocks.push(
+      <p className="ls-sec__text" key={`p-${blocks.length}`}>
+        {line}
+      </p>,
+    );
+  }
+  flushList();
+  return <div className="ls-md">{blocks}</div>;
 }
 
 /**
@@ -526,8 +575,8 @@ export function LocalSkillDrawer({ skill, onClose }: { skill: LocalSkillRow; onC
           )}
 
           <section>
-            <div className="ls-sec__label">What it does</div>
-            <p className="ls-sec__text">{skill.what}</p>
+            <div className="ls-sec__label">Notes</div>
+            <MarkdownNotes value={skill.notes} />
           </section>
 
           <section>
@@ -543,26 +592,6 @@ export function LocalSkillDrawer({ skill, onClose }: { skill: LocalSkillRow; onC
                 </div>
               ))}
             </div>
-          </section>
-
-          <section>
-            <div className="ls-sec__label ls-sec__label--icon">
-              <Icon name="shield-check" size={13} className="ls-ico-ok" />
-              Why it&rsquo;s safe
-            </div>
-            <div className="ls-why">
-              {skill.why.map((line) => (
-                <div className="ls-why__row" key={line}>
-                  <Icon name="check" size={14} className="ls-ico-ok" />
-                  <span>{line}</span>
-                </div>
-              ))}
-            </div>
-          </section>
-
-          <section>
-            <div className="ls-sec__label">What your assistant uses it for</div>
-            <p className="ls-sec__text ls-sec__text--muted">{skill.uses}</p>
           </section>
 
           {skill.status === "update" && skill.changes.length > 0 && (

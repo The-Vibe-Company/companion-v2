@@ -15,11 +15,12 @@ export function parseSkillPublishAction(value: string | undefined): SkillPublish
 
 export function assertTargetedSkillUpdate(input: {
   frontmatter: SkillFrontmatter;
+  companionSkillId?: string;
   expectSlug?: string;
   expectSkillId?: string;
   expectedSkill?: ExpectedSkill | null;
 }): void {
-  const { frontmatter, expectSlug, expectSkillId, expectedSkill } = input;
+  const { frontmatter, companionSkillId, expectSlug, expectSkillId, expectedSkill } = input;
 
   if (expectSlug && frontmatter.name !== expectSlug) {
     throw new Error(`package name "${frontmatter.name}" does not match the skill you are updating ("${expectSlug}")`);
@@ -35,10 +36,10 @@ export function assertTargetedSkillUpdate(input: {
     throw new Error(`target skill id does not match the skill you are updating ("${expectSkillId}")`);
   }
 
-  const metadataSkillId = frontmatter.metadata.companion_skill_id;
+  const metadataSkillId = companionSkillId ?? frontmatter.metadata.companion_skill_id;
   if (metadataSkillId && metadataSkillId !== expectSkillId) {
     throw new Error(
-      `package metadata.companion_skill_id "${metadataSkillId}" does not match the skill you are updating ("${expectSkillId}")`,
+      `package Companion skill id "${metadataSkillId}" does not match the skill you are updating ("${expectSkillId}")`,
     );
   }
 }

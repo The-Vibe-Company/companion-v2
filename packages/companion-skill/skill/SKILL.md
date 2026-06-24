@@ -2,8 +2,6 @@
 name: companion
 description: "Use when managing local SKILL.md packages with Companion: validate, publish, update, resolve skill dependencies, declare the secrets and environment variables a skill needs, install updates, audit skills, check workspace versions, or self-update this Companion skill through the Companion workspace API."
 license: MIT
-metadata:
-  companion_version: 1.9.1
 allowed-tools: read_file write_file run_shell
 ---
 
@@ -11,8 +9,8 @@ allowed-tools: read_file write_file run_shell
 
 This skill lets you manage the skills on this machine and keep them in sync with a Companion
 workspace: validate a skill, publish it, push an update, and check whether everything is current.
-You always run the mandatory Companion self-update check first, and you always confirm a change with
-the user before anything is published.
+Run the mandatory Companion self-update check once at the first Companion invocation in a
+conversation, and always confirm a change with the user before anything is published.
 
 ## Configuration
 
@@ -48,27 +46,45 @@ Never print the token back to the user or write it into a skill package. Only re
 `~/.companion/credentials.json` (or the Windows equivalent) for credentials, and otherwise treat
 skill files as the only thing you read; do not scan the rest of the machine.
 
-A skill is a folder with a `SKILL.md` at its root. Companion records two values under
-`metadata` in that file:
+A skill is a folder with a `SKILL.md` and a `companion.json` at its root. `SKILL.md` stays
+Agent Skills-compatible; Companion-specific package data lives in `companion.json`.
 
-- `companion_skill_id` — the workspace id of the published skill (added on first publish).
-- `companion_version` — the version this folder corresponds to.
+`companion.json` is the package manifest. It records:
 
-These let you tell, offline, which workspace skill a folder maps to and whether it is behind.
+- `name` — the skill slug.
+- `version` — the package version.
+- `metadata.companionSkillId` — the workspace id of the published skill.
+- `metadata.changelog` — release notes for each published version.
+- `environment.env` and `environment.secrets` — declarations only, never values.
+- `dependencies` — `{ "<skill-name>": "<skill-id>" }`.
+- `notes` — Markdown-compatible free-form notes.
+
+Fetch the public JSON Schema from:
+
+```http
+GET /v1/schemas/companion-manifest.v2.schema.json
+```
+
+Use it whenever you create, validate, or repair `companion.json`.
 
 ## Mandatory startup self-update
 
-Every time this Companion skill is invoked, run this self-update check before doing any other
-Companion task. This check is mandatory startup maintenance, not an optional user confirmation flow.
-Do not validate, publish, update, archive, label, install, or otherwise mutate any other skill until
-this check has succeeded. The trusted source is the token-authenticated Companion workspace resolved
-from `COMPANION_API_URL` and `COMPANION_TOKEN`; if those credentials or the workspace URL look wrong
-or unexpected, stop and ask the user to refresh Companion credentials before downloading anything.
+Run this self-update check only once per conversation, on the first invocation of this Companion
+skill in that discussion. After it succeeds, remember that it succeeded for the rest of the
+conversation and do not repeat it on later Companion turns unless the user explicitly asks to check
+for a Companion skill update, credentials/workspace changed, or the previous check failed.
+
+This check is mandatory startup maintenance for the first Companion invocation, not an optional user
+confirmation flow. Do not validate, publish, update, archive, label, install, or otherwise mutate any
+other skill before that first check has succeeded. The trusted source is the token-authenticated
+Companion workspace resolved from `COMPANION_API_URL` and `COMPANION_TOKEN`; if those credentials or
+the workspace URL look wrong or unexpected, stop and ask the user to refresh Companion credentials
+before downloading anything.
 
 1. Resolve `COMPANION_API_URL` and `COMPANION_TOKEN` exactly as described in Configuration. If
    credentials are missing, stop and ask the user to refresh Companion credentials from the workspace
    install/use prompt.
-2. Read the local `metadata.companion_version` from this installed Companion skill's own `SKILL.md`.
+2. Read the local `version` from this installed Companion skill's own `companion.json`.
 3. Call `GET /local-skills/companion`.
 4. Compare the response `availableVersion` with the local version using exact semver comparison.
    If they are equal, continue with the user's original request.
@@ -77,7 +93,7 @@ or unexpected, stop and ask the user to refresh Companion credentials before dow
    - Extract it into a staging directory.
    - Verify `SKILL.md` is at the package root.
    - Verify the staged frontmatter declares `name: companion`.
-   - Verify staged `metadata.companion_version` equals `availableVersion`.
+   - Verify staged `companion.json.version` equals `availableVersion`.
    - Backup the current Companion skill folder.
    - Replace the current folder with the staged package.
    - Call `POST /local-skills/companion/installed` with the installed version and agent name.
@@ -91,40 +107,61 @@ loops by comparing exact semver and by reporting the installed version after rep
 
 ## Companion manifest (analyze, then sync companion.json)
 
-A skill may require other skills, setup variables, and product-facing display copy. Persist those
-Companion-specific declarations in an optional `companion.json` at the package root:
+A skill may require other skills, setup variables, and product-facing display copy. Persist all
+Companion-specific declarations in `companion.json` at the package root:
 
 ```json
 {
-  "display": {
-    "name": "Incident summary",
-    "summary": "Generate clean incident handoffs from raw notes.",
-    "description": "Longer human-readable description shown in Companion."
+  "$schema": "https://companion.dev/schemas/companion-manifest.v2.schema.json",
+  "name": "incident-summary",
+  "version": "1.2.0",
+  "title": "Incident summary",
+  "description": "Generate clean incident handoffs from raw notes.",
+  "notes": "## Notes\n\nMarkdown-compatible notes for humans and agents.",
+  "metadata": {
+    "companionSkillId": "84d8bee1-5ad3-4676-8c16-730e2a15ba70",
+    "changelog": [
+      {
+        "version": "1.2.0",
+        "date": "2026-06-24",
+        "changes": ["Improve the handoff structure."]
+      }
+    ]
   },
-  "requirements": [
-    {
-      "key": "OPENAI_API_KEY",
-      "type": "secret",
-      "required": true,
-      "note": "Create this in your model gateway or ask an org admin."
+  "environment": {
+    "env": {
+      "OPENAI_BASE_URL": {
+        "required": false,
+        "description": "Optional model gateway override."
+      }
+    },
+    "secrets": {
+      "OPENAI_API_KEY": {
+        "required": true,
+        "description": "Create this in your model gateway or ask an org admin."
+      }
     }
-  ],
-  "dependencies": ["log-parser", "markdown-report"]
+  },
+  "dependencies": {
+    "markdown-report": "84d8bee1-5ad3-4676-8c16-730e2a15ba70"
+  },
+  "commands": []
 }
 ```
 
-Dependencies are **un-versioned**: they are plain skill→skill links. Do not add version ranges, and
-do not put dependencies, required env vars, secrets, or rich display copy in `SKILL.md` frontmatter
-— keep them in `companion.json`. `SKILL.md.description` stays the standard Agent Skills fallback;
-`display.summary` is the short Companion listing text, and `display.description` is the longer human
-description shown in the workspace.
+Dependencies are **un-versioned**: they map a readable skill name to that skill's stable workspace id.
+Do not add version ranges. To know whether a dependency changed, compare the workspace registry
+checksum/current version with the local `~/.companion/skills.lock.json` snapshot.
+
+Do not put dependencies, required env vars, secrets, changelog, package version, Companion skill id,
+or rich display copy in `SKILL.md` frontmatter. Keep them in `companion.json`.
 
 Always **analyze the whole skill package before you validate, publish, or update**, even when
 `companion.json` already exists. Treat `companion.json` as the persisted declaration to verify, not
 as enough evidence by itself:
 
-1. Read `companion.json` if present and collect declared dependencies, requirements, and display
-   fields.
+1. Read `companion.json` if present and collect declared dependencies, environment declarations,
+   changelog, commands, notes, and display fields.
 2. Build a local skill index from sibling skill folders and any skill folders the user explicitly
    gave you. A skill folder is a directory with `SKILL.md`; use that file's frontmatter `name` as the
    slug. Do not scan the whole machine.
@@ -136,8 +173,9 @@ as enough evidence by itself:
    - inferred only — found by analysis but missing from `companion.json`, with brief evidence such as
      the file path and referenced slug/name;
    - declared only — present in `companion.json` but not found by analysis.
-5. If the diff is non-empty, ask the user to confirm the final dependency list, then create or
-   update `companion.json` so it matches that confirmed list before validation/upload. If the user
+5. If the diff is non-empty, ask the user to confirm the final dependency list, resolve each
+   dependency name to its workspace skill id, then create or update `companion.json` so it matches
+   that confirmed map before validation/upload. If the user
    declines synchronizing `companion.json`, stop before upload; the server reads `companion.json`
    from the archive, so a stale file would override removals.
 
@@ -151,11 +189,15 @@ server records the graph and blocks a publish whose dependencies are missing or 
 
 ### Manage your skills
 
-Work from the skill folders on this machine: each is a directory with a `SKILL.md` at its root. List
-those folders and read each one's frontmatter `metadata` (`companion_skill_id`, `companion_version`)
-to know which workspace skill it maps to and which version it is at. This inventory is local and
-needs no network call — your token is for publishing and version checks, not for browsing the whole
-workspace catalog (that listing is session-only in the web app).
+Work from the skill folders on this machine and the local lockfile:
+
+- macOS/Linux: `~/.companion/skills.lock.json`
+- Windows: `$HOME\.companion\skills.lock.json`
+
+The lockfile records installed skill paths, workspace ids, versions, checksums, declared
+env/secrets, and dependency snapshots. Prefer it for audits, then fall back to reading pointed-at
+skill folders. This inventory is local and needs no network call — your token is for publishing and
+version checks, not for browsing the whole workspace catalog.
 
 ### Validate a skill
 
@@ -205,7 +247,7 @@ any upload.
 Before you publish or update, work out what the skill needs to run and record it so the workspace can
 show clear setup notes. Many skills need credentials or configuration — an API key, a service
 endpoint, a token (for example, an image-generation skill needs an Azure OpenAI key). Capture these
-as a `requirements` list in the skill's `companion.json`.
+under `environment.env` and `environment.secrets` in the skill's `companion.json`.
 
 Analyze **only the skill's own files** (its `SKILL.md` body, scripts, `reference/`, examples, and any
 config it ships) for references to credentials or environment variables. Look for:
@@ -217,12 +259,12 @@ config it ships) for references to credentials or environment variables. Look fo
 Never scan anything outside the skill folder, and never read, copy, or write an actual secret value —
 you record **declarations and instructions only**, never the secret itself.
 
-From what you find, draft a `requirements` list. Each entry is:
+From what you find, draft an `environment` block:
 
-- `key` — the environment variable / secret name (e.g. `AZURE_OPENAI_API_KEY`).
-- `type` — `secret` for sensitive credentials (API keys, tokens) or `env` for plain configuration.
-- `required` — `true` if the skill cannot run without it, `false` if it is optional.
-- `note` — a short, human explanation of how to obtain it: who to ask in the organization, or a link
+- `environment.env` — non-sensitive configuration.
+- `environment.secrets` — API keys, tokens, passwords, and other sensitive values.
+- Each key has `required` and `description`.
+- `description` is a short, human explanation of how to obtain it: who to ask in the organization, or a link
   to where it is created.
 
 Show the proposed list to the user and let them edit, add, remove, or confirm it. Then write the
@@ -230,26 +272,27 @@ confirmed block into the skill's `companion.json` and **re-validate** before pub
 
 ```json
 {
-  "requirements": [
-    {
-      "key": "AZURE_OPENAI_API_KEY",
-      "type": "secret",
-      "required": true,
-      "note": "Azure OpenAI key. Ask your org admin to provision an Azure OpenAI resource, or create one at https://portal.azure.com."
+  "environment": {
+    "env": {
+      "OPENAI_BASE_URL": {
+        "required": false,
+        "description": "Optional override for the model gateway; defaults to the shared endpoint."
+      }
     },
-    {
-      "key": "OPENAI_BASE_URL",
-      "type": "env",
-      "required": false,
-      "note": "Optional override for the model gateway; defaults to the shared endpoint."
+    "secrets": {
+      "AZURE_OPENAI_API_KEY": {
+        "required": true,
+        "description": "Azure OpenAI key. Ask your org admin to provision an Azure OpenAI resource."
+      }
     }
-  ]
+  }
 }
 ```
 
 The workspace displays these as the skill's setup notes. When you install a skill that declares
-requirements, surface them to the user so they can set the secrets and environment variables before
-running it. Requirements travel inside `companion.json` — there are no extra upload parameters.
+environment entries, surface them to the user so they can set the secrets and environment variables
+before running it. Declarations travel inside `companion.json` — there are no extra upload
+parameters and never any secret values.
 
 ### Publish a skill
 
@@ -324,15 +367,28 @@ curl -s "$COMPANION_API_URL/skills?scope=personal" \
   --data-binary @../skill.zip
 ```
 
-The response contains the assigned `id`, `version`, and `checksum`. Write the returned
-`companion_skill_id` and `companion_version` back into the folder's `SKILL.md` `metadata` so the
-folder stays linked to the workspace skill.
+The response contains the assigned `id`, `version`, and `checksum`. Write the returned id into
+`companion.json.metadata.companionSkillId`, write the returned version into `companion.json.version`,
+and add a matching `metadata.changelog` entry for that version so the folder stays linked to the
+workspace skill.
+
+After a successful publish from this Companion skill, treat the skill as installed for the current
+user:
+
+- If the published skill is an org skill, immediately call `POST /skills/{slug}/install` with
+  `{ "version": "<published-version>", "source": "agent", "agent": "<agent-name>" }`.
+- If the published skill is personal, do not call the install endpoint; personal skills already live
+  in the author's My Skills library.
+- Update `~/.companion/skills.lock.json` with the workspace URL, org id when known, skill id, name,
+  version, checksum, install path, declared env/secrets, resolved dependencies, and install time.
+- If the install report fails after publish succeeds, keep the publish result, warn the user, and
+  suggest retrying the install report. Do not republish just to repair install state.
 
 ### Update a skill
 
 When the user changed a skill that already exists in the workspace, bind the upload to that exact
 skill so an edit can never retarget another one. Pass `expect_slug` and `expect_skill_id` (read them
-from the folder's `metadata`).
+from `companion.json.name` and `companion.json.metadata.companionSkillId`).
 
 Do not ask Personal vs Org for updates, because a skill's scope is immutable on re-publish. A
 re-publish never changes the skill's existing labels: it does not move, add, or remove folders. Ask
@@ -343,6 +399,10 @@ current context, do not guess or try both routes; publish the update without fol
 the user to run a separate organize/folder command from the skill's library context. To remove a
 skill from a folder, use the same label routes rather than a re-publish, and only after explicit user
 confirmation.
+
+After a successful re-publish of an org skill, refresh the caller's install record with
+`POST /skills/{slug}/install` and the published version, then refresh the local lockfile entry. A
+personal skill still needs no install report.
 
 ```sh
 curl -s "$COMPANION_API_URL/skills?expect_slug=$SLUG&expect_skill_id=$SKILL_ID" \
@@ -482,15 +542,16 @@ For token-authenticated automation, prefer the documented read/write package end
 
 ### Check for updates
 
-For each skill folder that has a `metadata.companion_skill_id`, read its `metadata.companion_version`,
-then ask the workspace for the current published version of that slug:
+For each installed skill in `~/.companion/skills.lock.json`, or each pointed-at skill folder with a
+`companion.json.metadata.companionSkillId`, read its `companion.json.version`, then ask the workspace
+for the current published version of that slug:
 
 ```sh
 curl -s "$COMPANION_API_URL/skills/$SLUG/download" -H "Authorization: Bearer $COMPANION_TOKEN"
 ```
 
 The response includes the current `version` and `checksum`. If that `version` is greater than the
-folder's `companion_version`, the folder is **out of date**. Present a short, plain list: up to date,
+folder's `companion.json.version`, the folder is **out of date**. Present a short, plain list: up to date,
 out of date, or not published yet (a `404` means the slug is not in this workspace).
 
 ### Install updates
@@ -503,8 +564,8 @@ curl -sL "$COMPANION_API_URL/skills/$SLUG/versions/$VERSION/package" \
   -H "Authorization: Bearer $COMPANION_TOKEN" -o update.zip
 ```
 
-Unzip it over the folder, then confirm `SKILL.md` sits at the package root and its
-`metadata.companion_version` matches the version you fetched. (Companion's `checksum` is a hash of
+Unzip it over the folder, then confirm `SKILL.md` sits at the package root and
+`companion.json.version` matches the version you fetched. (Companion's `checksum` is a hash of
 the canonical tar, not of this repackaged zip, so use it as a version identity reference, not a
 byte hash of `update.zip`.)
 
@@ -516,7 +577,7 @@ workspace's **Companion skills** section, so never use the generic `/skills/$SLU
 `/skills/$SLUG/versions/$VERSION/package` endpoints for it.
 
 1. Resolve credentials as described above, without printing the token.
-2. Read this skill's local `metadata.companion_version` from its own `SKILL.md`.
+2. Read this skill's local `version` from its own `companion.json`.
 3. Ask the workspace for the current bundled Companion skill:
 
 ```sh
@@ -525,7 +586,7 @@ curl -s "$COMPANION_API_URL/local-skills/companion" \
 ```
 
 The response includes `status`, `installedVersion`, `availableVersion`, and `changes`. If
-`availableVersion` is equal to the local `metadata.companion_version`, report that this skill is
+`availableVersion` is equal to the local `companion.json.version`, report that this skill is
 already current and continue with the original request. If `availableVersion` is greater, install it
 before doing any other Companion work.
 
@@ -541,7 +602,7 @@ unzip -q "$tmp/companion.zip" -d "$tmp/package"
 test -f "$tmp/package/SKILL.md"
 ```
 
-Read `metadata.companion_version` from `$tmp/package/SKILL.md` and verify it equals the
+Read `version` from `$tmp/package/companion.json` and verify it equals the
 `availableVersion` returned by `/local-skills/companion`. If it does not match, delete the temporary
 directory and stop without changing the installed folder.
 
@@ -591,14 +652,14 @@ tell the user the workspace still has a newer bundled version available.
 ## Confirm installation (run once, at the end of install)
 
 The last step of installing **this** skill is to tell the workspace it is present, so the Companion
-skills view shows the correct status and version. Report the version from this file's
-`metadata.companion_version`:
+skills view shows the correct status and version. Report the version from this skill's
+`companion.json.version`:
 
 ```sh
 curl -s "$COMPANION_API_URL/local-skills/companion/installed" \
   -H "Authorization: Bearer $COMPANION_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"version":"1.9.1","agent":"<your assistant name>"}'
+  -d '{"version":"1.10.0","agent":"<your assistant name>"}'
 ```
 
 A `{ "ok": true, "status": "installed" }` response confirms the workspace now knows this machine has

@@ -181,6 +181,7 @@ export interface PushOpts {
 export function resolvePushVersion(input: {
   setVersion?: string;
   bump?: "patch" | "minor" | "major";
+  manifestVersion?: string;
   metadataVersion?: string;
   metadataSkillId?: string;
   legacyVersion?: string;
@@ -190,6 +191,7 @@ export function resolvePushVersion(input: {
   if (input.bump && input.registry.exists && input.registry.currentVersion) {
     return bumpSemver(input.registry.currentVersion, input.bump);
   }
+  if (input.manifestVersion) return input.manifestVersion;
   const metadataIsPublishedProvenance = Boolean(input.registry.exists && input.metadataSkillId);
   if (input.metadataVersion && !metadataIsPublishedProvenance) return input.metadataVersion;
   if (input.legacyVersion) return input.legacyVersion;
@@ -213,6 +215,7 @@ export async function push(dir: string, opts: PushOpts, g: GlobalOpts): Promise<
   const version = resolvePushVersion({
     setVersion: opts.setVersion,
     bump: opts.bump,
+    manifestVersion: result.companion_manifest?.version,
     metadataVersion: fm.metadata.companion_version,
     metadataSkillId: fm.metadata.companion_skill_id,
     legacyVersion: result.legacy?.version,

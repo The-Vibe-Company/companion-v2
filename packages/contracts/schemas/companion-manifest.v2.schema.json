@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://companion.dev/schemas/companion-manifest.v2.schema.json",
+  "title": "Companion Manifest v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["$schema", "name", "version", "description", "metadata", "environment", "dependencies"],
+  "properties": {
+    "$schema": { "const": "https://companion.dev/schemas/companion-manifest.v2.schema.json" },
+    "name": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$" },
+    "version": {
+      "type": "string",
+      "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-((?:0|[1-9]\\d*|\\d*[A-Za-z-][0-9A-Za-z-]*)(?:\\.(?:0|[1-9]\\d*|\\d*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\\+([0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*))?$"
+    },
+    "title": { "type": "string", "minLength": 1, "maxLength": 120 },
+    "description": { "type": "string", "minLength": 1, "maxLength": 1024 },
+    "notes": { "type": "string", "maxLength": 8000 },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["changelog"],
+      "properties": {
+        "companionSkillId": { "type": "string", "format": "uuid" },
+        "changelog": {
+          "type": "array",
+          "maxItems": 200,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["version", "changes"],
+            "properties": {
+              "version": {
+                "type": "string",
+                "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-((?:0|[1-9]\\d*|\\d*[A-Za-z-][0-9A-Za-z-]*)(?:\\.(?:0|[1-9]\\d*|\\d*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\\+([0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*))?$"
+              },
+              "date": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+              "changes": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 50,
+                "items": { "type": "string", "minLength": 1, "maxLength": 1000 }
+              }
+            }
+          }
+        }
+      }
+    },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["env", "secrets"],
+      "properties": {
+        "env": { "$ref": "#/$defs/environmentMap" },
+        "secrets": { "$ref": "#/$defs/environmentMap" }
+      }
+    },
+    "dependencies": {
+      "type": "object",
+      "maxProperties": 64,
+      "propertyNames": { "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$" },
+      "additionalProperties": { "type": "string", "format": "uuid" }
+    },
+    "commands": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "desc"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+          "desc": { "type": "string", "minLength": 1, "maxLength": 500 }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "environmentMap": {
+      "type": "object",
+      "propertyNames": { "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["required", "description"],
+        "properties": {
+          "required": { "type": "boolean" },
+          "description": { "type": "string", "maxLength": 2000 }
+        },
+        "not": { "required": ["value"] }
+      }
+    }
+  }
+}

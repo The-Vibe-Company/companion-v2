@@ -79,7 +79,7 @@ function analyzeLegacyFields(doc: Record<string, unknown>): {
       code: "legacy-version",
       field: "version",
       message: "Top-level version is not part of the Agent Skills spec.",
-      suggestion: "Move it to metadata.companion_version or pass the version on publish.",
+      suggestion: "Move it to companion.json version or pass the version on publish.",
     });
   }
   if (doc.tools !== undefined) {

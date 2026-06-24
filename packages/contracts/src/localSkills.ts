@@ -44,9 +44,8 @@ export const localSkillRowSchema = z.object({
   lastReportedAt: z.string().nullable(),
   /** Optional source label the assistant reported. */
   agentLabel: z.string().nullable(),
-  what: z.string(),
-  uses: z.string(),
-  why: z.array(z.string()),
+  /** Markdown-compatible notes from the bundled skill's companion.json. */
+  notes: z.string(),
   commands: z.array(localSkillCommandSchema),
   /** What changes in the available version (shown when status === "update"). */
   changes: z.array(z.string()),

@@ -45,6 +45,7 @@ These are the skills endpoints a personal access token (`skills:read` + `skills:
 | Current bundled Companion skill status | `GET /local-skills/companion` | `skills:read` |
 | Download bundled Companion skill package | `GET /local-skills/companion/package` | `skills:read` |
 | Confirm this skill installed | `POST /local-skills/companion/installed` | `skills:write` |
+| Fetch companion.json v2 schema | `GET /v1/schemas/companion-manifest.v2.schema.json` | Public |
 
 Some skills-management routes are intended for the signed-in web session rather than the
 Companion PAT. Use them only when the caller is operating with a valid session cookie:
@@ -70,8 +71,9 @@ Do not use this skill for workspace members, invitations, org settings, or token
 Those are outside the skills-only management surface.
 
 Listing the whole workspace catalog (`GET /skills`) and enumerating versions are session-only in the
-web app and reject tokens. To inventory what is installed on this machine, read the local skill
-folders directly (each has a `SKILL.md` with `metadata.companion_skill_id` / `companion_version`).
+web app and reject tokens. To inventory what is installed on this machine, read
+`~/.companion/skills.lock.json` first, then fall back to pointed-at skill folders with
+`companion.json.metadata.companionSkillId` / `companion.json.version`.
 
 The built-in Companion skill is different from user-published skills. For the skill shown in the
 workspace's **Companion skills** section, use only the `/local-skills/companion` endpoints.
@@ -103,13 +105,29 @@ only, one-way). A skill name (slug) is unique across both libraries in a workspa
 - a raw `application/zip` or `application/gzip` body (the archive itself), with the same options as
   query params.
 
-Declare dependencies in the package root `companion.json`. The API still accepts repeated
-`dependency=<slug>` parameters as a legacy fallback only when the uploaded archive has no
-`companion.json`; when the manifest exists, its `dependencies` list wins. The Companion skill must
-analyze the local package, compare the result with `companion.json`, ask before changing the
-dependency list, synchronize `companion.json` to the confirmed final list, and only then package and
-send the archive. Set `action=validate` to run every package and identity check without publishing;
-the validate response is `{ "result": <validation>, "dependency_plan": <plan> }`.
+Declare dependencies in the package root `companion.json`. Manifest v2 uses a name-to-id map:
+`{ "dependencies": { "markdown-report": "84d8bee1-5ad3-4676-8c16-730e2a15ba70" } }`.
+The API still accepts repeated `dependency=<slug>` parameters as a legacy fallback only when the
+uploaded archive has no `companion.json`; when the manifest exists, its dependency keys win. The
+Companion skill must analyze the local package, compare the result with `companion.json`, ask before
+changing the dependency map, resolve each dependency to its workspace skill id, synchronize
+`companion.json`, and only then package and send the archive. Set `action=validate` to run every
+package and identity check without publishing; the validate response is
+`{ "result": <validation>, "dependency_plan": <plan> }`.
+
+After a successful publish or re-publish performed by the Companion skill, an org skill must be
+reported as installed for the current user:
+
+```http
+POST /skills/{slug}/install
+Content-Type: application/json
+
+{ "version": "1.10.0", "source": "agent", "agent": "Claude Code" }
+```
+
+Skip this install report for personal skills; they already appear in the author's My Skills library.
+If the install report fails after publish succeeds, do not republish. Tell the user publish succeeded
+and retry only the install report.
 
 Before publishing a brand-new skill, the Companion skill must ask the user for both placement
 decisions: Personal/My Skills vs Org/everyone, then existing folder, new folder, or no folder. Fetch
@@ -147,7 +165,8 @@ Content-Type: application/zip
 
 When updating a skill that already exists, send both `expect_slug` and `expect_skill_id`. The server
 rejects the upload if the package's frontmatter `name` differs from `expect_slug`, or if its
-`metadata.companion_skill_id` points at a different skill. This makes it impossible for an edit to
+`companion.json.metadata.companionSkillId` points at a different skill. Legacy
+`metadata.companion_skill_id` is accepted only as a migration fallback. This makes it impossible for an edit to
 silently retarget another skill.
 
 A re-publish preserves the skill's existing scope and labels. Do not ask Personal vs Org for updates,
@@ -163,10 +182,10 @@ call the org or personal label routes separately and only after explicit user co
 ## Dependencies & archive
 
 Dependencies are un-versioned skill→skill links persisted in a package's `companion.json`
-(`{ "dependencies": ["slug-a", "slug-b"] }`). Before validate or publish, the Companion skill must
-still analyze the full local package, compare inferred dependencies with `companion.json`, and ask
-before synchronizing additions or removals. Package only after `companion.json` matches the confirmed
-final list. Repeated `dependency=` parameters are accepted only for old packages without
+(`{ "dependencies": { "slug-a": "skill-uuid" } }`). Before validate or publish, the Companion skill
+must still analyze the full local package, compare inferred dependencies with `companion.json`, and
+ask before synchronizing additions or removals. Package only after `companion.json` matches the
+confirmed dependency map. Repeated `dependency=` parameters are accepted only for old packages without
 `companion.json`; do not send them for manifest-backed packages because the manifest is the source of
 truth.
 
@@ -273,8 +292,8 @@ skills.
 Versions are immutable. Each version row carries a `checksum` of the form `sha256:<64 hex>` over the
 canonical (uncompressed) tar. This is **not** the hash of the `.zip` the package endpoint serves, so
 treat it as a version identity reference, not a byte check of the download. To confirm an install,
-check that `SKILL.md` is at the package root and its `metadata.companion_version` matches the
-version you fetched.
+check that `SKILL.md` is at the package root and `companion.json.version` matches the version you
+fetched.
 
 ## Update the Companion skill itself
 
@@ -286,8 +305,8 @@ GET /local-skills/companion
 ```
 
 The response includes `status`, `installedVersion`, `availableVersion`, and `changes`. Compare
-`availableVersion` with the `metadata.companion_version` in the installed Companion skill's
-`SKILL.md`. If they match, no update is needed.
+`availableVersion` with the `version` in the installed Companion skill's `companion.json`. If they
+match, no update is needed.
 
 If `availableVersion` is newer, download the bundled package:
 
@@ -296,7 +315,7 @@ GET /local-skills/companion/package
 ```
 
 Extract it into a temporary directory, verify `SKILL.md` is at the package root, and verify its
-`metadata.companion_version` equals the `availableVersion` from `/local-skills/companion`. Only then
+`companion.json.version` equals the `availableVersion` from `/local-skills/companion`. Only then
 replace the installed Companion skill folder. After replacement, call
 `POST /local-skills/companion/installed` with the installed version so the workspace status updates.
 
@@ -309,8 +328,8 @@ built-in Companion skill. Those endpoints are for workspace-published skills.
 POST /local-skills/companion/installed
 Content-Type: application/json
 
-{ "version": "1.9.1", "agent": "Claude Code" }
+{ "version": "1.10.0", "agent": "Claude Code" }
 ```
 
-`version` must be valid semver (use this skill's `metadata.companion_version`). The response is
-`{ "ok": true, "status": "installed" | "update", "availableVersion": "1.9.1" }`.
+`version` must be valid semver (use this skill's `companion.json.version`). The response is
+`{ "ok": true, "status": "installed" | "update", "availableVersion": "1.10.0" }`.

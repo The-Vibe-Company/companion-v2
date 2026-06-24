@@ -14,8 +14,9 @@ import { localSkillStatusSchema } from "./localSkills";
 
 /**
  * Live status of a single skill→skill dependency edge, computed from current state on every read.
- * Dependencies are un-versioned (pure skill→skill links): there is deliberately no "update
- * available" status — versions are a skill's own publish concern, not the dependency graph's.
+ * Dependencies are un-versioned (pure skill→skill links). Package manifests declare them as a
+ * readable skill name mapped to the stable skill id; the persisted graph keeps the slug and resolved
+ * id for current workspace reads.
  */
 export const skillDependencyStatusSchema = z.enum([
   "satisfied", // target published, not archived, no cycle

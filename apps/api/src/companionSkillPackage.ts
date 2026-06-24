@@ -8,7 +8,7 @@ import {
 } from "@companion/companion-skill";
 import { computeLocalSkillStatus, type LocalSkillInstall } from "@companion/core/services";
 import type { LocalSkillPrompts, LocalSkillRow } from "@companion/contracts";
-import { packDir, parseFrontmatter } from "@companion/skills";
+import { packDir } from "@companion/skills";
 
 export interface CompanionSkillPackage {
   key: string;
@@ -16,7 +16,7 @@ export interface CompanionSkillPackage {
   archive: Buffer;
   checksum: string;
   sizeBytes: number;
-  /** Authoritative version, read from the bundled SKILL.md `metadata.companion_version`. */
+  /** Authoritative version, read from the bundled companion.json `version`. */
   version: string;
 }
 
@@ -39,10 +39,9 @@ export function getCompanionSkillPackage(): Promise<CompanionSkillPackage> {
 async function buildPackage(): Promise<CompanionSkillPackage> {
   const dir = companionSkillDir();
   const packed = await packDir(dir);
-  const fm = parseFrontmatter(await readFile(join(dir, "SKILL.md"), "utf8"));
-  if (!fm.ok) throw new Error(`bundled companion skill is invalid: ${fm.error ?? "frontmatter"}`);
-  const version = fm.data.metadata.companion_version;
-  if (!version) throw new Error("bundled companion skill is missing metadata.companion_version");
+  const manifest = JSON.parse(await readFile(join(dir, "companion.json"), "utf8")) as { version?: string };
+  const version = manifest.version;
+  if (!version) throw new Error("bundled companion skill is missing companion.json version");
   return {
     key: COMPANION_SKILL_KEY,
     archive: packed.archive,
@@ -105,7 +104,7 @@ function buildPrompts(version: string): LocalSkillPrompts {
     "2. Download the latest package:",
     `   ${download}`,
     "3. Unzip companion.zip into a temporary folder and verify SKILL.md is at the package root.",
-    `   Verify its metadata.companion_version is ${version}.`,
+    `   Verify its companion.json version is ${version}.`,
     "4. Validate the existing companion skill folder, then move it to a backup path and move the",
     "   extracted package folder into its place. Do not delete the existing folder before the new",
     "   package has been staged and verified.",
@@ -142,9 +141,7 @@ export async function buildCompanionSkillRow(install: LocalSkillInstall | null):
     availableVersion: pkg.version,
     lastReportedAt: install ? install.lastReportedAt.toISOString() : null,
     agentLabel: install?.agentLabel ?? null,
-    what: m.what,
-    uses: m.uses,
-    why: m.why,
+    notes: m.notes,
     commands: m.commands,
     changes: companionSkillChanges(pkg.version),
     prompts: buildPrompts(pkg.version),

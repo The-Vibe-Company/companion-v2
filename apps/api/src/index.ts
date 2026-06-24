@@ -95,6 +95,8 @@ import {
   setLabelIconInputSchema,
   skillFrontmatterSchema,
   skillFilterPreferencesSchema,
+  companionDependencySlugs,
+  companionManifestV2JsonSchema,
   fallbackCompanionManifest,
   updateOrgInputSchema,
   resolveOrgLogoContentType,
@@ -152,6 +154,8 @@ import { COMPANION_SKILL_KEY } from "@companion/companion-skill";
 
 const app = new Hono<{ Variables: ApiVariables }>();
 
+app.get("/v1/schemas/companion-manifest.v2.schema.json", (c) => c.json(companionManifestV2JsonSchema));
+
 /** Set the `companion_org` selection cookie (readable client-side, so not httpOnly). */
 function setOrgCookie(c: Context<{ Variables: ApiVariables }>, orgId: string): void {
   setCookie(c, "companion_org", orgId, {
@@ -175,7 +179,7 @@ async function withTenant<T>(
 async function canonicalizeSkillArchive(
   archive: Buffer,
   companion: { skillId: string; version: string },
-  overrides: { dependencies?: string[] } = {},
+  overrides: { dependencies?: string[] | Record<string, string> } = {},
 ) {
   const dir = await mkdtemp(join(tmpdir(), "companion-skill-"));
   try {
@@ -204,21 +208,47 @@ function buildSkillMd(
   id: string,
   description: string,
   body: string,
-  companion: { skillId: string; version: string },
+  _companion: { skillId: string; version: string },
 ): string {
   const frontmatter = skillFrontmatterSchema.parse({
     name: id,
     description,
-    metadata: {
-      companion_skill_id: companion.skillId,
-      companion_version: companion.version,
-    },
+    metadata: {},
   });
   return buildNormalizedSkillMd(frontmatter, body);
 }
 
 function skillSummary(fm: SkillFrontmatter, manifest: CompanionManifest): string {
   return manifest.display.summary ?? fm.description;
+}
+
+async function resolveDependencyMap(input: {
+  actor: ReturnType<typeof actorFromContext>;
+  orgId: string;
+  slugs: string[];
+}): Promise<Record<string, string>> {
+  const pairs: Record<string, string> = {};
+  for (const slug of input.slugs) {
+    const skill = await getSkillBySlug({ actor: input.actor, orgId: input.orgId, slug });
+    if (skill) pairs[slug] = skill.id;
+  }
+  return pairs;
+}
+
+async function assertManifestDependencyIds(input: {
+  actor: ReturnType<typeof actorFromContext>;
+  orgId: string;
+  manifest?: CompanionManifest;
+}): Promise<void> {
+  if (!input.manifest) return;
+  for (const [slug, declaredId] of Object.entries(input.manifest.dependencies)) {
+    if (!declaredId) continue;
+    const skill = await getSkillBySlug({ actor: input.actor, orgId: input.orgId, slug });
+    if (!skill) continue;
+    if (skill.id !== declaredId) {
+      throw new Error(`dependency "${slug}" id does not match the workspace skill`);
+    }
+  }
 }
 
 async function resolvePublishTarget(input: {
@@ -1570,6 +1600,7 @@ app.post("/v1/skills", bodyLimit({ maxSize: 32 * 1024 * 1024, onError: (c) => js
       try {
         assertTargetedSkillUpdate({
           frontmatter: fm,
+          companionSkillId: result.companion_manifest?.metadata.companionSkillId,
           expectSlug,
           expectSkillId,
           expectedSkill,
@@ -1585,6 +1616,11 @@ app.post("/v1/skills", bodyLimit({ maxSize: 32 * 1024 * 1024, onError: (c) => js
       companionManifestPath: result.companion_manifest_path,
       companionManifest: result.companion_manifest,
     });
+    try {
+      await assertManifestDependencyIds({ actor, orgId, manifest: result.companion_manifest });
+    } catch (error) {
+      return c.json({ result, error: error instanceof Error ? error.message : String(error) }, 422);
+    }
     // Dependency preflight: which declared deps are published / must be uploaded / dropped, plus any
     // blockers (missing / cycle). Skills are flat — there is no owner-cover constraint. Computed for
     // both validate (preview) and publish.
@@ -1606,14 +1642,15 @@ app.post("/v1/skills", bodyLimit({ maxSize: 32 * 1024 * 1024, onError: (c) => js
       orgId,
       slug: fm.name,
       explicitVersion: versionRaw,
-      metadataVersion: fm.metadata.companion_version,
-      metadataSkillId: fm.metadata.companion_skill_id,
+      metadataVersion: result.companion_manifest?.version ?? fm.metadata.companion_version,
+      metadataSkillId: result.companion_manifest?.metadata.companionSkillId ?? fm.metadata.companion_skill_id,
       legacyVersion: result.legacy?.version,
     });
+    const dependencyMap = await resolveDependencyMap({ actor, orgId, slugs: dependencyValues });
     const normalized = await canonicalizeSkillArchive(archive, {
       skillId: target.skillId,
       version: target.version,
-    }, result.companion_manifest_path === null ? { dependencies: dependencyValues } : {});
+    }, { dependencies: dependencyMap });
     const normalizedResult = await validateSkillArchive(normalized.canonical.archive);
     if (!normalizedResult.ok || !normalizedResult.frontmatter) {
       return c.json({ result: normalizedResult, error: normalizedResult.error ?? "validation failed after normalization" }, 422);
@@ -1634,7 +1671,7 @@ app.post("/v1/skills", bodyLimit({ maxSize: 32 * 1024 * 1024, onError: (c) => js
         version: target.version,
         note: messageRaw ?? "",
         body: normalizedResult.body ?? "",
-        dependencies: normalized.companionManifest.dependencies,
+        dependencies: companionDependencySlugs(normalized.companionManifest),
       });
     } catch (error) {
       // Unresolved dependencies (missing / cycle) — surface the plan, don't 500.
@@ -1681,11 +1718,15 @@ app.post("/v1/skills/create", bodyLimit({ maxSize: 2 * 1024 * 1024, onError: (c)
       },
       true,
     );
+    const carriedDependencyMap = await resolveDependencyMap({ actor, orgId, slugs: carriedDependencies });
     const companionManifest = buildInlineCompanionManifest({
       description: input.description,
       carriedDisplay,
       carriedRequirements,
-      carriedDependencies,
+      carriedDependencies: carriedDependencyMap,
+      name: input.id,
+      version: target.version,
+      companionSkillId: target.skillId,
     });
     const dir = await mkdtemp(join(tmpdir(), "companion-skill-"));
     try {
@@ -1709,7 +1750,7 @@ app.post("/v1/skills/create", bodyLimit({ maxSize: 2 * 1024 * 1024, onError: (c)
         version: target.version,
         note: "",
         body: result.body ?? "",
-        dependencies: carriedDependencies,
+        dependencies: companionDependencySlugs(companionManifest),
       });
       return c.json({ ok: true, ...published, warnings: result.warnings ?? [] });
     } finally {

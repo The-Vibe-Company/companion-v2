@@ -1,4 +1,5 @@
 import {
+  companionDependencySlugs,
   fallbackCompanionManifest,
   type CompanionDisplay,
   type CompanionManifest,
@@ -11,7 +12,7 @@ export function uploadDependencyValues(input: {
   companionManifest?: CompanionManifest;
 }): string[] {
   if (input.companionManifestPath !== null && input.companionManifest) {
-    return input.companionManifest.dependencies;
+    return companionDependencySlugs(input.companionManifest);
   }
   return input.queryDependencies;
 }
@@ -20,7 +21,10 @@ export function buildInlineCompanionManifest(input: {
   description: string;
   carriedDisplay?: CompanionDisplay | null;
   carriedRequirements: SkillRequirement[];
-  carriedDependencies: string[];
+  carriedDependencies: string[] | Record<string, string>;
+  name?: string;
+  version?: string;
+  companionSkillId?: string;
 }): CompanionManifest {
   const previousSummary = input.carriedDisplay?.summary?.trim();
   const previousDescription = input.carriedDisplay?.description?.trim();
@@ -34,5 +38,11 @@ export function buildInlineCompanionManifest(input: {
     },
     requirements: input.carriedRequirements,
     dependencies: input.carriedDependencies,
+    name: input.name,
+    version: input.version,
+    companionSkillId: input.companionSkillId,
+    changelog: input.version
+      ? [{ version: input.version, date: new Date().toISOString().slice(0, 10), changes: [`Publish version ${input.version}.`] }]
+      : undefined,
   });
 }

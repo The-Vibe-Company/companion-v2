@@ -2,6 +2,8 @@ import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { stringify as stringifyYaml } from "yaml";
 import {
+  companionDependencySlugs,
+  companionManifestJson,
   companionManifestSchema,
   fallbackCompanionManifest,
   toStoredSkillFrontmatter,
@@ -27,21 +29,14 @@ export interface PreparedSkillDir {
   legacy: SkillLegacyFrontmatter;
 }
 
-function sortedMetadata(metadata: Record<string, string>): Record<string, string> {
-  return Object.fromEntries(Object.entries(metadata).sort(([a], [b]) => a.localeCompare(b)));
-}
-
 export function withCompanionMetadata(
   frontmatter: SkillFrontmatter,
-  companion: CompanionManifestMetadata,
+  _companion: CompanionManifestMetadata,
 ): SkillFrontmatter {
+  const { companion_skill_id: _skillId, companion_version: _version, ...metadata } = frontmatter.metadata;
   return {
     ...frontmatter,
-    metadata: sortedMetadata({
-      ...frontmatter.metadata,
-      ...(companion.skillId ? { companion_skill_id: companion.skillId } : {}),
-      companion_version: companion.version,
-    }),
+    metadata: Object.fromEntries(Object.entries(metadata).sort(([a], [b]) => a.localeCompare(b))),
   };
 }
 
@@ -52,17 +47,29 @@ export function buildNormalizedSkillMd(frontmatter: SkillFrontmatter, body: stri
 }
 
 export function buildNormalizedCompanionJson(manifest: CompanionManifest): string {
-  return `${JSON.stringify(manifest, null, 2)}\n`;
+  return `${JSON.stringify(companionManifestJson(manifest), null, 2)}\n`;
 }
 
 export function toStoredSkillVersionManifest(
   frontmatter: SkillFrontmatter,
   companion: CompanionManifest,
-): ReturnType<typeof toStoredSkillFrontmatter> & { companion: CompanionManifest } {
+): ReturnType<typeof toStoredSkillFrontmatter> & { companion: Record<string, unknown> } {
   return {
     ...toStoredSkillFrontmatter(frontmatter),
-    companion,
+    companion: companionManifestJson(companion),
   };
+}
+
+function publishChangelogForVersion(manifest: CompanionManifest, version: string): CompanionManifest["metadata"]["changelog"] {
+  if (manifest.metadata.changelog.some((entry) => entry.version === version)) return manifest.metadata.changelog;
+  return [
+    {
+      version,
+      date: new Date().toISOString().slice(0, 10),
+      changes: [`Publish version ${version}.`],
+    },
+    ...manifest.metadata.changelog,
+  ];
 }
 
 function parseCompanionJson(raw: string | null, frontmatter: SkillFrontmatter): CompanionManifest {
@@ -70,14 +77,24 @@ function parseCompanionJson(raw: string | null, frontmatter: SkillFrontmatter): 
     return fallbackCompanionManifest({
       summary: frontmatter.description,
       requirements: frontmatter.requirements,
+      name: frontmatter.name,
+      version: frontmatter.metadata.companion_version,
+      companionSkillId: frontmatter.metadata.companion_skill_id,
     });
   }
   const parsed = companionManifestSchema.parse(JSON.parse(raw));
   return fallbackCompanionManifest({
-    summary: frontmatter.description,
+    summary: parsed.description ?? frontmatter.description,
+    name: parsed.name ?? frontmatter.name,
+    version: parsed.version ?? frontmatter.metadata.companion_version,
+    companionSkillId: parsed.metadata.companionSkillId ?? frontmatter.metadata.companion_skill_id,
     display: parsed.display,
     requirements: parsed.requirements,
-    dependencies: parsed.dependencies,
+    dependencies: parsed.legacyDependencySlugs.length ? companionDependencySlugs(parsed) : parsed.dependencies,
+    environment: parsed.environment,
+    changelog: parsed.metadata.changelog,
+    commands: parsed.commands,
+    notes: parsed.notes,
   });
 }
 
@@ -111,7 +128,20 @@ export async function prepareSkillDirForPublish(
   const frontmatter = withCompanionMetadata(reparsed.data, companion);
   const companionPath = join(rootDir, "companion.json");
   const rawCompanionJson = await readFile(companionPath, "utf8").catch(() => null);
-  const companionManifest = parseCompanionJson(rawCompanionJson, frontmatter);
+  const existingManifest = parseCompanionJson(rawCompanionJson, frontmatter);
+  const companionManifest = fallbackCompanionManifest({
+    summary: existingManifest.description ?? frontmatter.description,
+    name: frontmatter.name,
+    version: companion.version,
+    companionSkillId: companion.skillId,
+    display: existingManifest.display,
+    requirements: existingManifest.requirements,
+    dependencies: existingManifest.legacyDependencySlugs.length ? companionDependencySlugs(existingManifest) : existingManifest.dependencies,
+    environment: existingManifest.environment,
+    changelog: publishChangelogForVersion(existingManifest, companion.version),
+    commands: existingManifest.commands,
+    notes: existingManifest.notes,
+  });
   await writeFile(companionPath, buildNormalizedCompanionJson(companionManifest), "utf8");
   await writeFile(skillMdPath, buildNormalizedSkillMd(frontmatter, reparsed.body), "utf8");
   return {

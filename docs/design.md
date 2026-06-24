@@ -80,18 +80,19 @@ skill's personal-folder assignments. "Installed" is not a copied row — a membe
 (`scope='personal' AND creator=them`) ∪ (org skills they have a `skill_installs` row for), surfaced
 together. A version's declared tools
 (`skill_versions.tools`) come from the Agent Skills `allowed-tools` frontmatter string.
-Companion-specific package data lives in root `companion.json`, not `SKILL.md`: `display` (human
-name, short summary, long description), `requirements` (declared secrets and environment variables,
-never values), and un-versioned skill `dependencies`. `display.summary` updates the existing
+Companion-specific package data lives in root `companion.json`, not `SKILL.md`: `name`, `version`,
+human-facing `title`/`description`, Markdown-compatible `notes`, `metadata.companionSkillId`,
+`metadata.changelog`, `environment.env` / `environment.secrets` declarations (never values),
+`commands`, and un-versioned skill `dependencies` as `{ skillName: skillId }`. `description` updates the existing
 `skills.description` listing field; the full normalized manifest rides in the existing
 `skill_versions.frontmatter` JSON under `companion` and is parsed back into the read shape
 (`skillListRowSchema.display` / `skillListRowSchema.requirements`) for the skill detail view. Legacy
-packages that still declare `requirements` in `SKILL.md` are readable for compatibility and are
-normalized into `companion.json` on publish.
-Companion-specific registry data is written under `metadata.companion_*` when a package is
-published, including `companion_skill_id` and `companion_version`. On targeted re-publish, callers
-may send `expect_slug` and `expect_skill_id`; validation and publication reject mismatched
-frontmatter names and any present `metadata.companion_skill_id` that points at a different skill.
+packages that still declare `requirements` in `SKILL.md`, `display`, or dependency arrays are readable
+for compatibility and are normalized into `companion.json` on publish. Companion registry data is
+written into `companion.json` when a package is published. On targeted re-publish, callers may send
+`expect_slug` and `expect_skill_id`; validation and publication reject mismatched frontmatter names
+and any present `companion.json.metadata.companionSkillId` (or legacy
+`metadata.companion_skill_id`) that points at a different skill.
 On re-publish of an existing Companion package, reserved version metadata is treated as provenance; the API/CLI still assigns the
 next registry version unless the caller passes an explicit version. Legacy top-level `version`,
 `tools`, and unknown fields are warnings and are not preserved as top-level fields in newly stored
@@ -160,10 +161,10 @@ org member (like every skill mutation) and write `skill.archive` / `skill.restor
 their own machine or hand to a coding assistant, surfaced in the "Companion skills" sidebar section
 (above Settings). The catalog currently has one entry, `companion` — the management skill that an
 assistant uses to upload, update, validate, and check whether the user's skills are up to date
-(comparing each local skill's `metadata.companion_skill_id` / `companion_version` against the
-registry). The package and its presentation manifest ship in `packages/companion-skill`; the
-authoritative version is the `metadata.companion_version` baked into the bundled `SKILL.md`, which
-the API packs (and caches) on demand. Only per-member install state is persisted, in
+(comparing each local skill's `companion.json.metadata.companionSkillId` / `version` and local
+`~/.companion/skills.lock.json` snapshot against the registry). The package and its presentation manifest ship in `packages/companion-skill`; the
+authoritative version is the `version` in the bundled `companion.json`, which the API packs (and
+caches) on demand. Only per-member install state is persisted in the workspace, in
 `local_skill_installs` (`(org_id, user_id, skill_key)` PK, the reported `installed_version`, an
 optional `agent_label`, `installed_at`, and `last_reported_at`). The skill reports its own install
 at the end of its install flow, and status is derived (Not installed / Installed / Update available)
@@ -314,6 +315,8 @@ as defense-in-depth, but browser and CLI clients never connect directly to Postg
   per-machine status), `GET /v1/local-skills/:key`, `GET /v1/local-skills/:key/package` (download the
   bundled skill as `.zip`), and `POST /v1/local-skills/:key/installed` (the install callback: the
   skill reports `{ version, agent? }` so the workspace learns it is installed and at which version).
+- Schemas: `GET /v1/schemas/companion-manifest.v2.schema.json` serves the public JSON Schema used by
+  assistants and editors to create or repair `companion.json`.
 - Orgs & settings: `/v1/orgs`, `GET`/`POST`/`PUT /v1/orgs/current` (read/select/rename+reslug the org,
   admin only for `PUT`), `GET /v1/orgs/current/settings` (members, invitations,
   access domains), `POST /v1/orgs/current/domains` and
