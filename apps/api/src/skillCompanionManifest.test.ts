@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { fallbackCompanionManifest } from "@companion/contracts";
-import { buildInlineCompanionManifest, uploadDependencyValues } from "./skillCompanionManifest";
+import { companionManifestJson, fallbackCompanionManifest } from "@companion/contracts";
+import { buildInlineCompanionManifest, uploadDependencyValues, withResolvedManifestDependencies } from "./skillCompanionManifest";
 
 describe("uploadDependencyValues", () => {
   it("uses companion.json dependencies when a package manifest is present", () => {
@@ -25,6 +25,61 @@ describe("uploadDependencyValues", () => {
         companionManifestPath: null,
       }),
     ).toEqual(["query-dep"]);
+  });
+});
+
+describe("withResolvedManifestDependencies", () => {
+  it("replaces only dependencies and preserves complete manifest v2 fields", () => {
+    const manifest = fallbackCompanionManifest({
+      summary: "Uploaded manifest description.",
+      display: {
+        name: "Manifest v2",
+        summary: "Uploaded manifest description.",
+        description: "## Notes\n\nKeep this package complete.",
+      },
+      name: "manifest-v2",
+      version: "1.2.0",
+      companionSkillId: "84d8bee1-5ad3-4676-8c16-730e2a15ba70",
+      changelog: [
+        { version: "1.2.0", date: "2026-06-24", changes: ["Publish version 1.2.0."] },
+        { version: "1.1.0", date: "2026-06-20", changes: ["Add manifest v2 metadata."] },
+      ],
+      environment: {
+        env: { OPENAI_BASE_URL: { required: false, description: "Optional gateway." } },
+        secrets: { OPENAI_API_KEY: { required: true, description: "Ask an admin." } },
+      },
+      dependencies: { "old-dep": "3e16ce8a-0d5f-4b2e-9db3-ae30d05e4bf8" },
+      commands: [{ name: "Review package", desc: "Inspect and publish the package safely." }],
+      notes: "## Notes\n\nKeep this package complete.",
+    });
+
+    const updated = withResolvedManifestDependencies(manifest, {
+      "markdown-report": "c0e39fb6-fb84-4610-92e7-fcfc1dc09dde",
+    });
+    const json = companionManifestJson(updated);
+
+    expect(json).toMatchObject({
+      name: "manifest-v2",
+      version: "1.2.0",
+      title: "Manifest v2",
+      description: "Uploaded manifest description.",
+      notes: "## Notes\n\nKeep this package complete.",
+      metadata: {
+        companionSkillId: "84d8bee1-5ad3-4676-8c16-730e2a15ba70",
+        changelog: [
+          { version: "1.2.0", date: "2026-06-24", changes: ["Publish version 1.2.0."] },
+          { version: "1.1.0", date: "2026-06-20", changes: ["Add manifest v2 metadata."] },
+        ],
+      },
+      environment: {
+        env: { OPENAI_BASE_URL: { required: false, description: "Optional gateway." } },
+        secrets: { OPENAI_API_KEY: { required: true, description: "Ask an admin." } },
+      },
+      dependencies: { "markdown-report": "c0e39fb6-fb84-4610-92e7-fcfc1dc09dde" },
+      commands: [{ name: "Review package", desc: "Inspect and publish the package safely." }],
+    });
+    expect(json).not.toHaveProperty("display");
+    expect(json).not.toHaveProperty("requirements");
   });
 });
 

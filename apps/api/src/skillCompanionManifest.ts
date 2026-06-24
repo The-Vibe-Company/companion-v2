@@ -1,5 +1,7 @@
 import {
   companionDependencySlugs,
+  companionManifestJson,
+  companionManifestSchema,
   fallbackCompanionManifest,
   type CompanionDisplay,
   type CompanionManifest,
@@ -15,6 +17,16 @@ export function uploadDependencyValues(input: {
     return companionDependencySlugs(input.companionManifest);
   }
   return input.queryDependencies;
+}
+
+export function withResolvedManifestDependencies(
+  manifest: CompanionManifest,
+  dependencies: string[] | Record<string, string>,
+): CompanionManifest {
+  return companionManifestSchema.parse({
+    ...companionManifestJson(manifest),
+    dependencies,
+  });
 }
 
 export function buildInlineCompanionManifest(input: {

@@ -97,7 +97,6 @@ import {
   skillFilterPreferencesSchema,
   companionDependencySlugs,
   companionManifestV2JsonSchema,
-  fallbackCompanionManifest,
   updateOrgInputSchema,
   resolveOrgLogoContentType,
   resolveCommentImageContentType,
@@ -148,7 +147,7 @@ import {
 } from "./context";
 import { appRouter } from "./trpc";
 import { assertTargetedSkillUpdate, parseSkillPublishAction } from "./skillPublishGuards";
-import { buildInlineCompanionManifest, uploadDependencyValues } from "./skillCompanionManifest";
+import { buildInlineCompanionManifest, uploadDependencyValues, withResolvedManifestDependencies } from "./skillCompanionManifest";
 import { buildCompanionSkillRow, getCompanionSkillPackage } from "./companionSkillPackage";
 import { COMPANION_SKILL_KEY } from "@companion/companion-skill";
 
@@ -186,12 +185,7 @@ async function canonicalizeSkillArchive(
     await unpackAnyTo(archive, dir);
     const prepared = await prepareSkillDirForPublish(dir, companion);
     const companionManifest = overrides.dependencies
-      ? fallbackCompanionManifest({
-          summary: prepared.companionManifest.display.summary ?? prepared.frontmatter.description,
-          display: prepared.companionManifest.display,
-          requirements: prepared.companionManifest.requirements,
-          dependencies: overrides.dependencies,
-        })
+      ? withResolvedManifestDependencies(prepared.companionManifest, overrides.dependencies)
       : prepared.companionManifest;
     if (overrides.dependencies) {
       await writeFile(prepared.companionManifestPath, buildNormalizedCompanionJson(companionManifest), "utf8");
