@@ -145,6 +145,7 @@ function skillRowFromVM(vm: SkillVM): SkillListRow {
 
 const localSkills: LocalSkillRow[] = [
   {
+    workspaceId: currentOrg.id,
     key: "companion",
     name: "Companion",
     description: "Manage skills locally.",
@@ -742,6 +743,7 @@ describe("Companion skills install gate", () => {
 
   function localSkill(status: LocalSkillRow["status"], extra: Partial<LocalSkillRow> = {}): LocalSkillRow {
     return {
+      workspaceId: currentOrg.id,
       key: "companion",
       name: "Companion",
       description: "Manage skills locally.",
@@ -753,7 +755,11 @@ describe("Companion skills install gate", () => {
       notes: "A local helper skill.\n\n- Keeps local skills current.",
       commands: [],
       changes: [],
-      prompts: { install: "install", update: "update", use: "use" },
+      prompts: {
+        install: "install {base} {workspaceId} {token}",
+        update: "update {base} {workspaceId} {token}",
+        use: "use {base} {workspaceId} {token}",
+      },
       ...extra,
     };
   }
@@ -791,6 +797,7 @@ describe("Companion skills install gate", () => {
     clickGateCopy(container);
     await flushEffects();
     expect(queryMocks.issueToken).toHaveBeenCalledWith(["skills:read", "skills:write"]);
+    expect(clipboardWrite).toHaveBeenCalledWith("install http://127.0.0.1:3001 org-1 cmp_pat_test");
     expect(container.textContent).toContain("Copied");
   });
 

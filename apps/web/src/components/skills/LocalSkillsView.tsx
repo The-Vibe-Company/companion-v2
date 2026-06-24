@@ -45,8 +45,14 @@ function promptFor(skill: LocalSkillRow): string {
 type PromptMode = "default" | "reinstall";
 type CopiedKind = "prompt" | "reinstall";
 
-function fillPrompt(template: string, base: string, token: string): string {
-  return template.split("{base}").join(base).split("{token}").join(token);
+function fillPrompt(template: string, base: string, workspaceId: string, token: string): string {
+  return template
+    .split("{base}")
+    .join(base)
+    .split("{workspaceId}")
+    .join(workspaceId)
+    .split("{token}")
+    .join(token);
 }
 
 function MarkdownNotes({ value }: { value: string }) {
@@ -137,9 +143,11 @@ function gateStorageKey(workspaceName: string, key: string): string {
 
 export function LocalSkillsView({
   skills,
+  workspaceId,
   workspaceName,
 }: {
   skills: LocalSkillRow[];
+  workspaceId: string;
   workspaceName: string;
 }) {
   const [openKey, setOpenKey] = useState<string | null>(null);
@@ -265,8 +273,8 @@ export function LocalSkillsView({
         </div>
       </div>
 
-      {open && <LocalSkillDrawer skill={open} onClose={() => setOpenKey(null)} />}
-      {gateOpen && featured && <InstallGate skill={featured} onDismiss={dismissGate} />}
+      {open && <LocalSkillDrawer skill={open} workspaceId={workspaceId} onClose={() => setOpenKey(null)} />}
+      {gateOpen && featured && <InstallGate skill={featured} workspaceId={workspaceId} onDismiss={dismissGate} />}
     </div>
   );
 }
@@ -339,7 +347,15 @@ function LocalSkillCard({
  * activation surface (connect your assistant), not a detail surface: detail stays in the slide-over
  * drawer, so the DESIGN.md "drawer for detail, never modal-first" rule holds.
  */
-function InstallGate({ skill, onDismiss }: { skill: LocalSkillRow; onDismiss: () => void }) {
+function InstallGate({
+  skill,
+  workspaceId,
+  onDismiss,
+}: {
+  skill: LocalSkillRow;
+  workspaceId: string;
+  onDismiss: () => void;
+}) {
   const ref = useRef<HTMLDivElement>(null);
   const [token, setToken] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
@@ -373,8 +389,8 @@ function InstallGate({ skill, onDismiss }: { skill: LocalSkillRow; onDismiss: ()
   }, []);
 
   const buildPrompt = useCallback(
-    (tok: string) => fillPrompt(skill.prompts.install, base, tok),
-    [base, skill.prompts.install],
+    (tok: string) => fillPrompt(skill.prompts.install, base, workspaceId, tok),
+    [base, skill.prompts.install, workspaceId],
   );
   // Until the user copies, the token slot shows a placeholder so nothing secret is minted on open.
   const displayPrompt = buildPrompt(token ?? "cmp_pat_…");
@@ -480,7 +496,15 @@ function InstallGate({ skill, onDismiss }: { skill: LocalSkillRow; onDismiss: ()
   );
 }
 
-export function LocalSkillDrawer({ skill, onClose }: { skill: LocalSkillRow; onClose: () => void }) {
+export function LocalSkillDrawer({
+  skill,
+  workspaceId,
+  onClose,
+}: {
+  skill: LocalSkillRow;
+  workspaceId: string;
+  onClose: () => void;
+}) {
   const meta = STATUS_META[skill.status];
   const ref = useRef<HTMLDivElement>(null);
   const [copied, setCopied] = useState<CopiedKind | null>(null);
@@ -503,7 +527,7 @@ export function LocalSkillDrawer({ skill, onClose }: { skill: LocalSkillRow; onC
 
   // The prompt TEXT is derived below from the current template, so it stays correct even if `skill`
   // (and its status) changes while the drawer is open.
-  const prompt = token ? fillPrompt(template, base, token) : null;
+  const prompt = token ? fillPrompt(template, base, workspaceId, token) : null;
 
   const writeClipboard = useCallback(async (value: string): Promise<boolean> => {
     if (!navigator.clipboard) return true; // no API: the prompt is still visible to copy manually
@@ -527,15 +551,15 @@ export function LocalSkillDrawer({ skill, onClose }: { skill: LocalSkillRow; onC
   const copyDefaultPrompt = useCallback(async () => {
     if (!token) return;
     setPromptMode("default");
-    await copyPrompt("prompt", fillPrompt(promptFor(skill), base, token));
-  }, [base, copyPrompt, skill, token]);
+    await copyPrompt("prompt", fillPrompt(promptFor(skill), base, workspaceId, token));
+  }, [base, copyPrompt, skill, token, workspaceId]);
 
   const copyReinstallPrompt = useCallback(async () => {
     if (!token) return;
-    const reinstallPrompt = fillPrompt(skill.prompts.install, base, token);
+    const reinstallPrompt = fillPrompt(skill.prompts.install, base, workspaceId, token);
     setPromptMode("reinstall");
     await copyPrompt("reinstall", reinstallPrompt);
-  }, [base, copyPrompt, skill.prompts.install, token]);
+  }, [base, copyPrompt, skill.prompts.install, token, workspaceId]);
 
   const handAndConfirm = useCallback(async () => {
     if (!prompt || !(await writeClipboard(prompt))) return;

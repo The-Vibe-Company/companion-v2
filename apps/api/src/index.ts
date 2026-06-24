@@ -1837,13 +1837,15 @@ app.get("/v1/local-skills", async (c) => {
   try {
     actorFromContext(c, true);
     requireScope(c, "skills:read");
-    const install = await withTenant(
+    const row = await withTenant(
       c,
-      ({ actor, orgId, database }) =>
-        getLocalSkillInstall({ actor, orgId, skillKey: COMPANION_SKILL_KEY, database }),
+      async ({ actor, orgId, database }) => {
+        const install = await getLocalSkillInstall({ actor, orgId, skillKey: COMPANION_SKILL_KEY, database });
+        return buildCompanionSkillRow(install, orgId);
+      },
       true,
     );
-    return c.json([await buildCompanionSkillRow(install)]);
+    return c.json([row]);
   } catch (error) {
     return jsonError(c, error, 401);
   }
@@ -1855,12 +1857,15 @@ app.get("/v1/local-skills/:key", async (c) => {
     requireScope(c, "skills:read");
     const key = c.req.param("key");
     if (key !== COMPANION_SKILL_KEY) return c.json({ error: `unknown local skill: ${key}` }, 404);
-    const install = await withTenant(
+    const row = await withTenant(
       c,
-      ({ actor, orgId, database }) => getLocalSkillInstall({ actor, orgId, skillKey: key, database }),
+      async ({ actor, orgId, database }) => {
+        const install = await getLocalSkillInstall({ actor, orgId, skillKey: key, database });
+        return buildCompanionSkillRow(install, orgId);
+      },
       true,
     );
-    return c.json(await buildCompanionSkillRow(install));
+    return c.json(row);
   } catch (error) {
     return jsonError(c, error, 401);
   }

@@ -20,8 +20,9 @@ export const localSkillCommandSchema = z.object({
 export type LocalSkillCommand = z.infer<typeof localSkillCommandSchema>;
 
 /**
- * Prompt templates handed to the assistant. The client fills `{base}` (the API base URL) and
- * `{token}` (a freshly minted personal access token) before copying or sending.
+ * Prompt templates handed to the assistant. The client fills `{base}` (the API base URL),
+ * `{workspaceId}` (organizations.id), and `{token}` (a freshly minted personal access token) before
+ * copying or sending.
  */
 export const localSkillPromptsSchema = z.object({
   install: z.string(),
@@ -32,6 +33,8 @@ export type LocalSkillPrompts = z.infer<typeof localSkillPromptsSchema>;
 
 /** Denormalized read shape for the Companion skills view and the CLI. */
 export const localSkillRowSchema = z.object({
+  /** Companion workspace id (`organizations.id`) for local credential and lockfile keys. */
+  workspaceId: z.string(),
   key: z.string(),
   name: z.string(),
   description: z.string(),
