@@ -34,13 +34,17 @@ async function assertMember(database: Db, actor: ActorContext, orgId: string): P
   if (!role) throw new Error("not a member of this organization");
 }
 
-/** Validate + normalize a label path (throws on an invalid path). */
-function parsePath(path: string): string {
+/** Validate + normalize a label path (throws on an invalid path). Shared with the personal-folder service. */
+export function parseLabelPath(path: string): string {
   return labelPathSchema.parse(path);
 }
+const parsePath = parseLabelPath;
 
-/** All proper-ancestor paths of `path`, root-first. `marketing/seo/local` → [marketing, marketing/seo]. */
-function ancestorsOf(path: string): string[] {
+/**
+ * All proper-ancestor paths of `path`, root-first. `marketing/seo/local` → [marketing, marketing/seo].
+ * Shared with the personal-folder service.
+ */
+export function ancestorsOfPath(path: string): string[] {
   const segments = path.split("/");
   const out: string[] = [];
   for (let i = 1; i < segments.length; i++) {
@@ -48,51 +52,33 @@ function ancestorsOf(path: string): string[] {
   }
   return out;
 }
+const ancestorsOf = ancestorsOfPath;
 
 /** A path + all of its ancestors, root-first, de-duped (the set a create/assign must materialize). */
-function pathWithAncestors(path: string): string[] {
+export function pathWithAncestors(path: string): string[] {
   return [...ancestorsOf(path), path];
 }
 
+/** One appearance row (an explicit `labels` / `personal_labels` row). */
+export interface LabelAppearanceRow {
+  path: string;
+  displayName: string | null;
+  color: string | null;
+  icon: string | null;
+}
+
 /**
- * Build the derived label tree + flat appearance list. A node exists if a `labels` row declares its
- * exact path (`explicit`), OR a skill is assigned a path at/under it (derived parent), OR it is an
- * ancestor of either. `count` is the de-duped roll-up of skills filed at the node OR any descendant.
+ * Build the derived label tree + flat appearance list from already-fetched appearance rows and
+ * (skillId, path) assignment rows. Pure (no DB) so the org and personal folder services share the
+ * exact tree-assembly logic. A node exists if an appearance row declares its exact path (`explicit`),
+ * OR a skill is assigned a path at/under it (derived parent), OR it is an ancestor of either. `count`
+ * is the de-duped roll-up of skills filed at the node OR any descendant.
  */
-export async function listLabels(input: {
-  actor: ActorContext;
-  orgId: string;
-  database?: Db;
-}): Promise<LabelsResponse> {
-  const database = input.database ?? db;
-  await assertMember(database, input.actor, input.orgId);
-
-  const labelRowsRaw = await database
-    .select({
-      path: schema.labels.path,
-      displayName: schema.labels.displayName,
-      color: schema.labels.color,
-      icon: schema.labels.icon,
-    })
-    .from(schema.labels)
-    .where(eq(schema.labels.orgId, input.orgId))
-    .orderBy(asc(schema.labels.path));
-  const labelRows = Array.isArray(labelRowsRaw) ? labelRowsRaw : [];
-
-  // Roll-up counts must match the folder lists in `/v1/skills`, which exclude archived skills — so
-  // join `skills` and drop archived assignments (an explicit `labels` row keeps the folder visible at
-  // count 0 even when its only skills are archived).
-  const assignmentRowsRaw = await database
-    .select({ skillId: schema.skillLabels.skillId, path: schema.skillLabels.path })
-    .from(schema.skillLabels)
-    .innerJoin(
-      schema.skills,
-      and(eq(schema.skills.id, schema.skillLabels.skillId), eq(schema.skills.orgId, schema.skillLabels.orgId)),
-    )
-    .where(and(eq(schema.skillLabels.orgId, input.orgId), isNull(schema.skills.archivedAt)));
-  const assignmentRows = Array.isArray(assignmentRowsRaw) ? assignmentRowsRaw : [];
-
-  // Appearance per explicit path (only `labels` rows carry color/icon).
+export function assembleLabelsResponse(
+  labelRows: LabelAppearanceRow[],
+  assignmentRows: Array<{ skillId: string; path: string }>,
+): LabelsResponse {
+  // Appearance per explicit path (only label rows carry color/icon).
   const appearance = new Map<string, { displayName: string | null; color: LabelColor | null; icon: LabelIcon | null }>();
   for (const r of labelRows) {
     appearance.set(r.path, {
@@ -163,6 +149,44 @@ export async function listLabels(input: {
 }
 
 /**
+ * The org-wide shared folder tree + flat appearance list. Roll-up counts must match the folder lists
+ * in `/v1/skills`, which exclude archived skills — so the assignment join drops archived skills (an
+ * explicit `labels` row keeps an empty folder visible at count 0).
+ */
+export async function listLabels(input: {
+  actor: ActorContext;
+  orgId: string;
+  database?: Db;
+}): Promise<LabelsResponse> {
+  const database = input.database ?? db;
+  await assertMember(database, input.actor, input.orgId);
+
+  const labelRowsRaw = await database
+    .select({
+      path: schema.labels.path,
+      displayName: schema.labels.displayName,
+      color: schema.labels.color,
+      icon: schema.labels.icon,
+    })
+    .from(schema.labels)
+    .where(eq(schema.labels.orgId, input.orgId))
+    .orderBy(asc(schema.labels.path));
+  const labelRows = Array.isArray(labelRowsRaw) ? labelRowsRaw : [];
+
+  const assignmentRowsRaw = await database
+    .select({ skillId: schema.skillLabels.skillId, path: schema.skillLabels.path })
+    .from(schema.skillLabels)
+    .innerJoin(
+      schema.skills,
+      and(eq(schema.skills.id, schema.skillLabels.skillId), eq(schema.skills.orgId, schema.skillLabels.orgId)),
+    )
+    .where(and(eq(schema.skillLabels.orgId, input.orgId), isNull(schema.skills.archivedAt)));
+  const assignmentRows = Array.isArray(assignmentRowsRaw) ? assignmentRowsRaw : [];
+
+  return assembleLabelsResponse(labelRows, assignmentRows);
+}
+
+/**
  * Create (upsert) a label path + all of its ancestors, optionally with appearance on the leaf.
  * Idempotent: re-creating an existing path keeps it (and updates supplied color/icon). Any member.
  */
@@ -227,11 +251,16 @@ export async function addSublabel(input: {
 }
 
 /** Resolve a skill id from a slug within the org (labels target the skill by id). */
+/**
+ * Resolve an ORG skill id from a slug. Org labels only apply to org-scoped skills — a personal skill
+ * is filed with personal folders, never the shared tree, so resolving one here is "not found" (which
+ * also prevents another member's private skill from being leaked into an org folder's roll-up count).
+ */
 async function resolveSkillId(database: Db, orgId: string, slug: string): Promise<string> {
   const skill = await database.query.skills.findFirst({
     where: and(eq(schema.skills.orgId, orgId), eq(schema.skills.slug, slug)),
   });
-  if (!skill) throw new Error("skill not found");
+  if (!skill || skill.scope !== "org") throw new Error("skill not found");
   return skill.id;
 }
 

@@ -253,6 +253,7 @@ export function DetailView({
   total,
   me,
   myRole,
+  orgName,
   allLabels,
   onBack,
   onPrev,
@@ -261,6 +262,7 @@ export function DetailView({
   onToggleInstalled,
   onToggleLabel,
   onSelectLabel,
+  onShare,
   onInstall,
   onUpdate,
   onOpenSkill,
@@ -272,7 +274,8 @@ export function DetailView({
   total: number;
   me: MeVM;
   myRole: OrgRole;
-  /** Every label path that exists org-wide (for the "Add to folder" picker). */
+  orgName: string;
+  /** Every folder path in this skill's library (for the "Add to folder" picker). */
   allLabels: string[];
   onBack: () => void;
   onPrev: () => void;
@@ -283,6 +286,9 @@ export function DetailView({
   onToggleLabel: (path: string) => void;
   /** Navigate to a folder's scope (chip click). */
   onSelectLabel: (path: string) => void;
+  /** Share this personal skill into the org library (owner + authored only). */
+  onShare: () => void;
+  /** Open the install flow (hands the Companion agent the prompt; the agent reports back on install). */
   onInstall: () => void;
   onUpdate: () => void;
   onOpenSkill: (slug: string) => void;
@@ -451,13 +457,22 @@ export function DetailView({
   // Guard against a stale "dependencies" tab if the count just dropped to zero.
   const activeTab: DetailTab = tab === "dependencies" && !showDeps ? "overview" : tab;
 
+  // Library-aware framing. A personal skill or an installed copy lives in "My Skills"; everything else
+  // is an org skill. Only the owner can open a personal skill (server-enforced), so Share is owner-safe.
+  const inMyLibrary = skill.scope === "personal" || skill.source === "installed";
+  const libLabel = inMyLibrary ? "My Skills" : orgName;
+  const isInstalledCopy = skill.source === "installed";
+  const canShare = skill.scope === "personal" && !skill.archived;
+  const eyebrow = skill.scope === "personal" ? "Personal skill" : isInstalledCopy ? "Installed skill" : "Organization skill";
+  const eyebrowIcon = skill.scope === "personal" ? "user" : isInstalledCopy ? "download" : "building-2";
+
   return (
     <div className="dpage">
       <div className="dtop">
         <div className="crumb">
           <button className="crumb__btn" onClick={onBack}>
-            <Icon name="package" size={13} />
-            Skills
+            <Icon name={inMyLibrary ? "user" : "building-2"} size={13} />
+            {libLabel}
           </button>
           <span className="crumb__sep">/</span> <b>{skill.id}</b>
         </div>
@@ -478,6 +493,11 @@ export function DetailView({
           <button className="btn-ghost" onClick={onRestore} title="Restore this skill">
             <Icon name="rotate-ccw" size={14} />
             Restore
+          </button>
+        ) : canShare ? (
+          <button className="btn-primary" onClick={onShare} title="Share this skill to the organization">
+            <Icon name="send" size={14} />
+            Share to organization
           </button>
         ) : (
           <button
@@ -522,8 +542,8 @@ export function DetailView({
             <div className="dhead">
               <div className="dhead__main">
                 <p className="lin-eyebrow">
-                  <Icon name="package" size={13} />
-                  Skill package
+                  <Icon name={eyebrowIcon} size={13} />
+                  {eyebrow}
                 </p>
                 <h1 className="dtitle dtitle--linear">{skill.display?.name ?? skill.id}</h1>
                 {skill.display?.name ? <p className="dslug mono">{skill.id}</p> : null}
@@ -534,15 +554,27 @@ export function DetailView({
                     by <span className="dbyline__name">{skill.authorName}</span>
                   </span>
                 </p>
-                <FiledIn
-                  skill={skill}
-                  allLabels={allLabels}
-                  onToggleLabel={onToggleLabel}
-                  onSelectLabel={onSelectLabel}
-                />
+                {isInstalledCopy && (
+                  <div className="ls-confirm dinstalled-note">
+                    <Icon name="info" size={15} />
+                    <span>
+                      Installed from <b>{orgName}</b>. The original lives in the organization library. Personal
+                      folders do not apply to installed skills.
+                    </span>
+                  </div>
+                )}
+                {/* Installed copies are not personally filed — hide the folder picker for them. */}
+                {!isInstalledCopy && (
+                  <FiledIn
+                    skill={skill}
+                    allLabels={allLabels}
+                    onToggleLabel={onToggleLabel}
+                    onSelectLabel={onSelectLabel}
+                  />
+                )}
               </div>
               <div className="dhead__aside">
-                <StatusCard skill={skill} />
+                <StatusCard skill={skill} libLabel={isInstalledCopy ? "My Skills · installed" : libLabel} />
               </div>
             </div>
 

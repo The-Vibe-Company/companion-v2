@@ -180,6 +180,114 @@
 .up-done__v { font-family: var(--font-mono); font-size: var(--text-xs); color: var(--color-fg); margin-left: auto; display: inline-flex; align-items: center; gap: 6px; }
 .up-done__v svg { color: var(--color-faint); }
 
+/* folder selector -------------------------------------------------------- */
+.up-labelsel { position: relative; display: inline-block; }
+.up-labelsel__btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 34px;
+  min-width: 200px;
+  max-width: 100%;
+  padding: 0 10px 0 11px;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  color: var(--color-fg);
+  font-family: var(--font-ui);
+  font-size: var(--text-sm);
+  cursor: pointer;
+  transition: border-color var(--duration-fast) var(--ease-out-quint), background-color var(--duration-fast) var(--ease-out-quint);
+}
+.up-labelsel__btn:hover { border-color: var(--color-line-strong); background: var(--color-surface-raised); }
+.up-labelsel__btn:focus-visible { outline: none; border-color: var(--color-accent-edge); box-shadow: 0 0 0 2px var(--color-accent-ring); }
+.up-labelsel__btn[aria-expanded="true"] { border-color: var(--color-accent-edge); box-shadow: 0 0 0 2px var(--color-accent-ring); }
+.up-labelsel__name { flex: 1; min-width: 0; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.up-labelsel__btn > svg:last-child { color: var(--color-faint); flex: none; transition: transform var(--duration-fast) var(--ease-out-quint); }
+.up-labelsel__btn[aria-expanded="true"] > svg:last-child { transform: rotate(180deg); }
+
+.up-labelsel__menu {
+  position: absolute;
+  z-index: 10;
+  top: calc(100% + 6px);
+  left: 0;
+  width: min(320px, calc(100vw - 48px));
+  max-width: 360px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+}
+.up-labelsel__search {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 10px;
+  height: 38px;
+  border-bottom: 1px solid var(--color-line);
+  color: var(--color-faint);
+}
+.up-labelsel__input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: none;
+  outline: none;
+  font-family: var(--font-ui);
+  font-size: var(--text-sm);
+  color: var(--color-fg);
+}
+.up-labelsel__input::placeholder { color: var(--color-faint); }
+.up-labelsel__list { max-height: 220px; overflow-y: auto; padding: 5px; display: flex; flex-direction: column; gap: 1px; }
+.up-labelsel__item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  border: none;
+  background: none;
+  border-radius: var(--radius-sm);
+  color: var(--color-fg);
+  font-family: var(--font-ui);
+  font-size: var(--text-sm);
+  text-align: left;
+  cursor: pointer;
+}
+.up-labelsel__item:hover { background: var(--color-surface-raised); }
+.up-labelsel__item svg { color: var(--color-faint); flex: none; }
+.up-labelsel__item.is-sel svg { color: var(--color-accent-edge); }
+.up-labelsel__iname { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.up-labelsel__check {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--color-line-strong);
+  border-radius: var(--radius-sm);
+  color: var(--color-accent-fg);
+}
+.up-labelsel__check.is-on { background: var(--color-accent); border-color: var(--color-accent); }
+.up-labelsel__empty { padding: 12px 10px; font-size: var(--text-sm); color: var(--color-faint); text-align: center; }
+.up-labelsel__create {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 9px 12px;
+  border: none;
+  border-top: 1px solid var(--color-line);
+  background: none;
+  color: var(--color-accent-edge);
+  font-family: var(--font-ui);
+  font-size: var(--text-sm);
+  text-align: left;
+  cursor: pointer;
+}
+.up-labelsel__create:hover { background: var(--color-accent-tint); }
+
 /* responsive ------------------------------------------------------------- */
 @media (max-width: 640px) {
   .up__body { grid-template-columns: 1fr; }

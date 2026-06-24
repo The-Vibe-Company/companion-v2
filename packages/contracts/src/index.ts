@@ -3,6 +3,7 @@ export * from "./frontmatter";
 export * from "./companionManifest";
 export * from "./validation";
 export * from "./labels";
+export * from "./personalLabels";
 export * from "./skill";
 export * from "./token";
 export * from "./lockfile";

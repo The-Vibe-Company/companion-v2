@@ -52,7 +52,7 @@ one person. There is no open, self-hostable answer for a **team**.
 | Area | Included |
 |---|---|
 | **Install** | Single `docker compose up` bundle: Postgres, object storage (MinIO), Mailpit for local email, web portal, and API. First user becomes Org Owner. Temporal is prepared but deferred. |
-| **Identity & access** | Organization → User; email invitations; RBAC roles (Org Owner/Admin/Developer); skills are org-wide (no owner, no visibility flags) and organized with shared labels. |
+| **Identity & access** | Organization → User; email invitations; RBAC roles (Org Owner/Admin/Developer); skills live in a private **My Skills** library or the org-wide library (`scope` personal/org), shareable one-way to the org, organized with shared org folders + private personal folders. |
 | **Providers** | **Local Docker** provider behind the pluggable interface; **Fly.io Machines** as fast-follow. (Kubernetes & Modal deferred to V1.) |
 | **Pillar 1 — Agents** | Deploy ≥1 Hermès agent template; choose model via OpenRouter; attach skills; attach a Granite vault; chat surface. |
 | **Pillar 2 — Containers** | Org-admin **approval** of images into the catalog; **1-click deploy** of ≥1 container; surface connection details/secrets. |
@@ -88,9 +88,13 @@ Each requirement has user stories with acceptance criteria. Priorities: **P0** =
 - As any actor, I can only act within orgs I'm a **member** of; Org Owner/Admin hold elevated org
   capabilities. *AC:* every endpoint is membership-gated and tenant-scoped; cross-tenant access is
   impossible (verified by tests).
-- As any member, I can **read and modify every skill** in my org — there is no per-skill owner or
-  visibility flag. *AC:* create/edit/publish/archive/delete are allowed for any member of the org and
-  denied for non-members; the acting user is recorded as the skill's creator for audit.
+- As any member, I can **read and modify every org-scoped skill** in my org. *AC:*
+  create/edit/publish/archive/delete are allowed for any member of the org and denied for non-members;
+  the acting user is recorded as the skill's creator for audit.
+- As any member, I have a private **My Skills** library: skills I author there (`scope=personal`) are
+  visible and editable **only by me** (admins included), and I can **Share** one into the org library
+  (owner-only, one-way). *AC:* a personal skill never appears in another member's list/detail/search;
+  share flips it to org-scoped; install records an org skill into My Skills without copying the row.
 
 ### 5.3 Skills Hub (P0)
 - As a Builder, I can **upload a `SKILL.md` package** and have it validated and versioned. *AC:*

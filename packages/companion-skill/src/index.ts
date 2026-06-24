@@ -64,6 +64,15 @@ export const COMPANION_SKILL_MANIFEST: CompanionSkillManifest = {
   ],
   changelog: [
     {
+      version: "1.9.0",
+      changes: [
+        "Adds a private My Skills library: a skill is created in your personal library by default (scope=personal) and is visible only to you, organized by your own personal folders.",
+        "Share a personal skill into the org library with POST /skills/{slug}/share (owner-only, one-way personal -> org).",
+        "List a specific library with GET /skills?lib=mine|org; publish chooses a library with the scope field (defaults to org for the CLI).",
+        "Organizes personal skills with personal folders: GET /personal-labels, POST /personal-labels, PUT /personal-labels/rename|color|icon, DELETE /personal-labels, and POST|DELETE /skills/{slug}/personal-labels.",
+      ],
+    },
+    {
       version: "1.8.0",
       changes: [
         "Removes skill owners, visibility, and teams: every skill is visible to every org member, and any member can manage any skill.",

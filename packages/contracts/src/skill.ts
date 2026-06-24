@@ -1,13 +1,15 @@
 import { z } from "zod";
-import { validationStateSchema } from "./scope";
+import { validationStateSchema, skillScopeSchema } from "./scope";
 import { SKILL_NAME_RE, SEMVER_RE, skillRequirementSchema } from "./frontmatter";
 import { companionDisplaySchema } from "./companionManifest";
 import { labelPathSchema } from "./labels";
 import { localSkillStatusSchema } from "./localSkills";
 
 /**
- * Skills carry no owner or visibility axis: every skill is visible to every member of its org and
- * any member may edit it. Skills are organized only by org-wide shared labels (see `./labels`).
+ * Skills live in one of two libraries (`scope`): the flat org-wide library — visible to every member,
+ * any member may edit, organized by org-wide shared labels (see `./labels`) — or a private personal
+ * library ("My Skills"), visible only to its creator and organized by that user's personal folders
+ * (see `./personalLabels`). A personal skill can be shared into the org library (a one-way move).
  */
 
 /**
@@ -127,9 +129,19 @@ export const skillListRowSchema = z.object({
   display: companionDisplaySchema.default({}),
   validation: validationStateSchema,
   validation_error: z.string().nullable(),
-  /** The label paths this skill is filed under (org-wide shared folders), sorted lexicographically. */
+  /** Which library this row belongs to: 'org' (shared) or 'personal' (private to the creator). */
+  scope: skillScopeSchema.default("org"),
+  /**
+   * Only set in the "My Skills" (`?lib=mine`) view: 'authored' = a personal skill the caller created;
+   * 'installed' = an org skill the caller installed, surfaced under My Skills. Null in the org view.
+   */
+  source: z.enum(["authored", "installed"]).nullable().default(null),
+  /**
+   * The label paths this skill is filed under. In the org view these are org-wide shared folders; in
+   * the My Skills view they are the caller's personal folders. Sorted lexicographically.
+   */
   labels: z.array(z.string()).default([]),
-  /** Who first published the skill (provenance / Activity). */
+  /** Who first published the skill (provenance / Activity). For a personal skill, also the owner. */
   creator_id: z.string(),
   creator_name: z.string(),
   creator_initials: z.string(),
@@ -317,6 +329,12 @@ export type SkillVersionRow = z.infer<typeof skillVersionRowSchema>;
 export const publishSkillInputSchema = z.object({
   skill_id: z.string().uuid().optional(),
   slug: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/),
+  /**
+   * Library to publish into on first create. Omitted = 'org' (preserves CLI/bundled-skill behavior:
+   * every publish is org-wide unless asked otherwise). Ignored on re-publish — scope never changes by
+   * publishing; only the Share action moves a personal skill to 'org'.
+   */
+  scope: skillScopeSchema.optional(),
   /** Label paths to file the skill under (org-wide shared folders). Applied on create. */
   labels: z.array(labelPathSchema).max(64).default([]),
   version: z.string(),
@@ -347,7 +365,17 @@ export const createSkillInputSchema = z.object({
   id: z.string().regex(SKILL_NAME_RE, "id must be kebab-case (lowercase letters, digits, hyphens)"),
   description: z.string().min(1, "description is required").max(1024),
   body: z.string().max(1024 * 1024, "body is too large").default(""),
-  /** Label paths to file the new skill under (org-wide shared folders). */
+  /** Library to create into. Defaults to 'personal' — browser "Create" authors into My Skills. */
+  scope: skillScopeSchema.default("personal"),
+  /** Label paths to file the new skill under (org folders for 'org' scope, personal for 'personal'). */
   labels: z.array(labelPathSchema).max(64).default([]),
 });
 export type CreateSkillInput = z.infer<typeof createSkillInputSchema>;
+
+/** Response of `POST /v1/skills/:slug/share` — move a personal skill into the org library. */
+export const shareSkillResultSchema = z.object({
+  ok: z.literal(true),
+  slug: z.string(),
+  scope: z.literal("org"),
+});
+export type ShareSkillResult = z.infer<typeof shareSkillResultSchema>;

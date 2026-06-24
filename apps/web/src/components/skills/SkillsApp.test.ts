@@ -37,6 +37,16 @@ const queryMocks = vi.hoisted(() => ({
   deleteLabel: vi.fn(),
   setLabelColor: vi.fn(),
   setLabelIcon: vi.fn(),
+  // Personal-folder RPCs + Share.
+  fetchPersonalLabels: vi.fn(),
+  assignPersonalSkillLabel: vi.fn(),
+  unassignPersonalSkillLabel: vi.fn(),
+  createPersonalLabel: vi.fn(),
+  renamePersonalLabel: vi.fn(),
+  deletePersonalLabel: vi.fn(),
+  setPersonalLabelColor: vi.fn(),
+  setPersonalLabelIcon: vi.fn(),
+  shareSkillToOrg: vi.fn(),
 }));
 
 vi.mock("next/navigation", () => ({
@@ -68,6 +78,8 @@ function skill(overrides: Partial<SkillVM> & { id: string }): SkillVM {
     validation: "valid",
     description: "Test skill",
     error: null,
+    scope: "org",
+    source: null,
     labels: [],
     authorId: "user-1",
     authorName: "Ada Lovelace",
@@ -107,6 +119,8 @@ function skillRowFromVM(vm: SkillVM): SkillListRow {
     description: vm.description,
     display: vm.display ?? {},
     validation_error: vm.error,
+    scope: vm.scope,
+    source: vm.source,
     tools: vm.tools,
     requirements: vm.requirements,
     compatibility: vm.compatibility,
@@ -172,19 +186,25 @@ function emptyLabels(): LabelsResponse {
 }
 
 function routeSourceFor(initialRoute: React.ComponentProps<typeof SkillsApp>["initialRoute"]) {
-  return initialRoute.kind === "all" && !initialRoute.skill ? "default" : "explicit";
+  return "lib" in initialRoute && initialRoute.lib === "mine" && initialRoute.kind === "all" && !initialRoute.skill
+    ? "default"
+    : "explicit";
 }
 
+// These suites exercise the flat folder/list behavior on the ORG library (the seed carries org-style
+// folders like `marketing/seo`), so skills seed into `initialOrgSkills` and routes target `lib: "org"`.
 function appProps(
   initialRoute: React.ComponentProps<typeof SkillsApp>["initialRoute"],
   overrides: Partial<React.ComponentProps<typeof SkillsApp>> = {},
 ): React.ComponentProps<typeof SkillsApp> {
   return {
-    initialSkills: seededSkills(),
+    initialMineSkills: [],
+    initialOrgSkills: seededSkills(),
     initialLocalSkills: localSkills,
     // Default to no saved chips so the route selection alone drives the list; individual tests pass
     // their own `initialFilterPreferences` to exercise the saved-filter behavior.
     initialFilterPreferences: { active_filters: [] },
+    initialPersonalLabels: emptyLabels(),
     initialLabels: seededLabels,
     me,
     orgs: [currentOrg],
@@ -295,6 +315,15 @@ beforeEach(() => {
   queryMocks.deleteLabel.mockResolvedValue(undefined);
   queryMocks.setLabelColor.mockResolvedValue(undefined);
   queryMocks.setLabelIcon.mockResolvedValue(undefined);
+  queryMocks.fetchPersonalLabels.mockResolvedValue(emptyLabels());
+  queryMocks.assignPersonalSkillLabel.mockResolvedValue(undefined);
+  queryMocks.unassignPersonalSkillLabel.mockResolvedValue(undefined);
+  queryMocks.createPersonalLabel.mockResolvedValue(undefined);
+  queryMocks.renamePersonalLabel.mockResolvedValue(undefined);
+  queryMocks.deletePersonalLabel.mockResolvedValue(undefined);
+  queryMocks.setPersonalLabelColor.mockResolvedValue(undefined);
+  queryMocks.setPersonalLabelIcon.mockResolvedValue(undefined);
+  queryMocks.shareSkillToOrg.mockResolvedValue({ ok: true, slug: "x", scope: "org" });
   mountedRoots = [];
 });
 
@@ -308,18 +337,19 @@ afterEach(() => {
 
 describe("SkillsApp initial route", () => {
   it("renders All skills (every org skill, ignoring saved filters) from the default route", () => {
-    const html = render({ kind: "all" });
+    const html = render({ lib: "org", kind: "all" });
     expect(html).toContain("All skills");
     expect(html).toContain("seo-helper");
     expect(html).toContain("brand-kit");
     expect(html).toContain("loose-skill");
   });
 
-  it("renders the Starred view from the initial route", () => {
-    const html = render({ kind: "starred", skill: undefined }, {
-      initialSkills: [
-        skill({ id: "seo-helper", labels: ["marketing/seo"], starred: true }),
-        skill({ id: "brand-kit", labels: ["marketing"] }),
+  it("renders the Starred view (My Skills) from the initial route", () => {
+    // Starred is a My-Skills view, so seed the personal library (one starred).
+    const html = render({ lib: "mine", kind: "starred", skill: undefined }, {
+      initialMineSkills: [
+        skill({ id: "seo-helper", scope: "personal", source: "authored", starred: true }),
+        skill({ id: "brand-kit", scope: "personal", source: "authored" }),
       ],
     });
     expect(html).toContain("Starred");
@@ -327,16 +357,20 @@ describe("SkillsApp initial route", () => {
     expect(html).not.toContain("brand-kit");
   });
 
-  it("renders the No-folder view from the initial route", () => {
-    const html = render({ kind: "nolabel" });
-    // Only the skill filed in no folder shows.
-    expect(html).toContain("loose-skill");
-    expect(html).not.toContain("Open skill seo-helper");
-    expect(html).not.toContain("Open skill brand-kit");
+  it("renders the Installed view (My Skills) from the initial route", () => {
+    const html = render({ lib: "mine", kind: "installed" }, {
+      initialMineSkills: [
+        skill({ id: "brand-linter", scope: "org", source: "installed", installStatus: "installed" }),
+        skill({ id: "my-draft", scope: "personal", source: "authored" }),
+      ],
+    });
+    expect(html).toContain("Installed");
+    expect(html).toContain("brand-linter");
+    expect(html).not.toContain("Open skill my-draft");
   });
 
   it("renders a label folder route (skills filed under the path or any descendant)", () => {
-    const html = render({ kind: "label", label: "marketing" });
+    const html = render({ lib: "org", kind: "label", label: "marketing" });
     // marketing rolls up both its own skill and the marketing/seo descendant.
     expect(html).toContain("seo-helper");
     expect(html).toContain("brand-kit");
@@ -344,15 +378,15 @@ describe("SkillsApp initial route", () => {
   });
 
   it("narrows to a nested label path", () => {
-    const html = render({ kind: "label", label: "marketing/seo" });
+    const html = render({ lib: "org", kind: "label", label: "marketing/seo" });
     expect(html).toContain("seo-helper");
     expect(html).not.toContain("Open skill brand-kit");
     expect(html).not.toContain("Open skill loose-skill");
   });
 
-  it("falls back to All skills for an unknown label route", () => {
-    const html = render({ kind: "label", label: "does-not-exist" });
-    expect(html).toContain("No skills match");
+  it("falls back to an empty list for an unknown label route", () => {
+    const html = render({ lib: "org", kind: "label", label: "does-not-exist" });
+    expect(html).toContain("No organization skills match this view");
   });
 
   it("renders Companion skills from the initial route", () => {
@@ -362,14 +396,14 @@ describe("SkillsApp initial route", () => {
   });
 
   it("renders a skill detail from a workspace skill route instead of saved filters", () => {
-    const html = render({ kind: "all", skill: "seo-helper" });
+    const html = render({ lib: "org", kind: "all", skill: "seo-helper" });
     expect(html).toContain("Install skill");
     expect(html).toContain("seo-helper");
     expect(html).not.toContain("No skills match");
   });
 
   it("renders a skill detail while preserving its label route", () => {
-    const html = render({ kind: "label", label: "marketing/seo", skill: "seo-helper" });
+    const html = render({ lib: "org", kind: "label", label: "marketing/seo", skill: "seo-helper" });
     expect(html).toContain("Install skill");
     expect(html).toContain("seo-helper");
     expect(html).toContain("Filed in");
@@ -398,7 +432,7 @@ describe("SkillsApp sidebar label tree derivation", () => {
   }
 
   it("derives intermediate parents and de-duped roll-up counts", async () => {
-    const { container } = await mountSkillsApp({ kind: "all" });
+    const { container } = await mountSkillsApp({ lib: "org", kind: "all" });
     await flushEffects();
 
     // `marketing` is derived as a parent (only `marketing/seo` + `marketing` are assigned).
@@ -411,7 +445,7 @@ describe("SkillsApp sidebar label tree derivation", () => {
   });
 
   it("gates child rows behind their collapsed parent (chevron expand)", async () => {
-    const { container } = await mountSkillsApp({ kind: "all" });
+    const { container } = await mountSkillsApp({ lib: "org", kind: "all" });
     await flushEffects();
 
     // marketing/seo is a child of marketing; collapsed by default, so its row is hidden.
@@ -431,7 +465,7 @@ describe("SkillsApp sidebar label tree derivation", () => {
   });
 
   it("renders an explicit empty folder (a `labels` row with no skills) with a zero count", async () => {
-    const { container } = await mountSkillsApp({ kind: "all" });
+    const { container } = await mountSkillsApp({ lib: "org", kind: "all" });
     await flushEffects();
 
     const growth = labelRow(container, "growth");
@@ -441,20 +475,21 @@ describe("SkillsApp sidebar label tree derivation", () => {
     expect(growth.querySelector(".lblrow__chev--leaf")).not.toBeNull();
   });
 
-  it("reflects All skills / Starred counts in the sidebar", async () => {
-    const { container } = await mountSkillsApp({ kind: "all" }, {
+  it("reflects My Skills / Starred counts in the sidebar", async () => {
+    const { container } = await mountSkillsApp({ lib: "mine", kind: "all" }, {
       props: {
-        initialSkills: [
-          skill({ id: "seo-helper", labels: ["marketing/seo"], starred: true }),
-          skill({ id: "brand-kit", labels: ["marketing"] }),
-          skill({ id: "loose-skill" }),
+        initialMineSkills: [
+          skill({ id: "seo-helper", scope: "personal", source: "authored", starred: true }),
+          skill({ id: "brand-kit", scope: "personal", source: "authored" }),
+          skill({ id: "loose-skill", scope: "personal", source: "authored" }),
         ],
       },
     });
     await flushEffects();
 
-    const all = findButton(container, "All skills");
-    expect(all.querySelector(".navitem__count")?.textContent?.trim()).toBe("3");
+    // The first `.ml-libhead__count` belongs to the My Skills section.
+    const mineCount = container.querySelector(".ml-libhead__count");
+    expect(mineCount?.textContent?.trim()).toBe("3");
     const starred = findButton(container, "Starred skills");
     expect(starred.querySelector(".navitem__count")?.textContent?.trim()).toBe("1");
   });
@@ -464,8 +499,8 @@ describe("SkillsApp optimistic label assignment", () => {
   it("fires exactly one unassign RPC per detail toggle and keeps the detail open (StrictMode-safe)", async () => {
     // From the All-skills scope the skill stays in view after unfiling, so the detail does not close.
     const { container } = await mountSkillsApp(
-      { kind: "all", skill: "seo-helper" },
-      { url: "/skills?skill=seo-helper" },
+      { lib: "org", kind: "all", skill: "seo-helper" },
+      { url: "/skills?lib=org&skill=seo-helper" },
     );
     await flushEffects();
     expect(container.textContent).toContain("Install skill");
@@ -488,8 +523,8 @@ describe("SkillsApp optimistic label assignment", () => {
   it("reverts the optimistic toggle and keeps the detail open when the RPC fails", async () => {
     queryMocks.unassignSkillLabel.mockRejectedValueOnce(new Error("nope"));
     const { container } = await mountSkillsApp(
-      { kind: "all", skill: "seo-helper" },
-      { url: "/skills?skill=seo-helper" },
+      { lib: "org", kind: "all", skill: "seo-helper" },
+      { url: "/skills?lib=org&skill=seo-helper" },
     );
     await flushEffects();
 
@@ -505,52 +540,54 @@ describe("SkillsApp optimistic label assignment", () => {
 
 describe("SkillsApp navigation", () => {
   it("preserves unsaved filters when browser Back closes a pushed detail", async () => {
-    const { container } = await mountSkillsApp({ kind: "all" });
+    const { container } = await mountSkillsApp({ lib: "org", kind: "all" });
     await flushEffects();
     // The default route ignores the saved starred filter, so every skill shows.
     expect(container.textContent).toContain("loose-skill");
 
     clickButton(container, "Open skill loose-skill");
     await flushEffects();
-    expect(window.location.search).toBe("?skill=loose-skill");
+    expect(window.location.search).toBe("?lib=org&skill=loose-skill");
     expect(container.textContent).toContain("Install skill");
 
-    window.history.replaceState({}, "", "/skills");
+    // Browser Back returns to the org list (the entry before the pushed detail).
+    window.history.replaceState({}, "", "/skills?lib=org");
     await act(async () => {
       window.dispatchEvent(new PopStateEvent("popstate"));
     });
 
-    expect(window.location.search).toBe("");
+    expect(window.location.search).toBe("?lib=org");
     expect(container.textContent).toContain("loose-skill");
     expect(container.textContent).not.toContain("Install skill");
   });
 
   it("persists a label folder in the URL when opening a skill under it", async () => {
     const { container } = await mountSkillsApp(
-      { kind: "label", label: "marketing/seo" },
-      { url: "/skills?view=label&label=marketing%2Fseo" },
+      { lib: "org", kind: "label", label: "marketing/seo" },
+      { url: "/skills?lib=org&view=label&label=marketing%2Fseo" },
     );
     await flushEffects();
 
     clickButton(container, "Open skill seo-helper");
     await flushEffects();
 
-    expect(window.location.search).toBe("?view=label&label=marketing%2Fseo&skill=seo-helper");
+    expect(window.location.search).toBe("?lib=org&view=label&label=marketing%2Fseo&skill=seo-helper");
     expect(container.textContent).toContain("Install skill");
   });
 
   it("falls back to replacing the URL when closing a directly loaded detail", async () => {
     const { container } = await mountSkillsApp(
-      { kind: "all", skill: "seo-helper" },
-      { url: "/skills?skill=seo-helper" },
+      { lib: "org", kind: "all", skill: "seo-helper" },
+      { url: "/skills?lib=org&skill=seo-helper" },
     );
     await flushEffects();
     expect(container.textContent).toContain("Install skill");
 
-    clickButton(container, "Skills");
+    // The detail crumb's back button is labeled by the library (the org name for an org skill).
+    clickButton(container, "Acme");
     await flushEffects();
 
-    expect(window.location.pathname + window.location.search).toBe("/skills");
+    expect(window.location.pathname + window.location.search).toBe("/skills?lib=org");
     expect(container.textContent).toContain("seo-helper");
     expect(container.textContent).not.toContain("Install skill");
   });
@@ -592,11 +629,11 @@ describe("SkillsApp navigation", () => {
 });
 
 describe("SkillsApp label folder creation", () => {
-  it("creates an empty folder from the org-root input and selects it (one createLabel RPC)", async () => {
-    const { container } = await mountSkillsApp({ kind: "all" });
+  it("creates an empty folder from the Organization header input and selects it (one createLabel RPC)", async () => {
+    const { container } = await mountSkillsApp({ lib: "org", kind: "all" });
     await flushEffects();
 
-    clickButton(container, "New folder");
+    clickButton(container, "New org folder");
     await flushEffects();
 
     const input = container.querySelector<HTMLInputElement>('input[aria-label="New folder path"]');
@@ -611,20 +648,20 @@ describe("SkillsApp label folder creation", () => {
     expect(queryMocks.createLabel).toHaveBeenCalledTimes(1);
     expect(queryMocks.createLabel).toHaveBeenCalledWith("campaigns", { displayName: "campaigns" });
     // The new folder is selected (its scope is now the active label route).
-    expect(window.location.search).toBe("?view=label&label=campaigns");
+    expect(window.location.search).toBe("?lib=org&view=label&label=campaigns");
   });
 
   it("rewrites the URL when renaming the active folder, preserving the open skill", async () => {
     const { container } = await mountSkillsApp(
-      { kind: "label", label: "marketing/seo" },
-      { url: "/skills?view=label&label=marketing%2Fseo" },
+      { lib: "org", kind: "label", label: "marketing/seo" },
+      { url: "/skills?lib=org&view=label&label=marketing%2Fseo" },
     );
     await flushEffects();
 
     // Open a skill under the active folder so the route carries both label + skill.
     clickButton(container, "Open skill seo-helper");
     await flushEffects();
-    expect(window.location.search).toBe("?view=label&label=marketing%2Fseo&skill=seo-helper");
+    expect(window.location.search).toBe("?lib=org&view=label&label=marketing%2Fseo&skill=seo-helper");
 
     // Rename the active leaf folder (marketing/seo → marketing/growth) via its options menu.
     clickButton(container, "marketing/seo options");
@@ -642,16 +679,16 @@ describe("SkillsApp label folder creation", () => {
 
     expect(queryMocks.renameLabel).toHaveBeenCalledWith("marketing/seo", "marketing/growth", { displayName: "growth" });
     // The URL round-trips the new path and keeps the detail open (reload re-opens the same skill).
-    expect(window.location.search).toBe("?view=label&label=marketing%2Fgrowth&skill=seo-helper");
+    expect(window.location.search).toBe("?lib=org&view=label&label=marketing%2Fgrowth&skill=seo-helper");
   });
 
   it("renames a folder display name while keeping the same canonical path", async () => {
     const { container } = await mountSkillsApp(
-      { kind: "label", label: "dev" },
+      { lib: "org", kind: "label", label: "dev" },
       {
-        url: "/skills?view=label&label=dev",
+        url: "/skills?lib=org&view=label&label=dev",
         props: {
-          initialSkills: [],
+          initialOrgSkills: [],
           initialLabels: { tree: [], flat: [{ path: "dev", displayName: null, color: null, icon: null }] },
         },
       },
@@ -672,7 +709,7 @@ describe("SkillsApp label folder creation", () => {
     await flushEffects();
 
     expect(queryMocks.renameLabel).toHaveBeenCalledWith("dev", "dev", { displayName: "Dev" });
-    expect(window.location.search).toBe("?view=label&label=dev");
+    expect(window.location.search).toBe("?lib=org&view=label&label=dev");
     expect(container.textContent).toContain("Dev");
   });
 });

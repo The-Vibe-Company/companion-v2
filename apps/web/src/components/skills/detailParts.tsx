@@ -240,10 +240,22 @@ function statusBadge(validation: SkillVM["validation"]): { tone: "ok" | "warn" |
  * The detail head's status card: Status (colored badge + dot), Version, Updated, Stars.
  * Version/Updated/Stars live here so the stacked sections below never repeat them.
  */
-export function StatusCard({ skill }: { skill: SkillVM }) {
+export function StatusCard({ skill, libLabel }: { skill: SkillVM; libLabel?: string }) {
   const badge = statusBadge(skill.validation);
+  // For a personal skill the owner is the viewer; org skills show the publisher.
+  const owner = skill.scope === "personal" ? "You" : skill.authorName;
   return (
     <div className="statuscard">
+      {libLabel && (
+        <div className="statuscard__row">
+          <span className="statuscard__k">Library</span>
+          <span className="statuscard__v">{libLabel}</span>
+        </div>
+      )}
+      <div className="statuscard__row">
+        <span className="statuscard__k">Owner</span>
+        <span className="statuscard__v">{owner}</span>
+      </div>
       <div className="statuscard__row">
         <span className="statuscard__k">Status</span>
         <span className={"statuscard__badge statuscard__badge--" + badge.tone}>

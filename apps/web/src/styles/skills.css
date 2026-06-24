@@ -91,7 +91,7 @@ body { background: var(--color-canvas); color: var(--color-fg); font-family: var
 .lblnew__input::placeholder { color: var(--color-faint); }
 
 /* A label row: collapse chevron · selectable main (icon + name + roll-up count) · hover "⋯". */
-.lblrow { display: flex; align-items: center; gap: 2px; border-radius: var(--radius-md);
+.lblrow { position: relative; display: flex; align-items: center; gap: 2px; border-radius: var(--radius-md);
   transition: background-color var(--duration-fast) var(--ease-out-quint); }
 .lblrow:hover { background: var(--color-surface-raised); }
 .lblrow--active { background: var(--color-accent-tint); }
@@ -100,17 +100,24 @@ body { background: var(--color-canvas); color: var(--color-fg); font-family: var
 .lblrow__chev:hover { color: var(--color-fg); }
 .lblrow__chev.is-open { transform: rotate(90deg); }
 .lblrow__chev--leaf { cursor: default; pointer-events: none; }
-.lblrow__main { flex: 1; min-width: 0; display: flex; align-items: center; gap: 9px; padding: 5px 6px; border: none; background: none; cursor: pointer;
+/* Right padding reserves the count/options column so the name never runs under the absolute count. */
+.lblrow__main { flex: 1; min-width: 0; display: flex; align-items: center; gap: 9px; padding: 5px 22px 5px 6px; border: none; background: none; cursor: pointer;
   color: var(--color-muted); font-family: var(--font-ui); font-size: var(--text-sm); text-align: left;
   transition: color var(--duration-fast) var(--ease-out-quint); }
 .lblrow:hover .lblrow__main, .lblrow--active .lblrow__main { color: var(--color-fg); }
 .lblrow__ico { color: var(--color-faint); display: inline-flex; flex: none; }
 .lblrow:hover .lblrow__ico, .lblrow--active .lblrow__ico { color: var(--color-fg); }
 .lblrow__name { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 500; }
-.lblrow__count { font-family: var(--font-mono); font-size: 11px; color: var(--color-faint); flex: none; }
+/* Counts sit in one right-hand column (10px in), aligned with the Starred / Installed nav counts;
+   the options button swaps in on hover. */
+.lblrow__count { position: absolute; right: 10px; top: 50%; transform: translateY(-50%);
+  font-family: var(--font-mono); font-size: 11px; color: var(--color-faint);
+  transition: opacity var(--duration-fast) var(--ease-out-quint); }
 .lblrow--active .lblrow__count { color: var(--color-muted); }
-.lblrow__more { width: 22px; height: 22px; margin-right: 4px; display: grid; place-items: center; border: none; background: none; cursor: pointer;
-  color: var(--color-faint); border-radius: 4px; opacity: 0; flex: none;
+.lblrow:hover .lblrow__count, .lblrow:focus-within .lblrow__count { opacity: 0; }
+.lblrow__more { position: absolute; right: 4px; top: 50%; transform: translateY(-50%);
+  width: 22px; height: 22px; display: grid; place-items: center; border: none; background: none; cursor: pointer;
+  color: var(--color-faint); border-radius: 4px; opacity: 0;
   transition: opacity var(--duration-fast) var(--ease-out-quint), background-color var(--duration-fast) var(--ease-out-quint), color var(--duration-fast) var(--ease-out-quint); }
 .lblrow:hover .lblrow__more, .lblrow__more:focus-visible { opacity: 1; }
 .lblrow__more:hover { background: var(--color-surface-sunken); color: var(--color-fg); }
@@ -666,6 +673,34 @@ body { background: var(--color-canvas); color: var(--color-fg); font-family: var
   .side:not(.side--mobile-open) .lblrow {
     display: none;
   }
+  /* Collapsed rail: the two library headers (My Skills / Organization) become centered icon
+     buttons like the other nav icons — drop the chevron, name, count, and the new-folder plus. */
+  .side:not(.side--mobile-open) .ml-libhead__chev,
+  .side:not(.side--mobile-open) .ml-libhead__name,
+  .side:not(.side--mobile-open) .ml-libhead__count,
+  .side:not(.side--mobile-open) .ml-libhead .side__addteam,
+  .side:not(.side--mobile-open) .ml-updot {
+    display: none;
+  }
+  .side:not(.side--mobile-open) .ml-libhead {
+    width: 44px;
+    height: 44px;
+    padding: 0;
+    gap: 0;
+  }
+  .side:not(.side--mobile-open) .ml-libhead__main {
+    width: 44px;
+    height: 44px;
+    justify-content: center;
+    gap: 0;
+    padding: 0;
+  }
+  .side:not(.side--mobile-open) .ml-libhead__ico { color: var(--color-muted); }
+  .side:not(.side--mobile-open) .ml-libhead.is-active .ml-libhead__ico { color: var(--color-fg); }
+  /* The Starred / Installed shortcuts nest under a header when expanded; in the rail they must
+     center like top-level icons (clear the nested left padding). */
+  .side:not(.side--mobile-open) .ml-kids { gap: 4px; }
+  .side:not(.side--mobile-open) .ml-kids .navitem { padding-left: 0; }
   .side:not(.side--mobile-open) .side__foot {
     justify-content: center;
     padding: 12px 0;
@@ -883,5 +918,173 @@ body { background: var(--color-canvas); color: var(--color-fg); font-family: var
 .ls-gate__foot { flex: none; display: flex; align-items: center; gap: var(--space-3);
   padding: var(--space-4) var(--space-5); border-top: 1px solid var(--color-line); background: var(--color-surface-sunken); }
 .ls-gate__foot .btn-primary { margin-left: auto; }
+
+/* ===================== Two-library sidebar (My Skills / Organization) ===================== */
+/* A collapsible library section header: chevron + icon + name + skill-count + "new folder" plus. */
+.ml-libhead {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  border-radius: var(--radius-md);
+  transition: background-color var(--duration-fast) var(--ease-out-quint);
+}
+.ml-libhead:hover { background: var(--color-surface-raised); }
+.ml-libhead.is-active { background: var(--color-accent-tint); }
+.ml-libhead__chev {
+  width: 18px;
+  height: 32px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  border: none;
+  background: none;
+  cursor: pointer;
+  color: var(--color-faint);
+  flex: none;
+  transition: color var(--duration-fast) var(--ease-out-quint);
+}
+.ml-libhead__chev:hover { color: var(--color-fg); }
+.ml-libhead__main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  /* Right padding clears the always-visible count + "new folder" button. */
+  padding: 7px 52px 7px 4px;
+  border: none;
+  background: none;
+  cursor: pointer;
+  color: var(--color-fg);
+  font-family: var(--font-ui);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  text-align: left;
+}
+.ml-libhead__ico { color: var(--color-muted); display: inline-flex; flex: none; }
+.ml-libhead.is-active .ml-libhead__ico { color: var(--color-fg); }
+.ml-libhead__name { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ml-libhead__count {
+  position: absolute;
+  right: 30px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--color-muted);
+}
+/* The "new folder" button stays visible (not hover-only) so it's discoverable; the count sits to its left. */
+.ml-libhead .side__addteam { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); margin: 0; opacity: 1; }
+/* The children of a library section (Starred / Installed shortcuts + the folder tree). */
+.ml-kids { display: flex; flex-direction: column; gap: 2px; }
+.ml-kids .navitem { padding-left: 28px; }
+/* Drop the folder-row main's left padding inside a library section so the folder icons line up with
+   the Starred / Installed icons (the chevron gutter already supplies the indent). */
+.ml-kids .lblrow__main { padding-left: 0; }
+/* Amber "updates available" dot on the Installed shortcut (paired with a title/aria-label). */
+.ml-updot {
+  margin-left: auto;
+  width: 7px;
+  height: 7px;
+  border-radius: var(--radius-full);
+  background: var(--color-warn);
+  flex: none;
+}
+
+/* Optional segmented library toggle (non-default layout). */
+.segoff { background: transparent; color: var(--color-muted); }
+.segoff:hover { color: var(--color-fg); }
+.segon {
+  background: var(--color-surface);
+  color: var(--color-fg);
+  box-shadow: var(--shadow-xs);
+  border: 1px solid var(--color-line) !important;
+}
+.segon .navitem__ico, .segoff svg { color: inherit; }
+
+/* ===================== Share-to-organization confirm dialog ===================== */
+.ml-share {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 90;
+  width: min(440px, calc(100vw - 32px));
+  background: var(--color-surface);
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+}
+.ml-share__head { display: flex; align-items: flex-start; gap: 12px; padding: 20px 22px 0; }
+.ml-share__icon {
+  width: 34px;
+  height: 34px;
+  border-radius: var(--radius-md);
+  background: var(--color-accent-tint);
+  color: var(--color-accent-edge);
+  display: grid;
+  place-items: center;
+  flex: none;
+}
+.ml-share__heading { flex: 1; min-width: 0; }
+.ml-share__title { font-size: var(--text-md); font-weight: 600; color: var(--color-fg); }
+.ml-share__sub { margin-top: 4px; font-size: var(--text-sm); color: var(--color-muted); }
+.ml-share__sub .mono { color: var(--color-fg); font-weight: 500; }
+.ml-share__why { padding: 14px 22px 4px; display: flex; flex-direction: column; gap: 10px; }
+.ml-share__row {
+  display: flex;
+  gap: 9px;
+  align-items: flex-start;
+  font-size: var(--text-sm);
+  color: var(--color-muted);
+  line-height: var(--leading-normal, 1.5);
+}
+.ml-share__rowico { color: var(--color-faint); margin-top: 2px; flex: none; display: inline-flex; }
+.ml-share__rowico--ok { color: var(--color-ok); }
+.ml-share__foot { display: flex; justify-content: flex-end; gap: 8px; padding: 18px 22px 20px; }
+.ml-share__cancel {
+  height: 32px;
+  padding: 0 14px;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  color: var(--color-fg);
+  font-family: var(--font-ui);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  cursor: pointer;
+}
+
+/* The installed-from-org note in the skill detail (the base .ls-confirm lives above). */
+.dinstalled-note { margin-top: 18px; }
+
+/* Toast Undo / dismiss affordances (the base .og-toast lives in styles/org.css). */
+.og-toast__msg { flex: 1; min-width: 0; }
+.og-toast__undo {
+  border: none;
+  background: none;
+  color: inherit;
+  font-family: var(--font-ui);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  padding: 0 4px;
+}
+.og-toast__close {
+  border: none;
+  background: none;
+  color: inherit;
+  opacity: 0.6;
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  padding: 0 2px;
+}
+.og-toast__close:hover { opacity: 1; }
 
 /* Login / auth styles live in styles/auth.css. */

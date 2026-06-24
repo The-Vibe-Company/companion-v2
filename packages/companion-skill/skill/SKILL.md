@@ -3,7 +3,7 @@ name: companion
 description: "Use when managing local SKILL.md packages with Companion: validate, publish, update, resolve skill dependencies, declare the secrets and environment variables a skill needs, install updates, audit skills, check workspace versions, or self-update this Companion skill through the Companion workspace API."
 license: MIT
 metadata:
-  companion_version: 1.8.0
+  companion_version: 1.9.0
 allowed-tools: read_file write_file run_shell
 ---
 
@@ -225,8 +225,11 @@ or update `companion.json` with the confirmed final list before packaging; do no
 with a stale dependency manifest. If the plan listed dependencies under `upload`, analyze and
 publish those first (topological order).
 
-There is no owner to choose. Every skill is visible to every member of the workspace, and any member
-can read, edit, archive, or delete any skill. You organize skills with **labels** (folders) instead.
+A skill lives in one of two libraries (`scope`). An **org** skill is visible to every member of the
+workspace, and any member can read, edit, archive, or delete it — organized with org-wide **labels**
+(folders). A **personal** skill is private to its creator (the My Skills library), organized with that
+person's own **personal folders**. Publishing defaults to `org`; pass `scope: personal` to author a
+private skill, and `POST /skills/{slug}/share` to move a personal skill into the org library (one-way).
 
 A label is an org-wide, shared, slash-separated path such as `marketing/seo`. A skill can carry
 several labels at once; labels do not affect who can see the skill, only how it is filed. To file a

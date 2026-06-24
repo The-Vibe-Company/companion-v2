@@ -123,6 +123,8 @@ interface FakeOptions {
   archivedSkillIds?: string[];
   /** slug → skill id for `resolveSkillId`; map a slug to `null` to model "not found". */
   skillBySlug?: Record<string, string | null>;
+  /** Slugs whose resolved skill is PERSONAL-scoped (org labels must reject these). Default: org. */
+  personalSlugs?: string[];
 }
 
 function fakeDb(opts: FakeOptions = {}) {
@@ -313,15 +315,17 @@ function fakeDb(opts: FakeOptions = {}) {
       skills: {
         findFirst: async (q?: { where?: unknown }) => {
           const params = pathParams(q?.where);
+          const personal = new Set(opts.personalSlugs ?? []);
+          const scopeFor = (slug: string) => (personal.has(slug) ? ("personal" as const) : ("org" as const));
           const map = opts.skillBySlug;
           if (map) {
             for (const [slug, id] of Object.entries(map)) {
-              if (params.includes(slug)) return id == null ? undefined : { id };
+              if (params.includes(slug)) return id == null ? undefined : { id, scope: scopeFor(slug) };
             }
             return undefined;
           }
           const slug = params[0];
-          return slug ? { id: `skill-${slug}` } : undefined;
+          return slug ? { id: `skill-${slug}`, scope: scopeFor(slug) } : undefined;
         },
       },
     },
@@ -453,6 +457,17 @@ describe("assignLabel / unassignLabel", () => {
     await expect(assignLabel({ actor, orgId: ORG, slug: "ghost", path: "growth", database })).rejects.toThrow(
       "skill not found",
     );
+  });
+
+  it("rejects org labels on a PERSONAL skill (no leak into the shared folder tree)", async () => {
+    const { database, skillLabels } = fakeDb({ skillBySlug: { "my-draft": "skill-p" }, personalSlugs: ["my-draft"] });
+    await expect(assignLabel({ actor, orgId: ORG, slug: "my-draft", path: "growth", database })).rejects.toThrow(
+      "skill not found",
+    );
+    await expect(unassignLabel({ actor, orgId: ORG, slug: "my-draft", path: "growth", database })).rejects.toThrow(
+      "skill not found",
+    );
+    expect(skillLabels).toHaveLength(0);
   });
 });
 

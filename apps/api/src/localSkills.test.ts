@@ -65,7 +65,7 @@ describe("companion skill package + row", () => {
       desc: "Detect dependencies, setup requirements, and display copy and record them in the skill manifest.",
     });
     expect(row.changes).toContain(
-      "Removes skill owners, visibility, and teams: every skill is visible to every org member, and any member can manage any skill.",
+      "Adds a private My Skills library: a skill is created in your personal library by default (scope=personal) and is visible only to you, organized by your own personal folders.",
     );
     // The install prompt drives the report-back call and leaves placeholders for the client.
     expect(row.prompts.install).toContain("/local-skills/companion/package");

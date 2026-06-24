@@ -25,6 +25,8 @@ function registryRow(over: Partial<SkillListRow> = {}): SkillListRow {
     display: {},
     validation: "valid",
     validation_error: null,
+    scope: "org",
+    source: null,
     labels: [],
     creator_id: "user-1",
     creator_name: "User One",

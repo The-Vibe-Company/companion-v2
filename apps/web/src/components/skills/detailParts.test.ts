@@ -11,6 +11,8 @@ const skill: SkillVM = {
   validation: "valid",
   description: "Demo skill.",
   error: null,
+  scope: "org",
+  source: null,
   labels: ["marketing", "marketing/seo"],
   authorId: "user-1",
   authorName: "Alice Nardon",
