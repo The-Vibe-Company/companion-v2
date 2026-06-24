@@ -91,7 +91,7 @@ body { background: var(--color-canvas); color: var(--color-fg); font-family: var
 .lblnew__input::placeholder { color: var(--color-faint); }
 
 /* A label row: collapse chevron · selectable main (icon + name + roll-up count) · hover "⋯". */
-.lblrow { display: flex; align-items: center; gap: 2px; border-radius: var(--radius-md);
+.lblrow { position: relative; display: flex; align-items: center; gap: 2px; border-radius: var(--radius-md);
   transition: background-color var(--duration-fast) var(--ease-out-quint); }
 .lblrow:hover { background: var(--color-surface-raised); }
 .lblrow--active { background: var(--color-accent-tint); }
@@ -100,17 +100,24 @@ body { background: var(--color-canvas); color: var(--color-fg); font-family: var
 .lblrow__chev:hover { color: var(--color-fg); }
 .lblrow__chev.is-open { transform: rotate(90deg); }
 .lblrow__chev--leaf { cursor: default; pointer-events: none; }
-.lblrow__main { flex: 1; min-width: 0; display: flex; align-items: center; gap: 9px; padding: 5px 6px; border: none; background: none; cursor: pointer;
+/* Right padding reserves the count/options column so the name never runs under the absolute count. */
+.lblrow__main { flex: 1; min-width: 0; display: flex; align-items: center; gap: 9px; padding: 5px 22px 5px 6px; border: none; background: none; cursor: pointer;
   color: var(--color-muted); font-family: var(--font-ui); font-size: var(--text-sm); text-align: left;
   transition: color var(--duration-fast) var(--ease-out-quint); }
 .lblrow:hover .lblrow__main, .lblrow--active .lblrow__main { color: var(--color-fg); }
 .lblrow__ico { color: var(--color-faint); display: inline-flex; flex: none; }
 .lblrow:hover .lblrow__ico, .lblrow--active .lblrow__ico { color: var(--color-fg); }
 .lblrow__name { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 500; }
-.lblrow__count { font-family: var(--font-mono); font-size: 11px; color: var(--color-faint); flex: none; }
+/* Counts sit in one right-hand column (10px in), aligned with the Starred / Installed nav counts;
+   the options button swaps in on hover. */
+.lblrow__count { position: absolute; right: 10px; top: 50%; transform: translateY(-50%);
+  font-family: var(--font-mono); font-size: 11px; color: var(--color-faint);
+  transition: opacity var(--duration-fast) var(--ease-out-quint); }
 .lblrow--active .lblrow__count { color: var(--color-muted); }
-.lblrow__more { width: 22px; height: 22px; margin-right: 4px; display: grid; place-items: center; border: none; background: none; cursor: pointer;
-  color: var(--color-faint); border-radius: 4px; opacity: 0; flex: none;
+.lblrow:hover .lblrow__count, .lblrow:focus-within .lblrow__count { opacity: 0; }
+.lblrow__more { position: absolute; right: 4px; top: 50%; transform: translateY(-50%);
+  width: 22px; height: 22px; display: grid; place-items: center; border: none; background: none; cursor: pointer;
+  color: var(--color-faint); border-radius: 4px; opacity: 0;
   transition: opacity var(--duration-fast) var(--ease-out-quint), background-color var(--duration-fast) var(--ease-out-quint), color var(--duration-fast) var(--ease-out-quint); }
 .lblrow:hover .lblrow__more, .lblrow__more:focus-visible { opacity: 1; }
 .lblrow__more:hover { background: var(--color-surface-sunken); color: var(--color-fg); }
