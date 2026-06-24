@@ -45,7 +45,7 @@ export function OrgSwitcher({
           size={26}
         />
         <span className="og-switch__meta">
-          <span className="og-switch__name">{current.name}</span>
+          <span className="og-switch__name" title={current.name}>{current.name}</span>
         </span>
         <span className="og-switch__chev">
           <Icon name="chevrons-up-down" size={15} />
