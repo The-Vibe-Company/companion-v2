@@ -39,7 +39,7 @@ import { db, schema, type Db } from "@companion/db";
 import { initialsFor, slugify } from "@companion/db/ids";
 import { listOrgAccessDomains } from "./domainAccess";
 import { classifyEmailDomain } from "./email-domains";
-import { canManageOrg, canTouchOwner, isLastOwner } from "./authz";
+import { canManageOrg, canManagePersonalSkill, canTouchOwner, isLastOwner } from "./authz";
 
 // Org-wide shared label ("folder") services. Re-exported so callers keep importing everything from
 // `@companion/core/services`. `labels.ts` imports `getOrgRole`/`ActorContext` from here (both hoisted
@@ -55,6 +55,20 @@ export {
   renameLabel,
   deleteLabel,
 } from "./labels";
+
+// Per-user personal folder ("My Skills") services, mirroring the org-label set. Same load-order
+// reasoning as `./labels`: `personalLabels.ts` only imports `getOrgRole`/`ActorContext` (hoisted /
+// type-only) plus the pure tree helpers from `./labels`.
+export {
+  listPersonalLabels,
+  createPersonalLabel,
+  assignPersonalLabel,
+  unassignPersonalLabel,
+  setPersonalLabelColor,
+  setPersonalLabelIcon,
+  renamePersonalLabel,
+  deletePersonalLabel,
+} from "./personalLabels";
 
 // Domain-driven onboarding services (create/join/context). Re-exported so callers keep importing
 // everything from `@companion/core/services`. `onboarding.ts` only imports `uniqueSlug` (a hoisted
@@ -544,18 +558,55 @@ export async function removeMember(input: {
     .where(and(eq(schema.memberships.orgId, input.orgId), eq(schema.memberships.userId, input.userId)));
 }
 
+/** Which library a skill read targets. Org skills are flat; personal skills are owner-private. */
+export type SkillLibrary = "org" | "mine" | "accessible";
+
 /**
- * Skills are flat: the visibility gate is just org membership + the tenant scope `eq(orgId)`. This
- * asserts membership and returns the org-scoped predicate every skill read/write shares.
+ * The visibility gate for skill reads: org membership + the tenant scope, narrowed by `library`.
+ *   * `org`        — the flat org-wide library: `scope = 'org'` (every member, default).
+ *   * `mine`       — the caller's "My Skills": their authored personal skills PLUS org skills they have
+ *                    installed (surfaced under My Skills).
+ *   * `accessible` — single-skill resolution: every org skill PLUS the caller's own personal skills.
+ *                    Used by `getSkillBySlug` so a personal skill stays reachable by its owner.
+ * Asserts membership and returns the predicate every skill read/write shares.
  */
-async function visibleSkillPredicate(database: Db, actor: ActorContext, orgId: string) {
+async function visibleSkillPredicate(
+  database: Db,
+  actor: ActorContext,
+  orgId: string,
+  library: SkillLibrary = "org",
+) {
   await assertMember(database, actor, orgId);
-  return eq(schema.skills.orgId, orgId);
+  const orgScope = eq(schema.skills.orgId, orgId);
+  if (library === "org") {
+    return and(orgScope, eq(schema.skills.scope, "org"));
+  }
+  if (library === "accessible") {
+    return and(
+      orgScope,
+      sql`(${schema.skills.scope} = 'org' or ${schema.skills.creatorId} = ${actor.id})`,
+    );
+  }
+  // `mine`: personal skills I authored, OR org skills I have installed.
+  return and(
+    orgScope,
+    sql`(
+      (${schema.skills.scope} = 'personal' and ${schema.skills.creatorId} = ${actor.id})
+      or (${schema.skills.scope} = 'org' and exists (
+        select 1 from ${schema.skillInstalls} si
+        where si.org_id = ${orgId} and si.skill_id = ${schema.skills.id} and si.user_id = ${actor.id}
+      ))
+    )`,
+  );
 }
 
-/** The set of skill ids (live + archived) in the org — every member can read every skill. */
+/**
+ * The set of skill ids the actor can read (org skills + their own personal skills). Drives the
+ * "used by" roll-up so it never leaks a dependent the actor cannot see (e.g. another member's
+ * private skill that depends on an org skill).
+ */
 async function visibleSkillIds(database: Db, actor: ActorContext, orgId: string): Promise<Set<string>> {
-  const predicate = await visibleSkillPredicate(database, actor, orgId);
+  const predicate = await visibleSkillPredicate(database, actor, orgId, "accessible");
   const rows = await database.select({ id: schema.skills.id }).from(schema.skills).where(predicate);
   // Defensive (mocked DBs in tests may return a non-array for this shape) — see loadDepGraph.
   return new Set((Array.isArray(rows) ? rows : []).map((r) => r.id));
@@ -575,6 +626,12 @@ export function toPrefixTsQuery(raw: string): string | null {
 export async function listSkills(input: {
   actor: ActorContext;
   orgId: string;
+  /**
+   * Which library to read: `org` (flat org-wide, default), `mine` (the caller's "My Skills" —
+   * authored personal skills + org skills they installed), or `accessible` (single-skill resolution:
+   * org skills + the caller's own personal skills).
+   */
+  library?: SkillLibrary;
   /** Filter to skills filed under this label path OR any descendant of it. */
   label?: string;
   /** Filter to skills filed under no label at all. */
@@ -593,8 +650,13 @@ export async function listSkills(input: {
   database?: Db;
 }): Promise<SkillListRow[]> {
   const database = input.database ?? db;
-  const baseVisibility = await visibleSkillPredicate(database, input.actor, input.orgId);
+  const library: SkillLibrary = input.library ?? "org";
+  const baseVisibility = await visibleSkillPredicate(database, input.actor, input.orgId, library);
   const predicates = [baseVisibility];
+  // Which folder table backs this library's "filed in" paths: org skills use the shared `skill_labels`;
+  // the My-Skills library uses the caller's private `personal_skill_labels`.
+  const labelTable = library === "mine" ? schema.personalSkillLabels : schema.skillLabels;
+  const labelOwnerScope = library === "mine" ? sql` and sl.owner_id = ${input.actor.id}` : sql``;
   // Archived skills drop out of normal lists; the Archived view shows only them; detail/deps/
   // download resolution includes both so an archived skill stays viewable and downloadable.
   if (!input.includeArchived) {
@@ -605,13 +667,13 @@ export async function listSkills(input: {
   if (input.label) {
     const labelPrefix = `${input.label}/%`;
     predicates.push(
-      sql`exists (select 1 from ${schema.skillLabels} sl where sl.org_id = ${input.orgId} and sl.skill_id = ${schema.skills.id} and (sl.path = ${input.label} or sl.path like ${labelPrefix}))`,
+      sql`exists (select 1 from ${labelTable} sl where sl.org_id = ${input.orgId} and sl.skill_id = ${schema.skills.id}${labelOwnerScope} and (sl.path = ${input.label} or sl.path like ${labelPrefix}))`,
     );
   }
   // "No label" pseudo-filter: skills carrying no assignment at all.
   if (input.nolabel) {
     predicates.push(
-      sql`not exists (select 1 from ${schema.skillLabels} sl where sl.org_id = ${input.orgId} and sl.skill_id = ${schema.skills.id})`,
+      sql`not exists (select 1 from ${labelTable} sl where sl.org_id = ${input.orgId} and sl.skill_id = ${schema.skills.id}${labelOwnerScope})`,
     );
   }
 
@@ -643,6 +705,7 @@ export async function listSkills(input: {
       org_id: schema.skills.orgId,
       slug: schema.skills.slug,
       description: schema.skills.description,
+      scope: schema.skills.scope,
       validation: schema.skills.validation,
       validation_error: schema.skills.validationError,
       creator_id: schema.skills.creatorId,
@@ -650,9 +713,15 @@ export async function listSkills(input: {
       creator_initials: schema.profiles.initials,
       // Correlated array_agg of the skill's label paths, sorted. A RAW sql subquery (NOT a
       // database.select().limit, which breaks the hand-rolled fakeDbs in tests); empty → '{}'.
-      labels: sql<
-        string[]
-      >`coalesce((select array_agg(sl.path order by sl.path) from ${schema.skillLabels} sl where sl.org_id = ${input.orgId} and sl.skill_id = ${schema.skills.id}), '{}')`,
+      // The org library reads org `skill_labels`; My Skills reads the caller's private
+      // `personal_skill_labels`; single-skill (`accessible`) resolution picks per row by the
+      // skill's scope so an org skill keeps its shared folders and a personal skill its private ones.
+      labels:
+        library === "mine"
+          ? sql<string[]>`coalesce((select array_agg(psl.path order by psl.path) from ${schema.personalSkillLabels} psl where psl.org_id = ${input.orgId} and psl.owner_id = ${input.actor.id} and psl.skill_id = ${schema.skills.id}), '{}')`
+          : library === "accessible"
+            ? sql<string[]>`case when ${schema.skills.scope} = 'personal' then coalesce((select array_agg(psl.path order by psl.path) from ${schema.personalSkillLabels} psl where psl.org_id = ${input.orgId} and psl.owner_id = ${schema.skills.creatorId} and psl.skill_id = ${schema.skills.id}), '{}') else coalesce((select array_agg(sl.path order by sl.path) from ${schema.skillLabels} sl where sl.org_id = ${input.orgId} and sl.skill_id = ${schema.skills.id}), '{}') end`
+            : sql<string[]>`coalesce((select array_agg(sl.path order by sl.path) from ${schema.skillLabels} sl where sl.org_id = ${input.orgId} and sl.skill_id = ${schema.skills.id}), '{}')`,
       current_version: schema.skillVersions.version,
       license: schema.skillVersions.license,
       frontmatter: schema.skillVersions.frontmatter,
@@ -755,6 +824,16 @@ export async function listSkills(input: {
       slug: r.slug,
       description: summary,
       display: companion.display,
+      scope: r.scope ?? "org",
+      // `source` is only meaningful in the My-Skills (`mine`) view: 'authored' = a personal skill the
+      // caller created; 'installed' = an org skill they installed, surfaced under My Skills. The org
+      // and single-skill views leave it null.
+      source:
+        library === "mine"
+          ? (r.scope ?? "org") === "personal"
+            ? ("authored" as const)
+            : ("installed" as const)
+          : null,
       validation: r.validation,
       validation_error: r.validation_error,
       labels: (Array.isArray(r.labels) ? r.labels : []).slice().sort((a, b) => a.localeCompare(b)),
@@ -868,8 +947,15 @@ export async function getSkillBySlug(input: {
   slug: string;
   database?: Db;
 }): Promise<SkillListRow | null> {
-  // Resolve by slug across both live and archived skills — archived ones stay viewable.
-  const rows = await listSkills({ ...input, includeArchived: true, database: input.database ?? db });
+  // Resolve by slug across both live and archived skills — archived ones stay viewable. Uses the
+  // `accessible` library so an org skill resolves for anyone and a personal skill only for its owner
+  // (every single-skill mutate — install/archive/share/star/deps — funnels through here).
+  const rows = await listSkills({
+    ...input,
+    library: "accessible",
+    includeArchived: true,
+    database: input.database ?? db,
+  });
   return rows.find((r) => r.slug === input.slug) ?? null;
 }
 
@@ -1317,6 +1403,16 @@ export async function assertCanPublishSkillVersion(input: {
     where: and(eq(schema.skills.orgId, input.orgId), eq(schema.skills.slug, payload.slug)),
   });
   if (existing) {
+    // Slugs are workspace-unique across scopes. A non-owner can neither see nor re-publish another
+    // member's personal skill, and you cannot publish over a skill of a different scope (Share is the
+    // only personal→org transition). Surface a generic name-collision error so a private skill is
+    // never revealed.
+    if (existing.scope === "personal" && existing.creatorId !== input.actor.id) {
+      throw new Error(`a skill named ${payload.slug} already exists in this workspace`);
+    }
+    if (payload.scope && payload.scope !== existing.scope) {
+      throw new Error(`a skill named ${payload.slug} already exists in this workspace`);
+    }
     if (payload.skill_id && payload.skill_id !== existing.id) {
       throw new Error("skill_id does not match existing skill");
     }
@@ -1367,14 +1463,18 @@ async function writeSkillVersion(input: {
           slug: payload.slug,
           description: payload.description,
           creatorId: input.actor.id,
+          // First create chooses the library; omitted defaults to 'org' (CLI/bundled-skill behavior).
+          // Re-publish (the UPDATE branch above) never changes scope — only Share moves personal→org.
+          scope: payload.scope ?? "org",
           validation: "valid",
         })
         .returning();
   if (!skill) throw new Error("could not write skill");
 
   // Apply the requested label paths on CREATE only (re-publish never re-files an existing skill).
-  // Materialize each path + its ancestors into `labels` so the folder exists in the tree, then add
-  // the `skill_labels` assignment edges. Idempotent inserts; ancestor rows are no-ops if present.
+  // Materialize each path + its ancestors so the folder exists in the tree, then add the assignment
+  // edges. Org skills file into the shared `labels` / `skill_labels`; a personal skill files into the
+  // owner's private `personal_labels` / `personal_skill_labels`. Idempotent inserts.
   if (!existing && payload.labels.length) {
     const paths = [...new Set(payload.labels)];
     const folderPaths = new Set<string>();
@@ -1382,20 +1482,42 @@ async function writeSkillVersion(input: {
       const segments = path.split("/");
       for (let i = 1; i <= segments.length; i++) folderPaths.add(segments.slice(0, i).join("/"));
     }
-    for (const path of folderPaths) {
+    if ((payload.scope ?? "org") === "personal") {
+      for (const path of folderPaths) {
+        await database
+          .insert(schema.personalLabels)
+          .values({ orgId: input.orgId, ownerId: input.actor.id, path })
+          .onConflictDoNothing({
+            target: [schema.personalLabels.orgId, schema.personalLabels.ownerId, schema.personalLabels.path],
+          });
+      }
       await database
-        .insert(schema.labels)
-        .values({ orgId: input.orgId, path, createdBy: input.actor.id })
-        .onConflictDoNothing({ target: [schema.labels.orgId, schema.labels.path] });
+        .insert(schema.personalSkillLabels)
+        .values(paths.map((path) => ({ orgId: input.orgId, ownerId: input.actor.id, skillId: skill.id, path })))
+        .onConflictDoNothing({
+          target: [
+            schema.personalSkillLabels.orgId,
+            schema.personalSkillLabels.ownerId,
+            schema.personalSkillLabels.skillId,
+            schema.personalSkillLabels.path,
+          ],
+        });
+    } else {
+      for (const path of folderPaths) {
+        await database
+          .insert(schema.labels)
+          .values({ orgId: input.orgId, path, createdBy: input.actor.id })
+          .onConflictDoNothing({ target: [schema.labels.orgId, schema.labels.path] });
+      }
+      await database
+        .insert(schema.skillLabels)
+        .values(
+          paths.map((path) => ({ orgId: input.orgId, skillId: skill.id, path, createdBy: input.actor.id })),
+        )
+        .onConflictDoNothing({
+          target: [schema.skillLabels.orgId, schema.skillLabels.skillId, schema.skillLabels.path],
+        });
     }
-    await database
-      .insert(schema.skillLabels)
-      .values(
-        paths.map((path) => ({ orgId: input.orgId, skillId: skill.id, path, createdBy: input.actor.id })),
-      )
-      .onConflictDoNothing({
-        target: [schema.skillLabels.orgId, schema.skillLabels.skillId, schema.skillLabels.path],
-      });
   }
 
   const [version] = await database
@@ -1530,9 +1652,9 @@ export async function getDownloadVersion(input: {
   // Archived skills stay downloadable ONLY while a published version still references them — across
   // ALL versions (an old published version may still declare a dependency the current one dropped),
   // so existing installs of that version never break. An unreferenced archived skill is not found.
-  const visible = (await listSkills({ actor: input.actor, orgId: input.orgId, includeArchived: true, database })).find(
-    (s) => s.slug === input.slug,
-  );
+  const visible = (
+    await listSkills({ actor: input.actor, orgId: input.orgId, library: "accessible", includeArchived: true, database })
+  ).find((s) => s.slug === input.slug);
   if (!visible) throw new Error("skill not found");
   if (visible.archived) {
     const referenced = await database
@@ -2009,7 +2131,58 @@ export async function restoreSkill(input: {
   });
 }
 
-/** Shared modify gate for a resolved skill row. Skills are flat: any org member may modify any skill. */
+/**
+ * Move a personal skill into the org library ("Share to organization"). Owner-only: only the creator
+ * of a personal skill may share it. Flips `scope` 'personal' → 'org' (now visible to every member,
+ * owner display becomes the creator) and drops its private folder assignments — org folders apply from
+ * here on. The slug is already workspace-unique, so the scope flip can never collide. One-way: there
+ * is no un-share endpoint.
+ */
+export async function shareSkill(input: {
+  actor: ActorContext;
+  orgId: string;
+  slug: string;
+  database?: Db;
+}): Promise<{ scope: "org" }> {
+  const database = input.database ?? db;
+  await assertMember(database, input.actor, input.orgId);
+  // Resolve the row directly (not via the list query) — Share only needs identity + scope + owner.
+  const skill = await database.query.skills.findFirst({
+    where: and(eq(schema.skills.orgId, input.orgId), eq(schema.skills.slug, input.slug)),
+  });
+  if (!skill) throw new Error("skill not found");
+  if (!canManagePersonalSkill(input.actor.id, { scope: skill.scope, creatorId: skill.creatorId })) {
+    throw new Error("only the owner can share a personal skill");
+  }
+  await database.transaction(async (txDb) => {
+    const tx = txDb as unknown as Db;
+    await tx
+      .update(schema.skills)
+      .set({ scope: "org", updatedAt: new Date() })
+      .where(eq(schema.skills.id, skill.id));
+    // The skill leaves the personal library: drop its private folder assignments (org folders apply now).
+    await tx
+      .delete(schema.personalSkillLabels)
+      .where(
+        and(eq(schema.personalSkillLabels.orgId, input.orgId), eq(schema.personalSkillLabels.skillId, skill.id)),
+      );
+    await tx.insert(schema.auditLog).values({
+      orgId: input.orgId,
+      actorId: input.actor.id,
+      action: "skill.share",
+      targetType: "skill",
+      targetId: skill.id,
+      metadata: { slug: skill.slug },
+    });
+  });
+  return { scope: "org" };
+}
+
+/**
+ * Shared modify gate for a resolved skill row. Org skills are flat (any member may modify). A personal
+ * skill is owner-only — only its creator may archive/restore it. (Callers resolve via `getSkillBySlug`
+ * which already hides others' personal skills; this is the explicit defense-in-depth assertion.)
+ */
 async function assertCanModifySkillRow(input: {
   actor: ActorContext;
   orgId: string;
@@ -2017,6 +2190,9 @@ async function assertCanModifySkillRow(input: {
   database: Db;
 }): Promise<void> {
   await assertMember(input.database, input.actor, input.orgId);
+  if (input.skill.scope === "personal" && input.skill.creator_id !== input.actor.id) {
+    throw new Error("only the owner can modify a personal skill");
+  }
 }
 
 /* ---- Personal access tokens (programmatic publish / install) --------------- */
@@ -2337,6 +2513,12 @@ export async function installSkill(input: {
   const database = input.database ?? db;
   const skill = await getSkillBySlug(input);
   if (!skill) throw new Error("skill not found");
+  // Install records that an org skill is in the caller's My Skills. A personal skill is already there
+  // (it is authored, not installed); another member's personal skill is invisible (resolves to null
+  // above). So an install only ever targets an org skill.
+  if (skill.scope === "personal") {
+    throw new Error("personal skills cannot be installed; they already live in My Skills");
+  }
   const now = new Date();
   const version = input.version?.trim() ? input.version.trim() : null;
   const agentLabel = input.agentLabel?.trim() ? input.agentLabel.trim() : null;

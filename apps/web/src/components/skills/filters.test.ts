@@ -9,6 +9,8 @@ function mk(p: Partial<SkillVM> & { id: string }): SkillVM {
     validation: "valid",
     description: "",
     error: null,
+    scope: "org",
+    source: null,
     labels: [],
     authorId: "user-1",
     authorName: "Alice Nardon",

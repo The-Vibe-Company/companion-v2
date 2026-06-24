@@ -19,6 +19,10 @@ import { sql } from "drizzle-orm";
 
 export const orgRoleEnum = pgEnum("org_role", ["owner", "admin", "developer"]);
 export const validationStateEnum = pgEnum("validation_state", ["valid", "validating", "invalid"]);
+// A skill's library scope. 'org' = the flat org-wide library (default; visible to every member).
+// 'personal' = private to `creator_id` (the owner) — the design's "My Skills". Only the owner sees it,
+// even admins do not. Share flips 'personal' → 'org'; there is no reverse transition.
+export const skillScopeEnum = pgEnum("skill_scope", ["personal", "org"]);
 export const orgKindEnum = pgEnum("org_kind", ["personal", "team"]);
 export const orgPlanEnum = pgEnum("org_plan", ["free", "team"]);
 export const invitationStatusEnum = pgEnum("invitation_status", [
@@ -184,11 +188,14 @@ export const skills = pgTable(
       .references(() => organizations.id, { onDelete: "cascade" }),
     slug: text("slug").notNull(),
     description: text("description").notNull(),
-    // Every skill is visible to every member of its org; there is no owner/visibility axis.
-    // `creator_id` records who first published the skill (provenance/Activity, drives the profile join).
+    // `creator_id` records who first published the skill (provenance/Activity, drives the profile
+    // join). It is also the OWNER of a personal skill: when `scope = 'personal'` only this user can
+    // read/edit/share it. Org skills (`scope = 'org'`) keep the flat model — every member may edit.
     creatorId: text("creator_id")
       .notNull()
       .references(() => user.id, { onDelete: "cascade" }),
+    // Library scope. 'org' (default) = flat org-wide library; 'personal' = private to creator_id.
+    scope: skillScopeEnum("scope").notNull().default("org"),
     currentVersionId: uuid("current_version_id"),
     validation: validationStateEnum("validation").notNull().default("valid"),
     validationError: text("validation_error"),
@@ -204,6 +211,8 @@ export const skills = pgTable(
     uniqueOrgSlug: unique("skills_org_slug_uq").on(t.orgId, t.slug),
     uniqueOrgId: unique("skills_org_id_id_uq").on(t.orgId, t.id),
     byArchived: index("skills_archived_idx").on(t.orgId, t.archivedAt),
+    // My-Skills authored-list lookups: (org, scope, creator). Org lists use the slug uq / PK.
+    byScope: index("skills_org_scope_creator_idx").on(t.orgId, t.scope, t.creatorId),
   }),
 );
 
@@ -362,6 +371,74 @@ export const skillLabels = pgTable(
       columns: [t.orgId, t.skillId],
       foreignColumns: [skills.orgId, skills.id],
       name: "skill_labels_skill_org_fk",
+    }).onDelete("cascade"),
+  }),
+);
+
+/**
+ * Per-user personal folder tree — the "My Skills" counterpart to {@link labels}. Same shape, but
+ * keyed by `(org_id, owner_id, path)` so each user's personal library has its own private folders. A
+ * row lets an empty personal folder exist. RLS is user-scoped (org_id AND owner_id) because these
+ * rows are private; the service additionally filters `owner_id = actor.id` on every query.
+ */
+export const personalLabels = pgTable(
+  "personal_labels",
+  {
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    ownerId: text("owner_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    path: text("path").notNull(),
+    displayName: text("display_name"),
+    color: text("color"),
+    icon: text("icon"),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.orgId, t.ownerId, t.path] }),
+    byPath: index("personal_labels_owner_path_idx").using(
+      "btree",
+      t.orgId,
+      t.ownerId,
+      t.path.asc().op("text_pattern_ops"),
+    ),
+  }),
+);
+
+/**
+ * The personal assignment edge: an authored personal skill is "filed in" N personal paths. One row
+ * per (owner, skill, path). Path stored directly so rename = prefix `UPDATE` and delete = prefix
+ * `DELETE`. The org-scoped composite FK `(org_id, skill_id) → skills(org_id, id)` guarantees the
+ * edge's org matches the skill's and cascades on skill/org delete (e.g. when a shared skill is reaped).
+ */
+export const personalSkillLabels = pgTable(
+  "personal_skill_labels",
+  {
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    ownerId: text("owner_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    skillId: uuid("skill_id").notNull(),
+    path: text("path").notNull(),
+    createdAt: now(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.orgId, t.ownerId, t.skillId, t.path] }),
+    byPath: index("personal_skill_labels_owner_path_idx").using(
+      "btree",
+      t.orgId,
+      t.ownerId,
+      t.path.asc().op("text_pattern_ops"),
+    ),
+    skillOrgFk: foreignKey({
+      columns: [t.orgId, t.skillId],
+      foreignColumns: [skills.orgId, skills.id],
+      name: "personal_skill_labels_skill_org_fk",
     }).onDelete("cascade"),
   }),
 );

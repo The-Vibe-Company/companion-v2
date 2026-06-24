@@ -18,6 +18,8 @@ const SORT_OPTIONS: { key: SortKey; label: string }[] = [
 
 export function ListView({
   skills,
+  library,
+  scopeKind,
   breadcrumb,
   activeLabel,
   onOpen,
@@ -32,9 +34,12 @@ export function ListView({
   onRetryPreferences,
 }: {
   skills: SkillVM[];
+  /** Which library this list shows (drives scope-aware empty + upload copy). */
+  library: "mine" | "org";
+  scopeKind: "all" | "starred" | "installed" | "label";
   /** Folder breadcrumb for the active sidebar selection (e.g. ["marketing", "seo"]). */
   breadcrumb: string[];
-  /** The active label path, or null when viewing All / Starred / No-folder. */
+  /** The active label path, or null when viewing All / Starred / Installed. */
   activeLabel: string | null;
   onOpen: (id: string) => void;
   onToggleStar: (id: string) => void;
@@ -221,11 +226,17 @@ export function ListView({
         {!shown.length && (
           <div className="empty">
             <Icon name="search-x" size={22} style={{ color: "var(--color-faint)" }} />
-            <div className="empty__title">No skills match</div>
+            <div className="empty__title">{q.trim() ? "No skills match" : "Nothing here yet"}</div>
             <div className="empty__desc">
               {q.trim()
-                ? "No skills match your search. Clear the search or filters to see the full registry."
-                : "No skills match this view. Clear the filters to see the full registry."}
+                ? "No skills match your search. Clear the search or filters to see this view in full."
+                : scopeKind === "installed"
+                  ? "You have not installed any organization skills yet. Open one in Organization to install it."
+                  : scopeKind === "starred"
+                    ? "No starred skills yet. Star a skill to keep it here."
+                    : library === "mine"
+                      ? "No skills in My Skills yet. Upload one, or install a skill from the organization library."
+                      : "No organization skills match this view. Clear the filters to see them all."}
             </div>
           </div>
         )}

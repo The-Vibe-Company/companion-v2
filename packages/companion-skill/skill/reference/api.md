@@ -25,6 +25,7 @@ These are the skills endpoints a personal access token (`skills:read` + `skills:
 | Inspect a skill's dependency graph | `GET /skills/{slug}/dependencies` | `skills:read` |
 | Archive a skill | `POST /skills/{slug}/archive` | `skills:write` |
 | Restore an archived skill | `POST /skills/{slug}/restore` | `skills:write` |
+| Share a personal skill to the org | `POST /skills/{slug}/share` | `skills:write` |
 | List the label (folder) tree | `GET /labels` | `skills:read` |
 | Create a label (folder) | `POST /labels` | `skills:write` |
 | Rename a label (cascades) | `PUT /labels/rename` | `skills:write` |
@@ -33,6 +34,14 @@ These are the skills endpoints a personal access token (`skills:read` + `skills:
 | Delete a label (cascades) | `DELETE /labels` | `skills:write` |
 | File a skill into a label | `POST /skills/{slug}/labels` | `skills:write` |
 | Unfile a skill from a label | `DELETE /skills/{slug}/labels` | `skills:write` |
+| List the personal folder tree | `GET /personal-labels` | `skills:read` |
+| Create a personal folder | `POST /personal-labels` | `skills:write` |
+| Rename a personal folder (cascades) | `PUT /personal-labels/rename` | `skills:write` |
+| Set a personal folder's color | `PUT /personal-labels/color` | `skills:write` |
+| Set a personal folder's icon | `PUT /personal-labels/icon` | `skills:write` |
+| Delete a personal folder (cascades) | `DELETE /personal-labels` | `skills:write` |
+| File a personal skill into a personal folder | `POST /skills/{slug}/personal-labels` | `skills:write` |
+| Unfile a personal skill from a personal folder | `DELETE /skills/{slug}/personal-labels` | `skills:write` |
 | Current bundled Companion skill status | `GET /local-skills/companion` | `skills:read` |
 | Download bundled Companion skill package | `GET /local-skills/companion/package` | `skills:read` |
 | Confirm this skill installed | `POST /local-skills/companion/installed` | `skills:write` |
@@ -67,11 +76,23 @@ folders directly (each has a `SKILL.md` with `metadata.companion_skill_id` / `co
 The built-in Companion skill is different from user-published skills. For the skill shown in the
 workspace's **Companion skills** section, use only the `/local-skills/companion` endpoints.
 
-## Upload bodies and labels
+## Libraries (personal vs org)
 
-There is no owner and no visibility. Every skill in a workspace is visible to every member, and any
-member can read, edit, archive, or delete any skill. Skills are organized with **labels** (folders)
-instead — see "Labels (folders)" below.
+A skill lives in one of two libraries, set by its `scope`:
+
+- **`org`** — the flat org-wide library: visible to every member, and any member can read, edit,
+  archive, or delete it. Organized with org-wide **labels** (folders).
+- **`personal`** — a private "My Skills" library: visible only to its creator (even to admins).
+  Organized with the creator's own **personal folders** (`/personal-labels`).
+
+`GET /skills?lib=mine` returns the caller's My Skills (their authored personal skills plus org skills
+they have installed); `GET /skills?lib=org` (the default) returns the org library. On publish, the
+`scope` field chooses the library on first create — it defaults to `org` for the CLI/bundled skill, so
+the existing behavior is unchanged unless you ask for `personal`. Re-publishing never changes scope;
+**`POST /skills/{slug}/share`** is the only way to move a personal skill into the org library (owner
+only, one-way). A skill name (slug) is unique across both libraries in a workspace.
+
+## Upload bodies and labels
 
 `POST /skills` accepts either:
 
@@ -94,8 +115,11 @@ Omit `label` to leave the skill unfiled. A label path is slash-separated, lower-
 (`[a-z0-9]+(?:-[a-z0-9]+)*`), no empty/leading/trailing slash, and a bounded length and depth.
 Labels never affect who can see a skill — they only file it.
 
-- Sending legacy `owner_team`, `everyone`, `team`, `teams`, `scope`, `visibility`, or `private`
-  parameters is rejected, and a skill must not declare `scope` or `visibility` in its `SKILL.md`.
+- `scope` (`personal` | `org`) chooses the library on first create (default `org`); it is ignored
+  on re-publish. Sending legacy `owner_team`, `everyone`, `team`, `teams`, `visibility`, or `private`
+  parameters is rejected, and a skill must not declare `visibility` in its `SKILL.md`.
+- Personal-folder endpoints mirror the org `/labels` set under `/personal-labels` and
+  `/skills/{slug}/personal-labels`; they only organize your own authored personal skills.
 
 Examples:
 

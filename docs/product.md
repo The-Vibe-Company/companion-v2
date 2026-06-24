@@ -51,15 +51,19 @@ For the technical design, see [`design.md`](design.md).
 
 ## 3. The three pillars
 
-Skills are **flat and org-wide**: every skill is visible to every member of the organization, and any
-member can create, edit, publish, archive, or delete any skill. There is no owner and no per-skill
-visibility flag. The platform records `creator_id` (who authored a skill) for Activity and audit — it
-is provenance, not an access right. Org-wide visibility never crosses organization boundaries.
+Every skill lives in one of two **libraries**. **My Skills** is private: a member authors skills there
+(only they can see them) and can also install org skills into it; it is organized by that member's own
+**personal folders**. The **Organization** library is flat and org-wide: every skill in it is visible to
+every member, and any member can edit, publish, archive, or delete it. A member moves a personal skill
+into the org library with one action — **Share to organization** (owner-only, one-way). The platform
+records `creator_id` (who authored a skill) for Activity and audit, and it is also the owner of a
+personal skill; nothing crosses organization boundaries.
 
-To stay organized without restricting access, skills are filed under **labels** ("folders") — an
-org-wide **shared** tree of slash-separated paths (e.g. `marketing/seo`), multi-assigned per skill,
-each path with its own color and icon, empty folders allowed. Any member can create, assign, rename,
-recolor, or delete labels.
+To stay organized, skills are filed under **labels** ("folders"): the Organization library uses an
+org-wide **shared** tree, and My Skills uses each member's **personal** tree. A folder path is
+slash-separated (e.g. `marketing/seo`), multi-assigned per skill, each path with its own color and
+icon, empty folders allowed. Any member can create, assign, rename, recolor, or delete folders in
+either tree they own access to (org folders are shared; personal folders are private).
 
 ### Pillar 1 — Hermès Agents
 Deploy curated AI agents built on the **Hermes** runtime, with **Granite** markdown memory and model
@@ -119,11 +123,13 @@ next run. Versioning lets members **pin** or **upgrade**.
 **Org roles:** `Owner` (everything, incl. billing/delete) → `Admin` (members, providers, catalog) →
 `Developer` (publish skills, define and deploy agents and containers).
 
-There are **no teams** and no per-resource visibility. A permission decision combines two checks:
-**is the actor a member of this org** (the tenant rule) **and does the actor's org role permit the
-action** (the role rule). Skills are the flat case: every member can read every skill, and any member
-can create, edit, publish, archive, or delete any skill — the only thing recorded per skill is its
-creator (provenance/audit). Skills are organized, not gated, by **shared labels**. See
+There are **no teams**. A permission decision combines two checks: **is the actor a member of this
+org** (the tenant rule) **and does the actor's org role permit the action** (the role rule). On top of
+that, skills carry one library axis: **org** skills are the flat case — every member can read and edit
+any of them — while **personal** skills (My Skills) are private to their creator, with no admin
+override. The only thing recorded per skill is its creator (provenance/audit), which is also the owner
+of a personal skill. Skills are organized, not gated, by **labels** (shared org folders + private
+personal folders). See
 [`design.md`](design.md) for the full model.
 
 ---

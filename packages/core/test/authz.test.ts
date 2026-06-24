@@ -1,13 +1,16 @@
 import { describe, expect, it } from "vitest";
 import type { OrgRole } from "@companion/contracts";
 import {
+  canAccessSkill,
   canManageOrg,
+  canManagePersonalSkill,
   canPerform,
   canTouchOwner,
   isLastOwner,
   isOrgAdmin,
   type Actor,
   type SkillAction,
+  type SkillScopeRef,
 } from "../src/index";
 
 const actor = (orgRole: OrgRole): Actor => ({ orgRole });
@@ -41,6 +44,38 @@ describe("canPerform — flat skill capability gate (every member ⇒ every acti
     for (const action of SKILL_ACTIONS) {
       expect(canPerform(actor("developer"), action)).toBe(true);
     }
+  });
+});
+
+describe("canAccessSkill — personal-skill privacy (owner-only, NO admin override)", () => {
+  const orgSkill: SkillScopeRef = { scope: "org", creatorId: "u-creator" };
+  const personalSkill: SkillScopeRef = { scope: "personal", creatorId: "u-owner" };
+
+  it("org skill is visible to any actor (creator or not)", () => {
+    expect(canAccessSkill("u-owner", orgSkill)).toBe(true);
+    expect(canAccessSkill("u-creator", orgSkill)).toBe(true);
+    expect(canAccessSkill("u-stranger", orgSkill)).toBe(true);
+  });
+
+  it("personal skill is visible ONLY to its creator", () => {
+    expect(canAccessSkill("u-owner", personalSkill)).toBe(true);
+    expect(canAccessSkill("u-someone-else", personalSkill)).toBe(false);
+  });
+
+  it("an admin/owner who is NOT the creator still cannot see a personal skill", () => {
+    // The load-bearing privacy assertion: scope wins, org role is irrelevant. "Only you see this library."
+    expect(canAccessSkill("u-admin", personalSkill)).toBe(false);
+  });
+});
+
+describe("canManagePersonalSkill — owner-only mutate (Share / personal-folder assign)", () => {
+  it("only the creator of a personal skill may", () => {
+    expect(canManagePersonalSkill("u-owner", { scope: "personal", creatorId: "u-owner" })).toBe(true);
+    expect(canManagePersonalSkill("u-other", { scope: "personal", creatorId: "u-owner" })).toBe(false);
+  });
+
+  it("org skills are not managed through the personal gate", () => {
+    expect(canManagePersonalSkill("u-creator", { scope: "org", creatorId: "u-creator" })).toBe(false);
   });
 });
 

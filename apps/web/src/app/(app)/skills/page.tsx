@@ -37,16 +37,22 @@ export default async function SkillsPage({
   if (!current) redirect("/onboarding");
   const orgHeaders = { "x-companion-org": current.id };
 
-  const [skillsResult, filterPreferences, labelsResult, localSkillsResult] = await Promise.all([
-    serverApiFetch<SkillListRow[]>("/v1/skills", { headers: orgHeaders }).catch(() => null),
-    serverApiFetch<SkillFilterPreferences>("/v1/skill-filter-preferences", { headers: orgHeaders }).catch(() => null),
-    // Best-effort: the label tree degrades gracefully to empty if this fails.
-    serverApiFetch<LabelsResponse>("/v1/labels", { headers: orgHeaders }).catch(() => EMPTY_LABELS),
-    // Best-effort: the Companion skills section degrades gracefully if this fails.
-    serverApiFetch<LocalSkillRow[]>("/v1/local-skills", { headers: orgHeaders }).catch(() => [] as LocalSkillRow[]),
-  ]);
-  if (!skillsResult || !filterPreferences) return <WorkspaceLoadError />;
-  const skills = skillsResult.map(mapSkill);
+  const [mineResult, orgResult, filterPreferences, personalLabelsResult, labelsResult, localSkillsResult] =
+    await Promise.all([
+      // "My Skills": the caller's authored personal skills + org skills they installed.
+      serverApiFetch<SkillListRow[]>("/v1/skills?lib=mine", { headers: orgHeaders }).catch(() => null),
+      // The flat org-wide library.
+      serverApiFetch<SkillListRow[]>("/v1/skills?lib=org", { headers: orgHeaders }).catch(() => null),
+      serverApiFetch<SkillFilterPreferences>("/v1/skill-filter-preferences", { headers: orgHeaders }).catch(() => null),
+      // Best-effort: each tree degrades gracefully to empty if its fetch fails.
+      serverApiFetch<LabelsResponse>("/v1/personal-labels", { headers: orgHeaders }).catch(() => EMPTY_LABELS),
+      serverApiFetch<LabelsResponse>("/v1/labels", { headers: orgHeaders }).catch(() => EMPTY_LABELS),
+      // Best-effort: the Companion skills section degrades gracefully if this fails.
+      serverApiFetch<LocalSkillRow[]>("/v1/local-skills", { headers: orgHeaders }).catch(() => [] as LocalSkillRow[]),
+    ]);
+  if (!mineResult || !orgResult || !filterPreferences) return <WorkspaceLoadError />;
+  const mineSkills = mineResult.map(mapSkill);
+  const orgSkills = orgResult.map(mapSkill);
 
   const me: MeVM = {
     id: whoami.userId,
@@ -57,9 +63,11 @@ export default async function SkillsPage({
 
   return (
     <SkillsApp
-      initialSkills={skills}
+      initialMineSkills={mineSkills}
+      initialOrgSkills={orgSkills}
       initialLocalSkills={localSkillsResult ?? []}
       initialFilterPreferences={filterPreferences}
+      initialPersonalLabels={personalLabelsResult ?? EMPTY_LABELS}
       initialLabels={labelsResult ?? EMPTY_LABELS}
       me={me}
       orgs={orgs}

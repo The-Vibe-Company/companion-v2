@@ -55,8 +55,10 @@ export async function issueToken(scopes: TokenScope[], name?: string): Promise<I
 export async function publishSkillPackage(
   file: File,
   opts: {
-    /** Label paths to file the skill under (org-wide shared folders). Applied on create. */
+    /** Folder paths to file the skill under (personal or org folders per scope). Applied on create. */
     labels?: string[];
+    /** Library to publish into on create: 'personal' (My Skills) or 'org'. */
+    scope?: "personal" | "org";
     version?: string;
     expectSlug?: string;
     expectSkillId?: string;
@@ -66,6 +68,7 @@ export async function publishSkillPackage(
   const fd = new FormData();
   fd.append("file", file);
   fd.append("action", "publish");
+  if (opts.scope) fd.append("scope", opts.scope);
   // The API parses repeatable `label` fields (one per path) into the publish `labels` payload.
   for (const path of opts.labels ?? []) fd.append("label", path);
   if (opts.version) fd.append("version", opts.version);
@@ -109,7 +112,9 @@ export async function createSkillInline(input: {
   id: string;
   description: string;
   body: string;
-  /** Label paths to file the new skill under (org-wide shared folders). */
+  /** Library to create into: 'personal' (default, My Skills) or 'org'. */
+  scope?: "personal" | "org";
+  /** Folder paths to file the new skill under (personal or org folders per scope). */
   labels?: string[];
 }): Promise<PublishResult> {
   return apiFetch<PublishResult>("/v1/skills/create", {
@@ -280,6 +285,57 @@ export async function unassignSkillLabel(slug: string, path: string): Promise<vo
   });
 }
 
+// --- Personal folders ("My Skills") — same shapes as org labels, owner-scoped on the server -------
+
+export async function fetchPersonalLabels(): Promise<LabelsResponse> {
+  return apiFetch<LabelsResponse>("/v1/personal-labels");
+}
+
+export async function createPersonalLabel(
+  path: string,
+  opts?: { displayName?: string; color?: LabelColor | null; icon?: LabelIcon | null },
+): Promise<void> {
+  await apiFetch<{ ok: true }>("/v1/personal-labels", {
+    method: "POST",
+    body: JSON.stringify({ path, displayName: opts?.displayName, color: opts?.color, icon: opts?.icon }),
+  });
+}
+
+export async function renamePersonalLabel(from: string, to: string, opts?: { displayName?: string }): Promise<void> {
+  await apiFetch<{ ok: true }>("/v1/personal-labels/rename", {
+    method: "PUT",
+    body: JSON.stringify({ from, to, displayName: opts?.displayName }),
+  });
+}
+
+export async function setPersonalLabelColor(path: string, color: LabelColor | null): Promise<void> {
+  await apiFetch<{ ok: true }>("/v1/personal-labels/color", { method: "PUT", body: JSON.stringify({ path, color }) });
+}
+
+export async function setPersonalLabelIcon(path: string, icon: LabelIcon | null): Promise<void> {
+  await apiFetch<{ ok: true }>("/v1/personal-labels/icon", { method: "PUT", body: JSON.stringify({ path, icon }) });
+}
+
+export async function deletePersonalLabel(path: string): Promise<void> {
+  await apiFetch<{ ok: true }>("/v1/personal-labels", { method: "DELETE", body: JSON.stringify({ path }) });
+}
+
+export async function assignPersonalSkillLabel(slug: string, path: string): Promise<void> {
+  await apiFetch<{ ok: true }>(`/v1/skills/${slug}/personal-labels`, { method: "POST", body: JSON.stringify({ path }) });
+}
+
+export async function unassignPersonalSkillLabel(slug: string, path: string): Promise<void> {
+  await apiFetch<{ ok: true }>(`/v1/skills/${slug}/personal-labels`, {
+    method: "DELETE",
+    body: JSON.stringify({ path }),
+  });
+}
+
+/** Share a personal skill into the org library (owner-only; flips scope personal → org). */
+export async function shareSkillToOrg(slug: string): Promise<{ ok: true; slug: string; scope: "org" }> {
+  return apiFetch<{ ok: true; slug: string; scope: "org" }>(`/v1/skills/${slug}/share`, { method: "POST" });
+}
+
 export async function saveSkillFilterPreferences(
   preferences: SkillFilterPreferences,
 ): Promise<SkillFilterPreferences> {
@@ -313,17 +369,37 @@ export async function restoreSkill(slug: string): Promise<void> {
   await apiFetch(`/v1/skills/${slug}/restore`, { method: "POST", body: "{}" });
 }
 
-/** Fetch the archived skills for the workspace (the Archived view). */
+/** Merge two library result sets, de-duped by skill id (the My-Skills copy wins). */
+function mergeBySkillId(mine: SkillListRow[], org: SkillListRow[]): SkillListRow[] {
+  const seen = new Set(mine.map((s) => s.id));
+  return [...mine, ...org.filter((s) => !seen.has(s.id))];
+}
+
+/**
+ * Fetch the archived skills for the Archived view. The view is library-independent, so it shows
+ * everything the caller can restore: their archived personal skills (My Skills) plus archived org
+ * skills. Each library is fetched separately and merged (the org library defaults when `lib` is absent).
+ */
 export async function fetchArchivedSkills(): Promise<SkillListRow[]> {
-  return apiFetch<SkillListRow[]>("/v1/skills?archived=true");
+  const [mine, org] = await Promise.all([
+    apiFetch<SkillListRow[]>("/v1/skills?lib=mine&archived=true").catch(() => [] as SkillListRow[]),
+    apiFetch<SkillListRow[]>("/v1/skills?lib=org&archived=true"),
+  ]);
+  return mergeBySkillId(mine, org);
 }
 
 /**
  * Relevance-ranked full-text search across skills (slug, description, tools, labels, and the
- * SKILL.md body). Server-ordered by relevance — render the rows as-is. Powers the ⌘K palette.
+ * SKILL.md body). Searches BOTH libraries (My Skills + Organization) so a member's private skills
+ * are findable in the ⌘K palette, then merges the results de-duped by id.
  */
 export async function fetchSkillSearch(query: string, signal?: AbortSignal): Promise<SkillListRow[]> {
-  return apiFetch<SkillListRow[]>(`/v1/skills?q=${encodeURIComponent(query)}`, { signal });
+  const q = encodeURIComponent(query);
+  const [mine, org] = await Promise.all([
+    apiFetch<SkillListRow[]>(`/v1/skills?lib=mine&q=${q}`, { signal }).catch(() => [] as SkillListRow[]),
+    apiFetch<SkillListRow[]>(`/v1/skills?lib=org&q=${q}`, { signal }),
+  ]);
+  return mergeBySkillId(mine, org);
 }
 
 // --- Local skills (the "Companion skills" section) ----------------------------------------------

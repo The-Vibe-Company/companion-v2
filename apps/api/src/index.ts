@@ -57,12 +57,21 @@ import {
   setSkillFilterPreferences,
   setOrgLogoFromUpload,
   orgLogoPublicPath,
+  shareSkill,
   toggleStar,
   installSkill,
   unassignLabel,
   uninstallSkill,
   updateOrg,
   updateUserProfile,
+  listPersonalLabels,
+  createPersonalLabel,
+  assignPersonalLabel,
+  unassignPersonalLabel,
+  setPersonalLabelColor,
+  setPersonalLabelIcon,
+  renamePersonalLabel,
+  deletePersonalLabel,
 } from "@companion/core/services";
 import {
   addCommentInputSchema,
@@ -96,6 +105,7 @@ import {
   updateUserProfileInputSchema,
   type CompanionManifest,
   type SkillFrontmatter,
+  type SkillScope,
 } from "@companion/contracts";
 import {
   commentImageKey,
@@ -259,8 +269,9 @@ function parseMultiValues(values: Array<string | undefined>): string[] {
 }
 
 function rejectLegacySkillVisibilityInput(hasField: (name: string) => boolean): void {
+  // `scope` is a supported input again (the personal/org library axis). The team/visibility/owner
+  // inputs below were the removed ownership model and stay rejected.
   if (
-    hasField("scope") ||
     hasField("visibility") ||
     hasField("everyone") ||
     hasField("team") ||
@@ -269,7 +280,7 @@ function rejectLegacySkillVisibilityInput(hasField: (name: string) => boolean): 
     hasField("private")
   ) {
     throw new Error(
-      "legacy skill scope/visibility/owner inputs are not supported; skills are visible to every org member — use labels to organize them",
+      "legacy skill visibility/owner/team inputs are not supported; organize skills with labels and use `scope` (personal/org) to choose a library",
     );
   }
 }
@@ -285,7 +296,9 @@ async function publishCanonical(input: {
   fm: SkillFrontmatter;
   companionManifest: CompanionManifest;
   skillId: string;
-  /** Org-wide shared label paths to file the skill under (applied on create). */
+  /** Library to publish into on first create: 'personal' (My Skills) or 'org' (default). */
+  scope?: SkillScope;
+  /** Label paths to file the skill under on create (personal folders for 'personal', else org). */
   labels?: string[];
   version: string;
   note: string;
@@ -293,12 +306,14 @@ async function publishCanonical(input: {
   body: string;
   dependencies?: string[];
 }): Promise<{ id: string; slug: string; version: string; checksum: string; sizeBytes: number }> {
-  const { actor, orgId, canonical, fm, companionManifest, skillId, labels, version, note, body, dependencies } = input;
+  const { actor, orgId, canonical, fm, companionManifest, skillId, scope, labels, version, note, body, dependencies } =
+    input;
   if (!isValidSemver(version)) throw new Error(`invalid semver: ${version}`);
   const key = skillArchiveKey({ orgId, slug: fm.name, version });
   const payload = publishSkillInputSchema.parse({
     skill_id: skillId,
     slug: fm.name,
+    ...(scope ? { scope } : {}),
     labels: labels ?? [],
     version,
     description: skillSummary(fm, companionManifest),
@@ -803,8 +818,11 @@ app.delete("/v1/orgs/current/members/:userId", async (c) => {
 
 app.get("/v1/skills", async (c) => {
   try {
-    // `?label=marketing/seo` filters to skills filed under that path OR any descendant; `?nolabel=true`
-    // filters to skills filed under no label at all. Every skill is visible to every member.
+    // `?lib=mine` returns the caller's "My Skills" (authored personal skills + org skills they have
+    // installed); `?lib=org` (default) is the flat org-wide library. `?label=marketing/seo` filters to
+    // skills filed under that path OR any descendant (personal folders for `mine`, org folders for
+    // `org`); `?nolabel=true` filters to skills with no folder.
+    const library = c.req.query("lib") === "mine" ? ("mine" as const) : ("org" as const);
     const labelRaw = c.req.query("label")?.trim();
     // A label may only reach the LIKE-prefix filter if it is a well-formed path. A malformed/typo
     // `?label=` (e.g. `%`) can't match any validated stored path, so it returns an EMPTY folder —
@@ -819,7 +837,7 @@ app.get("/v1/skills", async (c) => {
     return c.json(
       await withTenant(c, ({ actor, orgId, database }) =>
         labelValid
-          ? listSkills({ actor, orgId, label, nolabel, archived, query, limit: query ? 20 : undefined, database })
+          ? listSkills({ actor, orgId, library, label, nolabel, archived, query, limit: query ? 20 : undefined, database })
           : Promise.resolve([] as Awaited<ReturnType<typeof listSkills>>),
       ),
     );
@@ -932,6 +950,115 @@ app.delete("/v1/labels", async (c) => {
     await withTenant(
       c,
       ({ actor, orgId, database }) => deleteLabel({ actor, orgId, path: input.path, database }),
+      true,
+    );
+    return c.json({ ok: true as const });
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
+/**
+ * Personal folders ("My Skills"). Same request shapes as org labels but scoped to the caller — a
+ * member never sees another member's personal folders. The service enforces the `owner_id` scope on
+ * every query.
+ */
+app.get("/v1/personal-labels", async (c) => {
+  try {
+    actorFromContext(c, true);
+    requireScope(c, "skills:read");
+    return c.json(
+      await withTenant(c, ({ actor, orgId, database }) => listPersonalLabels({ actor, orgId, database }), true),
+    );
+  } catch (error) {
+    return jsonError(c, error, 401);
+  }
+});
+
+app.post("/v1/personal-labels", async (c) => {
+  try {
+    actorFromContext(c, true);
+    requireScope(c, "skills:write");
+    const input = createLabelInputSchema.parse(await c.req.json());
+    await withTenant(
+      c,
+      ({ actor, orgId, database }) =>
+        createPersonalLabel({
+          actor,
+          orgId,
+          path: input.path,
+          displayName: input.displayName,
+          color: input.color,
+          icon: input.icon,
+          database,
+        }),
+      true,
+    );
+    return c.json({ ok: true as const });
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
+app.put("/v1/personal-labels/rename", async (c) => {
+  try {
+    actorFromContext(c, true);
+    requireScope(c, "skills:write");
+    const input = renameLabelInputSchema.parse(await c.req.json());
+    await withTenant(
+      c,
+      ({ actor, orgId, database }) =>
+        renamePersonalLabel({ actor, orgId, from: input.from, to: input.to, displayName: input.displayName, database }),
+      true,
+    );
+    return c.json({ ok: true as const });
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
+app.put("/v1/personal-labels/color", async (c) => {
+  try {
+    actorFromContext(c, true);
+    requireScope(c, "skills:write");
+    const input = setLabelColorInputSchema.parse(await c.req.json());
+    await withTenant(
+      c,
+      ({ actor, orgId, database }) =>
+        setPersonalLabelColor({ actor, orgId, path: input.path, color: input.color, database }),
+      true,
+    );
+    return c.json({ ok: true as const });
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
+app.put("/v1/personal-labels/icon", async (c) => {
+  try {
+    actorFromContext(c, true);
+    requireScope(c, "skills:write");
+    const input = setLabelIconInputSchema.parse(await c.req.json());
+    await withTenant(
+      c,
+      ({ actor, orgId, database }) =>
+        setPersonalLabelIcon({ actor, orgId, path: input.path, icon: input.icon, database }),
+      true,
+    );
+    return c.json({ ok: true as const });
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
+app.delete("/v1/personal-labels", async (c) => {
+  try {
+    actorFromContext(c, true);
+    requireScope(c, "skills:write");
+    const input = deleteLabelInputSchema.parse(await c.req.json());
+    await withTenant(
+      c,
+      ({ actor, orgId, database }) => deletePersonalLabel({ actor, orgId, path: input.path, database }),
       true,
     );
     return c.json({ ok: true as const });
@@ -1252,6 +1379,42 @@ app.delete("/v1/skills/:slug/labels", async (c) => {
   }
 });
 
+/** File one of the caller's authored personal skills into a personal folder (path in the body). */
+app.post("/v1/skills/:slug/personal-labels", async (c) => {
+  try {
+    actorFromContext(c, true);
+    requireScope(c, "skills:write");
+    const { path } = assignLabelInputSchema.parse(await c.req.json());
+    await withTenant(
+      c,
+      ({ actor, orgId, database }) =>
+        assignPersonalLabel({ actor, orgId, slug: c.req.param("slug"), path, database }),
+      true,
+    );
+    return c.json({ ok: true as const });
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
+/** Remove a personal folder from one of the caller's skills (the folder itself stays). */
+app.delete("/v1/skills/:slug/personal-labels", async (c) => {
+  try {
+    actorFromContext(c, true);
+    requireScope(c, "skills:write");
+    const { path } = assignLabelInputSchema.parse(await c.req.json());
+    await withTenant(
+      c,
+      ({ actor, orgId, database }) =>
+        unassignPersonalLabel({ actor, orgId, slug: c.req.param("slug"), path, database }),
+      true,
+    );
+    return c.json({ ok: true as const });
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
 /** Requires + Used by graph for a skill (optionally a specific version). Session or skills:read PAT. */
 app.get("/v1/skills/:slug/dependencies", async (c) => {
   try {
@@ -1305,6 +1468,22 @@ app.post("/v1/skills/:slug/restore", async (c) => {
   }
 });
 
+/** Share a personal skill into the org library (owner-only; flips scope personal → org). */
+app.post("/v1/skills/:slug/share", async (c) => {
+  try {
+    actorFromContext(c, true);
+    requireScope(c, "skills:write");
+    const result = await withTenant(
+      c,
+      ({ actor, orgId, database }) => shareSkill({ actor, orgId, slug: c.req.param("slug"), database }),
+      true,
+    );
+    return c.json({ ok: true as const, slug: c.req.param("slug"), scope: result.scope });
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
 /**
  * Publish a packaged skill. Two body shapes:
  *  - multipart/form-data (browser dropzone / CLI): `file` + `action`/`label`/`version`/`message`.
@@ -1329,6 +1508,7 @@ app.post("/v1/skills", bodyLimit({ maxSize: 32 * 1024 * 1024, onError: (c) => js
     let expectSkillId: string | undefined;
     let labelValues: string[] = [];
     let dependencyValues: string[] = [];
+    let scopeRaw: string | undefined;
 
     if (contentType.includes("multipart/form-data")) {
       const form = await c.req.formData();
@@ -1345,6 +1525,7 @@ app.post("/v1/skills", bodyLimit({ maxSize: 32 * 1024 * 1024, onError: (c) => js
       messageRaw = field("message");
       expectSlug = field("expect_slug");
       expectSkillId = field("expect_skill_id");
+      scopeRaw = field("scope");
       labelValues = parseMultiValues([...form.getAll("label"), ...form.getAll("labels")].map((v) => String(v)));
       dependencyValues = parseMultiValues([...form.getAll("dependency"), ...form.getAll("dependencies")].map((v) => String(v)));
     } else {
@@ -1357,9 +1538,13 @@ app.post("/v1/skills", bodyLimit({ maxSize: 32 * 1024 * 1024, onError: (c) => js
       messageRaw = c.req.query("message");
       expectSlug = c.req.query("expect_slug");
       expectSkillId = c.req.query("expect_skill_id");
+      scopeRaw = c.req.query("scope");
       labelValues = parseMultiValues([...url.searchParams.getAll("label"), ...url.searchParams.getAll("labels")]);
       dependencyValues = parseMultiValues([...url.searchParams.getAll("dependency"), ...url.searchParams.getAll("dependencies")]);
     }
+    // Library to publish into on first create ('personal' from My Skills, else 'org'). Re-publish of an
+    // existing skill keeps its scope regardless. Validated to the enum; an unknown value is ignored.
+    const scope: SkillScope | undefined = scopeRaw === "personal" || scopeRaw === "org" ? scopeRaw : undefined;
 
     let parsedAction;
     try {
@@ -1442,6 +1627,9 @@ app.post("/v1/skills", bodyLimit({ maxSize: 32 * 1024 * 1024, onError: (c) => js
         fm: normalized.frontmatter,
         companionManifest: normalized.companionManifest,
         skillId: target.skillId,
+        // First create picks the library; re-publish keeps the existing scope (the publish guard
+        // rejects a scope that contradicts an existing skill of that slug).
+        scope,
         labels: labelValues,
         version: target.version,
         note: messageRaw ?? "",
@@ -1477,16 +1665,18 @@ app.post("/v1/skills/create", bodyLimit({ maxSize: 2 * 1024 * 1024, onError: (c)
     // forward the current version's declared dependencies and requirements (declared secrets/env
     // setup notes) so an inline edit never silently drops them — this path rebuilds the frontmatter
     // from id/description/body alone (there is no companion.json or frontmatter editor here).
-    const { carriedDependencies, carriedRequirements, carriedDisplay } = await withTenant(
+    const { carriedDependencies, carriedRequirements, carriedDisplay, exists } = await withTenant(
       c,
       async ({ actor: a, orgId: o, database }) => {
         const existing = await getSkillBySlug({ actor: a, orgId: o, slug: input.id, database });
-        if (!existing?.current_version) return { carriedDependencies: [], carriedRequirements: [], carriedDisplay: null };
+        if (!existing?.current_version)
+          return { carriedDependencies: [], carriedRequirements: [], carriedDisplay: null, exists: !!existing };
         const deps = await getSkillDependencies({ actor: a, orgId: o, slug: input.id, database });
         return {
           carriedDependencies: deps.requires.map((r) => r.slug),
           carriedRequirements: existing.requirements,
           carriedDisplay: existing.display,
+          exists: true,
         };
       },
       true,
@@ -1513,6 +1703,8 @@ app.post("/v1/skills/create", bodyLimit({ maxSize: 2 * 1024 * 1024, onError: (c)
         fm: result.frontmatter,
         companionManifest,
         skillId: target.skillId,
+        // Only a brand-new skill chooses its library; editing an existing one keeps its scope.
+        scope: exists ? undefined : input.scope,
         labels: input.labels,
         version: target.version,
         note: "",

@@ -5,9 +5,11 @@ import type { LabelColor, LabelIcon } from "@companion/contracts";
 import { LABEL_COLORS, LABEL_ICONS, labelDisplayNameToPath } from "@companion/contracts";
 import { Icon } from "../Icon";
 import { OrgSwitcher } from "../org/OrgSwitcher";
-import { WorkspaceAvatar } from "../org/WorkspaceAvatar";
 import type { OrgVM } from "@/lib/types";
+import type { SkillsLibrary } from "./route";
 import type { TreeRow } from "./SkillsApp";
+
+type SidebarSelection = { lib: SkillsLibrary; kind: "all" | "starred" | "installed" | "label"; label?: string } | null;
 
 /** A `position: fixed` popover anchored at the cursor, clamped to the viewport (the `.side__nav`
  * scroll container would clip an absolutely-positioned menu — see the viewbar-clipping memory). */
@@ -192,6 +194,92 @@ function LabelMenu({
   );
 }
 
+/** The folder rows of one library's tree (chevron/leaf, colored icon, name, count, options menu). */
+function LabelTreeRows({
+  rows,
+  expanded,
+  activePath,
+  onToggleExpand,
+  onSelect,
+  onOpenMenu,
+}: {
+  rows: TreeRow[];
+  expanded: Set<string>;
+  activePath: string | null;
+  onToggleExpand: (path: string) => void;
+  onSelect: (path: string) => void;
+  onOpenMenu: (row: TreeRow, pos: { x: number; y: number }) => void;
+}) {
+  const labelIcon = (row: TreeRow): string => {
+    if (row.icon) return row.icon;
+    if (row.hasChildren) return expanded.has(row.path) ? "folder-open" : "folder";
+    return "tag";
+  };
+  // Only rows whose ancestors are all expanded are visible (chevron-collapse).
+  const visibleRows = rows.filter((row) => {
+    if (row.depth === 0) return true;
+    const segments = row.path.split("/");
+    for (let i = 1; i < segments.length; i += 1) {
+      if (!expanded.has(segments.slice(0, i).join("/"))) return false;
+    }
+    return true;
+  });
+  return (
+    <>
+      {visibleRows.map((row) => {
+        const active = activePath === row.path;
+        const isOpen = expanded.has(row.path);
+        return (
+          <div className={"lblrow" + (active ? " lblrow--active" : "")} key={row.path} style={{ paddingLeft: 8 + row.depth * 14 }}>
+            {row.hasChildren ? (
+              <button
+                type="button"
+                className={"lblrow__chev" + (isOpen ? " is-open" : "")}
+                aria-label={isOpen ? "Collapse" : "Expand"}
+                aria-expanded={isOpen}
+                onClick={() => onToggleExpand(row.path)}
+              >
+                <Icon name="chevron-right" size={13} />
+              </button>
+            ) : (
+              <span className="lblrow__chev lblrow__chev--leaf" aria-hidden="true" />
+            )}
+            <button
+              type="button"
+              className="lblrow__main"
+              aria-current={active ? "page" : undefined}
+              onClick={() => {
+                onSelect(row.path);
+                if (row.hasChildren) onToggleExpand(row.path);
+              }}
+              title={row.path}
+            >
+              <span className="lblrow__ico" style={row.color ? { color: row.color } : undefined}>
+                <Icon name={labelIcon(row)} size={15} />
+              </span>
+              <span className="lblrow__name">{row.displayName ?? row.leafName}</span>
+              <span className="lblrow__count tnum">{row.count}</span>
+            </button>
+            <button
+              type="button"
+              className="lblrow__more"
+              aria-label={row.path + " options"}
+              title="Folder options"
+              onClick={(e) => {
+                e.stopPropagation();
+                const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                onOpenMenu(row, { x: r.left, y: r.bottom + 4 });
+              }}
+            >
+              <Icon name="more-horizontal" size={15} />
+            </button>
+          </div>
+        );
+      })}
+    </>
+  );
+}
+
 export function Sidebar({
   orgs,
   currentOrg,
@@ -199,15 +287,21 @@ export function Sidebar({
   onOnboard,
   onOpenSettings,
   onWarmSettings,
-  treeRows,
+  mineTreeRows,
+  orgTreeRows,
   expanded,
   onToggleExpand,
   selection,
-  totalCount,
+  mineCount,
+  orgCount,
   starredCount,
+  installedCount,
+  installedUpdateCount,
   onOpenPalette,
-  onSelectAll,
+  onSelectMineAll,
+  onSelectOrgAll,
   onSelectStarred,
+  onSelectInstalled,
   onSelectLabel,
   onCreateLabel,
   onSetLabelColor,
@@ -230,24 +324,28 @@ export function Sidebar({
   onOnboard: (mode: "create" | "join") => void;
   onOpenSettings: () => void;
   onWarmSettings: () => void;
-  /** Flat, depth-ordered label rows derived from skills + explicit labels (stable lexicographic sort). */
-  treeRows: TreeRow[];
+  mineTreeRows: TreeRow[];
+  orgTreeRows: TreeRow[];
   expanded: Set<string>;
   onToggleExpand: (path: string) => void;
-  /** The active org-wide scope selection (drives which slice of skills the list shows). */
-  selection: { kind: "all" | "starred" | "nolabel" | "label"; label?: string };
-  totalCount: number;
+  /** The active workspace selection, or null when a library-independent view (local/archived) is shown. */
+  selection: SidebarSelection;
+  mineCount: number;
+  orgCount: number;
   starredCount: number;
+  installedCount: number;
+  installedUpdateCount: number;
   onOpenPalette: () => void;
-  onSelectAll: () => void;
+  onSelectMineAll: () => void;
+  onSelectOrgAll: () => void;
   onSelectStarred: () => void;
-  onSelectLabel: (path: string) => void;
-  /** Create an empty folder and select it (the org-root `+` inline input). */
-  onCreateLabel: (path: string, displayName?: string) => void;
-  onSetLabelColor: (path: string, color: LabelColor | null) => void;
-  onSetLabelIcon: (path: string, icon: LabelIcon | null) => void;
-  onRenameLabel: (from: string, to: string, displayName?: string) => void;
-  onDeleteLabel: (path: string) => void;
+  onSelectInstalled: () => void;
+  onSelectLabel: (lib: SkillsLibrary, path: string) => void;
+  onCreateLabel: (lib: SkillsLibrary, path: string, displayName?: string) => void;
+  onSetLabelColor: (lib: SkillsLibrary, path: string, color: LabelColor | null) => void;
+  onSetLabelIcon: (lib: SkillsLibrary, path: string, icon: LabelIcon | null) => void;
+  onRenameLabel: (lib: SkillsLibrary, from: string, to: string, displayName?: string) => void;
+  onDeleteLabel: (lib: SkillsLibrary, path: string) => void;
   onSelectLocal: () => void;
   onSelectArchived: () => void;
   localActive: boolean;
@@ -258,11 +356,13 @@ export function Sidebar({
   onToggleMobile: () => void;
   onCloseMobile: () => void;
 }) {
-  const [menu, setMenu] = useState<{ row: TreeRow; pos: { x: number; y: number } } | null>(null);
-  // The inline new-folder input on the org-root row (top-level) and per-label "add sublabel" seed.
-  const [newFolderSeed, setNewFolderSeed] = useState<string | null>(null);
+  const [menu, setMenu] = useState<{ row: TreeRow; lib: SkillsLibrary; pos: { x: number; y: number } } | null>(null);
+  // The inline new-folder input, scoped to the library whose `+` (or "add sublabel") opened it.
+  const [newFolder, setNewFolder] = useState<{ lib: SkillsLibrary; seed: string } | null>(null);
   const [newFolderValue, setNewFolderValue] = useState("");
   const newFolderInputRef = useRef<HTMLInputElement>(null);
+  const [mineOpen, setMineOpen] = useState(true);
+  const [orgOpen, setOrgOpen] = useState(true);
 
   const warmSettings = () => onWarmSettings();
   const runAndClose = (action: () => void) => {
@@ -270,43 +370,61 @@ export function Sidebar({
     onCloseMobile();
   };
 
-  // Only top-level rows whose ancestors are all expanded are visible (chevron-collapse).
-  const visibleRows = treeRows.filter((row) => {
-    if (row.depth === 0) return true;
-    const segments = row.path.split("/");
-    for (let i = 1; i < segments.length; i += 1) {
-      if (!expanded.has(segments.slice(0, i).join("/"))) return false;
-    }
-    return true;
-  });
+  const inWorkspace = !localActive && !archivedActive && selection !== null;
+  const mineHeadActive = inWorkspace && selection!.lib === "mine" && selection!.kind === "all";
+  const orgHeadActive = inWorkspace && selection!.lib === "org" && selection!.kind === "all";
+  const activeMineLabel = inWorkspace && selection!.lib === "mine" && selection!.kind === "label" ? selection!.label ?? null : null;
+  const activeOrgLabel = inWorkspace && selection!.lib === "org" && selection!.kind === "label" ? selection!.label ?? null : null;
 
-  const openNewFolder = (seed: string) => {
-    setNewFolderSeed(seed);
+  const openNewFolder = (lib: SkillsLibrary, seed: string) => {
+    setNewFolder({ lib, seed });
     setNewFolderValue(seed ? seed + "/" : "");
     queueMicrotask(() => newFolderInputRef.current?.focus());
   };
   const cancelNewFolder = () => {
-    setNewFolderSeed(null);
+    setNewFolder(null);
     setNewFolderValue("");
   };
   const commitNewFolder = () => {
+    const lib = newFolder?.lib;
     const raw = newFolderValue.trim().replace(/\/+$/, "");
     cancelNewFolder();
-    if (!raw) return;
+    if (!raw || !lib) return;
     try {
       const path = labelDisplayNameToPath(raw);
       const displayName = raw.split("/").filter(Boolean).pop()?.trim() ?? raw;
-      runAndClose(() => onCreateLabel(path, displayName));
+      runAndClose(() => onCreateLabel(lib, path, displayName));
     } catch {
       return;
     }
   };
 
-  const labelIcon = (row: TreeRow): string => {
-    if (row.icon) return row.icon;
-    if (row.hasChildren) return expanded.has(row.path) ? "folder-open" : "folder";
-    return "tag";
-  };
+  const newFolderRow = (lib: SkillsLibrary, placeholder: string) =>
+    newFolder?.lib === lib ? (
+      <div className="lblnew" style={{ paddingLeft: 8 + (newFolder.seed ? 16 : 0) }}>
+        <span className="lblnew__ico">
+          <Icon name="folder" size={15} />
+        </span>
+        <input
+          ref={newFolderInputRef}
+          className="lblnew__input"
+          value={newFolderValue}
+          placeholder={placeholder}
+          aria-label="New folder path"
+          onChange={(e) => setNewFolderValue(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              commitNewFolder();
+            } else if (e.key === "Escape") {
+              e.preventDefault();
+              cancelNewFolder();
+            }
+          }}
+          onBlur={cancelNewFolder}
+        />
+      </div>
+    ) : null;
 
   return (
     <aside className={"side" + (mobileOpen ? " side--mobile-open" : "")}>
@@ -337,136 +455,129 @@ export function Sidebar({
         </button>
       </div>
       <nav className="side__nav" aria-label="Primary">
-        <button
-          className={"navitem" + (selection.kind === "all" && !localActive && !archivedActive ? " navitem--active" : "")}
-          aria-current={selection.kind === "all" && !localActive && !archivedActive ? "page" : undefined}
-          onClick={() => runAndClose(onSelectAll)}
-          title="All skills"
-        >
-          <span className="navitem__ico">
-            <Icon name="layers" />
-          </span>
-          <span className="navitem__label">All skills</span>
-          <span className="navitem__count tnum">{totalCount}</span>
-        </button>
-        <button
-          className={"navitem" + (selection.kind === "starred" && !localActive && !archivedActive ? " navitem--active" : "")}
-          aria-current={selection.kind === "starred" && !localActive && !archivedActive ? "page" : undefined}
-          onClick={() => runAndClose(onSelectStarred)}
-          title="Starred skills"
-        >
-          <span className="navitem__ico">
-            <Icon name="star" />
-          </span>
-          <span className="navitem__label">Starred</span>
-          <span className="navitem__count tnum">{starredCount}</span>
-        </button>
-
-        {/* Org-root row: avatar + name selects All; hover reveals the new-folder `+`. */}
-        <div className="side__grouplabel side__grouplabel--row lblroot">
+        {/* ===== MY SKILLS ===== */}
+        <div className={"ml-libhead" + (mineHeadActive ? " is-active" : "")} style={{ marginTop: 2 }}>
           <button
             type="button"
-            className="lblroot__main"
-            onClick={() => runAndClose(onSelectAll)}
-            title={currentOrg.name + " — all skills"}
+            className={"ml-libhead__chev" + (mineOpen ? " is-open" : "")}
+            aria-label={mineOpen ? "Collapse My Skills" : "Expand My Skills"}
+            aria-expanded={mineOpen}
+            onClick={() => setMineOpen((o) => !o)}
           >
-            <WorkspaceAvatar org={currentOrg} className="lblroot__av" size={18} />
-            <span className="lblroot__name">{currentOrg.name}</span>
+            <Icon name={mineOpen ? "chevron-down" : "chevron-right"} size={16} />
           </button>
           <button
-            className="side__addteam"
-            title="New folder"
-            aria-label="New folder"
-            onClick={() => openNewFolder("")}
+            type="button"
+            className="ml-libhead__main"
+            aria-current={mineHeadActive ? "page" : undefined}
+            onClick={() => {
+              setMineOpen(true);
+              runAndClose(onSelectMineAll);
+            }}
+            title="My Skills"
           >
+            <span className="ml-libhead__ico">
+              <Icon name="user" size={16} />
+            </span>
+            <span className="ml-libhead__name">My Skills</span>
+          </button>
+          <span className="ml-libhead__count tnum">{mineCount}</span>
+          <button className="side__addteam" title="New personal folder" aria-label="New personal folder" onClick={() => openNewFolder("mine", "")}>
             <Icon name="plus" size={14} />
           </button>
         </div>
-
-        {newFolderSeed !== null && (
-          <div className="lblnew" style={{ paddingLeft: 8 + (newFolderSeed ? 16 : 0) }}>
-            <span className="lblnew__ico">
-              <Icon name="folder" size={15} />
-            </span>
-            <input
-              ref={newFolderInputRef}
-              className="lblnew__input"
-              value={newFolderValue}
-              placeholder="marketing/seo…"
-              aria-label="New folder path"
-              onChange={(e) => setNewFolderValue(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  e.preventDefault();
-                  commitNewFolder();
-                } else if (e.key === "Escape") {
-                  e.preventDefault();
-                  cancelNewFolder();
-                }
-              }}
-              onBlur={cancelNewFolder}
+        {mineOpen && (
+          <div className="ml-kids">
+            <button
+              className={"navitem" + (inWorkspace && selection!.kind === "starred" ? " navitem--active" : "")}
+              aria-current={inWorkspace && selection!.kind === "starred" ? "page" : undefined}
+              onClick={() => runAndClose(onSelectStarred)}
+              title="Starred skills"
+            >
+              <span className="navitem__ico">
+                <Icon name="star" />
+              </span>
+              <span className="navitem__label">Starred</span>
+              <span className="navitem__count tnum">{starredCount}</span>
+            </button>
+            <button
+              className={"navitem" + (inWorkspace && selection!.kind === "installed" ? " navitem--active" : "")}
+              aria-current={inWorkspace && selection!.kind === "installed" ? "page" : undefined}
+              onClick={() => runAndClose(onSelectInstalled)}
+              title={installedUpdateCount > 0 ? `${installedUpdateCount} update${installedUpdateCount === 1 ? "" : "s"} available` : "Installed from the organization"}
+            >
+              <span className="navitem__ico">
+                <Icon name="download" />
+              </span>
+              <span className="navitem__label">Installed</span>
+              {installedUpdateCount > 0 ? (
+                <span
+                  className="ml-updot"
+                  title={`${installedUpdateCount} update${installedUpdateCount === 1 ? "" : "s"} available`}
+                  aria-label={`${installedUpdateCount} update${installedUpdateCount === 1 ? "" : "s"} available`}
+                />
+              ) : (
+                <span className="navitem__count tnum">{installedCount}</span>
+              )}
+            </button>
+            {newFolderRow("mine", "drafts/research…")}
+            <LabelTreeRows
+              rows={mineTreeRows}
+              expanded={expanded}
+              activePath={activeMineLabel}
+              onToggleExpand={onToggleExpand}
+              onSelect={(path) => runAndClose(() => onSelectLabel("mine", path))}
+              onOpenMenu={(row, pos) => setMenu({ row, lib: "mine", pos })}
             />
           </div>
         )}
 
-        {visibleRows.map((row) => {
-          const active = selection.kind === "label" && selection.label === row.path && !localActive && !archivedActive;
-          const isOpen = expanded.has(row.path);
-          return (
-            <div
-              className={"lblrow" + (active ? " lblrow--active" : "")}
-              key={row.path}
-              style={{ paddingLeft: 8 + row.depth * 14 }}
-            >
-              {row.hasChildren ? (
-                <button
-                  type="button"
-                  className={"lblrow__chev" + (isOpen ? " is-open" : "")}
-                  aria-label={isOpen ? "Collapse" : "Expand"}
-                  aria-expanded={isOpen}
-                  onClick={() => onToggleExpand(row.path)}
-                >
-                  <Icon name="chevron-right" size={13} />
-                </button>
-              ) : (
-                <span className="lblrow__chev lblrow__chev--leaf" aria-hidden="true" />
-              )}
-              <button
-                type="button"
-                className="lblrow__main"
-                aria-current={active ? "page" : undefined}
-                onClick={() =>
-                  runAndClose(() => {
-                    onSelectLabel(row.path);
-                    // Clicking a folder with children also opens/closes it (matches the chevron + the original design).
-                    if (row.hasChildren) onToggleExpand(row.path);
-                  })
-                }
-                title={row.path}
-              >
-                <span className="lblrow__ico" style={row.color ? { color: row.color } : undefined}>
-                  <Icon name={labelIcon(row)} size={15} />
-                </span>
-                <span className="lblrow__name">{row.displayName ?? row.leafName}</span>
-                <span className="lblrow__count tnum">{row.count}</span>
-              </button>
-              <button
-                type="button"
-                className="lblrow__more"
-                aria-label={row.path + " options"}
-                title="Folder options"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-                  setMenu({ row, pos: { x: r.left, y: r.bottom + 4 } });
-                }}
-              >
-                <Icon name="more-horizontal" size={15} />
-              </button>
-            </div>
-          );
-        })}
+        {/* ===== ORGANIZATION ===== */}
+        <div className={"ml-libhead" + (orgHeadActive ? " is-active" : "")} style={{ marginTop: 4 }}>
+          <button
+            type="button"
+            className={"ml-libhead__chev" + (orgOpen ? " is-open" : "")}
+            aria-label={orgOpen ? "Collapse Organization" : "Expand Organization"}
+            aria-expanded={orgOpen}
+            onClick={() => setOrgOpen((o) => !o)}
+          >
+            <Icon name={orgOpen ? "chevron-down" : "chevron-right"} size={16} />
+          </button>
+          <button
+            type="button"
+            className="ml-libhead__main"
+            aria-current={orgHeadActive ? "page" : undefined}
+            onClick={() => {
+              setOrgOpen(true);
+              runAndClose(onSelectOrgAll);
+            }}
+            title="Organization"
+          >
+            <span className="ml-libhead__ico">
+              <Icon name="building-2" size={16} />
+            </span>
+            <span className="ml-libhead__name">Organization</span>
+          </button>
+          <span className="ml-libhead__count tnum">{orgCount}</span>
+          <button className="side__addteam" title="New org folder" aria-label="New org folder" onClick={() => openNewFolder("org", "")}>
+            <Icon name="plus" size={14} />
+          </button>
+        </div>
+        {orgOpen && (
+          <div className="ml-kids">
+            {newFolderRow("org", "marketing/seo…")}
+            <LabelTreeRows
+              rows={orgTreeRows}
+              expanded={expanded}
+              activePath={activeOrgLabel}
+              onToggleExpand={onToggleExpand}
+              onSelect={(path) => runAndClose(() => onSelectLabel("org", path))}
+              onOpenMenu={(row, pos) => setMenu({ row, lib: "org", pos })}
+            />
+          </div>
+        )}
 
+        {/* ===== BOTTOM ===== */}
         <button
           className={"navitem navitem--bottom" + (localActive ? " navitem--active" : "")}
           aria-current={localActive ? "page" : undefined}
@@ -511,11 +622,11 @@ export function Sidebar({
           row={menu.row}
           pos={menu.pos}
           onClose={() => setMenu(null)}
-          onSetColor={onSetLabelColor}
-          onSetIcon={onSetLabelIcon}
-          onAddSublabel={(parent) => openNewFolder(parent)}
-          onRename={onRenameLabel}
-          onDelete={onDeleteLabel}
+          onSetColor={(path, color) => onSetLabelColor(menu.lib, path, color)}
+          onSetIcon={(path, icon) => onSetLabelIcon(menu.lib, path, icon)}
+          onAddSublabel={(parent) => openNewFolder(menu.lib, parent)}
+          onRename={(from, to, displayName) => onRenameLabel(menu.lib, from, to, displayName)}
+          onDelete={(path) => onDeleteLabel(menu.lib, path)}
         />
       )}
     </aside>

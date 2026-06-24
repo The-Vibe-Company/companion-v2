@@ -19,9 +19,16 @@ export interface SkillVM {
   description: string;
   display?: CompanionDisplay;
   error: string | null;
-  /** Org-wide shared label paths this skill is filed under (slash-separated folders). */
+  /** Which library this row belongs to: 'org' (shared) or 'personal' (private to the creator). */
+  scope: "personal" | "org";
+  /**
+   * Only set in the My Skills view: 'authored' = a personal skill the caller created; 'installed' =
+   * an org skill the caller installed, surfaced under My Skills. Null in the org view.
+   */
+  source: "authored" | "installed" | null;
+  /** Label paths this skill is filed under (org folders in the org view, personal folders in mine). */
   labels: string[];
-  /** Who first published the skill (provenance / Activity). */
+  /** Who first published the skill (provenance / Activity). For a personal skill, also the owner. */
   authorId: string;
   authorName: string;
   authorInitials: string;
@@ -55,6 +62,8 @@ export function mapSkill(row: SkillListRow): SkillVM {
     description: row.description,
     display: row.display ?? {},
     error: row.validation_error,
+    scope: row.scope ?? "org",
+    source: row.source ?? null,
     labels: row.labels ?? [],
     authorId: row.creator_id,
     authorName: row.creator_name,

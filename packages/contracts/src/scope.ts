@@ -8,6 +8,14 @@ export type OrgRole = z.infer<typeof orgRoleSchema>;
 export const validationStateSchema = z.enum(["valid", "validating", "invalid"]);
 export type ValidationState = z.infer<typeof validationStateSchema>;
 
+/**
+ * A skill's library scope. `org` = the flat org-wide library (visible to every member, any member may
+ * edit). `personal` = private to the creator (the "My Skills" library); only the owner can read, edit,
+ * or share it — admins included. Share is a one-way `personal` → `org` transition.
+ */
+export const skillScopeSchema = z.enum(["personal", "org"]);
+export type SkillScope = z.infer<typeof skillScopeSchema>;
+
 export const ORG_ROLES: readonly OrgRole[] = ["owner", "admin", "developer"] as const;
 
 /** Lifecycle of a membership invitation. */

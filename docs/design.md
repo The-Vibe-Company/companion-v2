@@ -62,12 +62,23 @@ adds `profiles`, `organizations`, `memberships`, `invitations`,
 `skill_filter_preferences`, `skill_comments`, `skill_comment_images`, `local_skill_installs`,
 `api_tokens`, and `audit_log`. There are **no teams**: the hierarchy is `Organization → User`.
 
-Every tenant-owned table carries `org_id`. A skill is a **flat, org-wide** row with **no owner and no
-visibility flag**: every member of the org can read every skill, and any member can create, edit,
-publish, archive, or delete any skill. The only principal recorded on a skill is `creator_id` — who
-authored the row, for Activity and audit; it grants no special access. There is no `owner_id`,
-`owner_team_id`, `everyone` flag, `skill_team_shares` table, or `PUT /v1/skills/:slug/owner` endpoint —
-they were removed. A version's declared tools
+Every tenant-owned table carries `org_id`. A skill lives in one of two libraries, set by a single
+`skills.scope` enum (`'org'` default, or `'personal'`):
+
+- **`org`** — the flat org-wide library: every member of the org can read it, and any member can edit,
+  publish, archive, or delete it. Organized by org-wide shared **labels**.
+- **`personal`** — a private "My Skills" library, visible **only to its creator** (admins included —
+  there is no admin override). The owner is `creator_id`; only the owner can read, edit, share, or
+  delete it. Organized by that user's **personal folders** (`personal_labels`).
+
+`creator_id` (always recorded, for Activity/audit) doubles as the **owner** of a personal skill. There
+is still no `owner_team_id`, `everyone` flag, `skill_team_shares` table, or `PUT /v1/skills/:slug/owner`
+endpoint. A slug is **workspace-unique across both scopes** (`skills_org_slug_uq (org_id, slug)`), so the
+slug-keyed dependency graph stays unambiguous and Share can never collide. The one scope transition is
+**Share** (`POST /v1/skills/:slug/share`): owner-only, one-way `personal → org`, which also drops the
+skill's personal-folder assignments. "Installed" is not a copied row — a member's My Skills =
+(`scope='personal' AND creator=them`) ∪ (org skills they have a `skill_installs` row for), surfaced
+together. A version's declared tools
 (`skill_versions.tools`) come from the Agent Skills `allowed-tools` frontmatter string.
 Companion-specific package data lives in root `companion.json`, not `SKILL.md`: `display` (human
 name, short summary, long description), `requirements` (declared secrets and environment variables,
@@ -109,8 +120,16 @@ keeps the prefix `LIKE` index-friendly. Rename and delete cascade over `path = $
 validate as slash-separated kebab segments (`[a-z0-9]+(?:-[a-z0-9]+)*`), no empty/leading/trailing
 slash, bounded length. `display_name` is optional per explicit path and falls back to the path leaf
 when absent; renaming can set a display name such as `Dev` while moving the canonical path to its
-slugified form (`dev`). There is no owner and no per-label permission: **any** member can create,
-assign, unassign, rename, recolor, re-icon, or delete labels, including empty folders.
+slugified form (`dev`). For org labels there is no owner and no per-label permission: **any** member
+can create, assign, unassign, rename, recolor, re-icon, or delete labels, including empty folders.
+
+**Personal folders.** The My Skills library has a per-user counterpart to the org label tables:
+`personal_labels` and `personal_skill_labels`, identical in shape but keyed `(org_id, owner_id, path)`
+/ `(org_id, owner_id, skill_id, path)` and scoped to the owner on every query (with user-scoped RLS as
+defense-in-depth, since both `app.org_id` and `app.user_id` GUCs are set per request). They organize a
+member's authored personal skills only (installed copies stay unfiled) and are reached through the
+mirrored `/v1/personal-labels` + `/v1/skills/:slug/personal-labels` endpoints. Sharing a personal skill
+drops its `personal_skill_labels` rows; org folders apply from then on.
 
 **Skill dependencies (un-versioned skill→skill links).** A skill version can declare that it
 requires other skills. Edges live in `skill_version_dependencies` (`(skill_version_id,

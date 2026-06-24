@@ -27,13 +27,13 @@ Read these before making non-trivial changes:
 1. **Hermès Agents** — agents on the **Hermes** runtime, with **Granite** memory and **OpenRouter** model
    routing.
 2. **Curated Container Catalog** — org-admin-approved images/templates, deployed 1-click.
-3. **Skills Hub** — versioned `SKILL.md` packages, visible to every org member and organized by org-wide shared **labels** ("folders"), attached opt-in to agents.
+3. **Skills Hub** — versioned `SKILL.md` packages in two libraries (private **My Skills** + the org-wide library), organized by **labels** ("folders"), attached opt-in to agents.
 
 Canonical terms — **do not invent synonyms**:
 - Hierarchy: **Organization → User**. There are no teams.
 - Org roles: **Owner, Admin, Developer**.
-- **Skills are flat and org-wide.** A skill is a plain org-scoped row with no owner and no visibility flag: every member of the org can read it, and **any** member can create, edit, publish, archive, or delete **any** skill. `creator_id` records who authored the row (provenance/Activity), never an access right.
-- **Labels are the only organizing axis.** Skills are organized by an org-wide **shared** tree of slash-separated **labels** (e.g. `marketing/seo`) — multi-assigned per skill, with optional per-path display name, color + icon, and empty folders allowed. Any member can create, assign, rename, recolor, or delete labels (`/v1/labels`, `/v1/skills/:slug/labels`).
+- **Skills have two libraries (`skills.scope`).** `org` = flat org-wide: every member can read it, and **any** member can edit/publish/archive/delete it. `personal` = private "My Skills", visible and editable **only by its creator** (admins included — no override). `creator_id` records who authored the row (provenance/Activity) and is also the **owner** of a personal skill. The one transition is **Share** (`POST /v1/skills/:slug/share`, owner-only, one-way `personal → org`). A slug is **workspace-unique across both scopes**. "Installed" is not a copied row: My Skills = own personal skills ∪ org skills you have a `skill_installs` row for.
+- **Labels organize within a library.** Org skills use an org-wide **shared** tree (`/v1/labels`, `/v1/skills/:slug/labels`); My Skills uses each member's **personal** tree (`/v1/personal-labels`, `/v1/skills/:slug/personal-labels`). A label is a slash-separated path (e.g. `marketing/seo`), multi-assigned, with optional per-path display name, color + icon, and empty folders allowed. Personal folders organize authored personal skills only.
 - Deploy targets are **providers**: **Docker (local), Fly, Kubernetes, Modal**.
 
 ## Target repository layout
@@ -58,8 +58,8 @@ docs/         # vision / product / design / PRD
 ```
 
 **Anchor files** (the contracts the system hinges on — see `docs/design.md`):
-- `packages/db/schema.ts` — all entities + the `org_id` tenant column and `creator_id` provenance column on skills (no owner or visibility column); the `labels` + `skill_labels` tables (the only skill-organizing axis).
-- `packages/auth/policy.ts` — typed RBAC: tenant/membership gate + org-role capability gate; the "deploy for" logic (skills themselves carry no per-resource access gate — any member can do anything to any skill).
+- `packages/db/schema.ts` — all entities + the `org_id` tenant column, the `creator_id` provenance/owner column and the `scope` (personal/org) column on skills; the `labels`/`skill_labels` (org) and `personal_labels`/`personal_skill_labels` (per-user) folder tables.
+- `packages/core/src/authz.ts` — typed RBAC: tenant/membership gate + org-role capability gate, plus `canAccessSkill`/`canManagePersonalSkill` (personal-skill privacy: owner-only, no admin override). Org skills carry no per-resource gate; personal skills do.
 - `packages/providers/port.ts` — the `DeploymentProvider` interface + neutral `DeploySpec`.
 - `apps/worker/reconcile.ts` — observe → diff → apply → drift loop.
 - `packages/hermes/configBuilder.ts` — agent + skills + vault + model + secrets → `DeploySpec`.
@@ -75,14 +75,16 @@ docs/         # vision / product / design / PRD
   them directly.
 - **One source of truth for types:** entities live in `packages/db`; shared contracts in
   `packages/contracts`. Don't redefine shapes ad hoc.
-- **Authorization = tenant + role.** A permission decision is a **tenant/membership gate** (is the actor a
-  member of this org?) **plus** a **capability gate** (does the actor's org role permit the action?).
-  Skills carry **no per-resource access gate**: every org member can read every skill in the org, and
-  any member can create/edit/publish/archive/delete any skill. Enforce in the **service layer**
+- **Authorization = tenant + role (+ scope for personal skills).** A permission decision is a
+  **tenant/membership gate** (is the actor a member of this org?) **plus** a **capability gate** (does the
+  actor's org role permit the action?). **Org** skills carry no per-resource gate (any member can do
+  anything). **Personal** skills add a per-resource gate: only the creator can read/edit/share/delete
+  them — admins included (`canAccessSkill`/`canManagePersonalSkill`). Enforce in the **service layer**
   (`packages/core`) so web, REST, and the worker share one path — never only in route handlers.
-- **Provenance, not ownership:** a skill records `creator_id` (who authored the row, for Activity/audit)
-  but has no owner and no read-visibility state. Organize skills with **labels** (org-wide shared
-  folders), never with access flags.
+- **Provenance + ownership:** a skill records `creator_id` (who authored the row, for Activity/audit),
+  which is also the **owner** of a personal skill. The library axis is `skills.scope` (personal/org);
+  Share is the only `personal → org` transition. Organize skills with **labels** (org shared folders +
+  personal private folders), never with ad-hoc access flags.
 - **Desired-state:** every deployable is a row of declared intent; the reconciler converges reality and
   heals drift. Provisioning is **idempotent** (keyed so retries never double-provision).
 - **Secrets** are envelope-encrypted, **write-only** over the API, referenced by id, and injected by the

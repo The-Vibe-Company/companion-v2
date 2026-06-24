@@ -42,9 +42,21 @@ import {
   skillsRouteSource,
   skillsRouteWithSkill,
   skillsRouteWithoutSkill,
+  type SkillsLibrary,
   type SkillsRoute,
   type SkillsRouteSource,
 } from "./route";
+import { ShareDialog } from "./ShareDialog";
+import {
+  assignPersonalSkillLabel,
+  createPersonalLabel as createPersonalLabelRpc,
+  deletePersonalLabel as deletePersonalLabelRpc,
+  renamePersonalLabel as renamePersonalLabelRpc,
+  setPersonalLabelColor as setPersonalLabelColorRpc,
+  setPersonalLabelIcon as setPersonalLabelIconRpc,
+  shareSkillToOrg,
+  unassignPersonalSkillLabel,
+} from "@/lib/queries";
 import { Onboarding } from "../org/Onboarding";
 import { settingsHref } from "../org/SettingsApp";
 import { SettingsDrawer, SettingsDrawerError } from "../org/SettingsDrawer";
@@ -118,9 +130,9 @@ export interface TreeRow {
   hasChildren: boolean;
 }
 
-const SCOPE_KINDS = ["all", "starred", "nolabel", "label"] as const;
-type ScopeKind = (typeof SCOPE_KINDS)[number];
-type Selection = { kind: ScopeKind; label?: string };
+type ScopeKind = "all" | "starred" | "installed" | "label";
+/** The active workspace slice: a library (`mine`/`org`) + a kind within it. */
+type Selection = { lib: SkillsLibrary; kind: ScopeKind; label?: string };
 
 /**
  * Derive the flattened label tree from the live skills + explicit label appearances. Intermediate
@@ -185,10 +197,15 @@ function skillUnderLabel(skill: SkillVM, path: string): boolean {
   return (skill.labels ?? []).some((p) => p === path || p.startsWith(path + "/"));
 }
 
-/** Does a skill belong to the active org-wide scope (sidebar selection)? */
+/**
+ * Does a skill belong to the active slice? The skill set is already library-filtered, so this only
+ * narrows within the library: starred / installed (installed = a `source: installed` row) / filed
+ * under the selected folder. Installed skills carry no personal folders, so a `label` slice naturally
+ * shows only authored personal skills.
+ */
 function skillInSelection(skill: SkillVM, selection: Selection): boolean {
   if (selection.kind === "starred") return skill.starred;
-  if (selection.kind === "nolabel") return (skill.labels ?? []).length === 0;
+  if (selection.kind === "installed") return skill.source === "installed";
   if (selection.kind === "label") return selection.label ? skillUnderLabel(skill, selection.label) : true;
   return true;
 }
@@ -196,10 +213,12 @@ function skillInSelection(skill: SkillVM, selection: Selection): boolean {
 type SkillsView = "workspace" | "local" | "archived";
 
 function selectionFromRoute(route: SkillsRoute): Selection {
-  if (route.kind === "starred") return { kind: "starred" };
-  if (route.kind === "nolabel") return { kind: "nolabel" };
-  if (route.kind === "label") return { kind: "label", label: route.label };
-  return { kind: "all" };
+  if (route.kind === "starred") return { lib: "mine", kind: "starred" };
+  if (route.kind === "installed") return { lib: "mine", kind: "installed" };
+  if (route.kind === "label") return { lib: route.lib, kind: "label", label: route.label };
+  if (route.kind === "all") return { lib: route.lib, kind: "all" };
+  // local / archived have no workspace selection — default to My Skills behind the scenes.
+  return { lib: "mine", kind: "all" };
 }
 
 function skillsViewForRoute(route: SkillsRoute): SkillsView {
@@ -210,17 +229,19 @@ function skillsViewForRoute(route: SkillsRoute): SkillsView {
 
 function routeFromSelection(selection: Selection, skill?: string): SkillsRoute {
   let route: SkillsRoute;
-  if (selection.kind === "starred") route = { kind: "starred" };
-  else if (selection.kind === "nolabel") route = { kind: "nolabel" };
-  else if (selection.kind === "label" && selection.label) route = { kind: "label", label: selection.label };
-  else route = { kind: "all" };
+  if (selection.kind === "starred") route = { lib: "mine", kind: "starred" };
+  else if (selection.kind === "installed") route = { lib: "mine", kind: "installed" };
+  else if (selection.kind === "label" && selection.label) route = { lib: selection.lib, kind: "label", label: selection.label };
+  else route = { lib: selection.lib, kind: "all" };
   return skill ? skillsRouteWithSkill(route, skill) : route;
 }
 
 export function SkillsApp({
-  initialSkills,
+  initialMineSkills,
+  initialOrgSkills,
   initialLocalSkills,
   initialFilterPreferences,
+  initialPersonalLabels,
   initialLabels,
   me,
   orgs,
@@ -228,9 +249,11 @@ export function SkillsApp({
   initialRoute,
   initialRouteSource,
 }: {
-  initialSkills: SkillVM[];
+  initialMineSkills: SkillVM[];
+  initialOrgSkills: SkillVM[];
   initialLocalSkills: LocalSkillRow[];
   initialFilterPreferences: SkillFilterPreferences;
+  initialPersonalLabels: LabelsResponse;
   initialLabels: LabelsResponse;
   me: MeVM;
   orgs: OrgVM[];
@@ -242,8 +265,12 @@ export function SkillsApp({
   const orgActions = useOrgActions();
   const settingsWarmupRef = useRef<{ orgId: string; promise: Promise<SettingsAppData> } | null>(null);
   const [localSettings, setLocalSettings] = useState<LocalSettingsSurface | null>(null);
-  const [skills, setSkills] = useState<SkillVM[]>(initialSkills);
-  const [labels, setLabels] = useState<LabelVM[]>(initialLabels.flat);
+  // Two libraries held side by side: My Skills (authored personal + installed org) and the org library;
+  // each with its own folder appearances. The active set is derived from `selection.lib` below.
+  const [mineSkills, setMineSkills] = useState<SkillVM[]>(initialMineSkills);
+  const [orgSkills, setOrgSkills] = useState<SkillVM[]>(initialOrgSkills);
+  const [personalLabels, setPersonalLabels] = useState<LabelVM[]>(initialPersonalLabels.flat);
+  const [orgLabels, setOrgLabels] = useState<LabelVM[]>(initialLabels.flat);
   const [localSkills, setLocalSkills] = useState<LocalSkillRow[]>(initialLocalSkills);
   const [currentView, setCurrentView] = useState<SkillsView>(() => skillsViewForRoute(initialRoute));
   const [archivedSkills, setArchivedSkills] = useState<SkillVM[]>([]);
@@ -251,16 +278,35 @@ export function SkillsApp({
   const [selection, setSelection] = useState<Selection>(() => selectionFromRoute(initialRoute));
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const [filters, setFilters] = useState<Filter[]>(() => initialFilterPreferences.active_filters);
+  const [shareTarget, setShareTarget] = useState<SkillVM | null>(null);
+
+  const activeLib: SkillsLibrary = selection.lib;
+  const skills = activeLib === "org" ? orgSkills : mineSkills;
+  const labels = activeLib === "org" ? orgLabels : personalLabels;
 
   // Synchronous mirrors for optimistic handlers (StrictMode-safe: read current state via the ref,
   // never gate an RPC on a flag set inside a setState updater — the double-invoke would drop it).
-  const skillsRef = useRef<SkillVM[]>(initialSkills);
-  const labelsRef = useRef<LabelVM[]>(initialLabels.flat);
-  skillsRef.current = skills;
-  labelsRef.current = labels;
+  const mineSkillsRef = useRef<SkillVM[]>(initialMineSkills);
+  const orgSkillsRef = useRef<SkillVM[]>(initialOrgSkills);
+  const personalLabelsRef = useRef<LabelVM[]>(initialPersonalLabels.flat);
+  const orgLabelsRef = useRef<LabelVM[]>(initialLabels.flat);
+  const activeLibRef = useRef<SkillsLibrary>(activeLib);
+  mineSkillsRef.current = mineSkills;
+  orgSkillsRef.current = orgSkills;
+  personalLabelsRef.current = personalLabels;
+  orgLabelsRef.current = orgLabels;
+  activeLibRef.current = activeLib;
 
-  useEffect(() => setSkills(initialSkills), [initialSkills]);
-  useEffect(() => setLabels(initialLabels.flat), [initialLabels]);
+  // Star toggles apply to every copy of a skill (an installed org skill lives in both libraries).
+  const setSkillEverywhere = useCallback((id: string, fn: (s: SkillVM) => SkillVM) => {
+    setMineSkills((arr) => arr.map((s) => (s.id === id ? fn(s) : s)));
+    setOrgSkills((arr) => arr.map((s) => (s.id === id ? fn(s) : s)));
+  }, []);
+
+  useEffect(() => setMineSkills(initialMineSkills), [initialMineSkills]);
+  useEffect(() => setOrgSkills(initialOrgSkills), [initialOrgSkills]);
+  useEffect(() => setPersonalLabels(initialPersonalLabels.flat), [initialPersonalLabels]);
+  useEffect(() => setOrgLabels(initialLabels.flat), [initialLabels]);
   useEffect(() => setLocalSkills(initialLocalSkills), [initialLocalSkills]);
   useEffect(() => {
     document.cookie = `companion_org=${encodeURIComponent(currentOrg.id)}; path=/; SameSite=Lax`;
@@ -352,7 +398,7 @@ export function SkillsApp({
     initialRoute.kind === "local" ? null : initialRoute.skill ?? null,
   );
   const [preferenceStatus, setPreferenceStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
-  const [toast, setToast] = useState<string | null>(null);
+  const [toast, setToast] = useState<{ msg: string; undo?: () => void } | null>(null);
   const openIdRef = useRef<string | null>(null);
   const uploadReturnRef = useRef<HTMLElement | null>(null);
   const didInitializePersistenceRef = useRef(false);
@@ -467,27 +513,29 @@ export function SkillsApp({
   }, []);
 
   // --- Optimistic mutations: stars / install ---------------------------------
-  const toggleStar = useCallback((id: string) => {
-    setSkills((arr) =>
-      arr.map((s) =>
-        s.id === id ? { ...s, starred: !s.starred, stars: s.stars + (s.starred ? -1 : 1) } : s,
-      ),
-    );
-    toggleStarRpc(id).catch(() => {
-      setSkills((arr) =>
-        arr.map((s) =>
-          s.id === id ? { ...s, starred: !s.starred, stars: s.stars + (s.starred ? -1 : 1) } : s,
-        ),
-      );
-    });
-  }, []);
+  const toggleStar = useCallback(
+    (id: string) => {
+      const flip = (s: SkillVM): SkillVM => ({ ...s, starred: !s.starred, stars: s.stars + (s.starred ? -1 : 1) });
+      setSkillEverywhere(id, flip);
+      toggleStarRpc(id).catch(() => setSkillEverywhere(id, flip));
+    },
+    [setSkillEverywhere],
+  );
 
+  /**
+   * Install an org skill into My Skills, or remove it. Updates the org row's status AND mirrors a
+   * `source: installed` copy in the My-Skills set so it appears under My Skills → Installed immediately
+   * (and the Installed nav count + update dot react). Optimistic, with an Undo toast. No refresh.
+   */
   const setInstalled = useCallback(
-    (id: string, installed: boolean) => {
-      const target = skillsRef.current.find((s) => s.id === id);
-      const markVersion = target?.version ?? null;
-      const prev = target ? { status: target.installStatus, version: target.installedVersion } : null;
-      setSkills((arr) =>
+    (id: string, installed: boolean, opts?: { undo?: boolean }) => {
+      const orgRow = orgSkillsRef.current.find((s) => s.id === id) ?? mineSkillsRef.current.find((s) => s.id === id);
+      if (!orgRow) return;
+      const markVersion = orgRow.version ?? null;
+      const prevOrg = { status: orgRow.installStatus, version: orgRow.installedVersion };
+      const prevMine = mineSkillsRef.current;
+      // Org row: reflect the new install status.
+      setOrgSkills((arr) =>
         arr.map((s) =>
           s.id === id
             ? installed
@@ -496,96 +544,148 @@ export function SkillsApp({
             : s,
         ),
       );
+      // My-Skills mirror: add an installed copy, or drop it.
+      setMineSkills((arr) => {
+        if (!installed) return arr.filter((s) => !(s.id === id && s.source === "installed"));
+        if (arr.some((s) => s.id === id)) return arr;
+        return [
+          ...arr,
+          { ...orgRow, scope: "org", source: "installed", labels: [], installStatus: "installed", installedVersion: markVersion },
+        ];
+      });
       const request = installed ? markSkillInstalled(id, markVersion) : markSkillUninstalled(id);
       request
         .then((res) => {
-          if (res.installed) {
-            setSkills((arr) =>
-              arr.map((s) =>
-                s.id === id ? { ...s, installStatus: res.status, installedVersion: res.installed_version } : s,
-              ),
+          if (res.installed && "installed_version" in res) {
+            const v = res.installed_version;
+            const st = res.status;
+            setOrgSkills((arr) => arr.map((s) => (s.id === id ? { ...s, installStatus: st, installedVersion: v } : s)));
+            setMineSkills((arr) =>
+              arr.map((s) => (s.id === id && s.source === "installed" ? { ...s, installStatus: st, installedVersion: v } : s)),
             );
           }
-          setToast(installed ? `Marked ${id} as installed` : `Marked ${id} as not installed`);
+          if (opts?.undo) {
+            setToast({ msg: installed ? `Installed ${id} to My Skills` : `Removed ${id} from My Skills`, undo: () => setInstalled(id, !installed) });
+          } else {
+            setToast({ msg: installed ? `Marked ${id} as installed` : `Marked ${id} as not installed` });
+          }
         })
         .catch((e) => {
-          if (prev) {
-            setSkills((arr) =>
-              arr.map((s) =>
-                s.id === id ? { ...s, installStatus: prev.status, installedVersion: prev.version } : s,
-              ),
-            );
-          }
+          setOrgSkills((arr) =>
+            arr.map((s) => (s.id === id ? { ...s, installStatus: prevOrg.status, installedVersion: prevOrg.version } : s)),
+          );
+          setMineSkills(prevMine);
           orgActions.setError((e as Error).message);
         });
     },
     [orgActions],
   );
 
-  // --- Optimistic label mutations --------------------------------------------
-  // Every handler captures the previous value, reads current state from a SYNCHRONOUS ref, applies
-  // the optimistic setState, fires the RPC, and reverts on failure. No router.refresh() on success
-  // (it re-derives the route and would close the open detail). Counts re-derive from `skills` in the
-  // tree memo, so adding/removing a label assignment automatically adjusts the roll-up.
+  // Install an org skill into My Skills from the detail view, with an Undo toast.
+  const installToMine = useCallback((id: string) => setInstalled(id, true, { undo: true }), [setInstalled]);
 
-  // Assign or unassign a label path on a skill (toggle). The detail "Add to folder" calls this.
-  const toggleSkillLabel = useCallback((skillId: string, path: string) => {
-    const current = skillsRef.current.find((s) => s.id === skillId);
-    if (!current) return;
-    const had = (current.labels ?? []).includes(path);
-    // The server's assignLabel upserts the path AND its ancestors as explicit `labels` rows, so a
-    // newly-assigned folder must persist in the tree even after its last skill is unfiled. Mirror that:
-    // on assign, register any not-yet-known ancestor as an explicit folder (and revert those on failure).
-    const newFolders: string[] = [];
-    if (!had) {
-      const known = new Set(labelsRef.current.map((l) => l.path));
-      const segs = path.split("/");
-      for (let i = 1; i <= segs.length; i += 1) {
-        const p = segs.slice(0, i).join("/");
-        if (!known.has(p)) newFolders.push(p);
+  // --- Optimistic label mutations (per library) ------------------------------
+  // Every handler takes the target library explicitly (the stacked sidebar shows BOTH trees, so the
+  // org tree can be edited while My Skills is active). It captures the previous value, reads current
+  // state from the matching SYNCHRONOUS ref, applies the optimistic setState, fires the matching RPC
+  // (org `labels` vs personal folders), and reverts on failure. No router.refresh() on success.
+  const skillsSetterFor = useCallback(
+    (lib: SkillsLibrary) => (lib === "org" ? setOrgSkills : setMineSkills),
+    [],
+  );
+  const labelsSetterFor = useCallback(
+    (lib: SkillsLibrary) => (lib === "org" ? setOrgLabels : setPersonalLabels),
+    [],
+  );
+  const skillsRefFor = useCallback(
+    (lib: SkillsLibrary) => (lib === "org" ? orgSkillsRef : mineSkillsRef),
+    [],
+  );
+  const labelsRefFor = useCallback(
+    (lib: SkillsLibrary) => (lib === "org" ? orgLabelsRef : personalLabelsRef),
+    [],
+  );
+  const labelRpcs = useMemo(
+    () => ({
+      org: {
+        assign: assignSkillLabel,
+        unassign: unassignSkillLabel,
+        create: createLabelRpc,
+        color: setLabelColorRpc,
+        icon: setLabelIconRpc,
+        rename: renameLabelRpc,
+        del: deleteLabelRpc,
+      },
+      mine: {
+        assign: assignPersonalSkillLabel,
+        unassign: unassignPersonalSkillLabel,
+        create: createPersonalLabelRpc,
+        color: setPersonalLabelColorRpc,
+        icon: setPersonalLabelIconRpc,
+        rename: renamePersonalLabelRpc,
+        del: deletePersonalLabelRpc,
+      },
+    }),
+    [],
+  );
+
+  // Assign or unassign a folder path on a skill (toggle). The detail "Add to folder" calls this.
+  const toggleSkillLabel = useCallback(
+    (lib: SkillsLibrary, skillId: string, path: string) => {
+      const setSk = skillsSetterFor(lib);
+      const setLb = labelsSetterFor(lib);
+      const rpcs = labelRpcs[lib];
+      const current = skillsRefFor(lib).current.find((s) => s.id === skillId);
+      if (!current) return;
+      const had = (current.labels ?? []).includes(path);
+      const newFolders: string[] = [];
+      if (!had) {
+        const known = new Set(labelsRefFor(lib).current.map((l) => l.path));
+        const segs = path.split("/");
+        for (let i = 1; i <= segs.length; i += 1) {
+          const p = segs.slice(0, i).join("/");
+          if (!known.has(p)) newFolders.push(p);
+        }
       }
-    }
-    setSkills((arr) =>
-      arr.map((s) =>
-        s.id === skillId
-          ? {
-              ...s,
-              labels: had ? s.labels.filter((p) => p !== path) : [...s.labels, path],
-            }
-          : s,
-      ),
-    );
-    if (newFolders.length) {
-      setLabels((arr) => [...arr, ...newFolders.map((p) => ({ path: p, displayName: null, color: null, icon: null }))]);
-    }
-    const rpc = had ? unassignSkillLabel(skillId, path) : assignSkillLabel(skillId, path);
-    rpc.catch((err: unknown) => {
-      setSkills((arr) =>
+      setSk((arr) =>
         arr.map((s) =>
-          s.id === skillId
-            ? { ...s, labels: had ? [...s.labels, path] : s.labels.filter((p) => p !== path) }
-            : s,
+          s.id === skillId ? { ...s, labels: had ? s.labels.filter((p) => p !== path) : [...s.labels, path] } : s,
         ),
       );
       if (newFolders.length) {
-        const remove = new Set(newFolders);
-        setLabels((arr) => arr.filter((l) => !remove.has(l.path)));
+        setLb((arr) => [...arr, ...newFolders.map((p) => ({ path: p, displayName: null, color: null, icon: null }))]);
       }
-      setLabelNotice(err instanceof Error ? err.message : "Could not update the skill's folders.");
-    });
-  }, []);
+      const rpc = had ? rpcs.unassign(skillId, path) : rpcs.assign(skillId, path);
+      rpc.catch((err: unknown) => {
+        setSk((arr) =>
+          arr.map((s) =>
+            s.id === skillId
+              ? { ...s, labels: had ? [...s.labels, path] : s.labels.filter((p) => p !== path) }
+              : s,
+          ),
+        );
+        if (newFolders.length) {
+          const remove = new Set(newFolders);
+          setLb((arr) => arr.filter((l) => !remove.has(l.path)));
+        }
+        setLabelNotice(err instanceof Error ? err.message : "Could not update the skill's folders.");
+      });
+    },
+    [labelRpcs, labelsRefFor, labelsSetterFor, skillsRefFor, skillsSetterFor],
+  );
 
-  // Create an empty folder (explicit `labels` row) and select it.
+  // Create an empty folder (explicit row) in a library and select it.
   const createLabelPath = useCallback(
-    (path: string, displayName?: string) => {
-      if (labelsRef.current.some((l) => l.path === path)) {
-        setSelection({ kind: "label", label: path });
-        replaceSkillsUrl({ kind: "label", label: path });
+    (lib: SkillsLibrary, path: string, displayName?: string) => {
+      const setLb = labelsSetterFor(lib);
+      if (labelsRefFor(lib).current.some((l) => l.path === path)) {
+        setSelection({ lib, kind: "label", label: path });
+        replaceSkillsUrl({ lib, kind: "label", label: path });
         return;
       }
       const optimistic: LabelVM = { path, displayName: displayName ?? null, color: null, icon: null };
-      setLabels((arr) => [...arr, optimistic]);
-      setSelection({ kind: "label", label: path });
+      setLb((arr) => [...arr, optimistic]);
+      setSelection({ lib, kind: "label", label: path });
       setOpenId(null);
       setExpanded((prev) => {
         const next = new Set(prev);
@@ -593,101 +693,143 @@ export function SkillsApp({
         for (let i = 1; i < segs.length; i += 1) next.add(segs.slice(0, i).join("/"));
         return next;
       });
-      replaceSkillsUrl({ kind: "label", label: path });
-      createLabelRpc(path, { displayName }).catch((err: unknown) => {
-        setLabels((arr) => arr.filter((l) => l.path !== path));
+      replaceSkillsUrl({ lib, kind: "label", label: path });
+      labelRpcs[lib].create(path, { displayName }).catch((err: unknown) => {
+        setLb((arr) => arr.filter((l) => l.path !== path));
         setLabelNotice(err instanceof Error ? err.message : "Could not create the folder.");
       });
     },
-    [replaceSkillsUrl],
+    [labelRpcs, labelsRefFor, labelsSetterFor, replaceSkillsUrl],
   );
 
-  const setLabelColorPath = useCallback((path: string, color: LabelColor | null) => {
-    const prev = labelsRef.current.find((l) => l.path === path);
-    const prevColor = prev?.color ?? null;
-    setLabels((arr) => {
-      const exists = arr.some((l) => l.path === path);
-      return exists
-        ? arr.map((l) => (l.path === path ? { ...l, color } : l))
-        : [...arr, { path, displayName: null, color, icon: null }];
-    });
-    setLabelColorRpc(path, color).catch((err: unknown) => {
-      setLabels((arr) => arr.map((l) => (l.path === path ? { ...l, color: prevColor } : l)));
-      setLabelNotice(err instanceof Error ? err.message : "Could not change the folder color.");
-    });
-  }, []);
+  const setLabelColorPath = useCallback(
+    (lib: SkillsLibrary, path: string, color: LabelColor | null) => {
+      const setLb = labelsSetterFor(lib);
+      const prevColor = labelsRefFor(lib).current.find((l) => l.path === path)?.color ?? null;
+      setLb((arr) => {
+        const exists = arr.some((l) => l.path === path);
+        return exists
+          ? arr.map((l) => (l.path === path ? { ...l, color } : l))
+          : [...arr, { path, displayName: null, color, icon: null }];
+      });
+      labelRpcs[lib].color(path, color).catch((err: unknown) => {
+        setLb((arr) => arr.map((l) => (l.path === path ? { ...l, color: prevColor } : l)));
+        setLabelNotice(err instanceof Error ? err.message : "Could not change the folder color.");
+      });
+    },
+    [labelRpcs, labelsRefFor, labelsSetterFor],
+  );
 
-  const setLabelIconPath = useCallback((path: string, icon: LabelIcon | null) => {
-    const prev = labelsRef.current.find((l) => l.path === path);
-    const prevIcon = prev?.icon ?? null;
-    setLabels((arr) => {
-      const exists = arr.some((l) => l.path === path);
-      return exists
-        ? arr.map((l) => (l.path === path ? { ...l, icon } : l))
-        : [...arr, { path, displayName: null, color: null, icon }];
-    });
-    setLabelIconRpc(path, icon).catch((err: unknown) => {
-      setLabels((arr) => arr.map((l) => (l.path === path ? { ...l, icon: prevIcon } : l)));
-      setLabelNotice(err instanceof Error ? err.message : "Could not change the folder icon.");
-    });
-  }, []);
+  const setLabelIconPath = useCallback(
+    (lib: SkillsLibrary, path: string, icon: LabelIcon | null) => {
+      const setLb = labelsSetterFor(lib);
+      const prevIcon = labelsRefFor(lib).current.find((l) => l.path === path)?.icon ?? null;
+      setLb((arr) => {
+        const exists = arr.some((l) => l.path === path);
+        return exists
+          ? arr.map((l) => (l.path === path ? { ...l, icon } : l))
+          : [...arr, { path, displayName: null, color: null, icon }];
+      });
+      labelRpcs[lib].icon(path, icon).catch((err: unknown) => {
+        setLb((arr) => arr.map((l) => (l.path === path ? { ...l, icon: prevIcon } : l)));
+        setLabelNotice(err instanceof Error ? err.message : "Could not change the folder icon.");
+      });
+    },
+    [labelRpcs, labelsRefFor, labelsSetterFor],
+  );
 
   const renameLabelPath = useCallback(
-    (from: string, to: string, displayName?: string) => {
+    (lib: SkillsLibrary, from: string, to: string, displayName?: string) => {
       if (from === to && displayName === undefined) return;
-      const prevLabels = labelsRef.current;
-      const prevSkills = skillsRef.current;
+      const setLb = labelsSetterFor(lib);
+      const setSk = skillsSetterFor(lib);
+      const prevLabels = labelsRefFor(lib).current;
+      const prevSkills = skillsRefFor(lib).current;
       const within = (p: string) => p === from || p.startsWith(from + "/");
       const remap = (p: string) => (within(p) ? to + p.slice(from.length) : p);
-      setLabels((arr) =>
+      setLb((arr) =>
         arr.map((l) => ({
           ...l,
           path: remap(l.path),
           displayName: displayName !== undefined && l.path === from ? displayName : l.displayName,
         })),
       );
-      setSkills((arr) => arr.map((s) => ({ ...s, labels: s.labels.map(remap) })));
+      setSk((arr) => arr.map((s) => ({ ...s, labels: s.labels.map(remap) })));
       setSelection((sel) =>
-        sel.kind === "label" && sel.label && within(sel.label)
-          ? { kind: "label", label: remap(sel.label) }
+        sel.lib === lib && sel.kind === "label" && sel.label && within(sel.label)
+          ? { lib, kind: "label", label: remap(sel.label) }
           : sel,
       );
-      // Keep the URL in sync when the active folder (or an ancestor of it) is the one being renamed,
-      // preserving any open skill so reload/back re-opens it under the new path. Mirrors deleteLabelPath.
-      if (selection.kind === "label" && selection.label && within(selection.label)) {
+      if (selection.lib === lib && selection.kind === "label" && selection.label && within(selection.label)) {
         replaceSkillsUrl(
-          routeFromSelection({ kind: "label", label: remap(selection.label) }, openIdRef.current ?? undefined),
+          routeFromSelection({ lib, kind: "label", label: remap(selection.label) }, openIdRef.current ?? undefined),
         );
       }
-      renameLabelRpc(from, to, { displayName }).catch((err: unknown) => {
-        setLabels(prevLabels);
-        setSkills(prevSkills);
+      labelRpcs[lib].rename(from, to, { displayName }).catch((err: unknown) => {
+        setLb(prevLabels);
+        setSk(prevSkills);
         setLabelNotice(err instanceof Error ? err.message : "Could not rename the folder.");
       });
     },
-    [replaceSkillsUrl, selection],
+    [labelRpcs, labelsRefFor, labelsSetterFor, replaceSkillsUrl, selection, skillsRefFor, skillsSetterFor],
   );
 
   const deleteLabelPath = useCallback(
-    (path: string) => {
-      const prevLabels = labelsRef.current;
-      const prevSkills = skillsRef.current;
+    (lib: SkillsLibrary, path: string) => {
+      const setLb = labelsSetterFor(lib);
+      const setSk = skillsSetterFor(lib);
+      const prevLabels = labelsRefFor(lib).current;
+      const prevSkills = skillsRefFor(lib).current;
       const within = (p: string) => p === path || p.startsWith(path + "/");
-      setLabels((arr) => arr.filter((l) => !within(l.path)));
-      setSkills((arr) => arr.map((s) => ({ ...s, labels: s.labels.filter((p) => !within(p)) })));
+      setLb((arr) => arr.filter((l) => !within(l.path)));
+      setSk((arr) => arr.map((s) => ({ ...s, labels: s.labels.filter((p) => !within(p)) })));
       setSelection((sel) =>
-        sel.kind === "label" && sel.label && within(sel.label) ? { kind: "all" } : sel,
+        sel.lib === lib && sel.kind === "label" && sel.label && within(sel.label) ? { lib, kind: "all" } : sel,
       );
-      if (selection.kind === "label" && selection.label && within(selection.label)) {
-        replaceSkillsUrl({ kind: "all" });
+      if (selection.lib === lib && selection.kind === "label" && selection.label && within(selection.label)) {
+        replaceSkillsUrl({ lib, kind: "all" });
       }
-      deleteLabelRpc(path).catch((err: unknown) => {
-        setLabels(prevLabels);
-        setSkills(prevSkills);
+      labelRpcs[lib].del(path).catch((err: unknown) => {
+        setLb(prevLabels);
+        setSk(prevSkills);
         setLabelNotice(err instanceof Error ? err.message : "Could not delete the folder.");
       });
     },
-    [replaceSkillsUrl, selection],
+    [labelRpcs, labelsRefFor, labelsSetterFor, replaceSkillsUrl, selection, skillsRefFor, skillsSetterFor],
+  );
+
+  // --- Share a personal skill to the org library (optimistic, with Undo) ------
+  const confirmShare = useCallback(
+    (vm: SkillVM) => {
+      const id = vm.id;
+      const prevMine = mineSkillsRef.current;
+      const prevOrg = orgSkillsRef.current;
+      // Move the row mine → org: drop the authored personal row, add an org copy (owner = me).
+      setMineSkills((arr) => arr.filter((s) => !(s.id === id && s.source === "authored")));
+      setOrgSkills((arr) =>
+        arr.some((s) => s.id === id)
+          ? arr
+          : [...arr, { ...vm, scope: "org", source: null, labels: [], starred: false }],
+      );
+      setShareTarget(null);
+      // Re-point the detail to the org copy so it stays open under the new library.
+      setSelection({ lib: "org", kind: "all" });
+      setOpenId(id);
+      setLastId(id);
+      if (typeof window !== "undefined" && window.location.pathname === "/skills") {
+        replaceSkillsUrl({ lib: "org", kind: "all", skill: id });
+      }
+      // Share is one-way (there is no un-share endpoint), so the toast offers no Undo — only the
+      // RPC-failure path reverts the optimistic move.
+      shareSkillToOrg(id)
+        .then(() => setToast({ msg: `Shared ${id} to ${currentOrg.name}. Everyone can use it now.` }))
+        .catch((e) => {
+          setMineSkills(prevMine);
+          setOrgSkills(prevOrg);
+          orgActions.setError((e as Error).message);
+        });
+    },
+    [currentOrg.name, orgActions, replaceSkillsUrl],
   );
 
   // Auto-dismiss toasts.
@@ -724,7 +866,9 @@ export function SkillsApp({
 
   const archiveSkillById = useCallback(
     (id: string) => {
-      setSkills((arr) => arr.filter((s) => s.id !== id));
+      // Drop the skill from whichever library it appears in (org skill, or the actor's personal skill).
+      setMineSkills((arr) => arr.filter((s) => s.id !== id));
+      setOrgSkills((arr) => arr.filter((s) => s.id !== id));
       setOpenId((cur) => {
         if (cur !== id) return cur;
         clearCurrentSkillUrl();
@@ -759,8 +903,23 @@ export function SkillsApp({
   );
 
   // --- Derived ---------------------------------------------------------------
-  const treeRows = useMemo(() => deriveTreeRows(skills, labels), [skills, labels]);
-  const starredCount = useMemo(() => skills.filter((s) => s.starred).length, [skills]);
+  // Personal folders organize only AUTHORED personal skills (installed copies carry no personal labels),
+  // so the personal tree is derived from that subset. The org tree is unchanged.
+  const personalTreeRows = useMemo(
+    () => deriveTreeRows(mineSkills.filter((s) => s.source === "authored"), personalLabels),
+    [mineSkills, personalLabels],
+  );
+  const orgTreeRows = useMemo(() => deriveTreeRows(orgSkills, orgLabels), [orgSkills, orgLabels]);
+  const activeTreeRows = activeLib === "org" ? orgTreeRows : personalTreeRows;
+
+  const mineCount = mineSkills.length;
+  const orgCount = orgSkills.length;
+  const starredCount = useMemo(() => mineSkills.filter((s) => s.starred).length, [mineSkills]);
+  const installedCount = useMemo(() => mineSkills.filter((s) => s.source === "installed").length, [mineSkills]);
+  const installedUpdateCount = useMemo(
+    () => mineSkills.filter((s) => s.source === "installed" && s.installStatus === "update").length,
+    [mineSkills],
+  );
 
   // The active scope + the in-list filter chips both gate the list.
   const filtered = useMemo(
@@ -771,9 +930,9 @@ export function SkillsApp({
   const activeLabel = selection.kind === "label" ? selection.label ?? null : null;
   const breadcrumb = useMemo(() => {
     if (selection.kind === "starred") return ["Starred"];
-    if (selection.kind === "nolabel") return ["No folder"];
+    if (selection.kind === "installed") return ["Installed"];
     if (selection.kind === "label" && selection.label) return selection.label.split("/");
-    return ["All skills"];
+    return selection.lib === "org" ? ["All skills"] : ["My Skills"];
   }, [selection]);
 
   const routeForCurrentSurface = useCallback(
@@ -820,10 +979,15 @@ export function SkillsApp({
     },
     [],
   );
-  const selectAll = useCallback(() => applySkillsRoute({ kind: "all" }, "push"), [applySkillsRoute]);
-  const selectStarred = useCallback(() => applySkillsRoute({ kind: "starred" }, "push"), [applySkillsRoute]);
+  const selectMineAll = useCallback(() => applySkillsRoute({ lib: "mine", kind: "all" }, "push"), [applySkillsRoute]);
+  const selectOrgAll = useCallback(() => applySkillsRoute({ lib: "org", kind: "all" }, "push"), [applySkillsRoute]);
+  const selectStarred = useCallback(() => applySkillsRoute({ lib: "mine", kind: "starred" }, "push"), [applySkillsRoute]);
+  const selectInstalled = useCallback(
+    () => applySkillsRoute({ lib: "mine", kind: "installed" }, "push"),
+    [applySkillsRoute],
+  );
   const selectLabel = useCallback(
-    (path: string) => applySkillsRoute({ kind: "label", label: path }, "push"),
+    (lib: SkillsLibrary, path: string) => applySkillsRoute({ lib, kind: "label", label: path }, "push"),
     [applySkillsRoute],
   );
   const selectLocal = useCallback(() => applySkillsRoute({ kind: "local" }, "push"), [applySkillsRoute]);
@@ -876,9 +1040,9 @@ export function SkillsApp({
       if (window.location.pathname === "/skills") {
         const route = parseSkillsRoute(window.location.search);
         const source = skillsRouteSource(window.location.search);
-        if (source === "default" && route.kind === "all") {
+        if (source === "default" && route.kind === "all" && route.lib === "mine") {
           setCurrentView("workspace");
-          setSelection({ kind: "all" });
+          setSelection({ lib: "mine", kind: "all" });
           if (!openIdRef.current) setFilters(initialFilterPreferences.active_filters);
           setOpenId(null);
           setLastId(null);
@@ -904,7 +1068,7 @@ export function SkillsApp({
     setUploadOpen(false);
     setOpenId(id);
     setLastId(id);
-    pushSkillsUrl(openingFromWorkspace ? routeForCurrentSurface(id) : { kind: "all", skill: id });
+    pushSkillsUrl(openingFromWorkspace ? routeForCurrentSurface(id) : { lib: "mine", kind: "all", skill: id });
   }, [currentView, pushSkillsUrl, routeForCurrentSurface]);
 
   const openArchived = useCallback((id: string) => {
@@ -918,12 +1082,18 @@ export function SkillsApp({
   const openSkillBySlug = useCallback(
     async (slug: string) => {
       setUploadOpen(false);
-      if (skillsRef.current.some((s) => s.id === slug)) {
+      // Dependency links resolve to org skills first, then the actor's personal library.
+      const lib: SkillsLibrary | null = orgSkillsRef.current.some((s) => s.id === slug)
+        ? "org"
+        : mineSkillsRef.current.some((s) => s.id === slug)
+          ? "mine"
+          : null;
+      if (lib) {
         setCurrentView("workspace");
-        setSelection({ kind: "all" });
+        setSelection({ lib, kind: "all" });
         setOpenId(slug);
         setLastId(slug);
-        pushSkillsUrl({ kind: "all", skill: slug });
+        pushSkillsUrl({ lib, kind: "all", skill: slug });
         return;
       }
       await loadArchived();
@@ -1005,7 +1175,7 @@ export function SkillsApp({
   // Keyboard: ⌘K toggles palette; Esc back to list; ↑/↓ move between skills.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (uploadOpen || updateSkill || installSkill) return;
+      if (uploadOpen || updateSkill || installSkill || shareTarget) return;
       if (mobileSidebarOpen && e.key === "Escape") {
         e.preventDefault();
         setMobileSidebarOpen(false);
@@ -1033,10 +1203,20 @@ export function SkillsApp({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [openId, paletteOpen, mobileSidebarOpen, uploadOpen, updateSkill, installSkill, back, go]);
+  }, [openId, paletteOpen, mobileSidebarOpen, uploadOpen, updateSkill, installSkill, shareTarget, back, go]);
 
   const localActive = currentView === "local";
   const archivedActive = currentView === "archived";
+  // The open skill's library drives detail actions + the folder picker (authored personal → personal
+  // folders; everything else → org folders).
+  const detailLib: SkillsLibrary = skill && skill.scope === "personal" ? "mine" : "org";
+  const detailTreePaths = (detailLib === "org" ? orgTreeRows : personalTreeRows).map((r) => r.path);
+  const activeTreePaths = activeTreeRows.map((r) => r.path);
+  // The palette searches across both libraries (de-duped by id, preferring the My-Skills copy).
+  const paletteSkills = useMemo(() => {
+    const seen = new Set(mineSkills.map((s) => s.id));
+    return [...mineSkills, ...orgSkills.filter((s) => !seen.has(s.id))];
+  }, [mineSkills, orgSkills]);
 
   return (
     <div className={"app app--skills" + (mobileSidebarOpen ? " app--side-open" : "")}>
@@ -1049,15 +1229,21 @@ export function SkillsApp({
         onWarmSettings={() => {
           void warmSettings();
         }}
-        treeRows={treeRows}
+        mineTreeRows={personalTreeRows}
+        orgTreeRows={orgTreeRows}
         expanded={expanded}
         onToggleExpand={toggleExpand}
-        selection={currentView === "workspace" ? selection : { kind: "all" }}
-        totalCount={skills.length}
+        selection={currentView === "workspace" ? selection : null}
+        mineCount={mineCount}
+        orgCount={orgCount}
         starredCount={starredCount}
+        installedCount={installedCount}
+        installedUpdateCount={installedUpdateCount}
         onOpenPalette={() => setPaletteOpen(true)}
-        onSelectAll={selectAll}
+        onSelectMineAll={selectMineAll}
+        onSelectOrgAll={selectOrgAll}
         onSelectStarred={selectStarred}
+        onSelectInstalled={selectInstalled}
         onSelectLabel={selectLabel}
         onCreateLabel={createLabelPath}
         onSetLabelColor={setLabelColorPath}
@@ -1092,14 +1278,17 @@ export function SkillsApp({
             total={detailPool.length}
             me={me}
             myRole={currentOrg.myRole}
-            allLabels={treeRows.map((r) => r.path)}
+            orgName={currentOrg.name}
+            allLabels={detailTreePaths}
             onBack={back}
             onPrev={() => go(-1)}
             onNext={() => go(1)}
             onToggleStar={() => toggleStar(skill.id)}
             onToggleInstalled={() => setInstalled(skill.id, skill.installStatus === "none")}
-            onToggleLabel={(path) => toggleSkillLabel(skill.id, path)}
-            onSelectLabel={selectLabel}
+            onToggleLabel={(path) => toggleSkillLabel(detailLib, skill.id, path)}
+            onSelectLabel={(path) => selectLabel(detailLib, path)}
+            onShare={() => setShareTarget(skill)}
+            onInstallToMine={() => installToMine(skill.id)}
             onInstall={() => setInstallSkill(skill)}
             onUpdate={() => setUpdateSkill(skill)}
             onOpenSkill={openSkillBySlug}
@@ -1116,6 +1305,8 @@ export function SkillsApp({
         ) : (
           <ListView
             skills={filtered}
+            library={selection.lib}
+            scopeKind={selection.kind}
             breadcrumb={breadcrumb}
             activeLabel={activeLabel}
             onOpen={open}
@@ -1133,7 +1324,7 @@ export function SkillsApp({
       </div>
       {paletteOpen && (
         <CommandPalette
-          allSkills={skills}
+          allSkills={paletteSkills}
           onPick={(id) => {
             open(id);
             setPaletteOpen(false);
@@ -1145,7 +1336,8 @@ export function SkillsApp({
       {uploadOpen && (
         <UploadDialog
           mode="create"
-          allLabels={treeRows.map((r) => r.path)}
+          scope={activeLib === "org" ? "org" : "personal"}
+          allLabels={activeTreePaths}
           defaultLabels={activeLabel ? [activeLabel] : []}
           onClose={closeUpload}
           onPublished={() => router.refresh()}
@@ -1155,7 +1347,8 @@ export function SkillsApp({
         <UploadDialog
           mode="update"
           skill={updateSkill}
-          allLabels={treeRows.map((r) => r.path)}
+          scope={updateSkill.scope === "personal" ? "personal" : "org"}
+          allLabels={(updateSkill.scope === "personal" ? personalTreeRows : orgTreeRows).map((r) => r.path)}
           onClose={() => setUpdateSkill(null)}
           onPublished={() => router.refresh()}
         />
@@ -1182,9 +1375,32 @@ export function SkillsApp({
           {orgActions.error}
         </div>
       )}
+      {shareTarget && (
+        <ShareDialog
+          skill={shareTarget}
+          orgName={currentOrg.name}
+          onConfirm={() => confirmShare(shareTarget)}
+          onClose={() => setShareTarget(null)}
+        />
+      )}
       {toast && (
-        <div className="og-toast og-toast--ok" role="status" onClick={() => setToast(null)}>
-          {toast}
+        <div className="og-toast og-toast--ok" role="status">
+          <span className="og-toast__msg">{toast.msg}</span>
+          {toast.undo && (
+            <button
+              type="button"
+              className="og-toast__undo"
+              onClick={() => {
+                toast.undo?.();
+                setToast(null);
+              }}
+            >
+              Undo
+            </button>
+          )}
+          <button type="button" className="og-toast__close" aria-label="Dismiss" onClick={() => setToast(null)}>
+            ×
+          </button>
         </div>
       )}
       {localSettings?.kind === "ready" && (

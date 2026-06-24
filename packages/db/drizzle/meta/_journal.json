@@ -183,6 +183,20 @@
       "when": 1781051400000,
       "tag": "0025_label_display_names",
       "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1781051500000,
+      "tag": "0026_personal_skills",
+      "breakpoints": true
+    },
+    {
+      "idx": 27,
+      "version": "7",
+      "when": 1781051600000,
+      "tag": "0027_personal_labels",
+      "breakpoints": true
     }
   ]
 }

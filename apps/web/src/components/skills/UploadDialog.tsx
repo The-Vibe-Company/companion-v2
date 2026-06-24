@@ -1075,6 +1075,7 @@ function DependencyPreflight({
 export function UploadDialog({
   mode = "create",
   skill = null,
+  scope = "personal",
   allLabels = [],
   defaultLabels = [],
   onClose,
@@ -1082,7 +1083,9 @@ export function UploadDialog({
 }: {
   mode?: "create" | "update";
   skill?: SkillVM | null;
-  /** Every label path that exists org-wide (for the optional initial folder picker on create). */
+  /** Library to publish into on create: 'personal' (My Skills) or 'org'. Ignored on update. */
+  scope?: "personal" | "org";
+  /** Every folder path in the target library (for the optional initial folder picker on create). */
   allLabels?: string[];
   /** Folders to pre-file a brand-new skill under on create (e.g. the active sidebar folder), so the
    *  "Upload to <folder>" CTA actually files the skill there. Ignored on update. */
@@ -1189,6 +1192,7 @@ export function UploadDialog({
     try {
       const res = await publishSkillPackage(file, {
         labels: isUpdate ? undefined : labels,
+        scope: isUpdate ? undefined : scope,
         version: isUpdate ? ver : undefined,
         expectSlug: isUpdate ? skill!.id : undefined,
         expectSkillId: isUpdate ? skill!.uuid : undefined,
@@ -1260,6 +1264,7 @@ export function UploadDialog({
         id,
         description: form.description.trim(),
         body: form.body,
+        scope: isUpdate ? undefined : scope,
         labels: isUpdate ? undefined : labels,
       });
       finishPublish({
