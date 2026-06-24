@@ -82,6 +82,35 @@ export const companionCommandSchema = z
 
 export type CompanionCommand = z.infer<typeof companionCommandSchema>;
 
+export const companionUpdateCheckSchema = z
+  .object({
+    runtime: z.literal("python"),
+    script: z
+      .string()
+      .min(1, "check script path is required")
+      .max(260, "check script path must be at most 260 characters")
+      .refine((value) => !value.includes("\\"), "check script path must use forward slashes")
+      .refine((value) => !value.startsWith("/"), "check script path must be relative")
+      .refine((value) => !/^[a-zA-Z]:/.test(value), "check script path must be relative")
+      .refine(
+        (value) => value.split("/").every((segment) => segment && segment !== "." && segment !== ".."),
+        "check script path must not contain empty, dot, or dot-dot segments",
+      ),
+    timeoutSeconds: z.number().int().min(1).max(300).default(30),
+  })
+  .strip();
+
+export type CompanionUpdateCheck = z.infer<typeof companionUpdateCheckSchema>;
+
+export const companionChecksSchema = z
+  .object({
+    updates: companionUpdateCheckSchema.optional(),
+  })
+  .strip()
+  .default({});
+
+export type CompanionChecks = z.infer<typeof companionChecksSchema>;
+
 const legacyDependencySchema = z
   .union([
     z.string().regex(SKILL_NAME_RE, "dependency slug must be kebab-case"),
@@ -166,6 +195,7 @@ export const companionManifestSchema = z
     environment: companionEnvironmentSchema,
     dependencies: companionDependenciesInputSchema,
     commands: z.array(companionCommandSchema).max(64, "at most 64 commands are allowed").default([]),
+    checks: companionChecksSchema,
     /** Legacy v1 fields. Accepted for migration, never emitted by buildCompanionManifestJson. */
     display: companionDisplaySchema.optional(),
     requirements: z.array(skillRequirementSchema).max(64, "at most 64 requirements are allowed").optional(),
@@ -213,6 +243,7 @@ export const companionManifestSchema = z
       dependencies,
       legacyDependencySlugs,
       commands: value.commands,
+      checks: value.checks,
       // Compatibility read shape for existing UI/API code. These are not serialized to companion.json.
       display: companionDisplaySchema.parse({
         name: title,
@@ -243,6 +274,7 @@ export function companionManifestJson(manifest: CompanionManifest): Record<strin
   out.environment = manifest.environment;
   out.dependencies = manifest.dependencies;
   out.commands = manifest.commands;
+  if (manifest.checks.updates) out.checks = manifest.checks;
   return out;
 }
 
@@ -257,6 +289,7 @@ export function fallbackCompanionManifest(input: {
   changelog?: CompanionChangelogEntry[];
   environment?: CompanionEnvironment;
   commands?: CompanionCommand[];
+  checks?: CompanionChecks;
   notes?: string;
 }): CompanionManifest {
   const summary = input.summary.trim() || "Skill";
@@ -280,5 +313,6 @@ export function fallbackCompanionManifest(input: {
     environment: input.environment ?? requirementsToEnvironment(input.requirements),
     dependencies: dependencies ?? {},
     commands: input.commands ?? [],
+    checks: input.checks ?? {},
   });
 }

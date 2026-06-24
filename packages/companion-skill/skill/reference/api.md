@@ -35,6 +35,9 @@ These are the skills endpoints a personal access token (`skills:read` + `skills:
 
 | Action | Method & path | Scope |
 | --- | --- | --- |
+| List org library skills | `GET /skills?lib=org` | `skills:read` |
+| List My Skills | `GET /skills?lib=mine` | `skills:read` |
+| List reported installed skills | `GET /skills?installed=true` | `skills:read` |
 | Current published version + checksum | `GET /skills/{slug}/download` | `skills:read` |
 | Download a version package | `GET /skills/{slug}/versions/{version}/package` | `skills:read` |
 | Browse a version's files | `GET /skills/{slug}/versions/{version}/files` | `skills:read` |
@@ -71,7 +74,6 @@ Companion PAT. Use them only when the caller is operating with a valid session c
 
 | Action | Method & path | Auth |
 | --- | --- | --- |
-| List skills | `GET /skills` | Session |
 | Get skill metadata | `GET /skills/{slug}` | Session |
 | Enumerate versions | `GET /skills/{slug}/versions` | Session |
 | Read comments | `GET /skills/{slug}/comments` | Session |
@@ -89,10 +91,12 @@ bytes. Text-only comments may still be sent as JSON.
 Do not use this skill for workspace members, invitations, org settings, or token management.
 Those are outside the skills-only management surface.
 
-Listing the whole workspace catalog (`GET /skills`) and enumerating versions are session-only in the
-web app and reject tokens. To inventory what is installed on this machine, read the active
-workspace-id entry in `~/.companion/skills.lock.json` first, then fall back to pointed-at skill
-folders with `companion.json.metadata.companionSkillId` / `companion.json.version`.
+Listing the workspace catalog (`GET /skills?lib=org`), My Skills (`GET /skills?lib=mine`), and
+Companion-reported installs (`GET /skills?installed=true`) works with a `skills:read` token.
+`installed=true` means the current user has a `skill_installs` row in Companion; it does not prove
+the package files still exist on disk. To inventory what is actually installed on this machine, read
+the active workspace-id entry in `~/.companion/skills.lock.json` first, then fall back to pointed-at
+skill folders with `companion.json.metadata.companionSkillId` / `companion.json.version`.
 `~/.companion/skills.log.json` is a legacy alias: read it only once if `skills.lock.json` is absent,
 then write future state to `skills.lock.json`.
 
@@ -318,6 +322,28 @@ treat it as a version identity reference, not a byte check of the download. To c
 check that `SKILL.md` is at the package root and `companion.json.version` matches the version you
 fetched.
 
+## Local manifest checks
+
+Manifest v2 may declare a local update check:
+
+```json
+{
+  "checks": {
+    "updates": {
+      "runtime": "python",
+      "script": "scripts/check_updates.py",
+      "timeoutSeconds": 30
+    }
+  }
+}
+```
+
+The Companion API validates the declaration and verifies the referenced script is packaged, but it
+never executes the script. The installed Companion skill runs it locally when asked to audit updates.
+The bundled `scripts/check_updates.py` resolves credentials, calls `GET /skills?lib=mine`,
+`GET /skills?lib=org`, and `GET /skills?installed=true`, then compares those rows with
+`~/.companion/skills.lock.json` or the legacy `skills.log.json` fallback.
+
 ## Update the Companion skill itself
 
 The Companion skill must check whether this local Companion skill is current at startup, before any
@@ -351,8 +377,8 @@ built-in Companion skill. Those endpoints are for workspace-published skills.
 POST /local-skills/companion/installed
 Content-Type: application/json
 
-{ "version": "1.10.0", "agent": "Claude Code" }
+{ "version": "1.11.0", "agent": "Claude Code" }
 ```
 
 `version` must be valid semver (use this skill's `companion.json.version`). The response is
-`{ "ok": true, "status": "installed" | "update", "availableVersion": "1.10.0" }`.
+`{ "ok": true, "status": "installed" | "update", "availableVersion": "1.11.0" }`.

@@ -43,7 +43,7 @@ describe("companion skill package + row", () => {
     const pkg = await getCompanionSkillPackage();
     expect(pkg.key).toBe("companion");
     expect(pkg.checksum).toMatch(/^sha256:[0-9a-f]{64}$/);
-    expect(pkg.version).toBe("1.10.1");
+    expect(pkg.version).toBe("1.11.0");
     expect(pkg.sizeBytes).toBeGreaterThan(0);
   });
 
@@ -73,8 +73,8 @@ describe("companion skill package + row", () => {
       desc: "Create or repair manifest v2 with identity, env/secrets, dependency ids, notes, commands, and changelog.",
     });
     const changelog = row.changes.join("\n");
-    expect(changelog).toContain("Keys ~/.companion/credentials.json");
-    expect(changelog).toContain("skills.lock.json");
+    expect(changelog).toContain("token-supported workspace skill listing");
+    expect(changelog).toContain("local Python update check");
     // The install prompt drives the report-back call and leaves placeholders for the client.
     expect(row.prompts.install).toContain("/local-skills/companion/package");
     expect(row.prompts.install).toContain("/local-skills/companion/installed");
@@ -107,9 +107,13 @@ describe("companion skill package + row", () => {
   it("bundles mandatory self-update and explicit publish placement instructions", async () => {
     const skillMd = await readFile(join(companionSkillDir(), "SKILL.md"), "utf8");
     const apiRef = await readFile(join(companionSkillDir(), "reference", "api.md"), "utf8");
+    const checkScript = await readFile(join(companionSkillDir(), "scripts", "check_updates.py"), "utf8");
     expect(skillMd).not.toContain("companion_version:");
     expect(skillMd).toContain("companion.json.version");
     expect(skillMd).toContain("skills.lock.json");
+    expect(skillMd).toContain("GET /skills?installed=true");
+    expect(skillMd).toContain("python3 scripts/check_updates.py");
+    expect(skillMd).toContain("executes only on the user's machine");
     expect(skillMd).toContain("skills.log.json");
     expect(skillMd).toContain("COMPANION_WORKSPACE_ID");
     expect(skillMd).toContain("Never write the token to this lockfile");
@@ -140,6 +144,10 @@ describe("companion skill package + row", () => {
     expect(apiRef).toContain("POST /skills?scope=org&label=marketing&label=marketing%2Fseo");
     expect(apiRef).toContain("POST /skills?scope=personal");
     expect(apiRef).toContain("GET /v1/schemas/companion-manifest.v2.schema.json");
+    expect(apiRef).toContain("GET /skills?lib=mine");
+    expect(apiRef).toContain("GET /skills?installed=true");
+    expect(apiRef).toContain("Local manifest checks");
+    expect(apiRef).toContain("never executes the script");
     expect(apiRef).toContain("COMPANION_WORKSPACE_ID");
     expect(apiRef).toContain("skills.log.json");
     expect(apiRef).toContain("response includes `workspaceId`");
@@ -151,6 +159,8 @@ describe("companion skill package + row", () => {
     expect(apiRef).toContain("Personal folder routes use the same request bodies and response shapes");
     expect(apiRef).not.toContain("defaults to `org`");
     expect(apiRef).not.toMatch(/owner_team[\s\S]{0,120}`scope`[\s\S]{0,120}parameters (?:is|are) rejected/);
+    expect(checkScript).toContain("def resolve_credentials");
+    expect(checkScript).toContain("/skills?installed=true");
   });
 
   it("reflects an install record as installed/update", async () => {

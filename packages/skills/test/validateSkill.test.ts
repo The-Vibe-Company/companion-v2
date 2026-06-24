@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { gzipSync } from "node:zlib";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { COMPANION_MANIFEST_SCHEMA_URL, type ValidationCheckId } from "@companion/contracts";
+import { COMPANION_MANIFEST_SCHEMA_URL, type ValidationCheck, type ValidationCheckId } from "@companion/contracts";
 import {
   packDir,
   prepareSkillDirForPublish,
@@ -12,7 +12,7 @@ import {
 } from "../src/index";
 import { VALID_SKILL_MD, buildTar, makeSkillDir, mkTmpDir, skillMd } from "./helpers";
 
-function check(checks: { id: ValidationCheckId; status: string }[], id: ValidationCheckId) {
+function check(checks: ValidationCheck[], id: ValidationCheckId) {
   return checks.find((c) => c.id === id);
 }
 
@@ -323,6 +323,7 @@ describe("prepareSkillDirForPublish", () => {
   it("preserves complete manifest v2 fields through canonical packaging", async () => {
     const uploadedChangelog = [{ version: "1.1.0", date: "2026-06-20", changes: ["Add manifest v2 metadata."] }];
     const commands = [{ name: "Review package", desc: "Inspect and publish the package safely." }];
+    const checks = { updates: { runtime: "python" as const, script: "scripts/check_updates.py", timeoutSeconds: 30 } };
     const environment = {
       env: { OPENAI_BASE_URL: { required: false, description: "Optional gateway." } },
       secrets: { OPENAI_API_KEY: { required: true, description: "Ask an admin." } },
@@ -330,6 +331,7 @@ describe("prepareSkillDirForPublish", () => {
     const dependencies = { "markdown-report": "3e16ce8a-0d5f-4b2e-9db3-ae30d05e4bf8" };
     const dir = await makeSkillDir({
       "SKILL.md": skillMd("name: manifest-v2\ndescription: Frontmatter fallback.", "# Body\n"),
+      "scripts/check_updates.py": "print('ok')\n",
       "companion.json": JSON.stringify({
         $schema: COMPANION_MANIFEST_SCHEMA_URL,
         name: "manifest-v2",
@@ -344,6 +346,7 @@ describe("prepareSkillDirForPublish", () => {
         environment,
         dependencies,
         commands,
+        checks,
       }),
     });
 
@@ -359,6 +362,7 @@ describe("prepareSkillDirForPublish", () => {
       environment: typeof environment;
       dependencies: typeof dependencies;
       commands: typeof commands;
+      checks: typeof checks;
     };
 
     expect(companionJson).toMatchObject({
@@ -371,6 +375,7 @@ describe("prepareSkillDirForPublish", () => {
       environment,
       dependencies,
       commands,
+      checks,
     });
     expect(companionJson.metadata.companionSkillId).toBe("84d8bee1-5ad3-4676-8c16-730e2a15ba70");
     expect(companionJson.metadata.changelog).toContainEqual(uploadedChangelog[0]);
@@ -381,6 +386,28 @@ describe("prepareSkillDirForPublish", () => {
     });
     expect(companionJson).not.toHaveProperty("display");
     expect(companionJson).not.toHaveProperty("requirements");
+  });
+
+  it("rejects a manifest update check whose script is not packaged", async () => {
+    const dir = await makeSkillDir({
+      "SKILL.md": skillMd("name: missing-check\ndescription: Missing check script."),
+      "companion.json": JSON.stringify({
+        $schema: COMPANION_MANIFEST_SCHEMA_URL,
+        name: "missing-check",
+        version: "1.0.0",
+        description: "Missing check script.",
+        metadata: { changelog: [{ version: "1.0.0", changes: ["Add check."] }] },
+        environment: { env: {}, secrets: {} },
+        dependencies: {},
+        commands: [],
+        checks: { updates: { runtime: "python", script: "scripts/check_updates.py", timeoutSeconds: 30 } },
+      }),
+    });
+
+    const res = await validateSkillDir(dir);
+    expect(res.ok).toBe(false);
+    expect(check(res.checks, "companion")?.status).toBe("fail");
+    expect(check(res.checks, "companion")?.detail).toContain("checks.updates.script not found");
   });
 
   it("rejects legacy top-level visibility fields on publish", async () => {
