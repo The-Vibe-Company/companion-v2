@@ -679,10 +679,21 @@ describe("SkillsApp label folder creation", () => {
 
 describe("Companion skills install gate", () => {
   // localStorage persists across happy-dom tests in the same file, so reset the dismissal flag.
-  beforeEach(() => window.localStorage.clear());
+  // localStorage and issueToken call history both leak across happy-dom tests; reset them so the
+  // "token is never minted until copy" assertions are reliable.
+  beforeEach(() => {
+    window.localStorage.clear();
+    queryMocks.issueToken.mockClear();
+  });
   afterEach(() => window.localStorage.clear());
 
   const dismissKey = "companion:companion-skills:gate-dismissed:Acme:companion";
+
+  function clickGateCopy(container: HTMLElement) {
+    const btn = container.querySelector<HTMLButtonElement>(".ls-gate__foot .btn-primary");
+    if (!btn) throw new Error("gate Copy prompt button not found");
+    act(() => btn.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+  }
 
   function localSkill(status: LocalSkillRow["status"], extra: Partial<LocalSkillRow> = {}): LocalSkillRow {
     return {
@@ -713,21 +724,34 @@ describe("Companion skills install gate", () => {
 
     expect(container.textContent).toContain("Connect Companion to your assistant");
     expect(container.textContent).toContain("Required to start");
-    // The gate mints a real read+write token and enables the footer "Copy prompt" once ready.
-    expect(queryMocks.issueToken).toHaveBeenCalledWith(["skills:read", "skills:write"]);
-    const copyBtn = container.querySelector<HTMLButtonElement>(".ls-gate__foot .btn-primary");
-    expect(copyBtn?.disabled).toBe(false);
+    // Lazy mint: opening the gate must NOT create a credential.
+    expect(queryMocks.issueToken).not.toHaveBeenCalled();
 
     clickButton(container, "Skip for now");
     await flushEffects();
 
     expect(container.textContent).not.toContain("Connect Companion to your assistant");
     expect(container.textContent).toContain("Not connected");
-    // Dismissal persists so the gate doesn't re-nag on the next visit.
+    // Skipping never mints a token, and dismissal persists so the gate doesn't re-nag.
+    expect(queryMocks.issueToken).not.toHaveBeenCalled();
     expect(window.localStorage.getItem(dismissKey)).toBe("1");
   });
 
-  it("lets the user retry when the access-token mint fails", async () => {
+  it("mints the scoped token only when the prompt is copied", async () => {
+    const { container } = await mountSkillsApp(
+      { kind: "local" },
+      { props: { initialLocalSkills: [localSkill("none")] } },
+    );
+    await flushEffects();
+    expect(queryMocks.issueToken).not.toHaveBeenCalled();
+
+    clickGateCopy(container);
+    await flushEffects();
+    expect(queryMocks.issueToken).toHaveBeenCalledWith(["skills:read", "skills:write"]);
+    expect(container.textContent).toContain("Copied");
+  });
+
+  it("surfaces a retry path when the on-copy token mint fails", async () => {
     queryMocks.issueToken.mockRejectedValueOnce(new Error("network down"));
     const { container } = await mountSkillsApp(
       { kind: "local" },
@@ -735,15 +759,16 @@ describe("Companion skills install gate", () => {
     );
     await flushEffects();
 
-    // Mint failed: the gate stays open, shows the error + retry, and Copy stays disabled.
-    expect(container.textContent).toContain("Could not create an access token");
-    const copyBtn = container.querySelector<HTMLButtonElement>(".ls-gate__foot .btn-primary");
-    expect(copyBtn?.disabled).toBe(true);
-
-    // Retry succeeds (default mock) and the prompt becomes copyable.
-    clickButton(container, "try again");
+    clickGateCopy(container);
     await flushEffects();
-    expect(copyBtn?.disabled).toBe(false);
+    // The first mint failed: the gate stays open and surfaces the error.
+    expect(container.textContent).toContain("Could not create an access token");
+
+    // Copying again uses the default (resolving) mock and clears the error.
+    clickGateCopy(container);
+    await flushEffects();
+    expect(container.textContent).not.toContain("Could not create an access token");
+    expect(container.textContent).toContain("Copied");
   });
 
   it("keeps the gate closed when dismissal was already persisted", async () => {

@@ -292,25 +292,48 @@ function LocalSkillCard({
  */
 function InstallGate({ skill, onDismiss }: { skill: LocalSkillRow; onDismiss: () => void }) {
   const ref = useRef<HTMLDivElement>(null);
+  const [token, setToken] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [failed, setFailed] = useState(false);
   useModalA11y(ref, onDismiss);
 
-  const { token, phase, retry } = usePromptToken();
   const base = apiBase();
-  const prompt = token ? fillPrompt(skill.prompts.install, base, token) : null;
+  // Lazy mint: the scoped token is created only when the user actually copies the prompt, so opening
+  // this page and clicking "Skip for now" never leaves an unused 90-day credential behind. Mirrors the
+  // upload dialog's ensure()/CodeBlock.resolveText pattern.
+  const ensureToken = useCallback(async () => {
+    if (token) return token;
+    const issued = await issueToken([...TOKEN_SCOPES]);
+    setToken(issued.token);
+    return issued.token;
+  }, [token]);
 
-  const copy = useCallback(async () => {
-    if (!prompt) return;
+  const buildPrompt = useCallback(
+    (tok: string) => fillPrompt(skill.prompts.install, base, tok),
+    [base, skill.prompts.install],
+  );
+  // Until the user copies, the token slot shows a placeholder so nothing secret is minted on open.
+  const displayPrompt = buildPrompt(token ?? "cmp_pat_…");
+
+  const copyPrompt = useCallback(async () => {
+    setFailed(false);
+    let value: string;
+    try {
+      value = buildPrompt(await ensureToken());
+    } catch {
+      setFailed(true);
+      return;
+    }
     if (navigator.clipboard) {
       try {
-        await navigator.clipboard.writeText(prompt);
+        await navigator.clipboard.writeText(value);
       } catch {
-        return; // the prompt is still visible above to copy manually
+        // clipboard blocked: the prompt above is still selectable to copy by hand
       }
     }
     setCopied(true);
     setTimeout(() => setCopied(false), 1800);
-  }, [prompt]);
+  }, [buildPrompt, ensureToken]);
 
   return (
     <>
@@ -354,28 +377,20 @@ function InstallGate({ skill, onDismiss }: { skill: LocalSkillRow; onDismiss: ()
           </div>
 
           <div className="ls-gate__promptlabel">Give this to your assistant</div>
-          {phase === "loading" && (
-            <div className="ls-prompt-state">
-              <Icon name="loader" size={15} className="ls-spin" />
-              Preparing a secure access token…
+          <CodeBlock
+            text={displayPrompt}
+            scroll
+            copyLabel="Copy prompt"
+            resolveText={async () => buildPrompt(await ensureToken())}
+          />
+          <p className="ls-prompt-hint">
+            A scoped skills:read + skills:write token is added when you copy. It expires in 90 days.
+          </p>
+          {failed && (
+            <div className="ls-copied ls-copied--warn" role="alert">
+              <Icon name="alert-triangle" size={14} />
+              Could not create an access token. Check your connection, then copy again.
             </div>
-          )}
-          {phase === "error" && (
-            <div className="up-errblock" role="alert">
-              Could not create an access token. Check your connection, then
-              <button type="button" className="ls-retry" onClick={() => void retry()}>
-                try again
-              </button>
-              .
-            </div>
-          )}
-          {phase === "ready" && prompt && (
-            <>
-              <CodeBlock text={prompt} scroll copyLabel="Copy prompt" />
-              <p className="ls-prompt-hint">
-                Scoped to skills:read + skills:write, expires in 90 days.
-              </p>
-            </>
           )}
         </div>
 
@@ -383,12 +398,7 @@ function InstallGate({ skill, onDismiss }: { skill: LocalSkillRow; onDismiss: ()
           <button type="button" className="ls-textbtn" onClick={onDismiss}>
             Skip for now
           </button>
-          <button
-            type="button"
-            className="btn-primary"
-            onClick={copy}
-            disabled={phase !== "ready"}
-          >
+          <button type="button" className="btn-primary" onClick={copyPrompt}>
             <Icon name={copied ? "check" : "copy"} size={14} />
             {copied ? "Copied" : "Copy prompt"}
           </button>
