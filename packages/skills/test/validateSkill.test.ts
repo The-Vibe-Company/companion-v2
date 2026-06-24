@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { gzipSync } from "node:zlib";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { ValidationCheckId } from "@companion/contracts";
+import { COMPANION_MANIFEST_SCHEMA_URL, type ValidationCheckId } from "@companion/contracts";
 import {
   packDir,
   prepareSkillDirForPublish,
@@ -318,6 +318,69 @@ describe("prepareSkillDirForPublish", () => {
     expect(rewritten).not.toMatch(/^scope:/m);
     expect(rewritten).not.toMatch(/^tools:/m);
     expect(prepared.warnings.map((w) => w.field).sort()).toEqual(["tools", "version"]);
+  });
+
+  it("preserves complete manifest v2 fields through canonical packaging", async () => {
+    const uploadedChangelog = [{ version: "1.1.0", date: "2026-06-20", changes: ["Add manifest v2 metadata."] }];
+    const commands = [{ name: "Review package", desc: "Inspect and publish the package safely." }];
+    const environment = {
+      env: { OPENAI_BASE_URL: { required: false, description: "Optional gateway." } },
+      secrets: { OPENAI_API_KEY: { required: true, description: "Ask an admin." } },
+    };
+    const dependencies = { "markdown-report": "3e16ce8a-0d5f-4b2e-9db3-ae30d05e4bf8" };
+    const dir = await makeSkillDir({
+      "SKILL.md": skillMd("name: manifest-v2\ndescription: Frontmatter fallback.", "# Body\n"),
+      "companion.json": JSON.stringify({
+        $schema: COMPANION_MANIFEST_SCHEMA_URL,
+        name: "manifest-v2",
+        version: "1.1.0",
+        title: "Manifest v2",
+        description: "Uploaded manifest description.",
+        notes: "## Notes\n\nKeep this package complete.",
+        metadata: {
+          companionSkillId: "3e16ce8a-0d5f-4b2e-9db3-ae30d05e4bf8",
+          changelog: uploadedChangelog,
+        },
+        environment,
+        dependencies,
+        commands,
+      }),
+    });
+
+    const prepared = await prepareSkillDirForPublish(dir, {
+      skillId: "84d8bee1-5ad3-4676-8c16-730e2a15ba70",
+      version: "1.2.0",
+    });
+    const companionJson = JSON.parse(await readFile(join(prepared.rootDir, "companion.json"), "utf8")) as Record<
+      string,
+      unknown
+    > & {
+      metadata: { companionSkillId?: string; changelog: Array<{ version: string; changes: string[] }> };
+      environment: typeof environment;
+      dependencies: typeof dependencies;
+      commands: typeof commands;
+    };
+
+    expect(companionJson).toMatchObject({
+      $schema: COMPANION_MANIFEST_SCHEMA_URL,
+      name: "manifest-v2",
+      version: "1.2.0",
+      title: "Manifest v2",
+      description: "Uploaded manifest description.",
+      notes: "## Notes\n\nKeep this package complete.",
+      environment,
+      dependencies,
+      commands,
+    });
+    expect(companionJson.metadata.companionSkillId).toBe("84d8bee1-5ad3-4676-8c16-730e2a15ba70");
+    expect(companionJson.metadata.changelog).toContainEqual(uploadedChangelog[0]);
+    expect(companionJson.metadata.changelog).toContainEqual({
+      version: "1.2.0",
+      date: expect.any(String),
+      changes: ["Publish version 1.2.0."],
+    });
+    expect(companionJson).not.toHaveProperty("display");
+    expect(companionJson).not.toHaveProperty("requirements");
   });
 
   it("rejects legacy top-level visibility fields on publish", async () => {
