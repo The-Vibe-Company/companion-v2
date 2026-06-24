@@ -713,6 +713,10 @@ describe("Companion skills install gate", () => {
 
     expect(container.textContent).toContain("Connect Companion to your assistant");
     expect(container.textContent).toContain("Required to start");
+    // The gate mints a real read+write token and enables the footer "Copy prompt" once ready.
+    expect(queryMocks.issueToken).toHaveBeenCalledWith(["skills:read", "skills:write"]);
+    const copyBtn = container.querySelector<HTMLButtonElement>(".ls-gate__foot .btn-primary");
+    expect(copyBtn?.disabled).toBe(false);
 
     clickButton(container, "Skip for now");
     await flushEffects();
@@ -721,6 +725,25 @@ describe("Companion skills install gate", () => {
     expect(container.textContent).toContain("Not connected");
     // Dismissal persists so the gate doesn't re-nag on the next visit.
     expect(window.localStorage.getItem(dismissKey)).toBe("1");
+  });
+
+  it("lets the user retry when the access-token mint fails", async () => {
+    queryMocks.issueToken.mockRejectedValueOnce(new Error("network down"));
+    const { container } = await mountSkillsApp(
+      { kind: "local" },
+      { props: { initialLocalSkills: [localSkill("none")] } },
+    );
+    await flushEffects();
+
+    // Mint failed: the gate stays open, shows the error + retry, and Copy stays disabled.
+    expect(container.textContent).toContain("Could not create an access token");
+    const copyBtn = container.querySelector<HTMLButtonElement>(".ls-gate__foot .btn-primary");
+    expect(copyBtn?.disabled).toBe(true);
+
+    // Retry succeeds (default mock) and the prompt becomes copyable.
+    clickButton(container, "try again");
+    await flushEffects();
+    expect(copyBtn?.disabled).toBe(false);
   });
 
   it("keeps the gate closed when dismissal was already persisted", async () => {
