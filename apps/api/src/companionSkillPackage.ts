@@ -52,9 +52,10 @@ async function buildPackage(): Promise<CompanionSkillPackage> {
 }
 
 /**
- * Assistant prompt templates with `{base}` (API base URL) and `{token}` (a freshly minted PAT) left
- * for the web client to fill. The version is already baked in. Each install/update prompt ends with
- * the report-back step so the workspace learns the skill is installed.
+ * Assistant prompt templates with `{base}` (API base URL), `{workspaceId}` (organizations.id), and
+ * `{token}` (a freshly minted PAT) left for the web client to fill. The version is already baked in.
+ * Each install/update prompt ends with the report-back step so the workspace learns the skill is
+ * installed.
  */
 function buildPrompts(version: string): LocalSkillPrompts {
   const download =
@@ -69,7 +70,21 @@ function buildPrompts(version: string): LocalSkillPrompts {
     "```sh",
     'mkdir -p "$HOME/.companion"',
     "umask 077",
-    `printf '{"apiUrl":"%s","token":"%s","updatedAt":"%s"}\\n' "{base}" "{token}" "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" > "$HOME/.companion/credentials.json"`,
+    `node <<'NODE'
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+const file = path.join(os.homedir(), ".companion", "credentials.json");
+const workspaceId = "{workspaceId}";
+const entry = { apiUrl: "{base}", token: "{token}", updatedAt: new Date().toISOString() };
+let current = {};
+try { current = JSON.parse(fs.readFileSync(file, "utf8")); } catch {}
+const workspaces = current && current.schemaVersion === 2 && current.workspaces && typeof current.workspaces === "object"
+  ? current.workspaces
+  : {};
+const next = { schemaVersion: 2, activeWorkspaceId: workspaceId, workspaces: { ...workspaces, [workspaceId]: entry } };
+fs.writeFileSync(file, JSON.stringify(next, null, 2) + "\\n", { mode: 0o600 });
+NODE`,
     'chmod 600 "$HOME/.companion/credentials.json" 2>/dev/null || true',
     "```",
     "",
@@ -77,7 +92,15 @@ function buildPrompts(version: string): LocalSkillPrompts {
     "```powershell",
     '$dir = Join-Path $HOME ".companion"',
     "New-Item -ItemType Directory -Force -Path $dir | Out-Null",
-    '@{ apiUrl = "{base}"; token = "{token}"; updatedAt = (Get-Date).ToUniversalTime().ToString("o") } | ConvertTo-Json -Compress | Set-Content -NoNewline -Encoding UTF8 (Join-Path $dir "credentials.json")',
+    '$file = Join-Path $dir "credentials.json"',
+    '$workspaceId = "{workspaceId}"',
+    '$entry = @{ apiUrl = "{base}"; token = "{token}"; updatedAt = (Get-Date).ToUniversalTime().ToString("o") }',
+    '$current = $null',
+    'if (Test-Path $file) { try { $current = Get-Content -Raw $file | ConvertFrom-Json } catch {} }',
+    '$workspaces = @{}',
+    'if ($current -and $current.schemaVersion -eq 2 -and $current.workspaces) { $current.workspaces.PSObject.Properties | ForEach-Object { $workspaces[$_.Name] = $_.Value } }',
+    '$workspaces[$workspaceId] = $entry',
+    '@{ schemaVersion = 2; activeWorkspaceId = $workspaceId; workspaces = $workspaces } | ConvertTo-Json -Depth 5 | Set-Content -NoNewline -Encoding UTF8 $file',
     "```",
   ].join("\n");
 
@@ -120,19 +143,23 @@ function buildPrompts(version: string): LocalSkillPrompts {
     "Use the Companion skill to manage, validate, and publish my skills.",
     "First refresh its stored workspace credentials by running the snippet for this user's OS:",
     credentials,
-    "Then use the skill. It should read COMPANION_API_URL and COMPANION_TOKEN from the environment if",
-    "both are set; otherwise it should read them from ~/.companion/credentials.json on macOS/Linux or",
-    "$HOME\\.companion\\credentials.json on Windows.",
+    "Then use the skill. It should read COMPANION_API_URL, COMPANION_WORKSPACE_ID, and",
+    "COMPANION_TOKEN from the environment when available; otherwise it should read them from",
+    "~/.companion/credentials.json on macOS/Linux or $HOME\\.companion\\credentials.json on Windows.",
   ].join("\n");
 
   return { install, update, use };
 }
 
 /** Compose the read row for the Companion skills view from the caller's install record. */
-export async function buildCompanionSkillRow(install: LocalSkillInstall | null): Promise<LocalSkillRow> {
+export async function buildCompanionSkillRow(
+  install: LocalSkillInstall | null,
+  workspaceId: string,
+): Promise<LocalSkillRow> {
   const pkg = await getCompanionSkillPackage();
   const m = COMPANION_SKILL_MANIFEST;
   return {
+    workspaceId,
     key: m.key,
     name: m.name,
     description: m.description,

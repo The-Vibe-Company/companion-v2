@@ -44,6 +44,7 @@ const skill: SkillVM = {
 
 function localSkill(status: LocalSkillRow["status"]): LocalSkillRow {
   return {
+    workspaceId: "org-1",
     key: "companion",
     name: "Companion",
     description: "Manage skills locally.",
@@ -56,9 +57,9 @@ function localSkill(status: LocalSkillRow["status"]): LocalSkillRow {
     commands: [],
     changes: ["Refreshes the bundled helper."],
     prompts: {
-      install: "install {base} {token}",
-      update: "update {base} {token}",
-      use: "use {base} {token}",
+      install: "install {base} {workspaceId} {token}",
+      update: "update {base} {workspaceId} {token}",
+      use: "use {base} {workspaceId} {token}",
     },
   };
 }
@@ -169,18 +170,21 @@ describe("skill update flow", () => {
     const update = renderToString(
       React.createElement(LocalSkillDrawer, {
         skill: localSkill("update"),
+        workspaceId: "org-1",
         onClose: vi.fn(),
       }),
     );
     const installed = renderToString(
       React.createElement(LocalSkillDrawer, {
         skill: localSkill("installed"),
+        workspaceId: "org-1",
         onClose: vi.fn(),
       }),
     );
     const fresh = renderToString(
       React.createElement(LocalSkillDrawer, {
         skill: localSkill("none"),
+        workspaceId: "org-1",
         onClose: vi.fn(),
       }),
     );

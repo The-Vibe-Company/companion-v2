@@ -1,6 +1,7 @@
 # Companion workspace API — quick reference
 
-Base URL is `COMPANION_API_URL` (ends in `/v1`). Authenticate every request with
+Base URL is `COMPANION_API_URL` (ends in `/v1`). The active workspace id is
+`COMPANION_WORKSPACE_ID` (`organizations.id`). Authenticate every request with
 `Authorization: Bearer $COMPANION_TOKEN`. The token is scoped to `skills:read` + `skills:write`.
 
 Resolve those values from the environment first. If either variable is missing, read the dedicated
@@ -9,8 +10,26 @@ local credentials file written by the Companion install/use prompt:
 - macOS/Linux: `~/.companion/credentials.json`
 - Windows: `$HOME\.companion\credentials.json`
 
-The file contains `apiUrl`, `token`, and `updatedAt`. Use `apiUrl` as `COMPANION_API_URL` and `token`
-as `COMPANION_TOKEN`. Never print the token back to the user.
+The current file is schema v2 and is keyed by workspace id:
+
+```json
+{
+  "schemaVersion": 2,
+  "activeWorkspaceId": "6a9c3cfd-6a1e-4a7b-8f77-1f7f0e62e3d4",
+  "workspaces": {
+    "6a9c3cfd-6a1e-4a7b-8f77-1f7f0e62e3d4": {
+      "apiUrl": "https://companion.acme.dev/v1",
+      "token": "cmp_pat_...",
+      "updatedAt": "2026-06-15T12:00:00.000Z"
+    }
+  }
+}
+```
+
+Use `activeWorkspaceId` to pick the workspace entry, then use that entry's `apiUrl` and `token`.
+For the legacy flat shape `{ "apiUrl": "...", "token": "..." }`, use those values and call
+token-supported `GET /local-skills/companion` to read its `workspaceId` before writing local
+inventory. Never print the token back to the user.
 
 These are the skills endpoints a personal access token (`skills:read` + `skills:write`) can call:
 
@@ -42,7 +61,7 @@ These are the skills endpoints a personal access token (`skills:read` + `skills:
 | Delete a personal folder (cascades) | `DELETE /personal-labels` | `skills:write` |
 | File a personal skill into a personal folder | `POST /skills/{slug}/personal-labels` | `skills:write` |
 | Unfile a personal skill from a personal folder | `DELETE /skills/{slug}/personal-labels` | `skills:write` |
-| Current bundled Companion skill status | `GET /local-skills/companion` | `skills:read` |
+| Current bundled Companion skill status + workspace id | `GET /local-skills/companion` | `skills:read` |
 | Download bundled Companion skill package | `GET /local-skills/companion/package` | `skills:read` |
 | Confirm this skill installed | `POST /local-skills/companion/installed` | `skills:write` |
 | Fetch companion.json v2 schema | `GET /v1/schemas/companion-manifest.v2.schema.json` | Public |
@@ -71,12 +90,16 @@ Do not use this skill for workspace members, invitations, org settings, or token
 Those are outside the skills-only management surface.
 
 Listing the whole workspace catalog (`GET /skills`) and enumerating versions are session-only in the
-web app and reject tokens. To inventory what is installed on this machine, read
-`~/.companion/skills.lock.json` first, then fall back to pointed-at skill folders with
-`companion.json.metadata.companionSkillId` / `companion.json.version`.
+web app and reject tokens. To inventory what is installed on this machine, read the active
+workspace-id entry in `~/.companion/skills.lock.json` first, then fall back to pointed-at skill
+folders with `companion.json.metadata.companionSkillId` / `companion.json.version`.
+`~/.companion/skills.log.json` is a legacy alias: read it only once if `skills.lock.json` is absent,
+then write future state to `skills.lock.json`.
 
 The built-in Companion skill is different from user-published skills. For the skill shown in the
 workspace's **Companion skills** section, use only the `/local-skills/companion` endpoints.
+The `GET /local-skills/companion` response includes `workspaceId`; use it as
+`COMPANION_WORKSPACE_ID` when migrating legacy flat credentials or URL-keyed lockfiles.
 
 ## Libraries (personal vs org)
 

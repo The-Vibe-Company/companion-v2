@@ -1,13 +1,22 @@
 {
   "$schema": "https://companion.dev/schemas/companion-manifest.v2.schema.json",
   "name": "companion",
-  "version": "1.10.0",
+  "version": "1.10.1",
   "title": "Companion",
   "description": "Manage local SKILL.md packages with Companion: self-update first, validate, publish, update, resolve dependencies, track installs, and repair manifests.",
-  "notes": "## What it does\n\nThe Companion skill gives your assistant one reliable workflow for local SKILL.md packages: validate, publish, update, organize, install, audit, and self-update.\n\n## Safety model\n\n- Reads only skill folders you point it at and Companion's own local state under ~/.companion.\n- Stores credentials in ~/.companion/credentials.json and never prints tokens.\n- Confirms publishing or archival changes before mutating workspace skills.\n- Uses companion.json as the source of truth for package identity, version, env/secrets, dependencies, notes, commands, and changelog.\n\n## Local tracking\n\nCompanion records installed skills in ~/.companion/skills.lock.json so audits can quickly compare local versions, checksums, and dependency snapshots against the workspace registry.",
+  "notes": "## What it does\n\nThe Companion skill gives your assistant one reliable workflow for local SKILL.md packages: validate, publish, update, organize, install, audit, and self-update.\n\n## Safety model\n\n- Reads only skill folders you point it at and Companion's own local state under ~/.companion.\n- Stores credentials in ~/.companion/credentials.json by workspace id and never prints tokens.\n- Confirms publishing or archival changes before mutating workspace skills.\n- Uses companion.json as the source of truth for package identity, version, env/secrets, dependencies, notes, commands, and changelog.\n\n## Local tracking\n\nCompanion records installed skills in ~/.companion/skills.lock.json under workspace-id keys so audits can compare local versions, checksums, and dependency snapshots against the workspace registry without storing tokens.",
   "metadata": {
     "companionSkillId": "b0780a97-6972-4a2b-8e88-f41a528900c7",
     "changelog": [
+      {
+        "version": "1.10.1",
+        "date": "2026-06-24",
+        "changes": [
+          "Keys ~/.companion/credentials.json and ~/.companion/skills.lock.json by Companion workspace id.",
+          "Keeps tokens only in credentials.json; the skills lockfile stores apiUrl metadata but never secrets.",
+          "Documents migration from URL-keyed lockfiles and the legacy skills.log.json alias."
+        ]
+      },
       {
         "version": "1.10.0",
         "date": "2026-06-24",
@@ -35,6 +44,10 @@
       "COMPANION_API_URL": {
         "required": true,
         "description": "Workspace API base URL. The install/use prompt stores this in ~/.companion/credentials.json when the environment variable is not set."
+      },
+      "COMPANION_WORKSPACE_ID": {
+        "required": false,
+        "description": "Companion workspace id (organizations.id). The install/use prompt stores credentials and local install inventory under this workspace key."
       }
     },
     "secrets": {

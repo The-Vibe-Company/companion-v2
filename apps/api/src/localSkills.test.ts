@@ -6,6 +6,8 @@ import { reportLocalSkillInstallInputSchema } from "@companion/contracts";
 import { computeLocalSkillStatus } from "@companion/core/services";
 import { buildCompanionSkillRow, getCompanionSkillPackage } from "./companionSkillPackage";
 
+const workspaceId = "org-1";
+
 describe("computeLocalSkillStatus", () => {
   it("returns none when the member has never reported an install", () => {
     expect(computeLocalSkillStatus(null, "1.2.0")).toBe("none");
@@ -41,14 +43,15 @@ describe("companion skill package + row", () => {
     const pkg = await getCompanionSkillPackage();
     expect(pkg.key).toBe("companion");
     expect(pkg.checksum).toMatch(/^sha256:[0-9a-f]{64}$/);
-    expect(pkg.version).toBe("1.10.0");
+    expect(pkg.version).toBe("1.10.1");
     expect(pkg.sizeBytes).toBeGreaterThan(0);
   });
 
   it("builds a 'none' row with an actionable install prompt for a fresh caller", async () => {
     const pkg = await getCompanionSkillPackage();
-    const row = await buildCompanionSkillRow(null);
+    const row = await buildCompanionSkillRow(null, workspaceId);
     expect(row.status).toBe("none");
+    expect(row.workspaceId).toBe(workspaceId);
     expect(row.description).toContain("SKILL.md");
     expect(row.description).toContain("self-update");
     expect(row.notes).toContain("companion.json");
@@ -70,22 +73,26 @@ describe("companion skill package + row", () => {
       desc: "Create or repair manifest v2 with identity, env/secrets, dependency ids, notes, commands, and changelog.",
     });
     const changelog = row.changes.join("\n");
-    expect(changelog).toContain("Moves Companion registry identity");
-    expect(changelog).toContain("manifest v2");
+    expect(changelog).toContain("Keys ~/.companion/credentials.json");
+    expect(changelog).toContain("skills.lock.json");
     // The install prompt drives the report-back call and leaves placeholders for the client.
     expect(row.prompts.install).toContain("/local-skills/companion/package");
     expect(row.prompts.install).toContain("/local-skills/companion/installed");
     expect(row.prompts.install).toContain("{base}");
+    expect(row.prompts.install).toContain("{workspaceId}");
     expect(row.prompts.install).toContain("{token}");
     expect(row.prompts.install).toContain(pkg.version);
   });
 
   it("prompts persist fresh workspace credentials for future skill calls", async () => {
-    const row = await buildCompanionSkillRow(null);
+    const row = await buildCompanionSkillRow(null, workspaceId);
     for (const prompt of [row.prompts.install, row.prompts.update, row.prompts.use]) {
       expect(prompt).toContain("$HOME/.companion/credentials.json");
       expect(prompt).toContain("credentials.json");
+      expect(prompt).toContain("schemaVersion");
+      expect(prompt).toContain("activeWorkspaceId");
       expect(prompt).toContain("{base}");
+      expect(prompt).toContain("{workspaceId}");
       expect(prompt).toContain("{token}");
       expect(prompt).toContain("Do not print the token");
     }
@@ -103,6 +110,9 @@ describe("companion skill package + row", () => {
     expect(skillMd).not.toContain("companion_version:");
     expect(skillMd).toContain("companion.json.version");
     expect(skillMd).toContain("skills.lock.json");
+    expect(skillMd).toContain("skills.log.json");
+    expect(skillMd).toContain("COMPANION_WORKSPACE_ID");
+    expect(skillMd).toContain("Never write the token to this lockfile");
     expect(skillMd).toContain("## Mandatory startup self-update");
     expect(skillMd).toContain("only once per conversation");
     expect(skillMd).toContain("do not repeat it on later Companion turns");
@@ -130,6 +140,9 @@ describe("companion skill package + row", () => {
     expect(apiRef).toContain("POST /skills?scope=org&label=marketing&label=marketing%2Fseo");
     expect(apiRef).toContain("POST /skills?scope=personal");
     expect(apiRef).toContain("GET /v1/schemas/companion-manifest.v2.schema.json");
+    expect(apiRef).toContain("COMPANION_WORKSPACE_ID");
+    expect(apiRef).toContain("skills.log.json");
+    expect(apiRef).toContain("response includes `workspaceId`");
     expect(apiRef).toContain("POST /skills/{slug}/install");
     expect(apiRef).toContain("updates preserve the existing scope");
     expect(apiRef).toContain("skill must not declare `scope` or `visibility`");
@@ -148,11 +161,11 @@ describe("companion skill package + row", () => {
       installedAt: new Date("2026-06-15T00:00:00.000Z"),
       lastReportedAt: new Date("2026-06-15T00:00:00.000Z"),
     };
-    const current = await buildCompanionSkillRow({ ...base, installedVersion: pkg.version });
+    const current = await buildCompanionSkillRow({ ...base, installedVersion: pkg.version }, workspaceId);
     expect(current.status).toBe("installed");
     expect(current.lastReportedAt).not.toBeNull();
 
-    const behind = await buildCompanionSkillRow({ ...base, installedVersion: "0.0.1" });
+    const behind = await buildCompanionSkillRow({ ...base, installedVersion: "0.0.1" }, workspaceId);
     expect(behind.status).toBe("update");
   });
 });

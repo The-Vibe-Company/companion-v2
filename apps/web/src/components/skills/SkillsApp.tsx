@@ -1263,7 +1263,7 @@ export function SkillsApp({
       )}
       <div className="main" aria-hidden={mobileSidebarOpen || undefined} inert={mobileSidebarOpen ? true : undefined}>
         {currentView === "local" ? (
-          <LocalSkillsView skills={localSkills} workspaceName={currentOrg.name} />
+          <LocalSkillsView skills={localSkills} workspaceId={currentOrg.id} workspaceName={currentOrg.name} />
         ) : skill ? (
           <DetailView
             skill={skill}

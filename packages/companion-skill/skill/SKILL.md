@@ -14,33 +14,45 @@ conversation, and always confirm a change with the user before anything is publi
 
 ## Configuration
 
-You need two values, supplied when this skill is installed, refreshed by the web app's "Use" prompt,
-or set in the environment:
+You need three values, supplied when this skill is installed, refreshed by the web app's "Use"
+prompt, or set in the environment:
 
 - `COMPANION_API_URL` — the workspace API base, e.g. `https://companion.acme.dev/v1`.
+- `COMPANION_WORKSPACE_ID` — the Companion workspace id (`organizations.id`), used to key local
+  credentials and install inventory.
 - `COMPANION_TOKEN` — a personal access token (`cmp_pat_…`) scoped to `skills:read` and
   `skills:write`. Send it as `Authorization: Bearer $COMPANION_TOKEN`.
 
 Resolve credentials in this order before any network call:
 
-1. If both `COMPANION_API_URL` and `COMPANION_TOKEN` are set in the environment, use them.
+1. If both `COMPANION_API_URL` and `COMPANION_TOKEN` are set in the environment, use them. If
+   `COMPANION_WORKSPACE_ID` is also set, use it for local lockfile writes.
 2. Otherwise read the dedicated local credentials file:
    - macOS/Linux: `~/.companion/credentials.json`
    - Windows: `$HOME\.companion\credentials.json`
 
-The file is JSON:
+The current file format is JSON keyed by workspace id:
 
 ```json
 {
-  "apiUrl": "https://companion.acme.dev/v1",
-  "token": "cmp_pat_...",
-  "updatedAt": "2026-06-15T12:00:00.000Z"
+  "schemaVersion": 2,
+  "activeWorkspaceId": "6a9c3cfd-6a1e-4a7b-8f77-1f7f0e62e3d4",
+  "workspaces": {
+    "6a9c3cfd-6a1e-4a7b-8f77-1f7f0e62e3d4": {
+      "apiUrl": "https://companion.acme.dev/v1",
+      "token": "cmp_pat_...",
+      "updatedAt": "2026-06-15T12:00:00.000Z"
+    }
+  }
 }
 ```
 
-Use `apiUrl` as `COMPANION_API_URL` and `token` as `COMPANION_TOKEN`. If neither source is available,
-stop and ask the user to copy the latest Companion install/use prompt from the workspace so fresh
-credentials can be saved.
+Use `activeWorkspaceId` to select the workspace entry, then use that entry's `apiUrl` as
+`COMPANION_API_URL`, its `token` as `COMPANION_TOKEN`, and the key as `COMPANION_WORKSPACE_ID`. For
+backward compatibility, if the file is the legacy flat shape `{ "apiUrl": "...", "token": "..." }`,
+use those values and call token-supported `GET /local-skills/companion` to read its `workspaceId`.
+If neither source is available, stop and ask the user to copy the latest Companion install/use prompt
+from the workspace so fresh credentials can be saved.
 
 Never print the token back to the user or write it into a skill package. Only read
 `~/.companion/credentials.json` (or the Windows equivalent) for credentials, and otherwise treat
@@ -53,7 +65,7 @@ Agent Skills-compatible; Companion-specific package data lives in `companion.jso
 
 - `name` — the skill slug.
 - `version` — the package version.
-- `metadata.companionSkillId` — the workspace id of the published skill.
+- `metadata.companionSkillId` — the published skill's stable id in the workspace registry.
 - `metadata.changelog` — release notes for each published version.
 - `environment.env` and `environment.secrets` — declarations only, never values.
 - `dependencies` — `{ "<skill-name>": "<skill-id>" }`.
@@ -194,10 +206,17 @@ Work from the skill folders on this machine and the local lockfile:
 - macOS/Linux: `~/.companion/skills.lock.json`
 - Windows: `$HOME\.companion\skills.lock.json`
 
-The lockfile records installed skill paths, workspace ids, versions, checksums, declared
-env/secrets, and dependency snapshots. Prefer it for audits, then fall back to reading pointed-at
-skill folders. This inventory is local and needs no network call — your token is for publishing and
-version checks, not for browsing the whole workspace catalog.
+The canonical lockfile is keyed by workspace id, not by Companion URL. Each workspace record includes
+`apiUrl` metadata plus installed skill paths, workspace ids, versions, checksums, declared
+env/secrets, and dependency snapshots. It must never contain `COMPANION_TOKEN` or any other secret.
+Prefer it for audits, then fall back to reading pointed-at skill folders. This inventory is local and
+needs no network call — your token is for publishing and version checks, not for browsing the whole
+workspace catalog.
+
+If a legacy `~/.companion/skills.log.json` exists, read it only as a one-time fallback when
+`skills.lock.json` is absent. Write all future state to `skills.lock.json`. If the lockfile uses the
+old URL-keyed `workspaces` shape, migrate entries to `workspaces[COMPANION_WORKSPACE_ID]` on the next
+write and keep `apiUrl` as metadata under that workspace entry.
 
 ### Validate a skill
 
@@ -379,8 +398,9 @@ user:
   `{ "version": "<published-version>", "source": "agent", "agent": "<agent-name>" }`.
 - If the published skill is personal, do not call the install endpoint; personal skills already live
   in the author's My Skills library.
-- Update `~/.companion/skills.lock.json` with the workspace URL, org id when known, skill id, name,
-  version, checksum, install path, declared env/secrets, resolved dependencies, and install time.
+- Update `~/.companion/skills.lock.json` under `workspaces[COMPANION_WORKSPACE_ID]` with the
+  workspace id, `apiUrl`, skill id, name, version, checksum, install path, declared env/secrets,
+  resolved dependencies, and install time. Never write the token to this lockfile.
 - If the install report fails after publish succeeds, keep the publish result, warn the user, and
   suggest retrying the install report. Do not republish just to repair install state.
 
@@ -542,9 +562,9 @@ For token-authenticated automation, prefer the documented read/write package end
 
 ### Check for updates
 
-For each installed skill in `~/.companion/skills.lock.json`, or each pointed-at skill folder with a
-`companion.json.metadata.companionSkillId`, read its `companion.json.version`, then ask the workspace
-for the current published version of that slug:
+For each installed skill under the active workspace in `~/.companion/skills.lock.json`, or each
+pointed-at skill folder with a `companion.json.metadata.companionSkillId`, read its
+`companion.json.version`, then ask the workspace for the current published version of that slug:
 
 ```sh
 curl -s "$COMPANION_API_URL/skills/$SLUG/download" -H "Authorization: Bearer $COMPANION_TOKEN"

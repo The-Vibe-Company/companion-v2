@@ -161,8 +161,11 @@ org member (like every skill mutation) and write `skill.archive` / `skill.restor
 their own machine or hand to a coding assistant, surfaced in the "Companion skills" sidebar section
 (above Settings). The catalog currently has one entry, `companion` — the management skill that an
 assistant uses to upload, update, validate, and check whether the user's skills are up to date
-(comparing each local skill's `companion.json.metadata.companionSkillId` / `version` and local
-`~/.companion/skills.lock.json` snapshot against the registry). The package and its presentation manifest ship in `packages/companion-skill`; the
+(comparing each local skill's `companion.json.metadata.companionSkillId` / `version` and the active
+workspace-id entry in the local `~/.companion/skills.lock.json` snapshot against the registry). Local
+credentials live separately in `~/.companion/credentials.json`, keyed by `organizations.id`; the
+lockfile keeps `apiUrl` metadata but never stores tokens. Legacy URL-keyed lockfiles are migrated on
+the next write, and `skills.log.json` is only a read-once legacy alias. The package and its presentation manifest ship in `packages/companion-skill`; the
 authoritative version is the `version` in the bundled `companion.json`, which the API packs (and
 caches) on demand. Only per-member install state is persisted in the workspace, in
 `local_skill_installs` (`(org_id, user_id, skill_key)` PK, the reported `installed_version`, an
@@ -315,6 +318,8 @@ as defense-in-depth, but browser and CLI clients never connect directly to Postg
   per-machine status), `GET /v1/local-skills/:key`, `GET /v1/local-skills/:key/package` (download the
   bundled skill as `.zip`), and `POST /v1/local-skills/:key/installed` (the install callback: the
   skill reports `{ version, agent? }` so the workspace learns it is installed and at which version).
+  Local skill rows include `workspaceId` (`organizations.id`) so token-authenticated assistants can
+  key credentials and local lockfiles without calling session-only org endpoints.
 - Schemas: `GET /v1/schemas/companion-manifest.v2.schema.json` serves the public JSON Schema used by
   assistants and editors to create or repair `companion.json`.
 - Orgs & settings: `/v1/orgs`, `GET`/`POST`/`PUT /v1/orgs/current` (read/select/rename+reslug the org,
