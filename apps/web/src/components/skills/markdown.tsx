@@ -8,12 +8,24 @@
    ─────────────────────────────────────────────────────────────── */
 
 import React, { type ReactNode } from "react";
-import { langForFile, tokenize, type FileLang } from "./fileFormat";
+import { collectHeadings, langForFile, tokenize, type FileLang } from "./fileFormat";
 
-/** Tokenized read-only code block. */
-export function CodeView({ content, lang }: { content: string; lang: FileLang }) {
+/**
+ * Tokenized read-only code block. With `gutter`, prepend an aria-hidden line-number
+ * column kept outside the horizontally-scrolling `<pre>` so it stays pinned; vertical
+ * scroll is shared with the surrounding `.fv-body`.
+ */
+export function CodeView({
+  content,
+  lang,
+  gutter = false,
+}: {
+  content: string;
+  lang: FileLang;
+  gutter?: boolean;
+}) {
   const toks = tokenize(content, lang);
-  return (
+  const code = (
     <pre className="codeview">
       <code>
         {toks.map((t, i) =>
@@ -27,6 +39,18 @@ export function CodeView({ content, lang }: { content: string; lang: FileLang })
         )}
       </code>
     </pre>
+  );
+  if (!gutter) return code;
+  const lineCount = content.split("\n").length;
+  return (
+    <div className="cv">
+      <div className="cv-gutter" aria-hidden="true">
+        {Array.from({ length: lineCount }, (_, i) => (
+          <span key={i}>{i + 1}</span>
+        ))}
+      </div>
+      {code}
+    </div>
   );
 }
 
@@ -77,6 +101,11 @@ export function MarkdownView({ content }: { content: string }) {
   const blocks: ReactNode[] = [];
   let i = 0;
   let key = 0;
+  // Anchor ids for the on-this-page outline. `collectHeadings` walks the same
+  // fence-aware sequence, so consuming ids by occurrence index keeps the rendered
+  // heading id identical to the outline entry.
+  const headings = collectHeadings(content);
+  let headingIdx = 0;
   while (i < lines.length) {
     const line = at(i);
     // code fence
@@ -103,10 +132,11 @@ export function MarkdownView({ content }: { content: string }) {
     if (h) {
       const lvl = (h[1] ?? "").length;
       const Tag = ("h" + Math.min(lvl + 1, 6)) as keyof React.JSX.IntrinsicElements;
+      const id = headings[headingIdx++]?.id;
       blocks.push(
         React.createElement(
           Tag,
-          { key: key++, className: "md-h md-h" + lvl },
+          { key: key++, id, className: "md-h md-h" + lvl },
           inlineMd(h[2] ?? "", "h" + key),
         ),
       );
@@ -219,5 +249,5 @@ export function FileContent({
 }) {
   const lang = langForFile(path);
   if (lang === "md" && mode !== "raw") return <MarkdownView content={content} />;
-  return <CodeView content={content} lang={lang} />;
+  return <CodeView content={content} lang={lang} gutter />;
 }
