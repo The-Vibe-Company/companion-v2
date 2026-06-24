@@ -344,6 +344,13 @@
 .dsection__count { margin-left: auto; font-family: var(--font-mono); font-size: 11px; color: var(--color-faint); }
 .dsection__body { padding: 2px 4px 24px; }
 .dsection__body .props { margin-top: 0; }
+.skillnotes .md { max-width: 72ch; }
+.skillnotes .md-h:first-child { margin-top: 0; }
+.skillnotes .md-p:last-child,
+.skillnotes .md-ul:last-child,
+.skillnotes .md-ol:last-child,
+.skillnotes .md-quote:last-child,
+.skillnotes .codeview:last-child { margin-bottom: 0; }
 
 @media (max-width: 900px) {
   .ddoc { padding: 34px 28px 56px; }

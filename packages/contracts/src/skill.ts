@@ -128,6 +128,8 @@ export const skillListRowSchema = z.object({
   description: z.string(),
   /** Human display fields normalized from companion.json, with SKILL.md fallbacks. */
   display: companionDisplaySchema.default({}),
+  /** Markdown-compatible notes from companion.json, kept distinct from the short description. */
+  notes: z.string().nullable().default(null),
   validation: validationStateSchema,
   validation_error: z.string().nullable(),
   /** Which library this row belongs to: 'org' (shared) or 'personal' (private to the creator). */

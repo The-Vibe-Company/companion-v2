@@ -248,7 +248,7 @@ export const companionManifestSchema = z
       display: companionDisplaySchema.parse({
         name: title,
         summary: description,
-        description: notes ?? description,
+        description: value.display?.description,
       }),
       requirements: companionEnvironmentToRequirements(environment),
     };

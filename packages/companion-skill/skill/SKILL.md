@@ -71,6 +71,10 @@ Agent Skills-compatible; Companion-specific package data lives in `companion.jso
 - `dependencies` — `{ "<skill-name>": "<skill-id>" }`.
 - `notes` — Markdown-compatible free-form notes.
 
+The workspace API keeps short summaries and long notes separate: skill metadata rows expose
+`description` as the short list/detail summary and `notes` as optional Markdown from
+`companion.json`. Do not copy setup notes or long Markdown content into `description`.
+
 Fetch the public JSON Schema from:
 
 ```http

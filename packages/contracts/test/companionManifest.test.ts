@@ -38,10 +38,12 @@ describe("companionManifestSchema", () => {
       "OPENAI_API_KEY",
       "OPENAI_BASE_URL",
     ]);
+    expect(parsed.notes).toBe("## Notes\n\nMarkdown notes.");
     expect(parsed.display.summary).toBe("Generate clean incident handoffs from raw notes.");
     expect(companionManifestJson(parsed)).toMatchObject({
       checks: { updates: { runtime: "python", script: "scripts/check_updates.py", timeoutSeconds: 30 } },
     });
+    expect(parsed.display.description).toBeUndefined();
   });
 
   it("accepts legacy display, requirements, and dependency arrays for migration", () => {
@@ -56,6 +58,8 @@ describe("companionManifestSchema", () => {
     });
 
     expect(parsed.title).toBe("Incident summary");
+    expect(parsed.notes).toBe("Longer human-readable description shown in Companion.");
+    expect(parsed.display.description).toBe("Longer human-readable description shown in Companion.");
     expect(parsed.requirements).toEqual([{ key: "OPENAI_API_KEY", type: "secret", required: true, note: "Ask an admin." }]);
     expect(parsed.dependencies).toEqual({});
     expect(parsed.legacyDependencySlugs).toEqual(["log-parser", "markdown-report"]);

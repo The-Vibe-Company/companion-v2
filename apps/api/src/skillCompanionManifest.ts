@@ -32,6 +32,7 @@ export function withResolvedManifestDependencies(
 export function buildInlineCompanionManifest(input: {
   description: string;
   carriedDisplay?: CompanionDisplay | null;
+  carriedNotes?: string | null;
   carriedRequirements: SkillRequirement[];
   carriedDependencies: string[] | Record<string, string>;
   name?: string;
@@ -41,13 +42,14 @@ export function buildInlineCompanionManifest(input: {
   const previousSummary = input.carriedDisplay?.summary?.trim();
   const previousDescription = input.carriedDisplay?.description?.trim();
   const hasRichDescription = previousDescription && previousDescription !== previousSummary;
+  const carriedNotes = input.carriedNotes?.trim() || (hasRichDescription ? previousDescription : undefined);
   return fallbackCompanionManifest({
     summary: input.description,
     display: {
       name: input.carriedDisplay?.name,
       summary: input.description,
-      description: hasRichDescription ? input.carriedDisplay?.description : input.description,
     },
+    notes: carriedNotes,
     requirements: input.carriedRequirements,
     dependencies: input.carriedDependencies,
     name: input.name,
