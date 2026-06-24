@@ -176,6 +176,77 @@ function DetailMoreMenu({
   );
 }
 
+/** The detail page's top-level sections, shown as a tab bar under the breadcrumb. */
+type DetailTab = "overview" | "files" | "dependencies" | "activity" | "discussion";
+
+// Only the active tabpanel is mounted (the Files explorer + scroll-spy shouldn't run
+// hidden). All tabs therefore point `aria-controls` at one stable panel id so no tab
+// references a missing element; the panel names its controlling tab via aria-labelledby.
+const DETAIL_PANEL_ID = "skill-detail-panel";
+
+interface TabDef {
+  id: DetailTab;
+  label: string;
+  icon: string;
+  count?: number;
+}
+
+/** Accessible tablist: roving tabindex, arrow/Home/End navigation, activation follows focus. */
+function DetailTabs({
+  tabs,
+  active,
+  onSelect,
+}: {
+  tabs: TabDef[];
+  active: DetailTab;
+  onSelect: (id: DetailTab) => void;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  return (
+    <div
+      className="dtabs"
+      role="tablist"
+      aria-label="Skill detail sections"
+      ref={ref}
+      onKeyDown={(event) => {
+        if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+        event.preventDefault();
+        const idx = tabs.findIndex((t) => t.id === active);
+        const next =
+          event.key === "ArrowRight"
+            ? (idx + 1) % tabs.length
+            : event.key === "ArrowLeft"
+              ? (idx - 1 + tabs.length) % tabs.length
+              : event.key === "Home"
+                ? 0
+                : tabs.length - 1;
+        const nextTab = tabs[next];
+        if (!nextTab) return;
+        onSelect(nextTab.id);
+        ref.current?.querySelector<HTMLButtonElement>(`#dtab-${nextTab.id}`)?.focus();
+      }}
+    >
+      {tabs.map((t) => (
+        <button
+          key={t.id}
+          id={`dtab-${t.id}`}
+          type="button"
+          role="tab"
+          className="dtab"
+          aria-selected={active === t.id}
+          aria-controls={DETAIL_PANEL_ID}
+          tabIndex={active === t.id ? 0 : -1}
+          onClick={() => onSelect(t.id)}
+        >
+          <Icon name={t.icon} size={14} />
+          {t.label}
+          {t.count != null && <span className="dtab__count mono">{t.count}</span>}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 export function DetailView({
   skill,
   index,
@@ -223,6 +294,12 @@ export function DetailView({
   const [comments, setComments] = useState<SkillCommentRow[]>([]);
   const [files, setFiles] = useState<SkillFile[]>([]);
   const [deps, setDeps] = useState<SkillDependenciesResponse | null>(null);
+  const [tab, setTab] = useState<DetailTab>("overview");
+
+  // Reset to Overview when opening a different skill (not on a version bump).
+  useEffect(() => {
+    setTab("overview");
+  }, [skill.id]);
 
   useEffect(() => {
     let active = true;
@@ -361,6 +438,19 @@ export function DetailView({
   const usedN = deps?.used_by_n ?? skill.usedByCount;
   const description = skill.display?.description ?? skill.description;
 
+  const showDeps = reqN + usedN > 0;
+  const tabs: TabDef[] = [
+    { id: "overview", label: "Overview", icon: "package" },
+    { id: "files", label: "Files", icon: "file-text", count: files.length },
+    ...(showDeps
+      ? [{ id: "dependencies" as const, label: "Dependencies", icon: "layers", count: reqN + usedN }]
+      : []),
+    { id: "activity", label: "Activity", icon: "activity", count: versions.length },
+    { id: "discussion", label: "Discussion", icon: "message-square", count: comments.length },
+  ];
+  // Guard against a stale "dependencies" tab if the count just dropped to zero.
+  const activeTab: DetailTab = tab === "dependencies" && !showDeps ? "overview" : tab;
+
   return (
     <div className="dpage">
       <div className="dtop">
@@ -418,95 +508,107 @@ export function DetailView({
         />
       </div>
 
-      <div className="dbody dbody--doc">
-        <div className="ddoc">
-          <div className="dhead">
-            <div className="dhead__main">
-              <p className="lin-eyebrow">
-                <Icon name="package" size={13} />
-                Skill package
-              </p>
-              <h1 className="dtitle dtitle--linear">{skill.display?.name ?? skill.id}</h1>
-              {skill.display?.name ? <p className="dslug mono">{skill.id}</p> : null}
-              <p className="ov__lead ov__lead--linear">{description}</p>
-              <p className="dbyline">
-                <Avatar initials={skill.authorInitials} size={16} />
-                <span>
-                  by <span className="dbyline__name">{skill.authorName}</span>
-                </span>
-              </p>
-              <FiledIn
-                skill={skill}
-                allLabels={allLabels}
-                onToggleLabel={onToggleLabel}
-                onSelectLabel={onSelectLabel}
-              />
-            </div>
-            <div className="dhead__aside">
-              <StatusCard skill={skill} />
-            </div>
-          </div>
+      <DetailTabs tabs={tabs} active={activeTab} onSelect={setTab} />
 
-          {invalid && skill.error && (
-            <div className="lin-alert">
-              <p className="seclabel" style={{ color: "var(--color-danger)", marginBottom: 8 }}>
-                Validation error
-              </p>
-              <div className="errblock">{skill.error}</div>
-            </div>
-          )}
-
-          <div className="dsections">
-            <Section label="What it does" defaultOpen>
-              <p className="ov__lead ov__lead--linear" style={{ marginTop: 0 }}>
-                {description} It is delivered as a versioned SKILL.md package and runs against the
-                agent&apos;s declared tools on its next reconcile.
-              </p>
-            </Section>
-
-            {skill.requirements.length > 0 && (
-              <Section label="Setup & secrets" count={skill.requirements.length} defaultOpen>
-                <Requirements requirements={skill.requirements} />
-              </Section>
-            )}
-
-            <Section label="Package" count={files.length} defaultOpen>
-              <FileExplorer files={files} requestedPath={null} panelMode />
-            </Section>
-
-            {reqN + usedN > 0 && (
-              <Section label="Dependencies" count={reqN + usedN} defaultOpen>
-                <DependenciesTab
-                  slug={skill.id}
-                  version={skill.version}
-                  deps={deps}
-                  onOpenSkill={onOpenSkill}
+      <div
+        className={"dpanel " + (activeTab === "files" ? "dpanel--files" : "dpanel--doc")}
+        role="tabpanel"
+        id={DETAIL_PANEL_ID}
+        aria-labelledby={`dtab-${activeTab}`}
+        tabIndex={0}
+      >
+        {activeTab === "overview" && (
+          <div className="ddoc">
+            <div className="dhead">
+              <div className="dhead__main">
+                <p className="lin-eyebrow">
+                  <Icon name="package" size={13} />
+                  Skill package
+                </p>
+                <h1 className="dtitle dtitle--linear">{skill.display?.name ?? skill.id}</h1>
+                {skill.display?.name ? <p className="dslug mono">{skill.id}</p> : null}
+                <p className="ov__lead ov__lead--linear">{description}</p>
+                <p className="dbyline">
+                  <Avatar initials={skill.authorInitials} size={16} />
+                  <span>
+                    by <span className="dbyline__name">{skill.authorName}</span>
+                  </span>
+                </p>
+                <FiledIn
+                  skill={skill}
+                  allLabels={allLabels}
+                  onToggleLabel={onToggleLabel}
+                  onSelectLabel={onSelectLabel}
                 />
-              </Section>
+              </div>
+              <div className="dhead__aside">
+                <StatusCard skill={skill} />
+              </div>
+            </div>
+
+            {invalid && skill.error && (
+              <div className="lin-alert">
+                <p className="seclabel" style={{ color: "var(--color-danger)", marginBottom: 8 }}>
+                  Validation error
+                </p>
+                <div className="errblock">{skill.error}</div>
+              </div>
             )}
 
-            <Section label="Manifest">
-              <div className="props">
-                <ManifestRows skill={skill} />
-              </div>
-            </Section>
+            <div className="dsections">
+              <Section label="What it does" defaultOpen>
+                <p className="ov__lead ov__lead--linear" style={{ marginTop: 0 }}>
+                  {description} It is delivered as a versioned SKILL.md package and runs against the
+                  agent&apos;s declared tools on its next reconcile.
+                </p>
+              </Section>
 
-            <Section label="Activity" count={versions.length}>
-              <Activity versions={versions} authorName={skill.authorName} />
-            </Section>
+              {skill.requirements.length > 0 && (
+                <Section label="Setup & secrets" count={skill.requirements.length} defaultOpen>
+                  <Requirements requirements={skill.requirements} />
+                </Section>
+              )}
 
-            <Section label="Discussion" defaultOpen>
-              <Discussion
-                comments={comments}
-                versions={versions}
-                me={{ id: me.id, name: me.name, initials: me.initials }}
-                canDeprecate={canDeprecate}
-                onAdd={addComment}
-                onToggleDeprecated={toggleDeprecated}
-              />
-            </Section>
+              <Section label="Manifest">
+                <div className="props">
+                  <ManifestRows skill={skill} />
+                </div>
+              </Section>
+            </div>
           </div>
-        </div>
+        )}
+
+        {activeTab === "files" && <FileExplorer files={files} requestedPath={null} />}
+
+        {activeTab === "dependencies" && (
+          <div className="ddoc">
+            <DependenciesTab
+              slug={skill.id}
+              version={skill.version}
+              deps={deps}
+              onOpenSkill={onOpenSkill}
+            />
+          </div>
+        )}
+
+        {activeTab === "activity" && (
+          <div className="ddoc">
+            <Activity versions={versions} authorName={skill.authorName} />
+          </div>
+        )}
+
+        {activeTab === "discussion" && (
+          <div className="ddoc">
+            <Discussion
+              comments={comments}
+              versions={versions}
+              me={{ id: me.id, name: me.name, initials: me.initials }}
+              canDeprecate={canDeprecate}
+              onAdd={addComment}
+              onToggleDeprecated={toggleDeprecated}
+            />
+          </div>
+        )}
       </div>
     </div>
   );

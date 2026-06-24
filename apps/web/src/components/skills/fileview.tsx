@@ -10,11 +10,11 @@
    Ported from the Claude-Design prototype (app.jsx, "Explorer A").
    ─────────────────────────────────────────────────────────────── */
 
-import { useEffect, useMemo, useState, type CSSProperties } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import type { SkillFile } from "@companion/contracts";
 import { Icon } from "../Icon";
 import { FileContent, type FileViewMode } from "./markdown";
-import { fileSize, iconForFile, langForFile, LANG_LABEL } from "./fileFormat";
+import { collectHeadings, fileSize, iconForFile, langForFile, LANG_LABEL } from "./fileFormat";
 
 const base = (p: string): string => p.split("/").pop() ?? p;
 
@@ -87,6 +87,74 @@ export function FileViewer({ file, onBack }: { file: SkillFile; onBack?: () => v
   const leaf = parts[parts.length - 1] ?? path;
   const preview = isMd && mode === "preview";
 
+  // On-this-page outline (Markdown Preview only). Ids match MarkdownView's headings.
+  const headings = useMemo(
+    () => (preview && content !== null ? collectHeadings(content) : []),
+    [preview, content],
+  );
+  const hasOutline = headings.length >= 2;
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const [active, setActive] = useState<string | null>(null);
+  // After a click we scroll to a heading; suppress scroll-spy briefly so the clicked
+  // entry stays highlighted even when it can't reach the very top (last sections).
+  const lockRef = useRef(false);
+  const lockTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (lockTimer.current) clearTimeout(lockTimer.current);
+  }, []);
+
+  // Seed / reset the active entry whenever the file or view mode changes.
+  useEffect(() => {
+    setActive(headings[0]?.id ?? null);
+  }, [path, mode, headings]);
+
+  // Scroll-spy: mark the heading nearest the top of the reading pane as active.
+  useEffect(() => {
+    if (!hasOutline) return;
+    const root = bodyRef.current;
+    if (!root) return;
+    const els = Array.from(root.querySelectorAll<HTMLElement>(".md-h")).filter((el) => el.id);
+    if (els.length === 0) return;
+    let fired = false;
+    const visible = new Set<string>();
+    const io = new IntersectionObserver(
+      (entries) => {
+        fired = true;
+        for (const e of entries) {
+          const id = (e.target as HTMLElement).id;
+          if (e.isIntersecting) visible.add(id);
+          else visible.delete(id);
+        }
+        if (lockRef.current) return;
+        const first = els.find((el) => visible.has(el.id));
+        if (first) setActive(first.id);
+      },
+      { root, rootMargin: "0px 0px -70% 0px", threshold: 0 },
+    );
+    els.forEach((el) => io.observe(el));
+    // Fail open: if the observer never fires (some embedded contexts), keep the first.
+    const fallback = setTimeout(() => {
+      if (!fired) setActive(els[0]?.id ?? null);
+    }, 500);
+    return () => {
+      clearTimeout(fallback);
+      io.disconnect();
+    };
+  }, [hasOutline, path, mode, content]);
+
+  const scrollToHeading = (id: string) => {
+    const el = bodyRef.current?.querySelector<HTMLElement>(`#${CSS.escape(id)}`);
+    if (!el) return;
+    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+    setActive(id);
+    lockRef.current = true;
+    if (lockTimer.current) clearTimeout(lockTimer.current);
+    lockTimer.current = setTimeout(() => {
+      lockRef.current = false;
+    }, 700);
+    el.scrollIntoView({ behavior: reduce ? "auto" : "smooth", block: "start" });
+  };
+
   return (
     <>
       <div className="fv-head">
@@ -132,26 +200,51 @@ export function FileViewer({ file, onBack }: { file: SkillFile; onBack?: () => v
         )}
       </div>
       {viewable ? (
-        <div className={"fv-body " + (preview ? "fv-body--md" : "fv-body--code")}>
-          {file.truncated && (
-            <p
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 6,
-                margin: 0,
-                padding: "8px 16px",
-                fontSize: "var(--text-xs)",
-                color: "var(--color-muted)",
-                borderBottom: "1px solid var(--color-line)",
-                background: "var(--color-surface)",
-              }}
-            >
-              <Icon name="info" size={12} />
-              Preview truncated — download the package to read the full file.
-            </p>
+        <div
+          ref={bodyRef}
+          className={
+            "fv-body " +
+            (preview ? "fv-body--md" : "fv-body--code") +
+            (hasOutline ? " has-outline" : "")
+          }
+        >
+          <div className="fv-main">
+            {file.truncated && (
+              <p
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 6,
+                  margin: 0,
+                  padding: "8px 16px",
+                  fontSize: "var(--text-xs)",
+                  color: "var(--color-muted)",
+                  borderBottom: "1px solid var(--color-line)",
+                  background: "var(--color-surface)",
+                }}
+              >
+                <Icon name="info" size={12} />
+                Preview truncated — download the package to read the full file.
+              </p>
+            )}
+            <FileContent path={path} content={content} mode={mode} />
+          </div>
+          {hasOutline && (
+            <nav className="fv-outline" aria-label="On this page">
+              {headings.map((h) => (
+                <button
+                  key={h.id}
+                  type="button"
+                  className="fv-outitem"
+                  data-level={h.level}
+                  aria-current={active === h.id ? "true" : undefined}
+                  onClick={() => scrollToHeading(h.id)}
+                >
+                  {h.text}
+                </button>
+              ))}
+            </nav>
           )}
-          <FileContent path={path} content={content} mode={mode} />
         </div>
       ) : (
         <div className="fv-body">

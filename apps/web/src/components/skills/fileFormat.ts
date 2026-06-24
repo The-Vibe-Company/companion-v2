@@ -44,6 +44,66 @@ export function fileSize(content: string): string {
   return fmtBytes(new Blob([content]).size);
 }
 
+/** A heading extracted from a Markdown body for the on-this-page outline. */
+export interface Heading {
+  /** `#` count (1–6). */
+  level: number;
+  /** Display text with inline markers stripped. */
+  text: string;
+  /** Anchor id, GitHub-style slug, de-duplicated within the document. */
+  id: string;
+}
+
+/** Drop inline Markdown markers (`code`, **bold**, [label](url)) for plain display/slug text. */
+function stripInline(text: string): string {
+  return text
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/\*\*([^*]+)\*\*/g, "$1")
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1");
+}
+
+/** GitHub-style slug: lowercase, keep word chars/spaces/hyphens, spaces → `-`, collapse. */
+export function slugify(text: string): string {
+  return text
+    .toLowerCase()
+    .trim()
+    .replace(/[^\w\s-]/g, "")
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+/**
+ * Extract the heading outline from a Markdown body. Mirrors `MarkdownView`'s parse
+ * exactly so anchor ids line up by occurrence: strip leading frontmatter with the
+ * same regex, walk lines fence-aware (headings inside ``` fences are ignored), and
+ * de-duplicate slugs with a `name`, `name-1`, `name-2`… counter.
+ */
+export function collectHeadings(content: string): Heading[] {
+  let body = content;
+  const fm = /^---\n([\s\S]*?)\n---\n?/.exec(content);
+  if (fm) body = content.slice(fm[0].length);
+  const out: Heading[] = [];
+  const counts = new Map<string, number>();
+  let inFence = false;
+  for (const line of body.split("\n")) {
+    if (/^```/.test(line)) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) continue;
+    const h = /^(#{1,6})\s+(.*)$/.exec(line);
+    if (!h) continue;
+    const level = (h[1] ?? "").length;
+    const text = stripInline(h[2] ?? "").trim();
+    const base = slugify(text) || "section";
+    const n = counts.get(base) ?? 0;
+    counts.set(base, n + 1);
+    out.push({ level, text, id: n === 0 ? base : `${base}-${n}` });
+  }
+  return out;
+}
+
 /** A single highlighted token: `cls` is the CSS class, or `null` for plain text. */
 export interface Token {
   text: string;
