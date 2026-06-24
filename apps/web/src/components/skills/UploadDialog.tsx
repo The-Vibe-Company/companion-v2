@@ -473,18 +473,16 @@ function PromptPanel({
   labels,
   setLabels,
   allLabels,
-  token,
+  scope,
   ensure,
-  regen,
   isUpdate,
   target,
 }: {
   labels: string[];
   setLabels: (labels: string[]) => void;
   allLabels: string[];
-  token: string | null;
+  scope: "personal" | "org";
   ensure: () => Promise<string>;
-  regen: () => Promise<string>;
   isUpdate: boolean;
   target?: {
     slug: string;
@@ -496,11 +494,15 @@ function PromptPanel({
   const base = apiBase();
   const queryTarget = target ? { slug: target.slug, skillId: target.skillId, version: target.nextVersion } : undefined;
   const validateQuery = skillUploadQuery(queryTarget, "validate");
-  const publishQuery = skillUploadQuery(queryTarget);
-  // File new skills under folders by appending repeatable `label` params to the publish URL.
-  const labelParams = isUpdate ? "" : labels.map((p) => `&label=${encodeURIComponent(p)}`).join("");
+  // New skills publish into the chosen library (`scope`); re-publish keeps the existing scope. Folders
+  // are appended as repeatable `label` params. Build from non-empty parts so a bare create has no `?&`.
+  const publishParams = [
+    skillUploadQuery(queryTarget),
+    ...(isUpdate ? [] : [`scope=${scope}`, ...labels.map((p) => `label=${encodeURIComponent(p)}`)]),
+  ].filter(Boolean);
+  const publishQuery = publishParams.join("&");
   const validateUrl = `${base}/skills?${validateQuery}`;
-  const publishUrl = `${base}/skills?${publishQuery}${labelParams}`;
+  const publishUrl = `${base}/skills?${publishQuery}`;
   const buildPrompt = (tok: string) =>
     target
       ? `You are updating an existing Companion skill through the workspace API.
@@ -527,14 +529,18 @@ Workflow:
 8. If result.ok is not true for any other reason, do not publish. Fix only the validation issue named by Companion, then validate once more.
 9. Publish only after validation is accepted: create a POST request to the publish endpoint with the same validated archive as the body.
 10. Report the published skill id and version from the response. Never publish after failed validation or ambiguous identity.`
-      : `You are publishing a Companion skill through the workspace API.
+      : `You are publishing a Companion skill through the workspace API, into ${
+          scope === "org"
+            ? "the ORGANIZATION library (visible to every member of the workspace)"
+            : "the user's PRIVATE My Skills library (visible only to them until they share it)"
+        }.
 
 The package is a standard Agent Skill: SKILL.md at the root, with YAML frontmatter containing name and description.
 
 Validation endpoint:
 ${validateUrl}
 
-Publish endpoint:
+Publish endpoint (note scope=${scope}, publishes into ${scope === "org" ? "the organization" : "My Skills"}):
 ${publishUrl}
 
 Workflow:
@@ -546,39 +552,30 @@ Workflow:
 6. Read the validation response. If result.ok is not true, or if the response is 422, do not publish. Fix only the validation issue named by Companion, then validate once more.
 7. Publish only after validation is accepted: create a POST request to the publish endpoint with the same validated archive as the body.
 8. Report the published skill id and Companion-assigned version from the response. Never publish after failed validation or ambiguous identity.`;
-  const displayPrompt = buildPrompt(token ?? "cmp_pat_…");
+  const displayPrompt = buildPrompt("cmp_pat_…");
   return (
     <>
       <p className="up-panel__lede">
-        Give an agent everything it needs to publish on your behalf. The token below is scoped to{" "}
-        <b>skills:write</b> and expires in 90 days.
+        Hand this prompt to your assistant. Copying it mints a short-lived <b>skills:write</b> token
+        (90-day expiry) and drops it into the prompt for you, so the agent can validate and publish
+        {scope === "org" ? " to the organization" : " into your private My Skills"} on your behalf.
       </p>
-      <div className="up-step">
-        <StepLabel n="1">Upload token</StepLabel>
-        <TokenRow
-          token={token}
-          ensure={ensure}
-          regen={regen}
-          hint={
-            <>Keep it secret. Anyone with this token can publish skills to the workspace until it expires.</>
-          }
-        />
-      </div>
       {!isUpdate && (
         <div className="up-step">
-          <StepLabel n="2">Folders</StepLabel>
+          <StepLabel n="1">Folders</StepLabel>
           <LabelPicker value={labels} onChange={setLabels} allLabels={allLabels} />
           <p className="up-seg-note">
             {labels.length === 0
-              ? "Optional. The published skill is visible to everyone; folders just organize it."
+              ? scope === "org"
+                ? "Optional. The published skill is visible to everyone; folders just organize it."
+                : "Optional. This skill stays private to you; personal folders just organize it."
               : `Filed under ${labels.join(", ")} on publish.`}{" "}
-            Validates with <span className="mono">?{validateQuery}</span>, then publishes with{" "}
-            <span className="mono">?{publishQuery}{labelParams}</span>.
+            Publishes with <span className="mono">?{publishQuery}</span>.
           </p>
         </div>
       )}
       <div className="up-step">
-        <StepLabel n={isUpdate ? "2" : "3"}>Prompt</StepLabel>
+        <StepLabel n={isUpdate ? "1" : "2"}>Prompt</StepLabel>
         <CodeBlock
           text={displayPrompt}
           scroll
@@ -594,6 +591,7 @@ function ZipPanel({
   labels,
   setLabels,
   allLabels,
+  scope,
   file,
   setFile,
   isUpdate,
@@ -604,6 +602,7 @@ function ZipPanel({
   labels: string[];
   setLabels: (labels: string[]) => void;
   allLabels: string[];
+  scope: "personal" | "org";
   file: File | null;
   setFile: (f: File | null) => void;
   isUpdate: boolean;
@@ -692,7 +691,9 @@ function ZipPanel({
           <LabelPicker value={labels} onChange={setLabels} allLabels={allLabels} />
           <p className="up-seg-note">
             {labels.length === 0
-              ? "Optional. Every member can see this skill; folders just organize it."
+              ? scope === "org"
+                ? "Optional. Every member can see this skill; folders just organize it."
+                : "Optional. This skill stays private to you; personal folders just organize it."
               : `Filed under ${labels.join(", ")} on upload.`}{" "}
             Set on upload; Companion does not read folders from the package.
           </p>
@@ -1342,8 +1343,10 @@ export function UploadDialog({
                 <>
                   Update <span className="mono" style={{ fontWeight: 600 }}>{skill!.id}</span>
                 </>
+              ) : scope === "org" ? (
+                "Upload an organization skill"
               ) : (
-                "Upload a skill"
+                "Upload a personal skill"
               )}
             </h2>
             <p className="up__sub">
@@ -1354,8 +1357,14 @@ export function UploadDialog({
                   Publish a new version. Current <span className="mono">{skill!.version}</span> · next{" "}
                   <span className="mono">{ver}</span>.
                 </>
+              ) : scope === "org" ? (
+                <>
+                  Publishing to the <b>Organization</b> library. Every member can find, star, and install it.
+                </>
               ) : (
-                "Publish a new versioned SKILL.md package to the workspace."
+                <>
+                  Publishing to your private <b>My Skills</b> library. Only you can see it until you share it.
+                </>
               )}
             </p>
           </div>
@@ -1464,9 +1473,8 @@ export function UploadDialog({
                     labels={labels}
                     setLabels={setLabels}
                     allLabels={allLabels}
-                    token={token}
+                    scope={scope}
                     ensure={ensureToken}
-                    regen={regenToken}
                     isUpdate={isUpdate}
                     target={
                       isUpdate
@@ -1485,6 +1493,7 @@ export function UploadDialog({
                     labels={labels}
                     setLabels={setLabels}
                     allLabels={allLabels}
+                    scope={scope}
                     file={file}
                     setFile={setFile}
                     isUpdate={isUpdate}
