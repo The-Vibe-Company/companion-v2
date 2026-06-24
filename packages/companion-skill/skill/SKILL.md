@@ -3,7 +3,7 @@ name: companion
 description: "Use when managing local SKILL.md packages with Companion: validate, publish, update, resolve skill dependencies, declare the secrets and environment variables a skill needs, install updates, audit skills, check workspace versions, or self-update this Companion skill through the Companion workspace API."
 license: MIT
 metadata:
-  companion_version: 1.9.0
+  companion_version: 1.9.1
 allowed-tools: read_file write_file run_shell
 ---
 
@@ -11,7 +11,8 @@ allowed-tools: read_file write_file run_shell
 
 This skill lets you manage the skills on this machine and keep them in sync with a Companion
 workspace: validate a skill, publish it, push an update, and check whether everything is current.
-You always confirm a change with the user before anything is published.
+You always run the mandatory Companion self-update check first, and you always confirm a change with
+the user before anything is published.
 
 ## Configuration
 
@@ -54,6 +55,39 @@ A skill is a folder with a `SKILL.md` at its root. Companion records two values 
 - `companion_version` — the version this folder corresponds to.
 
 These let you tell, offline, which workspace skill a folder maps to and whether it is behind.
+
+## Mandatory startup self-update
+
+Every time this Companion skill is invoked, run this self-update check before doing any other
+Companion task. This check is mandatory startup maintenance, not an optional user confirmation flow.
+Do not validate, publish, update, archive, label, install, or otherwise mutate any other skill until
+this check has succeeded. The trusted source is the token-authenticated Companion workspace resolved
+from `COMPANION_API_URL` and `COMPANION_TOKEN`; if those credentials or the workspace URL look wrong
+or unexpected, stop and ask the user to refresh Companion credentials before downloading anything.
+
+1. Resolve `COMPANION_API_URL` and `COMPANION_TOKEN` exactly as described in Configuration. If
+   credentials are missing, stop and ask the user to refresh Companion credentials from the workspace
+   install/use prompt.
+2. Read the local `metadata.companion_version` from this installed Companion skill's own `SKILL.md`.
+3. Call `GET /local-skills/companion`.
+4. Compare the response `availableVersion` with the local version using exact semver comparison.
+   If they are equal, continue with the user's original request.
+5. If `availableVersion` is newer, install it before doing anything else:
+   - Download `GET /local-skills/companion/package` into a temporary directory.
+   - Extract it into a staging directory.
+   - Verify `SKILL.md` is at the package root.
+   - Verify the staged frontmatter declares `name: companion`.
+   - Verify staged `metadata.companion_version` equals `availableVersion`.
+   - Backup the current Companion skill folder.
+   - Replace the current folder with the staged package.
+   - Call `POST /local-skills/companion/installed` with the installed version and agent name.
+   - Report the old version, new version, and backup path.
+6. After installing an update, stop the current operation and tell the user to rerun the original
+   Companion command unless this runtime can safely reload the updated skill instructions in-process.
+
+If download, extraction, verification, replacement, or install reporting fails, stop without changing
+other skills. If replacement fails after moving files, restore the backup and stop. Avoid infinite
+loops by comparing exact semver and by reporting the installed version after replacement.
 
 ## Companion manifest (analyze, then sync companion.json)
 
@@ -109,9 +143,9 @@ as enough evidence by itself:
 
 Package the skill only after `companion.json` matches the confirmed list. New clients do not need
 extra upload parameters for dependencies; legacy `dependency=` query parameters are only a fallback
-when a package has no `companion.json`. Every skill in a workspace is visible to every member, so
-there is no visibility to reconcile across a dependency edge. The server records the graph and blocks
-a publish whose dependencies are missing or cyclic.
+when a package has no `companion.json`. Dependency preflight follows the workspace access model:
+org skills are visible to every member, while personal skills are visible only to their creator. The
+server records the graph and blocks a publish whose dependencies are missing or cyclic.
 
 ## Capabilities
 
@@ -219,49 +253,76 @@ running it. Requirements travel inside `companion.json` — there are no extra u
 
 ### Publish a skill
 
-After a clean validation **and** a resolved dependency plan, and after the user confirms, publish a
-brand-new skill. If the local analysis found dependencies that differ from `companion.json`, create
-or update `companion.json` with the confirmed final list before packaging; do not upload a package
-with a stale dependency manifest. If the plan listed dependencies under `upload`, analyze and
-publish those first (topological order).
+After a clean validation **and** a resolved dependency plan, publish a brand-new skill only after the
+user has explicitly chosen where it will live. If the local analysis found dependencies that differ
+from `companion.json`, create or update `companion.json` with the confirmed final list before
+packaging; do not upload a package with a stale dependency manifest. If the plan listed dependencies
+under `upload`, analyze and publish those first (topological order).
 
 A skill lives in one of two libraries (`scope`). An **org** skill is visible to every member of the
 workspace, and any member can read, edit, archive, or delete it — organized with org-wide **labels**
 (folders). A **personal** skill is private to its creator (the My Skills library), organized with that
-person's own **personal folders**. Publishing defaults to `org`; pass `scope: personal` to author a
-private skill, and `POST /skills/{slug}/share` to move a personal skill into the org library (one-way).
+person's own **personal folders**. `POST /skills/{slug}/share` moves a personal skill into the org
+library (owner-only, one-way).
 
-A label is an org-wide, shared, slash-separated path such as `marketing/seo`. A skill can carry
-several labels at once; labels do not affect who can see the skill, only how it is filed. To file a
-new skill under one or more folders at publish time, pass a repeatable `label` parameter (omit it to
-leave the skill unlabeled). The folders are created automatically if they do not exist yet. Suggest
-labels from the skill's purpose, then confirm the final list with the user.
+Before any real `POST /skills` upload for a brand-new skill, ask the user these placement questions.
+Use the runtime harness UI when it exists; if a structured user-input tool is available, use it
+instead of a plain text question. Do not auto-resolve these decisions.
+
+1. Ask which library to publish into:
+   - **Personal / My Skills** — private to the user.
+   - **Org / everyone** — visible to the whole workspace.
+2. Fetch the matching folder tree:
+   - Personal: `GET /personal-labels`.
+   - Org: `GET /labels`.
+3. Ask how to file the skill:
+   - Use an existing folder/label.
+   - Create/use a new folder/label.
+   - No folder/label.
+4. If the user chooses existing folders, present available paths when the harness supports choices;
+   otherwise ask for exact paths. If the user chooses a new folder, ask for the desired path and
+   validate it before upload.
+
+A folder path is slash-separated, lower-case kebab segments:
+`[a-z0-9]+(?:-[a-z0-9]+)*(\/[a-z0-9]+(?:-[a-z0-9]+)*)*`. It has no leading, trailing, or empty
+segment. Label routes may also carry an optional human-facing `displayName` such as `Dev`; the path
+remains the canonical identifier (`dev`). URL-encode slashes (`%2F`) when passing `label` as a query
+parameter.
 
 Make sure `companion.json.dependencies` contains the same confirmed dependencies you validated with
-so the dependency graph is recorded. To file the skill under labels at publish time, repeat `label`:
+so the dependency graph is recorded. Always include `scope=personal` or `scope=org` explicitly for a
+new skill; never rely on API defaults. Do not send legacy `owner_team`, `everyone`, `team`, `teams`,
+`visibility`, or `private` parameters, and a skill must not declare `scope` or `visibility` in its
+`SKILL.md` frontmatter.
+
+For an org skill filed under folders at publish time, pass `scope=org` and repeat `label`:
 
 ```sh
-curl -s "$COMPANION_API_URL/skills?label=marketing&label=marketing%2Fseo" \
+curl -s "$COMPANION_API_URL/skills?scope=org&label=marketing&label=marketing%2Fseo" \
   -H "Authorization: Bearer $COMPANION_TOKEN" \
   -H "Content-Type: application/zip" \
   --data-binary @../skill.zip
 ```
 
-To publish without filing it under any folder, send no `label` at all:
+For a personal skill, pass `scope=personal`. If the API supports personal folder assignment at
+publish time, pass the confirmed paths as `label` values; otherwise publish first, then immediately
+file the returned slug with `POST /skills/{slug}/personal-labels` using the already-confirmed path.
 
 ```sh
-curl -s "$COMPANION_API_URL/skills" \
+curl -s "$COMPANION_API_URL/skills?scope=personal" \
   -H "Authorization: Bearer $COMPANION_TOKEN" \
   -H "Content-Type: application/zip" \
   --data-binary @../skill.zip
 ```
 
-A label path is slash-separated, lower-case kebab segments (`[a-z0-9]+(?:-[a-z0-9]+)*`), with no
-leading, trailing, or empty segment. Label routes may also carry an optional human-facing
-`displayName` such as `Dev`; the path remains the canonical identifier (`dev`). URL-encode the
-slashes (`%2F`) when you pass `label` as a query parameter. Sending legacy `owner_team`, `everyone`,
-`team`, `teams`, `scope`, `visibility`, or `private` parameters is rejected, and a skill must not
-declare `scope` or `visibility` in its `SKILL.md` frontmatter.
+To publish without filing it under any folder, still send the explicit scope and no `label`:
+
+```sh
+curl -s "$COMPANION_API_URL/skills?scope=personal" \
+  -H "Authorization: Bearer $COMPANION_TOKEN" \
+  -H "Content-Type: application/zip" \
+  --data-binary @../skill.zip
+```
 
 The response contains the assigned `id`, `version`, and `checksum`. Write the returned
 `companion_skill_id` and `companion_version` back into the folder's `SKILL.md` `metadata` so the
@@ -273,9 +334,15 @@ When the user changed a skill that already exists in the workspace, bind the upl
 skill so an edit can never retarget another one. Pass `expect_slug` and `expect_skill_id` (read them
 from the folder's `metadata`).
 
-A re-publish keeps the skill's existing labels untouched: it does not move or remove folders. Pass
-`label` on an update only to **add** the skill to more folders. To remove a skill from a folder, use
-the label routes (see "Organize skills with labels") rather than a re-publish.
+Do not ask Personal vs Org for updates, because a skill's scope is immutable on re-publish. A
+re-publish never changes the skill's existing labels: it does not move, add, or remove folders. Ask
+only whether the user wants to add folder labels after the update. If yes, publish the new version
+first, then use the library already known from the current workflow: `/skills/{slug}/labels` for org
+skills or `/skills/{slug}/personal-labels` for personal skills. If the library is not known from the
+current context, do not guess or try both routes; publish the update without folder changes and ask
+the user to run a separate organize/folder command from the skill's library context. To remove a
+skill from a folder, use the same label routes rather than a re-publish, and only after explicit user
+confirmation.
 
 ```sh
 curl -s "$COMPANION_API_URL/skills?expect_slug=$SLUG&expect_skill_id=$SKILL_ID" \
@@ -295,20 +362,26 @@ Summarize what changed and confirm before sending.
 
 ### Organize skills with labels
 
-Labels (folders) are how skills are organized — there is no owner and no visibility. A label is an
-org-wide, **shared** path of slash-separated, lower-case kebab segments such as `marketing/seo`, with
-an optional human-facing `displayName` such as `SEO`. The whole org sees the same folder tree; every
-skill is visible to every member regardless of its labels. A skill can hold several labels at once,
-folders may be empty, and any member can create, assign, rename, recolor, or delete a label.
+Labels (folders) organize skills inside a library; they do not change a skill's `scope` or access.
+Org skills use the org-wide, **shared** label tree under `/labels`. Personal skills use the creator's
+private folder tree under `/personal-labels`. A folder is a slash-separated, lower-case kebab path
+such as `marketing/seo`, with an optional human-facing `displayName` such as `SEO`. A skill can hold
+several labels at once, and folders may be empty.
 
 The path is always sent in the **request body or query**, never as a URL path segment, so that the
 slashes inside a path survive routing. Confirm any rename or delete with the user first, because both
-cascade across descendant folders for the whole organization.
+cascade across descendant folders for the relevant library.
 
-List the folder tree (roll-up counts plus each path's display name, color, and icon):
+List the org folder tree (roll-up counts plus each path's display name, color, and icon):
 
 ```sh
 curl -s "$COMPANION_API_URL/labels" -H "Authorization: Bearer $COMPANION_TOKEN"
+```
+
+List the caller's personal folder tree:
+
+```sh
+curl -s "$COMPANION_API_URL/personal-labels" -H "Authorization: Bearer $COMPANION_TOKEN"
 ```
 
 The response is `{ "tree": [...], "flat": [...] }`: `tree` is the nested folder hierarchy with a
@@ -368,9 +441,11 @@ curl -s -X DELETE "$COMPANION_API_URL/labels" \
   -d '{"path":"growth/seo"}'
 ```
 
-Each label mutation returns `{ "ok": true }`. Deleting a folder only unfiles its skills; it never
-deletes a skill. Inspect a skill's dependency graph with `GET /skills/$SLUG/dependencies` if you are
-unsure what it pulls in or what depends on it — dependencies are independent of labels.
+Personal folder routes mirror the org routes under `/personal-labels` and
+`/skills/$SLUG/personal-labels`; use them only for authored personal skills. Each label mutation
+returns `{ "ok": true }`. Deleting a folder only unfiles its skills; it never deletes a skill.
+Inspect a skill's dependency graph with `GET /skills/$SLUG/dependencies` if you are unsure what it
+pulls in or what depends on it — dependencies are independent of labels.
 
 ### Manage skill API calls
 
@@ -380,8 +455,10 @@ members, invitations, org settings, or tokens.
 Allowed skills API tasks:
 
 - Validate, publish, or update a skill with `POST /skills` after full local analysis and a synced
-  `companion.json`. Use `dependency=` parameters only for old packages that have no manifest yet, and
-  repeat `label=<path>` to file the skill under folders.
+  `companion.json`. Use `dependency=` parameters only for old packages that have no manifest yet.
+  For new skills, send explicit `scope=personal` or `scope=org` after the user chooses the library;
+  repeat `label=<path>` only for confirmed new-skill folder placement. For existing skills, add or
+  remove folders with the label routes after the update.
 - Inspect a skill's dependency graph with `GET /skills/$SLUG/dependencies`.
 - Archive or restore a skill with `POST /skills/$SLUG/archive` and `POST /skills/$SLUG/restore`
   (any member can do this).
@@ -389,9 +466,10 @@ Allowed skills API tasks:
   the current version's required slugs).
 - Download packages with `GET /skills/$SLUG/versions/$VERSION/package`.
 - Browse version files with `GET /skills/$SLUG/versions/$VERSION/files`.
-- Organize skills with labels: list the tree with `GET /labels`; create, rename, recolor, set the
-  icon, or delete a folder with `POST /labels`, `PUT /labels/rename|color|icon`, and `DELETE /labels`;
-  file or unfile a skill with `POST` / `DELETE /skills/$SLUG/labels`. All work with a `skills:write`
+- Organize skills with labels: list the org tree with `GET /labels` or the personal tree with
+  `GET /personal-labels`; create, rename, recolor, set the icon, or delete folders with the matching
+  label routes; file or unfile a skill with `POST` / `DELETE /skills/$SLUG/labels` for org skills or
+  `POST` / `DELETE /skills/$SLUG/personal-labels` for personal skills. All work with a `skills:write`
   token and the path always travels in the body or query (see "Organize skills with labels").
 - Read or write skill comments and stars only when the caller has a valid signed-in session for
   those routes. Do not assume a `cmp_pat_...` token can call session-only endpoints. A comment may
@@ -432,9 +510,10 @@ byte hash of `update.zip`.)
 
 ### Update this Companion skill
 
-Use this flow when the user asks to update **the Companion skill itself**. This is the built-in
-local skill shown in the workspace's **Companion skills** section, so never use the generic
-`/skills/$SLUG/download` or `/skills/$SLUG/versions/$VERSION/package` endpoints for it.
+This is the detailed replacement flow used by the mandatory startup self-update check above. It
+applies only to **the Companion skill itself**. This is the built-in local skill shown in the
+workspace's **Companion skills** section, so never use the generic `/skills/$SLUG/download` or
+`/skills/$SLUG/versions/$VERSION/package` endpoints for it.
 
 1. Resolve credentials as described above, without printing the token.
 2. Read this skill's local `metadata.companion_version` from its own `SKILL.md`.
@@ -447,11 +526,11 @@ curl -s "$COMPANION_API_URL/local-skills/companion" \
 
 The response includes `status`, `installedVersion`, `availableVersion`, and `changes`. If
 `availableVersion` is equal to the local `metadata.companion_version`, report that this skill is
-already current and stop. If `availableVersion` is greater, summarize `changes` and confirm with the
-user before replacing local files.
+already current and continue with the original request. If `availableVersion` is greater, install it
+before doing any other Companion work.
 
-After confirmation, download and stage the latest package in a temporary directory before touching
-the installed skill folder:
+Download and stage the latest package in a temporary directory before touching the installed skill
+folder:
 
 ```sh
 tmp="$(mktemp -d)"
@@ -493,6 +572,10 @@ mv "$staged" "$skill_dir"
 echo "Previous Companion skill saved at $backup"
 ```
 
+If replacement fails after moving files, restore the backup before stopping. Do not continue to the
+original Companion task after installing a newer Companion skill unless this runtime can safely
+reload the updated instructions in-process.
+
 Then report the installed version back to the workspace:
 
 ```sh
@@ -515,7 +598,7 @@ skills view shows the correct status and version. Report the version from this f
 curl -s "$COMPANION_API_URL/local-skills/companion/installed" \
   -H "Authorization: Bearer $COMPANION_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"version":"1.8.0","agent":"<your assistant name>"}'
+  -d '{"version":"1.9.1","agent":"<your assistant name>"}'
 ```
 
 A `{ "ok": true, "status": "installed" }` response confirms the workspace now knows this machine has

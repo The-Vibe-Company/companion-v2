@@ -38,21 +38,22 @@ export const COMPANION_SKILL_MANIFEST: CompanionSkillManifest = {
   key: COMPANION_SKILL_KEY,
   name: "Companion",
   description:
-    "Manage local SKILL.md packages with Companion: validate, publish, update, resolve skill dependencies, organize skills with shared labels (folders), install updates, audit skills, check workspace versions, and self-update this Companion skill.",
+    "Manage local SKILL.md packages with Companion: self-update first, validate, publish with explicit library and folder placement, update, resolve skill dependencies, organize skills with folders, audit versions, and install updates.",
   what:
-    "The Companion skill gives your assistant everything it needs to look after your skills on this machine. It can validate them, publish new ones, push updates, file them under shared labels (folders), and check that everything is current. It always confirms a change with you before anything is published.",
+    "The Companion skill gives your assistant everything it needs to look after your skills on this machine. It self-updates before doing other Companion work, validates skills, publishes new ones only after you choose Personal vs Org and a folder placement, pushes updates, files skills under folders, and checks that everything is current.",
   uses:
     "Your assistant uses it whenever you ask to publish, update, validate, or check your skills, so the steps stay consistent and safe.",
   why: [
     "Reads only the skills you point it at. Nothing else on your machine.",
-    "Always validates and confirms with you before it publishes anything.",
-    "Organizes skills with org-wide shared labels (folders): every skill is visible to every member, and any member can file, rename, or delete a folder.",
+    "Always checks whether the Companion skill itself needs an update before touching other skills.",
+    "Always validates and asks where a new skill should live before it publishes anything.",
+    "Organizes org skills with shared folders and personal skills with private My Skills folders.",
     "Every publish and update is recorded in the workspace history.",
   ],
   commands: [
-    { name: "Publish a skill", desc: "Validate a skill, optionally file it under labels (folders), and publish it safely." },
+    { name: "Publish a skill", desc: "Validate a skill, ask Personal vs Org and folder placement, then publish it safely." },
     { name: "Update a skill", desc: "Push a new version with targeted identity checks." },
-    { name: "Organize with labels", desc: "Create, assign, rename, recolor, or delete shared folder labels." },
+    { name: "Organize with labels", desc: "Create, assign, rename, recolor, or delete org and personal folder labels." },
     { name: "Resolve dependencies", desc: "Analyze packages and sync companion.json before upload." },
     { name: "Sync companion.json", desc: "Detect dependencies, setup requirements, and display copy and record them in the skill manifest." },
     { name: "Manage skill API calls", desc: "Use the supported skills API surface without crossing into workspace admin." },
@@ -64,11 +65,20 @@ export const COMPANION_SKILL_MANIFEST: CompanionSkillManifest = {
   ],
   changelog: [
     {
+      version: "1.9.1",
+      changes: [
+        "Runs a mandatory Companion self-update check at the start of every Companion invocation before validating, publishing, updating, labeling, or installing any other skill.",
+        "Installs newer bundled Companion versions through /local-skills/companion/package, verifies the staged package, backs up the old folder, reports the installed version, and then asks the user to rerun when runtime reload is not guaranteed.",
+        "Requires explicit publish placement for brand-new skills: Personal/My Skills vs Org/everyone, then existing folder, new folder, or no folder before POST /skills.",
+        "Documents scope as valid on first publish only, with updates preserving existing scope and labels unless the user explicitly adds folders.",
+      ],
+    },
+    {
       version: "1.9.0",
       changes: [
-        "Adds a private My Skills library: a skill is created in your personal library by default (scope=personal) and is visible only to you, organized by your own personal folders.",
+        "Adds a private My Skills library: a personal skill is visible only to you and organized by your own personal folders.",
         "Share a personal skill into the org library with POST /skills/{slug}/share (owner-only, one-way personal -> org).",
-        "List a specific library with GET /skills?lib=mine|org; publish chooses a library with the scope field (defaults to org for the CLI).",
+        "List a specific library with GET /skills?lib=mine|org; first publish chooses a library with the scope field.",
         "Organizes personal skills with personal folders: GET /personal-labels, POST /personal-labels, PUT /personal-labels/rename|color|icon, DELETE /personal-labels, and POST|DELETE /skills/{slug}/personal-labels.",
       ],
     },

@@ -1,8 +1,8 @@
 {
   "display": {
     "name": "Companion",
-    "summary": "Manage local SKILL.md packages with Companion.",
-    "description": "Validate, publish, update, resolve dependencies, declare setup requirements, organize skills with shared labels (folders), audit versions, install updates, and self-update the bundled Companion skill through the workspace API."
+    "summary": "Manage local SKILL.md packages with mandatory self-updates.",
+    "description": "Self-update the bundled Companion skill first, then validate, publish with explicit Personal/Org and folder placement, update, resolve dependencies, declare setup requirements, organize skills with folders, audit versions, and install updates through the workspace API."
   },
   "requirements": [
     {
