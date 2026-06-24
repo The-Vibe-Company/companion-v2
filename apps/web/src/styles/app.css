@@ -35,7 +35,28 @@
   line-height: 1;
 }
 
-.dtabs { padding-top: 6px; }
+/* Tab bar under the breadcrumb: Overview / Files / Dependencies / Activity / Discussion. */
+.dtabs { display: flex; align-items: center; gap: var(--space-1); flex: none; padding: 0 16px;
+  border-bottom: var(--border-width) solid var(--color-line); overflow-x: auto; scrollbar-width: none; }
+.dtabs::-webkit-scrollbar { display: none; }
+.dtab { display: inline-flex; align-items: center; gap: 7px; flex: none; padding: 11px 10px 12px;
+  border: none; background: transparent; cursor: pointer; color: var(--color-muted); font-family: var(--font-ui);
+  font-size: var(--text-sm); white-space: nowrap; border-bottom: 2px solid transparent;
+  margin-bottom: calc(-1 * var(--border-width));
+  transition: color var(--duration-fast) var(--ease-out-quint), border-color var(--duration-fast) var(--ease-out-quint); }
+.dtab svg { color: var(--color-faint); }
+.dtab:hover { color: var(--color-fg); }
+.dtab:hover svg { color: var(--color-muted); }
+.dtab[aria-selected="true"] { color: var(--color-fg); font-weight: var(--weight-medium); border-bottom-color: var(--color-fg); }
+.dtab[aria-selected="true"] svg { color: var(--color-fg); }
+.dtab:focus-visible { outline: 2px solid var(--color-accent); outline-offset: -2px; border-radius: var(--radius-sm); }
+.dtab__count { font-family: var(--font-mono); font-size: 11px; color: var(--color-faint); font-variant-numeric: tabular-nums; }
+
+/* Panel host: one active tabpanel fills the remaining height. */
+.dpanel { flex: 1; min-height: 0; }
+.dpanel--doc { overflow-y: auto; background: var(--color-canvas); }
+.dpanel--files { display: flex; overflow: hidden; }
+
 .dbody--full { grid-template-columns: 1fr; }
 .dcontent--flush { padding: 0; overflow: hidden; display: flex; min-height: 0; }
 
@@ -140,6 +161,21 @@
 .fv-body--code { background: var(--color-surface-sunken); }
 .fv-body--md { padding: 30px 40px 56px; }
 .fv-body--md .md { max-width: 720px; margin: 0 auto; }
+.fv-main { min-width: 0; }
+
+/* On-this-page outline (Markdown Preview with >= 2 headings): a sticky right rail. */
+.fv-body--md.has-outline { display: grid; grid-template-columns: minmax(0, 1fr) 168px; column-gap: 20px; }
+.fv-outline { position: sticky; top: 0; align-self: start; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.fv-outitem { display: block; width: 100%; text-align: left; border: none; background: transparent; cursor: pointer;
+  padding: 4px 8px; border-radius: var(--radius-sm); color: var(--color-muted); font-family: var(--font-ui); font-size: var(--text-xs);
+  line-height: 1.4; border-left: 2px solid transparent; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  transition: color var(--duration-fast) var(--ease-out-quint), background-color var(--duration-fast) var(--ease-out-quint); }
+.fv-outitem:hover { background: var(--color-surface-raised); color: var(--color-fg); }
+.fv-outitem[data-level="2"] { padding-left: 18px; }
+.fv-outitem[data-level="3"] { padding-left: 28px; }
+.fv-outitem[data-level="4"], .fv-outitem[data-level="5"], .fv-outitem[data-level="6"] { padding-left: 38px; }
+.fv-outitem[aria-current="true"] { color: var(--color-fg); background: var(--color-accent-tint); border-left-color: var(--color-accent-edge); }
+.fv-outitem:focus-visible { outline: 2px solid var(--color-accent); outline-offset: -2px; }
 .fx--panel .fv-head { height: auto; flex-wrap: wrap; row-gap: 7px; padding: 8px 12px; }
 .fx--panel .fv-path { flex: 1 1 220px; }
 .fx--panel .fv-spacer { display: none; }
@@ -150,6 +186,13 @@
 .codeview { margin: 0; padding: 18px 20px; font-family: var(--font-mono); font-size: 12.5px; line-height: 1.7;
   color: var(--color-fg); white-space: pre; overflow-x: auto; tab-size: 2; }
 .codeview code { font-family: inherit; }
+/* Line-number gutter: kept outside the x-scrolling <pre>, vertical scroll shared by .fv-body.
+   font/line-height MUST match .codeview so row N aligns. */
+.cv { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; }
+.cv-gutter { font-family: var(--font-mono); font-size: 12.5px; line-height: 1.7; padding: 18px 12px 18px 16px;
+  text-align: right; user-select: none; color: var(--color-faint); font-variant-numeric: tabular-nums;
+  border-right: var(--border-width) solid var(--color-line); background: var(--color-surface-sunken); }
+.cv-gutter span { display: block; }
 .tk-kw  { color: oklch(0.5 0.13 285); }
 .tk-lit { color: oklch(0.5 0.13 285); }
 .tk-str { color: oklch(0.5 0.1 152); }
@@ -307,9 +350,15 @@
   /* The head wraps: the status card drops to its own full-width row below the title block. */
   .dhead__aside { width: 100%; }
   .dhead__aside .statuscard { max-width: 320px; }
+  /* The reading pane is too narrow for a side rail — drop the outline, keep the prose full-width. */
+  .fv-body--md.has-outline { display: block; }
+  .fv-outline { display: none; }
 }
 
 @media (max-width: 700px) {
+  /* Files tab (full explorer): stack the tree above the reading pane. */
+  .dpanel--files .fx { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
+  .dpanel--files .fx-tree { max-height: 168px; border-right: none; border-bottom: var(--border-width) solid var(--color-line); }
   .fx--panel { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
   .fx--panel .fx-tree { max-height: 168px; border-right: none; border-bottom: 1px solid var(--color-line); }
   .fx--panel .fv-head { align-items: flex-start; }
@@ -323,6 +372,7 @@
 
 @media (max-width: 560px) {
   .dtop { gap: 6px; padding: 0 10px; }
+  .dtabs { padding: 0 10px; }
   .dtop .crumb { flex: 1 1 auto; }
   .dtop .crumb__sep,
   .dtop .crumb b,

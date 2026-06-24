@@ -65,8 +65,8 @@ function renderDetail() {
   return renderDetailFor(skill);
 }
 
-describe("DetailView single-column document layout", () => {
-  it("renders the head facts, the status card, the filed folders, and the section stack", () => {
+describe("DetailView tabbed detail layout", () => {
+  it("renders the head facts, the status card, the filed folders, and the tab bar", () => {
     const html = renderDetail();
 
     expect(html).toContain("linear-demo");
@@ -82,13 +82,16 @@ describe("DetailView single-column document layout", () => {
     expect(html).toContain("Filed in");
     expect(html).toContain("marketing/seo");
     expect(html).toContain("Add to folder");
-    // Stacked collapsible sections.
+    // Tab bar: Files / Dependencies / Activity / Discussion are tabs; the Overview
+    // tab carries the descriptive "What it does" + "Manifest" sections.
+    expect(html).toContain('role="tablist"');
+    expect(html).toContain('id="dtab-overview"');
+    expect(html).toContain('id="dtab-files"');
+    expect(html).toContain('id="dtab-dependencies"');
+    expect(html).toContain('id="dtab-activity"');
+    expect(html).toContain('id="dtab-discussion"');
     expect(html).toContain("What it does");
-    expect(html).toContain("Package");
-    expect(html).toContain("Dependencies");
     expect(html).toContain("Manifest");
-    expect(html).toContain("Activity");
-    expect(html).toContain("Discussion");
     // The single-column doc replaces the old rail + slide-in panel chrome.
     expect(html).not.toContain("dsidebar--linear");
     expect(html).not.toContain("dpanel__nav");
@@ -135,16 +138,24 @@ describe("DetailView single-column document layout", () => {
     });
 
     expect(html).not.toContain("Setup &amp; secrets");
-    // The Dependencies section is dropped, but the Package + Manifest sections stay.
-    expect(html).not.toContain('class="dsection__label">Dependencies');
-    expect(html).toContain("Package");
+    // With no deps the Dependencies tab is dropped; Files stays and the Overview
+    // keeps its Manifest section.
+    expect(html).not.toContain('id="dtab-dependencies"');
+    expect(html).toContain('id="dtab-files"');
     expect(html).toContain("Manifest");
   });
 
-  it("renders the Package section through the inline file explorer", () => {
+  it("exposes Files as a tab and does not eagerly render the explorer in Overview", () => {
     const html = renderDetail();
 
-    expect(html).toContain("fx fx--panel");
-    expect(html).toContain("No files in this package.");
+    // The file explorer lives behind the Files tab; only the active (Overview)
+    // tabpanel is rendered server-side, so the explorer markup is absent here.
+    // Every tab points aria-controls at the one stable panel id (the active panel),
+    // so no tab references a missing element.
+    expect(html).toContain('id="dtab-files"');
+    expect(html).toContain('aria-controls="skill-detail-panel"');
+    expect(html).toContain('id="skill-detail-panel"');
+    expect(html).toContain('aria-labelledby="dtab-overview"');
+    expect(html).not.toContain("No files in this package.");
   });
 });
