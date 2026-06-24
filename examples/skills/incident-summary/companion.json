@@ -1,7 +1,26 @@
 {
-  "display": {
-    "summary": "Summarize an incident timeline from logs into a concise postmortem draft."
+  "$schema": "https://companion.dev/schemas/companion-manifest.v2.schema.json",
+  "name": "incident-summary",
+  "version": "0.1.9",
+  "title": "Incident summary",
+  "description": "Summarize an incident timeline from logs into a concise postmortem draft.",
+  "notes": "Reads local log excerpts and produces a terse incident summary: timeline, impact, suspected cause, and follow-ups.",
+  "metadata": {
+    "companionSkillId": "62641a8d-3860-41a9-a9a2-1798006aad29",
+    "changelog": [
+      {
+        "version": "0.1.9",
+        "date": "2026-06-24",
+        "changes": [
+          "Publish version 0.1.9."
+        ]
+      }
+    ]
   },
-  "requirements": [],
-  "dependencies": []
+  "environment": {
+    "env": {},
+    "secrets": {}
+  },
+  "dependencies": {},
+  "commands": []
 }

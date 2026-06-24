@@ -47,7 +47,8 @@ describe("buildInlineCompanionManifest", () => {
       description: "Long detail copy.",
     });
     expect(manifest.requirements.map((req) => req.key)).toEqual(["OPENAI_API_KEY"]);
-    expect(manifest.dependencies).toEqual(["markdown-report"]);
+    expect(manifest.dependencies).toEqual({});
+    expect(manifest.legacyDependencySlugs).toEqual(["markdown-report"]);
   });
 
   it("updates display description when the carried description was only the old summary", () => {

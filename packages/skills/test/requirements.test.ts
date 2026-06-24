@@ -77,16 +77,17 @@ describe("requirements frontmatter", () => {
     await prepareSkillDirForPublish(dir, { version: "1.0.0" });
     const written = await readFile(join(dir, "SKILL.md"), "utf8");
     const companionJson = JSON.parse(await readFile(join(dir, "companion.json"), "utf8")) as {
-      requirements: Array<{ key: string }>;
+      environment: {
+        env: Record<string, unknown>;
+        secrets: Record<string, unknown>;
+      };
     };
     const reparsed = parseFrontmatter(written);
     expect(reparsed.ok).toBe(true);
     if (!reparsed.ok) return;
     expect(reparsed.data.requirements).toEqual([]);
-    expect(companionJson.requirements.map((r) => r.key)).toEqual([
-      "AZURE_OPENAI_API_KEY",
-      "AZURE_OPENAI_ENDPOINT",
-    ]);
+    expect(Object.keys(companionJson.environment.secrets)).toEqual(["AZURE_OPENAI_API_KEY"]);
+    expect(Object.keys(companionJson.environment.env)).toEqual(["AZURE_OPENAI_ENDPOINT"]);
   });
 
   it("omits requirements from the canonical SKILL.md", () => {

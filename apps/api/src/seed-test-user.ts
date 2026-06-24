@@ -10,7 +10,7 @@ import {
   type ActorContext,
 } from "@companion/core/services";
 import { closeDb, db, schema } from "@companion/db";
-import { packDir, parseFrontmatter, toStoredSkillVersionManifest } from "@companion/skills";
+import { buildNormalizedCompanionJson, packDir, parseFrontmatter, toStoredSkillVersionManifest } from "@companion/skills";
 import { putSkillArchive, skillArchiveKey } from "@companion/storage";
 import { and, eq, inArray } from "drizzle-orm";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -92,8 +92,6 @@ function buildSkillMd(spec: Pick<SeedSkillSpec, "slug" | "version" | "descriptio
     "---",
     `name: ${spec.slug}`,
     `description: ${JSON.stringify(spec.description)}`,
-    "metadata:",
-    `  companion_version: ${JSON.stringify(spec.version)}`,
   ];
   if (spec.license) lines.push(`license: ${spec.license}`);
   if (spec.tools?.length) {
@@ -111,9 +109,12 @@ async function seedSkill(actor: ActorContext, orgId: string, spec: SeedSkillSpec
       summary: spec.description,
       requirements: spec.requirements ?? [],
       dependencies: spec.dependencies ?? [],
+      name: spec.slug,
+      version: spec.version,
+      changelog: [{ version: spec.version, date: "2026-06-24", changes: [`Seed ${spec.slug} ${spec.version}.`] }],
     });
     await writeFile(join(dir, "SKILL.md"), md);
-    await writeFile(join(dir, "companion.json"), `${JSON.stringify(companionManifest, null, 2)}\n`);
+    await writeFile(join(dir, "companion.json"), buildNormalizedCompanionJson(companionManifest));
     const canonical = await packDir(dir);
     const parsed = parseFrontmatter(md);
     if (!parsed.ok) throw new Error(parsed.error);

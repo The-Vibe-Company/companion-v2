@@ -122,7 +122,8 @@ describe("validateSkillDir — companion.json", () => {
     expect(res.companion_manifest_path).toBe("companion.json");
     expect(res.companion_manifest?.display.summary).toBe("Manifest summary.");
     expect(res.companion_manifest?.requirements.map((r) => r.key)).toEqual(["MANIFEST_TOKEN"]);
-    expect(res.companion_manifest?.dependencies).toEqual(["markdown-report"]);
+    expect(res.companion_manifest?.dependencies).toEqual({});
+    expect(res.companion_manifest?.legacyDependencySlugs).toEqual(["markdown-report"]);
     expect(res.warnings?.some((w) => w.code === "legacy-requirements")).toBe(true);
   });
 
@@ -187,7 +188,8 @@ describe("validateSkillArchive — companion.json", () => {
     expect(res.ok).toBe(true);
     expect(res.companion_manifest_path).toBe("companion.json");
     expect(res.companion_manifest?.display.summary).toBe("Root manifest.");
-    expect(res.companion_manifest?.dependencies).toEqual(["markdown-report"]);
+    expect(res.companion_manifest?.dependencies).toEqual({});
+    expect(res.companion_manifest?.legacyDependencySlugs).toEqual(["markdown-report"]);
   });
 
   it("ignores companion.json files outside the selected package root", async () => {
@@ -203,7 +205,7 @@ describe("validateSkillArchive — companion.json", () => {
     expect(res.ok).toBe(true);
     expect(res.companion_manifest_path).toBeNull();
     expect(res.companion_manifest?.display.summary).toBe("Root fallback.");
-    expect(res.companion_manifest?.dependencies).toEqual([]);
+    expect(res.companion_manifest?.dependencies).toEqual({});
   });
 
   it("uses the wrapped companion.json when the selected SKILL.md is wrapped", async () => {
@@ -219,7 +221,8 @@ describe("validateSkillArchive — companion.json", () => {
     expect(res.ok).toBe(true);
     expect(res.companion_manifest_path).toBe("wrapped-skill/companion.json");
     expect(res.companion_manifest?.display.summary).toBe("Wrapped manifest.");
-    expect(res.companion_manifest?.dependencies).toEqual(["wrapped-dep"]);
+    expect(res.companion_manifest?.dependencies).toEqual({});
+    expect(res.companion_manifest?.legacyDependencySlugs).toEqual(["wrapped-dep"]);
   });
 
   it("fails validation for an invalid companion.json next to the selected SKILL.md", async () => {
@@ -290,7 +293,7 @@ describe("packDir — determinism & integrity", () => {
 });
 
 describe("prepareSkillDirForPublish", () => {
-  it("rewrites SKILL.md with Companion metadata and no legacy top-level fields", async () => {
+  it("rewrites SKILL.md without Companion metadata and writes companion.json identity", async () => {
     const dir = await makeSkillDir({
       "SKILL.md": skillMd(
         "name: legacy-publish\ndescription: Legacy package.\nversion: 1.2.3\ntools:\n  - read_file",
@@ -298,12 +301,18 @@ describe("prepareSkillDirForPublish", () => {
       ),
     });
     const prepared = await prepareSkillDirForPublish(dir, {
-      skillId: "skill-123",
+      skillId: "84d8bee1-5ad3-4676-8c16-730e2a15ba70",
       version: "2.0.0",
     });
     const rewritten = await readFile(join(prepared.rootDir, "SKILL.md"), "utf8");
-    expect(rewritten).toContain("companion_skill_id: skill-123");
-    expect(rewritten).toContain("companion_version: 2.0.0");
+    const companionJson = JSON.parse(await readFile(join(prepared.rootDir, "companion.json"), "utf8")) as {
+      version: string;
+      metadata: { companionSkillId?: string };
+    };
+    expect(rewritten).not.toContain("companion_skill_id");
+    expect(rewritten).not.toContain("companion_version");
+    expect(companionJson.version).toBe("2.0.0");
+    expect(companionJson.metadata.companionSkillId).toBe("84d8bee1-5ad3-4676-8c16-730e2a15ba70");
     expect(rewritten).toContain("allowed-tools: read_file");
     expect(rewritten).not.toMatch(/^version:/m);
     expect(rewritten).not.toMatch(/^scope:/m);
@@ -330,7 +339,7 @@ describe("prepareSkillDirForPublish", () => {
       "wrapped-skill/references/notes.md": "notes\n",
     });
     const prepared = await prepareSkillDirForPublish(dir, {
-      skillId: "skill-456",
+      skillId: "84d8bee1-5ad3-4676-8c16-730e2a15ba70",
       version: "1.0.0",
     });
     expect(prepared.rootDir.endsWith("wrapped-skill")).toBe(true);

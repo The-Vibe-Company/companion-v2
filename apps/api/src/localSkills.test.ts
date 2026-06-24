@@ -41,7 +41,7 @@ describe("companion skill package + row", () => {
     const pkg = await getCompanionSkillPackage();
     expect(pkg.key).toBe("companion");
     expect(pkg.checksum).toMatch(/^sha256:[0-9a-f]{64}$/);
-    expect(pkg.version).toBe("1.9.1");
+    expect(pkg.version).toBe("1.10.0");
     expect(pkg.sizeBytes).toBeGreaterThan(0);
   });
 
@@ -51,6 +51,8 @@ describe("companion skill package + row", () => {
     expect(row.status).toBe("none");
     expect(row.description).toContain("SKILL.md");
     expect(row.description).toContain("self-update");
+    expect(row.notes).toContain("companion.json");
+    expect(row.notes).toContain("skills.lock.json");
     expect(row.installedVersion).toBeNull();
     expect(row.lastReportedAt).toBeNull();
     expect(row.availableVersion).toBe(pkg.version);
@@ -65,13 +67,11 @@ describe("companion skill package + row", () => {
     });
     expect(row.commands).toContainEqual({
       name: "Sync companion.json",
-      desc: "Detect dependencies, setup requirements, and display copy and record them in the skill manifest.",
+      desc: "Create or repair manifest v2 with identity, env/secrets, dependency ids, notes, commands, and changelog.",
     });
     const changelog = row.changes.join("\n");
-    expect(changelog).toContain("mandatory Companion self-update check");
-    expect(changelog).toContain("/local-skills/companion/package");
-    expect(changelog).toContain("Requires explicit publish placement");
-    expect(changelog).toContain("scope as valid on first publish only");
+    expect(changelog).toContain("Moves Companion registry identity");
+    expect(changelog).toContain("manifest v2");
     // The install prompt drives the report-back call and leaves placeholders for the client.
     expect(row.prompts.install).toContain("/local-skills/companion/package");
     expect(row.prompts.install).toContain("/local-skills/companion/installed");
@@ -100,11 +100,18 @@ describe("companion skill package + row", () => {
   it("bundles mandatory self-update and explicit publish placement instructions", async () => {
     const skillMd = await readFile(join(companionSkillDir(), "SKILL.md"), "utf8");
     const apiRef = await readFile(join(companionSkillDir(), "reference", "api.md"), "utf8");
-    expect(skillMd).toContain("companion_version: 1.9.1");
+    expect(skillMd).not.toContain("companion_version:");
+    expect(skillMd).toContain("companion.json.version");
+    expect(skillMd).toContain("skills.lock.json");
     expect(skillMd).toContain("## Mandatory startup self-update");
+    expect(skillMd).toContain("only once per conversation");
+    expect(skillMd).toContain("do not repeat it on later Companion turns");
     expect(skillMd).toContain("Do not validate, publish, update, archive, label, install");
     expect(skillMd).toContain("GET /local-skills/companion");
     expect(skillMd).toContain("POST /local-skills/companion/installed");
+    expect(skillMd).toContain("GET /v1/schemas/companion-manifest.v2.schema.json");
+    expect(skillMd).toContain("POST /skills/{slug}/install");
+    expect(skillMd).toContain("After a successful publish from this Companion skill");
     expect(skillMd).toContain("Before any real `POST /skills` upload for a brand-new skill");
     expect(skillMd).toContain("Personal / My Skills");
     expect(skillMd).toContain("Org / everyone");
@@ -122,6 +129,8 @@ describe("companion skill package + row", () => {
     expect(apiRef).toContain("The Companion skill must send `scope=personal` or `scope=org`");
     expect(apiRef).toContain("POST /skills?scope=org&label=marketing&label=marketing%2Fseo");
     expect(apiRef).toContain("POST /skills?scope=personal");
+    expect(apiRef).toContain("GET /v1/schemas/companion-manifest.v2.schema.json");
+    expect(apiRef).toContain("POST /skills/{slug}/install");
     expect(apiRef).toContain("updates preserve the existing scope");
     expect(apiRef).toContain("skill must not declare `scope` or `visibility`");
     expect(apiRef).toContain("Re-publish never moves, adds, or removes folder labels");

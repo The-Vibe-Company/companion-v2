@@ -853,6 +853,9 @@ body { background: var(--color-canvas); color: var(--color-fg); font-family: var
 .ls-sec__label--icon { display: inline-flex; align-items: center; gap: 6px; }
 .ls-sec__text { margin: 0; font-size: var(--text-sm); color: var(--color-fg); line-height: var(--leading-normal); }
 .ls-sec__text--muted { color: var(--color-muted); }
+.ls-md { display: flex; flex-direction: column; gap: 8px; }
+.ls-md__heading { font-size: var(--text-sm); font-weight: 700; color: var(--color-fg); line-height: var(--leading-tight); }
+.ls-md__list { margin: 0; padding-left: 18px; color: var(--color-fg); font-size: var(--text-sm); line-height: var(--leading-normal); }
 .ls-ico-ok { color: var(--color-ok); }
 
 .ls-cmds { display: flex; flex-direction: column; gap: 12px; }

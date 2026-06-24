@@ -156,6 +156,7 @@ describe("skills push version resolution", () => {
       resolvePushVersion({
         setVersion: "9.0.0",
         bump: "minor",
+        manifestVersion: "3.0.0",
         metadataVersion: "2.0.0",
         legacyVersion: "1.0.0",
         registry: existing,
@@ -167,6 +168,7 @@ describe("skills push version resolution", () => {
     expect(
       resolvePushVersion({
         bump: "minor",
+        manifestVersion: "3.0.0",
         metadataVersion: "2.0.0",
         legacyVersion: "1.0.0",
         registry: existing,
@@ -175,6 +177,15 @@ describe("skills push version resolution", () => {
   });
 
   it("falls back through metadata, legacy, auto-patch, then new-skill default", () => {
+    expect(
+      resolvePushVersion({
+        manifestVersion: "3.0.0",
+        metadataVersion: "2.0.0",
+        metadataSkillId: "skill-1",
+        legacyVersion: "1.0.0",
+        registry: existing,
+      }),
+    ).toBe("3.0.0");
     expect(resolvePushVersion({ metadataVersion: "2.0.0", legacyVersion: "1.0.0", registry: existing })).toBe("2.0.0");
     expect(resolvePushVersion({ legacyVersion: "1.0.0", registry: existing })).toBe("1.0.0");
     expect(resolvePushVersion({ registry: existing })).toBe("1.2.4");

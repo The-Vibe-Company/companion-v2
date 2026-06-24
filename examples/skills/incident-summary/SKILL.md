@@ -1,9 +1,7 @@
 ---
 name: incident-summary
 description: Summarize an incident timeline from logs into a concise postmortem draft.
-metadata:
-  companion_skill_id: 84d8bee1-5ad3-4676-8c16-730e2a15ba70
-  companion_version: 0.1.8
+metadata: {}
 license: MIT
 allowed-tools: read_file run_python
 ---

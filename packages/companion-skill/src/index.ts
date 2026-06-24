@@ -1,14 +1,12 @@
-import { existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 /**
  * `@companion/companion-skill` — the built-in "Companion" management skill.
  *
- * This package ships both the packable skill source (`skill/SKILL.md` + supporting files) and the
- * presentation manifest the "Companion skills" view renders. The authoritative version is the
- * `metadata.companion_version` baked into `skill/SKILL.md`; the API derives `availableVersion` from
- * the packed package, never from a constant here.
+ * The packable skill source lives in `skill/`. Its `companion.json` is the source of truth for
+ * version, user-facing copy, commands, changelog, and setup declarations.
  */
 
 export const COMPANION_SKILL_KEY = "companion";
@@ -20,164 +18,49 @@ export interface CompanionSkillCommand {
 
 export interface CompanionSkillChangelogEntry {
   version: string;
+  date?: string;
   changes: string[];
 }
 
 export interface CompanionSkillManifest {
   key: string;
   name: string;
+  version: string;
   description: string;
-  what: string;
-  uses: string;
-  why: string[];
+  notes: string;
   commands: CompanionSkillCommand[];
   changelog: CompanionSkillChangelogEntry[];
 }
 
-export const COMPANION_SKILL_MANIFEST: CompanionSkillManifest = {
-  key: COMPANION_SKILL_KEY,
-  name: "Companion",
-  description:
-    "Manage local SKILL.md packages with Companion: self-update first, validate, publish with explicit library and folder placement, update, resolve skill dependencies, organize skills with folders, audit versions, and install updates.",
-  what:
-    "The Companion skill gives your assistant everything it needs to look after your skills on this machine. It self-updates before doing other Companion work, validates skills, publishes new ones only after you choose Personal vs Org and a folder placement, pushes updates, files skills under folders, and checks that everything is current.",
-  uses:
-    "Your assistant uses it whenever you ask to publish, update, validate, or check your skills, so the steps stay consistent and safe.",
-  why: [
-    "Reads only the skills you point it at. Nothing else on your machine.",
-    "Always checks whether the Companion skill itself needs an update before touching other skills.",
-    "Always validates and asks where a new skill should live before it publishes anything.",
-    "Organizes org skills with shared folders and personal skills with private My Skills folders.",
-    "Every publish and update is recorded in the workspace history.",
-  ],
-  commands: [
-    { name: "Publish a skill", desc: "Validate a skill, ask Personal vs Org and folder placement, then publish it safely." },
-    { name: "Update a skill", desc: "Push a new version with targeted identity checks." },
-    { name: "Organize with labels", desc: "Create, assign, rename, recolor, or delete org and personal folder labels." },
-    { name: "Resolve dependencies", desc: "Analyze packages and sync companion.json before upload." },
-    { name: "Sync companion.json", desc: "Detect dependencies, setup requirements, and display copy and record them in the skill manifest." },
-    { name: "Manage skill API calls", desc: "Use the supported skills API surface without crossing into workspace admin." },
-    { name: "Update Companion skill", desc: "Check and install the latest bundled Companion skill safely." },
-    { name: "Check for updates", desc: "See whether the skills on this machine are up to date." },
-    { name: "Install updates", desc: "Bring outdated skills up to the latest published version." },
-    { name: "Validate a skill", desc: "Check a skill is well formed before you share it." },
-    { name: "Manage your skills", desc: "List and organize the skills on this machine." },
-  ],
-  changelog: [
-    {
-      version: "1.9.1",
-      changes: [
-        "Runs a mandatory Companion self-update check at the start of every Companion invocation before validating, publishing, updating, labeling, or installing any other skill.",
-        "Installs newer bundled Companion versions through /local-skills/companion/package, verifies the staged package, backs up the old folder, reports the installed version, and then asks the user to rerun when runtime reload is not guaranteed.",
-        "Requires explicit publish placement for brand-new skills: Personal/My Skills vs Org/everyone, then existing folder, new folder, or no folder before POST /skills.",
-        "Documents scope as valid on first publish only, with updates preserving existing scope and labels unless the user explicitly adds folders.",
-      ],
-    },
-    {
-      version: "1.9.0",
-      changes: [
-        "Adds a private My Skills library: a personal skill is visible only to you and organized by your own personal folders.",
-        "Share a personal skill into the org library with POST /skills/{slug}/share (owner-only, one-way personal -> org).",
-        "List a specific library with GET /skills?lib=mine|org; first publish chooses a library with the scope field.",
-        "Organizes personal skills with personal folders: GET /personal-labels, POST /personal-labels, PUT /personal-labels/rename|color|icon, DELETE /personal-labels, and POST|DELETE /skills/{slug}/personal-labels.",
-      ],
-    },
-    {
-      version: "1.8.0",
-      changes: [
-        "Removes skill owners, visibility, and teams: every skill is visible to every org member, and any member can manage any skill.",
-        "Organizes skills with org-wide shared labels (folders): GET /labels, POST /labels, PUT /labels/rename|color|icon, DELETE /labels, and POST|DELETE /skills/{slug}/labels (path always in the body or query).",
-        "Drops GET /skills/upload-options and PUT /skills/{slug}/owner; publish takes repeatable label= values instead of owner_team, and the visibility dependency status is gone.",
-      ],
-    },
-    {
-      version: "1.7.0",
-      changes: [
-        "Replaces skill visibility with a single Owner: a skill is owned by you (Personal, private) or by a team (visible to the whole workspace).",
-        "Renames PUT /skills/{slug}/visibility to PUT /skills/{slug}/owner with body { owner_team } (null = Personal, slug = that team).",
-        "Upload accepts owner_team only — the everyone and team fields are gone, and skills must not declare visibility.",
-      ],
-    },
-    {
-      version: "1.6.0",
-      changes: [
-        "Documents comment image attachments: POST /skills/{slug}/comments accepts multipart/form-data with up to six image files.",
-        "Adds the session-gated GET /skills/{slug}/comments/{commentId}/images/{imageId} endpoint and the images array on comment rows.",
-      ],
-    },
-    {
-      version: "1.5.0",
-      changes: [
-        "Moves Companion-specific package data into companion.json: display copy, dependencies, and setup requirements.",
-        "Keeps legacy SKILL.md requirements readable but normalizes them into companion.json on publish.",
-        "Uses companion.json dependencies as the upload source of truth, with dependency= kept only as an old-package fallback.",
-      ],
-    },
-    {
-      version: "1.4.0",
-      changes: [
-        "Changes a published skill's visibility with PUT /skills/{slug}/visibility (works with a skills:write token).",
-        "Cascade also raises required sub-skills or reduces dependent skills so the cover invariant holds.",
-      ],
-    },
-    {
-      version: "1.3.0",
-      changes: [
-        "Analyzes a skill before upload to detect the secrets and environment variables it needs.",
-        "Proposes a `requirements` list (secret/env, required, and a note on how to obtain each) and confirms it with you before writing it into the SKILL.md frontmatter.",
-        "Surfaces a skill's declared requirements as setup notes so you know what to configure before running it.",
-      ],
-    },
-    {
-      version: "1.2.1",
-      changes: [
-        "Always analyzes the full skill package for dependencies before validate, publish, or update.",
-        "Compares inferred dependencies with companion.json and asks before synchronizing additions or removals.",
-        "Uses the confirmed dependency list for validation and upload, then publishes missing local dependencies first.",
-      ],
-    },
-    {
-      version: "1.2.0",
-      changes: [
-        "Reads an optional companion.json to declare required skill→skill dependencies (un-versioned slugs).",
-        "Runs a dependency preflight before publishing: surfaces already-published, must-upload-too, removed, and archival-candidate dependencies.",
-        "Publishes missing dependencies first in topological order, and blocks publishes with missing, cyclic, or less-visible dependencies.",
-        "On update, proposes archiving dependencies that are no longer required by any published skill (never automatically).",
-      ],
-    },
-    {
-      version: "1.1.0",
-      changes: [
-        "Adds explicit owner-team guidance for publishing skills under a team.",
-        "Documents Private, Everyone, and team-share visibility separately from ownership.",
-        "Lets assistants fetch and propose available teams while preserving current upload defaults.",
-        "Clarifies the supported skills API management surface for assistants.",
-      ],
-    },
-    {
-      version: "1.0.2",
-      changes: [
-        "Adds an explicit self-update flow for the bundled Companion skill.",
-        "Checks the local skill against the workspace Companion skills catalog before replacing files.",
-      ],
-    },
-    {
-      version: "1.0.1",
-      changes: [
-        "Stores the current workspace API URL and token in a local credentials file during install and use prompts.",
-        "Reads credentials from the environment first, then from the local Companion credentials file.",
-      ],
-    },
-    {
-      version: "1.0.0",
-      changes: [
-        "Publish, update, validate, and list skills from your assistant.",
-        "Checks every skill on this machine against the workspace and flags what is out of date.",
-        "Confirms each change with you and records it in the workspace history.",
-      ],
-    },
-  ],
-};
+interface RawCompanionJson {
+  name?: string;
+  version?: string;
+  title?: string;
+  description?: string;
+  notes?: string;
+  metadata?: {
+    changelog?: CompanionSkillChangelogEntry[];
+  };
+  commands?: CompanionSkillCommand[];
+}
+
+function loadCompanionSkillManifest(): CompanionSkillManifest {
+  const raw = JSON.parse(readFileSync(join(companionSkillDir(), "companion.json"), "utf8")) as RawCompanionJson;
+  const key = raw.name ?? COMPANION_SKILL_KEY;
+  const version = raw.version;
+  if (!version) throw new Error("bundled companion skill is missing companion.json version");
+  return {
+    key,
+    name: raw.title ?? "Companion",
+    version,
+    description: raw.description ?? "Manage local SKILL.md packages with Companion.",
+    notes: raw.notes ?? "",
+    commands: raw.commands ?? [],
+    changelog: raw.metadata?.changelog ?? [],
+  };
+}
+
+export const COMPANION_SKILL_MANIFEST: CompanionSkillManifest = loadCompanionSkillManifest();
 
 /** Free-form changelog lookup; empty array when the version is unknown. */
 export function companionSkillChanges(version: string): string[] {
