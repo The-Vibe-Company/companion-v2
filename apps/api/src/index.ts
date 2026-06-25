@@ -154,6 +154,8 @@ import { COMPANION_SKILL_KEY } from "@companion/companion-skill";
 
 const app = new Hono<{ Variables: ApiVariables }>();
 
+export { app };
+
 app.get("/v1/schemas/companion-manifest.v2.schema.json", (c) => c.json(companionManifestV2JsonSchema));
 
 /** Set the `companion_org` selection cookie (readable client-side, so not httpOnly). */
