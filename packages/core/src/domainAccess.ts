@@ -16,7 +16,6 @@ export interface DomainJoinableOrg {
   name: string;
   domain: string;
   memberCount: number;
-  teamCount: number;
 }
 
 export function normalizeAccessDomain(value: string): string {
@@ -107,9 +106,6 @@ export async function listJoinableOrgsByDomain(domain: string, actorId: string, 
       name: row.name,
       domain: row.domain,
       memberCount: Number(members?.value ?? 0),
-      // Teams were removed product-wide (Org → User); always 0. Kept for the onboarding read shape
-      // until the API/web onboarding slices drop the field.
-      teamCount: 0,
     });
   }
   return orgs;

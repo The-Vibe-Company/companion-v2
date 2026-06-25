@@ -24,15 +24,10 @@ export interface OnboardingContextResult {
 
 export interface CompleteOnboardingInput {
   org: { name: string; domain?: string | null; autoJoin?: boolean; color?: string | null; logoUrl?: string | null };
-  /**
-   * Teams were removed product-wide (Org → User). The field is kept (optional) so the existing
-   * onboarding API/web callers still type-check; it is ignored — no team row is created.
-   */
-  team?: { name: string; color?: string | null; icon?: string | null };
   invites: string[];
 }
 
-function normalizeBrandColor(value: string | null | undefined, label: "org" | "team"): string | null {
+function normalizeBrandColor(value: string | null | undefined, label: "org"): string | null {
   const color = value?.trim() ?? "";
   if (!color) return null;
   if (!(TEAM_BRAND_COLORS as readonly string[]).includes(color)) throw new Error(`invalid ${label} color`);

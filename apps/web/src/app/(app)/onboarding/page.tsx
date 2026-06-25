@@ -29,7 +29,6 @@ export default async function OnboardingPage() {
           name: org.name,
           domain: org.domain,
           memberCount: org.member_count,
-          teamCount: org.team_count,
         })),
       }
     : { email: whoami.email, domain: null, isPersonal: false, matchedOrgs: [] };

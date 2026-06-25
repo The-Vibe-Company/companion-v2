@@ -8,6 +8,7 @@ DEFAULT_SMOKE_PASSWORD="adminadmin"
 SMOKE_EMAIL="${BROWSER_SMOKE_EMAIL:-$DEFAULT_SMOKE_EMAIL}"
 SMOKE_PASSWORD="${BROWSER_SMOKE_PASSWORD:-$DEFAULT_SMOKE_PASSWORD}"
 SMOKE_SKILL="incident-summary"
+SMOKE_SKILL_DIR=""
 
 log() {
   printf '[agent-browser-smoke] %s\n' "$*"
@@ -126,8 +127,10 @@ prepare_fixtures() {
     --signup \
     --profile "$profile" >/dev/null
 
+  SMOKE_SKILL_DIR="$(prepare_smoke_skill_dir "$profile")"
+
   local push_output
-  if ! push_output="$(pnpm --filter @companion/cli dev skills push "$PWD/examples/skills/incident-summary" \
+  if ! push_output="$(pnpm --filter @companion/cli dev skills push "$SMOKE_SKILL_DIR" \
     --label engineering \
     --profile "$profile" 2>&1)"; then
     if ! printf '%s' "$push_output" | grep -Fi "version already exists" >/dev/null; then
@@ -137,8 +140,37 @@ prepare_fixtures() {
   fi
 }
 
+prepare_smoke_skill_dir() {
+  local profile="$1"
+  local fixture="$PWD/examples/skills/incident-summary"
+  local info_json existing_id tmp
+
+  if ! info_json="$(pnpm --silent --filter @companion/cli dev --json skills info "$SMOKE_SKILL" --profile "$profile" 2>/dev/null)"; then
+    printf '%s\n' "$fixture"
+    return
+  fi
+  existing_id="$(printf '%s' "$info_json" | node -e 'let s=""; process.stdin.on("data", d => s += d); process.stdin.on("end", () => { const j = JSON.parse(s); process.stdout.write(j.id || ""); });')"
+  if [ -z "$existing_id" ]; then
+    printf '%s\n' "$fixture"
+    return
+  fi
+
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/companion-smoke-skill.XXXXXX")"
+  cp -R "$fixture/." "$tmp/"
+  SKILL_ID="$existing_id" SKILL_DIR="$tmp" node <<'NODE'
+const fs = require("node:fs");
+const path = require("node:path");
+const manifestPath = path.join(process.env.SKILL_DIR, "companion.json");
+const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+manifest.metadata = manifest.metadata || {};
+manifest.metadata.companionSkillId = process.env.SKILL_ID;
+fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+NODE
+  printf '%s\n' "$tmp"
+}
+
 require_command agent-browser
-trap 'agent-browser close >/dev/null 2>&1 || true' EXIT
+trap 'agent-browser close >/dev/null 2>&1 || true; if [ -n "$SMOKE_SKILL_DIR" ] && [ "$SMOKE_SKILL_DIR" != "$PWD/examples/skills/incident-summary" ]; then rm -rf "$SMOKE_SKILL_DIR"; fi' EXIT
 
 if ! is_loopback_url; then
   if [ -z "${BROWSER_SMOKE_EMAIL+x}" ] || [ -z "${BROWSER_SMOKE_PASSWORD+x}" ]; then

@@ -7,9 +7,6 @@ const baseInput = {
     domain: "acme.test",
     autoJoin: false,
   },
-  team: {
-    name: "Engineering",
-  },
   invites: [],
 };
 
@@ -21,25 +18,17 @@ describe("completeOnboardingInputSchema", () => {
         org: { ...baseInput.org, color: "url(https://evil.test/x.png)" },
       }),
     ).toThrow();
-    expect(() =>
-      completeOnboardingInputSchema.parse({
-        ...baseInput,
-        team: { ...baseInput.team, color: "url(https://evil.test/x.png)" },
-      }),
-    ).toThrow();
   });
 
-  it("accepts team palette colors", () => {
+  it("accepts organization palette colors", () => {
     const color = TEAM_BRAND_COLORS[0]!;
     expect(
       completeOnboardingInputSchema.parse({
         ...baseInput,
         org: { ...baseInput.org, color },
-        team: { ...baseInput.team, color },
       }),
     ).toMatchObject({
       org: { color },
-      team: { color },
     });
   });
 });
@@ -52,8 +41,8 @@ describe("onboardingContextSchema", () => {
         domain: "acme.test",
         is_personal: false,
         matched_orgs: [
-          { id: "org_1", name: "Client A", domain: "acme.test", member_count: 2, team_count: 1 },
-          { id: "org_2", name: "Client B", domain: "acme.test", member_count: 4, team_count: 3 },
+          { id: "org_1", name: "Client A", domain: "acme.test", member_count: 2 },
+          { id: "org_2", name: "Client B", domain: "acme.test", member_count: 4 },
         ],
       }),
     ).toMatchObject({ matched_orgs: [{ id: "org_1" }, { id: "org_2" }] });

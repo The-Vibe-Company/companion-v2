@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Shared helpers for the local Companion skill scripts.
 
-This module is imported by both ``check_updates.py`` and ``skill_guard.py``. It
+This module is imported by ``bootstrap.py``, ``check_updates.py``, and ``skill_guard.py``. It
 holds credential resolution, the workspace API client, semver comparison, and
 lockfile parsing. It NEVER prints or persists the Companion token.
 """
@@ -19,8 +19,7 @@ from typing import Any
 
 
 def fail(message: str) -> None:
-    print(f"error: {message}", file=sys.stderr)
-    raise SystemExit(1)
+    raise SystemExit(f"error: {message}")
 
 
 def load_json(path: Path) -> dict[str, Any] | None:

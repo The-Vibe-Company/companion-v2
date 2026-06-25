@@ -82,12 +82,12 @@ describe("completeOnboarding", () => {
 });
 
 describe("domain onboarding context", () => {
-  it("returns multiple organizations for the actor's corporate domain (teamCount always 0)", async () => {
+  it("returns multiple organizations for the actor's corporate domain", async () => {
     const domainRows = [
       { orgId: "org-1", name: "Client A", domain: "acme.test" },
       { orgId: "org-2", name: "Client B", domain: "acme.test" },
     ];
-    // One member-count query per matched org (team counts were removed).
+    // One member-count query per matched org.
     const counts = [{ value: 2 }, { value: 4 }];
     const database = {
       select: vi.fn((cols: Record<string, unknown>) => {
@@ -106,8 +106,8 @@ describe("domain onboarding context", () => {
     await expect(getOnboardingContext(actor, database)).resolves.toMatchObject({
       domain: "acme.test",
       matchedOrgs: [
-        { id: "org-1", name: "Client A", memberCount: 2, teamCount: 0 },
-        { id: "org-2", name: "Client B", memberCount: 4, teamCount: 0 },
+        { id: "org-1", name: "Client A", memberCount: 2 },
+        { id: "org-2", name: "Client B", memberCount: 4 },
       ],
     });
   });

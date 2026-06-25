@@ -31,6 +31,31 @@ export const localSkillPromptsSchema = z.object({
 });
 export type LocalSkillPrompts = z.infer<typeof localSkillPromptsSchema>;
 
+/** Official file hashes for local integrity checks. */
+export const localSkillIntegrityFilePathSchema = z
+  .string()
+  .min(1)
+  .refine((value) => !value.includes("\\"), "integrity file paths must use forward slashes")
+  .refine((value) => !value.startsWith("/"), "integrity file paths must be relative")
+  .refine(
+    (value) => value.split("/").every((segment) => segment && segment !== "." && segment !== ".."),
+    "integrity file paths must not contain empty, dot, or dot-dot segments",
+  );
+
+export const localSkillIntegrityDigestSchema = z.string().regex(/^sha256:[0-9a-f]{64}$/);
+
+export const localSkillIntegrityFilesSchema = z
+  .record(localSkillIntegrityFilePathSchema, localSkillIntegrityDigestSchema)
+  .refine((files) => Object.keys(files).length > 0, "integrity files must not be empty");
+
+export const localSkillIntegritySchema = z.object({
+  /** Checksum of the canonical packed skill package. */
+  packageChecksum: localSkillIntegrityDigestSchema,
+  /** SHA-256 of important package files, keyed by package-relative path. */
+  files: localSkillIntegrityFilesSchema,
+});
+export type LocalSkillIntegrity = z.infer<typeof localSkillIntegritySchema>;
+
 /** Denormalized read shape for the Companion skills view and the CLI. */
 export const localSkillRowSchema = z.object({
   /** Companion workspace id (`organizations.id`) for local credential and lockfile keys. */
@@ -52,6 +77,8 @@ export const localSkillRowSchema = z.object({
   commands: z.array(localSkillCommandSchema),
   /** What changes in the available version (shown when status === "update"). */
   changes: z.array(z.string()),
+  /** Official hashes used by the installed skill to detect local customizations before update. */
+  integrity: localSkillIntegritySchema,
   prompts: localSkillPromptsSchema,
 });
 export type LocalSkillRow = z.infer<typeof localSkillRowSchema>;

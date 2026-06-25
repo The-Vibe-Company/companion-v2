@@ -372,7 +372,7 @@ Manifest v2 may declare a local update check:
   "checks": {
     "updates": {
       "runtime": "python",
-      "script": "scripts/check_updates.py",
+      "script": "scripts/bootstrap.py",
       "timeoutSeconds": 30
     }
   }
@@ -381,9 +381,20 @@ Manifest v2 may declare a local update check:
 
 The Companion API validates the declaration and verifies the referenced script is packaged, but it
 never executes the script. The installed Companion skill runs it locally when asked to audit updates.
-The bundled `scripts/check_updates.py` resolves credentials, calls `GET /skills?lib=mine`,
-`GET /skills?lib=org`, and `GET /skills?installed=true`, then compares those rows with
-`~/.companion/skills.lock.json` or the legacy `skills.log.json` fallback.
+The bundled `scripts/bootstrap.py` resolves credentials, calls `GET /local-skills/companion`,
+`GET /skills?lib=mine`, `GET /skills?lib=org`, and `GET /skills?installed=true`, then compares those
+rows with `~/.companion/skills.lock.json` or the legacy `skills.log.json` fallback.
+`scripts/check_updates.py` remains a compatibility wrapper around the bootstrap.
+
+Run the fast bootstrap when the agent needs startup context:
+
+```sh
+python3 scripts/bootstrap.py --json --auto-update-companion
+```
+
+The JSON shape is stable and contains `workspace`, `companion`, `integrity`, `skills`, `actions`, and
+`errors`. With `--auto-update-companion`, the script may update only the Companion skill itself. It
+never installs workspace-published skill updates; it only reports those as actions.
 
 ## Local preflight guard
 
@@ -412,9 +423,11 @@ other Companion task or skill mutation:
 GET /local-skills/companion
 ```
 
-The response includes `status`, `installedVersion`, `availableVersion`, and `changes`. Compare
-`availableVersion` with the `version` in the installed Companion skill's `companion.json`. If they
-match, no update is needed.
+The response includes `status`, `installedVersion`, `availableVersion`, `changes`, and `integrity`.
+`integrity.packageChecksum` is the canonical bundled package checksum, and `integrity.files` maps
+package-relative paths such as `SKILL.md`, `companion.json`, and `scripts/bootstrap.py` to official
+`sha256:<hex>` file hashes. Compare `availableVersion` with the version in the installed Companion
+skill's `companion.json`. If they match, no update is needed.
 
 If `availableVersion` is newer, download the bundled package:
 
@@ -422,10 +435,16 @@ If `availableVersion` is newer, download the bundled package:
 GET /local-skills/companion/package
 ```
 
-Extract it into a temporary directory, verify `SKILL.md` is at the package root, and verify its
-`companion.json.version` equals the `availableVersion` from `/local-skills/companion`. Only then
-replace the installed Companion skill folder. After replacement, call
-`POST /local-skills/companion/installed` with the installed version so the workspace status updates.
+Before replacing anything, compare the installed tracked files with the installed package's
+`companion.integrity.json` baseline. If the installed copy predates that baseline and already matches
+`availableVersion`, use `integrity.files` from `/local-skills/companion` as the fallback baseline. If
+any tracked file is modified or missing against the selected baseline, preserve the local folder and
+report `reason: "local_customizations"`. If all tracked files match, extract the package into a
+temporary directory, verify `SKILL.md` is at the package root, verify its `companion.json.version`
+equals the `availableVersion` from `/local-skills/companion`, and verify the staged
+`companion.integrity.json` matches the staged package files. Only then replace the installed
+Companion skill folder. After replacement, call `POST /local-skills/companion/installed` with the
+installed version so the workspace status updates.
 
 Do not use `/skills/{slug}/download` or `/skills/{slug}/versions/{version}/package` to update the
 built-in Companion skill. Those endpoints are for workspace-published skills.
@@ -436,8 +455,8 @@ built-in Companion skill. Those endpoints are for workspace-published skills.
 POST /local-skills/companion/installed
 Content-Type: application/json
 
-{ "version": "1.12.2", "agent": "Claude Code" }
+{ "version": "1.13.0", "agent": "Claude Code" }
 ```
 
 `version` must be valid semver (use this skill's `companion.json.version`). The response is
-`{ "ok": true, "status": "installed" | "update", "availableVersion": "1.12.2" }`.
+`{ "ok": true, "status": "installed" | "update", "availableVersion": "1.13.0" }`.

@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { LocalSkillRow } from "@companion/contracts";
 import type { SkillVM } from "@/lib/types";
 import { DetailMoreMenuContent, DetailView } from "./DetailView";
-import { LocalSkillDrawer } from "./LocalSkillsView";
+import { LocalSkillDrawer, LocalSkillsView } from "./LocalSkillsView";
 import { UploadDialog } from "./UploadDialog";
 
 const skill: SkillVM = {
@@ -44,7 +44,7 @@ const skill: SkillVM = {
   },
 };
 
-function localSkill(status: LocalSkillRow["status"]): LocalSkillRow {
+function localSkill(status: LocalSkillRow["status"], overrides: Partial<LocalSkillRow> = {}): LocalSkillRow {
   return {
     workspaceId: "org-1",
     key: "companion",
@@ -58,11 +58,13 @@ function localSkill(status: LocalSkillRow["status"]): LocalSkillRow {
     notes: "A local helper skill.\n\n- Keeps local skills current.",
     commands: [],
     changes: ["Refreshes the bundled helper."],
+    integrity: { packageChecksum: `sha256:${"a".repeat(64)}`, files: { "SKILL.md": `sha256:${"b".repeat(64)}` } },
     prompts: {
       install: "install {base} {workspaceId} {token}",
       update: "update {base} {workspaceId} {token}",
       use: "use {base} {workspaceId} {token}",
     },
+    ...overrides,
   };
 }
 
@@ -196,5 +198,23 @@ describe("skill update flow", () => {
     expect(installed).not.toContain("Reinstall Skill?");
     expect(fresh).toContain("Copy install prompt");
     expect(fresh).not.toContain("Reinstall Skill?");
+  });
+
+  it("uses the canonical companion local skill instead of the first row", () => {
+    const html = renderToString(
+      React.createElement(LocalSkillsView, {
+        workspaceId: "org-1",
+        workspaceName: "Acme",
+        skills: [
+          localSkill("none", { key: "other-helper", name: "Other helper", description: "Wrong row." }),
+          localSkill("installed"),
+        ],
+      }),
+    );
+
+    expect(html).toContain("Companion");
+    expect(html).toContain("companion");
+    expect(html).not.toContain("Other helper");
+    expect(html).not.toContain("other-helper");
   });
 });

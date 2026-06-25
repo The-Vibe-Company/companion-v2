@@ -156,7 +156,7 @@ export function LocalSkillsView({
   const [mounted, setMounted] = useState(false);
   const [dismissed, setDismissed] = useState(false);
 
-  const featured = skills[0] ?? null;
+  const featured = useMemo(() => skills.find((skill) => skill.key === "companion") ?? null, [skills]);
   const open = useMemo(() => skills.find((s) => s.key === openKey) ?? null, [skills, openKey]);
 
   const storageKey = featured ? gateStorageKey(workspaceName, featured.key) : null;

@@ -83,43 +83,42 @@ GET /v1/schemas/companion-manifest.v2.schema.json
 
 Use it whenever you create, validate, or repair `companion.json`.
 
-## Mandatory startup self-update
+## Mandatory startup bootstrap
 
-Run this self-update check only once per conversation, on the first invocation of this Companion
-skill in that discussion. After it succeeds, remember that it succeeded for the rest of the
-conversation and do not repeat it on later Companion turns unless the user explicitly asks to check
-for a Companion skill update, credentials/workspace changed, or the previous check failed.
+Run this bootstrap only once per conversation, on the first invocation of this Companion skill in
+that discussion. After it succeeds, remember that it succeeded for the rest of the conversation and
+do not repeat it on later Companion turns unless the user explicitly asks to check for updates,
+credentials/workspace changed, or the previous bootstrap failed.
 
-This check is mandatory startup maintenance for the first Companion invocation, not an optional user
+This bootstrap is mandatory startup maintenance for the first Companion invocation, not an optional
 confirmation flow. Do not validate, publish, update, archive, label, install, or otherwise mutate any
-other skill before that first check has succeeded. The trusted source is the token-authenticated
+other skill before that first bootstrap has succeeded. The trusted source is the token-authenticated
 Companion workspace resolved from `COMPANION_API_URL` and `COMPANION_TOKEN`; if those credentials or
 the workspace URL look wrong or unexpected, stop and ask the user to refresh Companion credentials
 before downloading anything.
 
-1. Resolve `COMPANION_API_URL` and `COMPANION_TOKEN` exactly as described in Configuration. If
-   credentials are missing, stop and ask the user to refresh Companion credentials from the workspace
-   install/use prompt.
-2. Read the local `version` from this installed Companion skill's own `companion.json`.
-3. Call `GET /local-skills/companion`.
-4. Compare the response `availableVersion` with the local version using exact semver comparison.
-   If they are equal, continue with the user's original request.
-5. If `availableVersion` is newer, install it before doing anything else:
-   - Download `GET /local-skills/companion/package` into a temporary directory.
-   - Extract it into a staging directory.
-   - Verify `SKILL.md` is at the package root.
-   - Verify the staged frontmatter declares `name: companion`.
-   - Verify staged `companion.json.version` equals `availableVersion`.
-   - Backup the current Companion skill folder.
-   - Replace the current folder with the staged package.
-   - Call `POST /local-skills/companion/installed` with the installed version and agent name.
-   - Report the old version, new version, and backup path.
-6. After installing an update, stop the current operation and tell the user to rerun the original
-   Companion command unless this runtime can safely reload the updated skill instructions in-process.
+Run it from this skill package root:
 
-If download, extraction, verification, replacement, or install reporting fails, stop without changing
-other skills. If replacement fails after moving files, restore the backup and stop. Avoid infinite
-loops by comparing exact semver and by reporting the installed version after replacement.
+```sh
+python3 scripts/bootstrap.py --json --auto-update-companion
+```
+
+The bootstrap resolves credentials, calls `GET /local-skills/companion`, `GET /skills?lib=org`,
+`GET /skills?lib=mine`, and `GET /skills?installed=true`, reads the active workspace entry in
+`~/.companion/skills.lock.json` or the legacy `skills.log.json` fallback, and returns a JSON context
+with `workspace`, `companion`, `integrity`, `skills`, `actions`, and `errors`.
+
+If a newer Companion skill is available and all tracked local files still match the installed
+version's official baseline from `companion.integrity.json`, `--auto-update-companion` downloads,
+stages, verifies, backs up, replaces, and reports the installed version through
+`POST /local-skills/companion/installed`. If any tracked local file is `modified` or `missing`
+against that installed baseline, the bootstrap blocks replacement with
+`reason: "local_customizations"` and preserves the local folder. It never installs updates for other
+skills; it only reports those as recommended actions.
+
+After installing a Companion update, stop the current operation and tell the user to rerun the
+original Companion command unless this runtime can safely reload the updated skill instructions
+in-process.
 
 ## Mandatory preflight guard (run before create, update, install, or lockfile write)
 
@@ -197,7 +196,7 @@ Companion-specific declarations in `companion.json` at the package root:
   "checks": {
     "updates": {
       "runtime": "python",
-      "script": "scripts/check_updates.py",
+      "script": "scripts/bootstrap.py",
       "timeoutSeconds": 30
     }
   }
@@ -303,7 +302,7 @@ fall back to `~/.companion/skills.log.json` only when the lockfile is absent. Th
 check does this for you:
 
 ```sh
-python3 scripts/check_updates.py
+python3 scripts/bootstrap.py --summary
 ```
 
 Run that script from this skill's package root. It only reads local Companion state and calls the
@@ -689,6 +688,8 @@ manifest declaration but never runs skill scripts in the control plane. The scri
 credentials, calls `GET /skills?lib=mine`, `GET /skills?lib=org`, and `GET /skills?installed=true`,
 then compares those workspace rows with the active workspace entry in
 `~/.companion/skills.lock.json` (or the legacy `skills.log.json` fallback).
+Use `python3 scripts/check_updates.py` only as a compatibility alias; it delegates to the same
+bootstrap implementation.
 
 For a targeted manual check of one installed skill, read its local `companion.json.version`, then ask
 the workspace for the current published version of that slug:
@@ -721,83 +722,27 @@ byte hash of `update.zip`.)
 
 ### Update this Companion skill
 
-This is the detailed replacement flow used by the mandatory startup self-update check above. It
-applies only to **the Companion skill itself**. This is the built-in local skill shown in the
-workspace's **Companion skills** section, so never use the generic `/skills/$SLUG/download` or
+This is the detailed replacement flow used by the mandatory startup bootstrap above. It applies only
+to **the Companion skill itself**. This is the built-in local skill shown in the workspace's
+**Companion skills** section, so never use the generic `/skills/$SLUG/download` or
 `/skills/$SLUG/versions/$VERSION/package` endpoints for it.
 
-1. Resolve credentials as described above, without printing the token.
-2. Read this skill's local `version` from its own `companion.json`.
-3. Ask the workspace for the current bundled Companion skill:
+Prefer the bootstrap command; it performs the integrity check and replacement flow:
 
 ```sh
-curl -s "$COMPANION_API_URL/local-skills/companion" \
-  -H "Authorization: Bearer $COMPANION_TOKEN"
+python3 scripts/bootstrap.py --json --auto-update-companion
 ```
 
-The response includes `status`, `installedVersion`, `availableVersion`, and `changes`. If
-`availableVersion` is equal to the local `companion.json.version`, report that this skill is
-already current and continue with the original request. If `availableVersion` is greater, install it
-before doing any other Companion work.
-
-Download and stage the latest package in a temporary directory before touching the installed skill
-folder:
-
-```sh
-tmp="$(mktemp -d)"
-curl -fsSL "$COMPANION_API_URL/local-skills/companion/package" \
-  -H "Authorization: Bearer $COMPANION_TOKEN" \
-  -o "$tmp/companion.zip"
-unzip -q "$tmp/companion.zip" -d "$tmp/package"
-test -f "$tmp/package/SKILL.md"
-```
-
-Read `version` from `$tmp/package/companion.json` and verify it equals the
-`availableVersion` returned by `/local-skills/companion`. If it does not match, delete the temporary
-directory and stop without changing the installed folder.
-
-If validation passes, replace the existing Companion skill folder with a staged copy. Validate the
-target before moving anything: `skill_dir` must be an absolute path, its basename must be
-`companion`, and the existing `$skill_dir/SKILL.md` must declare `name: companion`.
-
-```sh
-skill_dir="<path-to-installed-companion-skill>"
-case "$skill_dir" in
-  /*) ;;
-  *) echo "skill_dir must be absolute" >&2; exit 1 ;;
-esac
-test "$(basename "$skill_dir")" = "companion"
-test -f "$skill_dir/SKILL.md"
-grep -q '^name: companion$' "$skill_dir/SKILL.md"
-
-parent="$(dirname "$skill_dir")"
-staged="$(mktemp -d "$parent/.companion-update.XXXXXX")"
-cp -R "$tmp/package/." "$staged/"
-test -f "$staged/SKILL.md"
-grep -q '^name: companion$' "$staged/SKILL.md"
-
-backup="$(mktemp -d "$parent/.companion-backup.XXXXXX")"
-rmdir "$backup"
-mv "$skill_dir" "$backup"
-mv "$staged" "$skill_dir"
-echo "Previous Companion skill saved at $backup"
-```
-
-If replacement fails after moving files, restore the backup before stopping. Do not continue to the
-original Companion task after installing a newer Companion skill unless this runtime can safely
-reload the updated instructions in-process.
-
-Then report the installed version back to the workspace:
-
-```sh
-curl -s "$COMPANION_API_URL/local-skills/companion/installed" \
-  -H "Authorization: Bearer $COMPANION_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"version":"<availableVersion>","agent":"<your assistant name>"}'
-```
-
-Treat `{ "ok": true, "status": "installed" }` as success. If the response says `status: "update"`,
-tell the user the workspace still has a newer bundled version available.
+The bootstrap reads the local `companion.json.version`, compares it with `availableVersion` from
+`GET /local-skills/companion`, compares tracked files against the installed
+`companion.integrity.json` baseline, downloads `GET /local-skills/companion/package`, verifies
+`SKILL.md`, the staged `companion.json.version`, and the staged integrity baseline, backs up the
+current folder, replaces it, and reports the install with
+`POST /local-skills/companion/installed`. Treat a JSON result with
+`companion.autoUpdate.applied: true` as success. If the result has
+`companion.autoUpdate.blocked: true` and `reason: "local_customizations"`, do not overwrite the local
+folder; report the modified or missing files and ask the user whether to merge or reinstall the
+official package manually.
 
 ## Confirm installation (run once, at the end of install)
 
@@ -809,7 +754,7 @@ skills view shows the correct status and version. Report the version from this s
 curl -s "$COMPANION_API_URL/local-skills/companion/installed" \
   -H "Authorization: Bearer $COMPANION_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"version":"1.12.2","agent":"<your assistant name>"}'
+  -d '{"version":"1.13.0","agent":"<your assistant name>"}'
 ```
 
 A `{ "ok": true, "status": "installed" }` response confirms the workspace now knows this machine has

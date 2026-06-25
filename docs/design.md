@@ -174,7 +174,13 @@ credentials live separately in `~/.companion/credentials.json`, keyed by `organi
 lockfile keeps `apiUrl` metadata but never stores tokens. Legacy URL-keyed lockfiles are migrated on
 the next write, and `skills.log.json` is only a read-once legacy alias. The package and its presentation manifest ship in `packages/companion-skill`; the
 authoritative version is the `version` in the bundled `companion.json`, which the API packs (and
-caches) on demand. Only per-member install state is persisted in the workspace, in
+caches) on demand. Local skill rows also expose official integrity metadata: the canonical package
+checksum plus SHA-256 hashes for tracked files such as `SKILL.md`, `companion.json`, and
+`scripts/bootstrap.py`. The packaged skill also ships `companion.integrity.json`, a version-matched
+baseline for the installed copy. The installed bootstrap compares tracked files against that local
+baseline before auto-updating Companion, falling back to the workspace hashes only when the installed
+version is already the current bundled version; modified or missing tracked files are treated as
+local customizations and are never overwritten automatically. Only per-member install state is persisted in the workspace, in
 `local_skill_installs` (`(org_id, user_id, skill_key)` PK, the reported `installed_version`, an
 optional `agent_label`, `installed_at`, and `last_reported_at`). The skill reports its own install
 at the end of its install flow, and status is derived (Not installed / Installed / Update available)
@@ -345,7 +351,9 @@ slug-keyed detail route.
   bundled skill as `.zip`), and `POST /v1/local-skills/:key/installed` (the install callback: the
   skill reports `{ version, agent? }` so the workspace learns it is installed and at which version).
   Local skill rows include `workspaceId` (`organizations.id`) so token-authenticated assistants can
-  key credentials and local lockfiles without calling session-only org endpoints.
+  key credentials and local lockfiles without calling session-only org endpoints, plus `integrity`
+  metadata used by the bootstrap to verify current packages and as a same-version fallback for local
+  customization detection before replacement.
 - Schemas: `GET /v1/schemas/companion-manifest.v2.schema.json` serves the public JSON Schema used by
   assistants and editors to create or repair `companion.json`.
 - Orgs & settings: `/v1/orgs`, `GET`/`POST`/`PUT /v1/orgs/current` (read/select/rename+reslug the org,

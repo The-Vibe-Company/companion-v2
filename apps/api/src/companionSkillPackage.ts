@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
@@ -7,20 +8,29 @@ import {
   companionSkillDir,
 } from "@companion/companion-skill";
 import { computeLocalSkillStatus, type LocalSkillInstall } from "@companion/core/services";
-import type { LocalSkillPrompts, LocalSkillRow } from "@companion/contracts";
-import { packDir } from "@companion/skills";
+import { localSkillIntegrityFilesSchema, type LocalSkillPrompts, type LocalSkillRow } from "@companion/contracts";
+import { packDir, tarGzToZip } from "@companion/skills";
+import { z } from "zod";
 
 export interface CompanionSkillPackage {
   key: string;
-  /** Canonical `.tar.gz` archive. */
-  archive: Buffer;
+  /** Exact `.zip` bytes served by `/local-skills/companion/package`. */
+  zip: Buffer;
+  /** Canonical package checksum computed from the deterministic package archive. */
   checksum: string;
   sizeBytes: number;
   /** Authoritative version, read from the bundled companion.json `version`. */
   version: string;
+  integrity: LocalSkillRow["integrity"];
 }
 
 let cached: Promise<CompanionSkillPackage> | null = null;
+
+const companionIntegrityBaselineSchema = z.object({
+  schemaVersion: z.literal(1),
+  version: z.string(),
+  files: localSkillIntegrityFilesSchema.refine((files) => Object.keys(files).length > 0, "integrity baseline must include files"),
+});
 
 /**
  * Pack the bundled Companion skill once and cache the result (archive + checksum + version). The
@@ -39,15 +49,32 @@ export function getCompanionSkillPackage(): Promise<CompanionSkillPackage> {
 async function buildPackage(): Promise<CompanionSkillPackage> {
   const dir = companionSkillDir();
   const packed = await packDir(dir);
+  const zip = await tarGzToZip(packed.archive);
+  const packageChecksum = packed.checksum;
   const manifest = JSON.parse(await readFile(join(dir, "companion.json"), "utf8")) as { version?: string };
   const version = manifest.version;
   if (!version) throw new Error("bundled companion skill is missing companion.json version");
+  const baseline = companionIntegrityBaselineSchema.parse(JSON.parse(await readFile(join(dir, "companion.integrity.json"), "utf8")));
+  if (baseline.version !== version) throw new Error("bundled companion integrity baseline version does not match companion.json");
+  const files: Record<string, string> = { ...baseline.files };
+  for (const relPath of [...Object.keys(baseline.files), "companion.integrity.json"]) {
+    const bytes = await readFile(join(dir, relPath));
+    const digest = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+    if (relPath !== "companion.integrity.json" && baseline.files[relPath] !== digest) {
+      throw new Error(`bundled companion integrity baseline is stale for ${relPath}`);
+    }
+    files[relPath] = digest;
+  }
   return {
     key: COMPANION_SKILL_KEY,
-    archive: packed.archive,
-    checksum: packed.checksum,
-    sizeBytes: packed.sizeBytes,
+    zip,
+    checksum: packageChecksum,
+    sizeBytes: zip.length,
     version,
+    integrity: {
+      packageChecksum,
+      files,
+    },
   };
 }
 
@@ -114,9 +141,11 @@ NODE`,
     `   ${download}`,
     "3. Unzip companion.zip into wherever you keep skills (for example ~/.claude/skills/companion)",
     "   and confirm SKILL.md sits at the package root. Remove companion.zip when done.",
-    "4. Confirm the install so this workspace knows it is ready:",
+    "4. Run the bootstrap once from the installed companion folder:",
+    "   python3 scripts/bootstrap.py --summary",
+    "5. Confirm the install so this workspace knows it is ready:",
     `   ${report}`,
-    "5. Tell me when it's ready.",
+    "6. Tell me when it's ready.",
   ].join("\n");
 
   const update = [
@@ -124,17 +153,21 @@ NODE`,
     "",
     "1. Run the credential snippet for this user's OS so future skill calls use the current workspace:",
     credentials,
-    "2. Download the latest package:",
+    "2. From the installed companion folder, run the safe bootstrap update:",
+    "   python3 scripts/bootstrap.py --json --auto-update-companion",
+    "   It preserves local customizations: if tracked files are modified or missing, it blocks with",
+    '   reason "local_customizations" instead of overwriting them.',
+    "3. If bootstrap cannot run because the installed copy is too old, download the latest package:",
     `   ${download}`,
-    "3. Unzip companion.zip into a temporary folder and verify SKILL.md is at the package root.",
+    "4. Unzip companion.zip into a temporary folder and verify SKILL.md is at the package root.",
     `   Verify its companion.json version is ${version}.`,
-    "4. Validate the existing companion skill folder, then move it to a backup path and move the",
+    "5. Validate the existing companion skill folder, then move it to a backup path and move the",
     "   extracted package folder into its place. Do not delete the existing folder before the new",
     "   package has been staged and verified.",
     "   Remove companion.zip and the temporary folder when done.",
-    "5. Confirm the new version with the workspace:",
+    "6. Confirm the new version with the workspace:",
     `   ${report}`,
-    "6. Tell me what changed.",
+    "7. Tell me what changed.",
   ].join("\n");
 
   // The "use" prompt also carries fresh credentials: the drawer mints a new token on copy/send, so
@@ -146,6 +179,8 @@ NODE`,
     "Then use the skill. It should read COMPANION_API_URL, COMPANION_WORKSPACE_ID, and",
     "COMPANION_TOKEN from the environment when available; otherwise it should read them from",
     "~/.companion/credentials.json on macOS/Linux or $HOME\\.companion\\credentials.json on Windows.",
+    "On the first Companion use in a conversation, run:",
+    "python3 scripts/bootstrap.py --json --auto-update-companion",
   ].join("\n");
 
   return { install, update, use };
@@ -171,6 +206,7 @@ export async function buildCompanionSkillRow(
     notes: m.notes,
     commands: m.commands,
     changes: companionSkillChanges(pkg.version),
+    integrity: pkg.integrity,
     prompts: buildPrompts(pkg.version),
   };
 }

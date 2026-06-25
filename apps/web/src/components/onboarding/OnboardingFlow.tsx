@@ -8,22 +8,19 @@ import {
   Aside,
   ScreenAccount,
   ScreenCreateOrg,
-  ScreenCreateTeam,
   ScreenDetecting,
   ScreenFound,
   ScreenInvite,
   ScreenWelcome,
   hashColor,
   initialsOf,
-  LOGO_COLORS,
   type OrgDraft,
-  type TeamDraft,
 } from "./screens";
 
-type Screen = "account" | "detecting" | "found" | "create_org" | "create_team" | "invite" | "welcome";
+type Screen = "account" | "detecting" | "found" | "create_org" | "invite" | "welcome";
 type Path = "create" | "join" | null;
 
-const CREATE_STEPS = ["Account", "Organization", "First team", "Invite teammates", "You're in"];
+const CREATE_STEPS = ["Account", "Organization", "Invite teammates", "You're in"];
 const JOIN_STEPS = ["Account", "Your organization", "You're in"];
 
 function stepOf(screen: Screen, path: Path): number {
@@ -39,12 +36,10 @@ function stepOf(screen: Screen, path: Path): number {
     case "found":
     case "create_org":
       return 1;
-    case "create_team":
-      return 2;
     case "invite":
-      return 3;
+      return 2;
     default:
-      return 4;
+      return 3;
   }
 }
 
@@ -64,7 +59,6 @@ export function OnboardingFlow({ context, me }: { context: OnboardingContext; me
   const [selectedOrgId, setSelectedOrgId] = useState<string | null>(() => context.matchedOrgs[0]?.id ?? null);
 
   const [org, setOrg] = useState<OrgDraft>({ name: "", website: "", logo: null, candidates: [], fetchedFrom: "", domain: "" });
-  const [team, setTeam] = useState<TeamDraft>({ name: "", color: LOGO_COLORS[0]! });
   const [invites, setInvites] = useState<string[]>([]);
   const [allowDomain, setAllowDomain] = useState<boolean>(!!corporateDomain);
 
@@ -123,7 +117,6 @@ export function OnboardingFlow({ context, me }: { context: OnboardingContext; me
           color: org.logo?.color ?? null,
           logoUrl: org.logo?.src ?? null,
         },
-        team: { name: team.name.trim(), color: team.color, icon: team.emoji ?? null },
         invites,
       });
       router.push("/skills");
@@ -169,18 +162,8 @@ export function OnboardingFlow({ context, me }: { context: OnboardingContext; me
         org={org}
         setOrg={setOrg}
         domainHint={corporateDomain}
-        onNext={() => setScreen("create_team")}
-        onBack={() => (context.matchedOrgs.length ? setScreen("found") : setScreen("account"))}
-      />
-    );
-  } else if (screen === "create_team") {
-    panel = (
-      <ScreenCreateTeam
-        team={team}
-        setTeam={setTeam}
-        orgName={org.name}
         onNext={() => setScreen("invite")}
-        onBack={() => setScreen("create_org")}
+        onBack={() => (context.matchedOrgs.length ? setScreen("found") : setScreen("account"))}
       />
     );
   } else if (screen === "invite") {
@@ -192,7 +175,7 @@ export function OnboardingFlow({ context, me }: { context: OnboardingContext; me
         setAllowDomain={setAllowDomain}
         domain={org.domain || null}
         onFinish={() => setScreen("welcome")}
-        onBack={() => setScreen("create_team")}
+        onBack={() => setScreen("create_org")}
       />
     );
   } else if (screen === "welcome") {
@@ -200,7 +183,6 @@ export function OnboardingFlow({ context, me }: { context: OnboardingContext; me
       <ScreenWelcome
         path={path === "join" ? "join" : "create"}
         org={org}
-        team={team}
         invites={invites}
         allowDomain={allowDomain}
         domain={org.domain || null}
