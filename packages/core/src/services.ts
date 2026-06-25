@@ -148,9 +148,16 @@ function parseStoredCompanionManifest(frontmatter: string, fallbackSummary: stri
           ...parsed.data.display,
           description: parsed.data.display.description ?? (parsed.data.notes ? undefined : legacy?.description),
         },
+        name: parsed.data.name,
+        version: parsed.data.version,
+        companionSkillId: parsed.data.metadata.companionSkillId,
+        changelog: parsed.data.metadata.changelog,
+        environment: parsed.data.environment,
         notes: parsed.data.notes,
         requirements: parsed.data.requirements,
         dependencies: parsed.data.dependencies,
+        commands: parsed.data.commands,
+        checks: parsed.data.checks,
       });
     }
   } catch {
@@ -1108,30 +1115,36 @@ export async function listSkillVersions(input: {
     .from(schema.skillVersions)
     .where(and(eq(schema.skillVersions.orgId, input.orgId), eq(schema.skillVersions.skillId, skill.id)))
     .orderBy(desc(schema.skillVersions.createdAt));
-  return rows.map((r) => {
-    const manifest = parseStoredSkillFrontmatter(r.frontmatter);
-    const companion = parseStoredCompanionManifest(r.frontmatter, skill.description);
-    return {
-      id: r.id,
-      skill_id: r.skillId,
-      version: r.version,
-      note: r.note,
-      frontmatter: r.frontmatter,
-      tools: r.tools.length ? r.tools : parseAllowedTools(manifest?.["allowed-tools"]),
-      license: r.license ?? manifest?.license ?? null,
-      compatibility: manifest?.compatibility ?? null,
-      metadata: manifest?.metadata ?? {},
-      display: companion.display,
-      requirements: companion.requirements,
-      size_bytes: r.sizeBytes,
-      checksum: r.checksum,
-      storage_path: r.storagePath,
-      validation: r.validation,
-      validation_error: r.validationError,
-      created_by: r.createdBy,
-      created_at: r.createdAt.toISOString(),
-    };
-  });
+  return rows.map((r) => skillVersionRowFromRecord(r, skill));
+}
+
+export function skillVersionRowFromRecord(
+  r: typeof schema.skillVersions.$inferSelect,
+  skill: Pick<SkillListRow, "description">,
+): SkillVersionRow {
+  const manifest = parseStoredSkillFrontmatter(r.frontmatter);
+  const companion = parseStoredCompanionManifest(r.frontmatter, skill.description);
+  return {
+    id: r.id,
+    skill_id: r.skillId,
+    version: r.version,
+    note: r.note,
+    changelog: companion.metadata.changelog.find((entry) => entry.version === r.version) ?? null,
+    frontmatter: r.frontmatter,
+    tools: r.tools.length ? r.tools : parseAllowedTools(manifest?.["allowed-tools"]),
+    license: r.license ?? manifest?.license ?? null,
+    compatibility: manifest?.compatibility ?? null,
+    metadata: manifest?.metadata ?? {},
+    display: companion.display,
+    requirements: companion.requirements,
+    size_bytes: r.sizeBytes,
+    checksum: r.checksum,
+    storage_path: r.storagePath,
+    validation: r.validation,
+    validation_error: r.validationError,
+    created_by: r.createdBy,
+    created_at: r.createdAt.toISOString(),
+  };
 }
 
 /** Shape a stored `skill_comment_images` row into the API/view-model image (with its serve `url`). */

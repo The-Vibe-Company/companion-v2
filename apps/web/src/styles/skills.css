@@ -416,6 +416,8 @@ body { background: var(--color-canvas); color: var(--color-fg); font-family: var
 .act__ver { font-family: var(--font-mono); font-size: var(--text-xs); color: var(--color-fg); background: var(--color-surface-sunken); border: 1px solid var(--color-line); border-radius: 4px; padding: 0 6px; }
 .act__time { font-family: var(--font-mono); font-size: 11px; color: var(--color-faint); margin-left: auto; }
 .act__note { margin: 4px 0 0; font-size: var(--text-xs); color: var(--color-muted); }
+.act__changes { margin: 7px 0 0; padding-left: 16px; display: flex; flex-direction: column; gap: 3px; color: var(--color-muted); }
+.act__change { font-size: var(--text-xs); line-height: var(--leading-normal); }
 .curtag { font-family: var(--font-mono); font-size: 10px; color: var(--color-accent-fg); background: var(--color-accent); border-radius: 4px; padding: 1px 6px; font-weight: 600; }
 
 /* --- Comments (Linear-style thread + composer) --------------------------- */

@@ -109,6 +109,10 @@ Companion PAT. Use them only when the caller is operating with a valid session c
 | Read a comment image | `GET /skills/{slug}/comments/{commentId}/images/{imageId}` | Session |
 | Toggle star | `POST /skills/{slug}/star` | Session |
 
+Version rows returned by `GET /skills/{slug}/versions` include a nullable `changelog` object. When
+present, it is the `companion.json.metadata.changelog` entry for that exact version and carries
+`version`, optional `date`, and `changes`.
+
 A comment row includes an `images` array; each image carries `id`, `content_type`, `byte_size`,
 `position`, and a `url` (the session-gated path above) for display. To attach images when adding a
 comment, send `POST /skills/{slug}/comments` as `multipart/form-data` with the `body` field plus up to
