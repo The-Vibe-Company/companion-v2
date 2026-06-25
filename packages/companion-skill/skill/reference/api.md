@@ -145,7 +145,7 @@ reported as installed for the current user:
 POST /skills/{slug}/install
 Content-Type: application/json
 
-{ "version": "1.10.0", "source": "agent", "agent": "Claude Code" }
+{ "version": "<published-version>", "source": "agent", "agent": "Claude Code" }
 ```
 
 Skip this install report for personal skills; they already appear in the author's My Skills library.
@@ -351,8 +351,8 @@ built-in Companion skill. Those endpoints are for workspace-published skills.
 POST /local-skills/companion/installed
 Content-Type: application/json
 
-{ "version": "1.10.0", "agent": "Claude Code" }
+{ "version": "1.10.2", "agent": "Claude Code" }
 ```
 
 `version` must be valid semver (use this skill's `companion.json.version`). The response is
-`{ "ok": true, "status": "installed" | "update", "availableVersion": "1.10.0" }`.
+`{ "ok": true, "status": "installed" | "update", "availableVersion": "1.10.2" }`.
