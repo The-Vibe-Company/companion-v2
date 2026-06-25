@@ -48,6 +48,7 @@ These are the skills endpoints a personal access token (`skills:read` + `skills:
 | Inspect a skill's dependency graph | `GET /skills/{slug}/dependencies` | `skills:read` |
 | Archive a skill | `POST /skills/{slug}/archive` | `skills:write` |
 | Restore an archived skill | `POST /skills/{slug}/restore` | `skills:write` |
+| Preview private deps included when sharing | `GET /skills/{slug}/share-plan` | `skills:read` |
 | Share a personal skill to the org | `POST /skills/{slug}/share` | `skills:write` |
 | List the label (folder) tree | `GET /labels` | `skills:read` |
 | Create a label (folder) | `POST /labels` | `skills:write` |
@@ -108,6 +109,10 @@ Companion PAT. Use them only when the caller is operating with a valid session c
 | Read a comment image | `GET /skills/{slug}/comments/{commentId}/images/{imageId}` | Session |
 | Toggle star | `POST /skills/{slug}/star` | Session |
 
+Version rows returned by `GET /skills/{slug}/versions` include a nullable `changelog` object. When
+present, it is the `companion.json.metadata.changelog` entry for that exact version and carries
+`version`, optional `date`, and `changes`.
+
 A comment row includes an `images` array; each image carries `id`, `content_type`, `byte_size`,
 `position`, and a `url` (the session-gated path above) for display. To attach images when adding a
 comment, send `POST /skills/{slug}/comments` as `multipart/form-data` with the `body` field plus up to
@@ -152,8 +157,12 @@ the `scope` field chooses the library. The Companion skill must send `scope=pers
 explicitly for a brand-new skill after asking the user where to publish it; do not rely on server
 defaults. Re-publishing never changes scope, so do not send `scope` on updates. Depending on server
 version, update-time `scope` may be ignored or rejected if it contradicts the existing skill.
-**`POST /skills/{slug}/share`** is the only way to move a personal skill into the org library (owner
-only, one-way). A skill name (slug) is unique across both libraries in a workspace.
+**`GET /skills/{slug}/share-plan`** previews the mandatory private dependency migration for a personal
+skill. It returns the private dependencies owned by the same creator that will be shared with the root
+skill, plus any blocking dependency issues. **`POST /skills/{slug}/share`** is the only way to move a
+personal skill into the org library (owner only, one-way). Sharing is atomic and includes those private
+dependencies automatically; the response includes `shared_dependencies`. A skill name (slug) is unique
+across both libraries in a workspace.
 
 ## Upload bodies and labels
 

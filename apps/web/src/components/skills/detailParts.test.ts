@@ -1,8 +1,9 @@
 import React from "react";
 import { renderToString } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
+import type { SkillVersionRow } from "@companion/contracts";
 import type { SkillVM } from "@/lib/types";
-import { FiledIn, PropList, Requirements } from "./detailParts";
+import { Activity, FiledIn, PropList, Requirements } from "./detailParts";
 
 const skill: SkillVM = {
   uuid: "skill-1",
@@ -118,5 +119,65 @@ describe("Requirements section rendering", () => {
   it("shows an empty state when nothing is declared", () => {
     const html = renderToString(React.createElement(Requirements, { requirements: [] }));
     expect(html).toContain("no required secrets or environment variables");
+  });
+});
+
+function versionRow(overrides: Partial<SkillVersionRow>): SkillVersionRow {
+  return {
+    id: "version-1",
+    skill_id: "skill-1",
+    version: "1.2.0",
+    note: "",
+    changelog: null,
+    frontmatter: "{}",
+    tools: [],
+    license: null,
+    compatibility: null,
+    metadata: {},
+    display: {},
+    requirements: [],
+    size_bytes: 100,
+    checksum: "sha256:" + "a".repeat(64),
+    storage_path: "skill-archives/demo/1.2.0.tar.gz",
+    validation: "valid",
+    validation_error: null,
+    created_by: "user-1",
+    created_at: "2026-06-25T10:00:00.000Z",
+    ...overrides,
+  };
+}
+
+describe("Activity changelog rendering", () => {
+  it("renders the matching version changelog as compact change items", () => {
+    const html = renderToString(
+      React.createElement(Activity, {
+        authorName: "Alice Nardon",
+        versions: [
+          versionRow({
+            changelog: {
+              version: "1.2.0",
+              date: "2026-06-25",
+              changes: ["Add changelog to Activity.", "Keep the timeline compact."],
+            },
+          }),
+        ],
+      }),
+    );
+
+    expect(html).toContain("Add changelog to Activity.");
+    expect(html).toContain("Keep the timeline compact.");
+    expect(html).toContain("act__changes");
+  });
+
+  it("falls back to the release note when no changelog entry exists", () => {
+    const html = renderToString(
+      React.createElement(Activity, {
+        authorName: "Alice Nardon",
+        versions: [versionRow({ id: "version-2", version: "1.1.0", note: "Manual release note." })],
+      }),
+    );
+
+    expect(html).toContain("Manual release note.");
+    expect(html).toContain("act__note");
   });
 });

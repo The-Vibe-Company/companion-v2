@@ -14,6 +14,7 @@ const serviceMocks = vi.hoisted(() => {
     archiveSkill: noop,
     assignLabel: noop,
     buildDependencyPlan: noop,
+    buildSkillSharePlan: noop,
     completeOnboarding: noop,
     createInvitation: noop,
     createLabel: noop,
