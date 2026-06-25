@@ -399,10 +399,19 @@ confirmed block into the skill's `companion.json` and **re-validate** before pub
 }
 ```
 
-The workspace displays these as the skill's setup notes. When you install a skill that declares
-environment entries, surface them to the user so they can set the secrets and environment variables
-before running it. Declarations travel inside `companion.json` — there are no extra upload
+The workspace displays these as the skill's setup notes. When you install or update a skill that
+declares environment entries, surface them to the user so they can set the secrets and environment
+variables before running it. Declarations travel inside `companion.json` — there are no extra upload
 parameters and never any secret values.
+
+Before installing or updating a workspace-published skill, inspect the target package's
+`companion.json.environment.secrets`. Treat only secrets with `required: true` as blocking. Never ask
+the user to paste or reveal secret values; ask them to confirm that every required secret is already
+available/configured, or to explicitly authorize installing without those secrets ready. If they do
+neither, stop before downloading, replacing files, calling install endpoints, or writing
+`~/.companion/skills.lock.json`. Optional secrets and non-secret environment variables are setup
+notes only and do not block installation. This guard does not apply to the built-in Companion
+self-update flow under `/local-skills/companion`.
 
 ### Publish a skill
 
@@ -694,8 +703,11 @@ out of date, or not published yet (a `404` means the slug is not in this workspa
 
 ### Install updates
 
-For an out-of-date folder, take the current `version` from the `download` response above, fetch that
-version's package, and replace the files in place (after the user confirms):
+For an out-of-date folder, take the current `version` from the `download` response above. Before
+fetching the package or replacing files, apply the required-secret readiness guard from "Declare
+required secrets and environment variables": required secrets must be confirmed ready, or the user
+must explicitly authorize installing without them. Then fetch that version's package and replace the
+files in place:
 
 ```sh
 curl -sL "$COMPANION_API_URL/skills/$SLUG/versions/$VERSION/package" \
@@ -797,7 +809,7 @@ skills view shows the correct status and version. Report the version from this s
 curl -s "$COMPANION_API_URL/local-skills/companion/installed" \
   -H "Authorization: Bearer $COMPANION_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"version":"1.12.1","agent":"<your assistant name>"}'
+  -d '{"version":"1.12.2","agent":"<your assistant name>"}'
 ```
 
 A `{ "ok": true, "status": "installed" }` response confirms the workspace now knows this machine has
