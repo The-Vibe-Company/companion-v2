@@ -3,6 +3,7 @@ import {
   COMPANION_MANIFEST_SCHEMA_URL,
   companionDependencySlugs,
   companionEnvironmentToRequirements,
+  companionManifestJson,
   companionManifestSchema,
   fallbackCompanionManifest,
 } from "../src/companionManifest";
@@ -26,6 +27,7 @@ describe("companionManifestSchema", () => {
       },
       dependencies: { "markdown-report": "84d8bee1-5ad3-4676-8c16-730e2a15ba70" },
       commands: [{ name: "Publish", desc: "Publish safely." }],
+      checks: { updates: { runtime: "python", script: "scripts/check_updates.py", timeoutSeconds: 30 } },
     });
 
     expect(parsed.name).toBe("incident-summary");
@@ -38,6 +40,9 @@ describe("companionManifestSchema", () => {
     ]);
     expect(parsed.notes).toBe("## Notes\n\nMarkdown notes.");
     expect(parsed.display.summary).toBe("Generate clean incident handoffs from raw notes.");
+    expect(companionManifestJson(parsed)).toMatchObject({
+      checks: { updates: { runtime: "python", script: "scripts/check_updates.py", timeoutSeconds: 30 } },
+    });
     expect(parsed.display.description).toBeUndefined();
   });
 
@@ -77,6 +82,29 @@ describe("companionManifestSchema", () => {
         ),
       }),
     ).toThrow(/64 dependencies/);
+  });
+
+  it("rejects unsafe local update check declarations", () => {
+    expect(() =>
+      companionManifestSchema.parse({
+        checks: { updates: { runtime: "node", script: "scripts/check_updates.py" } },
+      }),
+    ).toThrow();
+    expect(() =>
+      companionManifestSchema.parse({
+        checks: { updates: { runtime: "python", script: "/tmp/check.py" } },
+      }),
+    ).toThrow(/relative/);
+    expect(() =>
+      companionManifestSchema.parse({
+        checks: { updates: { runtime: "python", script: "../check.py" } },
+      }),
+    ).toThrow(/dot-dot/);
+    expect(() =>
+      companionManifestSchema.parse({
+        checks: { updates: { runtime: "python", script: "scripts\\check.py" } },
+      }),
+    ).toThrow(/forward slashes/);
   });
 
   it("rejects secret values and missing changelog for v2 versions", () => {

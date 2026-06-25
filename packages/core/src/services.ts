@@ -637,6 +637,8 @@ export async function listSkills(input: {
   label?: string;
   /** Filter to skills filed under no label at all. */
   nolabel?: boolean;
+  /** Return only org skills the caller has recorded as installed. */
+  installedOnly?: boolean;
   /** Return ONLY archived skills (the Archived view). Ignored when `includeArchived` is set. */
   archived?: boolean;
   /** Include both archived and live skills (detail / dependency / download resolution). */
@@ -675,6 +677,22 @@ export async function listSkills(input: {
   if (input.nolabel) {
     predicates.push(
       sql`not exists (select 1 from ${labelTable} sl where sl.org_id = ${input.orgId} and sl.skill_id = ${schema.skills.id}${labelOwnerScope})`,
+    );
+  }
+  if (input.installedOnly) {
+    predicates.push(
+      exists(
+        database
+          .select({ one: sql`1` })
+          .from(schema.skillInstalls)
+          .where(
+            and(
+              eq(schema.skillInstalls.orgId, input.orgId),
+              eq(schema.skillInstalls.skillId, schema.skills.id),
+              eq(schema.skillInstalls.userId, input.actor.id),
+            ),
+          ),
+      ),
     );
   }
 

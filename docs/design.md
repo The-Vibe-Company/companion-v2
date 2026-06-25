@@ -83,8 +83,8 @@ together. A version's declared tools
 Companion-specific package data lives in root `companion.json`, not `SKILL.md`: `name`, `version`,
 human-facing `title`/`description`, Markdown-compatible `notes`, `metadata.companionSkillId`,
 `metadata.changelog`, `environment.env` / `environment.secrets` declarations (never values),
-`commands`, and un-versioned skill `dependencies` as `{ skillName: skillId }`. `description` updates the existing
-`skills.description` listing field; the full normalized manifest rides in the existing
+`commands`, local-only `checks`, and un-versioned skill `dependencies` as `{ skillName: skillId }`.
+`description` updates the existing `skills.description` listing field; the full normalized manifest rides in the existing
 `skill_versions.frontmatter` JSON under `companion` and is parsed back into the read shape
 (`skillListRowSchema.display` / `skillListRowSchema.requirements`) for the skill detail view. Legacy
 packages that still declare `requirements` in `SKILL.md`, `display`, or dependency arrays are readable
@@ -173,6 +173,11 @@ optional `agent_label`, `installed_at`, and `last_reported_at`). The skill repor
 at the end of its install flow, and status is derived (Not installed / Installed / Update available)
 by comparing the reported version against the bundled version. Installs are recorded with an
 `audit_log` `local_skill.install` entry.
+
+`GET /v1/skills` is token-readable with `skills:read`: `lib=org` returns the org library, `lib=mine`
+returns the caller's authored personal skills plus reported installed org skills, and
+`installed=true` narrows the list to skills with a `skill_installs` row for that caller. This is
+Companion-reported install state; exact disk inventory remains local in `~/.companion/skills.lock.json`.
 
 `api_tokens` holds scoped personal access tokens for programmatic publish/install.
 Only the `sha256` `token_hash` is stored (the plaintext `cmp_pat_…` is shown once); each row carries

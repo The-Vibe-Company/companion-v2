@@ -1,7 +1,7 @@
 {
-  "$schema": "https://companion.dev/schemas/companion-manifest.v2.schema.json",
+  "$schema": "https://thecompanion.sh/schemas/companion-manifest.v2.schema.json",
   "name": "companion",
-  "version": "1.10.3",
+  "version": "1.11.1",
   "title": "Companion",
   "description": "Manage local SKILL.md packages with Companion: self-update first, validate, publish, update, resolve dependencies, track installs, and repair manifests.",
   "notes": "## What it does\n\nThe Companion skill gives your assistant one reliable workflow for local SKILL.md packages: validate, publish, update, organize, install, audit, and self-update.\n\n## Safety model\n\n- Reads only skill folders you point it at and Companion's own local state under ~/.companion.\n- Stores credentials in ~/.companion/credentials.json by workspace id and never prints tokens.\n- Confirms publishing or archival changes before mutating workspace skills.\n- Uses companion.json as the source of truth for package identity, version, env/secrets, dependencies, notes, commands, and changelog.\n\n## Local tracking\n\nCompanion records installed skills in ~/.companion/skills.lock.json under workspace-id keys so audits can compare local versions, checksums, and dependency snapshots against the workspace registry without storing tokens.",
@@ -9,7 +9,7 @@
     "companionSkillId": "b0780a97-6972-4a2b-8e88-f41a528900c7",
     "changelog": [
       {
-        "version": "1.10.3",
+        "version": "1.11.1",
         "date": "2026-06-25",
         "changes": [
           "Adds a CI guard requiring companion.json.version to increase when bundled Companion skill files change.",
@@ -17,10 +17,19 @@
         ]
       },
       {
+        "version": "1.11.0",
+        "date": "2026-06-24",
+        "changes": [
+          "Documents token-supported workspace skill listing, including My Skills and installed-only filters.",
+          "Adds a local Python update check that compares workspace listings, reported installs, and ~/.companion/skills.lock.json.",
+          "Declares local-only manifest checks so agents can run update audits without the Companion API executing skill scripts."
+        ]
+      },
+      {
         "version": "1.10.2",
         "date": "2026-06-24",
         "changes": [
-          "Updates Companion manifest examples to use the companion.dev schema URL."
+          "Updates Companion manifest examples to use the thecompanion.sh schema URL."
         ]
       },
       {
@@ -74,6 +83,7 @@
   },
   "dependencies": {},
   "commands": [
+    { "name": "List skills", "desc": "List org, My Skills, reported installed skills, and local lockfile inventory." },
     { "name": "Publish a skill", "desc": "Validate a skill, ask Personal vs Org and folder placement, then publish it safely." },
     { "name": "Update a skill", "desc": "Push a new version with targeted identity checks." },
     { "name": "Organize with labels", "desc": "Create, assign, rename, recolor, or delete org and personal folder labels." },
@@ -85,5 +95,12 @@
     { "name": "Install updates", "desc": "Bring outdated skills up to the latest published version." },
     { "name": "Validate a skill", "desc": "Check a skill is well formed before you share it." },
     { "name": "Manage your skills", "desc": "List and organize the skills on this machine." }
-  ]
+  ],
+  "checks": {
+    "updates": {
+      "runtime": "python",
+      "script": "scripts/check_updates.py",
+      "timeoutSeconds": 30
+    }
+  }
 }

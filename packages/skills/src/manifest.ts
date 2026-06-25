@@ -94,6 +94,7 @@ function parseCompanionJson(raw: string | null, frontmatter: SkillFrontmatter): 
     environment: parsed.environment,
     changelog: parsed.metadata.changelog,
     commands: parsed.commands,
+    checks: parsed.checks,
     notes: parsed.notes,
   });
 }
@@ -140,6 +141,7 @@ export async function prepareSkillDirForPublish(
     environment: existingManifest.environment,
     changelog: publishChangelogForVersion(existingManifest, companion.version),
     commands: existingManifest.commands,
+    checks: existingManifest.checks,
     notes: existingManifest.notes,
   });
   await writeFile(companionPath, buildNormalizedCompanionJson(companionManifest), "utf8");

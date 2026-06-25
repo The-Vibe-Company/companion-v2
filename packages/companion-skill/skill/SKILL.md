@@ -128,7 +128,7 @@ Companion-specific declarations in `companion.json` at the package root:
 
 ```json
 {
-  "$schema": "https://companion.dev/schemas/companion-manifest.v2.schema.json",
+  "$schema": "https://thecompanion.sh/schemas/companion-manifest.v2.schema.json",
   "name": "incident-summary",
   "version": "1.2.0",
   "title": "Incident summary",
@@ -161,7 +161,14 @@ Companion-specific declarations in `companion.json` at the package root:
   "dependencies": {
     "markdown-report": "84d8bee1-5ad3-4676-8c16-730e2a15ba70"
   },
-  "commands": []
+  "commands": [],
+  "checks": {
+    "updates": {
+      "runtime": "python",
+      "script": "scripts/check_updates.py",
+      "timeoutSeconds": 30
+    }
+  }
 }
 ```
 
@@ -177,7 +184,7 @@ Always **analyze the whole skill package before you validate, publish, or update
 as enough evidence by itself:
 
 1. Read `companion.json` if present and collect declared dependencies, environment declarations,
-   changelog, commands, notes, and display fields.
+   changelog, commands, local checks, notes, and display fields.
 2. Build a local skill index from sibling skill folders and any skill folders the user explicitly
    gave you. A skill folder is a directory with `SKILL.md`; use that file's frontmatter `name` as the
    slug. Do not scan the whole machine.
@@ -214,13 +221,39 @@ The canonical lockfile is keyed by workspace id, not by Companion URL. Each work
 `apiUrl` metadata plus installed skill paths, workspace ids, versions, checksums, declared
 env/secrets, and dependency snapshots. It must never contain `COMPANION_TOKEN` or any other secret.
 Prefer it for audits, then fall back to reading pointed-at skill folders. This inventory is local and
-needs no network call — your token is for publishing and version checks, not for browsing the whole
-workspace catalog.
+can be combined with the token-readable workspace catalog to explain what is published, what is
+reported installed, and what is actually tracked on this machine.
 
 If a legacy `~/.companion/skills.log.json` exists, read it only as a one-time fallback when
 `skills.lock.json` is absent. Write all future state to `skills.lock.json`. If the lockfile uses the
 old URL-keyed `workspaces` shape, migrate entries to `workspaces[COMPANION_WORKSPACE_ID]` on the next
 write and keep `apiUrl` as metadata under that workspace entry.
+
+### List workspace and local skills
+
+Use the token-supported list endpoint to inspect the workspace catalog:
+
+```sh
+curl -s "$COMPANION_API_URL/skills?lib=org" -H "Authorization: Bearer $COMPANION_TOKEN"
+curl -s "$COMPANION_API_URL/skills?lib=mine" -H "Authorization: Bearer $COMPANION_TOKEN"
+curl -s "$COMPANION_API_URL/skills?installed=true" -H "Authorization: Bearer $COMPANION_TOKEN"
+```
+
+`lib=org` lists the org library. `lib=mine` lists the caller's My Skills: authored personal skills
+plus org skills reported as installed. `installed=true` narrows any list to skills with a
+`skill_installs` record for the current user, which means "reported installed to Companion"; it does
+not prove the files still exist on disk.
+
+For real local inventory, read the active workspace entry in `~/.companion/skills.lock.json` and
+fall back to `~/.companion/skills.log.json` only when the lockfile is absent. The bundled update
+check does this for you:
+
+```sh
+python3 scripts/check_updates.py
+```
+
+Run that script from this skill's package root. It only reads local Companion state and calls the
+skills API with `skills:read`; it does not write files, publish, install, or update anything.
 
 ### Validate a skill
 
@@ -538,6 +571,9 @@ members, invitations, org settings, or tokens.
 
 Allowed skills API tasks:
 
+- List workspace skills with `GET /skills?lib=org`, `GET /skills?lib=mine`, and
+  `GET /skills?installed=true` using a `skills:read` token. Use `installed=true` for Companion's
+  reported install state; use the local lockfile for disk inventory.
 - Validate, publish, or update a skill with `POST /skills` after full local analysis and a synced
   `companion.json`. Use `dependency=` parameters only for old packages that have no manifest yet.
   For new skills, send explicit `scope=personal` or `scope=org` after the user chooses the library;
@@ -566,9 +602,20 @@ For token-authenticated automation, prefer the documented read/write package end
 
 ### Check for updates
 
-For each installed skill under the active workspace in `~/.companion/skills.lock.json`, or each
-pointed-at skill folder with a `companion.json.metadata.companionSkillId`, read its
-`companion.json.version`, then ask the workspace for the current published version of that slug:
+For a full audit, run the local-only manifest-declared update check from this skill package:
+
+```sh
+python3 scripts/check_updates.py
+```
+
+This Python script executes only on the user's machine. The Companion API validates and serves the
+manifest declaration but never runs skill scripts in the control plane. The script resolves
+credentials, calls `GET /skills?lib=mine`, `GET /skills?lib=org`, and `GET /skills?installed=true`,
+then compares those workspace rows with the active workspace entry in
+`~/.companion/skills.lock.json` (or the legacy `skills.log.json` fallback).
+
+For a targeted manual check of one installed skill, read its local `companion.json.version`, then ask
+the workspace for the current published version of that slug:
 
 ```sh
 curl -s "$COMPANION_API_URL/skills/$SLUG/download" -H "Authorization: Bearer $COMPANION_TOKEN"
@@ -683,7 +730,7 @@ skills view shows the correct status and version. Report the version from this s
 curl -s "$COMPANION_API_URL/local-skills/companion/installed" \
   -H "Authorization: Bearer $COMPANION_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"version":"1.10.3","agent":"<your assistant name>"}'
+  -d '{"version":"1.11.1","agent":"<your assistant name>"}'
 ```
 
 A `{ "ok": true, "status": "installed" }` response confirms the workspace now knows this machine has

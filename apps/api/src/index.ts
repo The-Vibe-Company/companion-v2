@@ -149,9 +149,12 @@ import { appRouter } from "./trpc";
 import { assertTargetedSkillUpdate, parseSkillPublishAction } from "./skillPublishGuards";
 import { buildInlineCompanionManifest, uploadDependencyValues, withResolvedManifestDependencies } from "./skillCompanionManifest";
 import { buildCompanionSkillRow, getCompanionSkillPackage } from "./companionSkillPackage";
+import { parseSkillListQuery } from "./skillListQuery";
 import { COMPANION_SKILL_KEY } from "@companion/companion-skill";
 
 const app = new Hono<{ Variables: ApiVariables }>();
+
+export { app };
 
 app.get("/v1/schemas/companion-manifest.v2.schema.json", (c) => c.json(companionManifestV2JsonSchema));
 
@@ -842,27 +845,36 @@ app.delete("/v1/orgs/current/members/:userId", async (c) => {
 
 app.get("/v1/skills", async (c) => {
   try {
+    actorFromContext(c, true);
+    requireScope(c, "skills:read");
     // `?lib=mine` returns the caller's "My Skills" (authored personal skills + org skills they have
     // installed); `?lib=org` (default) is the flat org-wide library. `?label=marketing/seo` filters to
     // skills filed under that path OR any descendant (personal folders for `mine`, org folders for
-    // `org`); `?nolabel=true` filters to skills with no folder.
-    const library = c.req.query("lib") === "mine" ? ("mine" as const) : ("org" as const);
-    const labelRaw = c.req.query("label")?.trim();
+    // `org`); `?nolabel=true` filters to skills with no folder; `?installed=true` narrows to skills
+    // the caller has reported installed.
+    const parsed = parseSkillListQuery((name) => c.req.query(name));
     // A label may only reach the LIKE-prefix filter if it is a well-formed path. A malformed/typo
     // `?label=` (e.g. `%`) can't match any validated stored path, so it returns an EMPTY folder —
     // never a SQL wildcard leaking into the LIKE, and never a silent broadening to the whole org list.
-    const labelValid = !labelRaw || labelPathSchema.safeParse(labelRaw).success;
-    const label = labelRaw || undefined;
-    const nolabel = c.req.query("nolabel") === "true";
-    const archived = c.req.query("archived") === "true";
     // `?q=` turns this into a relevance-ranked full-text search (slug, description, tools, and the
     // SKILL.md body). Folded into the list endpoint so no path can shadow a valid `search` slug.
-    const query = c.req.query("q")?.trim() || undefined;
     return c.json(
       await withTenant(c, ({ actor, orgId, database }) =>
-        labelValid
-          ? listSkills({ actor, orgId, library, label, nolabel, archived, query, limit: query ? 20 : undefined, database })
+        parsed.labelValid
+          ? listSkills({
+              actor,
+              orgId,
+              library: parsed.library,
+              label: parsed.label,
+              nolabel: parsed.nolabel,
+              installedOnly: parsed.installedOnly,
+              archived: parsed.archived,
+              query: parsed.query,
+              limit: parsed.limit,
+              database,
+            })
           : Promise.resolve([] as Awaited<ReturnType<typeof listSkills>>),
+        true,
       ),
     );
   } catch (error) {
