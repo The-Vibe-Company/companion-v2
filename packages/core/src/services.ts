@@ -17,6 +17,7 @@ import type {
   SkillFilterPreferences,
   SkillListRow,
   SkillPublicPreview,
+  SkillSharePlan,
   SkillShareTarget,
   SkillVersionRow,
   TokenScope,
@@ -1830,6 +1831,8 @@ export async function getDownloadVersion(input: {
 interface DepGraphSkill {
   id: string;
   slug: string;
+  scope: "personal" | "org";
+  creatorId: string;
   archivedAt: Date | null;
   currentVersionId: string | null;
   /** Current published version string (null when no version), for org-wide update comparisons. */
@@ -1861,6 +1864,8 @@ async function loadDepGraph(database: Db, orgId: string): Promise<DepGraph> {
     .select({
       id: schema.skills.id,
       slug: schema.skills.slug,
+      scope: schema.skills.scope,
+      creatorId: schema.skills.creatorId,
       archivedAt: schema.skills.archivedAt,
       currentVersionId: schema.skills.currentVersionId,
       currentVersion: schema.skillVersions.version,
@@ -1877,6 +1882,8 @@ async function loadDepGraph(database: Db, orgId: string): Promise<DepGraph> {
     const entry: DepGraphSkill = {
       id: s.id,
       slug: s.slug,
+      scope: s.scope,
+      creatorId: s.creatorId,
       archivedAt: s.archivedAt,
       currentVersionId: s.currentVersionId,
       currentVersion: s.currentVersion ?? null,
@@ -1973,6 +1980,76 @@ function depNote(status: SkillDependencyStatus, targetSlug: string, dependentSlu
     default:
       return null;
   }
+}
+
+function shareBlockerMessage(status: SkillDependencyStatus, targetSlug: string, dependentSlug: string): string {
+  return depNote(status, targetSlug, dependentSlug) ?? `${targetSlug} is not ready to share`;
+}
+
+function addShareBlocker(
+  blocked: Map<string, SkillSharePlan["blocked"][number]>,
+  slug: string,
+  status: SkillDependencyStatus,
+  msg: string,
+): void {
+  if (!blocked.has(slug)) blocked.set(slug, { slug, status, msg });
+}
+
+interface ShareMigrationDependency {
+  id: string;
+  slug: string;
+  status: "satisfied";
+  note: null;
+}
+
+interface ShareMigrationPlan {
+  root: DepGraphSkill;
+  dependencies: ShareMigrationDependency[];
+  blocked: SkillSharePlan["blocked"];
+}
+
+function buildShareDependencyClosure(input: {
+  graph: DepGraph;
+  root: DepGraphSkill;
+}): ShareMigrationPlan {
+  const dependencies = new Map<string, ShareMigrationDependency>();
+  const blocked = new Map<string, SkillSharePlan["blocked"][number]>();
+  const visited = new Set<string>();
+
+  const visit = (dependent: DepGraphSkill) => {
+    if (visited.has(dependent.id)) return;
+    visited.add(dependent.id);
+
+    for (const edge of input.graph.requiresBySkill.get(dependent.id) ?? []) {
+      const target = input.graph.bySlug.get(edge.dependsOnSlug);
+      if (!target) {
+        addShareBlocker(blocked, edge.dependsOnSlug, "missing", "not published to this workspace");
+        continue;
+      }
+      if (target.scope === "personal" && target.creatorId !== input.root.creatorId) {
+        addShareBlocker(blocked, edge.dependsOnSlug, "missing", "not published to this workspace");
+        continue;
+      }
+
+      const status = depEdgeStatus(input.graph, dependent.id, edge);
+      if (status !== "satisfied") {
+        addShareBlocker(blocked, edge.dependsOnSlug, status, shareBlockerMessage(status, edge.dependsOnSlug, dependent.slug));
+        continue;
+      }
+
+      if (target.scope === "personal" && target.id !== input.root.id) {
+        dependencies.set(target.slug, { id: target.id, slug: target.slug, status: "satisfied", note: null });
+        visit(target);
+      }
+    }
+  };
+
+  visit(input.root);
+  return {
+    root: input.root,
+    dependencies: [...dependencies.values()].sort((a, b) => a.slug.localeCompare(b.slug)),
+    blocked: [...blocked.values()].sort((a, b) => a.slug.localeCompare(b.slug)),
+  };
 }
 
 /**
@@ -2172,6 +2249,8 @@ function depGraphDependentFor(input: { graph: DepGraph; slug: string }): DepGrap
   return {
     id: existing?.id ?? `prospective:${input.slug}`,
     slug: input.slug,
+    scope: existing?.scope ?? "org",
+    creatorId: existing?.creatorId ?? "",
     archivedAt: null,
     currentVersionId: existing?.currentVersionId ?? null,
     currentVersion: existing?.currentVersion ?? null,
@@ -2266,50 +2345,95 @@ export async function restoreSkill(input: {
 }
 
 /**
+ * Preview the mandatory private dependency migration for Share. The plan walks the current-version
+ * dependency closure from the personal root skill: org dependencies remain as-is, while the owner's
+ * personal dependencies are listed for the same one-way move into the org library. Missing, archived,
+ * cyclic, or non-owned private targets block the share.
+ */
+async function buildShareMigrationPlan(input: {
+  actor: ActorContext;
+  orgId: string;
+  slug: string;
+  database?: Db;
+}): Promise<ShareMigrationPlan> {
+  const database = input.database ?? db;
+  await assertMember(database, input.actor, input.orgId);
+  const skill = await database.query.skills.findFirst({
+    where: and(eq(schema.skills.orgId, input.orgId), eq(schema.skills.slug, input.slug)),
+  });
+  if (!skill) throw new Error("skill not found");
+  // Preserve personal-skill privacy: a non-owner must see the same result as an unknown slug.
+  // Org skills are visible to every member, so they can still return the explicit "not shareable"
+  // owner-gate error below.
+  if (skill.scope === "personal" && skill.creatorId !== input.actor.id) throw new Error("skill not found");
+  if (!canManagePersonalSkill(input.actor.id, { scope: skill.scope, creatorId: skill.creatorId })) {
+    throw new Error("only the owner can share a personal skill");
+  }
+
+  const graph = await loadDepGraph(database, input.orgId);
+  const root = graph.bySlug.get(skill.slug);
+  if (!root) throw new Error("skill not found");
+  return buildShareDependencyClosure({ graph, root });
+}
+
+export async function buildSkillSharePlan(input: {
+  actor: ActorContext;
+  orgId: string;
+  slug: string;
+  database?: Db;
+}): Promise<SkillSharePlan> {
+  const plan = await buildShareMigrationPlan(input);
+
+  return {
+    slug: plan.root.slug,
+    dependencies: plan.dependencies.map(({ slug, status, note }) => ({ slug, status, note })),
+    blocked: plan.blocked,
+  };
+}
+
+/**
  * Move a personal skill into the org library ("Share to organization"). Owner-only: only the creator
- * of a personal skill may share it. Flips `scope` 'personal' → 'org' (now visible to every member,
- * owner display becomes the creator) and drops its private folder assignments — org folders apply from
- * here on. The slug is already workspace-unique, so the scope flip can never collide. One-way: there
- * is no un-share endpoint.
+ * of a personal skill may share it. Flips `scope` 'personal' → 'org' for the root skill and all of
+ * its owner-private dependency closure, then drops their private folder assignments — org folders
+ * apply from here on. The slug is already workspace-unique, so the scope flip can never collide.
+ * One-way: there is no un-share endpoint.
  */
 export async function shareSkill(input: {
   actor: ActorContext;
   orgId: string;
   slug: string;
   database?: Db;
-}): Promise<{ scope: "org" }> {
+}): Promise<{ scope: "org"; shared_dependencies: string[] }> {
   const database = input.database ?? db;
-  await assertMember(database, input.actor, input.orgId);
-  // Resolve the row directly (not via the list query) — Share only needs identity + scope + owner.
-  const skill = await database.query.skills.findFirst({
-    where: and(eq(schema.skills.orgId, input.orgId), eq(schema.skills.slug, input.slug)),
-  });
-  if (!skill) throw new Error("skill not found");
-  if (!canManagePersonalSkill(input.actor.id, { scope: skill.scope, creatorId: skill.creatorId })) {
-    throw new Error("only the owner can share a personal skill");
-  }
-  await database.transaction(async (txDb) => {
+  const result = await database.transaction(async (txDb) => {
     const tx = txDb as unknown as Db;
+    const plan = await buildShareMigrationPlan({ actor: input.actor, orgId: input.orgId, slug: input.slug, database: tx });
+    if (plan.blocked.length) throw new Error("share dependencies must be resolved before sharing");
+
+    const migrationIds = [plan.root.id, ...plan.dependencies.map((d) => d.id)];
+    const sharedDependencies = plan.dependencies.map((d) => d.slug);
+
     await tx
       .update(schema.skills)
       .set({ scope: "org", updatedAt: new Date() })
-      .where(eq(schema.skills.id, skill.id));
-    // The skill leaves the personal library: drop its private folder assignments (org folders apply now).
+      .where(and(eq(schema.skills.orgId, input.orgId), inArray(schema.skills.id, migrationIds)));
+    // Migrated skills leave the personal library: drop private folder assignments (org folders apply now).
     await tx
       .delete(schema.personalSkillLabels)
       .where(
-        and(eq(schema.personalSkillLabels.orgId, input.orgId), eq(schema.personalSkillLabels.skillId, skill.id)),
+        and(eq(schema.personalSkillLabels.orgId, input.orgId), inArray(schema.personalSkillLabels.skillId, migrationIds)),
       );
     await tx.insert(schema.auditLog).values({
       orgId: input.orgId,
       actorId: input.actor.id,
       action: "skill.share",
       targetType: "skill",
-      targetId: skill.id,
-      metadata: { slug: skill.slug },
+      targetId: plan.root.id,
+      metadata: { slug: plan.root.slug, shared_dependencies: sharedDependencies },
     });
+    return { scope: "org" as const, shared_dependencies: sharedDependencies };
   });
-  return { scope: "org" };
+  return result;
 }
 
 /**

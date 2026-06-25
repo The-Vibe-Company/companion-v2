@@ -287,8 +287,10 @@ use it to build a clean public preview URL such as `/s/$share_token`.
 ### Public org-skill preview links
 
 Org skills have an anyone-with-the-link metadata preview. Personal skills do not; the user must first
-share a personal skill to the org with `POST /skills/{slug}/share`. The preview exposes only display
-metadata and never exposes package content, files, downloads, requirements, secrets, labels, `id`,
+preview the mandatory private dependency migration with `GET /skills/{slug}/share-plan`, then share a
+personal skill to the org with `POST /skills/{slug}/share`. The share is atomic and includes owned
+private dependencies automatically; the response includes `shared_dependencies`. The preview exposes
+only display metadata and never exposes package content, files, downloads, requirements, secrets, labels, `id`,
 `org_id`, or `creator_id`.
 
 ```http
@@ -433,8 +435,9 @@ a different slug. Never publish a second skill over an existing slug.
 A skill lives in one of two libraries (`scope`). An **org** skill is visible to every member of the
 workspace, and any member can read, edit, archive, or delete it — organized with org-wide **labels**
 (folders). A **personal** skill is private to its creator (the My Skills library), organized with that
-person's own **personal folders**. `POST /skills/{slug}/share` moves a personal skill into the org
-library (owner-only, one-way).
+person's own **personal folders**. `GET /skills/{slug}/share-plan` previews the owned private
+dependencies that must move with a personal skill, and `POST /skills/{slug}/share` moves the root plus
+those private dependencies into the org library atomically (owner-only, one-way).
 
 Before any real `POST /skills` upload for a brand-new skill, ask the user these placement questions.
 Use the runtime harness UI when it exists; if a structured user-input tool is available, use it

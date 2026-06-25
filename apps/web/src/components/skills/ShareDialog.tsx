@@ -1,7 +1,9 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
+import type { SkillSharePlan } from "@companion/contracts";
 import { Icon } from "../Icon";
+import { fetchSkillSharePlan } from "@/lib/queries";
 import type { SkillVM } from "@/lib/types";
 
 /**
@@ -17,11 +19,13 @@ export function ShareDialog({
 }: {
   skill: SkillVM;
   orgName: string;
-  onConfirm: () => void;
+  onConfirm: (plan: SkillSharePlan) => void;
   onClose: () => void;
 }) {
   const cancelRef = useRef<HTMLButtonElement>(null);
   const returnRef = useRef<HTMLElement | null>(null);
+  const [plan, setPlan] = useState<SkillSharePlan | null>(null);
+  const [planError, setPlanError] = useState<string | null>(null);
 
   useEffect(() => {
     returnRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -38,6 +42,26 @@ export function ShareDialog({
       queueMicrotask(() => returnRef.current?.focus());
     };
   }, [onClose]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setPlan(null);
+    setPlanError(null);
+    fetchSkillSharePlan(skill.id)
+      .then((next) => {
+        if (!cancelled) setPlan(next);
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) setPlanError(error instanceof Error ? error.message : "Could not load the share plan.");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [skill.id]);
+
+  const blocked = plan?.blocked ?? [];
+  const dependencies = plan?.dependencies ?? [];
+  const canConfirm = !!plan && !planError && blocked.length === 0;
 
   return (
     <>
@@ -75,12 +99,52 @@ export function ShareDialog({
             </span>
             <span>You can install it back into My Skills anytime.</span>
           </div>
+          {!plan && !planError && (
+            <div className="ml-share__row">
+              <span className="ml-share__rowico" aria-hidden="true">
+                <Icon name="loader" size={15} />
+              </span>
+              <span>Checking private dependencies...</span>
+            </div>
+          )}
+          {dependencies.length > 0 && (
+            <div className="ml-share__deps" aria-label="Private dependencies included in this share">
+              <div className="ml-share__depshead">Private dependencies included</div>
+              {dependencies.map((dep) => (
+                <div className="ml-share__dep" key={dep.slug}>
+                  <Icon name="package" size={14} />
+                  <span className="mono">{dep.slug}</span>
+                </div>
+              ))}
+            </div>
+          )}
+          {blocked.length > 0 && (
+            <div className="ml-share__block">
+              <div className="ml-share__depshead">Resolve before sharing</div>
+              {blocked.map((block) => (
+                <div className="ml-share__dep" key={block.slug}>
+                  <Icon name="alert-triangle" size={14} />
+                  <span>
+                    <b className="mono">{block.slug}</b>: {block.msg}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+          {planError && (
+            <div className="ml-share__block">
+              <div className="ml-share__dep">
+                <Icon name="alert-triangle" size={14} />
+                <span>{planError}</span>
+              </div>
+            </div>
+          )}
         </div>
         <div className="ml-share__foot">
           <button type="button" className="ml-share__cancel" ref={cancelRef} onClick={onClose}>
             Cancel
           </button>
-          <button type="button" className="btn-primary" onClick={onConfirm}>
+          <button type="button" className="btn-primary" onClick={() => plan && onConfirm(plan)} disabled={!canConfirm}>
             <Icon name="send" size={15} />
             Share to organization
           </button>

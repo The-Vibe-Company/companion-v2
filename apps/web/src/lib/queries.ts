@@ -16,6 +16,8 @@ import type {
   SkillFilesResponse,
   SkillFilterPreferences,
   SkillListRow,
+  SkillSharePlan,
+  ShareSkillResult,
   SkillVersionRow,
   TokenScope,
   ValidationResult,
@@ -333,8 +335,16 @@ export async function unassignPersonalSkillLabel(slug: string, path: string): Pr
 }
 
 /** Share a personal skill into the org library (owner-only; flips scope personal → org). */
-export async function shareSkillToOrg(slug: string): Promise<{ ok: true; slug: string; scope: "org" }> {
-  return apiFetch<{ ok: true; slug: string; scope: "org" }>(`/v1/skills/${slug}/share`, { method: "POST" });
+export async function fetchSkillSharePlan(slug: string): Promise<SkillSharePlan> {
+  return apiFetch<SkillSharePlan>(`/v1/skills/${slug}/share-plan`);
+}
+
+export async function shareSkillToOrg(slug: string): Promise<ShareSkillResult> {
+  return apiFetch<ShareSkillResult>(`/v1/skills/${slug}/share`, { method: "POST" });
+}
+
+export async function fetchSkillLibrary(lib: "mine" | "org"): Promise<SkillListRow[]> {
+  return apiFetch<SkillListRow[]>(`/v1/skills?lib=${lib}`);
 }
 
 export async function saveSkillFilterPreferences(

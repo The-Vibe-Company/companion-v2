@@ -1047,6 +1047,38 @@ body { background: var(--color-canvas); color: var(--color-fg); font-family: var
 }
 .ml-share__rowico { color: var(--color-faint); margin-top: 2px; flex: none; display: inline-flex; }
 .ml-share__rowico--ok { color: var(--color-ok); }
+.ml-share__deps,
+.ml-share__block {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-sunken);
+  padding: 10px;
+}
+.ml-share__block {
+  border-color: color-mix(in oklab, var(--color-warn) 34%, var(--color-line));
+  background: color-mix(in oklab, var(--color-warn) 8%, var(--color-surface));
+}
+.ml-share__depshead {
+  color: var(--color-faint);
+  font-size: var(--text-xs);
+  font-weight: 600;
+}
+.ml-share__dep {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  color: var(--color-muted);
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal, 1.5);
+}
+.ml-share__dep svg {
+  flex: none;
+  margin-top: 2px;
+  color: var(--color-faint);
+}
 .ml-share__foot { display: flex; justify-content: flex-end; gap: 8px; padding: 18px 22px 20px; }
 .ml-share__cancel {
   height: 32px;
