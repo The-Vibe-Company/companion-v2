@@ -45,6 +45,7 @@ These are the skills endpoints a personal access token (`skills:read` + `skills:
 | Validate (no publish) + dependency preflight | `POST /skills?action=validate` | `skills:write` |
 | Publish a new skill | `POST /skills` | `skills:write` |
 | Update a skill | `POST /skills?expect_slug={slug}&expect_skill_id={id}` | `skills:write` |
+| Rename a skill in place | `POST /skills/{slug}/rename` | `skills:write` |
 | Inspect a skill's dependency graph | `GET /skills/{slug}/dependencies` | `skills:read` |
 | Archive a skill | `POST /skills/{slug}/archive` | `skills:write` |
 | Restore an archived skill | `POST /skills/{slug}/restore` | `skills:write` |
@@ -245,6 +246,30 @@ and if a skill already exists for the package slug but the package declares a di
 is rejected (`skill "<name>" has id "<id>", but the package declares Companion skill id "<other>";
 refusing to retarget`). This makes it impossible for an edit to silently retarget another skill.
 
+## Rename a skill
+
+Use `POST /skills/{slug}/rename` only when the user explicitly wants the same workspace skill id to
+move to a new slug. This is not a publish and does not create, archive, duplicate, or replace a skill.
+
+```http
+POST /skills/skill-creator/rename
+Content-Type: application/json
+
+{ "newSlug": "skill-creator-and-eval", "title": "Skill Creator and Eval" }
+```
+
+The response is `{ "ok": true, "id": "...", "old_slug": "skill-creator", "slug":
+"skill-creator-and-eval", "title": "Skill Creator and Eval" }`. The `id`, versions, labels,
+installs, stars, comments, share token, dependency links, checksums, and package history stay attached
+to the same skill. Existing public `/s/{share_token}` links remain valid and resolve to the new slug.
+Historical package archives are not rewritten.
+
+After a successful rename, update the local package folder so future publishes use the new slug:
+change `SKILL.md` frontmatter `name` and `companion.json.name` to the returned `slug`, keep
+`companion.json.metadata.companionSkillId` unchanged, and send future updates with
+`expect_slug={newSlug}&expect_skill_id={id}`. Do not try to rename by uploading the old
+`companionSkillId` under a new package name; normal `POST /skills` retarget protection will reject it.
+
 A re-publish preserves the skill's existing scope and labels. Do not ask Personal vs Org for updates,
 because scope is immutable. Re-publish never moves, adds, or removes folder labels. Ask only whether
 to add folders after the update; if yes, publish the new version first, then call
@@ -284,7 +309,9 @@ visible to every member, while personal skills are visible only to their creator
 in `upload` first, in topological order.
 
 `GET /skills/{slug}/dependencies?version=` returns the resolved Requires + Used by graph. Each edge
-keeps a live status (`satisfied` / `missing` / `archived` / `cycle`).
+keeps a live status (`satisfied` / `missing` / `archived` / `cycle`). Dependency reads use the stable
+target skill id when the server has one, so a renamed dependency continues to resolve and is shown
+under its current slug.
 
 Archiving hides a skill from the normal lists but keeps it viewable, restorable, and downloadable
 while a published version still references it. `POST /skills/{slug}/archive` accepts an optional

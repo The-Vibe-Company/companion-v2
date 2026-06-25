@@ -192,6 +192,8 @@ export const skills = pgTable(
       .references(() => organizations.id, { onDelete: "cascade" }),
     slug: text("slug").notNull(),
     description: text("description").notNull(),
+    /** Mutable display-title override used by explicit rename; version manifests stay immutable. */
+    displayName: text("display_name"),
     // `creator_id` records who first published the skill (provenance/Activity, drives the profile
     // join). It is also the OWNER of a personal skill: when `scope = 'personal'` only this user can
     // read/edit/share it. Org skills (`scope = 'org'`) keep the flat model — every member may edit.

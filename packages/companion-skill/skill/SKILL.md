@@ -63,7 +63,7 @@ Agent Skills-compatible; Companion-specific package data lives in `companion.jso
 
 `companion.json` is the package manifest. It records:
 
-- `name` — the skill slug.
+- `name` — the skill slug. After an explicit Companion rename, update this to the returned slug.
 - `version` — the package version.
 - `metadata.companionSkillId` — the published skill's stable id in the workspace registry.
 - `metadata.changelog` — release notes for each published version.
@@ -156,7 +156,9 @@ prints or writes the token.
   existing one, restore it if it is archived, or pick a different slug.
 
 Never infer that one skill replaces another because their names are similar. Identity is the workspace
-skill id (`companion.json metadata.companionSkillId`), not the slug text.
+skill id (`companion.json metadata.companionSkillId`), not the slug text. If the user wants to rename
+an existing skill, use the explicit rename endpoint; do not publish the old `companionSkillId` under a
+new package name.
 
 ## Companion manifest (analyze, then sync companion.json)
 
@@ -649,11 +651,36 @@ curl -s -X DELETE "$COMPANION_API_URL/labels" \
   -d '{"path":"growth/seo"}'
 ```
 
+### Rename a skill
+
+When the user explicitly wants to change a skill's slug while keeping the same workspace skill id, use
+the dedicated rename API. Do not upload a package with the old `companionSkillId` and a new
+`companion.json.name`; the normal publish endpoint rejects that as a retarget.
+
+```http
+POST /skills/{oldSlug}/rename
+Content-Type: application/json
+
+{ "newSlug": "skill-creator-and-eval", "title": "Skill Creator and Eval" }
+```
+
+The response includes the unchanged `id`, `old_slug`, new `slug`, and nullable `title`. Versions,
+labels, installs, stars, comments, share token, dependency links, checksums, and historical package
+archives remain attached to the same skill id. Public `/s/{share_token}` links continue to work and
+resolve to the new slug.
+
+After success, update the local skill folder before any future publish: change `SKILL.md` frontmatter
+`name` and `companion.json.name` to the returned `slug`, keep
+`companion.json.metadata.companionSkillId` unchanged, and use the returned slug for future
+`expect_slug` values.
+
 Personal folder routes mirror the org routes under `/personal-labels` and
 `/skills/$SLUG/personal-labels`; use them only for authored personal skills. Each label mutation
 returns `{ "ok": true }`. Deleting a folder only unfiles its skills; it never deletes a skill.
 Inspect a skill's dependency graph with `GET /skills/$SLUG/dependencies` if you are unsure what it
-pulls in or what depends on it — dependencies are independent of labels.
+pulls in or what depends on it — dependencies are independent of labels. Dependency reads use the
+stable target skill id when available, so a renamed dependency remains valid and appears under its
+current slug.
 
 ### Manage skill API calls
 
@@ -673,6 +700,9 @@ Allowed skills API tasks:
   For new skills, send explicit `scope=personal` or `scope=org` after the user chooses the library;
   repeat `label=<path>` only for confirmed new-skill folder placement. For existing skills, add or
   remove folders with the label routes after the update.
+- Rename a skill with `POST /skills/$SLUG/rename` only after explicit user confirmation. After
+  success, update local `SKILL.md` and `companion.json.name` to the returned slug while preserving
+  `metadata.companionSkillId`.
 - Inspect a skill's dependency graph with `GET /skills/$SLUG/dependencies`.
 - Archive or restore a skill with `POST /skills/$SLUG/archive` and `POST /skills/$SLUG/restore`
   (any member can do this).

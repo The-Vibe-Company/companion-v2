@@ -48,6 +48,8 @@ import {
   listSkillVersions,
   publishSkillVersion,
   assertCanPublishSkillVersion,
+  prepareSkillPublishDependencies,
+  renameSkill,
   renameLabel,
   reportLocalSkillInstall,
   removeOrgAccessDomain,
@@ -91,6 +93,7 @@ import {
   labelPathSchema,
   orgSettingsResponseSchema,
   publishSkillInputSchema,
+  renameSkillInputSchema,
   renameLabelInputSchema,
   reportLocalSkillInstallInputSchema,
   reportSkillInstallInputSchema,
@@ -234,35 +237,6 @@ function skillSummary(fm: SkillFrontmatter, manifest: CompanionManifest): string
   return manifest.display.summary ?? fm.description;
 }
 
-async function resolveDependencyMap(input: {
-  actor: ReturnType<typeof actorFromContext>;
-  orgId: string;
-  slugs: string[];
-}): Promise<Record<string, string>> {
-  const pairs: Record<string, string> = {};
-  for (const slug of input.slugs) {
-    const skill = await getSkillBySlug({ actor: input.actor, orgId: input.orgId, slug });
-    if (skill) pairs[slug] = skill.id;
-  }
-  return pairs;
-}
-
-async function assertManifestDependencyIds(input: {
-  actor: ReturnType<typeof actorFromContext>;
-  orgId: string;
-  manifest?: CompanionManifest;
-}): Promise<void> {
-  if (!input.manifest) return;
-  for (const [slug, declaredId] of Object.entries(input.manifest.dependencies)) {
-    if (!declaredId) continue;
-    const skill = await getSkillBySlug({ actor: input.actor, orgId: input.orgId, slug });
-    if (!skill) continue;
-    if (skill.id !== declaredId) {
-      throw new Error(`dependency "${slug}" id does not match the workspace skill`);
-    }
-  }
-}
-
 async function resolvePublishTarget(input: {
   actor: ReturnType<typeof actorFromContext>;
   orgId: string;
@@ -346,7 +320,7 @@ async function publishCanonical(input: {
   note: string;
   /** SKILL.md markdown body — persisted server-side to power full-text content search. */
   body: string;
-  dependencies?: string[];
+  dependencies?: Awaited<ReturnType<typeof prepareSkillPublishDependencies>>;
 }): Promise<{ id: string; slug: string; version: string; checksum: string; sizeBytes: number }> {
   const { actor, orgId, canonical, fm, companionManifest, skillId, scope, labels, version, note, body, dependencies } =
     input;
@@ -367,7 +341,7 @@ async function publishCanonical(input: {
     tools: fm.allowedTools,
     license: fm.license ?? null,
     note,
-    dependencies: dependencies ?? [],
+    dependencies: dependencies?.slugs ?? [],
   });
   await withTenantContext({ orgId, userId: actor.id }, (database) =>
     assertCanPublishSkillVersion({ actor, orgId, payload, database }),
@@ -375,7 +349,7 @@ async function publishCanonical(input: {
   await putSkillArchive({ key, body: canonical.archive, preventOverwrite: true });
   try {
     const published = await withTenantContext({ orgId, userId: actor.id }, (database) =>
-      publishSkillVersion({ actor, orgId, payload, archiveKey: key, database }),
+      publishSkillVersion({ actor, orgId, payload, archiveKey: key, dependencies, database }),
     );
     return { ...published, slug: fm.name, checksum: canonical.checksum, sizeBytes: canonical.sizeBytes };
   } catch (error) {
@@ -1190,6 +1164,31 @@ app.post("/v1/skills/:slug/share", async (c) => {
   }
 });
 
+/** Explicitly rename a skill slug/title in place without publishing a new version. */
+app.post("/v1/skills/:slug/rename", async (c) => {
+  try {
+    actorFromContext(c, true);
+    requireScope(c, "skills:write");
+    const body = renameSkillInputSchema.parse(await c.req.json());
+    const result = await withTenant(
+      c,
+      ({ actor, orgId, database }) =>
+        renameSkill({
+          actor,
+          orgId,
+          slug: c.req.param("slug"),
+          newSlug: body.newSlug,
+          title: body.title,
+          database,
+        }),
+      true,
+    );
+    return c.json(result);
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
 app.get("/v1/skills/:slug", async (c) => {
   try {
     // Resolve archived skills too — they stay viewable, so the canonical detail endpoint must
@@ -1685,11 +1684,18 @@ app.post("/v1/skills", bodyLimit({ maxSize: 32 * 1024 * 1024, onError: (c) => js
       companionManifestPath: result.companion_manifest_path,
       companionManifest: result.companion_manifest,
     });
+    let preparedDependencies;
     try {
-      await assertManifestDependencyIds({ actor, orgId, manifest: result.companion_manifest });
+      preparedDependencies = await prepareSkillPublishDependencies({
+        actor,
+        orgId,
+        slugs: dependencyValues,
+        manifest: result.companion_manifest,
+      });
     } catch (error) {
       return c.json({ result, error: error instanceof Error ? error.message : String(error) }, 422);
     }
+    dependencyValues = preparedDependencies.slugs;
     // Dependency preflight: which declared deps are published / must be uploaded / dropped, plus any
     // blockers (missing / cycle). Skills are flat — there is no owner-cover constraint. Computed for
     // both validate (preview) and publish.
@@ -1715,11 +1721,10 @@ app.post("/v1/skills", bodyLimit({ maxSize: 32 * 1024 * 1024, onError: (c) => js
       metadataSkillId: result.companion_manifest?.metadata.companionSkillId ?? fm.metadata.companion_skill_id,
       legacyVersion: result.legacy?.version,
     });
-    const dependencyMap = await resolveDependencyMap({ actor, orgId, slugs: dependencyValues });
     const normalized = await canonicalizeSkillArchive(archive, {
       skillId: target.skillId,
       version: target.version,
-    }, { dependencies: dependencyMap });
+    }, { dependencies: preparedDependencies.manifestDependencies });
     const normalizedResult = await validateSkillArchive(normalized.canonical.archive);
     if (!normalizedResult.ok || !normalizedResult.frontmatter) {
       return c.json({ result: normalizedResult, error: normalizedResult.error ?? "validation failed after normalization" }, 422);
@@ -1740,7 +1745,7 @@ app.post("/v1/skills", bodyLimit({ maxSize: 32 * 1024 * 1024, onError: (c) => js
         version: target.version,
         note: messageRaw ?? "",
         body: normalizedResult.body ?? "",
-        dependencies: companionDependencySlugs(normalized.companionManifest),
+        dependencies: preparedDependencies,
       });
     } catch (error) {
       // Unresolved dependencies (missing / cycle) — surface the plan, don't 500.
@@ -1788,13 +1793,13 @@ app.post("/v1/skills/create", bodyLimit({ maxSize: 2 * 1024 * 1024, onError: (c)
       },
       true,
     );
-    const carriedDependencyMap = await resolveDependencyMap({ actor, orgId, slugs: carriedDependencies });
+    const preparedCarriedDependencies = await prepareSkillPublishDependencies({ actor, orgId, slugs: carriedDependencies });
     const companionManifest = buildInlineCompanionManifest({
       description: input.description,
       carriedDisplay,
       carriedNotes,
       carriedRequirements,
-      carriedDependencies: carriedDependencyMap,
+      carriedDependencies: preparedCarriedDependencies.manifestDependencies,
       name: input.id,
       version: target.version,
       companionSkillId: target.skillId,
@@ -1821,7 +1826,7 @@ app.post("/v1/skills/create", bodyLimit({ maxSize: 2 * 1024 * 1024, onError: (c)
         version: target.version,
         note: "",
         body: result.body ?? "",
-        dependencies: companionDependencySlugs(companionManifest),
+        dependencies: preparedCarriedDependencies,
       });
       return c.json({ ok: true, ...published, warnings: result.warnings ?? [] });
     } finally {

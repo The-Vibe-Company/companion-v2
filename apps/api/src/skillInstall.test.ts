@@ -29,9 +29,9 @@ describe("computeSkillInstallStatus", () => {
 
 describe("depClosureHasUpdate", () => {
   // A -> B -> C dependency chain.
-  const requires = new Map<string, { dependsOnSkillId: string | null }[]>([
-    ["A", [{ dependsOnSkillId: "B" }]],
-    ["B", [{ dependsOnSkillId: "C" }]],
+  const requires = new Map<string, { targetId: string | null }[]>([
+    ["A", [{ targetId: "B" }]],
+    ["B", [{ targetId: "C" }]],
   ]);
 
   it("is false when no dependency is behind", () => {
@@ -51,16 +51,16 @@ describe("depClosureHasUpdate", () => {
   });
 
   it("skips unresolved (missing) dependency edges", () => {
-    const withMissing = new Map<string, { dependsOnSkillId: string | null }[]>([
-      ["A", [{ dependsOnSkillId: null }]],
+    const withMissing = new Map<string, { targetId: string | null }[]>([
+      ["A", [{ targetId: null }]],
     ]);
     expect(depClosureHasUpdate("A", withMissing, () => true)).toBe(false);
   });
 
   it("terminates on a dependency cycle", () => {
-    const cyclic = new Map<string, { dependsOnSkillId: string | null }[]>([
-      ["A", [{ dependsOnSkillId: "B" }]],
-      ["B", [{ dependsOnSkillId: "A" }]],
+    const cyclic = new Map<string, { targetId: string | null }[]>([
+      ["A", [{ targetId: "B" }]],
+      ["B", [{ targetId: "A" }]],
     ]);
     expect(depClosureHasUpdate("A", cyclic, () => false)).toBe(false);
     expect(depClosureHasUpdate("A", cyclic, (id) => id === "B")).toBe(true);

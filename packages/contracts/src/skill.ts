@@ -83,6 +83,23 @@ export const archiveSkillInputSchema = z.object({
 });
 export type ArchiveSkillInput = z.infer<typeof archiveSkillInputSchema>;
 
+/** Body of `POST /v1/skills/:slug/rename` — explicit slug/title rename without publishing a version. */
+export const renameSkillInputSchema = z.object({
+  newSlug: z.string().trim().regex(SKILL_NAME_RE, "newSlug must be kebab-case (lowercase letters, digits, hyphens)"),
+  title: z.string().trim().min(1, "title must not be empty").max(120, "title must be at most 120 characters").optional(),
+});
+export type RenameSkillInput = z.infer<typeof renameSkillInputSchema>;
+
+/** Response from `POST /v1/skills/:slug/rename`. */
+export const renameSkillResultSchema = z.object({
+  ok: z.literal(true),
+  id: z.string(),
+  old_slug: z.string(),
+  slug: z.string(),
+  title: z.string().nullable(),
+});
+export type RenameSkillResult = z.infer<typeof renameSkillResultSchema>;
+
 /**
  * Body of `POST /v1/skills/:slug/install` — record a published skill as installed for the caller.
  * The assistant posts this at the end of the normal install flow (`source: "agent"`); a member can
