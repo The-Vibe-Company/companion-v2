@@ -113,12 +113,16 @@ before downloading anything.
    - Backup the current Companion skill folder.
    - Replace the current folder with the staged package.
    - Call `POST /local-skills/companion/installed` with the installed version and agent name.
-   - Report the old version, new version, and backup path.
+   - After a successful replacement and install report, delete only the backup folder created for
+     this self-update.
+   - Report the old version, new version, and deleted backup path.
 6. After installing an update, stop the current operation and tell the user to rerun the original
    Companion command unless this runtime can safely reload the updated skill instructions in-process.
 
 If download, extraction, verification, replacement, or install reporting fails, stop without changing
-other skills. If replacement fails after moving files, restore the backup and stop. Avoid infinite
+other skills. If replacement fails after moving files, restore the backup and stop. If install
+reporting fails after replacement, keep the backup and report its path so the user can recover
+manually. Never delete older Companion backup folders that predate this self-update. Avoid infinite
 loops by comparing exact semver and by reporting the installed version after replacement.
 
 ## Mandatory preflight guard (run before create, update, install, or lockfile write)
@@ -799,6 +803,17 @@ curl -s "$COMPANION_API_URL/local-skills/companion/installed" \
 Treat `{ "ok": true, "status": "installed" }` as success. If the response says `status: "update"`,
 tell the user the workspace still has a newer bundled version available.
 
+After a successful replacement and successful install report, delete only the backup folder created
+for that self-update:
+
+```sh
+rm -rf "$backup"
+echo "Deleted Companion self-update backup at $backup"
+```
+
+Do not delete older `companion.backup-*` or `.companion-backup.*` folders that existed before this
+self-update. If install reporting fails, keep the backup and report its path.
+
 ## Confirm installation (run once, at the end of install)
 
 The last step of installing **this** skill is to tell the workspace it is present, so the Companion
@@ -809,7 +824,7 @@ skills view shows the correct status and version. Report the version from this s
 curl -s "$COMPANION_API_URL/local-skills/companion/installed" \
   -H "Authorization: Bearer $COMPANION_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"version":"1.12.2","agent":"<your assistant name>"}'
+  -d '{"version":"1.12.3","agent":"<your assistant name>"}'
 ```
 
 A `{ "ok": true, "status": "installed" }` response confirms the workspace now knows this machine has

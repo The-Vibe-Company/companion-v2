@@ -426,6 +426,9 @@ Extract it into a temporary directory, verify `SKILL.md` is at the package root,
 `companion.json.version` equals the `availableVersion` from `/local-skills/companion`. Only then
 replace the installed Companion skill folder. After replacement, call
 `POST /local-skills/companion/installed` with the installed version so the workspace status updates.
+After that install report succeeds, delete only the backup folder created for this self-update. Keep
+the backup if install reporting fails, and never delete older Companion backup folders that existed
+before this update.
 
 Do not use `/skills/{slug}/download` or `/skills/{slug}/versions/{version}/package` to update the
 built-in Companion skill. Those endpoints are for workspace-published skills.
@@ -436,8 +439,8 @@ built-in Companion skill. Those endpoints are for workspace-published skills.
 POST /local-skills/companion/installed
 Content-Type: application/json
 
-{ "version": "1.12.2", "agent": "Claude Code" }
+{ "version": "1.12.3", "agent": "Claude Code" }
 ```
 
 `version` must be valid semver (use this skill's `companion.json.version`). The response is
-`{ "ok": true, "status": "installed" | "update", "availableVersion": "1.12.2" }`.
+`{ "ok": true, "status": "installed" | "update", "availableVersion": "1.12.3" }`.
