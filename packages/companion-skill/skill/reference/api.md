@@ -382,8 +382,8 @@ built-in Companion skill. Those endpoints are for workspace-published skills.
 POST /local-skills/companion/installed
 Content-Type: application/json
 
-{ "version": "1.11.0", "agent": "Claude Code" }
+{ "version": "1.11.1", "agent": "Claude Code" }
 ```
 
 `version` must be valid semver (use this skill's `companion.json.version`). The response is
-`{ "ok": true, "status": "installed" | "update", "availableVersion": "1.11.0" }`.
+`{ "ok": true, "status": "installed" | "update", "availableVersion": "1.11.1" }`.
