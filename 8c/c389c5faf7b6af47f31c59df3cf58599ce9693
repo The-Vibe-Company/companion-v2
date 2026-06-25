@@ -1,12 +1,16 @@
 packages/companion-skill/skill/companion.json
   s_dad9d282b7ed38::t_e1c9d26887a94b 11,13-17
+  s_dad9d282b7ed38::t_db4e093a314252 4,12
 packages/companion-skill/skill/reference/api.md
   s_dad9d282b7ed38::t_e1c9d26887a94b 89-96
+  s_dad9d282b7ed38::t_db4e093a314252 450,454
 apps/api/src/localSkills.test.ts
   s_dad9d282b7ed38::t_fde60198e02068 76-77
   s_dad9d282b7ed38::t_e1c9d26887a94b 134-136,159-160
+  s_dad9d282b7ed38::t_db4e093a314252 46
 packages/companion-skill/skill/SKILL.md
   s_dad9d282b7ed38::t_e1c9d26887a94b 541-550
+  s_dad9d282b7ed38::t_db4e093a314252 837
 ---
 {
   "schema_version": "authorship/3.0.0",
