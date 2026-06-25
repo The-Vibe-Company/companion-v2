@@ -72,6 +72,27 @@
           "desc": { "type": "string", "minLength": 1, "maxLength": 500 }
         }
       }
+    },
+    "checks": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "updates": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["runtime", "script"],
+          "properties": {
+            "runtime": { "const": "python" },
+            "script": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 260,
+              "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|/)\\.\\.?(/|$))(?!.*//)[^\\u0000]+$"
+            },
+            "timeoutSeconds": { "type": "integer", "minimum": 1, "maximum": 300, "default": 30 }
+          }
+        }
+      }
     }
   },
   "$defs": {

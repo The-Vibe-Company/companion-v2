@@ -54,6 +54,13 @@ function layoutCheck(f: RawFindings, skillName: string | null): ValidationCheck 
   };
 }
 
+function packageRelativePath(f: RawFindings, relPath: string): string {
+  if (!f.skillMdPath || f.skillMdPath === "SKILL.md") return relPath;
+  const slash = f.skillMdPath.lastIndexOf("/");
+  const root = slash >= 0 ? f.skillMdPath.slice(0, slash) : "";
+  return root ? `${root}/${relPath}` : relPath;
+}
+
 function parseCompanionManifest(f: RawFindings, fallback: { summary: string; requirements?: CompanionManifest["requirements"] }): {
   check: ValidationCheck;
   manifest?: CompanionManifest;
@@ -106,8 +113,24 @@ function parseCompanionManifest(f: RawFindings, fallback: { summary: string; req
       dependencies: result.data.legacyDependencySlugs.length ? companionDependencySlugs(result.data) : result.data.dependencies,
       changelog: result.data.metadata.changelog,
       commands: result.data.commands,
+      checks: result.data.checks,
       notes: result.data.notes,
     });
+    const updateCheck = manifest.checks.updates;
+    if (updateCheck) {
+      const expected = packageRelativePath(f, updateCheck.script);
+      if (!f.files.includes(expected)) {
+        return {
+          check: {
+            id: "companion",
+            label: VALIDATION_CHECK_LABELS.companion,
+            status: "fail",
+            detail: `checks.updates.script not found in package: ${updateCheck.script}`,
+          },
+          path: f.companionJsonPath,
+        };
+      }
+    }
     return {
       check: {
         id: "companion",

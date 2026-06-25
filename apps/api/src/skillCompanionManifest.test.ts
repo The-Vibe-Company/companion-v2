@@ -50,6 +50,7 @@ describe("withResolvedManifestDependencies", () => {
       },
       dependencies: { "old-dep": "3e16ce8a-0d5f-4b2e-9db3-ae30d05e4bf8" },
       commands: [{ name: "Review package", desc: "Inspect and publish the package safely." }],
+      checks: { updates: { runtime: "python", script: "scripts/check_updates.py", timeoutSeconds: 30 } },
       notes: "## Notes\n\nKeep this package complete.",
     });
 
@@ -77,6 +78,7 @@ describe("withResolvedManifestDependencies", () => {
       },
       dependencies: { "markdown-report": "c0e39fb6-fb84-4610-92e7-fcfc1dc09dde" },
       commands: [{ name: "Review package", desc: "Inspect and publish the package safely." }],
+      checks: { updates: { runtime: "python", script: "scripts/check_updates.py", timeoutSeconds: 30 } },
     });
     expect(json).not.toHaveProperty("display");
     expect(json).not.toHaveProperty("requirements");
