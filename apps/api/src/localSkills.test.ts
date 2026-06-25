@@ -43,7 +43,7 @@ describe("companion skill package + row", () => {
     const pkg = await getCompanionSkillPackage();
     expect(pkg.key).toBe("companion");
     expect(pkg.checksum).toMatch(/^sha256:[0-9a-f]{64}$/);
-    expect(pkg.version).toBe("1.12.0");
+    expect(pkg.version).toBe("1.12.1");
     expect(pkg.sizeBytes).toBeGreaterThan(0);
   });
 
@@ -75,6 +75,8 @@ describe("companion skill package + row", () => {
     const changelog = row.changes.join("\n");
     expect(changelog).toContain("public preview links");
     expect(changelog).toContain("share_token");
+    expect(changelog).toContain("preflight guard");
+    expect(changelog).toContain("expect_slug");
     // The install prompt drives the report-back call and leaves placeholders for the client.
     expect(row.prompts.install).toContain("/local-skills/companion/package");
     expect(row.prompts.install).toContain("/local-skills/companion/installed");
@@ -108,6 +110,8 @@ describe("companion skill package + row", () => {
     const skillMd = await readFile(join(companionSkillDir(), "SKILL.md"), "utf8");
     const apiRef = await readFile(join(companionSkillDir(), "reference", "api.md"), "utf8");
     const checkScript = await readFile(join(companionSkillDir(), "scripts", "check_updates.py"), "utf8");
+    const companionLib = await readFile(join(companionSkillDir(), "scripts", "companion_lib.py"), "utf8");
+    const guardScript = await readFile(join(companionSkillDir(), "scripts", "skill_guard.py"), "utf8");
     expect(skillMd).not.toContain("companion_version:");
     expect(skillMd).toContain("companion.json.version");
     expect(skillMd).toContain("https://thecompanion.sh/schemas/companion-manifest.v2.schema.json");
@@ -164,8 +168,13 @@ describe("companion skill package + row", () => {
     expect(apiRef).toContain("Personal folder routes use the same request bodies and response shapes");
     expect(apiRef).not.toContain("defaults to `org`");
     expect(apiRef).not.toMatch(/owner_team[\s\S]{0,120}`scope`[\s\S]{0,120}parameters (?:is|are) rejected/);
-    expect(checkScript).toContain("def resolve_credentials");
+    expect(companionLib).toContain("def resolve_credentials");
     expect(checkScript).toContain("/skills?installed=true");
+    expect(checkScript).toContain("from companion_lib import");
+    // The anti-duplication / anti-retargeting guard ships alongside the update check.
+    expect(guardScript).toContain("def detect_conflicts");
+    expect(guardScript).toContain("def create_preflight");
+    expect(guardScript).toContain("def migrate_legacy_log");
   });
 
   it("reflects an install record as installed/update", async () => {

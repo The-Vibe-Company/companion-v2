@@ -147,6 +147,23 @@ describe("skills push labels", () => {
     // The registry row fixture carries no owner axis — only labels organize a skill.
     expect(registryRow().labels).toEqual([]);
   });
+
+  it("omits expect_* on a brand-new skill but binds them on an update", () => {
+    const create = buildPublishFormData({ archive: Buffer.from("a"), name: "demo", version: "1.0.0", labels: [] });
+    expect(create.get("expect_slug")).toBeNull();
+    expect(create.get("expect_skill_id")).toBeNull();
+
+    const update = buildPublishFormData({
+      archive: Buffer.from("a"),
+      name: "demo",
+      version: "1.0.1",
+      labels: [],
+      expectSlug: "demo",
+      expectSkillId: "skill-1",
+    });
+    expect(update.get("expect_slug")).toBe("demo");
+    expect(update.get("expect_skill_id")).toBe("skill-1");
+  });
 });
 
 describe("skills push version resolution", () => {

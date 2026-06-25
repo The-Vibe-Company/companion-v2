@@ -215,10 +215,18 @@ Content-Type: application/zip
 ## Targeted updates
 
 When updating a skill that already exists, send both `expect_slug` and `expect_skill_id`. The server
-rejects the upload if the package's frontmatter `name` differs from `expect_slug`, or if its
-`companion.json.metadata.companionSkillId` points at a different skill. Legacy
-`metadata.companion_skill_id` is accepted only as a migration fallback. This makes it impossible for an edit to
-silently retarget another skill.
+**requires** both whenever the published slug already exists and rejects the update otherwise
+(`updating skill "<name>" requires expect_slug and expect_skill_id`). It also rejects the upload if the
+package's frontmatter `name` differs from `expect_slug`. Legacy `metadata.companion_skill_id` is
+accepted only as a migration fallback.
+
+On top of that, the server enforces the slug ↔ id binding on **every** publish and validate, even when
+no `expect_*` is sent: if the package's `companion.json.metadata.companionSkillId` resolves to a
+workspace skill whose slug is not the package name, the upload is rejected
+(`package Companion skill id "<id>" belongs to skill "<other>", not "<name>"; refusing to retarget`),
+and if a skill already exists for the package slug but the package declares a different id, the upload
+is rejected (`skill "<name>" has id "<id>", but the package declares Companion skill id "<other>";
+refusing to retarget`). This makes it impossible for an edit to silently retarget another skill.
 
 A re-publish preserves the skill's existing scope and labels. Do not ask Personal vs Org for updates,
 because scope is immutable. Re-publish never moves, adds, or removes folder labels. Ask only whether
@@ -368,6 +376,24 @@ The bundled `scripts/check_updates.py` resolves credentials, calls `GET /skills?
 `GET /skills?lib=org`, and `GET /skills?installed=true`, then compares those rows with
 `~/.companion/skills.lock.json` or the legacy `skills.log.json` fallback.
 
+## Local preflight guard
+
+`scripts/skill_guard.py` is a local-only preflight the installed Companion skill runs before it
+creates, updates, installs, or writes the lockfile for a skill. Like the update check, the API never
+runs it.
+
+```sh
+python3 scripts/skill_guard.py --json [--create-check <slug>] [skill-dir ...]
+```
+
+It unions `GET /skills?lib=org`, `?lib=mine`, `?installed=true`, and the `archived=true` views with the
+local inventory (`~/.companion/skills.lock.json` plus scanned local skill folders), reports
+duplication / retargeting conflicts, and — when `--create-check` is passed — refuses to create over a
+slug that already exists anywhere. If a legacy `~/.companion/skills.log.json` is present it is migrated
+into `skills.lock.json` and deleted; secrets are never copied and the token is never printed. Exit code
+`0` means clean (warnings allowed), `2` means a blocking conflict or a refused create, `1` means it
+could not run.
+
 ## Update the Companion skill itself
 
 The Companion skill must check whether this local Companion skill is current at startup, before any
@@ -401,8 +427,8 @@ built-in Companion skill. Those endpoints are for workspace-published skills.
 POST /local-skills/companion/installed
 Content-Type: application/json
 
-{ "version": "1.12.0", "agent": "Claude Code" }
+{ "version": "1.12.1", "agent": "Claude Code" }
 ```
 
 `version` must be valid semver (use this skill's `companion.json.version`). The response is
-`{ "ok": true, "status": "installed" | "update", "availableVersion": "1.12.0" }`.
+`{ "ok": true, "status": "installed" | "update", "availableVersion": "1.12.1" }`.
