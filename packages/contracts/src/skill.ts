@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { validationStateSchema, skillScopeSchema } from "./scope";
 import { SKILL_NAME_RE, SEMVER_RE, skillRequirementSchema } from "./frontmatter";
-import { companionDisplaySchema } from "./companionManifest";
+import { companionChangelogEntrySchema, companionDisplaySchema } from "./companionManifest";
 import { labelPathSchema } from "./labels";
 import { localSkillStatusSchema } from "./localSkills";
 
@@ -333,6 +333,7 @@ export const skillVersionRowSchema = z.object({
   skill_id: z.string(),
   version: z.string(),
   note: z.string(),
+  changelog: companionChangelogEntrySchema.nullable(),
   frontmatter: z.string(),
   tools: z.array(z.string()),
   license: z.string().nullable(),

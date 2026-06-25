@@ -472,26 +472,39 @@ export function Activity({
 }) {
   return (
     <div className="feed">
-      {versions.map((v, i) => (
-        <div className="act" key={v.id}>
-          <div className="act__rail">
-            <span className={"act__node" + (i === 0 ? " act__node--cur" : "")}>
-              <Icon name={i === 0 ? "upload" : "git-commit"} size={12} />
-            </span>
-            {i < versions.length - 1 && <span className="act__line" />}
-          </div>
-          <div className="act__body">
-            <div className="act__top">
-              <span className="act__who">{authorName}</span>
-              <span className="act__verb">published</span>
-              <span className="act__ver">v{v.version}</span>
-              {i === 0 && <span className="curtag">current</span>}
-              <span className="act__time">{v.created_at.slice(0, 10)}</span>
+      {versions.map((v, i) => {
+        const changes = v.changelog?.changes ?? [];
+        return (
+          <div className="act" key={v.id}>
+            <div className="act__rail">
+              <span className={"act__node" + (i === 0 ? " act__node--cur" : "")}>
+                <Icon name={i === 0 ? "upload" : "git-commit"} size={12} />
+              </span>
+              {i < versions.length - 1 && <span className="act__line" />}
             </div>
-            <p className="act__note">{v.note}</p>
+            <div className="act__body">
+              <div className="act__top">
+                <span className="act__who">{authorName}</span>
+                <span className="act__verb">published</span>
+                <span className="act__ver">v{v.version}</span>
+                {i === 0 && <span className="curtag">current</span>}
+                <span className="act__time">{v.created_at.slice(0, 10)}</span>
+              </div>
+              {changes.length ? (
+                <ul className="act__changes">
+                  {changes.map((change, changeIndex) => (
+                    <li className="act__change" key={`${v.id}-${changeIndex}`}>
+                      {change}
+                    </li>
+                  ))}
+                </ul>
+              ) : v.note ? (
+                <p className="act__note">{v.note}</p>
+              ) : null}
+            </div>
           </div>
-        </div>
-      ))}
+        );
+      })}
       {versions.length === 0 && <div className="alist--empty">No versions yet.</div>}
     </div>
   );
