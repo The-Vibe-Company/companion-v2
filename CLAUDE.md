@@ -144,6 +144,9 @@ still uses Docker Compose (`scripts/dev-stack.sh`).
   comments, versions, dependencies, labels, etc.), **update the bundled Companion skill** in
   `packages/companion-skill/skill/` (`SKILL.md` and `reference/api.md`, plus `companion.json` if the
   capabilities changed) so the agent-facing docs match the API.
+- If you changed any **e-road API** behavior or contract, explicitly verify whether the bundled
+  Companion skill in this repository must be updated for those API changes, and update
+  `packages/companion-skill/skill/` when the skill-facing workflow, endpoint contract, or docs changed.
 - If you changed frontend behavior, include the `agent-browser` validation result in your handoff. The
   minimum smoke path is: signed-out redirect, login, Skills list, filters, detail view, upload drawer,
   mobile viewport, and browser errors.

@@ -6,6 +6,7 @@ import type {
   LabelColor,
   LabelIcon,
   LabelsResponse,
+  LocalSkillRow,
   ReportLocalSkillInstallResult,
   ReportSkillInstallResult,
   SkillUninstallResult,
@@ -407,6 +408,11 @@ export async function fetchSkillSearch(query: string, signal?: AbortSignal): Pro
 /** Public download URL for a local skill package (referenced by the assistant prompt). */
 export function localSkillPackageUrl(key: string): string {
   return `${apiBase()}/local-skills/${encodeURIComponent(key)}/package`;
+}
+
+/** Fetch the bundled local helper skills and their per-member install status. */
+export async function fetchLocalSkills(): Promise<LocalSkillRow[]> {
+  return apiFetch<LocalSkillRow[]>("/v1/local-skills");
 }
 
 /** Manual fallback: record that this member installed the local skill at a version. */
