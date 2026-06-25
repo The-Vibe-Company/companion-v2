@@ -121,6 +121,38 @@ If download, extraction, verification, replacement, or install reporting fails, 
 other skills. If replacement fails after moving files, restore the backup and stop. Avoid infinite
 loops by comparing exact semver and by reporting the installed version after replacement.
 
+## Mandatory preflight guard (run before create, update, install, or lockfile write)
+
+Before you create a new skill, publish an update, install a skill, or write
+`~/.companion/skills.lock.json`, run the local guard. It cross-checks the local inventory (lockfile +
+local skill folders) against the workspace catalog so a duplicate or retarget can never slip through.
+
+```sh
+python3 scripts/skill_guard.py --json <skill-dir> [more-skill-dirs...]
+# Before creating a brand-new skill, also pass the intended slug:
+python3 scripts/skill_guard.py --json --create-check <slug> <skill-dir>
+```
+
+Run it from this skill's package root. It is local-only and read-only, with one exception: if a legacy
+`~/.companion/skills.log.json` exists it is migrated into `skills.lock.json` and then deleted. It never
+prints or writes the token.
+
+- **Exit code 0** — clean (warnings allowed). **Exit code 2** — a blocking conflict or a refused
+  create; **stop** and surface the findings to the user. **Exit code 1** — could not run (credentials
+  or API error).
+- Blocking conflict kinds: `id_multiple_slugs` (one workspace skill id mapped to two slugs),
+  `slug_multiple_ids`, `id_mismatch_online` (a local slug published online under a different id —
+  a retarget), `duplicate_companion_id_manifests` (two local manifests share one `companionSkillId`),
+  and `lock_two_slugs_one_id` (repair the lockfile).
+- A locally tracked skill that is gone or archived in the workspace is reported `missing_or_archived`,
+  never `current` — never assume a close-named skill replaced it.
+- `--create-check <slug>` searches the exact slug across org, My Skills, installed, the lockfile, the
+  legacy log, and local folders. If it is found anywhere, do not create a second skill: update the
+  existing one, restore it if it is archived, or pick a different slug.
+
+Never infer that one skill replaces another because their names are similar. Identity is the workspace
+skill id (`companion.json metadata.companionSkillId`), not the slug text.
+
 ## Companion manifest (analyze, then sync companion.json)
 
 A skill may require other skills, setup variables, and product-facing display copy. Persist all
@@ -224,10 +256,13 @@ Prefer it for audits, then fall back to reading pointed-at skill folders. This i
 can be combined with the token-readable workspace catalog to explain what is published, what is
 reported installed, and what is actually tracked on this machine.
 
-If a legacy `~/.companion/skills.log.json` exists, read it only as a one-time fallback when
-`skills.lock.json` is absent. Write all future state to `skills.lock.json`. If the lockfile uses the
-old URL-keyed `workspaces` shape, migrate entries to `workspaces[COMPANION_WORKSPACE_ID]` on the next
-write and keep `apiUrl` as metadata under that workspace entry.
+If a legacy `~/.companion/skills.log.json` exists, it is migrated into `skills.lock.json` and then
+deleted — the preflight guard does this automatically (lockfile entries win on conflict; secrets are
+never copied). Write all future state to `skills.lock.json`. If the lockfile uses the old URL-keyed
+`workspaces` shape, migrate entries to `workspaces[COMPANION_WORKSPACE_ID]` on the next write and keep
+`apiUrl` as metadata under that workspace entry. A lockfile entry whose skill is archived or no longer
+visible in the workspace is `missing_or_archived`, not "up to date" — keep it flagged, do not silently
+treat a close-named skill as its replacement.
 
 ### List workspace and local skills
 
@@ -358,6 +393,11 @@ from `companion.json`, create or update `companion.json` with the confirmed fina
 packaging; do not upload a package with a stale dependency manifest. If the plan listed dependencies
 under `upload`, analyze and publish those first (topological order).
 
+First confirm the slug is actually new: run `python3 scripts/skill_guard.py --json --create-check
+<slug>` (or check that `GET /skills/{slug}/download` returns 404). If the slug already exists online or
+locally, this is not a brand-new skill — update the existing one, restore it if it is archived, or pick
+a different slug. Never publish a second skill over an existing slug.
+
 A skill lives in one of two libraries (`scope`). An **org** skill is visible to every member of the
 workspace, and any member can read, edit, archive, or delete it — organized with org-wide **labels**
 (folders). A **personal** skill is private to its creator (the My Skills library), organized with that
@@ -444,8 +484,13 @@ user:
 ### Update a skill
 
 When the user changed a skill that already exists in the workspace, bind the upload to that exact
-skill so an edit can never retarget another one. Pass `expect_slug` and `expect_skill_id` (read them
-from `companion.json.name` and `companion.json.metadata.companionSkillId`).
+skill so an edit can never retarget another one. Always pass `expect_slug` and `expect_skill_id` (read
+them from `companion.json.name` and `companion.json.metadata.companionSkillId`) — the server now
+**requires** both on any update and rejects the upload otherwise. `companionSkillId` is the stable,
+immutable identity: if it points at a different workspace skill than the slug you are updating, the
+server refuses the publish (`refusing to retarget`). If `companion.json.metadata.companionSkillId`
+contradicts the skill published under that slug, stop and tell the user this looks like a different
+skill instead of forcing the update.
 
 Do not ask Personal vs Org for updates, because a skill's scope is immutable on re-publish. A
 re-publish never changes the skill's existing labels: it does not move, add, or remove folders. Ask
@@ -730,7 +775,7 @@ skills view shows the correct status and version. Report the version from this s
 curl -s "$COMPANION_API_URL/local-skills/companion/installed" \
   -H "Authorization: Bearer $COMPANION_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"version":"1.11.1","agent":"<your assistant name>"}'
+  -d '{"version":"1.12.0","agent":"<your assistant name>"}'
 ```
 
 A `{ "ok": true, "status": "installed" }` response confirms the workspace now knows this machine has

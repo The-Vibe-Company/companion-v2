@@ -979,6 +979,28 @@ export async function getSkillBySlug(input: {
   return rows.find((r) => r.slug === input.slug) ?? null;
 }
 
+/**
+ * Resolve a skill by its workspace id (== `companion.json metadata.companionSkillId`). Uses the same
+ * `accessible` visibility + archived inclusion as {@link getSkillBySlug}, so personal-skill privacy and
+ * archived resolution behave identically — the publish anti-retarget guard relies on this to detect a
+ * package whose declared Companion skill id belongs to a different (or another member's) skill.
+ */
+export async function getSkillById(input: {
+  actor: ActorContext;
+  orgId: string;
+  id: string;
+  database?: Db;
+}): Promise<SkillListRow | null> {
+  const rows = await listSkills({
+    actor: input.actor,
+    orgId: input.orgId,
+    library: "accessible",
+    includeArchived: true,
+    database: input.database ?? db,
+  });
+  return rows.find((r) => r.id === input.id) ?? null;
+}
+
 export async function listSkillVersions(input: {
   actor: ActorContext;
   orgId: string;

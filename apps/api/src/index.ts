@@ -27,6 +27,7 @@ import {
   getOnboardingContext,
   getOnboardingState,
   getSkillBySlug,
+  getSkillById,
   getSkillDependencies,
   restoreSkill,
   getSkillFilterPreferences,
@@ -146,7 +147,7 @@ import {
   type ApiVariables,
 } from "./context";
 import { appRouter } from "./trpc";
-import { assertTargetedSkillUpdate, parseSkillPublishAction } from "./skillPublishGuards";
+import { assertNoCompanionRetarget, assertTargetedSkillUpdate, assertUpdateIsTargeted, parseSkillPublishAction } from "./skillPublishGuards";
 import { buildInlineCompanionManifest, uploadDependencyValues, withResolvedManifestDependencies } from "./skillCompanionManifest";
 import { buildCompanionSkillRow, getCompanionSkillPackage } from "./companionSkillPackage";
 import { parseSkillListQuery } from "./skillListQuery";
@@ -1595,25 +1596,43 @@ app.post("/v1/skills", bodyLimit({ maxSize: 32 * 1024 * 1024, onError: (c) => js
       return c.json({ result, error: result.error ?? "validation failed" }, 422);
     }
     const fm = result.frontmatter;
-    // When updating a known skill, bind the upload to both the slug and, when supplied, the
-    // Companion skill UUID. Metadata is optional for old packages, but cannot point elsewhere.
-    if (expectSlug || expectSkillId) {
-      const expectedSkill = await getSkillBySlug({
-        actor,
-        orgId,
-        slug: expectSlug ?? fm.name,
+    // Identity guard, enforced on every publish/validate so a buggy or malicious agent can never
+    // retarget a skill. `slugSkill` is the skill that currently owns this slug (null on a fresh create
+    // — it doubles as the "is this an update?" probe); `companionIdSkill` is the skill the package's
+    // declared Companion id resolves to (org-scoped). The declared id (== skills.id) is authoritative.
+    const declaredCompanionId =
+      result.companion_manifest?.metadata.companionSkillId ?? fm.metadata.companion_skill_id ?? undefined;
+    const slugSkill = await getSkillBySlug({ actor, orgId, slug: fm.name });
+    const companionIdSkill = declaredCompanionId
+      ? await getSkillById({ actor, orgId, id: declaredCompanionId })
+      : null;
+    try {
+      assertNoCompanionRetarget({
+        frontmatter: fm,
+        companionSkillId: declaredCompanionId,
+        lookup: { slugSkill, companionIdSkill },
       });
-      try {
+      // The actual mutation must declare its intent: updating an existing slug requires expect_*.
+      // Validate stays flexible so an agent can probe an unknown package without knowing the id yet.
+      if (parsedAction === "publish") {
+        assertUpdateIsTargeted({ frontmatter: fm, slugSkill, expectSlug, expectSkillId });
+      }
+      // When the caller does send expect_*, also bind the upload to that exact slug + id.
+      if (expectSlug || expectSkillId) {
+        const expectedSkill =
+          expectSlug && expectSlug !== fm.name
+            ? await getSkillBySlug({ actor, orgId, slug: expectSlug })
+            : slugSkill;
         assertTargetedSkillUpdate({
           frontmatter: fm,
-          companionSkillId: result.companion_manifest?.metadata.companionSkillId,
+          companionSkillId: declaredCompanionId,
           expectSlug,
           expectSkillId,
           expectedSkill,
         });
-      } catch (error) {
-        return c.json({ result, error: error instanceof Error ? error.message : String(error) }, 422);
       }
+    } catch (error) {
+      return c.json({ result, error: error instanceof Error ? error.message : String(error) }, 422);
     }
     // companion.json is the preferred dependency source. Legacy dependency= query params remain a
     // fallback for old clients that upload packages without a Companion manifest.

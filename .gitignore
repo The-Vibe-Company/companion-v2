@@ -8,6 +8,10 @@ dist/
 out/
 *.tsbuildinfo
 
+# Python (bundled skill scripts + tests)
+__pycache__/
+*.pyc
+
 # Turborepo
 .turbo/
 
