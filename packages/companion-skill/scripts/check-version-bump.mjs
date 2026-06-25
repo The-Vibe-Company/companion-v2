@@ -59,7 +59,7 @@ function compareSemver(a, b) {
   return 0;
 }
 
-function readVersionFromJson(json, label) {
+function readManifestFromJson(json, label) {
   let parsed;
   try {
     parsed = JSON.parse(json);
@@ -69,7 +69,10 @@ function readVersionFromJson(json, label) {
   if (typeof parsed.version !== "string" || parsed.version.length === 0) {
     fail(`${label} ${manifestPath} is missing a string version`);
   }
-  return parseSemver(parsed.version, label);
+  return {
+    parsed,
+    version: parseSemver(parsed.version, label),
+  };
 }
 
 let mergeBase;
@@ -100,13 +103,25 @@ try {
   fail(`could not read base ${manifestPath} from ${baseRef}`);
 }
 
-const baseVersion = readVersionFromJson(baseManifestJson, "base");
-const currentVersion = readVersionFromJson(readFileSync(join(repoRoot, manifestPath), "utf8"), "current");
+const baseManifest = readManifestFromJson(baseManifestJson, "base");
+const currentManifest = readManifestFromJson(readFileSync(join(repoRoot, manifestPath), "utf8"), "current");
+const baseVersion = baseManifest.version;
+const currentVersion = currentManifest.version;
 
 if (compareSemver(currentVersion, baseVersion) <= 0) {
   fail(
     `${manifestPath} changed but version did not increase (${baseVersion.raw} -> ${currentVersion.raw}). ` +
       `Bump companion.json.version above ${baseVersion.raw}.`,
+  );
+}
+
+const changelog = currentManifest.parsed.metadata?.changelog;
+const firstEntryVersion = Array.isArray(changelog) ? changelog[0]?.version : undefined;
+if (firstEntryVersion !== currentVersion.raw) {
+  fail(
+    `${manifestPath} version is ${currentVersion.raw}, but metadata.changelog[0].version is ` +
+      `${typeof firstEntryVersion === "string" ? firstEntryVersion : "missing"}. ` +
+      `Add a top changelog entry for ${currentVersion.raw}.`,
   );
 }
 

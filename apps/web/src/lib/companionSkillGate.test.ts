@@ -16,6 +16,7 @@ function localSkill(status: LocalSkillRow["status"]): LocalSkillRow {
     notes: "",
     commands: [],
     changes: [],
+    integrity: { packageChecksum: `sha256:${"a".repeat(64)}`, files: { "SKILL.md": `sha256:${"b".repeat(64)}` } },
     prompts: { install: "", update: "", use: "" },
   };
 }

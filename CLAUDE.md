@@ -130,6 +130,11 @@ still uses Docker Compose (`scripts/dev-stack.sh`).
 - **`DESIGN.md` follows the Google Design.md format.** Any change to the root `DESIGN.md` must pass
   `npx --yes @google/design.md@0.2.0 lint DESIGN.md --format json`; CI runs this automatically when
   `DESIGN.md` changes.
+- **Bundled Companion skill changes require a version bump.** Any change under
+  `packages/companion-skill/skill/` must increase `packages/companion-skill/skill/companion.json`
+  `version`, add a matching top changelog entry, and refresh `companion.integrity.json` with
+  `pnpm --filter @companion/companion-skill update:integrity`. CI enforces this with
+  `pnpm --filter @companion/companion-skill check:version-bump`.
 - **Provider conformance suite.** Every provider adapter must pass the same contract tests; verify the
   `capabilities()` declaration matches real behavior (e.g., exec, persistent volumes, scale-to-zero).
 - **Reconcile idempotency.** Re-applying a deployment must not create duplicates; destroy must be
@@ -143,10 +148,13 @@ still uses Docker Compose (`scripts/dev-stack.sh`).
 - If you changed the public skills API surface (endpoints, or the request/response shapes for skills,
   comments, versions, dependencies, labels, etc.), **update the bundled Companion skill** in
   `packages/companion-skill/skill/` (`SKILL.md` and `reference/api.md`, plus `companion.json` if the
-  capabilities changed) so the agent-facing docs match the API.
+  capabilities changed) so the agent-facing docs match the API. Because this touches the bundled skill,
+  also bump `companion.json.version`, add the matching top changelog entry, and refresh
+  `companion.integrity.json`.
 - If you changed any **e-road API** behavior or contract, explicitly verify whether the bundled
   Companion skill in this repository must be updated for those API changes, and update
   `packages/companion-skill/skill/` when the skill-facing workflow, endpoint contract, or docs changed.
+  Any such bundled-skill update must include the version/changelog/integrity update above.
 - If you changed frontend behavior, include the `agent-browser` validation result in your handoff. The
   minimum smoke path is: signed-out redirect, login, Skills list, filters, detail view, upload drawer,
   mobile viewport, and browser errors.
