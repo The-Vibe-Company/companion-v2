@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { SEMVER_RE, SKILL_NAME_RE, SKILL_REQUIREMENT_KEY_RE, skillRequirementSchema, type SkillRequirement } from "./frontmatter";
 
-export const COMPANION_MANIFEST_SCHEMA_URL = "https://companion.dev/schemas/companion-manifest.v2.schema.json";
+export const COMPANION_MANIFEST_SCHEMA_URL = "https://thecompanion.sh/schemas/companion-manifest.v2.schema.json";
 
 export const companionDisplaySchema = z
   .object({

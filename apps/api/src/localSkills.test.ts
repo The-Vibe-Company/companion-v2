@@ -110,6 +110,7 @@ describe("companion skill package + row", () => {
     const checkScript = await readFile(join(companionSkillDir(), "scripts", "check_updates.py"), "utf8");
     expect(skillMd).not.toContain("companion_version:");
     expect(skillMd).toContain("companion.json.version");
+    expect(skillMd).toContain("https://thecompanion.sh/schemas/companion-manifest.v2.schema.json");
     expect(skillMd).toContain("skills.lock.json");
     expect(skillMd).toContain("GET /skills?installed=true");
     expect(skillMd).toContain("python3 scripts/check_updates.py");

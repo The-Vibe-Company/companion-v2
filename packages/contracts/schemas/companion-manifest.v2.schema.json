@@ -1,12 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://companion.dev/schemas/companion-manifest.v2.schema.json",
+  "$id": "https://thecompanion.sh/schemas/companion-manifest.v2.schema.json",
   "title": "Companion Manifest v2",
   "type": "object",
   "additionalProperties": false,
   "required": ["$schema", "name", "version", "description", "metadata", "environment", "dependencies"],
   "properties": {
-    "$schema": { "const": "https://companion.dev/schemas/companion-manifest.v2.schema.json" },
+    "$schema": { "const": "https://thecompanion.sh/schemas/companion-manifest.v2.schema.json" },
     "name": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$" },
     "version": {
       "type": "string",

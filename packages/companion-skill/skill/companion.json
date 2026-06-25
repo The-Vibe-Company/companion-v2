@@ -1,5 +1,5 @@
 {
-  "$schema": "https://companion.dev/schemas/companion-manifest.v2.schema.json",
+  "$schema": "https://thecompanion.sh/schemas/companion-manifest.v2.schema.json",
   "name": "companion",
   "version": "1.11.0",
   "title": "Companion",
@@ -15,6 +15,13 @@
           "Documents token-supported workspace skill listing, including My Skills and installed-only filters.",
           "Adds a local Python update check that compares workspace listings, reported installs, and ~/.companion/skills.lock.json.",
           "Declares local-only manifest checks so agents can run update audits without the Companion API executing skill scripts."
+        ]
+      },
+      {
+        "version": "1.10.2",
+        "date": "2026-06-24",
+        "changes": [
+          "Updates Companion manifest examples to use the thecompanion.sh schema URL."
         ]
       },
       {
