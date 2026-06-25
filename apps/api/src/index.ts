@@ -603,7 +603,6 @@ app.get("/v1/onboarding/context", async (c) => {
         name: org.name,
         domain: org.domain,
         member_count: org.memberCount,
-        team_count: org.teamCount,
       })),
     });
   } catch (error) {
@@ -629,7 +628,7 @@ app.post("/v1/onboarding/create", async (c) => {
     const input = completeOnboardingInputSchema.parse(await c.req.json());
     const { orgId, inviteTokens } = await completeOnboarding(actor, input);
     setOrgCookie(c, orgId);
-    // Best-effort invite emails: a bounced address must NOT undo the org/team the user just created
+    // Best-effort invite emails: a bounced address must NOT undo the org the user just created
     // (this intentionally diverges from /v1/invitations, which rolls a single invite back on failure).
     const base = process.env.COMPANION_WEB_URL ?? "http://127.0.0.1:3000";
     for (const { email, token } of inviteTokens) {

@@ -9,8 +9,8 @@ import {
   type SetStateAction,
 } from "react";
 import { Icon } from "@/components/Icon";
-import { Avatar, EmojiPicker, hashColor, initialsOf, LOGO_COLORS } from "@/components/branding";
-export { Avatar, EmojiPicker, hashColor, initialsOf, LOGO_COLORS } from "@/components/branding";
+import { Avatar, hashColor, initialsOf, LOGO_COLORS } from "@/components/branding";
+export { Avatar, hashColor, initialsOf, LOGO_COLORS } from "@/components/branding";
 import {
   brandIconCandidates,
   firstLoadableBrandIconCandidate,
@@ -35,12 +35,6 @@ export interface OrgDraft {
   candidates: LogoCandidate[];
   fetchedFrom: string;
   domain: string;
-}
-
-export interface TeamDraft {
-  name: string;
-  color: string;
-  emoji?: string;
 }
 
 /* =========================================================== ASIDE / STEPS */
@@ -109,7 +103,7 @@ export function ScreenAccount({
     <div className="ob-panel" key="account">
       <p className="ob-eyebrow">Create your account</p>
       <h1 className="ob-h1">Welcome to Companion</h1>
-      <p className="ob-sub">Leverage all your AI as a team. First, tell us who you are.</p>
+      <p className="ob-sub">Leverage all your AI across your organization. First, tell us who you are.</p>
       <div className="ob-body">
         <div className="ob-field">
           <label className="ob-field__label" htmlFor="f-name">Your name</label>
@@ -208,8 +202,6 @@ export function ScreenFound({
                 <div className="ob-orgcard__domain">{org.domain}</div>
                 <div className="ob-orgcard__stats">
                   <span>{org.memberCount} {org.memberCount === 1 ? "member" : "members"}</span>
-                  <span className="ob-dot-sep">·</span>
-                  <span>{org.teamCount} {org.teamCount === 1 ? "team" : "teams"}</span>
                 </div>
               </div>
               {org.id === selected.id && <span className="ob-choice-check"><Icon name="check" size={13} /></span>}
@@ -335,7 +327,7 @@ export function ScreenCreateOrg({
     <div className="ob-panel" key="create_org">
       <p className="ob-eyebrow">New organization</p>
       <h1 className="ob-h1">Set up your organization</h1>
-      <p className="ob-sub">This is the top-level home for your agents, teams, and skills.</p>
+      <p className="ob-sub">This is the shared home for your members, agents, and skills.</p>
       <div className="ob-body">
         <div className="ob-field">
           <label className="ob-field__label" htmlFor="o-name">Organization name</label>
@@ -446,89 +438,6 @@ export function ScreenCreateOrg({
   );
 }
 
-/* =========================================================== SCREEN: CREATE TEAM */
-export function ScreenCreateTeam({
-  team,
-  setTeam,
-  orgName,
-  onNext,
-  onBack,
-}: {
-  team: TeamDraft;
-  setTeam: Dispatch<SetStateAction<TeamDraft>>;
-  orgName: string;
-  onNext: () => void;
-  onBack: () => void;
-}) {
-  const [picker, setPicker] = useState(false);
-  const valid = team.name.trim().length >= 2;
-  const initial = team.name.trim() ? initialsOf(team.name) : "T";
-  return (
-    <div className="ob-panel" key="create_team">
-      <p className="ob-eyebrow">First team</p>
-      <h1 className="ob-h1">Create your first team</h1>
-      <p className="ob-sub">
-        Teams group people and the agents they share inside {orgName || "your organization"}. You can add more later.
-      </p>
-      <div className="ob-body">
-        <div className="ob-logorow">
-          <div className="ob-logorow__pick">
-            <button className="ob-emoji-trigger" onClick={() => setPicker((p) => !p)} aria-label="Choose a team icon" title="Choose an icon">
-              <Avatar size="lg" color={team.color} initial={initial} emoji={team.emoji} />
-              <span className="ob-emoji-edit"><Icon name={team.emoji ? "pencil" : "smile-plus"} size={12} /></span>
-            </button>
-            {picker && (
-              <EmojiPicker
-                value={team.emoji}
-                onPick={(e) => {
-                  setTeam((t) => ({ ...t, emoji: e || undefined }));
-                  setPicker(false);
-                }}
-                onClose={() => setPicker(false)}
-              />
-            )}
-          </div>
-          <div className="ob-field" style={{ flex: 1 }}>
-            <label className="ob-field__label" htmlFor="t-name">Team name</label>
-            <input
-              id="t-name"
-              className="ob-input"
-              autoFocus
-              value={team.name}
-              placeholder="Platform"
-              onChange={(e) => setTeam((t) => ({ ...t, name: e.target.value }))}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && valid) onNext();
-              }}
-            />
-          </div>
-        </div>
-        <div className="ob-field">
-          <label className="ob-field__label">Team color</label>
-          <div className="ob-swatches">
-            {LOGO_COLORS.map((c) => (
-              <button
-                key={c}
-                className={`ob-swatch${team.color === c ? " is-sel" : ""}`}
-                style={{ background: c }}
-                aria-label="color"
-                onClick={() => setTeam((t) => ({ ...t, color: c }))}
-              />
-            ))}
-          </div>
-        </div>
-      </div>
-      <div className="ob-foot">
-        <button className="ob-backlink" onClick={onBack}><Icon name="arrow-left" size={15} />Back</button>
-        <span className="ob-spacer" />
-        <button className="cds-btn cds-btn--lg cds-btn--primary" disabled={!valid} onClick={onNext}>
-          Continue<span className="cds-btn__icon"><Icon name="arrow-right" /></span>
-        </button>
-      </div>
-    </div>
-  );
-}
-
 /* =============================================================== SCREEN: INVITE */
 export function ScreenInvite({
   invites,
@@ -556,7 +465,7 @@ export function ScreenInvite({
   const canAutoJoin = !!domain;
   return (
     <div className="ob-panel" key="invite">
-      <p className="ob-eyebrow">Invite your team</p>
+      <p className="ob-eyebrow">Invite collaborators</p>
       <h1 className="ob-h1">Bring in your collaborators</h1>
       <p className="ob-sub">
         Invite people by email{canAutoJoin ? ", or enable your domain for self-serve joining" : ""}. Skip and do this later if you like.
@@ -634,7 +543,6 @@ export function ScreenInvite({
 export function ScreenWelcome({
   path,
   org,
-  team,
   invites,
   allowDomain,
   domain,
@@ -644,7 +552,6 @@ export function ScreenWelcome({
 }: {
   path: "create" | "join";
   org: OrgDraft;
-  team: TeamDraft;
   invites: string[];
   allowDomain: boolean;
   domain: string | null;
@@ -681,29 +588,8 @@ export function ScreenWelcome({
             <span className="ob-srow__tag">org</span>
           </div>
 
-          {isJoin ? (
-            <div className="ob-srow">
-              <span className="ob-avatar ob-avatar--sm" style={{ background: "var(--color-surface-raised)", color: "var(--color-muted)" }}>
-                <Icon name="users" size={14} />
-              </span>
-              <div className="ob-srow__meta">
-                <div className="ob-srow__t">
-                  {joinedOrg!.teamCount} {joinedOrg!.teamCount === 1 ? "team" : "teams"}
-                </div>
-                <div className="ob-srow__d">Browse and request to join teams inside {name}</div>
-              </div>
-              <span className="ob-srow__tag">teams</span>
-            </div>
-          ) : (
+          {!isJoin && (
             <>
-              <div className="ob-srow">
-                <Avatar size="sm" color={team.color} initial={initialsOf(team.name)} emoji={team.emoji} />
-                <div className="ob-srow__meta">
-                  <div className="ob-srow__t">{team.name}</div>
-                  <div className="ob-srow__d">Your first team · you're the admin</div>
-                </div>
-                <span className="ob-srow__tag">team</span>
-              </div>
               <div className="ob-srow">
                 <span className="ob-avatar ob-avatar--sm" style={{ background: "var(--color-surface-raised)", color: "var(--color-muted)" }}>
                   <Icon name="mail" size={14} />
