@@ -1,13 +1,20 @@
 {
   "$schema": "https://thecompanion.sh/schemas/companion-manifest.v2.schema.json",
   "name": "companion",
-  "version": "1.12.2",
+  "version": "1.12.3",
   "title": "Companion",
   "description": "Manage local SKILL.md packages with Companion: self-update first, validate, publish, update, resolve dependencies, track installs, and repair manifests.",
   "notes": "## What it does\n\nThe Companion skill gives your assistant one reliable workflow for local SKILL.md packages: validate, publish, update, organize, install, audit, and self-update.\n\n## Safety model\n\n- Reads only skill folders you point it at and Companion's own local state under ~/.companion.\n- Stores credentials in ~/.companion/credentials.json by workspace id and never prints tokens.\n- Confirms publishing or archival changes before mutating workspace skills.\n- Uses companion.json as the source of truth for package identity, version, env/secrets, dependencies, notes, commands, and changelog.\n\n## Local tracking\n\nCompanion records installed skills in ~/.companion/skills.lock.json under workspace-id keys so audits can compare local versions, checksums, and dependency snapshots against the workspace registry without storing tokens.",
   "metadata": {
     "companionSkillId": "b0780a97-6972-4a2b-8e88-f41a528900c7",
     "changelog": [
+      {
+        "version": "1.12.3",
+        "date": "2026-06-25",
+        "changes": [
+          "Deletes only the backup created by a successful Companion self-update after the install report succeeds, while preserving older backups and keeping the new backup if reporting fails."
+        ]
+      },
       {
         "version": "1.12.2",
         "date": "2026-06-25",
