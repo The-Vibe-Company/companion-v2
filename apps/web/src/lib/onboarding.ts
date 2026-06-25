@@ -7,7 +7,6 @@ export interface OnboardingMatchedOrg {
   name: string;
   domain: string;
   memberCount: number;
-  teamCount: number;
 }
 
 /** Client view of the email-domain classification driving the onboarding flow. */
@@ -20,7 +19,6 @@ export interface OnboardingContext {
 
 export interface CompleteOnboardingPayload {
   org: { name: string; domain?: string | null; autoJoin: boolean; color?: string | null; logoUrl?: string | null };
-  team: { name: string; color?: string | null; icon?: string | null };
   invites: string[];
 }
 
@@ -29,7 +27,7 @@ export async function joinByDomain(orgId: string): Promise<{ orgId: string }> {
   return apiFetch("/v1/onboarding/join", { method: "POST", body: JSON.stringify({ orgId }) });
 }
 
-/** Create the org + first team + invites and finish onboarding. */
+/** Create the org + invites and finish onboarding. */
 export async function completeOnboarding(payload: CompleteOnboardingPayload): Promise<{ orgId: string }> {
   return apiFetch("/v1/onboarding/create", { method: "POST", body: JSON.stringify(payload) });
 }

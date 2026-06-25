@@ -86,6 +86,14 @@ The signed-in web app uses `GET /skills/share-target/{share_token}` with a sessi
 `{org_id, slug}` for members before opening the slug-keyed detail route. Agents should normally share
 the web URL `/s/{share_token}` instead of calling that resolver directly.
 
+After a successful skill upload or update, agents must include a `Skill link: ...` line in the chat.
+For org skills, fetch `GET /skills?lib=org`, find the published `slug`, and build
+`${COMPANION_API_URL without /v1}/s/{share_token}` from that row. Personal skills have no public
+preview until they are shared to the org; use the signed-in detail URL
+`${COMPANION_API_URL without /v1}/skills?skill={slug}` instead. If the publish succeeded but the
+org `share_token` lookup fails, do not republish; report success and provide the signed-in detail
+fallback.
+
 Some skills-management routes are intended for the signed-in web session rather than the
 Companion PAT. Use them only when the caller is operating with a valid session cookie:
 
@@ -354,6 +362,15 @@ treat it as a version identity reference, not a byte check of the download. To c
 check that `SKILL.md` is at the package root and `companion.json.version` matches the version you
 fetched.
 
+Before the Companion skill installs or updates a workspace-published skill, it must inspect the
+target `companion.json.environment.secrets`. Secrets marked `required: true` block installation until
+the user confirms they are already available/configured, or explicitly authorizes installing without
+them. The agent must never ask the user to paste secret values. Optional secrets and non-secret
+environment variables are surfaced as setup notes only. If required secrets are not confirmed and no
+override is given, stop before downloading/replacing files, calling install endpoints, or writing
+`~/.companion/skills.lock.json`. This guard does not apply to the bundled Companion self-update
+endpoints under `/local-skills/companion`.
+
 ## Local manifest checks
 
 Manifest v2 may declare a local update check:
@@ -417,6 +434,9 @@ Extract it into a temporary directory, verify `SKILL.md` is at the package root,
 `companion.json.version` equals the `availableVersion` from `/local-skills/companion`. Only then
 replace the installed Companion skill folder. After replacement, call
 `POST /local-skills/companion/installed` with the installed version so the workspace status updates.
+After that install report succeeds, delete only the backup folder created for this self-update. Keep
+the backup if install reporting fails, and never delete older Companion backup folders that existed
+before this update.
 
 Do not use `/skills/{slug}/download` or `/skills/{slug}/versions/{version}/package` to update the
 built-in Companion skill. Those endpoints are for workspace-published skills.
@@ -427,8 +447,8 @@ built-in Companion skill. Those endpoints are for workspace-published skills.
 POST /local-skills/companion/installed
 Content-Type: application/json
 
-{ "version": "1.12.1", "agent": "Claude Code" }
+{ "version": "1.12.4", "agent": "Claude Code" }
 ```
 
 `version` must be valid semver (use this skill's `companion.json.version`). The response is
-`{ "ok": true, "status": "installed" | "update", "availableVersion": "1.12.1" }`.
+`{ "ok": true, "status": "installed" | "update", "availableVersion": "1.12.4" }`.

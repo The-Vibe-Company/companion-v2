@@ -113,12 +113,16 @@ before downloading anything.
    - Backup the current Companion skill folder.
    - Replace the current folder with the staged package.
    - Call `POST /local-skills/companion/installed` with the installed version and agent name.
-   - Report the old version, new version, and backup path.
+   - After a successful replacement and install report, delete only the backup folder created for
+     this self-update.
+   - Report the old version, new version, and deleted backup path.
 6. After installing an update, stop the current operation and tell the user to rerun the original
    Companion command unless this runtime can safely reload the updated skill instructions in-process.
 
 If download, extraction, verification, replacement, or install reporting fails, stop without changing
-other skills. If replacement fails after moving files, restore the backup and stop. Avoid infinite
+other skills. If replacement fails after moving files, restore the backup and stop. If install
+reporting fails after replacement, keep the backup and report its path so the user can recover
+manually. Never delete older Companion backup folders that predate this self-update. Avoid infinite
 loops by comparing exact semver and by reporting the installed version after replacement.
 
 ## Mandatory preflight guard (run before create, update, install, or lockfile write)
@@ -399,10 +403,19 @@ confirmed block into the skill's `companion.json` and **re-validate** before pub
 }
 ```
 
-The workspace displays these as the skill's setup notes. When you install a skill that declares
-environment entries, surface them to the user so they can set the secrets and environment variables
-before running it. Declarations travel inside `companion.json` — there are no extra upload
+The workspace displays these as the skill's setup notes. When you install or update a skill that
+declares environment entries, surface them to the user so they can set the secrets and environment
+variables before running it. Declarations travel inside `companion.json` — there are no extra upload
 parameters and never any secret values.
+
+Before installing or updating a workspace-published skill, inspect the target package's
+`companion.json.environment.secrets`. Treat only secrets with `required: true` as blocking. Never ask
+the user to paste or reveal secret values; ask them to confirm that every required secret is already
+available/configured, or to explicitly authorize installing without those secrets ready. If they do
+neither, stop before downloading, replacing files, calling install endpoints, or writing
+`~/.companion/skills.lock.json`. Optional secrets and non-secret environment variables are setup
+notes only and do not block installation. This guard does not apply to the built-in Companion
+self-update flow under `/local-skills/companion`.
 
 ### Publish a skill
 
@@ -524,6 +537,16 @@ confirmation.
 After a successful re-publish of an org skill, refresh the caller's install record with
 `POST /skills/{slug}/install` and the published version, then refresh the local lockfile entry. A
 personal skill still needs no install report.
+
+After any successful publish or re-publish, include a skill link in the final chat response. Resolve
+`webBase` by removing the trailing `/v1` from `COMPANION_API_URL`. For org skills, fetch
+`GET /skills?lib=org`, find the row whose `slug` matches the published skill, and use its
+`share_token` to build the public preview link: `Skill link: ${webBase}/s/{share_token}`. For
+personal skills, explain that there is no public link until the owner shares it to the org, and use
+the signed-in detail link instead: `Skill link: ${webBase}/skills?skill={slug}`. If a publish
+succeeded but the org row or `share_token` cannot be retrieved, do not publish again; report the
+successful publish and fall back to the signed-in detail link, using `lib=org` when you know the
+skill is org-scoped.
 
 ```sh
 curl -s "$COMPANION_API_URL/skills?expect_slug=$SLUG&expect_skill_id=$SKILL_ID" \
@@ -694,8 +717,11 @@ out of date, or not published yet (a `404` means the slug is not in this workspa
 
 ### Install updates
 
-For an out-of-date folder, take the current `version` from the `download` response above, fetch that
-version's package, and replace the files in place (after the user confirms):
+For an out-of-date folder, take the current `version` from the `download` response above. Before
+fetching the package or replacing files, apply the required-secret readiness guard from "Declare
+required secrets and environment variables": required secrets must be confirmed ready, or the user
+must explicitly authorize installing without them. Then fetch that version's package and replace the
+files in place:
 
 ```sh
 curl -sL "$COMPANION_API_URL/skills/$SLUG/versions/$VERSION/package" \
@@ -787,6 +813,17 @@ curl -s "$COMPANION_API_URL/local-skills/companion/installed" \
 Treat `{ "ok": true, "status": "installed" }` as success. If the response says `status: "update"`,
 tell the user the workspace still has a newer bundled version available.
 
+After a successful replacement and successful install report, delete only the backup folder created
+for that self-update:
+
+```sh
+rm -rf "$backup"
+echo "Deleted Companion self-update backup at $backup"
+```
+
+Do not delete older `companion.backup-*` or `.companion-backup.*` folders that existed before this
+self-update. If install reporting fails, keep the backup and report its path.
+
 ## Confirm installation (run once, at the end of install)
 
 The last step of installing **this** skill is to tell the workspace it is present, so the Companion
@@ -797,7 +834,7 @@ skills view shows the correct status and version. Report the version from this s
 curl -s "$COMPANION_API_URL/local-skills/companion/installed" \
   -H "Authorization: Bearer $COMPANION_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"version":"1.12.1","agent":"<your assistant name>"}'
+  -d '{"version":"1.12.4","agent":"<your assistant name>"}'
 ```
 
 A `{ "ok": true, "status": "installed" }` response confirms the workspace now knows this machine has

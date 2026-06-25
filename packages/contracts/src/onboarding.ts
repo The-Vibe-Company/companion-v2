@@ -7,7 +7,6 @@ export const onboardingMatchedOrgSchema = z.object({
   name: z.string(),
   domain: z.string(),
   member_count: z.number().int().nonnegative(),
-  team_count: z.number().int().nonnegative(),
 });
 export type OnboardingMatchedOrg = z.infer<typeof onboardingMatchedOrgSchema>;
 
@@ -33,11 +32,6 @@ export const completeOnboardingInputSchema = z.object({
     autoJoin: z.boolean().default(false),
     color: teamBrandColorSchema.nullish(),
     logoUrl: z.string().url().max(2048).nullish(),
-  }),
-  team: z.object({
-    name: z.string().min(1).max(120),
-    color: teamBrandColorSchema.nullish(),
-    icon: z.string().max(16).nullish(),
   }),
   invites: z.array(z.string().email()).max(50).default([]),
 });
