@@ -43,7 +43,7 @@ describe("companion skill package + row", () => {
     const pkg = await getCompanionSkillPackage();
     expect(pkg.key).toBe("companion");
     expect(pkg.checksum).toMatch(/^sha256:[0-9a-f]{64}$/);
-    expect(pkg.version).toBe("1.12.1");
+    expect(pkg.version).toBe("1.12.2");
     expect(pkg.sizeBytes).toBeGreaterThan(0);
   });
 
@@ -73,10 +73,8 @@ describe("companion skill package + row", () => {
       desc: "Create or repair manifest v2 with identity, env/secrets, dependency ids, notes, commands, and changelog.",
     });
     const changelog = row.changes.join("\n");
-    expect(changelog).toContain("public preview links");
-    expect(changelog).toContain("share_token");
-    expect(changelog).toContain("preflight guard");
-    expect(changelog).toContain("expect_slug");
+    expect(changelog).toContain("declared required secrets are ready");
+    expect(changelog).toContain("explicit user authorization");
     // The install prompt drives the report-back call and leaves placeholders for the client.
     expect(row.prompts.install).toContain("/local-skills/companion/package");
     expect(row.prompts.install).toContain("/local-skills/companion/installed");
