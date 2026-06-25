@@ -397,10 +397,36 @@ export const createSkillInputSchema = z.object({
 });
 export type CreateSkillInput = z.infer<typeof createSkillInputSchema>;
 
+/** A private dependency that will be moved with `POST /v1/skills/:slug/share`. */
+export const skillSharePlanDependencySchema = z.object({
+  slug: z.string(),
+  status: skillDependencyStatusSchema,
+  note: z.string().nullable(),
+});
+export type SkillSharePlanDependency = z.infer<typeof skillSharePlanDependencySchema>;
+
+/** A dependency condition that prevents sharing until resolved. */
+export const skillSharePlanBlockerSchema = z.object({
+  slug: z.string(),
+  status: skillDependencyStatusSchema,
+  msg: z.string(),
+});
+export type SkillSharePlanBlocker = z.infer<typeof skillSharePlanBlockerSchema>;
+
+/** Response of `GET /v1/skills/:slug/share-plan` — preview the required private dependency migration. */
+export const skillSharePlanSchema = z.object({
+  slug: z.string(),
+  dependencies: z.array(skillSharePlanDependencySchema),
+  blocked: z.array(skillSharePlanBlockerSchema),
+});
+export type SkillSharePlan = z.infer<typeof skillSharePlanSchema>;
+
 /** Response of `POST /v1/skills/:slug/share` — move a personal skill into the org library. */
 export const shareSkillResultSchema = z.object({
   ok: z.literal(true),
   slug: z.string(),
   scope: z.literal("org"),
+  /** Private dependency slugs that were moved into the org library with the root skill. */
+  shared_dependencies: z.array(z.string()).default([]),
 });
 export type ShareSkillResult = z.infer<typeof shareSkillResultSchema>;

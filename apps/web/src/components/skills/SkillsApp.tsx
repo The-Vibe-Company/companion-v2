@@ -9,6 +9,7 @@ import type {
   LabelVM,
   LocalSkillRow,
   SkillFilterPreferences,
+  SkillSharePlan,
 } from "@companion/contracts";
 import {
   archiveSkill as archiveSkillRpc,
@@ -16,6 +17,7 @@ import {
   createLabel as createLabelRpc,
   deleteLabel as deleteLabelRpc,
   fetchArchivedSkills,
+  fetchSkillLibrary,
   markSkillInstalled,
   markSkillUninstalled,
   renameLabel as renameLabelRpc,
@@ -791,34 +793,34 @@ export function SkillsApp({
     [labelRpcs, labelsRefFor, labelsSetterFor, replaceSkillsUrl, selection, skillsRefFor, skillsSetterFor],
   );
 
-  // --- Share a personal skill to the org library (optimistic, with Undo) ------
+  // --- Share a personal skill to the org library -----------------------------
   const confirmShare = useCallback(
-    (vm: SkillVM) => {
+    (vm: SkillVM, _plan: SkillSharePlan) => {
       const id = vm.id;
-      const prevMine = mineSkillsRef.current;
-      const prevOrg = orgSkillsRef.current;
-      // Move the row mine → org: drop the authored personal row, add an org copy (owner = me).
-      setMineSkills((arr) => arr.filter((s) => !(s.id === id && s.source === "authored")));
-      setOrgSkills((arr) =>
-        arr.some((s) => s.id === id)
-          ? arr
-          : [...arr, { ...vm, scope: "org", source: null, labels: [], starred: false }],
-      );
       setShareTarget(null);
-      // Re-point the detail to the org copy so it stays open under the new library.
-      setSelection({ lib: "org", kind: "all" });
-      setOpenId(id);
-      setLastId(id);
-      if (typeof window !== "undefined" && window.location.pathname === "/skills") {
-        replaceSkillsUrl({ lib: "org", kind: "all", skill: id });
-      }
-      // Share is one-way (there is no un-share endpoint), so the toast offers no Undo — only the
-      // RPC-failure path reverts the optimistic move.
+      // Share is one-way (there is no un-share endpoint). Refetch both libraries after success so
+      // derived rows, labels, installs, stars, and dependency counters stay server-authoritative.
       shareSkillToOrg(id)
-        .then(() => setToast({ msg: `Shared ${id} to ${currentOrg.name}. Everyone can use it now.` }))
+        .then(async (result) => {
+          const [mineRows, orgRows] = await Promise.all([fetchSkillLibrary("mine"), fetchSkillLibrary("org")]);
+          setMineSkills(mineRows.map(mapSkill));
+          setOrgSkills(orgRows.map(mapSkill));
+          // Re-point the detail to the org copy so it stays open under the new library.
+          setSelection({ lib: "org", kind: "all" });
+          setOpenId(id);
+          setLastId(id);
+          if (typeof window !== "undefined" && window.location.pathname === "/skills") {
+            replaceSkillsUrl({ lib: "org", kind: "all", skill: id });
+          }
+          const count = result.shared_dependencies.length;
+          setToast({
+            msg:
+              count > 0
+                ? `Shared ${id} and ${count} private ${count === 1 ? "dependency" : "dependencies"} to ${currentOrg.name}.`
+                : `Shared ${id} to ${currentOrg.name}. Everyone can use it now.`,
+          });
+        })
         .catch((e) => {
-          setMineSkills(prevMine);
-          setOrgSkills(prevOrg);
           orgActions.setError((e as Error).message);
         });
     },
@@ -1371,7 +1373,7 @@ export function SkillsApp({
         <ShareDialog
           skill={shareTarget}
           orgName={currentOrg.name}
-          onConfirm={() => confirmShare(shareTarget)}
+          onConfirm={(plan) => confirmShare(shareTarget, plan)}
           onClose={() => setShareTarget(null)}
         />
       )}

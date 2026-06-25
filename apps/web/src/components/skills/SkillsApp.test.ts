@@ -15,6 +15,8 @@ const queryMocks = vi.hoisted(() => ({
   fetchSkillDetail: vi.fn(),
   fetchSkillDependencies: vi.fn(),
   fetchSkillDownloadUrl: vi.fn(),
+  fetchSkillLibrary: vi.fn(),
+  fetchSkillSharePlan: vi.fn(),
   fetchSkillVersionFiles: vi.fn(),
   addComment: vi.fn(),
   archiveSkill: vi.fn(),
@@ -297,6 +299,8 @@ beforeEach(() => {
   queryMocks.fetchSkillDetail.mockResolvedValue({ versions: [], comments: [], frontmatter: null });
   queryMocks.fetchSkillDependencies.mockResolvedValue(null);
   queryMocks.fetchSkillDownloadUrl.mockResolvedValue("/download");
+  queryMocks.fetchSkillLibrary.mockResolvedValue([]);
+  queryMocks.fetchSkillSharePlan.mockResolvedValue({ slug: "x", dependencies: [], blocked: [] });
   queryMocks.fetchSkillVersionFiles.mockResolvedValue({ files: [] });
   queryMocks.addComment.mockResolvedValue(null);
   queryMocks.archiveSkill.mockResolvedValue(undefined);
@@ -326,7 +330,7 @@ beforeEach(() => {
   queryMocks.deletePersonalLabel.mockResolvedValue(undefined);
   queryMocks.setPersonalLabelColor.mockResolvedValue(undefined);
   queryMocks.setPersonalLabelIcon.mockResolvedValue(undefined);
-  queryMocks.shareSkillToOrg.mockResolvedValue({ ok: true, slug: "x", scope: "org" });
+  queryMocks.shareSkillToOrg.mockResolvedValue({ ok: true, slug: "x", scope: "org", shared_dependencies: [] });
   mountedRoots = [];
 });
 
@@ -370,6 +374,109 @@ describe("SkillsApp initial route", () => {
     expect(html).toContain("Installed");
     expect(html).toContain("brand-linter");
     expect(html).not.toContain("Open skill my-draft");
+  });
+
+  it("shows mandatory private dependencies before sharing and reloads the migrated skills", async () => {
+    const root = skill({ id: "pdf-extractor", scope: "personal", source: "authored" });
+    const dependency = skill({ id: "markdown-report", scope: "personal", source: "authored" });
+    const sharedRoot = skill({ id: "pdf-extractor", scope: "org", source: null });
+    const sharedDependency = skill({ id: "markdown-report", scope: "org", source: null });
+    queryMocks.fetchSkillSharePlan.mockResolvedValueOnce({
+      slug: "pdf-extractor",
+      dependencies: [{ slug: "markdown-report", status: "satisfied", note: null }],
+      blocked: [],
+    });
+    queryMocks.shareSkillToOrg.mockResolvedValueOnce({
+      ok: true,
+      slug: "pdf-extractor",
+      scope: "org",
+      shared_dependencies: ["markdown-report"],
+    });
+    queryMocks.fetchSkillLibrary.mockImplementation(async (lib: "mine" | "org") =>
+      lib === "mine" ? [] : [skillRowFromVM(sharedRoot), skillRowFromVM(sharedDependency)],
+    );
+
+    const { container } = await mountSkillsApp(
+      { lib: "mine", kind: "all", skill: "pdf-extractor" },
+      {
+        props: {
+          initialMineSkills: [root, dependency],
+          initialOrgSkills: [],
+        },
+      },
+    );
+    await flushEffects();
+
+    clickButton(container, "Share to organization");
+    await flushEffects();
+
+    expect(queryMocks.fetchSkillSharePlan).toHaveBeenCalledWith("pdf-extractor");
+    expect(container.textContent).toContain("Private dependencies included");
+    expect(container.textContent).toContain("markdown-report");
+
+    const dialog = container.querySelector('[role="dialog"]');
+    expect(dialog).not.toBeNull();
+    const confirm = Array.from(dialog!.querySelectorAll("button")).find((node) =>
+      node.textContent?.includes("Share to organization"),
+    ) as HTMLButtonElement | undefined;
+    expect(confirm?.disabled).toBe(false);
+
+    act(() => {
+      confirm?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flushEffects();
+
+    expect(queryMocks.shareSkillToOrg).toHaveBeenCalledWith("pdf-extractor");
+    expect(queryMocks.fetchSkillLibrary).toHaveBeenCalledWith("mine");
+    expect(queryMocks.fetchSkillLibrary).toHaveBeenCalledWith("org");
+    expect(container.textContent).toContain("Shared pdf-extractor and 1 private dependency to Acme.");
+  });
+
+  it("uses the refetched server lists after sharing, not the preview", async () => {
+    const root = skill({ id: "pdf-extractor", scope: "personal", source: "authored" });
+    const dependency = skill({ id: "markdown-report", scope: "personal", source: "authored" });
+    const sharedRoot = skill({ id: "pdf-extractor", scope: "org", source: null });
+    queryMocks.fetchSkillSharePlan.mockResolvedValueOnce({
+      slug: "pdf-extractor",
+      dependencies: [{ slug: "markdown-report", status: "satisfied", note: null }],
+      blocked: [],
+    });
+    queryMocks.shareSkillToOrg.mockResolvedValueOnce({
+      ok: true,
+      slug: "pdf-extractor",
+      scope: "org",
+      shared_dependencies: [],
+    });
+    queryMocks.fetchSkillLibrary.mockImplementation(async (lib: "mine" | "org") =>
+      lib === "mine" ? [skillRowFromVM(dependency)] : [skillRowFromVM(sharedRoot)],
+    );
+
+    const { container } = await mountSkillsApp(
+      { lib: "mine", kind: "all", skill: "pdf-extractor" },
+      {
+        props: {
+          initialMineSkills: [root, dependency],
+          initialOrgSkills: [],
+        },
+      },
+    );
+    await flushEffects();
+
+    clickButton(container, "Share to organization");
+    await flushEffects();
+    const dialog = container.querySelector('[role="dialog"]');
+    const confirm = Array.from(dialog!.querySelectorAll("button")).find((node) =>
+      node.textContent?.includes("Share to organization"),
+    ) as HTMLButtonElement;
+
+    act(() => {
+      confirm.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flushEffects();
+
+    expect(container.textContent).toContain("Shared pdf-extractor to Acme. Everyone can use it now.");
+    expect(container.textContent).toContain("pdf-extractor");
+    expect(container.textContent).not.toContain("markdown-report");
   });
 
   it("renders a label folder route (skills filed under the path or any descendant)", () => {
