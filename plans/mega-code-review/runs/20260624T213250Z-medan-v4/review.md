@@ -1,2 +1,0 @@
-**[P2] packages/companion-skill/skill/scripts/check_updates.py:82 - Prerelease versions are ordered above stable releases**
-The new local update check compares versions by `(major, minor, patch, suffix)`, which makes `1.0.0-alpha` sort higher than `1.0.0` because the stable suffix is an empty string. If a published prerelease is current while the local lockfile has the stable release, the script incorrectly reports an available update and can direct users to replace a stable skill with a prerelease.
