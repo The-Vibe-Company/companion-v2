@@ -74,7 +74,8 @@ Every tenant-owned table carries `org_id`. A skill lives in one of two libraries
 `creator_id` (always recorded, for Activity/audit) doubles as the **owner** of a personal skill. There
 is still no `owner_team_id`, `everyone` flag, `skill_team_shares` table, or `PUT /v1/skills/:slug/owner`
 endpoint. A slug is **workspace-unique across both scopes** (`skills_org_slug_uq (org_id, slug)`), so the
-slug-keyed dependency graph stays unambiguous and Share can never collide. The one scope transition is
+slug route stays unambiguous and Share can never collide. Dependency reads prefer the stable target
+`skills.id`, so an explicit rename can change the slug without replacing the skill. The one scope transition is
 **Share** (`POST /v1/skills/:slug/share`): owner-only, one-way `personal → org`, which also drops the
 skill's personal-folder assignments. "Installed" is not a copied row — a member's My Skills =
 (`scope='personal' AND creator=them`) ∪ (org skills they have a `skill_installs` row for), surfaced
@@ -87,19 +88,26 @@ version, creator display name/initials, star count, and `updated_at`. It never r
 `creator_id`, SKILL.md body, package files, downloads, requirements, secrets, or labels. Personal
 skills are never exposed through this path; the owner must Share the skill into the org library first,
 and archived org skills return 404.
+`skills.display_name` is a nullable, mutable display-title override used by explicit rename. It is
+overlaid onto the current read model as `display.name` but never rewrites existing
+`skill_versions.frontmatter` rows or stored package archives.
 Companion-specific package data lives in root `companion.json`, not `SKILL.md`: `name`, `version`,
 human-facing `title`/`description`, Markdown-compatible `notes`, `metadata.companionSkillId`,
 `metadata.changelog`, `environment.env` / `environment.secrets` declarations (never values),
 `commands`, local-only `checks`, and un-versioned skill `dependencies` as `{ skillName: skillId }`.
 `description` updates the existing `skills.description` listing field; the full normalized manifest rides in the existing
 `skill_versions.frontmatter` JSON under `companion` and is parsed back into the read shape
-(`skillListRowSchema.display` / `skillListRowSchema.requirements`) for the skill detail view. Legacy
+(`skillListRowSchema.display` / `skillListRowSchema.requirements`) for the skill detail view; the
+skill-level `display_name` override wins over the manifest title when present. Legacy
 packages that still declare `requirements` in `SKILL.md`, `display`, or dependency arrays are readable
 for compatibility and are normalized into `companion.json` on publish. Companion registry data is
 written into `companion.json` when a package is published. On targeted re-publish, callers may send
 `expect_slug` and `expect_skill_id`; validation and publication reject mismatched frontmatter names
 and any present `companion.json.metadata.companionSkillId` (or legacy
 `metadata.companion_skill_id`) that points at a different skill.
+Renaming a skill is not a publish side effect: `POST /v1/skills/:slug/rename` updates the existing
+`skills` row's `slug` (and optional display title) in place, keeps the same `id`, and leaves the
+normal anti-retargeting guard on `POST /v1/skills` intact.
 On re-publish of an existing Companion package, reserved version metadata is treated as provenance; the API/CLI still assigns the
 next registry version unless the caller passes an explicit version. Legacy top-level `version`,
 `tools`, and unknown fields are warnings and are not preserved as top-level fields in newly stored
@@ -143,7 +151,9 @@ drops its `personal_skill_labels` rows; org folders apply from then on.
 requires other skills. Edges live in `skill_version_dependencies` (`(skill_version_id,
 depends_on_slug)` PK, plus `org_id`, the dependent `skill_id`, and a resolved `depends_on_skill_id`
 that is `null` when the declared slug is not published — a *missing* dependency), so each version
-keeps its exact graph. Dependencies are **un-versioned**: there are no semver ranges, no resolved
+keeps its exact graph. Runtime reads resolve `depends_on_skill_id` first and fall back to
+`depends_on_slug` only for unresolved legacy/missing edges; the displayed slug is the target skill's
+current slug when the id resolves. Dependencies are **un-versioned**: there are no semver ranges, no resolved
 version pins, and no "update available" status — versions are a skill's own publish concern, not the
 dependency graph's. Each edge's status is computed live on read from current state: **Satisfied**,
 **Missing** (target unpublished), **Archived** (target archived), or **Cycle blocked**
@@ -321,6 +331,7 @@ slug-keyed detail route.
   `/v1/skills/:slug`, `/v1/skills/:slug/versions`,
   `/v1/skills/:slug/download`, `/v1/skill-filter-preferences`,
   `POST /v1/skills/create` (author a SKILL.md inline),
+  `POST /v1/skills/:slug/rename` (explicit in-place slug/title rename, preserving the skill id),
   `GET /v1/skills/:slug/versions/:version/package` (download a version as `.zip`), and
   `GET /v1/skills/:slug/versions/:version/files` (read a version's package contents for the in-app
   file explorer — text files are returned UTF-8-decoded and capped, binaries carry `content: null`).
@@ -363,12 +374,14 @@ slug-keyed detail route.
   `PUT /v1/users/me` (update display name), and `/v1/invitations`. There are no `/v1/teams` endpoints.
 
 Requests authenticate by Better Auth cookie session. An `Authorization: Bearer cmp_pat_…` token is
-accepted **only** on the PAT-enabled skills endpoints (`POST /v1/skills`, `POST /v1/skills/create`,
+accepted **only** on the PAT-enabled skills endpoints (`GET /v1/skills`, `POST /v1/skills`,
+`POST /v1/skills/create`, `POST /v1/skills/:slug/rename`,
 `GET /v1/skills/:slug/download`,
 `GET /v1/skills/:slug/versions/:version/package`,
-`GET /v1/skills/:slug/versions/:version/files`, and the `/v1/local-skills*` endpoints); every other
-endpoint rejects tokens. Token requests are scope-gated (`skills:write` to publish/create,
-`skills:read` to download). Reading the local-skills catalog
+`GET /v1/skills/:slug/versions/:version/files`, the skills install/dependency/archive/share/label
+surfaces, and the `/v1/local-skills*` endpoints); every other endpoint rejects tokens. Token requests
+are scope-gated (`skills:write` to publish/create/rename/mutate, `skills:read` to read/download).
+Reading the local-skills catalog
 and downloading its package require `skills:read`; the install callback
 (`POST /v1/local-skills/:key/installed`) mutates state and writes an audit row, so it requires
 `skills:write` — the read+write token the install prompt mints satisfies
@@ -379,6 +392,7 @@ labels to file the skill under on publish). Setting
 `expect_slug` and `expect_skill_id` in form fields or query params for both validation and
 publication. Uploads accept `.zip` or `.tar.gz`; the canonical stored, checksummed format is `.tar.gz`.
 
-Skill archives are stored under `{org_id}/{slug}/{version}.tar.gz` in the `skill-archives` bucket;
-the per-version package endpoint repackages them as `.zip` on the fly. Clients never receive S3
+Skill archives are stored under `{org_id}/{slug}/{version}.tar.gz` in the `skill-archives` bucket
+using the slug at publish time; a later rename does not move historical archive objects. The
+per-version package endpoint repackages them as `.zip` on the fly. Clients never receive S3
 admin credentials.

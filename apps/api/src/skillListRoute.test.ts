@@ -41,6 +41,7 @@ const serviceMocks = vi.hoisted(() => {
     listSkillVersions: noop,
     publishSkillVersion: noop,
     assertCanPublishSkillVersion: noop,
+    renameSkill: vi.fn(),
     renameLabel: noop,
     reportLocalSkillInstall: noop,
     removeOrgAccessDomain: noop,
@@ -71,6 +72,17 @@ const serviceMocks = vi.hoisted(() => {
     deletePersonalLabel: noop,
     ensureUserBootstrap: noop,
     resolveApiToken: vi.fn(),
+    resolveDependencyReferences: vi.fn(async (input: { slugs: string[] }) =>
+      input.slugs.map((slug) => ({ declaredSlug: slug, slug, skillId: null })),
+    ),
+    resolvedDependencySlugs: vi.fn((dependencies: Array<{ slug: string }>) => [...new Set(dependencies.map((d) => d.slug))]),
+    resolvedDependencyIdMap: vi.fn((dependencies: Array<{ slug: string; skillId: string | null }>) =>
+      Object.fromEntries(dependencies.filter((d) => d.skillId).map((d) => [d.slug, d.skillId])),
+    ),
+    prepareSkillPublishDependencies: vi.fn(async (input: { slugs: string[] }) => {
+      const references = input.slugs.map((slug) => ({ declaredSlug: slug, slug, skillId: null }));
+      return { references, slugs: [...new Set(input.slugs)], manifestDependencies: {} };
+    }),
   };
 });
 
@@ -211,6 +223,69 @@ describe("GET/POST /v1/skills/:slug/share", () => {
 
     expect(res.status).toBe(400);
     expect(serviceMocks.buildSkillSharePlan).not.toHaveBeenCalled();
+  });
+});
+
+describe("POST /v1/skills/:slug/rename", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    serviceMocks.resolveApiToken.mockImplementation(async (token: string) => tokenFor(token));
+  });
+
+  it("renames a skill through the explicit service mutation", async () => {
+    serviceMocks.renameSkill.mockResolvedValue({
+      ok: true,
+      id: "skill-1",
+      old_slug: "skill-creator",
+      slug: "skill-creator-and-eval",
+      title: "Skill Creator and Eval",
+    });
+
+    const res = await app.request("/v1/skills/skill-creator/rename", {
+      method: "POST",
+      headers: { Authorization: "Bearer write-only", "content-type": "application/json" },
+      body: JSON.stringify({ newSlug: "skill-creator-and-eval", title: "Skill Creator and Eval" }),
+    });
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({
+      ok: true,
+      id: "skill-1",
+      old_slug: "skill-creator",
+      slug: "skill-creator-and-eval",
+      title: "Skill Creator and Eval",
+    });
+    expect(serviceMocks.renameSkill).toHaveBeenCalledWith(
+      expect.objectContaining({
+        actor: actorA,
+        orgId: "org-1",
+        slug: "skill-creator",
+        newSlug: "skill-creator-and-eval",
+        title: "Skill Creator and Eval",
+      }),
+    );
+  });
+
+  it("validates the new slug before calling the service", async () => {
+    const res = await app.request("/v1/skills/skill-creator/rename", {
+      method: "POST",
+      headers: { Authorization: "Bearer write-only", "content-type": "application/json" },
+      body: JSON.stringify({ newSlug: "Skill Creator" }),
+    });
+
+    expect(res.status).toBe(400);
+    expect(serviceMocks.renameSkill).not.toHaveBeenCalled();
+  });
+
+  it("requires skills:write", async () => {
+    const res = await app.request("/v1/skills/skill-creator/rename", {
+      method: "POST",
+      headers: { Authorization: "Bearer read-a", "content-type": "application/json" },
+      body: JSON.stringify({ newSlug: "skill-creator-and-eval" }),
+    });
+
+    expect(res.status).toBe(400);
+    expect(serviceMocks.renameSkill).not.toHaveBeenCalled();
   });
 });
 

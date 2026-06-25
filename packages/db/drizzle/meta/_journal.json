@@ -204,6 +204,13 @@
       "when": 1781051700000,
       "tag": "0028_skill_share_token",
       "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "7",
+      "when": 1781051800000,
+      "tag": "0029_skill_display_name",
+      "breakpoints": true
     }
   ]
 }

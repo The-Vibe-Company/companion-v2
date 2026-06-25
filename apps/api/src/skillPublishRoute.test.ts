@@ -44,7 +44,18 @@ const serviceMocks = vi.hoisted(() => {
     listSkillVersions: noop,
     publishSkillVersion: noop,
     assertCanPublishSkillVersion: noop,
-    assertManifestDependencyIds: noop,
+    resolveDependencyReferences: vi.fn(async (input: { slugs: string[] }) =>
+      input.slugs.map((slug) => ({ declaredSlug: slug, slug, skillId: null })),
+    ),
+    resolvedDependencySlugs: vi.fn((dependencies: Array<{ slug: string }>) => [...new Set(dependencies.map((d) => d.slug))]),
+    resolvedDependencyIdMap: vi.fn((dependencies: Array<{ slug: string; skillId: string | null }>) =>
+      Object.fromEntries(dependencies.filter((d) => d.skillId).map((d) => [d.slug, d.skillId])),
+    ),
+    prepareSkillPublishDependencies: vi.fn(async (input: { slugs: string[] }) => {
+      const references = input.slugs.map((slug) => ({ declaredSlug: slug, slug, skillId: null }));
+      return { references, slugs: [...new Set(input.slugs)], manifestDependencies: {} };
+    }),
+    renameSkill: noop,
     renameLabel: noop,
     reportLocalSkillInstall: noop,
     removeOrgAccessDomain: noop,
@@ -147,6 +158,21 @@ describe("POST /v1/skills identity guard", () => {
     expect(res.status).toBe(422);
     await expect(res.json()).resolves.toMatchObject({
       error: expect.stringContaining('belongs to skill "other-skill", not "research-agent"'),
+    });
+    expect(serviceMocks.publishSkillVersion).not.toHaveBeenCalled();
+  });
+
+  it("rejects an old-slug upload after an explicit rename", async () => {
+    skillsMocks.validateSkillArchive.mockResolvedValue(validated("skill-creator", "skill-1"));
+    serviceMocks.getSkillBySlug.mockResolvedValue(null); // old slug no longer resolves after rename
+    serviceMocks.getSkillById.mockResolvedValue({ id: "skill-1", slug: "skill-creator-and-eval" });
+
+    const res = await publish();
+    expect(res.status).toBe(422);
+    await expect(res.json()).resolves.toMatchObject({
+      error: expect.stringContaining(
+        'package Companion skill id "skill-1" belongs to skill "skill-creator-and-eval", not "skill-creator"',
+      ),
     });
     expect(serviceMocks.publishSkillVersion).not.toHaveBeenCalled();
   });
