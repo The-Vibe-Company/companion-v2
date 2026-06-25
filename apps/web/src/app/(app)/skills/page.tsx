@@ -7,6 +7,7 @@ import type {
 } from "@companion/contracts";
 import { loadOrgContext } from "@/lib/currentOrg";
 import { serverApiFetch } from "@/lib/apiServer";
+import { requiresCompanionSkillInstall } from "@/lib/companionSkillGate";
 import { SkillsApp } from "@/components/skills/SkillsApp";
 import { parseSkillsRoute, skillsRouteSource } from "@/components/skills/route";
 import { WorkspaceLoadError } from "@/components/org/WorkspaceLoadError";
@@ -36,8 +37,12 @@ export default async function SkillsPage({
   // A user who has finished onboarding always has an org; if not, send them (back) to onboarding.
   if (!current) redirect("/onboarding");
   const orgHeaders = { "x-companion-org": current.id };
+  const localSkillsResult = await serverApiFetch<LocalSkillRow[]>("/v1/local-skills", { headers: orgHeaders }).catch(
+    () => null,
+  );
+  if (requiresCompanionSkillInstall(localSkillsResult)) redirect("/companion-setup");
 
-  const [mineResult, orgResult, filterPreferences, personalLabelsResult, labelsResult, localSkillsResult] =
+  const [mineResult, orgResult, filterPreferences, personalLabelsResult, labelsResult] =
     await Promise.all([
       // "My Skills": the caller's authored personal skills + org skills they installed.
       serverApiFetch<SkillListRow[]>("/v1/skills?lib=mine", { headers: orgHeaders }).catch(() => null),
@@ -47,8 +52,6 @@ export default async function SkillsPage({
       // Best-effort: each tree degrades gracefully to empty if its fetch fails.
       serverApiFetch<LabelsResponse>("/v1/personal-labels", { headers: orgHeaders }).catch(() => EMPTY_LABELS),
       serverApiFetch<LabelsResponse>("/v1/labels", { headers: orgHeaders }).catch(() => EMPTY_LABELS),
-      // Best-effort: the Companion skills section degrades gracefully if this fails.
-      serverApiFetch<LocalSkillRow[]>("/v1/local-skills", { headers: orgHeaders }).catch(() => [] as LocalSkillRow[]),
     ]);
   if (!mineResult || !orgResult || !filterPreferences) return <WorkspaceLoadError />;
   const mineSkills = mineResult.map(mapSkill);

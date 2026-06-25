@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 const appUrl = (process.env.APP_URL ?? "http://127.0.0.1:3300").replace(/\/$/, "");
+const apiUrl = (process.env.COMPANION_API_URL ?? "http://127.0.0.1:3301").replace(/\/$/, "");
 const email = process.env.BROWSER_SMOKE_EMAIL ?? process.env.COMPANION_SEED_EMAIL ?? "admin@tvc.dev";
 const password = process.env.BROWSER_SMOKE_PASSWORD ?? process.env.COMPANION_SEED_PASSWORD ?? "adminadmin";
 
@@ -31,10 +32,18 @@ function cookieHeader() {
 }
 
 async function request(path, init = {}) {
+  return requestUrl(`${appUrl}${path}`, init);
+}
+
+async function apiRequest(path, init = {}) {
+  return requestUrl(`${apiUrl}${path}`, init);
+}
+
+async function requestUrl(url, init = {}) {
   const headers = new Headers(init.headers ?? {});
   const cookie = cookieHeader();
   if (cookie) headers.set("cookie", cookie);
-  const response = await fetch(`${appUrl}${path}`, {
+  const response = await fetch(url, {
     ...init,
     headers,
     redirect: "manual",
@@ -98,6 +107,29 @@ async function login() {
   }
 }
 
+async function markCompanionSkillInstalled() {
+  const current = await apiRequest("/v1/local-skills/companion");
+  const row = await current.json().catch(() => ({}));
+  if (!current.ok) {
+    fail(`GET /v1/local-skills/companion returned ${current.status}; body: ${JSON.stringify(row).slice(0, 400)}`);
+  }
+  if (!row.availableVersion) {
+    fail("GET /v1/local-skills/companion did not include availableVersion");
+  }
+
+  const installed = await apiRequest("/v1/local-skills/companion/installed", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ version: row.availableVersion, agent: "rsc-smoke" }),
+  });
+  const result = await installed.json().catch(() => ({}));
+  if (!installed.ok || result?.ok !== true) {
+    fail(
+      `POST /v1/local-skills/companion/installed returned ${installed.status}; body: ${JSON.stringify(result).slice(0, 400)}`,
+    );
+  }
+}
+
 async function checkPage(path, expected) {
   const response = await request(path);
   if (response.status >= 500) {
@@ -119,6 +151,7 @@ async function checkPage(path, expected) {
 
 await checkUnauthenticatedRedirect();
 await login();
+await markCompanionSkillInstalled();
 await checkPage("/skills", ["Skills", "Upload skill"]);
 await checkPage("/settings", ["Settings", "Members"]);
 

@@ -776,7 +776,7 @@ describe("Companion skills install gate", () => {
     await flushEffects();
 
     expect(container.textContent).toContain("Connect Companion to your assistant");
-    expect(container.textContent).toContain("Required to start");
+    expect(container.textContent).toContain("Required to continue");
     // Lazy mint: opening the gate must NOT create a credential.
     expect(queryMocks.issueToken).not.toHaveBeenCalled();
 
