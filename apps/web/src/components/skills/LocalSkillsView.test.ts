@@ -9,18 +9,15 @@ import { LocalSkillsView } from "./LocalSkillsView";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-const routerMock = vi.hoisted(() => ({
-  replace: vi.fn(),
-  refresh: vi.fn(),
-}));
-
 const queryMocks = vi.hoisted(() => ({
   fetchLocalSkills: vi.fn(),
   issueToken: vi.fn(),
 }));
 
+// The view no longer touches the router (the install is not a hard gate), but keep a stub so any
+// transitive import resolves.
 vi.mock("next/navigation", () => ({
-  useRouter: () => routerMock,
+  useRouter: () => ({ replace: vi.fn(), refresh: vi.fn(), push: vi.fn() }),
 }));
 
 vi.mock("@/lib/queries", () => ({
@@ -44,7 +41,7 @@ const baseSkill: LocalSkillRow = {
   changes: [],
   integrity: { packageChecksum: `sha256:${"a".repeat(64)}`, files: { "SKILL.md": `sha256:${"b".repeat(64)}` } },
   prompts: {
-    install: "install {base} {workspaceId} {token}",
+    install: 'install {base} {workspaceId} {token} agent=<your assistant>',
     update: "update {base} {workspaceId} {token}",
     use: "use {base} {workspaceId} {token}",
   },
@@ -52,7 +49,7 @@ const baseSkill: LocalSkillRow = {
 
 const mountedRoots: Root[] = [];
 
-async function mount(required = true) {
+async function mount(skill: LocalSkillRow = baseSkill) {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
@@ -60,23 +57,33 @@ async function mount(required = true) {
   await act(async () => {
     root.render(
       React.createElement(LocalSkillsView, {
-        skills: [baseSkill],
+        skills: [skill],
         workspaceId: "org-1",
         workspaceName: "Acme",
-        required,
       }),
     );
   });
   return container;
 }
 
-describe("LocalSkillsView required setup", () => {
+async function flush() {
+  await act(async () => {
+    vi.advanceTimersByTime(3000);
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+}
+
+describe("LocalSkillsView", () => {
   beforeEach(() => {
     vi.useFakeTimers();
-    routerMock.replace.mockReset();
-    routerMock.refresh.mockReset();
     queryMocks.fetchLocalSkills.mockReset();
     queryMocks.issueToken.mockResolvedValue({ token: "cmp_pat_test" });
+    try {
+      window.localStorage.clear();
+    } catch {
+      /* ignore */
+    }
   });
 
   afterEach(() => {
@@ -87,7 +94,16 @@ describe("LocalSkillsView required setup", () => {
     vi.useRealTimers();
   });
 
-  it("redirects to Skills when the out-of-band Companion install is reported", async () => {
+  it("auto-opens the dismissible connect dialog with an assistant chooser when not installed", async () => {
+    const container = await mount();
+    expect(container.textContent).toContain("Connect Companion to your assistant");
+    // Both assistant tiles are offered; the install is no longer forced ("Maybe later" is available).
+    expect(container.textContent).toContain("Claude Code");
+    expect(container.textContent).toContain("Codex");
+    expect(container.textContent).toContain("Maybe later");
+  });
+
+  it("flips to the Connected banner when an out-of-band install is reported", async () => {
     queryMocks.fetchLocalSkills.mockResolvedValueOnce([
       {
         ...baseSkill,
@@ -97,28 +113,27 @@ describe("LocalSkillsView required setup", () => {
       },
     ]);
 
-    await mount(true);
-    expect(routerMock.replace).not.toHaveBeenCalled();
+    const container = await mount();
+    expect(queryMocks.fetchLocalSkills).not.toHaveBeenCalled();
 
-    await act(async () => {
-      vi.advanceTimersByTime(3000);
-      await Promise.resolve();
-    });
+    await flush();
 
     expect(queryMocks.fetchLocalSkills).toHaveBeenCalledTimes(1);
-    expect(routerMock.replace).toHaveBeenCalledWith("/skills");
-    expect(routerMock.refresh).toHaveBeenCalledTimes(1);
+    expect(container.textContent).toContain("Connected.");
+    expect(container.textContent).not.toContain("Connect Companion to your assistant");
   });
 
-  it("does not poll in the optional Companion skills view", async () => {
-    await mount(false);
-
-    await act(async () => {
-      vi.advanceTimersByTime(3000);
-      await Promise.resolve();
+  it("does not poll once the skill is installed", async () => {
+    const container = await mount({
+      ...baseSkill,
+      status: "installed",
+      installedVersion: "1.0.0",
+      lastReportedAt: "2026-06-25T00:00:00.000Z",
     });
+    expect(container.textContent).toContain("Connected.");
+
+    await flush();
 
     expect(queryMocks.fetchLocalSkills).not.toHaveBeenCalled();
-    expect(routerMock.replace).not.toHaveBeenCalled();
   });
 });

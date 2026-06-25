@@ -1,6 +1,5 @@
 "use client";
 
-import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import type { LocalSkillRow, LocalSkillStatus, TokenScope } from "@companion/contracts";
@@ -47,14 +46,64 @@ function promptFor(skill: LocalSkillRow): string {
 type PromptMode = "default" | "reinstall";
 type CopiedKind = "prompt" | "reinstall";
 
-function fillPrompt(template: string, base: string, workspaceId: string, token: string): string {
+/** The assistants the install dialog can target. The id is the `agent` label reported on install. */
+type AssistantId = "claude-code" | "codex";
+const ASSISTANTS: Record<AssistantId, { name: string; vendor: string; hint: string }> = {
+  "claude-code": { name: "Claude Code", vendor: "anthropic", hint: "paste into Claude Code" },
+  codex: { name: "Codex", vendor: "openai", hint: "paste into Codex" },
+};
+
+/**
+ * Fill the assistant-prompt placeholders. `agent` substitutes the `<your assistant>` slot the API leaves
+ * in the report-back step; it defaults to that literal so callers without an assistant chooser (the detail
+ * drawer, the CLI) get byte-identical output to before.
+ */
+function fillPrompt(
+  template: string,
+  base: string,
+  workspaceId: string,
+  token: string,
+  agent = "<your assistant>",
+): string {
   return template
     .split("{base}")
     .join(base)
     .split("{workspaceId}")
     .join(workspaceId)
     .split("{token}")
-    .join(token);
+    .join(token)
+    .split("<your assistant>")
+    .join(agent);
+}
+
+/** Anthropic mark, shown on the Claude Code chooser tile (copied from the design). */
+function ClaudeLogo() {
+  return (
+    <span className="ls-tile__logo" style={{ background: "#D97757" }} aria-hidden="true">
+      <svg width="21" height="21" viewBox="0 0 24 24" fill="#fff">
+        <g>
+          <rect x="11.2" y="2" width="1.6" height="20" rx="0.8" />
+          <rect x="11.2" y="2" width="1.6" height="20" rx="0.8" transform="rotate(36 12 12)" />
+          <rect x="11.2" y="2" width="1.6" height="20" rx="0.8" transform="rotate(72 12 12)" />
+          <rect x="11.2" y="2" width="1.6" height="20" rx="0.8" transform="rotate(108 12 12)" />
+          <rect x="11.2" y="2" width="1.6" height="20" rx="0.8" transform="rotate(144 12 12)" />
+        </g>
+      </svg>
+    </span>
+  );
+}
+
+/** OpenAI mark, shown on the Codex chooser tile (copied from the design). */
+function CodexLogo() {
+  return (
+    <span className="ls-tile__logo" style={{ background: "#0b0b0d" }} aria-hidden="true">
+      <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="1.5">
+        <ellipse cx="12" cy="12" rx="9.2" ry="3.6" />
+        <ellipse cx="12" cy="12" rx="9.2" ry="3.6" transform="rotate(60 12 12)" />
+        <ellipse cx="12" cy="12" rx="9.2" ry="3.6" transform="rotate(120 12 12)" />
+      </svg>
+    </span>
+  );
 }
 
 function MarkdownNotes({ value }: { value: string }) {
@@ -147,24 +196,20 @@ export function LocalSkillsView({
   skills,
   workspaceId,
   workspaceName,
-  required = false,
 }: {
   skills: LocalSkillRow[];
   workspaceId: string;
   workspaceName: string;
-  required?: boolean;
 }) {
-  const router = useRouter();
   const [localSkills, setLocalSkills] = useState<LocalSkillRow[]>(skills);
   const [openKey, setOpenKey] = useState<string | null>(null);
-  // localStorage is read post-mount only (SSR renders the gate/install-banner closed) to avoid the
+  // localStorage is read post-mount only (SSR renders the dialog/banners closed) to avoid the
   // hydration mismatch the theme prefs hit; `mounted` also keeps `renderToString` output stable.
   const [mounted, setMounted] = useState(false);
   const [dismissed, setDismissed] = useState(false);
 
-  const featured = required
-    ? localSkills.find((skill) => skill.key === REQUIRED_LOCAL_SKILL_KEY) ?? null
-    : localSkills.find((skill) => skill.key === REQUIRED_LOCAL_SKILL_KEY) ?? localSkills[0] ?? null;
+  const featured =
+    localSkills.find((skill) => skill.key === REQUIRED_LOCAL_SKILL_KEY) ?? localSkills[0] ?? null;
   const open = useMemo(() => localSkills.find((s) => s.key === openKey) ?? null, [localSkills, openKey]);
 
   const storageKey = featured ? gateStorageKey(workspaceName, featured.key) : null;
@@ -172,16 +217,15 @@ export function LocalSkillsView({
   useEffect(() => setLocalSkills(skills), [skills]);
   useEffect(() => setMounted(true), []);
   useEffect(() => {
-    if (!storageKey || required) return;
+    if (!storageKey) return;
     try {
       setDismissed(window.localStorage.getItem(storageKey) === "1");
     } catch {
       setDismissed(false);
     }
-  }, [required, storageKey]);
+  }, [storageKey]);
 
   const dismissGate = useCallback(() => {
-    if (required) return;
     setDismissed(true);
     if (storageKey) {
       try {
@@ -190,7 +234,7 @@ export function LocalSkillsView({
         /* private mode / storage disabled: fall back to in-memory dismissal */
       }
     }
-  }, [required, storageKey]);
+  }, [storageKey]);
 
   const reopenGate = useCallback(() => {
     setDismissed(false);
@@ -205,21 +249,18 @@ export function LocalSkillsView({
 
   const isNone = featured?.status === "none";
 
+  // While the skill isn't installed, poll so the page flips to the "Connected" banner on its own once
+  // the user runs the prompt in their assistant. The install is no longer a hard gate, so this only
+  // refreshes status — it never redirects.
   useEffect(() => {
-    if (!required || !isNone) return;
+    if (!isNone) return;
     let cancelled = false;
     const checkInstall = async () => {
       try {
         const next = await fetchLocalSkills();
-        if (cancelled) return;
-        setLocalSkills(next);
-        const nextFeatured = next.find((skill) => skill.key === REQUIRED_LOCAL_SKILL_KEY);
-        if (nextFeatured && nextFeatured.status !== "none") {
-          router.replace("/skills");
-          router.refresh();
-        }
+        if (!cancelled) setLocalSkills(next);
       } catch {
-        /* keep the required gate open; the next poll or reload can recover */
+        /* transient: the next poll or a reload can recover */
       }
     };
     const timer = window.setInterval(() => {
@@ -229,11 +270,12 @@ export function LocalSkillsView({
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [featured, isNone, required, router]);
+  }, [isNone]);
 
-  // The gate auto-closes if status flips to installed/update while open, or the drawer opens.
-  const gateOpen = mounted && isNone && (required || !dismissed) && open === null;
-  const showInstallBanner = !required && mounted && isNone && dismissed && open === null;
+  // The dialog auto-closes if status flips to installed/update while open, or the drawer opens.
+  const gateOpen = mounted && isNone && !dismissed && open === null;
+  const showDeferredBanner = mounted && isNone && dismissed && open === null;
+  const showInstalledBanner = featured?.status === "installed";
   const showUpdateBanner = featured?.status === "update";
 
   return (
@@ -260,15 +302,35 @@ export function LocalSkillsView({
         </div>
       )}
 
-      {showInstallBanner && (
-        <div className="ls-banner ls-banner--warn" role="status">
-          <Icon name="alert-triangle" size={16} className="ls-banner__ico" />
+      {showInstalledBanner && (
+        <div className="ls-banner ls-banner--ok" role="status">
+          <Icon name="check-circle-2" size={16} className="ls-banner__ico" />
           <span className="ls-banner__text">
-            <strong>Not connected.</strong> Your assistant can&rsquo;t manage skills on this machine
-            yet.
+            <strong>Connected.</strong> Claude Code, Codex, and your agents can manage the skills on this
+            machine.
           </span>
-          <button type="button" className="ls-banner__action" onClick={reopenGate}>
-            Install
+        </div>
+      )}
+
+      {showDeferredBanner && (
+        <div className="ls-banner ls-banner--danger" role="status">
+          <span className="ls-banner__tile" aria-hidden="true">
+            <Icon name="plug-zap" size={19} />
+          </span>
+          <span className="ls-banner__stack">
+            <span className="ls-banner__title">Companion is not connected to your assistant</span>
+            <span className="ls-banner__sub">
+              Claude Code and Codex can&rsquo;t manage the skills on this machine yet. It takes about a
+              minute.
+            </span>
+          </span>
+          <button
+            type="button"
+            className="btn-danger btn-danger--solid ls-banner__cta"
+            onClick={reopenGate}
+          >
+            <Icon name="arrow-right" size={15} />
+            Connect your assistant
           </button>
         </div>
       )}
@@ -312,12 +374,7 @@ export function LocalSkillsView({
 
       {open && <LocalSkillDrawer skill={open} workspaceId={workspaceId} onClose={() => setOpenKey(null)} />}
       {gateOpen && featured && (
-        <InstallGate
-          skill={featured}
-          workspaceId={workspaceId}
-          dismissible={!required}
-          onDismiss={dismissGate}
-        />
+        <InstallGate skill={featured} workspaceId={workspaceId} onDismiss={dismissGate} />
       )}
     </div>
   );
@@ -387,28 +444,28 @@ function LocalSkillCard({
 }
 
 /**
- * Blocking install gate — shown once when the Companion skill is not installed. This is an
+ * Install dialog — auto-opens (dismissibly) when the Companion skill isn't installed. This is an
  * activation surface (connect your assistant), not a detail surface: detail stays in the slide-over
- * drawer, so the DESIGN.md "drawer for detail, never modal-first" rule holds.
+ * drawer, so the DESIGN.md "drawer for detail, never modal-first" rule holds. Dismissing it leaves the
+ * deferred (red) banner; the install is never forced.
  */
 function InstallGate({
   skill,
   workspaceId,
-  dismissible,
   onDismiss,
 }: {
   skill: LocalSkillRow;
   workspaceId: string;
-  dismissible: boolean;
   onDismiss: () => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const [token, setToken] = useState<string | null>(null);
+  const [assistant, setAssistant] = useState<AssistantId>("claude-code");
   const [copied, setCopied] = useState(false);
   const [failed, setFailed] = useState(false);
   const [clipFailed, setClipFailed] = useState(false);
   const [busy, setBusy] = useState(false);
-  useModalA11y(ref, dismissible ? onDismiss : () => undefined);
+  useModalA11y(ref, onDismiss);
 
   const base = apiBase();
   // Lazy mint with in-flight de-duplication: a token is created only on copy, and concurrent clicks
@@ -434,12 +491,15 @@ function InstallGate({
     return pending;
   }, []);
 
+  // The chosen assistant fills the prompt's `agent` slot, so the report-back step names the assistant
+  // that actually runs the install.
   const buildPrompt = useCallback(
-    (tok: string) => fillPrompt(skill.prompts.install, base, workspaceId, tok),
-    [base, skill.prompts.install, workspaceId],
+    (tok: string) => fillPrompt(skill.prompts.install, base, workspaceId, tok, assistant),
+    [assistant, base, skill.prompts.install, workspaceId],
   );
   // Until the user copies, the token slot shows a placeholder so nothing secret is minted on open.
   const displayPrompt = buildPrompt(token ?? "cmp_pat_…");
+  const meta = ASSISTANTS[assistant];
 
   const copyPrompt = useCallback(async () => {
     setFailed(false);
@@ -468,7 +528,7 @@ function InstallGate({
 
   return (
     <>
-      <div className="ls-gate-scrim" onClick={dismissible ? onDismiss : undefined} />
+      <div className="ls-gate-scrim" onClick={onDismiss} />
       <div
         className="ls-gate"
         role="dialog"
@@ -477,19 +537,26 @@ function InstallGate({
         ref={ref}
         tabIndex={-1}
       >
-        <div className="ls-gate__body">
-          <div className="ls-gate__eyebrow">
-            <span className="ls-gate__mark" aria-hidden="true">
-              C
-            </span>
-            Required to continue
+        <div className="ls-gate__head">
+          <span className="ls-gate__mark" aria-hidden="true">
+            C
+          </span>
+          <div className="ls-gate__headtext">
+            <div className="ls-gate__eyebrow">Connect your assistant · about a minute</div>
+            <h2 className="ls-gate__title" id="ls-gate-title">
+              Connect Companion to your assistant
+            </h2>
           </div>
-          <h2 className="ls-gate__title" id="ls-gate-title">
-            Connect Companion to your assistant
-          </h2>
+          <button type="button" className="ls-gate__close" aria-label="Close" onClick={onDismiss}>
+            <Icon name="x" size={17} />
+          </button>
+        </div>
+
+        <div className="ls-gate__body">
           <p className="ls-gate__lede">
-            Companion isn&rsquo;t connected yet. Install the skill on this machine so Claude, Codex,
-            and your agents can manage the skills here.
+            Install the skill on this machine so Claude Code, Codex, and your agents can manage the
+            skills here. You give it a short prompt once. It only acts after confirming changes with
+            you.
           </p>
 
           <div className="ls-gate__feats">
@@ -507,7 +574,33 @@ function InstallGate({
             </span>
           </div>
 
-          <div className="ls-gate__promptlabel">Give this to your assistant</div>
+          <div className="ls-gate__chotitle">Which assistant do you use?</div>
+          <div className="ls-choose" role="group" aria-label="Choose your assistant">
+            {(Object.keys(ASSISTANTS) as AssistantId[]).map((id) => {
+              const info = ASSISTANTS[id];
+              const on = assistant === id;
+              return (
+                <button
+                  key={id}
+                  type="button"
+                  className={"atile" + (on ? " atile--on" : "")}
+                  aria-pressed={on}
+                  onClick={() => setAssistant(id)}
+                >
+                  {id === "claude-code" ? <ClaudeLogo /> : <CodexLogo />}
+                  <span className="ls-tile__text">
+                    <span className="ls-tile__name">{info.name}</span>
+                    <span className="ls-tile__vendor mono">{info.vendor}</span>
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+
+          <div className="ls-gate__pastehint">
+            <span className="ls-gate__promptlabel">Give this to {meta.name}</span>
+            <span className="ls-gate__hint">{meta.hint}</span>
+          </div>
           {/* Plain pre + a single copy path (the footer button): unlike CodeBlock, this never falls
               back to copying the masked placeholder when the on-copy token mint fails. */}
           <pre className="ls-gate__prompt">{displayPrompt}</pre>
@@ -529,10 +622,15 @@ function InstallGate({
         </div>
 
         <div className="ls-gate__foot">
-          {dismissible && (
-            <button type="button" className="ls-textbtn" onClick={onDismiss}>
-              Skip for now
-            </button>
+          <button type="button" className="ls-textbtn" onClick={onDismiss}>
+            Maybe later
+          </button>
+          <span className="ls-gate__footspace" />
+          {copied && (
+            <span className="ls-gate__copied" role="status">
+              <Icon name="check" size={13} />
+              Copied
+            </span>
           )}
           <button type="button" className="btn-primary" onClick={copyPrompt} disabled={busy}>
             <Icon name={copied ? "check" : "copy"} size={14} />
