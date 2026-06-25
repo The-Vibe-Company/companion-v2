@@ -1,10 +1,10 @@
 {
   "files": {
-    "SKILL.md": "sha256:bc67af321d7f2d51e4687d9cdb26e268589d98dd5ac8ae0cd1e94050af2fc386",
-    "companion.json": "sha256:3b03e27cea4c3a15e21df67eed8e830c88a5f95a288e244334f79405d392063d",
+    "SKILL.md": "sha256:c304aea9c63d407013f0ab080aa52f6680d6255d0d35dd8b2b74f649912cc65a",
+    "companion.json": "sha256:2b713b42964ddbd3f6dfd2c29ffeaea04f5c6a15affa031c3ace4130b236fe5b",
     "scripts/bootstrap.py": "sha256:b5098eac9bdc6531af1668367aa04cf66181de4c796095605ba90b90cb37b021",
     "scripts/bootstrap_integrity.py": "sha256:697301a13d7fae907966209507e2636692b276c401e334ee97e4596e7b7b2ebe",
-    "scripts/bootstrap_update.py": "sha256:16fe8a2f30d8a4df649bc3b48ae00cebdd4c4dba158f4b8b53c3342bf164ed33",
+    "scripts/bootstrap_update.py": "sha256:0d9e2b1d17550fea9cc4775e9885681f478b6b4b1ce2825b980727db430cbb78",
     "scripts/check_updates.py": "sha256:c7da8735afd89e4c47764b64907ff3f295ae0f98f9c551cf77eb083c6bdf1116",
     "scripts/companion_lib.py": "sha256:2950ee36af06e79e1e6ea10719387992429dc618d7c9163dd11e2c4c43b9e13e",
     "scripts/skill_guard.py": "sha256:d98266af026e5aab94213a970e53fe3c086351b92fee8ac445149c4214476211"

@@ -103,7 +103,7 @@ export function ScreenAccount({
     <div className="ob-panel" key="account">
       <p className="ob-eyebrow">Create your account</p>
       <h1 className="ob-h1">Welcome to Companion</h1>
-      <p className="ob-sub">Leverage all your AI as a team. First, tell us who you are.</p>
+      <p className="ob-sub">Leverage all your AI across your organization. First, tell us who you are.</p>
       <div className="ob-body">
         <div className="ob-field">
           <label className="ob-field__label" htmlFor="f-name">Your name</label>
@@ -327,7 +327,7 @@ export function ScreenCreateOrg({
     <div className="ob-panel" key="create_org">
       <p className="ob-eyebrow">New organization</p>
       <h1 className="ob-h1">Set up your organization</h1>
-      <p className="ob-sub">This is the top-level home for your agents, members, and skills.</p>
+      <p className="ob-sub">This is the shared home for your members, agents, and skills.</p>
       <div className="ob-body">
         <div className="ob-field">
           <label className="ob-field__label" htmlFor="o-name">Organization name</label>
@@ -465,7 +465,7 @@ export function ScreenInvite({
   const canAutoJoin = !!domain;
   return (
     <div className="ob-panel" key="invite">
-      <p className="ob-eyebrow">Invite your team</p>
+      <p className="ob-eyebrow">Invite collaborators</p>
       <h1 className="ob-h1">Bring in your collaborators</h1>
       <p className="ob-sub">
         Invite people by email{canAutoJoin ? ", or enable your domain for self-serve joining" : ""}. Skip and do this later if you like.

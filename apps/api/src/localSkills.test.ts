@@ -174,6 +174,9 @@ describe("companion skill package + row", () => {
     expect(skillMd).toContain("GET /v1/schemas/companion-manifest.v2.schema.json");
     expect(skillMd).toContain("POST /skills/{slug}/install");
     expect(skillMd).toContain("After a successful publish from this Companion skill");
+    expect(skillMd).toContain("After any successful publish or re-publish, include a skill link");
+    expect(skillMd).toContain("Skill link: ${webBase}/s/{share_token}");
+    expect(skillMd).toContain("GET /skills?lib=org");
     expect(skillMd).toContain("Before any real `POST /skills` upload for a brand-new skill");
     expect(skillMd).toContain("Personal / My Skills");
     expect(skillMd).toContain("Org / everyone");
@@ -196,6 +199,8 @@ describe("companion skill package + row", () => {
     expect(apiRef).toContain("GET /skills?installed=true");
     expect(apiRef).toContain("GET /public/skills/{share_token}");
     expect(apiRef).toContain("Rows also include `share_token`");
+    expect(apiRef).toContain("After a successful skill upload or update");
+    expect(apiRef).toContain("Skill link: ...");
     expect(apiRef).toContain("Local manifest checks");
     expect(apiRef).toContain("scripts/bootstrap.py");
     expect(apiRef).toContain("integrity.packageChecksum");

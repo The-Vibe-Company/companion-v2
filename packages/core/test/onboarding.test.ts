@@ -7,8 +7,7 @@ const actor = { id: "user-1", email: "owner@acme.test", name: "Owner" };
 
 /**
  * Teams were removed product-wide (Org → User). Onboarding creates only the org + the owner
- * membership (+ optional domain-access + invitations); no team row is written. The `team` field is
- * kept on the input shape (optional, ignored) so existing API/web callers still type-check.
+ * membership (+ optional domain-access + invitations); no team row is written.
  */
 function input(patch: Partial<CompleteOnboardingInput> = {}): CompleteOnboardingInput {
   const base: CompleteOnboardingInput = {

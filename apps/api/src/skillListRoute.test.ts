@@ -10,6 +10,7 @@ const serviceMocks = vi.hoisted(() => {
     archiveSkill: noop,
     assignLabel: noop,
     buildDependencyPlan: noop,
+    buildSkillSharePlan: vi.fn(),
     completeOnboarding: noop,
     createInvitation: noop,
     createLabel: noop,
@@ -53,7 +54,7 @@ const serviceMocks = vi.hoisted(() => {
     setSkillFilterPreferences: noop,
     setOrgLogoFromUpload: noop,
     orgLogoPublicPath: vi.fn(() => "/org-logo.png"),
-    shareSkill: noop,
+    shareSkill: vi.fn(),
     toggleStar: noop,
     installSkill: noop,
     unassignLabel: noop,
@@ -109,6 +110,7 @@ function tokenFor(header: string | undefined) {
   if (header === "read-a") return { actor: actorA, orgId: "org-1", scopes: ["skills:read"] };
   if (header === "read-b") return { actor: actorB, orgId: "org-1", scopes: ["skills:read"] };
   if (header === "write-only") return { actor: actorA, orgId: "org-1", scopes: ["skills:write"] };
+  if (header === "read-write") return { actor: actorA, orgId: "org-1", scopes: ["skills:read", "skills:write"] };
   return null;
 }
 
@@ -155,6 +157,60 @@ describe("GET /v1/public/skills/:token", () => {
 
     expect(res.status).toBe(404);
     await expect(res.json()).resolves.toMatchObject({ ok: false, error: "skill not found" });
+  });
+});
+
+describe("GET/POST /v1/skills/:slug/share", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    serviceMocks.resolveApiToken.mockImplementation(async (token: string) => tokenFor(token));
+  });
+
+  it("returns the mandatory private dependency plan", async () => {
+    serviceMocks.buildSkillSharePlan.mockResolvedValue({
+      slug: "pdf-extractor",
+      dependencies: [{ slug: "markdown-report", status: "satisfied", note: null }],
+      blocked: [],
+    });
+
+    const res = await app.request("/v1/skills/pdf-extractor/share-plan", { headers: { Authorization: "Bearer read-a" } });
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({
+      slug: "pdf-extractor",
+      dependencies: [{ slug: "markdown-report", status: "satisfied", note: null }],
+      blocked: [],
+    });
+    expect(serviceMocks.buildSkillSharePlan).toHaveBeenCalledWith(
+      expect.objectContaining({ actor: actorA, orgId: "org-1", slug: "pdf-extractor" }),
+    );
+  });
+
+  it("shares the skill and echoes migrated private dependencies", async () => {
+    serviceMocks.shareSkill.mockResolvedValue({ scope: "org", shared_dependencies: ["markdown-report"] });
+
+    const res = await app.request("/v1/skills/pdf-extractor/share", {
+      method: "POST",
+      headers: { Authorization: "Bearer write-only" },
+    });
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({
+      ok: true,
+      slug: "pdf-extractor",
+      scope: "org",
+      shared_dependencies: ["markdown-report"],
+    });
+    expect(serviceMocks.shareSkill).toHaveBeenCalledWith(
+      expect.objectContaining({ actor: actorA, orgId: "org-1", slug: "pdf-extractor" }),
+    );
+  });
+
+  it("keeps share-plan behind skills:read", async () => {
+    const res = await app.request("/v1/skills/pdf-extractor/share-plan", { headers: { Authorization: "Bearer write-only" } });
+
+    expect(res.status).toBe(400);
+    expect(serviceMocks.buildSkillSharePlan).not.toHaveBeenCalled();
   });
 });
 

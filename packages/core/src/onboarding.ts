@@ -84,8 +84,8 @@ export async function joinOrgByDomain(actor: ActorContext, orgId: string, databa
 }
 
 /**
- * Atomically create the user's organization and invitations, and mark onboarding complete. (Teams
- * were removed product-wide — no team is created.) Domain access is only honored for the actor's own
+ * Atomically create the user's organization and invitations, and mark onboarding complete. Domain
+ * access is only honored for the actor's own
  * (verified, when gated) work domain during onboarding.
  */
 export async function completeOnboarding(

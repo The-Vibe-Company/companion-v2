@@ -34,7 +34,7 @@ export function Onboarding({
         </div>
         <h2 className="og-onb__h">Set up your workspace</h2>
         <p className="og-onb__sub">
-          Start with a personal workspace just for you, or join an organization your team already runs.
+          Start with a personal workspace just for you, or join an existing organization.
         </p>
         <div className="og-choices">
           <button className="og-choice" onClick={() => onMode("create")}>
@@ -49,7 +49,7 @@ export function Onboarding({
             <span className="og-choice__ic"><Icon name="users" size={20} /></span>
             <span>
               <span className="og-choice__t">Join an organization</span>
-              <span className="og-choice__d">Use an invite link or code from a teammate to join an existing organization and its teams.</span>
+              <span className="og-choice__d">Use an invite link or code to join an existing organization.</span>
             </span>
             <span className="og-choice__arrow"><Icon name="arrow-right" size={16} /></span>
           </button>
@@ -81,7 +81,7 @@ function CreateOrgFlow({
     <Dialog
       icon="plus"
       title="Create a workspace"
-      desc="Name it and pick whether it's just for you or for a team."
+      desc="Name it and pick whether it's personal or shared."
       onClose={onClose}
       foot={
         <>
@@ -112,11 +112,11 @@ function CreateOrgFlow({
             <Icon name="user" size={13} />Personal
           </button>
           <button className={"og-seg__btn" + (kind === "team" ? " is-on" : "")} onClick={() => setKind("team")}>
-            <Icon name="users" size={13} />Team
+            <Icon name="users" size={13} />Organization
           </button>
         </div>
         <span className="og-field__hint">
-          {kind === "personal" ? "Private to you. You can convert it to a team later." : "Invite members and create teams from settings."}
+          {kind === "personal" ? "Private to you." : "Invite members from settings."}
         </span>
       </div>
     </Dialog>
@@ -141,7 +141,7 @@ function JoinOrgFlow({
     <Dialog
       icon="log-in"
       title="Join an organization"
-      desc="Paste the invite link or code a teammate shared with you."
+      desc="Paste the invite link or code you received."
       onClose={onClose}
       foot={
         <>

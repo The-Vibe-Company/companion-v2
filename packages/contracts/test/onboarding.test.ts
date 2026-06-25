@@ -20,7 +20,7 @@ describe("completeOnboardingInputSchema", () => {
     ).toThrow();
   });
 
-  it("accepts organization palette colors", () => {
+  it("accepts org palette colors without a team payload", () => {
     const color = TEAM_BRAND_COLORS[0]!;
     expect(
       completeOnboardingInputSchema.parse({
@@ -29,6 +29,7 @@ describe("completeOnboardingInputSchema", () => {
       }),
     ).toMatchObject({
       org: { color },
+      invites: [],
     });
   });
 });

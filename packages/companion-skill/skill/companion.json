@@ -29,6 +29,28 @@
         ]
       },
       {
+        "version": "1.12.5",
+        "date": "2026-06-25",
+        "changes": [
+          "Documents the share-plan preview endpoint for personal skills.",
+          "Documents that sharing a personal skill to the org also migrates required owner-private dependencies and returns shared_dependencies."
+        ]
+      },
+      {
+        "version": "1.12.4",
+        "date": "2026-06-25",
+        "changes": [
+          "Requires agents to share a Skill link in chat after successful skill uploads or updates, using public org preview links when available."
+        ]
+      },
+      {
+        "version": "1.12.3",
+        "date": "2026-06-25",
+        "changes": [
+          "Deletes only the backup created by a successful Companion self-update after the install report succeeds, while preserving older backups and keeping the new backup if reporting fails."
+        ]
+      },
+      {
         "version": "1.12.2",
         "date": "2026-06-25",
         "changes": [

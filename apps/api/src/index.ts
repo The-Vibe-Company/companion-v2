@@ -16,6 +16,7 @@ import {
   archiveSkill,
   assignLabel,
   buildDependencyPlan,
+  buildSkillSharePlan,
   completeOnboarding,
   createInvitation,
   createLabel,
@@ -628,7 +629,7 @@ app.post("/v1/onboarding/create", async (c) => {
     const input = completeOnboardingInputSchema.parse(await c.req.json());
     const { orgId, inviteTokens } = await completeOnboarding(actor, input);
     setOrgCookie(c, orgId);
-    // Best-effort invite emails: a bounced address must NOT undo the org/team the user just created
+    // Best-effort invite emails: a bounced address must NOT undo the org the user just created
     // (this intentionally diverges from /v1/invitations, which rolls a single invite back on failure).
     const base = process.env.COMPANION_WEB_URL ?? "http://127.0.0.1:3000";
     for (const { email, token } of inviteTokens) {
@@ -1153,6 +1154,42 @@ app.put("/v1/skill-filter-preferences", async (c) => {
   }
 });
 
+/** Share a personal skill into the org library (owner-only; flips scope personal → org). */
+app.get("/v1/skills/:slug/share-plan", async (c) => {
+  try {
+    actorFromContext(c, true);
+    requireScope(c, "skills:read");
+    const result = await withTenant(
+      c,
+      ({ actor, orgId, database }) => buildSkillSharePlan({ actor, orgId, slug: c.req.param("slug"), database }),
+      true,
+    );
+    return c.json(result);
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
+app.post("/v1/skills/:slug/share", async (c) => {
+  try {
+    actorFromContext(c, true);
+    requireScope(c, "skills:write");
+    const result = await withTenant(
+      c,
+      ({ actor, orgId, database }) => shareSkill({ actor, orgId, slug: c.req.param("slug"), database }),
+      true,
+    );
+    return c.json({
+      ok: true as const,
+      slug: c.req.param("slug"),
+      scope: result.scope,
+      shared_dependencies: result.shared_dependencies,
+    });
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
 app.get("/v1/skills/:slug", async (c) => {
   try {
     // Resolve archived skills too — they stay viewable, so the canonical detail endpoint must
@@ -1523,22 +1560,6 @@ app.post("/v1/skills/:slug/restore", async (c) => {
       true,
     );
     return c.json({ ok: true });
-  } catch (error) {
-    return jsonError(c, error);
-  }
-});
-
-/** Share a personal skill into the org library (owner-only; flips scope personal → org). */
-app.post("/v1/skills/:slug/share", async (c) => {
-  try {
-    actorFromContext(c, true);
-    requireScope(c, "skills:write");
-    const result = await withTenant(
-      c,
-      ({ actor, orgId, database }) => shareSkill({ actor, orgId, slug: c.req.param("slug"), database }),
-      true,
-    );
-    return c.json({ ok: true as const, slug: c.req.param("slug"), scope: result.scope });
   } catch (error) {
     return jsonError(c, error);
   }

@@ -20,7 +20,7 @@ import {
 type Screen = "account" | "detecting" | "found" | "create_org" | "invite" | "welcome";
 type Path = "create" | "join" | null;
 
-const CREATE_STEPS = ["Account", "Organization", "Invite teammates", "You're in"];
+const CREATE_STEPS = ["Account", "Organization", "Invite collaborators", "You're in"];
 const JOIN_STEPS = ["Account", "Your organization", "You're in"];
 
 function stepOf(screen: Screen, path: Path): number {

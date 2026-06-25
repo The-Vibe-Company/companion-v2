@@ -7,6 +7,13 @@ import { DetailMoreMenuContent, DetailView } from "./DetailView";
 import { LocalSkillDrawer, LocalSkillsView } from "./LocalSkillsView";
 import { UploadDialog } from "./UploadDialog";
 
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({
+    refresh: vi.fn(),
+    replace: vi.fn(),
+  }),
+}));
+
 const skill: SkillVM = {
   uuid: "skill-1",
   id: "research-agent",

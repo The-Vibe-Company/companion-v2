@@ -1,10 +1,12 @@
 "use client";
 
+import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import type { LocalSkillRow, LocalSkillStatus, TokenScope } from "@companion/contracts";
 import { TOKEN_SCOPES } from "@companion/contracts";
-import { apiBase, issueToken } from "@/lib/queries";
+import { apiBase, fetchLocalSkills, issueToken } from "@/lib/queries";
+import { REQUIRED_LOCAL_SKILL_KEY } from "@/lib/companionSkillGate";
 import { Icon } from "../Icon";
 import { CodeBlock, useModalA11y } from "./UploadDialog";
 
@@ -145,33 +147,41 @@ export function LocalSkillsView({
   skills,
   workspaceId,
   workspaceName,
+  required = false,
 }: {
   skills: LocalSkillRow[];
   workspaceId: string;
   workspaceName: string;
+  required?: boolean;
 }) {
+  const router = useRouter();
+  const [localSkills, setLocalSkills] = useState<LocalSkillRow[]>(skills);
   const [openKey, setOpenKey] = useState<string | null>(null);
   // localStorage is read post-mount only (SSR renders the gate/install-banner closed) to avoid the
   // hydration mismatch the theme prefs hit; `mounted` also keeps `renderToString` output stable.
   const [mounted, setMounted] = useState(false);
   const [dismissed, setDismissed] = useState(false);
 
-  const featured = useMemo(() => skills.find((skill) => skill.key === "companion") ?? null, [skills]);
-  const open = useMemo(() => skills.find((s) => s.key === openKey) ?? null, [skills, openKey]);
+  const featured = required
+    ? localSkills.find((skill) => skill.key === REQUIRED_LOCAL_SKILL_KEY) ?? null
+    : localSkills.find((skill) => skill.key === REQUIRED_LOCAL_SKILL_KEY) ?? localSkills[0] ?? null;
+  const open = useMemo(() => localSkills.find((s) => s.key === openKey) ?? null, [localSkills, openKey]);
 
   const storageKey = featured ? gateStorageKey(workspaceName, featured.key) : null;
 
+  useEffect(() => setLocalSkills(skills), [skills]);
   useEffect(() => setMounted(true), []);
   useEffect(() => {
-    if (!storageKey) return;
+    if (!storageKey || required) return;
     try {
       setDismissed(window.localStorage.getItem(storageKey) === "1");
     } catch {
       setDismissed(false);
     }
-  }, [storageKey]);
+  }, [required, storageKey]);
 
   const dismissGate = useCallback(() => {
+    if (required) return;
     setDismissed(true);
     if (storageKey) {
       try {
@@ -180,7 +190,7 @@ export function LocalSkillsView({
         /* private mode / storage disabled: fall back to in-memory dismissal */
       }
     }
-  }, [storageKey]);
+  }, [required, storageKey]);
 
   const reopenGate = useCallback(() => {
     setDismissed(false);
@@ -194,9 +204,36 @@ export function LocalSkillsView({
   }, [storageKey]);
 
   const isNone = featured?.status === "none";
+
+  useEffect(() => {
+    if (!required || !isNone) return;
+    let cancelled = false;
+    const checkInstall = async () => {
+      try {
+        const next = await fetchLocalSkills();
+        if (cancelled) return;
+        setLocalSkills(next);
+        const nextFeatured = next.find((skill) => skill.key === REQUIRED_LOCAL_SKILL_KEY);
+        if (nextFeatured && nextFeatured.status !== "none") {
+          router.replace("/skills");
+          router.refresh();
+        }
+      } catch {
+        /* keep the required gate open; the next poll or reload can recover */
+      }
+    };
+    const timer = window.setInterval(() => {
+      void checkInstall();
+    }, 3000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [featured, isNone, required, router]);
+
   // The gate auto-closes if status flips to installed/update while open, or the drawer opens.
-  const gateOpen = mounted && isNone && !dismissed && open === null;
-  const showInstallBanner = mounted && isNone && dismissed && open === null;
+  const gateOpen = mounted && isNone && (required || !dismissed) && open === null;
+  const showInstallBanner = !required && mounted && isNone && dismissed && open === null;
   const showUpdateBanner = featured?.status === "update";
 
   return (
@@ -274,7 +311,14 @@ export function LocalSkillsView({
       </div>
 
       {open && <LocalSkillDrawer skill={open} workspaceId={workspaceId} onClose={() => setOpenKey(null)} />}
-      {gateOpen && featured && <InstallGate skill={featured} workspaceId={workspaceId} onDismiss={dismissGate} />}
+      {gateOpen && featured && (
+        <InstallGate
+          skill={featured}
+          workspaceId={workspaceId}
+          dismissible={!required}
+          onDismiss={dismissGate}
+        />
+      )}
     </div>
   );
 }
@@ -350,10 +394,12 @@ function LocalSkillCard({
 function InstallGate({
   skill,
   workspaceId,
+  dismissible,
   onDismiss,
 }: {
   skill: LocalSkillRow;
   workspaceId: string;
+  dismissible: boolean;
   onDismiss: () => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
@@ -362,7 +408,7 @@ function InstallGate({
   const [failed, setFailed] = useState(false);
   const [clipFailed, setClipFailed] = useState(false);
   const [busy, setBusy] = useState(false);
-  useModalA11y(ref, onDismiss);
+  useModalA11y(ref, dismissible ? onDismiss : () => undefined);
 
   const base = apiBase();
   // Lazy mint with in-flight de-duplication: a token is created only on copy, and concurrent clicks
@@ -422,7 +468,7 @@ function InstallGate({
 
   return (
     <>
-      <div className="ls-gate-scrim" onClick={onDismiss} />
+      <div className="ls-gate-scrim" onClick={dismissible ? onDismiss : undefined} />
       <div
         className="ls-gate"
         role="dialog"
@@ -436,7 +482,7 @@ function InstallGate({
             <span className="ls-gate__mark" aria-hidden="true">
               C
             </span>
-            Required to start
+            Required to continue
           </div>
           <h2 className="ls-gate__title" id="ls-gate-title">
             Connect Companion to your assistant
@@ -483,9 +529,11 @@ function InstallGate({
         </div>
 
         <div className="ls-gate__foot">
-          <button type="button" className="ls-textbtn" onClick={onDismiss}>
-            Skip for now
-          </button>
+          {dismissible && (
+            <button type="button" className="ls-textbtn" onClick={onDismiss}>
+              Skip for now
+            </button>
+          )}
           <button type="button" className="btn-primary" onClick={copyPrompt} disabled={busy}>
             <Icon name={copied ? "check" : "copy"} size={14} />
             {copied ? "Copied" : "Copy prompt"}

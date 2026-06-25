@@ -151,15 +151,11 @@ def install_companion_update(
                 backup.rename(skill_dir)
             raise
 
-        try:
-            report = api_post_json(api_url, token, "/local-skills/companion/installed", {"version": available_version, "agent": agent})
-        except BaseException:
-            if backup and backup.exists():
-                if skill_dir.exists():
-                    shutil.rmtree(skill_dir, ignore_errors=True)
-                backup.rename(skill_dir)
-            raise
-        return {"applied": True, "version": available_version, "backupPath": str(backup), "report": report}
+        report = api_post_json(api_url, token, "/local-skills/companion/installed", {"version": available_version, "agent": agent})
+        backup_path = str(backup)
+        shutil.rmtree(backup)
+        backup = None
+        return {"applied": True, "version": available_version, "backupPath": backup_path, "backupDeleted": True, "report": report}
     finally:
         if restore_cwd and restore_cwd.exists():
             os.chdir(restore_cwd)

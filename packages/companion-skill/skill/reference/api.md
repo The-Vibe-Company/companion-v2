@@ -48,6 +48,7 @@ These are the skills endpoints a personal access token (`skills:read` + `skills:
 | Inspect a skill's dependency graph | `GET /skills/{slug}/dependencies` | `skills:read` |
 | Archive a skill | `POST /skills/{slug}/archive` | `skills:write` |
 | Restore an archived skill | `POST /skills/{slug}/restore` | `skills:write` |
+| Preview private deps included when sharing | `GET /skills/{slug}/share-plan` | `skills:read` |
 | Share a personal skill to the org | `POST /skills/{slug}/share` | `skills:write` |
 | List the label (folder) tree | `GET /labels` | `skills:read` |
 | Create a label (folder) | `POST /labels` | `skills:write` |
@@ -86,6 +87,14 @@ The signed-in web app uses `GET /skills/share-target/{share_token}` with a sessi
 `{org_id, slug}` for members before opening the slug-keyed detail route. Agents should normally share
 the web URL `/s/{share_token}` instead of calling that resolver directly.
 
+After a successful skill upload or update, agents must include a `Skill link: ...` line in the chat.
+For org skills, fetch `GET /skills?lib=org`, find the published `slug`, and build
+`${COMPANION_API_URL without /v1}/s/{share_token}` from that row. Personal skills have no public
+preview until they are shared to the org; use the signed-in detail URL
+`${COMPANION_API_URL without /v1}/skills?skill={slug}` instead. If the publish succeeded but the
+org `share_token` lookup fails, do not republish; report success and provide the signed-in detail
+fallback.
+
 Some skills-management routes are intended for the signed-in web session rather than the
 Companion PAT. Use them only when the caller is operating with a valid session cookie:
 
@@ -99,6 +108,10 @@ Companion PAT. Use them only when the caller is operating with a valid session c
 | Deprecate/restore a comment | `PATCH /skills/{slug}/comments/{id}` | Session |
 | Read a comment image | `GET /skills/{slug}/comments/{commentId}/images/{imageId}` | Session |
 | Toggle star | `POST /skills/{slug}/star` | Session |
+
+Version rows returned by `GET /skills/{slug}/versions` include a nullable `changelog` object. When
+present, it is the `companion.json.metadata.changelog` entry for that exact version and carries
+`version`, optional `date`, and `changes`.
 
 A comment row includes an `images` array; each image carries `id`, `content_type`, `byte_size`,
 `position`, and a `url` (the session-gated path above) for display. To attach images when adding a
@@ -144,8 +157,12 @@ the `scope` field chooses the library. The Companion skill must send `scope=pers
 explicitly for a brand-new skill after asking the user where to publish it; do not rely on server
 defaults. Re-publishing never changes scope, so do not send `scope` on updates. Depending on server
 version, update-time `scope` may be ignored or rejected if it contradicts the existing skill.
-**`POST /skills/{slug}/share`** is the only way to move a personal skill into the org library (owner
-only, one-way). A skill name (slug) is unique across both libraries in a workspace.
+**`GET /skills/{slug}/share-plan`** previews the mandatory private dependency migration for a personal
+skill. It returns the private dependencies owned by the same creator that will be shared with the root
+skill, plus any blocking dependency issues. **`POST /skills/{slug}/share`** is the only way to move a
+personal skill into the org library (owner only, one-way). Sharing is atomic and includes those private
+dependencies automatically; the response includes `shared_dependencies`. A skill name (slug) is unique
+across both libraries in a workspace.
 
 ## Upload bodies and labels
 
@@ -444,7 +461,9 @@ temporary directory, verify `SKILL.md` is at the package root, verify its `compa
 equals the `availableVersion` from `/local-skills/companion`, and verify the staged
 `companion.integrity.json` matches the staged package files. Only then replace the installed
 Companion skill folder. After replacement, call `POST /local-skills/companion/installed` with the
-installed version so the workspace status updates.
+installed version so the workspace status updates. After that install report succeeds, delete only
+the backup folder created for this self-update. Keep the backup if install reporting fails, and never
+delete older Companion backup folders that existed before this update.
 
 Do not use `/skills/{slug}/download` or `/skills/{slug}/versions/{version}/package` to update the
 built-in Companion skill. Those endpoints are for workspace-published skills.

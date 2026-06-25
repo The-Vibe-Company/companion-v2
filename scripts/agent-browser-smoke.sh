@@ -127,6 +127,7 @@ prepare_fixtures() {
     --signup \
     --profile "$profile" >/dev/null
 
+  mark_companion_skill_installed "$api" "$profile"
   SMOKE_SKILL_DIR="$(prepare_smoke_skill_dir "$profile")"
 
   local push_output
@@ -138,6 +139,43 @@ prepare_fixtures() {
       exit 1
     fi
   fi
+}
+
+mark_companion_skill_installed() {
+  local api="$1" profile="$2"
+  PROFILE="$profile" API_URL="$api" node <<'NODE'
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+
+const profile = process.env.PROFILE;
+const api = process.env.API_URL.replace(/\/$/, "");
+const suffix = profile === "default" ? "" : `.${profile}`;
+const sessionPath = path.join(process.env.COMPANION_HOME || path.join(os.homedir(), ".companion"), `session${suffix}.json`);
+const session = JSON.parse(fs.readFileSync(sessionPath, "utf8"));
+const headers = {
+  cookie: session.cookie,
+  "content-type": "application/json",
+};
+if (session.orgId) headers["x-companion-org"] = session.orgId;
+
+(async () => {
+  const current = await fetch(`${api}/v1/local-skills/companion`, { headers });
+  if (!current.ok) throw new Error(`GET /v1/local-skills/companion failed: ${current.status}`);
+  const row = await current.json();
+  const version = row.availableVersion;
+  if (!version) throw new Error("Companion local skill response did not include availableVersion");
+  const installed = await fetch(`${api}/v1/local-skills/companion/installed`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ version, agent: "browser-smoke" }),
+  });
+  if (!installed.ok) throw new Error(`POST /v1/local-skills/companion/installed failed: ${installed.status}`);
+})().catch((error) => {
+  console.error(error.message);
+  process.exit(1);
+});
+NODE
 }
 
 prepare_smoke_skill_dir() {

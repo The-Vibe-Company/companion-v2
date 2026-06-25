@@ -120,6 +120,12 @@ After installing a Companion update, stop the current operation and tell the use
 original Companion command unless this runtime can safely reload the updated skill instructions
 in-process.
 
+If download, extraction, verification, replacement, or install reporting fails, stop without changing
+other skills. If replacement fails after moving files, restore the backup and stop. If install
+reporting fails after replacement, keep the backup and report its path so the user can recover
+manually. Never delete older Companion backup folders that predate this self-update. Avoid infinite
+loops by comparing exact semver and by reporting the installed version after replacement.
+
 ## Mandatory preflight guard (run before create, update, install, or lockfile write)
 
 Before you create a new skill, publish an update, install a skill, or write
@@ -282,8 +288,10 @@ use it to build a clean public preview URL such as `/s/$share_token`.
 ### Public org-skill preview links
 
 Org skills have an anyone-with-the-link metadata preview. Personal skills do not; the user must first
-share a personal skill to the org with `POST /skills/{slug}/share`. The preview exposes only display
-metadata and never exposes package content, files, downloads, requirements, secrets, labels, `id`,
+preview the mandatory private dependency migration with `GET /skills/{slug}/share-plan`, then share a
+personal skill to the org with `POST /skills/{slug}/share`. The share is atomic and includes owned
+private dependencies automatically; the response includes `shared_dependencies`. The preview exposes
+only display metadata and never exposes package content, files, downloads, requirements, secrets, labels, `id`,
 `org_id`, or `creator_id`.
 
 ```http
@@ -428,8 +436,9 @@ a different slug. Never publish a second skill over an existing slug.
 A skill lives in one of two libraries (`scope`). An **org** skill is visible to every member of the
 workspace, and any member can read, edit, archive, or delete it — organized with org-wide **labels**
 (folders). A **personal** skill is private to its creator (the My Skills library), organized with that
-person's own **personal folders**. `POST /skills/{slug}/share` moves a personal skill into the org
-library (owner-only, one-way).
+person's own **personal folders**. `GET /skills/{slug}/share-plan` previews the owned private
+dependencies that must move with a personal skill, and `POST /skills/{slug}/share` moves the root plus
+those private dependencies into the org library atomically (owner-only, one-way).
 
 Before any real `POST /skills` upload for a brand-new skill, ask the user these placement questions.
 Use the runtime harness UI when it exists; if a structured user-input tool is available, use it
@@ -532,6 +541,16 @@ confirmation.
 After a successful re-publish of an org skill, refresh the caller's install record with
 `POST /skills/{slug}/install` and the published version, then refresh the local lockfile entry. A
 personal skill still needs no install report.
+
+After any successful publish or re-publish, include a skill link in the final chat response. Resolve
+`webBase` by removing the trailing `/v1` from `COMPANION_API_URL`. For org skills, fetch
+`GET /skills?lib=org`, find the row whose `slug` matches the published skill, and use its
+`share_token` to build the public preview link: `Skill link: ${webBase}/s/{share_token}`. For
+personal skills, explain that there is no public link until the owner shares it to the org, and use
+the signed-in detail link instead: `Skill link: ${webBase}/skills?skill={slug}`. If a publish
+succeeded but the org row or `share_token` cannot be retrieved, do not publish again; report the
+successful publish and fall back to the signed-in detail link, using `lib=org` when you know the
+skill is org-scoped.
 
 ```sh
 curl -s "$COMPANION_API_URL/skills?expect_slug=$SLUG&expect_skill_id=$SKILL_ID" \
@@ -743,6 +762,17 @@ current folder, replaces it, and reports the install with
 `companion.autoUpdate.blocked: true` and `reason: "local_customizations"`, do not overwrite the local
 folder; report the modified or missing files and ask the user whether to merge or reinstall the
 official package manually.
+
+After a successful replacement and successful install report, delete only the backup folder created
+for that self-update:
+
+```sh
+rm -rf "$backup"
+echo "Deleted Companion self-update backup at $backup"
+```
+
+Do not delete older `companion.backup-*` or `.companion-backup.*` folders that existed before this
+self-update. If install reporting fails, keep the backup and report its path.
 
 ## Confirm installation (run once, at the end of install)
 

@@ -288,10 +288,10 @@ class BootstrapTests(unittest.TestCase):
         self.assertTrue(result["applied"])
         self.assertEqual("1.1.0", json.loads((self.skill_dir / "companion.json").read_text(encoding="utf-8"))["version"])
         backup = Path(result["backupPath"])
-        self.assertTrue(backup.exists())
-        self.assertEqual("1.0.0", json.loads((backup / "companion.json").read_text(encoding="utf-8"))["version"])
+        self.assertTrue(result["backupDeleted"])
+        self.assertFalse(backup.exists())
 
-    def test_install_update_restores_backup_when_reporting_fails(self):
+    def test_install_update_keeps_backup_when_reporting_fails(self):
         official_files = {}
 
         def write_package(_api_url, _token, destination, _expected_checksum=None):
@@ -318,7 +318,10 @@ class BootstrapTests(unittest.TestCase):
         ):
             bootstrap.install_companion_update("https://api.example/v1", "cmp_pat_SECRET", self.skill_dir, "1.1.0", "Codex", official_files)
 
-        self.assertEqual("1.0.0", json.loads((self.skill_dir / "companion.json").read_text(encoding="utf-8"))["version"])
+        self.assertEqual("1.1.0", json.loads((self.skill_dir / "companion.json").read_text(encoding="utf-8"))["version"])
+        backups = list(self.skill_dir.parent.glob(".companion-backup.*"))
+        self.assertEqual(1, len(backups))
+        self.assertEqual("1.0.0", json.loads((backups[0] / "companion.json").read_text(encoding="utf-8"))["version"])
 
     def test_install_update_rejects_self_consistent_package_that_differs_from_workspace_hashes(self):
         def write_package(_api_url, _token, destination, _expected_checksum=None):
