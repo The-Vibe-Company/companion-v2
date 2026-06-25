@@ -43,7 +43,7 @@ describe("companion skill package + row", () => {
     const pkg = await getCompanionSkillPackage();
     expect(pkg.key).toBe("companion");
     expect(pkg.checksum).toMatch(/^sha256:[0-9a-f]{64}$/);
-    expect(pkg.version).toBe("1.10.2");
+    expect(pkg.version).toBe("1.10.3");
     expect(pkg.sizeBytes).toBeGreaterThan(0);
   });
 
