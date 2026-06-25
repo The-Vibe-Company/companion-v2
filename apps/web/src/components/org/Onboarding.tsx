@@ -159,7 +159,7 @@ function JoinOrgFlow({
         <input
           className="og-input og-input--mono"
           autoFocus
-          placeholder="companion.dev/join/XXXXXX"
+          placeholder="thecompanion.sh/join/XXXXXX"
           value={code}
           onChange={(e) => setCode(e.target.value)}
           onKeyDown={(e) => { if (e.key === "Enter") submit(); }}

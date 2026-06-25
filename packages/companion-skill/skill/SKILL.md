@@ -128,7 +128,7 @@ Companion-specific declarations in `companion.json` at the package root:
 
 ```json
 {
-  "$schema": "https://companion.dev/schemas/companion-manifest.v2.schema.json",
+  "$schema": "https://thecompanion.sh/schemas/companion-manifest.v2.schema.json",
   "name": "incident-summary",
   "version": "1.2.0",
   "title": "Incident summary",
