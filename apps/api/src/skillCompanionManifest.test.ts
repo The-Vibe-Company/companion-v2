@@ -99,14 +99,15 @@ describe("buildInlineCompanionManifest", () => {
     expect(manifest.display).toEqual({
       name: "Human name",
       summary: "Updated short summary.",
-      description: "Long detail copy.",
+      description: undefined,
     });
+    expect(manifest.notes).toBe("Long detail copy.");
     expect(manifest.requirements.map((req) => req.key)).toEqual(["OPENAI_API_KEY"]);
     expect(manifest.dependencies).toEqual({});
     expect(manifest.legacyDependencySlugs).toEqual(["markdown-report"]);
   });
 
-  it("updates display description when the carried description was only the old summary", () => {
+  it("does not synthesize notes when the carried description was only the old summary", () => {
     const manifest = buildInlineCompanionManifest({
       description: "Updated short summary.",
       carriedDisplay: {
@@ -121,7 +122,28 @@ describe("buildInlineCompanionManifest", () => {
     expect(manifest.display).toEqual({
       name: "Human name",
       summary: "Updated short summary.",
-      description: "Updated short summary.",
+      description: undefined,
     });
+    expect(manifest.notes).toBeUndefined();
+  });
+
+  it("preserves carried Manifest V2 notes for inline edits", () => {
+    const manifest = buildInlineCompanionManifest({
+      description: "Updated short summary.",
+      carriedDisplay: {
+        name: "Human name",
+        summary: "Old summary.",
+      },
+      carriedNotes: "## Notes\n\nKeep the setup detail.",
+      carriedRequirements: [],
+      carriedDependencies: [],
+    });
+
+    expect(manifest.display).toEqual({
+      name: "Human name",
+      summary: "Updated short summary.",
+      description: undefined,
+    });
+    expect(manifest.notes).toBe("## Notes\n\nKeep the setup detail.");
   });
 });
