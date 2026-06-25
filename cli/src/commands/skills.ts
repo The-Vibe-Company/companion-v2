@@ -63,6 +63,9 @@ export function buildPublishFormData(input: {
   version: string;
   labels: string[];
   message?: string;
+  /** On an update, the slug + workspace skill id this upload must target. */
+  expectSlug?: string;
+  expectSkillId?: string;
 }): FormData {
   const fd = new FormData();
   fd.append("file", new Blob([input.archive], { type: "application/gzip" }), `${input.name}-${input.version}.tar.gz`);
@@ -70,6 +73,10 @@ export function buildPublishFormData(input: {
   fd.append("version", input.version);
   for (const label of input.labels) fd.append("label", label);
   if (input.message) fd.append("message", input.message);
+  // Updating an existing skill: bind the upload to that exact slug + id so the server's targeted-update
+  // guard accepts it (it now requires both) and an edit can never retarget a different skill.
+  if (input.expectSlug) fd.append("expect_slug", input.expectSlug);
+  if (input.expectSkillId) fd.append("expect_skill_id", input.expectSkillId);
   return fd;
 }
 
@@ -254,6 +261,9 @@ export async function push(dir: string, opts: PushOpts, g: GlobalOpts): Promise<
     version,
     labels,
     message: opts.message,
+    // The server requires both on an update; reg.exists means the slug already lives in the workspace.
+    expectSlug: reg.exists ? fm.name : undefined,
+    expectSkillId: reg.exists ? (reg.id ?? undefined) : undefined,
   });
 
   const published = await client.request<{ id: string; checksum: string; sizeBytes?: number }>("/v1/skills", { method: "POST", body: fd });

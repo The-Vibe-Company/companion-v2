@@ -54,6 +54,16 @@ jobs:
       - name: Check bundled Companion skill version
         run: pnpm --filter @companion/companion-skill check:version-bump
 
+      - name: Set up Python
+        if: matrix.node-version == 22
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Companion skill guard tests (Python)
+        if: matrix.node-version == 22
+        run: python -m unittest discover -s packages/companion-skill/skill/scripts -p 'test_*.py'
+
       - name: Typecheck
         run: pnpm -r typecheck
 

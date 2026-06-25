@@ -1,13 +1,22 @@
 {
   "$schema": "https://thecompanion.sh/schemas/companion-manifest.v2.schema.json",
   "name": "companion",
-  "version": "1.11.1",
+  "version": "1.12.0",
   "title": "Companion",
   "description": "Manage local SKILL.md packages with Companion: self-update first, validate, publish, update, resolve dependencies, track installs, and repair manifests.",
   "notes": "## What it does\n\nThe Companion skill gives your assistant one reliable workflow for local SKILL.md packages: validate, publish, update, organize, install, audit, and self-update.\n\n## Safety model\n\n- Reads only skill folders you point it at and Companion's own local state under ~/.companion.\n- Stores credentials in ~/.companion/credentials.json by workspace id and never prints tokens.\n- Confirms publishing or archival changes before mutating workspace skills.\n- Uses companion.json as the source of truth for package identity, version, env/secrets, dependencies, notes, commands, and changelog.\n\n## Local tracking\n\nCompanion records installed skills in ~/.companion/skills.lock.json under workspace-id keys so audits can compare local versions, checksums, and dependency snapshots against the workspace registry without storing tokens.",
   "metadata": {
     "companionSkillId": "b0780a97-6972-4a2b-8e88-f41a528900c7",
     "changelog": [
+      {
+        "version": "1.12.0",
+        "date": "2026-06-25",
+        "changes": [
+          "Adds a mandatory local preflight guard (scripts/skill_guard.py) to run before create, update, install, or lockfile writes, blocking duplicate slugs and skill-id retargets.",
+          "Refuses to create a skill whose slug already exists online or locally, and always sends expect_slug + expect_skill_id on updates now that the server requires them.",
+          "Automatically migrates and removes the legacy skills.log.json after copying entries into skills.lock.json, and flags archived or missing skills as missing_or_archived instead of current."
+        ]
+      },
       {
         "version": "1.11.1",
         "date": "2026-06-25",
@@ -91,6 +100,7 @@
     { "name": "Sync companion.json", "desc": "Create or repair manifest v2 with identity, env/secrets, dependency ids, notes, commands, and changelog." },
     { "name": "Manage skill API calls", "desc": "Use the supported skills API surface without crossing into workspace admin." },
     { "name": "Update Companion skill", "desc": "Check and install the latest bundled Companion skill safely." },
+    { "name": "Guard against duplicates", "desc": "Preflight the local inventory and workspace catalog before create/update/install to block duplicate slugs and skill-id retargets." },
     { "name": "Check for updates", "desc": "Compare installed skills and dependencies against the workspace registry." },
     { "name": "Install updates", "desc": "Bring outdated skills up to the latest published version." },
     { "name": "Validate a skill", "desc": "Check a skill is well formed before you share it." },
