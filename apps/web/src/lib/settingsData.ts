@@ -3,7 +3,6 @@ import "server-only";
 import { redirect } from "next/navigation";
 import { loadOrgContext } from "@/lib/currentOrg";
 import { serverApiFetch } from "@/lib/apiServer";
-import { requiresCompanionSkillInstall } from "@/lib/companionSkillGate";
 import {
   buildSettingsAppData,
   initialsOf,
@@ -12,7 +11,6 @@ import {
 } from "@/lib/settingsViewModel";
 import type { SettingsAppData, SettingsDialog, SettingsRoute, SettingsView } from "@/components/org/model";
 import type { MeVM } from "@/lib/types";
-import type { LocalSkillRow } from "@companion/contracts";
 
 export type SettingsSearchParams = Promise<Record<string, string | string[] | undefined>>;
 export { parseOrgSettingsResponse } from "@/lib/settingsViewModel";
@@ -57,10 +55,6 @@ export async function loadSettingsPageData(searchParams: SettingsSearchParams): 
   const { current } = orgContext;
   if (!current) redirect("/onboarding");
   const orgHeaders = { "x-companion-org": current.id };
-  const localSkills = await serverApiFetch<LocalSkillRow[]>("/v1/local-skills", { headers: orgHeaders }).catch(
-    () => null,
-  );
-  if (requiresCompanionSkillInstall(localSkills)) redirect("/companion-setup");
 
   const me: MeVM = {
     id: whoami.userId,

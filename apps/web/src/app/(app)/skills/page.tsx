@@ -7,7 +7,6 @@ import type {
 } from "@companion/contracts";
 import { loadOrgContext } from "@/lib/currentOrg";
 import { serverApiFetch } from "@/lib/apiServer";
-import { requiresCompanionSkillInstall } from "@/lib/companionSkillGate";
 import { SkillsApp } from "@/components/skills/SkillsApp";
 import { parseSkillsRoute, skillsRouteSource } from "@/components/skills/route";
 import { WorkspaceLoadError } from "@/components/org/WorkspaceLoadError";
@@ -37,10 +36,11 @@ export default async function SkillsPage({
   // A user who has finished onboarding always has an org; if not, send them (back) to onboarding.
   if (!current) redirect("/onboarding");
   const orgHeaders = { "x-companion-org": current.id };
+  // The Companion skill is no longer a hard gate: the install dialog opens (dismissibly) inside the
+  // Companion skills view itself, so we just load the status to render that view and the sidebar dot.
   const localSkillsResult = await serverApiFetch<LocalSkillRow[]>("/v1/local-skills", { headers: orgHeaders }).catch(
     () => null,
   );
-  if (requiresCompanionSkillInstall(localSkillsResult)) redirect("/companion-setup");
 
   const [mineResult, orgResult, filterPreferences, personalLabelsResult, labelsResult] =
     await Promise.all([
