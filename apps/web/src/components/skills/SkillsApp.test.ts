@@ -776,16 +776,16 @@ describe("Companion skills install gate", () => {
     await flushEffects();
 
     expect(container.textContent).toContain("Connect Companion to your assistant");
-    expect(container.textContent).toContain("Required to continue");
+    expect(container.textContent).toContain("Which assistant do you use?");
     // Lazy mint: opening the gate must NOT create a credential.
     expect(queryMocks.issueToken).not.toHaveBeenCalled();
 
-    clickButton(container, "Skip for now");
+    clickButton(container, "Maybe later");
     await flushEffects();
 
     expect(container.textContent).not.toContain("Connect Companion to your assistant");
-    expect(container.textContent).toContain("Not connected");
-    // Skipping never mints a token, and dismissal persists so the gate doesn't re-nag.
+    expect(container.textContent).toContain("Companion is not connected to your assistant");
+    // Dismissing never mints a token, and dismissal persists so the gate doesn't re-nag.
     expect(queryMocks.issueToken).not.toHaveBeenCalled();
     expect(window.localStorage.getItem(dismissKey)).toBe("1");
   });
@@ -867,7 +867,7 @@ describe("Companion skills install gate", () => {
     await flushEffects();
 
     expect(container.textContent).not.toContain("Connect Companion to your assistant");
-    expect(container.textContent).toContain("Not connected");
+    expect(container.textContent).toContain("Companion is not connected to your assistant");
   });
 
   it("shows the update banner (and no gate) when an update is available", async () => {
@@ -882,7 +882,7 @@ describe("Companion skills install gate", () => {
     expect(container.textContent).toContain("1.7.2 to 1.8.0");
   });
 
-  it("shows no gate or banner when installed and current", async () => {
+  it("shows the Connected banner (and no gate) when installed and current", async () => {
     const { container } = await mountSkillsApp(
       { kind: "local" },
       { props: { initialLocalSkills: [localSkill("installed", { installedVersion: "1.8.0" })] } },
@@ -890,7 +890,9 @@ describe("Companion skills install gate", () => {
     await flushEffects();
 
     expect(container.textContent).not.toContain("Connect Companion to your assistant");
-    expect(container.textContent).not.toContain("Not connected");
+    expect(container.textContent).not.toContain("Companion is not connected");
     expect(container.textContent).not.toContain("for the Companion skill");
+    // Installed + current surfaces the calm green confirmation, not the gate or red banner.
+    expect(container.textContent).toContain("Connected.");
   });
 });
