@@ -1956,12 +1956,11 @@ app.get("/v1/local-skills/:key/package", async (c) => {
     const key = c.req.param("key");
     if (key !== COMPANION_SKILL_KEY) return c.json({ error: `unknown local skill: ${key}` }, 404);
     const pkg = await getCompanionSkillPackage();
-    const zip = await tarGzToZip(pkg.archive);
-    return new Response(new Uint8Array(zip), {
+    return new Response(new Uint8Array(pkg.zip), {
       headers: {
         "content-type": "application/zip",
         "content-disposition": `attachment; filename="${key}.zip"`,
-        "content-length": String(zip.length),
+        "content-length": String(pkg.zip.length),
         "x-skill-checksum": pkg.checksum,
         "x-skill-version": pkg.version,
       },

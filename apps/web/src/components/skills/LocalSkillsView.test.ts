@@ -39,6 +39,7 @@ const baseSkill: LocalSkillRow = {
   notes: "A local helper skill.",
   commands: [],
   changes: [],
+  integrity: { packageChecksum: `sha256:${"a".repeat(64)}`, files: { "SKILL.md": `sha256:${"b".repeat(64)}` } },
   prompts: {
     install: 'install {base} {workspaceId} {token} agent=<your assistant>',
     update: "update {base} {workspaceId} {token}",

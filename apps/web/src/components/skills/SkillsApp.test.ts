@@ -163,6 +163,7 @@ const localSkills: LocalSkillRow[] = [
     notes: "A local helper skill.\n\n- Keeps local skills current.",
     commands: [],
     changes: [],
+    integrity: { packageChecksum: `sha256:${"a".repeat(64)}`, files: { "SKILL.md": `sha256:${"b".repeat(64)}` } },
     prompts: { install: "install", update: "update", use: "use" },
   },
 ];
@@ -866,6 +867,7 @@ describe("Companion skills install gate", () => {
       notes: "A local helper skill.\n\n- Keeps local skills current.",
       commands: [],
       changes: [],
+      integrity: { packageChecksum: `sha256:${"a".repeat(64)}`, files: { "SKILL.md": `sha256:${"b".repeat(64)}` } },
       prompts: {
         install: "install {base} {workspaceId} {token}",
         update: "update {base} {workspaceId} {token}",

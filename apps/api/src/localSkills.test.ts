@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -43,8 +44,37 @@ describe("companion skill package + row", () => {
     const pkg = await getCompanionSkillPackage();
     expect(pkg.key).toBe("companion");
     expect(pkg.checksum).toMatch(/^sha256:[0-9a-f]{64}$/);
-    expect(pkg.version).toBe("1.12.5");
+    expect(pkg.version).toBe("1.13.0");
     expect(pkg.sizeBytes).toBeGreaterThan(0);
+    expect(pkg.integrity.packageChecksum).toBe(pkg.checksum);
+    expect(pkg.integrity.files["SKILL.md"]).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(pkg.integrity.files["companion.json"]).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(pkg.integrity.files["companion.integrity.json"]).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(pkg.integrity.files["scripts/bootstrap.py"]).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(pkg.integrity.files["scripts/companion_lib.py"]).toMatch(/^sha256:[0-9a-f]{64}$/);
+
+    const baseline = JSON.parse(await readFile(join(companionSkillDir(), "companion.integrity.json"), "utf8")) as {
+      schemaVersion?: unknown;
+      version?: unknown;
+      files?: Record<string, string>;
+    };
+    expect(baseline.schemaVersion).toBe(1);
+    expect(baseline.version).toBe(pkg.version);
+    expect(Object.keys(baseline.files ?? {}).sort()).toEqual([
+      "SKILL.md",
+      "companion.json",
+      "scripts/bootstrap.py",
+      "scripts/bootstrap_integrity.py",
+      "scripts/bootstrap_update.py",
+      "scripts/check_updates.py",
+      "scripts/companion_lib.py",
+      "scripts/skill_guard.py",
+    ]);
+    for (const [relPath, digest] of Object.entries(baseline.files ?? {})) {
+      const bytes = await readFile(join(companionSkillDir(), relPath));
+      expect(digest).toBe(`sha256:${createHash("sha256").update(bytes).digest("hex")}`);
+      expect(pkg.integrity.files[relPath]).toBe(digest);
+    }
   });
 
   it("builds a 'none' row with an actionable install prompt for a fresh caller", async () => {
@@ -59,7 +89,13 @@ describe("companion skill package + row", () => {
     expect(row.installedVersion).toBeNull();
     expect(row.lastReportedAt).toBeNull();
     expect(row.availableVersion).toBe(pkg.version);
+    expect(row.integrity.packageChecksum).toBe(pkg.checksum);
+    expect(row.integrity.files["scripts/bootstrap.py"]).toMatch(/^sha256:[0-9a-f]{64}$/);
     expect(row.commands.length).toBeGreaterThan(0);
+    expect(row.commands).toContainEqual({
+      name: "Bootstrap health check",
+      desc: "Gather workspace, self-update, local integrity, and installed-skill context in one fast pass.",
+    });
     expect(row.commands).toContainEqual({
       name: "Publish a skill",
       desc: "Validate a skill, ask Personal vs Org and folder placement, then publish it safely.",
@@ -73,11 +109,12 @@ describe("companion skill package + row", () => {
       desc: "Create or repair manifest v2 with identity, env/secrets, dependency ids, notes, commands, and changelog.",
     });
     const changelog = row.changes.join("\n");
-    expect(changelog).toContain("share-plan preview endpoint");
-    expect(changelog).toContain("shared_dependencies");
+    expect(changelog).toContain("fast local bootstrap health check");
+    expect(changelog).toContain("preserves local customizations");
     // The install prompt drives the report-back call and leaves placeholders for the client.
     expect(row.prompts.install).toContain("/local-skills/companion/package");
     expect(row.prompts.install).toContain("/local-skills/companion/installed");
+    expect(row.prompts.install).toContain("python3 scripts/bootstrap.py --summary");
     expect(row.prompts.install).toContain("{base}");
     expect(row.prompts.install).toContain("{workspaceId}");
     expect(row.prompts.install).toContain("{token}");
@@ -97,6 +134,8 @@ describe("companion skill package + row", () => {
       expect(prompt).toContain("Do not print the token");
     }
     expect(row.prompts.update).toContain("/local-skills/companion/package");
+    expect(row.prompts.update).toContain("python3 scripts/bootstrap.py --json --auto-update-companion");
+    expect(row.prompts.update).toContain("local_customizations");
     expect(row.prompts.update).toContain("move it to a backup path");
     expect(row.prompts.update).toContain("Do not delete the existing folder");
     expect(row.prompts.update).not.toContain("Unzip it over");
@@ -108,6 +147,8 @@ describe("companion skill package + row", () => {
     const skillMd = await readFile(join(companionSkillDir(), "SKILL.md"), "utf8");
     const apiRef = await readFile(join(companionSkillDir(), "reference", "api.md"), "utf8");
     const checkScript = await readFile(join(companionSkillDir(), "scripts", "check_updates.py"), "utf8");
+    const bootstrapScript = await readFile(join(companionSkillDir(), "scripts", "bootstrap.py"), "utf8");
+    const bootstrapUpdateScript = await readFile(join(companionSkillDir(), "scripts", "bootstrap_update.py"), "utf8");
     const companionLib = await readFile(join(companionSkillDir(), "scripts", "companion_lib.py"), "utf8");
     const guardScript = await readFile(join(companionSkillDir(), "scripts", "skill_guard.py"), "utf8");
     expect(skillMd).not.toContain("companion_version:");
@@ -117,16 +158,18 @@ describe("companion skill package + row", () => {
     expect(skillMd).toContain("GET /skills?installed=true");
     expect(skillMd).toContain("GET /public/skills/{share_token}");
     expect(skillMd).toContain("/s/{share_token}");
-    expect(skillMd).toContain("python3 scripts/check_updates.py");
+    expect(skillMd).toContain("python3 scripts/bootstrap.py --json --auto-update-companion");
+    expect(skillMd).toContain("reason: \"local_customizations\"");
     expect(skillMd).toContain("executes only on the user's machine");
     expect(skillMd).toContain("skills.log.json");
     expect(skillMd).toContain("COMPANION_WORKSPACE_ID");
     expect(skillMd).toContain("Never write the token to this lockfile");
-    expect(skillMd).toContain("## Mandatory startup self-update");
+    expect(skillMd).toContain("## Mandatory startup bootstrap");
     expect(skillMd).toContain("only once per conversation");
     expect(skillMd).toContain("do not repeat it on later Companion turns");
     expect(skillMd).toContain("Do not validate, publish, update, archive, label, install");
     expect(skillMd).toContain("GET /local-skills/companion");
+    expect(skillMd).toContain("integrity");
     expect(skillMd).toContain("POST /local-skills/companion/installed");
     expect(skillMd).toContain("GET /v1/schemas/companion-manifest.v2.schema.json");
     expect(skillMd).toContain("POST /skills/{slug}/install");
@@ -159,6 +202,9 @@ describe("companion skill package + row", () => {
     expect(apiRef).toContain("After a successful skill upload or update");
     expect(apiRef).toContain("Skill link: ...");
     expect(apiRef).toContain("Local manifest checks");
+    expect(apiRef).toContain("scripts/bootstrap.py");
+    expect(apiRef).toContain("integrity.packageChecksum");
+    expect(apiRef).toContain("local_customizations");
     expect(apiRef).toContain("never executes the script");
     expect(apiRef).toContain("COMPANION_WORKSPACE_ID");
     expect(apiRef).toContain("skills.log.json");
@@ -172,8 +218,11 @@ describe("companion skill package + row", () => {
     expect(apiRef).not.toContain("defaults to `org`");
     expect(apiRef).not.toMatch(/owner_team[\s\S]{0,120}`scope`[\s\S]{0,120}parameters (?:is|are) rejected/);
     expect(companionLib).toContain("def resolve_credentials");
-    expect(checkScript).toContain("/skills?installed=true");
-    expect(checkScript).toContain("from companion_lib import");
+    expect(checkScript).toContain("bootstrap.main()");
+    expect(bootstrapScript).toContain("/skills?installed=true");
+    expect(bootstrapScript).toContain("/local-skills/companion");
+    expect(bootstrapUpdateScript).toContain("local_customizations");
+    expect(bootstrapScript).toContain("from companion_lib import");
     // The anti-duplication / anti-retargeting guard ships alongside the update check.
     expect(guardScript).toContain("def detect_conflicts");
     expect(guardScript).toContain("def create_preflight");

@@ -588,23 +588,32 @@ export function ScreenWelcome({
             <span className="ob-srow__tag">org</span>
           </div>
 
-          {!isJoin && (
-            <>
-              <div className="ob-srow">
-                <span className="ob-avatar ob-avatar--sm" style={{ background: "var(--color-surface-raised)", color: "var(--color-muted)" }}>
-                  <Icon name="mail" size={14} />
-                </span>
-                <div className="ob-srow__meta">
-                  <div className="ob-srow__t">
-                    {invites.length ? `${invites.length} invite${invites.length > 1 ? "s" : ""} sent` : "No invites yet"}
-                  </div>
-                  <div className="ob-srow__d">
-                    {allowDomain && domain ? `@${domain} is enabled for onboarding` : "Domain access is off"}
-                  </div>
-                </div>
-                <span className="ob-srow__tag">members</span>
+          {isJoin ? (
+            <div className="ob-srow">
+              <span className="ob-avatar ob-avatar--sm" style={{ background: "var(--color-surface-raised)", color: "var(--color-muted)" }}>
+                <Icon name="users" size={14} />
+              </span>
+              <div className="ob-srow__meta">
+                <div className="ob-srow__t">{joinedOrg!.memberCount + 1} people</div>
+                <div className="ob-srow__d">You can now use the shared workspace library</div>
               </div>
-            </>
+              <span className="ob-srow__tag">members</span>
+            </div>
+          ) : (
+            <div className="ob-srow">
+              <span className="ob-avatar ob-avatar--sm" style={{ background: "var(--color-surface-raised)", color: "var(--color-muted)" }}>
+                <Icon name="mail" size={14} />
+              </span>
+              <div className="ob-srow__meta">
+                <div className="ob-srow__t">
+                  {invites.length ? `${invites.length} invite${invites.length > 1 ? "s" : ""} sent` : "No invites yet"}
+                </div>
+                <div className="ob-srow__d">
+                  {allowDomain && domain ? `@${domain} is enabled for onboarding` : "Domain access is off"}
+                </div>
+              </div>
+              <span className="ob-srow__tag">members</span>
+            </div>
           )}
         </div>
       </div>

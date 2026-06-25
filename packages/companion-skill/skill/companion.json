@@ -1,13 +1,33 @@
 {
   "$schema": "https://thecompanion.sh/schemas/companion-manifest.v2.schema.json",
   "name": "companion",
-  "version": "1.12.5",
+  "version": "1.13.0",
   "title": "Companion",
-  "description": "Manage local SKILL.md packages with Companion: self-update first, validate, publish, update, resolve dependencies, track installs, and repair manifests.",
+  "description": "Manage local SKILL.md packages with Companion: bootstrap context, self-update first, validate, publish, update, resolve dependencies, track installs, and repair manifests.",
   "notes": "## What it does\n\nThe Companion skill gives your assistant one reliable workflow for local SKILL.md packages: validate, publish, update, organize, install, audit, and self-update.\n\n## Safety model\n\n- Reads only skill folders you point it at and Companion's own local state under ~/.companion.\n- Stores credentials in ~/.companion/credentials.json by workspace id and never prints tokens.\n- Confirms publishing or archival changes before mutating workspace skills.\n- Uses companion.json as the source of truth for package identity, version, env/secrets, dependencies, notes, commands, and changelog.\n\n## Local tracking\n\nCompanion records installed skills in ~/.companion/skills.lock.json under workspace-id keys so audits can compare local versions, checksums, and dependency snapshots against the workspace registry without storing tokens.",
   "metadata": {
     "companionSkillId": "b0780a97-6972-4a2b-8e88-f41a528900c7",
+    "integrityFiles": [
+      "SKILL.md",
+      "companion.json",
+      "scripts/bootstrap.py",
+      "scripts/bootstrap_integrity.py",
+      "scripts/bootstrap_update.py",
+      "scripts/check_updates.py",
+      "scripts/companion_lib.py",
+      "scripts/skill_guard.py"
+    ],
     "changelog": [
+      {
+        "version": "1.13.0",
+        "date": "2026-06-25",
+        "changes": [
+          "Adds a fast local bootstrap health check that returns workspace, Companion, integrity, and skill update context in one pass.",
+          "Allows Companion self-update from the bootstrap only when tracked local files still match an official installed-version baseline.",
+          "Ships a local integrity baseline so future Companion updates can detect customized tracked files across versions.",
+          "Detects and preserves local customizations to bootstrap and Companion scripts instead of overwriting them automatically."
+        ]
+      },
       {
         "version": "1.12.5",
         "date": "2026-06-25",
@@ -124,6 +144,7 @@
   },
   "dependencies": {},
   "commands": [
+    { "name": "Bootstrap health check", "desc": "Gather workspace, self-update, local integrity, and installed-skill context in one fast pass." },
     { "name": "List skills", "desc": "List org, My Skills, reported installed skills, and local lockfile inventory." },
     { "name": "Publish a skill", "desc": "Validate a skill, ask Personal vs Org and folder placement, then publish it safely." },
     { "name": "Update a skill", "desc": "Push a new version with targeted identity checks." },
@@ -141,7 +162,7 @@
   "checks": {
     "updates": {
       "runtime": "python",
-      "script": "scripts/check_updates.py",
+      "script": "scripts/bootstrap.py",
       "timeoutSeconds": 30
     }
   }
