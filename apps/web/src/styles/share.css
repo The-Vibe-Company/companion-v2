@@ -1,0 +1,136 @@
+/* Public skill share preview ------------------------------------------------ */
+.spage {
+  min-height: 100vh;
+  display: flex;
+  padding: 0;
+  background:
+    linear-gradient(var(--color-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--color-line) 1px, transparent 1px),
+    var(--color-canvas);
+  background-size: 44px 44px;
+  color: var(--color-fg);
+}
+
+.spreview {
+  width: 100%;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  border: 0;
+  border-radius: 0;
+  background:
+    linear-gradient(90deg, color-mix(in oklab, var(--color-surface) 94%, transparent), transparent 72%),
+    color-mix(in oklab, var(--color-surface) 72%, transparent);
+  padding: 72px;
+}
+
+.spreview__brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  margin-bottom: 76px;
+}
+
+.spreview__mark {
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-md);
+  background: var(--color-surface) url("/brand/companion-mark-ui.png") center / 86% no-repeat;
+}
+
+.spreview__brandtext {
+  font-weight: 600;
+  font-size: var(--text-base);
+}
+
+.spreview__eyebrow {
+  margin: 0 0 16px;
+}
+
+.spreview__title {
+  margin: 0;
+  max-width: 13ch;
+  overflow-wrap: anywhere;
+  font-size: 6.5rem;
+  line-height: 0.9;
+  letter-spacing: 0;
+}
+
+.spreview__slug {
+  margin: 22px 0 0;
+  color: var(--color-faint);
+  font-size: var(--text-base);
+  overflow-wrap: anywhere;
+}
+
+.spreview__desc {
+  max-width: 62ch;
+  margin: 36px 0 0;
+  color: var(--color-muted);
+  font-size: 1.35rem;
+  line-height: var(--leading-relaxed);
+}
+
+.spreview__facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 38px;
+}
+
+.spreview__fact {
+  min-height: 38px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-sunken);
+  color: var(--color-muted);
+  padding: 0 13px;
+  font-size: var(--text-base);
+}
+
+.spreview__actions {
+  display: flex;
+  margin-top: 48px;
+}
+
+.spreview__cta {
+  height: 44px;
+  padding: 0 16px;
+}
+
+@media (max-width: 980px) {
+  .spreview {
+    padding: 52px 36px;
+  }
+
+  .spreview__brand {
+    margin-bottom: 56px;
+  }
+
+  .spreview__title {
+    font-size: 4.6rem;
+  }
+}
+
+@media (max-width: 560px) {
+  .spreview {
+    padding: 28px 18px;
+  }
+
+  .spreview__title {
+    font-size: 3.15rem;
+  }
+
+  .spreview__desc {
+    font-size: 1.05rem;
+  }
+
+  .spreview__actions {
+    margin-top: 34px;
+  }
+}

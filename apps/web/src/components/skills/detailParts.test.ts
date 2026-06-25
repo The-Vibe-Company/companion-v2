@@ -7,6 +7,7 @@ import { FiledIn, PropList, Requirements } from "./detailParts";
 const skill: SkillVM = {
   uuid: "skill-1",
   id: "manifest-demo",
+  shareToken: "share-manifest-demo",
   version: "1.2.3",
   validation: "valid",
   description: "Demo skill.",

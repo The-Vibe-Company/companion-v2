@@ -9,6 +9,7 @@ const me: MeVM = { id: "user-1", name: "Ada Lovelace", email: "ada@example.com",
 const skill: SkillVM = {
   uuid: "skill-1",
   id: "linear-demo",
+  shareToken: "share-linear-demo",
   version: "1.2.3",
   validation: "valid",
   description: "A focused skill for incident handoffs.",
@@ -87,6 +88,8 @@ describe("DetailView tabbed detail layout", () => {
     expect(html).toContain("Filed in");
     expect(html).toContain("marketing/seo");
     expect(html).toContain("Add to folder");
+    expect(html).toContain("Copy public link");
+    expect(html).toContain("Share");
     // Tab bar: Files / Dependencies / Activity / Discussion are tabs; the Overview
     // tab carries the Manifest section and optional notes.
     expect(html).toContain('role="tablist"');
@@ -103,6 +106,13 @@ describe("DetailView tabbed detail layout", () => {
     expect(html).not.toContain("More sections");
     // No owner / visibility axis on the detail anymore.
     expect(html).not.toContain("Personal");
+  });
+
+  it("does not expose a public copy action for personal skills", () => {
+    const html = renderDetailFor({ ...skill, scope: "personal" });
+
+    expect(html).not.toContain("Copy public link");
+    expect(html).toContain("Share to organization");
   });
 
   it("prefers Companion title and summary for the detail title and lead", () => {

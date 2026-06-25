@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type {
   OrgRole,
   SkillCommentRow,
@@ -185,6 +185,12 @@ type DetailTab = "overview" | "files" | "dependencies" | "activity" | "discussio
 // references a missing element; the panel names its controlling tab via aria-labelledby.
 const DETAIL_PANEL_ID = "skill-detail-panel";
 
+function isEditableShortcutTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  const tag = target.tagName.toLowerCase();
+  return tag === "input" || tag === "textarea" || tag === "select" || target.isContentEditable;
+}
+
 export function normalizeSkillNotes(value: string | null | undefined): string {
   if (!value) return "";
   const lines = value.replace(/\r\n/g, "\n").split("\n");
@@ -331,10 +337,13 @@ export function DetailView({
   const [files, setFiles] = useState<SkillFile[]>([]);
   const [deps, setDeps] = useState<SkillDependenciesResponse | null>(null);
   const [tab, setTab] = useState<DetailTab>("overview");
+  const [copiedPublicLink, setCopiedPublicLink] = useState(false);
+  const canCopyPublicLink = skill.scope === "org" && !skill.archived;
 
   // Reset to Overview when opening a different skill (not on a version bump).
   useEffect(() => {
     setTab("overview");
+    setCopiedPublicLink(false);
   }, [skill.id]);
 
   useEffect(() => {
@@ -391,6 +400,30 @@ export function DetailView({
     const url = await fetchSkillDownloadUrl(skill.id, skill.version);
     window.location.href = url;
   };
+
+  const copyPublicLink = useCallback(async () => {
+    if (!canCopyPublicLink) return;
+    const url = `${window.location.origin}/s/${skill.shareToken}`;
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopiedPublicLink(true);
+      window.setTimeout(() => setCopiedPublicLink(false), 1600);
+    } catch {
+      // Clipboard can be blocked in insecure contexts; leave the control unchanged.
+    }
+  }, [canCopyPublicLink, skill.shareToken]);
+
+  useEffect(() => {
+    if (!canCopyPublicLink) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!event.metaKey || !event.shiftKey || event.key.toLowerCase() !== "c") return;
+      if (isEditableShortcutTarget(event.target)) return;
+      event.preventDefault();
+      void copyPublicLink();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [canCopyPublicLink, copyPublicLink]);
 
   // Flat model: skills carry no owner/visibility axis — every member can do anything to any skill.
   const canModifySkill = true;
@@ -496,6 +529,7 @@ export function DetailView({
   const canShare = skill.scope === "personal" && !skill.archived;
   const eyebrow = skill.scope === "personal" ? "Personal skill" : isInstalledCopy ? "Installed skill" : "Organization skill";
   const eyebrowIcon = skill.scope === "personal" ? "user" : isInstalledCopy ? "download" : "building-2";
+  const publicLinkTitle = copiedPublicLink ? "Public link copied" : "Copy public link";
 
   return (
     <div className="dpage">
@@ -576,7 +610,21 @@ export function DetailView({
                   <Icon name={eyebrowIcon} size={13} />
                   {eyebrow}
                 </p>
-                <h1 className="dtitle dtitle--linear">{skill.display?.name ?? skill.id}</h1>
+                <div className="dtitlebar">
+                  <h1 className="dtitle dtitle--linear">{skill.display?.name ?? skill.id}</h1>
+                  {canCopyPublicLink && (
+                    <button
+                      className="btn-ghost dsharebtn"
+                      type="button"
+                      title={publicLinkTitle}
+                      aria-label={publicLinkTitle}
+                      onClick={() => void copyPublicLink()}
+                    >
+                      <Icon name={copiedPublicLink ? "check" : "link-2"} size={14} />
+                      {copiedPublicLink ? "Copied" : "Share"}
+                    </button>
+                  )}
+                </div>
                 {skill.display?.name ? <p className="dslug mono">{skill.id}</p> : null}
                 <p className="ov__lead ov__lead--linear">{description}</p>
                 <p className="dbyline">

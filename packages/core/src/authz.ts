@@ -13,6 +13,9 @@ import { type OrgRole, type SkillScope } from "@companion/contracts";
  * mirrors the SQL guards in the SECURITY DEFINER management RPCs — the database is authoritative;
  * these power the route layer + the table-driven tests. Every role passed in is the actor's role IN
  * A SPECIFIC org, so a role in org A never authorizes org B.
+ *
+ * Public share-link previews are not routed through `canAccessSkill`: they are a separate,
+ * explicit metadata-only read path that resolves only live org skills by unguessable token.
  */
 
 export type SkillAction =

@@ -16,6 +16,8 @@ import type {
   SkillDependentRow,
   SkillFilterPreferences,
   SkillListRow,
+  SkillPublicPreview,
+  SkillShareTarget,
   SkillVersionRow,
   TokenScope,
 } from "@companion/contracts";
@@ -721,6 +723,7 @@ export async function listSkills(input: {
   const baseQuery = database
     .select({
       id: schema.skills.id,
+      share_token: schema.skills.shareToken,
       org_id: schema.skills.orgId,
       slug: schema.skills.slug,
       description: schema.skills.description,
@@ -840,6 +843,7 @@ export async function listSkills(input: {
     return {
       id: r.id,
       org_id: r.org_id,
+      share_token: r.share_token,
       slug: r.slug,
       description: summary,
       display: companion.display,
@@ -893,6 +897,94 @@ export async function listSkills(input: {
       updated_at: r.updated_at.toISOString(),
     };
   }) as SkillListRow[];
+}
+
+/**
+ * Public, unauthenticated skill-link preview. This intentionally does not take an actor/org: the
+ * unguessable token is the bearer for a metadata-only preview. It only resolves live org skills and
+ * never returns ids, tenant identifiers, package files, or SKILL.md content.
+ */
+export async function getSkillPublicPreviewByShareToken(input: {
+  token: string;
+  database?: Db;
+}): Promise<SkillPublicPreview | null> {
+  const token = input.token.trim();
+  if (!token) return null;
+  const database = input.database ?? db;
+  const rows = await database
+    .select({
+      slug: schema.skills.slug,
+      description: schema.skills.description,
+      creator_name: schema.profiles.name,
+      creator_initials: schema.profiles.initials,
+      current_version: schema.skillVersions.version,
+      frontmatter: schema.skillVersions.frontmatter,
+      star_count: sql<number>`cast(count(${schema.skillStars.userId}) as int)`,
+      updated_at: schema.skills.updatedAt,
+    })
+    .from(schema.skills)
+    .innerJoin(schema.profiles, eq(schema.profiles.id, schema.skills.creatorId))
+    .innerJoin(schema.skillVersions, eq(schema.skillVersions.id, schema.skills.currentVersionId))
+    .leftJoin(schema.skillStars, eq(schema.skillStars.skillId, schema.skills.id))
+    .where(
+      and(
+        eq(schema.skills.shareToken, token),
+        eq(schema.skills.scope, "org"),
+        isNull(schema.skills.archivedAt),
+      ),
+    )
+    .groupBy(schema.skills.id, schema.profiles.id, schema.skillVersions.id)
+    .limit(1);
+
+  const row = rows[0];
+  if (!row) return null;
+  const manifest = parseStoredCompanionManifest(row.frontmatter ?? "", row.description);
+  return {
+    display_name: manifest.display.name ?? row.slug,
+    slug: row.slug,
+    description: manifest.display.summary ?? row.description,
+    current_version: row.current_version,
+    creator_name: row.creator_name,
+    creator_initials: row.creator_initials,
+    star_count: row.star_count,
+    updated_at: row.updated_at.toISOString(),
+  };
+}
+
+/**
+ * Authenticated share-link target resolver. Unlike the public preview, this returns the org id so the
+ * web app can switch workspaces before opening the slug-keyed detail route. It only resolves when the
+ * actor is already a member of the token's org.
+ */
+export async function getSkillShareTargetByShareToken(input: {
+  actor: ActorContext;
+  token: string;
+  database?: Db;
+}): Promise<SkillShareTarget | null> {
+  const token = input.token.trim();
+  if (!token) return null;
+  const database = input.database ?? db;
+  const rows = await database
+    .select({
+      org_id: schema.skills.orgId,
+      slug: schema.skills.slug,
+    })
+    .from(schema.skills)
+    .innerJoin(
+      schema.memberships,
+      and(eq(schema.memberships.orgId, schema.skills.orgId), eq(schema.memberships.userId, input.actor.id)),
+    )
+    .where(
+      and(
+        eq(schema.skills.shareToken, token),
+        eq(schema.skills.scope, "org"),
+        isNull(schema.skills.archivedAt),
+      ),
+    )
+    .limit(1);
+
+  const row = rows[0];
+  return row ? { org_id: row.org_id, slug: row.slug } : null;
 }
 
 const EMPTY_SKILL_FILTER_PREFERENCES: SkillFilterPreferences = {

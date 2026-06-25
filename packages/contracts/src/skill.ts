@@ -125,6 +125,8 @@ export const skillListRowSchema = z.object({
   id: z.string(),
   org_id: z.string(),
   slug: z.string(),
+  /** Unguessable public metadata preview token for org skills. */
+  share_token: z.string(),
   description: z.string(),
   /** Human display fields normalized from companion.json, with SKILL.md fallbacks. */
   display: companionDisplaySchema.default({}),
@@ -179,6 +181,26 @@ export const skillListRowSchema = z.object({
   updated_at: z.string(),
 });
 export type SkillListRow = z.infer<typeof skillListRowSchema>;
+
+/** Public, unauthenticated skill-link preview shape. Metadata-only; never includes tenant ids or package content. */
+export const skillPublicPreviewSchema = z.object({
+  display_name: z.string(),
+  slug: z.string(),
+  description: z.string(),
+  current_version: z.string(),
+  creator_name: z.string(),
+  creator_initials: z.string(),
+  star_count: z.number().int().nonnegative(),
+  updated_at: z.string(),
+});
+export type SkillPublicPreview = z.infer<typeof skillPublicPreviewSchema>;
+
+/** Authenticated share-link resolver shape. Used by the web app to switch to the token's workspace. */
+export const skillShareTargetSchema = z.object({
+  org_id: z.string(),
+  slug: z.string(),
+});
+export type SkillShareTarget = z.infer<typeof skillShareTargetSchema>;
 
 /** An image attached to a comment. `url` is the auth-checked serve path for the stored object. */
 export const skillCommentImageSchema = z.object({

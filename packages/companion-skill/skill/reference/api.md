@@ -1,8 +1,9 @@
 # Companion workspace API — quick reference
 
 Base URL is `COMPANION_API_URL` (ends in `/v1`). The active workspace id is
-`COMPANION_WORKSPACE_ID` (`organizations.id`). Authenticate every request with
+`COMPANION_WORKSPACE_ID` (`organizations.id`). Authenticate management requests with
 `Authorization: Bearer $COMPANION_TOKEN`. The token is scoped to `skills:read` + `skills:write`.
+The public preview endpoint documented below intentionally does not use this token.
 
 Resolve those values from the environment first. If either variable is missing, read the dedicated
 local credentials file written by the Companion install/use prompt:
@@ -69,11 +70,28 @@ These are the skills endpoints a personal access token (`skills:read` + `skills:
 | Confirm this skill installed | `POST /local-skills/companion/installed` | `skills:write` |
 | Fetch companion.json v2 schema | `GET /v1/schemas/companion-manifest.v2.schema.json` | Public |
 
+Public org-skill previews are separate from PAT-authenticated management. Use the `share_token`
+returned on skill rows to build the web URL `/s/{share_token}` or to fetch metadata directly:
+
+```http
+GET /public/skills/{share_token}
+```
+
+This endpoint is unauthenticated. It returns only `display_name`, `slug`, `description`,
+`current_version`, `creator_name`, `creator_initials`, `star_count`, and `updated_at` for a live org
+skill. Personal, archived, and unknown tokens return 404. It never exposes package content, files,
+downloads, requirements, secrets, labels, `id`, `org_id`, or `creator_id`.
+
+The signed-in web app uses `GET /skills/share-target/{share_token}` with a session cookie to resolve
+`{org_id, slug}` for members before opening the slug-keyed detail route. Agents should normally share
+the web URL `/s/{share_token}` instead of calling that resolver directly.
+
 Some skills-management routes are intended for the signed-in web session rather than the
 Companion PAT. Use them only when the caller is operating with a valid session cookie:
 
 | Action | Method & path | Auth |
 | --- | --- | --- |
+| Resolve a share link target | `GET /skills/share-target/{share_token}` | Session |
 | Get skill metadata | `GET /skills/{slug}` | Session |
 | Enumerate versions | `GET /skills/{slug}/versions` | Session |
 | Read comments | `GET /skills/{slug}/comments` | Session |
@@ -90,8 +108,9 @@ bytes. Text-only comments may still be sent as JSON.
 
 Skill metadata rows returned by `GET /skills` and `GET /skills/{slug}` include both `description`
 (the short summary used in lists and detail leads) and `notes` (optional Markdown-compatible
-`companion.json` notes). Keep them distinct: do not copy setup notes or long Markdown content into
-`description`.
+`companion.json` notes). Rows also include `share_token`, which is only for org-skill public preview
+links and is not an auth credential. Keep summaries and notes distinct: do not copy setup notes or
+long Markdown content into `description`.
 
 Do not use this skill for workspace members, invitations, org settings, or token management.
 Those are outside the skills-only management surface.
@@ -382,8 +401,8 @@ built-in Companion skill. Those endpoints are for workspace-published skills.
 POST /local-skills/companion/installed
 Content-Type: application/json
 
-{ "version": "1.11.1", "agent": "Claude Code" }
+{ "version": "1.12.0", "agent": "Claude Code" }
 ```
 
 `version` must be valid semver (use this skill's `companion.json.version`). The response is
-`{ "ok": true, "status": "installed" | "update", "availableVersion": "1.11.1" }`.
+`{ "ok": true, "status": "installed" | "update", "availableVersion": "1.12.0" }`.

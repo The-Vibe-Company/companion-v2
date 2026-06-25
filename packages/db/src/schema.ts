@@ -183,6 +183,10 @@ export const skills = pgTable(
   "skills",
   {
     id: uuid("id").primaryKey().defaultRandom(),
+    shareToken: text("share_token")
+      .notNull()
+      .unique()
+      .default(sql`substr(replace(gen_random_uuid()::text,'-',''),1,16)`),
     orgId: uuid("org_id")
       .notNull()
       .references(() => organizations.id, { onDelete: "cascade" }),

@@ -2,8 +2,22 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
+  metadataBase: new URL(process.env.COMPANION_WEB_URL ?? "http://localhost:3000"),
   title: "Companion · Skills",
   description: "A versioned registry of SKILL.md packages.",
+  openGraph: {
+    title: "Companion · Skills",
+    description: "A versioned registry of SKILL.md packages.",
+    siteName: "Companion",
+    type: "website",
+    images: [{ url: "/brand/companion-logo.png", width: 512, height: 512, alt: "Companion" }],
+  },
+  twitter: {
+    card: "summary",
+    title: "Companion · Skills",
+    description: "A versioned registry of SKILL.md packages.",
+    images: ["/brand/companion-logo.png"],
+  },
   icons: {
     icon: "/brand/favicon.png",
     apple: "/brand/apple-icon.png",

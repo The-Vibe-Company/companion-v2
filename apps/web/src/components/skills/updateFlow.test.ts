@@ -10,6 +10,7 @@ import { UploadDialog } from "./UploadDialog";
 const skill: SkillVM = {
   uuid: "skill-1",
   id: "research-agent",
+  shareToken: "share-research-agent",
   version: "1.2.3",
   validation: "valid",
   description: "Research helper.",
