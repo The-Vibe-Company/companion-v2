@@ -538,6 +538,16 @@ After a successful re-publish of an org skill, refresh the caller's install reco
 `POST /skills/{slug}/install` and the published version, then refresh the local lockfile entry. A
 personal skill still needs no install report.
 
+After any successful publish or re-publish, include a skill link in the final chat response. Resolve
+`webBase` by removing the trailing `/v1` from `COMPANION_API_URL`. For org skills, fetch
+`GET /skills?lib=org`, find the row whose `slug` matches the published skill, and use its
+`share_token` to build the public preview link: `Skill link: ${webBase}/s/{share_token}`. For
+personal skills, explain that there is no public link until the owner shares it to the org, and use
+the signed-in detail link instead: `Skill link: ${webBase}/skills?skill={slug}`. If a publish
+succeeded but the org row or `share_token` cannot be retrieved, do not publish again; report the
+successful publish and fall back to the signed-in detail link, using `lib=org` when you know the
+skill is org-scoped.
+
 ```sh
 curl -s "$COMPANION_API_URL/skills?expect_slug=$SLUG&expect_skill_id=$SKILL_ID" \
   -H "Authorization: Bearer $COMPANION_TOKEN" \
@@ -824,7 +834,7 @@ skills view shows the correct status and version. Report the version from this s
 curl -s "$COMPANION_API_URL/local-skills/companion/installed" \
   -H "Authorization: Bearer $COMPANION_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"version":"1.12.3","agent":"<your assistant name>"}'
+  -d '{"version":"1.12.4","agent":"<your assistant name>"}'
 ```
 
 A `{ "ok": true, "status": "installed" }` response confirms the workspace now knows this machine has
