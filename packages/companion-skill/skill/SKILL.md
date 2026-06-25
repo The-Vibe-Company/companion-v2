@@ -277,7 +277,26 @@ curl -s "$COMPANION_API_URL/skills?installed=true" -H "Authorization: Bearer $CO
 `lib=org` lists the org library. `lib=mine` lists the caller's My Skills: authored personal skills
 plus org skills reported as installed. `installed=true` narrows any list to skills with a
 `skill_installs` record for the current user, which means "reported installed to Companion"; it does
-not prove the files still exist on disk.
+not prove the files still exist on disk. Skill rows include `share_token`; for live org skills only,
+use it to build a clean public preview URL such as `/s/$share_token`.
+
+### Public org-skill preview links
+
+Org skills have an anyone-with-the-link metadata preview. Personal skills do not; the user must first
+share a personal skill to the org with `POST /skills/{slug}/share`. The preview exposes only display
+metadata and never exposes package content, files, downloads, requirements, secrets, labels, `id`,
+`org_id`, or `creator_id`.
+
+```http
+GET /public/skills/{share_token}
+```
+
+The endpoint is public and does not use `COMPANION_TOKEN`. A 200 response contains
+`display_name`, `slug`, `description`, `current_version`, `creator_name`, `creator_initials`,
+`star_count`, and `updated_at`; personal, archived, or unknown tokens return 404. When helping a user
+copy or share a skill link, prefer the web URL `/s/{share_token}` for org skills. The signed-in web app
+uses a separate session-only resolver so it can switch to the token's workspace before opening the
+slug-keyed detail route; agents normally do not need to call that resolver.
 
 For real local inventory, read the active workspace entry in `~/.companion/skills.lock.json` and
 fall back to `~/.companion/skills.log.json` only when the lockfile is absent. The bundled update
@@ -619,6 +638,9 @@ Allowed skills API tasks:
 - List workspace skills with `GET /skills?lib=org`, `GET /skills?lib=mine`, and
   `GET /skills?installed=true` using a `skills:read` token. Use `installed=true` for Companion's
   reported install state; use the local lockfile for disk inventory.
+- Read a public org-skill preview with `GET /public/skills/{share_token}` without a token when the
+  user wants a share/unfurl link. Use only the `share_token` from an org skill row and prefer the web
+  URL `/s/{share_token}` for sharing.
 - Validate, publish, or update a skill with `POST /skills` after full local analysis and a synced
   `companion.json`. Use `dependency=` parameters only for old packages that have no manifest yet.
   For new skills, send explicit `scope=personal` or `scope=org` after the user chooses the library;
@@ -775,7 +797,7 @@ skills view shows the correct status and version. Report the version from this s
 curl -s "$COMPANION_API_URL/local-skills/companion/installed" \
   -H "Authorization: Bearer $COMPANION_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"version":"1.12.0","agent":"<your assistant name>"}'
+  -d '{"version":"1.12.1","agent":"<your assistant name>"}'
 ```
 
 A `{ "ok": true, "status": "installed" }` response confirms the workspace now knows this machine has

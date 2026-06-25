@@ -14,6 +14,7 @@ export type { LabelVM };
 export interface SkillVM {
   uuid: string; // db id
   id: string; // slug (the displayed machine name)
+  shareToken: string;
   version: string | null;
   validation: ValidationState;
   description: string;
@@ -58,6 +59,7 @@ export function mapSkill(row: SkillListRow): SkillVM {
   return {
     uuid: row.id,
     id: row.slug,
+    shareToken: row.share_token,
     version: row.current_version,
     validation: row.validation,
     description: row.description,

@@ -74,6 +74,7 @@ const currentOrg: OrgVM = {
 function skill(overrides: Partial<SkillVM> & { id: string }): SkillVM {
   return {
     uuid: "skill-" + overrides.id,
+    shareToken: "share-" + overrides.id,
     version: "1.0.0",
     validation: "valid",
     description: "Test skill",
@@ -109,6 +110,7 @@ function skill(overrides: Partial<SkillVM> & { id: string }): SkillVM {
 function skillRowFromVM(vm: SkillVM): SkillListRow {
   return {
     id: vm.uuid,
+    share_token: vm.shareToken,
     slug: vm.id,
     org_id: currentOrg.id,
     labels: vm.labels,

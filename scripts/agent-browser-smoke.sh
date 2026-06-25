@@ -126,9 +126,15 @@ prepare_fixtures() {
     --signup \
     --profile "$profile" >/dev/null
 
-  pnpm --filter @companion/cli dev skills push "$PWD/examples/skills/incident-summary" \
+  local push_output
+  if ! push_output="$(pnpm --filter @companion/cli dev skills push "$PWD/examples/skills/incident-summary" \
     --label engineering \
-    --profile "$profile" >/dev/null
+    --profile "$profile" 2>&1)"; then
+    if ! printf '%s' "$push_output" | grep -Fi "version already exists" >/dev/null; then
+      printf '%s\n' "$push_output" >&2
+      exit 1
+    fi
+  fi
 }
 
 require_command agent-browser
@@ -159,6 +165,8 @@ agent-browser find label "Email" fill "$SMOKE_EMAIL"
 agent-browser find label "Password" fill "$SMOKE_PASSWORD"
 agent-browser find role button click --name "Sign in"
 wait_for_skills
+agent-browser open "$APP_URL/skills?lib=org"
+wait_for_skills
 agent-browser eval "for (const b of Array.from(document.querySelectorAll('button'))) { if (b.textContent && b.textContent.trim() === 'Clear') b.click(); }" >/dev/null
 agent-browser wait 300
 assert_body_contains "$SMOKE_SKILL"
@@ -179,20 +187,20 @@ agent-browser find role button click --name "Open skill $SMOKE_SKILL"
 agent-browser wait 1000
 assert_body_contains "$SMOKE_SKILL"
 assert_body_contains "Install skill"
-agent-browser find role button click --name "Skills"
+agent-browser open "$APP_URL/skills?lib=org"
 wait_for_skills
 
 log "Checking upload dialog opens"
 agent-browser find role button click --name "Upload skill"
 agent-browser wait 500
-assert_body_contains "Upload a skill"
+assert_body_contains "Upload an organization skill"
 assert_body_contains "Assistant IA"
 assert_body_contains "Create in the browser"
 agent-browser find role button click --name "Cancel"
 
 log "Checking mobile viewport"
 agent-browser set device "iPhone 14"
-agent-browser open "$APP_URL/skills"
+agent-browser open "$APP_URL/skills?lib=org"
 wait_for_skills
 assert_body_contains "Upload skill"
 assert_body_contains "$SMOKE_SKILL"

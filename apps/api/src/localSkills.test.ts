@@ -43,7 +43,7 @@ describe("companion skill package + row", () => {
     const pkg = await getCompanionSkillPackage();
     expect(pkg.key).toBe("companion");
     expect(pkg.checksum).toMatch(/^sha256:[0-9a-f]{64}$/);
-    expect(pkg.version).toBe("1.12.0");
+    expect(pkg.version).toBe("1.12.1");
     expect(pkg.sizeBytes).toBeGreaterThan(0);
   });
 
@@ -73,6 +73,8 @@ describe("companion skill package + row", () => {
       desc: "Create or repair manifest v2 with identity, env/secrets, dependency ids, notes, commands, and changelog.",
     });
     const changelog = row.changes.join("\n");
+    expect(changelog).toContain("public preview links");
+    expect(changelog).toContain("share_token");
     expect(changelog).toContain("preflight guard");
     expect(changelog).toContain("expect_slug");
     // The install prompt drives the report-back call and leaves placeholders for the client.
@@ -115,6 +117,8 @@ describe("companion skill package + row", () => {
     expect(skillMd).toContain("https://thecompanion.sh/schemas/companion-manifest.v2.schema.json");
     expect(skillMd).toContain("skills.lock.json");
     expect(skillMd).toContain("GET /skills?installed=true");
+    expect(skillMd).toContain("GET /public/skills/{share_token}");
+    expect(skillMd).toContain("/s/{share_token}");
     expect(skillMd).toContain("python3 scripts/check_updates.py");
     expect(skillMd).toContain("executes only on the user's machine");
     expect(skillMd).toContain("skills.log.json");
@@ -149,6 +153,8 @@ describe("companion skill package + row", () => {
     expect(apiRef).toContain("GET /v1/schemas/companion-manifest.v2.schema.json");
     expect(apiRef).toContain("GET /skills?lib=mine");
     expect(apiRef).toContain("GET /skills?installed=true");
+    expect(apiRef).toContain("GET /public/skills/{share_token}");
+    expect(apiRef).toContain("Rows also include `share_token`");
     expect(apiRef).toContain("Local manifest checks");
     expect(apiRef).toContain("never executes the script");
     expect(apiRef).toContain("COMPANION_WORKSPACE_ID");

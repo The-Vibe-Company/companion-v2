@@ -35,6 +35,8 @@ import {
   getDownloadVersion,
   getCommentImageAsset,
   getOrgLogoAsset,
+  getSkillPublicPreviewByShareToken,
+  getSkillShareTargetByShareToken,
   issueApiToken,
   joinOrgByDomain,
   listApiTokens,
@@ -158,6 +160,17 @@ const app = new Hono<{ Variables: ApiVariables }>();
 export { app };
 
 app.get("/v1/schemas/companion-manifest.v2.schema.json", (c) => c.json(companionManifestV2JsonSchema));
+
+app.get("/v1/public/skills/:token", async (c) => {
+  try {
+    const preview = await getSkillPublicPreviewByShareToken({ token: c.req.param("token") });
+    if (!preview) return jsonError(c, "skill not found", 404);
+    c.header("Cache-Control", "public, s-maxage=300, stale-while-revalidate=600");
+    return c.json(preview);
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
 
 /** Set the `companion_org` selection cookie (readable client-side, so not httpOnly). */
 function setOrgCookie(c: Context<{ Variables: ApiVariables }>, orgId: string): void {
@@ -387,6 +400,17 @@ app.use("*", attachSession);
 app.get("/health", (c) => c.json({ ok: true }));
 
 app.on(["GET", "POST"], "/auth/*", (c) => auth.handler(c.req.raw));
+
+app.get("/v1/skills/share-target/:token", async (c) => {
+  try {
+    const actor = actorFromContext(c);
+    const target = await getSkillShareTargetByShareToken({ actor, token: c.req.param("token") });
+    if (!target) return jsonError(c, "skill not found", 404);
+    return c.json(target);
+  } catch (error) {
+    return jsonError(c, error, 401);
+  }
+});
 
 app.all("/trpc/*", async (c) => {
   const actor = c.get("user")

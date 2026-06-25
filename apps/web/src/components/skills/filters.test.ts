@@ -5,6 +5,7 @@ import { chipParts, filtersKey, makeFilter, matchFilters, type Filter } from "./
 function mk(p: Partial<SkillVM> & { id: string }): SkillVM {
   return {
     uuid: p.id,
+    shareToken: "share-" + p.id,
     version: "1.0.0",
     validation: "valid",
     description: "",

@@ -28,6 +28,8 @@ const serviceMocks = vi.hoisted(() => {
     getDownloadVersion: noop,
     getCommentImageAsset: noop,
     getOrgLogoAsset: noop,
+    getSkillPublicPreviewByShareToken: vi.fn(),
+    getSkillShareTargetByShareToken: vi.fn(),
     issueApiToken: noop,
     joinOrgByDomain: noop,
     listApiTokens: noop,
@@ -75,6 +77,11 @@ const dbMocks = vi.hoisted(() => ({
   withTenantContext: vi.fn(async (_ctx: unknown, fn: (database: unknown) => unknown) => fn({})),
 }));
 
+const authMocks = vi.hoisted(() => ({
+  getSession: vi.fn(async (): Promise<unknown | null> => null),
+  handler: vi.fn(),
+}));
+
 vi.mock("@hono/node-server", () => ({
   serve: vi.fn(),
 }));
@@ -82,9 +89,9 @@ vi.mock("@hono/node-server", () => ({
 vi.mock("@companion/auth", () => ({
   auth: {
     api: {
-      getSession: vi.fn(async () => null),
+      getSession: authMocks.getSession,
     },
-    handler: vi.fn(),
+    handler: authMocks.handler,
     $Infer: {},
   },
 }));
@@ -104,6 +111,101 @@ function tokenFor(header: string | undefined) {
   if (header === "write-only") return { actor: actorA, orgId: "org-1", scopes: ["skills:write"] };
   return null;
 }
+
+describe("GET /v1/public/skills/:token", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    authMocks.getSession.mockResolvedValue(null);
+  });
+
+  it("returns a metadata-only skill preview without auth", async () => {
+    serviceMocks.getSkillPublicPreviewByShareToken.mockResolvedValue({
+      display_name: "Mega Code Review",
+      slug: "mega-code-review",
+      description: "Review changes with repository context.",
+      current_version: "1.2.3",
+      creator_name: "Ada Lovelace",
+      creator_initials: "AL",
+      star_count: 7,
+      updated_at: "2026-06-25T10:00:00.000Z",
+    });
+
+    const res = await app.request("/v1/public/skills/share-token-1");
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("cache-control")).toBe("public, s-maxage=300, stale-while-revalidate=600");
+    await expect(res.json()).resolves.toEqual({
+      display_name: "Mega Code Review",
+      slug: "mega-code-review",
+      description: "Review changes with repository context.",
+      current_version: "1.2.3",
+      creator_name: "Ada Lovelace",
+      creator_initials: "AL",
+      star_count: 7,
+      updated_at: "2026-06-25T10:00:00.000Z",
+    });
+    expect(serviceMocks.getSkillPublicPreviewByShareToken).toHaveBeenCalledWith({ token: "share-token-1" });
+    expect(dbMocks.withTenantContext).not.toHaveBeenCalled();
+  });
+
+  it("404s unknown, personal, or archived share tokens", async () => {
+    serviceMocks.getSkillPublicPreviewByShareToken.mockResolvedValue(null);
+
+    const res = await app.request("/v1/public/skills/not-public");
+
+    expect(res.status).toBe(404);
+    await expect(res.json()).resolves.toMatchObject({ ok: false, error: "skill not found" });
+  });
+});
+
+describe("GET /v1/skills/share-target/:token", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    authMocks.getSession.mockResolvedValue({
+      user: { id: "user-a", email: "a@example.test", name: "User A" },
+      session: { id: "session-1" },
+    });
+  });
+
+  it("returns the token's org target for a signed-in member", async () => {
+    serviceMocks.getSkillShareTargetByShareToken.mockResolvedValue({
+      org_id: "org-target",
+      slug: "mega-code-review",
+    });
+
+    const res = await app.request("/v1/skills/share-target/share-token-1", {
+      headers: { cookie: "session=value" },
+    });
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({ org_id: "org-target", slug: "mega-code-review" });
+    expect(serviceMocks.getSkillShareTargetByShareToken).toHaveBeenCalledWith({
+      actor: actorA,
+      token: "share-token-1",
+    });
+  });
+
+  it("404s when the token is unknown or not accessible to the signed-in user", async () => {
+    serviceMocks.getSkillShareTargetByShareToken.mockResolvedValue(null);
+
+    const res = await app.request("/v1/skills/share-target/not-public", {
+      headers: { cookie: "session=value" },
+    });
+
+    expect(res.status).toBe(404);
+    await expect(res.json()).resolves.toMatchObject({ ok: false, error: "skill not found" });
+  });
+
+  it("requires a signed-in session", async () => {
+    authMocks.getSession.mockResolvedValue(null);
+
+    const res = await app.request("/v1/skills/share-target/share-token-1");
+
+    expect(res.status).toBe(401);
+    await expect(res.json()).resolves.toMatchObject({ ok: false, error: "not authenticated" });
+    expect(serviceMocks.getSkillShareTargetByShareToken).not.toHaveBeenCalled();
+  });
+});
 
 describe("GET /v1/skills", () => {
   beforeEach(() => {
