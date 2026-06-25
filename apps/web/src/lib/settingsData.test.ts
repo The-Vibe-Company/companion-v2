@@ -30,24 +30,6 @@ const current = {
   logoUrl: null,
 } as const;
 
-const installedLocalSkills = [
-  {
-    workspaceId: "org_1",
-    key: "companion",
-    name: "Companion",
-    description: "Manage skills locally.",
-    status: "installed",
-    installedVersion: "1.0.0",
-    availableVersion: "1.0.0",
-    lastReportedAt: "2026-06-25T00:00:00.000Z",
-    agentLabel: null,
-    notes: "",
-    commands: [],
-    changes: [],
-    prompts: { install: "", update: "", use: "" },
-  },
-] as const;
-
 describe("parseOrgSettingsResponse", () => {
   beforeEach(() => {
     vi.spyOn(console, "error").mockImplementation(() => undefined);
@@ -157,25 +139,12 @@ describe("parseOrgSettingsResponse", () => {
 
   it("makes loadSettingsPageData return null for malformed settings data", async () => {
     const { loadSettingsPageData } = await import("./settingsData");
-    serverApiFetch
-      .mockResolvedValueOnce(whoami)
-      .mockResolvedValueOnce(installedLocalSkills)
-      .mockResolvedValueOnce({ members: {} });
+    serverApiFetch.mockResolvedValueOnce(whoami).mockResolvedValueOnce({ members: {} });
     loadOrgContext.mockResolvedValue({ orgs: [current], current });
 
     await expect(loadSettingsPageData(Promise.resolve({}))).resolves.toBeNull();
     expect(serverApiFetch).toHaveBeenCalledWith("/v1/orgs/current/settings", {
       headers: { "x-companion-org": "org_1" },
     });
-  });
-
-  it("redirects settings to Companion setup until the required local skill is installed", async () => {
-    const { loadSettingsPageData } = await import("./settingsData");
-    serverApiFetch.mockResolvedValueOnce(whoami).mockResolvedValueOnce([
-      { ...installedLocalSkills[0], status: "none", installedVersion: null, lastReportedAt: null },
-    ]);
-    loadOrgContext.mockResolvedValue({ orgs: [current], current });
-
-    await expect(loadSettingsPageData(Promise.resolve({}))).rejects.toThrow("redirect:/companion-setup");
   });
 });

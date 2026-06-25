@@ -793,6 +793,21 @@ body { background: var(--color-canvas); color: var(--color-fg); font-family: var
   text-decoration: underline; text-underline-offset: 3px; }
 .ls-banner__action:hover { color: var(--color-muted); }
 
+/* Connected (calm green confirmation). */
+.ls-banner--ok { background: var(--color-ok-tint); border-bottom-color: var(--color-ok-line); }
+.ls-banner--ok .ls-banner__ico { color: var(--color-ok); }
+.ls-banner--ok .ls-banner__text { color: var(--color-ok); }
+
+/* Not connected (prominent red CTA: icon tile + stacked copy + solid action). */
+.ls-banner--danger { background: var(--color-danger-tint); border-bottom-color: var(--color-danger-line);
+  padding: 14px var(--space-5); align-items: center; }
+.ls-banner__tile { display: grid; place-items: center; width: 38px; height: 38px; flex: none;
+  border-radius: var(--radius-md); background: var(--color-danger); color: oklch(0.99 0.01 25); }
+.ls-banner__stack { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.ls-banner__title { font-size: var(--text-sm); font-weight: 600; color: var(--color-fg); }
+.ls-banner__sub { font-size: var(--text-xs); color: var(--color-muted); line-height: var(--leading-normal); }
+.ls-banner__cta { flex: none; }
+
 /* card ------------------------------------------------------------------- */
 .ls-card { position: relative; border: 1px solid var(--color-line); border-radius: var(--radius-md); background: var(--color-surface);
   padding: var(--space-5); display: flex; flex-direction: column; gap: var(--space-4); text-align: left; }
@@ -900,27 +915,59 @@ body { background: var(--color-canvas); color: var(--color-fg); font-family: var
     to { transform: translate(-50%, -50%); opacity: 1; }
   }
 }
-.ls-gate__body { flex: 1; min-height: 0; overflow-y: auto; padding: var(--space-6) var(--space-5) var(--space-5); }
+/* Dialog header: brand mark + eyebrow/title + dismiss. */
+.ls-gate__head { flex: none; display: flex; align-items: flex-start; gap: var(--space-3);
+  padding: var(--space-5) var(--space-5) 0; }
+.ls-gate__headtext { flex: 1; min-width: 0; }
+.ls-gate__close { flex: none; width: 28px; height: 28px; display: grid; place-items: center;
+  border: 0; background: transparent; border-radius: var(--radius-md); color: var(--color-faint); cursor: pointer;
+  transition: background-color var(--duration-fast) var(--ease-out-quint), color var(--duration-fast) var(--ease-out-quint); }
+.ls-gate__close:hover { background: var(--color-surface-raised); color: var(--color-fg); }
+
+.ls-gate__body { flex: 1; min-height: 0; overflow-y: auto; padding: var(--space-4) var(--space-5) var(--space-5); }
 .ls-gate__eyebrow { display: inline-flex; align-items: center; gap: 8px; font-size: var(--text-xs); font-weight: 600;
   text-transform: uppercase; letter-spacing: var(--tracking-wide); color: var(--color-muted); }
-.ls-gate__mark { display: grid; place-items: center; width: 22px; height: 22px; flex: none; border-radius: var(--radius-sm);
-  background: var(--color-accent); color: var(--color-accent-fg); font-weight: 600; font-size: var(--text-sm); }
-.ls-gate__title { margin: var(--space-3) 0 0; font-size: var(--text-lg); font-weight: 600;
+.ls-gate__mark { display: grid; place-items: center; width: 34px; height: 34px; flex: none; border-radius: var(--radius-md);
+  background: var(--color-accent); color: var(--color-accent-fg); font-weight: 600; font-size: var(--text-md); }
+.ls-gate__title { margin: 3px 0 0; font-size: var(--text-lg); font-weight: 600;
   letter-spacing: var(--tracking-tight); color: var(--color-fg); text-wrap: pretty; }
 .ls-gate__lede { margin: 8px 0 0; font-size: var(--text-sm); color: var(--color-muted); line-height: var(--leading-normal); }
 .ls-gate__feats { display: flex; flex-wrap: wrap; gap: 8px; margin-top: var(--space-4); }
 .ls-gate__feat { display: inline-flex; align-items: center; gap: 7px; font-size: var(--text-sm); color: var(--color-fg);
   border: 1px solid var(--color-line); border-radius: var(--radius-full); padding: 5px 12px; }
 .ls-gate__feat-ico { flex: none; color: var(--color-accent-edge); }
+/* Assistant chooser: two selectable brand tiles; the active one carries an inset accent ring. */
+.ls-gate__chotitle { margin: var(--space-5) 0 9px; font-size: 11px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: var(--tracking-wide); color: var(--color-faint); }
+.ls-choose { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.atile { display: flex; align-items: center; gap: 11px; text-align: left; padding: 12px 13px;
+  border: 1px solid var(--color-line); background: var(--color-surface); border-radius: var(--radius-md); cursor: pointer;
+  transition: box-shadow var(--duration-fast) var(--ease-out-quint), border-color var(--duration-fast) var(--ease-out-quint),
+              background-color var(--duration-fast) var(--ease-out-quint); }
+.atile:hover { border-color: var(--color-line-strong); background: var(--color-surface-raised); }
+.atile--on { box-shadow: inset 0 0 0 2px var(--color-accent); border-color: var(--color-accent); }
+.atile:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
+.ls-tile__logo { display: grid; place-items: center; width: 36px; height: 36px; flex: none; border-radius: var(--radius-md); }
+.ls-tile__logo svg { display: block; }
+.ls-tile__text { min-width: 0; }
+.ls-tile__name { display: block; font-size: var(--text-sm); font-weight: 500; color: var(--color-fg); }
+.ls-tile__vendor { display: block; font-size: 11px; color: var(--color-faint); }
+
+/* "Give this to <assistant>" + paste hint, on one baseline-aligned row. */
+.ls-gate__pastehint { display: flex; align-items: baseline; justify-content: space-between; gap: 10px;
+  margin: var(--space-5) 0 8px; }
+.ls-gate__hint { flex: none; font-size: var(--text-xs); color: var(--color-faint); }
 .ls-gate__promptlabel { margin: var(--space-5) 0 8px; font-size: 11px; font-weight: 600;
   text-transform: uppercase; letter-spacing: var(--tracking-wide); color: var(--color-faint); }
+.ls-gate__pastehint .ls-gate__promptlabel { margin: 0; }
 .ls-gate__prompt { margin: 0; border: 1px solid var(--color-line); background: var(--color-surface-sunken);
   border-radius: var(--radius-md); padding: 13px 14px; font-family: var(--font-mono); font-size: var(--text-xs);
   line-height: 1.7; color: var(--color-fg); white-space: pre-wrap; word-break: break-word;
   max-height: 280px; overflow: auto; }
 .ls-gate__foot { flex: none; display: flex; align-items: center; gap: var(--space-3);
   padding: var(--space-4) var(--space-5); border-top: 1px solid var(--color-line); background: var(--color-surface-sunken); }
-.ls-gate__foot .btn-primary { margin-left: auto; }
+.ls-gate__footspace { flex: 1; }
+.ls-gate__copied { display: inline-flex; align-items: center; gap: 5px; font-size: var(--text-xs); color: var(--color-ok); }
 
 /* ===================== Two-library sidebar (My Skills / Organization) ===================== */
 /* A collapsible library section header: chevron + icon + name + skill-count + "new folder" plus. */
