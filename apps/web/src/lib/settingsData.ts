@@ -44,9 +44,13 @@ export async function loadSettingsPageData(searchParams: SettingsSearchParams): 
   initialRoute: SettingsRoute;
   initialDialog: SettingsDialog;
 } | null> {
-  const whoami = await serverApiFetch<{ userId: string; email: string; name: string; needsOnboarding?: boolean }>(
-    "/v1/auth/whoami",
-  ).catch(() => null);
+  const whoami = await serverApiFetch<{
+    userId: string;
+    email: string;
+    name: string;
+    avatarUrl?: string | null;
+    needsOnboarding?: boolean;
+  }>("/v1/auth/whoami").catch(() => null);
   if (!whoami) redirect("/login");
   if (whoami.needsOnboarding) redirect("/onboarding");
 
@@ -61,6 +65,7 @@ export async function loadSettingsPageData(searchParams: SettingsSearchParams): 
     name: whoami.name || whoami.email || "You",
     email: whoami.email,
     initials: initialsOf(whoami.name || whoami.email || "You"),
+    avatarUrl: whoami.avatarUrl ?? null,
   };
 
   const settingsRaw = await serverApiFetch<unknown>("/v1/orgs/current/settings", {

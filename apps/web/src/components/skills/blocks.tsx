@@ -1,5 +1,6 @@
 import type { ValidationState } from "@companion/contracts";
 import { Icon } from "../Icon";
+import { UserAvatar } from "../UserAvatar";
 
 export function vdot(v: ValidationState): "ok" | "down" | "unknown" {
   return v === "valid" ? "ok" : v === "invalid" ? "down" : "unknown";
@@ -11,14 +12,22 @@ export function syncView(s: string): { dot: "ok" | "warn" | "unknown" } {
   return { dot: "warn" };
 }
 
-export function Avatar({ initials, size = 18 }: { initials: string; size?: number }) {
+export function Avatar({
+  initials,
+  avatarUrl = null,
+  size = 18,
+}: {
+  initials: string;
+  avatarUrl?: string | null;
+  size?: number;
+}) {
   return (
-    <span
+    <UserAvatar
       className="avatar"
+      avatarUrl={avatarUrl}
+      initials={initials}
       style={{ width: size, height: size, fontSize: size <= 18 ? 8 : 9 }}
-    >
-      {initials}
-    </span>
+    />
   );
 }
 

@@ -16,6 +16,8 @@ import {
   updateMe as updateMeRpc,
   updateOrg as updateOrgRpc,
   uploadWorkspaceLogo as uploadWorkspaceLogoRpc,
+  uploadUserAvatar as uploadUserAvatarRpc,
+  removeUserAvatar as removeUserAvatarRpc,
 } from "@/lib/org";
 import {
   applyAccent,
@@ -188,7 +190,7 @@ export function SettingsController({
   };
 
   const ctx: OrgCtx = {
-    user: (id) => users[id] ?? { id, name: id, initials: "?", email: "" },
+    user: (id) => users[id] ?? { id, name: id, initials: "?", email: "", avatarUrl: null },
     currentOrg: current,
     myId: me.id,
     myRole: current.myRole,
@@ -203,7 +205,7 @@ export function SettingsController({
       const trimmed = name.trim();
       if (!trimmed) return;
       const initials = initialsOf(trimmed);
-      const prev: SeedUser = users[me.id] ?? { id: me.id, name: me.name, initials: me.initials, email: me.email };
+      const prev: SeedUser = users[me.id] ?? { id: me.id, name: me.name, initials: me.initials, email: me.email, avatarUrl: me.avatarUrl };
       setUsers((u) => ({ ...u, [me.id]: { ...prev, name: trimmed, initials } }));
       setBusy(true);
       updateMeRpc(trimmed)
@@ -249,6 +251,40 @@ export function SettingsController({
           color: res.color ?? null,
           logoUrl: res.logoUrl ?? null,
         }));
+      } catch (e) {
+        setErr(e instanceof Error ? e.message : String(e));
+        void refreshSettingsData();
+        throw e;
+      } finally {
+        setBusy(false);
+      }
+    },
+    // Optimistically swap my avatar everywhere it reads from `users` (sidebar chip, members "you"
+    // row). The server returns a freshly `?v=`-versioned URL so other surfaces cache-bust too.
+    uploadUserAvatar: async (file) => {
+      setBusy(true);
+      try {
+        const res = await uploadUserAvatarRpc(file);
+        setUsers((u) => {
+          const prev: SeedUser = u[me.id] ?? { id: me.id, name: me.name, initials: me.initials, email: me.email, avatarUrl: null };
+          return { ...u, [me.id]: { ...prev, avatarUrl: res.avatarUrl ?? null } };
+        });
+      } catch (e) {
+        setErr(e instanceof Error ? e.message : String(e));
+        void refreshSettingsData();
+        throw e;
+      } finally {
+        setBusy(false);
+      }
+    },
+    removeUserAvatar: async () => {
+      setBusy(true);
+      try {
+        const res = await removeUserAvatarRpc();
+        setUsers((u) => {
+          const prev: SeedUser = u[me.id] ?? { id: me.id, name: me.name, initials: me.initials, email: me.email, avatarUrl: null };
+          return { ...u, [me.id]: { ...prev, avatarUrl: res.avatarUrl ?? null } };
+        });
       } catch (e) {
         setErr(e instanceof Error ? e.message : String(e));
         void refreshSettingsData();

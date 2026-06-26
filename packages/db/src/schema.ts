@@ -93,6 +93,12 @@ export const profiles = pgTable("profiles", {
   name: text("name").notNull(),
   initials: text("initials").notNull(),
   handle: text("handle"),
+  /**
+   * Same-origin serve path for a custom uploaded avatar (`/v1/users/{id}/avatar`), or null to fall
+   * back to the user's Gravatar / colored initials. Parallels `organizations.logoUrl`; the binary
+   * lives in object storage under `users/{id}/avatar`.
+   */
+  avatarUrl: text("avatar_url"),
   /** Set when the user finishes onboarding (creates/joins an org) or accepts an invite. Null = needs onboarding. */
   onboardedAt: timestamp("onboarded_at", { withTimezone: true }),
   createdAt: now(),

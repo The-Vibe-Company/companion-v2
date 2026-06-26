@@ -61,7 +61,7 @@ vi.mock("@/lib/queries", () => ({
   ...queryMocks,
 }));
 
-const me: MeVM = { id: "user-1", name: "Ada Lovelace", email: "ada@example.com", initials: "AL" };
+const me: MeVM = { id: "user-1", name: "Ada Lovelace", email: "ada@example.com", initials: "AL", avatarUrl: null };
 const currentOrg: OrgVM = {
   id: "org-1",
   name: "Acme",
@@ -88,6 +88,7 @@ function skill(overrides: Partial<SkillVM> & { id: string }): SkillVM {
     authorId: "user-1",
     authorName: "Ada Lovelace",
     authorInitials: "AL",
+    authorAvatarUrl: null,
     tools: [],
     requirements: [],
     compatibility: null,
@@ -119,6 +120,7 @@ function skillRowFromVM(vm: SkillVM): SkillListRow {
     creator_id: vm.authorId,
     creator_name: vm.authorName,
     creator_initials: vm.authorInitials,
+    creator_avatar_url: vm.authorAvatarUrl,
     current_version: vm.version,
     validation: vm.validation,
     description: vm.description,

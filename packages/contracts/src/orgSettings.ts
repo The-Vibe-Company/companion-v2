@@ -11,6 +11,8 @@ export const orgSettingsMemberSchema = z.object({
   name: z.string(),
   email: z.string(),
   initials: z.string(),
+  /** Resolved avatar URL (custom upload or Gravatar); null falls back to initials. */
+  avatarUrl: z.string().nullable().default(null),
 });
 export type OrgSettingsMember = z.infer<typeof orgSettingsMemberSchema>;
 

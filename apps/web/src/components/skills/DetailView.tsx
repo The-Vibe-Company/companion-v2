@@ -459,6 +459,7 @@ export function DetailView({
       created_at: new Date().toISOString(),
       author_name: me.name,
       author_initials: me.initials,
+      author_avatar_url: me.avatarUrl,
       parent_id: parentId,
       version_id: versionId,
       version: versionId ? (versions.find((v) => v.id === versionId)?.version ?? null) : null,
@@ -472,8 +473,8 @@ export function DetailView({
         setComments((c) =>
           c.map((x) =>
             x.id === tmpId
-              ? // Server row carries persistent image urls; keep our display name/initials.
-                { ...row, author_name: me.name, author_initials: me.initials }
+              ? // Server row carries persistent image urls but no author display fields; keep ours.
+                { ...row, author_name: me.name, author_initials: me.initials, author_avatar_url: me.avatarUrl }
               : // Re-point any optimistic reply that targeted this still-pending root.
                 x.parent_id === tmpId
                 ? { ...x, parent_id: row.id }
@@ -494,7 +495,7 @@ export function DetailView({
         setComments((c) =>
           c.map((x) =>
             x.id === id
-              ? { ...row, author_name: x.author_name, author_initials: x.author_initials }
+              ? { ...row, author_name: x.author_name, author_initials: x.author_initials, author_avatar_url: x.author_avatar_url }
               : x,
           ),
         ),
@@ -630,7 +631,7 @@ export function DetailView({
                 {skill.display?.name ? <p className="dslug mono">{skill.id}</p> : null}
                 <p className="ov__lead ov__lead--linear">{description}</p>
                 <p className="dbyline">
-                  <Avatar initials={skill.authorInitials} size={16} />
+                  <Avatar initials={skill.authorInitials} avatarUrl={skill.authorAvatarUrl} size={16} />
                   <span>
                     by <span className="dbyline__name">{skill.authorName}</span>
                   </span>
@@ -711,7 +712,14 @@ export function DetailView({
 
         {activeTab === "activity" && (
           <div className="ddoc">
-            <Activity versions={versions} authorName={skill.authorName} />
+            <Activity
+              versions={versions}
+              fallbackAuthor={{
+                name: skill.authorName,
+                initials: skill.authorInitials,
+                avatarUrl: skill.authorAvatarUrl,
+              }}
+            />
           </div>
         )}
 
@@ -720,7 +728,7 @@ export function DetailView({
             <Discussion
               comments={comments}
               versions={versions}
-              me={{ id: me.id, name: me.name, initials: me.initials }}
+              me={{ id: me.id, name: me.name, initials: me.initials, avatarUrl: me.avatarUrl }}
               canDeprecate={canDeprecate}
               onAdd={addComment}
               onToggleDeprecated={toggleDeprecated}

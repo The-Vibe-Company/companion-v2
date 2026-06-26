@@ -17,6 +17,7 @@ function mk(p: Partial<SkillVM> & { id: string }): SkillVM {
     authorId: "user-1",
     authorName: "Alice Nardon",
     authorInitials: "AN",
+    authorAvatarUrl: null,
     tools: [],
     requirements: [],
     compatibility: null,

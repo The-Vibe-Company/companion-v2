@@ -20,6 +20,7 @@ const skill: SkillVM = {
   authorId: "user-1",
   authorName: "Alice Nardon",
   authorInitials: "AN",
+  authorAvatarUrl: null,
   tools: ["read_file"],
   requirements: [
     {
@@ -142,6 +143,9 @@ function versionRow(overrides: Partial<SkillVersionRow>): SkillVersionRow {
     validation: "valid",
     validation_error: null,
     created_by: "user-1",
+    created_by_name: null,
+    created_by_initials: null,
+    created_by_avatar_url: null,
     created_at: "2026-06-25T10:00:00.000Z",
     ...overrides,
   };
@@ -151,7 +155,7 @@ describe("Activity changelog rendering", () => {
   it("renders the matching version changelog as compact change items", () => {
     const html = renderToString(
       React.createElement(Activity, {
-        authorName: "Alice Nardon",
+        fallbackAuthor: { name: "Alice Nardon", initials: "AN", avatarUrl: null },
         versions: [
           versionRow({
             changelog: {
@@ -172,7 +176,7 @@ describe("Activity changelog rendering", () => {
   it("falls back to the release note when no changelog entry exists", () => {
     const html = renderToString(
       React.createElement(Activity, {
-        authorName: "Alice Nardon",
+        fallbackAuthor: { name: "Alice Nardon", initials: "AN", avatarUrl: null },
         versions: [versionRow({ id: "version-2", version: "1.1.0", note: "Manual release note." })],
       }),
     );

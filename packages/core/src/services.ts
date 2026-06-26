@@ -35,9 +35,11 @@ import {
   publishSkillInputSchema,
   renameSkillInputSchema,
   skillFilterPreferencesSchema,
+  userAvatarPublicPath,
   type CompanionManifest,
   type PublishSkillInput,
 } from "@companion/contracts";
+import { gravatarUrl, resolveUserAvatarUrl } from "./avatar";
 
 import { compareSemver } from "@companion/skills";
 import { db, schema, type Db } from "@companion/db";
@@ -116,6 +118,8 @@ export interface OrgSettingsMember {
   name: string;
   email: string;
   initials: string;
+  /** Resolved avatar URL (custom upload or Gravatar); null falls back to initials. */
+  avatarUrl: string | null;
 }
 
 export function uniqueSlug(base: string, suffix: string): string {
@@ -399,6 +403,96 @@ export async function getOrgLogoAsset(input: {
   if (!role) throw new Error("not a member of this organization");
 }
 
+/**
+ * Persist a custom user-avatar marker after its binary has been stored. Self-service: keyed by the
+ * actor's own id. Bumping `updatedAt` rotates the `?v=` cache-bust baked into the serve path so every
+ * surface re-fetches the new image. `profiles` carries no RLS (keyed by the auth user id), so this
+ * runs on the plain `db` handle like `updateUserProfile`.
+ */
+export async function setUserAvatarFromUpload(input: {
+  actor: ActorContext;
+  database?: Db;
+}): Promise<{ avatarUrl: string }> {
+  const database = input.database ?? db;
+  await ensureUserBootstrap(input.actor, database);
+  const now = new Date();
+  const path = userAvatarPublicPath(input.actor.id, now.getTime());
+  await database
+    .update(schema.profiles)
+    .set({ avatarUrl: path, updatedAt: now })
+    .where(eq(schema.profiles.id, input.actor.id));
+  return { avatarUrl: path };
+}
+
+/** Remove a custom avatar, reverting to the user's Gravatar / colored initials. Self-service. */
+export async function clearUserAvatar(input: {
+  actor: ActorContext;
+  database?: Db;
+}): Promise<{ avatarUrl: string }> {
+  const database = input.database ?? db;
+  await ensureUserBootstrap(input.actor, database);
+  await database
+    .update(schema.profiles)
+    .set({ avatarUrl: null, updatedAt: new Date() })
+    .where(eq(schema.profiles.id, input.actor.id));
+  return { avatarUrl: gravatarUrl(input.actor.email) };
+}
+
+/**
+ * Authorization gate for reading a hosted user-avatar binary. Kept inside the tenant boundary:
+ *  1. The binary is served only while the target's profile still marks a custom avatar, so a
+ *     removed avatar cannot be fetched by a stale URL even if its storage object lingered after a
+ *     failed best-effort delete.
+ *  2. Cross-user reads require the actor to share at least one organization with the target (or be
+ *     the target), mirroring the org-logo serve gate — defense-in-depth alongside RLS.
+ */
+export async function getUserAvatarAsset(input: {
+  actor: ActorContext;
+  userId: string;
+  database?: Db;
+}): Promise<void> {
+  if (!input.actor?.id) throw new Error("authentication required");
+  if (!input.userId) throw new Error("user id is required");
+  const database = input.database ?? db;
+  const profile = await database.query.profiles.findFirst({
+    where: eq(schema.profiles.id, input.userId),
+    columns: { avatarUrl: true },
+  });
+  if (!profile?.avatarUrl) throw new Error("avatar not found");
+  if (input.userId === input.actor.id) return;
+  const actorOrgs = await database
+    .select({ orgId: schema.memberships.orgId })
+    .from(schema.memberships)
+    .where(eq(schema.memberships.userId, input.actor.id));
+  const orgIds = (Array.isArray(actorOrgs) ? actorOrgs : []).map((r) => r.orgId);
+  if (orgIds.length === 0) throw new Error("not authorized to view this avatar");
+  const shared = await database
+    .select({ one: sql`1` })
+    .from(schema.memberships)
+    .where(and(eq(schema.memberships.userId, input.userId), inArray(schema.memberships.orgId, orgIds)))
+    .limit(1);
+  if (!Array.isArray(shared) || shared.length === 0) {
+    throw new Error("not authorized to view this avatar");
+  }
+}
+
+/** Resolve the current actor's own avatar URL (custom upload or Gravatar) for `whoami`. */
+export async function getMyAvatarUrl(input: {
+  actor: ActorContext;
+  database?: Db;
+}): Promise<string> {
+  const database = input.database ?? db;
+  const profile = await database.query.profiles
+    .findFirst({ where: eq(schema.profiles.id, input.actor.id) })
+    .catch(() => null);
+  return resolveUserAvatarUrl({
+    userId: input.actor.id,
+    email: input.actor.email,
+    avatarUrl: profile?.avatarUrl ?? null,
+    updatedAtEpoch: profile?.updatedAt instanceof Date ? profile.updatedAt.getTime() : 0,
+  });
+}
+
 export async function getOrgSettings(input: {
   actor: ActorContext;
   orgId: string;
@@ -442,6 +536,8 @@ export async function getOrgSettings(input: {
       name: schema.profiles.name,
       email: schema.profiles.email,
       initials: schema.profiles.initials,
+      avatarUrl: schema.profiles.avatarUrl,
+      updatedAt: schema.profiles.updatedAt,
     })
     .from(schema.memberships)
     .innerJoin(schema.profiles, eq(schema.profiles.id, schema.memberships.userId))
@@ -456,6 +552,12 @@ export async function getOrgSettings(input: {
     name: r.name,
     email: r.email,
     initials: r.initials,
+    avatarUrl: resolveUserAvatarUrl({
+      userId: r.userId,
+      email: r.email,
+      avatarUrl: r.avatarUrl ?? null,
+      updatedAtEpoch: r.updatedAt instanceof Date ? r.updatedAt.getTime() : 0,
+    }),
   }));
 
   // Admins additionally see pending invitations: folded into `members[]` (legacy, for the existing
@@ -487,6 +589,8 @@ export async function getOrgSettings(input: {
         name: display,
         email: invite.email,
         initials: initialsFor(display),
+        // No account yet → no custom upload possible; Gravatar (or initials) only.
+        avatarUrl: gravatarUrl(invite.email),
       });
       invitations.push({
         id: invite.id,
@@ -751,6 +855,9 @@ export async function listSkills(input: {
       creator_id: schema.skills.creatorId,
       creator_name: schema.profiles.name,
       creator_initials: schema.profiles.initials,
+      creator_email: schema.profiles.email,
+      creator_avatar_url: schema.profiles.avatarUrl,
+      creator_updated_at: schema.profiles.updatedAt,
       // Correlated array_agg of the skill's label paths, sorted. A RAW sql subquery (NOT a
       // database.select().limit, which breaks the hand-rolled fakeDbs in tests); empty → '{}'.
       // The org library reads org `skill_labels`; My Skills reads the caller's private
@@ -895,6 +1002,12 @@ export async function listSkills(input: {
       creator_id: r.creator_id,
       creator_name: r.creator_name,
       creator_initials: r.creator_initials,
+      creator_avatar_url: resolveUserAvatarUrl({
+        userId: r.creator_id,
+        email: r.creator_email ?? "",
+        avatarUrl: r.creator_avatar_url ?? null,
+        updatedAtEpoch: r.creator_updated_at instanceof Date ? r.creator_updated_at.getTime() : 0,
+      }),
       current_version: r.current_version,
       compatibility: manifest?.compatibility ?? null,
       metadata: manifest?.metadata ?? {},
@@ -1240,12 +1353,54 @@ export async function listSkillVersions(input: {
     .from(schema.skillVersions)
     .where(and(eq(schema.skillVersions.orgId, input.orgId), eq(schema.skillVersions.skillId, skill.id)))
     .orderBy(desc(schema.skillVersions.createdAt));
-  return rows.map((r) => skillVersionRowFromRecord(r, skill));
+  // Per-version attribution: resolve the member who published each version (name/initials/avatar).
+  const authorById = await loadVersionAuthors(database, rows.map((r) => r.createdBy));
+  return rows.map((r) => skillVersionRowFromRecord(r, skill, authorById.get(r.createdBy) ?? null));
+}
+
+/** Display fields for a version publisher, with the avatar already resolved (custom or Gravatar). */
+type VersionAuthor = { name: string; initials: string; avatarUrl: string };
+
+/**
+ * Batch-load the `profiles` of version publishers, keyed by user id. Mirrors `loadCommentImages`'s
+ * `Array.isArray` defensiveness so a hand-rolled fakeDb that doesn't implement this extra query
+ * degrades to no-author (null display fields) rather than throwing in unrelated suites.
+ */
+async function loadVersionAuthors(database: Db, userIds: string[]): Promise<Map<string, VersionAuthor>> {
+  const byId = new Map<string, VersionAuthor>();
+  const ids = [...new Set(userIds)];
+  if (ids.length === 0) return byId;
+  const rows = await database
+    .select({
+      id: schema.profiles.id,
+      name: schema.profiles.name,
+      initials: schema.profiles.initials,
+      email: schema.profiles.email,
+      avatarUrl: schema.profiles.avatarUrl,
+      updatedAt: schema.profiles.updatedAt,
+    })
+    .from(schema.profiles)
+    .where(inArray(schema.profiles.id, ids));
+  if (!Array.isArray(rows)) return byId;
+  for (const r of rows) {
+    byId.set(r.id, {
+      name: r.name,
+      initials: r.initials,
+      avatarUrl: resolveUserAvatarUrl({
+        userId: r.id,
+        email: r.email,
+        avatarUrl: r.avatarUrl ?? null,
+        updatedAtEpoch: r.updatedAt instanceof Date ? r.updatedAt.getTime() : 0,
+      }),
+    });
+  }
+  return byId;
 }
 
 export function skillVersionRowFromRecord(
   r: typeof schema.skillVersions.$inferSelect,
   skill: Pick<SkillListRow, "description">,
+  author?: VersionAuthor | null,
 ): SkillVersionRow {
   const manifest = parseStoredSkillFrontmatter(r.frontmatter);
   const companion = parseStoredCompanionManifest(r.frontmatter, skill.description);
@@ -1268,6 +1423,9 @@ export function skillVersionRowFromRecord(
     validation: r.validation,
     validation_error: r.validationError,
     created_by: r.createdBy,
+    created_by_name: author?.name ?? null,
+    created_by_initials: author?.initials ?? null,
+    created_by_avatar_url: author?.avatarUrl ?? null,
     created_at: r.createdAt.toISOString(),
   };
 }
@@ -1342,6 +1500,9 @@ export async function listSkillComments(input: {
       created_at: schema.skillComments.createdAt,
       author_name: schema.profiles.name,
       author_initials: schema.profiles.initials,
+      author_email: schema.profiles.email,
+      author_avatar_url_raw: schema.profiles.avatarUrl,
+      author_updated_at: schema.profiles.updatedAt,
       parent_id: schema.skillComments.parentId,
       version_id: schema.skillComments.versionId,
       version: schema.skillVersions.version,
@@ -1358,13 +1519,23 @@ export async function listSkillComments(input: {
     input.slug,
     rows.map((r) => r.id),
   );
-  return rows.map((r) => ({
-    ...r,
-    created_at: r.created_at.toISOString(),
-    // A null version_id is always global; otherwise the leftJoin label (null if the version is gone).
-    version: r.version_id ? r.version : null,
-    images: imagesByComment.get(r.id) ?? [],
-  }));
+  return rows.map((r) => {
+    // Resolve the author avatar server-side and DROP the email (never leak it to the client).
+    const { author_email, author_avatar_url_raw, author_updated_at, ...rest } = r;
+    return {
+      ...rest,
+      created_at: r.created_at.toISOString(),
+      // A null version_id is always global; otherwise the leftJoin label (null if the version is gone).
+      version: r.version_id ? r.version : null,
+      author_avatar_url: resolveUserAvatarUrl({
+        userId: r.author_id,
+        email: author_email ?? "",
+        avatarUrl: author_avatar_url_raw ?? null,
+        updatedAtEpoch: author_updated_at instanceof Date ? author_updated_at.getTime() : 0,
+      }),
+      images: imagesByComment.get(r.id) ?? [],
+    };
+  });
 }
 
 export async function toggleStar(input: {

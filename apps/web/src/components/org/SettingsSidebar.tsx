@@ -3,6 +3,7 @@
 import type { ReactNode } from "react";
 import { useEffect, useState } from "react";
 import { Icon } from "../Icon";
+import { UserAvatar } from "../UserAvatar";
 import { WorkspaceAvatar } from "./WorkspaceAvatar";
 import type { OrgCtx, SettingsRoute, SettingsView } from "./model";
 
@@ -115,7 +116,7 @@ export function SettingsSidebar({
             <div className="sx-group__label">Account</div>
             <NavItem
               active={is("profile")}
-              avatar={<span className="sx-av sx-av--me">{me.initials}</span>}
+              avatar={<UserAvatar className="sx-av sx-av--me" avatarUrl={me.avatarUrl} initials={me.initials} />}
               label="Profile"
               onClick={() => goTo({ view: "profile" })}
             />

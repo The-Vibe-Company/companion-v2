@@ -49,6 +49,11 @@ export function orgLogoKey(orgId: string): string {
   return `orgs/${orgId}/logo`;
 }
 
+/** Stored custom profile avatar for a user (content-type is kept on the object). */
+export function userAvatarKey(userId: string): string {
+  return `users/${userId}/avatar`;
+}
+
 /**
  * Stored comment image attachment. `imageId` is globally unique (the `skill_comment_images.id`),
  * so the key needs no comment/skill segment. Content-type is kept on the object. Uploaded with the
@@ -102,6 +107,67 @@ export async function getOrgLogo(input: {
     if (name === "NoSuchKey" || name === "NotFound") return null;
     throw error;
   }
+}
+
+export async function putUserAvatar(input: {
+  userId: string;
+  body: Uint8Array;
+  contentType: string;
+  client?: S3Client;
+  config?: StorageConfig;
+}): Promise<void> {
+  const config = input.config ?? getStorageConfig();
+  const client = input.client ?? createStorageClient(config);
+  await client.send(
+    new PutObjectCommand({
+      Bucket: config.bucket,
+      Key: userAvatarKey(input.userId),
+      Body: input.body,
+      ContentType: input.contentType,
+    }),
+  );
+}
+
+export async function getUserAvatar(input: {
+  userId: string;
+  client?: S3Client;
+  config?: StorageConfig;
+}): Promise<{ body: Buffer; contentType: string } | null> {
+  const config = input.config ?? getStorageConfig();
+  const client = input.client ?? createStorageClient(config);
+  try {
+    const res = await client.send(
+      new GetObjectCommand({
+        Bucket: config.bucket,
+        Key: userAvatarKey(input.userId),
+      }),
+    );
+    if (!res.Body) return null;
+    const bytes = await res.Body.transformToByteArray();
+    return {
+      body: Buffer.from(bytes),
+      contentType: res.ContentType ?? "application/octet-stream",
+    };
+  } catch (error) {
+    const name = error instanceof Error ? error.name : "";
+    if (name === "NoSuchKey" || name === "NotFound") return null;
+    throw error;
+  }
+}
+
+export async function deleteUserAvatar(input: {
+  userId: string;
+  client?: S3Client;
+  config?: StorageConfig;
+}): Promise<void> {
+  const config = input.config ?? getStorageConfig();
+  const client = input.client ?? createStorageClient(config);
+  await client.send(
+    new DeleteObjectCommand({
+      Bucket: config.bucket,
+      Key: userAvatarKey(input.userId),
+    }),
+  );
 }
 
 export async function putSkillArchive(input: {

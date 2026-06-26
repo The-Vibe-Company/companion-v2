@@ -63,6 +63,10 @@ import {
   setSkillFilterPreferences,
   setOrgLogoFromUpload,
   orgLogoPublicPath,
+  setUserAvatarFromUpload,
+  clearUserAvatar,
+  getUserAvatarAsset,
+  getMyAvatarUrl,
   shareSkill,
   toggleStar,
   installSkill,
@@ -106,6 +110,8 @@ import {
   companionManifestV2JsonSchema,
   updateOrgInputSchema,
   resolveOrgLogoContentType,
+  resolveUserAvatarContentType,
+  MAX_USER_AVATAR_BYTES,
   resolveCommentImageContentType,
   sniffCommentImageMime,
   MAX_COMMENT_IMAGES,
@@ -121,6 +127,9 @@ import {
   getSkillArchive,
   getOrgLogo,
   putOrgLogo,
+  putUserAvatar,
+  getUserAvatar,
+  deleteUserAvatar,
   skillArchiveKey,
   putSkillArchive,
   signedSkillArchiveUrl,
@@ -532,10 +541,14 @@ app.get("/v1/auth/whoami", async (c) => {
     const orgId = await orgIdFromContext(c).catch(() => null);
     const org = orgs.find((o) => o.org_id === orgId) ?? orgs[0] ?? null;
     const { onboarded } = await getOnboardingState(actor);
+    // Resolve the actor's own avatar (custom upload or Gravatar) — the single source both web
+    // loaders use to build `MeVM`, so the current user's avatar shows on every authed surface.
+    const avatarUrl = await getMyAvatarUrl({ actor });
     return c.json({
       userId: actor.id,
       email: actor.email,
       name: actor.name,
+      avatarUrl,
       org,
       role: org?.org_role ?? null,
       onboarded,
@@ -756,6 +769,76 @@ app.get("/v1/orgs/:orgId/logo", async (c) => {
       headers: {
         "Content-Type": asset.contentType,
         "Cache-Control": "private, no-cache",
+      },
+    });
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
+/** Upload (or replace) the current user's profile avatar. Self-service; session only. */
+app.post(
+  "/v1/users/me/avatar",
+  // The body limit guards the whole multipart request (file bytes + form framing), so it carries a
+  // little headroom over the 2 MB file cap; the real file-size limit is enforced on the bytes below
+  // so a genuine 2 MB image is never rejected by framing overhead alone.
+  bodyLimit({
+    maxSize: MAX_USER_AVATAR_BYTES + 256 * 1024,
+    onError: (c) => jsonError(c, "avatar exceeds the 2 MB upload limit", 413),
+  }),
+  async (c) => {
+    try {
+      if (isTokenRequest(c)) throw new Error("personal access tokens cannot update the profile");
+      const actor = actorFromContext(c);
+      const file = (await c.req.formData()).get("file");
+      if (!(file instanceof File)) throw new Error("file is required");
+      if (!resolveUserAvatarContentType(file)) throw new Error("avatar must be a PNG, JPEG, WebP, or GIF image");
+      const body = Buffer.from(await file.arrayBuffer());
+      if (!body.length) throw new Error("file is empty");
+      if (body.length > MAX_USER_AVATAR_BYTES) throw new Error("avatar exceeds the 2 MB upload limit");
+      // Verify the real bytes match an allowed image (reject a non-image with a faked extension/header).
+      const contentType = sniffCommentImageMime(body);
+      if (!contentType) throw new Error("avatar must be a PNG, JPEG, WebP, or GIF image");
+      await putUserAvatar({ userId: actor.id, body, contentType });
+      return c.json(await setUserAvatarFromUpload({ actor }));
+    } catch (error) {
+      return jsonError(c, error);
+    }
+  },
+);
+
+/** Remove the current user's custom avatar, reverting to Gravatar / colored initials. */
+app.delete("/v1/users/me/avatar", async (c) => {
+  try {
+    if (isTokenRequest(c)) throw new Error("personal access tokens cannot update the profile");
+    const actor = actorFromContext(c);
+    // Clear the profile marker first so the avatar stops resolving and serving immediately; then
+    // remove the storage object best-effort. If the object delete fails, the cleared marker already
+    // makes it unfetchable (the serve gate requires the marker), so the photo is gone from view and
+    // the two stores cannot diverge into a still-servable orphan.
+    const result = await clearUserAvatar({ actor });
+    await deleteUserAvatar({ userId: actor.id }).catch((err) => {
+      console.error("failed to delete avatar object", err);
+    });
+    return c.json(result);
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
+/** Serve a hosted user-avatar binary to any authenticated member. */
+app.get("/v1/users/:userId/avatar", async (c) => {
+  try {
+    const actor = actorFromContext(c, true);
+    const userId = c.req.param("userId");
+    await getUserAvatarAsset({ actor, userId });
+    const asset = await getUserAvatar({ userId });
+    if (!asset) return c.json({ error: "avatar not found" }, 404);
+    return new Response(asset.body, {
+      headers: {
+        "Content-Type": asset.contentType,
+        "Cache-Control": "private, no-cache",
+        "X-Content-Type-Options": "nosniff",
       },
     });
   } catch (error) {

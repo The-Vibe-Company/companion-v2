@@ -167,6 +167,8 @@ export const skillListRowSchema = z.object({
   creator_id: z.string(),
   creator_name: z.string(),
   creator_initials: z.string(),
+  /** Resolved avatar URL for the creator (custom upload or Gravatar); null falls back to initials. */
+  creator_avatar_url: z.string().nullable().default(null),
   current_version: z.string().nullable(),
   license: z.string().nullable(),
   compatibility: z.string().nullable(),
@@ -238,6 +240,8 @@ export const skillCommentRowSchema = z.object({
   created_at: z.string(),
   author_name: z.string().nullable().optional(),
   author_initials: z.string().nullable().optional(),
+  /** Resolved avatar URL for the author (custom upload or Gravatar); null falls back to initials. */
+  author_avatar_url: z.string().nullable().optional(),
   /** `null` = a root thread; a non-null value points at the root comment it replies to. */
   parent_id: z.string().nullable(),
   /** `null` = global thread; else the linked `skill_versions.id`. */
@@ -366,6 +370,10 @@ export const skillVersionRowSchema = z.object({
   validation: validationStateSchema,
   validation_error: z.string().nullable(),
   created_by: z.string(),
+  /** Display fields for the member who published this version (joined from `profiles`). */
+  created_by_name: z.string().nullable().default(null),
+  created_by_initials: z.string().nullable().default(null),
+  created_by_avatar_url: z.string().nullable().default(null),
   created_at: z.string(),
 });
 export type SkillVersionRow = z.infer<typeof skillVersionRowSchema>;

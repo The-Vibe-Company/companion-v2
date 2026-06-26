@@ -211,6 +211,13 @@
       "when": 1781051800000,
       "tag": "0029_skill_display_name",
       "breakpoints": true
+    },
+    {
+      "idx": 30,
+      "version": "7",
+      "when": 1781051900000,
+      "tag": "0030_user_avatar",
+      "breakpoints": true
     }
   ]
 }

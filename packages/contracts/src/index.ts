@@ -12,3 +12,4 @@ export * from "./localSkills";
 export * from "./onboarding";
 export * from "./preferences";
 export * from "./orgSettings";
+export * from "./avatar";

@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { MeVM, SkillVM } from "@/lib/types";
 import { DetailView } from "./DetailView";
 
-const me: MeVM = { id: "user-1", name: "Ada Lovelace", email: "ada@example.com", initials: "AL" };
+const me: MeVM = { id: "user-1", name: "Ada Lovelace", email: "ada@example.com", initials: "AL", avatarUrl: null };
 
 const skill: SkillVM = {
   uuid: "skill-1",
@@ -21,6 +21,7 @@ const skill: SkillVM = {
   authorId: "user-1",
   authorName: "Ada Lovelace",
   authorInitials: "AL",
+  authorAvatarUrl: null,
   tools: ["read_file"],
   requirements: [{ key: "OPENAI_API_KEY", type: "secret", required: true, note: "Required for model calls." }],
   compatibility: "Requires Node.js 22+",

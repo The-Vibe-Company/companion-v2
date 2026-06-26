@@ -69,7 +69,7 @@ export function buildSettingsAppData(input: {
 }): SettingsAppData {
   const { me, current, settings, tokens = [] } = input;
   const users: Record<string, SeedUser> = {
-    [me.id]: { id: me.id, name: me.name, email: me.email, initials: me.initials },
+    [me.id]: { id: me.id, name: me.name, email: me.email, initials: me.initials, avatarUrl: me.avatarUrl },
   };
 
   for (const member of settings.members) {
@@ -78,6 +78,7 @@ export function buildSettingsAppData(input: {
       name: member.name,
       email: member.email,
       initials: member.initials || initialsOf(member.name || member.email || member.userId),
+      avatarUrl: member.avatarUrl ?? null,
     };
   }
 

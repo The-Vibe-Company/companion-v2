@@ -34,6 +34,8 @@ export interface SkillVM {
   authorId: string;
   authorName: string;
   authorInitials: string;
+  /** Resolved avatar URL for the creator (custom upload or Gravatar); null falls back to initials. */
+  authorAvatarUrl: string | null;
   tools: string[];
   requirements: SkillRequirement[]; // declared secrets / env vars + install notes
   compatibility: string | null;
@@ -72,6 +74,7 @@ export function mapSkill(row: SkillListRow): SkillVM {
     authorId: row.creator_id,
     authorName: row.creator_name,
     authorInitials: row.creator_initials,
+    authorAvatarUrl: row.creator_avatar_url ?? null,
     tools: row.tools ?? [],
     requirements: row.requirements ?? [],
     compatibility: row.compatibility,
@@ -98,6 +101,8 @@ export interface MeVM {
   name: string;
   email: string;
   initials: string;
+  /** Resolved avatar URL (custom upload or Gravatar); null falls back to initials. */
+  avatarUrl: string | null;
 }
 
 /* ---- Org / membership view-models (settings surface + switcher) ----------- */
@@ -120,6 +125,7 @@ export interface MemberVM {
   name: string;
   email: string;
   initials: string;
+  avatarUrl: string | null; // resolved avatar (custom upload or Gravatar); null → initials
   role: OrgRole;
   joined: string; // formatted date, or "—" / "pending"
   pending: boolean; // true => from invitations, not memberships

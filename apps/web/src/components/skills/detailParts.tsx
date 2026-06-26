@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { SkillCommentRow, SkillVersionRow } from "@companion/contracts";
 import { Icon } from "../Icon";
+import { UserAvatar } from "../UserAvatar";
 import { relativeTime } from "@/lib/format";
 import type { MeVM, SkillVM } from "@/lib/types";
 
@@ -465,15 +466,20 @@ export function Requirements({ requirements }: { requirements: SkillVM["requirem
 
 export function Activity({
   versions,
-  authorName,
+  fallbackAuthor,
 }: {
   versions: SkillVersionRow[];
-  authorName: string;
+  /** Shown when a version row has no joined publisher (e.g. the skill creator, as a fallback). */
+  fallbackAuthor: { name: string; initials: string; avatarUrl: string | null };
 }) {
   return (
     <div className="feed">
       {versions.map((v, i) => {
         const changes = v.changelog?.changes ?? [];
+        // Per-version attribution: the member who published this version, falling back to the creator.
+        const whoName = v.created_by_name ?? fallbackAuthor.name;
+        const whoInitials = v.created_by_initials ?? fallbackAuthor.initials;
+        const whoAvatar = v.created_by_avatar_url ?? fallbackAuthor.avatarUrl;
         return (
           <div className="act" key={v.id}>
             <div className="act__rail">
@@ -484,7 +490,14 @@ export function Activity({
             </div>
             <div className="act__body">
               <div className="act__top">
-                <span className="act__who">{authorName}</span>
+                <UserAvatar
+                  className="avatar"
+                  avatarUrl={whoAvatar}
+                  initials={whoInitials}
+                  size={16}
+                  style={{ alignSelf: "center", fontSize: 8 }}
+                />
+                <span className="act__who">{whoName}</span>
                 <span className="act__verb">published</span>
                 <span className="act__ver">v{v.version}</span>
                 {i === 0 && <span className="curtag">current</span>}
@@ -534,7 +547,11 @@ export function Comments({
       <div className="comments">
         {list.map((c) => (
           <div className="comment" key={c.id}>
-            <span className="avatar comment__avatar">{c.author_initials ?? "?"}</span>
+            <UserAvatar
+              className="avatar comment__avatar"
+              avatarUrl={c.author_avatar_url ?? null}
+              initials={c.author_initials ?? "?"}
+            />
             <div className="comment__body">
               <div className="comment__head">
                 <span className="comment__who">{c.author_name ?? "Someone"}</span>
@@ -547,7 +564,7 @@ export function Comments({
         {!list.length && <div className="comments__empty">No comments yet. Start the thread.</div>}
       </div>
       <div className="composer">
-        <span className="avatar comment__avatar">{me.initials}</span>
+        <UserAvatar className="avatar comment__avatar" avatarUrl={me.avatarUrl} initials={me.initials} />
         <div className="composer__box">
           <textarea
             className="composer__input"
