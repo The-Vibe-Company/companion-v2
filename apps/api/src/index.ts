@@ -128,6 +128,7 @@ import {
 import {
   bumpSemver,
   compareSemver,
+  extractArchiveFileContent,
   extractArchiveFiles,
   isValidSemver,
   buildNormalizedCompanionJson,
@@ -1855,6 +1856,21 @@ app.get("/v1/skills/:slug/download", async (c) => {
   }
 });
 
+async function loadSkillVersionArchive(
+  c: Context<{ Variables: ApiVariables }>,
+  slug: string,
+  version: string,
+) {
+  const found = await withTenant(
+    c,
+    ({ actor, orgId, database }) =>
+      getDownloadVersion({ actor, orgId, slug, version, database }),
+    true,
+  );
+  const tarGz = await getSkillArchive({ key: found.storagePath });
+  return { found, tarGz };
+}
+
 /**
  * Download a specific version as a `.zip` for assistant or direct-download installs.
  * Visibility-gated; requires `skills:read` for token-authed callers.
@@ -1864,13 +1880,7 @@ app.get("/v1/skills/:slug/versions/:version/package", async (c) => {
     actorFromContext(c, true);
     requireScope(c, "skills:read");
     const slug = c.req.param("slug");
-    const found = await withTenant(
-      c,
-      ({ actor, orgId, database }) =>
-        getDownloadVersion({ actor, orgId, slug, version: c.req.param("version"), database }),
-      true,
-    );
-    const tarGz = await getSkillArchive({ key: found.storagePath });
+    const { tarGz } = await loadSkillVersionArchive(c, slug, c.req.param("version"));
     const zip = await tarGzToZip(tarGz);
     return new Response(new Uint8Array(zip), {
       headers: {
@@ -1894,16 +1904,49 @@ app.get("/v1/skills/:slug/versions/:version/files", async (c) => {
     actorFromContext(c, true);
     requireScope(c, "skills:read");
     const slug = c.req.param("slug");
-    const found = await withTenant(
-      c,
-      ({ actor, orgId, database }) =>
-        getDownloadVersion({ actor, orgId, slug, version: c.req.param("version"), database }),
-      true,
-    );
-    const tarGz = await getSkillArchive({ key: found.storagePath });
+    const { found, tarGz } = await loadSkillVersionArchive(c, slug, c.req.param("version"));
     const tar = toTar(tarGz);
     const { files } = await extractArchiveFiles(tar);
     return c.json({ version: found.version, files });
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
+/**
+ * Serve one browser-native previewable file from a specific package version. Visibility-gated like
+ * `/files` and `/package`; unsupported package entries stay download-only.
+ */
+app.get("/v1/skills/:slug/versions/:version/files/content", async (c) => {
+  try {
+    actorFromContext(c, true);
+    requireScope(c, "skills:read");
+    const path = c.req.query("path");
+    if (!path) return jsonError(c, new Error("path is required"), 400);
+    const slug = c.req.param("slug");
+    const { tarGz } = await loadSkillVersionArchive(c, slug, c.req.param("version"));
+    const tar = toTar(tarGz);
+    const file = await extractArchiveFileContent(tar, path);
+    if (file.status !== "ok") {
+      const status =
+        file.status === "invalid_path" ? 400 :
+          file.status === "not_found" ? 404 :
+            file.status === "unsupported" ? 415 :
+              413;
+      return jsonError(c, new Error(file.message), status);
+    }
+
+    const leaf = file.path.split("/").pop() || "file";
+    const filename = leaf.replace(/["\r\n]/g, "_");
+    return new Response(new Uint8Array(file.bytes), {
+      headers: {
+        "content-type": file.content_type,
+        "content-disposition": `inline; filename="${filename}"`,
+        "content-length": String(file.bytes.length),
+        "x-content-type-options": "nosniff",
+        "content-security-policy": "sandbox; default-src 'none'; img-src data: blob:; style-src 'unsafe-inline'",
+      },
+    });
   } catch (error) {
     return jsonError(c, error);
   }

@@ -61,7 +61,55 @@ function buildTree(files: SkillFile[]): TreeNode[] {
 }
 
 /* ---- File viewer (reading pane) ----------------------------------------- */
-export function FileViewer({ file, onBack }: { file: SkillFile; onBack?: () => void }) {
+function NativeFilePreview({
+  file,
+  contentUrl,
+}: {
+  file: SkillFile;
+  contentUrl: string;
+}) {
+  const [failed, setFailed] = useState(false);
+  useEffect(() => setFailed(false), [contentUrl]);
+
+  if (failed) {
+    return (
+      <div className="fx-empty">
+        <Icon name="alert-triangle" size={28} />
+        <span className="fx-empty__t">Preview unavailable — download the package to view.</span>
+      </div>
+    );
+  }
+
+  if (file.preview_kind === "image") {
+    return (
+      <div className="fv-native fv-native--image">
+        <img src={contentUrl} alt={base(file.path)} onError={() => setFailed(true)} />
+      </div>
+    );
+  }
+
+  if (file.preview_kind === "pdf") {
+    return (
+      <iframe
+        className="fv-native-pdf"
+        src={contentUrl}
+        title={base(file.path)}
+      />
+    );
+  }
+
+  return null;
+}
+
+export function FileViewer({
+  file,
+  onBack,
+  contentUrl,
+}: {
+  file: SkillFile;
+  onBack?: () => void;
+  contentUrl?: string;
+}) {
   const path = file.path;
   const lang = langForFile(path);
   const isMd = lang === "md";
@@ -70,7 +118,10 @@ export function FileViewer({ file, onBack }: { file: SkillFile; onBack?: () => v
   useEffect(() => setMode("preview"), [path]);
 
   const content = file.content;
-  const viewable = !file.binary && content !== null;
+  const textViewable = !file.binary && content !== null;
+  const nativeViewable =
+    !!contentUrl && (file.preview_kind === "image" || file.preview_kind === "pdf");
+  const viewable = textViewable || nativeViewable;
 
   const copy = () => {
     if (content === null) return;
@@ -85,7 +136,7 @@ export function FileViewer({ file, onBack }: { file: SkillFile; onBack?: () => v
 
   const parts = path.split("/");
   const leaf = parts[parts.length - 1] ?? path;
-  const preview = isMd && mode === "preview";
+  const preview = textViewable && isMd && mode === "preview";
 
   // On-this-page outline (Markdown Preview only). Ids match MarkdownView's headings.
   const headings = useMemo(
@@ -177,7 +228,7 @@ export function FileViewer({ file, onBack }: { file: SkillFile; onBack?: () => v
         <span className="fv-spacer" />
         <span className="fv-lang">{LANG_LABEL[lang]}</span>
         <span className="fv-size">{fmtSize(file)}</span>
-        {viewable && isMd && (
+        {textViewable && isMd && (
           <span className="fv-seg">
             <button className={mode === "preview" ? "is-on" : ""} onClick={() => setMode("preview")}>
               <Icon name="eye" size={13} />
@@ -189,7 +240,7 @@ export function FileViewer({ file, onBack }: { file: SkillFile; onBack?: () => v
             </button>
           </span>
         )}
-        {viewable && (
+        {textViewable && (
           <button
             className={"fv-copy" + (copied ? " done" : "")}
             onClick={copy}
@@ -199,7 +250,7 @@ export function FileViewer({ file, onBack }: { file: SkillFile; onBack?: () => v
           </button>
         )}
       </div>
-      {viewable ? (
+      {textViewable ? (
         <div
           ref={bodyRef}
           className={
@@ -245,6 +296,10 @@ export function FileViewer({ file, onBack }: { file: SkillFile; onBack?: () => v
               ))}
             </nav>
           )}
+        </div>
+      ) : nativeViewable && contentUrl ? (
+        <div className={"fv-body fv-body--native fv-body--" + file.preview_kind}>
+          <NativeFilePreview file={file} contentUrl={contentUrl} />
         </div>
       ) : (
         <div className="fv-body">
@@ -331,10 +386,12 @@ export function FileExplorer({
   files,
   requestedPath,
   panelMode = false,
+  contentUrlForPath,
 }: {
   files: SkillFile[];
   requestedPath?: string | null;
   panelMode?: boolean;
+  contentUrlForPath?: (path: string) => string;
 }) {
   const tree = useMemo(() => buildTree(files), [files]);
   const byPath = useMemo(() => {
@@ -395,7 +452,7 @@ export function FileExplorer({
       </div>
       <div className="fx-pane">
         {selected ? (
-          <FileViewer file={selected} />
+          <FileViewer file={selected} contentUrl={contentUrlForPath?.(selected.path)} />
         ) : (
           <div className="fv-body">
             <div className="fx-empty">

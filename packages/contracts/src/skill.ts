@@ -334,6 +334,8 @@ export const skillFileSchema = z.object({
   content: z.string().nullable(),
   binary: z.boolean(),
   truncated: z.boolean(),
+  preview_kind: z.enum(["text", "image", "pdf", "unsupported"]).default("unsupported"),
+  content_type: z.string().nullable().default(null),
 });
 export type SkillFile = z.infer<typeof skillFileSchema>;
 
