@@ -413,14 +413,17 @@ treat it as a version identity reference, not a byte check of the download. To c
 check that `SKILL.md` is at the package root and `companion.json.version` matches the version you
 fetched.
 
-Before the Companion skill installs or updates a workspace-published skill, it must inspect the
-target `companion.json.environment.secrets`. Secrets marked `required: true` block installation until
-the user confirms they are already available/configured, or explicitly authorizes installing without
-them. The agent must never ask the user to paste secret values. Optional secrets and non-secret
-environment variables are surfaced as setup notes only. If required secrets are not confirmed and no
-override is given, stop before downloading/replacing files, calling install endpoints, or writing
-`~/.companion/skills.lock.json`. This guard does not apply to the bundled Companion self-update
-endpoints under `/local-skills/companion`.
+Before the Companion skill installs or updates a workspace-published skill, it must resolve the
+transitive `GET /skills/{slug}/dependencies` closure, inspect every target package's
+`companion.json.environment.secrets`, and install dependencies before the requested root skill.
+Secrets marked `required: true` block installation until the user confirms they are already
+available/configured, or explicitly authorizes installing without them; `install_skill.py` records
+that confirmation with `--confirm-required-secrets`. The agent must never ask the user to paste
+secret values. Optional secrets and non-secret environment variables are surfaced as setup notes only.
+If required secrets are not confirmed and no override is given, stop before downloading/replacing
+files, calling install endpoints, or writing `~/.companion/skills.lock.json`. Missing, archived,
+cycle-blocked, not-openable, locally customized, or untracked dependencies also stop the root install.
+This guard does not apply to the bundled Companion self-update endpoints under `/local-skills/companion`.
 
 ## Local manifest checks
 

@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import sys
@@ -39,7 +41,10 @@ class EnvSandbox(unittest.TestCase):
         self.root = Path(self._tmp.name)
         self.home = self.root / "home"
         self.home.mkdir()
-        self._saved = {key: os.environ.get(key) for key in ("HOME", "COMPANION_HOME")}
+        self._saved = {
+            key: os.environ.get(key)
+            for key in ("HOME", "COMPANION_HOME", "COMPANION_API_URL", "COMPANION_TOKEN", "COMPANION_WORKSPACE_ID", "COMPANION_AGENT")
+        }
         os.environ["HOME"] = str(self.home)
         os.environ["COMPANION_HOME"] = str(self.home / ".companion")
 
@@ -299,6 +304,458 @@ class FanOutTests(EnvSandbox):
         project_record = project_lock["workspaces"]["ws-1"]["skills"]["demo"]
         # Project lockfile stores repo-relative paths so it can be committed and shared.
         self.assertEqual(project_record["targets"][0]["path"], ".codex/skills/demo")
+
+
+class DependencyInstallPlanTests(EnvSandbox):
+    def _zip_package(self, name: str = "demo") -> bytes:
+        import zipfile
+
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as archive:
+            archive.writestr("SKILL.md", f"# {name}\n")
+            archive.writestr("companion.json", json.dumps({"name": name, "version": "1.0.0"}))
+        return buf.getvalue()
+
+    def _patch_dependency_api(self, graph: dict[str, list[dict[str, object]]]):
+        original_fetch = install_skill.fetch_skill_node
+        original_get = install_skill.api_get
+
+        def fake_fetch(_api_url: str, _token: str, slug: str, version_override: str | None = None) -> dict[str, object]:
+            version = version_override or "1.0.0"
+            return {
+                "slug": slug,
+                "version": version,
+                "skill": {"name": slug, "slug": slug, "skillId": f"id-{slug}", "version": version, "checksum": "sha256:pkg"},
+            }
+
+        def fake_get(_api_url: str, _token: str, path: str) -> dict[str, object]:
+            slug = path.split("/skills/", 1)[1].split("/dependencies", 1)[0]
+            from urllib.parse import unquote
+
+            return {"requires": graph.get(unquote(slug), [])}
+
+        install_skill.fetch_skill_node = fake_fetch
+        install_skill.api_get = fake_get
+        return original_fetch, original_get
+
+    def _restore_dependency_api(self, originals) -> None:
+        install_skill.fetch_skill_node, install_skill.api_get = originals
+
+    def _run_main(self, args: list[str]) -> tuple[int, str, str]:
+        old_argv = sys.argv
+        os.environ["COMPANION_API_URL"] = "https://api/v1"
+        os.environ["COMPANION_TOKEN"] = "token"
+        os.environ["COMPANION_WORKSPACE_ID"] = "ws"
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        sys.argv = ["install_skill.py", *args]
+        try:
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                try:
+                    install_skill.main()
+                except SystemExit as exc:
+                    code = exc.code if isinstance(exc.code, int) else 1
+                else:
+                    code = 0
+        finally:
+            sys.argv = old_argv
+        return code, stdout.getvalue(), stderr.getvalue()
+
+    def test_transitive_install_plan_is_dependency_first(self) -> None:
+        originals = self._patch_dependency_api(
+            {
+                "a": [{"slug": "b", "status": "satisfied", "can_open": True}],
+                "b": [{"slug": "c", "status": "satisfied", "can_open": True}],
+                "c": [],
+            }
+        )
+        try:
+            plan = install_skill.build_install_plan("https://api/v1", "token", "a")
+        finally:
+            self._restore_dependency_api(originals)
+
+        self.assertEqual(plan["blockers"], [])
+        self.assertEqual([node["slug"] for node in plan["nodes"]], ["c", "b", "a"])
+
+        calls: list[str] = []
+        original_install_node = install_skill.install_node
+
+        def fake_install_node(*args, **_kwargs):
+            node = args[3]
+            calls.append(node["slug"])
+            return [{"tool": "claude-code", "scope": "user", "status": "installed", "slug": node["slug"], "version": node["version"]}]
+
+        install_skill.install_node = fake_install_node
+        try:
+            result = install_skill.install_nodes(
+                "https://api/v1",
+                "token",
+                "ws",
+                plan["nodes"],
+                [("claude-code", "user")],
+                REGISTRY,
+                None,
+                {},
+                {},
+                False,
+            )
+        finally:
+            install_skill.install_node = original_install_node
+
+        self.assertEqual(calls, ["c", "b", "a"])
+        self.assertEqual(result["completed"], ["c", "b", "a"])
+
+    def test_shared_dependency_is_planned_once(self) -> None:
+        originals = self._patch_dependency_api(
+            {
+                "a": [
+                    {"slug": "b", "status": "satisfied", "can_open": True},
+                    {"slug": "c", "status": "satisfied", "can_open": True},
+                ],
+                "b": [{"slug": "d", "status": "satisfied", "can_open": True}],
+                "c": [{"slug": "d", "status": "satisfied", "can_open": True}],
+                "d": [],
+            }
+        )
+        try:
+            plan = install_skill.build_install_plan("https://api/v1", "token", "a")
+        finally:
+            self._restore_dependency_api(originals)
+
+        self.assertEqual([node["slug"] for node in plan["nodes"]], ["d", "b", "c", "a"])
+        self.assertEqual([node["slug"] for node in plan["nodes"]].count("d"), 1)
+
+    def test_dependency_status_blockers_stop_the_plan_before_install(self) -> None:
+        originals = self._patch_dependency_api(
+            {
+                "a": [
+                    {"slug": "missing-dep", "status": "missing", "can_open": False, "note": "not published"},
+                    {"slug": "archived-dep", "status": "archived", "can_open": True, "note": "publisher archived this skill"},
+                    {"slug": "cycle-dep", "status": "cycle", "can_open": True, "note": "forms a cycle"},
+                ],
+            }
+        )
+        try:
+            plan = install_skill.build_install_plan("https://api/v1", "token", "a")
+        finally:
+            self._restore_dependency_api(originals)
+
+        statuses = {blocker["slug"]: blocker["status"] for blocker in plan["blockers"]}
+        self.assertEqual(
+            statuses,
+            {"missing-dep": "missing", "archived-dep": "archived", "cycle-dep": "cycle"},
+        )
+
+    def test_real_cycle_and_not_openable_dependency_are_blockers(self) -> None:
+        originals = self._patch_dependency_api(
+            {
+                "a": [
+                    {"slug": "b", "status": "satisfied", "can_open": True},
+                    {"slug": "hidden", "status": "satisfied", "can_open": False, "note": "not visible"},
+                ],
+                "b": [{"slug": "a", "status": "satisfied", "can_open": True}],
+            }
+        )
+        try:
+            plan = install_skill.build_install_plan("https://api/v1", "token", "a")
+        finally:
+            self._restore_dependency_api(originals)
+
+        blockers = {(blocker["slug"], blocker["status"], blocker["canOpen"]) for blocker in plan["blockers"]}
+        self.assertIn(("a", "cycle", True), blockers)
+        self.assertIn(("hidden", "satisfied", False), blockers)
+
+    def test_local_conflict_on_dependency_blocks_root_without_force(self) -> None:
+        dep_target = companion_lib.resolve_target_dir("claude-code", "user", "dep", None, REGISTRY)
+        dep_target.mkdir(parents=True)
+        (dep_target / "SKILL.md").write_text("hand authored\n", encoding="utf-8")
+        nodes = [
+            {"slug": "dep", "version": "1.0.0", "skill": {"name": "dep", "slug": "dep", "version": "1.0.0"}},
+            {"slug": "root", "version": "1.0.0", "skill": {"name": "root", "slug": "root", "version": "1.0.0"}},
+        ]
+
+        conflicts = install_skill.preflight_target_conflicts(
+            nodes,
+            [("claude-code", "user")],
+            REGISTRY,
+            None,
+            {},
+            {},
+            force=False,
+        )
+        self.assertEqual(len(conflicts), 1)
+        self.assertEqual(conflicts[0]["slug"], "dep")
+        self.assertEqual(conflicts[0]["status"], "skipped_untracked")
+        self.assertFalse(companion_lib.resolve_target_dir("claude-code", "user", "root", None, REGISTRY).exists())
+
+        forced = install_skill.preflight_target_conflicts(
+            nodes,
+            [("claude-code", "user")],
+            REGISTRY,
+            None,
+            {},
+            {},
+            force=True,
+        )
+        self.assertEqual(forced, [])
+
+    def test_required_secrets_are_collected_from_companion_manifest(self) -> None:
+        original_get = install_skill.api_get
+
+        def fake_get(_api_url: str, _token: str, _path: str) -> dict[str, object]:
+            return {
+                "files": [
+                    {"path": "SKILL.md", "content": "# demo\n"},
+                    {
+                        "path": "companion.json",
+                        "content": json.dumps(
+                            {
+                                "environment": {
+                                    "secrets": {
+                                        "OPENAI_API_KEY": {"required": True},
+                                        "OPTIONAL_TOKEN": {"required": False},
+                                    }
+                                }
+                            }
+                        ),
+                    },
+                ]
+            }
+
+        install_skill.api_get = fake_get
+        try:
+            required = install_skill.collect_required_secrets(
+                "https://api/v1",
+                "token",
+                [{"slug": "demo", "version": "1.0.0", "skill": {"name": "demo"}}],
+            )
+        finally:
+            install_skill.api_get = original_get
+
+        self.assertEqual(required, [{"slug": "demo", "version": "1.0.0", "secret": "OPENAI_API_KEY"}])
+
+    def test_required_secret_without_required_field_defaults_to_blocking(self) -> None:
+        manifest = {"environment": {"secrets": {"OPENAI_API_KEY": {"description": "from provider"}}}}
+        self.assertEqual(install_skill.required_secret_names(manifest), ["OPENAI_API_KEY"])
+
+    def test_main_dependency_blocker_stops_before_mutation(self) -> None:
+        calls = {"downloads": 0, "installs": 0, "reports": 0}
+        originals = (
+            install_skill.build_install_plan,
+            install_skill.api_download_bytes,
+            install_skill.install_nodes,
+            install_skill.report_install,
+        )
+
+        install_skill.build_install_plan = lambda *_args: {
+            "root": None,
+            "nodes": [],
+            "blockers": [{"slug": "dep", "requiredBy": "root", "status": "missing", "note": "not published", "canOpen": False}],
+        }
+        install_skill.api_download_bytes = lambda *_args: calls.__setitem__("downloads", calls["downloads"] + 1)
+        install_skill.install_nodes = lambda *_args: calls.__setitem__("installs", calls["installs"] + 1)
+        install_skill.report_install = lambda *_args: calls.__setitem__("reports", calls["reports"] + 1)
+        try:
+            code, out, _err = self._run_main(["root", "--tools", "claude-code", "--json"])
+        finally:
+            (
+                install_skill.build_install_plan,
+                install_skill.api_download_bytes,
+                install_skill.install_nodes,
+                install_skill.report_install,
+            ) = originals
+
+        self.assertEqual(code, 2)
+        payload = json.loads(out)
+        self.assertIn("dependency preflight failed", payload["error"])
+        self.assertEqual(calls, {"downloads": 0, "installs": 0, "reports": 0})
+        self.assertFalse(companion_lib.lockfile_path().exists())
+
+    def test_main_required_secrets_blocker_stops_before_mutation(self) -> None:
+        calls = {"downloads": 0, "installs": 0, "reports": 0}
+        node = {"slug": "root", "version": "1.0.0", "skill": {"name": "root", "slug": "root", "version": "1.0.0"}}
+        originals = (
+            install_skill.build_install_plan,
+            install_skill.collect_required_secrets,
+            install_skill.api_download_bytes,
+            install_skill.install_nodes,
+            install_skill.report_install,
+        )
+
+        install_skill.build_install_plan = lambda *_args: {"root": node, "nodes": [node], "blockers": []}
+        install_skill.collect_required_secrets = lambda *_args: [{"slug": "root", "version": "1.0.0", "secret": "OPENAI_API_KEY"}]
+        install_skill.api_download_bytes = lambda *_args: calls.__setitem__("downloads", calls["downloads"] + 1)
+        install_skill.install_nodes = lambda *_args: calls.__setitem__("installs", calls["installs"] + 1)
+        install_skill.report_install = lambda *_args: calls.__setitem__("reports", calls["reports"] + 1)
+        try:
+            code, out, _err = self._run_main(["root", "--tools", "claude-code", "--json"])
+        finally:
+            (
+                install_skill.build_install_plan,
+                install_skill.collect_required_secrets,
+                install_skill.api_download_bytes,
+                install_skill.install_nodes,
+                install_skill.report_install,
+            ) = originals
+
+        self.assertEqual(code, 2)
+        payload = json.loads(out)
+        self.assertEqual(payload["requiredSecrets"][0]["secret"], "OPENAI_API_KEY")
+        self.assertEqual(calls, {"downloads": 0, "installs": 0, "reports": 0})
+        self.assertFalse(companion_lib.lockfile_path().exists())
+
+    def test_main_local_conflict_blocker_stops_before_mutation(self) -> None:
+        calls = {"downloads": 0, "installs": 0, "reports": 0}
+        node = {"slug": "root", "version": "1.0.0", "skill": {"name": "root", "slug": "root", "version": "1.0.0"}}
+        originals = (
+            install_skill.build_install_plan,
+            install_skill.collect_required_secrets,
+            install_skill.preflight_target_conflicts,
+            install_skill.api_download_bytes,
+            install_skill.install_nodes,
+            install_skill.report_install,
+        )
+
+        install_skill.build_install_plan = lambda *_args: {"root": node, "nodes": [node], "blockers": []}
+        install_skill.collect_required_secrets = lambda *_args: []
+        install_skill.preflight_target_conflicts = lambda *_args, **_kwargs: [
+            {"slug": "root", "version": "1.0.0", "tool": "claude-code", "scope": "user", "status": "skipped_untracked", "path": "/x"}
+        ]
+        install_skill.api_download_bytes = lambda *_args: calls.__setitem__("downloads", calls["downloads"] + 1)
+        install_skill.install_nodes = lambda *_args: calls.__setitem__("installs", calls["installs"] + 1)
+        install_skill.report_install = lambda *_args: calls.__setitem__("reports", calls["reports"] + 1)
+        try:
+            code, out, _err = self._run_main(["root", "--tools", "claude-code", "--json"])
+        finally:
+            (
+                install_skill.build_install_plan,
+                install_skill.collect_required_secrets,
+                install_skill.preflight_target_conflicts,
+                install_skill.api_download_bytes,
+                install_skill.install_nodes,
+                install_skill.report_install,
+            ) = originals
+
+        self.assertEqual(code, 2)
+        payload = json.loads(out)
+        self.assertEqual(payload["conflicts"][0]["status"], "skipped_untracked")
+        self.assertEqual(calls, {"downloads": 0, "installs": 0, "reports": 0})
+        self.assertFalse(companion_lib.lockfile_path().exists())
+
+    def test_main_partial_install_withholds_report(self) -> None:
+        calls: list[tuple[str, str]] = []
+        dep = {"slug": "dep", "version": "1.0.0", "skill": {"name": "dep", "slug": "dep", "version": "1.0.0"}}
+        root = {"slug": "root", "version": "1.0.0", "skill": {"name": "root", "slug": "root", "version": "1.0.0"}}
+        originals = (
+            install_skill.build_install_plan,
+            install_skill.collect_required_secrets,
+            install_skill.preflight_target_conflicts,
+            install_skill.install_nodes,
+            install_skill.report_install,
+        )
+
+        install_skill.build_install_plan = lambda *_args: {"root": root, "nodes": [dep, root], "blockers": []}
+        install_skill.collect_required_secrets = lambda *_args: []
+        install_skill.preflight_target_conflicts = lambda *_args, **_kwargs: []
+        install_skill.install_nodes = lambda *_args, **_kwargs: {
+            "targets": [{"slug": "dep", "version": "1.0.0", "tool": "claude-code", "scope": "user", "status": "installed"}],
+            "completed": ["dep"],
+            "skipped": ["root"],
+        }
+        install_skill.report_install = lambda *_args: calls.append((_args[2], _args[3]))
+        try:
+            code, out, _err = self._run_main(["root", "--tools", "claude-code", "--json", "--report"])
+        finally:
+            (
+                install_skill.build_install_plan,
+                install_skill.collect_required_secrets,
+                install_skill.preflight_target_conflicts,
+                install_skill.install_nodes,
+                install_skill.report_install,
+            ) = originals
+
+        self.assertEqual(code, 0)
+        payload = json.loads(out)
+        self.assertTrue(payload["reportWithheld"])
+        self.assertFalse(payload["complete"])
+        self.assertEqual(calls, [])
+
+    def test_main_complete_install_reports_root_once(self) -> None:
+        calls: list[tuple[str, str]] = []
+        dep = {"slug": "dep", "version": "1.0.0", "skill": {"name": "dep", "slug": "dep", "version": "1.0.0"}}
+        root = {"slug": "root", "version": "1.0.0", "skill": {"name": "root", "slug": "root", "version": "1.0.0"}}
+        originals = (
+            install_skill.build_install_plan,
+            install_skill.collect_required_secrets,
+            install_skill.preflight_target_conflicts,
+            install_skill.install_nodes,
+            install_skill.report_install,
+        )
+
+        install_skill.build_install_plan = lambda *_args: {"root": root, "nodes": [dep, root], "blockers": []}
+        install_skill.collect_required_secrets = lambda *_args: []
+        install_skill.preflight_target_conflicts = lambda *_args, **_kwargs: []
+        install_skill.install_nodes = lambda *_args, **_kwargs: {
+            "targets": [
+                {"slug": "dep", "version": "1.0.0", "tool": "claude-code", "scope": "user", "status": "installed"},
+                {"slug": "root", "version": "1.0.0", "tool": "claude-code", "scope": "user", "status": "installed"},
+            ],
+            "completed": ["dep", "root"],
+            "skipped": [],
+        }
+
+        def fake_report(_api_url: str, _token: str, slug: str, version: str, _agent: str):
+            calls.append((slug, version))
+            return {"ok": True}
+
+        install_skill.report_install = fake_report
+        try:
+            code, out, _err = self._run_main(["root", "--tools", "claude-code", "--json", "--report"])
+        finally:
+            (
+                install_skill.build_install_plan,
+                install_skill.collect_required_secrets,
+                install_skill.preflight_target_conflicts,
+                install_skill.install_nodes,
+                install_skill.report_install,
+            ) = originals
+
+        self.assertEqual(code, 0)
+        payload = json.loads(out)
+        self.assertTrue(payload["complete"])
+        self.assertFalse(payload["reportWithheld"])
+        self.assertEqual(calls, [("root", "1.0.0")])
+
+    def test_install_nodes_records_dependency_and_root_lockfiles(self) -> None:
+        original_download = install_skill.api_download_bytes
+        dep = {"slug": "dep", "version": "1.0.0", "skill": {"name": "dep", "slug": "dep", "skillId": "id-dep", "version": "1.0.0"}}
+        root = {"slug": "root", "version": "1.0.0", "skill": {"name": "root", "slug": "root", "skillId": "id-root", "version": "1.0.0"}}
+        project_root = self.root / "repo"
+
+        install_skill.api_download_bytes = lambda _api_url, _token, path: self._zip_package("dep" if "/dep/" in path else "root")
+        try:
+            result = install_skill.install_nodes(
+                "https://api/v1",
+                "token",
+                "ws",
+                [dep, root],
+                [("claude-code", "user"), ("codex", "project")],
+                REGISTRY,
+                project_root,
+                {},
+                {},
+                False,
+            )
+        finally:
+            install_skill.api_download_bytes = original_download
+
+        self.assertEqual(result["completed"], ["dep", "root"])
+        user_skills = json.loads(companion_lib.lockfile_path().read_text())["workspaces"]["ws"]["skills"]
+        project_skills = json.loads(companion_lib.project_lockfile_path(project_root).read_text())["workspaces"]["ws"]["skills"]
+        self.assertEqual(sorted(user_skills), ["dep", "root"])
+        self.assertEqual(sorted(project_skills), ["dep", "root"])
+        self.assertEqual(user_skills["dep"]["targets"][0]["tool"], "claude-code")
+        self.assertEqual(project_skills["root"]["targets"][0]["path"], ".codex/skills/root")
 
 
 if __name__ == "__main__":
