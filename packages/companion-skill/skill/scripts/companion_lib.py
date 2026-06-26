@@ -8,12 +8,15 @@ lockfile parsing. It NEVER prints or persists the Companion token.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime, timezone
+from functools import cmp_to_key
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +40,20 @@ def api_get(base: str, token: str, path: str) -> Any:
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
             return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        fail(f"GET {url} failed with HTTP {exc.code}: {body}")
+    except urllib.error.URLError as exc:
+        fail(f"GET {url} failed: {exc.reason}")
+
+
+def api_download_bytes(base: str, token: str, path: str) -> bytes:
+    """Download a binary payload (e.g. a skill package zip) from the workspace API."""
+    url = f"{base.rstrip('/')}{path}"
+    request = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            return response.read()
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
         fail(f"GET {url} failed with HTTP {exc.code}: {body}")
@@ -158,6 +175,251 @@ def lockfile_candidates() -> list[Path]:
     return [lockfile_path(), legacy_log_path()]
 
 
+# --- Multi-tool support -------------------------------------------------------
+#
+# A skill can be installed into several local coding tools (Claude Code, Codex, …) at once.
+# The tool registry (scripts/tools.json) is the single, extensible source of truth for each
+# tool's on-disk skill directories; ~/.companion/config.json records which tools this machine
+# uses; and lockfile records grow a `targets[]` array so every install location stays tracked.
+
+
+def tool_registry_path() -> Path:
+    return Path(__file__).resolve().parent / "tools.json"
+
+
+def load_tool_registry(path: Path | None = None) -> dict[str, Any]:
+    """Return the {tool_key: spec} registry from tools.json."""
+    raw = load_json(path or tool_registry_path())
+    if not isinstance(raw, dict) or not isinstance(raw.get("tools"), dict):
+        fail("tools.json is missing or has no `tools` object")
+    return raw["tools"]
+
+
+def config_path() -> Path:
+    return companion_home() / "config.json"
+
+
+def load_tool_config() -> list[str]:
+    """Return the user's confirmed tool set from ~/.companion/config.json (never holds secrets)."""
+    raw = load_json(config_path())
+    if isinstance(raw, dict) and isinstance(raw.get("tools"), list):
+        return [str(tool) for tool in raw["tools"] if isinstance(tool, str)]
+    return []
+
+
+def save_tool_config(tools: list[str], detected_at: str | None = None) -> Path:
+    path = config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload: dict[str, Any] = {"schemaVersion": 1, "tools": sorted(dict.fromkeys(tools))}
+    if detected_at:
+        payload["detectedAt"] = detected_at
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
+def detect_tools(registry: dict[str, Any] | None = None) -> list[str]:
+    """Auto-detect which registered tools are present on this machine via their `detect` paths."""
+    registry = registry if registry is not None else load_tool_registry()
+    found: list[str] = []
+    for key, spec in registry.items():
+        for probe in spec.get("detect", []) or []:
+            if Path(probe).expanduser().exists():
+                found.append(key)
+                break
+    return sorted(found)
+
+
+def resolve_target_dir(
+    tool: str,
+    scope: str,
+    skill_name: str,
+    project_root: Path | None = None,
+    registry: dict[str, Any] | None = None,
+) -> Path:
+    """Resolve the on-disk skill folder for a (tool, scope) target."""
+    registry = registry if registry is not None else load_tool_registry()
+    spec = registry.get(tool)
+    if not spec:
+        fail(f"unknown tool {tool!r}")
+    template = (spec.get("skillsDir") or {}).get(scope)
+    if not template:
+        fail(f"tool {tool!r} has no {scope!r} skills directory in tools.json")
+    if scope == "user":
+        base = Path(template).expanduser()
+    elif scope == "project":
+        if project_root is None:
+            fail("project scope requires a project root")
+        base = Path(project_root) / template
+    else:
+        fail(f"unknown scope {scope!r}")
+    return base / skill_name
+
+
+def find_project_root(start: Path | None = None) -> Path | None:
+    """Walk up from `start` (default cwd) to the nearest repo root (directory holding .git)."""
+    current = (start or Path.cwd()).resolve()
+    for candidate in [current, *current.parents]:
+        if (candidate / ".git").exists():
+            return candidate
+    return None
+
+
+def project_lockfile_path(project_root: Path) -> Path:
+    """Per-project lockfile, so multiple projects never overwrite each other's project-scope installs."""
+    return Path(project_root) / ".companion" / "skills.lock.json"
+
+
+def compute_dir_checksum(path: Path) -> str:
+    """Deterministic sha256 over a skill folder, used to detect locally customized targets."""
+    digest = hashlib.sha256()
+    for file in sorted(p for p in Path(path).rglob("*") if p.is_file()):
+        rel = file.relative_to(path).as_posix()
+        digest.update(rel.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(file.read_bytes())
+        digest.update(b"\0")
+    return f"sha256:{digest.hexdigest()}"
+
+
+def normalize_targets(value: dict[str, Any]) -> list[dict[str, Any]]:
+    """Read a lockfile record's install targets, tolerating the legacy single-`installPath` shape."""
+    targets: list[dict[str, Any]] = []
+    raw = value.get("targets")
+    if isinstance(raw, list):
+        for entry in raw:
+            if isinstance(entry, dict) and entry.get("path"):
+                targets.append(
+                    {
+                        "tool": entry.get("tool") or "claude-code",
+                        "scope": entry.get("scope") or "user",
+                        "path": entry.get("path"),
+                        "checksum": entry.get("checksum"),
+                        # Preserve the per-target version (falls back to the record-level version) so a
+                        # partial update never rewrites an up-to-date target with a stale version.
+                        "version": entry.get("version") or value.get("version"),
+                    }
+                )
+    if not targets:
+        legacy_path = value.get("installPath") or value.get("path")
+        if legacy_path:
+            # Pre-multi-tool lockfiles recorded a single user-scope Claude Code install. Their stored
+            # checksum is the package checksum, NOT compute_dir_checksum(folder), so it is not a
+            # comparable folder checksum — expose None so callers don't false-positive on customization.
+            targets.append(
+                {
+                    "tool": "claude-code",
+                    "scope": "user",
+                    "path": legacy_path,
+                    "checksum": None,
+                    "version": value.get("version"),
+                }
+            )
+    return targets
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def ensure_workspace_lock_entry(raw: dict[str, Any], workspace_id: str | None, api_url: str) -> dict[str, Any]:
+    """Return (creating if needed) the workspace-keyed entry that holds the `skills` map, for writes."""
+    key = workspace_id or api_url
+    workspaces = raw.setdefault("workspaces", {})
+    if not isinstance(workspaces, dict):
+        raw["workspaces"] = workspaces = {}
+    entry = workspaces.get(key)
+    if not isinstance(entry, dict):
+        entry = {}
+        workspaces[key] = entry
+    entry.setdefault("apiUrl", api_url)
+    entry.setdefault("skills", {})
+    if not isinstance(entry["skills"], dict):
+        entry["skills"] = {}
+    return entry
+
+
+def existing_target_rows(record: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """A prior record's target rows, preserving each target's own version (legacy-aware)."""
+    if not isinstance(record, dict):
+        return []
+    rows: list[dict[str, Any]] = []
+    for target in normalize_targets(record):
+        rows.append(
+            {
+                "tool": target["tool"],
+                "scope": target["scope"],
+                "path": target["path"],
+                "checksum": target.get("checksum"),
+                "version": target.get("version") or record.get("version"),
+            }
+        )
+    return rows
+
+
+def upsert_skill_lock_record(
+    path: Path,
+    workspace_id: str | None,
+    api_url: str,
+    skill: dict[str, Any],
+    targets: list[dict[str, Any]],
+    relative_to: Path | None,
+) -> None:
+    """Upsert one skill record, MERGING the run's targets with any already tracked at this scope.
+
+    The single canonical lockfile writer (companion_lib owns read, normalize, AND write). Only the
+    targets touched by this run are replaced (matched by tool+scope); every other tracked target — a
+    different tool, an untouched project, or a skipped one not in `targets` — is preserved so a scoped
+    or partial install never erases the rest of the lockfile. Never writes the token.
+    """
+    if not targets:
+        return
+    raw = load_json(path)
+    if not isinstance(raw, dict):
+        raw = {}
+    raw.setdefault("lockfileVersion", 2)
+    entry = ensure_workspace_lock_entry(raw, workspace_id, api_url)
+
+    new_rows = []
+    for target in targets:
+        stored_path = target["path"]
+        if relative_to is not None:
+            try:
+                stored_path = Path(target["path"]).relative_to(relative_to).as_posix()
+            except ValueError:
+                stored_path = target["path"]
+        new_rows.append(
+            {
+                "tool": target["tool"],
+                "scope": target["scope"],
+                "path": stored_path,
+                "checksum": target["checksum"],
+                "version": skill["version"],
+            }
+        )
+
+    overridden = {(row["tool"], row["scope"]) for row in new_rows}
+    kept = [row for row in existing_target_rows(entry["skills"].get(skill["name"])) if (row["tool"], row["scope"]) not in overridden]
+    merged = kept + new_rows
+
+    # Top-level version reflects the OLDEST target so "update available" fires whenever any target is
+    # behind the published version; per-target `version` keeps the granular truth.
+    versions = [row.get("version") for row in merged if row.get("version")]
+    oldest = min(versions, key=cmp_to_key(compare_semver)) if versions else skill["version"]
+
+    entry["skills"][skill["name"]] = {
+        "name": skill["name"],
+        "slug": skill["slug"],
+        "skillId": skill.get("skillId"),
+        "companionSkillId": skill.get("companionSkillId"),
+        "version": oldest,
+        "checksum": skill.get("checksum"),
+        "targets": merged,
+        "addedAt": now_iso(),
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(raw, indent=2) + "\n", encoding="utf-8")
+
+
 def workspace_lock_entry(raw: dict[str, Any], workspace_id: str | None, api_url: str) -> dict[str, Any] | None:
     workspaces = raw.get("workspaces")
     if isinstance(workspaces, dict):
@@ -199,11 +461,23 @@ def skill_records_from_lock(entry: dict[str, Any] | None) -> list[dict[str, Any]
                 "version": value.get("version") or value.get("resolved") or value.get("installedVersion"),
                 "checksum": value.get("checksum"),
                 "path": value.get("installPath") or value.get("path"),
+                # Every install location for this skill at this scope level (multi-tool aware),
+                # with a legacy single-`installPath` lockfile folding into one user-scope target.
+                "targets": normalize_targets(value),
                 "skillId": value.get("skillId") or value.get("workspaceSkillId") or value.get("companionSkillId"),
                 "companionSkillId": value.get("companionSkillId"),
             }
         )
     return sorted(records, key=lambda row: row["name"])
+
+
+def load_inventory_from(path: Path, workspace_id: str | None, api_url: str) -> list[dict[str, Any]]:
+    """Read skill records from one specific lockfile path (returns [] when absent)."""
+    raw = load_json(path)
+    if raw is None:
+        return []
+    entry = workspace_lock_entry(raw, workspace_id, api_url)
+    return skill_records_from_lock(entry)
 
 
 def load_local_inventory(workspace_id: str | None, api_url: str) -> tuple[Path | None, list[dict[str, Any]]]:
@@ -214,6 +488,23 @@ def load_local_inventory(workspace_id: str | None, api_url: str) -> tuple[Path |
         entry = workspace_lock_entry(raw, workspace_id, api_url)
         return path, skill_records_from_lock(entry)
     return None, []
+
+
+def load_project_inventory(
+    workspace_id: str | None, api_url: str, start: Path | None = None
+) -> tuple[Path | None, list[dict[str, Any]]]:
+    """Records from the current project's lockfile (`<repo>/.companion/skills.lock.json`).
+
+    The single canonical loader for project-scope installs so every consumer (bootstrap inventory,
+    the preflight guard) reads the two-level lockfile model the same way. Returns (path, records),
+    or (None, []) when not inside a repo or the project lockfile is absent.
+    """
+    project_root = find_project_root(start)
+    if project_root is None:
+        return None, []
+    path = project_lockfile_path(project_root)
+    records = load_inventory_from(path, workspace_id, api_url)
+    return (path if records else None), records
 
 
 def status_for_local(row: dict[str, Any], workspace_by_slug: dict[str, dict[str, Any]], reported_by_slug: dict[str, dict[str, Any]]) -> tuple[str, str]:

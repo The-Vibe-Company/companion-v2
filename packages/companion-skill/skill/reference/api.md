@@ -198,6 +198,15 @@ Skip this install report for personal skills; they already appear in the author'
 If the install report fails after publish succeeds, do not republish. Tell the user publish succeeded
 and retry only the install report.
 
+The install report stays **aggregate**: the workspace tracks one `skill_installs` row per user, with
+no per-tool dimension. When a skill is installed into several local tools at once (Claude Code, Codex,
+…) or into multiple projects, still send a **single** `POST /skills/{slug}/install`, using `agent` to
+name the tools (for example `"Claude Code, Codex"`). The per-tool, per-project install locations are
+tracked locally, not in the workspace: each lockfile skill record carries a `targets[]` array
+(`{ tool, scope, path, checksum }`), user-scope targets in `~/.companion/skills.lock.json` and
+project-scope targets in a per-project `<repo>/.companion/skills.lock.json`. A legacy single-`installPath`
+record reads as one `claude-code`/`user` target.
+
 Before publishing a brand-new skill, the Companion skill must ask the user for both placement
 decisions: Personal/My Skills vs Org/everyone, then existing folder, new folder, or no folder. Fetch
 the relevant tree first (`GET /personal-labels` for personal, `GET /labels` for org) and validate new

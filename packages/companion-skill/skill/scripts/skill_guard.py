@@ -28,6 +28,7 @@ from companion_lib import (  # noqa: E402  (path shim must run before the import
     fail,
     legacy_log_path,
     load_json,
+    load_project_inventory,
     lockfile_path,
     print_rows,
     resolve_credentials,
@@ -175,6 +176,19 @@ def build_local_inventory(workspace_id: str | None, api_url: str, scan_roots: li
                 "version": record.get("version"),
                 "path": record.get("path"),
                 "source": "lockfile",
+            }
+        )
+    # Project-scope installs live in a per-project lockfile, so the guard must inventory the current
+    # repo's lockfile too or a project-installed duplicate/retarget could slip past the preflight.
+    _project_path, project_records = load_project_inventory(workspace_id, api_url)
+    for record in project_records:
+        entries.append(
+            {
+                "slug": record.get("slug") or record["name"],
+                "skill_id": record.get("skillId"),
+                "version": record.get("version"),
+                "path": record.get("path"),
+                "source": "project_lockfile",
             }
         )
     # Defensive: migration should have removed the legacy file, but if it is still
@@ -647,7 +661,8 @@ def main(argv: list[str] | None = None) -> int:
 
     create_check = None
     if options["create_check"]:
-        lockfile_slugs = {e["slug"] for e in local_entries if e["source"] == "lockfile"}
+        # Both the user and the per-project lockfile count as existing installs for duplicate detection.
+        lockfile_slugs = {e["slug"] for e in local_entries if e["source"] in ("lockfile", "project_lockfile")}
         legacy_slugs = {e["slug"] for e in local_entries if e["source"] == "legacy_log"}
         manifest_slugs = {e["slug"] for e in local_entries if e["source"].startswith("manifest:")}
         create_check = create_preflight(
