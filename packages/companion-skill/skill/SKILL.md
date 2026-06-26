@@ -271,6 +271,22 @@ never copied). Write all future state to `skills.lock.json`. If the lockfile use
 visible in the workspace is `missing_or_archived`, not "up to date" — keep it flagged, do not silently
 treat a close-named skill as its replacement.
 
+**A skill can be installed into several tools at once.** Each lockfile skill record carries a
+`targets[]` array — one entry per install location, `{ tool, scope, path, checksum }`. A pre-multi-tool
+record that only has a single `installPath` is read as one `claude-code`/`user` target. There are two
+lockfile levels, same shape:
+
+- **User-scope** installs (`~/.claude/skills`, `~/.codex/skills`) live in `~/.companion/skills.lock.json`.
+- **Project-scope** installs (`.claude/skills`, `.codex/skills` inside a repo) live in a **per-project**
+  `<repo>/.companion/skills.lock.json`, one per project, with repo-relative paths so it can optionally
+  be committed to share the project's skill set. Never write the token to this lockfile either.
+
+The set of tools this machine uses is recorded in `~/.companion/config.json`
+(`{ "schemaVersion": 1, "tools": ["claude-code", "codex"] }` — never any secret). The supported tools
+and their on-disk skill directories are declared in this skill's `scripts/tools.json` registry, which
+is extensible: adding a tool there is enough to make it an install target. `scripts/tools.schema.json`
+is its JSON Schema (referenced via `$schema`) describing the registry shape.
+
 ### List workspace and local skills
 
 Use the token-supported list endpoint to inspect the workspace catalog:
@@ -317,6 +333,43 @@ python3 scripts/bootstrap.py --summary
 
 Run that script from this skill's package root. It only reads local Companion state and calls the
 skills API with `skills:read`; it does not write files, publish, install, or update anything.
+
+### Install a skill into your tools (Claude Code, Codex, …)
+
+Installing a skill deploys its package into **every tool the user works with**, not just the one in
+use right now. Resolve the target tools, confirm with the user, then fan out:
+
+1. **Resolve the tool set.** Read `~/.companion/config.json`. If it is missing or empty, auto-detect
+   present tools (`python3 scripts/install_skill.py` reports what it found, or call
+   `detect_tools` from `companion_lib`), **propose the detected set to the user for confirmation**
+   (they can add or remove tools), then persist it to `config.json`. Reuse it on later installs.
+2. **Ask the user where to install — always.** Before installing, ask whether they want it **global**
+   (user-scope, available in every project) or **for this project only** (project-scope in the current
+   repo), or both. Never silently pick a scope. Use a structured choice if the runtime offers one.
+   `user` maps to global, `project` to the current repo; pass `--scope user|project|both` accordingly.
+   There can be many projects on the machine, so project-scope installs are tracked per repo in
+   `<repo>/.companion/skills.lock.json`. For a project-scope install, confirm the current repo is the
+   intended one (project scope requires a repo root).
+3. **Check required secrets first** (the environment guard above), then run the deterministic fan-out:
+
+   ```sh
+   python3 scripts/install_skill.py <slug> --scope user            # all configured tools, user-global
+   python3 scripts/install_skill.py <slug> --scope both            # user-global + the current repo
+   python3 scripts/install_skill.py <slug> --tools claude-code,codex --json
+   ```
+
+   It downloads the package once, deploys it into each `(tool, scope)` target, records every target in
+   the right lockfile, and prints a summary. A target whose on-disk folder was customized locally is
+   left untouched (`skipped_customized`) unless you pass `--force`, so an install never clobbers local
+   edits.
+4. **Report once.** After the fan-out, send a single aggregate `POST /skills/{slug}/install` with the
+   installed version and an `agent` label listing the tools (for example `"Claude Code, Codex"`). The
+   workspace tracks installs per user, not per tool, so this stays one call even across multiple tools
+   and projects. (`install_skill.py --report` can send it for you.)
+
+To **update** installed skills across tools, `python3 scripts/bootstrap.py --summary` lists every local
+skill with its per-tool `targets`; re-run `install_skill.py <slug>` to bring the behind targets up to
+the current published version, then re-report once.
 
 ### Validate a skill
 
@@ -514,8 +567,9 @@ user:
 - If the published skill is personal, do not call the install endpoint; personal skills already live
   in the author's My Skills library.
 - Update `~/.companion/skills.lock.json` under `workspaces[COMPANION_WORKSPACE_ID]` with the
-  workspace id, `apiUrl`, skill id, name, version, checksum, install path, declared env/secrets,
-  resolved dependencies, and install time. Never write the token to this lockfile.
+  workspace id, `apiUrl`, skill id, name, version, checksum, the install `targets[]` (one per
+  tool/scope), declared env/secrets, resolved dependencies, and install time. Never write the token to
+  this lockfile.
 - If the install report fails after publish succeeds, keep the publish result, warn the user, and
   suggest retrying the install report. Do not republish just to repair install state.
 

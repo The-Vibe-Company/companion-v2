@@ -16,6 +16,7 @@ import os
 import re
 import sys
 from datetime import datetime, timezone
+from functools import cmp_to_key
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +28,7 @@ from companion_lib import (  # noqa: E402
     api_get,
     compare_semver,
     load_local_inventory,
+    load_project_inventory,
     resolve_credentials,
     status_for_local,
 )
@@ -69,6 +71,28 @@ def build_skill_context(
 ) -> dict[str, Any]:
     workspace_by_slug, reported_by_slug = workspace_skill_rows(org_skills, mine_skills, installed_skills)
     lock_path, local_rows = load_local_inventory(workspace_id, api_url)
+
+    # Fold in project-scope installs from the current repo's lockfile so the inventory is
+    # multi-project aware: each skill shows every install location (user-global + this project),
+    # merged by slug so the same skill installed at both scopes lists all of its targets.
+    project_lock_path, project_rows = load_project_inventory(workspace_id, api_url)
+    if project_rows:
+        by_name = {row["name"]: row for row in local_rows}
+        for row in project_rows:
+            existing = by_name.get(row["name"])
+            if existing is None:
+                local_rows.append(row)
+                by_name[row["name"]] = row
+                continue
+            existing.setdefault("targets", [])
+            existing["targets"] = [*(existing.get("targets") or []), *(row.get("targets") or [])]
+            # Effective version is the OLDEST across user + project targets so a behind project
+            # target makes the merged skill read as "update", not "current".
+            versions = [t.get("version") for t in existing["targets"] if t.get("version")]
+            candidates = [v for v in (existing.get("version"), row.get("version"), *versions) if v]
+            if candidates:
+                existing["version"] = min(candidates, key=cmp_to_key(compare_semver))
+
     local = []
     counts = {"current": 0, "update": 0, "missing": 0, "unknown": 0}
     for row in local_rows:
@@ -81,6 +105,9 @@ def build_skill_context(
                 "status": status,
                 "reason": reason,
                 "path": row.get("path"),
+                # Every install location for this skill (Claude Code, Codex, …) at its scope level.
+                # A legacy single-path lockfile folds into one user-scope Claude Code target.
+                "targets": row.get("targets") or [],
                 "skillId": row.get("skillId"),
                 "checksum": row.get("checksum"),
             }
@@ -99,6 +126,7 @@ def build_skill_context(
 
     return {
         "lockfile": str(lock_path) if lock_path else None,
+        "projectLockfile": str(project_lock_path) if project_lock_path else None,
         "workspaceCount": len(workspace_by_slug),
         "reportedInstalledCount": len(reported_by_slug),
         "localCount": len(local),
@@ -124,7 +152,7 @@ def collect_context(auto_update: bool = False, agent: str = "companion-bootstrap
             "autoUpdate": {"requested": auto_update, "applied": False, "blocked": False, "reason": None},
         },
         "integrity": {"status": "unknown", "blockingFiles": [], "files": [], "counts": {}, "packageChecksum": None},
-        "skills": {"lockfile": None, "workspaceCount": 0, "reportedInstalledCount": 0, "localCount": 0, "counts": {}, "updates": [], "local": []},
+        "skills": {"lockfile": None, "projectLockfile": None, "workspaceCount": 0, "reportedInstalledCount": 0, "localCount": 0, "counts": {}, "updates": [], "local": []},
         "actions": [],
         "errors": [],
     }

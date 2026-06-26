@@ -1,0 +1,18 @@
+{
+  "$schema": "./tools.schema.json",
+  "schemaVersion": 1,
+  "tools": {
+    "claude-code": {
+      "displayName": "Claude Code",
+      "detect": ["~/.claude"],
+      "skillsDir": { "user": "~/.claude/skills", "project": ".claude/skills" },
+      "format": "skill-md"
+    },
+    "codex": {
+      "displayName": "Codex",
+      "detect": ["~/.codex"],
+      "skillsDir": { "user": "~/.codex/skills", "project": ".codex/skills" },
+      "format": "skill-md"
+    }
+  }
+}
