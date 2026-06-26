@@ -764,6 +764,9 @@ Allowed skills API tasks:
   the current version's required slugs).
 - Download packages with `GET /skills/$SLUG/versions/$VERSION/package`.
 - Browse version files with `GET /skills/$SLUG/versions/$VERSION/files`.
+- Preview one browser-native file with
+  `GET /skills/$SLUG/versions/$VERSION/files/content?path=$PATH` when the file list marks it as
+  text, image, or PDF. Unsupported files return 415; download the package to inspect them.
 - Organize skills with labels: list the org tree with `GET /labels` or the personal tree with
   `GET /personal-labels`; create, rename, recolor, set the icon, or delete folders with the matching
   label routes; file or unfile a skill with `POST` / `DELETE /skills/$SLUG/labels` for org skills or

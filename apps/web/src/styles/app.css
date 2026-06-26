@@ -162,6 +162,10 @@
 .fv-body--md { padding: 30px 40px 56px; }
 .fv-body--md .md { max-width: 720px; margin: 0 auto; }
 .fv-main { min-width: 0; }
+.fv-body--native { background: var(--color-surface-sunken); display: flex; min-height: 0; }
+.fv-native { flex: 1; min-width: 0; min-height: 0; display: grid; place-items: center; padding: 24px; }
+.fv-native--image img { display: block; max-width: 100%; max-height: 100%; object-fit: contain; }
+.fv-native-pdf { flex: 1; width: 100%; min-height: 100%; border: 0; background: var(--color-surface); }
 
 /* On-this-page outline (Markdown Preview with >= 2 headings): a sticky right rail. */
 .fv-body--md.has-outline { display: grid; grid-template-columns: minmax(0, 1fr) 168px; column-gap: 20px; }
