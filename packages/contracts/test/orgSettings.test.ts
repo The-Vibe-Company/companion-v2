@@ -40,6 +40,7 @@ const validPayload = {
       name: "Stan Girard",
       email: "stan@example.com",
       initials: "SG",
+      avatarUrl: null,
     },
   ],
   invitations: [],

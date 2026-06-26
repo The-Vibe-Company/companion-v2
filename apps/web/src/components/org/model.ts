@@ -7,6 +7,8 @@ export interface SeedUser {
   name: string;
   initials: string;
   email: string;
+  /** Resolved avatar URL (custom upload or Gravatar); null falls back to initials. */
+  avatarUrl: string | null;
 }
 
 /** An org member row — active, or a pending invite (pending=true). */
@@ -130,6 +132,8 @@ export interface OrgCtx {
   addAccessDomain: (domain: string) => Promise<void>;
   removeAccessDomain: (domainId: string) => Promise<void>;
   uploadWorkspaceLogo: (file: File) => Promise<void>;
+  uploadUserAvatar: (file: File) => Promise<void>;
+  removeUserAvatar: () => Promise<void>;
   createApiKey: (name: string, scope: "read" | "write") => Promise<string>;
   revokeApiKey: (id: string) => void;
   setMemberRole: (orgId: string, userId: string, role: OrgRole) => void;

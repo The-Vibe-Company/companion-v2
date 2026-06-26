@@ -64,6 +64,18 @@ export async function updateMe(name: string): Promise<{ id: string; name: string
   });
 }
 
+/** Upload (or replace) the signed-in user's avatar. Mirrors `POST /v1/users/me/avatar`. */
+export async function uploadUserAvatar(file: File): Promise<{ avatarUrl: string | null }> {
+  const fd = new FormData();
+  fd.append("file", file);
+  return apiFetch("/v1/users/me/avatar", { method: "POST", body: fd });
+}
+
+/** Remove the signed-in user's custom avatar (revert to Gravatar / initials). Mirrors `DELETE /v1/users/me/avatar`. */
+export async function removeUserAvatar(): Promise<{ avatarUrl: string | null }> {
+  return apiFetch("/v1/users/me/avatar", { method: "DELETE" });
+}
+
 /**
  * Rename and/or re-slug the current workspace. Mirrors `PUT /v1/orgs/current`.
  * Returns the server-normalized values so the caller can reconcile (the server slugifies).

@@ -21,8 +21,9 @@ body { background: var(--color-canvas); color: var(--color-fg); font-family: var
 .vdot--warn { background: var(--color-warn); }
 .vdot--down { background: var(--color-danger); }
 .vdot--unknown { background: var(--color-unknown); }
-.avatar { border-radius: var(--radius-full); flex: none; display: inline-grid; place-items: center;
+.avatar { border-radius: var(--radius-full); flex: none; display: inline-grid; place-items: center; overflow: hidden;
   font-weight: 600; color: var(--color-muted); background: var(--color-surface-raised); border: 1px solid var(--color-line); }
+.avatar img { width: 100%; height: 100%; object-fit: cover; }
 
 /* ========================================================================== */
 /* Sidebar                                                                    */

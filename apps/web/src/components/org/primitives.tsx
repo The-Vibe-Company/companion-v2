@@ -2,14 +2,11 @@
 
 import { useEffect, useRef, type ReactNode } from "react";
 import { Icon } from "../Icon";
+import { UserAvatar } from "../UserAvatar";
 import type { SeedUser } from "./model";
 
 export function Avatar({ u, size = 30, cls = "og-mav" }: { u: SeedUser; size?: number; cls?: string }) {
-  return (
-    <span className={cls} style={{ width: size, height: size }}>
-      {u.initials}
-    </span>
-  );
+  return <UserAvatar className={cls} avatarUrl={u.avatarUrl} initials={u.initials} size={size} />;
 }
 
 export function RoleDot({ role }: { role: string }) {

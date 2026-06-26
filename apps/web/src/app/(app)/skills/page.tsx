@@ -24,9 +24,13 @@ export default async function SkillsPage({
   const params = await searchParams;
   const initialRoute = parseSkillsRoute(params);
   const initialRouteSource = skillsRouteSource(params);
-  const whoami = await serverApiFetch<{ userId: string; email: string; name: string; needsOnboarding?: boolean }>(
-    "/v1/auth/whoami",
-  ).catch(() => null);
+  const whoami = await serverApiFetch<{
+    userId: string;
+    email: string;
+    name: string;
+    avatarUrl?: string | null;
+    needsOnboarding?: boolean;
+  }>("/v1/auth/whoami").catch(() => null);
   if (!whoami) redirect("/login");
   if (whoami.needsOnboarding) redirect("/onboarding");
 
@@ -62,6 +66,7 @@ export default async function SkillsPage({
     name: whoami.name || whoami.email || "You",
     email: whoami.email,
     initials: (whoami.name?.[0] ?? whoami.email?.[0] ?? "?").toUpperCase(),
+    avatarUrl: whoami.avatarUrl ?? null,
   };
 
   return (

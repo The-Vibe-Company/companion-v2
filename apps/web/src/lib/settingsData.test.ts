@@ -56,7 +56,7 @@ describe("parseOrgSettingsResponse", () => {
     const { buildSettingsAppData } = await import("./settingsViewModel");
 
     const data = buildSettingsAppData({
-      me: { id: "user_1", name: "Admin", email: "admin@tvc.dev", initials: "A" },
+      me: { id: "user_1", name: "Admin", email: "admin@tvc.dev", initials: "A", avatarUrl: null },
       current,
       settings: {
         org: {
@@ -85,6 +85,7 @@ describe("parseOrgSettingsResponse", () => {
             name: "Admin",
             email: "admin@tvc.dev",
             initials: "A",
+            avatarUrl: null,
           },
         ],
         invitations: [
@@ -134,6 +135,7 @@ describe("parseOrgSettingsResponse", () => {
       name: "Admin",
       email: "admin@tvc.dev",
       initials: "A",
+      avatarUrl: null,
     });
   });
 

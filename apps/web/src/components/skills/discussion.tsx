@@ -10,6 +10,7 @@ import {
   isAllowedCommentImageFile,
 } from "@companion/contracts";
 import { Icon } from "../Icon";
+import { UserAvatar } from "../UserAvatar";
 import { relativeTime } from "@/lib/format";
 
 /** Add type for `onAdd` callbacks: text + optional image files for a new comment or reply. */
@@ -29,7 +30,7 @@ type ScopeKey = "global";
 interface DiscussionProps {
   comments: SkillCommentRow[];
   versions: SkillVersionRow[];
-  me: { id: string; name: string; initials: string };
+  me: { id: string; name: string; initials: string; avatarUrl: string | null };
   canDeprecate: (c: SkillCommentRow) => boolean;
   onAdd: AddCommentFn;
   onToggleDeprecated: (id: string, next: boolean) => void;
@@ -330,7 +331,11 @@ function ThreadCard({
   return (
     <div className={"thread" + (root.deprecated ? " is-deprecated" : "")}>
       <div className="thread__main">
-        <span className="avatar comment__avatar">{root.author_initials ?? "?"}</span>
+        <UserAvatar
+          className="avatar comment__avatar"
+          avatarUrl={root.author_avatar_url ?? null}
+          initials={root.author_initials ?? "?"}
+        />
         <div className="comment__body">
           <div className="thread__head">
             <span className="comment__who">{root.author_name ?? "Someone"}</span>
@@ -353,9 +358,11 @@ function ThreadCard({
             <div className="thread__replies">
               {replies.map((r) => (
                 <div className="reply" key={r.id}>
-                  <span className="avatar comment__avatar reply__avatar">
-                    {r.author_initials ?? "?"}
-                  </span>
+                  <UserAvatar
+                    className="avatar comment__avatar reply__avatar"
+                    avatarUrl={r.author_avatar_url ?? null}
+                    initials={r.author_initials ?? "?"}
+                  />
                   <div className="comment__body">
                     <div className="comment__head">
                       <span className="comment__who">{r.author_name ?? "Someone"}</span>
@@ -540,7 +547,7 @@ export function Discussion({
         )}
       </div>
       <div className="composer">
-        <span className="avatar comment__avatar">{me.initials}</span>
+        <UserAvatar className="avatar comment__avatar" avatarUrl={me.avatarUrl} initials={me.initials} />
         <CommentComposer
           placeholder="Start a thread…"
           submitLabel="Comment"

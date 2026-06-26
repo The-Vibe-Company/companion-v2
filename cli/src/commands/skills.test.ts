@@ -33,6 +33,7 @@ function registryRow(over: Partial<SkillListRow> = {}): SkillListRow {
     creator_id: "user-1",
     creator_name: "User One",
     creator_initials: "UO",
+    creator_avatar_url: null,
     current_version: "1.0.0",
     license: null,
     compatibility: null,
