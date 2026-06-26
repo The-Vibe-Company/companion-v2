@@ -42,6 +42,7 @@ These are the skills endpoints a personal access token (`skills:read` + `skills:
 | Current published version + checksum | `GET /skills/{slug}/download` | `skills:read` |
 | Download a version package | `GET /skills/{slug}/versions/{version}/package` | `skills:read` |
 | Browse a version's files | `GET /skills/{slug}/versions/{version}/files` | `skills:read` |
+| Preview one browser-native file | `GET /skills/{slug}/versions/{version}/files/content?path={path}` | `skills:read` |
 | Validate (no publish) + dependency preflight | `POST /skills?action=validate` | `skills:write` |
 | Publish a new skill | `POST /skills` | `skills:write` |
 | Update a skill | `POST /skills?expect_slug={slug}&expect_skill_id={id}` | `skills:write` |
@@ -113,6 +114,11 @@ Companion PAT. Use them only when the caller is operating with a valid session c
 Version rows returned by `GET /skills/{slug}/versions` include a nullable `changelog` object. When
 present, it is the `companion.json.metadata.changelog` entry for that exact version and carries
 `version`, optional `date`, and `changes`.
+
+`GET /skills/{slug}/versions/{version}/files` returns package-relative paths, sizes, capped text
+content, and preview metadata. Use `GET /skills/{slug}/versions/{version}/files/content?path={path}`
+only for browser-native previews of text, JSON, Markdown, images, SVG, and PDF. Unsupported files
+return 415 and should be downloaded through the package endpoint instead.
 
 A comment row includes an `images` array; each image carries `id`, `content_type`, `byte_size`,
 `position`, and a `url` (the session-gated path above) for display. To attach images when adding a

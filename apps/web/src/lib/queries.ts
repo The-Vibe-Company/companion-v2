@@ -180,6 +180,11 @@ export async function fetchSkillVersionFiles(
   );
 }
 
+/** Auth-checked inline preview URL for one browser-native file inside a skill version. */
+export function skillFileContentUrl(slug: string, version: string, path: string): string {
+  return `/v1/skills/${encodeURIComponent(slug)}/versions/${encodeURIComponent(version)}/files/content?path=${encodeURIComponent(path)}`;
+}
+
 export async function addComment(
   slug: string,
   body: string,
