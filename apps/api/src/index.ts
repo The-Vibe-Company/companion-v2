@@ -111,6 +111,7 @@ import {
   updateOrgInputSchema,
   resolveOrgLogoContentType,
   resolveUserAvatarContentType,
+  MAX_USER_AVATAR_BYTES,
   resolveCommentImageContentType,
   sniffCommentImageMime,
   MAX_COMMENT_IMAGES,
@@ -778,7 +779,13 @@ app.get("/v1/orgs/:orgId/logo", async (c) => {
 /** Upload (or replace) the current user's profile avatar. Self-service; session only. */
 app.post(
   "/v1/users/me/avatar",
-  bodyLimit({ maxSize: 2 * 1024 * 1024, onError: (c) => jsonError(c, "avatar exceeds the 2 MB upload limit", 413) }),
+  // The body limit guards the whole multipart request (file bytes + form framing), so it carries a
+  // little headroom over the 2 MB file cap; the real file-size limit is enforced on the bytes below
+  // so a genuine 2 MB image is never rejected by framing overhead alone.
+  bodyLimit({
+    maxSize: MAX_USER_AVATAR_BYTES + 256 * 1024,
+    onError: (c) => jsonError(c, "avatar exceeds the 2 MB upload limit", 413),
+  }),
   async (c) => {
     try {
       if (isTokenRequest(c)) throw new Error("personal access tokens cannot update the profile");
@@ -788,6 +795,7 @@ app.post(
       if (!resolveUserAvatarContentType(file)) throw new Error("avatar must be a PNG, JPEG, WebP, or GIF image");
       const body = Buffer.from(await file.arrayBuffer());
       if (!body.length) throw new Error("file is empty");
+      if (body.length > MAX_USER_AVATAR_BYTES) throw new Error("avatar exceeds the 2 MB upload limit");
       // Verify the real bytes match an allowed image (reject a non-image with a faked extension/header).
       const contentType = sniffCommentImageMime(body);
       if (!contentType) throw new Error("avatar must be a PNG, JPEG, WebP, or GIF image");
