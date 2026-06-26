@@ -804,10 +804,15 @@ app.delete("/v1/users/me/avatar", async (c) => {
   try {
     if (isTokenRequest(c)) throw new Error("personal access tokens cannot update the profile");
     const actor = actorFromContext(c);
+    // Clear the profile marker first so the avatar stops resolving and serving immediately; then
+    // remove the storage object best-effort. If the object delete fails, the cleared marker already
+    // makes it unfetchable (the serve gate requires the marker), so the photo is gone from view and
+    // the two stores cannot diverge into a still-servable orphan.
+    const result = await clearUserAvatar({ actor });
     await deleteUserAvatar({ userId: actor.id }).catch((err) => {
       console.error("failed to delete avatar object", err);
     });
-    return c.json(await clearUserAvatar({ actor }));
+    return c.json(result);
   } catch (error) {
     return jsonError(c, error);
   }
