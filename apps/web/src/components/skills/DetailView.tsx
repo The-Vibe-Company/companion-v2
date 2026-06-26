@@ -15,6 +15,7 @@ import {
   fetchSkillDetail,
   fetchSkillDownloadUrl,
   fetchSkillVersionFiles,
+  skillFileContentUrl,
   setCommentDeprecated as setCommentDeprecatedRpc,
 } from "@/lib/queries";
 import type { MeVM, SkillVM } from "@/lib/types";
@@ -531,6 +532,7 @@ export function DetailView({
   const eyebrow = skill.scope === "personal" ? "Personal skill" : isInstalledCopy ? "Installed skill" : "Organization skill";
   const eyebrowIcon = skill.scope === "personal" ? "user" : isInstalledCopy ? "download" : "building-2";
   const publicLinkTitle = copiedPublicLink ? "Public link copied" : "Copy public link";
+  const currentVersion = skill.version;
 
   return (
     <div className="dpage">
@@ -689,7 +691,13 @@ export function DetailView({
           </div>
         )}
 
-        {activeTab === "files" && <FileExplorer files={files} requestedPath={null} />}
+        {activeTab === "files" && (
+          <FileExplorer
+            files={files}
+            requestedPath={null}
+            contentUrlForPath={currentVersion ? (path) => skillFileContentUrl(skill.id, currentVersion, path) : undefined}
+          />
+        )}
 
         {activeTab === "dependencies" && (
           <div className="ddoc">

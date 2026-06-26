@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { extractArchiveFiles } from "../src/index";
+import { extractArchiveFileContent, extractArchiveFiles } from "../src/index";
 import { VALID_SKILL_MD, buildTar } from "./helpers";
 
 describe("extractArchiveFiles — happy path", () => {
@@ -98,6 +98,30 @@ describe("extractArchiveFiles — binary detection", () => {
     expect(png?.content).toBeNull();
     expect(png?.truncated).toBe(false);
     expect(png?.size).toBeGreaterThan(0);
+    expect(png?.preview_kind).toBe("unsupported");
+    expect(png?.content_type).toBeNull();
+  });
+
+  it("marks browser-native binary files previewable only when their signature matches", async () => {
+    const validPng = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const tar = await buildTar([
+      { name: "SKILL.md", content: VALID_SKILL_MD },
+      { name: "valid.png", content: validPng },
+      { name: "fake.pdf", content: "not a pdf" },
+    ]);
+    const res = await extractArchiveFiles(tar);
+    expect(res.files.find((f) => f.path === "valid.png")).toMatchObject({
+      binary: true,
+      content: null,
+      preview_kind: "image",
+      content_type: "image/png",
+    });
+    expect(res.files.find((f) => f.path === "fake.pdf")).toMatchObject({
+      binary: true,
+      content: null,
+      preview_kind: "unsupported",
+      content_type: null,
+    });
   });
 
   it("downgrades an allowlisted file containing a NUL byte to binary", async () => {
@@ -175,5 +199,67 @@ describe("extractArchiveFiles — size caps", () => {
     ]);
     const res = await extractArchiveFiles(tar);
     expect(res.oversize).toBe(true);
+  });
+});
+
+describe("extractArchiveFileContent", () => {
+  it("extracts browser-native image, PDF, SVG, and JSON files by path", async () => {
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00]);
+    const tar = await buildTar([
+      { name: "SKILL.md", content: VALID_SKILL_MD },
+      { name: "assets/logo.png", content: png },
+      { name: "reference/demo.pdf", content: Buffer.from("%PDF-1.4\n") },
+      { name: "assets/icon.svg", content: '<svg xmlns="http://www.w3.org/2000/svg"></svg>' },
+      { name: "companion.json", content: '{"name":"demo"}\n' },
+    ]);
+
+    const image = await extractArchiveFileContent(tar, "assets/logo.png");
+    expect(image).toMatchObject({ status: "ok", preview_kind: "image", content_type: "image/png" });
+    if (image.status === "ok") expect(image.bytes.equals(png)).toBe(true);
+
+    await expect(extractArchiveFileContent(tar, "reference/demo.pdf")).resolves.toMatchObject({
+      status: "ok",
+      preview_kind: "pdf",
+      content_type: "application/pdf",
+    });
+    await expect(extractArchiveFileContent(tar, "assets/icon.svg")).resolves.toMatchObject({
+      status: "ok",
+      preview_kind: "image",
+      content_type: "image/svg+xml",
+    });
+    await expect(extractArchiveFileContent(tar, "companion.json")).resolves.toMatchObject({
+      status: "ok",
+      preview_kind: "text",
+      content_type: "application/json; charset=utf-8",
+    });
+  });
+
+  it("rejects traversal, symlink targets, missing files, unsupported types, and oversized entries", async () => {
+    const tar = await buildTar([
+      { name: "SKILL.md", content: VALID_SKILL_MD },
+      { name: "assets/link.png", type: "symlink", linkname: "real.png" },
+      { name: "archive.bin", content: Buffer.from([1, 2, 3]) },
+    ]);
+    const hugeTar = await buildTar([
+      { name: "SKILL.md", content: VALID_SKILL_MD },
+      { name: "huge.pdf", content: Buffer.concat([Buffer.from("%PDF-1.4\n"), Buffer.alloc(11 * 1024 * 1024)]) },
+    ]);
+
+    await expect(extractArchiveFileContent(tar, "../evil.pdf")).resolves.toMatchObject({ status: "invalid_path" });
+    await expect(extractArchiveFileContent(tar, "assets/link.png")).resolves.toMatchObject({ status: "not_found" });
+    await expect(extractArchiveFileContent(tar, "missing.pdf")).resolves.toMatchObject({ status: "not_found" });
+    await expect(extractArchiveFileContent(tar, "archive.bin")).resolves.toMatchObject({ status: "unsupported" });
+    await expect(extractArchiveFileContent(hugeTar, "huge.pdf")).resolves.toMatchObject({ status: "oversize" });
+  });
+
+  it("rejects files whose bytes do not match their previewable extension", async () => {
+    const tar = await buildTar([
+      { name: "SKILL.md", content: VALID_SKILL_MD },
+      { name: "fake.png", content: "not a png" },
+      { name: "fake.pdf", content: "not a pdf" },
+    ]);
+
+    await expect(extractArchiveFileContent(tar, "fake.png")).resolves.toMatchObject({ status: "unsupported" });
+    await expect(extractArchiveFileContent(tar, "fake.pdf")).resolves.toMatchObject({ status: "unsupported" });
   });
 });

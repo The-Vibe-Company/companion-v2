@@ -5,14 +5,17 @@
    ─────────────────────────────────────────────────────────────── */
 
 /** A recognised display language for a package file. */
-export type FileLang = "md" | "json" | "py" | "text";
+export type FileLang = "md" | "json" | "py" | "pdf" | "image" | "text";
 
 /** Resolve a file's display language from its path/extension. */
 export function langForFile(path: string): FileLang {
+  const lower = path.toLowerCase();
   if (path.endsWith(".md")) return "md";
   if (path.endsWith(".json")) return "json";
   if (path.endsWith(".py")) return "py";
-  if (path.endsWith(".gitignore")) return "text";
+  if (lower.endsWith(".pdf")) return "pdf";
+  if (/\.(png|jpe?g|webp|gif|svg)$/.test(lower)) return "image";
+  if (lower.endsWith(".gitignore")) return "text";
   return "text";
 }
 
@@ -22,6 +25,8 @@ export function iconForFile(path: string): string {
   if (l === "md") return "file-text";
   if (l === "json") return "braces";
   if (l === "py") return "file-code";
+  if (l === "pdf") return "file-text";
+  if (l === "image") return "image";
   return "file";
 }
 
@@ -30,6 +35,8 @@ export const LANG_LABEL: Record<FileLang, string> = {
   md: "Markdown",
   json: "JSON",
   py: "Python",
+  pdf: "PDF",
+  image: "Image",
   text: "Text",
 };
 

@@ -42,6 +42,7 @@ These are the skills endpoints a personal access token (`skills:read` + `skills:
 | Current published version + checksum | `GET /skills/{slug}/download` | `skills:read` |
 | Download a version package | `GET /skills/{slug}/versions/{version}/package` | `skills:read` |
 | Browse a version's files | `GET /skills/{slug}/versions/{version}/files` | `skills:read` |
+| Preview one browser-native file | `GET /skills/{slug}/versions/{version}/files/content?path={path}` | `skills:read` |
 | Validate (no publish) + dependency preflight | `POST /skills?action=validate` | `skills:write` |
 | Publish a new skill | `POST /skills` | `skills:write` |
 | Update a skill | `POST /skills?expect_slug={slug}&expect_skill_id={id}` | `skills:write` |
@@ -113,6 +114,11 @@ Companion PAT. Use them only when the caller is operating with a valid session c
 Version rows returned by `GET /skills/{slug}/versions` include a nullable `changelog` object. When
 present, it is the `companion.json.metadata.changelog` entry for that exact version and carries
 `version`, optional `date`, and `changes`.
+
+`GET /skills/{slug}/versions/{version}/files` returns package-relative paths, sizes, capped text
+content, and preview metadata. Use `GET /skills/{slug}/versions/{version}/files/content?path={path}`
+only for browser-native previews of text, JSON, Markdown, images, SVG, and PDF. Unsupported files
+return 415 and should be downloaded through the package endpoint instead.
 
 A comment row includes an `images` array; each image carries `id`, `content_type`, `byte_size`,
 `position`, and a `url` (the session-gated path above) for display. To attach images when adding a
@@ -197,6 +203,15 @@ Content-Type: application/json
 Skip this install report for personal skills; they already appear in the author's My Skills library.
 If the install report fails after publish succeeds, do not republish. Tell the user publish succeeded
 and retry only the install report.
+
+The install report stays **aggregate**: the workspace tracks one `skill_installs` row per user, with
+no per-tool dimension. When a skill is installed into several local tools at once (Claude Code, Codex,
+…) or into multiple projects, still send a **single** `POST /skills/{slug}/install`, using `agent` to
+name the tools (for example `"Claude Code, Codex"`). The per-tool, per-project install locations are
+tracked locally, not in the workspace: each lockfile skill record carries a `targets[]` array
+(`{ tool, scope, path, checksum }`), user-scope targets in `~/.companion/skills.lock.json` and
+project-scope targets in a per-project `<repo>/.companion/skills.lock.json`. A legacy single-`installPath`
+record reads as one `claude-code`/`user` target.
 
 Before publishing a brand-new skill, the Companion skill must ask the user for both placement
 decisions: Personal/My Skills vs Org/everyone, then existing folder, new folder, or no folder. Fetch

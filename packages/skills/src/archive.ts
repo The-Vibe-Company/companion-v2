@@ -1,4 +1,6 @@
 import { extract as tarExtract } from "tar-stream";
+import type { Headers } from "tar-stream";
+import type { Readable } from "node:stream";
 import { gunzipSync } from "node:zlib";
 import { readdir, readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
@@ -62,6 +64,109 @@ export interface ArchiveFinding {
   oversize: boolean;
 }
 
+interface ArchiveCounters {
+  totalBytes: number;
+  fileCount: number;
+  oversize: boolean;
+}
+
+type ArchiveEntryClassification =
+  | {
+      kind: "file";
+      rawName: string;
+      type: string;
+      path: string;
+      size: number;
+      countable: true;
+    }
+  | {
+      kind: "skip";
+      rawName: string;
+      type: string;
+      path: string;
+      size: number;
+      countable: boolean;
+      violation: string | null;
+    };
+
+function classifyArchiveEntry(header: { name?: string; type?: string | null; size?: number }): ArchiveEntryClassification {
+  const rawName = header.name ?? "";
+  const type = (header.type ?? "file") as string;
+  const size = header.size ?? 0;
+  const norm = normalizePosix(rawName);
+
+  if (norm.violation) {
+    return { kind: "skip", rawName, type, path: norm.path, size, countable: false, violation: `${norm.violation}: ${rawName}` };
+  }
+  if (type === "directory") {
+    return { kind: "skip", rawName, type, path: norm.path, size, countable: false, violation: null };
+  }
+  if (!norm.path) {
+    return { kind: "skip", rawName, type, path: norm.path, size, countable: false, violation: `empty path: ${rawName}` };
+  }
+  if (type === "symlink" || type === "link") {
+    return { kind: "skip", rawName, type, path: norm.path, size, countable: true, violation: `symlink/hardlink rejected: ${rawName}` };
+  }
+  if (!SAFE_ENTRY_TYPES.has(type)) {
+    return { kind: "skip", rawName, type, path: norm.path, size, countable: true, violation: `unsupported entry type '${type}': ${rawName}` };
+  }
+  if (isExcluded(norm.path)) {
+    return { kind: "skip", rawName, type, path: norm.path, size, countable: true, violation: null };
+  }
+  return { kind: "file", rawName, type, path: norm.path, size, countable: true };
+}
+
+function countArchiveEntry(counters: ArchiveCounters, entry: ArchiveEntryClassification): void {
+  if (!entry.countable) return;
+  counters.fileCount += 1;
+  counters.totalBytes += entry.size;
+  if (
+    entry.size > MAX_FILE_BYTES ||
+    counters.totalBytes > MAX_ARCHIVE_BYTES ||
+    counters.fileCount > MAX_ENTRY_COUNT
+  ) {
+    counters.oversize = true;
+  }
+}
+
+function drainArchiveStream(stream: Readable, next: () => void): void {
+  stream.on("end", next);
+  stream.resume();
+}
+
+async function walkArchive(
+  tar: Buffer,
+  onFile: (
+    entry: Extract<ArchiveEntryClassification, { kind: "file" }>,
+    stream: Readable,
+    next: () => void,
+    reject: (reason?: unknown) => void,
+    counters: ArchiveCounters,
+  ) => void,
+  onViolation?: (violation: string) => void,
+): Promise<ArchiveCounters> {
+  const counters: ArchiveCounters = { totalBytes: 0, fileCount: 0, oversize: false };
+  const ex = tarExtract();
+
+  await new Promise<void>((resolve, reject) => {
+    ex.on("entry", (header: Headers, stream, next) => {
+      const entry = classifyArchiveEntry(header);
+      countArchiveEntry(counters, entry);
+      if (entry.kind === "skip") {
+        if (entry.violation) onViolation?.(entry.violation);
+        drainArchiveStream(stream, next);
+        return;
+      }
+      onFile(entry, stream, next, reject, counters);
+    });
+    ex.on("finish", () => resolve());
+    ex.on("error", reject);
+    ex.end(tar);
+  });
+
+  return counters;
+}
+
 /**
  * Inspect a tar buffer entry-by-entry WITHOUT extracting to disk. Only SKILL.md is
  * read into memory (capped); all other file streams are drained. Rejects symlinks,
@@ -82,74 +187,22 @@ export async function inspectTar(tar: Buffer): Promise<ArchiveFinding> {
   };
   const skillCandidates: { path: string; depth: number; content: string }[] = [];
   const companionCandidates: { path: string; depth: number; content: string | null }[] = [];
-  const ex = tarExtract();
+  const counters = await walkArchive(
+    tar,
+    (entry, stream, next, reject) => {
+      finding.files.push(entry.path);
 
-  await new Promise<void>((resolve, reject) => {
-    ex.on("entry", (header, stream, next) => {
-      const rawName = header.name ?? "";
-      const type = (header.type ?? "file") as string;
-
-      if (type === "symlink" || type === "link") {
-        finding.violations.push(`symlink/hardlink rejected: ${rawName}`);
-        stream.on("end", next);
-        stream.resume();
-        return;
-      }
-      if (!SAFE_ENTRY_TYPES.has(type)) {
-        finding.violations.push(`unsupported entry type '${type}': ${rawName}`);
-        stream.on("end", next);
-        stream.resume();
-        return;
-      }
-
-      const norm = normalizePosix(rawName);
-      if (norm.violation) {
-        finding.violations.push(`${norm.violation}: ${rawName}`);
-        stream.on("end", next);
-        stream.resume();
-        return;
-      }
-
-      if (type === "directory") {
-        stream.on("end", next);
-        stream.resume();
-        return;
-      }
-      if (!norm.path) {
-        finding.violations.push(`empty path: ${rawName}`);
-        stream.on("end", next);
-        stream.resume();
-        return;
-      }
-      finding.fileCount += 1;
-      const size = header.size ?? 0;
-      finding.totalBytes += size;
-      if (
-        size > MAX_FILE_BYTES ||
-        finding.totalBytes > MAX_ARCHIVE_BYTES ||
-        finding.fileCount > MAX_ENTRY_COUNT
-      ) {
-        finding.oversize = true;
-      }
-      if (isExcluded(norm.path)) {
-        stream.on("end", next);
-        stream.resume();
-        return;
-      }
-      finding.files.push(norm.path);
-
-      const base = norm.path.split("/").pop();
-      if (base === "companion.json" && size > MAX_SKILL_MD_BYTES) {
+      const base = entry.path.split("/").pop();
+      if (base === "companion.json" && entry.size > MAX_SKILL_MD_BYTES) {
         companionCandidates.push({
-          path: norm.path,
-          depth: norm.path.split("/").length,
+          path: entry.path,
+          depth: entry.path.split("/").length,
           content: null,
         });
-        stream.on("end", next);
-        stream.resume();
+        drainArchiveStream(stream, next);
         return;
       }
-      if ((base === SKILL_FILE || base === "companion.json") && size <= MAX_SKILL_MD_BYTES) {
+      if ((base === SKILL_FILE || base === "companion.json") && entry.size <= MAX_SKILL_MD_BYTES) {
         const chunks: Buffer[] = [];
         let read = 0;
         stream.on("data", (c: Buffer) => {
@@ -158,8 +211,8 @@ export async function inspectTar(tar: Buffer): Promise<ArchiveFinding> {
         });
         stream.on("end", () => {
           const candidate = {
-            path: norm.path,
-            depth: norm.path.split("/").length,
+            path: entry.path,
+            depth: entry.path.split("/").length,
             content: Buffer.concat(chunks).toString("utf8"),
           };
           if (base === SKILL_FILE) skillCandidates.push(candidate);
@@ -170,13 +223,14 @@ export async function inspectTar(tar: Buffer): Promise<ArchiveFinding> {
         return;
       }
 
-      stream.on("end", next);
-      stream.resume();
-    });
-    ex.on("finish", () => resolve());
-    ex.on("error", reject);
-    ex.end(tar);
-  });
+      drainArchiveStream(stream, next);
+    },
+    (violation) => finding.violations.push(violation),
+  );
+
+  finding.totalBytes = counters.totalBytes;
+  finding.fileCount = counters.fileCount;
+  finding.oversize = counters.oversize;
 
   skillCandidates.sort((a, b) => a.depth - b.depth);
   const skillCandidate = skillCandidates[0];
@@ -209,6 +263,19 @@ const TEXT_EXTENSIONS = new Set([
 /** Extensionless basenames we still treat as text. Matched case-insensitively. */
 const TEXT_BASENAMES = new Set(["license", "readme", "dockerfile", "makefile"]);
 
+export type ArchiveFilePreviewKind = "text" | "image" | "pdf" | "unsupported";
+
+export interface ArchiveFilePreview {
+  preview_kind: ArchiveFilePreviewKind;
+  content_type: string | null;
+}
+
+function extensionForPath(relPath: string): string {
+  const base = (relPath.split("/").pop() ?? "").toLowerCase();
+  const dot = base.lastIndexOf(".");
+  return dot >= 0 ? base.slice(dot + 1) : "";
+}
+
 /** Decide whether a posix relpath's basename is a text file by extension/name. */
 function isTextPath(relPath: string): boolean {
   const base = (relPath.split("/").pop() ?? "").toLowerCase();
@@ -223,6 +290,96 @@ function isTextPath(relPath: string): boolean {
   return TEXT_BASENAMES.has(base);
 }
 
+export function previewForPath(relPath: string): ArchiveFilePreview {
+  const ext = extensionForPath(relPath);
+  if (isTextPath(relPath)) {
+    if (ext === "json") return { preview_kind: "text", content_type: "application/json; charset=utf-8" };
+    if (ext === "md" || ext === "markdown") return { preview_kind: "text", content_type: "text/markdown; charset=utf-8" };
+    return { preview_kind: "text", content_type: "text/plain; charset=utf-8" };
+  }
+  const descriptor = binaryPreviewDescriptor(relPath);
+  if (descriptor) return { preview_kind: descriptor.preview_kind, content_type: descriptor.content_type };
+  return { preview_kind: "unsupported", content_type: null };
+}
+
+function hasBinaryNul(bytes: Buffer): boolean {
+  return bytes.subarray(0, BINARY_SNIFF_BYTES).includes(0);
+}
+
+function looksLikeSvg(bytes: Buffer): boolean {
+  if (hasBinaryNul(bytes)) return false;
+  const head = bytes.subarray(0, Math.min(bytes.length, 4096)).toString("utf8").trimStart();
+  return /^<\?xml[\s\S]*?<svg[\s>]/i.test(head) || /^<svg[\s>]/i.test(head);
+}
+
+type PreviewDescriptor = {
+  preview_kind: Exclude<ArchiveFilePreviewKind, "text" | "unsupported">;
+  content_type: string;
+  matches: (bytes: Buffer) => boolean;
+};
+
+const BINARY_PREVIEW_DESCRIPTORS: Record<string, PreviewDescriptor> = {
+  pdf: {
+    preview_kind: "pdf",
+    content_type: "application/pdf",
+    matches: (bytes) => bytes.length >= 5 && bytes.subarray(0, 5).toString("ascii") === "%PDF-",
+  },
+  png: {
+    preview_kind: "image",
+    content_type: "image/png",
+    matches: (bytes) => (
+      bytes.length >= 8 &&
+      bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47 &&
+      bytes[4] === 0x0d && bytes[5] === 0x0a && bytes[6] === 0x1a && bytes[7] === 0x0a
+    ),
+  },
+  jpg: {
+    preview_kind: "image",
+    content_type: "image/jpeg",
+    matches: (bytes) => bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff,
+  },
+  jpeg: {
+    preview_kind: "image",
+    content_type: "image/jpeg",
+    matches: (bytes) => bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff,
+  },
+  gif: {
+    preview_kind: "image",
+    content_type: "image/gif",
+    matches: (bytes) => (
+      bytes.length >= 6 &&
+      bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x38 &&
+      (bytes[4] === 0x37 || bytes[4] === 0x39) && bytes[5] === 0x61
+    ),
+  },
+  webp: {
+    preview_kind: "image",
+    content_type: "image/webp",
+    matches: (bytes) => (
+      bytes.length >= 12 &&
+      bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46 &&
+      bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50
+    ),
+  },
+  svg: {
+    preview_kind: "image",
+    content_type: "image/svg+xml",
+    matches: looksLikeSvg,
+  },
+};
+
+function binaryPreviewDescriptor(relPath: string): PreviewDescriptor | null {
+  return BINARY_PREVIEW_DESCRIPTORS[extensionForPath(relPath)] ?? null;
+}
+
+function matchesPreviewSignature(bytes: Buffer, relPath: string, preview: ArchiveFilePreview): boolean {
+  if (preview.preview_kind === "text") return !hasBinaryNul(bytes);
+  const descriptor = binaryPreviewDescriptor(relPath);
+  return descriptor?.content_type === preview.content_type && descriptor.preview_kind === preview.preview_kind
+    ? descriptor.matches(bytes)
+    : false;
+}
+
 export interface ExtractedFile {
   path: string;
   size: number;
@@ -231,6 +388,8 @@ export interface ExtractedFile {
   binary: boolean;
   /** True if the displayed content was sliced because the file exceeds the display cap. */
   truncated: boolean;
+  preview_kind: ArchiveFilePreviewKind;
+  content_type: string | null;
 }
 
 export interface ExtractResult {
@@ -259,70 +418,10 @@ export async function extractArchiveFiles(
   const displayCap = opts.maxFileBytes ?? MAX_DISPLAY_BYTES;
   const files: ExtractedFile[] = [];
   const violations: string[] = [];
-  let totalBytes = 0;
-  let fileCount = 0;
-  let oversize = false;
-  const ex = tarExtract();
-
-  await new Promise<void>((resolve, reject) => {
-    ex.on("entry", (header, stream, next) => {
-      const rawName = header.name ?? "";
-      const type = (header.type ?? "file") as string;
-
-      if (type === "symlink" || type === "link") {
-        violations.push(`symlink/hardlink rejected: ${rawName}`);
-        stream.on("end", next);
-        stream.resume();
-        return;
-      }
-      if (!SAFE_ENTRY_TYPES.has(type)) {
-        violations.push(`unsupported entry type '${type}': ${rawName}`);
-        stream.on("end", next);
-        stream.resume();
-        return;
-      }
-
-      const norm = normalizePosix(rawName);
-      if (norm.violation) {
-        violations.push(`${norm.violation}: ${rawName}`);
-        stream.on("end", next);
-        stream.resume();
-        return;
-      }
-
-      if (type === "directory") {
-        stream.on("end", next);
-        stream.resume();
-        return;
-      }
-      if (!norm.path) {
-        violations.push(`empty path: ${rawName}`);
-        stream.on("end", next);
-        stream.resume();
-        return;
-      }
-
-      fileCount += 1;
-      const size = header.size ?? 0;
-      totalBytes += size;
-      if (
-        size > MAX_FILE_BYTES ||
-        totalBytes > MAX_ARCHIVE_BYTES ||
-        fileCount > MAX_ENTRY_COUNT
-      ) {
-        oversize = true;
-      }
-
-      // Skip packaging junk (.git, .DS_Store, node_modules, __pycache__, *.pyc, …) the same
-      // way the packer excludes it — an uploaded macOS/IDE archive shouldn't clutter the explorer.
-      // Security size limits above still count excluded bytes and entries.
-      if (isExcluded(norm.path)) {
-        stream.on("end", next);
-        stream.resume();
-        return;
-      }
-
-      if (isTextPath(norm.path)) {
+  const counters = await walkArchive(
+    tar,
+    (entry, stream, next, reject) => {
+      if (isTextPath(entry.path)) {
         const chunks: Buffer[] = [];
         let read = 0;
         let sniffedBinary = false;
@@ -342,13 +441,14 @@ export async function extractArchiveFiles(
         stream.on("end", () => {
           files.push(
             sniffedBinary
-              ? { path: norm.path, size, content: null, binary: true, truncated: false }
+              ? { path: entry.path, size: entry.size, content: null, binary: true, truncated: false, preview_kind: "unsupported", content_type: null }
               : {
-                  path: norm.path,
-                  size,
+                  path: entry.path,
+                  size: entry.size,
                   content: Buffer.concat(chunks).toString("utf8"),
                   binary: false,
                   truncated: read > displayCap,
+                  ...previewForPath(entry.path),
                 },
           );
           next();
@@ -357,18 +457,126 @@ export async function extractArchiveFiles(
         return;
       }
 
-      // Binary by extension: drain the stream, count its size, never decode.
-      files.push({ path: norm.path, size, content: null, binary: true, truncated: false });
-      stream.on("end", next);
-      stream.resume();
-    });
-    ex.on("finish", () => resolve());
-    ex.on("error", reject);
-    ex.end(tar);
-  });
+      // Binary by extension: drain the stream, keep only a small signature window for
+      // preview classification, and never decode or buffer the file.
+      const preview = previewForPath(entry.path);
+      if (preview.preview_kind === "unsupported" || !preview.content_type) {
+        files.push({ path: entry.path, size: entry.size, content: null, binary: true, truncated: false, ...preview });
+        drainArchiveStream(stream, next);
+        return;
+      }
+
+      const chunks: Buffer[] = [];
+      let sniffed = 0;
+      stream.on("data", (c: Buffer) => {
+        if (sniffed >= BINARY_SNIFF_BYTES) return;
+        const slice = c.subarray(0, BINARY_SNIFF_BYTES - sniffed);
+        chunks.push(slice);
+        sniffed += slice.length;
+      });
+      stream.on("end", () => {
+        const previewable = matchesPreviewSignature(Buffer.concat(chunks), entry.path, preview);
+        files.push({
+          path: entry.path,
+          size: entry.size,
+          content: null,
+          binary: true,
+          truncated: false,
+          ...(previewable ? preview : { preview_kind: "unsupported" as const, content_type: null }),
+        });
+        next();
+      });
+      stream.on("error", reject);
+    },
+    (violation) => violations.push(violation),
+  );
 
   files.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
-  return { files, oversize, violations };
+  return { files, oversize: counters.oversize, violations };
+}
+
+export type ExtractArchiveFileContentResult =
+  | {
+      status: "ok";
+      path: string;
+      size: number;
+      bytes: Buffer;
+      preview_kind: Exclude<ArchiveFilePreviewKind, "unsupported">;
+      content_type: string;
+    }
+  | { status: "not_found" | "unsupported" | "invalid_path" | "oversize"; message: string };
+
+export async function extractArchiveFileContent(
+  tar: Buffer,
+  requestedPath: string,
+): Promise<ExtractArchiveFileContentResult> {
+  const normalizedRequest = requestedPath.replace(/\\/g, "/");
+  const wanted = normalizePosix(requestedPath);
+  if (wanted.violation || !wanted.path || wanted.path !== normalizedRequest) {
+    return { status: "invalid_path", message: "invalid file path" };
+  }
+
+  let result: ExtractArchiveFileContentResult | null = null;
+
+  await walkArchive(
+    tar,
+    (entry, stream, next, reject, counters) => {
+      if (counters.oversize && result === null) {
+        result = { status: "oversize", message: "archive entry exceeds size limit" };
+      }
+
+      if (result !== null || entry.path !== wanted.path) {
+        drainArchiveStream(stream, next);
+        return;
+      }
+
+      const preview = previewForPath(entry.path);
+      const previewKind = preview.preview_kind === "unsupported" ? null : preview.preview_kind;
+      const contentType = preview.content_type;
+      if (!previewKind || !contentType) {
+        result = { status: "unsupported", message: "file is not previewable" };
+        drainArchiveStream(stream, next);
+        return;
+      }
+
+      const chunks: Buffer[] = [];
+      let read = 0;
+      let tooLarge = false;
+      stream.on("data", (c: Buffer) => {
+        read += c.length;
+        if (read > MAX_FILE_BYTES) {
+          tooLarge = true;
+          return;
+        }
+        chunks.push(c);
+      });
+      stream.on("end", () => {
+        if (tooLarge) {
+          result = { status: "oversize", message: "archive entry exceeds size limit" };
+          next();
+          return;
+        }
+        const bytes = Buffer.concat(chunks);
+        if (!matchesPreviewSignature(bytes, entry.path, preview)) {
+          result = { status: "unsupported", message: "file is not previewable" };
+          next();
+          return;
+        }
+        result = {
+          status: "ok",
+          path: entry.path,
+          size: read,
+          bytes,
+          preview_kind: previewKind,
+          content_type: contentType,
+        };
+        next();
+      });
+      stream.on("error", reject);
+    },
+  );
+
+  return result ?? { status: "not_found", message: "file not found" };
 }
 
 export interface DirFile {
