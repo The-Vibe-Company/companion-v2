@@ -55,6 +55,10 @@ import urllib.parse  # noqa: E402
 import urllib.request  # noqa: E402
 
 
+def api_quote(value: str) -> str:
+    return urllib.parse.quote(str(value), safe="")
+
+
 def extract_package(zip_bytes: bytes, dest: Path) -> Path:
     """Extract a skill zip into `dest` and return the folder that holds SKILL.md at its root.
 
@@ -128,6 +132,80 @@ def existing_target(lock_records: dict[str, Any], skill_name: str, tool: str, sc
     return (False, None)
 
 
+def target_conflict(
+    skill_name: str,
+    tool: str,
+    scope: str,
+    registry: dict[str, Any],
+    project_root: Path | None,
+    prior_user: dict[str, Any],
+    prior_project: dict[str, Any],
+    force: bool,
+    include_checksum: bool,
+) -> tuple[Path | None, dict[str, Any] | None]:
+    """Classify whether a target can be safely replaced under the shared install policy."""
+    try:
+        target_dir = resolve_target_dir(tool, scope, skill_name, project_root, registry)
+    except SystemExit as exc:
+        row: dict[str, Any] = {"tool": tool, "scope": scope, "status": "error", "reason": str(exc), "path": None}
+        if include_checksum:
+            row["checksum"] = None
+        return None, row
+
+    if force or not target_dir.exists():
+        return target_dir, None
+
+    prior = prior_user if scope == "user" else prior_project
+    tracked, recorded = existing_target(prior, skill_name, tool, scope)
+    if not tracked:
+        row = {
+            "tool": tool,
+            "scope": scope,
+            "status": "skipped_untracked",
+            "reason": "an existing folder not tracked in the lockfile; pass --force to replace it",
+            "path": str(target_dir),
+        }
+        if include_checksum:
+            row["checksum"] = compute_dir_checksum(target_dir)
+        return target_dir, row
+
+    if recorded is not None:
+        current_checksum = compute_dir_checksum(target_dir)
+        if current_checksum != recorded:
+            row = {
+                "tool": tool,
+                "scope": scope,
+                "status": "skipped_customized",
+                "reason": "local_customizations: on-disk folder diverges from the lockfile; pass --force to overwrite",
+                "path": str(target_dir),
+            }
+            if include_checksum:
+                row["checksum"] = current_checksum
+            return target_dir, row
+
+    return target_dir, None
+
+
+def target_preflight_conflicts(
+    skill_name: str,
+    plan: list[tuple[str, str]],
+    registry: dict[str, Any],
+    project_root: Path | None,
+    prior_user: dict[str, Any],
+    prior_project: dict[str, Any],
+    force: bool,
+) -> list[dict[str, Any]]:
+    """Return blocking local target conflicts without mutating the target folders."""
+    conflicts: list[dict[str, Any]] = []
+    for tool, scope in plan:
+        _target_dir, conflict = target_conflict(
+            skill_name, tool, scope, registry, project_root, prior_user, prior_project, force, include_checksum=False
+        )
+        if conflict:
+            conflicts.append(conflict)
+    return conflicts
+
+
 def fan_out_install(
     package_dir: Path,
     skill_name: str,
@@ -141,43 +219,15 @@ def fan_out_install(
     """Deploy `package_dir` into each planned (tool, scope) target. Returns one result row each."""
     results: list[dict[str, Any]] = []
     for tool, scope in plan:
-        try:
-            target_dir = resolve_target_dir(tool, scope, skill_name, project_root, registry)
-        except SystemExit as exc:
-            results.append({"tool": tool, "scope": scope, "status": "error", "reason": str(exc), "path": None, "checksum": None})
+        target_dir, conflict = target_conflict(
+            skill_name, tool, scope, registry, project_root, prior_user, prior_project, force, include_checksum=True
+        )
+        if conflict:
+            results.append(conflict)
             continue
-
-        prior = prior_user if scope == "user" else prior_project
-        tracked, recorded = existing_target(prior, skill_name, tool, scope)
-        if target_dir.exists() and not force:
-            if not tracked:
-                # An existing folder Companion does not track (manually authored or installed another
-                # way). Never silently delete it; require --force.
-                results.append(
-                    {
-                        "tool": tool,
-                        "scope": scope,
-                        "status": "skipped_untracked",
-                        "reason": "an existing folder not tracked in the lockfile; pass --force to replace it",
-                        "path": str(target_dir),
-                        "checksum": compute_dir_checksum(target_dir),
-                    }
-                )
-                continue
-            # `recorded is None` means a tracked legacy install with no comparable folder checksum — it
-            # is Companion-managed, so update it; only a divergent comparable checksum blocks as customized.
-            if recorded is not None and compute_dir_checksum(target_dir) != recorded:
-                results.append(
-                    {
-                        "tool": tool,
-                        "scope": scope,
-                        "status": "skipped_customized",
-                        "reason": "local_customizations: on-disk folder diverges from the lockfile; pass --force to overwrite",
-                        "path": str(target_dir),
-                        "checksum": compute_dir_checksum(target_dir),
-                    }
-                )
-                continue
+        if target_dir is None:
+            results.append({"tool": tool, "scope": scope, "status": "error", "reason": "target directory could not be resolved", "path": None, "checksum": None})
+            continue
 
         # Isolate each target: a copy/remove/rename failure on one must not abort the fan-out, so every
         # successful target is still returned and recorded in the lockfile (no untracked partial installs).
@@ -200,8 +250,243 @@ def fan_out_install(
     return results
 
 
+def skill_from_row(skill_row: dict[str, Any], version_override: str | None = None) -> dict[str, Any]:
+    if not isinstance(skill_row, dict) or not skill_row.get("slug"):
+        fail("skill row is missing a slug")
+    slug = str(skill_row["slug"])
+    version = version_override or skill_row.get("current_version")
+    if not version:
+        fail(f"skill {slug!r} has no published version to install")
+    version = str(version)
+    current_version = skill_row.get("current_version")
+    record_checksum = skill_row.get("checksum") if current_version is not None and version == str(current_version) else None
+    metadata = skill_row.get("metadata") if isinstance(skill_row.get("metadata"), dict) else {}
+    return {
+        "name": slug,
+        "slug": slug,
+        "skillId": skill_row.get("id"),
+        "companionSkillId": metadata.get("companionSkillId"),
+        "version": version,
+        "checksum": record_checksum,
+    }
+
+
+def fetch_skill_node(api_url: str, token: str, slug: str, version_override: str | None = None) -> dict[str, Any]:
+    skill_row = api_get(api_url, token, f"/skills/{api_quote(slug)}")
+    if not isinstance(skill_row, dict) or not skill_row.get("slug"):
+        fail(f"skill {slug!r} not found in this workspace")
+    skill = skill_from_row(skill_row, version_override)
+    return {"slug": skill["slug"], "version": skill["version"], "skill": skill}
+
+
+def dependency_path(slug: str, version: str | None = None) -> str:
+    path = f"/skills/{api_quote(slug)}/dependencies"
+    if version:
+        path += f"?version={api_quote(version)}"
+    return path
+
+
+def build_install_plan(api_url: str, token: str, root_slug: str, root_version: str | None = None) -> dict[str, Any]:
+    """Return dependency-first install nodes and blockers for the root skill.
+
+    Dependencies are un-versioned in Companion. The requested root may use an explicit old version,
+    while dependencies are resolved and installed at their current published versions.
+    """
+    nodes: list[dict[str, Any]] = []
+    blockers: list[dict[str, Any]] = []
+    visited: set[str] = set()
+    visiting: list[str] = []
+
+    def visit(slug: str, version_override: str | None, required_by: str | None) -> None:
+        if slug in visited:
+            return
+        if slug in visiting:
+            blockers.append(
+                {
+                    "slug": slug,
+                    "requiredBy": required_by,
+                    "status": "cycle",
+                    "note": "local dependency traversal found a cycle",
+                    "canOpen": True,
+                }
+            )
+            return
+
+        visiting.append(slug)
+        node = fetch_skill_node(api_url, token, slug, version_override)
+        deps = api_get(api_url, token, dependency_path(node["slug"], version_override))
+        requires = deps.get("requires") if isinstance(deps, dict) else []
+        for dep in sorted((row for row in requires if isinstance(row, dict)), key=lambda row: str(row.get("slug") or "")):
+            dep_slug = str(dep.get("slug") or "")
+            status = str(dep.get("status") or "missing")
+            can_open = bool(dep.get("can_open"))
+            if status != "satisfied" or not can_open:
+                blockers.append(
+                    {
+                        "slug": dep_slug,
+                        "requiredBy": node["slug"],
+                        "status": status,
+                        "note": dep.get("note"),
+                        "canOpen": can_open,
+                    }
+                )
+                continue
+            visit(dep_slug, None, node["slug"])
+
+        visiting.pop()
+        visited.add(node["slug"])
+        nodes.append(node)
+
+    visit(root_slug, root_version, None)
+    root = next((node for node in nodes if node["slug"] == root_slug), None)
+    return {"root": root, "nodes": nodes, "blockers": blockers}
+
+
+def required_secret_names(manifest: dict[str, Any]) -> list[str]:
+    environment = manifest.get("environment") if isinstance(manifest, dict) else {}
+    secrets = environment.get("secrets") if isinstance(environment, dict) else {}
+    if not isinstance(secrets, dict):
+        return []
+    names: list[str] = []
+    for name, spec in secrets.items():
+        required = spec is not False if not isinstance(spec, dict) else spec.get("required", True) is True
+        if required:
+            names.append(str(name))
+    return sorted(names)
+
+
+def fetch_required_secrets(api_url: str, token: str, node: dict[str, Any]) -> list[dict[str, str]]:
+    files_response = api_get(api_url, token, f"/skills/{api_quote(node['slug'])}/versions/{api_quote(node['version'])}/files")
+    files = files_response.get("files") if isinstance(files_response, dict) else []
+    companion_file = next((file for file in files if isinstance(file, dict) and file.get("path") == "companion.json"), None)
+    if not companion_file:
+        return []
+    content = companion_file.get("content")
+    if content is None:
+        fail(f"cannot inspect companion.json for {node['slug']} {node['version']}: content was not returned")
+    try:
+        manifest = json.loads(str(content))
+    except json.JSONDecodeError as exc:
+        fail(f"cannot inspect companion.json for {node['slug']} {node['version']}: invalid JSON: {exc}")
+    return [{"slug": node["slug"], "version": node["version"], "secret": name} for name in required_secret_names(manifest)]
+
+
+def collect_required_secrets(api_url: str, token: str, nodes: list[dict[str, Any]]) -> list[dict[str, str]]:
+    required: list[dict[str, str]] = []
+    for node in nodes:
+        required.extend(fetch_required_secrets(api_url, token, node))
+    return required
+
+
+def preflight_target_conflicts(
+    nodes: list[dict[str, Any]],
+    plan: list[tuple[str, str]],
+    registry: dict[str, Any],
+    project_root: Path | None,
+    prior_user: dict[str, Any],
+    prior_project: dict[str, Any],
+    force: bool,
+) -> list[dict[str, Any]]:
+    conflicts: list[dict[str, Any]] = []
+    for node in nodes:
+        for conflict in target_preflight_conflicts(node["skill"]["name"], plan, registry, project_root, prior_user, prior_project, force):
+            conflicts.append({"slug": node["slug"], "version": node["version"], **conflict})
+    return conflicts
+
+
+def format_dependency_blockers(blockers: list[dict[str, Any]]) -> str:
+    lines = ["dependency preflight failed:"]
+    for blocker in blockers:
+        required_by = f" required by {blocker.get('requiredBy')}" if blocker.get("requiredBy") else ""
+        note = f" ({blocker.get('note')})" if blocker.get("note") else ""
+        lines.append(f"  - {blocker.get('slug')}{required_by}: {blocker.get('status')}{note}")
+    return "\n".join(lines)
+
+
+def format_required_secrets(required: list[dict[str, str]]) -> str:
+    lines = ["required secrets must be confirmed before install:"]
+    for row in required:
+        lines.append(f"  - {row['slug']} {row['version']}: {row['secret']}")
+    lines.append("rerun after confirmation with --confirm-required-secrets")
+    return "\n".join(lines)
+
+
+def format_target_conflicts(conflicts: list[dict[str, Any]]) -> str:
+    lines = ["local target preflight failed:"]
+    for conflict in conflicts:
+        lines.append(
+            f"  - {conflict.get('slug')} {conflict.get('tool')} ({conflict.get('scope')}): "
+            f"{conflict.get('status')} {conflict.get('path') or ''} {conflict.get('reason') or ''}".rstrip()
+        )
+    return "\n".join(lines)
+
+
+def fail_preflight(json_output: bool, message: str, **payload: Any) -> None:
+    if json_output:
+        print(json.dumps({"ok": False, "error": message, **payload}, indent=2, sort_keys=True))
+        raise SystemExit(2)
+    print(f"error: {message}", file=sys.stderr)
+    raise SystemExit(2)
+
+
+def install_node(
+    api_url: str,
+    token: str,
+    workspace_id: str | None,
+    node: dict[str, Any],
+    plan: list[tuple[str, str]],
+    registry: dict[str, Any],
+    project_root: Path | None,
+    prior_user: dict[str, Any],
+    prior_project: dict[str, Any],
+    force: bool,
+) -> list[dict[str, Any]]:
+    zip_bytes = api_download_bytes(api_url, token, f"/skills/{api_quote(node['slug'])}/versions/{api_quote(node['version'])}/package")
+    with tempfile.TemporaryDirectory(prefix="companion-install-") as tmp:
+        package_dir = extract_package(zip_bytes, Path(tmp))
+        results = fan_out_install(package_dir, node["skill"]["name"], plan, registry, project_root, prior_user, prior_project, force)
+
+    for row in results:
+        row["slug"] = node["slug"]
+        row["version"] = node["version"]
+
+    installed = [row for row in results if row["status"] == "installed"]
+    user_targets = [row for row in installed if row["scope"] == "user"]
+    project_targets = [row for row in installed if row["scope"] == "project"]
+    upsert_skill_lock_record(lockfile_path(), workspace_id, api_url, node["skill"], user_targets, relative_to=None)
+    if project_root is not None and project_targets:
+        upsert_skill_lock_record(project_lockfile_path(project_root), workspace_id, api_url, node["skill"], project_targets, relative_to=project_root)
+    return results
+
+
+def install_nodes(
+    api_url: str,
+    token: str,
+    workspace_id: str | None,
+    nodes: list[dict[str, Any]],
+    plan: list[tuple[str, str]],
+    registry: dict[str, Any],
+    project_root: Path | None,
+    prior_user: dict[str, Any],
+    prior_project: dict[str, Any],
+    force: bool,
+) -> dict[str, Any]:
+    all_results: list[dict[str, Any]] = []
+    completed: list[str] = []
+    skipped: list[str] = []
+    for index, node in enumerate(nodes):
+        results = install_node(api_url, token, workspace_id, node, plan, registry, project_root, prior_user, prior_project, force)
+        all_results.extend(results)
+        complete = bool(results) and len([row for row in results if row["status"] == "installed"]) == len(plan)
+        if not complete:
+            skipped = [later["slug"] for later in nodes[index + 1:]]
+            break
+        completed.append(node["slug"])
+    return {"targets": all_results, "completed": completed, "skipped": skipped}
+
+
 def report_install(api_url: str, token: str, slug: str, version: str, agent: str) -> dict[str, Any]:
-    url = f"{api_url.rstrip('/')}/skills/{urllib.parse.quote(slug)}/install"
+    url = f"{api_url.rstrip('/')}/skills/{api_quote(slug)}/install"
     body = json.dumps({"version": version, "agent": agent, "source": "agent"}).encode("utf-8")
     request = urllib.request.Request(
         url,
@@ -246,6 +531,11 @@ def main() -> None:
     parser.add_argument("--scope", choices=["user", "project", "both"], default="user", help="install scope")
     parser.add_argument("--project", help="project root for project-scope installs (defaults to the current repo root)")
     parser.add_argument("--force", action="store_true", help="overwrite locally customized targets")
+    parser.add_argument(
+        "--confirm-required-secrets",
+        action="store_true",
+        help="confirm that required secrets for the skill and its dependencies are already configured",
+    )
     parser.add_argument("--report", action="store_true", help="send the aggregate POST /skills/:slug/install report")
     parser.add_argument("--agent", default=os.environ.get("COMPANION_AGENT"), help="agent label for the install report")
     parser.add_argument("--json", action="store_true", help="print a machine-readable result")
@@ -260,32 +550,7 @@ def main() -> None:
     if "project" in scopes:
         project_root = Path(args.project).expanduser().resolve() if args.project else find_project_root()
 
-    skill_row = api_get(api_url, token, f"/skills/{urllib.parse.quote(args.slug)}")
-    if not isinstance(skill_row, dict) or not skill_row.get("slug"):
-        fail(f"skill {args.slug!r} not found in this workspace")
-    slug = str(skill_row["slug"])
-    # The skill folder is named by the slug (kebab, workspace-unique); the /skills/:slug row carries
-    # no separate `name`, and a skill's frontmatter name matches its slug.
-    skill_name = slug
-    version = args.version or skill_row.get("current_version")
-    if not version:
-        fail(f"skill {slug!r} has no published version to install")
-    version = str(version)
-    # The detail row's checksum is the CURRENT version's package checksum; it only matches when we are
-    # installing the current version. For an explicit older --version, leave it None rather than record
-    # a checksum that does not describe the package actually downloaded.
-    current_version = skill_row.get("current_version")
-    record_checksum = skill_row.get("checksum") if current_version is not None and version == str(current_version) else None
-    skill = {
-        "name": skill_name,
-        "slug": slug,
-        "skillId": skill_row.get("id"),
-        "companionSkillId": (skill_row.get("metadata") or {}).get("companionSkillId") if isinstance(skill_row.get("metadata"), dict) else None,
-        "version": version,
-        "checksum": record_checksum,
-    }
-
-    plan = plan_targets(tools, scopes, project_root)
+    install_target_plan = plan_targets(tools, scopes, project_root)
 
     # Resolve prior records through workspace_lock_entry so customization detection still works on
     # activeWorkspaceId-, legacy URL-, or flat-keyed lockfiles (not only workspace_id/api_url keys).
@@ -299,38 +564,80 @@ def main() -> None:
         if isinstance(raw_project, dict):
             prior_project = workspace_lock_entry(raw_project, workspace_id, api_url).get("skills", {}) or {}
 
-    zip_bytes = api_download_bytes(api_url, token, f"/skills/{urllib.parse.quote(slug)}/versions/{urllib.parse.quote(version)}/package")
+    install_plan = build_install_plan(api_url, token, args.slug, args.version)
+    if install_plan["blockers"]:
+        fail_preflight(
+            args.json,
+            format_dependency_blockers(install_plan["blockers"]),
+            blockers=install_plan["blockers"],
+        )
+    nodes = install_plan["nodes"]
+    if not nodes or not install_plan["root"]:
+        fail(f"skill {args.slug!r} not found in this workspace")
+    root = install_plan["root"]
 
-    with tempfile.TemporaryDirectory(prefix="companion-install-") as tmp:
-        package_dir = extract_package(zip_bytes, Path(tmp))
-        results = fan_out_install(package_dir, skill_name, plan, registry, project_root, prior_user, prior_project, args.force)
+    required_secrets = collect_required_secrets(api_url, token, nodes)
+    if required_secrets and not args.confirm_required_secrets:
+        fail_preflight(
+            args.json,
+            format_required_secrets(required_secrets),
+            requiredSecrets=required_secrets,
+        )
 
+    conflicts = preflight_target_conflicts(
+        nodes,
+        install_target_plan,
+        registry,
+        project_root,
+        prior_user,
+        prior_project,
+        args.force,
+    )
+    if conflicts:
+        fail_preflight(args.json, format_target_conflicts(conflicts), conflicts=conflicts)
+
+    install_result = install_nodes(
+        api_url,
+        token,
+        workspace_id,
+        nodes,
+        install_target_plan,
+        registry,
+        project_root,
+        prior_user,
+        prior_project,
+        args.force,
+    )
+    results = install_result["targets"]
     installed = [row for row in results if row["status"] == "installed"]
-    user_targets = [row for row in installed if row["scope"] == "user"]
-    project_targets = [row for row in installed if row["scope"] == "project"]
-    upsert_skill_lock_record(lockfile_path(), workspace_id, api_url, skill, user_targets, relative_to=None)
-    if project_root is not None and project_targets:
-        upsert_skill_lock_record(project_lockfile_path(project_root), workspace_id, api_url, skill, project_targets, relative_to=project_root)
+    root_results = [row for row in results if row.get("slug") == root["slug"]]
 
     # The workspace install report is a single aggregate row at this version. Only send it when EVERY
-    # planned target installed; a partial fan-out (a skipped or failed target) must not mark the skill
-    # current for the user while one of their tools/scopes is still behind or missing.
-    complete = bool(installed) and len(installed) == len(plan)
+    # planned target for the root and its dependency closure installed; a partial fan-out must not mark
+    # the root current while one of the local tools/scopes is still behind or missing.
+    complete = bool(nodes) and len(installed) == len(nodes) * len(install_target_plan)
     report = None
     report_withheld = args.report and not complete
     if args.report and complete:
         installed_tools = sorted({registry[row["tool"]].get("displayName", row["tool"]) for row in installed})
         agent_label = args.agent or ", ".join(installed_tools)
-        report = report_install(api_url, token, slug, version, agent_label)
+        report = report_install(api_url, token, root["slug"], root["version"], agent_label)
 
     summary = {
-        "slug": slug,
-        "version": version,
+        "slug": root["slug"],
+        "version": root["version"],
         "tools": tools,
         "scopes": scopes,
         "projectRoot": str(project_root) if project_root else None,
+        "installOrder": [node["slug"] for node in nodes],
+        "dependencies": [node["slug"] for node in nodes if node["slug"] != root["slug"]],
+        "requiredSecrets": required_secrets,
+        "confirmedRequiredSecrets": bool(required_secrets and args.confirm_required_secrets),
         "targets": results,
+        "rootTargets": root_results,
         "installedCount": len(installed),
+        "installedSkillCount": len(install_result["completed"]),
+        "skippedSkills": install_result["skipped"],
         "complete": complete,
         "report": report,
         "reportWithheld": report_withheld,
@@ -339,21 +646,31 @@ def main() -> None:
     if args.json:
         print(json.dumps(summary, indent=2, sort_keys=True))
     else:
-        print(f"Installed {slug} {version} into {len(installed)} target(s):")
-        for row in results:
-            marker = "ok" if row["status"] == "installed" else row["status"]
-            print(f"  - {row['tool']} ({row['scope']}): {marker} {row.get('path') or ''}".rstrip())
+        dep_count = len(summary["dependencies"])
+        suffix = f" plus {dep_count} dependenc{'y' if dep_count == 1 else 'ies'}" if dep_count else ""
+        print(f"Installed {root['slug']} {root['version']}{suffix} into {len(installed)} target(s):")
+        for node in nodes:
+            node_rows = [row for row in results if row.get("slug") == node["slug"]]
+            if not node_rows:
+                print(f"  {node['slug']} {node['version']}: skipped")
+                continue
+            print(f"  {node['slug']} {node['version']}:")
+            for row in node_rows:
+                marker = "ok" if row["status"] == "installed" else row["status"]
+                print(f"    - {row['tool']} ({row['scope']}): {marker} {row.get('path') or ''}".rstrip())
         skipped = [row for row in results if row["status"] in ("skipped_customized", "skipped_untracked")]
         if skipped:
             print("Some targets were left untouched (locally customized or untracked); pass --force to overwrite.")
         errored = [row for row in results if row["status"] == "error"]
         if errored:
             print(f"{len(errored)} target(s) failed to install; see the per-target results above.")
+        if install_result["skipped"]:
+            print(f"Skipped skill(s) after a failed dependency install: {', '.join(install_result['skipped'])}.")
         if report_withheld:
             print("Aggregate install report withheld: not every planned target installed. Resolve the "
                   "skipped/failed targets (or pass --force), then report once all targets are current.")
         elif not args.report:
-            print(f"Next: report the aggregate install with POST /skills/{slug}/install (version {version}).")
+            print(f"Next: report the aggregate install with POST /skills/{root['slug']}/install (version {root['version']}).")
 
 
 if __name__ == "__main__":

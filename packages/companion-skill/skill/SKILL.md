@@ -350,19 +350,28 @@ use right now. Resolve the target tools, confirm with the user, then fan out:
    There can be many projects on the machine, so project-scope installs are tracked per repo in
    `<repo>/.companion/skills.lock.json`. For a project-scope install, confirm the current repo is the
    intended one (project scope requires a repo root).
-3. **Check required secrets first** (the environment guard above), then run the deterministic fan-out:
+3. **Let the installer resolve dependencies and preflight everything.** `install_skill.py` reads the
+   root skill's dependency graph transitively, installs dependencies before the requested skill, and
+   stops before installing the requested skill if any dependency is missing, archived, cycle-blocked,
+   not openable, locally customized, untracked, or blocked on required secrets. Required secrets are
+   read from each package's `companion.json`; do not ask the user to paste values. After the user
+   confirms those secrets are already configured, pass `--confirm-required-secrets`.
 
    ```sh
    python3 scripts/install_skill.py <slug> --scope user            # all configured tools, user-global
    python3 scripts/install_skill.py <slug> --scope both            # user-global + the current repo
    python3 scripts/install_skill.py <slug> --tools claude-code,codex --json
+   python3 scripts/install_skill.py <slug> --confirm-required-secrets --report
    ```
 
-   It downloads the package once, deploys it into each `(tool, scope)` target, records every target in
-   the right lockfile, and prints a summary. A target whose on-disk folder was customized locally is
-   left untouched (`skipped_customized`) unless you pass `--force`, so an install never clobbers local
-   edits.
-4. **Report once.** After the fan-out, send a single aggregate `POST /skills/{slug}/install` with the
+   It checks the graph and local targets before package downloads, downloads each package only after
+   preflight passes, deploys every skill in dependency-first order into each `(tool, scope)` target,
+   records every target in the right lockfile, and prints a summary. A target whose on-disk folder was
+   customized locally is left untouched (`skipped_customized`) unless you pass `--force`, so an install
+   never clobbers local edits. If `--version` requests an older root version, dependencies still
+   resolve to their current published versions because Companion dependencies are not version-pinned.
+4. **Report once.** After the dependency-first fan-out, send a single aggregate
+   `POST /skills/{slug}/install` for the requested root skill with the
    installed version and an `agent` label listing the tools (for example `"Claude Code, Codex"`). The
    workspace tracks installs per user, not per tool, so this stays one call even across multiple tools
    and projects. (`install_skill.py --report` can send it for you.)
