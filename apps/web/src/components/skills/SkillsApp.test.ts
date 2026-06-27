@@ -724,6 +724,27 @@ describe("SkillsApp optimistic label assignment", () => {
     expect(queryMocks.unassignSkillLabel).not.toHaveBeenCalled();
   });
 
+  it("makes same-library folder targets visibly active while dragging a skill", async () => {
+    const { container } = await mountSkillsApp({ lib: "org", kind: "all" });
+    await flushEffects();
+
+    const source = skillRow(container, "loose-skill");
+    const target = folderRow(container, "growth");
+
+    await dispatchDnd(source, "dragstart");
+
+    expect(container.querySelector(".side")?.classList.contains("side--skill-drop")).toBe(true);
+    expect(target.classList.contains("lblrow--dropready")).toBe(true);
+
+    await dispatchDnd(target, "dragover");
+
+    expect(target.classList.contains("lblrow--dropok")).toBe(true);
+    expect(target.classList.contains("lblrow--dropready")).toBe(false);
+
+    await dispatchDnd(source, "dragend");
+    expect(container.querySelector(".side")?.classList.contains("side--skill-drop")).toBe(false);
+  });
+
   it("moves a skill out of the active folder when dropped from a folder view", async () => {
     const { container } = await mountSkillsApp(
       { lib: "org", kind: "label", label: "marketing" },

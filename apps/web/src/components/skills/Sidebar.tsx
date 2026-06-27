@@ -345,6 +345,7 @@ function LabelTreeRows({
         const dragging = drag?.kind === "label" && drag.lib === lib && drag.path === row.path;
         const dropOk = dropTarget?.kind === "label" && dropTarget.lib === lib && dropTarget.path === row.path;
         const dropJustDone = dropDone?.kind === "label" && dropDone.lib === lib && dropDone.path === row.path;
+        const dropReady = drag?.kind === "skill" && drag.lib === lib && !dropOk && !dropJustDone;
         const handleDragStart = (event: DragEvent<HTMLDivElement>) => {
           event.dataTransfer.effectAllowed = "move";
           event.dataTransfer.setData("text/plain", row.path);
@@ -372,6 +373,7 @@ function LabelTreeRows({
               "lblrow" +
               (active ? " lblrow--active" : "") +
               (dragging ? " lblrow--dragging" : "") +
+              (dropReady ? " lblrow--dropready" : "") +
               (dropOk ? " lblrow--dropok" : "") +
               (dropJustDone ? " lblrow--dropdone" : "")
             }
@@ -565,6 +567,7 @@ export function Sidebar({
 
   const rootDropOk = (lib: SkillsLibrary) => dropTarget?.kind === "root" && dropTarget.lib === lib;
   const rootDropDone = (lib: SkillsLibrary) => dropDone?.kind === "root" && dropDone.lib === lib;
+  const skillDropMode = drag?.kind === "skill";
   const rootDropProps = (lib: SkillsLibrary) => ({
     onDragOver: (event: DragEvent<HTMLDivElement>) => {
       if (!isRootDropValid(drag, lib)) return;
@@ -644,7 +647,7 @@ export function Sidebar({
     ) : null;
 
   return (
-    <aside className={"side" + (mobileOpen ? " side--mobile-open" : "")}>
+    <aside className={"side" + (mobileOpen ? " side--mobile-open" : "") + (skillDropMode ? " side--skill-drop" : "")}>
       <div className="side__brand">
         <button
           className="side__toggle"
