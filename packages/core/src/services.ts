@@ -2459,7 +2459,7 @@ function buildShareDependencyClosure(input: {
 
 /**
  * Resolve the Requires + Used by graph for one skill (optionally a specific version), with each
- * edge's live status. Every member can read every skill, so targets/dependents are always linkable.
+ * edge's live status. Invisible personal targets are reported as missing so reads do not leak them.
  */
 export async function getSkillDependencies(input: {
   actor: ActorContext;
@@ -2474,8 +2474,21 @@ export async function getSkillDependencies(input: {
 
   const graph = await loadDepGraph(database, input.orgId);
   const visibleBySlug = new Map(
-    (await listSkills({ actor: input.actor, orgId: input.orgId, includeArchived: true, database })).map((s) => [s.slug, s] as const),
+    (
+      await listSkills({
+        actor: input.actor,
+        orgId: input.orgId,
+        library: "accessible",
+        includeArchived: true,
+        database,
+      })
+    ).map((s) => [s.slug, s] as const),
   );
+  const installMeta = (row: SkillListRow | undefined) => ({
+    version: row?.current_version ?? null,
+    install_status: row?.install_status ?? "none",
+    installed_version: row?.installed_version ?? null,
+  });
 
   // Requires: edges declared by the selected (or current) version.
   const versions = await listSkillVersions({ actor: input.actor, orgId: input.orgId, slug: input.slug, database });
@@ -2500,6 +2513,7 @@ export async function getSkillDependencies(input: {
         .orderBy(asc(schema.skillVersionDependencies.dependsOnSlug))
     : [];
 
+  const directTargets: Array<{ target: DepGraphSkill; slug: string }> = [];
   const requires: SkillDependencyRow[] = requiresEdgeRows.map((row) => {
     const edge = makeDepEdge(graph, {
       skillId: skill.id,
@@ -2513,13 +2527,100 @@ export async function getSkillDependencies(input: {
     // A target the actor cannot read is reported as "missing" — same no-existence-leak behavior as
     // the publish preflight; the real status is only computed for visible targets.
     const status = canOpen ? depEdgeStatus(graph, skill.id, edge) : "missing";
+    if (target && targetRow) directTargets.push({ target, slug: displaySlug });
     return {
       slug: displaySlug,
       status,
       note: depNote(status, displaySlug, skill.slug),
       can_open: canOpen,
+      ...installMeta(targetRow),
+      depth: 0,
+      via: null,
     };
   });
+
+  const directSlugs = new Set(requires.map((row) => row.slug));
+  const seen = new Set<string>([skill.id]);
+  for (const row of requiresEdgeRows) {
+    const edge = makeDepEdge(graph, {
+      skillId: skill.id,
+      dependsOnSlug: row.dependsOnSlug,
+      dependsOnSkillId: row.dependsOnSkillId,
+    });
+    if (edge.target) seen.add(edge.target.id);
+  }
+
+  const queue: Array<{ id: string; slug: string; depth: number }> = [];
+  const queued = new Set<string>();
+  for (const { target, slug: targetSlug } of directTargets) {
+    if (queued.has(target.id) || target.archivedAt || !target.currentVersionId) continue;
+    queued.add(target.id);
+    queue.push({ id: target.id, slug: targetSlug, depth: 1 });
+  }
+
+  const missingTransitive = new Set<string>();
+  const transitive: SkillDependencyRow[] = [];
+  while (queue.length > 0) {
+    const parent = queue.shift()!;
+    const parentSkill = graph.byId.get(parent.id);
+    if (!parentSkill || parentSkill.archivedAt || !parentSkill.currentVersionId) continue;
+
+    for (const edge of graph.requiresBySkill.get(parent.id) ?? []) {
+      const depth = parent.depth + 1;
+      const target = edge.target;
+      if (!target) {
+        if (directSlugs.has(edge.declaredSlug) || missingTransitive.has(edge.declaredSlug)) continue;
+        missingTransitive.add(edge.declaredSlug);
+        transitive.push({
+          slug: edge.declaredSlug,
+          status: "missing",
+          note: depNote("missing", edge.declaredSlug, parent.slug),
+          can_open: false,
+          version: null,
+          install_status: "none",
+          installed_version: null,
+          depth,
+          via: parent.slug,
+        });
+        continue;
+      }
+      if (seen.has(target.id)) continue;
+      seen.add(target.id);
+
+      const targetRow = visibleBySlug.get(target.slug);
+      if (!targetRow) {
+        transitive.push({
+          slug: edge.declaredSlug,
+          status: "missing",
+          note: depNote("missing", edge.declaredSlug, parent.slug),
+          can_open: false,
+          version: null,
+          install_status: "none",
+          installed_version: null,
+          depth,
+          via: parent.slug,
+        });
+        continue;
+      }
+
+      const displaySlug = targetRow.slug;
+      const status = depEdgeStatus(graph, parent.id, edge);
+      transitive.push({
+        slug: displaySlug,
+        status,
+        note: depNote(status, displaySlug, parent.slug),
+        can_open: true,
+        ...installMeta(targetRow),
+        depth,
+        via: parent.slug,
+      });
+
+      if (!target.archivedAt && target.currentVersionId) {
+        queue.push({ id: target.id, slug: displaySlug, depth });
+      }
+    }
+  }
+  transitive.sort((a, b) => a.depth - b.depth || a.slug.localeCompare(b.slug));
 
   // Used by: other skills whose current version declares this skill as a dependency.
   const usedBy: SkillDependentRow[] = [];
@@ -2543,9 +2644,12 @@ export async function getSkillDependencies(input: {
     slug: skill.slug,
     version: versionRow?.version ?? skill.current_version,
     requires,
+    transitive,
     used_by: usedBy,
     requires_n: requires.length,
+    transitive_n: transitive.length,
     used_by_n: usedBy.length,
+    updates_n: [...requires, ...transitive].filter((row) => row.install_status === "update").length,
   };
 }
 

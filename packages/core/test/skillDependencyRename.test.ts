@@ -24,6 +24,7 @@ interface SkillRow {
 const source: SkillRow = { id: "00000000-0000-0000-0000-000000000001", slug: "web-archiver", currentVersionId: "version-source" };
 const renamedTarget: SkillRow = { id: "00000000-0000-0000-0000-000000000002", slug: "log-parser-renamed", currentVersionId: "version-target" };
 const reusedOldSlug: SkillRow = { id: "00000000-0000-0000-0000-000000000003", slug: "log-parser", currentVersionId: "version-reused" };
+const sharedHelper: SkillRow = { id: "00000000-0000-0000-0000-000000000004", slug: "shared-helper", currentVersionId: "version-helper" };
 
 interface DependencyEdge {
   skillId: string;
@@ -60,11 +61,25 @@ function versionFor(skill: SkillRow, version: string) {
   };
 }
 
-function fakeDb(opts: { includeRenamedTarget?: boolean; edgeOverride?: Partial<DependencyEdge> } = {}) {
+function fakeDb(opts: {
+  includeRenamedTarget?: boolean;
+  edgeOverride?: Partial<DependencyEdge>;
+  skills?: SkillRow[];
+  dependencyEdges?: DependencyEdge[];
+  versionOverrides?: Record<string, string>;
+  installedVersions?: Record<string, string | null>;
+} = {}) {
   const includeRenamedTarget = opts.includeRenamedTarget ?? true;
   const dependencyEdge: DependencyEdge = { ...edge, ...opts.edgeOverride };
-  const skills = [source, ...(includeRenamedTarget ? [renamedTarget] : []), reusedOldSlug];
-  const versions = [versionFor(source, "1.0.0"), versionFor(renamedTarget, "2.0.0"), versionFor(reusedOldSlug, "1.0.0")];
+  const dependencyEdges = opts.dependencyEdges ?? [dependencyEdge];
+  const skills = opts.skills ?? [source, ...(includeRenamedTarget ? [renamedTarget] : []), reusedOldSlug];
+  const installedVersions = new Map(Object.entries(opts.installedVersions ?? {}));
+  const versions = skills.map((skill) =>
+    versionFor(
+      skill,
+      opts.versionOverrides?.[skill.id] ?? (skill.id === renamedTarget.id ? "2.0.0" : "1.0.0"),
+    ),
+  );
 
   const rowsFor = (table: unknown, cols: Record<string, unknown> | undefined) => {
     if (table === schema.skills && cols && "share_token" in cols) {
@@ -92,7 +107,7 @@ function fakeDb(opts: { includeRenamedTarget?: boolean; edgeOverride?: Partial<D
           tools: [],
           star_count: 0,
           starred: false,
-          installed: false,
+          installed: installedVersions.has(s.id),
           archived_at: null,
           created_at: createdAt,
           updated_at: createdAt,
@@ -121,15 +136,18 @@ function fakeDb(opts: { includeRenamedTarget?: boolean; edgeOverride?: Partial<D
     }
     if (table === schema.skillVersionDependencies) {
       if (cols && "target_id" in cols) {
-        return [{ slug: dependencyEdge.dependsOnSlug, target_id: dependencyEdge.dependsOnSkillId }];
+        return dependencyEdges.map((d) => ({ slug: d.dependsOnSlug, target_id: d.dependsOnSkillId }));
       }
       if (cols && "targetId" in cols) {
-        return [{ slug: dependencyEdge.dependsOnSlug, targetId: dependencyEdge.dependsOnSkillId, skillId: dependencyEdge.skillId }];
+        return dependencyEdges.map((d) => ({ slug: d.dependsOnSlug, targetId: d.dependsOnSkillId, skillId: d.skillId }));
       }
-      return [dependencyEdge];
+      if (cols && "skillVersionId" in cols) {
+        return dependencyEdges;
+      }
+      return dependencyEdges.filter((d) => d.skillId === source.id);
     }
     if (table === schema.skillInstalls) {
-      return [];
+      return [...installedVersions.entries()].map(([skill_id, installed_version]) => ({ skill_id, installed_version }));
     }
     return [];
   };
@@ -225,6 +243,69 @@ describe("skill dependency reads after target rename", () => {
       slug: "log-parser",
       used_by: [],
     });
+  });
+
+  it("returns transitive dependencies once with the shortest via parent and install metadata", async () => {
+    const database = fakeDb({
+      skills: [source, renamedTarget, reusedOldSlug, sharedHelper],
+      dependencyEdges: [
+        edge,
+        {
+          skillId: source.id,
+          skillVersionId: source.currentVersionId,
+          dependsOnSlug: reusedOldSlug.slug,
+          dependsOnSkillId: reusedOldSlug.id,
+        },
+        {
+          skillId: renamedTarget.id,
+          skillVersionId: renamedTarget.currentVersionId,
+          dependsOnSlug: sharedHelper.slug,
+          dependsOnSkillId: sharedHelper.id,
+        },
+        {
+          skillId: reusedOldSlug.id,
+          skillVersionId: reusedOldSlug.currentVersionId,
+          dependsOnSlug: sharedHelper.slug,
+          dependsOnSkillId: sharedHelper.id,
+        },
+      ],
+      versionOverrides: {
+        [renamedTarget.id]: "2.0.0",
+        [sharedHelper.id]: "3.0.0",
+      },
+      installedVersions: {
+        [renamedTarget.id]: "1.0.0",
+        [sharedHelper.id]: "2.0.0",
+      },
+    });
+
+    const result = await getSkillDependencies({ actor, orgId: ORG, slug: "web-archiver", database });
+
+    expect(result.requires).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          slug: "log-parser-renamed",
+          version: "2.0.0",
+          install_status: "update",
+          installed_version: "1.0.0",
+          depth: 0,
+          via: null,
+        }),
+        expect.objectContaining({ slug: "log-parser", depth: 0, via: null }),
+      ]),
+    );
+    expect(result.transitive).toEqual([
+      expect.objectContaining({
+        slug: "shared-helper",
+        version: "3.0.0",
+        install_status: "update",
+        installed_version: "2.0.0",
+        depth: 2,
+        via: "log-parser-renamed",
+      }),
+    ]);
+    expect(result.transitive_n).toBe(1);
+    expect(result.updates_n).toBe(2);
   });
 
   it("normalizes a renamed dependency by stable id before republish", async () => {
