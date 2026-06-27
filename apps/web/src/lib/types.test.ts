@@ -25,6 +25,7 @@ function row(over: Partial<SkillListRow> = {}): SkillListRow {
     updater_name: "Uma Updater",
     updater_initials: "UU",
     updater_avatar_url: "https://example.com/uma.png",
+    modifiers: [],
     current_version: "1.0.0",
     license: null,
     compatibility: null,

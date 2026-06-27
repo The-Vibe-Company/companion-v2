@@ -26,6 +26,7 @@ const skill: SkillVM = {
   updaterName: "Ada Lovelace",
   updaterInitials: "AL",
   updaterAvatarUrl: null,
+  modifiers: [],
   tools: ["read_file"],
   requirements: [{ key: "OPENAI_API_KEY", type: "secret", required: true, note: "Required for model calls." }],
   compatibility: "Requires Node.js 22+",
