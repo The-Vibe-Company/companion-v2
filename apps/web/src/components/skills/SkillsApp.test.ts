@@ -318,7 +318,16 @@ function libraryHeader(container: HTMLElement, title: "My Skills" | "Organizatio
   return row;
 }
 
-function dndEvent(type: string): Event {
+function sidebarNav(container: HTMLElement): HTMLElement {
+  const nav = container.querySelector<HTMLElement>(".side__nav");
+  if (!nav) throw new Error("Could not find sidebar nav");
+  return nav;
+}
+
+function dndEvent(
+  type: string,
+  options: { clientX?: number; clientY?: number; relatedTarget?: EventTarget | null } = {},
+): Event {
   const event = new Event(type, { bubbles: true, cancelable: true });
   Object.defineProperty(event, "dataTransfer", {
     value: {
@@ -329,12 +338,19 @@ function dndEvent(type: string): Event {
       setData: vi.fn(),
     },
   });
+  Object.defineProperty(event, "clientX", { value: options.clientX ?? 1 });
+  Object.defineProperty(event, "clientY", { value: options.clientY ?? 1 });
+  if ("relatedTarget" in options) Object.defineProperty(event, "relatedTarget", { value: options.relatedTarget });
   return event;
 }
 
-async function dispatchDnd(node: HTMLElement, type: string) {
+async function dispatchDnd(
+  node: HTMLElement,
+  type: string,
+  options: { clientX?: number; clientY?: number; relatedTarget?: EventTarget | null } = {},
+) {
   act(() => {
-    node.dispatchEvent(dndEvent(type));
+    node.dispatchEvent(dndEvent(type, options));
   });
   await flushEffects();
 }
@@ -744,7 +760,7 @@ describe("SkillsApp optimistic label assignment", () => {
     expect(container.querySelector(".lblrow--dropready")).toBeNull();
     expect(container.querySelector(".lblrow--dropok")).toBeNull();
 
-    await dispatchDnd(target, "dragover");
+    await dispatchDnd(target, "dragenter");
 
     expect(target.classList.contains("lblrow--dropok")).toBe(true);
     expect(other.classList.contains("lblrow--dropok")).toBe(false);
@@ -765,7 +781,7 @@ describe("SkillsApp optimistic label assignment", () => {
     expect(queryFolderRow(container, "marketing/seo")).toBeNull();
 
     await dispatchDnd(source, "dragstart");
-    await dispatchDnd(target, "dragover");
+    await dispatchDnd(target, "dragenter");
 
     expect(target.classList.contains("lblrow--openpending")).toBe(true);
 
@@ -784,10 +800,13 @@ describe("SkillsApp optimistic label assignment", () => {
     expect(queryFolderRow(container, "marketing/seo")).not.toBeNull();
     expect(target.classList.contains("lblrow--openpending")).toBe(false);
 
+    await dispatchDnd(target, "drop");
+    expect(queryMocks.assignSkillLabel).toHaveBeenCalledWith("loose-skill", "marketing");
+
     await dispatchDnd(source, "dragend");
   });
 
-  it("cancels folder auto-expand when the skill drag leaves before the dwell delay", async () => {
+  it("keeps hover and dwell active through noisy internal dragleave events", async () => {
     const { container } = await mountSkillsApp({ lib: "org", kind: "all" });
     await flushEffects();
     vi.useFakeTimers();
@@ -796,10 +815,39 @@ describe("SkillsApp optimistic label assignment", () => {
     const target = folderRow(container, "marketing");
 
     await dispatchDnd(source, "dragstart");
-    await dispatchDnd(target, "dragover");
+    await dispatchDnd(target, "dragenter");
     expect(target.classList.contains("lblrow--openpending")).toBe(true);
 
-    await dispatchDnd(target, "dragleave");
+    await dispatchDnd(target, "dragleave", { relatedTarget: null });
+    expect(target.classList.contains("lblrow--dropok")).toBe(true);
+    expect(target.classList.contains("lblrow--openpending")).toBe(true);
+
+    act(() => {
+      vi.advanceTimersByTime(650);
+    });
+    await flushEffects();
+
+    expect(queryFolderRow(container, "marketing/seo")).not.toBeNull();
+
+    await dispatchDnd(source, "dragend");
+  });
+
+  it("cancels folder auto-expand when the skill drag moves to an empty sidebar area", async () => {
+    const { container } = await mountSkillsApp({ lib: "org", kind: "all" });
+    await flushEffects();
+    vi.useFakeTimers();
+
+    const source = skillRow(container, "loose-skill");
+    const target = folderRow(container, "marketing");
+
+    await dispatchDnd(source, "dragstart");
+    await dispatchDnd(target, "dragenter");
+    expect(target.classList.contains("lblrow--openpending")).toBe(true);
+
+    await dispatchDnd(sidebarNav(container), "dragover");
+    await flushEffects();
+
+    expect(target.classList.contains("lblrow--dropok")).toBe(false);
     expect(target.classList.contains("lblrow--openpending")).toBe(false);
 
     act(() => {

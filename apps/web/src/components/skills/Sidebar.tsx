@@ -32,9 +32,18 @@ function isRootDropValid(drag: DragItem | null, lib: SkillsLibrary): drag is Dra
   return labelParent(drag.path) !== null;
 }
 
-function dragLeaveStaysInside(event: DragEvent<HTMLElement>): boolean {
-  const related = event.relatedTarget;
-  return related instanceof Node && event.currentTarget.contains(related);
+function isSkillsLibrary(value: string | undefined): value is SkillsLibrary {
+  return value === "mine" || value === "org";
+}
+
+function dropSurfaceForTarget(target: EventTarget | null): HTMLElement | null {
+  return target instanceof Element ? target.closest<HTMLElement>("[data-skill-drop-kind]") : null;
+}
+
+function dragLeftBounds(event: DragEvent<HTMLElement>): boolean {
+  const rect = event.currentTarget.getBoundingClientRect();
+  if (rect.width === 0 && rect.height === 0) return false;
+  return event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom;
 }
 
 /** A `position: fixed` popover anchored at the cursor, clamped to the viewport (the `.side__nav`
@@ -368,6 +377,15 @@ function LabelTreeRows({
     if (openPendingPath && expanded.has(openPendingPath)) clearDwellOpen();
   }, [clearDwellOpen, expanded, openPendingPath]);
 
+  useEffect(() => {
+    if (
+      openPendingPath &&
+      (dropTarget?.kind !== "label" || dropTarget.lib !== lib || dropTarget.path !== openPendingPath)
+    ) {
+      clearDwellOpen();
+    }
+  }, [clearDwellOpen, dropTarget, lib, openPendingPath]);
+
   const labelIcon = (row: TreeRow): string => {
     if (row.icon) return row.icon;
     if (row.hasChildren) return expanded.has(row.path) ? "folder-open" : "folder";
@@ -391,12 +409,13 @@ function LabelTreeRows({
         const dropOk = dropTarget?.kind === "label" && dropTarget.lib === lib && dropTarget.path === row.path;
         const dropJustDone = dropDone?.kind === "label" && dropDone.lib === lib && dropDone.path === row.path;
         const openPending = openPendingPath === row.path && dropOk && drag?.kind === "skill";
+        const forceDropIconColor = dropOk || openPending || dropJustDone;
         const handleDragStart = (event: DragEvent<HTMLDivElement>) => {
           event.dataTransfer.effectAllowed = "move";
           event.dataTransfer.setData("text/plain", row.path);
           onDragStart({ kind: "label", lib, path: row.path, leaf: row.leafName });
         };
-        const handleDragOver = (event: DragEvent<HTMLDivElement>) => {
+        const handleDragHover = (event: DragEvent<HTMLDivElement>) => {
           if (!isLabelDropValid(drag, lib, row.path)) return;
           event.preventDefault();
           event.dataTransfer.dropEffect = "move";
@@ -433,14 +452,12 @@ function LabelTreeRows({
               onDropTarget(null);
               onDragEnd();
             }}
-            onDragOver={handleDragOver}
-            onDragLeave={(event) => {
-              if (!dragLeaveStaysInside(event)) {
-                clearDwellOpen();
-                onDropTarget(null);
-              }
-            }}
+            onDragEnter={handleDragHover}
+            onDragOver={handleDragHover}
             onDrop={handleDrop}
+            data-skill-drop-kind="label"
+            data-skill-drop-lib={lib}
+            data-skill-drop-path={row.path}
             style={{ paddingLeft: 8 + row.depth * 14 }}
           >
             {row.hasChildren ? (
@@ -466,7 +483,7 @@ function LabelTreeRows({
               }}
               title={row.path}
             >
-              <span className="lblrow__ico" style={row.color ? { color: row.color } : undefined}>
+              <span className="lblrow__ico" style={row.color && !forceDropIconColor ? { color: row.color } : undefined}>
                 <Icon name={labelIcon(row)} size={15} />
               </span>
               <span className="lblrow__name">{row.displayName ?? row.leafName}</span>
@@ -620,15 +637,50 @@ export function Sidebar({
   const rootDropOk = (lib: SkillsLibrary) => dropTarget?.kind === "root" && dropTarget.lib === lib;
   const rootDropDone = (lib: SkillsLibrary) => dropDone?.kind === "root" && dropDone.lib === lib;
   const skillDropMode = drag?.kind === "skill";
+
+  const dropTargetForSurface = useCallback(
+    (target: EventTarget | null): DropTarget | null => {
+      const surface = dropSurfaceForTarget(target);
+      if (!surface) return null;
+      const lib = surface.dataset.skillDropLib;
+      if (!isSkillsLibrary(lib)) return null;
+      if (surface.dataset.skillDropKind === "root") return isRootDropValid(drag, lib) ? { lib, kind: "root" } : null;
+      if (surface.dataset.skillDropKind !== "label") return null;
+      const path = surface.dataset.skillDropPath;
+      return path && isLabelDropValid(drag, lib, path) ? { lib, kind: "label", path } : null;
+    },
+    [drag],
+  );
+
+  const clearDropTargetIfOutsideSurface = useCallback(
+    (event: DragEvent<HTMLElement>) => {
+      if (!drag) return;
+      if (dropTargetForSurface(event.target)) return;
+      setDropTarget(null);
+    },
+    [drag, dropTargetForSurface],
+  );
+
+  const clearDropTargetIfOutsideNav = useCallback(
+    (event: DragEvent<HTMLElement>) => {
+      if (!drag || !dragLeftBounds(event)) return;
+      setDropTarget(null);
+    },
+    [drag],
+  );
+
   const rootDropProps = (lib: SkillsLibrary) => ({
-    onDragOver: (event: DragEvent<HTMLDivElement>) => {
+    onDragEnter: (event: DragEvent<HTMLDivElement>) => {
       if (!isRootDropValid(drag, lib)) return;
       event.preventDefault();
       event.dataTransfer.dropEffect = "move";
       setDropTarget({ lib, kind: "root" });
     },
-    onDragLeave: (event: DragEvent<HTMLDivElement>) => {
-      if (!dragLeaveStaysInside(event)) setDropTarget(null);
+    onDragOver: (event: DragEvent<HTMLDivElement>) => {
+      if (!isRootDropValid(drag, lib)) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "move";
+      setDropTarget({ lib, kind: "root" });
     },
     onDrop: (event: DragEvent<HTMLDivElement>) => {
       if (!isRootDropValid(drag, lib)) return;
@@ -640,6 +692,8 @@ export function Sidebar({
       flashDropDone({ lib, kind: "root" });
       onDragEnd();
     },
+    "data-skill-drop-kind": "root",
+    "data-skill-drop-lib": lib,
   });
 
   const inWorkspace = !localActive && !archivedActive && selection !== null;
@@ -726,7 +780,12 @@ export function Sidebar({
           <Icon name="search" size={14} />
         </button>
       </div>
-      <nav className="side__nav" aria-label="Primary">
+      <nav
+        className="side__nav"
+        aria-label="Primary"
+        onDragOver={clearDropTargetIfOutsideSurface}
+        onDragLeave={clearDropTargetIfOutsideNav}
+      >
         {/* ===== MY SKILLS ===== */}
         <div
           className={
