@@ -745,7 +745,9 @@ returns `{ "ok": true }`. Deleting a folder only unfiles its skills; it never de
 Inspect a skill's dependency graph with `GET /skills/$SLUG/dependencies` if you are unsure what it
 pulls in or what depends on it — dependencies are independent of labels. Dependency reads use the
 stable target skill id when available, so a renamed dependency remains valid and appears under its
-current slug.
+current slug. The response includes direct `requires[]`, deduplicated `transitive[]` dependencies with
+`via` provenance, and per-dependency `install_status` so agents can spot dependencies that need an
+update.
 
 ### Manage skill API calls
 
@@ -768,7 +770,8 @@ Allowed skills API tasks:
 - Rename a skill with `POST /skills/$SLUG/rename` only after explicit user confirmation. After
   success, update local `SKILL.md` and `companion.json.name` to the returned slug while preserving
   `metadata.companionSkillId`.
-- Inspect a skill's dependency graph with `GET /skills/$SLUG/dependencies`.
+- Inspect a skill's dependency graph with `GET /skills/$SLUG/dependencies`, including transitive
+  dependencies and dependency update status.
 - Archive or restore a skill with `POST /skills/$SLUG/archive` and `POST /skills/$SLUG/restore`
   (any member can do this).
 - Read current published metadata with `GET /skills/$SLUG/download` (its `dependencies` array lists

@@ -34,6 +34,16 @@ export const skillDependencyRowSchema = z.object({
   note: z.string().nullable(),
   /** True when the target exists (the slug links to its detail). */
   can_open: z.boolean(),
+  /** Current published version of the target skill, when visible. */
+  version: z.string().nullable().default(null),
+  /** Caller install state for the target skill: none, installed, or update available. */
+  install_status: localSkillStatusSchema.default("none"),
+  /** Version the caller recorded installing, when available. */
+  installed_version: z.string().nullable().default(null),
+  /** 0 for direct Requires rows; >=1 for transitive dependency rows. */
+  depth: z.number().int().nonnegative().default(0),
+  /** Parent slug that pulled this dependency in; null for direct Requires rows. */
+  via: z.string().nullable().default(null),
 });
 export type SkillDependencyRow = z.infer<typeof skillDependencyRowSchema>;
 
@@ -52,9 +62,12 @@ export const skillDependenciesResponseSchema = z.object({
   slug: z.string(),
   version: z.string().nullable(),
   requires: z.array(skillDependencyRowSchema),
+  transitive: z.array(skillDependencyRowSchema).default([]),
   used_by: z.array(skillDependentRowSchema),
   requires_n: z.number().int().nonnegative(),
+  transitive_n: z.number().int().nonnegative().default(0),
   used_by_n: z.number().int().nonnegative(),
+  updates_n: z.number().int().nonnegative().default(0),
 });
 export type SkillDependenciesResponse = z.infer<typeof skillDependenciesResponseSchema>;
 

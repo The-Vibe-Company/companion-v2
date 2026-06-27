@@ -353,7 +353,8 @@ slug-keyed detail route.
   `GET /v1/skills/:slug/comments/:commentId/images/:imageId` (serve an attachment, membership-gated), and
   `PATCH /v1/skills/:slug/comments/:id` (deprecate / restore a thread).
   Dependencies & archive: `GET /v1/skills/:slug/dependencies?version=` (the Requires + Used by graph
-  with live statuses), `POST /v1/skills/:slug/archive` (optional `{reason}`) and
+  with live statuses, dependency install/update metadata, and a deduplicated transitive dependency
+  list with `depth` + `via` provenance), `POST /v1/skills/:slug/archive` (optional `{reason}`) and
   `POST /v1/skills/:slug/restore`, and `GET /v1/skills?archived=true` (the Archived view). `POST
   /v1/skills` accepts declared `dependency` fields and, on `action=validate`, returns a
   `dependency_plan`; an unresolved-dependency publish returns 422 with that plan.

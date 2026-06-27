@@ -28,8 +28,80 @@ describe("skill dependency contracts", () => {
     });
     expect(parsed.requires).toHaveLength(2);
     expect(parsed.requires[1]!.status).toBe("missing");
+    expect(parsed.requires[0]!).toMatchObject({
+      version: null,
+      install_status: "none",
+      installed_version: null,
+      depth: 0,
+      via: null,
+    });
+    expect(parsed.transitive).toEqual([]);
+    expect(parsed.transitive_n).toBe(0);
+    expect(parsed.updates_n).toBe(0);
     expect("owner_kind" in parsed.requires[0]!).toBe(false);
     expect("owner_kind" in parsed.used_by[0]!).toBe(false);
+  });
+
+  it("parses transitive dependencies and dependency install update metadata", () => {
+    const parsed = skillDependenciesResponseSchema.parse({
+      slug: "web-archiver",
+      version: "0.4.2",
+      requires: [
+        {
+          slug: "log-parser",
+          status: "satisfied",
+          note: null,
+          can_open: true,
+          version: "2.1.0",
+          install_status: "update",
+          installed_version: "2.0.0",
+          depth: 0,
+          via: null,
+        },
+      ],
+      transitive: [
+        {
+          slug: "html-sanitize",
+          status: "satisfied",
+          note: null,
+          can_open: true,
+          version: "1.3.0",
+          install_status: "installed",
+          installed_version: "1.3.0",
+          depth: 2,
+          via: "log-parser",
+        },
+      ],
+      used_by: [],
+      requires_n: 1,
+      transitive_n: 1,
+      used_by_n: 0,
+      updates_n: 1,
+    });
+
+    expect(parsed.requires[0]!.install_status).toBe("update");
+    expect(parsed.requires[0]!.installed_version).toBe("2.0.0");
+    expect(parsed.transitive[0]!).toMatchObject({
+      slug: "html-sanitize",
+      version: "1.3.0",
+      depth: 2,
+      via: "log-parser",
+    });
+    expect(parsed.transitive_n).toBe(1);
+    expect(parsed.updates_n).toBe(1);
+  });
+
+  it("rejects an invalid dependency install status", () => {
+    expect(() =>
+      skillDependenciesResponseSchema.parse({
+        slug: "x",
+        version: null,
+        requires: [{ slug: "y", status: "satisfied", note: null, can_open: true, install_status: "bogus" }],
+        used_by: [],
+        requires_n: 1,
+        used_by_n: 0,
+      }),
+    ).toThrow();
   });
 
   it("rejects a removed version-based status", () => {

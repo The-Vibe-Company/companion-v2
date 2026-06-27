@@ -329,7 +329,13 @@ in `upload` first, in topological order.
 `GET /skills/{slug}/dependencies?version=` returns the resolved Requires + Used by graph. Each edge
 keeps a live status (`satisfied` / `missing` / `archived` / `cycle`). Dependency reads use the stable
 target skill id when the server has one, so a renamed dependency continues to resolve and is shown
-under its current slug.
+under its current slug. `requires[]` contains direct dependencies only. `transitive[]` contains
+deduplicated dependencies of dependencies, with `depth` (graph distance from the root skill) and
+`via` (the parent slug that pulled the row in). Dependency rows also include `version` (current
+published version), `install_status` (`none` / `installed` / `update`), and `installed_version` for
+the caller. `install_status: "update"` means the caller's recorded install is behind the current
+published dependency closure, matching the Skills list signal. The response counters include
+`requires_n`, `transitive_n`, `used_by_n`, and `updates_n`.
 
 Archiving hides a skill from the normal lists but keeps it viewable, restorable, and downloadable
 while a published version still references it. `POST /skills/{slug}/archive` accepts an optional
