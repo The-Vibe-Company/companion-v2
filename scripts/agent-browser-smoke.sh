@@ -9,6 +9,10 @@ SMOKE_EMAIL="${BROWSER_SMOKE_EMAIL:-$DEFAULT_SMOKE_EMAIL}"
 SMOKE_PASSWORD="${BROWSER_SMOKE_PASSWORD:-$DEFAULT_SMOKE_PASSWORD}"
 SMOKE_SKILL="incident-summary"
 SMOKE_SKILL_DIR=""
+SMOKE_PROFILE=""
+# Filed under a NESTED label so the sidebar has a collapsed parent ("engineering") with a child
+# ("engineering/tools") — required to exercise the 650ms folder dwell auto-open during a drag.
+SMOKE_SKILL_LABEL="engineering/tools"
 
 log() {
   printf '[agent-browser-smoke] %s\n' "$*"
@@ -88,6 +92,81 @@ assert_no_browser_errors() {
   fi
 }
 
+# Assert a JS expression evaluates to boolean true in the page. We query the DOM AFTER a real
+# action, so production's own logic is under test — never the value we fed in.
+assert_eval_true() {
+  local expr="$1" msg="$2" result
+  result="$(agent-browser eval "$expr" || true)"
+  if [ "$result" != "true" ]; then
+    printf '[agent-browser-smoke] %s (eval %s => %s)\n' "$msg" "$expr" "$result" >&2
+    body_text >&2 || true
+    exit 1
+  fi
+}
+
+# Center point (x y) of an element's bounding box, from real layout.
+box_center() {
+  agent-browser get box "$1" | awk '/^x:/{x=$2}/^y:/{y=$2}/^width:/{w=$2}/^height:/{h=$2}END{printf "%d %d\n", x + w / 2, y + h / 2}'
+}
+
+# Ground truth (independent of the browser): does the skill now carry `label` directly?
+assert_skill_filed_under() {
+  local label="$1" info_json filed
+  if ! info_json="$(pnpm --silent --filter @companion/cli dev --json skills info "$SMOKE_SKILL" --profile "$SMOKE_PROFILE" 2>/dev/null)"; then
+    printf '[agent-browser-smoke] Could not read skill info to confirm the drop\n' >&2
+    exit 1
+  fi
+  filed="$(printf '%s' "$info_json" | node -e 'let s="";process.stdin.on("data",d=>s+=d);process.stdin.on("end",()=>{const j=JSON.parse(s);const ls=Array.isArray(j.labels)?j.labels:[];process.stdout.write(ls.includes(process.argv[1])?"yes":"no");})' "$label")"
+  if [ "$filed" != "yes" ]; then
+    printf '[agent-browser-smoke] Drop did not file %s under "%s". Skill info: %s\n' "$SMOKE_SKILL" "$label" "$info_json" >&2
+    exit 1
+  fi
+}
+
+# Real-mouse pointer drag: skill row -> sidebar folder. This is the assertion the prior native-DnD
+# attempts could never make truthfully — CDP mouse input drives genuine pointer events, so if the
+# drop-target hover, the 650ms dwell auto-open, or the drop ever broke for a real user, this fails.
+drag_and_drop_smoke() {
+  log "Checking real-mouse pointer drag (skill -> folder)"
+  agent-browser open "$APP_URL/skills?lib=org"
+  wait_for_skills
+
+  local src_sel dst_sel child_sel sx sy dx dy
+  src_sel="button[aria-label=\"Open skill ${SMOKE_SKILL}\"]"
+  dst_sel='[data-skill-drop-kind="label"][data-skill-drop-path="engineering"]'
+  child_sel='[data-skill-drop-path="engineering/tools"]'
+
+  assert_eval_true "!!document.querySelector('$dst_sel')" "engineering folder row not found"
+  assert_eval_true "!document.querySelector('$child_sel')" "engineering should start collapsed"
+
+  read -r sx sy < <(box_center "$src_sel")
+  read -r dx dy < <(box_center "$dst_sel")
+
+  # Press on the skill, cross the 4px threshold, then step the cursor onto the folder.
+  agent-browser mouse move "$sx" "$sy"
+  agent-browser mouse down left
+  agent-browser mouse move "$((sx + 8))" "$((sy + 8))"
+  agent-browser mouse move "$(((sx + dx) / 2))" "$(((sy + dy) / 2))"
+  agent-browser mouse move "$dx" "$dy"
+  agent-browser wait 120
+
+  assert_eval_true "document.querySelector('$dst_sel').classList.contains('lblrow--dropok')" \
+    "engineering did not highlight (.lblrow--dropok) under a real-mouse drag"
+  assert_eval_true "document.querySelectorAll('.lblrow--dropok').length === 1" \
+    "expected exactly one highlighted folder during the drag"
+
+  # Hold over the closed parent: the 650ms dwell must reveal its child folder.
+  agent-browser wait 800
+  assert_eval_true "!!document.querySelector('$child_sel')" \
+    "the 650ms dwell did not auto-open the engineering folder"
+
+  # Drop, then confirm the model actually changed (not just the 1-frame .lblrow--dropdone flash).
+  agent-browser mouse up left
+  agent-browser wait 400
+  assert_skill_filed_under "engineering"
+  assert_no_browser_errors
+}
+
 api_url() {
   if [ -n "${COMPANION_API_URL:-}" ]; then
     printf '%s\n' "${COMPANION_API_URL%/}"
@@ -113,6 +192,7 @@ prepare_fixtures() {
   api="$(api_url)"
   profile="browser-smoke-${APP_URL##*:}"
   profile="${profile%%/*}"
+  SMOKE_PROFILE="$profile"
 
   log "Preparing smoke account and skill fixture against $api"
   pnpm --filter @companion/cli dev login \
@@ -132,7 +212,7 @@ prepare_fixtures() {
 
   local push_output
   if ! push_output="$(pnpm --filter @companion/cli dev skills push "$SMOKE_SKILL_DIR" \
-    --label engineering \
+    --label "$SMOKE_SKILL_LABEL" \
     --profile "$profile" 2>&1)"; then
     if ! printf '%s' "$push_output" | grep -Fi "version already exists" >/dev/null; then
       printf '%s\n' "$push_output" >&2
@@ -259,6 +339,8 @@ assert_body_contains "$SMOKE_SKILL"
 assert_body_contains "Install skill"
 agent-browser open "$APP_URL/skills?lib=org"
 wait_for_skills
+
+drag_and_drop_smoke
 
 log "Checking upload dialog opens"
 agent-browser find role button click --name "Upload skill"

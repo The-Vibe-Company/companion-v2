@@ -1,40 +1,54 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type PointerEvent } from "react";
 import type { LabelColor, LabelIcon } from "@companion/contracts";
 import { LABEL_COLORS, LABEL_ICONS, labelDisplayNameToPath } from "@companion/contracts";
 import { Icon } from "../Icon";
 import { OrgSwitcher } from "../org/OrgSwitcher";
 import type { OrgVM } from "@/lib/types";
 import type { SkillsLibrary } from "./route";
-import type { TreeRow } from "./SkillsApp";
+import type { ResolvedTarget } from "./dragGeometry";
+import type { DragItem, TreeRow } from "./SkillsApp";
 
 type SidebarSelection = { lib: SkillsLibrary; kind: "all" | "starred" | "installed" | "label"; label?: string } | null;
+type MoveTarget = { path: string; label: string };
+
+function labelParent(path: string): string | null {
+  const i = path.lastIndexOf("/");
+  return i === -1 ? null : path.slice(0, i);
+}
 
 /** A `position: fixed` popover anchored at the cursor, clamped to the viewport (the `.side__nav`
  * scroll container would clip an absolutely-positioned menu — see the viewbar-clipping memory). */
 function LabelMenu({
   row,
   pos,
+  moveTargets,
   onClose,
   onSetColor,
   onSetIcon,
   onAddSublabel,
+  onMove,
   onRename,
   onDelete,
 }: {
   row: TreeRow;
   pos: { x: number; y: number };
+  moveTargets: MoveTarget[];
   onClose: () => void;
   onSetColor: (path: string, color: LabelColor | null) => void;
   onSetIcon: (path: string, icon: LabelIcon | null) => void;
   onAddSublabel: (parentPath: string) => void;
+  onMove: (targetParent: string | null) => void;
   onRename: (from: string, to: string, displayName?: string) => void;
   onDelete: (path: string) => void;
 }) {
   const menuRef = useRef<HTMLDivElement>(null);
   const [renaming, setRenaming] = useState(false);
+  const [moving, setMoving] = useState(false);
   const rowLabel = row.displayName ?? row.leafName;
+  const parentPath = labelParent(row.path);
+  const canMove = parentPath !== null || moveTargets.length > 0;
   const [renameValue, setRenameValue] = useState(rowLabel);
   const renameInputRef = useRef<HTMLInputElement>(null);
   const commitRename = () => {
@@ -66,6 +80,10 @@ function LabelMenu({
     el.style.left = `${left}px`;
     el.style.top = `${top}px`;
   }, [pos]);
+  useEffect(() => {
+    setMoving(false);
+    setRenaming(false);
+  }, [row.path]);
   useEffect(() => {
     const onDown = (e: MouseEvent) => {
       if (menuRef.current && !menuRef.current.contains(e.target as Node)) onClose();
@@ -176,6 +194,63 @@ function LabelMenu({
         </span>
         <span className="menu__label">Add sublabel</span>
       </button>
+      {canMove && (
+        <>
+          <button
+            type="button"
+            className={"menu__item" + (moving ? " is-sel" : "")}
+            role="menuitem"
+            aria-label={`Move ${row.path}`}
+            aria-expanded={moving}
+            onClick={() => setMoving((value) => !value)}
+          >
+            <span className="ico">
+              <Icon name="corner-down-right" size={14} />
+            </span>
+            <span className="menu__label">Move to...</span>
+            <span className="menu__desc">{moving ? "Hide" : "Choose"}</span>
+          </button>
+          {moving && (
+            <div className="lblmenu__move" role="group" aria-label={`Move ${row.path} to`}>
+              {parentPath !== null && (
+                <button
+                  type="button"
+                  className="menu__item"
+                  onClick={() => {
+                    onClose();
+                    onMove(null);
+                  }}
+                  aria-label={`Move ${row.path} to top level`}
+                >
+                  <span className="ico">
+                    <Icon name="folder" size={14} />
+                  </span>
+                  <span className="menu__label">Top level</span>
+                  <span className="menu__desc">Root</span>
+                </button>
+              )}
+              {moveTargets.map((target) => (
+                <button
+                  key={target.path}
+                  type="button"
+                  className="menu__item"
+                  onClick={() => {
+                    onClose();
+                    onMove(target.path);
+                  }}
+                  aria-label={`Move ${row.path} to ${target.path}`}
+                >
+                  <span className="ico">
+                    <Icon name="folder" size={14} />
+                  </span>
+                  <span className="menu__label">{target.label}</span>
+                  <span className="menu__desc">{target.path}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </>
+      )}
       <button
         type="button"
         className="menu__item menu__item--danger"
@@ -196,19 +271,31 @@ function LabelMenu({
 
 /** The folder rows of one library's tree (chevron/leaf, colored icon, name, count, options menu). */
 function LabelTreeRows({
+  lib,
   rows,
   expanded,
   activePath,
+  drag,
+  hovered,
+  openPendingPath,
+  dropDone,
   onToggleExpand,
   onSelect,
   onOpenMenu,
+  onStartDrag,
 }: {
+  lib: SkillsLibrary;
   rows: TreeRow[];
   expanded: Set<string>;
   activePath: string | null;
+  drag: DragItem | null;
+  hovered: ResolvedTarget | null;
+  openPendingPath: string | null;
+  dropDone: ResolvedTarget | null;
   onToggleExpand: (path: string) => void;
   onSelect: (path: string) => void;
   onOpenMenu: (row: TreeRow, pos: { x: number; y: number }) => void;
+  onStartDrag: (item: DragItem, e: PointerEvent<HTMLElement>) => void;
 }) {
   const labelIcon = (row: TreeRow): string => {
     if (row.icon) return row.icon;
@@ -229,8 +316,31 @@ function LabelTreeRows({
       {visibleRows.map((row) => {
         const active = activePath === row.path;
         const isOpen = expanded.has(row.path);
+        const dragging = drag?.kind === "label" && drag.lib === lib && drag.path === row.path;
+        const dropOk = hovered?.kind === "label" && hovered.lib === lib && hovered.path === row.path;
+        const dropJustDone = dropDone?.kind === "label" && dropDone.lib === lib && dropDone.path === row.path;
+        const openPending = openPendingPath === row.path && dropOk && drag?.kind === "skill";
+        const forceDropIconColor = dropOk || openPending || dropJustDone;
         return (
-          <div className={"lblrow" + (active ? " lblrow--active" : "")} key={row.path} style={{ paddingLeft: 8 + row.depth * 14 }}>
+          <div
+            className={
+              "lblrow" +
+              (active ? " lblrow--active" : "") +
+              (dragging ? " lblrow--dragging" : "") +
+              (dropOk ? " lblrow--dropok" : "") +
+              (openPending ? " lblrow--openpending" : "") +
+              (dropJustDone ? " lblrow--dropdone" : "")
+            }
+            key={row.path}
+            onPointerDown={(e) => {
+              if (e.button !== 0) return;
+              onStartDrag({ kind: "label", lib, path: row.path, leaf: row.leafName }, e);
+            }}
+            data-skill-drop-kind="label"
+            data-skill-drop-lib={lib}
+            data-skill-drop-path={row.path}
+            style={{ paddingLeft: 8 + row.depth * 14 }}
+          >
             {row.hasChildren ? (
               <button
                 type="button"
@@ -254,7 +364,7 @@ function LabelTreeRows({
               }}
               title={row.path}
             >
-              <span className="lblrow__ico" style={row.color ? { color: row.color } : undefined}>
+              <span className="lblrow__ico" style={row.color && !forceDropIconColor ? { color: row.color } : undefined}>
                 <Icon name={labelIcon(row)} size={15} />
               </span>
               <span className="lblrow__name">{row.displayName ?? row.leafName}</span>
@@ -308,6 +418,12 @@ export function Sidebar({
   onSetLabelIcon,
   onRenameLabel,
   onDeleteLabel,
+  drag,
+  hovered,
+  openPendingPath,
+  dropDone,
+  onReparentLabel,
+  onLabelStartDrag,
   onSelectLocal,
   onSelectArchived,
   localActive,
@@ -346,6 +462,12 @@ export function Sidebar({
   onSetLabelIcon: (lib: SkillsLibrary, path: string, icon: LabelIcon | null) => void;
   onRenameLabel: (lib: SkillsLibrary, from: string, to: string, displayName?: string) => void;
   onDeleteLabel: (lib: SkillsLibrary, path: string) => void;
+  drag: DragItem | null;
+  hovered: ResolvedTarget | null;
+  openPendingPath: string | null;
+  dropDone: ResolvedTarget | null;
+  onReparentLabel: (lib: SkillsLibrary, from: string, targetParent: string | null) => void;
+  onLabelStartDrag: (item: DragItem, e: PointerEvent<HTMLElement>) => void;
   onSelectLocal: () => void;
   onSelectArchived: () => void;
   localActive: boolean;
@@ -369,6 +491,16 @@ export function Sidebar({
     action();
     onCloseMobile();
   };
+
+  const rootDropOk = (lib: SkillsLibrary) => hovered?.kind === "root" && hovered.lib === lib;
+  const rootDropDone = (lib: SkillsLibrary) => dropDone?.kind === "root" && dropDone.lib === lib;
+  const skillDropMode = drag?.kind === "skill";
+
+  // Library headers are pure drop targets — the pointer hook hit-tests these data attributes.
+  const rootDropProps = (lib: SkillsLibrary) => ({
+    "data-skill-drop-kind": "root" as const,
+    "data-skill-drop-lib": lib,
+  });
 
   const inWorkspace = !localActive && !archivedActive && selection !== null;
   const mineHeadActive = inWorkspace && selection!.lib === "mine" && selection!.kind === "all";
@@ -427,7 +559,7 @@ export function Sidebar({
     ) : null;
 
   return (
-    <aside className={"side" + (mobileOpen ? " side--mobile-open" : "")}>
+    <aside className={"side" + (mobileOpen ? " side--mobile-open" : "") + (skillDropMode ? " side--skill-drop" : "")}>
       <div className="side__brand">
         <button
           className="side__toggle"
@@ -456,7 +588,16 @@ export function Sidebar({
       </div>
       <nav className="side__nav" aria-label="Primary">
         {/* ===== MY SKILLS ===== */}
-        <div className={"ml-libhead" + (mineHeadActive ? " is-active" : "")} style={{ marginTop: 2 }}>
+        <div
+          className={
+            "ml-libhead" +
+            (mineHeadActive ? " is-active" : "") +
+            (rootDropOk("mine") ? " ml-libhead--dropok" : "") +
+            (rootDropDone("mine") ? " ml-libhead--dropdone" : "")
+          }
+          style={{ marginTop: 2 }}
+          {...rootDropProps("mine")}
+        >
           <button
             type="button"
             className={"ml-libhead__chev" + (mineOpen ? " is-open" : "")}
@@ -522,18 +663,33 @@ export function Sidebar({
             </button>
             {newFolderRow("mine", "drafts/research…")}
             <LabelTreeRows
+              lib="mine"
               rows={mineTreeRows}
               expanded={expanded}
               activePath={activeMineLabel}
+              drag={drag}
+              hovered={hovered}
+              openPendingPath={openPendingPath}
+              dropDone={dropDone}
               onToggleExpand={onToggleExpand}
               onSelect={(path) => runAndClose(() => onSelectLabel("mine", path))}
               onOpenMenu={(row, pos) => setMenu({ row, lib: "mine", pos })}
+              onStartDrag={onLabelStartDrag}
             />
           </div>
         )}
 
         {/* ===== ORGANIZATION ===== */}
-        <div className={"ml-libhead" + (orgHeadActive ? " is-active" : "")} style={{ marginTop: 4 }}>
+        <div
+          className={
+            "ml-libhead" +
+            (orgHeadActive ? " is-active" : "") +
+            (rootDropOk("org") ? " ml-libhead--dropok" : "") +
+            (rootDropDone("org") ? " ml-libhead--dropdone" : "")
+          }
+          style={{ marginTop: 4 }}
+          {...rootDropProps("org")}
+        >
           <button
             type="button"
             className={"ml-libhead__chev" + (orgOpen ? " is-open" : "")}
@@ -567,12 +723,18 @@ export function Sidebar({
           <div className="ml-kids">
             {newFolderRow("org", "marketing/seo…")}
             <LabelTreeRows
+              lib="org"
               rows={orgTreeRows}
               expanded={expanded}
               activePath={activeOrgLabel}
+              drag={drag}
+              hovered={hovered}
+              openPendingPath={openPendingPath}
+              dropDone={dropDone}
               onToggleExpand={onToggleExpand}
               onSelect={(path) => runAndClose(() => onSelectLabel("org", path))}
               onOpenMenu={(row, pos) => setMenu({ row, lib: "org", pos })}
+              onStartDrag={onLabelStartDrag}
             />
           </div>
         )}
@@ -621,10 +783,21 @@ export function Sidebar({
         <LabelMenu
           row={menu.row}
           pos={menu.pos}
+          moveTargets={(menu.lib === "mine" ? mineTreeRows : orgTreeRows)
+            .filter((row) => {
+              const currentParent = labelParent(menu.row.path);
+              return (
+                row.path !== menu.row.path &&
+                row.path !== currentParent &&
+                !row.path.startsWith(menu.row.path + "/")
+              );
+            })
+            .map((row) => ({ path: row.path, label: row.displayName ?? row.leafName }))}
           onClose={() => setMenu(null)}
           onSetColor={(path, color) => onSetLabelColor(menu.lib, path, color)}
           onSetIcon={(path, icon) => onSetLabelIcon(menu.lib, path, icon)}
           onAddSublabel={(parent) => openNewFolder(menu.lib, parent)}
+          onMove={(targetParent) => onReparentLabel(menu.lib, menu.row.path, targetParent)}
           onRename={(from, to, displayName) => onRenameLabel(menu.lib, from, to, displayName)}
           onDelete={(path) => onDeleteLabel(menu.lib, path)}
         />

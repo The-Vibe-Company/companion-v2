@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useState, type PointerEvent } from "react";
 import { Icon } from "../Icon";
 import { UserAvatar } from "../UserAvatar";
 import type { SkillContributorVM, SkillVM } from "@/lib/types";
@@ -111,6 +111,8 @@ export function ListView({
   onClearFilters,
   preferenceStatus,
   onRetryPreferences,
+  dragSkillId,
+  onSkillStartDrag,
 }: {
   skills: SkillVM[];
   /** Which library this list shows (drives scope-aware empty + upload copy). */
@@ -130,6 +132,10 @@ export function ListView({
   onClearFilters: () => void;
   preferenceStatus: "idle" | "saving" | "saved" | "error";
   onRetryPreferences: () => void;
+  dragSkillId: string | null;
+  /** Begin a pointer drag from a skill row (the hook gates it behind a small move threshold,
+   *  so a plain click still opens the skill). */
+  onSkillStartDrag: (id: string, e: PointerEvent<HTMLElement>) => void;
 }) {
   // Search + sort are local list-view affordances (label/status filtering lives in the sidebar / chips).
   const [q, setQ] = useState("");
@@ -250,73 +256,89 @@ export function ListView({
           <span className="r">Stars</span>
           <span className="r">Updated</span>
         </div>
-        {shown.map((s) => (
-          <div key={s.id} className={"crow" + (lastId === s.id ? " is-active" : "")} title={peopleLabel(s)}>
-            <button
-              type="button"
-              className="crow__hit"
-              aria-label={`Open skill ${s.id}`}
-              onClick={() => onOpen(s.id)}
-            />
-            <span className="crow__name">
-              {s.id}
-              <ValidationMarker skill={s} />
-              {s.description ? <span className="crow__desc">{s.description}</span> : null}
-              <InstallMark state={s.installStatus} />
-            </span>
-            <PeopleStack skill={s} />
-            <span className="ver">{s.version ?? "—"}</span>
-            <span className="crow__deps">
-              {s.requiresCount > 0 ? (
-                <span
-                  className={"depspill" + (s.depWarn ? " depspill--warn" : "")}
-                  title={`${s.requiresCount} dependency${s.requiresCount === 1 ? "" : "ies"}`}
-                >
-                  <Icon name="package" size={11} />
-                  {s.requiresCount}
-                </span>
-              ) : s.usedByCount > 0 ? (
-                <span className="depspill depspill--used" title={`Used by ${s.usedByCount}`}>
-                  <Icon name="corner-down-right" size={11} />
-                  {s.usedByCount}
-                </span>
-              ) : (
-                <span style={{ color: "var(--color-faint)" }}>—</span>
-              )}
-            </span>
-            <span className="crow__stars r">
+        {shown.map((s) => {
+          const canDrag = !(library === "mine" && s.source === "installed");
+          const dragging = canDrag && dragSkillId === s.id;
+          return (
+            <div
+              key={s.id}
+              className={"crow" + (lastId === s.id ? " is-active" : "") + (dragging ? " crow--dragging" : "")}
+              title={peopleLabel(s)}
+              onPointerDown={
+                canDrag
+                  ? (e) => {
+                      if (e.button !== 0) return;
+                      onSkillStartDrag(s.id, e);
+                    }
+                  : undefined
+              }
+            >
               <button
                 type="button"
-                className={"stars" + (s.starred ? " is-on" : "")}
-                title={s.starred ? "Unstar this skill" : "Star this skill"}
-                aria-pressed={s.starred}
-                aria-label={(s.starred ? "Unstar" : "Star") + " " + s.id}
-                onClick={() => onToggleStar(s.id)}
-              >
-                <Icon name="star" size={13} />
-                <span className="tnum">{s.stars}</span>
-              </button>
-            </span>
-            <span className="r when when--by" title={`Updated by ${s.updaterName} · ${s.updated}`}>
-              <UserAvatar
-                className="avatar"
-                avatarUrl={s.updaterAvatarUrl}
-                initials={s.updaterInitials}
-                size={14}
-                style={{ fontSize: 7 }}
+                className="crow__hit"
+                aria-label={`Open skill ${s.id}`}
+                onClick={() => onOpen(s.id)}
               />
-              {s.updated}
-            </span>
-            <span className="crow__mobilemeta">
-              <span>v{s.version ?? "—"}</span>
-              <span>{depsLabel(s)}</span>
-              <span>{s.updated}</span>
-              <span className="crow__mobile-install">
+              <span className="crow__name">
+                {s.id}
+                <ValidationMarker skill={s} />
+                {s.description ? <span className="crow__desc">{s.description}</span> : null}
                 <InstallMark state={s.installStatus} />
               </span>
-            </span>
-          </div>
-        ))}
+              <PeopleStack skill={s} />
+              <span className="ver">{s.version ?? "—"}</span>
+              <span className="crow__deps">
+                {s.requiresCount > 0 ? (
+                  <span
+                    className={"depspill" + (s.depWarn ? " depspill--warn" : "")}
+                    title={`${s.requiresCount} dependency${s.requiresCount === 1 ? "" : "ies"}`}
+                  >
+                    <Icon name="package" size={11} />
+                    {s.requiresCount}
+                  </span>
+                ) : s.usedByCount > 0 ? (
+                  <span className="depspill depspill--used" title={`Used by ${s.usedByCount}`}>
+                    <Icon name="corner-down-right" size={11} />
+                    {s.usedByCount}
+                  </span>
+                ) : (
+                  <span style={{ color: "var(--color-faint)" }}>—</span>
+                )}
+              </span>
+              <span className="crow__stars r">
+                <button
+                  type="button"
+                  className={"stars" + (s.starred ? " is-on" : "")}
+                  title={s.starred ? "Unstar this skill" : "Star this skill"}
+                  aria-pressed={s.starred}
+                  aria-label={(s.starred ? "Unstar" : "Star") + " " + s.id}
+                  onClick={() => onToggleStar(s.id)}
+                >
+                  <Icon name="star" size={13} />
+                  <span className="tnum">{s.stars}</span>
+                </button>
+              </span>
+              <span className="r when when--by" title={`Updated by ${s.updaterName} · ${s.updated}`}>
+                <UserAvatar
+                  className="avatar"
+                  avatarUrl={s.updaterAvatarUrl}
+                  initials={s.updaterInitials}
+                  size={14}
+                  style={{ fontSize: 7 }}
+                />
+                {s.updated}
+              </span>
+              <span className="crow__mobilemeta">
+                <span>v{s.version ?? "—"}</span>
+                <span>{depsLabel(s)}</span>
+                <span>{s.updated}</span>
+                <span className="crow__mobile-install">
+                  <InstallMark state={s.installStatus} />
+                </span>
+              </span>
+            </div>
+          );
+        })}
         {!shown.length && (
           <div className="empty">
             <Icon name="search-x" size={22} style={{ color: "var(--color-faint)" }} />

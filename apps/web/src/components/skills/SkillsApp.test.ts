@@ -292,6 +292,87 @@ function clickButton(container: HTMLElement, label: string) {
   });
 }
 
+function skillRow(container: HTMLElement, id: string): HTMLElement {
+  const button = findButton(container, `Open skill ${id}`);
+  const row = button.closest<HTMLElement>(".crow");
+  if (!row) throw new Error(`Could not find skill row: ${id}`);
+  return row;
+}
+
+function folderRow(container: HTMLElement, path: string): HTMLElement {
+  const button = container.querySelector<HTMLElement>(`button[aria-label="${path} options"]`);
+  const row = button?.closest<HTMLElement>(".lblrow");
+  if (!row) throw new Error(`Could not find folder row: ${path}`);
+  return row;
+}
+
+function queryFolderRow(container: HTMLElement, path: string): HTMLElement | null {
+  const button = container.querySelector<HTMLElement>(`button[aria-label="${path} options"]`);
+  return button?.closest<HTMLElement>(".lblrow") ?? null;
+}
+
+function libraryHeader(container: HTMLElement, title: "My Skills" | "Organization"): HTMLElement {
+  const button = findButton(container, title);
+  const row = button.closest<HTMLElement>(".ml-libhead");
+  if (!row) throw new Error(`Could not find library header: ${title}`);
+  return row;
+}
+
+// Pointer-based drag-and-drop drives the REAL production hit-test. We stub ONLY layout:
+// `document.elementFromPoint` (installed in beforeEach) is told which element sits under
+// the cursor via `elementUnderPointer` — happy-dom has no layout. Everything else runs as
+// production code: the >4px threshold, resolveDropTarget, the validity gates, the dwell
+// timer. This is deliberately NOT the old synthetic-DragEvent trap, where a `drop` was
+// dispatched straight at the target and the assertion merely echoed the element the test
+// fed in; here the component decides the target from coordinates, exactly like a real mouse.
+function pointerEvent(type: string, opts: { clientX?: number; clientY?: number; button?: number } = {}): PointerEvent {
+  return new PointerEvent(type, {
+    bubbles: true,
+    cancelable: true,
+    pointerId: 1,
+    isPrimary: true,
+    button: opts.button ?? 0,
+    clientX: opts.clientX ?? 0,
+    clientY: opts.clientY ?? 0,
+  });
+}
+
+function setElementUnderPointer(el: Element | null) {
+  elementUnderPointer = el;
+}
+
+// Press on a drag source (the row's onPointerDown). Records the press but — like production —
+// does NOT start a drag yet, so a click is still possible until the move crosses the threshold.
+function pressPointer(source: HTMLElement, clientX = 0, clientY = 0) {
+  setElementUnderPointer(source);
+  act(() => {
+    source.dispatchEvent(pointerEvent("pointerdown", { clientX, clientY }));
+  });
+}
+
+// Move the cursor over `over` (what elementFromPoint will return). Window-level, as the hook listens there.
+async function movePointer(over: Element | null, clientX = 30, clientY = 30) {
+  setElementUnderPointer(over);
+  act(() => {
+    window.dispatchEvent(pointerEvent("pointermove", { clientX, clientY }));
+  });
+  await flushEffects();
+}
+
+async function releasePointer(clientX = 30, clientY = 30) {
+  act(() => {
+    window.dispatchEvent(pointerEvent("pointerup", { clientX, clientY }));
+  });
+  await flushEffects();
+}
+
+// Full press -> move past the threshold over `target` -> release. `target` null releases over nothing.
+async function pointerDrag(source: HTMLElement, target: HTMLElement | null) {
+  pressPointer(source);
+  await movePointer(target);
+  await releasePointer();
+}
+
 // React tracks the input value via the native setter; bypassing it (plain `.value =`) makes the
 // synthetic onChange ignore the update. Use the prototype setter so onChange fires.
 function setReactInputValue(input: HTMLInputElement, value: string) {
@@ -310,9 +391,14 @@ async function flushEffects() {
 }
 
 let mountedRoots: Root[] = [];
+// The single layout stub: production calls document.elementFromPoint(x,y); the pointer
+// helpers set what it returns. Nothing else about the drag path is stubbed.
+let elementUnderPointer: Element | null = null;
 
 beforeEach(() => {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+  elementUnderPointer = null;
+  document.elementFromPoint = ((_x: number, _y: number) => elementUnderPointer) as typeof document.elementFromPoint;
   queryMocks.fetchArchivedSkills.mockResolvedValue([]);
   queryMocks.fetchSkillDetail.mockResolvedValue({ versions: [], comments: [], frontmatter: null });
   queryMocks.fetchSkillDependencies.mockResolvedValue(null);
@@ -356,6 +442,7 @@ afterEach(() => {
   for (const root of mountedRoots) {
     act(() => root.unmount());
   }
+  vi.useRealTimers();
   document.body.innerHTML = "";
   vi.restoreAllMocks();
 });
@@ -663,6 +750,322 @@ describe("SkillsApp optimistic label assignment", () => {
     // The chip is restored after the failure; the detail never closed.
     expect(container.textContent).toContain("Install skill");
     expect(container.querySelector('button[aria-label="Remove from marketing/seo"]')).not.toBeNull();
+  });
+
+  it("adds a skill to a folder when dropped on a same-library folder (real pointer path)", async () => {
+    const { container } = await mountSkillsApp({ lib: "org", kind: "all" });
+    await flushEffects();
+
+    await pointerDrag(skillRow(container, "loose-skill"), folderRow(container, "growth"));
+
+    expect(queryMocks.assignSkillLabel).toHaveBeenCalledTimes(1);
+    expect(queryMocks.assignSkillLabel).toHaveBeenCalledWith("loose-skill", "growth");
+    expect(queryMocks.unassignSkillLabel).not.toHaveBeenCalled();
+  });
+
+  it("does not start a drag for a sub-threshold move (a plain click still opens the skill)", async () => {
+    const { container } = await mountSkillsApp({ lib: "org", kind: "all" });
+    await flushEffects();
+
+    const source = skillRow(container, "loose-skill");
+    pressPointer(source, 10, 10);
+    await movePointer(folderRow(container, "growth"), 12, 11); // < 4px from the press origin
+
+    // No drag committed: no drop-mode, no highlight, no RPC even though we are "over" a valid folder.
+    expect(container.querySelector(".side")?.classList.contains("side--skill-drop")).toBe(false);
+    expect(container.querySelector(".lblrow--dropok")).toBeNull();
+    await releasePointer(12, 11);
+    expect(queryMocks.assignSkillLabel).not.toHaveBeenCalled();
+
+    // The press never blocked the row's click, so opening the skill still works.
+    clickButton(container, "Open skill loose-skill");
+    await flushEffects();
+    expect(container.textContent).toContain("Install skill");
+  });
+
+  it("marks only the hovered same-library folder while dragging a skill, and follows the cursor", async () => {
+    const { container } = await mountSkillsApp({ lib: "org", kind: "all" });
+    await flushEffects();
+
+    const source = skillRow(container, "loose-skill");
+    const growth = folderRow(container, "growth");
+    const marketing = folderRow(container, "marketing");
+
+    pressPointer(source);
+    await movePointer(growth);
+
+    expect(container.querySelector(".side")?.classList.contains("side--skill-drop")).toBe(true);
+    expect(growth.classList.contains("lblrow--dropok")).toBe(true);
+    expect(marketing.classList.contains("lblrow--dropok")).toBe(false);
+    expect(container.querySelectorAll(".lblrow--dropok")).toHaveLength(1);
+    expect(container.querySelector(".lblrow--dropready")).toBeNull(); // no global default highlight
+    // A floating ghost exists and is non-interactive (so it can never shadow the hit-test).
+    const ghost = document.querySelector<HTMLElement>(".skill-drag-preview");
+    expect(ghost).not.toBeNull();
+    expect(ghost?.style.pointerEvents).toBe("none");
+
+    // Highlight follows the cursor to a different folder.
+    await movePointer(marketing, 25, 60);
+    expect(growth.classList.contains("lblrow--dropok")).toBe(false);
+    expect(marketing.classList.contains("lblrow--dropok")).toBe(true);
+
+    // Release over empty space: no drop, drag mode cleared, ghost removed.
+    await movePointer(document.body, 600, 600);
+    await releasePointer(600, 600);
+    expect(queryMocks.assignSkillLabel).not.toHaveBeenCalled();
+    expect(container.querySelector(".side")?.classList.contains("side--skill-drop")).toBe(false);
+    expect(document.querySelector(".skill-drag-preview")).toBeNull();
+  });
+
+  it("auto-expands a closed folder after a 650ms dwell, and cancels if the cursor leaves first", async () => {
+    const { container } = await mountSkillsApp({ lib: "org", kind: "all" });
+    await flushEffects();
+    vi.useFakeTimers();
+
+    const source = skillRow(container, "loose-skill");
+    const marketing = folderRow(container, "marketing");
+    expect(queryFolderRow(container, "marketing/seo")).toBeNull();
+
+    pressPointer(source);
+    await movePointer(marketing);
+    expect(marketing.classList.contains("lblrow--openpending")).toBe(true);
+
+    // Cursor leaves before 650ms -> the auto-open is cancelled.
+    await movePointer(document.body, 600, 600);
+    act(() => {
+      vi.advanceTimersByTime(700);
+    });
+    await flushEffects();
+    expect(queryFolderRow(container, "marketing/seo")).toBeNull();
+    expect(marketing.classList.contains("lblrow--openpending")).toBe(false);
+
+    // Dwell again and hold past 650ms -> the folder expands.
+    await movePointer(marketing);
+    expect(marketing.classList.contains("lblrow--openpending")).toBe(true);
+    act(() => {
+      vi.advanceTimersByTime(649);
+    });
+    await flushEffects();
+    expect(queryFolderRow(container, "marketing/seo")).toBeNull();
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
+    await flushEffects();
+    expect(queryFolderRow(container, "marketing/seo")).not.toBeNull();
+    expect(marketing.classList.contains("lblrow--openpending")).toBe(false);
+
+    // Dropping on the now-open parent files the skill there.
+    await releasePointer();
+    expect(queryMocks.assignSkillLabel).toHaveBeenCalledWith("loose-skill", "marketing");
+  });
+
+  it("cancels the drag (no drop) on Escape", async () => {
+    const { container } = await mountSkillsApp({ lib: "org", kind: "all" });
+    await flushEffects();
+
+    pressPointer(skillRow(container, "loose-skill"));
+    await movePointer(folderRow(container, "growth"));
+    expect(container.querySelector(".lblrow--dropok")).not.toBeNull();
+
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    });
+    await flushEffects();
+
+    expect(queryMocks.assignSkillLabel).not.toHaveBeenCalled();
+    expect(container.querySelector(".side")?.classList.contains("side--skill-drop")).toBe(false);
+    expect(document.querySelector(".skill-drag-preview")).toBeNull();
+  });
+
+  it("moves a skill out of the active folder when dropped from a folder view", async () => {
+    const { container } = await mountSkillsApp(
+      { lib: "org", kind: "label", label: "marketing" },
+      { url: "/skills?lib=org&view=label&label=marketing" },
+    );
+    await flushEffects();
+
+    await pointerDrag(skillRow(container, "brand-kit"), folderRow(container, "growth"));
+
+    expect(queryMocks.assignSkillLabel).toHaveBeenCalledWith("brand-kit", "growth");
+    expect(queryMocks.unassignSkillLabel).toHaveBeenCalledWith("brand-kit", "marketing");
+    expect(container.querySelector('button[aria-label="Open skill brand-kit"]')).toBeNull();
+  });
+
+  it("moves a descendant-filed skill out of a parent folder roll-up", async () => {
+    const { container } = await mountSkillsApp(
+      { lib: "org", kind: "label", label: "marketing" },
+      { url: "/skills?lib=org&view=label&label=marketing" },
+    );
+    await flushEffects();
+
+    await pointerDrag(skillRow(container, "seo-helper"), folderRow(container, "growth"));
+
+    expect(queryMocks.assignSkillLabel).toHaveBeenCalledWith("seo-helper", "growth");
+    expect(queryMocks.unassignSkillLabel).toHaveBeenCalledWith("seo-helper", "marketing/seo");
+    expect(container.querySelector('button[aria-label="Open skill seo-helper"]')).toBeNull();
+  });
+
+  it("compensates a partially failed move and restores the source view", async () => {
+    queryMocks.unassignSkillLabel.mockRejectedValueOnce(new Error("source locked"));
+    const { container } = await mountSkillsApp(
+      { lib: "org", kind: "label", label: "marketing" },
+      { url: "/skills?lib=org&view=label&label=marketing" },
+    );
+    await flushEffects();
+
+    await pointerDrag(skillRow(container, "seo-helper"), folderRow(container, "growth"));
+    await flushEffects();
+
+    expect(queryMocks.assignSkillLabel).toHaveBeenCalledWith("seo-helper", "growth");
+    expect(queryMocks.unassignSkillLabel).toHaveBeenCalledWith("seo-helper", "marketing/seo");
+    expect(queryMocks.unassignSkillLabel).toHaveBeenCalledWith("seo-helper", "growth");
+    expect(container.querySelector('button[aria-label="Open skill seo-helper"]')).not.toBeNull();
+    expect(container.textContent).toContain("source locked");
+  });
+
+  it("unfiles a skill from the active folder when dropped on the library header", async () => {
+    const { container } = await mountSkillsApp(
+      { lib: "org", kind: "label", label: "marketing" },
+      { url: "/skills?lib=org&view=label&label=marketing" },
+    );
+    await flushEffects();
+
+    await pointerDrag(skillRow(container, "brand-kit"), libraryHeader(container, "Organization"));
+
+    expect(queryMocks.assignSkillLabel).not.toHaveBeenCalled();
+    expect(queryMocks.unassignSkillLabel).toHaveBeenCalledWith("brand-kit", "marketing");
+    expect(container.querySelector('button[aria-label="Open skill brand-kit"]')).toBeNull();
+  });
+
+  it("unfiles a descendant-filed skill from a parent roll-up when dropped on the library header", async () => {
+    const { container } = await mountSkillsApp(
+      { lib: "org", kind: "label", label: "marketing" },
+      { url: "/skills?lib=org&view=label&label=marketing" },
+    );
+    await flushEffects();
+
+    await pointerDrag(skillRow(container, "seo-helper"), libraryHeader(container, "Organization"));
+
+    expect(queryMocks.assignSkillLabel).not.toHaveBeenCalled();
+    expect(queryMocks.unassignSkillLabel).toHaveBeenCalledWith("seo-helper", "marketing/seo");
+    expect(container.querySelector('button[aria-label="Open skill seo-helper"]')).toBeNull();
+  });
+
+  it("blocks cross-library skill drops in the sidebar", async () => {
+    const { container } = await mountSkillsApp(
+      { lib: "org", kind: "all" },
+      {
+        props: {
+          initialMineSkills: [skill({ id: "private-draft", scope: "personal", source: "authored", labels: ["drafts"] })],
+        },
+      },
+    );
+    await flushEffects();
+
+    pressPointer(skillRow(container, "loose-skill"));
+    await movePointer(folderRow(container, "drafts"));
+    // A mine-library folder never accepts an org-skill drag — no highlight, no drop.
+    expect(container.querySelector(".lblrow--dropok")).toBeNull();
+    await releasePointer();
+
+    expect(queryMocks.assignSkillLabel).not.toHaveBeenCalled();
+    expect(queryMocks.assignPersonalSkillLabel).not.toHaveBeenCalled();
+  });
+
+  it("does not start a drag from installed My Skills rows", async () => {
+    const { container } = await mountSkillsApp(
+      { lib: "mine", kind: "all" },
+      {
+        props: {
+          initialMineSkills: [
+            skill({ id: "brand-linter", scope: "org", source: "installed", installStatus: "installed" }),
+            skill({ id: "private-draft", scope: "personal", source: "authored", labels: ["drafts"] }),
+          ],
+        },
+      },
+    );
+    await flushEffects();
+
+    pressPointer(skillRow(container, "brand-linter"));
+    await movePointer(folderRow(container, "drafts"));
+    // Installed rows carry no onPointerDown, so the press never starts a drag.
+    expect(container.querySelector(".side")?.classList.contains("side--skill-drop")).toBe(false);
+    await releasePointer();
+
+    expect(queryMocks.assignPersonalSkillLabel).not.toHaveBeenCalled();
+    expect(queryMocks.unassignPersonalSkillLabel).not.toHaveBeenCalled();
+  });
+});
+
+describe("SkillsApp drag-and-drop label reparenting", () => {
+  it("renames a dropped label under the target label", async () => {
+    const { container } = await mountSkillsApp({ lib: "org", kind: "all" });
+    await flushEffects();
+
+    await pointerDrag(folderRow(container, "growth"), folderRow(container, "marketing"));
+
+    expect(queryMocks.renameLabel).toHaveBeenCalledTimes(1);
+    expect(queryMocks.renameLabel).toHaveBeenCalledWith("growth", "marketing/growth", { displayName: undefined });
+  });
+
+  it("renames a nested label to the root when dropped on the library header", async () => {
+    const { container } = await mountSkillsApp({ lib: "org", kind: "all" });
+    await flushEffects();
+
+    const marketing = folderRow(container, "marketing");
+    const chevron = marketing.querySelector<HTMLButtonElement>(".lblrow__chev:not(.lblrow__chev--leaf)");
+    act(() => chevron!.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    await flushEffects();
+
+    await pointerDrag(folderRow(container, "marketing/seo"), libraryHeader(container, "Organization"));
+
+    expect(queryMocks.renameLabel).toHaveBeenCalledTimes(1);
+    expect(queryMocks.renameLabel).toHaveBeenCalledWith("marketing/seo", "seo", { displayName: undefined });
+  });
+
+  it("renames a label under another folder from the label options menu", async () => {
+    const { container } = await mountSkillsApp({ lib: "org", kind: "all" });
+    await flushEffects();
+
+    clickButton(container, "growth options");
+    await flushEffects();
+    clickButton(container, "Move growth");
+    await flushEffects();
+    clickButton(container, "Move growth to marketing");
+    await flushEffects();
+
+    expect(queryMocks.renameLabel).toHaveBeenCalledTimes(1);
+    expect(queryMocks.renameLabel).toHaveBeenCalledWith("growth", "marketing/growth", { displayName: undefined });
+  });
+
+  it("renames a nested label to the root from the label options menu", async () => {
+    const { container } = await mountSkillsApp({ lib: "org", kind: "all" });
+    await flushEffects();
+
+    const marketing = folderRow(container, "marketing");
+    const chevron = marketing.querySelector<HTMLButtonElement>(".lblrow__chev:not(.lblrow__chev--leaf)");
+    act(() => chevron!.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    await flushEffects();
+
+    clickButton(container, "marketing/seo options");
+    await flushEffects();
+    clickButton(container, "Move marketing/seo");
+    await flushEffects();
+    clickButton(container, "Move marketing/seo to top level");
+    await flushEffects();
+
+    expect(queryMocks.renameLabel).toHaveBeenCalledTimes(1);
+    expect(queryMocks.renameLabel).toHaveBeenCalledWith("marketing/seo", "seo", { displayName: undefined });
+  });
+
+  it("does not reparent a label onto itself", async () => {
+    const { container } = await mountSkillsApp({ lib: "org", kind: "all" });
+    await flushEffects();
+
+    const row = folderRow(container, "marketing");
+    await pointerDrag(row, row);
+
+    expect(queryMocks.renameLabel).not.toHaveBeenCalled();
   });
 });
 
