@@ -273,6 +273,22 @@ export function StatusCard({ skill, libLabel }: { skill: SkillVM; libLabel?: str
         <span className="statuscard__v statuscard__v--muted">{skill.updated}</span>
       </div>
       <div className="statuscard__row">
+        <span className="statuscard__k">Updated by</span>
+        <span
+          className="statuscard__v"
+          style={{ display: "inline-flex", alignItems: "center", justifyContent: "flex-end", gap: 6 }}
+        >
+          <UserAvatar
+            className="avatar"
+            avatarUrl={skill.updaterAvatarUrl}
+            initials={skill.updaterInitials}
+            size={16}
+            style={{ fontSize: 8 }}
+          />
+          {skill.updaterName}
+        </span>
+      </div>
+      <div className="statuscard__row">
         <span className="statuscard__k">Stars</span>
         <span className="statuscard__v mono tnum">{skill.stars}</span>
       </div>

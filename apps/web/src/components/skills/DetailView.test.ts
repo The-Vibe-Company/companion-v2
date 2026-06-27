@@ -22,6 +22,10 @@ const skill: SkillVM = {
   authorName: "Ada Lovelace",
   authorInitials: "AL",
   authorAvatarUrl: null,
+  updaterId: "user-1",
+  updaterName: "Ada Lovelace",
+  updaterInitials: "AL",
+  updaterAvatarUrl: null,
   tools: ["read_file"],
   requirements: [{ key: "OPENAI_API_KEY", type: "secret", required: true, note: "Required for model calls." }],
   compatibility: "Requires Node.js 22+",
@@ -107,6 +111,30 @@ describe("DetailView tabbed detail layout", () => {
     expect(html).not.toContain("More sections");
     // No owner / visibility axis on the detail anymore.
     expect(html).not.toContain("Personal");
+  });
+
+  it("shows both 'Created by' and 'Updated by' in the byline when the last updater differs", () => {
+    const html = renderDetailFor({
+      ...skill,
+      authorName: "Ada Lovelace",
+      updaterId: "user-2",
+      updaterName: "Beth Updater",
+      updaterInitials: "BU",
+    });
+
+    expect(html).toContain("Created by");
+    expect(html).toContain("Ada Lovelace"); // creator
+    expect(html).toContain("Beth Updater"); // last updater
+    // The byline carries two named people (creator + updater) via `.dbyline__name`.
+    expect((html.match(/dbyline__name/g) ?? []).length).toBe(2);
+  });
+
+  it("byline names only the creator when the updater is the creator", () => {
+    // The shared fixture has updaterId === authorId, so the byline collapses to a single name.
+    const html = renderDetail();
+
+    expect(html).toContain("Created by");
+    expect((html.match(/dbyline__name/g) ?? []).length).toBe(1);
   });
 
   it("does not expose a public copy action for personal skills", () => {

@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import { and, asc, count, desc, eq, exists, gt, inArray, isNull, ne, not, or, sql } from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
 import type {
   ApiTokenRow,
   DependencyPlan,
@@ -841,6 +842,10 @@ export async function listSkills(input: {
   // Filter with `@@` (short-circuits, and the body branch is index-eligible) rather than `ts_rank > 0`.
   if (doSearch) predicates.push(sql`(${bodyTsv} @@ ${tsQuery} or ${headTsv} @@ ${tsQuery})`);
 
+  // Second `profiles` join, aliased to the uploader of the current version (`skill_versions.created_by`),
+  // so we can surface "Last updated by" distinct from the creator without a schema change.
+  const updaterProfile = alias(schema.profiles, "updater_profile");
+
   const baseQuery = database
     .select({
       id: schema.skills.id,
@@ -858,6 +863,13 @@ export async function listSkills(input: {
       creator_email: schema.profiles.email,
       creator_avatar_url: schema.profiles.avatarUrl,
       creator_updated_at: schema.profiles.updatedAt,
+      // "Last updated by" — the uploader of the current version, joined via `updaterProfile`.
+      updater_id: schema.skillVersions.createdBy,
+      updater_name: updaterProfile.name,
+      updater_initials: updaterProfile.initials,
+      updater_email: updaterProfile.email,
+      updater_avatar_url: updaterProfile.avatarUrl,
+      updater_updated_at: updaterProfile.updatedAt,
       // Correlated array_agg of the skill's label paths, sorted. A RAW sql subquery (NOT a
       // database.select().limit, which breaks the hand-rolled fakeDbs in tests); empty → '{}'.
       // The org library reads org `skill_labels`; My Skills reads the caller's private
@@ -907,9 +919,10 @@ export async function listSkills(input: {
     .from(schema.skills)
     .innerJoin(schema.profiles, eq(schema.profiles.id, schema.skills.creatorId))
     .leftJoin(schema.skillVersions, eq(schema.skillVersions.id, schema.skills.currentVersionId))
+    .leftJoin(updaterProfile, eq(updaterProfile.id, schema.skillVersions.createdBy))
     .leftJoin(schema.skillStars, eq(schema.skillStars.skillId, schema.skills.id))
     .where(and(...predicates))
-    .groupBy(schema.skills.id, schema.profiles.id, schema.skillVersions.id);
+    .groupBy(schema.skills.id, schema.profiles.id, schema.skillVersions.id, updaterProfile.id);
 
   // Search path orders by relevance then recency and caps the result count; the default list path keeps
   // its recency-only ordering and never calls `.limit()` (so the fakeDb query mocks stay untouched).
@@ -1008,6 +1021,24 @@ export async function listSkills(input: {
         avatarUrl: r.creator_avatar_url ?? null,
         updatedAtEpoch: r.creator_updated_at instanceof Date ? r.creator_updated_at.getTime() : 0,
       }),
+      // "Last updated by" = uploader of the current version; fall back to the creator when a skill has
+      // no current version (left join → nulls) so the field is never empty.
+      updater_id: r.updater_id ?? r.creator_id,
+      updater_name: r.updater_name ?? r.creator_name,
+      updater_initials: r.updater_initials ?? r.creator_initials,
+      updater_avatar_url: r.updater_id
+        ? resolveUserAvatarUrl({
+            userId: r.updater_id,
+            email: r.updater_email ?? "",
+            avatarUrl: r.updater_avatar_url ?? null,
+            updatedAtEpoch: r.updater_updated_at instanceof Date ? r.updater_updated_at.getTime() : 0,
+          })
+        : resolveUserAvatarUrl({
+            userId: r.creator_id,
+            email: r.creator_email ?? "",
+            avatarUrl: r.creator_avatar_url ?? null,
+            updatedAtEpoch: r.creator_updated_at instanceof Date ? r.creator_updated_at.getTime() : 0,
+          }),
       current_version: r.current_version,
       compatibility: manifest?.compatibility ?? null,
       metadata: manifest?.metadata ?? {},

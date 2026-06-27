@@ -169,6 +169,16 @@ export const skillListRowSchema = z.object({
   creator_initials: z.string(),
   /** Resolved avatar URL for the creator (custom upload or Gravatar); null falls back to initials. */
   creator_avatar_url: z.string().nullable().default(null),
+  /**
+   * "Last updated by" — the member who uploaded the current version (derived from
+   * `skill_versions.created_by`), as opposed to `creator_id` (who first published). Falls back to the
+   * creator when no current version exists. Display fields are joined from `profiles`.
+   */
+  updater_id: z.string().nullable().default(null),
+  updater_name: z.string().nullable().default(null),
+  updater_initials: z.string().nullable().default(null),
+  /** Resolved avatar URL for the last updater (custom upload or Gravatar); null falls back to initials. */
+  updater_avatar_url: z.string().nullable().default(null),
   current_version: z.string().nullable(),
   license: z.string().nullable(),
   compatibility: z.string().nullable(),
