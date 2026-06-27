@@ -97,13 +97,27 @@ body { background: var(--color-canvas); color: var(--color-fg); font-family: var
 .lblrow[draggable="true"] { cursor: grab; }
 .lblrow:hover { background: var(--color-surface-raised); }
 .lblrow--active { background: var(--color-accent-tint); }
+.lblrow::before {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: 7px;
+  bottom: 7px;
+  width: 2px;
+  border-radius: var(--radius-full);
+  background: transparent;
+  transition: background-color var(--duration-fast) var(--ease-out-quint), opacity var(--duration-fast) var(--ease-out-quint), transform var(--duration-fast) var(--ease-out-quint);
+}
 .side--skill-drop .lblrow:not(.lblrow--dropready):not(.lblrow--dropok):not(.lblrow--dropdone) {
-  opacity: 0.56;
+  opacity: 0.68;
 }
 .side--skill-drop .lblrow--dropready {
-  background: color-mix(in oklab, var(--color-surface-raised) 70%, transparent);
-  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--color-line-strong) 76%, transparent);
+  background: color-mix(in oklab, var(--color-surface-raised) 62%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--color-line-strong) 55%, transparent);
   cursor: copy;
+}
+.side--skill-drop .lblrow--dropready::before {
+  background: color-mix(in oklab, var(--color-accent-edge) 38%, transparent);
 }
 .side--skill-drop .lblrow--dropready .lblrow__ico {
   color: var(--color-muted);
@@ -113,21 +127,24 @@ body { background: var(--color-canvas); color: var(--color-fg); font-family: var
   pointer-events: none;
 }
 .lblrow--dropok {
-  background: color-mix(in oklab, var(--color-accent-tint) 88%, var(--color-surface-raised));
+  background: linear-gradient(90deg, color-mix(in oklab, var(--color-accent-tint) 78%, var(--color-surface)) 0%, color-mix(in oklab, var(--color-accent-tint) 34%, var(--color-surface)) 100%);
   box-shadow:
-    inset 0 0 0 1px var(--color-accent-edge),
-    inset 4px 0 0 var(--color-accent-edge),
-    0 0 0 2px color-mix(in oklab, var(--color-accent-line) 56%, transparent),
-    0 10px 24px color-mix(in oklab, var(--color-accent-edge) 18%, transparent);
-  transform: translateX(3px) scale(1.012);
+    inset 0 0 0 1px color-mix(in oklab, var(--color-accent-edge) 48%, var(--color-line)),
+    0 1px 2px color-mix(in oklab, var(--color-accent-edge) 12%, transparent);
+}
+.lblrow--dropok::before {
+  background: var(--color-accent-edge);
+  transform: scaleY(1.14);
 }
 .lblrow--dropdone {
   animation: folder-drop-confirm 850ms var(--ease-out-quint);
-  background: color-mix(in oklab, var(--color-ok) 9%, var(--color-surface-raised));
+  background: color-mix(in oklab, var(--color-ok) 8%, var(--color-surface-raised));
   box-shadow:
-    inset 0 0 0 1px color-mix(in oklab, var(--color-ok) 42%, var(--color-line)),
-    inset 4px 0 0 var(--color-ok),
-    0 8px 18px color-mix(in oklab, var(--color-ok) 15%, transparent);
+    inset 0 0 0 1px color-mix(in oklab, var(--color-ok) 34%, var(--color-line)),
+    0 1px 2px color-mix(in oklab, var(--color-ok) 10%, transparent);
+}
+.lblrow--dropdone::before {
+  background: var(--color-ok);
 }
 .lblrow--dragging { opacity: 0.52; transform: scale(0.985); }
 .lblrow__chev { width: 18px; height: 26px; display: grid; place-items: center; border: none; background: none; cursor: pointer; flex: none;
@@ -155,25 +172,34 @@ body { background: var(--color-canvas); color: var(--color-fg); font-family: var
 .lblrow:hover .lblrow__count, .lblrow:focus-within .lblrow__count { opacity: 0; }
 .lblrow--dropok .lblrow__count, .lblrow--dropdone .lblrow__count {
   opacity: 1;
-  width: 18px;
-  height: 18px;
+  width: 17px;
+  height: 17px;
   display: grid;
   place-items: center;
   border-radius: var(--radius-full);
-  color: var(--color-surface);
+  color: var(--color-fg);
   font-size: 0;
 }
 .lblrow--dropok .lblrow__count {
-  background: var(--color-accent-edge);
+  background: var(--color-accent);
+  border: 1px solid color-mix(in oklab, var(--color-accent-edge) 30%, transparent);
 }
 .lblrow--dropdone .lblrow__count {
-  background: var(--color-ok);
+  background: color-mix(in oklab, var(--color-ok) 14%, var(--color-surface));
+  border: 1px solid color-mix(in oklab, var(--color-ok) 36%, transparent);
 }
-.lblrow--dropok .lblrow__count::after,
+.lblrow--dropok .lblrow__count::after {
+  content: "+";
+  font-family: var(--font-ui);
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1;
+  transform: translateY(-0.5px);
+}
 .lblrow--dropdone .lblrow__count::after {
   content: "";
-  width: 5px;
-  height: 9px;
+  width: 4px;
+  height: 7px;
   border-right: 2px solid currentColor;
   border-bottom: 2px solid currentColor;
   transform: translateY(-1px) rotate(45deg);
