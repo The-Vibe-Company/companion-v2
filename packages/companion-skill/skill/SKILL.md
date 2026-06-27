@@ -73,7 +73,9 @@ Agent Skills-compatible; Companion-specific package data lives in `companion.jso
 
 The workspace API keeps short summaries and long notes separate: skill metadata rows expose
 `description` as the short list/detail summary and `notes` as optional Markdown from
-`companion.json`. Do not copy setup notes or long Markdown content into `description`.
+`companion.json`. Rows also expose creator provenance (`creator_id`, `creator_name`,
+`creator_initials`, `creator_avatar_url`) and `modifiers`, the distinct members who published later
+versions. Do not copy setup notes or long Markdown content into `description`.
 
 Fetch the public JSON Schema from:
 

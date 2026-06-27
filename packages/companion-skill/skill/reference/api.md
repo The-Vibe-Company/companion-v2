@@ -129,8 +129,11 @@ bytes. Text-only comments may still be sent as JSON.
 Skill metadata rows returned by `GET /skills` and `GET /skills/{slug}` include both `description`
 (the short summary used in lists and detail leads) and `notes` (optional Markdown-compatible
 `companion.json` notes). Rows also include `share_token`, which is only for org-skill public preview
-links and is not an auth credential. Keep summaries and notes distinct: do not copy setup notes or
-long Markdown content into `description`.
+links and is not an auth credential. Rows include creator provenance (`creator_id`, `creator_name`,
+`creator_initials`, `creator_avatar_url`) plus `modifiers`: distinct members who published versions
+after the creator, ordered by latest publish time, each as `{ user_id, name, initials, avatar_url }`.
+Keep summaries and notes distinct: do not copy setup notes or long Markdown content into
+`description`.
 
 Do not use this skill for workspace members, invitations, org settings, or token management.
 Those are outside the skills-only management surface.

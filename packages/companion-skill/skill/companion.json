@@ -30,6 +30,13 @@
         ]
       },
       {
+        "version": "1.15.1",
+        "date": "2026-06-27",
+        "changes": [
+          "Documents the modifiers array returned by GET /skills rows so agents can distinguish the creator from members who published later versions."
+        ]
+      },
+      {
         "version": "1.15.0",
         "date": "2026-06-26",
         "changes": [

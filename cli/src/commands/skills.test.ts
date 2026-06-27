@@ -38,6 +38,7 @@ function registryRow(over: Partial<SkillListRow> = {}): SkillListRow {
     updater_name: "User One",
     updater_initials: "UO",
     updater_avatar_url: null,
+    modifiers: [],
     current_version: "1.0.0",
     license: null,
     compatibility: null,

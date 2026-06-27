@@ -3,8 +3,8 @@
 import { useMemo, useState } from "react";
 import { Icon } from "../Icon";
 import { UserAvatar } from "../UserAvatar";
-import type { SkillVM } from "@/lib/types";
-import { vdot, InstallMark } from "./blocks";
+import type { SkillContributorVM, SkillVM } from "@/lib/types";
+import { InstallMark } from "./blocks";
 import { chipParts, type Filter } from "./filters";
 import { FilterAdd } from "./FilterMenu";
 
@@ -16,6 +16,84 @@ const SORT_OPTIONS: { key: SortKey; label: string }[] = [
   { key: "name", label: "Name (A–Z)" },
   { key: "stars", label: "Most starred" },
 ];
+
+type Person = SkillContributorVM & { role: "creator" | "modifier" };
+
+function peopleFor(skill: SkillVM): Person[] {
+  const people: Person[] = [
+    {
+      id: skill.authorId,
+      name: skill.authorName,
+      initials: skill.authorInitials,
+      avatarUrl: skill.authorAvatarUrl,
+      role: "creator",
+    },
+  ];
+  const seen = new Set([skill.authorId]);
+  for (const modifier of skill.modifiers) {
+    if (seen.has(modifier.id)) continue;
+    seen.add(modifier.id);
+    people.push({ ...modifier, role: "modifier" });
+  }
+  return people;
+}
+
+function formatNames(names: string[]): string {
+  return names.join(", ");
+}
+
+function peopleLabel(skill: SkillVM): string {
+  const modifierNames = peopleFor(skill)
+    .filter((person) => person.role === "modifier")
+    .map((person) => person.name);
+  if (modifierNames.length === 0) return `Created by ${skill.authorName}.`;
+  return `Created by ${skill.authorName}. Updated by ${formatNames(modifierNames)}.`;
+}
+
+function PeopleStack({ skill }: { skill: SkillVM }) {
+  const people = peopleFor(skill);
+  const visible = people.slice(0, 4);
+  const hidden = people.length - visible.length;
+  const label = peopleLabel(skill);
+  return (
+    <span className="people" aria-label={label} title={label}>
+      {visible.map((person) => (
+        <UserAvatar
+          key={person.id}
+          className={"avatar people__avatar people__avatar--" + person.role}
+          avatarUrl={person.avatarUrl}
+          initials={person.initials}
+          size={22}
+        />
+      ))}
+      {hidden > 0 && <span className="people__more">+{hidden}</span>}
+    </span>
+  );
+}
+
+function ValidationMarker({ skill }: { skill: SkillVM }) {
+  if (skill.validation === "valid") return null;
+  if (skill.validation === "invalid") {
+    return (
+      <span className="invalid-pill">
+        <Icon name="alert-triangle" size={10} />
+        invalid
+      </span>
+    );
+  }
+  return (
+    <span className="invalid-pill invalid-pill--pending">
+      <Icon name="loader" size={10} />
+      validating
+    </span>
+  );
+}
+
+function depsLabel(skill: SkillVM): string {
+  if (skill.requiresCount > 0) return `${skill.requiresCount} req`;
+  if (skill.usedByCount > 0) return `${skill.usedByCount} used`;
+  return "no deps";
+}
 
 export function ListView({
   skills,
@@ -165,37 +243,35 @@ export function ListView({
 
       <div className="clist clist--deps">
         <div className="chead">
-          <span></span>
           <span>Skill</span>
+          <span>People</span>
           <span>Version</span>
           <span>Deps</span>
           <span className="r">Stars</span>
           <span className="r">Updated</span>
         </div>
         {shown.map((s) => (
-          <div key={s.id} className={"crow" + (lastId === s.id ? " is-active" : "")}>
+          <div key={s.id} className={"crow" + (lastId === s.id ? " is-active" : "")} title={peopleLabel(s)}>
             <button
               type="button"
               className="crow__hit"
               aria-label={`Open skill ${s.id}`}
               onClick={() => onOpen(s.id)}
             />
-            <span className={"vdot vdot--" + vdot(s.validation)} />
             <span className="crow__name">
               {s.id}
-              {s.validation === "invalid" && (
-                <span className="invalid-pill">
-                  <Icon name="alert-triangle" size={10} />
-                  invalid
-                </span>
-              )}
+              <ValidationMarker skill={s} />
               {s.description ? <span className="crow__desc">{s.description}</span> : null}
               <InstallMark state={s.installStatus} />
             </span>
+            <PeopleStack skill={s} />
             <span className="ver">{s.version ?? "—"}</span>
             <span className="crow__deps">
               {s.requiresCount > 0 ? (
-                <span className={"depspill" + (s.depWarn ? " depspill--warn" : "")} title={`${s.requiresCount} dependency${s.requiresCount === 1 ? "" : "ies"}`}>
+                <span
+                  className={"depspill" + (s.depWarn ? " depspill--warn" : "")}
+                  title={`${s.requiresCount} dependency${s.requiresCount === 1 ? "" : "ies"}`}
+                >
                   <Icon name="package" size={11} />
                   {s.requiresCount}
                 </span>
@@ -208,7 +284,7 @@ export function ListView({
                 <span style={{ color: "var(--color-faint)" }}>—</span>
               )}
             </span>
-            <span className="r">
+            <span className="crow__stars r">
               <button
                 type="button"
                 className={"stars" + (s.starred ? " is-on" : "")}
@@ -230,6 +306,14 @@ export function ListView({
                 style={{ fontSize: 7 }}
               />
               {s.updated}
+            </span>
+            <span className="crow__mobilemeta">
+              <span>v{s.version ?? "—"}</span>
+              <span>{depsLabel(s)}</span>
+              <span>{s.updated}</span>
+              <span className="crow__mobile-install">
+                <InstallMark state={s.installStatus} />
+              </span>
             </span>
           </div>
         ))}

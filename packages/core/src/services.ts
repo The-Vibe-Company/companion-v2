@@ -18,6 +18,7 @@ import type {
   SkillDependentRow,
   SkillFilterPreferences,
   SkillListRow,
+  SkillModifier,
   SkillPublicPreview,
   SkillSharePlan,
   SkillShareTarget,
@@ -929,6 +930,11 @@ export async function listSkills(input: {
   const rows = await (searchRank
     ? baseQuery.orderBy(desc(searchRank), desc(schema.skills.updatedAt)).limit(input.limit ?? 20)
     : baseQuery.orderBy(desc(schema.skills.updatedAt)));
+  const modifiersBySkill = await loadSkillModifiers({
+    database,
+    orgId: input.orgId,
+    skills: rows.map((r) => ({ skillId: r.id, creatorId: r.creator_id })),
+  });
 
   // Dependency counts + warn flag, computed from the org's current-version dependency graph.
   const graph = await loadDepGraph(database, input.orgId);
@@ -1039,6 +1045,7 @@ export async function listSkills(input: {
             avatarUrl: r.creator_avatar_url ?? null,
             updatedAtEpoch: r.creator_updated_at instanceof Date ? r.creator_updated_at.getTime() : 0,
           }),
+      modifiers: modifiersBySkill.get(r.id) ?? [],
       current_version: r.current_version,
       compatibility: manifest?.compatibility ?? null,
       metadata: manifest?.metadata ?? {},
@@ -1072,6 +1079,76 @@ export async function listSkills(input: {
       updated_at: r.updated_at.toISOString(),
     };
   }) as SkillListRow[];
+}
+
+async function loadSkillModifiers(input: {
+  database: Db;
+  orgId: string;
+  skills: Array<{ skillId: string; creatorId: string }>;
+}): Promise<Map<string, SkillModifier[]>> {
+  const bySkill = new Map<string, SkillModifier[]>();
+  if (input.skills.length === 0) return bySkill;
+
+  const creatorBySkill = new Map(input.skills.map((s) => [s.skillId, s.creatorId]));
+  const skillIds = input.skills.map((s) => s.skillId);
+  const rows = await input.database
+    .select({
+      skill_id: schema.skillVersions.skillId,
+      user_id: schema.skillVersions.createdBy,
+      name: schema.profiles.name,
+      initials: schema.profiles.initials,
+      email: schema.profiles.email,
+      avatar_url: schema.profiles.avatarUrl,
+      profile_updated_at: schema.profiles.updatedAt,
+      last_published_at: sql<Date>`max(${schema.skillVersions.createdAt})`,
+    })
+    .from(schema.skillVersions)
+    .innerJoin(schema.profiles, eq(schema.profiles.id, schema.skillVersions.createdBy))
+    .where(and(eq(schema.skillVersions.orgId, input.orgId), inArray(schema.skillVersions.skillId, skillIds)))
+    .groupBy(
+      schema.skillVersions.skillId,
+      schema.skillVersions.createdBy,
+      schema.profiles.id,
+      schema.profiles.name,
+      schema.profiles.initials,
+      schema.profiles.email,
+      schema.profiles.avatarUrl,
+      schema.profiles.updatedAt,
+    )
+    .orderBy(desc(sql`max(${schema.skillVersions.createdAt})`));
+
+  if (!Array.isArray(rows)) return bySkill;
+  const seenBySkill = new Map<string, Set<string>>();
+  for (const row of rows) {
+    if (
+      typeof row.skill_id !== "string" ||
+      typeof row.user_id !== "string" ||
+      typeof row.name !== "string" ||
+      typeof row.initials !== "string" ||
+      typeof row.email !== "string"
+    ) {
+      continue;
+    }
+    if (creatorBySkill.get(row.skill_id) === row.user_id) continue;
+    let seen = seenBySkill.get(row.skill_id);
+    if (!seen) seenBySkill.set(row.skill_id, (seen = new Set()));
+    if (seen.has(row.user_id)) continue;
+    seen.add(row.user_id);
+    const updatedAtEpoch = row.profile_updated_at instanceof Date ? row.profile_updated_at.getTime() : 0;
+    const modifier: SkillModifier = {
+      user_id: row.user_id,
+      name: row.name,
+      initials: row.initials,
+      avatar_url: resolveUserAvatarUrl({
+        userId: row.user_id,
+        email: row.email,
+        avatarUrl: typeof row.avatar_url === "string" ? row.avatar_url : null,
+        updatedAtEpoch,
+      }),
+    };
+    bySkill.set(row.skill_id, [...(bySkill.get(row.skill_id) ?? []), modifier]);
+  }
+  return bySkill;
 }
 
 /**

@@ -151,6 +151,15 @@ export type SkillUninstallResult = z.infer<typeof skillUninstallResultSchema>;
  * One row of the `skill_list_v` view — the denormalized read shape the web table
  * and the CLI list both consume. Machine-facing snake_case (mirrors the DB).
  */
+export const skillModifierSchema = z.object({
+  user_id: z.string(),
+  name: z.string(),
+  initials: z.string(),
+  /** Resolved avatar URL for the version publisher (custom upload or Gravatar); null falls back to initials. */
+  avatar_url: z.string().nullable(),
+});
+export type SkillModifier = z.infer<typeof skillModifierSchema>;
+
 export const skillListRowSchema = z.object({
   id: z.string(),
   org_id: z.string(),
@@ -192,6 +201,12 @@ export const skillListRowSchema = z.object({
   updater_initials: z.string().nullable().default(null),
   /** Resolved avatar URL for the last updater (custom upload or Gravatar); null falls back to initials. */
   updater_avatar_url: z.string().nullable().default(null),
+  /**
+   * Distinct members who published at least one version after the creator, ordered by their latest
+   * version publish time descending. The creator is excluded because the `creator_*` fields already
+   * carry that provenance.
+   */
+  modifiers: z.array(skillModifierSchema).default([]),
   current_version: z.string().nullable(),
   license: z.string().nullable(),
   compatibility: z.string().nullable(),
