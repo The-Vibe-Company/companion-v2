@@ -36,6 +36,12 @@ export interface SkillVM {
   authorInitials: string;
   /** Resolved avatar URL for the creator (custom upload or Gravatar); null falls back to initials. */
   authorAvatarUrl: string | null;
+  /** "Last updated by" — the member who uploaded the current version (falls back to the creator). */
+  updaterId: string;
+  updaterName: string;
+  updaterInitials: string;
+  /** Resolved avatar URL for the last updater (custom upload or Gravatar); null falls back to initials. */
+  updaterAvatarUrl: string | null;
   tools: string[];
   requirements: SkillRequirement[]; // declared secrets / env vars + install notes
   compatibility: string | null;
@@ -75,6 +81,13 @@ export function mapSkill(row: SkillListRow): SkillVM {
     authorName: row.creator_name,
     authorInitials: row.creator_initials,
     authorAvatarUrl: row.creator_avatar_url ?? null,
+    updaterId: row.updater_id ?? row.creator_id,
+    updaterName: row.updater_name ?? row.creator_name,
+    updaterInitials: row.updater_initials ?? row.creator_initials,
+    // Resolve the avatar ATOMICALLY against the updater identity: only borrow the creator's avatar when
+    // there is no updater (updater_id null). When the updater is known but has no avatar, keep null so
+    // UserAvatar renders the updater's initials — never the creator's face under the updater's name.
+    updaterAvatarUrl: row.updater_id ? (row.updater_avatar_url ?? null) : (row.creator_avatar_url ?? null),
     tools: row.tools ?? [],
     requirements: row.requirements ?? [],
     compatibility: row.compatibility,

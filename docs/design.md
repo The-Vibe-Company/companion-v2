@@ -71,7 +71,11 @@ Every tenant-owned table carries `org_id`. A skill lives in one of two libraries
   there is no admin override). The owner is `creator_id`; only the owner can read, edit, share, or
   delete it. Organized by that user's **personal folders** (`personal_labels`).
 
-`creator_id` (always recorded, for Activity/audit) doubles as the **owner** of a personal skill. There
+`creator_id` (always recorded, for Activity/audit) doubles as the **owner** of a personal skill, and is
+distinct from the **last updater**: the authenticated `GET /v1/skills` and `GET /v1/skills/:slug` read
+models carry both the `creator_*` ("Created by") and `updater_*` ("Last updated by") display fields, the
+latter derived from the uploader of the current version (`skill_versions.created_by` of
+`skills.current_version_id`) — no `updated_by` column. There
 is still no `owner_team_id`, `everyone` flag, `skill_team_shares` table, or `PUT /v1/skills/:slug/owner`
 endpoint. A slug is **workspace-unique across both scopes** (`skills_org_slug_uq (org_id, slug)`), so the
 slug route stays unambiguous and Share can never collide. Dependency reads prefer the stable target
