@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { Icon } from "../Icon";
+import { UserAvatar } from "../UserAvatar";
 import type { SkillVM } from "@/lib/types";
 import { vdot, InstallMark } from "./blocks";
 import { chipParts, type Filter } from "./filters";
@@ -220,7 +221,16 @@ export function ListView({
                 <span className="tnum">{s.stars}</span>
               </button>
             </span>
-            <span className="r when">{s.updated}</span>
+            <span className="r when when--by" title={`Updated by ${s.updaterName} · ${s.updated}`}>
+              <UserAvatar
+                className="avatar"
+                avatarUrl={s.updaterAvatarUrl}
+                initials={s.updaterInitials}
+                size={14}
+                style={{ fontSize: 7 }}
+              />
+              {s.updated}
+            </span>
           </div>
         ))}
         {!shown.length && (

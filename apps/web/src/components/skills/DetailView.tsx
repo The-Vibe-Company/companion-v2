@@ -633,8 +633,17 @@ export function DetailView({
                 <p className="dbyline">
                   <Avatar initials={skill.authorInitials} avatarUrl={skill.authorAvatarUrl} size={16} />
                   <span>
-                    by <span className="dbyline__name">{skill.authorName}</span>
+                    Created by <span className="dbyline__name">{skill.authorName}</span>
                   </span>
+                  {skill.updaterId !== skill.authorId && (
+                    <>
+                      <span aria-hidden="true">·</span>
+                      <Avatar initials={skill.updaterInitials} avatarUrl={skill.updaterAvatarUrl} size={16} />
+                      <span>
+                        Updated by <span className="dbyline__name">{skill.updaterName}</span>
+                      </span>
+                    </>
+                  )}
                 </p>
                 {isInstalledCopy && (
                   <div className="ls-confirm dinstalled-note">
