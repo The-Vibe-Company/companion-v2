@@ -108,20 +108,6 @@ body { background: var(--color-canvas); color: var(--color-fg); font-family: var
   background: transparent;
   transition: background-color var(--duration-fast) var(--ease-out-quint), opacity var(--duration-fast) var(--ease-out-quint), transform var(--duration-fast) var(--ease-out-quint);
 }
-.side--skill-drop .lblrow:not(.lblrow--dropready):not(.lblrow--dropok):not(.lblrow--dropdone) {
-  opacity: 0.68;
-}
-.side--skill-drop .lblrow--dropready {
-  background: color-mix(in oklab, var(--color-surface-raised) 62%, transparent);
-  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--color-line-strong) 55%, transparent);
-  cursor: copy;
-}
-.side--skill-drop .lblrow--dropready::before {
-  background: color-mix(in oklab, var(--color-accent-edge) 38%, transparent);
-}
-.side--skill-drop .lblrow--dropready .lblrow__ico {
-  color: var(--color-muted);
-}
 .side--skill-drop .lblrow__more {
   opacity: 0;
   pointer-events: none;
@@ -135,6 +121,13 @@ body { background: var(--color-canvas); color: var(--color-fg); font-family: var
 .lblrow--dropok::before {
   background: var(--color-accent-edge);
   transform: scaleY(1.14);
+}
+.lblrow--openpending::before {
+  animation: folder-dwell-pending 650ms var(--ease-out-quint) forwards;
+}
+.lblrow--openpending .lblrow__chev,
+.lblrow--openpending .lblrow__ico {
+  color: var(--color-accent-edge);
 }
 .lblrow--dropdone {
   animation: folder-drop-confirm 850ms var(--ease-out-quint);
@@ -1273,9 +1266,28 @@ body { background: var(--color-canvas); color: var(--color-fg); font-family: var
   }
 }
 
+@keyframes folder-dwell-pending {
+  0% {
+    opacity: 0.42;
+    transform: scaleY(0.38);
+  }
+  72% {
+    opacity: 0.74;
+  }
+  100% {
+    opacity: 1;
+    transform: scaleY(1.14);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .lblrow--dropok {
     transform: none;
+  }
+  .lblrow--openpending::before {
+    animation: none;
+    opacity: 1;
+    transform: scaleY(1.14);
   }
   .lblrow--dropdone,
   .ml-libhead--dropdone {

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, type DragEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type DragEvent } from "react";
 import type { LabelColor, LabelIcon } from "@companion/contracts";
 import { LABEL_COLORS, LABEL_ICONS, labelDisplayNameToPath } from "@companion/contracts";
 import { Icon } from "../Icon";
@@ -12,6 +12,7 @@ import type { DragItem, TreeRow } from "./SkillsApp";
 type SidebarSelection = { lib: SkillsLibrary; kind: "all" | "starred" | "installed" | "label"; label?: string } | null;
 type DropTarget = { lib: SkillsLibrary; kind: "label"; path: string } | { lib: SkillsLibrary; kind: "root" };
 type MoveTarget = { path: string; label: string };
+const FOLDER_DWELL_OPEN_DELAY_MS = 650;
 
 function labelParent(path: string): string | null {
   const i = path.lastIndexOf("/");
@@ -323,6 +324,50 @@ function LabelTreeRows({
   onDropSkillOnLabel: (lib: SkillsLibrary, skillId: string, targetPath: string, sourceLabel: string | null) => void;
   onReparentLabel: (lib: SkillsLibrary, from: string, targetParent: string | null) => void;
 }) {
+  const [openPendingPath, setOpenPendingPath] = useState<string | null>(null);
+  const dwellTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const dwellTargetRef = useRef<string | null>(null);
+  const expandedRef = useRef(expanded);
+
+  useEffect(() => {
+    expandedRef.current = expanded;
+  }, [expanded]);
+
+  const clearDwellOpen = useCallback((resetState = true) => {
+    if (dwellTimerRef.current) clearTimeout(dwellTimerRef.current);
+    dwellTimerRef.current = null;
+    dwellTargetRef.current = null;
+    if (resetState) setOpenPendingPath(null);
+  }, []);
+
+  const scheduleDwellOpen = useCallback(
+    (path: string) => {
+      if (dwellTargetRef.current === path) return;
+      clearDwellOpen();
+      dwellTargetRef.current = path;
+      setOpenPendingPath(path);
+      dwellTimerRef.current = setTimeout(() => {
+        if (dwellTargetRef.current === path && !expandedRef.current.has(path)) {
+          onToggleExpand(path);
+        }
+        dwellTimerRef.current = null;
+        dwellTargetRef.current = null;
+        setOpenPendingPath(null);
+      }, FOLDER_DWELL_OPEN_DELAY_MS);
+    },
+    [clearDwellOpen, onToggleExpand],
+  );
+
+  useEffect(() => () => clearDwellOpen(false), [clearDwellOpen]);
+
+  useEffect(() => {
+    if (!drag || drag.kind !== "skill" || drag.lib !== lib) clearDwellOpen();
+  }, [clearDwellOpen, drag, lib]);
+
+  useEffect(() => {
+    if (openPendingPath && expanded.has(openPendingPath)) clearDwellOpen();
+  }, [clearDwellOpen, expanded, openPendingPath]);
+
   const labelIcon = (row: TreeRow): string => {
     if (row.icon) return row.icon;
     if (row.hasChildren) return expanded.has(row.path) ? "folder-open" : "folder";
@@ -345,7 +390,7 @@ function LabelTreeRows({
         const dragging = drag?.kind === "label" && drag.lib === lib && drag.path === row.path;
         const dropOk = dropTarget?.kind === "label" && dropTarget.lib === lib && dropTarget.path === row.path;
         const dropJustDone = dropDone?.kind === "label" && dropDone.lib === lib && dropDone.path === row.path;
-        const dropReady = drag?.kind === "skill" && drag.lib === lib && !dropOk && !dropJustDone;
+        const openPending = openPendingPath === row.path && dropOk && drag?.kind === "skill";
         const handleDragStart = (event: DragEvent<HTMLDivElement>) => {
           event.dataTransfer.effectAllowed = "move";
           event.dataTransfer.setData("text/plain", row.path);
@@ -356,11 +401,14 @@ function LabelTreeRows({
           event.preventDefault();
           event.dataTransfer.dropEffect = "move";
           onDropTarget({ lib, kind: "label", path: row.path });
+          if (drag.kind === "skill" && row.hasChildren && !expandedRef.current.has(row.path)) scheduleDwellOpen(row.path);
+          else clearDwellOpen();
         };
         const handleDrop = (event: DragEvent<HTMLDivElement>) => {
           if (!isLabelDropValid(drag, lib, row.path)) return;
           event.preventDefault();
           event.stopPropagation();
+          clearDwellOpen();
           onDropTarget(null);
           if (drag.kind === "skill") onDropSkillOnLabel(lib, drag.skillId, row.path, drag.sourceLabel);
           else onReparentLabel(lib, drag.path, row.path);
@@ -373,20 +421,24 @@ function LabelTreeRows({
               "lblrow" +
               (active ? " lblrow--active" : "") +
               (dragging ? " lblrow--dragging" : "") +
-              (dropReady ? " lblrow--dropready" : "") +
               (dropOk ? " lblrow--dropok" : "") +
+              (openPending ? " lblrow--openpending" : "") +
               (dropJustDone ? " lblrow--dropdone" : "")
             }
             key={row.path}
             draggable
             onDragStart={handleDragStart}
             onDragEnd={() => {
+              clearDwellOpen();
               onDropTarget(null);
               onDragEnd();
             }}
             onDragOver={handleDragOver}
             onDragLeave={(event) => {
-              if (!dragLeaveStaysInside(event)) onDropTarget(null);
+              if (!dragLeaveStaysInside(event)) {
+                clearDwellOpen();
+                onDropTarget(null);
+              }
             }}
             onDrop={handleDrop}
             style={{ paddingLeft: 8 + row.depth * 14 }}

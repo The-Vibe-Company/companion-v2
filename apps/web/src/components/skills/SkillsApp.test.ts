@@ -306,6 +306,11 @@ function folderRow(container: HTMLElement, path: string): HTMLElement {
   return row;
 }
 
+function queryFolderRow(container: HTMLElement, path: string): HTMLElement | null {
+  const button = container.querySelector<HTMLElement>(`button[aria-label="${path} options"]`);
+  return button?.closest<HTMLElement>(".lblrow") ?? null;
+}
+
 function libraryHeader(container: HTMLElement, title: "My Skills" | "Organization"): HTMLElement {
   const button = findButton(container, title);
   const row = button.closest<HTMLElement>(".ml-libhead");
@@ -404,6 +409,7 @@ afterEach(() => {
   for (const root of mountedRoots) {
     act(() => root.unmount());
   }
+  vi.useRealTimers();
   document.body.innerHTML = "";
   vi.restoreAllMocks();
 });
@@ -724,25 +730,86 @@ describe("SkillsApp optimistic label assignment", () => {
     expect(queryMocks.unassignSkillLabel).not.toHaveBeenCalled();
   });
 
-  it("makes same-library folder targets visibly active while dragging a skill", async () => {
+  it("only marks the hovered same-library folder while dragging a skill", async () => {
     const { container } = await mountSkillsApp({ lib: "org", kind: "all" });
     await flushEffects();
 
     const source = skillRow(container, "loose-skill");
     const target = folderRow(container, "growth");
+    const other = folderRow(container, "marketing");
 
     await dispatchDnd(source, "dragstart");
 
     expect(container.querySelector(".side")?.classList.contains("side--skill-drop")).toBe(true);
-    expect(target.classList.contains("lblrow--dropready")).toBe(true);
+    expect(container.querySelector(".lblrow--dropready")).toBeNull();
+    expect(container.querySelector(".lblrow--dropok")).toBeNull();
 
     await dispatchDnd(target, "dragover");
 
     expect(target.classList.contains("lblrow--dropok")).toBe(true);
-    expect(target.classList.contains("lblrow--dropready")).toBe(false);
+    expect(other.classList.contains("lblrow--dropok")).toBe(false);
+    expect(Array.from(container.querySelectorAll(".lblrow--dropok"))).toHaveLength(1);
 
     await dispatchDnd(source, "dragend");
     expect(container.querySelector(".side")?.classList.contains("side--skill-drop")).toBe(false);
+  });
+
+  it("auto-expands a closed folder after a 650ms skill-drag dwell", async () => {
+    const { container } = await mountSkillsApp({ lib: "org", kind: "all" });
+    await flushEffects();
+    vi.useFakeTimers();
+
+    const source = skillRow(container, "loose-skill");
+    const target = folderRow(container, "marketing");
+
+    expect(queryFolderRow(container, "marketing/seo")).toBeNull();
+
+    await dispatchDnd(source, "dragstart");
+    await dispatchDnd(target, "dragover");
+
+    expect(target.classList.contains("lblrow--openpending")).toBe(true);
+
+    act(() => {
+      vi.advanceTimersByTime(649);
+    });
+    await flushEffects();
+
+    expect(queryFolderRow(container, "marketing/seo")).toBeNull();
+
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
+    await flushEffects();
+
+    expect(queryFolderRow(container, "marketing/seo")).not.toBeNull();
+    expect(target.classList.contains("lblrow--openpending")).toBe(false);
+
+    await dispatchDnd(source, "dragend");
+  });
+
+  it("cancels folder auto-expand when the skill drag leaves before the dwell delay", async () => {
+    const { container } = await mountSkillsApp({ lib: "org", kind: "all" });
+    await flushEffects();
+    vi.useFakeTimers();
+
+    const source = skillRow(container, "loose-skill");
+    const target = folderRow(container, "marketing");
+
+    await dispatchDnd(source, "dragstart");
+    await dispatchDnd(target, "dragover");
+    expect(target.classList.contains("lblrow--openpending")).toBe(true);
+
+    await dispatchDnd(target, "dragleave");
+    expect(target.classList.contains("lblrow--openpending")).toBe(false);
+
+    act(() => {
+      vi.advanceTimersByTime(650);
+    });
+    await flushEffects();
+
+    expect(queryFolderRow(container, "marketing/seo")).toBeNull();
+
+    await dispatchDnd(source, "dragend");
   });
 
   it("moves a skill out of the active folder when dropped from a folder view", async () => {
