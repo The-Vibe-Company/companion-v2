@@ -660,7 +660,7 @@ describe("SkillsApp navigation", () => {
 
     clickButton(container, "Open skill loose-skill");
     await flushEffects();
-    expect(window.location.search).toBe("?lib=org&skill=loose-skill");
+    expect(window.location.pathname + window.location.search).toBe("/s/share-loose-skill");
     expect(container.textContent).toContain("Install skill");
 
     // Browser Back returns to the org list (the entry before the pushed detail).
@@ -674,7 +674,7 @@ describe("SkillsApp navigation", () => {
     expect(container.textContent).not.toContain("Install skill");
   });
 
-  it("persists a label folder in the URL when opening a skill under it", async () => {
+  it("uses the public share URL when opening an org skill under a label", async () => {
     const { container } = await mountSkillsApp(
       { lib: "org", kind: "label", label: "marketing/seo" },
       { url: "/skills?lib=org&view=label&label=marketing%2Fseo" },
@@ -684,8 +684,42 @@ describe("SkillsApp navigation", () => {
     clickButton(container, "Open skill seo-helper");
     await flushEffects();
 
-    expect(window.location.search).toBe("?lib=org&view=label&label=marketing%2Fseo&skill=seo-helper");
+    expect(window.location.pathname + window.location.search).toBe("/s/share-seo-helper");
     expect(container.textContent).toContain("Install skill");
+  });
+
+  it("re-opens an org skill from a public share URL history entry", async () => {
+    const { container } = await mountSkillsApp({ lib: "org", kind: "all" }, { url: "/skills?lib=org" });
+    await flushEffects();
+    expect(container.textContent).not.toContain("Install skill");
+
+    window.history.pushState({ companionSkillsDetail: true }, "", "/s/share-brand-kit");
+    await act(async () => {
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    });
+
+    expect(window.location.pathname + window.location.search).toBe("/s/share-brand-kit");
+    expect(container.textContent).toContain("brand-kit");
+    expect(container.textContent).toContain("Install skill");
+  });
+
+  it("keeps personal skill detail URLs on the signed-in skills route", async () => {
+    const { container } = await mountSkillsApp(
+      { lib: "mine", kind: "all" },
+      {
+        props: {
+          initialOrgSkills: [],
+          initialMineSkills: [skill({ id: "my-draft", scope: "personal", source: "authored" })],
+        },
+      },
+    );
+    await flushEffects();
+
+    clickButton(container, "Open skill my-draft");
+    await flushEffects();
+
+    expect(window.location.pathname + window.location.search).toBe("/skills?skill=my-draft");
+    expect(container.textContent).toContain("Share to organization");
   });
 
   it("falls back to replacing the URL when closing a directly loaded detail", async () => {
@@ -695,6 +729,7 @@ describe("SkillsApp navigation", () => {
     );
     await flushEffects();
     expect(container.textContent).toContain("Install skill");
+    expect(window.location.pathname + window.location.search).toBe("/s/share-seo-helper");
 
     // The detail crumb's back button is labeled by the library (the org name for an org skill).
     clickButton(container, "Acme");
@@ -774,7 +809,7 @@ describe("SkillsApp label folder creation", () => {
     // Open a skill under the active folder so the route carries both label + skill.
     clickButton(container, "Open skill seo-helper");
     await flushEffects();
-    expect(window.location.search).toBe("?lib=org&view=label&label=marketing%2Fseo&skill=seo-helper");
+    expect(window.location.pathname + window.location.search).toBe("/s/share-seo-helper");
 
     // Rename the active leaf folder (marketing/seo → marketing/growth) via its options menu.
     clickButton(container, "marketing/seo options");
@@ -791,8 +826,8 @@ describe("SkillsApp label folder creation", () => {
     await flushEffects();
 
     expect(queryMocks.renameLabel).toHaveBeenCalledWith("marketing/seo", "marketing/growth", { displayName: "growth" });
-    // The URL round-trips the new path and keeps the detail open (reload re-opens the same skill).
-    expect(window.location.search).toBe("?lib=org&view=label&label=marketing%2Fgrowth&skill=seo-helper");
+    // The detail URL remains the skill's public share link while the selection state keeps the detail open.
+    expect(window.location.pathname + window.location.search).toBe("/s/share-seo-helper");
   });
 
   it("renames a folder display name while keeping the same canonical path", async () => {

@@ -17,29 +17,11 @@ async function loadBrandMark(): Promise<string | null> {
   }
 }
 
-async function loadFont(): Promise<ArrayBuffer | null> {
-  const candidates = [
-    "/System/Library/Fonts/SFNS.ttf",
-    "/System/Library/Fonts/Supplemental/Arial.ttf",
-    "/Library/Fonts/Arial.ttf",
-  ];
-  for (const candidate of candidates) {
-    try {
-      const data = await readFile(candidate);
-      return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
-    } catch {
-      // Try the next local system font.
-    }
-  }
-  return null;
-}
-
 export default async function SkillOpenGraphImage({ params }: { params: Promise<{ token: string }> }) {
   const { token } = await params;
-  const [preview, mark, fontData] = await Promise.all([
+  const [preview, mark] = await Promise.all([
     fetchPublicSkillPreview(token),
     loadBrandMark(),
-    loadFont(),
   ]);
   const title = preview?.display_name ?? "Skill not found";
   const slug = preview?.slug ?? "companion";
@@ -58,7 +40,7 @@ export default async function SkillOpenGraphImage({ params }: { params: Promise<
           background: "#f7f7f9",
           color: "#34313c",
           padding: 72,
-          fontFamily: fontData ? "CompanionUI" : "Arial",
+          fontFamily: "Arial",
           border: "1px solid #d9d6df",
         }}
       >
@@ -101,23 +83,13 @@ export default async function SkillOpenGraphImage({ params }: { params: Promise<
         </div>
 
         <div style={{ display: "flex", gap: 18, color: "#787182", fontSize: 24 }}>
-          {preview ? <div>{preview.star_count} stars</div> : null}
-          {preview ? <div>By {preview.creator_name}</div> : null}
+          {preview ? <div>{`${preview.star_count} stars`}</div> : null}
+          {preview ? <div>{`By ${preview.creator_name}`}</div> : null}
         </div>
       </div>
     ),
     {
       ...size,
-      fonts: fontData
-        ? [
-            {
-              name: "CompanionUI",
-              data: fontData,
-              style: "normal",
-              weight: 400,
-            },
-          ]
-        : [],
     },
   );
 }

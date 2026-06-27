@@ -31,6 +31,20 @@ export function skillsRouteLib(route: SkillsRoute): SkillsLibrary | null {
   return "lib" in route ? route.lib : null;
 }
 
+export function skillShareHref(token: string): string {
+  return `/s/${encodeURIComponent(token)}`;
+}
+
+export function parseSkillShareTokenPath(pathname: string): string | null {
+  const match = pathname.match(/^\/s\/([^/]+)\/?$/);
+  if (!match) return null;
+  try {
+    return decodeURIComponent(match[1] ?? "");
+  } catch {
+    return null;
+  }
+}
+
 function firstParam(
   params: URLSearchParams | Record<string, string | string[] | undefined>,
   key: string,

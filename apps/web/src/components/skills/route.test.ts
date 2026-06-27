@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  parseSkillShareTokenPath,
   parseSkillsRoute,
+  skillShareHref,
   skillsRouteHref,
   skillsRouteKey,
   skillsRouteLib,
@@ -101,6 +103,15 @@ describe("skills route helpers", () => {
     expect(skillsRouteHref({ lib: "org", kind: "label", label: "marketing/seo", skill: "incident-summary" })).toBe(
       "/skills?lib=org&view=label&label=marketing%2Fseo&skill=incident-summary",
     );
+  });
+
+  it("builds and parses public skill share URLs", () => {
+    expect(skillShareHref("abc123")).toBe("/s/abc123");
+    expect(skillShareHref("token with spaces")).toBe("/s/token%20with%20spaces");
+    expect(parseSkillShareTokenPath("/s/abc123")).toBe("abc123");
+    expect(parseSkillShareTokenPath("/s/token%20with%20spaces")).toBe("token with spaces");
+    expect(parseSkillShareTokenPath("/s/abc123/go")).toBeNull();
+    expect(parseSkillShareTokenPath("/skills")).toBeNull();
   });
 
   it("round-trips library + nested label path (and its open skill) through href + parse", () => {

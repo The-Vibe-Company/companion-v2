@@ -314,7 +314,6 @@
 .lin-eyebrow svg { color: var(--color-faint); }
 .dtitlebar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .dtitle--linear { font-size: 26px; line-height: 1.15; overflow-wrap: anywhere; }
-.dsharebtn { height: 28px; padding: 0 10px; }
 .dslug { margin: 7px 0 0; color: var(--color-faint); overflow-wrap: anywhere; }
 .ov__lead--linear { margin-top: 12px; max-width: 68ch; overflow-wrap: anywhere; }
 .dbyline { display: inline-flex; align-items: center; gap: 8px; margin: 14px 0 0; font-size: var(--text-xs); color: var(--color-muted); }
