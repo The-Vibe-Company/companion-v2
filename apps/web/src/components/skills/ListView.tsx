@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useState, type DragEvent } from "react";
 import { Icon } from "../Icon";
 import type { SkillVM } from "@/lib/types";
 import { vdot, InstallMark } from "./blocks";
@@ -15,6 +15,29 @@ const SORT_OPTIONS: { key: SortKey; label: string }[] = [
   { key: "name", label: "Name (A–Z)" },
   { key: "stars", label: "Most starred" },
 ];
+
+function setSkillDragImage(event: DragEvent<HTMLElement>, skill: SkillVM) {
+  const dataTransfer = event.dataTransfer as DataTransfer & {
+    setDragImage?: (image: Element, x: number, y: number) => void;
+  };
+  if (typeof dataTransfer.setDragImage !== "function") return;
+
+  const preview = document.createElement("div");
+  preview.className = "skill-drag-preview";
+
+  const dot = document.createElement("span");
+  dot.className = "vdot vdot--" + vdot(skill.validation);
+  preview.appendChild(dot);
+
+  const name = document.createElement("span");
+  name.className = "skill-drag-preview__name";
+  name.textContent = skill.id;
+  preview.appendChild(name);
+
+  document.body.appendChild(preview);
+  dataTransfer.setDragImage(preview, 14, 14);
+  window.setTimeout(() => preview.remove(), 0);
+}
 
 export function ListView({
   skills,
@@ -32,6 +55,9 @@ export function ListView({
   onClearFilters,
   preferenceStatus,
   onRetryPreferences,
+  dragSkillId,
+  onSkillDragStart,
+  onSkillDragEnd,
 }: {
   skills: SkillVM[];
   /** Which library this list shows (drives scope-aware empty + upload copy). */
@@ -51,6 +77,9 @@ export function ListView({
   onClearFilters: () => void;
   preferenceStatus: "idle" | "saving" | "saved" | "error";
   onRetryPreferences: () => void;
+  dragSkillId: string | null;
+  onSkillDragStart: (id: string) => void;
+  onSkillDragEnd: () => void;
 }) {
   // Search + sort are local list-view affordances (label/status filtering lives in the sidebar / chips).
   const [q, setQ] = useState("");
@@ -171,58 +200,75 @@ export function ListView({
           <span className="r">Stars</span>
           <span className="r">Updated</span>
         </div>
-        {shown.map((s) => (
-          <div key={s.id} className={"crow" + (lastId === s.id ? " is-active" : "")}>
-            <button
-              type="button"
-              className="crow__hit"
-              aria-label={`Open skill ${s.id}`}
-              onClick={() => onOpen(s.id)}
-            />
-            <span className={"vdot vdot--" + vdot(s.validation)} />
-            <span className="crow__name">
-              {s.id}
-              {s.validation === "invalid" && (
-                <span className="invalid-pill">
-                  <Icon name="alert-triangle" size={10} />
-                  invalid
-                </span>
-              )}
-              {s.description ? <span className="crow__desc">{s.description}</span> : null}
-              <InstallMark state={s.installStatus} />
-            </span>
-            <span className="ver">{s.version ?? "—"}</span>
-            <span className="crow__deps">
-              {s.requiresCount > 0 ? (
-                <span className={"depspill" + (s.depWarn ? " depspill--warn" : "")} title={`${s.requiresCount} dependency${s.requiresCount === 1 ? "" : "ies"}`}>
-                  <Icon name="package" size={11} />
-                  {s.requiresCount}
-                </span>
-              ) : s.usedByCount > 0 ? (
-                <span className="depspill depspill--used" title={`Used by ${s.usedByCount}`}>
-                  <Icon name="corner-down-right" size={11} />
-                  {s.usedByCount}
-                </span>
-              ) : (
-                <span style={{ color: "var(--color-faint)" }}>—</span>
-              )}
-            </span>
-            <span className="r">
+        {shown.map((s) => {
+          const canDrag = !(library === "mine" && s.source === "installed");
+          const dragging = canDrag && dragSkillId === s.id;
+          const onDragStart = (event: DragEvent<HTMLDivElement>) => {
+            if (!canDrag) return;
+            event.dataTransfer.effectAllowed = "move";
+            event.dataTransfer.setData("text/plain", s.id);
+            setSkillDragImage(event, s);
+            onSkillDragStart(s.id);
+          };
+          return (
+            <div
+              key={s.id}
+              className={"crow" + (lastId === s.id ? " is-active" : "") + (dragging ? " crow--dragging" : "")}
+              draggable={canDrag}
+              onDragStart={canDrag ? onDragStart : undefined}
+              onDragEnd={canDrag ? onSkillDragEnd : undefined}
+            >
               <button
                 type="button"
-                className={"stars" + (s.starred ? " is-on" : "")}
-                title={s.starred ? "Unstar this skill" : "Star this skill"}
-                aria-pressed={s.starred}
-                aria-label={(s.starred ? "Unstar" : "Star") + " " + s.id}
-                onClick={() => onToggleStar(s.id)}
-              >
-                <Icon name="star" size={13} />
-                <span className="tnum">{s.stars}</span>
-              </button>
-            </span>
-            <span className="r when">{s.updated}</span>
-          </div>
-        ))}
+                className="crow__hit"
+                aria-label={`Open skill ${s.id}`}
+                onClick={() => onOpen(s.id)}
+              />
+              <span className={"vdot vdot--" + vdot(s.validation)} />
+              <span className="crow__name">
+                {s.id}
+                {s.validation === "invalid" && (
+                  <span className="invalid-pill">
+                    <Icon name="alert-triangle" size={10} />
+                    invalid
+                  </span>
+                )}
+                {s.description ? <span className="crow__desc">{s.description}</span> : null}
+                <InstallMark state={s.installStatus} />
+              </span>
+              <span className="ver">{s.version ?? "—"}</span>
+              <span className="crow__deps">
+                {s.requiresCount > 0 ? (
+                  <span className={"depspill" + (s.depWarn ? " depspill--warn" : "")} title={`${s.requiresCount} dependency${s.requiresCount === 1 ? "" : "ies"}`}>
+                    <Icon name="package" size={11} />
+                    {s.requiresCount}
+                  </span>
+                ) : s.usedByCount > 0 ? (
+                  <span className="depspill depspill--used" title={`Used by ${s.usedByCount}`}>
+                    <Icon name="corner-down-right" size={11} />
+                    {s.usedByCount}
+                  </span>
+                ) : (
+                  <span style={{ color: "var(--color-faint)" }}>—</span>
+                )}
+              </span>
+              <span className="r">
+                <button
+                  type="button"
+                  className={"stars" + (s.starred ? " is-on" : "")}
+                  title={s.starred ? "Unstar this skill" : "Star this skill"}
+                  aria-pressed={s.starred}
+                  aria-label={(s.starred ? "Unstar" : "Star") + " " + s.id}
+                  onClick={() => onToggleStar(s.id)}
+                >
+                  <Icon name="star" size={13} />
+                  <span className="tnum">{s.stars}</span>
+                </button>
+              </span>
+              <span className="r when">{s.updated}</span>
+            </div>
+          );
+        })}
         {!shown.length && (
           <div className="empty">
             <Icon name="search-x" size={22} style={{ color: "var(--color-faint)" }} />

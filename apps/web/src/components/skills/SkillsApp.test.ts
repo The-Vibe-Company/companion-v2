@@ -277,6 +277,54 @@ function clickButton(container: HTMLElement, label: string) {
   });
 }
 
+function skillRow(container: HTMLElement, id: string): HTMLElement {
+  const button = findButton(container, `Open skill ${id}`);
+  const row = button.closest<HTMLElement>(".crow");
+  if (!row) throw new Error(`Could not find skill row: ${id}`);
+  return row;
+}
+
+function folderRow(container: HTMLElement, path: string): HTMLElement {
+  const button = container.querySelector<HTMLElement>(`button[aria-label="${path} options"]`);
+  const row = button?.closest<HTMLElement>(".lblrow");
+  if (!row) throw new Error(`Could not find folder row: ${path}`);
+  return row;
+}
+
+function libraryHeader(container: HTMLElement, title: "My Skills" | "Organization"): HTMLElement {
+  const button = findButton(container, title);
+  const row = button.closest<HTMLElement>(".ml-libhead");
+  if (!row) throw new Error(`Could not find library header: ${title}`);
+  return row;
+}
+
+function dndEvent(type: string): Event {
+  const event = new Event(type, { bubbles: true, cancelable: true });
+  Object.defineProperty(event, "dataTransfer", {
+    value: {
+      clearData: vi.fn(),
+      dropEffect: "none",
+      effectAllowed: "all",
+      getData: vi.fn(),
+      setData: vi.fn(),
+    },
+  });
+  return event;
+}
+
+async function dispatchDnd(node: HTMLElement, type: string) {
+  act(() => {
+    node.dispatchEvent(dndEvent(type));
+  });
+  await flushEffects();
+}
+
+async function dragAndDrop(source: HTMLElement, target: HTMLElement) {
+  await dispatchDnd(source, "dragstart");
+  await dispatchDnd(target, "dragover");
+  await dispatchDnd(target, "drop");
+}
+
 // React tracks the input value via the native setter; bypassing it (plain `.value =`) makes the
 // synthetic onChange ignore the update. Use the prototype setter so onChange fires.
 function setReactInputValue(input: HTMLInputElement, value: string) {
@@ -648,6 +696,211 @@ describe("SkillsApp optimistic label assignment", () => {
     // The chip is restored after the failure; the detail never closed.
     expect(container.textContent).toContain("Install skill");
     expect(container.querySelector('button[aria-label="Remove from marketing/seo"]')).not.toBeNull();
+  });
+
+  it("adds a skill to a folder when the row is dropped on a same-library folder", async () => {
+    const { container } = await mountSkillsApp({ lib: "org", kind: "all" });
+    await flushEffects();
+
+    await dragAndDrop(skillRow(container, "loose-skill"), folderRow(container, "growth"));
+
+    expect(queryMocks.assignSkillLabel).toHaveBeenCalledTimes(1);
+    expect(queryMocks.assignSkillLabel).toHaveBeenCalledWith("loose-skill", "growth");
+    expect(queryMocks.unassignSkillLabel).not.toHaveBeenCalled();
+  });
+
+  it("moves a skill out of the active folder when dropped from a folder view", async () => {
+    const { container } = await mountSkillsApp(
+      { lib: "org", kind: "label", label: "marketing" },
+      { url: "/skills?lib=org&view=label&label=marketing" },
+    );
+    await flushEffects();
+
+    await dragAndDrop(skillRow(container, "brand-kit"), folderRow(container, "growth"));
+
+    expect(queryMocks.assignSkillLabel).toHaveBeenCalledWith("brand-kit", "growth");
+    expect(queryMocks.unassignSkillLabel).toHaveBeenCalledWith("brand-kit", "marketing");
+    expect(container.querySelector('button[aria-label="Open skill brand-kit"]')).toBeNull();
+  });
+
+  it("moves a descendant-filed skill out of a parent folder roll-up", async () => {
+    const { container } = await mountSkillsApp(
+      { lib: "org", kind: "label", label: "marketing" },
+      { url: "/skills?lib=org&view=label&label=marketing" },
+    );
+    await flushEffects();
+
+    await dragAndDrop(skillRow(container, "seo-helper"), folderRow(container, "growth"));
+
+    expect(queryMocks.assignSkillLabel).toHaveBeenCalledWith("seo-helper", "growth");
+    expect(queryMocks.unassignSkillLabel).toHaveBeenCalledWith("seo-helper", "marketing/seo");
+    expect(container.querySelector('button[aria-label="Open skill seo-helper"]')).toBeNull();
+  });
+
+  it("compensates a partially failed move and restores the source view", async () => {
+    queryMocks.unassignSkillLabel.mockRejectedValueOnce(new Error("source locked"));
+    const { container } = await mountSkillsApp(
+      { lib: "org", kind: "label", label: "marketing" },
+      { url: "/skills?lib=org&view=label&label=marketing" },
+    );
+    await flushEffects();
+
+    await dragAndDrop(skillRow(container, "seo-helper"), folderRow(container, "growth"));
+    await flushEffects();
+
+    expect(queryMocks.assignSkillLabel).toHaveBeenCalledWith("seo-helper", "growth");
+    expect(queryMocks.unassignSkillLabel).toHaveBeenCalledWith("seo-helper", "marketing/seo");
+    expect(queryMocks.unassignSkillLabel).toHaveBeenCalledWith("seo-helper", "growth");
+    expect(container.querySelector('button[aria-label="Open skill seo-helper"]')).not.toBeNull();
+    expect(container.textContent).toContain("source locked");
+  });
+
+  it("unfiles a skill from the active folder when dropped on the library header", async () => {
+    const { container } = await mountSkillsApp(
+      { lib: "org", kind: "label", label: "marketing" },
+      { url: "/skills?lib=org&view=label&label=marketing" },
+    );
+    await flushEffects();
+
+    await dragAndDrop(skillRow(container, "brand-kit"), libraryHeader(container, "Organization"));
+
+    expect(queryMocks.assignSkillLabel).not.toHaveBeenCalled();
+    expect(queryMocks.unassignSkillLabel).toHaveBeenCalledWith("brand-kit", "marketing");
+    expect(container.querySelector('button[aria-label="Open skill brand-kit"]')).toBeNull();
+  });
+
+  it("unfiles a descendant-filed skill from a parent roll-up when dropped on the library header", async () => {
+    const { container } = await mountSkillsApp(
+      { lib: "org", kind: "label", label: "marketing" },
+      { url: "/skills?lib=org&view=label&label=marketing" },
+    );
+    await flushEffects();
+
+    await dragAndDrop(skillRow(container, "seo-helper"), libraryHeader(container, "Organization"));
+
+    expect(queryMocks.assignSkillLabel).not.toHaveBeenCalled();
+    expect(queryMocks.unassignSkillLabel).toHaveBeenCalledWith("seo-helper", "marketing/seo");
+    expect(container.querySelector('button[aria-label="Open skill seo-helper"]')).toBeNull();
+  });
+
+  it("blocks cross-library skill drops in the sidebar", async () => {
+    const { container } = await mountSkillsApp(
+      { lib: "org", kind: "all" },
+      {
+        props: {
+          initialMineSkills: [skill({ id: "private-draft", scope: "personal", source: "authored", labels: ["drafts"] })],
+        },
+      },
+    );
+    await flushEffects();
+
+    const source = skillRow(container, "loose-skill");
+    await dispatchDnd(source, "dragstart");
+    await dispatchDnd(folderRow(container, "drafts"), "dragover");
+    await dispatchDnd(folderRow(container, "drafts"), "drop");
+    await dispatchDnd(source, "dragend");
+
+    expect(queryMocks.assignSkillLabel).not.toHaveBeenCalled();
+    expect(queryMocks.assignPersonalSkillLabel).not.toHaveBeenCalled();
+  });
+
+  it("does not make installed My Skills rows draggable into personal folders", async () => {
+    const { container } = await mountSkillsApp(
+      { lib: "mine", kind: "all" },
+      {
+        props: {
+          initialMineSkills: [
+            skill({ id: "brand-linter", scope: "org", source: "installed", installStatus: "installed" }),
+            skill({ id: "private-draft", scope: "personal", source: "authored", labels: ["drafts"] }),
+          ],
+        },
+      },
+    );
+    await flushEffects();
+
+    const source = skillRow(container, "brand-linter");
+    expect(source.getAttribute("draggable")).toBe("false");
+    await dispatchDnd(source, "dragstart");
+    await dispatchDnd(folderRow(container, "drafts"), "dragover");
+    await dispatchDnd(folderRow(container, "drafts"), "drop");
+
+    expect(queryMocks.assignPersonalSkillLabel).not.toHaveBeenCalled();
+    expect(queryMocks.unassignPersonalSkillLabel).not.toHaveBeenCalled();
+  });
+});
+
+describe("SkillsApp drag-and-drop label reparenting", () => {
+  it("renames a dropped label under the target label", async () => {
+    const { container } = await mountSkillsApp({ lib: "org", kind: "all" });
+    await flushEffects();
+
+    await dragAndDrop(folderRow(container, "growth"), folderRow(container, "marketing"));
+
+    expect(queryMocks.renameLabel).toHaveBeenCalledTimes(1);
+    expect(queryMocks.renameLabel).toHaveBeenCalledWith("growth", "marketing/growth", { displayName: undefined });
+  });
+
+  it("renames a nested label to the root when dropped on the library header", async () => {
+    const { container } = await mountSkillsApp({ lib: "org", kind: "all" });
+    await flushEffects();
+
+    const marketing = folderRow(container, "marketing");
+    const chevron = marketing.querySelector<HTMLButtonElement>(".lblrow__chev:not(.lblrow__chev--leaf)");
+    act(() => chevron!.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    await flushEffects();
+
+    await dragAndDrop(folderRow(container, "marketing/seo"), libraryHeader(container, "Organization"));
+
+    expect(queryMocks.renameLabel).toHaveBeenCalledTimes(1);
+    expect(queryMocks.renameLabel).toHaveBeenCalledWith("marketing/seo", "seo", { displayName: undefined });
+  });
+
+  it("renames a label under another folder from the label options menu", async () => {
+    const { container } = await mountSkillsApp({ lib: "org", kind: "all" });
+    await flushEffects();
+
+    clickButton(container, "growth options");
+    await flushEffects();
+    clickButton(container, "Move growth");
+    await flushEffects();
+    clickButton(container, "Move growth to marketing");
+    await flushEffects();
+
+    expect(queryMocks.renameLabel).toHaveBeenCalledTimes(1);
+    expect(queryMocks.renameLabel).toHaveBeenCalledWith("growth", "marketing/growth", { displayName: undefined });
+  });
+
+  it("renames a nested label to the root from the label options menu", async () => {
+    const { container } = await mountSkillsApp({ lib: "org", kind: "all" });
+    await flushEffects();
+
+    const marketing = folderRow(container, "marketing");
+    const chevron = marketing.querySelector<HTMLButtonElement>(".lblrow__chev:not(.lblrow__chev--leaf)");
+    act(() => chevron!.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    await flushEffects();
+
+    clickButton(container, "marketing/seo options");
+    await flushEffects();
+    clickButton(container, "Move marketing/seo");
+    await flushEffects();
+    clickButton(container, "Move marketing/seo to top level");
+    await flushEffects();
+
+    expect(queryMocks.renameLabel).toHaveBeenCalledTimes(1);
+    expect(queryMocks.renameLabel).toHaveBeenCalledWith("marketing/seo", "seo", { displayName: undefined });
+  });
+
+  it("does not reparent a label onto itself", async () => {
+    const { container } = await mountSkillsApp({ lib: "org", kind: "all" });
+    await flushEffects();
+
+    const row = folderRow(container, "marketing");
+    await dispatchDnd(row, "dragstart");
+    await dispatchDnd(row, "dragover");
+    await dispatchDnd(row, "drop");
+    await dispatchDnd(row, "dragend");
+
+    expect(queryMocks.renameLabel).not.toHaveBeenCalled();
   });
 });
 

@@ -136,6 +136,10 @@ type ScopeKind = "all" | "starred" | "installed" | "label";
 /** The active workspace slice: a library (`mine`/`org`) + a kind within it. */
 type Selection = { lib: SkillsLibrary; kind: ScopeKind; label?: string };
 
+export type DragItem =
+  | { kind: "skill"; lib: SkillsLibrary; skillId: string; sourceLabel: string | null }
+  | { kind: "label"; lib: SkillsLibrary; path: string; leaf: string };
+
 /**
  * Derive the flattened label tree from the live skills + explicit label appearances. Intermediate
  * parents are synthesized; roll-up counts are de-duped per skill (a skill filed under `a/b` counts
@@ -281,6 +285,7 @@ export function SkillsApp({
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const [filters, setFilters] = useState<Filter[]>(() => initialFilterPreferences.active_filters);
   const [shareTarget, setShareTarget] = useState<SkillVM | null>(null);
+  const [drag, setDrag] = useState<DragItem | null>(null);
 
   const activeLib: SkillsLibrary = selection.lib;
   const skills = activeLib === "org" ? orgSkills : mineSkills;
@@ -293,6 +298,7 @@ export function SkillsApp({
   const personalLabelsRef = useRef<LabelVM[]>(initialPersonalLabels.flat);
   const orgLabelsRef = useRef<LabelVM[]>(initialLabels.flat);
   const activeLibRef = useRef<SkillsLibrary>(activeLib);
+  const dragRef = useRef<DragItem | null>(null);
   mineSkillsRef.current = mineSkills;
   orgSkillsRef.current = orgSkills;
   personalLabelsRef.current = personalLabels;
@@ -793,6 +799,143 @@ export function SkillsApp({
     [labelRpcs, labelsRefFor, labelsSetterFor, replaceSkillsUrl, selection, skillsRefFor, skillsSetterFor],
   );
 
+  const beginDrag = useCallback((item: DragItem) => {
+    dragRef.current = item;
+    setDrag(item);
+  }, []);
+
+  const endDrag = useCallback(() => {
+    dragRef.current = null;
+    setDrag(null);
+  }, []);
+
+  const dropSkillOnLabel = useCallback(
+    (lib: SkillsLibrary, skillId: string, targetPath: string, sourceLabel: string | null) => {
+      const setSk = skillsSetterFor(lib);
+      const setLb = labelsSetterFor(lib);
+      const rpcs = labelRpcs[lib];
+      const skill = skillsRefFor(lib).current.find((s) => s.id === skillId);
+      if (!skill) return;
+      const prevSkills = skillsRefFor(lib).current;
+      const prevLabels = labelsRefFor(lib).current;
+      const labels = skill.labels ?? [];
+      const hadTarget = labels.includes(targetPath);
+      const movingOutOfSource =
+        !!sourceLabel && sourceLabel !== targetPath && !targetPath.startsWith(sourceLabel + "/");
+      const sourceRemovals = movingOutOfSource
+        ? labels.filter((path) => path === sourceLabel || path.startsWith(sourceLabel + "/"))
+        : [];
+      if (hadTarget && sourceRemovals.length === 0) return;
+
+      const known = new Set(prevLabels.map((l) => l.path));
+      const newFolders: string[] = [];
+      if (!hadTarget) {
+        const segs = targetPath.split("/");
+        for (let i = 1; i <= segs.length; i += 1) {
+          const path = segs.slice(0, i).join("/");
+          if (!known.has(path)) newFolders.push(path);
+        }
+      }
+
+      setSk((arr) =>
+        arr.map((s) => {
+          if (s.id !== skillId) return s;
+          const remove = new Set(sourceRemovals);
+          const nextLabels = s.labels.filter((path) => !remove.has(path));
+          return { ...s, labels: hadTarget ? nextLabels : [...nextLabels, targetPath] };
+        }),
+      );
+      if (newFolders.length) {
+        setLb((arr) => [...arr, ...newFolders.map((path) => ({ path, displayName: null, color: null, icon: null }))]);
+      }
+
+      const ops: { run: () => Promise<unknown>; undo: () => Promise<unknown> }[] = [];
+      if (!hadTarget) {
+        ops.push({
+          run: () => rpcs.assign(skillId, targetPath),
+          undo: () => rpcs.unassign(skillId, targetPath),
+        });
+      }
+      for (const path of sourceRemovals) {
+        ops.push({
+          run: () => rpcs.unassign(skillId, path),
+          undo: () => rpcs.assign(skillId, path),
+        });
+      }
+
+      void Promise.allSettled(ops.map((op) => op.run())).then(async (results) => {
+        if (results.every((result) => result.status === "fulfilled")) return;
+        await Promise.allSettled(
+          ops
+            .filter((_, index) => results[index]?.status === "fulfilled")
+            .reverse()
+            .map((op) => op.undo()),
+        );
+        setSk(prevSkills);
+        setLb(prevLabels);
+        const rejected = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+        setLabelNotice(
+          rejected?.reason instanceof Error ? rejected.reason.message : "Could not move the skill between folders.",
+        );
+      });
+    },
+    [labelRpcs, labelsRefFor, labelsSetterFor, skillsRefFor, skillsSetterFor],
+  );
+
+  const dropSkillOnRoot = useCallback(
+    (lib: SkillsLibrary, skillId: string, sourceLabel: string | null) => {
+      if (!sourceLabel) return;
+      const setSk = skillsSetterFor(lib);
+      const rpcs = labelRpcs[lib];
+      const skill = skillsRefFor(lib).current.find((s) => s.id === skillId);
+      if (!skill) return;
+      const prevSkills = skillsRefFor(lib).current;
+      const sourceRemovals = (skill.labels ?? []).filter(
+        (path) => path === sourceLabel || path.startsWith(sourceLabel + "/"),
+      );
+      if (sourceRemovals.length === 0) return;
+
+      setSk((arr) =>
+        arr.map((s) => {
+          if (s.id !== skillId) return s;
+          const remove = new Set(sourceRemovals);
+          return { ...s, labels: s.labels.filter((path) => !remove.has(path)) };
+        }),
+      );
+
+      void Promise.allSettled(sourceRemovals.map((path) => rpcs.unassign(skillId, path))).then(async (results) => {
+        if (results.every((result) => result.status === "fulfilled")) return;
+        await Promise.allSettled(
+          sourceRemovals
+            .filter((_, index) => results[index]?.status === "fulfilled")
+            .reverse()
+            .map((path) => rpcs.assign(skillId, path)),
+        );
+        setSk(prevSkills);
+        const rejected = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+        setLabelNotice(rejected?.reason instanceof Error ? rejected.reason.message : "Could not remove the skill from this folder.");
+      });
+    },
+    [labelRpcs, skillsRefFor, skillsSetterFor],
+  );
+
+  const reparentLabel = useCallback(
+    (lib: SkillsLibrary, from: string, targetParent: string | null) => {
+      const leaf = from.split("/").pop() ?? from;
+      if (!leaf) return;
+      if (targetParent) {
+        if (targetParent === from || targetParent.startsWith(from + "/")) return;
+        const to = `${targetParent}/${leaf}`;
+        if (to === from) return;
+        renameLabelPath(lib, from, to);
+        return;
+      }
+      if (!from.includes("/")) return;
+      renameLabelPath(lib, from, leaf);
+    },
+    [renameLabelPath],
+  );
+
   // --- Share a personal skill to the org library -----------------------------
   const confirmShare = useCallback(
     (vm: SkillVM, _plan: SkillSharePlan) => {
@@ -1245,6 +1388,12 @@ export function SkillsApp({
         onSetLabelIcon={setLabelIconPath}
         onRenameLabel={renameLabelPath}
         onDeleteLabel={deleteLabelPath}
+        drag={drag}
+        onDragStart={beginDrag}
+        onDragEnd={endDrag}
+        onDropSkillOnLabel={dropSkillOnLabel}
+        onDropSkillOnRoot={dropSkillOnRoot}
+        onReparentLabel={reparentLabel}
         onSelectLocal={selectLocal}
         onSelectArchived={selectArchived}
         localActive={localActive}
@@ -1313,6 +1462,16 @@ export function SkillsApp({
             onClearFilters={clearFilters}
             preferenceStatus={preferenceStatus}
             onRetryPreferences={retryPreferenceSave}
+            dragSkillId={drag?.kind === "skill" && drag.lib === selection.lib ? drag.skillId : null}
+            onSkillDragStart={(skillId) =>
+              beginDrag({
+                kind: "skill",
+                lib: selection.lib,
+                skillId,
+                sourceLabel: activeLabel,
+              })
+            }
+            onSkillDragEnd={endDrag}
           />
         )}
       </div>
