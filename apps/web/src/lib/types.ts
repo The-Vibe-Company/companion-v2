@@ -3,12 +3,20 @@ import type {
   CompanionDisplay,
   LabelVM,
   SkillListRow,
+  SkillModifier,
   SkillRequirement,
   ValidationState,
 } from "@companion/contracts";
 import { formatBytes, formatDate, relativeTime } from "./format";
 
 export type { LabelVM };
+
+export type SkillContributorVM = {
+  id: string;
+  name: string;
+  initials: string;
+  avatarUrl: string | null;
+};
 
 /** The UI-facing skill shape consumed by the ported direction-C+C components. */
 export interface SkillVM {
@@ -42,6 +50,8 @@ export interface SkillVM {
   updaterInitials: string;
   /** Resolved avatar URL for the last updater (custom upload or Gravatar); null falls back to initials. */
   updaterAvatarUrl: string | null;
+  /** Distinct members who published versions after the creator, latest publisher first. */
+  modifiers: SkillContributorVM[];
   tools: string[];
   requirements: SkillRequirement[]; // declared secrets / env vars + install notes
   compatibility: string | null;
@@ -60,6 +70,15 @@ export interface SkillVM {
   depWarn: boolean; // any declared dependency is not satisfied
   archived: boolean; // hidden from normal lists
   referenced?: boolean; // referenced by ANY published version (gates archived download)
+}
+
+function mapModifier(row: SkillModifier): SkillContributorVM {
+  return {
+    id: row.user_id,
+    name: row.name,
+    initials: row.initials,
+    avatarUrl: row.avatar_url ?? null,
+  };
 }
 
 /** Map a skill_list_v row to the UI view-model. Date formatting runs server-side. */
@@ -88,6 +107,7 @@ export function mapSkill(row: SkillListRow): SkillVM {
     // there is no updater (updater_id null). When the updater is known but has no avatar, keep null so
     // UserAvatar renders the updater's initials — never the creator's face under the updater's name.
     updaterAvatarUrl: row.updater_id ? (row.updater_avatar_url ?? null) : (row.creator_avatar_url ?? null),
+    modifiers: (row.modifiers ?? []).map(mapModifier),
     tools: row.tools ?? [],
     requirements: row.requirements ?? [],
     compatibility: row.compatibility,

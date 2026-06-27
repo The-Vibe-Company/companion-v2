@@ -22,6 +22,7 @@ function mk(p: Partial<SkillVM> & { id: string }): SkillVM {
     updaterName: "Alice Nardon",
     updaterInitials: "AN",
     updaterAvatarUrl: null,
+    modifiers: [],
     tools: [],
     requirements: [],
     compatibility: null,
