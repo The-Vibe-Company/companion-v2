@@ -38,7 +38,9 @@ import { LocalSkillsView } from "./LocalSkillsView";
 import { CommandPalette } from "./CommandPalette";
 import { UploadDialog, InstallDialog } from "./UploadDialog";
 import {
+  parseSkillShareTokenPath,
   parseSkillsRoute,
+  skillShareHref,
   skillsRouteHref,
   skillsRouteKey,
   skillsRouteSource,
@@ -238,6 +240,10 @@ function routeFromSelection(selection: Selection, skill?: string): SkillsRoute {
   return skill ? skillsRouteWithSkill(route, skill) : route;
 }
 
+function isSkillsClientPath(pathname: string): boolean {
+  return pathname === "/skills" || parseSkillShareTokenPath(pathname) !== null;
+}
+
 export function SkillsApp({
   initialMineSkills,
   initialOrgSkills,
@@ -411,9 +417,30 @@ export function SkillsApp({
   const preferenceKey = JSON.stringify(initialFilterPreferences);
   const initialRouteKey = skillsRouteKey(initialRoute);
 
+  const shareableSkillForSlug = useCallback((slug: string): SkillVM | null => {
+    const isShareable = (s: SkillVM) => s.id === slug && s.scope === "org" && !s.archived;
+    return orgSkillsRef.current.find(isShareable) ?? mineSkillsRef.current.find(isShareable) ?? null;
+  }, []);
+
+  const skillForShareToken = useCallback((token: string): SkillVM | null => {
+    const isMatch = (s: SkillVM) => s.shareToken === token && s.scope === "org" && !s.archived;
+    return orgSkillsRef.current.find(isMatch) ?? mineSkillsRef.current.find(isMatch) ?? null;
+  }, []);
+
+  const hrefForSkillsRoute = useCallback(
+    (route: SkillsRoute): string => {
+      if (route.kind !== "local" && route.kind !== "archived" && route.skill) {
+        const shared = shareableSkillForSlug(route.skill);
+        if (shared) return skillShareHref(shared.shareToken);
+      }
+      return skillsRouteHref(route);
+    },
+    [shareableSkillForSlug],
+  );
+
   const writeSkillsUrl = useCallback((route: SkillsRoute, history: "push" | "replace") => {
-    if (typeof window === "undefined" || window.location.pathname !== "/skills") return;
-    const href = skillsRouteHref(route);
+    if (typeof window === "undefined" || !isSkillsClientPath(window.location.pathname)) return;
+    const href = hrefForSkillsRoute(route);
     const currentHref = `${window.location.pathname}${window.location.search}`;
     if (currentHref === href) return;
     const hasSkill = route.kind !== "local" && !!route.skill;
@@ -427,11 +454,15 @@ export function SkillsApp({
     } else {
       window.history.replaceState(hasSkill ? currentState : listState, "", href);
     }
-  }, []);
+  }, [hrefForSkillsRoute]);
   const replaceSkillsUrl = useCallback((route: SkillsRoute) => writeSkillsUrl(route, "replace"), [writeSkillsUrl]);
   const pushSkillsUrl = useCallback((route: SkillsRoute) => writeSkillsUrl(route, "push"), [writeSkillsUrl]);
   const clearCurrentSkillUrl = useCallback(() => {
-    if (typeof window === "undefined" || window.location.pathname !== "/skills") return;
+    if (typeof window === "undefined" || !isSkillsClientPath(window.location.pathname)) return;
+    if (parseSkillShareTokenPath(window.location.pathname)) {
+      replaceSkillsUrl({ lib: "org", kind: "all" });
+      return;
+    }
     replaceSkillsUrl(skillsRouteWithoutSkill(parseSkillsRoute(window.location.search)));
   }, [replaceSkillsUrl]);
 
@@ -454,7 +485,7 @@ export function SkillsApp({
     setOpenId(initialRoute.kind === "local" ? null : initialRoute.skill ?? null);
     setLastId(initialRoute.kind === "local" ? null : initialRoute.skill ?? null);
     setCurrentView(skillsViewForRoute(initialRoute));
-    if (typeof window !== "undefined" && window.location.pathname === "/skills") {
+    if (typeof window !== "undefined" && isSkillsClientPath(window.location.pathname)) {
       replaceSkillsUrl(initialRoute);
     }
   }, [currentOrg.id, preferenceKey, initialFilterPreferences, initialRoute, initialRouteKey, replaceSkillsUrl]);
@@ -803,13 +834,17 @@ export function SkillsApp({
       shareSkillToOrg(id)
         .then(async (result) => {
           const [mineRows, orgRows] = await Promise.all([fetchSkillLibrary("mine"), fetchSkillLibrary("org")]);
-          setMineSkills(mineRows.map(mapSkill));
-          setOrgSkills(orgRows.map(mapSkill));
+          const nextMineSkills = mineRows.map(mapSkill);
+          const nextOrgSkills = orgRows.map(mapSkill);
+          mineSkillsRef.current = nextMineSkills;
+          orgSkillsRef.current = nextOrgSkills;
+          setMineSkills(nextMineSkills);
+          setOrgSkills(nextOrgSkills);
           // Re-point the detail to the org copy so it stays open under the new library.
           setSelection({ lib: "org", kind: "all" });
           setOpenId(id);
           setLastId(id);
-          if (typeof window !== "undefined" && window.location.pathname === "/skills") {
+          if (typeof window !== "undefined" && isSkillsClientPath(window.location.pathname)) {
             replaceSkillsUrl({ lib: "org", kind: "all", skill: id });
           }
           const count = result.shared_dependencies.length;
@@ -966,13 +1001,9 @@ export function SkillsApp({
       setOpenId(nextOpenId);
       setLastId(nextOpenId);
       if (history === "none" || typeof window === "undefined") return;
-      const href = skillsRouteHref(route);
-      const currentHref = `${window.location.pathname}${window.location.search}`;
-      if (currentHref === href) return;
-      if (history === "push") window.history.pushState(window.history.state, "", href);
-      else window.history.replaceState(window.history.state, "", href);
+      writeSkillsUrl(route, history);
     },
-    [],
+    [writeSkillsUrl],
   );
   const selectMineAll = useCallback(() => applySkillsRoute({ lib: "mine", kind: "all" }, "push"), [applySkillsRoute]);
   const selectOrgAll = useCallback(() => applySkillsRoute({ lib: "org", kind: "all" }, "push"), [applySkillsRoute]);
@@ -1032,6 +1063,12 @@ export function SkillsApp({
       }
       settingsWarmupRef.current = null;
       setLocalSettings(null);
+      const shareToken = parseSkillShareTokenPath(window.location.pathname);
+      if (shareToken) {
+        const shared = skillForShareToken(shareToken);
+        applySkillsRoute(shared ? { lib: "org", kind: "all", skill: shared.id } : { lib: "org", kind: "all" }, "none");
+        return;
+      }
       if (window.location.pathname === "/skills") {
         const route = parseSkillsRoute(window.location.search);
         const source = skillsRouteSource(window.location.search);
@@ -1049,7 +1086,7 @@ export function SkillsApp({
     };
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
-  }, [applySkillsRoute, initialFilterPreferences.active_filters, loadArchived, showLocalSettings]);
+  }, [applySkillsRoute, initialFilterPreferences.active_filters, loadArchived, showLocalSettings, skillForShareToken]);
 
   // --- Open / navigate -------------------------------------------------------
   const detailPool = currentView === "archived" ? archivedSkills : filtered;
@@ -1110,7 +1147,9 @@ export function SkillsApp({
       return;
     }
     setOpenId(null);
-    replaceSkillsUrl(routeForCurrentSurface());
+    replaceSkillsUrl(
+      parseSkillShareTokenPath(window.location.pathname) ? { lib: "org", kind: "all" } : routeForCurrentSurface(),
+    );
   }, [replaceSkillsUrl, routeForCurrentSurface]);
   const go = useCallback(
     (delta: number) => {
@@ -1167,7 +1206,7 @@ export function SkillsApp({
     return () => window.removeEventListener("keydown", onKey);
   }, [mobileSidebarOpen]);
 
-  // Keyboard: ⌘K toggles palette; Esc back to list; ↑/↓ move between skills.
+  // Keyboard: ⌘K toggles palette; ⌘⇧C copies the public link; Esc back to list; ↑/↓ move between skills.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (uploadOpen || updateSkill || installSkill || shareTarget) return;
@@ -1185,6 +1224,19 @@ export function SkillsApp({
       if (!openId) return;
       const tag = (e.target as HTMLElement)?.tagName?.toLowerCase() ?? "";
       if (tag === "input" || tag === "textarea") return;
+      // ⌘⇧C copies the open org skill's public share link (its canonical /s/<token> URL).
+      // Personal / archived skills have no public link, so the shortcut no-ops for them.
+      if (e.metaKey && e.shiftKey && e.key.toLowerCase() === "c") {
+        const shareable = shareableSkillForSlug(openId);
+        if (!shareable || !navigator.clipboard) return;
+        e.preventDefault();
+        const url = `${window.location.origin}${skillShareHref(shareable.shareToken)}`;
+        void navigator.clipboard.writeText(url).then(
+          () => setToast({ msg: "Public link copied" }),
+          () => {},
+        );
+        return;
+      }
       if (e.key === "Escape") {
         e.preventDefault();
         back();
@@ -1198,7 +1250,7 @@ export function SkillsApp({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [openId, paletteOpen, mobileSidebarOpen, uploadOpen, updateSkill, installSkill, shareTarget, back, go]);
+  }, [openId, paletteOpen, mobileSidebarOpen, uploadOpen, updateSkill, installSkill, shareTarget, back, go, shareableSkillForSlug]);
 
   const localActive = currentView === "local";
   const archivedActive = currentView === "archived";

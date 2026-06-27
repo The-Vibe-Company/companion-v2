@@ -94,8 +94,8 @@ describe("DetailView tabbed detail layout", () => {
     expect(html).toContain("Filed in");
     expect(html).toContain("marketing/seo");
     expect(html).toContain("Add to folder");
-    expect(html).toContain("Copy public link");
-    expect(html).toContain("Share");
+    expect(html).not.toContain("Copy public link");
+    expect(html).not.toContain("dsharebtn");
     // Tab bar: Files / Dependencies / Activity / Discussion are tabs; the Overview
     // tab carries the Manifest section and optional notes.
     expect(html).toContain('role="tablist"');
