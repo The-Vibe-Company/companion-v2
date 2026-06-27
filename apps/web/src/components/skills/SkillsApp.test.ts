@@ -722,6 +722,84 @@ describe("SkillsApp navigation", () => {
     expect(container.textContent).toContain("Share to organization");
   });
 
+  it("copies the open org skill's public link on ⌘⇧C", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    const prior = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    try {
+      const { container } = await mountSkillsApp({ lib: "org", kind: "all" });
+      await flushEffects();
+      clickButton(container, "Open skill loose-skill");
+      await flushEffects();
+      expect(window.location.pathname).toBe("/s/share-loose-skill");
+
+      await act(async () => {
+        window.dispatchEvent(
+          new KeyboardEvent("keydown", { key: "C", metaKey: true, shiftKey: true, bubbles: true }),
+        );
+      });
+
+      expect(writeText).toHaveBeenCalledWith(`${window.location.origin}/s/share-loose-skill`);
+    } finally {
+      if (prior) Object.defineProperty(navigator, "clipboard", prior);
+      else Reflect.deleteProperty(navigator, "clipboard");
+    }
+  });
+
+  it("does not copy a public link for a personal skill on ⌘⇧C (it has none)", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    const prior = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    try {
+      const { container } = await mountSkillsApp(
+        { lib: "mine", kind: "all" },
+        {
+          props: {
+            initialOrgSkills: [],
+            initialMineSkills: [skill({ id: "my-draft", scope: "personal", source: "authored" })],
+          },
+        },
+      );
+      await flushEffects();
+      clickButton(container, "Open skill my-draft");
+      await flushEffects();
+      expect(window.location.pathname + window.location.search).toBe("/skills?skill=my-draft");
+
+      await act(async () => {
+        window.dispatchEvent(
+          new KeyboardEvent("keydown", { key: "C", metaKey: true, shiftKey: true, bubbles: true }),
+        );
+      });
+
+      expect(writeText).not.toHaveBeenCalled();
+    } finally {
+      if (prior) Object.defineProperty(navigator, "clipboard", prior);
+      else Reflect.deleteProperty(navigator, "clipboard");
+    }
+  });
+
+  it("ignores the public-link shortcut when the Clipboard API is unavailable", async () => {
+    const prior = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: undefined });
+    try {
+      const { container } = await mountSkillsApp({ lib: "org", kind: "all" });
+      await flushEffects();
+      clickButton(container, "Open skill loose-skill");
+      await flushEffects();
+
+      await act(async () => {
+        window.dispatchEvent(
+          new KeyboardEvent("keydown", { key: "C", metaKey: true, shiftKey: true, bubbles: true }),
+        );
+      });
+
+      expect(window.location.pathname).toBe("/s/share-loose-skill");
+    } finally {
+      if (prior) Object.defineProperty(navigator, "clipboard", prior);
+      else Reflect.deleteProperty(navigator, "clipboard");
+    }
+  });
+
   it("falls back to replacing the URL when closing a directly loaded detail", async () => {
     const { container } = await mountSkillsApp(
       { lib: "org", kind: "all", skill: "seo-helper" },

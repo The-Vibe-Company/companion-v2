@@ -1206,7 +1206,7 @@ export function SkillsApp({
     return () => window.removeEventListener("keydown", onKey);
   }, [mobileSidebarOpen]);
 
-  // Keyboard: ⌘K toggles palette; Esc back to list; ↑/↓ move between skills.
+  // Keyboard: ⌘K toggles palette; ⌘⇧C copies the public link; Esc back to list; ↑/↓ move between skills.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (uploadOpen || updateSkill || installSkill || shareTarget) return;
@@ -1224,6 +1224,19 @@ export function SkillsApp({
       if (!openId) return;
       const tag = (e.target as HTMLElement)?.tagName?.toLowerCase() ?? "";
       if (tag === "input" || tag === "textarea") return;
+      // ⌘⇧C copies the open org skill's public share link (its canonical /s/<token> URL).
+      // Personal / archived skills have no public link, so the shortcut no-ops for them.
+      if (e.metaKey && e.shiftKey && e.key.toLowerCase() === "c") {
+        const shareable = shareableSkillForSlug(openId);
+        if (!shareable || !navigator.clipboard) return;
+        e.preventDefault();
+        const url = `${window.location.origin}${skillShareHref(shareable.shareToken)}`;
+        void navigator.clipboard.writeText(url).then(
+          () => setToast({ msg: "Public link copied" }),
+          () => {},
+        );
+        return;
+      }
       if (e.key === "Escape") {
         e.preventDefault();
         back();
@@ -1237,7 +1250,7 @@ export function SkillsApp({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [openId, paletteOpen, mobileSidebarOpen, uploadOpen, updateSkill, installSkill, shareTarget, back, go]);
+  }, [openId, paletteOpen, mobileSidebarOpen, uploadOpen, updateSkill, installSkill, shareTarget, back, go, shareableSkillForSlug]);
 
   const localActive = currentView === "local";
   const archivedActive = currentView === "archived";
