@@ -67,8 +67,7 @@ function render(skills: SkillVM[]) {
       preferenceStatus: "idle",
       onRetryPreferences: vi.fn(),
       dragSkillId: null,
-      onSkillDragStart: vi.fn(),
-      onSkillDragEnd: vi.fn(),
+      onSkillStartDrag: vi.fn(),
     }),
   );
 }

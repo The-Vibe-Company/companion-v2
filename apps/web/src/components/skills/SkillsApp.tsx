@@ -32,6 +32,8 @@ import { fetchSettingsAppData } from "@/lib/settingsClient";
 import { mapSkill, type MeVM, type OrgVM, type SkillVM } from "@/lib/types";
 import { Sidebar } from "./Sidebar";
 import { ListView } from "./ListView";
+import { treeRowKey } from "./dragGeometry";
+import { useSkillDrag, type PointerLike } from "./useSkillDrag";
 import { ArchivedListView } from "./ArchivedListView";
 import { DetailView } from "./DetailView";
 import { LocalSkillsView } from "./LocalSkillsView";
@@ -1356,6 +1358,31 @@ export function SkillsApp({
     return [...mineSkills, ...orgSkills.filter((s) => !seen.has(s.id))];
   }, [mineSkills, orgSkills]);
 
+  // Pointer-based drag-and-drop (skills + folders). The hook owns the live mechanics
+  // (ghost, hit-testing, dwell auto-open, teardown); we feed it the DOM-agnostic
+  // orchestration callbacks + the per-(lib,path) folder lookup for the dwell check.
+  const treeRowsByPath = useMemo(() => {
+    const map = new Map<string, { hasChildren: boolean }>();
+    for (const r of personalTreeRows) map.set(treeRowKey("mine", r.path), { hasChildren: r.hasChildren });
+    for (const r of orgTreeRows) map.set(treeRowKey("org", r.path), { hasChildren: r.hasChildren });
+    return map;
+  }, [personalTreeRows, orgTreeRows]);
+  const skillDrag = useSkillDrag({
+    beginDrag,
+    endDrag,
+    onDropSkillOnLabel: dropSkillOnLabel,
+    onDropSkillOnRoot: dropSkillOnRoot,
+    onReparentLabel: reparentLabel,
+    onToggleExpand: toggleExpand,
+    expanded,
+    treeRowsByPath,
+  });
+  const startSkillDrag = useCallback(
+    (skillId: string, e: PointerLike) =>
+      skillDrag.startDrag({ kind: "skill", lib: selection.lib, skillId, sourceLabel: activeLabel }, e),
+    [skillDrag, selection.lib, activeLabel],
+  );
+
   return (
     <div className={"app app--skills" + (mobileSidebarOpen ? " app--side-open" : "")}>
       <Sidebar
@@ -1389,11 +1416,11 @@ export function SkillsApp({
         onRenameLabel={renameLabelPath}
         onDeleteLabel={deleteLabelPath}
         drag={drag}
-        onDragStart={beginDrag}
-        onDragEnd={endDrag}
-        onDropSkillOnLabel={dropSkillOnLabel}
-        onDropSkillOnRoot={dropSkillOnRoot}
+        hovered={skillDrag.hovered}
+        openPendingPath={skillDrag.openPendingPath}
+        dropDone={skillDrag.dropDone}
         onReparentLabel={reparentLabel}
+        onLabelStartDrag={skillDrag.startDrag}
         onSelectLocal={selectLocal}
         onSelectArchived={selectArchived}
         localActive={localActive}
@@ -1463,15 +1490,7 @@ export function SkillsApp({
             preferenceStatus={preferenceStatus}
             onRetryPreferences={retryPreferenceSave}
             dragSkillId={drag?.kind === "skill" && drag.lib === selection.lib ? drag.skillId : null}
-            onSkillDragStart={(skillId) =>
-              beginDrag({
-                kind: "skill",
-                lib: selection.lib,
-                skillId,
-                sourceLabel: activeLabel,
-              })
-            }
-            onSkillDragEnd={endDrag}
+            onSkillStartDrag={startSkillDrag}
           />
         )}
       </div>

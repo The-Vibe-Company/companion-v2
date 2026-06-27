@@ -1,10 +1,10 @@
 "use client";
 
-import { useMemo, useState, type DragEvent } from "react";
+import { useMemo, useState, type PointerEvent } from "react";
 import { Icon } from "../Icon";
 import { UserAvatar } from "../UserAvatar";
 import type { SkillContributorVM, SkillVM } from "@/lib/types";
-import { InstallMark, vdot } from "./blocks";
+import { InstallMark } from "./blocks";
 import { chipParts, type Filter } from "./filters";
 import { FilterAdd } from "./FilterMenu";
 
@@ -16,29 +16,6 @@ const SORT_OPTIONS: { key: SortKey; label: string }[] = [
   { key: "name", label: "Name (A–Z)" },
   { key: "stars", label: "Most starred" },
 ];
-
-function setSkillDragImage(event: DragEvent<HTMLElement>, skill: SkillVM) {
-  const dataTransfer = event.dataTransfer as DataTransfer & {
-    setDragImage?: (image: Element, x: number, y: number) => void;
-  };
-  if (typeof dataTransfer.setDragImage !== "function") return;
-
-  const preview = document.createElement("div");
-  preview.className = "skill-drag-preview";
-
-  const dot = document.createElement("span");
-  dot.className = "vdot vdot--" + vdot(skill.validation);
-  preview.appendChild(dot);
-
-  const name = document.createElement("span");
-  name.className = "skill-drag-preview__name";
-  name.textContent = skill.id;
-  preview.appendChild(name);
-
-  document.body.appendChild(preview);
-  dataTransfer.setDragImage(preview, 14, 14);
-  window.setTimeout(() => preview.remove(), 0);
-}
 
 type Person = SkillContributorVM & { role: "creator" | "modifier" };
 
@@ -135,8 +112,7 @@ export function ListView({
   preferenceStatus,
   onRetryPreferences,
   dragSkillId,
-  onSkillDragStart,
-  onSkillDragEnd,
+  onSkillStartDrag,
 }: {
   skills: SkillVM[];
   /** Which library this list shows (drives scope-aware empty + upload copy). */
@@ -157,8 +133,9 @@ export function ListView({
   preferenceStatus: "idle" | "saving" | "saved" | "error";
   onRetryPreferences: () => void;
   dragSkillId: string | null;
-  onSkillDragStart: (id: string) => void;
-  onSkillDragEnd: () => void;
+  /** Begin a pointer drag from a skill row (the hook gates it behind a small move threshold,
+   *  so a plain click still opens the skill). */
+  onSkillStartDrag: (id: string, e: PointerEvent<HTMLElement>) => void;
 }) {
   // Search + sort are local list-view affordances (label/status filtering lives in the sidebar / chips).
   const [q, setQ] = useState("");
@@ -282,21 +259,19 @@ export function ListView({
         {shown.map((s) => {
           const canDrag = !(library === "mine" && s.source === "installed");
           const dragging = canDrag && dragSkillId === s.id;
-          const onDragStart = (event: DragEvent<HTMLDivElement>) => {
-            if (!canDrag) return;
-            event.dataTransfer.effectAllowed = "move";
-            event.dataTransfer.setData("text/plain", s.id);
-            setSkillDragImage(event, s);
-            onSkillDragStart(s.id);
-          };
           return (
             <div
               key={s.id}
               className={"crow" + (lastId === s.id ? " is-active" : "") + (dragging ? " crow--dragging" : "")}
               title={peopleLabel(s)}
-              draggable={canDrag}
-              onDragStart={canDrag ? onDragStart : undefined}
-              onDragEnd={canDrag ? onSkillDragEnd : undefined}
+              onPointerDown={
+                canDrag
+                  ? (e) => {
+                      if (e.button !== 0) return;
+                      onSkillStartDrag(s.id, e);
+                    }
+                  : undefined
+              }
             >
               <button
                 type="button"

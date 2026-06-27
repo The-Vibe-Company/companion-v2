@@ -1,49 +1,21 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState, type DragEvent } from "react";
+import { useEffect, useRef, useState, type PointerEvent } from "react";
 import type { LabelColor, LabelIcon } from "@companion/contracts";
 import { LABEL_COLORS, LABEL_ICONS, labelDisplayNameToPath } from "@companion/contracts";
 import { Icon } from "../Icon";
 import { OrgSwitcher } from "../org/OrgSwitcher";
 import type { OrgVM } from "@/lib/types";
 import type { SkillsLibrary } from "./route";
+import type { ResolvedTarget } from "./dragGeometry";
 import type { DragItem, TreeRow } from "./SkillsApp";
 
 type SidebarSelection = { lib: SkillsLibrary; kind: "all" | "starred" | "installed" | "label"; label?: string } | null;
-type DropTarget = { lib: SkillsLibrary; kind: "label"; path: string } | { lib: SkillsLibrary; kind: "root" };
 type MoveTarget = { path: string; label: string };
-const FOLDER_DWELL_OPEN_DELAY_MS = 650;
 
 function labelParent(path: string): string | null {
   const i = path.lastIndexOf("/");
   return i === -1 ? null : path.slice(0, i);
-}
-
-function isLabelDropValid(drag: DragItem | null, lib: SkillsLibrary, targetPath: string): drag is DragItem {
-  if (!drag || drag.lib !== lib) return false;
-  if (drag.kind === "skill") return true;
-  if (targetPath === drag.path || targetPath.startsWith(drag.path + "/")) return false;
-  return `${targetPath}/${drag.leaf}` !== drag.path;
-}
-
-function isRootDropValid(drag: DragItem | null, lib: SkillsLibrary): drag is DragItem {
-  if (!drag || drag.lib !== lib) return false;
-  if (drag.kind === "skill") return drag.sourceLabel !== null;
-  return labelParent(drag.path) !== null;
-}
-
-function isSkillsLibrary(value: string | undefined): value is SkillsLibrary {
-  return value === "mine" || value === "org";
-}
-
-function dropSurfaceForTarget(target: EventTarget | null): HTMLElement | null {
-  return target instanceof Element ? target.closest<HTMLElement>("[data-skill-drop-kind]") : null;
-}
-
-function dragLeftBounds(event: DragEvent<HTMLElement>): boolean {
-  const rect = event.currentTarget.getBoundingClientRect();
-  if (rect.width === 0 && rect.height === 0) return false;
-  return event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom;
 }
 
 /** A `position: fixed` popover anchored at the cursor, clamped to the viewport (the `.side__nav`
@@ -304,88 +276,27 @@ function LabelTreeRows({
   expanded,
   activePath,
   drag,
-  dropTarget,
+  hovered,
+  openPendingPath,
   dropDone,
   onToggleExpand,
   onSelect,
   onOpenMenu,
-  onDragStart,
-  onDragEnd,
-  onDropTarget,
-  onDropDone,
-  onDropSkillOnLabel,
-  onReparentLabel,
+  onStartDrag,
 }: {
   lib: SkillsLibrary;
   rows: TreeRow[];
   expanded: Set<string>;
   activePath: string | null;
   drag: DragItem | null;
-  dropTarget: DropTarget | null;
-  dropDone: DropTarget | null;
+  hovered: ResolvedTarget | null;
+  openPendingPath: string | null;
+  dropDone: ResolvedTarget | null;
   onToggleExpand: (path: string) => void;
   onSelect: (path: string) => void;
   onOpenMenu: (row: TreeRow, pos: { x: number; y: number }) => void;
-  onDragStart: (item: DragItem) => void;
-  onDragEnd: () => void;
-  onDropTarget: (target: DropTarget | null) => void;
-  onDropDone: (target: DropTarget) => void;
-  onDropSkillOnLabel: (lib: SkillsLibrary, skillId: string, targetPath: string, sourceLabel: string | null) => void;
-  onReparentLabel: (lib: SkillsLibrary, from: string, targetParent: string | null) => void;
+  onStartDrag: (item: DragItem, e: PointerEvent<HTMLElement>) => void;
 }) {
-  const [openPendingPath, setOpenPendingPath] = useState<string | null>(null);
-  const dwellTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const dwellTargetRef = useRef<string | null>(null);
-  const expandedRef = useRef(expanded);
-
-  useEffect(() => {
-    expandedRef.current = expanded;
-  }, [expanded]);
-
-  const clearDwellOpen = useCallback((resetState = true) => {
-    if (dwellTimerRef.current) clearTimeout(dwellTimerRef.current);
-    dwellTimerRef.current = null;
-    dwellTargetRef.current = null;
-    if (resetState) setOpenPendingPath(null);
-  }, []);
-
-  const scheduleDwellOpen = useCallback(
-    (path: string) => {
-      if (dwellTargetRef.current === path) return;
-      clearDwellOpen();
-      dwellTargetRef.current = path;
-      setOpenPendingPath(path);
-      dwellTimerRef.current = setTimeout(() => {
-        if (dwellTargetRef.current === path && !expandedRef.current.has(path)) {
-          onToggleExpand(path);
-        }
-        dwellTimerRef.current = null;
-        dwellTargetRef.current = null;
-        setOpenPendingPath(null);
-      }, FOLDER_DWELL_OPEN_DELAY_MS);
-    },
-    [clearDwellOpen, onToggleExpand],
-  );
-
-  useEffect(() => () => clearDwellOpen(false), [clearDwellOpen]);
-
-  useEffect(() => {
-    if (!drag || drag.kind !== "skill" || drag.lib !== lib) clearDwellOpen();
-  }, [clearDwellOpen, drag, lib]);
-
-  useEffect(() => {
-    if (openPendingPath && expanded.has(openPendingPath)) clearDwellOpen();
-  }, [clearDwellOpen, expanded, openPendingPath]);
-
-  useEffect(() => {
-    if (
-      openPendingPath &&
-      (dropTarget?.kind !== "label" || dropTarget.lib !== lib || dropTarget.path !== openPendingPath)
-    ) {
-      clearDwellOpen();
-    }
-  }, [clearDwellOpen, dropTarget, lib, openPendingPath]);
-
   const labelIcon = (row: TreeRow): string => {
     if (row.icon) return row.icon;
     if (row.hasChildren) return expanded.has(row.path) ? "folder-open" : "folder";
@@ -406,34 +317,10 @@ function LabelTreeRows({
         const active = activePath === row.path;
         const isOpen = expanded.has(row.path);
         const dragging = drag?.kind === "label" && drag.lib === lib && drag.path === row.path;
-        const dropOk = dropTarget?.kind === "label" && dropTarget.lib === lib && dropTarget.path === row.path;
+        const dropOk = hovered?.kind === "label" && hovered.lib === lib && hovered.path === row.path;
         const dropJustDone = dropDone?.kind === "label" && dropDone.lib === lib && dropDone.path === row.path;
         const openPending = openPendingPath === row.path && dropOk && drag?.kind === "skill";
         const forceDropIconColor = dropOk || openPending || dropJustDone;
-        const handleDragStart = (event: DragEvent<HTMLDivElement>) => {
-          event.dataTransfer.effectAllowed = "move";
-          event.dataTransfer.setData("text/plain", row.path);
-          onDragStart({ kind: "label", lib, path: row.path, leaf: row.leafName });
-        };
-        const handleDragHover = (event: DragEvent<HTMLDivElement>) => {
-          if (!isLabelDropValid(drag, lib, row.path)) return;
-          event.preventDefault();
-          event.dataTransfer.dropEffect = "move";
-          onDropTarget({ lib, kind: "label", path: row.path });
-          if (drag.kind === "skill" && row.hasChildren && !expandedRef.current.has(row.path)) scheduleDwellOpen(row.path);
-          else clearDwellOpen();
-        };
-        const handleDrop = (event: DragEvent<HTMLDivElement>) => {
-          if (!isLabelDropValid(drag, lib, row.path)) return;
-          event.preventDefault();
-          event.stopPropagation();
-          clearDwellOpen();
-          onDropTarget(null);
-          if (drag.kind === "skill") onDropSkillOnLabel(lib, drag.skillId, row.path, drag.sourceLabel);
-          else onReparentLabel(lib, drag.path, row.path);
-          onDropDone({ lib, kind: "label", path: row.path });
-          onDragEnd();
-        };
         return (
           <div
             className={
@@ -445,16 +332,10 @@ function LabelTreeRows({
               (dropJustDone ? " lblrow--dropdone" : "")
             }
             key={row.path}
-            draggable
-            onDragStart={handleDragStart}
-            onDragEnd={() => {
-              clearDwellOpen();
-              onDropTarget(null);
-              onDragEnd();
+            onPointerDown={(e) => {
+              if (e.button !== 0) return;
+              onStartDrag({ kind: "label", lib, path: row.path, leaf: row.leafName }, e);
             }}
-            onDragEnter={handleDragHover}
-            onDragOver={handleDragHover}
-            onDrop={handleDrop}
             data-skill-drop-kind="label"
             data-skill-drop-lib={lib}
             data-skill-drop-path={row.path}
@@ -538,11 +419,11 @@ export function Sidebar({
   onRenameLabel,
   onDeleteLabel,
   drag,
-  onDragStart,
-  onDragEnd,
-  onDropSkillOnLabel,
-  onDropSkillOnRoot,
+  hovered,
+  openPendingPath,
+  dropDone,
   onReparentLabel,
+  onLabelStartDrag,
   onSelectLocal,
   onSelectArchived,
   localActive,
@@ -582,11 +463,11 @@ export function Sidebar({
   onRenameLabel: (lib: SkillsLibrary, from: string, to: string, displayName?: string) => void;
   onDeleteLabel: (lib: SkillsLibrary, path: string) => void;
   drag: DragItem | null;
-  onDragStart: (item: DragItem) => void;
-  onDragEnd: () => void;
-  onDropSkillOnLabel: (lib: SkillsLibrary, skillId: string, targetPath: string, sourceLabel: string | null) => void;
-  onDropSkillOnRoot: (lib: SkillsLibrary, skillId: string, sourceLabel: string | null) => void;
+  hovered: ResolvedTarget | null;
+  openPendingPath: string | null;
+  dropDone: ResolvedTarget | null;
   onReparentLabel: (lib: SkillsLibrary, from: string, targetParent: string | null) => void;
+  onLabelStartDrag: (item: DragItem, e: PointerEvent<HTMLElement>) => void;
   onSelectLocal: () => void;
   onSelectArchived: () => void;
   localActive: boolean;
@@ -604,9 +485,6 @@ export function Sidebar({
   const newFolderInputRef = useRef<HTMLInputElement>(null);
   const [mineOpen, setMineOpen] = useState(true);
   const [orgOpen, setOrgOpen] = useState(true);
-  const [dropTarget, setDropTarget] = useState<DropTarget | null>(null);
-  const [dropDone, setDropDone] = useState<DropTarget | null>(null);
-  const dropDoneTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const warmSettings = () => onWarmSettings();
   const runAndClose = (action: () => void) => {
@@ -614,85 +492,13 @@ export function Sidebar({
     onCloseMobile();
   };
 
-  useEffect(
-    () => () => {
-      if (dropDoneTimerRef.current) clearTimeout(dropDoneTimerRef.current);
-    },
-    [],
-  );
-
-  useEffect(() => {
-    if (!drag) setDropTarget(null);
-  }, [drag]);
-
-  const flashDropDone = (target: DropTarget) => {
-    if (dropDoneTimerRef.current) clearTimeout(dropDoneTimerRef.current);
-    setDropDone(target);
-    dropDoneTimerRef.current = setTimeout(() => {
-      setDropDone(null);
-      dropDoneTimerRef.current = null;
-    }, 850);
-  };
-
-  const rootDropOk = (lib: SkillsLibrary) => dropTarget?.kind === "root" && dropTarget.lib === lib;
+  const rootDropOk = (lib: SkillsLibrary) => hovered?.kind === "root" && hovered.lib === lib;
   const rootDropDone = (lib: SkillsLibrary) => dropDone?.kind === "root" && dropDone.lib === lib;
   const skillDropMode = drag?.kind === "skill";
 
-  const dropTargetForSurface = useCallback(
-    (target: EventTarget | null): DropTarget | null => {
-      const surface = dropSurfaceForTarget(target);
-      if (!surface) return null;
-      const lib = surface.dataset.skillDropLib;
-      if (!isSkillsLibrary(lib)) return null;
-      if (surface.dataset.skillDropKind === "root") return isRootDropValid(drag, lib) ? { lib, kind: "root" } : null;
-      if (surface.dataset.skillDropKind !== "label") return null;
-      const path = surface.dataset.skillDropPath;
-      return path && isLabelDropValid(drag, lib, path) ? { lib, kind: "label", path } : null;
-    },
-    [drag],
-  );
-
-  const clearDropTargetIfOutsideSurface = useCallback(
-    (event: DragEvent<HTMLElement>) => {
-      if (!drag) return;
-      if (dropTargetForSurface(event.target)) return;
-      setDropTarget(null);
-    },
-    [drag, dropTargetForSurface],
-  );
-
-  const clearDropTargetIfOutsideNav = useCallback(
-    (event: DragEvent<HTMLElement>) => {
-      if (!drag || !dragLeftBounds(event)) return;
-      setDropTarget(null);
-    },
-    [drag],
-  );
-
+  // Library headers are pure drop targets — the pointer hook hit-tests these data attributes.
   const rootDropProps = (lib: SkillsLibrary) => ({
-    onDragEnter: (event: DragEvent<HTMLDivElement>) => {
-      if (!isRootDropValid(drag, lib)) return;
-      event.preventDefault();
-      event.dataTransfer.dropEffect = "move";
-      setDropTarget({ lib, kind: "root" });
-    },
-    onDragOver: (event: DragEvent<HTMLDivElement>) => {
-      if (!isRootDropValid(drag, lib)) return;
-      event.preventDefault();
-      event.dataTransfer.dropEffect = "move";
-      setDropTarget({ lib, kind: "root" });
-    },
-    onDrop: (event: DragEvent<HTMLDivElement>) => {
-      if (!isRootDropValid(drag, lib)) return;
-      event.preventDefault();
-      event.stopPropagation();
-      setDropTarget(null);
-      if (drag.kind === "skill") onDropSkillOnRoot(lib, drag.skillId, drag.sourceLabel);
-      else onReparentLabel(lib, drag.path, null);
-      flashDropDone({ lib, kind: "root" });
-      onDragEnd();
-    },
-    "data-skill-drop-kind": "root",
+    "data-skill-drop-kind": "root" as const,
     "data-skill-drop-lib": lib,
   });
 
@@ -780,12 +586,7 @@ export function Sidebar({
           <Icon name="search" size={14} />
         </button>
       </div>
-      <nav
-        className="side__nav"
-        aria-label="Primary"
-        onDragOver={clearDropTargetIfOutsideSurface}
-        onDragLeave={clearDropTargetIfOutsideNav}
-      >
+      <nav className="side__nav" aria-label="Primary">
         {/* ===== MY SKILLS ===== */}
         <div
           className={
@@ -867,17 +668,13 @@ export function Sidebar({
               expanded={expanded}
               activePath={activeMineLabel}
               drag={drag}
-              dropTarget={dropTarget}
+              hovered={hovered}
+              openPendingPath={openPendingPath}
               dropDone={dropDone}
               onToggleExpand={onToggleExpand}
               onSelect={(path) => runAndClose(() => onSelectLabel("mine", path))}
               onOpenMenu={(row, pos) => setMenu({ row, lib: "mine", pos })}
-              onDragStart={onDragStart}
-              onDragEnd={onDragEnd}
-              onDropTarget={setDropTarget}
-              onDropDone={flashDropDone}
-              onDropSkillOnLabel={onDropSkillOnLabel}
-              onReparentLabel={onReparentLabel}
+              onStartDrag={onLabelStartDrag}
             />
           </div>
         )}
@@ -931,17 +728,13 @@ export function Sidebar({
               expanded={expanded}
               activePath={activeOrgLabel}
               drag={drag}
-              dropTarget={dropTarget}
+              hovered={hovered}
+              openPendingPath={openPendingPath}
               dropDone={dropDone}
               onToggleExpand={onToggleExpand}
               onSelect={(path) => runAndClose(() => onSelectLabel("org", path))}
               onOpenMenu={(row, pos) => setMenu({ row, lib: "org", pos })}
-              onDragStart={onDragStart}
-              onDragEnd={onDragEnd}
-              onDropTarget={setDropTarget}
-              onDropDone={flashDropDone}
-              onDropSkillOnLabel={onDropSkillOnLabel}
-              onReparentLabel={onReparentLabel}
+              onStartDrag={onLabelStartDrag}
             />
           </div>
         )}
