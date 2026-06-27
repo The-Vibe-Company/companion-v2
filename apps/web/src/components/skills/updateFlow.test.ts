@@ -34,6 +34,7 @@ const skill: SkillVM = {
   updaterName: "Alice Nardon",
   updaterInitials: "AN",
   updaterAvatarUrl: null,
+  modifiers: [],
   tools: ["read_file"],
   requirements: [],
   size: "1 KB",
