@@ -29,6 +29,7 @@ apps/web/src/components/skills/ListView.test.ts
   s_2b2874fa5b98a3::t_9b22b0f075fd37 1-24,29-89,95-109
   s_2b2874fa5b98a3::t_11d376f18c7382 90-91
   s_2b2874fa5b98a3::t_6ba3b74271c527 92-94
+  s_2b2874fa5b98a3::t_8069f079e81ac7 25-28
 apps/web/src/components/skills/DetailView.test.ts
   s_2b2874fa5b98a3::t_f5b644c1fdec05 29
 packages/contracts/test/skillListModifiers.test.ts
@@ -42,6 +43,8 @@ packages/contracts/src/skill.ts
   s_2b2874fa5b98a3::t_0dfa892d75ace1 141-149,191-196
 packages/companion-skill/skill/SKILL.md
   s_2b2874fa5b98a3::t_1033cd5fe8b98a 76-78
+apps/web/src/lib/types.test.ts
+  s_2b2874fa5b98a3::t_8069f079e81ac7 28
 ---
 {
   "schema_version": "authorship/3.0.0",
