@@ -84,7 +84,7 @@ export function labelDisplayNameToPath(input: string): LabelPath {
 }
 
 /**
- * The seven design swatches: six concrete colors + `null` (the default / inherited appearance).
+ * The twelve design swatches + `null` (the default / inherited appearance).
  * Stored verbatim as the `labels.color` string; `null` clears any custom color.
  */
 export const LABEL_COLORS = [
@@ -94,14 +94,36 @@ export const LABEL_COLORS = [
   "oklch(0.60 0.10 66)", // amber
   "oklch(0.55 0.13 24)", // terracotta
   "oklch(0.62 0.16 145)", // green
+  "oklch(0.58 0.14 340)", // rose
+  "oklch(0.58 0.11 220)", // sky
+  "oklch(0.50 0.035 265)", // slate
+  "oklch(0.62 0.14 30)", // coral
+  "oklch(0.52 0.13 275)", // indigo
+  "oklch(0.64 0.13 130)", // lime
 ] as const;
 export type LabelColor = (typeof LABEL_COLORS)[number];
 
-/** A label color: one of the six swatches, or `null` for the default. */
+/** Human-readable names for label color swatches (tooltips / aria-labels). */
+export const LABEL_COLOR_NAMES: Record<LabelColor, string> = {
+  "oklch(0.56 0.13 250)": "Blue",
+  "oklch(0.54 0.10 168)": "Teal",
+  "oklch(0.55 0.13 300)": "Violet",
+  "oklch(0.60 0.10 66)": "Amber",
+  "oklch(0.55 0.13 24)": "Terracotta",
+  "oklch(0.62 0.16 145)": "Green",
+  "oklch(0.58 0.14 340)": "Rose",
+  "oklch(0.58 0.11 220)": "Sky",
+  "oklch(0.50 0.035 265)": "Slate",
+  "oklch(0.62 0.14 30)": "Coral",
+  "oklch(0.52 0.13 275)": "Indigo",
+  "oklch(0.64 0.13 130)": "Lime",
+};
+
+/** A label color: one of the twelve swatches, or `null` for the default. */
 export const labelColorSchema = z.enum(LABEL_COLORS).nullable();
 
 /**
- * The 17 allowed label icons (lucide glyph names). `null` falls back to the default folder icon.
+ * The 32 allowed label icons (lucide glyph names). `null` falls back to the default folder icon.
  * The web Icon component must render every one of these (plus the `folder-open` state).
  */
 export const LABEL_ICONS = [
@@ -122,10 +144,25 @@ export const LABEL_ICONS = [
   "zap",
   "flame",
   "pen-tool",
+  "archive",
+  "box",
+  "calendar",
+  "file-text",
+  "git-branch",
+  "image",
+  "laptop",
+  "lock",
+  "mail",
+  "message-square",
+  "palette",
+  "settings",
+  "shield",
+  "terminal",
+  "building-2",
 ] as const;
 export type LabelIcon = (typeof LABEL_ICONS)[number];
 
-/** A label icon: one of the 17 allowed glyphs, or `null` for the default folder icon. */
+/** A label icon: one of the 32 allowed glyphs, or `null` for the default folder icon. */
 export const labelIconSchema = z.enum(LABEL_ICONS).nullable();
 
 /**

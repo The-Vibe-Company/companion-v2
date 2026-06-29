@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, type PointerEvent } from "react";
 import type { LabelColor, LabelIcon } from "@companion/contracts";
-import { LABEL_COLORS, LABEL_ICONS, labelDisplayNameToPath } from "@companion/contracts";
+import { LABEL_COLOR_NAMES, LABEL_COLORS, LABEL_ICONS, labelDisplayNameToPath } from "@companion/contracts";
 import { Icon } from "../Icon";
 import { OrgSwitcher } from "../org/OrgSwitcher";
 import type { OrgVM } from "@/lib/types";
@@ -118,8 +118,8 @@ function LabelMenu({
             type="button"
             className={"lblmenu__swatch" + (row.color === color ? " is-sel" : "")}
             style={{ background: color }}
-            title={color}
-            aria-label={color}
+            title={LABEL_COLOR_NAMES[color]}
+            aria-label={LABEL_COLOR_NAMES[color]}
             aria-pressed={row.color === color}
             onClick={() => onSetColor(row.path, color)}
           />
