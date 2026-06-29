@@ -177,7 +177,7 @@ def lockfile_candidates() -> list[Path]:
 
 # --- Multi-tool support -------------------------------------------------------
 #
-# A skill can be installed into several local coding tools (Claude Code, Codex, …) at once.
+# A skill can be installed into several local coding tools (Claude Code, Codex, OpenCode, …) at once.
 # The tool registry (scripts/tools.json) is the single, extensible source of truth for each
 # tool's on-disk skill directories; ~/.companion/config.json records which tools this machine
 # uses; and lockfile records grow a `targets[]` array so every install location stays tracked.

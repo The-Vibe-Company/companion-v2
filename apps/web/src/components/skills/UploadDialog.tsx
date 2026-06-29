@@ -60,10 +60,11 @@ function fmtSize(bytes: number): string {
   return (bytes / 1024 / 1024).toFixed(1) + " MB";
 }
 
-/** Where a skill gets installed locally (machine / Claude Code / Codex). */
+/** Where a skill gets installed locally (machine / Claude Code / Codex / OpenCode). */
 const UP_TARGETS = [
   { id: "claude", name: "Claude Code", icon: "sparkles", path: (id: string) => `~/.claude/skills/${id}` },
   { id: "codex", name: "Codex", icon: "code", path: (id: string) => `~/.codex/skills/${id}` },
+  { id: "opencode", name: "OpenCode", icon: "terminal", path: (id: string) => `~/.agents/skills/${id}` },
   { id: "local", name: "Local folder", icon: "folder", path: (id: string) => `./skills/${id}` },
 ] as const;
 type TargetId = (typeof UP_TARGETS)[number]["id"];
@@ -1748,8 +1749,8 @@ When the skill is installed, confirm it to Companion so it shows as installed in
                 "The package is on your machine."
               ) : (
                 <>
-                  Install <span className="mono">{id}@{version}</span> on your machine, Claude Code, or
-                  Codex.
+                  Install <span className="mono">{id}@{version}</span> on your machine, Claude Code,
+                  Codex, or OpenCode.
                 </>
               )}
             </p>

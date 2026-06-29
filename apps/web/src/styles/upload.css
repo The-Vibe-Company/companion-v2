@@ -52,8 +52,8 @@
 .up-hint code, .inline-code { font-family: var(--font-mono); font-size: 0.92em; color: var(--color-fg); background: var(--color-surface-sunken); border: 1px solid var(--color-line); border-radius: 4px; padding: 0 5px; }
 
 /* visibility segmented control (shared) ---------------------------------- */
-.up-seg { display: inline-flex; padding: 3px; gap: 2px; border: 1px solid var(--color-line); border-radius: var(--radius-md); background: var(--color-surface-sunken); }
-.up-seg button { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 11px; border: none; border-radius: var(--radius-sm);
+.up-seg { display: inline-flex; flex-wrap: wrap; max-width: 100%; padding: 3px; gap: 2px; border: 1px solid var(--color-line); border-radius: var(--radius-md); background: var(--color-surface-sunken); }
+.up-seg button { display: inline-flex; align-items: center; gap: 6px; min-width: 0; height: 28px; padding: 0 11px; border: none; border-radius: var(--radius-sm);
   background: none; color: var(--color-muted); cursor: pointer; font-family: var(--font-mono); font-size: var(--text-xs);
   transition: background-color var(--duration-fast) var(--ease-out-quint), color var(--duration-fast) var(--ease-out-quint); }
 .up-seg button:hover { color: var(--color-fg); }

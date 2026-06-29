@@ -188,7 +188,9 @@ assistant uses to upload, update, validate, and check whether the user's skills 
 workspace-id entry in the local `~/.companion/skills.lock.json` snapshot against the registry). Local
 credentials live separately in `~/.companion/credentials.json`, keyed by `organizations.id`; the
 lockfile keeps `apiUrl` metadata but never stores tokens. Legacy URL-keyed lockfiles are migrated on
-the next write, and `skills.log.json` is only a read-once legacy alias. The package and its presentation manifest ship in `packages/companion-skill`; the
+the next write, and `skills.log.json` is only a read-once legacy alias. Installs fan out through the
+bundled `scripts/tools.json` registry, currently covering Claude Code, Codex, and OpenCode; OpenCode
+uses the shared Agent Skills paths (`~/.agents/skills` and `.agents/skills`). The package and its presentation manifest ship in `packages/companion-skill`; the
 authoritative version is the `version` in the bundled `companion.json`, which the API packs (and
 caches) on demand. Local skill rows also expose official integrity metadata: the canonical package
 checksum plus SHA-256 hashes for tracked files such as `SKILL.md`, `companion.json`, and

@@ -104,6 +104,74 @@ assert_eval_true() {
   fi
 }
 
+json_string() {
+  node -e 'process.stdout.write(JSON.stringify(process.argv[1] ?? ""))' "$1"
+}
+
+wait_for_body_contains() {
+  local needle="$1" needle_js body
+  needle_js="$(json_string "$needle")"
+
+  for _ in $(seq 1 30); do
+    body="$(body_text || true)"
+    if printf '%s' "$body" | grep -Fi "$needle" >/dev/null; then
+      return 0
+    fi
+    sleep 1
+  done
+
+  printf '[agent-browser-smoke] Timed out waiting for page text: %s\n' "$needle" >&2
+  agent-browser get url >&2 || true
+  agent-browser eval "({ wanted: ${needle_js}, body: document.body.innerText })" >&2 || true
+  exit 1
+}
+
+fill_input() {
+  local selector="$1" value="$2" selector_js value_js result
+  selector_js="$(json_string "$selector")"
+  value_js="$(json_string "$value")"
+  result="$(
+    agent-browser eval "(() => {
+      const input = document.querySelector(${selector_js});
+      if (!input) return false;
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+      if (!setter) return false;
+      input.focus();
+      setter.call(input, ${value_js});
+      input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: ${value_js} }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+      return input.value === ${value_js};
+    })()" || true
+  )"
+  if [ "$result" != "true" ]; then
+    printf '[agent-browser-smoke] Could not fill input %s (eval => %s)\n' "$selector" "$result" >&2
+    body_text >&2 || true
+    exit 1
+  fi
+}
+
+click_button_text() {
+  local name="$1" name_js result
+  name_js="$(json_string "$name")"
+  result="$(
+    agent-browser eval "(() => {
+      const wanted = ${name_js};
+      const buttons = Array.from(document.querySelectorAll('button'));
+      const button =
+        buttons.find((b) => (b.textContent || '').trim() === wanted) ||
+        buttons.find((b) => (b.textContent || '').includes(wanted));
+      if (!button) return false;
+      button.click();
+      return true;
+    })()" || true
+  )"
+  if [ "$result" != "true" ]; then
+    printf '[agent-browser-smoke] Could not click button named "%s" (eval => %s)\n' "$name" "$result" >&2
+    body_text >&2 || true
+    exit 1
+  fi
+}
+
 # Center point (x y) of an element's bounding box, from real layout.
 box_center() {
   agent-browser get box "$1" | awk '/^x:/{x=$2}/^y:/{y=$2}/^width:/{w=$2}/^height:/{h=$2}END{printf "%d %d\n", x + w / 2, y + h / 2}'
@@ -311,9 +379,9 @@ agent-browser open "$APP_URL/skills"
 wait_for_login
 
 log "Signing in"
-agent-browser find label "Email" fill "$SMOKE_EMAIL"
-agent-browser find label "Password" fill "$SMOKE_PASSWORD"
-agent-browser find role button click --name "Sign in"
+fill_input "#si-email" "$SMOKE_EMAIL"
+fill_input "#si-pw" "$SMOKE_PASSWORD"
+click_button_text "Sign in"
 wait_for_skills
 agent-browser open "$APP_URL/skills?lib=org"
 wait_for_skills
@@ -350,12 +418,33 @@ assert_body_contains "Assistant IA"
 assert_body_contains "Create in the browser"
 agent-browser find role button click --name "Cancel"
 
+log "Checking Companion skills OpenCode support"
+agent-browser open "$APP_URL/skills?view=local"
+wait_for_body_contains "Companion skills"
+assert_body_contains "OpenCode"
+assert_no_browser_errors
+
 log "Checking mobile viewport"
 agent-browser set device "iPhone 14"
 agent-browser open "$APP_URL/skills?lib=org"
 wait_for_skills
 assert_body_contains "Upload skill"
 assert_body_contains "$SMOKE_SKILL"
+
+log "Checking mobile install targets"
+agent-browser open "$APP_URL/skills?lib=org&skill=$SMOKE_SKILL"
+wait_for_body_contains "Install skill"
+assert_body_contains "$SMOKE_SKILL"
+click_button_text "Install skill"
+wait_for_body_contains "Download package"
+click_button_text "Download package"
+wait_for_body_contains "OpenCode"
+assert_eval_true "document.documentElement.scrollWidth <= document.documentElement.clientWidth" \
+  "mobile install dialog introduced horizontal overflow"
+assert_eval_true "Array.from(document.querySelectorAll('.up-seg')).some((el) => el.textContent.includes('OpenCode') && getComputedStyle(el).flexWrap === 'wrap' && el.scrollWidth <= el.clientWidth)" \
+  "install-location selector did not wrap within its mobile container"
+assert_eval_true "(() => { const buttons = Array.from(document.querySelectorAll('.up-seg button')).filter((el) => ['Claude Code', 'Codex', 'OpenCode', 'Local folder'].includes((el.textContent || '').trim())); return buttons.length === 4 && buttons.every((el) => getComputedStyle(el).minWidth === '0px'); })()" \
+  "install-location buttons are missing min-width: 0"
 
 assert_no_browser_errors
 log "OK"

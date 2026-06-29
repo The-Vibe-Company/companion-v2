@@ -209,8 +209,8 @@ and retry only the install report.
 
 The install report stays **aggregate**: the workspace tracks one `skill_installs` row per user, with
 no per-tool dimension. When a skill is installed into several local tools at once (Claude Code, Codex,
-…) or into multiple projects, still send a **single** `POST /skills/{slug}/install`, using `agent` to
-name the tools (for example `"Claude Code, Codex"`). The per-tool, per-project install locations are
+OpenCode, …) or into multiple projects, still send a **single** `POST /skills/{slug}/install`, using `agent` to
+name the tools (for example `"Claude Code, Codex, OpenCode"`). The per-tool, per-project install locations are
 tracked locally, not in the workspace: each lockfile skill record carries a `targets[]` array
 (`{ tool, scope, path, checksum }`), user-scope targets in `~/.companion/skills.lock.json` and
 project-scope targets in a per-project `<repo>/.companion/skills.lock.json`. A legacy single-`installPath`

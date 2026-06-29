@@ -44,7 +44,7 @@ describe("companion skill package + row", () => {
     const pkg = await getCompanionSkillPackage();
     expect(pkg.key).toBe("companion");
     expect(pkg.checksum).toMatch(/^sha256:[0-9a-f]{64}$/);
-    expect(pkg.version).toBe("1.16.0");
+    expect(pkg.version).toBe("1.17.0");
     expect(pkg.sizeBytes).toBeGreaterThan(0);
     expect(pkg.integrity.packageChecksum).toBe(pkg.checksum);
     expect(pkg.integrity.files["SKILL.md"]).toMatch(/^sha256:[0-9a-f]{64}$/);
@@ -111,8 +111,8 @@ describe("companion skill package + row", () => {
       desc: "Create or repair manifest v2 with identity, env/secrets, dependency ids, notes, commands, and changelog.",
     });
     const changelog = row.changes.join("\n");
-    expect(changelog).toContain("deduplicated transitive dependencies");
-    expect(changelog).toContain("install_status update metadata");
+    expect(changelog).toContain("OpenCode as a multi-tool install target");
+    expect(changelog).toContain("~/.agents/skills");
     // The install prompt drives the report-back call and leaves placeholders for the client.
     expect(row.prompts.install).toContain("/local-skills/companion/package");
     expect(row.prompts.install).toContain("/local-skills/companion/installed");
@@ -120,6 +120,8 @@ describe("companion skill package + row", () => {
     expect(row.prompts.install).toContain("{base}");
     expect(row.prompts.install).toContain("{workspaceId}");
     expect(row.prompts.install).toContain("{token}");
+    expect(row.prompts.install).toContain("~/.agents/skills/companion");
+    expect(row.prompts.install).toContain("OpenCode");
     expect(row.prompts.install).toContain(pkg.version);
   });
 
@@ -154,6 +156,7 @@ describe("companion skill package + row", () => {
     const companionLib = await readFile(join(companionSkillDir(), "scripts", "companion_lib.py"), "utf8");
     const guardScript = await readFile(join(companionSkillDir(), "scripts", "skill_guard.py"), "utf8");
     expect(skillMd).not.toContain("companion_version:");
+    expect(skillMd).toContain("compatibility: claude-code codex opencode");
     expect(skillMd).toContain("companion.json.version");
     expect(skillMd).toContain("https://thecompanion.sh/schemas/companion-manifest.v2.schema.json");
     expect(skillMd).toContain("skills.lock.json");
@@ -212,6 +215,7 @@ describe("companion skill package + row", () => {
     expect(apiRef).toContain("skills.log.json");
     expect(apiRef).toContain("response includes `workspaceId`");
     expect(apiRef).toContain("POST /skills/{slug}/install");
+    expect(apiRef).toContain("Claude Code, Codex, OpenCode");
     expect(apiRef).toContain("updates preserve the existing scope");
     expect(apiRef).toContain("skill must not declare `scope` or `visibility`");
     expect(apiRef).toContain("Re-publish never moves, adds, or removes folder labels");
