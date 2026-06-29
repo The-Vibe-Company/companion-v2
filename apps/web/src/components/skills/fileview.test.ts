@@ -19,6 +19,27 @@ function file(overrides: Partial<SkillFile> & { path: string }): SkillFile {
 }
 
 describe("FileViewer browser-native previews", () => {
+  it("renders markdown tables in preview mode", () => {
+    const html = renderToString(
+      React.createElement(FileViewer, {
+        file: file({
+          path: "SKILL.md",
+          size: 48,
+          content: "| Name | Count |\n| --- | ---: |\n| Alpha | 12 |",
+          binary: false,
+          preview_kind: "text",
+          content_type: "text/markdown; charset=utf-8",
+        }),
+      }),
+    );
+
+    expect(html).toContain("Preview");
+    expect(html).toContain('<table class="md-table">');
+    expect(html).toContain("<td>Alpha</td>");
+    expect(html).toContain("text-align:right");
+    expect(html).not.toContain("cv-gutter");
+  });
+
   it("renders image files inline when a content URL is available", () => {
     const html = renderToString(
       React.createElement(FileViewer, {
