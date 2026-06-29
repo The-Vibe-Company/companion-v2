@@ -80,11 +80,31 @@ export function slugify(text: string): string {
     .replace(/^-+|-+$/g, "");
 }
 
+function isFenceStart(line: string): boolean {
+  return /^ {0,3}(`{3,}|~{3,})/.test(line);
+}
+
+function isThematicBreak(line: string): boolean {
+  return /^ {0,3}(?:(?:- *){3,}|(?:_ *){3,}|(?:\* *){3,})$/.test(line);
+}
+
+function isSetextTextLine(line: string): boolean {
+  if (!/\S/.test(line)) return false;
+  if (/^ {4}/.test(line)) return false;
+  if (isFenceStart(line)) return false;
+  if (isThematicBreak(line)) return false;
+  if (/^ {0,3}(?:#{1,6}(?:\s+|$)|>|\[[^\]]+\]:)/.test(line)) return false;
+  if (/^ {0,3}(?:[*+-]\s+|\d{1,9}[.)]\s+)/.test(line)) return false;
+  if (/^ {0,3}<\/?[A-Za-z][\w:-]*(?:\s|>|\/>)/.test(line)) return false;
+  return true;
+}
+
 /**
  * Extract the heading outline from a Markdown body. Mirrors `MarkdownView`'s parse
- * exactly so anchor ids line up by occurrence: strip leading frontmatter with the
- * same regex, walk lines fence-aware (headings inside ``` fences are ignored), and
- * de-duplicate slugs with a `name`, `name-1`, `name-2`… counter.
+ * closely enough that anchor ids line up by occurrence: strip leading frontmatter
+ * with the same regex, walk lines fence-aware (headings inside ``` / ~~~ fences
+ * are ignored), include ATX and setext headings, and de-duplicate slugs with a
+ * `name`, `name-1`, `name-2`… counter.
  */
 export function collectHeadings(content: string): Heading[] {
   let body = content;
@@ -92,21 +112,59 @@ export function collectHeadings(content: string): Heading[] {
   if (fm) body = content.slice(fm[0].length);
   const out: Heading[] = [];
   const counts = new Map<string, number>();
-  let inFence = false;
-  for (const line of body.split("\n")) {
-    if (/^```/.test(line)) {
-      inFence = !inFence;
-      continue;
-    }
-    if (inFence) continue;
-    const h = /^(#{1,6})\s+(.*)$/.exec(line);
-    if (!h) continue;
-    const level = (h[1] ?? "").length;
-    const text = stripInline(h[2] ?? "").trim();
+  let fence: { marker: "`" | "~"; length: number } | null = null;
+  const lines = body.split("\n");
+  const pushHeading = (level: number, rawText: string) => {
+    const text = stripInline(rawText).trim();
     const base = slugify(text) || "section";
     const n = counts.get(base) ?? 0;
     counts.set(base, n + 1);
     out.push({ level, text, id: n === 0 ? base : `${base}-${n}` });
+  };
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i] ?? "";
+    const fenceMatch = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+    if (fence) {
+      if (
+        fenceMatch &&
+        (fenceMatch[1]?.[0] as "`" | "~" | undefined) === fence.marker &&
+        (fenceMatch[1]?.length ?? 0) >= fence.length
+      ) {
+        fence = null;
+      }
+      continue;
+    }
+    if (fenceMatch) {
+      fence = { marker: fenceMatch[1]?.[0] as "`" | "~", length: fenceMatch[1]?.length ?? 3 };
+      continue;
+    }
+
+    const atx = /^ {0,3}(#{1,6})(?:\s+|$)(.*?)\s*#*\s*$/.exec(line);
+    if (atx) {
+      pushHeading((atx[1] ?? "").length, atx[2] ?? "");
+      continue;
+    }
+
+    if (isSetextTextLine(line)) {
+      const paragraphLines = [line];
+      let j = i + 1;
+      while (j < lines.length) {
+        const paragraphNext = lines[j] ?? "";
+        const paragraphSetext = /^ {0,3}(=+|-+)\s*$/.exec(paragraphNext);
+        if (paragraphSetext) {
+          pushHeading((paragraphSetext[1]?.[0] ?? "-") === "=" ? 1 : 2, paragraphLines.join(" "));
+          i = j;
+          break;
+        }
+        if (!isSetextTextLine(paragraphNext)) {
+          i = Math.max(i, j - 1);
+          break;
+        }
+        paragraphLines.push(paragraphNext);
+        j++;
+      }
+    }
   }
   return out;
 }

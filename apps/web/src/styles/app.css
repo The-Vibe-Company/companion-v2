@@ -217,12 +217,18 @@
 .md-h3 { font-size: 15px; margin: 22px 0 9px; }
 .md-h4 { font-size: 13.5px; margin: 18px 0 7px; color: var(--color-muted); text-transform: none; }
 .md-p { margin: 0 0 13px; color: var(--color-muted); max-width: 70ch; }
-.md-p code, .md-ul code, .md-ol code, .md-quote code { font-family: var(--font-mono); font-size: 0.9em; color: var(--color-fg);
+.md-p code, .md-ul code, .md-ol code, .md-quote code, .md-table code { font-family: var(--font-mono); font-size: 0.9em; color: var(--color-fg);
   background: var(--color-surface-sunken); border: 1px solid var(--color-line); border-radius: 4px; padding: 0.5px 5px; }
 .md-ul, .md-ol { margin: 0 0 14px; padding-left: 22px; color: var(--color-muted); display: flex; flex-direction: column; gap: 5px; max-width: 70ch; }
 .md-ul li, .md-ol li { line-height: var(--leading-relaxed); }
 .md-ul li::marker { color: var(--color-faint); }
 .md-ol li::marker { color: var(--color-faint); font-variant-numeric: tabular-nums; }
+.md-tablewrap { max-width: 100%; overflow-x: auto; margin: 0 0 16px; border: 1px solid var(--color-line); border-radius: var(--radius-md); background: var(--color-surface); }
+.md-table { width: 100%; min-width: 440px; border-collapse: collapse; font-size: var(--text-sm); color: var(--color-muted); }
+.md-table th, .md-table td { padding: 8px 10px; border-bottom: 1px solid color-mix(in oklab, var(--color-line) 70%, transparent); border-right: 1px solid color-mix(in oklab, var(--color-line) 70%, transparent); vertical-align: top; }
+.md-table th:last-child, .md-table td:last-child { border-right: none; }
+.md-table tr:last-child td { border-bottom: none; }
+.md-table th { background: var(--color-surface-sunken); color: var(--color-fg); font-weight: 600; }
 .md-hr { border: none; border-top: 1px solid var(--color-line); margin: 22px 0; }
 .md-quote { margin: 0 0 14px; padding: 4px 0 4px 16px; border-left: 2px solid var(--color-line-strong); color: var(--color-muted); }
 .md a { color: var(--color-accent-edge); text-decoration: none; text-underline-offset: 2px; }
@@ -355,6 +361,7 @@
 .skillnotes .md-ul:last-child,
 .skillnotes .md-ol:last-child,
 .skillnotes .md-quote:last-child,
+.skillnotes .md-tablewrap:last-child,
 .skillnotes .codeview:last-child { margin-bottom: 0; }
 
 @media (max-width: 900px) {

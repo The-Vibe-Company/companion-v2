@@ -1,13 +1,14 @@
 "use client";
 
 /* ───────────────────────────────────────────────────────────────
-   markdown.tsx — dependency-free block Markdown renderer + code view
-   for the Skill detail Files explorer. Class names mirror app.css
+   markdown.tsx — Markdown renderer + code view for the Skill detail
+   Files explorer. Class names mirror app.css
    (.codeview, .tk-*, .md, .md-*, .md-front, …) so styling applies.
-   Ported from the Claude-Design prototype (lib.jsx).
    ─────────────────────────────────────────────────────────────── */
 
-import React, { type ReactNode } from "react";
+import React from "react";
+import ReactMarkdown, { type Components } from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { collectHeadings, langForFile, tokenize, type FileLang } from "./fileFormat";
 
 /**
@@ -54,34 +55,40 @@ export function CodeView({
   );
 }
 
-/* ---- Inline markdown (code, bold, links) ------------------------- */
-function inlineMd(text: string, keyBase: string): ReactNode[] {
-  const nodes: ReactNode[] = [];
-  const re = /(`[^`]+`)|(\*\*[^*]+\*\*)|(\[[^\]]+\]\([^)]+\))/g;
-  let last = 0;
-  let m: RegExpExecArray | null;
-  let i = 0;
-  while ((m = re.exec(text))) {
-    if (m.index > last) nodes.push(text.slice(last, m.index));
-    const tok = m[0];
-    if (tok.startsWith("`")) nodes.push(<code key={keyBase + "-" + i}>{tok.slice(1, -1)}</code>);
-    else if (tok.startsWith("**"))
-      nodes.push(<strong key={keyBase + "-" + i}>{tok.slice(2, -2)}</strong>);
-    else {
-      const mm = /\[([^\]]+)\]\(([^)]+)\)/.exec(tok);
-      if (mm) {
-        nodes.push(
-          <a key={keyBase + "-" + i} href={mm[2]} onClick={(e) => e.preventDefault()}>
-            {mm[1]}
-          </a>,
-        );
-      }
-    }
-    last = re.lastIndex;
-    i++;
-  }
-  if (last < text.length) nodes.push(text.slice(last));
-  return nodes;
+function langFromFence(className?: string): FileLang {
+  const lang = /(?:^|\s)language-([A-Za-z0-9_-]+)/.exec(className ?? "")?.[1]?.toLowerCase();
+  if (lang === "json") return "json";
+  if (lang === "py" || lang === "python") return "py";
+  return "text";
+}
+
+type MarkdownAstNode = {
+  type?: string;
+  children?: MarkdownAstNode[];
+  data?: {
+    hProperties?: Record<string, unknown>;
+    [key: string]: unknown;
+  };
+};
+
+function visitMarkdownAst(node: MarkdownAstNode, visitor: (node: MarkdownAstNode) => void) {
+  visitor(node);
+  node.children?.forEach((child) => visitMarkdownAst(child, visitor));
+}
+
+function createHeadingIdPlugin(ids: string[]) {
+  return function remarkHeadingIds() {
+    return function addHeadingIds(tree: MarkdownAstNode) {
+      let headingIdx = 0;
+      visitMarkdownAst(tree, (node) => {
+        if (node.type !== "heading") return;
+        const id = ids[headingIdx++];
+        if (!id) return;
+        node.data = node.data ?? {};
+        node.data.hProperties = { ...node.data.hProperties, id };
+      });
+    };
+  };
 }
 
 /* ---- Block markdown renderer ------------------------------------- */
@@ -94,133 +101,75 @@ export function MarkdownView({ content }: { content: string }) {
     front = fm[1] ?? "";
     body = content.slice(fm[0].length);
   }
-  const lines = body.split("\n");
-  // `i < lines.length` always guards these reads; `?? ""` only satisfies the
-  // noUncheckedIndexedAccess compiler check (the value is never actually undefined).
-  const at = (n: number): string => lines[n] ?? "";
-  const blocks: ReactNode[] = [];
-  let i = 0;
-  let key = 0;
   // Anchor ids for the on-this-page outline. `collectHeadings` walks the same
-  // fence-aware sequence, so consuming ids by occurrence index keeps the rendered
-  // heading id identical to the outline entry.
-  const headings = collectHeadings(content);
-  let headingIdx = 0;
-  while (i < lines.length) {
-    const line = at(i);
-    // code fence
-    if (/^```/.test(line)) {
-      const fenceLang = line.slice(3).trim();
-      const buf: string[] = [];
-      i++;
-      while (i < lines.length && !/^```/.test(at(i))) {
-        buf.push(at(i));
-        i++;
-      }
-      i++; // skip closing fence
-      const lang: FileLang =
-        fenceLang === "json"
-          ? "json"
-          : fenceLang === "py" || fenceLang === "python"
-            ? "py"
-            : "text";
-      blocks.push(<CodeView key={key++} content={buf.join("\n")} lang={lang} />);
-      continue;
-    }
-    // heading
-    const h = /^(#{1,6})\s+(.*)$/.exec(line);
-    if (h) {
-      const lvl = (h[1] ?? "").length;
-      const Tag = ("h" + Math.min(lvl + 1, 6)) as keyof React.JSX.IntrinsicElements;
-      const id = headings[headingIdx++]?.id;
-      blocks.push(
-        React.createElement(
-          Tag,
-          { key: key++, id, className: "md-h md-h" + lvl },
-          inlineMd(h[2] ?? "", "h" + key),
-        ),
+  // body passed to react-markdown, so consuming ids by occurrence index keeps the
+  // rendered heading id identical to the outline entry.
+  const headingIdPlugin = React.useMemo(
+    () => createHeadingIdPlugin(collectHeadings(body).map((heading) => heading.id)),
+    [body],
+  );
+
+  const makeHeading = (level: 1 | 2 | 3 | 4 | 5 | 6): Components["h1"] =>
+    function Heading({ children, id }) {
+      const Tag = ("h" + Math.min(level + 1, 6)) as keyof React.JSX.IntrinsicElements;
+      return React.createElement(Tag, { id, className: "md-h md-h" + level }, children);
+    };
+
+  const components: Components = {
+    h1: makeHeading(1),
+    h2: makeHeading(2),
+    h3: makeHeading(3),
+    h4: makeHeading(4),
+    h5: makeHeading(5),
+    h6: makeHeading(6),
+    p({ children }) {
+      return <p className="md-p">{children}</p>;
+    },
+    ul({ children }) {
+      return <ul className="md-ul">{children}</ul>;
+    },
+    ol({ children }) {
+      return <ol className="md-ol">{children}</ol>;
+    },
+    blockquote({ children }) {
+      return <blockquote className="md-quote">{children}</blockquote>;
+    },
+    hr() {
+      return <hr className="md-hr" />;
+    },
+    a({ children, href }) {
+      return (
+        <a href={href} onClick={(e) => e.preventDefault()}>
+          {children}
+        </a>
       );
-      i++;
-      continue;
-    }
-    // hr
-    if (/^---+\s*$/.test(line)) {
-      blocks.push(<hr key={key++} className="md-hr" />);
-      i++;
-      continue;
-    }
-    // blockquote
-    if (/^>\s?/.test(line)) {
-      const buf: string[] = [];
-      while (i < lines.length && /^>\s?/.test(at(i))) {
-        buf.push(at(i).replace(/^>\s?/, ""));
-        i++;
+    },
+    code({ children, className }) {
+      const raw = String(children);
+      const isBlock = Boolean(className) || raw.includes("\n");
+      if (isBlock) {
+        return <CodeView content={raw.replace(/\n$/, "")} lang={langFromFence(className)} />;
       }
-      blocks.push(
-        <blockquote key={key++} className="md-quote">
-          {inlineMd(buf.join(" "), "q" + key)}
-        </blockquote>,
+      return <code>{children}</code>;
+    },
+    pre({ children }) {
+      return <>{children}</>;
+    },
+    table({ children }) {
+      return (
+        <div className="md-tablewrap">
+          <table className="md-table">{children}</table>
+        </div>
       );
-      continue;
-    }
-    // unordered list
-    if (/^\s*[-*]\s+/.test(line)) {
-      const items: string[] = [];
-      while (i < lines.length && /^\s*[-*]\s+/.test(at(i))) {
-        items.push(at(i).replace(/^\s*[-*]\s+/, ""));
-        i++;
-      }
-      blocks.push(
-        <ul key={key++} className="md-ul">
-          {items.map((it, j) => (
-            <li key={j}>{inlineMd(it, "ul" + key + "-" + j)}</li>
-          ))}
-        </ul>,
-      );
-      continue;
-    }
-    // ordered list
-    if (/^\s*\d+\.\s+/.test(line)) {
-      const items: string[] = [];
-      while (i < lines.length && /^\s*\d+\.\s+/.test(at(i))) {
-        items.push(at(i).replace(/^\s*\d+\.\s+/, ""));
-        i++;
-      }
-      blocks.push(
-        <ol key={key++} className="md-ol">
-          {items.map((it, j) => (
-            <li key={j}>{inlineMd(it, "ol" + key + "-" + j)}</li>
-          ))}
-        </ol>,
-      );
-      continue;
-    }
-    // blank
-    if (/^\s*$/.test(line)) {
-      i++;
-      continue;
-    }
-    // paragraph (gather until blank / block start)
-    const buf: string[] = [];
-    while (
-      i < lines.length &&
-      !/^\s*$/.test(at(i)) &&
-      !/^#{1,6}\s/.test(at(i)) &&
-      !/^```/.test(at(i)) &&
-      !/^\s*[-*]\s+/.test(at(i)) &&
-      !/^\s*\d+\.\s+/.test(at(i)) &&
-      !/^>\s?/.test(at(i)) &&
-      !/^---+\s*$/.test(at(i))
-    ) {
-      buf.push(at(i));
-      i++;
-    }
-    blocks.push(
-      <p key={key++} className="md-p">
-        {inlineMd(buf.join(" "), "p" + key)}
-      </p>,
-    );
-  }
+    },
+    th({ children, style }) {
+      return <th style={style}>{children}</th>;
+    },
+    td({ children, style }) {
+      return <td style={style}>{children}</td>;
+    },
+  };
+
   return (
     <div className="md">
       {front && (
@@ -229,7 +178,9 @@ export function MarkdownView({ content }: { content: string }) {
           <CodeView content={front} lang="text" />
         </div>
       )}
-      {blocks}
+      <ReactMarkdown remarkPlugins={[remarkGfm, headingIdPlugin]} components={components}>
+        {body}
+      </ReactMarkdown>
     </div>
   );
 }
