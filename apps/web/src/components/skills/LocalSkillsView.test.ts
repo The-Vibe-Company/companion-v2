@@ -100,7 +100,40 @@ describe("LocalSkillsView", () => {
     // Both assistant tiles are offered; the install is no longer forced ("Maybe later" is available).
     expect(container.textContent).toContain("Claude Code");
     expect(container.textContent).toContain("Codex");
+    expect(container.textContent).toContain("OpenCode");
     expect(container.textContent).toContain("Maybe later");
+  });
+
+  it("reports OpenCode as the installing assistant when selected", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+
+    const container = await mount();
+    const buttons = Array.from(container.querySelectorAll("button"));
+    const openCode = buttons.find((button) => button.textContent?.includes("OpenCode"));
+    expect(openCode).toBeTruthy();
+
+    await act(async () => {
+      openCode?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    const copy = Array.from(container.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("Copy prompt"),
+    );
+    expect(copy).toBeTruthy();
+
+    await act(async () => {
+      copy?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(queryMocks.issueToken).toHaveBeenCalledTimes(1);
+    expect(writeText).toHaveBeenCalledWith(expect.stringContaining("agent=OpenCode"));
+    expect(writeText).toHaveBeenCalledWith(expect.stringContaining("cmp_pat_test"));
   });
 
   it("flips to the Connected banner when an out-of-band install is reported", async () => {

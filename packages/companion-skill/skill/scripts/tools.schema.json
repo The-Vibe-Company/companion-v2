@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://thecompanion.sh/schemas/companion-tools.v1.schema.json",
   "title": "Companion tool registry",
-  "description": "Registry of local coding tools a Companion skill can be installed into (Claude Code, Codex, …). The single, extensible source of truth for each tool's on-disk skill directories.",
+  "description": "Registry of local coding tools a Companion skill can be installed into (Claude Code, Codex, OpenCode, …). The single, extensible source of truth for each tool's on-disk skill directories.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schemaVersion", "tools"],
@@ -50,12 +50,12 @@
             "user": {
               "type": "string",
               "minLength": 1,
-              "description": "User-global skills directory (with ~ allowed), e.g. \"~/.claude/skills\"."
+              "description": "User-global skills directory (with ~ allowed), e.g. \"~/.claude/skills\" or \"~/.agents/skills\"."
             },
             "project": {
               "type": "string",
               "minLength": 1,
-              "description": "Project-relative skills directory, e.g. \".claude/skills\" (joined under a repo root)."
+              "description": "Project-relative skills directory, e.g. \".claude/skills\" or \".agents/skills\" (joined under a repo root)."
             }
           }
         },

@@ -46,11 +46,12 @@ function promptFor(skill: LocalSkillRow): string {
 type PromptMode = "default" | "reinstall";
 type CopiedKind = "prompt" | "reinstall";
 
-/** The assistants the install dialog can target. The id is the `agent` label reported on install. */
-type AssistantId = "claude-code" | "codex";
+/** The assistants the install dialog can target. Their display name is reported as the install agent. */
+type AssistantId = "claude-code" | "codex" | "opencode";
 const ASSISTANTS: Record<AssistantId, { name: string; vendor: string; hint: string }> = {
   "claude-code": { name: "Claude Code", vendor: "anthropic", hint: "paste into Claude Code" },
   codex: { name: "Codex", vendor: "openai", hint: "paste into Codex" },
+  opencode: { name: "OpenCode", vendor: "opencode", hint: "paste into OpenCode" },
 };
 
 /**
@@ -102,6 +103,14 @@ function CodexLogo() {
         <ellipse cx="12" cy="12" rx="9.2" ry="3.6" transform="rotate(60 12 12)" />
         <ellipse cx="12" cy="12" rx="9.2" ry="3.6" transform="rotate(120 12 12)" />
       </svg>
+    </span>
+  );
+}
+
+function OpenCodeLogo() {
+  return (
+    <span className="ls-tile__logo" style={{ background: "#365c7d" }} aria-hidden="true">
+      <Icon name="terminal" size={18} style={{ color: "#fff" }} />
     </span>
   );
 }
@@ -306,8 +315,8 @@ export function LocalSkillsView({
         <div className="ls-banner ls-banner--ok" role="status">
           <Icon name="check-circle-2" size={16} className="ls-banner__ico" />
           <span className="ls-banner__text">
-            <strong>Connected.</strong> Claude Code, Codex, and your agents can manage the skills on this
-            machine.
+            <strong>Connected.</strong> Claude Code, Codex, OpenCode, and your agents can manage the
+            skills on this machine.
           </span>
         </div>
       )}
@@ -320,8 +329,8 @@ export function LocalSkillsView({
           <span className="ls-banner__stack">
             <span className="ls-banner__title">Companion is not connected to your assistant</span>
             <span className="ls-banner__sub">
-              Claude Code and Codex can&rsquo;t manage the skills on this machine yet. It takes about a
-              minute.
+              Claude Code, Codex, and OpenCode can&rsquo;t manage the skills on this machine yet. It takes
+              about a minute.
             </span>
           </span>
           <button
@@ -491,15 +500,15 @@ function InstallGate({
     return pending;
   }, []);
 
+  const meta = ASSISTANTS[assistant];
   // The chosen assistant fills the prompt's `agent` slot, so the report-back step names the assistant
   // that actually runs the install.
   const buildPrompt = useCallback(
-    (tok: string) => fillPrompt(skill.prompts.install, base, workspaceId, tok, assistant),
-    [assistant, base, skill.prompts.install, workspaceId],
+    (tok: string) => fillPrompt(skill.prompts.install, base, workspaceId, tok, meta.name),
+    [base, meta.name, skill.prompts.install, workspaceId],
   );
   // Until the user copies, the token slot shows a placeholder so nothing secret is minted on open.
   const displayPrompt = buildPrompt(token ?? "cmp_pat_…");
-  const meta = ASSISTANTS[assistant];
 
   const copyPrompt = useCallback(async () => {
     setFailed(false);
@@ -554,9 +563,9 @@ function InstallGate({
 
         <div className="ls-gate__body">
           <p className="ls-gate__lede">
-            Install the skill on this machine so Claude Code, Codex, and your agents can manage the
-            skills here. You give it a short prompt once. It only acts after confirming changes with
-            you.
+            Install the skill on this machine so Claude Code, Codex, OpenCode, and your agents can
+            manage the skills here. You give it a short prompt once. It only acts after confirming
+            changes with you.
           </p>
 
           <div className="ls-gate__feats">
@@ -587,7 +596,7 @@ function InstallGate({
                   aria-pressed={on}
                   onClick={() => setAssistant(id)}
                 >
-                  {id === "claude-code" ? <ClaudeLogo /> : <CodexLogo />}
+                  {id === "claude-code" ? <ClaudeLogo /> : id === "codex" ? <CodexLogo /> : <OpenCodeLogo />}
                   <span className="ls-tile__text">
                     <span className="ls-tile__name">{info.name}</span>
                     <span className="ls-tile__vendor mono">{info.vendor}</span>

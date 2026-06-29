@@ -13,6 +13,12 @@
       "detect": ["~/.codex"],
       "skillsDir": { "user": "~/.codex/skills", "project": ".codex/skills" },
       "format": "skill-md"
+    },
+    "opencode": {
+      "displayName": "OpenCode",
+      "detect": ["~/.config/opencode"],
+      "skillsDir": { "user": "~/.agents/skills", "project": ".agents/skills" },
+      "format": "skill-md"
     }
   }
 }

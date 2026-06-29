@@ -105,7 +105,7 @@ def build_skill_context(
                 "status": status,
                 "reason": reason,
                 "path": row.get("path"),
-                # Every install location for this skill (Claude Code, Codex, …) at its scope level.
+                # Every install location for this skill (Claude Code, Codex, OpenCode, …) at its scope level.
                 # A legacy single-path lockfile folds into one user-scope Claude Code target.
                 "targets": row.get("targets") or [],
                 "skillId": row.get("skillId"),

@@ -30,6 +30,12 @@ REGISTRY = {
         "skillsDir": {"user": "~/.codex/skills", "project": ".codex/skills"},
         "format": "skill-md",
     },
+    "opencode": {
+        "displayName": "OpenCode",
+        "detect": ["~/.config/opencode"],
+        "skillsDir": {"user": "~/.agents/skills", "project": ".agents/skills"},
+        "format": "skill-md",
+    },
 }
 
 
@@ -58,24 +64,34 @@ class EnvSandbox(unittest.TestCase):
 
 
 class RegistryTests(EnvSandbox):
-    def test_shipped_registry_loads_claude_and_codex(self) -> None:
+    def test_shipped_registry_loads_claude_codex_and_opencode(self) -> None:
         registry = companion_lib.load_tool_registry()
         self.assertIn("claude-code", registry)
         self.assertIn("codex", registry)
+        self.assertIn("opencode", registry)
         self.assertEqual(registry["claude-code"]["skillsDir"]["user"], "~/.claude/skills")
+        self.assertEqual(registry["opencode"]["detect"], ["~/.config/opencode"])
+        self.assertEqual(registry["opencode"]["skillsDir"]["user"], "~/.agents/skills")
+        self.assertEqual(registry["opencode"]["skillsDir"]["project"], ".agents/skills")
 
     def test_detect_tools_finds_only_present_tools(self) -> None:
         (self.home / ".claude").mkdir()
         self.assertEqual(companion_lib.detect_tools(REGISTRY), ["claude-code"])
         (self.home / ".codex").mkdir()
         self.assertEqual(companion_lib.detect_tools(REGISTRY), ["claude-code", "codex"])
+        (self.home / ".config" / "opencode").mkdir(parents=True)
+        self.assertEqual(companion_lib.detect_tools(REGISTRY), ["claude-code", "codex", "opencode"])
 
     def test_resolve_target_dir_user_and_project(self) -> None:
         user_dir = companion_lib.resolve_target_dir("claude-code", "user", "demo", None, REGISTRY)
         self.assertEqual(user_dir, self.home / ".claude" / "skills" / "demo")
+        opencode_user_dir = companion_lib.resolve_target_dir("opencode", "user", "demo", None, REGISTRY)
+        self.assertEqual(opencode_user_dir, self.home / ".agents" / "skills" / "demo")
         project_root = self.root / "repo"
         project_dir = companion_lib.resolve_target_dir("codex", "project", "demo", project_root, REGISTRY)
         self.assertEqual(project_dir, project_root / ".codex" / "skills" / "demo")
+        opencode_project_dir = companion_lib.resolve_target_dir("opencode", "project", "demo", project_root, REGISTRY)
+        self.assertEqual(opencode_project_dir, project_root / ".agents" / "skills" / "demo")
 
     def test_resolve_target_dir_rejects_unknown_tool(self) -> None:
         with self.assertRaises(SystemExit):
@@ -85,12 +101,12 @@ class RegistryTests(EnvSandbox):
 class ConfigTests(EnvSandbox):
     def test_round_trip_tool_config(self) -> None:
         self.assertEqual(companion_lib.load_tool_config(), [])
-        path = companion_lib.save_tool_config(["codex", "claude-code", "codex"], detected_at="2026-06-26T00:00:00Z")
+        path = companion_lib.save_tool_config(["opencode", "codex", "claude-code", "codex"], detected_at="2026-06-26T00:00:00Z")
         self.assertTrue(path.exists())
         saved = json.loads(path.read_text())
-        self.assertEqual(saved["tools"], ["claude-code", "codex"])  # sorted + deduped
+        self.assertEqual(saved["tools"], ["claude-code", "codex", "opencode"])  # sorted + deduped
         self.assertEqual(saved["detectedAt"], "2026-06-26T00:00:00Z")
-        self.assertEqual(companion_lib.load_tool_config(), ["claude-code", "codex"])
+        self.assertEqual(companion_lib.load_tool_config(), ["claude-code", "codex", "opencode"])
 
 
 class LockRecordTests(EnvSandbox):
@@ -171,12 +187,14 @@ class FanOutTests(EnvSandbox):
     def test_installs_into_every_planned_target(self) -> None:
         pkg = self._package()
         project_root = self.root / "repo"
-        plan = [("claude-code", "user"), ("codex", "user"), ("claude-code", "project")]
+        plan = [("claude-code", "user"), ("codex", "user"), ("opencode", "user"), ("claude-code", "project"), ("opencode", "project")]
         results = install_skill.fan_out_install(pkg, "demo", plan, REGISTRY, project_root, {}, {}, force=False)
         self.assertTrue(all(row["status"] == "installed" for row in results))
         self.assertTrue((self.home / ".claude" / "skills" / "demo" / "SKILL.md").exists())
         self.assertTrue((self.home / ".codex" / "skills" / "demo" / "SKILL.md").exists())
+        self.assertTrue((self.home / ".agents" / "skills" / "demo" / "SKILL.md").exists())
         self.assertTrue((project_root / ".claude" / "skills" / "demo" / "SKILL.md").exists())
+        self.assertTrue((project_root / ".agents" / "skills" / "demo" / "SKILL.md").exists())
 
     def test_skips_customized_target_unless_forced(self) -> None:
         pkg = self._package()

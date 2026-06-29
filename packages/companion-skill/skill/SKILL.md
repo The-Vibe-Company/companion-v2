@@ -2,6 +2,7 @@
 name: companion
 description: "Use when managing local SKILL.md packages with Companion: validate, publish, update, resolve skill dependencies, declare the secrets and environment variables a skill needs, install updates, audit skills, check workspace versions, or self-update this Companion skill through the Companion workspace API."
 license: MIT
+compatibility: claude-code codex opencode
 allowed-tools: read_file write_file run_shell
 ---
 
@@ -278,15 +279,17 @@ treat a close-named skill as its replacement.
 record that only has a single `installPath` is read as one `claude-code`/`user` target. There are two
 lockfile levels, same shape:
 
-- **User-scope** installs (`~/.claude/skills`, `~/.codex/skills`) live in `~/.companion/skills.lock.json`.
-- **Project-scope** installs (`.claude/skills`, `.codex/skills` inside a repo) live in a **per-project**
+- **User-scope** installs (`~/.claude/skills`, `~/.codex/skills`, `~/.agents/skills` for OpenCode) live in `~/.companion/skills.lock.json`.
+- **Project-scope** installs (`.claude/skills`, `.codex/skills`, `.agents/skills` for OpenCode inside a repo) live in a **per-project**
   `<repo>/.companion/skills.lock.json`, one per project, with repo-relative paths so it can optionally
   be committed to share the project's skill set. Never write the token to this lockfile either.
 
 The set of tools this machine uses is recorded in `~/.companion/config.json`
-(`{ "schemaVersion": 1, "tools": ["claude-code", "codex"] }` — never any secret). The supported tools
+(`{ "schemaVersion": 1, "tools": ["claude-code", "codex", "opencode"] }` — never any secret). The supported tools
 and their on-disk skill directories are declared in this skill's `scripts/tools.json` registry, which
-is extensible: adding a tool there is enough to make it an install target. `scripts/tools.schema.json`
+is extensible: adding a tool there is enough to make it an install target. The OpenCode target uses
+the shared Agent Skills paths (`~/.agents/skills` and `.agents/skills`) so the same installed package
+is discoverable by OpenCode's agent-compatible loader. `scripts/tools.schema.json`
 is its JSON Schema (referenced via `$schema`) describing the registry shape.
 
 ### List workspace and local skills
@@ -336,7 +339,7 @@ python3 scripts/bootstrap.py --summary
 Run that script from this skill's package root. It only reads local Companion state and calls the
 skills API with `skills:read`; it does not write files, publish, install, or update anything.
 
-### Install a skill into your tools (Claude Code, Codex, …)
+### Install a skill into your tools (Claude Code, Codex, OpenCode, …)
 
 Installing a skill deploys its package into **every tool the user works with**, not just the one in
 use right now. Resolve the target tools, confirm with the user, then fan out:
@@ -362,7 +365,7 @@ use right now. Resolve the target tools, confirm with the user, then fan out:
    ```sh
    python3 scripts/install_skill.py <slug> --scope user            # all configured tools, user-global
    python3 scripts/install_skill.py <slug> --scope both            # user-global + the current repo
-   python3 scripts/install_skill.py <slug> --tools claude-code,codex --json
+   python3 scripts/install_skill.py <slug> --tools claude-code,codex,opencode --json
    python3 scripts/install_skill.py <slug> --confirm-required-secrets --report
    ```
 
@@ -374,7 +377,7 @@ use right now. Resolve the target tools, confirm with the user, then fan out:
    resolve to their current published versions because Companion dependencies are not version-pinned.
 4. **Report once.** After the dependency-first fan-out, send a single aggregate
    `POST /skills/{slug}/install` for the requested root skill with the
-   installed version and an `agent` label listing the tools (for example `"Claude Code, Codex"`). The
+   installed version and an `agent` label listing the tools (for example `"Claude Code, Codex, OpenCode"`). The
    workspace tracks installs per user, not per tool, so this stays one call even across multiple tools
    and projects. (`install_skill.py --report` can send it for you.)
 
