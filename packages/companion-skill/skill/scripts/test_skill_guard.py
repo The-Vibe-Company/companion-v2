@@ -82,6 +82,40 @@ class ConflictDetectionTests(unittest.TestCase):
         conflicts = skill_guard.detect_conflicts(entries, online_index())
         self.assertIn(skill_guard.KIND_DUP_COMPANION_ID, kinds(conflicts))
 
+    def test_duplicate_local_skill_name_same_id_warns(self):
+        entries = [
+            entry("ship-pr", "SHIP-ID", source="manifest:/tmp/one", path="/tmp/one"),
+            entry("ship-pr", "SHIP-ID", source="manifest:/tmp/two", path="/tmp/two"),
+        ]
+        conflicts = skill_guard.detect_conflicts(entries, online_index())
+        duplicate = [c for c in conflicts if c["kind"] == skill_guard.KIND_DUPLICATE_LOCAL_SKILL_NAME]
+        self.assertEqual(1, len(duplicate))
+        self.assertEqual("warn", duplicate[0]["severity"])
+        self.assertFalse(skill_guard.has_blocking(conflicts))
+        self.assertNotIn(skill_guard.KIND_DUP_COMPANION_ID, kinds(conflicts))
+        self.assertIn("/tmp/one", {item["path"] for item in duplicate[0]["evidence"]})
+        self.assertIn("/tmp/two", {item["path"] for item in duplicate[0]["evidence"]})
+
+    def test_duplicate_local_skill_name_missing_ids_warns(self):
+        entries = [
+            entry("ship-pr", None, source="skill:/tmp/one", path="/tmp/one"),
+            entry("ship-pr", None, source="skill:/tmp/two", path="/tmp/two"),
+        ]
+        conflicts = skill_guard.detect_conflicts(entries, online_index())
+        duplicate = [c for c in conflicts if c["kind"] == skill_guard.KIND_DUPLICATE_LOCAL_SKILL_NAME]
+        self.assertEqual(1, len(duplicate))
+        self.assertEqual("warn", duplicate[0]["severity"])
+        self.assertFalse(skill_guard.has_blocking(conflicts))
+
+    def test_duplicate_local_skill_name_different_ids_still_blocks(self):
+        entries = [
+            entry("ship-pr", "SHIP-ID-1", source="manifest:/tmp/one", path="/tmp/one"),
+            entry("ship-pr", "SHIP-ID-2", source="manifest:/tmp/two", path="/tmp/two"),
+        ]
+        conflicts = skill_guard.detect_conflicts(entries, online_index())
+        self.assertIn(skill_guard.KIND_SLUG_MULTIPLE_IDS, kinds(conflicts))
+        self.assertTrue(skill_guard.has_blocking(conflicts))
+
     def test_archived_online_is_missing_or_archived_not_current(self):
         status, _ = companion_lib.status_for_local_guarded(
             {"name": "alpha", "version": "1.0.0"},
@@ -166,14 +200,24 @@ class CreatePreflightTests(unittest.TestCase):
 
 
 class ManifestDiscoveryTests(unittest.TestCase):
-    def _write_skill(self, root: Path, name: str, companion_id: str):
-        folder = root / name
+    def _write_skill(
+        self,
+        root: Path,
+        folder_name: str,
+        companion_id: str | None = None,
+        *,
+        skill_name: str | None = None,
+    ):
+        name = skill_name or folder_name
+        folder = root / folder_name
         folder.mkdir(parents=True)
-        (folder / "SKILL.md").write_text("# skill\n", encoding="utf-8")
-        (folder / "companion.json").write_text(
-            json.dumps({"name": name, "version": "1.0.0", "metadata": {"companionSkillId": companion_id}}),
-            encoding="utf-8",
-        )
+        (folder / "SKILL.md").write_text(f"---\nname: {name}\n---\n# skill\n", encoding="utf-8")
+        if companion_id is not None:
+            (folder / "companion.json").write_text(
+                json.dumps({"name": name, "version": "1.0.0", "metadata": {"companionSkillId": companion_id}}),
+                encoding="utf-8",
+            )
+        return folder
 
     def test_discovers_manifests_and_skips_noise(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -197,6 +241,41 @@ class ManifestDiscoveryTests(unittest.TestCase):
             ]
             conflicts = skill_guard.detect_conflicts(entries, online_index())
             self.assertIn(skill_guard.KIND_DUP_COMPANION_ID, kinds(conflicts))
+
+    def test_duplicate_name_with_manifest_and_skill_only_warns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_skill(root, "ship-pr-old", None, skill_name="ship-pr")
+            self._write_skill(root, "ship-pr-new", "SHIP-ID", skill_name="ship-pr")
+            found = skill_guard.discover_local_skill_folders([root])
+            entries = [
+                entry(item["slug"], item["companionSkillId"], source=item["source"], path=item["dir"])
+                for item in found
+            ]
+            conflicts = skill_guard.detect_conflicts(entries, online_index())
+            duplicate = [c for c in conflicts if c["kind"] == skill_guard.KIND_DUPLICATE_LOCAL_SKILL_NAME]
+            self.assertEqual(1, len(duplicate))
+            self.assertEqual("warn", duplicate[0]["severity"])
+            self.assertFalse(skill_guard.has_blocking(conflicts))
+
+    def test_build_inventory_includes_skill_md_only_folder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            folder = self._write_skill(root, "ship-pr-copy", None, skill_name="ship-pr")
+            previous_home = os.environ.get("COMPANION_HOME")
+            with tempfile.TemporaryDirectory() as home:
+                os.environ["COMPANION_HOME"] = home
+                try:
+                    entries = skill_guard.build_local_inventory("ws-1", "https://api.example/v1", [root])
+                finally:
+                    if previous_home is None:
+                        os.environ.pop("COMPANION_HOME", None)
+                    else:
+                        os.environ["COMPANION_HOME"] = previous_home
+            self.assertIn(
+                entry("ship-pr", None, source=f"skill:{folder}", path=str(folder)),
+                entries,
+            )
 
 
 class MigrationTests(unittest.TestCase):
