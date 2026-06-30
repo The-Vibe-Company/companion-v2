@@ -150,8 +150,12 @@ prints or writes the token.
   or API error).
 - Blocking conflict kinds: `id_multiple_slugs` (one workspace skill id mapped to two slugs),
   `slug_multiple_ids`, `id_mismatch_online` (a local slug published online under a different id —
-  a retarget), `duplicate_companion_id_manifests` (two local manifests share one `companionSkillId`),
-  and `lock_two_slugs_one_id` (repair the lockfile).
+  a retarget), `duplicate_companion_id_manifests` (two local manifests share one `companionSkillId`
+  under different slugs), and `lock_two_slugs_one_id` (repair the lockfile).
+- Warning conflict kinds: `duplicate_local_skill_name` means the same `SKILL.md` `name` is visible
+  from multiple local paths with the same `companionSkillId` or with missing ids. Surface the paths
+  to the user so they can remove or archive stale local copies manually; do not delete anything
+  automatically.
 - A locally tracked skill that is gone or archived in the workspace is reported `missing_or_archived`,
   never `current` — never assume a close-named skill replaced it.
 - `--create-check <slug>` searches the exact slug across org, My Skills, installed, the lockfile, the

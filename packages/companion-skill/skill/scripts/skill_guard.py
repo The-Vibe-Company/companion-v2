@@ -44,6 +44,7 @@ KIND_ID_MISMATCH_ONLINE = "id_mismatch_online"
 KIND_DUP_COMPANION_ID = "duplicate_companion_id_manifests"
 KIND_LOCK_TWO_SLUGS = "lock_two_slugs_one_id"
 KIND_MISSING_OR_ARCHIVED = "missing_or_archived"
+KIND_DUPLICATE_LOCAL_SKILL_NAME = "duplicate_local_skill_name"
 
 # Directories that never contain a sibling skill worth scanning.
 SKIP_DIRS = {
@@ -124,38 +125,99 @@ def build_online_index(api_url: str, token: str) -> dict[str, Any]:
 # Local inventory
 # --------------------------------------------------------------------------- #
 
-def discover_manifest_skills(scan_roots: list[Path]) -> list[dict[str, Any]]:
-    """Find local skill folders (SKILL.md + companion.json) one level under each root."""
+def _candidate_skill_dirs(scan_roots: list[Path]) -> list[Path]:
+    """Return each scan root and its immediate children, skipping obvious build/cache folders."""
     seen_dirs: set[str] = set()
-    found: list[dict[str, Any]] = []
+    candidates: list[Path] = []
     for root in scan_roots:
         if not root.exists() or not root.is_dir():
             continue
-        candidates = [root]
+        root_candidates = [root]
         for child in sorted(root.iterdir()):
             if child.is_dir() and child.name not in SKIP_DIRS:
-                candidates.append(child)
-        for candidate in candidates:
+                root_candidates.append(child)
+        for candidate in root_candidates:
             key = str(candidate.resolve())
             if key in seen_dirs:
                 continue
-            if not (candidate / "SKILL.md").exists() or not (candidate / "companion.json").exists():
-                continue
-            manifest = load_json(candidate / "companion.json") or {}
-            slug = manifest.get("name")
-            if not slug:
-                continue
             seen_dirs.add(key)
-            metadata = manifest.get("metadata") if isinstance(manifest.get("metadata"), dict) else {}
-            found.append(
-                {
-                    "slug": str(slug),
-                    "companionSkillId": metadata.get("companionSkillId"),
-                    "version": manifest.get("version"),
-                    "dir": str(candidate),
-                }
-            )
+            candidates.append(candidate)
+    return candidates
+
+
+def _unquote_scalar(value: str) -> str:
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+        return value[1:-1]
+    return value
+
+
+def read_skill_md_name(skill_md: Path) -> str | None:
+    """Read the Agent Skills frontmatter name without requiring a YAML dependency."""
+    try:
+        lines = skill_md.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    if not lines or lines[0].strip() != "---":
+        return None
+    for line in lines[1:]:
+        stripped = line.strip()
+        if stripped == "---":
+            return None
+        if stripped.startswith("name:"):
+            name = _unquote_scalar(stripped.split(":", 1)[1])
+            return name or None
+    return None
+
+
+def discover_local_skill_folders(scan_roots: list[Path]) -> list[dict[str, Any]]:
+    """Find visible local skill folders, including SKILL.md-only folders."""
+    found: list[dict[str, Any]] = []
+    for candidate in _candidate_skill_dirs(scan_roots):
+        skill_md = candidate / "SKILL.md"
+        if not skill_md.exists():
+            continue
+        raw_manifest = load_json(candidate / "companion.json") or {}
+        manifest = raw_manifest if isinstance(raw_manifest, dict) else {}
+        metadata = manifest.get("metadata") if isinstance(manifest.get("metadata"), dict) else {}
+        skill_name = read_skill_md_name(skill_md)
+        manifest_name = manifest.get("name") if isinstance(manifest.get("name"), str) else None
+        slug = skill_name or manifest_name or candidate.name
+        source_prefix = "manifest" if (candidate / "companion.json").exists() else "skill"
+        found.append(
+            {
+                "slug": str(slug),
+                "skill_name": skill_name,
+                "manifest_name": manifest_name,
+                "companionSkillId": metadata.get("companionSkillId"),
+                "version": manifest.get("version") if isinstance(manifest, dict) else None,
+                "dir": str(candidate),
+                "source": f"{source_prefix}:{candidate}",
+            }
+        )
     return found
+
+
+def discover_manifest_skills(scan_roots: list[Path]) -> list[dict[str, Any]]:
+    """Find local skill folders with a companion.json manifest."""
+    found: list[dict[str, Any]] = []
+    for skill in discover_local_skill_folders(scan_roots):
+        if not skill["source"].startswith("manifest:"):
+            continue
+        found.append(
+            {
+                "slug": skill["slug"],
+                "companionSkillId": skill.get("companionSkillId"),
+                "version": skill.get("version"),
+                "dir": skill["dir"],
+            }
+        )
+    return found
+
+
+def _is_local_skill_folder(entry: dict[str, Any]) -> bool:
+    source = str(entry.get("source") or "")
+    return source.startswith("manifest:") or source.startswith("skill:")
 
 
 def _lock_records(path: Path, workspace_id: str | None, api_url: str) -> list[dict[str, Any]]:
@@ -166,7 +228,7 @@ def _lock_records(path: Path, workspace_id: str | None, api_url: str) -> list[di
 
 
 def build_local_inventory(workspace_id: str | None, api_url: str, scan_roots: list[Path]) -> list[dict[str, Any]]:
-    """Union lockfile records, any leftover legacy-log records, and scanned manifests."""
+    """Union lockfile records, any leftover legacy-log records, and scanned local skill folders."""
     entries: list[dict[str, Any]] = []
     for record in _lock_records(lockfile_path(), workspace_id, api_url):
         entries.append(
@@ -204,14 +266,14 @@ def build_local_inventory(workspace_id: str | None, api_url: str, scan_roots: li
                     "source": "legacy_log",
                 }
             )
-    for manifest in discover_manifest_skills(scan_roots):
+    for local_skill in discover_local_skill_folders(scan_roots):
         entries.append(
             {
-                "slug": manifest["slug"],
-                "skill_id": manifest.get("companionSkillId"),
-                "version": manifest.get("version"),
-                "path": manifest["dir"],
-                "source": f"manifest:{manifest['dir']}",
+                "slug": local_skill["slug"],
+                "skill_id": local_skill.get("companionSkillId"),
+                "version": local_skill.get("version"),
+                "path": local_skill["dir"],
+                "source": local_skill["source"],
             }
         )
     return entries
@@ -274,7 +336,25 @@ def detect_conflicts(local_entries: list[dict[str, Any]], online: dict[str, Any]
                 }
             )
 
-    # 3. local slug published online under a different id (retarget).
+    # 3. same SKILL.md name visible from multiple local folders.
+    for slug, group in by_slug_local.items():
+        local_folder_group = [entry for entry in group if _is_local_skill_folder(entry) and entry.get("path")]
+        paths = sorted({entry["path"] for entry in local_folder_group if entry.get("path")})
+        ids = sorted({entry["skill_id"] for entry in local_folder_group if entry.get("skill_id")})
+        if len(paths) > 1 and len(ids) <= 1:
+            conflicts.append(
+                {
+                    "kind": KIND_DUPLICATE_LOCAL_SKILL_NAME,
+                    "severity": "warn",
+                    "slug": slug,
+                    "skill_id": ids[0] if len(ids) == 1 else None,
+                    "detail": f"SKILL.md name {slug} appears in multiple local paths: {', '.join(paths)}",
+                    "evidence": [_evidence(entry) for entry in local_folder_group],
+                    "remediation": "remove stale local copies or keep only the intended active path",
+                }
+            )
+
+    # 4. local slug published online under a different id (retarget).
     for entry in local_entries:
         slug = entry["slug"]
         local_id = entry.get("skill_id")
@@ -298,27 +378,31 @@ def detect_conflicts(local_entries: list[dict[str, Any]], online: dict[str, Any]
                 }
             )
 
-    # 4. two local manifests sharing one companionSkillId.
+    # 5. two local manifests sharing one companionSkillId under different slugs.
     manifest_by_id: dict[str, list[dict[str, Any]]] = {}
     for entry in local_entries:
         if entry["source"].startswith("manifest:") and entry.get("skill_id"):
             manifest_by_id.setdefault(entry["skill_id"], []).append(entry)
     for skill_id, group in manifest_by_id.items():
         dirs = sorted({entry["path"] for entry in group if entry.get("path")})
-        if len(dirs) > 1:
+        slugs = sorted({entry["slug"] for entry in group})
+        if len(dirs) > 1 and len(slugs) > 1:
             conflicts.append(
                 {
                     "kind": KIND_DUP_COMPANION_ID,
                     "severity": "block",
                     "slug": None,
                     "skill_id": skill_id,
-                    "detail": f"companionSkillId {skill_id} is declared by multiple local manifests: {', '.join(dirs)}",
+                    "detail": (
+                        f"companionSkillId {skill_id} is declared by multiple local manifests "
+                        f"under different slugs ({', '.join(slugs)}): {', '.join(dirs)}"
+                    ),
                     "evidence": [_evidence(entry) for entry in group],
                     "remediation": "give each skill a distinct companionSkillId",
                 }
             )
 
-    # 5. lockfile alone maps one id to two slugs -> repair the lockfile.
+    # 6. lockfile alone maps one id to two slugs -> repair the lockfile.
     lock_by_id: dict[str, list[dict[str, Any]]] = {}
     for entry in local_entries:
         if entry["source"] == "lockfile" and entry.get("skill_id"):
@@ -338,10 +422,10 @@ def detect_conflicts(local_entries: list[dict[str, Any]], online: dict[str, Any]
                 }
             )
 
-    # 6. locally tracked but missing/archived online (warn, never "current").
+    # 7. locally tracked but missing/archived online (warn, never "current").
     reported: set[str] = set()
     for entry in local_entries:
-        if entry["source"].startswith("manifest:"):
+        if _is_local_skill_folder(entry):
             continue  # a not-yet-published local folder is expected to be absent online
         slug = entry["slug"]
         if slug in reported:
@@ -550,7 +634,7 @@ def build_report(
     archived_slugs = online.get("archived_slugs", set())
     inventory = []
     for entry in local_entries:
-        if entry["source"].startswith("manifest:"):
+        if _is_local_skill_folder(entry):
             status, reason = "local", "local skill folder (not from the lockfile)"
         else:
             status, reason = status_for_local_guarded(
@@ -664,7 +748,7 @@ def main(argv: list[str] | None = None) -> int:
         # Both the user and the per-project lockfile count as existing installs for duplicate detection.
         lockfile_slugs = {e["slug"] for e in local_entries if e["source"] in ("lockfile", "project_lockfile")}
         legacy_slugs = {e["slug"] for e in local_entries if e["source"] == "legacy_log"}
-        manifest_slugs = {e["slug"] for e in local_entries if e["source"].startswith("manifest:")}
+        manifest_slugs = {e["slug"] for e in local_entries if _is_local_skill_folder(e)}
         create_check = create_preflight(
             options["create_check"],
             online["by_slug"],

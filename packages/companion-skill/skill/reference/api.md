@@ -485,6 +485,13 @@ into `skills.lock.json` and deleted; secrets are never copied and the token is n
 `0` means clean (warnings allowed), `2` means a blocking conflict or a refused create, `1` means it
 could not run.
 
+Scanned local folders include `SKILL.md`-only folders even when `companion.json` is missing. If the
+same `SKILL.md` `name` appears in multiple local paths with identical or missing Companion ids, the
+guard reports a warning kind `duplicate_local_skill_name` with path evidence. Treat that as manual
+cleanup guidance only: show the paths to the user, but do not delete or overwrite any local copy
+automatically. If the same slug maps to multiple Companion ids, it remains a blocking retargeting
+conflict.
+
 ## Update the Companion skill itself
 
 The Companion skill must check whether this local Companion skill is current at startup, before any
