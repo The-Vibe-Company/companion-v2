@@ -64,6 +64,8 @@ export {
   renameLabel,
   deleteLabel,
 } from "./labels";
+// Local binding (the block above only re-exports): shareSkill files a shared skill under org folders.
+import { assignLabel } from "./labels";
 
 // Per-user personal folder ("My Skills") services, mirroring the org-label set. Same load-order
 // reasoning as `./labels`: `personalLabels.ts` only imports `getOrgRole`/`ActorContext` (hoisted /
@@ -3115,6 +3117,8 @@ export async function shareSkill(input: {
   actor: ActorContext;
   orgId: string;
   slug: string;
+  /** Org folder path(s) to file the skill under as it enters the org library (private folders are dropped). */
+  labels?: string[];
   database?: Db;
 }): Promise<{ scope: "org"; shared_dependencies: string[] }> {
   const database = input.database ?? db;
@@ -3136,6 +3140,11 @@ export async function shareSkill(input: {
       .where(
         and(eq(schema.personalSkillLabels.orgId, input.orgId), inArray(schema.personalSkillLabels.skillId, migrationIds)),
       );
+    // The skill now enters the org catalogue: file it under the provided org folder(s). Private
+    // folders were just dropped, so without this the shared skill would be an orphan (no folder).
+    for (const path of input.labels ?? []) {
+      await assignLabel({ actor: input.actor, orgId: input.orgId, slug: plan.root.slug, path, database: tx });
+    }
     await tx.insert(schema.auditLog).values({
       orgId: input.orgId,
       actorId: input.actor.id,

@@ -971,12 +971,12 @@ export function SkillsApp({
 
   // --- Share a personal skill to the org library -----------------------------
   const confirmShare = useCallback(
-    (vm: SkillVM, _plan: SkillSharePlan) => {
+    (vm: SkillVM, _plan: SkillSharePlan, labels: string[]) => {
       const id = vm.id;
       setShareTarget(null);
       // Share is one-way (there is no un-share endpoint). Refetch both libraries after success so
       // derived rows, labels, installs, stars, and dependency counters stay server-authoritative.
-      shareSkillToOrg(id)
+      shareSkillToOrg(id, labels)
         .then(async (result) => {
           const [mineRows, orgRows] = await Promise.all([fetchSkillLibrary("mine"), fetchSkillLibrary("org")]);
           const nextMineSkills = mineRows.map(mapSkill);
@@ -1603,7 +1603,7 @@ export function SkillsApp({
         <ShareDialog
           skill={shareTarget}
           orgName={currentOrg.name}
-          onConfirm={(plan) => confirmShare(shareTarget, plan)}
+          onConfirm={(plan, labels) => confirmShare(shareTarget, plan, labels)}
           onClose={() => setShareTarget(null)}
         />
       )}

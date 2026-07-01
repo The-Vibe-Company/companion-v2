@@ -482,18 +482,18 @@ describe("SkillsApp initial route", () => {
   });
 
   it("shows mandatory private dependencies before sharing and reloads the migrated skills", async () => {
-    const root = skill({ id: "pdf-extractor", scope: "personal", source: "authored" });
+    const root = skill({ id: "extract-pdf-tools", scope: "personal", source: "authored" });
     const dependency = skill({ id: "markdown-report", scope: "personal", source: "authored" });
-    const sharedRoot = skill({ id: "pdf-extractor", scope: "org", source: null });
+    const sharedRoot = skill({ id: "extract-pdf-tools", scope: "org", source: null });
     const sharedDependency = skill({ id: "markdown-report", scope: "org", source: null });
     queryMocks.fetchSkillSharePlan.mockResolvedValueOnce({
-      slug: "pdf-extractor",
+      slug: "extract-pdf-tools",
       dependencies: [{ slug: "markdown-report", status: "satisfied", note: null }],
       blocked: [],
     });
     queryMocks.shareSkillToOrg.mockResolvedValueOnce({
       ok: true,
-      slug: "pdf-extractor",
+      slug: "extract-pdf-tools",
       scope: "org",
       shared_dependencies: ["markdown-report"],
     });
@@ -502,7 +502,7 @@ describe("SkillsApp initial route", () => {
     );
 
     const { container } = await mountSkillsApp(
-      { lib: "mine", kind: "all", skill: "pdf-extractor" },
+      { lib: "mine", kind: "all", skill: "extract-pdf-tools" },
       {
         props: {
           initialMineSkills: [root, dependency],
@@ -515,7 +515,7 @@ describe("SkillsApp initial route", () => {
     clickButton(container, "Share to organization");
     await flushEffects();
 
-    expect(queryMocks.fetchSkillSharePlan).toHaveBeenCalledWith("pdf-extractor");
+    expect(queryMocks.fetchSkillSharePlan).toHaveBeenCalledWith("extract-pdf-tools");
     expect(container.textContent).toContain("Private dependencies included");
     expect(container.textContent).toContain("markdown-report");
 
@@ -531,24 +531,24 @@ describe("SkillsApp initial route", () => {
     });
     await flushEffects();
 
-    expect(queryMocks.shareSkillToOrg).toHaveBeenCalledWith("pdf-extractor");
+    expect(queryMocks.shareSkillToOrg).toHaveBeenCalledWith("extract-pdf-tools", ["tools"]);
     expect(queryMocks.fetchSkillLibrary).toHaveBeenCalledWith("mine");
     expect(queryMocks.fetchSkillLibrary).toHaveBeenCalledWith("org");
-    expect(container.textContent).toContain("Shared pdf-extractor and 1 private dependency to Acme.");
+    expect(container.textContent).toContain("Shared extract-pdf-tools and 1 private dependency to Acme.");
   });
 
   it("uses the refetched server lists after sharing, not the preview", async () => {
-    const root = skill({ id: "pdf-extractor", scope: "personal", source: "authored" });
+    const root = skill({ id: "extract-pdf-tools", scope: "personal", source: "authored" });
     const dependency = skill({ id: "markdown-report", scope: "personal", source: "authored" });
-    const sharedRoot = skill({ id: "pdf-extractor", scope: "org", source: null });
+    const sharedRoot = skill({ id: "extract-pdf-tools", scope: "org", source: null });
     queryMocks.fetchSkillSharePlan.mockResolvedValueOnce({
-      slug: "pdf-extractor",
+      slug: "extract-pdf-tools",
       dependencies: [{ slug: "markdown-report", status: "satisfied", note: null }],
       blocked: [],
     });
     queryMocks.shareSkillToOrg.mockResolvedValueOnce({
       ok: true,
-      slug: "pdf-extractor",
+      slug: "extract-pdf-tools",
       scope: "org",
       shared_dependencies: [],
     });
@@ -557,7 +557,7 @@ describe("SkillsApp initial route", () => {
     );
 
     const { container } = await mountSkillsApp(
-      { lib: "mine", kind: "all", skill: "pdf-extractor" },
+      { lib: "mine", kind: "all", skill: "extract-pdf-tools" },
       {
         props: {
           initialMineSkills: [root, dependency],
@@ -579,8 +579,8 @@ describe("SkillsApp initial route", () => {
     });
     await flushEffects();
 
-    expect(container.textContent).toContain("Shared pdf-extractor to Acme. Everyone can use it now.");
-    expect(container.textContent).toContain("pdf-extractor");
+    expect(container.textContent).toContain("Shared extract-pdf-tools to Acme. Everyone can use it now.");
+    expect(container.textContent).toContain("extract-pdf-tools");
     expect(container.textContent).not.toContain("markdown-report");
   });
 

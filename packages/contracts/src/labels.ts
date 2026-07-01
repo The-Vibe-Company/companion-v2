@@ -233,3 +233,11 @@ export const labelMutationResultSchema = z.object({
   ok: z.literal(true),
 });
 export type LabelMutationResult = z.infer<typeof labelMutationResultSchema>;
+
+/**
+ * The org-wide skill folder roots. Every brand-new org skill must live under one of these, and its
+ * slug's last block must equal its folder root. Enforced on publish (POST /v1/skills and
+ * /v1/skills/create) and on personal->org share. The actionable fix is the `triage-skill-tools` skill.
+ */
+export const SKILL_FOLDER_ROOTS = ["dev", "marketing", "admin", "clients", "project", "tools"] as const;
+export type SkillFolderRoot = (typeof SKILL_FOLDER_ROOTS)[number];

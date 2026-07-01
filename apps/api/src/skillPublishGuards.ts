@@ -1,4 +1,4 @@
-import type { SkillFrontmatter } from "@companion/contracts";
+import { SKILL_FOLDER_ROOTS, type SkillFrontmatter } from "@companion/contracts";
 
 export type SkillPublishAction = "publish" | "validate";
 
@@ -96,9 +96,6 @@ export function assertUpdateIsTargeted(input: {
     );
   }
 }
-
-/** The six org folder roots every new skill must live under. */
-export const SKILL_FOLDER_ROOTS = ["dev", "marketing", "admin", "clients", "project", "tools"] as const;
 
 const SLUG_KEBAB_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 

@@ -344,8 +344,11 @@ export async function fetchSkillSharePlan(slug: string): Promise<SkillSharePlan>
   return apiFetch<SkillSharePlan>(`/v1/skills/${slug}/share-plan`);
 }
 
-export async function shareSkillToOrg(slug: string): Promise<ShareSkillResult> {
-  return apiFetch<ShareSkillResult>(`/v1/skills/${slug}/share`, { method: "POST" });
+export async function shareSkillToOrg(slug: string, labels: string[] = []): Promise<ShareSkillResult> {
+  return apiFetch<ShareSkillResult>(`/v1/skills/${slug}/share`, {
+    method: "POST",
+    body: JSON.stringify({ labels }),
+  });
 }
 
 export async function fetchSkillLibrary(lib: "mine" | "org"): Promise<SkillListRow[]> {

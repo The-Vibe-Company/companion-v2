@@ -198,24 +198,35 @@ describe("GET/POST /v1/skills/:slug/share", () => {
     );
   });
 
-  it("shares the skill and echoes migrated private dependencies", async () => {
+  it("shares a conforming skill filed under a matching folder and echoes migrated deps", async () => {
     serviceMocks.shareSkill.mockResolvedValue({ scope: "org", shared_dependencies: ["markdown-report"] });
 
-    const res = await app.request("/v1/skills/pdf-extractor/share", {
+    const res = await app.request("/v1/skills/extract-pdf-tools/share", {
       method: "POST",
-      headers: { Authorization: "Bearer write-only" },
+      headers: { Authorization: "Bearer write-only", "Content-Type": "application/json" },
+      body: JSON.stringify({ labels: ["tools"] }),
     });
 
     expect(res.status).toBe(200);
     await expect(res.json()).resolves.toEqual({
       ok: true,
-      slug: "pdf-extractor",
+      slug: "extract-pdf-tools",
       scope: "org",
       shared_dependencies: ["markdown-report"],
     });
     expect(serviceMocks.shareSkill).toHaveBeenCalledWith(
-      expect.objectContaining({ actor: actorA, orgId: "org-1", slug: "pdf-extractor" }),
+      expect.objectContaining({ actor: actorA, orgId: "org-1", slug: "extract-pdf-tools", labels: ["tools"] }),
     );
+  });
+
+  it("rejects a share that violates the naming/folder convention", async () => {
+    const res = await app.request("/v1/skills/pdf-extractor/share", {
+      method: "POST",
+      headers: { Authorization: "Bearer write-only" },
+    });
+
+    expect(res.status).toBe(422);
+    expect(serviceMocks.shareSkill).not.toHaveBeenCalled();
   });
 
   it("keeps share-plan behind skills:read", async () => {

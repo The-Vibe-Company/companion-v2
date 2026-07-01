@@ -1232,14 +1232,32 @@ app.post("/v1/skills/:slug/share", async (c) => {
   try {
     actorFromContext(c, true);
     requireScope(c, "skills:write");
+    const slug = c.req.param("slug");
+    // Optional JSON body { labels?: string[] } — the org folder(s) to file the skill under. An empty
+    // or absent body is tolerated (the naming guard below then rejects it as an orphan).
+    let labels: string[] = [];
+    try {
+      const body = (await c.req.json()) as { labels?: unknown };
+      if (Array.isArray(body?.labels)) labels = body.labels.map((v) => String(v)).filter(Boolean);
+    } catch {
+      // no body / not JSON — treat as no labels
+    }
+    // Sharing is the moment a personal skill enters the org catalogue, so it must follow the house
+    // convention: a conforming slug and a folder whose root matches. Personal skills were exempt while
+    // private; this is the gate on the way in. On failure, point the caller at triage-skill-tools.
+    try {
+      assertSkillNamingConvention({ slug, labels });
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : String(error) }, 422);
+    }
     const result = await withTenant(
       c,
-      ({ actor, orgId, database }) => shareSkill({ actor, orgId, slug: c.req.param("slug"), database }),
+      ({ actor, orgId, database }) => shareSkill({ actor, orgId, slug, labels, database }),
       true,
     );
     return c.json({
       ok: true as const,
-      slug: c.req.param("slug"),
+      slug,
       scope: result.scope,
       shared_dependencies: result.shared_dependencies,
     });

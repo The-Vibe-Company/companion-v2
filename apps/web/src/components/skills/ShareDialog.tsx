@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import type { SkillSharePlan } from "@companion/contracts";
+import { SKILL_FOLDER_ROOTS, type SkillSharePlan } from "@companion/contracts";
 import { Icon } from "../Icon";
 import { fetchSkillSharePlan } from "@/lib/queries";
 import type { SkillVM } from "@/lib/types";
@@ -19,7 +19,7 @@ export function ShareDialog({
 }: {
   skill: SkillVM;
   orgName: string;
-  onConfirm: (plan: SkillSharePlan) => void;
+  onConfirm: (plan: SkillSharePlan, labels: string[]) => void;
   onClose: () => void;
 }) {
   const cancelRef = useRef<HTMLButtonElement>(null);
@@ -61,7 +61,11 @@ export function ShareDialog({
 
   const blocked = plan?.blocked ?? [];
   const dependencies = plan?.dependencies ?? [];
-  const canConfirm = !!plan && !planError && blocked.length === 0;
+  // The org catalogue is convention-gated: a shared skill's slug must end with a folder root, and it
+  // is filed under that root. A non-conforming slug must be renamed (via triage-skill-tools) first.
+  const slugRoot = skill.id.split("-").at(-1) ?? "";
+  const rootValid = (SKILL_FOLDER_ROOTS as readonly string[]).includes(slugRoot);
+  const canConfirm = !!plan && !planError && blocked.length === 0 && rootValid;
 
   return (
     <>
@@ -131,6 +135,26 @@ export function ShareDialog({
               ))}
             </div>
           )}
+          {rootValid ? (
+            <div className="ml-share__row">
+              <span className="ml-share__rowico ml-share__rowico--ok" aria-hidden="true">
+                <Icon name="folder" size={15} />
+              </span>
+              <span>
+                Filed under <b className="mono">{slugRoot}</b> in the org library.
+              </span>
+            </div>
+          ) : (
+            <div className="ml-share__block">
+              <div className="ml-share__dep">
+                <Icon name="alert-triangle" size={14} />
+                <span>
+                  This skill&apos;s name must end with a folder root ({SKILL_FOLDER_ROOTS.join(", ")}) before it can
+                  be shared. Run the triage-skill-tools skill to rename and file it.
+                </span>
+              </div>
+            </div>
+          )}
           {planError && (
             <div className="ml-share__block">
               <div className="ml-share__dep">
@@ -144,7 +168,7 @@ export function ShareDialog({
           <button type="button" className="ml-share__cancel" ref={cancelRef} onClick={onClose}>
             Cancel
           </button>
-          <button type="button" className="btn-primary" onClick={() => plan && onConfirm(plan)} disabled={!canConfirm}>
+          <button type="button" className="btn-primary" onClick={() => plan && onConfirm(plan, [slugRoot])} disabled={!canConfirm}>
             <Icon name="send" size={15} />
             Share to organization
           </button>
