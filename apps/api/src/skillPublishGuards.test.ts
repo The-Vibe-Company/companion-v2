@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { SkillFrontmatter } from "@companion/contracts";
 import {
   assertNoCompanionRetarget,
+  assertSkillNamingConvention,
   assertTargetedSkillUpdate,
   assertUpdateIsTargeted,
   parseSkillPublishAction,
@@ -161,5 +162,51 @@ describe("parseSkillPublishAction", () => {
 
   it("rejects unknown actions instead of publishing by default", () => {
     expect(() => parseSkillPublishAction("validation")).toThrow("unsupported skill publish action: validation");
+  });
+});
+
+describe("assertSkillNamingConvention", () => {
+  it("accepts a conforming slug filed under a matching folder root", () => {
+    expect(() =>
+      assertSkillNamingConvention({ slug: "generate-image-marketing", labels: ["marketing/content/image"] }),
+    ).not.toThrow();
+  });
+
+  it("accepts a two-block slug whose last block is the folder root", () => {
+    expect(() => assertSkillNamingConvention({ slug: "review-dev", labels: ["dev/code-review"] })).not.toThrow();
+  });
+
+  it("rejects a slug that is not kebab-case", () => {
+    expect(() =>
+      assertSkillNamingConvention({ slug: "Generate_Image-marketing", labels: ["marketing"] }),
+    ).toThrow(/must be kebab-case/);
+  });
+
+  it("rejects a slug with more than four blocks", () => {
+    expect(() =>
+      assertSkillNamingConvention({ slug: "generate-a-fancy-youtube-marketing", labels: ["marketing"] }),
+    ).toThrow(/2 to 4 blocks/);
+  });
+
+  it("rejects a slug whose last block is not a folder root", () => {
+    expect(() =>
+      assertSkillNamingConvention({ slug: "generate-image", labels: ["marketing/content/image"] }),
+    ).toThrow(/must end with a folder root/);
+  });
+
+  it("rejects a skill with no folder (the no-orphan rule)", () => {
+    expect(() => assertSkillNamingConvention({ slug: "review-code-dev", labels: [] })).toThrow(
+      /must be filed under a folder/,
+    );
+  });
+
+  it("rejects a folder whose root does not match the slug root", () => {
+    expect(() =>
+      assertSkillNamingConvention({ slug: "review-code-dev", labels: ["marketing/content"] }),
+    ).toThrow(/the slug's root must match its folder/);
+  });
+
+  it("always points at the triage skill as the fix", () => {
+    expect(() => assertSkillNamingConvention({ slug: "nope", labels: [] })).toThrow(/triage-skill-tools/);
   });
 });

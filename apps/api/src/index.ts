@@ -163,7 +163,7 @@ import {
   type ApiVariables,
 } from "./context";
 import { appRouter } from "./trpc";
-import { assertNoCompanionRetarget, assertTargetedSkillUpdate, assertUpdateIsTargeted, parseSkillPublishAction } from "./skillPublishGuards";
+import { assertNoCompanionRetarget, assertSkillNamingConvention, assertTargetedSkillUpdate, assertUpdateIsTargeted, parseSkillPublishAction } from "./skillPublishGuards";
 import { buildInlineCompanionManifest, uploadDependencyValues, withResolvedManifestDependencies } from "./skillCompanionManifest";
 import { buildCompanionSkillRow, getCompanionSkillPackage } from "./companionSkillPackage";
 import { parseSkillListQuery } from "./skillListQuery";
@@ -1743,6 +1743,12 @@ app.post("/v1/skills", bodyLimit({ maxSize: 32 * 1024 * 1024, onError: (c) => js
       // Validate stays flexible so an agent can probe an unknown package without knowing the id yet.
       if (parsedAction === "publish") {
         assertUpdateIsTargeted({ frontmatter: fm, slugSkill, expectSlug, expectSkillId });
+        // Brand-new org skills must follow the house folder + naming convention so the shared
+        // catalogue stays navigable. Existing skills are grandfathered (gated on !slugSkill — their
+        // re-publishes keep working); personal skills use private folders and are exempt.
+        if (!slugSkill && scope !== "personal") {
+          assertSkillNamingConvention({ slug: fm.name, labels: labelValues });
+        }
       }
       // When the caller does send expect_*, also bind the upload to that exact slug + id.
       if (expectSlug || expectSkillId) {
@@ -1877,6 +1883,15 @@ app.post("/v1/skills/create", bodyLimit({ maxSize: 2 * 1024 * 1024, onError: (c)
       },
       true,
     );
+    // Same house convention as POST /v1/skills: a brand-new org skill created inline must follow the
+    // folder + naming rules. Updates (exists) and personal creates are exempt, matching the upload path.
+    if (!exists && input.scope === "org") {
+      try {
+        assertSkillNamingConvention({ slug: input.id, labels: input.labels ?? [] });
+      } catch (error) {
+        return c.json({ error: error instanceof Error ? error.message : String(error) }, 422);
+      }
+    }
     const preparedCarriedDependencies = await prepareSkillPublishDependencies({ actor, orgId, slugs: carriedDependencies });
     const companionManifest = buildInlineCompanionManifest({
       description: input.description,

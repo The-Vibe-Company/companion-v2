@@ -96,3 +96,55 @@ export function assertUpdateIsTargeted(input: {
     );
   }
 }
+
+/** The six org folder roots every new skill must live under. */
+export const SKILL_FOLDER_ROOTS = ["dev", "marketing", "admin", "clients", "project", "tools"] as const;
+
+const SLUG_KEBAB_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+
+/**
+ * House naming + filing convention, enforced only when a BRAND-NEW org skill is published. Existing
+ * skills (updates) are grandfathered — the caller skips this guard when a skill already owns the slug,
+ * so their non-conforming slugs keep working and their re-publishes are never blocked.
+ *
+ * Two invariants keep the org catalogue navigable as it grows:
+ *  - the slug is kebab-case, 2 to 4 blocks, and its LAST block is one of the six folder roots, so you
+ *    can read any slug and know where it lives (`generate-image-marketing`, `review-code-dev`);
+ *  - the skill is filed under at least one org folder whose root equals that same root — the "no
+ *    orphan" rule: a skill can never exist without a folder, and the slug can never disagree with it.
+ *
+ * We deliberately do NOT try to verify the first block is an English action verb here: a server-side
+ * verb list would false-reject legitimate verbs. That semantic part of the convention lives in the
+ * `triage-skill-tools` skill, which is also the actionable fix pointed at by every error below.
+ */
+export function assertSkillNamingConvention(input: { slug: string; labels: string[] }): void {
+  const { slug, labels } = input;
+  const fix = "run the triage-skill-tools skill to file and rename it before publishing";
+  const fail = (why: string) => new Error(`${why} — ${fix}.`);
+
+  if (!SLUG_KEBAB_RE.test(slug)) {
+    throw fail(`skill slug "${slug}" must be kebab-case (lowercase letters, digits, single hyphens)`);
+  }
+  const blocks = slug.split("-");
+  if (blocks.length < 2 || blocks.length > 4) {
+    throw fail(`skill slug "${slug}" must be 2 to 4 blocks in the form [verb]-[object]-[root]`);
+  }
+  const roots = SKILL_FOLDER_ROOTS as readonly string[];
+  const slugRoot = blocks[blocks.length - 1] ?? "";
+  if (!roots.includes(slugRoot)) {
+    throw fail(
+      `skill slug "${slug}" must end with a folder root (${SKILL_FOLDER_ROOTS.join(", ")}); its last block is "${slugRoot}"`,
+    );
+  }
+  const labelRoots = labels.map((label) => label.split("/")[0] ?? "").filter((root) => roots.includes(root));
+  if (labelRoots.length === 0) {
+    throw fail(
+      `skill "${slug}" must be filed under a folder rooted at one of ${SKILL_FOLDER_ROOTS.join(", ")}; none was provided`,
+    );
+  }
+  if (!labelRoots.includes(slugRoot)) {
+    throw fail(
+      `skill "${slug}" ends with root "${slugRoot}" but is filed under [${labelRoots.join(", ")}]; the slug's root must match its folder`,
+    );
+  }
+}
