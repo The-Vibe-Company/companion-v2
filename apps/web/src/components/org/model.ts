@@ -41,6 +41,8 @@ export interface OrgFull {
   accessDomains: OrgAccessDomain[];
   color: string | null;
   logoUrl: string | null;
+  /** The org's own skill-naming policy prompt (Workspace › General); null/undefined = none. */
+  skillNamingPolicy?: string | null;
   members: OrgMember[];
 }
 
@@ -128,6 +130,7 @@ export interface OrgCtx {
     slug?: string;
     color?: string | null;
     logoUrl?: string | null;
+    skillNamingPolicy?: string | null;
   }) => void;
   addAccessDomain: (domain: string) => Promise<void>;
   removeAccessDomain: (domainId: string) => Promise<void>;

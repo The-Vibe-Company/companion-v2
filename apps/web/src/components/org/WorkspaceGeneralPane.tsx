@@ -68,6 +68,15 @@ export function WorkspaceGeneralPane({ ctx }: { ctx: OrgCtx }) {
         onSave={(s) => ctx.setWorkspace({ slug: s.toLowerCase().replace(/[^a-z0-9-]/g, "-") })}
       />
 
+      <EditField
+        label="Skill naming policy"
+        placeholder="e.g. verb-object-root, kebab-case, filed under one folder"
+        hint="Your organization's own rule for naming and filing skills. The triage skill reads it and applies it when a skill is added. Leave empty for no policy — Companion imposes none."
+        value={ws.skillNamingPolicy ?? ""}
+        locked={!ctx.canManage}
+        onSave={(v) => ctx.setWorkspace({ skillNamingPolicy: v })}
+      />
+
       {ws.kind === "team" && (
         <div className="sx-sec">
           <h2 className="sx-sec__h">Domain access</h2>

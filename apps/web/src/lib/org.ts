@@ -86,6 +86,7 @@ export async function updateOrg(
     slug?: string;
     color?: string | null;
     logoUrl?: string | null;
+    skillNamingPolicy?: string | null;
   },
 ): Promise<{
   id: string;
@@ -95,6 +96,7 @@ export async function updateOrg(
   domainAutoJoin: boolean;
   color: string | null;
   logoUrl: string | null;
+  skillNamingPolicy: string | null;
 }> {
   return apiFetch("/v1/orgs/current", {
     method: "PUT",

@@ -218,6 +218,13 @@
       "when": 1781051900000,
       "tag": "0030_user_avatar",
       "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "7",
+      "when": 1781052000000,
+      "tag": "0031_org_skill_naming_policy",
+      "breakpoints": true
     }
   ]
 }

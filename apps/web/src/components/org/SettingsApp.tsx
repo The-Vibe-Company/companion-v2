@@ -230,6 +230,7 @@ export function SettingsController({
             domainAutoJoin: res.domainAutoJoin,
             color: res.color ?? null,
             logoUrl: res.logoUrl ?? null,
+            skillNamingPolicy: res.skillNamingPolicy ?? null,
           })),
         )
         .catch((e: Error) => {

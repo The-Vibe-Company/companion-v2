@@ -102,6 +102,7 @@ export function buildSettingsAppData(input: {
     })),
     color: settings.org.color ?? current.color ?? null,
     logoUrl: settings.org.logoUrl ?? current.logoUrl ?? null,
+    skillNamingPolicy: settings.org.skillNamingPolicy ?? null,
     members: settings.members.map((member) => ({
       userId: member.userId,
       role: member.role,

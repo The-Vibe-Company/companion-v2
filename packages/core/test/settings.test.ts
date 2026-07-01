@@ -4,6 +4,7 @@ import { apiTokenRowSchema, TEAM_BRAND_COLORS } from "@companion/contracts";
 import {
   API_TOKEN_TTL_MS,
   addOrgAccessDomain,
+  getSkillNamingPolicy,
   issueApiToken,
   listApiTokens,
   removeOrgAccessDomain,
@@ -295,6 +296,51 @@ describe("updateOrg", () => {
     });
     await expect(updateOrg({ actor: admin, orgId: ORG_A, logoUrl: null, database })).resolves.toMatchObject({ logoUrl: null });
     expect(calls.updates.at(-1)?.patch).toMatchObject({ logoUrl: null });
+  });
+
+  it("sets the org's skill naming policy (trimmed)", async () => {
+    const { database, calls } = fakeDb({
+      role: "admin",
+      org: { id: ORG_A, name: "Acme", slug: "acme", kind: "team", domain: null, domainAutoJoin: false, logoUrl: null },
+      updateReturning: [
+        { id: ORG_A, name: "Acme", slug: "acme", domain: null, domainAutoJoin: false, color: null, logoUrl: null, skillNamingPolicy: "verb-object-root" },
+      ],
+    });
+    await expect(
+      updateOrg({ actor: admin, orgId: ORG_A, skillNamingPolicy: "  verb-object-root  ", database }),
+    ).resolves.toMatchObject({ skillNamingPolicy: "verb-object-root" });
+    expect(calls.updates.at(-1)?.patch).toMatchObject({ skillNamingPolicy: "verb-object-root" });
+  });
+
+  it("clears the skill naming policy when set to blank", async () => {
+    const { database, calls } = fakeDb({
+      role: "admin",
+      org: { id: ORG_A, name: "Acme", slug: "acme", kind: "team", domain: null, domainAutoJoin: false, logoUrl: null },
+      updateReturning: [
+        { id: ORG_A, name: "Acme", slug: "acme", domain: null, domainAutoJoin: false, color: null, logoUrl: null, skillNamingPolicy: null },
+      ],
+    });
+    await expect(
+      updateOrg({ actor: admin, orgId: ORG_A, skillNamingPolicy: "   ", database }),
+    ).resolves.toMatchObject({ skillNamingPolicy: null });
+    expect(calls.updates.at(-1)?.patch).toMatchObject({ skillNamingPolicy: null });
+  });
+});
+
+describe("getSkillNamingPolicy", () => {
+  it("returns the org's policy for a member", async () => {
+    const { database } = fakeDb({
+      role: "developer",
+      org: { id: ORG_A, name: "Acme", slug: "acme", kind: "team", domain: null, domainAutoJoin: false, logoUrl: null, skillNamingPolicy: "our rule" },
+    });
+    await expect(getSkillNamingPolicy({ actor: developer, orgId: ORG_A, database })).resolves.toBe("our rule");
+  });
+
+  it("denies a non-member", async () => {
+    const { database } = fakeDb({ role: null });
+    await expect(getSkillNamingPolicy({ actor: stranger, orgId: ORG_A, database })).rejects.toThrow(
+      "not a member of this organization",
+    );
   });
 });
 

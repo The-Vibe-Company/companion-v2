@@ -33,6 +33,7 @@ import {
   restoreSkill,
   getSkillFilterPreferences,
   getOrgSettings,
+  getSkillNamingPolicy,
   getDownloadVersion,
   getCommentImageAsset,
   getOrgLogoAsset,
@@ -700,10 +701,31 @@ app.put("/v1/orgs/current", async (c) => {
           slug: input.slug,
           color: input.color,
           logoUrl: input.logoUrl,
+          skillNamingPolicy: input.skillNamingPolicy,
           database,
         }),
       ),
     );
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
+/**
+ * Token-readable read of the org's own skill-naming policy (the free-text prompt each org defines for
+ * itself). This is what the triage skill calls to apply the active org's rule. Companion imposes no
+ * convention; an org with no policy returns { policy: null }.
+ */
+app.get("/v1/orgs/current/skill-naming-policy", async (c) => {
+  try {
+    actorFromContext(c, true);
+    requireScope(c, "skills:read");
+    const policy = await withTenant(
+      c,
+      ({ actor, orgId, database }) => getSkillNamingPolicy({ actor, orgId, database }),
+      true,
+    );
+    return c.json({ policy });
   } catch (error) {
     return jsonError(c, error);
   }
