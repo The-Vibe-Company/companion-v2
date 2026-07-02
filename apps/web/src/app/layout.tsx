@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { PostHogProvider } from "./PostHogProvider";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -39,7 +40,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         {/* First in <body> so it runs before paint; kept out of <head> to avoid
             hydration mismatch when the host injects its own import map there. */}
         <script dangerouslySetInnerHTML={{ __html: NO_FOUC_SCRIPT }} />
-        {children}
+        <PostHogProvider>{children}</PostHogProvider>
       </body>
     </html>
   );
