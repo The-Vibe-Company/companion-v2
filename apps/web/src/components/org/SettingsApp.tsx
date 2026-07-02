@@ -49,7 +49,7 @@ import type {
 function normalizeOrgFull(org: OrgFull): OrgFull {
   const members = Array.isArray(org.members) ? org.members : [];
   const accessDomains = Array.isArray(org.accessDomains) ? org.accessDomains : [];
-  return { ...org, accessDomains, members };
+  return { ...org, accessDomains, skillNamingPolicy: org.skillNamingPolicy ?? null, members };
 }
 
 /** Build the canonical settings URL: `?view=` (+ `&dialog=`). */
@@ -230,6 +230,7 @@ export function SettingsController({
             domainAutoJoin: res.domainAutoJoin,
             color: res.color ?? null,
             logoUrl: res.logoUrl ?? null,
+            skillNamingPolicy: res.skillNamingPolicy ?? null,
           })),
         )
         .catch((e: Error) => {

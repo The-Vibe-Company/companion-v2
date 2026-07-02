@@ -32,13 +32,15 @@ For the legacy flat shape `{ "apiUrl": "...", "token": "..." }`, use those value
 token-supported `GET /local-skills/companion` to read its `workspaceId` before writing local
 inventory. Never print the token back to the user.
 
-These are the skills endpoints a personal access token (`skills:read` + `skills:write`) can call:
+These are the Companion skill-management endpoints a personal access token (`skills:read` +
+`skills:write`) can call:
 
 | Action | Method & path | Scope |
 | --- | --- | --- |
 | List org library skills | `GET /skills?lib=org` | `skills:read` |
 | List My Skills | `GET /skills?lib=mine` | `skills:read` |
 | List reported installed skills | `GET /skills?installed=true` | `skills:read` |
+| Read org skill naming policy | `GET /v1/orgs/current/skill-naming-policy` (or `GET /orgs/current/skill-naming-policy` from `COMPANION_API_URL`) | `skills:read` |
 | Current published version + checksum | `GET /skills/{slug}/download` | `skills:read` |
 | Download a version package | `GET /skills/{slug}/versions/{version}/package` | `skills:read` |
 | Browse a version's files | `GET /skills/{slug}/versions/{version}/files` | `skills:read` |
@@ -89,6 +91,17 @@ The signed-in web app uses `GET /skills/share-target/{share_token}` with a sessi
 `{org_id, slug}` for members before opening the slug-keyed detail route. Agents should normally share
 the web URL `/s/{share_token}` instead of calling that resolver directly.
 
+Before naming and filing a brand-new skill, call the token-readable workspace policy endpoint:
+
+```http
+GET /v1/orgs/current/skill-naming-policy
+```
+
+From `COMPANION_API_URL` (which already ends in `/v1`), call
+`GET /orgs/current/skill-naming-policy`. The response is `{ "policy": string | null }`. If `policy`
+is a string, apply it to the skill slug, package name, and folder choices. If it is `null`, do not
+impose a naming or filing convention.
+
 After a successful skill upload or update, agents must include a `Skill link: ...` line in the chat.
 For org skills, fetch `GET /skills?lib=org`, find the published `slug`, and build
 `${COMPANION_API_URL without /v1}/s/{share_token}` from that row. Personal skills have no public
@@ -135,8 +148,9 @@ after the creator, ordered by latest publish time, each as `{ user_id, name, ini
 Keep summaries and notes distinct: do not copy setup notes or long Markdown content into
 `description`.
 
-Do not use this skill for workspace members, invitations, org settings, or token management.
-Those are outside the skills-only management surface.
+Do not use this skill for workspace members, invitations, org settings mutation, or token
+management. The only PAT-readable org-settings surface for this skill is
+`GET /orgs/current/skill-naming-policy`.
 
 Listing the workspace catalog (`GET /skills?lib=org`), My Skills (`GET /skills?lib=mine`), and
 Companion-reported installs (`GET /skills?installed=true`) works with a `skills:read` token.

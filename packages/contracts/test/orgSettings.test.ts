@@ -4,6 +4,7 @@ import {
   orgSettingsResponseSchema,
   ORG_LOGO_FILE_ACCEPT,
   resolveOrgLogoContentType,
+  skillNamingPolicyResponseSchema,
   updateOrgInputSchema,
 } from "../src/orgSettings";
 
@@ -19,6 +20,7 @@ const org = {
   accessDomains: [],
   color: null,
   logoUrl: null,
+  skillNamingPolicy: null,
 };
 
 const domainJoin = {
@@ -105,6 +107,30 @@ describe("updateOrgInputSchema (workspace branding survives; team brand colors r
 
   it("requires at least one field to update", () => {
     expect(() => updateOrgInputSchema.parse({})).toThrow();
+  });
+
+  it("accepts a skill naming policy prompt", () => {
+    expect(updateOrgInputSchema.parse({ skillNamingPolicy: "verb-object-root, kebab" })).toMatchObject({
+      skillNamingPolicy: "verb-object-root, kebab",
+    });
+  });
+
+  it("accepts clearing the policy with null or empty string", () => {
+    expect(updateOrgInputSchema.parse({ skillNamingPolicy: null })).toMatchObject({ skillNamingPolicy: null });
+    expect(updateOrgInputSchema.parse({ skillNamingPolicy: "" })).toMatchObject({ skillNamingPolicy: "" });
+  });
+});
+
+describe("skillNamingPolicyResponseSchema", () => {
+  it("accepts a policy string or null", () => {
+    expect(skillNamingPolicyResponseSchema.parse({ policy: "verb-object-root" })).toEqual({
+      policy: "verb-object-root",
+    });
+    expect(skillNamingPolicyResponseSchema.parse({ policy: null })).toEqual({ policy: null });
+  });
+
+  it("requires the policy field", () => {
+    expect(() => skillNamingPolicyResponseSchema.parse({})).toThrow();
   });
 });
 

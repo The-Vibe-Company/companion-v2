@@ -121,6 +121,12 @@ export const organizations = pgTable(
     color: text("color"),
     /** Brand logo URL fetched/uploaded during onboarding; cosmetic. */
     logoUrl: text("logo_url"),
+    /**
+     * The org's own skill-naming policy: a free-text prompt describing how this organization wants
+     * skills named and filed. Read by the triage skill and applied per-org. Companion imposes
+     * nothing; null means this org has no policy.
+     */
+    skillNamingPolicy: text("skill_naming_policy"),
     createdAt: now(),
     updatedAt: updatedAt(),
   },

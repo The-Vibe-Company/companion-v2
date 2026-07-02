@@ -101,6 +101,9 @@
 .sx-field { display: flex; flex-direction: column; gap: 7px; margin-bottom: 18px; }
 .sx-field__label { font-size: var(--text-xs); color: var(--color-muted); font-weight: 500; }
 .sx-field__hint { font-size: 11px; color: var(--color-faint); line-height: 1.5; }
+.sx-field__meta { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.sx-field__count { flex: none; font-family: var(--font-mono); font-size: 11px; color: var(--color-faint); }
+.sx-field__count--error { color: var(--color-danger); }
 .sx-input { height: 36px; padding: 0 12px; border: 1px solid var(--color-line); border-radius: var(--radius-md); background: var(--color-surface);
   color: var(--color-fg); font-family: var(--font-ui); font-size: var(--text-sm); outline: none; width: 100%;
   transition: border-color var(--duration-fast) var(--ease-out-quint), box-shadow var(--duration-fast) var(--ease-out-quint); }
@@ -108,6 +111,13 @@
 .sx-input:focus-visible { border-color: var(--color-accent); box-shadow: 0 0 0 3px var(--color-accent-ring); }
 .sx-input::placeholder { color: var(--color-faint); }
 .sx-input:disabled { color: var(--color-muted); background: var(--color-surface-sunken); cursor: not-allowed; }
+.sx-textarea { width: 100%; min-height: 136px; padding: 10px 12px; border: 1px solid var(--color-line); border-radius: var(--radius-md);
+  background: var(--color-surface); color: var(--color-fg); font-family: var(--font-ui); font-size: var(--text-sm);
+  line-height: var(--leading-relaxed); resize: vertical; outline: none; white-space: pre-wrap; overflow-wrap: anywhere;
+  transition: border-color var(--duration-fast) var(--ease-out-quint), box-shadow var(--duration-fast) var(--ease-out-quint); }
+.sx-textarea:focus-visible { border-color: var(--color-accent); box-shadow: 0 0 0 3px var(--color-accent-ring); }
+.sx-textarea::placeholder { color: var(--color-faint); }
+.sx-textarea[readonly] { color: var(--color-muted); background: var(--color-surface-sunken); resize: none; }
 .sx-inputwrap { position: relative; display: flex; align-items: center; }
 .sx-inputwrap .pfx { position: absolute; left: 12px; font-family: var(--font-mono); font-size: var(--text-sm); color: var(--color-faint); pointer-events: none; }
 .sx-inputwrap .sx-input { padding-left: var(--pfx, 12px); }
@@ -472,12 +482,17 @@
   }
   .sx-readline .mono,
   .sx-input,
+  .sx-textarea,
   .sx-input--mono {
     min-width: 0;
   }
   .sx-row-actions,
   .sx-accents {
     flex-wrap: wrap;
+  }
+  .sx-field__meta {
+    flex-direction: column;
+    gap: 4px;
   }
   .og-errbar {
     margin: 12px 12px 0;

@@ -296,6 +296,7 @@ export async function updateOrg(input: {
   slug?: string;
   color?: string | null;
   logoUrl?: string | null;
+  skillNamingPolicy?: string | null;
   database?: Db;
 }): Promise<{
   id: string;
@@ -305,6 +306,7 @@ export async function updateOrg(input: {
   domainAutoJoin: boolean;
   color: string | null;
   logoUrl: string | null;
+  skillNamingPolicy: string | null;
 }> {
   const database = input.database ?? db;
   const role = await getOrgRole(input.orgId, input.actor.id, database);
@@ -320,6 +322,7 @@ export async function updateOrg(input: {
     slug?: string;
     color?: string | null;
     logoUrl?: string | null;
+    skillNamingPolicy?: string | null;
     updatedAt: Date;
   } = { updatedAt: new Date() };
   if (input.name !== undefined) {
@@ -341,11 +344,17 @@ export async function updateOrg(input: {
   if (input.logoUrl !== undefined) {
     patch.logoUrl = input.logoUrl;
   }
+  if (input.skillNamingPolicy !== undefined) {
+    // Empty/whitespace clears the policy (no policy for this org).
+    const policy = input.skillNamingPolicy?.trim();
+    patch.skillNamingPolicy = policy ? policy : null;
+  }
   if (
     patch.name === undefined &&
     patch.slug === undefined &&
     patch.color === undefined &&
-    patch.logoUrl === undefined
+    patch.logoUrl === undefined &&
+    patch.skillNamingPolicy === undefined
   ) {
     throw new Error("nothing to update");
   }
@@ -364,6 +373,7 @@ export async function updateOrg(input: {
         domainAutoJoin: schema.organizations.domainAutoJoin,
         color: schema.organizations.color,
         logoUrl: schema.organizations.logoUrl,
+        skillNamingPolicy: schema.organizations.skillNamingPolicy,
       });
   } catch (error) {
     if (isUniqueViolation(error)) throw new Error("that workspace URL is already taken");
@@ -371,6 +381,25 @@ export async function updateOrg(input: {
   }
   if (!row) throw new Error("organization not found");
   return row;
+}
+
+/**
+ * Read the org's skill-naming policy (the free-text prompt each org defines for itself). Any member
+ * may read it, including via a personal access token — this is what the triage skill calls.
+ */
+export async function getSkillNamingPolicy(input: {
+  actor: ActorContext;
+  orgId: string;
+  database?: Db;
+}): Promise<string | null> {
+  const database = input.database ?? db;
+  const [row] = await database
+    .select({ skillNamingPolicy: schema.organizations.skillNamingPolicy })
+    .from(schema.memberships)
+    .innerJoin(schema.organizations, eq(schema.organizations.id, schema.memberships.orgId))
+    .where(and(eq(schema.memberships.orgId, input.orgId), eq(schema.memberships.userId, input.actor.id)));
+  if (!row) throw new Error("not a member of this organization");
+  return row.skillNamingPolicy ?? null;
 }
 
 export function orgLogoPublicPath(orgId: string): string {
@@ -528,6 +557,7 @@ export async function getOrgSettings(input: {
     accessDomains: await listOrgAccessDomains(input.orgId, database),
     color: orgRow.color,
     logoUrl: orgRow.logoUrl,
+    skillNamingPolicy: orgRow.skillNamingPolicy,
   };
 
   const memberRows = await database

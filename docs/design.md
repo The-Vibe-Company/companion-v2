@@ -236,7 +236,9 @@ uploads the bytes, then persists the comment + image rows. Attachments are serve
 `GET /v1/skills/:slug/comments/:commentId/images/:imageId`, gated by org membership and streamed with
 `X-Content-Type-Options: nosniff`.
 
-Onboarding adds cosmetic `organizations.color`/`logo_url`.
+Onboarding adds cosmetic `organizations.color`/`logo_url`. Workspace settings also carry
+`organizations.skill_naming_policy`, a nullable free-text convention for naming and filing skills.
+Companion reads it during skill upload/triage; `null` means the org imposes no naming convention.
 `profiles.avatar_url` holds the same-origin serve path for a custom profile photo (binary in object
 storage at `users/{id}/avatar`). `GET /v1/users/:userId/avatar` serves it only while that marker is
 set and only to the user themselves or a member who shares an organization with them (tenant-scoped,
@@ -386,8 +388,9 @@ slug-keyed detail route, where the client replaces the address bar back to `/s/:
 - Schemas: `GET /v1/schemas/companion-manifest.v2.schema.json` serves the public JSON Schema used by
   assistants and editors to create or repair `companion.json`.
 - Orgs & settings: `/v1/orgs`, `GET`/`POST`/`PUT /v1/orgs/current` (read/select/rename+reslug the org,
-  admin only for `PUT`), `GET /v1/orgs/current/settings` (members, invitations,
-  access domains), `POST /v1/orgs/current/domains` and
+  plus `skillNamingPolicy` on admin-only `PUT`), `GET /v1/orgs/current/settings` (members,
+  invitations, access domains), `GET /v1/orgs/current/skill-naming-policy` (PAT-readable with
+  `skills:read`, returns `{ policy: string | null }`), `POST /v1/orgs/current/domains` and
   `DELETE /v1/orgs/current/domains/:domainId` (admin-only domain access list management),
   `PUT /v1/users/me` (update display name), and `/v1/invitations`. There are no `/v1/teams` endpoints.
 
@@ -397,8 +400,9 @@ accepted **only** on the PAT-enabled skills endpoints (`GET /v1/skills`, `POST /
 `GET /v1/skills/:slug/download`,
 `GET /v1/skills/:slug/versions/:version/package`,
 `GET /v1/skills/:slug/versions/:version/files`, the skills install/dependency/archive/share/label
-surfaces, and the `/v1/local-skills*` endpoints); every other endpoint rejects tokens. Token requests
-are scope-gated (`skills:write` to publish/create/rename/mutate, `skills:read` to read/download).
+surfaces, `GET /v1/orgs/current/skill-naming-policy`, and the `/v1/local-skills*` endpoints); every
+other endpoint rejects tokens. Token requests are scope-gated (`skills:write` to publish/create/rename/mutate,
+`skills:read` to read/download and read the org skill-naming policy).
 Reading the local-skills catalog
 and downloading its package require `skills:read`; the install callback
 (`POST /v1/local-skills/:key/installed`) mutates state and writes an audit row, so it requires

@@ -44,7 +44,7 @@ describe("companion skill package + row", () => {
     const pkg = await getCompanionSkillPackage();
     expect(pkg.key).toBe("companion");
     expect(pkg.checksum).toMatch(/^sha256:[0-9a-f]{64}$/);
-    expect(pkg.version).toBe("1.17.1");
+    expect(pkg.version).toBe("1.18.0");
     expect(pkg.sizeBytes).toBeGreaterThan(0);
     expect(pkg.integrity.packageChecksum).toBe(pkg.checksum);
     expect(pkg.integrity.files["SKILL.md"]).toMatch(/^sha256:[0-9a-f]{64}$/);
@@ -111,8 +111,8 @@ describe("companion skill package + row", () => {
       desc: "Create or repair manifest v2 with identity, env/secrets, dependency ids, notes, commands, and changelog.",
     });
     const changelog = row.changes.join("\n");
-    expect(changelog).toContain("same local SKILL.md name");
-    expect(changelog).toContain("duplicate local path evidence");
+    expect(changelog).toContain("workspace skill naming policy");
+    expect(changelog).toContain("GET /orgs/current/skill-naming-policy");
     // The install prompt drives the report-back call and leaves placeholders for the client.
     expect(row.prompts.install).toContain("/local-skills/companion/package");
     expect(row.prompts.install).toContain("/local-skills/companion/installed");
@@ -182,6 +182,11 @@ describe("companion skill package + row", () => {
     expect(skillMd).toContain("After any successful publish or re-publish, include a skill link");
     expect(skillMd).toContain("Skill link: ${webBase}/s/{share_token}");
     expect(skillMd).toContain("GET /skills?lib=org");
+    expect(skillMd).toContain("GET /orgs/current/skill-naming-policy");
+    expect(skillMd).toContain("returns `{ \"policy\": string | null }`. If");
+    expect(skillMd).toContain("`policy` is a string, apply that convention");
+    expect(skillMd).toContain("convention when naming the skill");
+    expect(skillMd).toContain("If `policy` is `null`, do not impose");
     expect(skillMd).toContain("Before any real `POST /skills` upload for a brand-new skill");
     expect(skillMd).toContain("Personal / My Skills");
     expect(skillMd).toContain("Org / everyone");
@@ -202,6 +207,11 @@ describe("companion skill package + row", () => {
     expect(apiRef).toContain("GET /v1/schemas/companion-manifest.v2.schema.json");
     expect(apiRef).toContain("GET /skills?lib=mine");
     expect(apiRef).toContain("GET /skills?installed=true");
+    expect(apiRef).toContain("Read org skill naming policy");
+    expect(apiRef).toContain("GET /v1/orgs/current/skill-naming-policy");
+    expect(apiRef).toContain("GET /orgs/current/skill-naming-policy");
+    expect(apiRef).toContain("The response is `{ \"policy\": string | null }`");
+    expect(apiRef).toContain("The only PAT-readable org-settings surface");
     expect(apiRef).toContain("GET /public/skills/{share_token}");
     expect(apiRef).toContain("Rows also include `share_token`");
     expect(apiRef).toContain("After a successful skill upload or update");

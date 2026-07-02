@@ -91,3 +91,98 @@ export function EditField({
     </div>
   );
 }
+
+/**
+ * Editable multi-line field. Unlike EditField, an empty value can be saved so nullable settings can
+ * be cleared from the UI. Enter inserts a newline; only the explicit actions save or reset.
+ */
+export function EditTextArea({
+  label,
+  hint,
+  value,
+  placeholder,
+  locked,
+  maxLength,
+  rows = 6,
+  removeLabel,
+  onSave,
+  onRemove,
+}: {
+  label: string;
+  hint?: string;
+  value: string;
+  placeholder?: string;
+  locked?: boolean;
+  maxLength?: number;
+  rows?: number;
+  removeLabel?: string;
+  onSave: (next: string) => void;
+  onRemove?: () => void;
+}) {
+  const [v, setV] = useState(value);
+  useEffect(() => setV(value), [value]);
+  const dirty = !locked && v !== value;
+  const inputId = useId();
+  const countId = useId();
+  const remaining = maxLength === undefined ? null : maxLength - v.length;
+  const overLimit = remaining !== null && remaining < 0;
+  return (
+    <div className="sx-field">
+      <label className="sx-field__label" htmlFor={inputId}>{label}</label>
+      <textarea
+        id={inputId}
+        className="sx-textarea"
+        value={v}
+        placeholder={placeholder}
+        readOnly={locked}
+        rows={rows}
+        maxLength={maxLength}
+        aria-describedby={countId}
+        onChange={(e) => setV(e.target.value)}
+        onKeyDown={(e) => {
+          if (locked) return;
+          if (e.key === "Escape") setV(value);
+        }}
+      />
+      <div className="sx-field__meta">
+        {hint && <span className="sx-field__hint">{hint}</span>}
+        {maxLength !== undefined && (
+          <span
+            className={"sx-field__count" + (overLimit ? " sx-field__count--error" : "")}
+            id={countId}
+            aria-live="polite"
+          >
+            {v.length}/{maxLength}
+          </span>
+        )}
+      </div>
+      {!locked && (dirty || (onRemove && value.trim().length > 0)) && (
+        <div className="sx-row-actions">
+          {dirty && (
+            <>
+              <button className="btn-primary" onClick={() => onSave(v)} disabled={overLimit}>
+                <Icon name="check" size={14} />
+                Save
+              </button>
+              <button className="btn-sec" onClick={() => setV(value)}>
+                Cancel
+              </button>
+            </>
+          )}
+          {onRemove && value.trim().length > 0 && (
+            <button
+              className="btn-sec"
+              onClick={() => {
+                setV("");
+                onRemove();
+              }}
+            >
+              <Icon name="x" size={14} />
+              {removeLabel ?? "Remove"}
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}

@@ -71,6 +71,7 @@ describe("parseOrgSettingsResponse", () => {
           accessDomains: [{ id: "domain_1", domain: "tvc.dev", createdAt: "2025-01-12T00:00:00.000Z" }],
           color: null,
           logoUrl: null,
+          skillNamingPolicy: null,
         },
         domainJoin: {
           actorDomain: "tvc.dev",

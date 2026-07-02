@@ -48,6 +48,8 @@ export const orgSettingsOrgSchema = z.object({
   accessDomains: z.array(orgSettingsAccessDomainSchema).default([]),
   color: z.string().nullable().default(null),
   logoUrl: z.string().nullable().default(null),
+  /** The org's own free-text skill-naming policy (read by the triage skill); null = none. */
+  skillNamingPolicy: z.string().nullable().default(null),
 });
 export type OrgSettingsOrg = z.infer<typeof orgSettingsOrgSchema>;
 
@@ -84,23 +86,35 @@ export const TEAM_BRAND_COLORS = [
 
 export const teamBrandColorSchema = z.enum(TEAM_BRAND_COLORS);
 
-/** Body of `PUT /v1/orgs/current` — rename, re-slug, and/or branding. */
+/** Max length of the org's free-text skill-naming policy prompt. */
+export const SKILL_NAMING_POLICY_MAX = 4000;
+
+/** Body of `PUT /v1/orgs/current` — rename, re-slug, branding, and/or the skill-naming policy. */
 export const updateOrgInputSchema = z
   .object({
     name: z.string().min(1).max(120).optional(),
     slug: z.string().min(1).max(120).optional(),
     color: teamBrandColorSchema.nullish(),
     logoUrl: z.string().url().max(2048).nullish(),
+    // Free-text policy prompt. Pass "" or null to clear it (no policy).
+    skillNamingPolicy: z.string().max(SKILL_NAMING_POLICY_MAX).nullish(),
   })
   .refine(
     (v) =>
       v.name !== undefined ||
       v.slug !== undefined ||
       v.color !== undefined ||
-      v.logoUrl !== undefined,
+      v.logoUrl !== undefined ||
+      v.skillNamingPolicy !== undefined,
     { message: "Provide at least one field to update." },
   );
 export type UpdateOrgInput = z.infer<typeof updateOrgInputSchema>;
+
+/** Response of the token-readable `GET /v1/orgs/current/skill-naming-policy`. */
+export const skillNamingPolicyResponseSchema = z.object({
+  policy: z.string().nullable(),
+});
+export type SkillNamingPolicyResponse = z.infer<typeof skillNamingPolicyResponseSchema>;
 
 export const addOrgAccessDomainInputSchema = z.object({
   domain: z.string().min(1).max(253),
