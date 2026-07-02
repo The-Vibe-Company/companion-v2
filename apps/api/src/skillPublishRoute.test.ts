@@ -31,6 +31,7 @@ const serviceMocks = vi.hoisted(() => {
     restoreSkill: noop,
     getSkillFilterPreferences: noop,
     getOrgSettings: noop,
+    getSkillNamingPolicy: noop,
     getDownloadVersion: noop,
     getCommentImageAsset: noop,
     getOrgLogoAsset: noop,

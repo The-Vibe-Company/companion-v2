@@ -393,13 +393,13 @@ export async function getSkillNamingPolicy(input: {
   database?: Db;
 }): Promise<string | null> {
   const database = input.database ?? db;
-  const role = await getOrgRole(input.orgId, input.actor.id, database);
-  if (!role) throw new Error("not a member of this organization");
-  const orgRow = await database.query.organizations.findFirst({
-    where: eq(schema.organizations.id, input.orgId),
-    columns: { skillNamingPolicy: true },
-  });
-  return orgRow?.skillNamingPolicy ?? null;
+  const [row] = await database
+    .select({ skillNamingPolicy: schema.organizations.skillNamingPolicy })
+    .from(schema.memberships)
+    .innerJoin(schema.organizations, eq(schema.organizations.id, schema.memberships.orgId))
+    .where(and(eq(schema.memberships.orgId, input.orgId), eq(schema.memberships.userId, input.actor.id)));
+  if (!row) throw new Error("not a member of this organization");
+  return row.skillNamingPolicy ?? null;
 }
 
 export function orgLogoPublicPath(orgId: string): string {

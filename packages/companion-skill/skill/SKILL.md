@@ -501,6 +501,17 @@ from `companion.json`, create or update `companion.json` with the confirmed fina
 packaging; do not upload a package with a stale dependency manifest. If the plan listed dependencies
 under `upload`, analyze and publish those first (topological order).
 
+Before proposing or finalizing a slug, package name, or folder placement for a brand-new skill, read
+the workspace's naming convention:
+
+```http
+GET /orgs/current/skill-naming-policy
+```
+
+This endpoint is token-readable with `skills:read` and returns `{ "policy": string | null }`. If
+`policy` is a string, apply that convention when naming the skill and when filing it into folders.
+If `policy` is `null`, do not impose a naming or filing convention of your own.
+
 First confirm the slug is actually new: run `python3 scripts/skill_guard.py --json --create-check
 <slug>` (or check that `GET /skills/{slug}/download` returns 404). If the slug already exists online or
 locally, this is not a brand-new skill — update the existing one, restore it if it is archived, or pick
@@ -759,13 +770,16 @@ update.
 ### Manage skill API calls
 
 Use the workspace API only for skills-management tasks. Do not use this skill to manage workspace
-members, invitations, org settings, or tokens.
+members, invitations, org settings mutation, or tokens. The only org-settings read this skill uses is
+`GET /orgs/current/skill-naming-policy`.
 
 Allowed skills API tasks:
 
 - List workspace skills with `GET /skills?lib=org`, `GET /skills?lib=mine`, and
   `GET /skills?installed=true` using a `skills:read` token. Use `installed=true` for Companion's
   reported install state; use the local lockfile for disk inventory.
+- Read the workspace skill naming policy with `GET /orgs/current/skill-naming-policy` before naming
+  or filing a brand-new skill.
 - Read a public org-skill preview with `GET /public/skills/{share_token}` without a token when the
   user wants a share/unfurl link. Use only the `share_token` from an org skill row and prefer the web
   URL `/s/{share_token}` for sharing.

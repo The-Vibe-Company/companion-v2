@@ -2,8 +2,9 @@
 
 import { useEffect, useState } from "react";
 import type { CSSProperties } from "react";
+import { SKILL_NAMING_POLICY_MAX } from "@companion/contracts";
 import { Icon } from "../Icon";
-import { PaneHead, EditField } from "./paneKit";
+import { PaneHead, EditField, EditTextArea } from "./paneKit";
 import { RoleDot } from "./primitives";
 import { orgRole } from "./roles";
 import { WorkspaceLogoPicker } from "./WorkspaceLogoPicker";
@@ -66,15 +67,6 @@ export function WorkspaceGeneralPane({ ctx }: { ctx: OrgCtx }) {
         value={ws.slug}
         locked={!ctx.canManage}
         onSave={(s) => ctx.setWorkspace({ slug: s.toLowerCase().replace(/[^a-z0-9-]/g, "-") })}
-      />
-
-      <EditField
-        label="Skill naming policy"
-        placeholder="e.g. verb-object-root, kebab-case, filed under one folder"
-        hint="Your organization's own rule for naming and filing skills. The triage skill reads it and applies it when a skill is added. Leave empty for no policy — Companion imposes none."
-        value={ws.skillNamingPolicy ?? ""}
-        locked={!ctx.canManage}
-        onSave={(v) => ctx.setWorkspace({ skillNamingPolicy: v })}
       />
 
       {ws.kind === "team" && (
@@ -152,6 +144,25 @@ export function WorkspaceGeneralPane({ ctx }: { ctx: OrgCtx }) {
           </div>
         </div>
       )}
+
+      <div className="sx-sec">
+        <h2 className="sx-sec__h">Skill naming policy</h2>
+        <p className="sx-sec__d">
+          Define this workspace&apos;s convention for naming and filing skills. Companion reads it when
+          a skill is added or uploaded and applies the rule. Leave it empty when no convention is imposed.
+        </p>
+        <EditTextArea
+          label="Policy"
+          placeholder="e.g. verb-object-root, kebab-case, filed under one folder"
+          hint={ctx.canManage ? "Use multiple lines for examples, edge cases, and filing rules." : "Only owners and admins can edit this policy."}
+          value={ws.skillNamingPolicy ?? ""}
+          locked={!ctx.canManage}
+          maxLength={SKILL_NAMING_POLICY_MAX}
+          onSave={(v) => ctx.setWorkspace({ skillNamingPolicy: v })}
+          onRemove={() => ctx.setWorkspace({ skillNamingPolicy: null })}
+          removeLabel="Remove policy"
+        />
+      </div>
 
       <div className="sx-sec">
         <h2 className="sx-sec__h">Details</h2>

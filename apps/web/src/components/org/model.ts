@@ -41,8 +41,8 @@ export interface OrgFull {
   accessDomains: OrgAccessDomain[];
   color: string | null;
   logoUrl: string | null;
-  /** The org's own skill-naming policy prompt (Workspace › General); null/undefined = none. */
-  skillNamingPolicy?: string | null;
+  /** The org's own skill-naming policy prompt (Workspace › General); null = none. */
+  skillNamingPolicy: string | null;
   members: OrgMember[];
 }
 

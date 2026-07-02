@@ -4,6 +4,7 @@ import {
   orgSettingsResponseSchema,
   ORG_LOGO_FILE_ACCEPT,
   resolveOrgLogoContentType,
+  skillNamingPolicyResponseSchema,
   updateOrgInputSchema,
 } from "../src/orgSettings";
 
@@ -117,6 +118,19 @@ describe("updateOrgInputSchema (workspace branding survives; team brand colors r
   it("accepts clearing the policy with null or empty string", () => {
     expect(updateOrgInputSchema.parse({ skillNamingPolicy: null })).toMatchObject({ skillNamingPolicy: null });
     expect(updateOrgInputSchema.parse({ skillNamingPolicy: "" })).toMatchObject({ skillNamingPolicy: "" });
+  });
+});
+
+describe("skillNamingPolicyResponseSchema", () => {
+  it("accepts a policy string or null", () => {
+    expect(skillNamingPolicyResponseSchema.parse({ policy: "verb-object-root" })).toEqual({
+      policy: "verb-object-root",
+    });
+    expect(skillNamingPolicyResponseSchema.parse({ policy: null })).toEqual({ policy: null });
+  });
+
+  it("requires the policy field", () => {
+    expect(() => skillNamingPolicyResponseSchema.parse({})).toThrow();
   });
 });
 

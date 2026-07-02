@@ -97,6 +97,7 @@ import {
   joinOnboardingOrgInputSchema,
   labelPathSchema,
   orgSettingsResponseSchema,
+  skillNamingPolicyResponseSchema,
   publishSkillInputSchema,
   renameSkillInputSchema,
   renameLabelInputSchema,
@@ -725,9 +726,9 @@ app.get("/v1/orgs/current/skill-naming-policy", async (c) => {
       ({ actor, orgId, database }) => getSkillNamingPolicy({ actor, orgId, database }),
       true,
     );
-    return c.json({ policy });
+    return c.json(skillNamingPolicyResponseSchema.parse({ policy }));
   } catch (error) {
-    return jsonError(c, error);
+    return jsonError(c, error, 401);
   }
 });
 

@@ -61,6 +61,8 @@ interface FakeDbOptions {
   orgConflict?: Record<string, unknown> | null;
   /** Rows returned for the `apiTokens` select (listApiTokens). */
   tokenRows?: Array<Record<string, unknown>>;
+  /** Rows returned for the joined skill-naming-policy select. */
+  skillNamingPolicyRows?: Array<Record<string, unknown>>;
   /** Rows returned by an `insert(...).returning(...)`. */
   insertReturning?: Array<Record<string, unknown>>;
   /** Whether the actor's email is verified for domain-access mutations. */
@@ -77,6 +79,8 @@ function fakeDb(options: FakeDbOptions = {}) {
     deletes: [] as Array<{ table: unknown; where?: unknown }>,
     /** the `.where` expr captured from the most recent token select. */
     tokenWhere: undefined as unknown,
+    /** the `.where` expr captured from the most recent skill-naming-policy select. */
+    policyWhere: undefined as unknown,
     /** every `insert(table).values(...)` call, in order. */
     inserts: [] as Array<{ table: unknown; values?: Record<string, unknown> }>,
   };
@@ -133,6 +137,7 @@ function fakeDb(options: FakeDbOptions = {}) {
 
   const selectBuilder = (cols: Record<string, unknown>) => {
     const isCount = "value" in cols;
+    const isPolicy = "skillNamingPolicy" in cols;
     const builder: Record<string, unknown> = {
       from() {
         return builder;
@@ -141,19 +146,27 @@ function fakeDb(options: FakeDbOptions = {}) {
         return builder;
       },
       where(expr: unknown) {
-        if (!isCount) calls.tokenWhere = expr;
+        if (isPolicy) calls.policyWhere = expr;
+        else if (!isCount) calls.tokenWhere = expr;
         return builder;
       },
       orderBy() {
         if (isCount) return Promise.resolve([{ value: 1 }]);
+        if (isPolicy) return Promise.resolve(policyRows());
         return Promise.resolve(options.tokenRows ?? []);
       },
       then(resolve: (v: unknown) => unknown) {
-        const rows = isCount ? [{ value: 1 }] : (options.tokenRows ?? []);
+        const rows = isCount ? [{ value: 1 }] : isPolicy ? policyRows() : (options.tokenRows ?? []);
         return Promise.resolve(rows).then(resolve);
       },
     };
     return builder;
+  };
+
+  const policyRows = () => {
+    if (options.skillNamingPolicyRows) return options.skillNamingPolicyRows;
+    if (options.role === null || options.role === undefined) return [];
+    return [{ skillNamingPolicy: options.org?.skillNamingPolicy ?? null }];
   };
 
   const insertBuilder = (table: unknown) => {
@@ -329,11 +342,13 @@ describe("updateOrg", () => {
 
 describe("getSkillNamingPolicy", () => {
   it("returns the org's policy for a member", async () => {
-    const { database } = fakeDb({
+    const { database, calls } = fakeDb({
       role: "developer",
       org: { id: ORG_A, name: "Acme", slug: "acme", kind: "team", domain: null, domainAutoJoin: false, logoUrl: null, skillNamingPolicy: "our rule" },
     });
     await expect(getSkillNamingPolicy({ actor: developer, orgId: ORG_A, database })).resolves.toBe("our rule");
+    expect(whereMentions(calls.policyWhere, ORG_A)).toBe(true);
+    expect(whereMentions(calls.policyWhere, developer.id)).toBe(true);
   });
 
   it("denies a non-member", async () => {

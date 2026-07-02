@@ -26,6 +26,7 @@ const serviceMocks = vi.hoisted(() => {
     restoreSkill: noop,
     getSkillFilterPreferences: noop,
     getOrgSettings: noop,
+    getSkillNamingPolicy: vi.fn(),
     getDownloadVersion: noop,
     getCommentImageAsset: noop,
     getOrgLogoAsset: noop,
@@ -335,6 +336,47 @@ describe("GET /v1/skills/share-target/:token", () => {
     expect(res.status).toBe(401);
     await expect(res.json()).resolves.toMatchObject({ ok: false, error: "not authenticated" });
     expect(serviceMocks.getSkillShareTargetByShareToken).not.toHaveBeenCalled();
+  });
+});
+
+describe("GET /v1/orgs/current/skill-naming-policy", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    serviceMocks.resolveApiToken.mockImplementation(async (token: string) => tokenFor(token));
+    serviceMocks.getSkillNamingPolicy.mockResolvedValue("verb-object-root");
+  });
+
+  it("allows a skills:read PAT to read the org policy", async () => {
+    const res = await app.request("/v1/orgs/current/skill-naming-policy", {
+      headers: { Authorization: "Bearer read-a" },
+    });
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({ policy: "verb-object-root" });
+    expect(serviceMocks.getSkillNamingPolicy).toHaveBeenCalledWith(
+      expect.objectContaining({ actor: actorA, orgId: "org-1" }),
+    );
+  });
+
+  it("rejects a PAT without skills:read with 401", async () => {
+    const res = await app.request("/v1/orgs/current/skill-naming-policy", {
+      headers: { Authorization: "Bearer write-only" },
+    });
+
+    expect(res.status).toBe(401);
+    await expect(res.json()).resolves.toMatchObject({ ok: false, error: expect.stringContaining("skills:read") });
+    expect(serviceMocks.getSkillNamingPolicy).not.toHaveBeenCalled();
+  });
+
+  it("returns 401 when the actor is not a member of the selected org", async () => {
+    serviceMocks.getSkillNamingPolicy.mockRejectedValue(new Error("not a member of this organization"));
+
+    const res = await app.request("/v1/orgs/current/skill-naming-policy", {
+      headers: { Authorization: "Bearer read-a" },
+    });
+
+    expect(res.status).toBe(401);
+    await expect(res.json()).resolves.toMatchObject({ ok: false, error: "not a member of this organization" });
   });
 });
 
