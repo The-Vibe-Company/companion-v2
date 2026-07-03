@@ -20,7 +20,7 @@ import type {
   ProvisionStepKey,
   SkillRequirement,
 } from "@companion/contracts";
-import { companionManifestSchema, parseStoredSkillFrontmatter } from "@companion/contracts";
+import { companionManifestSchema, parseStoredSkillFrontmatter, RESERVED_AGENT_SECRET_KEYS } from "@companion/contracts";
 import { canAccessAgent, canManageAgent } from "./authz";
 import { agentSecretAad, openSecret, sealSecret } from "./secretbox";
 import {
@@ -376,6 +376,9 @@ export async function createAgent(input: {
     throw new AgentValidationError(`model ${spec.model} is not available (unknown or not tool-capable)`);
   }
 
+  for (const key of Object.keys(spec.secrets)) {
+    assertUnreservedSecretKey(key);
+  }
   const existing = await loadAgentRow(database, input.orgId, spec.slug);
   if (existing) throw new AgentValidationError(`an agent named ${spec.slug} already exists`);
 
@@ -542,18 +545,44 @@ export async function provisionAgent(input: {
 }): Promise<void> {
   const { orgId, actorId, agentId, ctx } = input;
 
-  const loaded = await ctx.runTenant({ orgId, userId: actorId }, async (database) => {
-    const rows = await database.select().from(schema.agents).where(eq(schema.agents.id, agentId));
-    const row = rows[0];
-    if (!row) return null;
-    const pins = (await loadPins(database, orgId, [row.id])).get(row.id) ?? [];
-    await loadPinnedFrontmatter(database, orgId, pins);
-    const storagePaths = await loadPinStoragePaths(database, orgId, pins);
-    const secrets = await loadDecryptedSecrets(database, orgId, row, ctx);
-    return { row, pins, storagePaths, secrets };
-  });
+  // The prelude decrypts secrets + the server password OUTSIDE the step wrappers. A decryption
+  // failure (rotated/corrupt KEK) must not leave the row stuck in `provisioning` — persist a
+  // designed error so the UI can offer a fresh-fork retry.
+  let loaded: { row: AgentRow; pins: PinJoin[]; storagePaths: Map<string, string>; secrets: Map<string, string>; serverPassword: string } | null;
+  try {
+    loaded = await ctx.runTenant({ orgId, userId: actorId }, async (database) => {
+      const rows = await database.select().from(schema.agents).where(eq(schema.agents.id, agentId));
+      const row = rows[0];
+      if (!row) return null;
+      const pins = (await loadPins(database, orgId, [row.id])).get(row.id) ?? [];
+      await loadPinnedFrontmatter(database, orgId, pins);
+      const storagePaths = await loadPinStoragePaths(database, orgId, pins);
+      const secrets = await loadDecryptedSecrets(database, orgId, row, ctx);
+      const serverPassword = decryptServerPassword(orgId, row, ctx);
+      return { row, pins, storagePaths, secrets, serverPassword };
+    });
+  } catch (error) {
+    await ctx.runTenant({ orgId, userId: actorId }, async (database) => {
+      await database
+        .update(schema.agents)
+        .set({
+          lifecycle: "error",
+          provisionError: {
+            message: `Error: prepare: ${error instanceof Error ? error.message : String(error)}`,
+            sandbox_name: null,
+            region: ctx.region,
+            step: "fork",
+            exit_code: null,
+            detail: "Could not decrypt this agent's secrets. Retry provisions a fresh fork.",
+          },
+          updatedAt: new Date(),
+        })
+        .where(eq(schema.agents.id, agentId));
+    });
+    return;
+  }
   if (!loaded) return;
-  const { row, pins, storagePaths, secrets } = loaded;
+  const { row, pins, storagePaths, secrets, serverPassword } = loaded;
 
   const ref: SandboxRef = {
     sandboxName: row.sandboxName ?? sandboxNameFor(orgId, row.slug, row.provisionAttempt),
@@ -561,7 +590,6 @@ export async function provisionAgent(input: {
     region: row.region,
     timeoutMs: row.timeoutMs,
   };
-  const serverPassword = decryptServerPassword(orgId, row, ctx);
 
   let steps = row.provisionSteps as ProvisionStep[];
   let domain: string | null = row.sandboxDomain;
@@ -908,12 +936,15 @@ export async function setAgentSecrets(input: {
   secrets: Record<string, string | null>;
   ctx: AgentControlContext;
   database?: Db;
-}): Promise<AgentSecretState[]> {
+}): Promise<{ secrets: AgentSecretState[]; shouldRestart: boolean }> {
   const database = input.database ?? db;
   await assertMember(database, input.actor, input.orgId);
   const row = await loadAgentRow(database, input.orgId, input.slug);
   if (!row || !canManageAgent(input.actor.id, row)) throw new AgentValidationError("agent not found");
 
+  for (const key of Object.keys(input.secrets)) {
+    assertUnreservedSecretKey(key);
+  }
   const deletions = Object.entries(input.secrets)
     .filter(([, value]) => value === null)
     .map(([key]) => key);
@@ -967,7 +998,17 @@ export async function setAgentSecrets(input: {
   const pins = (await loadPins(database, input.orgId, [row.id])).get(row.id) ?? [];
   await loadPinnedFrontmatter(database, input.orgId, pins);
   const setKeys = await loadSecretKeys(database, input.orgId, row.id);
-  return secretStates(pins, setKeys);
+  // A running agent already has its env baked into the serve process — the caller relaunches serve
+  // (via the wake path) so the changed variables take effect.
+  const shouldRestart = row.lifecycle === "ready" && !!row.sandboxDomain;
+  return { secrets: secretStates(pins, setKeys), shouldRestart };
+}
+
+/** Guard the runtime's own env keys — a user secret must never shadow the server password/username. */
+function assertUnreservedSecretKey(key: string): void {
+  if (RESERVED_AGENT_SECRET_KEYS.includes(key)) {
+    throw new AgentValidationError(`the secret name ${key} is reserved by the runtime`);
+  }
 }
 
 export async function destroyAgent(input: {
@@ -1302,6 +1343,11 @@ export async function runSkillPush(input: {
       throw new AgentRuntimeError(`${input.skillSlug}@${input.toVersion}: archive failed safety checks`);
     }
     const extracted = await extractArchiveEntryBuffers(tar);
+    // Same post-extraction gate the provisioning path enforces — never ship a violating/oversized
+    // archive into a sandbox, even one that slipped past inspectTar.
+    if (extracted.violations.length > 0 || extracted.oversize) {
+      throw new AgentRuntimeError(`${input.skillSlug}@${input.toVersion}: archive failed safety checks`);
+    }
     const skillMdPath = extracted.files.find((f) => f.path.split("/").pop() === "SKILL.md")?.path ?? "SKILL.md";
     const root = skillMdPath.includes("/") ? skillMdPath.slice(0, skillMdPath.lastIndexOf("/") + 1) : "";
     await ctx.runtime.replaceSkill({

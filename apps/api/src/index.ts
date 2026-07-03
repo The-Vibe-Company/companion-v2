@@ -2318,6 +2318,18 @@ function kickAgentJob(key: string, job: () => Promise<void>): void {
 }
 const provisionJobKey = (orgId: string, slug: string) => `provision:${orgId}:${slug}`;
 const pushJobKey = (orgId: string, slug: string) => `push:${orgId}:${slug}`;
+const wakeJobKey = (orgId: string, slug: string) => `wake:${orgId}:${slug}`;
+
+/** Coalesce concurrent wakes of the same agent so serve is relaunched at most once at a time. */
+const inFlightWakes = new Map<string, Promise<unknown>>();
+function sharedWake<T>(orgId: string, slug: string, run: () => Promise<T>): Promise<T> {
+  const key = wakeJobKey(orgId, slug);
+  const existing = inFlightWakes.get(key);
+  if (existing) return existing as Promise<T>;
+  const promise = run().finally(() => inFlightWakes.delete(key));
+  inFlightWakes.set(key, promise);
+  return promise;
+}
 
 /** Map agent service failures onto the HTTP statuses the console expects. */
 function agentError(c: Context, error: unknown): Response {
@@ -2511,11 +2523,18 @@ app.post("/v1/agents/:slug/provision/retry", async (c) => {
 app.put("/v1/agents/:slug/secrets", async (c) => {
   try {
     const input = updateAgentSecretsInputSchema.parse(await c.req.json());
+    const slug = c.req.param("slug");
     const ctx = agentCtx();
-    const secrets = await withTenant(c, ({ actor, orgId, database }) =>
-      setAgentSecrets({ actor, orgId, slug: c.req.param("slug"), secrets: input.secrets, ctx, database }),
+    const result = await withTenant(c, ({ actor, orgId, database }) =>
+      setAgentSecrets({ actor, orgId, slug, secrets: input.secrets, ctx, database }),
     );
-    return c.json({ secrets });
+    // A running agent has its env baked into serve — relaunch it (deduped) so the change applies.
+    if (result.shouldRestart) {
+      const actor = actorFromContext(c);
+      const orgId = await orgIdFromContext(c);
+      kickAgentJob(wakeJobKey(orgId, slug), () => wakeAgent({ actor, orgId, slug, ctx }).then(() => undefined));
+    }
+    return c.json({ secrets: result.secrets, restarting: result.shouldRestart });
   } catch (error) {
     return agentError(c, error);
   }
@@ -2620,7 +2639,8 @@ async function agentChatTargetFor(c: Context<{ Variables: ApiVariables }>, slug:
   if (needsWake) {
     const actor = actorFromContext(c);
     const orgId = await orgIdFromContext(c);
-    await wakeAgent({ actor, orgId, slug, ctx });
+    // Share the in-flight wake across concurrent chat opens so serve is relaunched only once.
+    await sharedWake(orgId, slug, () => wakeAgent({ actor, orgId, slug, ctx }));
     target = await withTenant(c, ({ actor: a, orgId: org, database }) =>
       getAgentChatTarget({ actor: a, orgId: org, slug, ctx, database }),
     );

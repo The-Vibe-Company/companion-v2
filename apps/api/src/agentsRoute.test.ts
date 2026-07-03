@@ -284,10 +284,12 @@ describe("/v1/agents", () => {
     expect(res.status).toBe(404);
   });
 
-  it("never echoes secret values from the secrets endpoint", async () => {
-    serviceMocks.setAgentSecrets.mockResolvedValue([
-      { key: "ZENDESK_API_TOKEN", set: true, required_by: ["monka-triage"], required: true },
-    ]);
+  it("never echoes secret values + relaunches serve when the agent is running", async () => {
+    serviceMocks.setAgentSecrets.mockResolvedValue({
+      secrets: [{ key: "ZENDESK_API_TOKEN", set: true, required_by: ["monka-triage"], required: true }],
+      shouldRestart: true,
+    });
+    serviceMocks.wakeAgent.mockResolvedValue({ resumeMs: 100, status: "running" });
     const res = await app.request("/v1/agents/monka-support/secrets", {
       method: "PUT",
       headers: { "content-type": "application/json" },
@@ -298,7 +300,10 @@ describe("/v1/agents", () => {
     expect(text).not.toContain("super-secret-value");
     expect(JSON.parse(text)).toEqual({
       secrets: [{ key: "ZENDESK_API_TOKEN", set: true, required_by: ["monka-triage"], required: true }],
+      restarting: true,
     });
+    // The changed env only takes effect once serve is relaunched (deduped wake job).
+    expect(serviceMocks.wakeAgent).toHaveBeenCalledWith(expect.objectContaining({ slug: "monka-support" }));
   });
 
   it("destroy passes the typed confirmation through and tears the sandbox down after", async () => {

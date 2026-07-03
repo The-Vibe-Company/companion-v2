@@ -367,7 +367,7 @@ describe("setAgentSecrets", () => {
     seedAgent(store, "monka-support", {}, [{ slug: "monka-triage", version: "2.1.0" }]);
     const database = fakeAgentsDb(store);
 
-    const states = await setAgentSecrets({
+    const result = await setAgentSecrets({
       actor: me,
       orgId: ORG,
       slug: "monka-support",
@@ -375,7 +375,9 @@ describe("setAgentSecrets", () => {
       ctx: ctxFor(database),
       database,
     });
-    expect(states).toEqual([expect.objectContaining({ key: "ZENDESK_API_TOKEN", set: true })]);
+    expect(result.secrets).toEqual([expect.objectContaining({ key: "ZENDESK_API_TOKEN", set: true })]);
+    // The seeded agent is ready with a sandbox domain → the runtime env must be relaunched.
+    expect(result.shouldRestart).toBe(true);
     expect(JSON.stringify(store.audit)).not.toContain("zd-secret");
 
     const after = await setAgentSecrets({
@@ -386,7 +388,58 @@ describe("setAgentSecrets", () => {
       ctx: ctxFor(database),
       database,
     });
-    expect(after).toEqual([expect.objectContaining({ key: "ZENDESK_API_TOKEN", set: false })]);
+    expect(after.secrets).toEqual([expect.objectContaining({ key: "ZENDESK_API_TOKEN", set: false })]);
+  });
+
+  it("rejects reserved runtime key names in create and update", async () => {
+    const store = emptyStore();
+    seedSkill(store, "meeting-digest", "1.3.0");
+    seedAgent(store, "worker", {}, []);
+    const database = fakeAgentsDb(store);
+    await expect(
+      setAgentSecrets({
+        actor: me,
+        orgId: ORG,
+        slug: "worker",
+        secrets: { OPENCODE_SERVER_PASSWORD: "hijack" },
+        ctx: ctxFor(database),
+        database,
+      }),
+    ).rejects.toThrow(/reserved/);
+    await expect(
+      createAgent({
+        actor: me,
+        orgId: ORG,
+        input: {
+          slug: "hijacker",
+          scope: "personal",
+          instructions: "",
+          model: "anthropic/claude-x",
+          skills: [{ slug: "meeting-digest" }],
+          secrets: { OPENCODE_SERVER_USERNAME: "root" },
+        },
+        ctx: ctxFor(database),
+        database,
+      }),
+    ).rejects.toThrow(/reserved/);
+  });
+
+  it("does not restart a sleeping/provisioning agent (no live serve to relaunch)", async () => {
+    const store = emptyStore();
+    seedSkill(store, "monka-triage", "2.1.0", [{ key: "ZENDESK_API_TOKEN" }]);
+    seedAgent(store, "sleepy", { lifecycle: "ready", sandboxDomain: null }, [
+      { slug: "monka-triage", version: "2.1.0" },
+    ]);
+    const database = fakeAgentsDb(store);
+    const result = await setAgentSecrets({
+      actor: me,
+      orgId: ORG,
+      slug: "sleepy",
+      secrets: { ZENDESK_API_TOKEN: "zd" },
+      ctx: ctxFor(database),
+      database,
+    });
+    expect(result.shouldRestart).toBe(false);
   });
 });
 
