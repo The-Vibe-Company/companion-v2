@@ -92,6 +92,10 @@ export {
   removeOrgAccessDomain,
 } from "./domainAccess";
 
+// Envelope encryption for agent secrets (node:crypto — kept off the framework-free `index` entry so
+// the browser-safe authz exports never pull a Node built-in into a client bundle).
+export * from "./secretbox";
+
 export interface ActorContext {
   id: string;
   email: string;

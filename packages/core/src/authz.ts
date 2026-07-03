@@ -86,3 +86,27 @@ export function canAccessSkill(actorId: string, skill: SkillScopeRef): boolean {
 export function canManagePersonalSkill(actorId: string, skill: SkillScopeRef): boolean {
   return skill.scope === "personal" && skill.creatorId === actorId;
 }
+
+/* ---- Per-agent scope gate (Companion Agents) --------------------------------- */
+
+/** The minimal agent shape the scope gate needs: its library and its owner (creator). */
+export interface AgentScopeRef {
+  scope: SkillScope;
+  creatorId: string;
+}
+
+/**
+ * Can `actorId` SEE this agent? Mirrors {@link canAccessSkill}: org agents are flat (every member),
+ * personal agents are owner-only — deliberately NO admin override.
+ */
+export function canAccessAgent(actorId: string, agent: AgentScopeRef): boolean {
+  return agent.scope === "org" || agent.creatorId === actorId;
+}
+
+/**
+ * Can `actorId` MANAGE (provision / secrets / push / pause / destroy) this agent? Phase 1 keeps org
+ * agents flat like org skills — any member may manage; personal agents are owner-only.
+ */
+export function canManageAgent(actorId: string, agent: AgentScopeRef): boolean {
+  return canAccessAgent(actorId, agent);
+}

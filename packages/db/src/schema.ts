@@ -650,3 +650,175 @@ export const skillInstalls = pgTable(
     byOrgUser: index("skill_installs_org_user_idx").on(t.orgId, t.userId),
   }),
 );
+
+/* ================================ Companion Agents ================================ */
+
+// An agent's library scope mirrors skills: 'org' = flat org library (any member may manage),
+// 'personal' = private to creator_id ("My Companions") — no admin override.
+export const agentScopeEnum = pgEnum("agent_scope", ["personal", "org"]);
+// Coarse DB lifecycle. The user-facing status (running | sleeping) is DERIVED at read time from
+// last_active_at vs timeout_ms (+ paused_at), so rendering a list never wakes a sandbox.
+export const agentLifecycleEnum = pgEnum("agent_lifecycle", ["provisioning", "ready", "error"]);
+
+/** Jsonb payload shapes (kept structural; the zod contracts in @companion/contracts are the API truth). */
+export interface AgentProvisionStepRow {
+  key: "fork" | "push" | "serve" | "health";
+  label: string;
+  detail: string;
+  state: "pending" | "running" | "done" | "failed";
+  duration_ms: number | null;
+}
+export interface AgentProvisionErrorRow {
+  message: string;
+  sandbox_name: string | null;
+  region: string | null;
+  step: "fork" | "push" | "serve" | "health" | null;
+  exit_code: number | null;
+  detail: string | null;
+}
+export interface AgentPendingOpRow {
+  kind: "skill-push";
+  skill_slug: string;
+  from_version: string | null;
+  to_version: string;
+  phase: "pushing" | "restarting" | "updated" | "failed";
+  error: string | null;
+  started_at: string;
+}
+export interface AgentSessionSummaryRow {
+  id: string;
+  title: string;
+  message_count: number;
+  last_at: string | null;
+}
+
+/**
+ * One Companion Agent: a declared row of intent for a named, persistent sandbox (forked from the
+ * golden snapshot, OpenCode serving on port 4096) that runs the skills pinned in `agent_skills`.
+ * Provisioning progress and failures are persisted here (jsonb) so the UI survives reloads and the
+ * pipeline survives API restarts; retries fork a FRESH sandbox (`provision_attempt` keys the
+ * sandbox name, so a retry can never double-provision).
+ */
+export const agents = pgTable(
+  "agents",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    slug: text("slug").notNull(),
+    scope: agentScopeEnum("scope").notNull().default("personal"),
+    // Who created the agent; also the OWNER of a personal agent (mirrors skills.creator_id).
+    creatorId: text("creator_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    /** Free-form "Client" column value (e.g. "Monka"). */
+    clientLabel: text("client_label"),
+    /** Sidebar grouping label under the Agents root (e.g. "Ops"); cosmetic, phase 1. */
+    groupLabel: text("group_label"),
+    /** Operator markdown → the agent definition pushed to `.opencode/agents/<slug>.md`. */
+    instructions: text("instructions").notNull().default(""),
+    /** OpenCode model ref `provider/model-id` (validated against the models.dev catalog). */
+    model: text("model").notNull(),
+    region: text("region").notNull().default("iad1"),
+    lifecycle: agentLifecycleEnum("lifecycle").notNull().default("provisioning"),
+    /** Deterministic per-attempt sandbox name: cmp-<org8>-<slug>-a<attempt>. */
+    sandboxName: text("sandbox_name"),
+    /** Provider sandbox id (sb-…) once forked. */
+    sandboxId: text("sandbox_id"),
+    /** Public https URL of port 4096; reached only by the API proxy, never exposed to browsers. */
+    sandboxDomain: text("sandbox_domain"),
+    /** Provenance: which golden snapshot this agent was forked from, and the OpenCode pin. */
+    goldenSnapshotId: text("golden_snapshot_id"),
+    opencodeVersion: text("opencode_version"),
+    provisionAttempt: integer("provision_attempt").notNull().default(1),
+    provisionSteps: jsonb("provision_steps").$type<AgentProvisionStepRow[]>().notNull().default([]),
+    provisionError: jsonb("provision_error").$type<AgentProvisionErrorRow>(),
+    /** In-flight single-skill operation (push update); doubles as the 409 concurrency guard. */
+    pendingOp: jsonb("pending_op").$type<AgentPendingOpRow>(),
+    /** Per-agent OPENCODE_SERVER_PASSWORD, sealed by @companion/core secretbox. Write-only. */
+    serverPasswordEnc: text("server_password_enc"),
+    /** Cached session summaries (cap 10) so the detail view never wakes a sleeping sandbox. */
+    sessionsCache: jsonb("sessions_cache").$type<AgentSessionSummaryRow[]>().notNull().default([]),
+    /** Last measured snapshot-resume latency (the brief's success metric). */
+    lastResumeMs: integer("last_resume_ms"),
+    /** Sandbox inactivity timeout; drives the derived running|sleeping status. */
+    timeoutMs: integer("timeout_ms").notNull().default(300000),
+    lastActiveAt: timestamp("last_active_at", { withTimezone: true }),
+    /** Explicit operator pause: treated as sleeping even inside the activity window. */
+    pausedAt: timestamp("paused_at", { withTimezone: true }),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    uniqueOrgSlug: unique("agents_org_slug_uq").on(t.orgId, t.slug),
+    // Supports org-scoped composite FKs from agent_skills / agent_secrets (skills pattern).
+    uniqueOrgId: unique("agents_org_id_id_uq").on(t.orgId, t.id),
+    byScope: index("agents_org_scope_creator_idx").on(t.orgId, t.scope, t.creatorId),
+  }),
+);
+
+/**
+ * Skills pinned to an agent at an exact version. "Outdated" is computed live against the skill's
+ * current published version — never stored. Pushing an update replaces the folder in the sandbox,
+ * restarts the server, then bumps `version` + `pushed_at`.
+ */
+export const agentSkills = pgTable(
+  "agent_skills",
+  {
+    orgId: uuid("org_id").notNull(),
+    agentId: uuid("agent_id").notNull(),
+    skillId: uuid("skill_id").notNull(),
+    /** Pinned semver actually inside the sandbox. */
+    version: text("version").notNull(),
+    position: integer("position").notNull().default(0),
+    pushedAt: timestamp("pushed_at", { withTimezone: true }),
+    createdAt: now(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.agentId, t.skillId] }),
+    agentFk: foreignKey({
+      columns: [t.orgId, t.agentId],
+      foreignColumns: [agents.orgId, agents.id],
+      name: "agent_skills_agent_org_fk",
+    }).onDelete("cascade"),
+    skillFk: foreignKey({
+      columns: [t.orgId, t.skillId],
+      foreignColumns: [skills.orgId, skills.id],
+      name: "agent_skills_skill_org_fk",
+    }).onDelete("cascade"),
+    // Fan-out "affected agents" lookups: which agents pin this skill?
+    bySkill: index("agent_skills_org_skill_idx").on(t.orgId, t.skillId),
+  }),
+);
+
+/**
+ * Write-only, envelope-encrypted agent secrets (skill env vars). Values are sealed by
+ * @companion/core secretbox (AES-256-GCM; per-secret DEK wrapped by the COMPANION_SECRETS_KEY KEK;
+ * AAD = org:agent:key binds a blob to its exact row). The API exposes key names + set/not-set only;
+ * plaintext exists in memory solely at sandbox env-injection time.
+ */
+export const agentSecrets = pgTable(
+  "agent_secrets",
+  {
+    orgId: uuid("org_id").notNull(),
+    agentId: uuid("agent_id").notNull(),
+    key: text("key").notNull(),
+    wrappedDek: text("wrapped_dek").notNull(),
+    ciphertext: text("ciphertext").notNull(),
+    /** KEK rotation seam. */
+    keyVersion: integer("key_version").notNull().default(1),
+    createdBy: text("created_by").references(() => user.id, { onDelete: "set null" }),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.agentId, t.key] }),
+    agentFk: foreignKey({
+      columns: [t.orgId, t.agentId],
+      foreignColumns: [agents.orgId, agents.id],
+      name: "agent_secrets_agent_org_fk",
+    }).onDelete("cascade"),
+    keyCheck: check("agent_secrets_key_check", sql`${t.key} ~ '^[A-Za-z_][A-Za-z0-9_]*$'`),
+  }),
+);

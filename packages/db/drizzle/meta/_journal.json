@@ -225,6 +225,13 @@
       "when": 1781052000000,
       "tag": "0031_org_skill_naming_policy",
       "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1781052100000,
+      "tag": "0032_companion_agents",
+      "breakpoints": true
     }
   ]
 }
