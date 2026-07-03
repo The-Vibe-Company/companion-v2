@@ -18,6 +18,7 @@ import {
   statusDot,
   summaryLine,
   toModelProviders,
+  toolIcon,
   validateSecretKey,
 } from "./derive";
 
@@ -76,6 +77,21 @@ describe("status classes", () => {
     expect(statusDot("error")).toBe("vdot vdot--down");
     expect(statusBadge("running")).toBe("ls-badge--ok");
     expect(statusBadge("error")).toBe("vbadge--down");
+  });
+});
+
+describe("toolIcon", () => {
+  it("maps known tools to their glyphs and unknown tools to a code fallback", () => {
+    expect(toolIcon("bash")).toBe("terminal");
+    expect(toolIcon("Read")).toBe("file-text");
+    expect(toolIcon("write")).toBe("file-pen-line");
+    expect(toolIcon("edit")).toBe("square-pen");
+    expect(toolIcon("grep")).toBe("search");
+    expect(toolIcon("webfetch")).toBe("globe");
+    expect(toolIcon("list")).toBe("folder");
+    expect(toolIcon("task")).toBe("bot");
+    expect(toolIcon("todowrite")).toBe("check");
+    expect(toolIcon("some-mcp-tool")).toBe("code");
   });
 });
 

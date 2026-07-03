@@ -275,6 +275,46 @@ export function modelProviderConnected(groups: ModelGroupVM[], modelId: string):
   return false;
 }
 
+/* ---- Chat: per-tool icon ----------------------------------------------------------- */
+
+/**
+ * Map an OpenCode tool name to a Lucide icon name (see {@link Icon}) so a chat tool row reads at a
+ * glance — a shell run, a file read, a web fetch. Unknown tools fall back to a generic code glyph.
+ */
+export function toolIcon(tool: string): string {
+  switch (tool.toLowerCase()) {
+    case "bash":
+    case "shell":
+      return "terminal";
+    case "read":
+    case "cat":
+      return "file-text";
+    case "write":
+      return "file-pen-line";
+    case "edit":
+    case "patch":
+      return "square-pen";
+    case "grep":
+    case "glob":
+    case "search":
+      return "search";
+    case "webfetch":
+    case "fetch":
+      return "globe";
+    case "list":
+    case "ls":
+      return "folder";
+    case "task":
+    case "agent":
+      return "bot";
+    case "todowrite":
+    case "todoread":
+      return "check";
+    default:
+      return "code";
+  }
+}
+
 /* ---- Detail form: agent variable name validation ---------------------------------- */
 
 const ENV_VAR_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;

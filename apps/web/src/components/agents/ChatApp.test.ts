@@ -4,6 +4,7 @@ import React from "react";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { AgentChatEvent } from "@companion/contracts";
 import type { AgentVM } from "@/lib/types";
 import { ChatApp } from "./ChatApp";
 
@@ -258,6 +259,45 @@ describe("ChatApp", () => {
     expect(agentQueryMocks.fetchSessionMessages).toHaveBeenCalledTimes(1);
     expect(agentQueryMocks.fetchSessionMessages).toHaveBeenCalledWith("mail-digest", "sess-recent");
     expect(agentQueryMocks.createChatSession).not.toHaveBeenCalled();
+  });
+
+  it("shows the working indicator + titled tool row, and collapses the reasoning block when the answer starts", async () => {
+    const agent = agentVM({ sessions: [{ id: "sess-live", title: "Live", msgs: 1, when: "now" }] });
+    const { container } = await mountChatApp(agent);
+
+    // The stream is mocked; grab the event dispatcher ChatApp handed it and drive events by hand.
+    const onEvent = chatStreamMocks.openChatStream.mock.calls.at(-1)?.[2] as ((e: AgentChatEvent) => void) | undefined;
+    expect(typeof onEvent).toBe("function");
+    const fire = async (event: AgentChatEvent) => {
+      await act(async () => {
+        onEvent?.(event);
+      });
+    };
+
+    // session busy → working line with "Thinking…" + header spinner.
+    await fire({ type: "status", state: "busy", attempt: null, message: null });
+    expect(container.textContent).toContain("Thinking…");
+
+    // reasoning streams live and is visible.
+    await fire({ type: "reasoning.delta", part_id: "r1", delta: "weighing the options" });
+    expect(container.textContent).toContain("weighing the options");
+
+    // a tool run: titled row + "Running <title>…" working label.
+    await fire({ type: "tool.start", call_id: "c1", skill: "meeting-digest", tool: "bash", title: "Run digest", input: "{}" });
+    expect(container.textContent).toContain("Run digest");
+    expect(container.textContent).toContain("Running Run digest…");
+    await fire({ type: "tool.done", call_id: "c1", title: "Run digest", output: "3 files", duration_ms: 900 });
+
+    // the first answer token collapses the reasoning block (its body hides) and hides the working line.
+    await fire({ type: "text.delta", message_id: "m1", delta: "Here is the answer" });
+    expect(container.textContent).toContain("Here is the answer");
+    expect(container.textContent).not.toContain("weighing the options");
+    expect(container.textContent).toContain("Thought process");
+
+    // idle clears the working indicator entirely.
+    await fire({ type: "text.done", message_id: "m1" });
+    await fire({ type: "status", state: "idle", attempt: null, message: null });
+    expect(container.textContent).not.toContain("Running Run digest…");
   });
 
   it("New session clears the transcript and drops the session id", async () => {

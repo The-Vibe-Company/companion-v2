@@ -117,3 +117,30 @@
 
 /* Faint mono annotation (sleeping · wakes to update, sandbox ids, timings). */
 .ag-note { font-family: var(--font-mono); font-size: 11px; color: var(--color-faint); }
+
+/* Chat "the agent is working" indicator: three dots that fade in sequence (not a status dot — it
+   carries its own label, so DESIGN.md's dot-needs-a-word rule is satisfied by the adjacent text). */
+@keyframes ca-dot {
+  0%, 80%, 100% { opacity: 0.25; }
+  40% { opacity: 1; }
+}
+.ca-working__dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+.ca-working__dots > span {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--color-muted);
+  opacity: 0.25;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .ca-working__dots > span { animation: ca-dot 1.2s ease-in-out infinite; }
+  .ca-working__dots > span:nth-child(2) { animation-delay: 0.18s; }
+  .ca-working__dots > span:nth-child(3) { animation-delay: 0.36s; }
+}
+
+/* The currently-running tool row gets a faint accent edge so the live step stands out. */
+.ca-tool--running > button { border-color: var(--color-line-strong); }

@@ -149,23 +149,36 @@ export type ChatItem =
       /** "skill@version" when resolvable, else the raw tool name. */
       label: string;
       action: string;
+      /** Raw OpenCode tool name (bash/read/webfetch/…) — drives the per-tool icon. */
+      tool: string;
+      /** Resolved skill slug when the run maps to an installed skill, else null. */
+      skill: string | null;
       running: boolean;
       input: string;
       output: string;
       durationMs: number | null;
     }
+  | { kind: "reasoning"; id: string; partId: string; text: string; streaming: boolean }
   | { kind: "asst"; id: string; messageId: string | null; text: string; streaming: boolean };
+
+/** Live "is it running?" state, driven by OpenCode session.status — never inferred from content. */
+export interface WorkingState {
+  active: boolean;
+  label: string;
+}
 
 export interface ChatState {
   items: ChatItem[];
   /** True from send until the assistant reply completes (disables the composer). */
   busy: boolean;
+  /** The visible working indicator (session.status-driven). */
+  working: WorkingState;
   sessionId: string | null;
   error: string | null;
 }
 
 export function initChatState(): ChatState {
-  return { items: [], busy: false, sessionId: null, error: null };
+  return { items: [], busy: false, working: { active: false, label: "" }, sessionId: null, error: null };
 }
 
 export type ResolveToolLabel = (tool: string, skill: string | null) => { label: string; action: string };
@@ -205,7 +218,9 @@ function mapHistoryItem(item: AgentChatHistoryItem, resolveToolLabel: ResolveToo
         id: nextId("tool"),
         callId: item.call_id,
         label,
-        action,
+        action: item.title ?? action,
+        tool: item.tool,
+        skill: item.skill,
         running: false,
         input: item.input,
         output: item.output,
@@ -243,10 +258,26 @@ function applyEvent(state: ChatState, event: AgentChatEvent, resolveToolLabel: R
   switch (event.type) {
     case "ready":
       return { ...state, sessionId: event.session_id };
+    case "status": {
+      // The reliable "is it running?" signal from OpenCode's session.status — never inferred.
+      if (event.state === "idle") {
+        return { ...state, busy: false, working: { active: false, label: "" } };
+      }
+      if (event.state === "retry") {
+        const label = event.attempt ? `Retrying (attempt ${event.attempt})…` : "Retrying…";
+        return { ...state, busy: true, working: { active: true, label } };
+      }
+      // busy — keep a more specific "Running <tool>…" label if a tool is mid-flight.
+      const toolRunning = state.items.some((item) => item.kind === "tool" && item.running);
+      const label = toolRunning && state.working.label ? state.working.label : "Thinking…";
+      return { ...state, busy: true, working: { active: true, label } };
+    }
     case "tool.start": {
       const { label, action } = resolveToolLabel(event.tool, event.skill);
+      const runningLabel = event.title?.trim() ? event.title.trim() : label;
       return {
         ...state,
+        working: { active: true, label: `Running ${runningLabel}…` },
         items: [
           ...state.items,
           {
@@ -254,7 +285,9 @@ function applyEvent(state: ChatState, event: AgentChatEvent, resolveToolLabel: R
             id: nextId("tool"),
             callId: event.call_id,
             label,
-            action,
+            action: event.title ?? action,
+            tool: event.tool,
+            skill: event.skill,
             running: true,
             input: event.input,
             output: "",
@@ -264,24 +297,62 @@ function applyEvent(state: ChatState, event: AgentChatEvent, resolveToolLabel: R
       };
     }
     case "tool.done": {
+      const items = state.items.map((item) =>
+        item.kind === "tool" && item.callId === event.call_id
+          ? { ...item, running: false, action: event.title ?? item.action, output: event.output, durationMs: event.duration_ms }
+          : item,
+      );
+      // If nothing else is running but the session is still busy, fall back to a generic label.
+      const stillRunning = items.some((item) => item.kind === "tool" && item.running);
+      const working = stillRunning || !state.working.active ? state.working : { active: true, label: "Thinking…" };
+      return { ...state, items, working };
+    }
+    case "reasoning.delta": {
+      const existing = state.items.find(
+        (item): item is Extract<ChatItem, { kind: "reasoning" }> =>
+          item.kind === "reasoning" && item.partId === event.part_id,
+      );
+      const working = { active: true, label: state.working.label || "Thinking…" };
+      if (existing) {
+        return {
+          ...state,
+          working,
+          items: state.items.map((item) =>
+            item.kind === "reasoning" && item.partId === event.part_id
+              ? { ...item, text: item.text + event.delta }
+              : item,
+          ),
+        };
+      }
+      return {
+        ...state,
+        working,
+        items: [
+          ...state.items,
+          { kind: "reasoning", id: nextId("reasoning"), partId: event.part_id, text: event.delta, streaming: true },
+        ],
+      };
+    }
+    case "reasoning.done":
       return {
         ...state,
         items: state.items.map((item) =>
-          item.kind === "tool" && item.callId === event.call_id
-            ? { ...item, running: false, output: event.output, durationMs: event.duration_ms }
-            : item,
+          item.kind === "reasoning" && item.partId === event.part_id ? { ...item, streaming: false } : item,
         ),
       };
-    }
     case "text.delta": {
-      const existing = state.items.find(
+      // The answer is arriving — collapse any live reasoning block so it tucks itself away.
+      const items = state.items.map((item) =>
+        item.kind === "reasoning" && item.streaming ? { ...item, streaming: false } : item,
+      );
+      const existing = items.find(
         (item): item is Extract<ChatItem, { kind: "asst" }> =>
           item.kind === "asst" && item.messageId === event.message_id,
       );
       if (existing) {
         return {
           ...state,
-          items: state.items.map((item) =>
+          items: items.map((item) =>
             item.kind === "asst" && item.messageId === event.message_id
               ? { ...item, text: item.text + event.delta }
               : item,
@@ -291,7 +362,7 @@ function applyEvent(state: ChatState, event: AgentChatEvent, resolveToolLabel: R
       return {
         ...state,
         items: [
-          ...state.items,
+          ...items,
           { kind: "asst", id: nextId("asst"), messageId: event.message_id, text: event.delta, streaming: true },
         ],
       };
@@ -306,8 +377,8 @@ function applyEvent(state: ChatState, event: AgentChatEvent, resolveToolLabel: R
       };
     }
     case "session.idle":
-      return { ...state, busy: false };
+      return { ...state, busy: false, working: { active: false, label: "" } };
     case "error":
-      return { ...state, busy: false, error: event.message };
+      return { ...state, busy: false, working: { active: false, label: "" }, error: event.message };
   }
 }

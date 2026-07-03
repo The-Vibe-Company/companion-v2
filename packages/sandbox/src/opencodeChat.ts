@@ -1,6 +1,7 @@
 import { createOpencodeClient, type OpencodeClient } from "@opencode-ai/sdk";
 import type { AgentChatEvent, AgentChatHistoryItem } from "@companion/contracts";
 import { OPENCODE_SERVER_USERNAME } from "@companion/core";
+import { toolTitleAndSkill } from "./chatMapping";
 
 /**
  * The chat bridge to one agent's OpenCode server. Everything version-sensitive about the pinned
@@ -51,12 +52,15 @@ export async function loadSessionItems(client: OpencodeClient, sessionId: string
     // Tool runs render inline before the assistant text they belong to.
     for (const part of entry.parts) {
       if (part.type === "tool" && part.state.status === "completed") {
+        const inputJson = safeJson("input" in part.state ? part.state.input : {});
+        const { title, skill } = toolTitleAndSkill({ tool: part.tool, title: part.state.title, inputJson });
         items.push({
           kind: "tool",
           call_id: part.callID,
           tool: part.tool,
-          skill: null,
-          input: safeJson("input" in part.state ? part.state.input : {}),
+          skill,
+          title,
+          input: inputJson,
           output: truncate(part.state.output ?? "", 4000),
           duration_ms: part.state.time ? Math.max(0, part.state.time.end - part.state.time.start) : null,
         });
@@ -100,6 +104,9 @@ export async function* streamChatEvents(input: {
   // pinned SDK types don't model), so we diff against what we've emitted to derive the increment —
   // version-independent, no reliance on an optional `delta` field.
   const textEmitted = new Map<string, number>();
+  // Same cumulative-diff bookkeeping for the model's reasoning ("thinking") parts.
+  const reasoningEmitted = new Map<string, number>();
+  const doneReasoning = new Set<string>();
 
   // The signal must reach the SDK's underlying fetch: the SDK's SSE client checks `signal.aborted`
   // in its read loop and the fetch carries the signal, so aborting a stalled stream (no bytes
@@ -118,15 +125,18 @@ export async function* streamChatEvents(input: {
         if (part.sessionID !== sessionId) break;
         if (part.type === "tool") {
           const status = part.state.status;
+          const inputJson = "input" in part.state ? safeJson(part.state.input ?? {}) : "";
+          const title = "title" in part.state ? (part.state.title ?? null) : null;
+          const { title: humanTitle, skill } = toolTitleAndSkill({ tool: part.tool, title, inputJson });
           if ((status === "running" || status === "completed" || status === "error") && !startedTools.has(part.callID)) {
             startedTools.add(part.callID);
-            const inputPayload = "input" in part.state ? (part.state.input ?? {}) : {};
             yield {
               type: "tool.start",
               call_id: part.callID,
-              skill: null,
+              skill,
               tool: part.tool,
-              input: safeJson(inputPayload),
+              title: humanTitle,
+              input: inputJson,
             };
           }
           if (status === "completed" && !doneTools.has(part.callID)) {
@@ -134,6 +144,7 @@ export async function* streamChatEvents(input: {
             yield {
               type: "tool.done",
               call_id: part.callID,
+              title: humanTitle,
               output: truncate(part.state.output ?? "", 4000),
               duration_ms: part.state.time ? Math.max(0, part.state.time.end - part.state.time.start) : null,
             };
@@ -142,6 +153,7 @@ export async function* streamChatEvents(input: {
             yield {
               type: "tool.done",
               call_id: part.callID,
+              title: humanTitle,
               output: truncate(("error" in part.state ? String(part.state.error) : "tool failed") || "tool failed", 4000),
               duration_ms: null,
             };
@@ -162,11 +174,33 @@ export async function* streamChatEvents(input: {
             doneTexts.add(part.messageID);
             yield { type: "text.done", message_id: part.messageID };
           }
+        } else if (part.type === "reasoning") {
+          // The model's "thinking" streams like text (cumulative on updates); diff per part id.
+          const full = part.text ?? "";
+          const already = reasoningEmitted.get(part.id) ?? 0;
+          if (full.length > already) {
+            reasoningEmitted.set(part.id, full.length);
+            yield { type: "reasoning.delta", part_id: part.id, delta: full.slice(already) };
+          }
+          if (part.time?.end && !doneReasoning.has(part.id)) {
+            doneReasoning.add(part.id);
+            yield { type: "reasoning.done", part_id: part.id };
+          }
+        }
+        break;
+      }
+      case "session.status": {
+        if (event.properties.sessionID === sessionId) {
+          const st = event.properties.status;
+          if (st.type === "busy") yield { type: "status", state: "busy", attempt: null, message: null };
+          else if (st.type === "idle") yield { type: "status", state: "idle", attempt: null, message: null };
+          else if (st.type === "retry") yield { type: "status", state: "retry", attempt: st.attempt, message: st.message };
         }
         break;
       }
       case "session.idle": {
         if (event.properties.sessionID === sessionId) {
+          yield { type: "status", state: "idle", attempt: null, message: null };
           yield { type: "session.idle", session_id: sessionId };
         }
         break;

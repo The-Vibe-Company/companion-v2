@@ -10,7 +10,7 @@ import type { AgentVM } from "@/lib/types";
 import { Icon } from "../Icon";
 import { ChatMarkdown } from "./chatMarkdown";
 import { chatReducer, initChatState, openChatStream, type ChatItem } from "./chatStream";
-import { statusDot } from "./derive";
+import { statusDot, toolIcon } from "./derive";
 import { agentsRouteHref } from "./route";
 
 /**
@@ -165,7 +165,7 @@ function WakeBanner() {
   );
 }
 
-/** One collapsible skill-run row: chevron + spinner-or-check + label/action + duration meta. */
+/** One collapsible skill-run row: chevron + tool-type icon + label/title + skill chip + status. */
 function ToolRow({
   item,
   expanded,
@@ -176,7 +176,7 @@ function ToolRow({
   onToggle: () => void;
 }) {
   return (
-    <div style={{ alignSelf: "stretch", maxWidth: 620 }}>
+    <div style={{ alignSelf: "stretch", maxWidth: 620 }} className={item.running ? "ca-tool ca-tool--running" : "ca-tool"}>
       <button
         type="button"
         onClick={onToggle}
@@ -201,15 +201,21 @@ function ToolRow({
           size={12}
           style={{ transform: expanded ? "rotate(90deg)" : "none", transition: "transform 120ms var(--ease-out-quint)", flex: "none" }}
         />
-        {item.running ? (
-          <Icon name="loader" size={12} className="ls-spin" style={{ color: "var(--color-muted)" }} />
-        ) : (
-          <Icon name="check" size={12} style={{ color: "var(--color-ok)" }} />
+        <Icon name={toolIcon(item.tool)} size={13} style={{ color: "var(--color-muted)", flex: "none" }} />
+        <span style={{ color: "var(--color-fg)", fontWeight: 500, whiteSpace: "nowrap" }}>{item.label}</span>
+        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>{item.action}</span>
+        {item.skill && !item.label.startsWith(`${item.skill}@`) && (
+          <span className="chip" style={{ flex: "none" }} title="This run references this skill">
+            {item.skill}
+          </span>
         )}
-        <span style={{ color: "var(--color-fg)", fontWeight: 500 }}>{item.label}</span>
-        <span>{item.action}</span>
         <span style={{ flex: 1 }} />
-        <span style={{ color: "var(--color-faint)" }}>{item.running ? "running" : formatDurationSeconds(item.durationMs)}</span>
+        {item.running ? (
+          <Icon name="loader" size={12} className="ls-spin" style={{ color: "var(--color-muted)", flex: "none" }} />
+        ) : (
+          <Icon name="check" size={12} style={{ color: "var(--color-ok)", flex: "none" }} />
+        )}
+        <span style={{ color: "var(--color-faint)", flex: "none" }}>{item.running ? "running" : formatDurationSeconds(item.durationMs)}</span>
       </button>
       {expanded && (
         <div
@@ -228,6 +234,99 @@ function ToolRow({
           <pre style={TOOL_PRE}>{item.output || "…"}</pre>
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * The model's live "thinking". While it streams it renders expanded and muted; once the answer starts
+ * (`streaming` flips false via the reducer) it auto-collapses to a compact "Thought…" toggle the user
+ * can re-open. Expansion follows `streaming` unless the user has explicitly overridden it.
+ */
+function ReasoningRow({
+  item,
+  expanded,
+  onToggle,
+}: {
+  item: Extract<ChatItem, { kind: "reasoning" }>;
+  expanded: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <div style={{ alignSelf: "stretch", maxWidth: 620 }} className="ca-reason">
+      <button
+        type="button"
+        onClick={onToggle}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 7,
+          width: "100%",
+          textAlign: "left",
+          border: "none",
+          background: "none",
+          padding: "2px 0",
+          cursor: "pointer",
+          fontFamily: "var(--font-mono)",
+          fontSize: 11,
+          color: "var(--color-faint)",
+        }}
+      >
+        <Icon
+          name="chevron-right"
+          size={11}
+          style={{ transform: expanded ? "rotate(90deg)" : "none", transition: "transform 120ms var(--ease-out-quint)", flex: "none" }}
+        />
+        {item.streaming ? (
+          <Icon name="loader" size={11} className="ls-spin" style={{ flex: "none" }} />
+        ) : (
+          <Icon name="sparkles" size={11} style={{ flex: "none" }} />
+        )}
+        <span style={{ fontStyle: "italic" }}>{item.streaming ? "Thinking…" : "Thought process"}</span>
+      </button>
+      {expanded && (
+        <div
+          style={{
+            marginTop: 4,
+            paddingLeft: 11,
+            borderLeft: "2px solid var(--color-line)",
+            fontSize: "var(--text-xs)",
+            lineHeight: "var(--leading-normal)",
+            color: "var(--color-muted)",
+            fontStyle: "italic",
+            whiteSpace: "pre-wrap",
+          }}
+        >
+          {item.text}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** The "the agent is working" indicator: three animated dots + a live label, shown while it runs. */
+function WorkingLine({ label }: { label: string }) {
+  return (
+    <div
+      className="ca-working"
+      role="status"
+      aria-live="polite"
+      style={{
+        alignSelf: "flex-start",
+        display: "flex",
+        alignItems: "center",
+        gap: 9,
+        fontFamily: "var(--font-mono)",
+        fontSize: 11,
+        color: "var(--color-muted)",
+      }}
+    >
+      <span className="ca-working__dots" aria-hidden="true">
+        <span />
+        <span />
+        <span />
+      </span>
+      <span>{label || "Thinking…"}</span>
     </div>
   );
 }
@@ -256,7 +355,10 @@ export function ChatApp({
     () => (initialSessionId ?? agent.sessions[0]?.id ?? null) !== null,
   );
   const [text, setText] = useState("");
-  const [expandedTools, setExpandedTools] = useState<Set<string>>(() => new Set());
+  // Explicit per-row expand overrides. Absent → the row follows its default (a tool auto-expands
+  // while running, a reasoning block while it streams), so the in-progress step is open and prior
+  // ones tuck away — until the user clicks, which pins the row open or closed.
+  const [rowOverride, setRowOverride] = useState<Map<string, boolean>>(() => new Map());
   const [chat, dispatch] = useReducer(chatReducer, undefined, initChatState);
 
   /** `slug@pinnedVersion` when the tool run maps to a pin; otherwise the raw tool name. */
@@ -353,6 +455,10 @@ export function ChatApp({
   const statusWord = waking ? "waking" : status;
   const dotCls = waking ? "vdot vdot--warn" : statusDot(status);
   const sendDisabled = waking || resuming || creatingSession || chat.busy || status === "error" || !text.trim();
+  // The working line shows the live "it's running" state EXCEPT while assistant text is streaming
+  // (the streaming answer itself already reads as activity — no need to double it).
+  const streamingAssistant = chat.items.some((item) => item.kind === "asst" && item.streaming);
+  const showWorking = chat.working.active && !streamingAssistant;
 
   // Synchronous one-shot guard so a double-send (StrictMode / fast Enter) can't create two sessions
   // before `creatingSession` state has flushed.
@@ -408,17 +514,19 @@ export function ChatApp({
     setCreatingSession(false);
     setResuming(false);
     createGuardRef.current = false;
-    setExpandedTools(new Set());
+    setRowOverride(new Map());
     setText("");
     dispatch({ kind: "reset" });
     dispatch({ kind: "sys", text: `new session · ${agent.region}` });
   };
 
-  const toggleTool = (id: string) => {
-    setExpandedTools((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
+  /** Effective expansion: the user's pin if set, else the row's default (running/streaming). */
+  const isRowExpanded = (id: string, defaultOpen: boolean) => rowOverride.get(id) ?? defaultOpen;
+
+  const toggleRow = (id: string, defaultOpen: boolean) => {
+    setRowOverride((prev) => {
+      const next = new Map(prev);
+      next.set(id, !(prev.get(id) ?? defaultOpen));
       return next;
     });
   };
@@ -480,6 +588,9 @@ export function ChatApp({
               </span>
               <span className={dotCls} />
               <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--color-muted)" }}>{statusWord}</span>
+              {chat.working.active && (
+                <Icon name="loader" size={12} className="ls-spin" style={{ color: "var(--color-muted)", flex: "none" }} aria-label="working" />
+              )}
             </div>
             <span style={{ flex: 1 }} />
             {!mobile && (
@@ -538,7 +649,24 @@ export function ChatApp({
                 );
               }
               if (item.kind === "tool") {
-                return <ToolRow key={item.id} item={item} expanded={expandedTools.has(item.id)} onToggle={() => toggleTool(item.id)} />;
+                return (
+                  <ToolRow
+                    key={item.id}
+                    item={item}
+                    expanded={isRowExpanded(item.id, item.running)}
+                    onToggle={() => toggleRow(item.id, item.running)}
+                  />
+                );
+              }
+              if (item.kind === "reasoning") {
+                return (
+                  <ReasoningRow
+                    key={item.id}
+                    item={item}
+                    expanded={isRowExpanded(item.id, item.streaming)}
+                    onToggle={() => toggleRow(item.id, item.streaming)}
+                  />
+                );
               }
               return (
                 <div key={item.id} style={{ maxWidth: "68ch", fontSize: "var(--text-sm)", color: "var(--color-fg)", lineHeight: "var(--leading-relaxed)" }}>
@@ -546,6 +674,7 @@ export function ChatApp({
                 </div>
               );
             })}
+            {showWorking && <WorkingLine label={chat.working.label} />}
             {chat.error && (
               <div style={{ textAlign: "center", fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--color-danger)" }} role="alert">
                 {chat.error}

@@ -74,9 +74,9 @@ describe("chatReducer", () => {
 
   it("merges tool.done into the matching tool.start by call id", () => {
     let state = initChatState();
-    state = apply(state, { type: "tool.start", call_id: "c1", skill: "meeting-digest", tool: "digest", input: "{}" });
-    state = apply(state, { type: "tool.start", call_id: "c2", skill: null, tool: "bash", input: "ls" });
-    state = apply(state, { type: "tool.done", call_id: "c1", output: "ok", duration_ms: 1400 });
+    state = apply(state, { type: "tool.start", call_id: "c1", skill: "meeting-digest", tool: "digest", title: null, input: "{}" });
+    state = apply(state, { type: "tool.start", call_id: "c2", skill: null, tool: "bash", title: null, input: "ls" });
+    state = apply(state, { type: "tool.done", call_id: "c1", title: null, output: "ok", duration_ms: 1400 });
     const tools = state.items.filter((item) => item.kind === "tool");
     expect(tools).toHaveLength(2);
     const first = tools[0];
@@ -122,6 +122,7 @@ describe("chatReducer", () => {
           call_id: "c1",
           tool: "digest",
           skill: "meeting-digest",
+          title: "Summarize meeting",
           input: "{}",
           output: "done",
           duration_ms: 1200,
@@ -144,6 +145,70 @@ describe("chatReducer", () => {
       streaming: false,
       text: "on it",
     });
+  });
+
+  it("drives the working indicator from session.status events", () => {
+    let state = initChatState();
+    state = apply(state, { type: "status", state: "busy", attempt: null, message: null });
+    expect(state.working).toEqual({ active: true, label: "Thinking…" });
+    expect(state.busy).toBe(true);
+
+    state = apply(state, { type: "status", state: "retry", attempt: 2, message: "rate limited" });
+    expect(state.working).toEqual({ active: true, label: "Retrying (attempt 2)…" });
+
+    state = apply(state, { type: "status", state: "idle", attempt: null, message: null });
+    expect(state.working).toEqual({ active: false, label: "" });
+    expect(state.busy).toBe(false);
+  });
+
+  it("carries tool title/skill/tool onto the item and labels the working line with it", () => {
+    let state = initChatState();
+    state = apply(state, {
+      type: "tool.start",
+      call_id: "c1",
+      skill: "email-digest",
+      tool: "bash",
+      title: "Run digest",
+      input: '{"command":"python3 run.py"}',
+    });
+    const tool = state.items.find((item) => item.kind === "tool");
+    expect(tool && tool.kind === "tool" ? tool : null).toMatchObject({
+      tool: "bash",
+      skill: "email-digest",
+      action: "Run digest",
+      running: true,
+    });
+    expect(state.working).toEqual({ active: true, label: "Running Run digest…" });
+
+    state = apply(state, { type: "tool.done", call_id: "c1", title: "Run digest", output: "3 files", duration_ms: 900 });
+    const done = state.items.find((item) => item.kind === "tool");
+    expect(done && done.kind === "tool" ? done.running : true).toBe(false);
+  });
+
+  it("streams a reasoning block and auto-collapses it when the answer starts", () => {
+    let state = initChatState();
+    state = apply(state, { type: "reasoning.delta", part_id: "r1", delta: "Let me " });
+    state = apply(state, { type: "reasoning.delta", part_id: "r1", delta: "think." });
+    const reasoning = state.items.find((item) => item.kind === "reasoning");
+    expect(reasoning && reasoning.kind === "reasoning" ? { text: reasoning.text, streaming: reasoning.streaming } : null).toEqual({
+      text: "Let me think.",
+      streaming: true,
+    });
+    expect(state.working.active).toBe(true);
+
+    // The first assistant token tucks the reasoning block away.
+    state = apply(state, { type: "text.delta", message_id: "m1", delta: "Answer" });
+    const collapsed = state.items.find((item) => item.kind === "reasoning");
+    expect(collapsed && collapsed.kind === "reasoning" ? collapsed.streaming : true).toBe(false);
+    expect(state.items.some((item) => item.kind === "asst")).toBe(true);
+  });
+
+  it("marks a reasoning block done on reasoning.done", () => {
+    let state = initChatState();
+    state = apply(state, { type: "reasoning.delta", part_id: "r1", delta: "hmm" });
+    state = apply(state, { type: "reasoning.done", part_id: "r1" });
+    const reasoning = state.items.find((item) => item.kind === "reasoning");
+    expect(reasoning && reasoning.kind === "reasoning" ? reasoning.streaming : true).toBe(false);
   });
 
   it("clears the transcript back to an empty session on reset", () => {

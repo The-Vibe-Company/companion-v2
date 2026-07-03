@@ -364,6 +364,7 @@ export const agentChatHistoryItemSchema = z.discriminatedUnion("kind", [
     call_id: z.string(),
     tool: z.string(),
     skill: z.string().nullable().default(null),
+    title: z.string().nullable().default(null),
     input: z.string().default(""),
     output: z.string().default(""),
     duration_ms: z.number().int().nonnegative().nullable().default(null),
@@ -381,6 +382,9 @@ export type AgentSessionMessagesResponse = z.infer<typeof agentSessionMessagesRe
  * The API translates pinned-SDK OpenCode events into this stable shape so OpenCode's near-daily
  * churn stays server-side, next to the pinned `@opencode-ai/sdk`.
  */
+export const agentWorkingStateSchema = z.enum(["busy", "idle", "retry"]);
+export type AgentWorkingState = z.infer<typeof agentWorkingStateSchema>;
+
 export const agentChatEventSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("ready"), session_id: z.string() }),
   z.object({
@@ -389,16 +393,32 @@ export const agentChatEventSchema = z.discriminatedUnion("type", [
     /** Best-effort skill slug when the tool run maps to an installed skill. */
     skill: z.string().nullable().default(null),
     tool: z.string(),
+    /** OpenCode's human-readable summary of the run (e.g. "Read SKILL.md"), when available. */
+    title: z.string().nullable().default(null),
     input: z.string().default(""),
   }),
   z.object({
     type: z.literal("tool.done"),
     call_id: z.string(),
+    title: z.string().nullable().default(null),
     output: z.string().default(""),
     duration_ms: z.number().int().nonnegative().nullable().default(null),
   }),
   z.object({ type: z.literal("text.delta"), message_id: z.string(), delta: z.string() }),
   z.object({ type: z.literal("text.done"), message_id: z.string() }),
+  /** The model's reasoning ("thinking") stream — surfaced live, collapses when the answer starts. */
+  z.object({ type: z.literal("reasoning.delta"), part_id: z.string(), delta: z.string() }),
+  z.object({ type: z.literal("reasoning.done"), part_id: z.string() }),
+  /**
+   * Live working state from OpenCode's `session.status` — the reliable "is it running?" signal
+   * (busy while the model works, retry with an attempt/message, idle when done).
+   */
+  z.object({
+    type: z.literal("status"),
+    state: agentWorkingStateSchema,
+    attempt: z.number().int().positive().nullable().default(null),
+    message: z.string().nullable().default(null),
+  }),
   z.object({ type: z.literal("session.idle"), session_id: z.string() }),
   z.object({ type: z.literal("error"), message: z.string() }),
 ]);
