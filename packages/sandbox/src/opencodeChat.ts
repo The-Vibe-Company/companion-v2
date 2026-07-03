@@ -95,6 +95,11 @@ export async function* streamChatEvents(input: {
   const startedTools = new Set<string>();
   const doneTools = new Set<string>();
   const doneTexts = new Set<string>();
+  // Length already emitted per text part id. `message.part.updated` carries the CUMULATIVE text of
+  // an assistant text part (the server also emits a separate `message.part.delta` event that the
+  // pinned SDK types don't model), so we diff against what we've emitted to derive the increment —
+  // version-independent, no reliance on an optional `delta` field.
+  const textEmitted = new Map<string, number>();
 
   // The signal must reach the SDK's underlying fetch: the SDK's SSE client checks `signal.aborted`
   // in its read loop and the fetch carries the signal, so aborting a stalled stream (no bytes
@@ -142,7 +147,15 @@ export async function* streamChatEvents(input: {
             };
           }
         } else if (part.type === "text" && assistantMessages.has(part.messageID)) {
-          if (delta) {
+          // Emit the increment between the cumulative text and what we've already streamed. Falls
+          // back to the SDK's optional `delta` only when a part id isn't available.
+          const key = part.id ?? part.messageID;
+          const full = part.text ?? "";
+          const already = textEmitted.get(key) ?? 0;
+          if (full.length > already) {
+            textEmitted.set(key, full.length);
+            yield { type: "text.delta", message_id: part.messageID, delta: full.slice(already) };
+          } else if (delta && already === 0) {
             yield { type: "text.delta", message_id: part.messageID, delta };
           }
           if (part.time?.end && !doneTexts.has(part.messageID)) {
