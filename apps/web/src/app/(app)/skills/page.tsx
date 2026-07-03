@@ -1,5 +1,6 @@
 import { redirect } from "next/navigation";
 import type {
+  AgentsListResponse,
   LabelsResponse,
   LocalSkillRow,
   SkillFilterPreferences,
@@ -46,7 +47,7 @@ export default async function SkillsPage({
     () => null,
   );
 
-  const [mineResult, orgResult, filterPreferences, personalLabelsResult, labelsResult] =
+  const [mineResult, orgResult, filterPreferences, personalLabelsResult, labelsResult, agentsMine, agentsOrg] =
     await Promise.all([
       // "My Skills": the caller's authored personal skills + org skills they installed.
       serverApiFetch<SkillListRow[]>("/v1/skills?lib=mine", { headers: orgHeaders }).catch(() => null),
@@ -56,6 +57,9 @@ export default async function SkillsPage({
       // Best-effort: each tree degrades gracefully to empty if its fetch fails.
       serverApiFetch<LabelsResponse>("/v1/personal-labels", { headers: orgHeaders }).catch(() => EMPTY_LABELS),
       serverApiFetch<LabelsResponse>("/v1/labels", { headers: orgHeaders }).catch(() => EMPTY_LABELS),
+      // Best-effort agents lists for the sidebar Agents roots (hidden while the API is unavailable).
+      serverApiFetch<AgentsListResponse>("/v1/agents?lib=mine", { headers: orgHeaders }).catch(() => null),
+      serverApiFetch<AgentsListResponse>("/v1/agents?lib=org", { headers: orgHeaders }).catch(() => null),
     ]);
   if (!mineResult || !orgResult || !filterPreferences) return <WorkspaceLoadError />;
   const mineSkills = mineResult.map(mapSkill);
@@ -82,6 +86,7 @@ export default async function SkillsPage({
       currentOrg={current}
       initialRoute={initialRoute}
       initialRouteSource={initialRouteSource}
+      initialAgentsNav={{ mine: agentsMine, org: agentsOrg }}
     />
   );
 }
