@@ -416,7 +416,9 @@ export const agentChatEventSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("status"),
     state: agentWorkingStateSchema,
-    attempt: z.number().int().positive().nullable().default(null),
+    // `nonnegative`, not `positive`: OpenCode's retry counter may be 0-based, and the client now
+    // schema-validates events (a `positive()` bound would silently drop a legitimate `attempt: 0`).
+    attempt: z.number().int().nonnegative().nullable().default(null),
     message: z.string().nullable().default(null),
   }),
   z.object({ type: z.literal("session.idle"), session_id: z.string() }),

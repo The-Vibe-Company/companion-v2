@@ -55,6 +55,31 @@ describe("decodeChatEvent", () => {
     expect(decodeChatEvent({ event: null, id: null, data: '{"noType":1}' })).toBeNull();
     expect(decodeChatEvent({ event: null, id: null, data: "" })).toBeNull();
   });
+
+  it("schema-validates events: applies defaults and drops malformed frames", () => {
+    // Defaults are applied so downstream reads are total (attempt/message → null).
+    expect(decodeChatEvent({ event: null, id: null, data: '{"type":"status","state":"busy"}' })).toEqual({
+      type: "status",
+      state: "busy",
+      attempt: null,
+      message: null,
+    });
+    // A 0-based retry attempt is accepted (nonnegative), not dropped.
+    expect(decodeChatEvent({ event: null, id: null, data: '{"type":"status","state":"retry","attempt":0}' })).toMatchObject({
+      type: "status",
+      state: "retry",
+      attempt: 0,
+    });
+    expect(decodeChatEvent({ event: null, id: null, data: '{"type":"reasoning.delta","part_id":"r1","delta":"x"}' })).toEqual({
+      type: "reasoning.delta",
+      part_id: "r1",
+      delta: "x",
+    });
+    // Malformed frames (unknown type / missing required fields) are dropped, not fed to the reducer.
+    expect(decodeChatEvent({ event: null, id: null, data: '{"type":"totally.unknown"}' })).toBeNull();
+    expect(decodeChatEvent({ event: null, id: null, data: '{"type":"text.delta","message_id":"m1"}' })).toBeNull();
+    expect(decodeChatEvent({ event: null, id: null, data: '{"type":"status","state":"nope"}' })).toBeNull();
+  });
 });
 
 describe("chatReducer", () => {

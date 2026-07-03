@@ -1,4 +1,4 @@
-import type { AgentChatEvent, AgentChatHistoryItem } from "@companion/contracts";
+import { agentChatEventSchema, type AgentChatEvent, type AgentChatHistoryItem } from "@companion/contracts";
 
 /**
  * Pure pieces of the chat surface: an incremental SSE frame parser (the stream is consumed via
@@ -66,11 +66,11 @@ export function createSseParser(): SseParser {
 export function decodeChatEvent(frame: SseFrame): AgentChatEvent | null {
   if (!frame.data) return null;
   try {
-    const parsed: unknown = JSON.parse(frame.data);
-    if (typeof parsed === "object" && parsed !== null && "type" in parsed) {
-      return parsed as AgentChatEvent;
-    }
-    return null;
+    // Validate against the contract union rather than trusting the wire shape: a malformed frame
+    // (partial/renamed fields from an OpenCode churn) is dropped, not fed to the reducer. Defaults
+    // (`title`/`attempt`/`message` → null) are applied here, so downstream reads are total.
+    const result = agentChatEventSchema.safeParse(JSON.parse(frame.data));
+    return result.success ? result.data : null;
   } catch {
     return null;
   }
