@@ -59,7 +59,8 @@ docs/         # vision / product / design / PRD
 
 **Anchor files** (the contracts the system hinges on — see `docs/design.md`):
 - `packages/db/schema.ts` — all entities + the `org_id` tenant column, the `creator_id` provenance/owner column and the `scope` (personal/org) column on skills; the `labels`/`skill_labels` (org) and `personal_labels`/`personal_skill_labels` (per-user) folder tables.
-- `packages/core/src/authz.ts` — typed RBAC: tenant/membership gate + org-role capability gate, plus `canAccessSkill`/`canManagePersonalSkill` (personal-skill privacy: owner-only, no admin override). Org skills carry no per-resource gate; personal skills do.
+- `packages/core/src/authz.ts` — typed RBAC: tenant/membership gate + org-role capability gate, plus `canAccessSkill`/`canManagePersonalSkill` (personal-skill privacy: owner-only, no admin override) and the mirrored `canAccessAgent`/`canManageAgent`. Org skills carry no per-resource gate; personal skills do.
+- `packages/core/src/agentRuntime.ts` — the Companion Agents runtime port (`AgentRuntime`), implemented by `packages/sandbox` (pinned `@vercel/sandbox` + `@opencode-ai/sdk`); `packages/core/src/agents.ts` holds the agent services + 4-step provisioning executor (see `docs/design.md` → "Companion Agents").
 - `packages/providers/port.ts` — the `DeploymentProvider` interface + neutral `DeploySpec`.
 - `apps/worker/reconcile.ts` — observe → diff → apply → drift loop.
 - `packages/hermes/configBuilder.ts` — agent + skills + vault + model + secrets → `DeploySpec`.

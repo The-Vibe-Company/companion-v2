@@ -418,3 +418,82 @@ Skill archives are stored under `{org_id}/{slug}/{version}.tar.gz` in the `skill
 using the slug at publish time; a later rename does not move historical archive objects. The
 per-version package endpoint repackages them as `.zip` on the fly. Clients never receive S3
 admin credentials.
+
+## Companion Agents (phase 1)
+
+Agents are the first runtime pillar shipped on the portal: an **agent** is a declared row of intent
+for a named, persistent **Vercel Sandbox** (Firecracker microVM) forked from a **golden snapshot**
+with a pinned **OpenCode** server pre-installed, running the org's curated skills. The control plane
+(this repo) provisions, updates and proxies chat; it never executes skill content itself — bytes are
+pushed into the sandbox and run there.
+
+Vocabulary: an agent **pins** skills at exact versions (`agent_skills`); the **golden snapshot** is
+created once per `OPENCODE_VERSION` by `pnpm --filter @companion/sandbox golden`; the runtime
+provider seam is the `AgentRuntime` port (`packages/core/src/agentRuntime.ts`), implemented by
+`packages/sandbox` (`@vercel/sandbox` + `@opencode-ai/sdk`, both pinned exactly — OpenCode releases
+break near-daily).
+
+### Data model
+
+- `agents` — one row per agent: `org_id`, unique `slug`, `scope` (`personal` = creator-only like
+  personal skills, NO admin override; `org` = flat), `instructions` (markdown → the agent definition
+  file), `model` (`provider/model-id` from the models.dev catalog), `lifecycle`
+  (`provisioning | ready | error`), sandbox identity (`sandbox_name` = `cmp-<org8>-<slug>-a<attempt>`,
+  domain, golden provenance), `provision_attempt`/`provision_steps`/`provision_error` (persisted
+  pipeline progress — survives reloads and API restarts), `pending_op` (in-flight skill push; doubles
+  as the 409 concurrency guard), `server_password_enc`, `sessions_cache` (cap 10 — the detail view
+  never wakes a sandbox), `last_resume_ms`, `timeout_ms`, `last_active_at`, `paused_at`.
+- **Status is derived, never stored**: `provisioning`/`error` from the lifecycle, otherwise
+  `running` while `now - last_active_at < timeout_ms` and not paused, else `sleeping`. Rendering a
+  list therefore cannot wake a sandbox.
+- `agent_skills` — pinned versions; "outdated" is computed live against `skills.current_version_id`.
+- `agent_secrets` — write-only values, envelope-encrypted (AES-256-GCM; per-secret DEK wrapped by
+  the `COMPANION_SECRETS_KEY` KEK; AAD `org:agent:key` binds a blob to its exact row —
+  `packages/core/src/secretbox.ts`). The API returns key names + set/not-set only. Plaintext exists
+  in memory solely while building the serve env.
+- All three tables carry the tenant RLS policy (migration `0032_companion_agents.sql`).
+
+### Provisioning pipeline
+
+`provisionAgent` (packages/core/src/agents.ts) drives four steps that map 1:1 to the UI: **fork**
+the golden snapshot (per-attempt sandbox name → retries can never double-provision), **push** the
+agent markdown + `opencode.json` + skill folders (extracted server-side from the stored `.tar.gz`
+with the same traversal/symlink guards as every other reader; a missing *required* secret fails this
+step by design — set it on the detail view, then retry), **serve** (`opencode serve` detached with
+the injected env), **health** (poll the public domain with basic auth; retries absorb the
+post-resume router-cache staleness). Failures persist `{message, sandbox_name, region, step,
+exit_code}` and stop the sandbox best-effort; **retry forks fresh** (`attempt++`, previous sandbox
+destroyed). `withTenantContext` opens a transaction, so the executor interleaves short tenant
+transactions with un-transacted runtime calls — no sandbox call ever runs inside one. The pipeline
+runs fire-and-forget in-process (deduped per agent); a poll that finds `provisioning` with no live
+job flips the row to a designed "interrupted" error. A worker/Temporal takes this over
+post-phase-1.
+
+Sandbox processes do not survive a snapshot resume: every wake (`pause`/`wake`, chat entry on a
+sleeping agent, skill pushes to sleeping agents) relaunches `opencode serve` with a freshly
+decrypted env and records the measured `last_resume_ms`.
+
+### Chat proxy
+
+The browser never sees the sandbox: `/v1/agents/:slug/events` (SSE) and the session/prompt routes
+proxy through the API, which decrypts the per-agent basic-auth password server-side.
+`packages/sandbox/src/opencodeChat.ts` translates pinned-SDK OpenCode events into the stable
+`AgentChatEvent` vocabulary in `@companion/contracts` (tool.start/tool.done/text.delta/…), so SDK
+churn is absorbed in one file. Prompts use `promptAsync`; deltas arrive on the stream; the
+sessions cache updates without waking anything.
+
+### Endpoints (session-only — PATs are rejected; not a skills API surface)
+
+`GET/POST /v1/agents`, `GET /v1/agents/models` (models.dev catalog filtered to configured provider
+keys, tool-capable models only), `GET /v1/agents/:slug`, `GET /v1/agents/:slug/provision` +
+`POST …/provision/retry`, `PUT …/secrets`, `POST …/pause` / `…/wake`, `DELETE /v1/agents/:slug`
+(typed-name confirmation), `GET /v1/agents/skill-updates/:skillSlug` +
+`POST /v1/agents/:slug/skills/:skillSlug/push` (fan-out is client-driven sequential; per-agent
+phases in `pending_op`), `POST …/sessions`, `POST …/sessions/:id/prompt`, `GET …/events?session=`.
+
+### Non-goals (phase 1)
+
+Slack surfaces, public unauthenticated chat URLs, multi-user chat auth, billing, a reconcile
+worker (the desired-state rows are the seam), and golden-snapshot management UI
+(`COMPANION_GOLDEN_SNAPSHOT_ID` env is the single golden). Real-sandbox verification lives in
+`pnpm --filter @companion/sandbox smoke:vercel` (cred-gated, not CI).

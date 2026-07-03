@@ -1388,3 +1388,39 @@ export async function getProvisionProgress(input: {
     error: (row.provisionError as ProvisionError | null) ?? null,
   };
 }
+
+/**
+ * Crash recovery: a row still `provisioning` with NO live in-process job means the control plane
+ * restarted (or the job died) mid-pipeline. Flip it to the designed error state so the UI offers
+ * the normal fresh-fork retry (safe by construction — attempt-keyed sandbox names).
+ */
+export async function markProvisionInterrupted(input: {
+  actor: ActorContext;
+  orgId: string;
+  slug: string;
+  database?: Db;
+}): Promise<void> {
+  const database = input.database ?? db;
+  await assertMember(database, input.actor, input.orgId);
+  const row = await loadAgentRow(database, input.orgId, input.slug);
+  if (!row || row.lifecycle !== "provisioning") return;
+  const steps = (row.provisionSteps as ProvisionStep[]).map((step) =>
+    step.state === "running" ? { ...step, state: "failed" as const } : step,
+  );
+  await database
+    .update(schema.agents)
+    .set({
+      lifecycle: "error",
+      provisionSteps: steps,
+      provisionError: {
+        message: "Error: provisioning was interrupted (control plane restarted)",
+        sandbox_name: row.sandboxName,
+        region: row.region,
+        step: steps.find((s) => s.state === "failed")?.key ?? null,
+        exit_code: null,
+        detail: "No provisioning job is running for this agent. Retry provisions a fresh fork.",
+      },
+      updatedAt: new Date(),
+    })
+    .where(eq(schema.agents.id, row.id));
+}

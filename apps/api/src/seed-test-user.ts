@@ -13,6 +13,7 @@ import { closeDb, db, schema } from "@companion/db";
 import { buildNormalizedCompanionJson, packDir, parseFrontmatter, toStoredSkillVersionManifest } from "@companion/skills";
 import { putSkillArchive, skillArchiveKey } from "@companion/storage";
 import { and, eq, inArray } from "drizzle-orm";
+import { randomUUID } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -342,6 +343,150 @@ async function seedDependencyShowcase(actor: ActorContext, orgId: string): Promi
   console.log("Seeded dependency showcase (cycle, missing, archived)");
 }
 
+
+/**
+ * Demo Companion Agents so the /agents console renders a realistic fleet offline (list, detail,
+ * banner, fan-out). Display-only rows: no real sandbox behind them — provisioning/chat need real
+ * Vercel credentials and are exercised by `pnpm --filter @companion/sandbox smoke:vercel`.
+ */
+async function seedDemoAgents(actor: ActorContext): Promise<void> {
+  const orgs = await listOrgs(actor);
+  if (orgs.length === 0) return;
+  const orgId = orgs[0]!.org_id;
+
+  const existing = await db.select({ id: schema.agents.id }).from(schema.agents).where(eq(schema.agents.orgId, orgId));
+  if (existing.length > 0) return;
+
+  const skills = await db
+    .select({ id: schema.skills.id, slug: schema.skills.slug, currentVersionId: schema.skills.currentVersionId })
+    .from(schema.skills)
+    .where(eq(schema.skills.orgId, orgId));
+  const versions = await db
+    .select({ id: schema.skillVersions.id, version: schema.skillVersions.version })
+    .from(schema.skillVersions)
+    .where(eq(schema.skillVersions.orgId, orgId));
+  const currentVersionOf = (slug: string): { id: string; version: string } | null => {
+    const skill = skills.find((s) => s.slug === slug);
+    const version = skill?.currentVersionId ? versions.find((v) => v.id === skill.currentVersionId) : null;
+    return skill && version ? { id: skill.id, version: version.version } : null;
+  };
+
+  const steps = (state: "done" | "failed", failAt?: string) =>
+    [
+      { key: "fork", label: "Fork snapshot", detail: "golden-snap → sb", state: "done", duration_ms: 1200 },
+      { key: "push", label: "Push 1 skill", detail: "", state: failAt === "push" ? "failed" : state, duration_ms: 1600 },
+      { key: "serve", label: "Start server", detail: "opencode serve --port 4096", state: failAt ? "pending" : state, duration_ms: 1400 },
+      { key: "health", label: "Health check", detail: "GET /doc → 200", state: failAt ? "pending" : state, duration_ms: 600 },
+    ] as (typeof schema.agents.$inferInsert)["provisionSteps"];
+
+  const fleet: Array<{
+    slug: string;
+    scope: "personal" | "org";
+    client: string | null;
+    group: string | null;
+    instructions: string;
+    pins: string[];
+    lifecycle: "ready" | "error";
+    lastActiveMinutesAgo: number | null;
+    sessions?: Array<{ id: string; title: string; message_count: number; minutesAgo: number }>;
+    error?: boolean;
+  }> = [
+    {
+      slug: "report-writer",
+      scope: "org",
+      client: "Acme",
+      group: "Ops",
+      instructions: "Turns raw findings into polished markdown reports for the ops channel.",
+      pins: ["markdown-report", "log-parser"],
+      lifecycle: "ready",
+      lastActiveMinutesAgo: 4,
+      sessions: [
+        { id: "ses-seed-1", title: "Weekly ops report", message_count: 18, minutesAgo: 4 },
+        { id: "ses-seed-2", title: "Log anomaly digest", message_count: 6, minutesAgo: 60 * 26 },
+      ],
+    },
+    {
+      slug: "inbox-digest",
+      scope: "personal",
+      client: null,
+      group: "Ops",
+      instructions: "Sweeps the inbox nightly and files a digest.",
+      pins: ["email-digest"],
+      lifecycle: "ready",
+      lastActiveMinutesAgo: 60 * 24,
+      sessions: [{ id: "ses-seed-3", title: "Nightly sweep", message_count: 4, minutesAgo: 60 * 24 }],
+    },
+    {
+      slug: "incident-triage",
+      scope: "org",
+      client: "Acme",
+      group: "Support",
+      instructions: "Summarizes incidents and drafts follow-ups.",
+      pins: ["incident-summary"],
+      lifecycle: "error",
+      lastActiveMinutesAgo: null,
+      error: true,
+    },
+  ];
+
+  for (const spec of fleet) {
+    const pins = spec.pins.map(currentVersionOf).filter((p): p is { id: string; version: string } => p !== null);
+    if (pins.length === 0) continue;
+    const agentId = randomUUID();
+    const sandboxName = `cmp-${orgId.replace(/-/g, "").slice(0, 8)}-${spec.slug}-a1`;
+    await db.insert(schema.agents).values({
+      id: agentId,
+      orgId,
+      slug: spec.slug,
+      scope: spec.scope,
+      creatorId: actor.id,
+      clientLabel: spec.client,
+      groupLabel: spec.group,
+      instructions: spec.instructions,
+      model: "anthropic/claude-sonnet-4-5",
+      region: "iad1",
+      lifecycle: spec.lifecycle,
+      sandboxName,
+      sandboxId: spec.error ? null : sandboxName,
+      sandboxDomain: null,
+      goldenSnapshotId: null,
+      opencodeVersion: process.env.OPENCODE_VERSION ?? null,
+      provisionAttempt: 1,
+      provisionSteps: steps(spec.error ? "failed" : "done", spec.error ? "push" : undefined),
+      provisionError: spec.error
+        ? {
+            message: `Error: push skills: incident-summary requires PAGERDUTY_API_KEY`,
+            sandbox_name: sandboxName,
+            region: "iad1",
+            step: "push",
+            exit_code: null,
+            detail: "No secret named PAGERDUTY_API_KEY is set on this agent.\nThe sandbox was stopped. Set the secret, then retry.",
+          }
+        : null,
+      sessionsCache: (spec.sessions ?? []).map((session) => ({
+        id: session.id,
+        title: session.title,
+        message_count: session.message_count,
+        last_at: new Date(Date.now() - session.minutesAgo * 60_000).toISOString(),
+      })),
+      timeoutMs: 300000,
+      lastActiveAt: spec.lastActiveMinutesAgo === null ? null : new Date(Date.now() - spec.lastActiveMinutesAgo * 60_000),
+    });
+    await db.insert(schema.agentSkills).values(
+      pins.map((pin, index) => ({
+        orgId,
+        agentId,
+        skillId: pin.id,
+        // Pin the first agent one version behind nothing exists to be behind of in a fresh seed;
+        // keep the current version — the update banner appears naturally after the next publish.
+        version: pin.version,
+        position: index,
+      })),
+    );
+  }
+  console.log("Seeded demo Companion Agents (display-only; no live sandboxes).");
+}
+
 async function createAuthUser(input: { email: string; password: string; name: string }): Promise<void> {
   const { auth } = await import("@companion/auth");
   const authUrl = process.env.BETTER_AUTH_URL ?? process.env.COMPANION_API_URL ?? "http://127.0.0.1:3001";
@@ -399,6 +544,7 @@ async function main(): Promise<void> {
   }
   await markOnboarded(actor);
   await seedDemoContent(actor);
+  await seedDemoAgents(actor);
 
   console.log(created ? createdMessage(email, password) : `Local test user ${email} already exists; leaving password unchanged`);
 }

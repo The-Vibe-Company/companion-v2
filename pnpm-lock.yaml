@@ -47,6 +47,9 @@ importers:
       '@companion/email':
         specifier: workspace:*
         version: link:../../packages/email
+      '@companion/sandbox':
+        specifier: workspace:*
+        version: link:../../packages/sandbox
       '@companion/skills':
         specifier: workspace:*
         version: link:../../packages/skills
@@ -344,6 +347,9 @@ importers:
       '@types/node':
         specifier: ^22.10.2
         version: 22.19.20
+      tsx:
+        specifier: ^4.19.2
+        version: 4.22.4
       typescript:
         specifier: ^5.7.2
         version: 5.9.3

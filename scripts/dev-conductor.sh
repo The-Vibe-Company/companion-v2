@@ -517,7 +517,24 @@ launch_apps() {
     api_email_env="EMAIL_PROVIDER=log"
   fi
 
-  local api_cmd="COMPANION_API_HOST=127.0.0.1 COMPANION_API_PORT=$API_PORT DATABASE_URL=\"$DATABASE_URL\" BETTER_AUTH_URL=\"$API_URL\" BETTER_AUTH_COOKIE_PREFIX=\"$PROJECT\" COMPANION_WEB_URL=\"$WEB_URL\" COMPANION_API_URL=\"$API_URL\" NEXT_PUBLIC_COMPANION_API_URL=\"$API_URL\" $api_storage_env $api_email_env pnpm --filter @companion/api dev"
+  # Companion Agents: a persistent per-workspace KEK (so sealed secrets survive restarts) plus any
+  # sandbox/model env the invoking shell provides (VERCEL_*, COMPANION_*, provider API keys).
+  local secrets_key_file="$STATE_DIR/companion-secrets.key"
+  if [ ! -s "$secrets_key_file" ]; then
+    openssl rand -base64 32 > "$secrets_key_file" 2>/dev/null || true
+  fi
+  local api_agents_env=""
+  if [ -s "$secrets_key_file" ]; then
+    api_agents_env="COMPANION_SECRETS_KEY=\"$(cat "$secrets_key_file")\""
+  fi
+  local agents_var
+  for agents_var in VERCEL_TOKEN VERCEL_TEAM_ID VERCEL_PROJECT_ID COMPANION_GOLDEN_SNAPSHOT_ID OPENCODE_VERSION COMPANION_SANDBOX_TIMEOUT_MS ANTHROPIC_API_KEY OPENAI_API_KEY OPENROUTER_API_KEY; do
+    if [ -n "${!agents_var:-}" ]; then
+      api_agents_env="$api_agents_env $agents_var=\"${!agents_var}\""
+    fi
+  done
+
+  local api_cmd="COMPANION_API_HOST=127.0.0.1 COMPANION_API_PORT=$API_PORT DATABASE_URL=\"$DATABASE_URL\" BETTER_AUTH_URL=\"$API_URL\" BETTER_AUTH_COOKIE_PREFIX=\"$PROJECT\" COMPANION_WEB_URL=\"$WEB_URL\" COMPANION_API_URL=\"$API_URL\" NEXT_PUBLIC_COMPANION_API_URL=\"$API_URL\" $api_storage_env $api_email_env $api_agents_env pnpm --filter @companion/api dev"
   local web_cmd="COMPANION_API_URL=\"$API_URL\" NEXT_PUBLIC_COMPANION_API_URL=\"$API_URL\" pnpm --filter @companion/web dev --hostname 127.0.0.1 --port $WEB_PORT"
 
   free_port "$API_PORT" "api"
