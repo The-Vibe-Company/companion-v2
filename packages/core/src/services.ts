@@ -101,6 +101,9 @@ export * from "./secretbox";
 export * from "./agents";
 export * from "./agentRuntime";
 
+// Saved per-user model-provider connections (API keys). Same load-order reasoning as `./labels`.
+export * from "./providerConnections";
+
 export interface ActorContext {
   id: string;
   email: string;

@@ -102,3 +102,8 @@ export function openSecret(input: { kek: Buffer; sealed: SealedSecret; aad: stri
 export function agentSecretAad(orgId: string, agentId: string, key: string): string {
   return `${orgId}:${agentId}:${key}`;
 }
+
+/** AAD binding a saved provider connection to its row: `${orgId}:${userId}:provider:${provider}`. */
+export function providerConnectionAad(orgId: string, userId: string, provider: string): string {
+  return `${orgId}:${userId}:provider:${provider}`;
+}

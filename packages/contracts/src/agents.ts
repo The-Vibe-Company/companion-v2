@@ -194,10 +194,14 @@ export const AGENT_SECRET_VALUE_MAX = 8_192;
 /** Model ids are OpenCode-style `provider/model` refs (models.dev catalog). */
 export const AGENT_MODEL_RE = /^[a-z0-9][a-z0-9_-]*\/[A-Za-z0-9][A-Za-z0-9_.:\/-]*$/;
 
+/** Env var names the runtime owns — a user secret must never shadow these (would break the server). */
+export const RESERVED_AGENT_SECRET_KEYS: readonly string[] = ["OPENCODE_SERVER_PASSWORD", "OPENCODE_SERVER_USERNAME"];
+
 const agentSecretKeySchema = z
   .string()
   .regex(SKILL_REQUIREMENT_KEY_RE, "secret keys must look like environment variables (letters, digits, underscores)")
-  .max(120);
+  .max(120)
+  .refine((key) => !RESERVED_AGENT_SECRET_KEYS.includes(key), "this key name is reserved by the runtime");
 
 /**
  * Body of `POST /v1/agents`. Creating an agent starts provisioning immediately. Missing required
@@ -269,9 +273,43 @@ export type AgentModelRow = z.infer<typeof agentModelRowSchema>;
 
 export const agentModelsResponseSchema = z.object({
   models: z.array(agentModelRowSchema),
-  providers: z.array(z.object({ id: z.string(), name: z.string() })),
+  providers: z.array(
+    z.object({
+      id: z.string(),
+      name: z.string(),
+      /** Env var name(s) the provider's API key can be supplied under. */
+      env_keys: z.array(z.string()).default([]),
+      /** True when the current user has saved a connection (API key) for this provider. */
+      connected: z.boolean().default(false),
+    }),
+  ),
 });
 export type AgentModelsResponse = z.infer<typeof agentModelsResponseSchema>;
+
+/* ---- Provider connections (saved per-user model-provider API keys) ------------------- */
+
+/** One saved provider connection (`GET /v1/provider-connections`) — key NAME + state only. */
+export const providerConnectionRowSchema = z.object({
+  provider: z.string(),
+  key_name: z.string(),
+  set: z.literal(true),
+  created_at: z.string(),
+});
+export type ProviderConnectionRow = z.infer<typeof providerConnectionRowSchema>;
+
+export const providerConnectionsResponseSchema = z.object({
+  connections: z.array(providerConnectionRowSchema),
+});
+export type ProviderConnectionsResponse = z.infer<typeof providerConnectionsResponseSchema>;
+
+/** Body of `PUT /v1/provider-connections` — save/replace a provider API key (write-only). */
+export const setProviderConnectionInputSchema = z.object({
+  provider: z.string().min(1).max(120),
+  /** The env var name to store the key under (from the model catalog's `env_keys`). */
+  key_name: agentSecretKeySchema,
+  key: z.string().min(1).max(AGENT_SECRET_VALUE_MAX),
+});
+export type SetProviderConnectionInput = z.infer<typeof setProviderConnectionInputSchema>;
 
 /* ---- Skill update fan-out ----------------------------------------------------------- */
 

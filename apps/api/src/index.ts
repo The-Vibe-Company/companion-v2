@@ -15,9 +15,13 @@ import {
   AgentValidationError,
   createAgent,
   destroyAgent,
+  connectedProviderIds,
+  deleteProviderConnection,
   getAgentBySlug,
   getAgentChatTarget,
   getProvisionProgress,
+  listProviderConnections,
+  setProviderConnection,
   listAffectedAgents,
   listAgents,
   markProvisionInterrupted,
@@ -114,6 +118,7 @@ import {
   agentPromptInputSchema,
   createAgentInputSchema,
   destroyAgentInputSchema,
+  setProviderConnectionInputSchema,
   pushAgentSkillInputSchema,
   updateAgentSecretsInputSchema,
   completeOnboardingInputSchema,
@@ -2266,6 +2271,12 @@ app.delete("/v1/tokens/:id", async (c) => {
  * context is composed lazily so an instance without agent env vars still boots for everything else.
  */
 const agentModelCatalog = createModelCatalog();
+let agentSecretsKeyCache: Buffer | null = null;
+/** The envelope KEK, independent of the full runtime ctx — provider connections work pre-Vercel. */
+function agentSecretsKey(): Buffer {
+  if (!agentSecretsKeyCache) agentSecretsKeyCache = parseSecretsKey(process.env.COMPANION_SECRETS_KEY);
+  return agentSecretsKeyCache;
+}
 let agentControlCtx: AgentControlContext | null = null;
 function agentCtx(): AgentControlContext {
   if (agentControlCtx) return agentControlCtx;
@@ -2332,10 +2343,64 @@ app.get("/v1/agents", async (c) => {
 
 app.get("/v1/agents/models", async (c) => {
   try {
-    actorFromContext(c);
-    return c.json(await agentModelCatalog.listModels());
+    const catalog = await agentModelCatalog.listModels();
+    // Mark which providers the current user has connected (a model is pickable once its provider is).
+    const connected = await withTenant(c, ({ actor, orgId, database }) =>
+      connectedProviderIds({ actor, orgId, database }),
+    );
+    return c.json({
+      models: catalog.models,
+      providers: catalog.providers.map((p) => {
+        const envKeys = catalog.models.find((m) => m.provider === p.id)?.env_keys ?? [];
+        return { ...p, env_keys: envKeys, connected: connected.has(p.id) };
+      }),
+    });
   } catch (error) {
     return jsonError(c, error, 401);
+  }
+});
+
+/* ---- Provider connections (saved per-user model-provider API keys; session-only) ---- */
+
+app.get("/v1/provider-connections", async (c) => {
+  try {
+    const connections = await withTenant(c, ({ actor, orgId, database }) =>
+      listProviderConnections({ actor, orgId, database }),
+    );
+    return c.json({ connections });
+  } catch (error) {
+    return jsonError(c, error, 401);
+  }
+});
+
+app.put("/v1/provider-connections", async (c) => {
+  try {
+    const input = setProviderConnectionInputSchema.parse(await c.req.json());
+    const connection = await withTenant(c, ({ actor, orgId, database }) =>
+      setProviderConnection({
+        actor,
+        orgId,
+        provider: input.provider,
+        keyName: input.key_name,
+        key: input.key,
+        secretsKey: agentSecretsKey(),
+        database,
+      }),
+    );
+    return c.json({ connection });
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
+app.delete("/v1/provider-connections/:provider", async (c) => {
+  try {
+    await withTenant(c, ({ actor, orgId, database }) =>
+      deleteProviderConnection({ actor, orgId, provider: c.req.param("provider"), database }),
+    );
+    return c.json({ ok: true });
+  } catch (error) {
+    return jsonError(c, error);
   }
 });
 

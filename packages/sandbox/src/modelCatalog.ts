@@ -119,7 +119,13 @@ export function createModelCatalog(input: {
       models.sort((a, b) => a.provider.localeCompare(b.provider) || a.name.localeCompare(b.name));
       return {
         models,
-        providers: providers.map(([id, provider]) => ({ id, name: provider.name ?? id })),
+        // `connected` is per-user and filled in by the API layer; the catalog is stateless.
+        providers: providers.map(([id, provider]) => ({
+          id,
+          name: provider.name ?? id,
+          env_keys: provider.env ?? [],
+          connected: false,
+        })),
       };
     },
 

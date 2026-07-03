@@ -17,6 +17,8 @@ import {
   pushSkillUpdate,
   sandboxNameFor,
   setAgentSecrets,
+  sealSecret,
+  providerConnectionAad,
   type ActorContext,
   type AgentControlContext,
 } from "../src/services";
@@ -26,6 +28,10 @@ const ORG = "00000000-0000-0000-0000-0000000000aa";
 const me: ActorContext = { id: "user-me", email: "me@example.com", name: "Me" };
 const other: ActorContext = { id: "user-other", email: "o@example.com", name: "Other" };
 const KEK = parseSecretsKey(generateSecretsKey());
+
+function sealForTest(orgId: string, userId: string, provider: string, value: string) {
+  return sealSecret({ kek: KEK, plaintext: value, aad: providerConnectionAad(orgId, userId, provider) });
+}
 
 function manifestFrontmatter(requirements: Array<{ key: string; type?: "secret" | "env"; required?: boolean }>): string {
   return JSON.stringify({
@@ -289,6 +295,28 @@ describe("createAgent", () => {
       database,
     });
     expect(detail.secrets).toEqual([expect.objectContaining({ key: "SLACK_BOT_TOKEN", set: false })]);
+  });
+
+  it("seeds the model provider key from the owner's saved connection when not typed in", async () => {
+    const store = emptyStore();
+    seedSkill(store, "meeting-digest", "1.3.0");
+    // The owner connected Anthropic once; creating an agent without re-typing the key copies it.
+    store.providerConnections.push({
+      orgId: ORG,
+      userId: me.id,
+      provider: "anthropic",
+      keyName: "ANTHROPIC_API_KEY",
+      ...sealForTest(ORG, me.id, "anthropic", "sk-connected"),
+      keyVersion: 1,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    } as (typeof store.providerConnections)[number]);
+    const database = fakeAgentsDb(store);
+
+    await createAgent({ actor: me, orgId: ORG, input: { ...input, secrets: {} }, ctx: ctxFor(database), database });
+    const keyRow = store.agentSecrets.find((s) => s.key === "ANTHROPIC_API_KEY");
+    expect(keyRow).toBeDefined();
+    expect(keyRow?.ciphertext).not.toContain("sk-connected");
   });
 
   it("rejects duplicate slugs, unknown models, unknown/archived/foreign-personal skills", async () => {

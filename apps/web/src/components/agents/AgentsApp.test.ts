@@ -115,7 +115,7 @@ const models: AgentModelsResponse = {
       env_keys: ["OPENAI_API_KEY"],
     },
   ],
-  providers: [{ id: "openai", name: "OpenAI" }],
+  providers: [{ id: "openai", name: "OpenAI", env_keys: ["OPENAI_API_KEY"], connected: true }],
 };
 
 const PROVISIONING_PROGRESS: ProvisionProgress = {

@@ -822,3 +822,35 @@ export const agentSecrets = pgTable(
     keyCheck: check("agent_secrets_key_check", sql`${t.key} ~ '^[A-Za-z_][A-Za-z0-9_]*$'`),
   }),
 );
+
+/**
+ * A member's saved connection to a model provider: their own API key for e.g. Anthropic/OpenAI,
+ * envelope-encrypted like agent secrets. Connecting a provider ONCE enables its models in the
+ * create-agent picker for all of that member's future agents; at create time the key value is copied
+ * into the new agent's own secrets (agents stay self-contained). Write-only: the API exposes the
+ * key NAME + connected state only, never the value. One row per member per provider per workspace.
+ */
+export const userProviderConnections = pgTable(
+  "user_provider_connections",
+  {
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    /** models.dev provider id, e.g. "anthropic". */
+    provider: text("provider").notNull(),
+    /** The env var name the key is stored/injected under, e.g. ANTHROPIC_API_KEY. */
+    keyName: text("key_name").notNull(),
+    wrappedDek: text("wrapped_dek").notNull(),
+    ciphertext: text("ciphertext").notNull(),
+    keyVersion: integer("key_version").notNull().default(1),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.orgId, t.userId, t.provider] }),
+    keyCheck: check("user_provider_connections_key_check", sql`${t.keyName} ~ '^[A-Za-z_][A-Za-z0-9_]*$'`),
+  }),
+);

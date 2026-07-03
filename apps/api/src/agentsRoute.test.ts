@@ -101,6 +101,10 @@ const serviceMocks = vi.hoisted(() => {
     sandboxNameFor: vi.fn((org: string, slug: string, attempt: number) => `cmp-x-${slug}-a${attempt}`),
     setAgentSecrets: vi.fn(),
     wakeAgent: vi.fn(),
+    connectedProviderIds: vi.fn(async () => new Set<string>()),
+    listProviderConnections: vi.fn(async (): Promise<unknown[]> => []),
+    setProviderConnection: vi.fn(),
+    deleteProviderConnection: vi.fn(async () => undefined),
   };
 });
 
@@ -118,7 +122,10 @@ const sandboxMocks = vi.hoisted(() => ({
     restartServer: vi.fn(),
   },
   catalog: {
-    listModels: vi.fn(async () => ({ models: [{ id: "anthropic/claude-x" }], providers: [{ id: "anthropic", name: "Anthropic" }] })),
+    listModels: vi.fn(async () => ({
+      models: [{ id: "anthropic/claude-x", provider: "anthropic", env_keys: ["ANTHROPIC_API_KEY"] }],
+      providers: [{ id: "anthropic", name: "Anthropic", env_keys: ["ANTHROPIC_API_KEY"], connected: false }],
+    })),
     resolveModel: vi.fn(async () => ({ envKeys: ["ANTHROPIC_API_KEY"] })),
     clearCache: vi.fn(),
   },
@@ -353,9 +360,39 @@ describe("/v1/agents", () => {
     resolvePush();
   });
 
-  it("serves the model catalog to signed-in users", async () => {
+  it("serves the model catalog with per-user provider connected state", async () => {
+    serviceMocks.connectedProviderIds.mockResolvedValue(new Set(["anthropic"]));
     const res = await app.request("/v1/agents/models");
     expect(res.status).toBe(200);
-    await expect(res.json()).resolves.toMatchObject({ providers: [{ id: "anthropic", name: "Anthropic" }] });
+    await expect(res.json()).resolves.toMatchObject({
+      providers: [{ id: "anthropic", name: "Anthropic", env_keys: ["ANTHROPIC_API_KEY"], connected: true }],
+    });
+  });
+
+  it("saves and lists per-user provider connections (session-only, write-only)", async () => {
+    serviceMocks.setProviderConnection.mockResolvedValue({
+      provider: "anthropic",
+      key_name: "ANTHROPIC_API_KEY",
+      set: true,
+      created_at: "2026-07-03T00:00:00.000Z",
+    });
+    const put = await app.request("/v1/provider-connections", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ provider: "anthropic", key_name: "ANTHROPIC_API_KEY", key: "sk-secret-value" }),
+    });
+    expect(put.status).toBe(200);
+    const putText = await put.text();
+    expect(putText).not.toContain("sk-secret-value");
+    expect(serviceMocks.setProviderConnection).toHaveBeenCalledWith(
+      expect.objectContaining({ provider: "anthropic", keyName: "ANTHROPIC_API_KEY", key: "sk-secret-value" }),
+    );
+
+    serviceMocks.listProviderConnections.mockResolvedValue([
+      { provider: "anthropic", key_name: "ANTHROPIC_API_KEY", set: true, created_at: "2026-07-03T00:00:00.000Z" },
+    ]);
+    const list = await app.request("/v1/provider-connections");
+    expect(list.status).toBe(200);
+    await expect(list.json()).resolves.toMatchObject({ connections: [{ provider: "anthropic", set: true }] });
   });
 });

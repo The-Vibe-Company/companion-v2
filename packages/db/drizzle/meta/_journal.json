@@ -232,6 +232,13 @@
       "when": 1781052100000,
       "tag": "0032_companion_agents",
       "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1781052200000,
+      "tag": "0033_user_provider_connections",
+      "breakpoints": true
     }
   ]
 }

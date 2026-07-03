@@ -33,6 +33,7 @@ import {
   type SkillBundle,
 } from "./agentRuntime";
 import { assertMember, type ActorContext } from "./services";
+import { getDecryptedProviderKey } from "./providerConnections";
 
 /**
  * Companion Agents services. Every function keeps the house shape
@@ -455,6 +456,22 @@ export async function createAgent(input: {
   );
 
   const secretEntries = Object.entries(spec.secrets).filter(([, value]) => value.trim() !== "");
+  // Seed the model provider key from the owner's saved connection when they didn't type one in —
+  // each agent stays self-contained (runs on its own copy of the key), the connection is just the
+  // convenience source. Reserved keys are already rejected by the contract schema.
+  const provider = spec.model.slice(0, spec.model.indexOf("/"));
+  if (provider && !modelKeys.envKeys.some((key) => secretEntries.some(([k]) => k === key))) {
+    const connection = await getDecryptedProviderKey({
+      database,
+      orgId: input.orgId,
+      userId: input.actor.id,
+      provider,
+      secretsKey: input.ctx.secretsKey,
+    });
+    if (connection && modelKeys.envKeys.includes(connection.keyName)) {
+      secretEntries.push([connection.keyName, connection.value]);
+    }
+  }
   if (secretEntries.length > 0) {
     await database.insert(schema.agentSecrets).values(
       secretEntries.map(([key, value]) => {
