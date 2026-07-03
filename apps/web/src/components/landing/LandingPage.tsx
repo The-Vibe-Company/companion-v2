@@ -206,8 +206,7 @@ function Nav({ c }: { c: Copy }) {
     <header className="v5-nav">
       <div className="v5-wrap v5-nav__inner">
         <a className="v5-brand" href="#top" aria-label="Companion">
-          <span className="v5-brand__mark v5-brand__mark--logo" aria-hidden="true" />
-          <span className="v5-brand__name">Companion</span>
+          <span className="v5-brand__wordmark" role="img" aria-label="Companion" />
         </a>
         <nav className="v5-nav__links" aria-label="Sections">
           <a className="v5-nav__link" href="#loss">
@@ -625,8 +624,7 @@ function Footer({ c }: { c: Copy }) {
     <footer className="v5-footer">
       <div className="v5-wrap v5-footer__inner">
         <span className="v5-brand">
-          <span className="v5-brand__mark v5-brand__mark--logo v5-brand__mark--sm" aria-hidden="true" />
-          <span className="v5-brand__name v5-brand__name--sm">Companion</span>
+          <span className="v5-brand__wordmark v5-brand__wordmark--sm" role="img" aria-label="Companion" />
         </span>
         <span>{c.footerBy}</span>
         <span className="v5-footer__links">
