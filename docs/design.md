@@ -482,14 +482,38 @@ proxy through the API, which decrypts the per-agent basic-auth password server-s
 churn is absorbed in one file. Prompts use `promptAsync`; deltas arrive on the stream; the
 sessions cache updates without waking anything.
 
+### Model providers (per-user keys)
+
+The control plane never supplies model API keys. Each member **connects** a provider once — their
+own key, envelope-encrypted in `user_provider_connections` (migration 0033, per-user, write-only,
+same secretbox scheme). `GET /v1/agents/models` returns the FULL tool-capable models.dev catalog and
+marks which providers the caller has connected; the create form groups models by provider and only
+enables a provider's models once it is connected. At create time the connected key is copied into
+the new agent's own secrets, so agents stay self-contained. Reserved runtime env names
+(`OPENCODE_SERVER_*`) can never be used as secret names.
+
+Agent variables are editable after creation via `PUT /v1/agents/:slug/secrets` (add / replace /
+remove, write-only). Because the env is baked into the serve process at launch, a change on a
+running agent relaunches serve (deduped wake job) so it takes effect.
+
+### Chat sessions
+
+Opening a chat resumes the agent's last session and reloads its history
+(`GET …/sessions/:id/messages` → `loadSessionItems`, same parts→item translation as the event
+stream); a session is created lazily on first send, and a "New session" action starts a fresh one.
+A dead/stopped sandbox (Vercel's timeout runs from boot, not our activity clock) is detected by a
+domain preflight and woken on 410; concurrent wakes are coalesced.
+
 ### Endpoints (session-only — PATs are rejected; not a skills API surface)
 
-`GET/POST /v1/agents`, `GET /v1/agents/models` (models.dev catalog filtered to configured provider
-keys, tool-capable models only), `GET /v1/agents/:slug`, `GET /v1/agents/:slug/provision` +
-`POST …/provision/retry`, `PUT …/secrets`, `POST …/pause` / `…/wake`, `DELETE /v1/agents/:slug`
-(typed-name confirmation), `GET /v1/agents/skill-updates/:skillSlug` +
+`GET/POST /v1/agents`, `GET /v1/agents/models` (full tool-capable models.dev catalog + per-user
+`connected` flag), `GET/PUT/DELETE /v1/provider-connections`, `GET /v1/agents/:slug`,
+`GET /v1/agents/:slug/provision` + `POST …/provision/retry`, `PUT …/secrets` (add/replace/remove,
+relaunches a running agent), `POST …/pause` / `…/wake`, `DELETE /v1/agents/:slug` (typed-name
+confirmation), `GET /v1/agents/skill-updates/:skillSlug` +
 `POST /v1/agents/:slug/skills/:skillSlug/push` (fan-out is client-driven sequential; per-agent
-phases in `pending_op`), `POST …/sessions`, `POST …/sessions/:id/prompt`, `GET …/events?session=`.
+phases in `pending_op`), `POST …/sessions`, `POST …/sessions/:id/prompt`,
+`GET …/sessions/:id/messages`, `GET …/events?session=`.
 
 ### Non-goals (phase 1)
 

@@ -4,7 +4,7 @@ import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { useRouter } from "next/navigation";
 import type { AgentStatus } from "@companion/contracts";
-import { createChatSession, sendChatPrompt, wakeAgent } from "@/lib/agentQueries";
+import { createChatSession, fetchSessionMessages, sendChatPrompt, wakeAgent } from "@/lib/agentQueries";
 import { formatDurationSeconds } from "@/lib/format";
 import type { AgentVM } from "@/lib/types";
 import { Icon } from "../Icon";
@@ -72,14 +72,16 @@ const TOOL_PRE: CSSProperties = {
   whiteSpace: "pre-wrap",
 };
 
-/** Top bar: back to the console + preview note + Desktop / Mobile 390 segmented toggle. */
+/** Top bar: back to the console + preview note + New session + Desktop / Mobile 390 segmented toggle. */
 function ChatTopBar({
   mobile,
   onBack,
+  onNewSession,
   onSetMobile,
 }: {
   mobile: boolean;
   onBack: () => void;
+  onNewSession: () => void;
   onSetMobile: (mobile: boolean) => void;
 }) {
   return (
@@ -107,6 +109,27 @@ function ChatTopBar({
       </button>
       <span style={MONO_FAINT_11}>end-user surface preview</span>
       <span style={{ flex: 1 }} />
+      <button
+        type="button"
+        onClick={onNewSession}
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 7,
+          height: 28,
+          padding: "0 10px",
+          border: "1px solid var(--color-line)",
+          borderRadius: "var(--radius-md)",
+          background: "var(--color-surface)",
+          color: "var(--color-muted)",
+          fontFamily: "var(--font-ui)",
+          fontSize: "var(--text-xs)",
+          cursor: "pointer",
+        }}
+      >
+        <Icon name="plus" size={13} />
+        New session
+      </button>
       <div style={{ display: "inline-flex", border: "1px solid var(--color-line)", borderRadius: "var(--radius-md)", overflow: "hidden" }}>
         <button type="button" onClick={() => onSetMobile(false)} style={mobile ? SEG_OFF : SEG_ON}>
           Desktop
@@ -209,12 +232,29 @@ function ToolRow({
   );
 }
 
-export function ChatApp({ agent, orgName }: { agent: AgentVM; orgName: string }) {
+export function ChatApp({
+  agent,
+  orgName,
+  initialSessionId,
+}: {
+  agent: AgentVM;
+  orgName: string;
+  /** Resume a specific past session (from `?session=`); overrides the cached most-recent session. */
+  initialSessionId?: string;
+}) {
   const router = useRouter();
   const [mobile, setMobile] = useState(false);
   const [status, setStatus] = useState<AgentStatus>(agent.status);
   const [waking, setWaking] = useState(agent.status === "sleeping");
   const [sessionId, setSessionId] = useState<string | null>(null);
+  /** True while an on-demand session is being created (first send / new session), disables the composer. */
+  const [creatingSession, setCreatingSession] = useState(false);
+  // True while boot is resuming an existing session (fetching history) — keeps the composer disabled
+  // so a send can't race the resume and orphan it with a fresh session. Starts true only when there
+  // is a session to resume; a no-session boot leaves the composer usable immediately.
+  const [resuming, setResuming] = useState(
+    () => (initialSessionId ?? agent.sessions[0]?.id ?? null) !== null,
+  );
   const [text, setText] = useState("");
   const [expandedTools, setExpandedTools] = useState<Set<string>>(() => new Set());
   const [chat, dispatch] = useReducer(chatReducer, undefined, initChatState);
@@ -229,15 +269,19 @@ export function ChatApp({ agent, orgName }: { agent: AgentVM; orgName: string })
     [agent.skills],
   );
 
-  // --- Boot: wake (if sleeping) → create session. One-shot, guarded by a synchronous ref so
-  // StrictMode's double-mount never wakes or creates twice.
+  // --- Boot: wake (if sleeping) → resume an existing session with its history, OR wait to create a
+  // session lazily on the first send. One-shot, guarded by a synchronous ref so StrictMode's
+  // double-mount never wakes or reloads twice. The session to resume is `?session=` (initialSessionId)
+  // if given, else the most-recent cached session, else none (created lazily in `send`).
   const bootRef = useRef(false);
   useEffect(() => {
     if (bootRef.current) return;
     bootRef.current = true;
+    const resumeId = initialSessionId ?? agent.sessions[0]?.id ?? null;
     void (async () => {
       if (agent.status === "error") {
         dispatch({ kind: "sys", text: "agent unavailable · provisioning failed" });
+        setResuming(false);
         return;
       }
       try {
@@ -250,9 +294,27 @@ export function ChatApp({ agent, orgName }: { agent: AgentVM; orgName: string })
             text: ["resumed from snapshot", agent.region, formatDurationSeconds(result.resume_ms)].filter(Boolean).join(" · "),
           });
         }
-        const session = await createChatSession(agent.id);
-        dispatch({ kind: "sys", text: `session started · ${agent.region}` });
-        setSessionId(session.session_id);
+        if (!resumeId) {
+          // No session yet — the composer is usable; the first send creates one (see `send`).
+          dispatch({ kind: "sys", text: `ready · ${agent.region}` });
+          return;
+        }
+        // Resume an existing session: seed its history BEFORE opening the live stream so prior
+        // messages render above any new events. A history-load failure keeps the composer usable.
+        try {
+          const history = await fetchSessionMessages(agent.id, resumeId);
+          dispatch({ kind: "history", items: history.items, resolveToolLabel });
+        } catch (historyError) {
+          dispatch({
+            kind: "event",
+            event: {
+              type: "error",
+              message: historyError instanceof Error ? historyError.message : "Could not load the session history.",
+            },
+            resolveToolLabel,
+          });
+        }
+        setSessionId(resumeId);
       } catch (error) {
         setWaking(false);
         dispatch({
@@ -260,6 +322,8 @@ export function ChatApp({ agent, orgName }: { agent: AgentVM; orgName: string })
           event: { type: "error", message: error instanceof Error ? error.message : "Could not start the chat session." },
           resolveToolLabel,
         });
+      } finally {
+        setResuming(false);
       }
     })();
     // Boot is intentionally one-shot for the server-provided agent snapshot.
@@ -288,21 +352,66 @@ export function ChatApp({ agent, orgName }: { agent: AgentVM; orgName: string })
 
   const statusWord = waking ? "waking" : status;
   const dotCls = waking ? "vdot vdot--warn" : statusDot(status);
-  const sendDisabled = waking || chat.busy || status === "error" || !text.trim();
+  const sendDisabled = waking || resuming || creatingSession || chat.busy || status === "error" || !text.trim();
+
+  // Synchronous one-shot guard so a double-send (StrictMode / fast Enter) can't create two sessions
+  // before `creatingSession` state has flushed.
+  const createGuardRef = useRef(false);
 
   const send = () => {
     const trimmed = text.trim();
-    if (sendDisabled || !sessionId || !trimmed) return;
+    if (sendDisabled || !trimmed) return;
+    // Gate the whole send (not just the createChatSession call) on the synchronous guard so a
+    // double-fire in the same tick can't emit a duplicate user bubble or create a second session
+    // before `creatingSession` state has flushed.
+    if (!sessionId && createGuardRef.current) return;
+
     dispatch({ kind: "user", text: trimmed });
     dispatch({ kind: "send" });
     setText("");
-    sendChatPrompt(agent.id, sessionId, trimmed).catch((error) => {
-      dispatch({
-        kind: "event",
-        event: { type: "error", message: error instanceof Error ? error.message : "Could not send the message." },
-        resolveToolLabel,
+
+    if (sessionId) {
+      sendChatPrompt(agent.id, sessionId, trimmed).catch((error) => {
+        dispatch({
+          kind: "event",
+          event: { type: "error", message: error instanceof Error ? error.message : "Could not send the message." },
+          resolveToolLabel,
+        });
       });
-    });
+      return;
+    }
+
+    // No session yet: create one, open the stream (via the sessionId effect), then send.
+    createGuardRef.current = true;
+    setCreatingSession(true);
+    void (async () => {
+      try {
+        const session = await createChatSession(agent.id);
+        setSessionId(session.session_id);
+        await sendChatPrompt(agent.id, session.session_id, trimmed);
+      } catch (error) {
+        dispatch({
+          kind: "event",
+          event: { type: "error", message: error instanceof Error ? error.message : "Could not start the chat session." },
+          resolveToolLabel,
+        });
+      } finally {
+        setCreatingSession(false);
+        createGuardRef.current = false;
+      }
+    })();
+  };
+
+  /** Reset to a fresh session: clear the transcript + drop the session id so the next send creates one. */
+  const newSession = () => {
+    setSessionId(null);
+    setCreatingSession(false);
+    setResuming(false);
+    createGuardRef.current = false;
+    setExpandedTools(new Set());
+    setText("");
+    dispatch({ kind: "reset" });
+    dispatch({ kind: "sys", text: `new session · ${agent.region}` });
   };
 
   const toggleTool = (id: string) => {
@@ -322,7 +431,7 @@ export function ChatApp({ agent, orgName }: { agent: AgentVM; orgName: string })
       data-screen-label="Agent chat"
       style={{ height: "100vh", display: "flex", flexDirection: "column", background: "var(--color-canvas)" }}
     >
-      <ChatTopBar mobile={mobile} onBack={backToConsole} onSetMobile={setMobile} />
+      <ChatTopBar mobile={mobile} onBack={backToConsole} onNewSession={newSession} onSetMobile={setMobile} />
 
       <div style={{ flex: 1, minHeight: 0, display: "flex", alignItems: "stretch", justifyContent: "center", padding: "0 16px 16px" }}>
         <div style={mobile ? FRAME_MOBILE : FRAME_DESKTOP}>

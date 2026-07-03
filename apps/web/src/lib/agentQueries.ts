@@ -6,9 +6,12 @@ import type {
   AgentModelsResponse,
   AgentPendingOp,
   AgentSecretState,
+  AgentSessionMessagesResponse,
   AgentsListResponse,
   CreateAgentInput,
   CreateAgentSessionResult,
+  ProviderConnectionRow,
+  ProviderConnectionsResponse,
   ProvisionProgress,
   WakeAgentResult,
 } from "@companion/contracts";
@@ -43,15 +46,19 @@ export async function retryProvision(slug: string): Promise<ProvisionProgress> {
   });
 }
 
-/** Write-only secret values; `null` deletes a key. Values are never returned. */
+/** Write-only secret values; `null` deletes a key. Values are never returned. `restarting` = the
+ * running agent's serve process is being relaunched so the new variables take effect. */
 export async function setAgentSecrets(
   slug: string,
   secrets: Record<string, string | null>,
-): Promise<{ secrets: AgentSecretState[] }> {
-  return apiFetch<{ secrets: AgentSecretState[] }>(`/v1/agents/${encodeURIComponent(slug)}/secrets`, {
-    method: "PUT",
-    body: JSON.stringify({ secrets }),
-  });
+): Promise<{ secrets: AgentSecretState[]; restarting: boolean }> {
+  return apiFetch<{ secrets: AgentSecretState[]; restarting: boolean }>(
+    `/v1/agents/${encodeURIComponent(slug)}/secrets`,
+    {
+      method: "PUT",
+      body: JSON.stringify({ secrets }),
+    },
+  );
 }
 
 export async function pauseAgent(slug: string): Promise<{ ok: true }> {
@@ -111,4 +118,35 @@ export async function sendChatPrompt(slug: string, sessionId: string, text: stri
       body: JSON.stringify({ text }),
     },
   );
+}
+
+/** Prior messages of an existing session, for reopening a chat with its history. */
+export async function fetchSessionMessages(slug: string, sessionId: string): Promise<AgentSessionMessagesResponse> {
+  return apiFetch<AgentSessionMessagesResponse>(
+    `/v1/agents/${encodeURIComponent(slug)}/sessions/${encodeURIComponent(sessionId)}/messages`,
+  );
+}
+
+/* ---- Saved per-user model-provider connections (API keys) ---- */
+
+export async function fetchProviderConnections(): Promise<ProviderConnectionsResponse> {
+  return apiFetch<ProviderConnectionsResponse>("/v1/provider-connections");
+}
+
+/** Save/replace the current user's API key for a provider (write-only). */
+export async function setProviderConnection(input: {
+  provider: string;
+  key_name: string;
+  key: string;
+}): Promise<{ connection: ProviderConnectionRow }> {
+  return apiFetch<{ connection: ProviderConnectionRow }>("/v1/provider-connections", {
+    method: "PUT",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function deleteProviderConnection(provider: string): Promise<{ ok: true }> {
+  return apiFetch<{ ok: true }>(`/v1/provider-connections/${encodeURIComponent(provider)}`, {
+    method: "DELETE",
+  });
 }

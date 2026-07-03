@@ -108,4 +108,49 @@ describe("chatReducer", () => {
     expect(state.busy).toBe(false);
     expect(state.error).toBe("sandbox unreachable");
   });
+
+  it("seeds prior-session history above existing sys lines and maps tool rows as completed", () => {
+    let state = initChatState();
+    state = chatReducer(state, { kind: "sys", text: "resumed from snapshot" });
+    state = chatReducer(state, {
+      kind: "history",
+      resolveToolLabel,
+      items: [
+        { kind: "user", text: "hey" },
+        {
+          kind: "tool",
+          call_id: "c1",
+          tool: "digest",
+          skill: "meeting-digest",
+          input: "{}",
+          output: "done",
+          duration_ms: 1200,
+        },
+        { kind: "assistant", text: "on it" },
+      ],
+    });
+
+    // Existing sys line stays first, then the reloaded transcript in order.
+    expect(state.items.map((item) => item.kind)).toEqual(["sys", "user", "tool", "asst"]);
+    const tool = state.items.find((item) => item.kind === "tool");
+    expect(tool && tool.kind === "tool" ? tool : null).toMatchObject({
+      label: "meeting-digest@1.0.0",
+      running: false,
+      output: "done",
+      durationMs: 1200,
+    });
+    const asst = state.items.find((item) => item.kind === "asst");
+    expect(asst && asst.kind === "asst" ? { streaming: asst.streaming, text: asst.text } : null).toEqual({
+      streaming: false,
+      text: "on it",
+    });
+  });
+
+  it("clears the transcript back to an empty session on reset", () => {
+    let state = initChatState();
+    state = chatReducer(state, { kind: "user", text: "hello" });
+    state = chatReducer(state, { kind: "send" });
+    state = chatReducer(state, { kind: "reset" });
+    expect(state).toEqual(initChatState());
+  });
 });

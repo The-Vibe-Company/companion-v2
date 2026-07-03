@@ -61,8 +61,9 @@ export default async function AgentsPage({
     serverApiFetch<LabelsResponse>("/v1/personal-labels", { headers: orgHeaders }).catch(() => null),
     serverApiFetch<AgentModelsResponse>("/v1/agents/models", { headers: orgHeaders }).catch(() => null),
   ]);
-  // The two agents lists are required; everything else degrades gracefully.
-  if (!agentsMine && !agentsOrg) return <WorkspaceLoadError />;
+  // Both agents lists are required (each drives a library the console can land on); everything
+  // else degrades gracefully. If EITHER failed, we cannot render a trustworthy console.
+  if (!agentsMine || !agentsOrg) return <WorkspaceLoadError />;
 
   const mineSkills = (skillsMine ?? []).map(mapSkill);
   const orgSkills = (skillsOrg ?? []).map(mapSkill);

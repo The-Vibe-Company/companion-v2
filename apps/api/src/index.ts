@@ -173,6 +173,7 @@ import {
   createChatSession,
   createModelCatalog,
   createVercelRuntime,
+  loadSessionItems,
   sendPromptAsync,
   streamChatEvents,
   vercelConfigFromEnv,
@@ -2666,6 +2667,17 @@ app.post("/v1/agents/:slug/sessions", async (c) => {
       session: { id: session.id, title: session.title, message_count: 0, last_at: new Date().toISOString() },
     });
     return c.json({ session_id: session.id }, 201);
+  } catch (error) {
+    return agentError(c, error);
+  }
+});
+
+app.get("/v1/agents/:slug/sessions/:sessionId/messages", async (c) => {
+  try {
+    const target = await agentChatTargetFor(c, c.req.param("slug"));
+    const client = createChatClient({ domain: target.domain, password: target.password });
+    const items = await loadSessionItems(client, c.req.param("sessionId"));
+    return c.json({ items });
   } catch (error) {
     return agentError(c, error);
   }

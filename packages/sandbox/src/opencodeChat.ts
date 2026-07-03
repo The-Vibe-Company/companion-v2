@@ -1,5 +1,5 @@
 import { createOpencodeClient, type OpencodeClient } from "@opencode-ai/sdk";
-import type { AgentChatEvent } from "@companion/contracts";
+import type { AgentChatEvent, AgentChatHistoryItem } from "@companion/contracts";
 import { OPENCODE_SERVER_USERNAME } from "@companion/core";
 
 /**
@@ -38,6 +38,40 @@ export async function createChatSession(client: OpencodeClient, title?: string):
   return { id: res.data.id, title: res.data.title ?? title ?? "New session" };
 }
 
+/**
+ * Load a session's prior messages as normalized history items (for reopening a chat). Same
+ * parts→item translation as {@link streamChatEvents}, kept next to the pinned SDK.
+ */
+export async function loadSessionItems(client: OpencodeClient, sessionId: string): Promise<AgentChatHistoryItem[]> {
+  const res = await client.session.messages({ path: { id: sessionId } });
+  const messages = res.data ?? [];
+  const items: AgentChatHistoryItem[] = [];
+  for (const entry of messages) {
+    const role = entry.info.role;
+    // Tool runs render inline before the assistant text they belong to.
+    for (const part of entry.parts) {
+      if (part.type === "tool" && part.state.status === "completed") {
+        items.push({
+          kind: "tool",
+          call_id: part.callID,
+          tool: part.tool,
+          skill: null,
+          input: safeJson("input" in part.state ? part.state.input : {}),
+          output: truncate(part.state.output ?? "", 4000),
+          duration_ms: part.state.time ? Math.max(0, part.state.time.end - part.state.time.start) : null,
+        });
+      }
+    }
+    const text = entry.parts
+      .filter((part): part is Extract<typeof part, { type: "text" }> => part.type === "text")
+      .map((part) => part.text)
+      .join("")
+      .trim();
+    if (text) items.push({ kind: role === "user" ? "user" : "assistant", text });
+  }
+  return items;
+}
+
 /** Fire a prompt without waiting for the reply — deltas arrive on the event stream. */
 export async function sendPromptAsync(client: OpencodeClient, sessionId: string, text: string): Promise<void> {
   const res = await client.session.promptAsync({
@@ -62,8 +96,9 @@ export async function* streamChatEvents(input: {
   const doneTools = new Set<string>();
   const doneTexts = new Set<string>();
 
-  // The signal must reach the SDK's underlying fetch: without it, aborting a silent stream (no
-  // events flowing) would never unblock the `for await`.
+  // The signal must reach the SDK's underlying fetch: the SDK's SSE client checks `signal.aborted`
+  // in its read loop and the fetch carries the signal, so aborting a stalled stream (no bytes
+  // flowing) rejects the in-flight read and ends this loop — it can never hang the caller.
   const subscription = await client.event.subscribe(signal ? { signal } : {});
   for await (const event of subscription.stream) {
     if (signal?.aborted) return;

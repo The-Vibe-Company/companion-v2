@@ -2,8 +2,8 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Icon } from "../Icon";
-import type { AgentVM } from "@/lib/types";
-import { statusBadge, statusDot } from "./derive";
+import type { AgentSecretVM, AgentVM } from "@/lib/types";
+import { statusBadge, statusDot, validateSecretKey } from "./derive";
 import { provisionErrorText } from "./ProvisioningCard";
 
 /** One installed-skill row: version chip, outdated hint, and the push affordance. */
@@ -84,33 +84,267 @@ function SkillRow({
   );
 }
 
+const secretInputStyle: React.CSSProperties = {
+  flex: 1,
+  height: 30,
+  padding: "0 10px",
+  border: "1px solid var(--color-line)",
+  borderRadius: "var(--radius-sm)",
+  background: "var(--color-surface-sunken)",
+  fontFamily: "var(--font-mono)",
+  fontSize: "var(--text-xs)",
+  color: "var(--color-fg)",
+  outline: "none",
+};
+
+/** One agent variable row: set → Replace + Remove; not set → inline value input + Save. */
+function SecretRow({
+  secret,
+  busy,
+  onSet,
+  onRemove,
+}: {
+  secret: AgentSecretVM;
+  busy: boolean;
+  onSet: (key: string, value: string) => void;
+  onRemove: (key: string) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState("");
+  const submittedRef = useRef(false);
+  const prevBusyRef = useRef(busy);
+
+  // A save we submitted collapses the editor + clears the value once the RPC round-trip completes
+  // (the section-level busy flag falls back to false). Errors surface at the section level.
+  useEffect(() => {
+    if (prevBusyRef.current && !busy && submittedRef.current) {
+      submittedRef.current = false;
+      setEditing(false);
+      setValue("");
+    }
+    prevBusyRef.current = busy;
+  }, [busy]);
+
+  const save = () => {
+    if (!value.trim() || busy) return;
+    submittedRef.current = true;
+    onSet(secret.key, value);
+  };
+  const showInput = editing || !secret.set;
+
+  return (
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        gap: 7,
+        border: "1px solid var(--color-line)",
+        borderRadius: "var(--radius-md)",
+        padding: "9px 12px",
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
+        <Icon name="key" size={12} style={{ color: "var(--color-faint)" }} />
+        <span className="mono" style={{ fontSize: "var(--text-xs)", color: "var(--color-fg)" }}>
+          {secret.key}
+        </span>
+        {secret.requiredBy.length > 0 && (
+          <span style={{ fontSize: 11, color: "var(--color-faint)" }}>
+            required by <span className="mono">{secret.requiredBy.join(", ")}</span>
+          </span>
+        )}
+        <span style={{ flex: 1 }} />
+        <span className={"ag-set " + (secret.set ? "ag-set--ok" : "ag-set--danger")}>
+          {secret.set ? "set" : "not set"}
+        </span>
+        {secret.set && (
+          <>
+            <button
+              type="button"
+              className="ag-btn"
+              style={{ height: 24, padding: "0 9px", fontSize: "var(--text-xs)" }}
+              onClick={() => setEditing((e) => !e)}
+              disabled={busy}
+            >
+              Replace
+            </button>
+            <button
+              type="button"
+              className="ag-btn"
+              style={{ height: 24, padding: "0 9px", fontSize: "var(--text-xs)", color: "var(--color-danger)" }}
+              onClick={() => onRemove(secret.key)}
+              disabled={busy}
+              aria-label={`Remove ${secret.key}`}
+            >
+              Remove
+            </button>
+          </>
+        )}
+      </div>
+      {showInput && (
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <input
+            type="password"
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            placeholder="Paste value. Stored encrypted, never shown again."
+            aria-label={`Value for ${secret.key}`}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                save();
+              }
+            }}
+            style={secretInputStyle}
+          />
+          <button type="button" className="ag-btn" style={{ height: 30 }} onClick={save} disabled={busy || !value.trim()}>
+            Save
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** "Add variable" affordance: a validated name + value, submitted as a new agent secret. */
+function AddVariable({
+  existingKeys,
+  busy,
+  onAdd,
+}: {
+  existingKeys: string[];
+  busy: boolean;
+  onAdd: (key: string, value: string) => void;
+}) {
+  const [key, setKey] = useState("");
+  const [value, setValue] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  const add = () => {
+    if (busy) return;
+    const keyError = validateSecretKey(key, existingKeys);
+    if (keyError) {
+      setError(keyError);
+      return;
+    }
+    if (!value.trim()) {
+      setError("Enter a value.");
+      return;
+    }
+    setError(null);
+    onAdd(key.trim(), value);
+    setKey("");
+    setValue("");
+  };
+
+  // Collapse the error once the list length changes (the add landed).
+  useEffect(() => {
+    setError(null);
+  }, [existingKeys.length]);
+
+  return (
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        gap: 7,
+        border: "1px dashed var(--color-line-strong)",
+        borderRadius: "var(--radius-md)",
+        padding: "9px 12px",
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        <input
+          value={key}
+          onChange={(e) => setKey(e.target.value)}
+          placeholder="VARIABLE_NAME"
+          spellCheck={false}
+          aria-label="New variable name"
+          style={{ ...secretInputStyle, flex: "1 1 180px", textTransform: "none" }}
+        />
+        <input
+          type="password"
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          placeholder="Value"
+          aria-label="New variable value"
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              add();
+            }
+          }}
+          style={{ ...secretInputStyle, flex: "1 1 180px" }}
+        />
+        <button type="button" className="ag-btn" style={{ height: 30 }} onClick={add} disabled={busy}>
+          Add
+        </button>
+      </div>
+      {error && (
+        <span style={{ fontSize: 11, color: "var(--color-danger)" }} role="alert">
+          {error}
+        </span>
+      )}
+    </div>
+  );
+}
+
 /** The agent detail screen: header actions, content sections, and the Properties rail. */
 export function DetailView({
   agent,
   chatUrl,
   onBack,
   onOpenChat,
+  onOpenSession,
   onPauseWake,
   onRetry,
   onPushSkill,
+  onSetSecrets,
   onDestroy,
 }: {
   agent: AgentVM;
   chatUrl: string;
   onBack: () => void;
   onOpenChat: () => void;
+  onOpenSession: (sessionId: string) => void;
   onPauseWake: () => void;
   onRetry: () => void;
   onPushSkill: (skillSlug: string) => void;
+  /** Add/replace/remove agent variables; `null` deletes a key. Returns whether the agent restarts. */
+  onSetSecrets: (secrets: Record<string, string | null>) => Promise<{ restarting: boolean }>;
   onDestroy: () => void;
 }) {
   const [copied, setCopied] = useState(false);
   const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [destroyVal, setDestroyVal] = useState("");
+  const [secretsApplying, setSecretsApplying] = useState(false);
+  const [secretsRestarting, setSecretsRestarting] = useState(false);
+  const [secretsError, setSecretsError] = useState<string | null>(null);
+  const secretsBusyRef = useRef(false);
+
+  const applySecrets = (patch: Record<string, string | null>) => {
+    if (secretsBusyRef.current) return;
+    secretsBusyRef.current = true;
+    setSecretsApplying(true);
+    setSecretsError(null);
+    onSetSecrets(patch)
+      .then((res) => {
+        setSecretsRestarting(res.restarting);
+      })
+      .catch((e) => {
+        setSecretsError(e instanceof Error ? e.message : "Could not update the variables.");
+      })
+      .finally(() => {
+        secretsBusyRef.current = false;
+        setSecretsApplying(false);
+      });
+  };
 
   useEffect(() => {
     setDestroyVal("");
     setCopied(false);
+    setSecretsRestarting(false);
+    setSecretsError(null);
   }, [agent.id]);
   useEffect(
     () => () => {
@@ -233,37 +467,41 @@ export function DetailView({
 
               <section>
                 <div className="seclabel">
-                  Secrets <span className="seclabel__n">names only. Values are never shown.</span>
+                  Variables <span className="seclabel__n">write-only. Values are never shown.</span>
                 </div>
+                {secretsRestarting && (
+                  <div className="ls-banner ls-banner--warn" style={{ marginBottom: 10 }} role="status">
+                    <span className="ls-banner__ico">
+                      <Icon name="refresh-cw" size={15} />
+                    </span>
+                    <span className="ls-banner__text">
+                      Applying variables — the agent is restarting. Active chat sessions are interrupted.
+                    </span>
+                  </div>
+                )}
+                {secretsError && (
+                  <pre className="errblock" role="alert" style={{ margin: "0 0 10px" }}>
+                    {secretsError}
+                  </pre>
+                )}
                 <div className="reqlist">
                   {agent.secrets.map((secret) => (
-                    <div
+                    <SecretRow
                       key={secret.key}
-                      style={{
-                        display: "flex",
-                        alignItems: "center",
-                        gap: 9,
-                        border: "1px solid var(--color-line)",
-                        borderRadius: "var(--radius-md)",
-                        padding: "8px 12px",
-                      }}
-                    >
-                      <Icon name="key" size={12} style={{ color: "var(--color-faint)" }} />
-                      <span className="mono" style={{ fontSize: "var(--text-xs)", color: "var(--color-fg)" }}>
-                        {secret.key}
-                      </span>
-                      <span style={{ fontSize: 11, color: "var(--color-faint)" }}>
-                        required by <span className="mono">{secret.requiredBy.join(", ")}</span>
-                      </span>
-                      <span style={{ flex: 1 }} />
-                      <span className={"ag-set " + (secret.set ? "ag-set--ok" : "ag-set--danger")}>
-                        {secret.set ? "set" : "not set"}
-                      </span>
-                    </div>
+                      secret={secret}
+                      busy={secretsApplying}
+                      onSet={(key, value) => applySecrets({ [key]: value })}
+                      onRemove={(key) => applySecrets({ [key]: null })}
+                    />
                   ))}
                   {agent.secrets.length === 0 && (
-                    <div className="alist--empty">No secrets. None of this agent&apos;s skills require env vars.</div>
+                    <div className="alist--empty">No variables yet. Add one below or let a skill declare it.</div>
                   )}
+                  <AddVariable
+                    existingKeys={agent.secrets.map((s) => s.key)}
+                    busy={secretsApplying}
+                    onAdd={(key, value) => applySecrets({ [key]: value })}
+                  />
                 </div>
               </section>
 
@@ -273,7 +511,14 @@ export function DetailView({
                 </div>
                 <div className="alist">
                   {agent.sessions.map((session) => (
-                    <div className="arow" key={session.id}>
+                    <button
+                      type="button"
+                      className="arow"
+                      key={session.id}
+                      onClick={() => onOpenSession(session.id)}
+                      aria-label={`Open session ${session.title}`}
+                      style={{ width: "100%", textAlign: "left", cursor: "pointer" }}
+                    >
                       <Icon name="history" size={13} style={{ color: "var(--color-faint)" }} />
                       <span
                         style={{
@@ -294,7 +539,7 @@ export function DetailView({
                       <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--color-faint)" }}>
                         {session.when}
                       </span>
-                    </div>
+                    </button>
                   ))}
                   {agent.sessions.length === 0 && (
                     <div className="alist--empty">No sessions yet. Share the chat URL to start one.</div>

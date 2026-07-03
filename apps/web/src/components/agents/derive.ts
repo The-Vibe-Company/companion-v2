@@ -1,4 +1,5 @@
-import type { AgentStatus } from "@companion/contracts";
+import type { AgentModelRow, AgentModelsResponse, AgentsUpdateNotice, AgentStatus } from "@companion/contracts";
+import { RESERVED_AGENT_SECRET_KEYS } from "@companion/contracts";
 import type { AgentVM, SkillVM } from "@/lib/types";
 
 /** Pure derivations shared by the agents console views and the sidebar. */
@@ -169,4 +170,154 @@ export function filterAgents(
     rows = [...rows].sort((a, b) => a.id.localeCompare(b.id));
   }
   return rows;
+}
+
+/* ---- Create form: grouped-by-provider model picker ------------------------------- */
+
+export interface ModelProviderVM {
+  id: string;
+  name: string;
+  /** Env var name(s) the provider's API key can be supplied under. */
+  envKeys: string[];
+  /** True when the current user has a saved connection (API key) for this provider. */
+  connected: boolean;
+}
+
+export interface ModelGroupVM {
+  provider: ModelProviderVM;
+  models: AgentModelRow[];
+}
+
+/** Map the models-response providers to the picker VM (defaults to disconnected when absent). */
+export function toModelProviders(response: AgentModelsResponse): ModelProviderVM[] {
+  return response.providers.map((p) => ({
+    id: p.id,
+    name: p.name,
+    envKeys: p.env_keys,
+    connected: p.connected,
+  }));
+}
+
+/**
+ * Group the model catalog by provider, sorted connected-first then alphabetical, and keep only
+ * groups that still have at least one model. `connectedOverride` lets the CreateView flip a provider
+ * to connected locally (after a successful Connect) without re-fetching the whole catalog.
+ */
+export function groupModelsByProvider(
+  models: AgentModelRow[],
+  providers: ModelProviderVM[],
+  connectedOverride?: ReadonlySet<string>,
+): ModelGroupVM[] {
+  const byProvider = new Map<string, AgentModelRow[]>();
+  for (const model of models) {
+    const list = byProvider.get(model.provider);
+    if (list) list.push(model);
+    else byProvider.set(model.provider, [model]);
+  }
+  // Providers named in the catalog but missing from the providers[] list still get a group
+  // (env_keys unknown → cannot connect; the models are simply disabled).
+  const known = new Map(providers.map((p) => [p.id, p]));
+  const ids = new Set<string>([...providers.map((p) => p.id), ...byProvider.keys()]);
+  const groups: ModelGroupVM[] = [];
+  for (const id of ids) {
+    const rows = byProvider.get(id) ?? [];
+    if (rows.length === 0) continue;
+    const base = known.get(id);
+    const provider: ModelProviderVM = {
+      id,
+      name: base?.name ?? rows[0]?.provider_name ?? id,
+      envKeys: base?.envKeys ?? [],
+      connected: (connectedOverride?.has(id) ?? false) || (base?.connected ?? false),
+    };
+    groups.push({ provider, models: rows });
+  }
+  groups.sort((a, b) => {
+    if (a.provider.connected !== b.provider.connected) return a.provider.connected ? -1 : 1;
+    return a.provider.name.localeCompare(b.provider.name);
+  });
+  return groups;
+}
+
+/** Filter model groups by a search query, keeping a provider header whenever it has any match. */
+export function filterModelGroups(groups: ModelGroupVM[], query: string): ModelGroupVM[] {
+  const q = query.trim().toLowerCase();
+  if (!q) return groups;
+  const out: ModelGroupVM[] = [];
+  for (const group of groups) {
+    const providerHit =
+      group.provider.name.toLowerCase().includes(q) || group.provider.id.toLowerCase().includes(q);
+    const models = providerHit
+      ? group.models
+      : group.models.filter(
+          (m) =>
+            m.id.toLowerCase().includes(q) ||
+            m.name.toLowerCase().includes(q) ||
+            m.provider_name.toLowerCase().includes(q),
+        );
+    if (models.length > 0) out.push({ provider: group.provider, models });
+  }
+  return out;
+}
+
+/** The first model of the first connected provider (the create form's default selection), or null. */
+export function firstConnectedModel(groups: ModelGroupVM[]): string | null {
+  for (const group of groups) {
+    if (group.provider.connected && group.models[0]) return group.models[0].id;
+  }
+  return null;
+}
+
+/** True when the given model id belongs to a provider the user has connected. */
+export function modelProviderConnected(groups: ModelGroupVM[], modelId: string): boolean {
+  for (const group of groups) {
+    if (group.models.some((m) => m.id === modelId)) return group.provider.connected;
+  }
+  return false;
+}
+
+/* ---- Detail form: agent variable name validation ---------------------------------- */
+
+const ENV_VAR_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/** Validate a user-entered agent variable name; returns an inline error string or null when valid. */
+export function validateSecretKey(raw: string, existingKeys: readonly string[] = []): string | null {
+  const key = raw.trim();
+  if (!key) return "Enter a variable name.";
+  if (!ENV_VAR_RE.test(key)) return "Use letters, digits and underscores (e.g. API_TOKEN).";
+  if (RESERVED_AGENT_SECRET_KEYS.includes(key)) return "This name is reserved by the runtime.";
+  if (existingKeys.includes(key)) return "This variable already exists.";
+  return null;
+}
+
+/* ---- List: live update notices recomputed from the current agent rows ------------- */
+
+/**
+ * Recompute the "a newer skill version affects N agents" notices from the LIVE agent rows, so a push
+ * that lands a fresh version updates (or clears) the banner without a server round-trip. One notice
+ * per outdated skill slug, ordered by affected-count desc then slug.
+ */
+export function deriveUpdateNotices(agents: AgentVM[]): AgentsUpdateNotice[] {
+  const bySlug = new Map<string, { skillId: string; latest: string; count: number }>();
+  for (const agent of agents) {
+    for (const skill of agent.skills) {
+      if (!skill.outdated || !skill.latest) continue;
+      const existing = bySlug.get(skill.id);
+      if (existing) {
+        existing.count += 1;
+        // Track the highest latest version seen (string compare is enough for the banner label).
+        if (skill.latest > existing.latest) existing.latest = skill.latest;
+      } else {
+        bySlug.set(skill.id, { skillId: skill.skillId, latest: skill.latest, count: 1 });
+      }
+    }
+  }
+  return [...bySlug.entries()]
+    .map(([slug, v]) => ({
+      skill_id: v.skillId,
+      slug,
+      latest_version: v.latest,
+      affected_count: v.count,
+      released_at: null,
+    }))
+    .sort((a, b) => b.affected_count - a.affected_count || a.slug.localeCompare(b.slug));
 }

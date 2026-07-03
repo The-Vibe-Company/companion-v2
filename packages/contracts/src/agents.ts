@@ -355,6 +355,27 @@ export const createAgentSessionResultSchema = z.object({
 });
 export type CreateAgentSessionResult = z.infer<typeof createAgentSessionResultSchema>;
 
+/** A prior message when reloading a session's history (`GET .../sessions/:id/messages`). */
+export const agentChatHistoryItemSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("user"), text: z.string() }),
+  z.object({ kind: z.literal("assistant"), text: z.string() }),
+  z.object({
+    kind: z.literal("tool"),
+    call_id: z.string(),
+    tool: z.string(),
+    skill: z.string().nullable().default(null),
+    input: z.string().default(""),
+    output: z.string().default(""),
+    duration_ms: z.number().int().nonnegative().nullable().default(null),
+  }),
+]);
+export type AgentChatHistoryItem = z.infer<typeof agentChatHistoryItemSchema>;
+
+export const agentSessionMessagesResponseSchema = z.object({
+  items: z.array(agentChatHistoryItemSchema),
+});
+export type AgentSessionMessagesResponse = z.infer<typeof agentSessionMessagesResponseSchema>;
+
 /**
  * Normalized chat event vocabulary streamed over `GET /v1/agents/:slug/events`.
  * The API translates pinned-SDK OpenCode events into this stable shape so OpenCode's near-daily

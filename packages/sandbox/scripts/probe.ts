@@ -12,7 +12,7 @@
  * (3) session list/create  (4) [optional] promptAsync + raw event dump.
  */
 import { OPENCODE_SERVER_USERNAME } from "@companion/core";
-import { createChatClient, createChatSession, sendPromptAsync } from "../src/opencodeChat";
+import { createChatClient, sendPromptAsync } from "../src/opencodeChat";
 
 const DOMAIN = process.env.DOMAIN?.trim();
 const PASSWORD = process.env.PASSWORD?.trim();
@@ -73,10 +73,10 @@ async function main(): Promise<void> {
     process.exit(3);
   }
 
-  // 3 — SDK path: sessions.
+  // 3 — SDK path: sessions. Pass the deadline signal INTO the SDK call so a hung request aborts.
   const client = createChatClient({ domain: DOMAIN!, password: PASSWORD! });
   const doneList = step("SDK session.list (10s cap)");
-  const sessions = await timed(10_000, async () => (await client.session.list()).data ?? []);
+  const sessions = await timed(10_000, async (signal) => (await client.session.list({ signal })).data ?? []);
   doneList(`${sessions.length} session(s)`);
 
   if (!PROMPT) {
@@ -85,7 +85,11 @@ async function main(): Promise<void> {
   }
 
   // 4 — full round-trip with a raw event dump.
-  const session = await timed(10_000, async () => createChatSession(client, "probe"));
+  const session = await timed(10_000, async (signal) => {
+    const res = await client.session.create({ body: { title: "probe" }, signal });
+    if (!res.data) throw new Error("no session created");
+    return { id: res.data.id };
+  });
   console.log(`→ session ${session.id} created; prompting + dumping RAW events for ${WINDOW_MS}ms…`);
   const controller = new AbortController();
   const deadline = setTimeout(() => controller.abort(), WINDOW_MS);
@@ -98,23 +102,37 @@ async function main(): Promise<void> {
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let sawIdle = false;
+    // Buffer whole SSE frames (separated by a blank line) so a `data:` line split across network
+    // chunk boundaries is never mis-parsed.
+    let buffer = "";
     try {
-      for (;;) {
+      outer: for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
-        const chunk = decoder.decode(value, { stream: true });
-        for (const line of chunk.split("\n")) {
-          if (!line.startsWith("data:")) continue;
-          try {
-            const evt = JSON.parse(line.slice(5)) as { type?: string; properties?: unknown };
-            const compact = JSON.stringify(evt).slice(0, 220);
-            console.log(`  [event] ${compact}`);
-            if (evt.type === "session.idle") sawIdle = true;
-          } catch {
-            console.log(`  [raw] ${line.slice(0, 160)}`);
+        buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
+        let boundary = buffer.indexOf("\n\n");
+        while (boundary !== -1) {
+          const frame = buffer.slice(0, boundary);
+          buffer = buffer.slice(boundary + 2);
+          const data = frame
+            .split("\n")
+            .filter((line) => line.startsWith("data:"))
+            .map((line) => line.slice(line.startsWith("data: ") ? 6 : 5))
+            .join("\n");
+          if (data) {
+            try {
+              const evt = JSON.parse(data) as { type?: string };
+              console.log(`  [event] ${JSON.stringify(evt).slice(0, 220)}`);
+              if (evt.type === "session.idle") {
+                sawIdle = true;
+                break outer;
+              }
+            } catch {
+              console.log(`  [raw] ${data.slice(0, 160)}`);
+            }
           }
+          boundary = buffer.indexOf("\n\n");
         }
-        if (sawIdle) break;
       }
     } catch (error) {
       if (!controller.signal.aborted) throw error;

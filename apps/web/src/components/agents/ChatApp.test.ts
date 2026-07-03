@@ -11,6 +11,7 @@ const agentQueryMocks = vi.hoisted(() => ({
   wakeAgent: vi.fn(),
   createChatSession: vi.fn(),
   sendChatPrompt: vi.fn(),
+  fetchSessionMessages: vi.fn(),
 }));
 
 vi.mock("@/lib/agentQueries", () => agentQueryMocks);
@@ -65,14 +66,18 @@ function agentVM(overrides: Partial<AgentVM> = {}): AgentVM {
 let mountedRoots: Root[] = [];
 
 /** Mount inside StrictMode so double-invoked effects catch any non-guarded one-shot RPCs. */
-async function mountChatApp(agent: AgentVM) {
+async function mountChatApp(agent: AgentVM, initialSessionId?: string) {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
   mountedRoots.push(root);
   await act(async () => {
     root.render(
-      React.createElement(React.StrictMode, null, React.createElement(ChatApp, { agent, orgName: "Acme" })),
+      React.createElement(
+        React.StrictMode,
+        null,
+        React.createElement(ChatApp, { agent, orgName: "Acme", initialSessionId }),
+      ),
     );
   });
   await flushEffects();
@@ -113,6 +118,7 @@ beforeEach(() => {
   agentQueryMocks.wakeAgent.mockResolvedValue({ ok: true, resume_ms: 2400, status: "running" });
   agentQueryMocks.createChatSession.mockResolvedValue({ session_id: "sess-1" });
   agentQueryMocks.sendChatPrompt.mockResolvedValue({ ok: true });
+  agentQueryMocks.fetchSessionMessages.mockResolvedValue({ items: [] });
   chatStreamMocks.openChatStream.mockResolvedValue(undefined);
 });
 
@@ -145,10 +151,11 @@ describe("ChatApp", () => {
       "mail-digest runs curated skills in an isolated sandbox. Skill runs are shown inline.",
     );
 
-    // Running agent: no wake, one session (StrictMode double-mount safe), stream opened for it.
+    // Running agent with no cached sessions: no wake, NO eager session (lazy on first send).
     expect(agentQueryMocks.wakeAgent).not.toHaveBeenCalled();
-    expect(agentQueryMocks.createChatSession).toHaveBeenCalledTimes(1);
-    expect(container.textContent).toContain("session started · cdg1");
+    expect(agentQueryMocks.createChatSession).not.toHaveBeenCalled();
+    expect(agentQueryMocks.fetchSessionMessages).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("ready · cdg1");
   });
 
   it("shows the wake banner for a sleeping agent and wakes it exactly once", async () => {
@@ -172,14 +179,18 @@ describe("ChatApp", () => {
     });
     await flushEffects();
 
+    // Wakes exactly once (StrictMode double-mount safe); no eager session created on boot.
     expect(agentQueryMocks.wakeAgent).toHaveBeenCalledTimes(1);
     expect(container.querySelector(".chat-wake__track")).toBeFalsy();
     expect(container.textContent).toContain("resumed from snapshot · cdg1 · 2.4s");
-    expect(agentQueryMocks.createChatSession).toHaveBeenCalledTimes(1);
+    expect(agentQueryMocks.createChatSession).not.toHaveBeenCalled();
   });
 
-  it("appends the user bubble and sends the prompt exactly once", async () => {
+  it("creates a session on the first send, then sends the prompt exactly once", async () => {
     const { container } = await mountChatApp(agentVM());
+
+    // No session was created eagerly on mount.
+    expect(agentQueryMocks.createChatSession).not.toHaveBeenCalled();
 
     const input = container.querySelector<HTMLInputElement>('input[placeholder="Message mail-digest"]');
     if (!input) throw new Error("Could not find the composer input");
@@ -190,6 +201,8 @@ describe("ChatApp", () => {
     await flushEffects();
 
     expect(container.textContent).toContain("Quick check. What did you do on your last run?");
+    // First send lazily creates the session, then sends into it (each exactly once, StrictMode-safe).
+    expect(agentQueryMocks.createChatSession).toHaveBeenCalledTimes(1);
     expect(agentQueryMocks.sendChatPrompt).toHaveBeenCalledTimes(1);
     expect(agentQueryMocks.sendChatPrompt).toHaveBeenCalledWith(
       "mail-digest",
@@ -199,5 +212,79 @@ describe("ChatApp", () => {
 
     // Busy until the reply completes over the stream — the composer stays disabled.
     expect(findButton(container, "Send").disabled).toBe(true);
+  });
+
+  it("resumes a session from initialSessionId, loading its history once and rendering it", async () => {
+    agentQueryMocks.fetchSessionMessages.mockResolvedValue({
+      items: [
+        { kind: "user", text: "earlier question" },
+        {
+          kind: "tool",
+          call_id: "c1",
+          tool: "digest",
+          skill: "meeting-digest",
+          input: "{}",
+          output: "old output",
+          duration_ms: 900,
+        },
+        { kind: "assistant", text: "earlier answer" },
+      ],
+    });
+
+    const { container } = await mountChatApp(agentVM(), "sess-42");
+
+    // Loads the given session's history exactly once (StrictMode double-mount safe); never creates one.
+    expect(agentQueryMocks.fetchSessionMessages).toHaveBeenCalledTimes(1);
+    expect(agentQueryMocks.fetchSessionMessages).toHaveBeenCalledWith("mail-digest", "sess-42");
+    expect(agentQueryMocks.createChatSession).not.toHaveBeenCalled();
+
+    // History renders (user bubble, resolved tool label, assistant text).
+    expect(container.textContent).toContain("earlier question");
+    expect(container.textContent).toContain("earlier answer");
+    expect(container.textContent).toContain("meeting-digest@1.3.0");
+
+    // Stream opened for the resumed session id.
+    expect(chatStreamMocks.openChatStream).toHaveBeenCalled();
+    expect(chatStreamMocks.openChatStream.mock.calls[0]?.[1]).toBe("sess-42");
+  });
+
+  it("resumes the most recent cached session when no initialSessionId is given", async () => {
+    const agent = agentVM({
+      sessions: [{ id: "sess-recent", title: "Recent", msgs: 3, when: "2h ago" }],
+    });
+
+    await mountChatApp(agent);
+
+    expect(agentQueryMocks.fetchSessionMessages).toHaveBeenCalledTimes(1);
+    expect(agentQueryMocks.fetchSessionMessages).toHaveBeenCalledWith("mail-digest", "sess-recent");
+    expect(agentQueryMocks.createChatSession).not.toHaveBeenCalled();
+  });
+
+  it("New session clears the transcript and drops the session id", async () => {
+    const { container } = await mountChatApp(agentVM());
+
+    // Establish a session by sending once.
+    const input = container.querySelector<HTMLInputElement>('input[placeholder="Message mail-digest"]');
+    if (!input) throw new Error("Could not find the composer input");
+    setReactInputValue(input, "first message");
+    click(findButton(container, "Send"));
+    await flushEffects();
+    expect(container.textContent).toContain("first message");
+
+    click(findButton(container, "New session"));
+    await flushEffects();
+
+    // Transcript cleared; a fresh "new session" annotation is shown.
+    expect(container.textContent).not.toContain("first message");
+    expect(container.textContent).toContain("new session · cdg1");
+
+    // The next send creates a brand-new session (createChatSession called again).
+    agentQueryMocks.createChatSession.mockResolvedValue({ session_id: "sess-2" });
+    setReactInputValue(input, "second message");
+    click(findButton(container, "Send"));
+    await flushEffects();
+
+    expect(agentQueryMocks.createChatSession).toHaveBeenCalledTimes(2);
+    expect(agentQueryMocks.sendChatPrompt).toHaveBeenLastCalledWith("mail-digest", "sess-2", "second message");
   });
 });

@@ -30,8 +30,9 @@ const agentQueryMocks = vi.hoisted(() => ({
 
 vi.mock("@/lib/agentQueries", () => agentQueryMocks);
 
+const routerPush = vi.hoisted(() => vi.fn());
 vi.mock("next/navigation", () => ({
-  useRouter: () => ({ push: vi.fn(), refresh: vi.fn(), prefetch: vi.fn() }),
+  useRouter: () => ({ push: routerPush, refresh: vi.fn(), prefetch: vi.fn() }),
 }));
 
 const me: MeVM = { id: "user-1", name: "Ada Lovelace", email: "ada@example.com", initials: "AL", avatarUrl: null };
@@ -211,6 +212,8 @@ beforeEach(() => {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   agentQueryMocks.fetchAgent.mockResolvedValue(agentDetailRow({ slug: "mail-digest" }));
   agentQueryMocks.fetchProvision.mockResolvedValue(PROVISIONING_PROGRESS);
+  agentQueryMocks.setAgentSecrets.mockResolvedValue({ secrets: [], restarting: false });
+  routerPush.mockClear();
 });
 
 afterEach(async () => {
@@ -308,5 +311,76 @@ describe("AgentsApp detail route", () => {
 
     setReactInputValue(confirm, "mail-digest");
     expect(findButton(container, "Destroy agent").disabled).toBe(false);
+  });
+
+  it("adds a new agent variable via onSetSecrets, validating the name", async () => {
+    const { container } = await mountAgentsApp(
+      { lib: "mine", kind: "detail", agent: "mail-digest" },
+      { url: "/agents?agent=mail-digest" },
+    );
+
+    const nameInput = container.querySelector<HTMLInputElement>('input[aria-label="New variable name"]')!;
+    const valueInput = container.querySelector<HTMLInputElement>('input[aria-label="New variable value"]')!;
+
+    // A reserved name is rejected inline and never hits the RPC.
+    setReactInputValue(nameInput, "OPENCODE_SERVER_PASSWORD");
+    setReactInputValue(valueInput, "x");
+    await act(async () => findButton(container, "Add").click());
+    expect(agentQueryMocks.setAgentSecrets).not.toHaveBeenCalled();
+    expect(container.textContent).toMatch(/reserved/i);
+
+    // A valid name + value is submitted as the write-only patch.
+    setReactInputValue(nameInput, "STRIPE_KEY");
+    setReactInputValue(valueInput, "sk_live_123");
+    await act(async () => findButton(container, "Add").click());
+    await flushEffects();
+    expect(agentQueryMocks.setAgentSecrets).toHaveBeenCalledWith("mail-digest", { STRIPE_KEY: "sk_live_123" });
+  });
+
+  it("replaces and removes an existing variable, showing the restarting note", async () => {
+    agentQueryMocks.fetchAgent.mockResolvedValue(
+      agentDetailRow({
+        slug: "mail-digest",
+        secrets: [{ key: "NOTION_TOKEN", set: true, required_by: ["meeting-digest"], required: true }],
+      }),
+    );
+    agentQueryMocks.setAgentSecrets.mockResolvedValue({ secrets: [], restarting: true });
+
+    const { container } = await mountAgentsApp(
+      { lib: "mine", kind: "detail", agent: "mail-digest" },
+      { url: "/agents?agent=mail-digest" },
+    );
+
+    // Replace reveals the inline value input and submits under the same key.
+    await act(async () => findButton(container, "Replace").click());
+    const replaceInput = container.querySelector<HTMLInputElement>('input[aria-label="Value for NOTION_TOKEN"]')!;
+    setReactInputValue(replaceInput, "secret_new");
+    await act(async () => findButton(container, "Save").click());
+    await flushEffects();
+    expect(agentQueryMocks.setAgentSecrets).toHaveBeenCalledWith("mail-digest", { NOTION_TOKEN: "secret_new" });
+    // A restarting response surfaces the design-honest interrupt note.
+    expect(container.textContent).toContain("the agent is restarting");
+
+    // Remove sends a null value for the key.
+    await act(async () => findButton(container, "Remove NOTION_TOKEN").click());
+    await flushEffects();
+    expect(agentQueryMocks.setAgentSecrets).toHaveBeenCalledWith("mail-digest", { NOTION_TOKEN: null });
+  });
+
+  it("opens a recent session into the chat page with ?session", async () => {
+    agentQueryMocks.fetchAgent.mockResolvedValue(
+      agentDetailRow({
+        slug: "mail-digest",
+        sessions: [{ id: "ses_01", title: "Daily digest", message_count: 4, last_at: "2026-07-02T00:00:00.000Z" }],
+      }),
+    );
+
+    const { container } = await mountAgentsApp(
+      { lib: "mine", kind: "detail", agent: "mail-digest" },
+      { url: "/agents?agent=mail-digest" },
+    );
+
+    await act(async () => findButton(container, "Open session Daily digest").click());
+    expect(routerPush).toHaveBeenCalledWith("/agents/mail-digest/chat?session=ses_01");
   });
 });

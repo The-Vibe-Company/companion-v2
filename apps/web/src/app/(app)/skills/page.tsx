@@ -58,8 +58,16 @@ export default async function SkillsPage({
       serverApiFetch<LabelsResponse>("/v1/personal-labels", { headers: orgHeaders }).catch(() => EMPTY_LABELS),
       serverApiFetch<LabelsResponse>("/v1/labels", { headers: orgHeaders }).catch(() => EMPTY_LABELS),
       // Best-effort agents lists for the sidebar Agents roots (hidden while the API is unavailable).
-      serverApiFetch<AgentsListResponse>("/v1/agents?lib=mine", { headers: orgHeaders }).catch(() => null),
-      serverApiFetch<AgentsListResponse>("/v1/agents?lib=org", { headers: orgHeaders }).catch(() => null),
+      // Time-boxed so a slow/hanging agents API can never delay the Skills page render — the sidebar
+      // Agents roots degrade to absent, the skills library stays fully available.
+      serverApiFetch<AgentsListResponse>("/v1/agents?lib=mine", {
+        headers: orgHeaders,
+        signal: AbortSignal.timeout(2500),
+      }).catch(() => null),
+      serverApiFetch<AgentsListResponse>("/v1/agents?lib=org", {
+        headers: orgHeaders,
+        signal: AbortSignal.timeout(2500),
+      }).catch(() => null),
     ]);
   if (!mineResult || !orgResult || !filterPreferences) return <WorkspaceLoadError />;
   const mineSkills = mineResult.map(mapSkill);

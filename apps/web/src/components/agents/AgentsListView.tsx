@@ -182,25 +182,31 @@ export function AgentsListView({
             ))}
           </>
         )}
-        {agents.length === 0 && (
-          <div className="empty">
-            <Icon name="bot" size={22} style={{ color: "var(--color-faint)" }} />
-            <div className="empty__title">No agents yet</div>
-            <div className="empty__desc">
-              Provision your first one. Pick skills from the registry and Companion runs them in an isolated sandbox.
+        {rows.length === 0 &&
+          (agents.length === 0 && !label ? (
+            // True first-run empty: the whole library has no agents (and no label scope).
+            <div className="empty">
+              <Icon name="bot" size={22} style={{ color: "var(--color-faint)" }} />
+              <div className="empty__title">No agents yet</div>
+              <div className="empty__desc">
+                Provision your first one. Pick skills from the registry and Companion runs them in an isolated sandbox.
+              </div>
+              <button type="button" className="btn-primary" onClick={onOpenCreate}>
+                <Icon name="plus" size={14} />
+                New agent
+              </button>
             </div>
-            <button type="button" className="btn-primary" onClick={onOpenCreate}>
-              <Icon name="plus" size={14} />
-              New agent
-            </button>
-          </div>
-        )}
-        {agents.length > 0 && rows.length === 0 && (
-          <div className="empty">
-            <div className="empty__title">No agents match</div>
-            <div className="empty__desc">Clear the search or filter to see the whole fleet.</div>
-          </div>
-        )}
+          ) : (
+            // A label and/or search is active but nothing matches — scope-consistent, never "first run".
+            <div className="empty">
+              <div className="empty__title">No agents match</div>
+              <div className="empty__desc">
+                {label
+                  ? "No agents are filed under this label. Clear the filter to see the whole fleet."
+                  : "Clear the search to see the whole fleet."}
+              </div>
+            </div>
+          ))}
       </div>
     </div>
   );

@@ -1,16 +1,24 @@
 import { describe, expect, it } from "vitest";
+import type { AgentModelRow, AgentModelsResponse } from "@companion/contracts";
 import type { AgentVM, SkillVM } from "@/lib/types";
 import {
   agentCounts,
   deriveAgentNav,
   deriveSecretRows,
+  deriveUpdateNotices,
   filterAgents,
+  filterModelGroups,
+  firstConnectedModel,
   groupLabelMeta,
+  groupModelsByProvider,
   kebabName,
+  modelProviderConnected,
   outdatedSkills,
   statusBadge,
   statusDot,
   summaryLine,
+  toModelProviders,
+  validateSecretKey,
 } from "./derive";
 
 function agent(overrides: Partial<AgentVM>): AgentVM {
@@ -159,5 +167,123 @@ describe("filterAgents", () => {
     const sorted = filterAgents(fleet, { sort: "name" });
     expect(sorted.map((a) => a.id)).toEqual(["monka-support", "tvc-devis", "vibe-standup"]);
     expect(fleet[0]?.id).toBe("monka-support");
+  });
+});
+
+function modelRow(id: string, provider: string, providerName: string): AgentModelRow {
+  return {
+    id,
+    provider,
+    provider_name: providerName,
+    name: id,
+    description: null,
+    context: null,
+    cost_input: null,
+    cost_output: null,
+    env_keys: [],
+  };
+}
+
+function modelsResponse(connected: Record<string, boolean>): AgentModelsResponse {
+  return {
+    models: [
+      modelRow("openai/gpt-5.5", "openai", "OpenAI"),
+      modelRow("openai/gpt-5-mini", "openai", "OpenAI"),
+      modelRow("anthropic/claude-sonnet-4-5", "anthropic", "Anthropic"),
+    ],
+    providers: [
+      { id: "openai", name: "OpenAI", env_keys: ["OPENAI_API_KEY"], connected: connected.openai ?? false },
+      { id: "anthropic", name: "Anthropic", env_keys: ["ANTHROPIC_API_KEY"], connected: connected.anthropic ?? false },
+    ],
+  };
+}
+
+describe("groupModelsByProvider", () => {
+  it("groups models by provider, connected-first then alphabetical", () => {
+    const res = modelsResponse({ anthropic: true, openai: false });
+    const groups = groupModelsByProvider(res.models, toModelProviders(res));
+    expect(groups.map((g) => g.provider.id)).toEqual(["anthropic", "openai"]);
+    expect(groups[0]?.provider.connected).toBe(true);
+    expect(groups[1]?.models.map((m) => m.id)).toEqual(["openai/gpt-5.5", "openai/gpt-5-mini"]);
+  });
+
+  it("applies a local connected override (an inline Connect flips the group)", () => {
+    const res = modelsResponse({});
+    const groups = groupModelsByProvider(res.models, toModelProviders(res), new Set(["openai"]));
+    expect(groups.find((g) => g.provider.id === "openai")?.provider.connected).toBe(true);
+    expect(groups.find((g) => g.provider.id === "anthropic")?.provider.connected).toBe(false);
+    // Connected override sorts openai (connected) ahead of anthropic (not).
+    expect(groups[0]?.provider.id).toBe("openai");
+  });
+
+  it("gates model selectability on the owning provider's connection", () => {
+    const res = modelsResponse({ anthropic: true });
+    const groups = groupModelsByProvider(res.models, toModelProviders(res));
+    expect(modelProviderConnected(groups, "anthropic/claude-sonnet-4-5")).toBe(true);
+    expect(modelProviderConnected(groups, "openai/gpt-5.5")).toBe(false);
+    expect(modelProviderConnected(groups, "unknown/model")).toBe(false);
+  });
+
+  it("preselects the first model of the first connected provider (or null)", () => {
+    const connected = modelsResponse({ openai: true });
+    expect(firstConnectedModel(groupModelsByProvider(connected.models, toModelProviders(connected)))).toBe(
+      "openai/gpt-5.5",
+    );
+    const none = modelsResponse({});
+    expect(firstConnectedModel(groupModelsByProvider(none.models, toModelProviders(none)))).toBeNull();
+  });
+
+  it("filters models by query but keeps the header for any group with matches", () => {
+    const res = modelsResponse({ openai: true, anthropic: true });
+    const groups = groupModelsByProvider(res.models, toModelProviders(res));
+    const filtered = filterModelGroups(groups, "sonnet");
+    expect(filtered.map((g) => g.provider.id)).toEqual(["anthropic"]);
+    expect(filtered[0]?.models.map((m) => m.id)).toEqual(["anthropic/claude-sonnet-4-5"]);
+    // A provider-name query keeps all of that provider's models.
+    expect(filterModelGroups(groups, "openai")[0]?.models.length).toBe(2);
+  });
+});
+
+describe("validateSecretKey", () => {
+  it("accepts env-var-shaped names and rejects the rest", () => {
+    expect(validateSecretKey("API_TOKEN")).toBeNull();
+    expect(validateSecretKey("_x1")).toBeNull();
+    expect(validateSecretKey("")).toMatch(/name/i);
+    expect(validateSecretKey("1BAD")).toMatch(/letters/i);
+    expect(validateSecretKey("has space")).toMatch(/letters/i);
+    expect(validateSecretKey("OPENCODE_SERVER_PASSWORD")).toMatch(/reserved/i);
+    expect(validateSecretKey("DUP", ["DUP"])).toMatch(/already exists/i);
+  });
+});
+
+describe("deriveUpdateNotices", () => {
+  it("recomputes notices from the live agent rows, ordered by affected count", () => {
+    const rows = [
+      agent({
+        skills: [
+          { skillId: "s1", id: "meeting-digest", version: "1.2.0", latest: "1.3.0", outdated: true },
+          { skillId: "s2", id: "seo-helper", version: "1.0.0", latest: null, outdated: false },
+        ],
+      }),
+      agent({
+        skills: [{ skillId: "s1", id: "meeting-digest", version: "1.2.4", latest: "1.3.0", outdated: true }],
+      }),
+      agent({
+        skills: [{ skillId: "s3", id: "granite-notes", version: "2.0.0", latest: "2.1.0", outdated: true }],
+      }),
+    ];
+    const notices = deriveUpdateNotices(rows);
+    expect(notices.map((n) => n.slug)).toEqual(["meeting-digest", "granite-notes"]);
+    const digest = notices.find((n) => n.slug === "meeting-digest");
+    expect(digest?.affected_count).toBe(2);
+    expect(digest?.latest_version).toBe("1.3.0");
+    expect(digest?.skill_id).toBe("s1");
+  });
+
+  it("clears once no agent is outdated (banner disappears after a push)", () => {
+    const rows = [
+      agent({ skills: [{ skillId: "s1", id: "meeting-digest", version: "1.3.0", latest: "1.3.0", outdated: false }] }),
+    ];
+    expect(deriveUpdateNotices(rows)).toEqual([]);
   });
 });

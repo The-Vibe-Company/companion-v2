@@ -1,19 +1,232 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { AgentDetail, AgentModelRow } from "@companion/contracts";
+import type { AgentDetail, AgentModelRow, AgentModelsResponse } from "@companion/contracts";
 import { Icon } from "../Icon";
-import { createAgent } from "@/lib/agentQueries";
+import { createAgent, setProviderConnection } from "@/lib/agentQueries";
 import type { SkillVM } from "@/lib/types";
 import type { AgentsLibrary } from "./route";
-import { deriveSecretRows, kebabName } from "./derive";
+import {
+  deriveSecretRows,
+  filterModelGroups,
+  firstConnectedModel,
+  groupModelsByProvider,
+  kebabName,
+  modelProviderConnected,
+  toModelProviders,
+  type ModelGroupVM,
+} from "./derive";
 
 function contextHint(context: number | null): string | null {
   if (!context) return null;
   return `${Math.round(context / 1000)}k context`;
 }
 
-/** The create-agent form (design "Create agent" screen; the Model section is a searchable picker). */
+/** One provider header + its models. Connect reveals an inline key input; connected models are radios. */
+function ProviderGroup({
+  group,
+  model,
+  onSelectModel,
+  onConnected,
+}: {
+  group: ModelGroupVM;
+  model: string;
+  onSelectModel: (id: string) => void;
+  onConnected: (providerId: string) => void;
+}) {
+  const { provider } = group;
+  const [connecting, setConnecting] = useState(false);
+  const [key, setKey] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const savingRef = useRef(false);
+  const canConnect = provider.envKeys.length > 0;
+
+  const save = () => {
+    if (savingRef.current || !key.trim() || !canConnect) return;
+    savingRef.current = true;
+    setBusy(true);
+    setError(null);
+    setProviderConnection({ provider: provider.id, key_name: provider.envKeys[0]!, key: key.trim() })
+      .then(() => {
+        onConnected(provider.id);
+        setConnecting(false);
+        setKey("");
+      })
+      .catch((e) => {
+        setError(e instanceof Error ? e.message : "Could not save the key.");
+      })
+      .finally(() => {
+        savingRef.current = false;
+        setBusy(false);
+      });
+  };
+
+  return (
+    <div>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          padding: "8px 11px",
+          background: "var(--color-surface-sunken)",
+          borderBottom: "1px solid var(--color-line)",
+        }}
+      >
+        <span style={{ fontSize: "var(--text-xs)", fontWeight: 600, color: "var(--color-fg)" }}>{provider.name}</span>
+        <span style={{ flex: 1 }} />
+        {provider.connected ? (
+          <span
+            className="mono"
+            style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 10, color: "var(--color-ok)" }}
+          >
+            <Icon name="check" size={11} />
+            connected
+          </span>
+        ) : connecting ? null : (
+          <button
+            type="button"
+            onClick={() => setConnecting(true)}
+            disabled={!canConnect}
+            title={canConnect ? undefined : "This provider's key name is unknown."}
+            style={{
+              height: 24,
+              padding: "0 10px",
+              border: "1px solid var(--color-line)",
+              borderRadius: "var(--radius-sm)",
+              background: "var(--color-surface)",
+              color: "var(--color-fg)",
+              fontFamily: "var(--font-ui)",
+              fontSize: "var(--text-xs)",
+              fontWeight: 500,
+              cursor: canConnect ? "pointer" : "default",
+              opacity: canConnect ? 1 : 0.55,
+            }}
+          >
+            Connect
+          </button>
+        )}
+      </div>
+
+      {!provider.connected && connecting && (
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            gap: 6,
+            padding: "9px 11px",
+            borderBottom: "1px solid var(--color-line)",
+            background: "var(--color-surface-sunken)",
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <input
+              type="password"
+              value={key}
+              onChange={(e) => setKey(e.target.value)}
+              placeholder={`Paste your ${provider.name} API key (${provider.envKeys[0]})`}
+              aria-label={`API key for ${provider.name}`}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  save();
+                }
+              }}
+              style={{
+                flex: 1,
+                height: 30,
+                padding: "0 10px",
+                border: "1px solid var(--color-line)",
+                borderRadius: "var(--radius-sm)",
+                background: "var(--color-surface)",
+                fontFamily: "var(--font-mono)",
+                fontSize: "var(--text-xs)",
+                color: "var(--color-fg)",
+                outline: "none",
+              }}
+            />
+            <button type="button" className="ag-btn" onClick={save} disabled={busy || !key.trim()} style={{ height: 30 }}>
+              {busy ? "Saving…" : "Save"}
+            </button>
+          </div>
+          {error && (
+            <pre className="errblock" role="alert" style={{ margin: 0 }}>
+              {error}
+            </pre>
+          )}
+        </div>
+      )}
+
+      {group.models.map((m: AgentModelRow) => {
+        const sel = model === m.id;
+        const hint = m.description ?? contextHint(m.context);
+        const disabled = !provider.connected;
+        return (
+          <button
+            type="button"
+            key={m.id}
+            onClick={() => !disabled && onSelectModel(m.id)}
+            role="radio"
+            aria-checked={sel}
+            aria-disabled={disabled}
+            disabled={disabled}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 10,
+              width: "100%",
+              textAlign: "left",
+              border: "none",
+              borderBottom: "1px solid color-mix(in oklab, var(--color-line) 55%, transparent)",
+              background: sel ? "var(--color-accent-tint)" : "transparent",
+              padding: "9px 11px",
+              cursor: disabled ? "default" : "pointer",
+              opacity: disabled ? 0.5 : 1,
+              fontFamily: "var(--font-ui)",
+            }}
+          >
+            <span className={"addfolder__check" + (sel ? " is-on" : "")}>{sel && <Icon name="check" size={11} />}</span>
+            <span
+              style={{
+                fontFamily: "var(--font-mono)",
+                fontSize: "var(--text-xs)",
+                fontWeight: 500,
+                color: "var(--color-fg)",
+                flex: "none",
+              }}
+            >
+              {m.id}
+            </span>
+            {disabled ? (
+              <span style={{ flex: 1, minWidth: 0, fontSize: "var(--text-xs)", color: "var(--color-faint)" }}>
+                connect {provider.name} to use
+              </span>
+            ) : (
+              hint && (
+                <span
+                  style={{
+                    flex: 1,
+                    minWidth: 0,
+                    fontSize: "var(--text-xs)",
+                    color: "var(--color-muted)",
+                    whiteSpace: "nowrap",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                  }}
+                >
+                  {hint}
+                </span>
+              )
+            )}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/** The create-agent form (design "Create agent" screen; the Model section groups models by provider). */
 export function CreateView({
   lib,
   models,
@@ -23,7 +236,8 @@ export function CreateView({
   onCreated,
 }: {
   lib: AgentsLibrary;
-  models: AgentModelRow[];
+  /** The full models response — models + per-user provider connection state. */
+  models: AgentModelsResponse;
   registry: SkillVM[];
   appOrigin: string;
   onBack: () => void;
@@ -31,55 +245,57 @@ export function CreateView({
 }) {
   const [name, setName] = useState("");
   const [instructions, setInstructions] = useState("");
-  const [model, setModel] = useState<string>(() => models[0]?.id ?? "");
   const [modelQ, setModelQ] = useState("");
   const [skillQ, setSkillQ] = useState("");
   const [selected, setSelected] = useState<string[]>([]);
   const [secrets, setSecrets] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // Providers connected during this session (after a successful inline Connect) — local override so
+  // the models enable immediately without re-fetching the catalog.
+  const [connectedNow, setConnectedNow] = useState<Set<string>>(() => new Set());
   // Synchronous submit gate (StrictMode-safe: never gate the RPC on state set inside an updater).
   const submittingRef = useRef(false);
   const errorRef = useRef<HTMLPreElement>(null);
 
-  const slug = kebabName(name);
-  const selectedModel = useMemo(() => models.find((m) => m.id === model) ?? null, [models, model]);
-  // Each agent runs on ITS OWNER's provider key — the chosen model's key is a required write-only
-  // secret, entered here (any one of the provider's accepted env var names unlocks provisioning).
-  const modelKeyName = selectedModel?.env_keys[0] ?? null;
-  const modelKeySet = selectedModel ? selectedModel.env_keys.some((key) => (secrets[key] ?? "").trim() !== "") : false;
-  const canProvision =
-    name.trim().length > 0 && selected.length > 0 && !!model && (!modelKeyName || modelKeySet) && !busy;
+  const providers = useMemo(() => toModelProviders(models), [models]);
+  const groups = useMemo(
+    () => groupModelsByProvider(models.models, providers, connectedNow),
+    [models.models, providers, connectedNow],
+  );
+  const visibleGroups = useMemo(() => filterModelGroups(groups, modelQ), [groups, modelQ]);
 
-  const modelRows = useMemo(() => {
-    const q = modelQ.trim().toLowerCase();
-    if (!q) return models;
-    return models.filter(
-      (m) =>
-        m.id.toLowerCase().includes(q) ||
-        m.name.toLowerCase().includes(q) ||
-        m.provider_name.toLowerCase().includes(q) ||
-        m.provider.toLowerCase().includes(q),
-    );
-  }, [models, modelQ]);
+  // The selected model. Preselect the first connected provider's first model; keep it valid as
+  // providers connect. Never auto-select a disabled (unconnected) model.
+  const [model, setModel] = useState<string>(() => firstConnectedModel(groups) ?? "");
+  useEffect(() => {
+    if (model && modelProviderConnected(groups, model)) return;
+    const next = firstConnectedModel(groups);
+    if (next !== model) setModel(next ?? "");
+  }, [groups, model]);
+
+  const slug = kebabName(name);
+  const modelConnected = model ? modelProviderConnected(groups, model) : false;
+
+  // An ORG-scoped agent can only carry ORG skills — a personal skill would not be readable by other
+  // members. A personal (mine) agent keeps the full pickable set (org + own personal authored).
+  const pickable = useMemo(
+    () => (lib === "org" ? registry.filter((s) => s.scope === "org") : registry),
+    [lib, registry],
+  );
+
+  // Secrets are ONLY the skill-required env vars now; the provider key comes from the saved
+  // connection (the backend copies it at create).
+  const secretRows = useMemo(() => deriveSecretRows(selected, pickable), [selected, pickable]);
+
+  const canProvision =
+    kebabName(name).length > 0 && selected.length > 0 && !!model && modelConnected && !busy;
 
   const skillRows = useMemo(() => {
     const q = skillQ.trim().toLowerCase();
-    if (!q) return registry;
-    return registry.filter((s) => s.id.toLowerCase().includes(q) || s.description.toLowerCase().includes(q));
-  }, [registry, skillQ]);
-
-  const secretRows = useMemo(() => {
-    const skillRows = deriveSecretRows(selected, registry);
-    if (!modelKeyName) return skillRows;
-    // The provider key row leads the section; a skill can also declare the same key — merge `by`.
-    const existing = skillRows.find((row) => row.key === modelKeyName);
-    const rest = skillRows.filter((row) => row.key !== modelKeyName);
-    return [
-      { key: modelKeyName, by: [model, ...(existing?.by ?? [])], required: true },
-      ...rest,
-    ];
-  }, [selected, registry, model, modelKeyName]);
+    if (!q) return pickable;
+    return pickable.filter((s) => s.id.toLowerCase().includes(q) || s.description.toLowerCase().includes(q));
+  }, [pickable, skillQ]);
 
   const toggleSkill = (id: string) => {
     setSelected((list) => (list.includes(id) ? list.filter((s) => s !== id) : [...list, id]));
@@ -90,9 +306,12 @@ export function CreateView({
     submittingRef.current = true;
     setBusy(true);
     setError(null);
+    // Only submit the values whose key is in the CURRENT secret rows — a deselected skill's secret
+    // must not be sent along.
+    const wantedKeys = new Set(secretRows.map((row) => row.key));
     const filledSecrets: Record<string, string> = {};
     for (const [key, value] of Object.entries(secrets)) {
-      if (value) filledSecrets[key] = value;
+      if (value && wantedKeys.has(key)) filledSecrets[key] = value;
     }
     createAgent({
       slug,
@@ -118,9 +337,14 @@ export function CreateView({
     if (error) errorRef.current?.scrollIntoView({ block: "center", behavior: "smooth" });
   }, [error]);
 
+  const anyConnected = groups.some((g) => g.provider.connected);
   const provisionHint = canProvision
     ? `Forks the golden snapshot and pushes ${selected.length} ${selected.length === 1 ? "skill." : "skills."}`
-    : "Name the agent and pick at least one skill.";
+    : !anyConnected || !modelConnected
+      ? "Connect a model provider and pick its model."
+      : kebabName(name).length === 0 || selected.length === 0
+        ? "Name the agent and pick at least one skill."
+        : "";
 
   return (
     <div data-screen-label="Create agent" className="dpage">
@@ -209,71 +433,34 @@ export function CreateView({
                   }}
                 />
               </div>
-              <div style={{ maxHeight: 264, overflowY: "auto" }} role="radiogroup" aria-label="Model">
-                {modelRows.map((m) => {
-                  const sel = model === m.id;
-                  const hint = m.description ?? contextHint(m.context);
-                  return (
-                    <button
-                      type="button"
-                      key={m.id}
-                      onClick={() => setModel(m.id)}
-                      role="radio"
-                      aria-checked={sel}
-                      style={{
-                        display: "flex",
-                        alignItems: "center",
-                        gap: 10,
-                        width: "100%",
-                        textAlign: "left",
-                        border: "none",
-                        borderBottom: "1px solid color-mix(in oklab, var(--color-line) 55%, transparent)",
-                        background: sel ? "var(--color-accent-tint)" : "transparent",
-                        padding: "9px 11px",
-                        cursor: "pointer",
-                        fontFamily: "var(--font-ui)",
-                      }}
-                    >
-                      <span className={"addfolder__check" + (sel ? " is-on" : "")}>
-                        {sel && <Icon name="check" size={11} />}
-                      </span>
-                      <span
-                        style={{
-                          fontFamily: "var(--font-mono)",
-                          fontSize: "var(--text-xs)",
-                          fontWeight: 500,
-                          color: "var(--color-fg)",
-                          flex: "none",
-                        }}
-                      >
-                        {m.id}
-                      </span>
-                      <span className="chip">{m.provider_name}</span>
-                      {hint && (
-                        <span
-                          style={{
-                            flex: 1,
-                            minWidth: 0,
-                            fontSize: "var(--text-xs)",
-                            color: "var(--color-muted)",
-                            whiteSpace: "nowrap",
-                            overflow: "hidden",
-                            textOverflow: "ellipsis",
-                          }}
-                        >
-                          {hint}
-                        </span>
-                      )}
-                    </button>
-                  );
-                })}
-                {modelRows.length === 0 && (
+              <div style={{ maxHeight: 300, overflowY: "auto" }} role="radiogroup" aria-label="Model">
+                {visibleGroups.map((group) => (
+                  <ProviderGroup
+                    key={group.provider.id}
+                    group={group}
+                    model={model}
+                    onSelectModel={setModel}
+                    onConnected={(providerId) =>
+                      setConnectedNow((prev) => {
+                        const next = new Set(prev);
+                        next.add(providerId);
+                        return next;
+                      })
+                    }
+                  />
+                ))}
+                {visibleGroups.length === 0 && (
                   <div className="alist--empty" style={{ border: "none" }}>
                     No models match.
                   </div>
                 )}
               </div>
             </div>
+            {!anyConnected && (
+              <p style={{ margin: "7px 0 0", fontSize: "var(--text-xs)", color: "var(--color-faint)" }}>
+                Connect at least one model provider to pick a model.
+              </p>
+            )}
           </div>
 
           <div>
@@ -391,7 +578,7 @@ export function CreateView({
           {secretRows.length > 0 && (
             <div>
               <div className="seclabel">
-                Secrets <span className="seclabel__n">your model key + what the selected skills require</span>
+                Secrets <span className="seclabel__n">what the selected skills require</span>
               </div>
               <div className="reqlist">
                 {secretRows.map((row) => {

@@ -429,8 +429,13 @@ assert_no_browser_errors
 log "Checking the agents console"
 agent-browser set device "Desktop Chrome" >/dev/null 2>&1 || true
 agents_probe="$(agent-browser eval "fetch('/v1/agents?lib=mine').then((r) => r.status).catch(() => 0)" 2>/dev/null | tr -d '\"' || true)"
-if [ "$agents_probe" != "200" ]; then
-  log "Agents API not available (status: ${agents_probe:-unknown}) — skipping the agents section"
+if [ "$agents_probe" = "404" ]; then
+  # 404 = the agents API genuinely doesn't exist in this build (pre-merge) — a legitimate skip.
+  log "Agents API absent (404) — skipping the agents section"
+elif [ "$agents_probe" != "200" ]; then
+  # 401/403/5xx after a signed-in probe is a real regression, NOT a feature-absent skip.
+  printf '[agent-browser-smoke] Agents API probe returned %s (expected 200) — treating as a regression\n' "${agents_probe:-unknown}" >&2
+  exit 1
 else
   agent-browser open "$APP_URL/agents"
   wait_for_body_contains "New agent"

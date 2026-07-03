@@ -17,6 +17,7 @@ import {
   pauseAgent,
   pushAgentSkill,
   retryProvision,
+  setAgentSecrets,
   wakeAgent,
 } from "@/lib/agentQueries";
 import { formatDurationSeconds } from "@/lib/format";
@@ -41,7 +42,7 @@ import { CreateView } from "./CreateView";
 import { DetailView } from "./DetailView";
 import { ProvisioningCard } from "./ProvisioningCard";
 import { UpdateFanoutView } from "./UpdateFanoutView";
-import { deriveAgentNav } from "./derive";
+import { deriveAgentNav, deriveUpdateNotices } from "./derive";
 import {
   agentChatHref,
   agentsRouteHref,
@@ -354,11 +355,15 @@ export function AgentsApp({
         .then((res) => {
           patchAgent(slug, (a) => ({ ...a, pendingOp: res.pending_op }));
           let inFlight = false;
+          // Tolerate a few consecutive transient poll failures before giving up (mirrors the
+          // provisioning poll) — a single blip must not silently abandon the push.
+          let errorStreak = 0;
           const intervalId = setInterval(() => {
             if (inFlight) return;
             inFlight = true;
             fetchAgent(slug)
               .then((row) => {
+                errorStreak = 0;
                 applyDetail(row);
                 const op = row.pending_op;
                 if (!op || op.skill_slug !== skillSlug || op.phase === "updated" || op.phase === "failed") {
@@ -366,7 +371,10 @@ export function AgentsApp({
                   if (op?.phase === "failed" && op.error) setNotice(op.error);
                 }
               })
-              .catch(() => finish())
+              .catch(() => {
+                errorStreak += 1;
+                if (errorStreak >= 3) finish();
+              })
               .finally(() => {
                 inFlight = false;
               });
@@ -380,6 +388,21 @@ export function AgentsApp({
         });
     },
     [applyDetail, findAgent, patchAgent],
+  );
+
+  /**
+   * Write agent variables (add/replace/remove), then refetch the detail so the set/not-set state +
+   * required_by re-render. Returns `restarting` so the DetailView can surface the interrupt note.
+   * The DetailView owns the synchronous busy gate; this stays a plain async RPC.
+   */
+  const setSecrets = useCallback(
+    async (slug: string, secrets: Record<string, string | null>): Promise<{ restarting: boolean }> => {
+      const result = await setAgentSecrets(slug, secrets);
+      const row = await fetchAgent(slug).catch(() => null);
+      if (row) applyDetail(row);
+      return { restarting: result.restarting };
+    },
+    [applyDetail],
   );
 
   // Clear any in-flight push polls on unmount.
@@ -440,7 +463,9 @@ export function AgentsApp({
   // --- View switch -----------------------------------------------------------------
   const lib = route.lib;
   const libAgents = lib === "org" ? orgAgents : mineAgents;
-  const updates = lib === "org" ? initialOrgAgents.updates : initialMineAgents.updates;
+  // Recompute the update banner from the LIVE agent rows so a push that lands a fresh version
+  // updates (or clears) it in place — never the static server payload.
+  const updates = useMemo(() => deriveUpdateNotices(libAgents), [libAgents]);
   const backToList = () => applyRoute({ lib, kind: "list" }, "push");
 
   let main: React.ReactNode;
@@ -448,7 +473,7 @@ export function AgentsApp({
     main = (
       <CreateView
         lib={lib}
-        models={initialModels.models}
+        models={initialModels}
         registry={registrySkills}
         appOrigin={appOrigin}
         onBack={backToList}
@@ -495,9 +520,13 @@ export function AgentsApp({
             chatUrl={`${appOrigin}/agents/${detailAgent.id}/chat`}
             onBack={backToList}
             onOpenChat={() => router.push(agentChatHref(detailAgent.id))}
+            onOpenSession={(sessionId) =>
+              router.push(`${agentChatHref(detailAgent.id)}?session=${encodeURIComponent(sessionId)}`)
+            }
             onPauseWake={() => pauseWake(detailAgent.id)}
             onRetry={() => retryAgentProvision(detailAgent.id)}
             onPushSkill={(skillSlug) => pushSkill(detailAgent.id, skillSlug)}
+            onSetSecrets={(secrets) => setSecrets(detailAgent.id, secrets)}
             onDestroy={() => {
               void destroyOpenAgent(detailAgent.id);
             }}

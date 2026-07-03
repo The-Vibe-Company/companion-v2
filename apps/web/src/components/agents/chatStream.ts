@@ -1,4 +1,4 @@
-import type { AgentChatEvent } from "@companion/contracts";
+import type { AgentChatEvent, AgentChatHistoryItem } from "@companion/contracts";
 
 /**
  * Pure pieces of the chat surface: an incremental SSE frame parser (the stream is consumed via
@@ -168,17 +168,51 @@ export function initChatState(): ChatState {
   return { items: [], busy: false, sessionId: null, error: null };
 }
 
+export type ResolveToolLabel = (tool: string, skill: string | null) => { label: string; action: string };
+
 export type ChatAction =
   | { kind: "sys"; text: string }
   | { kind: "user"; text: string }
-  | { kind: "event"; event: AgentChatEvent; resolveToolLabel: (tool: string, skill: string | null) => { label: string; action: string } }
+  | { kind: "event"; event: AgentChatEvent; resolveToolLabel: ResolveToolLabel }
+  | {
+      /** Seed prior-session messages ABOVE any sys lines, before the live stream opens. */
+      kind: "history";
+      items: AgentChatHistoryItem[];
+      resolveToolLabel: ResolveToolLabel;
+    }
   | { kind: "send" }
-  | { kind: "reset-busy" };
+  | { kind: "reset-busy" }
+  /** Clear the transcript back to an empty session (New session). */
+  | { kind: "reset" };
 
 let localId = 0;
 function nextId(prefix: string): string {
   localId += 1;
   return `${prefix}-${localId}`;
+}
+
+/** Map one persisted history item to a completed `ChatItem` (tool rows resolve their label + finish). */
+function mapHistoryItem(item: AgentChatHistoryItem, resolveToolLabel: ResolveToolLabel): ChatItem {
+  switch (item.kind) {
+    case "user":
+      return { kind: "user", id: nextId("user"), text: item.text };
+    case "assistant":
+      return { kind: "asst", id: nextId("asst"), messageId: null, text: item.text, streaming: false };
+    case "tool": {
+      const { label, action } = resolveToolLabel(item.tool, item.skill);
+      return {
+        kind: "tool",
+        id: nextId("tool"),
+        callId: item.call_id,
+        label,
+        action,
+        running: false,
+        input: item.input,
+        output: item.output,
+        durationMs: item.duration_ms,
+      };
+    }
+  }
 }
 
 export function chatReducer(state: ChatState, action: ChatAction): ChatState {
@@ -187,20 +221,25 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       return { ...state, items: [...state.items, { kind: "sys", id: nextId("sys"), text: action.text }] };
     case "user":
       return { ...state, items: [...state.items, { kind: "user", id: nextId("user"), text: action.text }] };
+    case "history": {
+      // Preserve any existing sys lines (boot annotations like "resumed from snapshot") ABOVE the
+      // reloaded transcript, so history shows above new live events appended afterwards.
+      const sysLines = state.items.filter((item) => item.kind === "sys");
+      const history = action.items.map((item) => mapHistoryItem(item, action.resolveToolLabel));
+      return { ...state, items: [...sysLines, ...history] };
+    }
     case "send":
       return { ...state, busy: true, error: null };
     case "reset-busy":
       return { ...state, busy: false };
+    case "reset":
+      return initChatState();
     case "event":
       return applyEvent(state, action.event, action.resolveToolLabel);
   }
 }
 
-function applyEvent(
-  state: ChatState,
-  event: AgentChatEvent,
-  resolveToolLabel: (tool: string, skill: string | null) => { label: string; action: string },
-): ChatState {
+function applyEvent(state: ChatState, event: AgentChatEvent, resolveToolLabel: ResolveToolLabel): ChatState {
   switch (event.type) {
     case "ready":
       return { ...state, sessionId: event.session_id };
