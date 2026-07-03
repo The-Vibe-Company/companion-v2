@@ -2282,16 +2282,8 @@ function agentCtx(): AgentControlContext {
     opencodeVersion: process.env.OPENCODE_VERSION?.trim() || null,
     region: "iad1",
     timeoutMs: Number(process.env.COMPANION_SANDBOX_TIMEOUT_MS ?? 300000),
-    resolveModelEnv: async (model) => {
-      const resolved = await agentModelCatalog.resolveModel(model);
-      if (!resolved) return null;
-      const env: Record<string, string> = {};
-      for (const key of resolved.envKeys) {
-        const value = process.env[key];
-        if (value) env[key] = value;
-      }
-      return Object.keys(env).length > 0 ? env : null;
-    },
+    // Key NAMES only — each agent runs on its owner's key, stored as a write-only agent secret.
+    resolveModelKeys: (model) => agentModelCatalog.resolveModel(model),
   };
   return agentControlCtx;
 }
@@ -2383,6 +2375,16 @@ app.get("/v1/agents/:slug", async (c) => {
       getAgentBySlug({ actor, orgId, slug: c.req.param("slug"), database }),
     );
     if (!detail) return jsonError(c, "agent not found", 404);
+    // The model's provider key is a per-agent secret; make an UNSET one visible on the detail so
+    // the operator sees exactly what to fix before a retry (set keys already appear).
+    const modelKeys = await agentModelCatalog.resolveModel(detail.model).catch(() => null);
+    if (modelKeys && !modelKeys.envKeys.some((key) => detail.secrets.some((s) => s.key === key && s.set))) {
+      const wanted = modelKeys.envKeys[0];
+      if (wanted && !detail.secrets.some((s) => s.key === wanted)) {
+        detail.secrets.push({ key: wanted, set: false, required_by: [detail.model], required: true });
+        detail.secrets.sort((a, b) => a.key.localeCompare(b.key));
+      }
+    }
     return c.json(detail);
   } catch (error) {
     return jsonError(c, error, 401);
@@ -2526,20 +2528,40 @@ app.post("/v1/agents/:slug/skills/:skillSlug/push", async (c) => {
 
 /* ---- Agent chat (session-only; the sandbox basic-auth password never leaves this process) ---- */
 
+/** True when the sandbox behind `domain` answers as a live OpenCode server (not 410/dead). */
+async function sandboxAnswers(domain: string, password: string): Promise<boolean> {
+  try {
+    const auth = Buffer.from(`companion:${password}`).toString("base64");
+    const res = await fetch(`${domain}/doc`, {
+      headers: { authorization: `Basic ${auth}` },
+      signal: AbortSignal.timeout(6_000),
+    });
+    return res.status < 500 && res.status !== 410;
+  } catch {
+    return false;
+  }
+}
+
 async function agentChatTargetFor(c: Context<{ Variables: ApiVariables }>, slug: string) {
   const ctx = agentCtx();
   let target = await withTenant(c, ({ actor, orgId, database }) =>
     getAgentChatTarget({ actor, orgId, slug, ctx, database }),
   );
-  // Sleeping agents wake on chat entry (the wake banner covers this on the client); running agents
-  // are left untouched — waking re-launches the server and would sever live streams.
-  if (target.status === "sleeping") {
+  // A derived "running" status can lie: Vercel's hard timeout runs from boot/resume, not from our
+  // last_active_at, so the sandbox may already be stopped (410 SANDBOX_STOPPED). Preflight the
+  // domain and wake whenever the server does not actually answer — waking relaunches serve, which
+  // is exactly what a dead/stopped sandbox needs. Live servers are never restarted.
+  const needsWake = target.status === "sleeping" || !(await sandboxAnswers(target.domain, target.password));
+  if (needsWake) {
     const actor = actorFromContext(c);
     const orgId = await orgIdFromContext(c);
     await wakeAgent({ actor, orgId, slug, ctx });
     target = await withTenant(c, ({ actor: a, orgId: org, database }) =>
       getAgentChatTarget({ actor: a, orgId: org, slug, ctx, database }),
     );
+  } else {
+    // Keep an actively-used sandbox alive past its hard timeout (best-effort).
+    void ctx.runtime.extendTimeout?.(target.sandbox, ctx.timeoutMs);
   }
   return target;
 }

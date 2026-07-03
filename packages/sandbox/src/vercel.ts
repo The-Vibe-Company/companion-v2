@@ -183,6 +183,15 @@ export function createVercelRuntime(config: VercelRuntimeConfig): AgentRuntime {
       await sandbox.writeFiles(skillFilePayloads(skill));
     },
 
+    async extendTimeout(ref, ms) {
+      try {
+        const sandbox = await Sandbox.get({ ...credentials, name: ref.sandboxName, resume: false });
+        await sandbox.extendTimeout(ms);
+      } catch {
+        // Best-effort: a stopped/gone sandbox simply wakes on the next interaction instead.
+      }
+    },
+
     async restartServer({ ref, env, domain, password }) {
       const sandbox = await getSandbox(ref);
       await launchServe(sandbox, env);

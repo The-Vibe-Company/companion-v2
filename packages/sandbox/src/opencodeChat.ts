@@ -19,6 +19,11 @@ export function createChatClient(target: ChatTarget): OpencodeClient {
   const auth = Buffer.from(`${OPENCODE_SERVER_USERNAME}:${target.password}`).toString("base64");
   return createOpencodeClient({
     baseUrl: target.domain,
+    // BOTH auth channels are load-bearing: regular requests go through the custom fetch, but the
+    // SDK's SSE path (`event.subscribe`) calls global fetch directly and only merges the
+    // client-level `headers` config — without it the /event stream 401s and retries silently
+    // forever, which reads as "the agent never answers".
+    headers: { authorization: `Basic ${auth}` },
     fetch: (request: Request) => {
       const headers = new Headers(request.headers);
       headers.set("authorization", `Basic ${auth}`);
@@ -57,7 +62,9 @@ export async function* streamChatEvents(input: {
   const doneTools = new Set<string>();
   const doneTexts = new Set<string>();
 
-  const subscription = await client.event.subscribe();
+  // The signal must reach the SDK's underlying fetch: without it, aborting a silent stream (no
+  // events flowing) would never unblock the `for await`.
+  const subscription = await client.event.subscribe(signal ? { signal } : {});
   for await (const event of subscription.stream) {
     if (signal?.aborted) return;
     switch (event.type) {

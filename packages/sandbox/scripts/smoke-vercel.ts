@@ -103,14 +103,24 @@ async function main(): Promise<void> {
     let sawTool = false;
     let sawProbeOutput = false;
     let text = "";
-    const events = streamChatEvents({ client, sessionId: session.id });
+    // Hard deadline: abort the underlying SSE fetch so a silent stream can NEVER hang the smoke.
+    const chatAbort = new AbortController();
+    const chatDeadline = setTimeout(() => chatAbort.abort(), 180_000);
+    const events = streamChatEvents({ client, sessionId: session.id, signal: chatAbort.signal });
     await sendPromptAsync(client, session.id, "Run a smoke probe and tell me the exact output.");
-    const deadline = Date.now() + 180_000;
-    for await (const event of events) {
-      if (event.type === "tool.start") sawTool = true;
-      if (event.type === "tool.done" && event.output.includes("PROBE-OK-4242")) sawProbeOutput = true;
-      if (event.type === "text.delta") text += event.delta;
-      if (event.type === "session.idle" || Date.now() > deadline) break;
+    try {
+      for await (const event of events) {
+        if (event.type === "tool.start") sawTool = true;
+        if (event.type === "tool.done" && event.output.includes("PROBE-OK-4242")) sawProbeOutput = true;
+        if (event.type === "text.delta") text += event.delta;
+        if (event.type === "session.idle") break;
+      }
+    } catch (error) {
+      if (!chatAbort.signal.aborted) throw error;
+      console.log("  chat window elapsed without session.idle (aborted)");
+    } finally {
+      clearTimeout(chatDeadline);
+      chatAbort.abort();
     }
     report["skill_triggered"] = String(sawTool);
     report["script_ran"] = String(sawProbeOutput || text.includes("PROBE-OK-4242"));

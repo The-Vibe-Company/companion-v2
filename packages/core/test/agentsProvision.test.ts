@@ -99,7 +99,7 @@ function scriptedRuntime(script: RuntimeScript = {}) {
   return { runtime, calls };
 }
 
-function seedProvisionScenario(store: FakeStore, opts: { secretRequired?: boolean; secretSet?: boolean } = {}) {
+function seedProvisionScenario(store: FakeStore, opts: { secretRequired?: boolean; secretSet?: boolean; modelKeySet?: boolean } = {}) {
   const skillId = "skill-meeting-digest";
   const versionId = "version-meeting-digest-1.3.0";
   store.skills.push({
@@ -190,6 +190,21 @@ function seedProvisionScenario(store: FakeStore, opts: { secretRequired?: boolea
       updatedAt: new Date(),
     });
   }
+  if (opts.modelKeySet !== false) {
+    // The model provider key is a PER-AGENT secret (each user runs on their own key).
+    const sealedKey = sealSecret({ kek: KEK, plaintext: "sk-user-anthropic", aad: agentSecretAad(ORG, agentId, "ANTHROPIC_API_KEY") });
+    store.agentSecrets.push({
+      orgId: ORG,
+      agentId,
+      key: "ANTHROPIC_API_KEY",
+      wrappedDek: sealedKey.wrappedDek,
+      ciphertext: sealedKey.ciphertext,
+      keyVersion: 1,
+      createdBy: me.id,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+  }
   return agentId;
 }
 
@@ -211,7 +226,7 @@ async function ctxWith(
     opencodeVersion: "1.17.13",
     region: "iad1",
     timeoutMs: 300000,
-    resolveModelEnv: async () => ({ ANTHROPIC_API_KEY: "sk-anthropic" }),
+    resolveModelKeys: async () => ({ envKeys: ["ANTHROPIC_API_KEY"] }),
     ...overrides,
   };
 }
@@ -245,10 +260,11 @@ describe("provisionAgent — the 4-step executor", () => {
     expect(bundle.files.map((f) => f.path).sort()).toEqual(["SKILL.md", "scripts/digest.py"]);
     expect(bundle.files.find((f) => f.path === "scripts/digest.py")?.executable).toBe(true);
 
-    // Serve env: password + provider key + user secret — never persisted anywhere on the row.
+    // Serve env: password + the USER's provider key + skill secret — all from agent secrets,
+    // nothing from the control-plane env; never persisted anywhere on the row.
     const serve = calls.find((c) => c.op === "serve")?.args as { env: Record<string, string> };
     expect(serve.env.OPENCODE_SERVER_PASSWORD).toBe("pw-123");
-    expect(serve.env.ANTHROPIC_API_KEY).toBe("sk-anthropic");
+    expect(serve.env.ANTHROPIC_API_KEY).toBe("sk-user-anthropic");
     expect(serve.env.SLACK_BOT_TOKEN).toBe("xoxb-1");
     expect(JSON.stringify(store.agents[0])).not.toContain("xoxb-1");
     expect(store.audit.some((a) => a.action === "agent.provision")).toBe(true);
@@ -295,6 +311,25 @@ describe("provisionAgent — the 4-step executor", () => {
     });
     expect((row.provisionError as { detail: string }).detail).toContain("Set the secret, then retry");
     // The runtime never received the push — the guard runs before any bytes move.
+    expect(calls.some((c) => c.op === "push")).toBe(false);
+  });
+
+  it("a missing model provider key fails the PUSH step with the designed message", async () => {
+    const store = emptyStore();
+    const agentId = seedProvisionScenario(store, { modelKeySet: false });
+    const database = fakeAgentsDb(store);
+    const { runtime, calls } = scriptedRuntime();
+
+    await provisionAgent({ orgId: ORG, actorId: me.id, agentId, ctx: await ctxWith(database, runtime) });
+
+    const row = store.agents[0]!;
+    expect(row.lifecycle).toBe("error");
+    expect(steps(store)[1]).toMatchObject({ key: "push", state: "failed" });
+    expect(row.provisionError).toMatchObject({
+      message: expect.stringContaining("model anthropic/claude-x requires ANTHROPIC_API_KEY"),
+      step: "push",
+    });
+    expect((row.provisionError as { detail: string }).detail).toContain("ITS OWNER's key");
     expect(calls.some((c) => c.op === "push")).toBe(false);
   });
 

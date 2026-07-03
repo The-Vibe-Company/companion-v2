@@ -112,6 +112,7 @@ const models: AgentModelsResponse = {
       context: 200_000,
       cost_input: null,
       cost_output: null,
+      env_keys: ["OPENAI_API_KEY"],
     },
   ],
   providers: [{ id: "openai", name: "OpenAI" }],

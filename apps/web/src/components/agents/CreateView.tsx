@@ -43,7 +43,13 @@ export function CreateView({
   const errorRef = useRef<HTMLPreElement>(null);
 
   const slug = kebabName(name);
-  const canProvision = name.trim().length > 0 && selected.length > 0 && !!model && !busy;
+  const selectedModel = useMemo(() => models.find((m) => m.id === model) ?? null, [models, model]);
+  // Each agent runs on ITS OWNER's provider key — the chosen model's key is a required write-only
+  // secret, entered here (any one of the provider's accepted env var names unlocks provisioning).
+  const modelKeyName = selectedModel?.env_keys[0] ?? null;
+  const modelKeySet = selectedModel ? selectedModel.env_keys.some((key) => (secrets[key] ?? "").trim() !== "") : false;
+  const canProvision =
+    name.trim().length > 0 && selected.length > 0 && !!model && (!modelKeyName || modelKeySet) && !busy;
 
   const modelRows = useMemo(() => {
     const q = modelQ.trim().toLowerCase();
@@ -63,7 +69,17 @@ export function CreateView({
     return registry.filter((s) => s.id.toLowerCase().includes(q) || s.description.toLowerCase().includes(q));
   }, [registry, skillQ]);
 
-  const secretRows = useMemo(() => deriveSecretRows(selected, registry), [selected, registry]);
+  const secretRows = useMemo(() => {
+    const skillRows = deriveSecretRows(selected, registry);
+    if (!modelKeyName) return skillRows;
+    // The provider key row leads the section; a skill can also declare the same key — merge `by`.
+    const existing = skillRows.find((row) => row.key === modelKeyName);
+    const rest = skillRows.filter((row) => row.key !== modelKeyName);
+    return [
+      { key: modelKeyName, by: [model, ...(existing?.by ?? [])], required: true },
+      ...rest,
+    ];
+  }, [selected, registry, model, modelKeyName]);
 
   const toggleSkill = (id: string) => {
     setSelected((list) => (list.includes(id) ? list.filter((s) => s !== id) : [...list, id]));
@@ -375,7 +391,7 @@ export function CreateView({
           {secretRows.length > 0 && (
             <div>
               <div className="seclabel">
-                Secrets <span className="seclabel__n">required by selected skills</span>
+                Secrets <span className="seclabel__n">your model key + what the selected skills require</span>
               </div>
               <div className="reqlist">
                 {secretRows.map((row) => {

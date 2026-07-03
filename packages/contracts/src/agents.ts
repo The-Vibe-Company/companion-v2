@@ -246,7 +246,11 @@ export type WakeAgentResult = z.infer<typeof wakeAgentResultSchema>;
 
 /* ---- Model catalog ---------------------------------------------------------------- */
 
-/** One pickable model (`GET /v1/agents/models`), filtered to configured providers + tool-capable. */
+/**
+ * One pickable model (`GET /v1/agents/models`). The catalog is the FULL tool-capable models.dev
+ * registry — the control plane never injects its own provider keys; each user supplies the chosen
+ * model's key (`env_keys`) as a write-only agent secret.
+ */
 export const agentModelRowSchema = z.object({
   /** OpenCode model ref: `provider/model-id`. */
   id: z.string(),
@@ -258,12 +262,13 @@ export const agentModelRowSchema = z.object({
   /** USD per 1M tokens, when the catalog knows it. */
   cost_input: z.number().nonnegative().nullable().default(null),
   cost_output: z.number().nonnegative().nullable().default(null),
+  /** Env var name(s) the provider accepts for its API key (any one suffices). */
+  env_keys: z.array(z.string()).default([]),
 });
 export type AgentModelRow = z.infer<typeof agentModelRowSchema>;
 
 export const agentModelsResponseSchema = z.object({
   models: z.array(agentModelRowSchema),
-  /** Providers whose API keys are configured on the control plane. */
   providers: z.array(z.object({ id: z.string(), name: z.string() })),
 });
 export type AgentModelsResponse = z.infer<typeof agentModelsResponseSchema>;

@@ -10,7 +10,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "golden": "tsx scripts/create-golden-sandbox.ts",
-    "smoke:vercel": "tsx scripts/smoke-vercel.ts"
+    "smoke:vercel": "tsx scripts/smoke-vercel.ts",
+    "probe": "tsx scripts/probe.ts"
   },
   "dependencies": {
     "@companion/contracts": "workspace:*",

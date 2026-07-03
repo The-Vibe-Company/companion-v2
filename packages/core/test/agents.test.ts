@@ -140,7 +140,7 @@ function ctxFor(database: ReturnType<typeof fakeAgentsDb>, overrides: Partial<Ag
     opencodeVersion: "1.17.13",
     region: "iad1",
     timeoutMs: 300000,
-    resolveModelEnv: async (model) => (model.startsWith("anthropic/") ? { ANTHROPIC_API_KEY: "sk" } : null),
+    resolveModelKeys: async (model: string) => (model.startsWith("anthropic/") ? { envKeys: ["ANTHROPIC_API_KEY"] } : null),
     ...overrides,
   };
 }

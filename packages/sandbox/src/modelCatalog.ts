@@ -3,9 +3,10 @@ import type { AgentModelRow, AgentModelsResponse } from "@companion/contracts";
 /**
  * The model picker catalog. OpenCode enumerates providers/models from the models.dev registry and
  * addresses a model as `provider/model-id`, with provider API keys supplied via env vars. We fetch
- * the same registry, keep only providers whose env key(s) are configured on the control plane and
- * only tool-capable models (agents run skills), and cache in memory. A small bundled fallback keeps
- * the create form usable when models.dev is unreachable.
+ * the same registry and expose EVERY tool-capable model (agents run skills): the control plane
+ * never injects its own provider keys — each user supplies the chosen model's key (the provider's
+ * `env` var name) as a write-only agent secret. A small bundled fallback keeps the create form
+ * usable when models.dev is unreachable.
  */
 
 const REGISTRY_URL = "https://models.dev/api.json";
@@ -76,36 +77,28 @@ async function loadRegistry(fetcher: typeof fetch): Promise<Registry> {
   }
 }
 
-/** Providers whose required env key(s) are present. A provider lists alternates; any one suffices. */
-function providerConfigured(provider: RegistryProvider, env: NodeJS.ProcessEnv): boolean {
-  const keys = provider.env ?? [];
-  if (keys.length === 0) return false;
-  return keys.some((key) => (env[key] ?? "").trim() !== "");
-}
-
 export interface ModelCatalog {
   listModels(): Promise<AgentModelsResponse>;
-  /** Validate a `provider/model` ref and return the env vars to inject for its provider. */
+  /** Validate a `provider/model` ref; returns the provider's API-key env var name(s), or null. */
   resolveModel(modelRef: string): Promise<{ envKeys: string[] } | null>;
   /** Test seam. */
   clearCache(): void;
 }
 
 export function createModelCatalog(input: {
-  env?: NodeJS.ProcessEnv;
   fetcher?: typeof fetch;
 } = {}): ModelCatalog {
-  const env = input.env ?? process.env;
   const fetcher = input.fetcher ?? fetch;
 
-  async function configuredProviders(): Promise<Array<[string, RegistryProvider]>> {
+  async function allProviders(): Promise<Array<[string, RegistryProvider]>> {
     const registry = await loadRegistry(fetcher);
-    return Object.entries(registry).filter(([, provider]) => providerConfigured(provider, env));
+    // A provider with no key env var cannot be user-configured — skip it.
+    return Object.entries(registry).filter(([, provider]) => (provider.env ?? []).length > 0);
   }
 
   return {
     async listModels() {
-      const providers = await configuredProviders();
+      const providers = await allProviders();
       const models: AgentModelRow[] = [];
       for (const [providerId, provider] of providers) {
         for (const [modelKey, model] of Object.entries(provider.models ?? {})) {
@@ -119,6 +112,7 @@ export function createModelCatalog(input: {
             context: model.limit?.context ?? null,
             cost_input: model.cost?.input ?? null,
             cost_output: model.cost?.output ?? null,
+            env_keys: provider.env ?? [],
           });
         }
       }
@@ -134,14 +128,13 @@ export function createModelCatalog(input: {
       if (slash <= 0) return null;
       const providerId = modelRef.slice(0, slash);
       const modelKey = modelRef.slice(slash + 1);
-      const providers = await configuredProviders();
+      const providers = await allProviders();
       const entry = providers.find(([id]) => id === providerId);
       if (!entry) return null;
       const provider = entry[1];
       const model = provider.models?.[modelKey];
       if (!model || model.tool_call !== true) return null;
-      const envKeys = (provider.env ?? []).filter((key) => (env[key] ?? "").trim() !== "");
-      return { envKeys };
+      return { envKeys: provider.env ?? [] };
     },
 
     clearCache() {

@@ -61,8 +61,12 @@ export interface AgentControlContext {
   opencodeVersion: string | null;
   region: string;
   timeoutMs: number;
-  /** Resolve the env vars (provider API keys) to inject for a `provider/model` ref. */
-  resolveModelEnv: (model: string) => Promise<Record<string, string> | null>;
+  /**
+   * Resolve a `provider/model` ref to the provider's API-key env var NAME(s). The control plane
+   * never supplies key VALUES — the user stores their own key as a write-only agent secret under
+   * one of these names, and it reaches the sandbox with the rest of the secrets.
+   */
+  resolveModelKeys: (model: string) => Promise<{ envKeys: string[] } | null>;
 }
 
 /* ------------------------------------ derivations --------------------------------------- */
@@ -366,9 +370,9 @@ export async function createAgent(input: {
   await assertMember(database, input.actor, input.orgId);
   const spec = input.input;
 
-  const modelEnv = await input.ctx.resolveModelEnv(spec.model);
-  if (!modelEnv) {
-    throw new AgentValidationError(`model ${spec.model} is not available (unknown, not tool-capable, or its provider key is not configured)`);
+  const modelKeys = await input.ctx.resolveModelKeys(spec.model);
+  if (!modelKeys) {
+    throw new AgentValidationError(`model ${spec.model} is not available (unknown or not tool-capable)`);
   }
 
   const existing = await loadAgentRow(database, input.orgId, spec.slug);
@@ -612,6 +616,13 @@ export async function provisionAgent(input: {
 
   // Step 2 — push skills (bundle extraction included; a missing required secret fails HERE, by design).
   const pushed = await run("push", async () => {
+    const modelKeys = await modelKeysOrThrow(ctx, row.model);
+    if (!modelKeys.some((key) => secrets.has(key))) {
+      const wanted = modelKeys[0] ?? "the provider API key";
+      throw new AgentRuntimeError(`model ${row.model} requires ${wanted}`, {
+        detail: `No secret named ${wanted} is set on this agent — each agent runs on ITS OWNER's key.\nThe sandbox was stopped. Set the secret, then retry.`,
+      });
+    }
     const missing = missingRequiredSecrets(pins, new Set(secrets.keys()));
     if (missing.length > 0) {
       const [firstKey, firstSlug] = missing[0]!;
@@ -637,8 +648,9 @@ export async function provisionAgent(input: {
   });
   if (pushed === null) return;
 
-  // Step 3 — start server with the injected env (never persisted, never logged).
-  const env = buildServeEnv(serverPassword, await modelEnvOrThrow(ctx, row.model), secrets);
+  // Step 3 — start server with the injected env (never persisted, never logged). The model
+  // provider key is one of the agent's own secrets — nothing comes from the control plane env.
+  const env = buildServeEnv(serverPassword, secrets);
   const served = await run("serve", () => ctx.runtime.startServer({ ref, env }));
   if (served === null) return;
 
@@ -787,21 +799,16 @@ async function loadDecryptedSecrets(
   return out;
 }
 
-async function modelEnvOrThrow(ctx: AgentControlContext, model: string): Promise<Record<string, string>> {
-  const env = await ctx.resolveModelEnv(model);
-  if (!env) throw new AgentRuntimeError(`model ${model} is no longer available on this control plane`);
-  return env;
+async function modelKeysOrThrow(ctx: AgentControlContext, model: string): Promise<string[]> {
+  const resolved = await ctx.resolveModelKeys(model);
+  if (!resolved) throw new AgentRuntimeError(`model ${model} is no longer available in the catalog`);
+  return resolved.envKeys;
 }
 
-function buildServeEnv(
-  serverPassword: string,
-  modelEnv: Record<string, string>,
-  secrets: Map<string, string>,
-): ServeEnv {
+function buildServeEnv(serverPassword: string, secrets: Map<string, string>): ServeEnv {
   return {
     OPENCODE_SERVER_PASSWORD: serverPassword,
     OPENCODE_SERVER_USERNAME,
-    ...modelEnv,
     ...Object.fromEntries(secrets),
   };
 }
@@ -1024,7 +1031,7 @@ export async function wakeAgent(input: {
 
   const { row, secrets } = loaded;
   const serverPassword = decryptServerPassword(input.orgId, row, input.ctx);
-  const env = buildServeEnv(serverPassword, await modelEnvOrThrow(input.ctx, row.model), secrets);
+  const env = buildServeEnv(serverPassword, secrets);
   const woke = await input.ctx.runtime.wake({ ref: sandboxRefOf({ ...row, orgId: input.orgId }), env });
   await input.ctx.runtime.healthCheck({
     ref: sandboxRefOf({ ...row, orgId: input.orgId }),
@@ -1260,7 +1267,7 @@ export async function runSkillPush(input: {
     const { row, secrets, storagePath } = loaded;
     const ref = sandboxRefOf({ ...row, orgId });
     const serverPassword = decryptServerPassword(orgId, row, ctx);
-    const env = buildServeEnv(serverPassword, await modelEnvOrThrow(ctx, row.model), secrets);
+    const env = buildServeEnv(serverPassword, secrets);
 
     // Sleeping agents wake to update (the design's "sleeping · wakes to update").
     let domain = row.sandboxDomain;

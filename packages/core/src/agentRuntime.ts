@@ -73,6 +73,11 @@ export interface AgentRuntime {
   replaceSkill(input: { ref: SandboxRef; skill: SkillBundle }): Promise<void>;
   /** Kill + relaunch serve so replaced skills are re-discovered, then wait healthy. */
   restartServer(input: { ref: SandboxRef; env: ServeEnv; domain: string; password: string }): Promise<void>;
+  /**
+   * Push the sandbox's hard timeout out by `ms` (Vercel's clock runs from boot/resume, NOT from
+   * traffic — without this an active conversation dies mid-stream). Optional: best-effort feature.
+   */
+  extendTimeout?(ref: SandboxRef, ms: number): Promise<void>;
 }
 
 /** Fetches a stored skill archive (tar.gz bytes) by its storage path — wired to S3 in apps/api. */
