@@ -30,6 +30,7 @@ import {
 } from "@/lib/queries";
 import { fetchSettingsAppData } from "@/lib/settingsClient";
 import { mapSkill, type MeVM, type OrgVM, type SkillVM } from "@/lib/types";
+import { LIB_NAMES } from "../libraryNames";
 import { Sidebar } from "./Sidebar";
 import { ListView } from "./ListView";
 import { treeRowKey } from "./dragGeometry";
@@ -1107,7 +1108,7 @@ export function SkillsApp({
     if (selection.kind === "starred") return ["Starred"];
     if (selection.kind === "installed") return ["Installed"];
     if (selection.kind === "label" && selection.label) return selection.label.split("/");
-    return selection.lib === "org" ? ["All skills"] : ["My Skills"];
+    return selection.lib === "org" ? ["All skills"] : [LIB_NAMES.mine];
   }, [selection]);
 
   const routeForCurrentSurface = useCallback(
