@@ -96,6 +96,11 @@ export {
 // the browser-safe authz exports never pull a Node built-in into a client bundle).
 export * from "./secretbox";
 
+// Companion Agents services. Same load-order reasoning as `./labels`: `agents.ts` imports only
+// `assertMember` (hoisted) and the `ActorContext` type from here.
+export * from "./agents";
+export * from "./agentRuntime";
+
 export interface ActorContext {
   id: string;
   email: string;

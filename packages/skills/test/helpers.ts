@@ -44,6 +44,8 @@ export interface TarEntrySpec {
   linkname?: string;
   /** Override the declared size in the header (for zip-bomb / oversize tests). */
   size?: number;
+  /** Override the tar mode bits (defaults to 0o644; use 0o755 for executable-bit tests). */
+  mode?: number;
 }
 
 /** Craft an arbitrary tar (including malicious entries) for adversarial tests. */
@@ -58,7 +60,7 @@ export function buildTar(entries: TarEntrySpec[]): Promise<Buffer> {
       for (const e of entries) {
         const type = e.type ?? "file";
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const header: any = { name: e.name, type, mode: 0o644, mtime: new Date(0) };
+        const header: any = { name: e.name, type, mode: e.mode ?? 0o644, mtime: new Date(0) };
         if (type === "symlink" || type === "link") {
           header.linkname = e.linkname ?? "target";
           header.size = 0;

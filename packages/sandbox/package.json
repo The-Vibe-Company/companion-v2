@@ -1,11 +1,10 @@
 {
-  "name": "@companion/core",
+  "name": "@companion/sandbox",
   "version": "0.0.0",
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./src/index.ts",
-    "./services": "./src/services.ts"
+    ".": "./src/index.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
@@ -13,14 +12,12 @@
   },
   "dependencies": {
     "@companion/contracts": "workspace:*",
-    "@companion/db": "workspace:*",
-    "@companion/skills": "workspace:*",
-    "drizzle-orm": "^0.38.4",
-    "free-email-domains": "^1.2.0"
+    "@companion/core": "workspace:*",
+    "@opencode-ai/sdk": "1.17.13",
+    "@vercel/sandbox": "2.4.0"
   },
   "devDependencies": {
-    "@types/tar-stream": "^3.1.3",
-    "tar-stream": "^3.1.7",
+    "@types/node": "^22.10.2",
     "typescript": "^5.7.2",
     "vitest": "^2.1.8"
   }
