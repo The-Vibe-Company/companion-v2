@@ -95,10 +95,10 @@
 .v5-brand__name--sm { font-size: var(--text-sm); }
 /* Full "Companion" wordmark lockup (mark = the C). Swaps by theme. */
 .v5-brand__wordmark {
-  display: block; height: 26px; width: calc(26px * 7.05); flex: none;
+  display: block; height: 28px; width: auto; aspect-ratio: 1558 / 300; flex: none;
   background: url("/brand/companion-wordmark.png") left center / contain no-repeat;
 }
-.v5-brand__wordmark--sm { height: 20px; width: calc(20px * 7.05); }
+.v5-brand__wordmark--sm { height: 22px; }
 [data-theme="dark"] .v5-brand__wordmark { background-image: url("/brand/companion-wordmark-dark.png"); }
 .v5-nav__links { display: flex; align-items: center; gap: var(--space-2); }
 .v5-nav__link {
