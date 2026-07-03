@@ -40,6 +40,7 @@ import { AgentsListView } from "./AgentsListView";
 import { CreateView } from "./CreateView";
 import { DetailView } from "./DetailView";
 import { ProvisioningCard } from "./ProvisioningCard";
+import { UpdateFanoutView } from "./UpdateFanoutView";
 import { deriveAgentNav } from "./derive";
 import {
   agentChatHref,
@@ -504,13 +505,21 @@ export function AgentsApp({
         );
       }
     }
+  } else if (route.kind === "update") {
+    main = (
+      <UpdateFanoutView
+        skillSlug={route.skill}
+        onBack={backToList}
+        // Each polled detail during the fan-out run updates the console lists in place
+        // (skill versions + pending_op ride on the list VM via applyDetail).
+        onAgentDetail={applyDetail}
+      />
+    );
   } else {
-    // `list` — and, for this increment, the `update` route also lands on the list (fan-out ships
-    // next; the route parse stays intact so /agents?view=update&skill=… keeps resolving).
     main = (
       <AgentsListView
         lib={lib}
-        label={route.kind === "list" ? route.label ?? null : null}
+        label={route.label ?? null}
         agents={libAgents}
         updates={updates}
         onOpenAgent={(slug) => applyRoute({ lib, kind: "detail", agent: slug }, "push")}

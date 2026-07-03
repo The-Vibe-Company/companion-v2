@@ -424,6 +424,48 @@ wait_for_body_contains "Companion skills"
 assert_body_contains "OpenCode"
 assert_no_browser_errors
 
+
+# --- Companion Agents console (UI-only; skipped when the agents API is absent) -------------------
+log "Checking the agents console"
+agent-browser set device "Desktop Chrome" >/dev/null 2>&1 || true
+agents_probe="$(agent-browser eval "fetch('/v1/agents?lib=mine').then((r) => r.status).catch(() => 0)" 2>/dev/null | tr -d '\"' || true)"
+if [ "$agents_probe" != "200" ]; then
+  log "Agents API not available (status: ${agents_probe:-unknown}) — skipping the agents section"
+else
+  agent-browser open "$APP_URL/agents"
+  wait_for_body_contains "New agent"
+  assert_body_contains "My Companions"
+  assert_body_contains "Running"
+  assert_no_browser_errors
+
+  log "Checking the org fleet + agents sidebar nav"
+  agent-browser open "$APP_URL/agents?lib=org"
+  wait_for_body_contains "New agent"
+  assert_body_contains "Organization"
+  assert_no_browser_errors
+
+  log "Checking the create-agent form gating"
+  agent-browser open "$APP_URL/agents?view=new"
+  wait_for_body_contains "Provision agent"
+  assert_body_contains "Instructions"
+  assert_body_contains "Becomes the chat URL"
+  assert_eval_true "Array.from(document.querySelectorAll('button')).some((el) => el.textContent.trim() === 'Provision agent' && el.disabled)" \
+    "Provision agent should be disabled until a name and a skill are set"
+  assert_no_browser_errors
+
+  log "Checking an agent detail (seeded fleet)"
+  seeded_agent="$(agent-browser eval "fetch('/v1/agents?lib=org').then((r) => r.json()).then((d) => (d.agents && d.agents[0] ? d.agents[0].slug : ''))" 2>/dev/null | tr -d '\"' || true)"
+  if [ -n "$seeded_agent" ] && [ "$seeded_agent" != "null" ]; then
+    agent-browser open "$APP_URL/agents?lib=org&agent=$seeded_agent"
+    wait_for_body_contains "Properties"
+    assert_body_contains "$seeded_agent"
+    assert_body_contains "Danger zone"
+    assert_no_browser_errors
+  else
+    log "No seeded org agents — skipping the detail check"
+  fi
+fi
+
 log "Checking mobile viewport"
 agent-browser set device "iPhone 14"
 agent-browser open "$APP_URL/skills?lib=org"

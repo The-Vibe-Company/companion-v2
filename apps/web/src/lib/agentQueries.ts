@@ -1,12 +1,14 @@
 "use client";
 
 import type {
+  AffectedAgentsResponse,
   AgentDetail,
   AgentModelsResponse,
   AgentPendingOp,
   AgentSecretState,
   AgentsListResponse,
   CreateAgentInput,
+  CreateAgentSessionResult,
   ProvisionProgress,
   WakeAgentResult,
 } from "@companion/contracts";
@@ -86,4 +88,27 @@ export async function pushAgentSkill(slug: string, skillSlug: string): Promise<{
 
 export async function fetchAgentModels(): Promise<AgentModelsResponse> {
   return apiFetch<AgentModelsResponse>("/v1/agents/models");
+}
+
+/** The skill-update fan-out payload: skill meta + the agents NOT on the latest version. */
+export async function fetchSkillUpdates(skillSlug: string): Promise<AffectedAgentsResponse> {
+  return apiFetch<AffectedAgentsResponse>(`/v1/agents/skill-updates/${encodeURIComponent(skillSlug)}`);
+}
+
+export async function createChatSession(slug: string, title?: string): Promise<CreateAgentSessionResult> {
+  return apiFetch<CreateAgentSessionResult>(`/v1/agents/${encodeURIComponent(slug)}/sessions`, {
+    method: "POST",
+    body: JSON.stringify(title ? { title } : {}),
+  });
+}
+
+/** Fire-and-forget prompt (202); the reply arrives over the `/events` SSE stream. */
+export async function sendChatPrompt(slug: string, sessionId: string, text: string): Promise<{ ok: true }> {
+  return apiFetch<{ ok: true }>(
+    `/v1/agents/${encodeURIComponent(slug)}/sessions/${encodeURIComponent(sessionId)}/prompt`,
+    {
+      method: "POST",
+      body: JSON.stringify({ text }),
+    },
+  );
 }

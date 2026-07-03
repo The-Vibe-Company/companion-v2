@@ -76,6 +76,67 @@ export function decodeChatEvent(frame: SseFrame): AgentChatEvent | null {
   }
 }
 
+/* ---- Stream lifecycle ------------------------------------------------------------- */
+
+const STREAM_MAX_RECONNECTS = 3;
+
+/**
+ * Open the agent's SSE event stream and pump decoded events into `onEvent` until `signal` aborts.
+ * Consumed with fetch + ReadableStream (deterministic teardown); reconnects with exponential
+ * backoff (max {@link STREAM_MAX_RECONNECTS} tries), resuming from `parser.lastId()` via a
+ * `last_event_id` query param (harmless if the backend ignores it). Auth/shape failures
+ * (401/404/422) surface as a terminal `error` event instead of retrying.
+ */
+export async function openChatStream(
+  slug: string,
+  sessionId: string,
+  onEvent: (event: AgentChatEvent) => void,
+  signal: AbortSignal,
+): Promise<void> {
+  const parser = createSseParser();
+  let attempts = 0;
+  for (;;) {
+    if (signal.aborted) return;
+    try {
+      const params = new URLSearchParams({ session: sessionId });
+      const lastId = parser.lastId();
+      if (lastId) params.set("last_event_id", lastId);
+      const res = await fetch(`/v1/agents/${encodeURIComponent(slug)}/events?${params.toString()}`, {
+        signal,
+        headers: { accept: "text/event-stream" },
+      });
+      if (res.status === 401 || res.status === 404 || res.status === 422) {
+        onEvent({ type: "error", message: `Chat stream unavailable (${res.status}).` });
+        return;
+      }
+      if (!res.ok || !res.body) throw new Error(`stream failed: ${res.status}`);
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        for (const frame of parser.push(decoder.decode(value, { stream: true }))) {
+          const event = decodeChatEvent(frame);
+          if (event) onEvent(event);
+        }
+      }
+      // The server closed the stream — reconnect (the parser keeps its lastId).
+      throw new Error("stream ended");
+    } catch (error) {
+      if (signal.aborted) return;
+      attempts += 1;
+      if (attempts > STREAM_MAX_RECONNECTS) {
+        onEvent({
+          type: "error",
+          message: error instanceof Error && error.message !== "stream ended" ? error.message : "Lost connection to the agent stream.",
+        });
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 400 * 2 ** (attempts - 1)));
+    }
+  }
+}
+
 /* ---- Chat state ----------------------------------------------------------------- */
 
 export type ChatItem =

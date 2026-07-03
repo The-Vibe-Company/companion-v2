@@ -1,0 +1,497 @@
+"use client";
+
+import { useCallback, useEffect, useReducer, useRef, useState } from "react";
+import type { CSSProperties } from "react";
+import { useRouter } from "next/navigation";
+import type { AgentStatus } from "@companion/contracts";
+import { createChatSession, sendChatPrompt, wakeAgent } from "@/lib/agentQueries";
+import { formatDurationSeconds } from "@/lib/format";
+import type { AgentVM } from "@/lib/types";
+import { Icon } from "../Icon";
+import { ChatMarkdown } from "./chatMarkdown";
+import { chatReducer, initChatState, openChatStream, type ChatItem } from "./chatStream";
+import { statusDot } from "./derive";
+import { agentsRouteHref } from "./route";
+
+/**
+ * The full-viewport end-user chat surface for one agent (`/agents/<slug>/chat`) — NO console
+ * sidebar. Boot flow: wake a sleeping sandbox (banner + sys line), create a session, then consume
+ * the normalized SSE event stream via `openChatStream` (AbortController teardown, StrictMode-safe).
+ */
+
+const MONO_FAINT_11: CSSProperties = { fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--color-faint)" };
+
+const SEG_BASE: CSSProperties = {
+  height: 26,
+  padding: "0 10px",
+  border: "none",
+  cursor: "pointer",
+  fontFamily: "var(--font-ui)",
+  fontSize: 11,
+};
+const SEG_ON: CSSProperties = { ...SEG_BASE, background: "var(--color-surface-raised)", color: "var(--color-fg)", fontWeight: 600 };
+const SEG_OFF: CSSProperties = { ...SEG_BASE, background: "var(--color-surface)", color: "var(--color-muted)" };
+
+const FRAME_DESKTOP: CSSProperties = {
+  width: "min(880px, 100%)",
+  display: "flex",
+  flexDirection: "column",
+  border: "1px solid var(--color-line)",
+  borderRadius: 10,
+  overflow: "hidden",
+  boxShadow: "var(--shadow-xs)",
+  background: "var(--color-surface)",
+};
+const FRAME_MOBILE: CSSProperties = {
+  width: 390,
+  maxWidth: "100%",
+  height: "min(760px, 100%)",
+  display: "flex",
+  flexDirection: "column",
+  border: "1px solid var(--color-line)",
+  borderRadius: 12,
+  overflow: "hidden",
+  boxShadow: "var(--shadow-md)",
+  background: "var(--color-surface)",
+  alignSelf: "center",
+};
+
+const TOOL_SECTION_LABEL: CSSProperties = {
+  fontFamily: "var(--font-mono)",
+  fontSize: 10,
+  textTransform: "uppercase",
+  letterSpacing: "var(--tracking-wide)",
+  color: "var(--color-faint)",
+  marginBottom: 5,
+};
+const TOOL_PRE: CSSProperties = {
+  margin: 0,
+  fontFamily: "var(--font-mono)",
+  fontSize: "var(--text-xs)",
+  color: "var(--color-muted)",
+  whiteSpace: "pre-wrap",
+};
+
+/** Top bar: back to the console + preview note + Desktop / Mobile 390 segmented toggle. */
+function ChatTopBar({
+  mobile,
+  onBack,
+  onSetMobile,
+}: {
+  mobile: boolean;
+  onBack: () => void;
+  onSetMobile: (mobile: boolean) => void;
+}) {
+  return (
+    <div style={{ flex: "none", display: "flex", alignItems: "center", gap: 10, padding: "10px 16px" }}>
+      <button
+        type="button"
+        onClick={onBack}
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 7,
+          height: 28,
+          padding: "0 10px",
+          border: "1px solid var(--color-line)",
+          borderRadius: "var(--radius-md)",
+          background: "var(--color-surface)",
+          color: "var(--color-muted)",
+          fontFamily: "var(--font-ui)",
+          fontSize: "var(--text-xs)",
+          cursor: "pointer",
+        }}
+      >
+        <Icon name="arrow-left" size={13} />
+        Console
+      </button>
+      <span style={MONO_FAINT_11}>end-user surface preview</span>
+      <span style={{ flex: 1 }} />
+      <div style={{ display: "inline-flex", border: "1px solid var(--color-line)", borderRadius: "var(--radius-md)", overflow: "hidden" }}>
+        <button type="button" onClick={() => onSetMobile(false)} style={mobile ? SEG_OFF : SEG_ON}>
+          Desktop
+        </button>
+        <button type="button" onClick={() => onSetMobile(true)} style={mobile ? SEG_ON : SEG_OFF}>
+          Mobile 390
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** "Waking your agent" banner: spinner + copy + the indeterminate sweep track. */
+function WakeBanner() {
+  return (
+    <div
+      style={{
+        flex: "none",
+        padding: "12px 16px",
+        borderBottom: "1px solid var(--color-line)",
+        background: "var(--color-surface-sunken)",
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "center", gap: 9, fontSize: "var(--text-sm)", color: "var(--color-fg)", flexWrap: "wrap" }}>
+        <Icon name="loader" size={14} className="ls-spin" style={{ color: "var(--color-muted)" }} />
+        <span style={{ fontWeight: 500 }}>Waking your agent</span>
+        <span style={{ color: "var(--color-muted)" }}>Resuming sandbox from snapshot. Usually a few seconds.</span>
+      </div>
+      <div className="chat-wake__track">
+        <span className="chat-wake__bar" />
+      </div>
+    </div>
+  );
+}
+
+/** One collapsible skill-run row: chevron + spinner-or-check + label/action + duration meta. */
+function ToolRow({
+  item,
+  expanded,
+  onToggle,
+}: {
+  item: Extract<ChatItem, { kind: "tool" }>;
+  expanded: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <div style={{ alignSelf: "stretch", maxWidth: 620 }}>
+      <button
+        type="button"
+        onClick={onToggle}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          width: "100%",
+          textAlign: "left",
+          border: "1px solid var(--color-line)",
+          borderRadius: "var(--radius-md)",
+          background: "var(--color-surface-sunken)",
+          padding: "7px 10px",
+          cursor: "pointer",
+          fontFamily: "var(--font-mono)",
+          fontSize: "var(--text-xs)",
+          color: "var(--color-muted)",
+        }}
+      >
+        <Icon
+          name="chevron-right"
+          size={12}
+          style={{ transform: expanded ? "rotate(90deg)" : "none", transition: "transform 120ms var(--ease-out-quint)", flex: "none" }}
+        />
+        {item.running ? (
+          <Icon name="loader" size={12} className="ls-spin" style={{ color: "var(--color-muted)" }} />
+        ) : (
+          <Icon name="check" size={12} style={{ color: "var(--color-ok)" }} />
+        )}
+        <span style={{ color: "var(--color-fg)", fontWeight: 500 }}>{item.label}</span>
+        <span>{item.action}</span>
+        <span style={{ flex: 1 }} />
+        <span style={{ color: "var(--color-faint)" }}>{item.running ? "running" : formatDurationSeconds(item.durationMs)}</span>
+      </button>
+      {expanded && (
+        <div
+          style={{
+            border: "1px solid var(--color-line)",
+            borderTop: "none",
+            borderRadius: "0 0 var(--radius-md) var(--radius-md)",
+            background: "var(--color-surface-sunken)",
+            padding: "10px 12px",
+            margin: "0 1px",
+          }}
+        >
+          <div style={TOOL_SECTION_LABEL}>input</div>
+          <pre style={{ ...TOOL_PRE, margin: "0 0 10px" }}>{item.input}</pre>
+          <div style={TOOL_SECTION_LABEL}>result</div>
+          <pre style={TOOL_PRE}>{item.output || "…"}</pre>
+        </div>
+      )}
+    </div>
+  );
+}
+
+export function ChatApp({ agent, orgName }: { agent: AgentVM; orgName: string }) {
+  const router = useRouter();
+  const [mobile, setMobile] = useState(false);
+  const [status, setStatus] = useState<AgentStatus>(agent.status);
+  const [waking, setWaking] = useState(agent.status === "sleeping");
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [text, setText] = useState("");
+  const [expandedTools, setExpandedTools] = useState<Set<string>>(() => new Set());
+  const [chat, dispatch] = useReducer(chatReducer, undefined, initChatState);
+
+  /** `slug@pinnedVersion` when the tool run maps to a pin; otherwise the raw tool name. */
+  const resolveToolLabel = useCallback(
+    (tool: string, skill: string | null): { label: string; action: string } => {
+      const pin = agent.skills.find((s) => s.id === skill) ?? agent.skills.find((s) => s.id === tool);
+      if (pin) return { label: `${pin.id}@${pin.version}`, action: tool };
+      return { label: tool, action: "run" };
+    },
+    [agent.skills],
+  );
+
+  // --- Boot: wake (if sleeping) → create session. One-shot, guarded by a synchronous ref so
+  // StrictMode's double-mount never wakes or creates twice.
+  const bootRef = useRef(false);
+  useEffect(() => {
+    if (bootRef.current) return;
+    bootRef.current = true;
+    void (async () => {
+      if (agent.status === "error") {
+        dispatch({ kind: "sys", text: "agent unavailable · provisioning failed" });
+        return;
+      }
+      try {
+        if (agent.status === "sleeping") {
+          const result = await wakeAgent(agent.id);
+          setStatus(result.status);
+          setWaking(false);
+          dispatch({
+            kind: "sys",
+            text: ["resumed from snapshot", agent.region, formatDurationSeconds(result.resume_ms)].filter(Boolean).join(" · "),
+          });
+        }
+        const session = await createChatSession(agent.id);
+        dispatch({ kind: "sys", text: `session started · ${agent.region}` });
+        setSessionId(session.session_id);
+      } catch (error) {
+        setWaking(false);
+        dispatch({
+          kind: "event",
+          event: { type: "error", message: error instanceof Error ? error.message : "Could not start the chat session." },
+          resolveToolLabel,
+        });
+      }
+    })();
+    // Boot is intentionally one-shot for the server-provided agent snapshot.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // --- Stream lifecycle: one effect keyed by sessionId, aborted on cleanup (StrictMode-safe).
+  useEffect(() => {
+    if (!sessionId) return;
+    const controller = new AbortController();
+    void openChatStream(
+      agent.id,
+      sessionId,
+      (event) => dispatch({ kind: "event", event, resolveToolLabel }),
+      controller.signal,
+    );
+    return () => controller.abort();
+  }, [sessionId, agent.id, resolveToolLabel]);
+
+  // --- Auto-scroll the message area to the bottom on new items / streamed deltas.
+  const listRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const el = listRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [chat.items]);
+
+  const statusWord = waking ? "waking" : status;
+  const dotCls = waking ? "vdot vdot--warn" : statusDot(status);
+  const sendDisabled = waking || chat.busy || status === "error" || !text.trim();
+
+  const send = () => {
+    const trimmed = text.trim();
+    if (sendDisabled || !sessionId || !trimmed) return;
+    dispatch({ kind: "user", text: trimmed });
+    dispatch({ kind: "send" });
+    setText("");
+    sendChatPrompt(agent.id, sessionId, trimmed).catch((error) => {
+      dispatch({
+        kind: "event",
+        event: { type: "error", message: error instanceof Error ? error.message : "Could not send the message." },
+        resolveToolLabel,
+      });
+    });
+  };
+
+  const toggleTool = (id: string) => {
+    setExpandedTools((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const backToConsole = () =>
+    router.push(agentsRouteHref({ lib: agent.scope === "org" ? "org" : "mine", kind: "detail", agent: agent.id }));
+
+  return (
+    <div
+      data-screen-label="Agent chat"
+      style={{ height: "100vh", display: "flex", flexDirection: "column", background: "var(--color-canvas)" }}
+    >
+      <ChatTopBar mobile={mobile} onBack={backToConsole} onSetMobile={setMobile} />
+
+      <div style={{ flex: 1, minHeight: 0, display: "flex", alignItems: "stretch", justifyContent: "center", padding: "0 16px 16px" }}>
+        <div style={mobile ? FRAME_MOBILE : FRAME_DESKTOP}>
+          <header
+            style={{
+              flex: "none",
+              display: "flex",
+              alignItems: "center",
+              gap: 10,
+              height: 52,
+              padding: "0 16px",
+              borderBottom: "1px solid var(--color-line)",
+              background: "var(--color-surface)",
+            }}
+          >
+            <span
+              title={orgName}
+              style={{
+                display: "grid",
+                placeItems: "center",
+                width: 26,
+                height: 26,
+                borderRadius: "var(--radius-md)",
+                background: "var(--color-accent)",
+                color: "var(--color-accent-fg)",
+                fontWeight: 600,
+                fontSize: 13,
+                flex: "none",
+              }}
+            >
+              C
+            </span>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+              <span
+                style={{
+                  fontFamily: "var(--font-mono)",
+                  fontSize: "var(--text-sm)",
+                  fontWeight: 600,
+                  color: "var(--color-fg)",
+                  whiteSpace: "nowrap",
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                }}
+              >
+                {agent.id}
+              </span>
+              <span className={dotCls} />
+              <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--color-muted)" }}>{statusWord}</span>
+            </div>
+            <span style={{ flex: 1 }} />
+            {!mobile && (
+              <div style={{ display: "flex", gap: 5, flex: "none" }}>
+                {agent.skills.map((skill) => (
+                  <span key={skill.id} className="chip" title="This agent runs this skill">
+                    {skill.id}@{skill.version}
+                  </span>
+                ))}
+              </div>
+            )}
+          </header>
+
+          {waking && <WakeBanner />}
+
+          <div
+            ref={listRef}
+            style={{
+              flex: 1,
+              minHeight: 0,
+              overflowY: "auto",
+              padding: "20px 16px",
+              display: "flex",
+              flexDirection: "column",
+              gap: 14,
+              background: "var(--color-surface)",
+            }}
+          >
+            {chat.items.map((item) => {
+              if (item.kind === "sys") {
+                return (
+                  <div key={item.id} style={{ textAlign: "center", ...MONO_FAINT_11 }}>
+                    {item.text}
+                  </div>
+                );
+              }
+              if (item.kind === "user") {
+                return (
+                  <div
+                    key={item.id}
+                    style={{
+                      alignSelf: "flex-end",
+                      maxWidth: "78%",
+                      background: "var(--color-surface-raised)",
+                      border: "1px solid var(--color-line)",
+                      borderRadius: 10,
+                      padding: "8px 12px",
+                      fontSize: "var(--text-sm)",
+                      color: "var(--color-fg)",
+                      lineHeight: "var(--leading-normal)",
+                      whiteSpace: "pre-wrap",
+                    }}
+                  >
+                    {item.text}
+                  </div>
+                );
+              }
+              if (item.kind === "tool") {
+                return <ToolRow key={item.id} item={item} expanded={expandedTools.has(item.id)} onToggle={() => toggleTool(item.id)} />;
+              }
+              return (
+                <div key={item.id} style={{ maxWidth: "68ch", fontSize: "var(--text-sm)", color: "var(--color-fg)", lineHeight: "var(--leading-relaxed)" }}>
+                  <ChatMarkdown text={item.text} streaming={item.streaming} />
+                </div>
+              );
+            })}
+            {chat.error && (
+              <div style={{ textAlign: "center", fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--color-danger)" }} role="alert">
+                {chat.error}
+              </div>
+            )}
+          </div>
+
+          <div style={{ flex: "none", padding: "12px 16px 14px", borderTop: "1px solid var(--color-line)", background: "var(--color-surface)" }}>
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                border: "1px solid var(--color-line)",
+                borderRadius: "var(--radius-md)",
+                background: "var(--color-surface)",
+                padding: "4px 4px 4px 12px",
+              }}
+            >
+              <input
+                value={text}
+                onChange={(e) => setText(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") send();
+                }}
+                placeholder={status === "error" ? "Agent unavailable" : `Message ${agent.id}`}
+                style={{
+                  flex: 1,
+                  minWidth: 0,
+                  border: "none",
+                  outline: "none",
+                  background: "none",
+                  fontFamily: "var(--font-ui)",
+                  fontSize: "var(--text-sm)",
+                  color: "var(--color-fg)",
+                  height: 32,
+                }}
+              />
+              <button
+                type="button"
+                onClick={send}
+                disabled={sendDisabled}
+                className="btn-primary"
+                style={{ width: 32, height: 32, padding: 0, justifyContent: "center" }}
+                aria-label="Send"
+              >
+                <Icon name="arrow-up" size={15} />
+              </button>
+            </div>
+            <div style={{ marginTop: 7, fontSize: 11, color: "var(--color-faint)", textAlign: "center" }}>
+              {agent.id} runs curated skills in an isolated sandbox. Skill runs are shown inline.
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
