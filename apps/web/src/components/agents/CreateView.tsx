@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { AgentDetail, AgentModelRow } from "@companion/contracts";
 import { Icon } from "../Icon";
 import { createAgent } from "@/lib/agentQueries";
@@ -40,6 +40,7 @@ export function CreateView({
   const [busy, setBusy] = useState(false);
   // Synchronous submit gate (StrictMode-safe: never gate the RPC on state set inside an updater).
   const submittingRef = useRef(false);
+  const errorRef = useRef<HTMLPreElement>(null);
 
   const slug = kebabName(name);
   const canProvision = name.trim().length > 0 && selected.length > 0 && !!model && !busy;
@@ -94,6 +95,12 @@ export function CreateView({
         setError(e instanceof Error ? e.message : "Could not provision the agent.");
       });
   };
+
+  // The form is taller than the viewport and Provision also lives in the top bar — bring a failure
+  // into view once React has committed the errblock, so it is never silent.
+  useEffect(() => {
+    if (error) errorRef.current?.scrollIntoView({ block: "center", behavior: "smooth" });
+  }, [error]);
 
   const provisionHint = canProvision
     ? `Forks the golden snapshot and pushes ${selected.length} ${selected.length === 1 ? "skill." : "skills."}`
@@ -419,7 +426,7 @@ export function CreateView({
           )}
 
           {error && (
-            <pre className="errblock" style={{ margin: 0 }}>
+            <pre ref={errorRef} className="errblock" role="alert" style={{ margin: 0 }}>
               {error}
             </pre>
           )}

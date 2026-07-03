@@ -28,6 +28,24 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Load the repo-root .env (if present) so secrets like VERCEL_TOKEN / model provider keys reach the
+# API without depending on the launcher's environment. dotenv semantics: never overrides variables
+# already in the environment, and skips empty assignments (a copied .env.example full of empty
+# values must not nuke exported shell vars).
+if [ -f "$REPO_ROOT/.env" ]; then
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in ''|\#*) continue ;; esac
+    key="${line%%=*}"
+    value="${line#*=}"
+    case "$key" in *[!A-Za-z0-9_]*|'') continue ;; esac
+    [ -n "$value" ] || continue
+    if [ -z "${!key:-}" ]; then
+      value="${value%\"}"; value="${value#\"}"
+      export "$key=$value"
+    fi
+  done < "$REPO_ROOT/.env"
+fi
 cd "$REPO_ROOT"
 
 # ---------------------------------------------------------------------------
