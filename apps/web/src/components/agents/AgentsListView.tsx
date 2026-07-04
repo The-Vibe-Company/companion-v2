@@ -8,7 +8,7 @@ import type { AgentVM } from "@/lib/types";
 import type { AgentsLibrary } from "./route";
 import { agentCounts, filterAgents, statusDot, summaryLine, type AgentsSort } from "./derive";
 
-const GRID = { gridTemplateColumns: "minmax(200px,1fr) 92px 110px 96px 158px 92px", minWidth: 840 } as const;
+const GRID = { gridTemplateColumns: "minmax(200px,1fr) 92px 96px 158px 92px", minWidth: 730 } as const;
 
 /** Short display tail of an OpenCode `provider/model` ref (the full id stays in the title). */
 function modelTail(model: string): string {
@@ -129,7 +129,6 @@ export function AgentsListView({
             <div className="chead" style={GRID}>
               <span>Agent</span>
               <span>Status</span>
-              <span>Client</span>
               <span>Model</span>
               <span>Skills</span>
               <span className="r">Last active</span>
@@ -149,17 +148,6 @@ export function AgentsListView({
                 </span>
                 <span style={{ fontFamily: "var(--font-mono)", fontSize: "var(--text-xs)", color: "var(--color-muted)" }}>
                   {agent.status}
-                </span>
-                <span
-                  style={{
-                    fontSize: "var(--text-xs)",
-                    color: "var(--color-muted)",
-                    whiteSpace: "nowrap",
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                  }}
-                >
-                  {agent.client ?? "—"}
                 </span>
                 <span className="ver" title={agent.model}>
                   {modelTail(agent.model)}

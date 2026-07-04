@@ -163,7 +163,7 @@ export function filterAgents(
   const q = (input.query ?? "").trim().toLowerCase();
   let rows = agents.filter((a) => {
     if (input.label && a.groupLabel !== input.label) return false;
-    if (q && !a.id.toLowerCase().includes(q) && !(a.client ?? "").toLowerCase().includes(q)) return false;
+    if (q && !a.id.toLowerCase().includes(q)) return false;
     return true;
   });
   if (input.sort === "name") {

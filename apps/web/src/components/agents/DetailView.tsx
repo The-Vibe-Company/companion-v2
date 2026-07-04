@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { AgentModelsResponse } from "@companion/contracts";
 import { Icon } from "../Icon";
 import type { AgentSecretVM, AgentVM } from "@/lib/types";
-import { groupModelsByProvider, statusBadge, statusDot, toModelProviders, validateSecretKey } from "./derive";
+import { groupModelsByProvider, statusBadge, toModelProviders, validateSecretKey } from "./derive";
 import { provisionErrorText } from "./ProvisioningCard";
 
 /** Editable instructions + model for a created agent. Saving re-pushes config and relaunches serve. */
@@ -735,40 +735,6 @@ export function DetailView({
         <aside className="dsidebar">
           <p className="railhead">Properties</p>
           <div className="props">
-            <div className="prop">
-              <span className="prop__label">Status</span>
-              <span className="prop__value">
-                <span className={statusDot(agent.status)} />
-                <span className="mono" style={{ fontSize: "var(--text-xs)" }}>
-                  {agent.status}
-                </span>
-              </span>
-            </div>
-            <div className="prop">
-              <span className="prop__label">Model</span>
-              <span className="prop__value mono" style={{ fontSize: "var(--text-xs)" }}>
-                {agent.model}
-              </span>
-            </div>
-            <div className="prop">
-              <span className="prop__label">Client</span>
-              <span className="prop__value" style={{ fontSize: "var(--text-xs)" }}>
-                {agent.client ?? "—"}
-              </span>
-            </div>
-            <div className="prop">
-              <span className="prop__label">Region</span>
-              <span className="prop__value mono" style={{ fontSize: "var(--text-xs)" }}>
-                {agent.region}
-              </span>
-            </div>
-            <div className="prop">
-              <span className="prop__label">Sandbox</span>
-              <span className="prop__value mono" style={{ fontSize: "var(--text-xs)" }}>
-                {agent.sandboxName ?? agent.sandboxId ?? "—"}
-              </span>
-            </div>
-            <div className="divider" />
             <div className="prop">
               <span className="prop__label">Created</span>
               <span className="prop__value mono" style={{ fontSize: "var(--text-xs)" }}>

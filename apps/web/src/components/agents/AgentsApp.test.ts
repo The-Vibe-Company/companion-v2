@@ -290,7 +290,8 @@ describe("AgentsApp detail route", () => {
     expect(container.textContent).toContain("http://test.local/w/acme/agents/mail-digest/chat");
     expect(container.textContent).toContain("Properties");
     expect(container.textContent).toContain("NOTION_TOKEN");
-    expect(container.textContent).toContain("cdg1");
+    // The editable config section (model + instructions) replaced the read-only Model/Region rows.
+    expect(container.textContent).toContain("Instructions");
     expect(agentQueryMocks.fetchProvision).not.toHaveBeenCalled();
   });
 

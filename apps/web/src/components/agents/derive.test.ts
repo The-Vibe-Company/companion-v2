@@ -174,9 +174,9 @@ describe("filterAgents", () => {
     expect(filterAgents(fleet, { label: "Finance" }).map((a) => a.id)).toEqual(["tvc-devis"]);
   });
 
-  it("searches slug and client", () => {
+  it("searches by slug", () => {
     expect(filterAgents(fleet, { query: "monka" }).map((a) => a.id)).toEqual(["monka-support"]);
-    expect(filterAgents(fleet, { query: "tvc" }).map((a) => a.id)).toEqual(["tvc-devis", "vibe-standup"]);
+    expect(filterAgents(fleet, { query: "tvc" }).map((a) => a.id)).toEqual(["tvc-devis"]);
   });
 
   it("sorts by name on demand without mutating input", () => {
