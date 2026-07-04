@@ -1,10 +1,112 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { AgentModelsResponse } from "@companion/contracts";
 import { Icon } from "../Icon";
 import type { AgentSecretVM, AgentVM } from "@/lib/types";
-import { statusBadge, statusDot, validateSecretKey } from "./derive";
+import { groupModelsByProvider, statusBadge, statusDot, toModelProviders, validateSecretKey } from "./derive";
 import { provisionErrorText } from "./ProvisioningCard";
+
+/** Editable instructions + model for a created agent. Saving re-pushes config and relaunches serve. */
+function ConfigEditor({
+  agent,
+  models,
+  onUpdate,
+}: {
+  agent: AgentVM;
+  models: AgentModelsResponse;
+  onUpdate: (patch: { model?: string; instructions?: string }) => Promise<void>;
+}) {
+  const [instructions, setInstructions] = useState(agent.instructions);
+  const [model, setModel] = useState(agent.model);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [applied, setApplied] = useState(false);
+
+  // Sync local state if the agent prop changes underneath (e.g. after a save refetch).
+  useEffect(() => {
+    setInstructions(agent.instructions);
+    setModel(agent.model);
+  }, [agent.instructions, agent.model]);
+
+  // Only connected providers' models are pickable; keep the current model selectable regardless.
+  const groups = useMemo(
+    () => groupModelsByProvider(models.models, toModelProviders(models)).filter((g) => g.provider.connected),
+    [models],
+  );
+  const hasCurrent = groups.some((g) => g.models.some((m) => m.id === agent.model));
+  const dirty = instructions !== agent.instructions || model !== agent.model;
+
+  const save = () => {
+    if (!dirty || busy) return;
+    setBusy(true);
+    setError(null);
+    setApplied(false);
+    const patch: { model?: string; instructions?: string } = {};
+    if (model !== agent.model) patch.model = model;
+    if (instructions !== agent.instructions) patch.instructions = instructions;
+    onUpdate(patch)
+      .then(() => setApplied(true))
+      .catch((e) => setError(e instanceof Error ? e.message : "Could not save the changes."))
+      .finally(() => setBusy(false));
+  };
+
+  return (
+    <section>
+      <div className="seclabel">Instructions &amp; model</div>
+      <textarea
+        className="ag-textarea"
+        value={instructions}
+        onChange={(e) => {
+          setInstructions(e.target.value);
+          setApplied(false);
+        }}
+        placeholder="How this agent should behave…"
+        aria-label="Instructions"
+      />
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
+        <select
+          className="ag-field"
+          style={{ maxWidth: 320 }}
+          value={model}
+          onChange={(e) => {
+            setModel(e.target.value);
+            setApplied(false);
+          }}
+          aria-label="Model"
+        >
+          {!hasCurrent && <option value={agent.model}>{agent.model}</option>}
+          {groups.map((g) => (
+            <optgroup key={g.provider.id} label={g.provider.name}>
+              {g.models.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.name}
+                </option>
+              ))}
+            </optgroup>
+          ))}
+        </select>
+        <span style={{ flex: 1 }} />
+        <button type="button" className="btn-primary" disabled={!dirty || busy} onClick={save}>
+          {busy ? "Applying…" : "Save changes"}
+        </button>
+      </div>
+      <div className="ag-note" style={{ marginTop: 6 }}>
+        Connect more providers in Settings → Model providers to unlock their models.
+      </div>
+      {applied && (
+        <div className="ag-note" style={{ marginTop: 4, color: "var(--color-ok)" }}>
+          Saved — the agent restarts to apply. Active chat sessions are interrupted.
+        </div>
+      )}
+      {error && (
+        <div className="ag-note" style={{ marginTop: 4, color: "var(--color-danger)" }} role="alert">
+          {error}
+        </div>
+      )}
+    </section>
+  );
+}
 
 /** One installed-skill row: version chip, outdated hint, and the push affordance. */
 function SkillRow({
@@ -300,6 +402,7 @@ function AddVariable({
 export function DetailView({
   agent,
   chatUrl,
+  models,
   onBack,
   onOpenChat,
   onOpenSession,
@@ -307,10 +410,12 @@ export function DetailView({
   onRetry,
   onPushSkill,
   onSetSecrets,
+  onUpdate,
   onDestroy,
 }: {
   agent: AgentVM;
   chatUrl: string;
+  models: AgentModelsResponse;
   onBack: () => void;
   onOpenChat: () => void;
   onOpenSession: (sessionId: string) => void;
@@ -319,6 +424,8 @@ export function DetailView({
   onPushSkill: (skillSlug: string) => void;
   /** Add/replace/remove agent variables; `null` deletes a key. Returns whether the agent restarts. */
   onSetSecrets: (secrets: Record<string, string | null>) => Promise<{ restarting: boolean }>;
+  /** Edit the agent's model and/or instructions; re-pushes config + relaunches serve. */
+  onUpdate: (patch: { model?: string; instructions?: string }) => Promise<void>;
   onDestroy: () => void;
 }) {
   const [copied, setCopied] = useState(false);
@@ -459,6 +566,8 @@ export function DetailView({
                   </button>
                 </div>
               </section>
+
+              <ConfigEditor agent={agent} models={models} onUpdate={onUpdate} />
 
               <section>
                 <div className="seclabel">

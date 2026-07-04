@@ -232,6 +232,18 @@ export const createAgentInputSchema = z.object({
 });
 export type CreateAgentInput = z.infer<typeof createAgentInputSchema>;
 
+/**
+ * Body of `PATCH /v1/agents/:slug` — edit an existing agent's model and/or instructions. Applying a
+ * change re-pushes the agent config to its sandbox and relaunches serve (interrupting live sessions).
+ */
+export const updateAgentInputSchema = z
+  .object({
+    model: z.string().regex(AGENT_MODEL_RE, "model must be a provider/model id").optional(),
+    instructions: z.string().max(AGENT_INSTRUCTIONS_MAX).optional(),
+  })
+  .refine((v) => v.model !== undefined || v.instructions !== undefined, "nothing to update");
+export type UpdateAgentInput = z.infer<typeof updateAgentInputSchema>;
+
 /** Body of `PUT /v1/agents/:slug/secrets` — write-only; `null` deletes a key. */
 export const updateAgentSecretsInputSchema = z.object({
   secrets: z.record(agentSecretKeySchema, z.string().min(1).max(AGENT_SECRET_VALUE_MAX).nullable()),

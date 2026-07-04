@@ -13,6 +13,7 @@ import {
   listAffectedAgents,
   listAgents,
   parseSecretsKey,
+  updateAgentConfig,
   pauseAgent,
   pushSkillUpdate,
   sandboxNameFor,
@@ -318,6 +319,38 @@ describe("createAgent", () => {
     expect(store.agentSecrets.find((s) => s.key === "ANTHROPIC_API_KEY")).toBeUndefined();
     // And it is absent from the agent's variable list (managed, not user-facing).
     expect(detail.secrets.some((s) => s.key === "ANTHROPIC_API_KEY")).toBe(false);
+  });
+
+  it("updates instructions and model on an existing agent", async () => {
+    const store = emptyStore();
+    seedSkill(store, "meeting-digest", "1.3.0");
+    const database = fakeAgentsDb(store);
+    const created = await createAgent({ actor: me, orgId: ORG, input, ctx: ctxFor(database), database });
+
+    const detail = await updateAgentConfig({
+      actor: me,
+      orgId: ORG,
+      slug: created.slug,
+      patch: { instructions: "Be terse.", model: "anthropic/claude-opus" },
+      ctx: ctxFor(database),
+    });
+
+    expect(detail.instructions).toBe("Be terse.");
+    expect(detail.model).toBe("anthropic/claude-opus");
+    expect(store.agents[0]!.instructions).toBe("Be terse.");
+    expect(store.agents[0]!.model).toBe("anthropic/claude-opus");
+  });
+
+  it("rejects switching to an unknown/unavailable model on update", async () => {
+    const store = emptyStore();
+    seedSkill(store, "meeting-digest", "1.3.0");
+    const database = fakeAgentsDb(store);
+    const created = await createAgent({ actor: me, orgId: ORG, input, ctx: ctxFor(database), database });
+
+    await expect(
+      updateAgentConfig({ actor: me, orgId: ORG, slug: created.slug, patch: { model: "openai/gpt-x" }, ctx: ctxFor(database) }),
+    ).rejects.toThrow(/not available/);
+    expect(store.agents[0]!.model).toBe("anthropic/claude-x");
   });
 
   it("rejects duplicate slugs, unknown models, unknown/archived/foreign-personal skills", async () => {

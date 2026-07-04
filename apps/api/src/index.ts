@@ -33,6 +33,7 @@ import {
   runSkillPush,
   sandboxNameFor,
   setAgentSecrets,
+  updateAgentConfig,
   touchAgentActivity,
   updateAgentSessionsCache,
   wakeAgent,
@@ -120,6 +121,7 @@ import {
   destroyAgentInputSchema,
   setProviderConnectionInputSchema,
   pushAgentSkillInputSchema,
+  updateAgentInputSchema,
   updateAgentSecretsInputSchema,
   completeOnboardingInputSchema,
   createLabelInputSchema,
@@ -2533,6 +2535,24 @@ app.put("/v1/agents/:slug/secrets", async (c) => {
       kickAgentJob(wakeJobKey(orgId, slug), () => wakeAgent({ actor, orgId, slug, ctx }).then(() => undefined));
     }
     return c.json({ secrets: result.secrets, restarting: result.shouldRestart });
+  } catch (error) {
+    return agentError(c, error);
+  }
+});
+
+app.patch("/v1/agents/:slug", async (c) => {
+  try {
+    const input = updateAgentInputSchema.parse(await c.req.json());
+    const slug = c.req.param("slug");
+    const actor = actorFromContext(c);
+    const orgId = await orgIdFromContext(c);
+    const ctx = agentCtx();
+    // Persists, then (if the agent is provisioned) re-pushes config + relaunches serve synchronously.
+    const detail = await updateAgentConfig({ actor, orgId, slug, patch: input, ctx });
+    // Hide the managed provider key from the returned variable list (mirror GET).
+    const modelKeys = await agentModelCatalog.resolveModel(detail.model).catch(() => null);
+    if (modelKeys) detail.secrets = detail.secrets.filter((s) => !modelKeys.envKeys.includes(s.key));
+    return c.json(detail);
   } catch (error) {
     return agentError(c, error);
   }

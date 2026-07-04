@@ -18,6 +18,7 @@ import {
   pushAgentSkill,
   retryProvision,
   setAgentSecrets,
+  updateAgent,
   wakeAgent,
 } from "@/lib/agentQueries";
 import { formatDurationSeconds } from "@/lib/format";
@@ -405,6 +406,14 @@ export function AgentsApp({
     [applyDetail],
   );
 
+  const updateAgentConfig = useCallback(
+    async (slug: string, patch: { model?: string; instructions?: string }): Promise<void> => {
+      const row = await updateAgent(slug, patch);
+      applyDetail(row);
+    },
+    [applyDetail],
+  );
+
   // Clear any in-flight push polls on unmount.
   useEffect(
     () => () => {
@@ -519,6 +528,7 @@ export function AgentsApp({
           <DetailView
             agent={detailAgent}
             chatUrl={`${appOrigin}${agentChatHref(currentOrg.slug, detailAgent.id)}`}
+            models={initialModels}
             onBack={backToList}
             onOpenChat={() => router.push(agentChatHref(currentOrg.slug, detailAgent.id))}
             onOpenSession={(sessionId) =>
@@ -528,6 +538,7 @@ export function AgentsApp({
             onRetry={() => retryAgentProvision(detailAgent.id)}
             onPushSkill={(skillSlug) => pushSkill(detailAgent.id, skillSlug)}
             onSetSecrets={(secrets) => setSecrets(detailAgent.id, secrets)}
+            onUpdate={(patch) => updateAgentConfig(detailAgent.id, patch)}
             onDestroy={() => {
               void destroyOpenAgent(detailAgent.id);
             }}

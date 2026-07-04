@@ -46,6 +46,14 @@ export async function retryProvision(slug: string): Promise<ProvisionProgress> {
   });
 }
 
+/** Edit an existing agent's model and/or instructions; the API re-pushes config + relaunches serve. */
+export async function updateAgent(slug: string, patch: { model?: string; instructions?: string }): Promise<AgentDetail> {
+  return apiFetch<AgentDetail>(`/v1/agents/${encodeURIComponent(slug)}`, {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  });
+}
+
 /** Write-only secret values; `null` deletes a key. Values are never returned. `restarting` = the
  * running agent's serve process is being relaunched so the new variables take effect. */
 export async function setAgentSecrets(

@@ -1030,6 +1030,102 @@ export async function setAgentSecrets(input: {
   return { secrets: secretStates(pins, setKeys), shouldRestart };
 }
 
+/**
+ * Edit an existing agent's model and/or instructions after creation. Persists the change, then — if
+ * the agent has a live sandbox — re-pushes the two config files (`.opencode/agents/<slug>.md` +
+ * `opencode.json`, no skills) and relaunches serve so it takes effect, waking a sleeping agent to
+ * apply. Runtime calls run OUTSIDE any transaction; call from a route without wrapping in withTenant.
+ */
+export async function updateAgentConfig(input: {
+  actor: ActorContext;
+  orgId: string;
+  slug: string;
+  patch: { model?: string; instructions?: string };
+  ctx: AgentControlContext;
+}): Promise<AgentDetail> {
+  const { orgId, actor, ctx } = input;
+
+  // Phase 1 (tx): validate + persist, and capture what a live re-push needs.
+  const loaded = await ctx.runTenant({ orgId, userId: actor.id }, async (database) => {
+    await assertMember(database, actor, orgId);
+    const row = await loadAgentRow(database, orgId, input.slug);
+    if (!row || !canManageAgent(actor.id, row)) throw new AgentValidationError("agent not found");
+
+    const nextModel = input.patch.model ?? row.model;
+    if (input.patch.model && input.patch.model !== row.model) {
+      const keys = await ctx.resolveModelKeys(input.patch.model);
+      if (!keys) throw new AgentValidationError(`model ${input.patch.model} is not available (unknown or not tool-capable)`);
+    }
+    const nextInstructions =
+      input.patch.instructions !== undefined ? input.patch.instructions : row.instructions;
+
+    await database
+      .update(schema.agents)
+      .set({ model: nextModel, instructions: nextInstructions, updatedAt: new Date() })
+      .where(eq(schema.agents.id, row.id));
+    await database.insert(schema.auditLog).values({
+      orgId,
+      actorId: actor.id,
+      action: "agent.update",
+      targetType: "agent",
+      targetId: row.id,
+      metadata: {
+        slug: row.slug,
+        model: input.patch.model && input.patch.model !== row.model ? nextModel : undefined,
+        instructions: input.patch.instructions !== undefined ? true : undefined,
+      },
+    });
+
+    const updated: AgentRow = { ...row, model: nextModel, instructions: nextInstructions };
+    const secrets = await loadDecryptedSecrets(database, orgId, updated, ctx);
+    return { row: updated, secrets };
+  });
+
+  // Phase 2 (no tx): push the fresh config + relaunch serve when the agent is provisioned.
+  const { row, secrets } = loaded;
+  if (row.lifecycle === "ready" && row.sandboxName) {
+    const ref = sandboxRefOf({ ...row, orgId });
+    const serverPassword = decryptServerPassword(orgId, row, ctx);
+    const env = buildServeEnv(serverPassword, secrets);
+    let domain = row.sandboxDomain;
+    if (computeAgentStatus(row) === "sleeping" || !domain) {
+      const woke = await ctx.runtime.wake({ ref, env });
+      domain = woke.domain;
+    }
+    await ctx.runtime.pushSkills({
+      ref,
+      files: {
+        agentSlug: row.slug,
+        agentMarkdown: buildAgentMarkdown({
+          slug: row.slug,
+          description: firstLine(row.instructions),
+          instructions: row.instructions,
+          model: row.model,
+        }),
+        opencodeJson: buildOpencodeJson({ model: row.model }),
+        skills: [],
+      },
+    });
+    await ctx.runtime.restartServer({ ref, env, domain: domain!, password: serverPassword });
+    await ctx.runTenant({ orgId, userId: actor.id }, async (database) => {
+      await database
+        .update(schema.agents)
+        .set({ lastActiveAt: new Date(), pausedAt: null, updatedAt: new Date() })
+        .where(eq(schema.agents.id, row.id));
+    });
+  }
+
+  // Return the fresh detail via the injected tenant db (so tests see the fake store).
+  return ctx.runTenant({ orgId, userId: actor.id }, async (database) => {
+    const fresh = await loadAgentRow(database, orgId, input.slug);
+    if (!fresh) throw new AgentValidationError("agent not found");
+    const pins = (await loadPins(database, orgId, [fresh.id])).get(fresh.id) ?? [];
+    await loadPinnedFrontmatter(database, orgId, pins);
+    const setKeys = await loadSecretKeys(database, orgId, fresh.id);
+    return toDetail(fresh, pins, setKeys, Date.now());
+  });
+}
+
 /** Guard the runtime's own env keys — a user secret must never shadow the server password/username. */
 function assertUnreservedSecretKey(key: string): void {
   if (RESERVED_AGENT_SECRET_KEYS.includes(key)) {
