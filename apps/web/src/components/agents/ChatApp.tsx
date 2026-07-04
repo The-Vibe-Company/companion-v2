@@ -574,7 +574,7 @@ export function ChatApp({
                 flex: "none",
               }}
             >
-              C
+              {orgName.trim().charAt(0).toUpperCase() || "•"}
             </span>
             <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
               <span
