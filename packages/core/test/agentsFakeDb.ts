@@ -35,6 +35,7 @@ export interface FakeSkillVersionRow {
 }
 
 export type FakeProviderConnectionRow = typeof schema.userProviderConnections.$inferSelect;
+export type FakeOrgProviderConnectionRow = typeof schema.orgProviderConnections.$inferSelect;
 
 export interface FakeStore {
   role: "owner" | "admin" | "developer" | null;
@@ -44,6 +45,7 @@ export interface FakeStore {
   skills: FakeSkillRow[];
   skillVersions: FakeSkillVersionRow[];
   providerConnections: FakeProviderConnectionRow[];
+  orgProviderConnections: FakeOrgProviderConnectionRow[];
   audit: Array<Record<string, unknown>>;
 }
 
@@ -56,6 +58,7 @@ export function emptyStore(overrides: Partial<FakeStore> = {}): FakeStore {
     skills: [],
     skillVersions: [],
     providerConnections: [],
+    orgProviderConnections: [],
     audit: [],
     ...overrides,
   };
@@ -100,6 +103,7 @@ const AGENT_SECRET_KEYS = ["agentId", "key"];
 const SKILL_KEYS = ["id", "slug"];
 const SKILL_VERSION_KEYS = ["skillId", "id"];
 const PROVIDER_CONN_KEYS = ["userId", "provider"];
+const ORG_PROVIDER_CONN_KEYS = ["provider"];
 
 export function fakeAgentsDb(store: FakeStore): Db {
   function filterRows<T extends Record<string, unknown>>(rows: T[], keys: string[], cond: unknown): T[] {
@@ -167,6 +171,17 @@ export function fakeAgentsDb(store: FakeStore): Db {
           const rows = filterRows(
             store.providerConnections as unknown as Record<string, unknown>[],
             PROVIDER_CONN_KEYS,
+            cond,
+          );
+          if (projection && "provider" in projection && "keyName" in projection) {
+            return rows.map((r) => ({ provider: r.provider, keyName: r.keyName, createdAt: r.createdAt }));
+          }
+          return rows;
+        }
+        if (table === schema.orgProviderConnections) {
+          const rows = filterRows(
+            store.orgProviderConnections as unknown as Record<string, unknown>[],
+            ORG_PROVIDER_CONN_KEYS,
             cond,
           );
           if (projection && "provider" in projection && "keyName" in projection) {
@@ -298,6 +313,23 @@ export function fakeAgentsDb(store: FakeStore): Db {
             },
           };
         }
+        if (table === schema.orgProviderConnections) {
+          return {
+            onConflictDoUpdate: async (opts: { set: Record<string, unknown> }) => {
+              for (const v of list) {
+                const existing = store.orgProviderConnections.find((r) => r.provider === v.provider);
+                if (existing) Object.assign(existing, opts.set);
+                else
+                  store.orgProviderConnections.push({
+                    keyVersion: 1,
+                    createdAt: new Date(),
+                    updatedAt: new Date(),
+                    ...v,
+                  } as FakeOrgProviderConnectionRow);
+              }
+            },
+          };
+        }
         if (table === schema.auditLog) {
           store.audit.push(...list);
           return Promise.resolve();
@@ -357,6 +389,15 @@ export function fakeAgentsDb(store: FakeStore): Db {
             cond,
           ) as unknown as FakeProviderConnectionRow[];
           store.providerConnections = store.providerConnections.filter((r) => !doomed.includes(r));
+          return;
+        }
+        if (table === schema.orgProviderConnections) {
+          const doomed = filterRows(
+            store.orgProviderConnections as unknown as Record<string, unknown>[],
+            ORG_PROVIDER_CONN_KEYS,
+            cond,
+          ) as unknown as FakeOrgProviderConnectionRow[];
+          store.orgProviderConnections = store.orgProviderConnections.filter((r) => !doomed.includes(r));
           return;
         }
         throw new Error("fakeAgentsDb: unexpected delete target");

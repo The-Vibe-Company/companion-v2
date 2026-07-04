@@ -1,7 +1,8 @@
 import { and, eq } from "drizzle-orm";
 import { db, schema, type Db } from "@companion/db";
 import type { ProviderConnectionRow } from "@companion/contracts";
-import { openSecret, providerConnectionAad, sealSecret } from "./secretbox";
+import { canManageOrg } from "./authz";
+import { openSecret, orgProviderConnectionAad, providerConnectionAad, sealSecret } from "./secretbox";
 import { assertMember, type ActorContext } from "./services";
 
 /**
@@ -129,8 +130,9 @@ export async function deleteProviderConnection(input: {
 }
 
 /**
- * Decrypt the user's saved key for a provider, if any. Internal helper used by agent creation to
- * seed a new agent's secrets from the owner's saved connection. Never surfaced over the API.
+ * Decrypt the key that should reach an agent for a provider: the OWNER's personal connection wins,
+ * else the workspace-shared connection (personal overrides workspace). Internal helper used at serve
+ * time to inject the model provider key; never surfaced over the API.
  */
 export async function getDecryptedProviderKey(input: {
   database: Db;
@@ -139,7 +141,7 @@ export async function getDecryptedProviderKey(input: {
   provider: string;
   secretsKey: Buffer;
 }): Promise<{ keyName: string; value: string } | null> {
-  const rows = await input.database
+  const personal = await input.database
     .select()
     .from(schema.userProviderConnections)
     .where(
@@ -149,12 +151,154 @@ export async function getDecryptedProviderKey(input: {
         eq(schema.userProviderConnections.provider, input.provider),
       ),
     );
+  const own = personal[0];
+  if (own) {
+    return {
+      keyName: own.keyName,
+      value: openSecret({
+        kek: input.secretsKey,
+        sealed: { wrappedDek: own.wrappedDek, ciphertext: own.ciphertext },
+        aad: providerConnectionAad(input.orgId, input.userId, input.provider),
+      }),
+    };
+  }
+  return getDecryptedOrgProviderKey({ database: input.database, orgId: input.orgId, provider: input.provider, secretsKey: input.secretsKey });
+}
+
+/* ------------------------------------ workspace-shared connections -------------------------------- */
+
+/** List the workspace-shared provider connections. Any member may read (to see what the org shares). */
+export async function listOrgProviderConnections(input: {
+  actor: ActorContext;
+  orgId: string;
+  database?: Db;
+}): Promise<ProviderConnectionRow[]> {
+  const database = input.database ?? db;
+  await assertMember(database, input.actor, input.orgId);
+  const rows = await database
+    .select({
+      provider: schema.orgProviderConnections.provider,
+      keyName: schema.orgProviderConnections.keyName,
+      createdAt: schema.orgProviderConnections.createdAt,
+    })
+    .from(schema.orgProviderConnections)
+    .where(eq(schema.orgProviderConnections.orgId, input.orgId));
+  return rows
+    .map((row) => ({
+      provider: row.provider,
+      key_name: row.keyName,
+      set: true as const,
+      created_at: row.createdAt.toISOString(),
+    }))
+    .sort((a, b) => a.provider.localeCompare(b.provider));
+}
+
+/** Providers the workspace shares (for marking the model catalog as usable by any member). */
+export async function connectedOrgProviderIds(input: {
+  actor: ActorContext;
+  orgId: string;
+  database?: Db;
+}): Promise<Set<string>> {
+  const connections = await listOrgProviderConnections(input);
+  return new Set(connections.map((c) => c.provider));
+}
+
+/** Connect a provider for the whole workspace — owner/admin only. */
+export async function setOrgProviderConnection(input: {
+  actor: ActorContext;
+  orgId: string;
+  provider: string;
+  keyName: string;
+  key: string;
+  secretsKey: Buffer;
+  database?: Db;
+}): Promise<ProviderConnectionRow> {
+  const database = input.database ?? db;
+  const role = await assertMember(database, input.actor, input.orgId);
+  if (!canManageOrg(role)) throw new Error("only workspace owners and admins can manage shared providers");
+  const sealed = sealSecret({
+    kek: input.secretsKey,
+    plaintext: input.key,
+    aad: orgProviderConnectionAad(input.orgId, input.provider),
+  });
+  await database
+    .insert(schema.orgProviderConnections)
+    .values({
+      orgId: input.orgId,
+      provider: input.provider,
+      keyName: input.keyName,
+      wrappedDek: sealed.wrappedDek,
+      ciphertext: sealed.ciphertext,
+      createdBy: input.actor.id,
+    })
+    .onConflictDoUpdate({
+      target: [schema.orgProviderConnections.orgId, schema.orgProviderConnections.provider],
+      set: {
+        keyName: input.keyName,
+        wrappedDek: sealed.wrappedDek,
+        ciphertext: sealed.ciphertext,
+        createdBy: input.actor.id,
+        updatedAt: new Date(),
+      },
+    });
+  await database.insert(schema.auditLog).values({
+    orgId: input.orgId,
+    actorId: input.actor.id,
+    action: "provider.connect.org",
+    targetType: "provider",
+    targetId: input.provider,
+    metadata: { provider: input.provider, key_name: input.keyName }, // name only, never the key
+  });
+  return { provider: input.provider, key_name: input.keyName, set: true, created_at: new Date().toISOString() };
+}
+
+/** Disconnect a workspace-shared provider — owner/admin only. */
+export async function deleteOrgProviderConnection(input: {
+  actor: ActorContext;
+  orgId: string;
+  provider: string;
+  database?: Db;
+}): Promise<void> {
+  const database = input.database ?? db;
+  const role = await assertMember(database, input.actor, input.orgId);
+  if (!canManageOrg(role)) throw new Error("only workspace owners and admins can manage shared providers");
+  await database
+    .delete(schema.orgProviderConnections)
+    .where(
+      and(
+        eq(schema.orgProviderConnections.orgId, input.orgId),
+        eq(schema.orgProviderConnections.provider, input.provider),
+      ),
+    );
+  await database.insert(schema.auditLog).values({
+    orgId: input.orgId,
+    actorId: input.actor.id,
+    action: "provider.disconnect.org",
+    targetType: "provider",
+    targetId: input.provider,
+    metadata: { provider: input.provider },
+  });
+}
+
+/** Decrypt the workspace-shared key for a provider, if any. Internal (never surfaced over the API). */
+export async function getDecryptedOrgProviderKey(input: {
+  database: Db;
+  orgId: string;
+  provider: string;
+  secretsKey: Buffer;
+}): Promise<{ keyName: string; value: string } | null> {
+  const rows = await input.database
+    .select()
+    .from(schema.orgProviderConnections)
+    .where(and(eq(schema.orgProviderConnections.orgId, input.orgId), eq(schema.orgProviderConnections.provider, input.provider)));
   const row = rows[0];
   if (!row) return null;
-  const value = openSecret({
-    kek: input.secretsKey,
-    sealed: { wrappedDek: row.wrappedDek, ciphertext: row.ciphertext },
-    aad: providerConnectionAad(input.orgId, input.userId, input.provider),
-  });
-  return { keyName: row.keyName, value };
+  return {
+    keyName: row.keyName,
+    value: openSecret({
+      kek: input.secretsKey,
+      sealed: { wrappedDek: row.wrappedDek, ciphertext: row.ciphertext },
+      aad: orgProviderConnectionAad(input.orgId, input.provider),
+    }),
+  };
 }

@@ -6,8 +6,16 @@ import { SettingsSidebar } from "./SettingsSidebar";
 import { ProfilePane } from "./ProfilePane";
 import { PreferencesPane } from "./PreferencesPane";
 import { ApiKeysPane } from "./ApiKeysPane";
-import { ProvidersPane } from "./ProvidersPane";
+import { ProvidersPane, type ProviderScope } from "./ProvidersPane";
 import { WorkspaceGeneralPane } from "./WorkspaceGeneralPane";
+import {
+  deleteOrgProviderConnection,
+  deleteProviderConnection,
+  fetchOrgProviderConnections,
+  fetchProviderConnections,
+  setOrgProviderConnection,
+  setProviderConnection,
+} from "@/lib/agentQueries";
 import { MembersPane } from "./MembersPane";
 import { InvitationsPane } from "./InvitationsPane";
 import { InviteDialog } from "./dialogs";
@@ -25,6 +33,8 @@ function crumbFor(ctx: OrgCtx, route: SettingsRoute): string[] {
       return ["Account", "Model providers"];
     case "apikeys":
       return ["Account", "API keys"];
+    case "org-providers":
+      return [ws.name, "Shared providers"];
     case "general":
       return [ws.name, "General"];
     case "members":
@@ -60,10 +70,30 @@ export function SettingsView({
   onDialog: (dialog: SettingsDialog) => void;
   onClose: () => void;
 }) {
+  const personalProviders: ProviderScope = {
+    title: "Model providers",
+    desc: "Connect the AI providers your agents run on. Your key is stored encrypted, used only to run your agents, and never shown again.",
+    lockText: "Keys are personal to you and stored encrypted — Companion never displays them again.",
+    locked: false,
+    loadConnected: () => fetchProviderConnections().then((r) => new Set(r.connections.map((cn) => cn.provider))),
+    connect: (provider, keyName, key) => setProviderConnection({ provider, key_name: keyName, key }).then(() => {}),
+    disconnect: (provider) => deleteProviderConnection(provider).then(() => {}),
+  };
+  const workspaceProviders: ProviderScope = {
+    title: "Shared model providers",
+    desc: "Connect AI providers once for the whole workspace. Members without their own key use these. Stored encrypted, never shown again.",
+    lockText: "Shared with every member. Only owners and admins can change these.",
+    locked: !ctx.canManage,
+    loadConnected: () => fetchOrgProviderConnections().then((r) => new Set(r.connections.map((cn) => cn.provider))),
+    connect: (provider, keyName, key) => setOrgProviderConnection({ provider, key_name: keyName, key }).then(() => {}),
+    disconnect: (provider) => deleteOrgProviderConnection(provider).then(() => {}),
+  };
+
   let pane: React.ReactNode;
   if (route.view === "profile") pane = <ProfilePane ctx={ctx} />;
   else if (route.view === "preferences") pane = <PreferencesPane ctx={ctx} />;
-  else if (route.view === "providers") pane = <ProvidersPane />;
+  else if (route.view === "providers") pane = <ProvidersPane scope={personalProviders} />;
+  else if (route.view === "org-providers") pane = <ProvidersPane scope={workspaceProviders} />;
   else if (route.view === "apikeys") pane = <ApiKeysPane ctx={ctx} keys={apiKeys} />;
   else if (route.view === "general") pane = <WorkspaceGeneralPane ctx={ctx} />;
   else if (route.view === "members") pane = <MembersPane ctx={ctx} onInvite={() => onDialog("invite")} />;

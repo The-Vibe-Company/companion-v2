@@ -20,6 +20,7 @@ const SETTINGS_VIEWS: readonly SettingsView[] = [
   "preferences",
   "providers",
   "apikeys",
+  "org-providers",
   "general",
   "members",
   "invitations",

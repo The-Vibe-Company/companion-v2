@@ -158,3 +158,26 @@ export async function deleteProviderConnection(provider: string): Promise<{ ok: 
     method: "DELETE",
   });
 }
+
+/* ---- Workspace-shared provider connections (owner/admin write; any member reads) ---- */
+
+export async function fetchOrgProviderConnections(): Promise<ProviderConnectionsResponse> {
+  return apiFetch<ProviderConnectionsResponse>("/v1/org-provider-connections");
+}
+
+export async function setOrgProviderConnection(input: {
+  provider: string;
+  key_name: string;
+  key: string;
+}): Promise<{ connection: ProviderConnectionRow }> {
+  return apiFetch<{ connection: ProviderConnectionRow }>("/v1/org-provider-connections", {
+    method: "PUT",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function deleteOrgProviderConnection(provider: string): Promise<{ ok: true }> {
+  return apiFetch<{ ok: true }>(`/v1/org-provider-connections/${encodeURIComponent(provider)}`, {
+    method: "DELETE",
+  });
+}

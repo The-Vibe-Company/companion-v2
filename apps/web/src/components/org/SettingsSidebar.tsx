@@ -158,6 +158,12 @@ export function SettingsSidebar({
               onClick={() => goTo({ view: "general" })}
             />
             <NavItem
+              active={is("org-providers")}
+              icon="cpu"
+              label="Shared providers"
+              onClick={() => goTo({ view: "org-providers" })}
+            />
+            <NavItem
               active={is("members")}
               icon="users"
               label="Members"

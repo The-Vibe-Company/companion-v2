@@ -854,3 +854,33 @@ export const userProviderConnections = pgTable(
     keyCheck: check("user_provider_connections_key_check", sql`${t.keyName} ~ '^[A-Za-z_][A-Za-z0-9_]*$'`),
   }),
 );
+
+/**
+ * Workspace-shared model-provider connections: an owner/admin connects a provider ONCE for the whole
+ * org (envelope-encrypted, write-only). Members without their own {@link userProviderConnections} row
+ * fall back to this shared key at serve time (personal overrides workspace).
+ */
+export const orgProviderConnections = pgTable(
+  "org_provider_connections",
+  {
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    /** models.dev provider id, e.g. "anthropic". */
+    provider: text("provider").notNull(),
+    /** The env var name the key is stored/injected under, e.g. ANTHROPIC_API_KEY. */
+    keyName: text("key_name").notNull(),
+    wrappedDek: text("wrapped_dek").notNull(),
+    ciphertext: text("ciphertext").notNull(),
+    keyVersion: integer("key_version").notNull().default(1),
+    createdBy: text("created_by")
+      .notNull()
+      .references(() => user.id),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.orgId, t.provider] }),
+    keyCheck: check("org_provider_connections_key_check", sql`${t.keyName} ~ '^[A-Za-z_][A-Za-z0-9_]*$'`),
+  }),
+);

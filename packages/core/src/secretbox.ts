@@ -107,3 +107,8 @@ export function agentSecretAad(orgId: string, agentId: string, key: string): str
 export function providerConnectionAad(orgId: string, userId: string, provider: string): string {
   return `${orgId}:${userId}:provider:${provider}`;
 }
+
+/** AAD binding a workspace-shared provider connection to its row: `${orgId}:workspace:provider:${provider}`. */
+export function orgProviderConnectionAad(orgId: string, provider: string): string {
+  return `${orgId}:workspace:provider:${provider}`;
+}

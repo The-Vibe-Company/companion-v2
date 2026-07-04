@@ -3,15 +3,29 @@
 import { useEffect, useState } from "react";
 import { Icon } from "../Icon";
 import { PaneHead } from "./paneKit";
-import { deleteProviderConnection, fetchAgentModels, setProviderConnection } from "@/lib/agentQueries";
+import { fetchAgentModels } from "@/lib/agentQueries";
 import { toModelProviders, type ModelProviderVM } from "@/components/agents/derive";
 
-/* ============================ Account › Model providers ============================
-   Personal AI-provider keys, lifted out of the create-agent flow into a discoverable home.
-   Connect a provider once and every agent you create can use its models — the key is
-   referenced live at run time, never copied onto an agent or shown as a variable. */
-export function ProvidersPane() {
+/* ============================ Model providers (personal + workspace) ============================
+   One component, two scopes. Personal keys live under Account; workspace-shared keys under the
+   Workspace group (owner/admin write, everyone else read-only). Connecting a provider enables its
+   models for every agent — the key is referenced live at run time, never a variable. */
+
+export interface ProviderScope {
+  title: string;
+  desc: string;
+  lockText: string;
+  /** Read-only: show connected providers but no connect/disconnect (non-admins on the workspace scope). */
+  locked: boolean;
+  /** Provider ids connected in THIS scope (personal list, or the org's shared list). */
+  loadConnected: () => Promise<Set<string>>;
+  connect: (provider: string, keyName: string, key: string) => Promise<void>;
+  disconnect: (provider: string) => Promise<void>;
+}
+
+export function ProvidersPane({ scope }: { scope: ProviderScope }) {
   const [providers, setProviders] = useState<ModelProviderVM[] | null>(null);
+  const [connectedIds, setConnectedIds] = useState<Set<string>>(() => new Set());
   const [error, setError] = useState<string | null>(null);
   const [connecting, setConnecting] = useState<string | null>(null);
   const [tick, setTick] = useState(0);
@@ -19,21 +33,27 @@ export function ProvidersPane() {
 
   useEffect(() => {
     let live = true;
-    fetchAgentModels()
-      .then((r) => live && setProviders(toModelProviders(r)))
+    Promise.all([fetchAgentModels(), scope.loadConnected()])
+      .then(([catalog, ids]) => {
+        if (!live) return;
+        setProviders(toModelProviders(catalog));
+        setConnectedIds(ids);
+      })
       .catch((e) => live && setError(e instanceof Error ? e.message : "Could not load providers."));
     return () => {
       live = false;
     };
+    // scope.loadConnected identity is stable per render; tick drives reloads.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tick]);
 
-  const connected = providers?.filter((p) => p.connected) ?? [];
-  const available = providers?.filter((p) => !p.connected && p.envKeys.length > 0) ?? [];
+  const connected = (providers ?? []).filter((p) => connectedIds.has(p.id));
+  const available = (providers ?? []).filter((p) => !connectedIds.has(p.id) && p.envKeys.length > 0);
 
   const disconnect = async (id: string) => {
     setError(null);
     try {
-      await deleteProviderConnection(id);
+      await scope.disconnect(id);
       reload();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not disconnect.");
@@ -42,14 +62,11 @@ export function ProvidersPane() {
 
   return (
     <div className="sx-pane">
-      <PaneHead
-        title="Model providers"
-        desc="Connect the AI providers your agents run on. Your key is stored encrypted, used only to run your agents, and never shown again."
-      />
+      <PaneHead title={scope.title} desc={scope.desc} />
 
       <div className="og-lockbar og-lockbar--wide" style={{ marginBottom: 18 }}>
         <Icon name="shield-check" size={13} />
-        <span>Keys are personal to you and stored encrypted — Companion never displays them again.</span>
+        <span>{scope.lockText}</span>
       </div>
 
       {error && (
@@ -65,9 +82,7 @@ export function ProvidersPane() {
           {connected.length > 0 && (
             <>
               <div className="mlist__lbl">
-                <span>
-                  {connected.length} connected
-                </span>
+                <span>{connected.length} connected</span>
               </div>
               <div className="mlist">
                 {connected.map((p) => (
@@ -80,9 +95,11 @@ export function ProvidersPane() {
                     </div>
                     <div className="mrow__end">
                       <span className="badge scopebadge">Connected</span>
-                      <button className="mrow__x" title={`Disconnect ${p.name}`} onClick={() => void disconnect(p.id)}>
-                        <Icon name="trash-2" size={15} />
-                      </button>
+                      {!scope.locked && (
+                        <button className="mrow__x" title={`Disconnect ${p.name}`} onClick={() => void disconnect(p.id)}>
+                          <Icon name="trash-2" size={15} />
+                        </button>
+                      )}
                     </div>
                   </div>
                 ))}
@@ -90,42 +107,49 @@ export function ProvidersPane() {
             </>
           )}
 
-          <div className="mlist__lbl" style={{ marginTop: connected.length ? 16 : 0 }}>
-            <span>Available</span>
-          </div>
-          {available.length === 0 ? (
-            <div className="sx-empty">Every provider is connected.</div>
+          {scope.locked ? (
+            connected.length === 0 && <div className="sx-empty">Your workspace hasn’t shared any providers yet.</div>
           ) : (
-            <div className="mlist">
-              {available.map((p) =>
-                connecting === p.id ? (
-                  <ConnectRow
-                    key={p.id}
-                    provider={p}
-                    onCancel={() => setConnecting(null)}
-                    onConnected={() => {
-                      setConnecting(null);
-                      reload();
-                    }}
-                    onError={setError}
-                  />
-                ) : (
-                  <div className="mrow" key={p.id}>
-                    <span className="keyic">
-                      <Icon name="cpu" size={16} />
-                    </span>
-                    <div className="mrow__id">
-                      <div className="og-mname">{p.name}</div>
-                    </div>
-                    <div className="mrow__end">
-                      <button className="btn-sec" onClick={() => setConnecting(p.id)}>
-                        Connect
-                      </button>
-                    </div>
-                  </div>
-                ),
+            <>
+              <div className="mlist__lbl" style={{ marginTop: connected.length ? 16 : 0 }}>
+                <span>Available</span>
+              </div>
+              {available.length === 0 ? (
+                <div className="sx-empty">Every provider is connected.</div>
+              ) : (
+                <div className="mlist">
+                  {available.map((p) =>
+                    connecting === p.id ? (
+                      <ConnectRow
+                        key={p.id}
+                        provider={p}
+                        onConnect={scope.connect}
+                        onCancel={() => setConnecting(null)}
+                        onConnected={() => {
+                          setConnecting(null);
+                          reload();
+                        }}
+                        onError={setError}
+                      />
+                    ) : (
+                      <div className="mrow" key={p.id}>
+                        <span className="keyic">
+                          <Icon name="cpu" size={16} />
+                        </span>
+                        <div className="mrow__id">
+                          <div className="og-mname">{p.name}</div>
+                        </div>
+                        <div className="mrow__end">
+                          <button className="btn-sec" onClick={() => setConnecting(p.id)}>
+                            Connect
+                          </button>
+                        </div>
+                      </div>
+                    ),
+                  )}
+                </div>
               )}
-            </div>
+            </>
           )}
         </>
       )}
@@ -136,11 +160,13 @@ export function ProvidersPane() {
 /** Inline key entry for one provider — a password field + Connect/Cancel; the env var name is never shown. */
 function ConnectRow({
   provider,
+  onConnect,
   onCancel,
   onConnected,
   onError,
 }: {
   provider: ModelProviderVM;
+  onConnect: (provider: string, keyName: string, key: string) => Promise<void>;
   onCancel: () => void;
   onConnected: () => void;
   onError: (message: string | null) => void;
@@ -152,7 +178,7 @@ function ConnectRow({
     setBusy(true);
     onError(null);
     try {
-      await setProviderConnection({ provider: provider.id, key_name: provider.envKeys[0]!, key: key.trim() });
+      await onConnect(provider.id, provider.envKeys[0]!, key.trim());
       onConnected();
     } catch (e) {
       onError(e instanceof Error ? e.message : "Could not save the key.");

@@ -89,6 +89,7 @@ export type SettingsView =
   | "preferences"
   | "providers"
   | "apikeys"
+  | "org-providers"
   | "general"
   | "members"
   | "invitations";

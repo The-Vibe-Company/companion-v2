@@ -1,11 +1,15 @@
 import { describe, expect, it } from "vitest";
 import {
+  connectedOrgProviderIds,
   connectedProviderIds,
+  deleteOrgProviderConnection,
   deleteProviderConnection,
   generateSecretsKey,
   getDecryptedProviderKey,
+  listOrgProviderConnections,
   listProviderConnections,
   parseSecretsKey,
+  setOrgProviderConnection,
   setProviderConnection,
   type ActorContext,
 } from "../src/services";
@@ -84,5 +88,60 @@ describe("provider connections", () => {
   it("rejects non-members", async () => {
     const database = fakeAgentsDb(emptyStore({ role: null }));
     await expect(listProviderConnections({ actor: me, orgId: ORG, database })).rejects.toThrow("not a member");
+  });
+});
+
+describe("workspace-shared provider connections", () => {
+  it("an admin can set/list/delete a shared connection (any member can read it)", async () => {
+    const store = emptyStore({ role: "admin" });
+    const database = fakeAgentsDb(store);
+
+    await setOrgProviderConnection({
+      actor: me,
+      orgId: ORG,
+      provider: "anthropic",
+      keyName: "ANTHROPIC_API_KEY",
+      key: "sk-shared",
+      secretsKey: KEK,
+      database,
+    });
+    // Write-only: the list never returns the value.
+    const list = await listOrgProviderConnections({ actor: me, orgId: ORG, database });
+    expect(list).toEqual([{ provider: "anthropic", key_name: "ANTHROPIC_API_KEY", set: true, created_at: expect.any(String) }]);
+    expect(JSON.stringify(list)).not.toContain("sk-shared");
+    expect([...(await connectedOrgProviderIds({ actor: me, orgId: ORG, database }))]).toEqual(["anthropic"]);
+
+    await deleteOrgProviderConnection({ actor: me, orgId: ORG, provider: "anthropic", database });
+    expect(await listOrgProviderConnections({ actor: me, orgId: ORG, database })).toEqual([]);
+  });
+
+  it("rejects a non-admin trying to set or delete a shared connection", async () => {
+    const database = fakeAgentsDb(emptyStore({ role: "developer" }));
+    await expect(
+      setOrgProviderConnection({ actor: me, orgId: ORG, provider: "anthropic", keyName: "ANTHROPIC_API_KEY", key: "x", secretsKey: KEK, database }),
+    ).rejects.toThrow(/owners and admins/);
+    await expect(deleteOrgProviderConnection({ actor: me, orgId: ORG, provider: "anthropic", database })).rejects.toThrow(/owners and admins/);
+  });
+
+  it("resolves a provider key personal-first, then falls back to the workspace-shared key", async () => {
+    const store = emptyStore({ role: "admin" });
+    const database = fakeAgentsDb(store);
+    // Only a workspace-shared key exists → a member with no personal key resolves to it.
+    await setOrgProviderConnection({
+      actor: me,
+      orgId: ORG,
+      provider: "anthropic",
+      keyName: "ANTHROPIC_API_KEY",
+      key: "sk-workspace",
+      secretsKey: KEK,
+      database,
+    });
+    const shared = await getDecryptedProviderKey({ database, orgId: ORG, userId: other.id, provider: "anthropic", secretsKey: KEK });
+    expect(shared).toEqual({ keyName: "ANTHROPIC_API_KEY", value: "sk-workspace" });
+
+    // A personal key for `other` overrides the shared one.
+    await setProviderConnection({ actor: other, orgId: ORG, provider: "anthropic", keyName: "ANTHROPIC_API_KEY", key: "sk-personal", secretsKey: KEK, database });
+    const resolved = await getDecryptedProviderKey({ database, orgId: ORG, userId: other.id, provider: "anthropic", secretsKey: KEK });
+    expect(resolved).toEqual({ keyName: "ANTHROPIC_API_KEY", value: "sk-personal" });
   });
 });

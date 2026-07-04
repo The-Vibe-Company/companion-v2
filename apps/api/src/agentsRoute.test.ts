@@ -102,9 +102,13 @@ const serviceMocks = vi.hoisted(() => {
     setAgentSecrets: vi.fn(),
     wakeAgent: vi.fn(),
     connectedProviderIds: vi.fn(async () => new Set<string>()),
+    connectedOrgProviderIds: vi.fn(async () => new Set<string>()),
     listProviderConnections: vi.fn(async (): Promise<unknown[]> => []),
     setProviderConnection: vi.fn(),
     deleteProviderConnection: vi.fn(async () => undefined),
+    listOrgProviderConnections: vi.fn(async (): Promise<unknown[]> => []),
+    setOrgProviderConnection: vi.fn(),
+    deleteOrgProviderConnection: vi.fn(async () => undefined),
   };
 });
 

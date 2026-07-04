@@ -15,12 +15,16 @@ import {
   AgentValidationError,
   createAgent,
   destroyAgent,
+  connectedOrgProviderIds,
   connectedProviderIds,
+  deleteOrgProviderConnection,
   deleteProviderConnection,
   getAgentBySlug,
   getAgentChatTarget,
   getProvisionProgress,
+  listOrgProviderConnections,
   listProviderConnections,
+  setOrgProviderConnection,
   setProviderConnection,
   listAffectedAgents,
   listAgents,
@@ -2359,10 +2363,14 @@ app.get("/v1/agents", async (c) => {
 app.get("/v1/agents/models", async (c) => {
   try {
     const catalog = await agentModelCatalog.listModels();
-    // Mark which providers the current user has connected (a model is pickable once its provider is).
-    const connected = await withTenant(c, ({ actor, orgId, database }) =>
-      connectedProviderIds({ actor, orgId, database }),
-    );
+    // Mark which providers are usable: the user's own connection OR one shared by the workspace.
+    const connected = await withTenant(c, async ({ actor, orgId, database }) => {
+      const [personal, shared] = await Promise.all([
+        connectedProviderIds({ actor, orgId, database }),
+        connectedOrgProviderIds({ actor, orgId, database }),
+      ]);
+      return new Set<string>([...personal, ...shared]);
+    });
     return c.json({
       models: catalog.models,
       providers: catalog.providers.map((p) => {
@@ -2412,6 +2420,50 @@ app.delete("/v1/provider-connections/:provider", async (c) => {
   try {
     await withTenant(c, ({ actor, orgId, database }) =>
       deleteProviderConnection({ actor, orgId, provider: c.req.param("provider"), database }),
+    );
+    return c.json({ ok: true });
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
+/* ---- Workspace-shared provider connections (owner/admin write; any member reads) ---- */
+
+app.get("/v1/org-provider-connections", async (c) => {
+  try {
+    const connections = await withTenant(c, ({ actor, orgId, database }) =>
+      listOrgProviderConnections({ actor, orgId, database }),
+    );
+    return c.json({ connections });
+  } catch (error) {
+    return jsonError(c, error, 401);
+  }
+});
+
+app.put("/v1/org-provider-connections", async (c) => {
+  try {
+    const input = setProviderConnectionInputSchema.parse(await c.req.json());
+    const connection = await withTenant(c, ({ actor, orgId, database }) =>
+      setOrgProviderConnection({
+        actor,
+        orgId,
+        provider: input.provider,
+        keyName: input.key_name,
+        key: input.key,
+        secretsKey: agentSecretsKey(),
+        database,
+      }),
+    );
+    return c.json({ connection });
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
+app.delete("/v1/org-provider-connections/:provider", async (c) => {
+  try {
+    await withTenant(c, ({ actor, orgId, database }) =>
+      deleteOrgProviderConnection({ actor, orgId, provider: c.req.param("provider"), database }),
     );
     return c.json({ ok: true });
   } catch (error) {
