@@ -87,6 +87,7 @@ export interface SettingsAppData {
 export type SettingsView =
   | "profile"
   | "preferences"
+  | "providers"
   | "apikeys"
   | "general"
   | "members"

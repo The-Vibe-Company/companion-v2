@@ -18,6 +18,7 @@ export { parseOrgSettingsResponse } from "@/lib/settingsViewModel";
 const SETTINGS_VIEWS: readonly SettingsView[] = [
   "profile",
   "preferences",
+  "providers",
   "apikeys",
   "general",
   "members",

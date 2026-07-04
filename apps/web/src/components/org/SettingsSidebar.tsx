@@ -127,6 +127,12 @@ export function SettingsSidebar({
               onClick={() => goTo({ view: "preferences" })}
             />
             <NavItem
+              active={is("providers")}
+              icon="cpu"
+              label="Model providers"
+              onClick={() => goTo({ view: "providers" })}
+            />
+            <NavItem
               active={is("apikeys")}
               icon="key"
               label="API keys"

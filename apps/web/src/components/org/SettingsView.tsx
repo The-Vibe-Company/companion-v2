@@ -6,6 +6,7 @@ import { SettingsSidebar } from "./SettingsSidebar";
 import { ProfilePane } from "./ProfilePane";
 import { PreferencesPane } from "./PreferencesPane";
 import { ApiKeysPane } from "./ApiKeysPane";
+import { ProvidersPane } from "./ProvidersPane";
 import { WorkspaceGeneralPane } from "./WorkspaceGeneralPane";
 import { MembersPane } from "./MembersPane";
 import { InvitationsPane } from "./InvitationsPane";
@@ -20,6 +21,8 @@ function crumbFor(ctx: OrgCtx, route: SettingsRoute): string[] {
       return ["Account", "Profile"];
     case "preferences":
       return ["Account", "Preferences"];
+    case "providers":
+      return ["Account", "Model providers"];
     case "apikeys":
       return ["Account", "API keys"];
     case "general":
@@ -60,6 +63,7 @@ export function SettingsView({
   let pane: React.ReactNode;
   if (route.view === "profile") pane = <ProfilePane ctx={ctx} />;
   else if (route.view === "preferences") pane = <PreferencesPane ctx={ctx} />;
+  else if (route.view === "providers") pane = <ProvidersPane />;
   else if (route.view === "apikeys") pane = <ApiKeysPane ctx={ctx} keys={apiKeys} />;
   else if (route.view === "general") pane = <WorkspaceGeneralPane ctx={ctx} />;
   else if (route.view === "members") pane = <MembersPane ctx={ctx} onInvite={() => onDialog("invite")} />;
