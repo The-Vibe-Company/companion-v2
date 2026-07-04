@@ -518,17 +518,17 @@ export function DetailView({
               {provisionError && (
                 <section>
                   <div className="seclabel" style={{ color: "var(--color-danger)" }}>
-                    Provisioning failed
+                    Setup failed
                   </div>
                   <pre className="errblock" style={{ margin: 0 }}>
                     {provisionErrorText(provisionError)}
                   </pre>
                   <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 12 }}>
                     <button type="button" className="btn-primary" onClick={onRetry}>
-                      Retry provisioning
+                      Try again
                     </button>
                     <span style={{ fontSize: "var(--text-xs)", color: "var(--color-faint)" }}>
-                      Set the missing secret first or the retry fails the same way.
+                      Fix the cause above first, or the retry fails the same way.
                     </span>
                   </div>
                 </section>

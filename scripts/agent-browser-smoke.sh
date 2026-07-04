@@ -451,11 +451,11 @@ else
 
   log "Checking the create-agent form gating"
   agent-browser open "$APP_URL/agents?view=new"
-  wait_for_body_contains "Provision agent"
+  wait_for_body_contains "Create agent"
   assert_body_contains "Instructions"
   assert_body_contains "Becomes the chat URL"
-  assert_eval_true "Array.from(document.querySelectorAll('button')).some((el) => el.textContent.trim() === 'Provision agent' && el.disabled)" \
-    "Provision agent should be disabled until a name and a skill are set"
+  assert_eval_true "Array.from(document.querySelectorAll('button')).some((el) => el.textContent.trim() === 'Create agent' && el.disabled)" \
+    "Create agent should be disabled until a name and a skill are set"
   assert_no_browser_errors
 
   log "Checking an agent detail (seeded fleet)"

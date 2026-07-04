@@ -120,7 +120,7 @@ function ProviderGroup({
               setExpanded(true);
             }}
             disabled={!canConnect}
-            title={canConnect ? undefined : "This provider's key name is unknown."}
+            title={canConnect ? undefined : "This provider can't be connected here."}
             style={{
               height: 24,
               padding: "0 10px",
@@ -158,7 +158,7 @@ function ProviderGroup({
                   type="password"
                   value={key}
                   onChange={(e) => setKey(e.target.value)}
-                  placeholder={`Paste your ${provider.name} API key (${provider.envKeys[0]})`}
+                  placeholder={`Your ${provider.name} API key`}
                   aria-label={`API key for ${provider.name}`}
                   onKeyDown={(e) => {
                     if (e.key === "Enter") {
@@ -376,7 +376,7 @@ export function CreateView({
 
   const anyConnected = groups.some((g) => g.provider.connected);
   const provisionHint = canProvision
-    ? `Forks the golden snapshot and pushes ${selected.length} ${selected.length === 1 ? "skill." : "skills."}`
+    ? `Sets up your agent with ${selected.length} ${selected.length === 1 ? "skill." : "skills."} Takes a few seconds.`
     : !anyConnected || !modelConnected
       ? "Connect a model provider and pick its model."
       : kebabName(name).length === 0 || selected.length === 0
@@ -396,7 +396,7 @@ export function CreateView({
         </nav>
         <span className="dtop__spacer" />
         <button type="button" className="btn-primary" onClick={provision} disabled={!canProvision}>
-          Provision agent
+          Create agent
         </button>
       </div>
       <div style={{ flex: 1, overflowY: "auto" }}>
@@ -673,7 +673,7 @@ export function CreateView({
 
           <div style={{ display: "flex", alignItems: "center", gap: 12, borderTop: "1px solid var(--color-line)", paddingTop: 20 }}>
             <button type="button" className="btn-primary" onClick={provision} disabled={!canProvision}>
-              Provision agent
+              Create agent
             </button>
             <span style={{ fontSize: "var(--text-xs)", color: "var(--color-faint)" }}>{provisionHint}</span>
           </div>

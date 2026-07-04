@@ -513,16 +513,16 @@ export class AgentBusyError extends Error {}
 function initialSteps(skillSlugs: string[]): ProvisionStep[] {
   const count = skillSlugs.length;
   return [
-    { key: "fork", label: "Fork snapshot", detail: "", state: "pending", duration_ms: null },
+    { key: "fork", label: "Prepare sandbox", detail: "", state: "pending", duration_ms: null },
     {
       key: "push",
-      label: `Push ${count} ${count === 1 ? "skill" : "skills"}`,
+      label: `Install ${count} ${count === 1 ? "skill" : "skills"}`,
       detail: skillSlugs.join(", "),
       state: "pending",
       duration_ms: null,
     },
-    { key: "serve", label: "Start server", detail: "opencode serve --port 4096", state: "pending", duration_ms: null },
-    { key: "health", label: "Health check", detail: "GET /doc → 200", state: "pending", duration_ms: null },
+    { key: "serve", label: "Start agent", detail: "", state: "pending", duration_ms: null },
+    { key: "health", label: "Health check", detail: "", state: "pending", duration_ms: null },
   ];
 }
 
@@ -569,7 +569,7 @@ export async function provisionAgent(input: {
             region: ctx.region,
             step: "fork",
             exit_code: null,
-            detail: "Could not decrypt this agent's secrets. Retry provisions a fresh fork.",
+            detail: "Could not read this agent's variables. Try again.",
           },
           updatedAt: new Date(),
         })
@@ -614,7 +614,7 @@ export async function provisionAgent(input: {
       region: ref.region,
       step: key,
       exit_code: exitCode,
-      detail: detail ?? "The sandbox was stopped. Fix the cause, then retry with a fresh fork.",
+      detail: detail ?? "Fix the cause, then try again.",
     };
     await persistSteps({ lifecycle: "error", provisionError });
     // Best-effort teardown so a broken sandbox never lingers half-alive.
@@ -1610,7 +1610,7 @@ export async function markProvisionInterrupted(input: {
         region: row.region,
         step: steps.find((s) => s.state === "failed")?.key ?? null,
         exit_code: null,
-        detail: "No provisioning job is running for this agent. Retry provisions a fresh fork.",
+        detail: "No setup is running for this agent. Try again.",
       },
       updatedAt: new Date(),
     })

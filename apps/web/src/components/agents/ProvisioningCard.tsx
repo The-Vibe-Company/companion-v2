@@ -5,17 +5,11 @@ import { Icon } from "../Icon";
 import type { ProvisionStepVM } from "@/lib/types";
 
 /**
- * Compose the errblock text from the structured ProvisionError, mirroring the design's mono
- * error string (message, then indented sandbox/region/step/exit lines, then the detail hint).
+ * Compose the errblock text from the structured ProvisionError: the human message plus the detail
+ * hint. Infra internals (sandbox id / region / exit code) are intentionally omitted from the UI.
  */
 export function provisionErrorText(error: ProvisionError): string {
   const lines: string[] = [error.message];
-  const meta: string[] = [];
-  if (error.sandbox_name) meta.push(`  sandbox  ${error.sandbox_name}`);
-  if (error.region) meta.push(`  region   ${error.region}`);
-  if (error.step) meta.push(`  step     ${error.step}`);
-  if (error.exit_code != null) meta.push(`  exit     ${error.exit_code}`);
-  if (meta.length) lines.push("", ...meta);
   if (error.detail) lines.push("", error.detail);
   return lines.join("\n");
 }
@@ -75,7 +69,7 @@ export function ProvisioningCard({
             letterSpacing: "var(--tracking-wide)",
           }}
         >
-          Provisioning
+          Setting up
         </div>
         <h2
           style={{
@@ -89,8 +83,7 @@ export function ProvisioningCard({
           {name}
         </h2>
         <p style={{ margin: "6px 0 22px", fontSize: "var(--text-sm)", color: "var(--color-muted)" }}>
-          Forking the golden sandbox and pushing {skillsCount} {skillsCount === 1 ? "skill." : "skills."} Takes a few
-          seconds.
+          Setting up your agent with {skillsCount} {skillsCount === 1 ? "skill." : "skills."} Takes a few seconds.
         </p>
         <div style={{ display: "flex", flexDirection: "column" }}>
           {steps.map((step) => (
@@ -127,7 +120,7 @@ export function ProvisioningCard({
             </pre>
             <div style={{ display: "flex", gap: 8, marginTop: 16 }}>
               <button type="button" className="btn-primary" onClick={onRetry}>
-                Retry with a fresh fork
+                Try again
               </button>
               <button type="button" className="ag-btn" onClick={onBackToForm}>
                 Back to form
@@ -138,7 +131,7 @@ export function ProvisioningCard({
         {ok && (
           <div className="ls-confirm" style={{ marginTop: 14 }}>
             <Icon name="check" size={14} />
-            Healthy. Opening the agent…
+            Ready. Opening your agent…
           </div>
         )}
       </div>

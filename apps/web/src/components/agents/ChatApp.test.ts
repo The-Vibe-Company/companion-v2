@@ -137,7 +137,7 @@ describe("ChatApp", () => {
     const { container } = await mountChatApp(agentVM());
 
     expect(container.querySelector('[data-screen-label="Agent chat"]')).toBeTruthy();
-    expect(container.textContent).toContain("end-user surface preview");
+    expect(container.textContent).toContain("New session");
     expect(container.textContent).toContain("mail-digest");
     expect(container.textContent).toContain("running");
 

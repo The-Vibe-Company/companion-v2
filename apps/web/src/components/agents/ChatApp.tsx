@@ -21,17 +21,6 @@ import { agentsRouteHref } from "./route";
 
 const MONO_FAINT_11: CSSProperties = { fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--color-faint)" };
 
-const SEG_BASE: CSSProperties = {
-  height: 26,
-  padding: "0 10px",
-  border: "none",
-  cursor: "pointer",
-  fontFamily: "var(--font-ui)",
-  fontSize: 11,
-};
-const SEG_ON: CSSProperties = { ...SEG_BASE, background: "var(--color-surface-raised)", color: "var(--color-fg)", fontWeight: 600 };
-const SEG_OFF: CSSProperties = { ...SEG_BASE, background: "var(--color-surface)", color: "var(--color-muted)" };
-
 const FRAME_DESKTOP: CSSProperties = {
   width: "min(880px, 100%)",
   display: "flex",
@@ -41,19 +30,6 @@ const FRAME_DESKTOP: CSSProperties = {
   overflow: "hidden",
   boxShadow: "var(--shadow-xs)",
   background: "var(--color-surface)",
-};
-const FRAME_MOBILE: CSSProperties = {
-  width: 390,
-  maxWidth: "100%",
-  height: "min(760px, 100%)",
-  display: "flex",
-  flexDirection: "column",
-  border: "1px solid var(--color-line)",
-  borderRadius: 12,
-  overflow: "hidden",
-  boxShadow: "var(--shadow-md)",
-  background: "var(--color-surface)",
-  alignSelf: "center",
 };
 
 const TOOL_SECTION_LABEL: CSSProperties = {
@@ -72,72 +48,33 @@ const TOOL_PRE: CSSProperties = {
   whiteSpace: "pre-wrap",
 };
 
-/** Top bar: back to the console + preview note + New session + Desktop / Mobile 390 segmented toggle. */
-function ChatTopBar({
-  mobile,
-  onBack,
-  onNewSession,
-  onSetMobile,
-}: {
-  mobile: boolean;
-  onBack: () => void;
-  onNewSession: () => void;
-  onSetMobile: (mobile: boolean) => void;
-}) {
+/** Top bar for the end-user chat surface: a back affordance + New session. */
+function ChatTopBar({ onBack, onNewSession }: { onBack: () => void; onNewSession: () => void }) {
+  const btn: CSSProperties = {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 7,
+    height: 28,
+    padding: "0 10px",
+    border: "1px solid var(--color-line)",
+    borderRadius: "var(--radius-md)",
+    background: "var(--color-surface)",
+    color: "var(--color-muted)",
+    fontFamily: "var(--font-ui)",
+    fontSize: "var(--text-xs)",
+    cursor: "pointer",
+  };
   return (
     <div style={{ flex: "none", display: "flex", alignItems: "center", gap: 10, padding: "10px 16px" }}>
-      <button
-        type="button"
-        onClick={onBack}
-        style={{
-          display: "inline-flex",
-          alignItems: "center",
-          gap: 7,
-          height: 28,
-          padding: "0 10px",
-          border: "1px solid var(--color-line)",
-          borderRadius: "var(--radius-md)",
-          background: "var(--color-surface)",
-          color: "var(--color-muted)",
-          fontFamily: "var(--font-ui)",
-          fontSize: "var(--text-xs)",
-          cursor: "pointer",
-        }}
-      >
+      <button type="button" onClick={onBack} style={btn}>
         <Icon name="arrow-left" size={13} />
-        Console
+        Back
       </button>
-      <span style={MONO_FAINT_11}>end-user surface preview</span>
       <span style={{ flex: 1 }} />
-      <button
-        type="button"
-        onClick={onNewSession}
-        style={{
-          display: "inline-flex",
-          alignItems: "center",
-          gap: 7,
-          height: 28,
-          padding: "0 10px",
-          border: "1px solid var(--color-line)",
-          borderRadius: "var(--radius-md)",
-          background: "var(--color-surface)",
-          color: "var(--color-muted)",
-          fontFamily: "var(--font-ui)",
-          fontSize: "var(--text-xs)",
-          cursor: "pointer",
-        }}
-      >
+      <button type="button" onClick={onNewSession} style={btn}>
         <Icon name="plus" size={13} />
         New session
       </button>
-      <div style={{ display: "inline-flex", border: "1px solid var(--color-line)", borderRadius: "var(--radius-md)", overflow: "hidden" }}>
-        <button type="button" onClick={() => onSetMobile(false)} style={mobile ? SEG_OFF : SEG_ON}>
-          Desktop
-        </button>
-        <button type="button" onClick={() => onSetMobile(true)} style={mobile ? SEG_ON : SEG_OFF}>
-          Mobile 390
-        </button>
-      </div>
     </div>
   );
 }
@@ -345,7 +282,6 @@ export function ChatApp({
   initialSessionId?: string;
 }) {
   const router = useRouter();
-  const [mobile, setMobile] = useState(false);
   const [status, setStatus] = useState<AgentStatus>(agent.status);
   const [waking, setWaking] = useState(agent.status === "sleeping");
   const [sessionId, setSessionId] = useState<string | null>(null);
@@ -543,10 +479,10 @@ export function ChatApp({
       data-screen-label="Agent chat"
       style={{ height: "100vh", display: "flex", flexDirection: "column", background: "var(--color-canvas)" }}
     >
-      <ChatTopBar mobile={mobile} onBack={backToConsole} onNewSession={newSession} onSetMobile={setMobile} />
+      <ChatTopBar onBack={backToConsole} onNewSession={newSession} />
 
       <div style={{ flex: 1, minHeight: 0, display: "flex", alignItems: "stretch", justifyContent: "center", padding: "0 16px 16px" }}>
-        <div style={mobile ? FRAME_MOBILE : FRAME_DESKTOP}>
+        <div style={FRAME_DESKTOP}>
           <header
             style={{
               flex: "none",
@@ -597,15 +533,13 @@ export function ChatApp({
               )}
             </div>
             <span style={{ flex: 1 }} />
-            {!mobile && (
-              <div style={{ display: "flex", gap: 5, flex: "none" }}>
-                {agent.skills.map((skill) => (
-                  <span key={skill.id} className="chip" title="This agent runs this skill">
-                    {skill.id}@{skill.version}
-                  </span>
-                ))}
-              </div>
-            )}
+            <div style={{ display: "flex", gap: 5, flex: "none" }}>
+              {agent.skills.map((skill) => (
+                <span key={skill.id} className="chip" title="This agent runs this skill">
+                  {skill.id}@{skill.version}
+                </span>
+              ))}
+            </div>
           </header>
 
           {waking && <WakeBanner />}
