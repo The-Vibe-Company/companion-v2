@@ -482,19 +482,30 @@ proxy through the API, which decrypts the per-agent basic-auth password server-s
 churn is absorbed in one file. Prompts use `promptAsync`; deltas arrive on the stream; the
 sessions cache updates without waking anything.
 
-### Model providers (per-user keys)
+### Model providers (personal + workspace keys, referenced live)
 
-The control plane never supplies model API keys. Each member **connects** a provider once — their
-own key, envelope-encrypted in `user_provider_connections` (migration 0033, per-user, write-only,
-same secretbox scheme). `GET /v1/agents/models` returns the FULL tool-capable models.dev catalog and
-marks which providers the caller has connected; the create form groups models by provider and only
-enables a provider's models once it is connected. At create time the connected key is copied into
-the new agent's own secrets, so agents stay self-contained. Reserved runtime env names
-(`OPENCODE_SERVER_*`) can never be used as secret names.
+The control plane never supplies model API keys. A provider is **connected** with a real key,
+envelope-encrypted and write-only, at two scopes: **personal** (`user_provider_connections`, mig
+0033, per-user) and **workspace-shared** (`org_provider_connections`, mig 0034, PK `org_id+provider`,
+AAD `${orgId}:workspace:provider:${provider}`, **owner/admin write** via `canManageOrg`, any member
+reads). Both are managed in **Settings** — Account → *Model providers* and Workspace → *Shared
+providers* — never inside the create form, and the raw env var name is never shown to the user.
 
-Agent variables are editable after creation via `PUT /v1/agents/:slug/secrets` (add / replace /
-remove, write-only). Because the env is baked into the serve process at launch, a change on a
-running agent relaunches serve (deduped wake job) so it takes effect.
+The key is **referenced live, not copied**: `createAgent` no longer writes it into the agent's
+secrets. `loadDecryptedSecrets` resolves it at serve time (`getDecryptedProviderKey`) with
+**personal-overrides-workspace** precedence and injects it into the serve env on every serve path
+(provision / wake / restart), so rotating a key in Settings propagates and it **never appears as an
+agent variable** (`GET /v1/agents/:slug` also filters the model's provider env keys out of the
+variable list). `GET /v1/agents/models` marks a provider connected when the caller has a personal
+key **or** the workspace shares one. Reserved runtime env names (`OPENCODE_SERVER_*`) can never be
+used as variable names.
+
+Agent **variables** are the skill-required inputs only (label + `secret`/`env` kind from the skill's
+requirement), editable after creation via `PUT /v1/agents/:slug/secrets` (add / replace / remove,
+write-only). An agent's **model and instructions** are editable via `PATCH /v1/agents/:slug`
+(`updateAgentConfig`): it re-pushes the two config files and relaunches serve. Because the env is
+baked into the serve process at launch, a change on a running agent relaunches serve (deduped wake
+job) so it takes effect.
 
 ### Chat sessions
 
