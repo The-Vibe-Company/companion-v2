@@ -86,7 +86,7 @@ describe("agentsRouteKey", () => {
 });
 
 describe("agentChatHref", () => {
-  it("targets the standalone chat page", () => {
-    expect(agentChatHref("monka-support")).toBe("/agents/monka-support/chat");
+  it("targets the workspace-scoped chat page", () => {
+    expect(agentChatHref("acme", "monka-support")).toBe("/w/acme/agents/monka-support/chat");
   });
 });

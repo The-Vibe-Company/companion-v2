@@ -287,7 +287,7 @@ describe("AgentsApp detail route", () => {
 
     expect(container.querySelector('[data-screen-label="Agent detail"]')).toBeTruthy();
     expect(container.textContent).toContain("Chat URL");
-    expect(container.textContent).toContain("http://test.local/agents/mail-digest/chat");
+    expect(container.textContent).toContain("http://test.local/w/acme/agents/mail-digest/chat");
     expect(container.textContent).toContain("Properties");
     expect(container.textContent).toContain("NOTION_TOKEN");
     expect(container.textContent).toContain("cdg1");
@@ -381,6 +381,6 @@ describe("AgentsApp detail route", () => {
     );
 
     await act(async () => findButton(container, "Open session Daily digest").click());
-    expect(routerPush).toHaveBeenCalledWith("/agents/mail-digest/chat?session=ses_01");
+    expect(routerPush).toHaveBeenCalledWith("/w/acme/agents/mail-digest/chat?session=ses_01");
   });
 });

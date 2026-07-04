@@ -77,7 +77,7 @@ async function mountChatApp(agent: AgentVM, initialSessionId?: string) {
       React.createElement(
         React.StrictMode,
         null,
-        React.createElement(ChatApp, { agent, orgName: "Acme", initialSessionId }),
+        React.createElement(ChatApp, { agent, orgId: "org-1", orgName: "Acme", initialSessionId }),
       ),
     );
   });

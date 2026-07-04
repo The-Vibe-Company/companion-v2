@@ -39,6 +39,7 @@ function ProviderGroup({
   const [key, setKey] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState(false);
   const savingRef = useRef(false);
   const canConnect = provider.envKeys.length > 0;
 
@@ -69,13 +70,40 @@ function ProviderGroup({
           display: "flex",
           alignItems: "center",
           gap: 8,
-          padding: "8px 11px",
+          padding: "0 6px 0 0",
           background: "var(--color-surface-sunken)",
           borderBottom: "1px solid var(--color-line)",
         }}
       >
-        <span style={{ fontSize: "var(--text-xs)", fontWeight: 600, color: "var(--color-fg)" }}>{provider.name}</span>
-        <span style={{ flex: 1 }} />
+        <button
+          type="button"
+          onClick={() => setExpanded((e) => !e)}
+          aria-expanded={expanded}
+          aria-label={expanded ? `Collapse ${provider.name}` : `Expand ${provider.name}`}
+          style={{
+            flex: 1,
+            minWidth: 0,
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+            padding: "8px 11px",
+            border: "none",
+            background: "none",
+            cursor: "pointer",
+            fontFamily: "var(--font-ui)",
+            color: "var(--color-fg)",
+          }}
+        >
+          <Icon
+            name={expanded ? "chevron-down" : "chevron-right"}
+            size={12}
+            style={{ color: "var(--color-faint)", flex: "none" }}
+          />
+          <span style={{ fontSize: "var(--text-xs)", fontWeight: 600 }}>{provider.name}</span>
+          <span className="mono" style={{ fontSize: 10, color: "var(--color-faint)" }}>
+            {group.models.length}
+          </span>
+        </button>
         {provider.connected ? (
           <span
             className="mono"
@@ -87,7 +115,10 @@ function ProviderGroup({
         ) : connecting ? null : (
           <button
             type="button"
-            onClick={() => setConnecting(true)}
+            onClick={() => {
+              setConnecting(true);
+              setExpanded(true);
+            }}
             disabled={!canConnect}
             title={canConnect ? undefined : "This provider's key name is unknown."}
             style={{
@@ -109,119 +140,123 @@ function ProviderGroup({
         )}
       </div>
 
-      {!provider.connected && connecting && (
-        <div
-          style={{
-            display: "flex",
-            flexDirection: "column",
-            gap: 6,
-            padding: "9px 11px",
-            borderBottom: "1px solid var(--color-line)",
-            background: "var(--color-surface-sunken)",
-          }}
-        >
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <input
-              type="password"
-              value={key}
-              onChange={(e) => setKey(e.target.value)}
-              placeholder={`Paste your ${provider.name} API key (${provider.envKeys[0]})`}
-              aria-label={`API key for ${provider.name}`}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  e.preventDefault();
-                  save();
-                }
-              }}
+      {expanded && (
+        <>
+          {!provider.connected && connecting && (
+            <div
               style={{
-                flex: 1,
-                height: 30,
-                padding: "0 10px",
-                border: "1px solid var(--color-line)",
-                borderRadius: "var(--radius-sm)",
-                background: "var(--color-surface)",
-                fontFamily: "var(--font-mono)",
-                fontSize: "var(--text-xs)",
-                color: "var(--color-fg)",
-                outline: "none",
-              }}
-            />
-            <button type="button" className="ag-btn" onClick={save} disabled={busy || !key.trim()} style={{ height: 30 }}>
-              {busy ? "Saving…" : "Save"}
-            </button>
-          </div>
-          {error && (
-            <pre className="errblock" role="alert" style={{ margin: 0 }}>
-              {error}
-            </pre>
-          )}
-        </div>
-      )}
-
-      {group.models.map((m: AgentModelRow) => {
-        const sel = model === m.id;
-        const hint = m.description ?? contextHint(m.context);
-        const disabled = !provider.connected;
-        return (
-          <button
-            type="button"
-            key={m.id}
-            onClick={() => !disabled && onSelectModel(m.id)}
-            role="radio"
-            aria-checked={sel}
-            aria-disabled={disabled}
-            disabled={disabled}
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 10,
-              width: "100%",
-              textAlign: "left",
-              border: "none",
-              borderBottom: "1px solid color-mix(in oklab, var(--color-line) 55%, transparent)",
-              background: sel ? "var(--color-accent-tint)" : "transparent",
-              padding: "9px 11px",
-              cursor: disabled ? "default" : "pointer",
-              opacity: disabled ? 0.5 : 1,
-              fontFamily: "var(--font-ui)",
-            }}
-          >
-            <span className={"addfolder__check" + (sel ? " is-on" : "")}>{sel && <Icon name="check" size={11} />}</span>
-            <span
-              style={{
-                fontFamily: "var(--font-mono)",
-                fontSize: "var(--text-xs)",
-                fontWeight: 500,
-                color: "var(--color-fg)",
-                flex: "none",
+                display: "flex",
+                flexDirection: "column",
+                gap: 6,
+                padding: "9px 11px",
+                borderBottom: "1px solid var(--color-line)",
+                background: "var(--color-surface-sunken)",
               }}
             >
-              {m.id}
-            </span>
-            {disabled ? (
-              <span style={{ flex: 1, minWidth: 0, fontSize: "var(--text-xs)", color: "var(--color-faint)" }}>
-                connect {provider.name} to use
-              </span>
-            ) : (
-              hint && (
-                <span
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <input
+                  type="password"
+                  value={key}
+                  onChange={(e) => setKey(e.target.value)}
+                  placeholder={`Paste your ${provider.name} API key (${provider.envKeys[0]})`}
+                  aria-label={`API key for ${provider.name}`}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      save();
+                    }
+                  }}
                   style={{
                     flex: 1,
-                    minWidth: 0,
+                    height: 30,
+                    padding: "0 10px",
+                    border: "1px solid var(--color-line)",
+                    borderRadius: "var(--radius-sm)",
+                    background: "var(--color-surface)",
+                    fontFamily: "var(--font-mono)",
                     fontSize: "var(--text-xs)",
-                    color: "var(--color-muted)",
-                    whiteSpace: "nowrap",
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
+                    color: "var(--color-fg)",
+                    outline: "none",
+                  }}
+                />
+                <button type="button" className="ag-btn" onClick={save} disabled={busy || !key.trim()} style={{ height: 30 }}>
+                  {busy ? "Saving…" : "Save"}
+                </button>
+              </div>
+              {error && (
+                <pre className="errblock" role="alert" style={{ margin: 0 }}>
+                  {error}
+                </pre>
+              )}
+            </div>
+          )}
+
+          {group.models.map((m: AgentModelRow) => {
+            const sel = model === m.id;
+            const hint = m.description ?? contextHint(m.context);
+            const disabled = !provider.connected;
+            return (
+              <button
+                type="button"
+                key={m.id}
+                onClick={() => !disabled && onSelectModel(m.id)}
+                role="radio"
+                aria-checked={sel}
+                aria-disabled={disabled}
+                disabled={disabled}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 10,
+                  width: "100%",
+                  textAlign: "left",
+                  border: "none",
+                  borderBottom: "1px solid color-mix(in oklab, var(--color-line) 55%, transparent)",
+                  background: sel ? "var(--color-accent-tint)" : "transparent",
+                  padding: "9px 11px",
+                  cursor: disabled ? "default" : "pointer",
+                  opacity: disabled ? 0.5 : 1,
+                  fontFamily: "var(--font-ui)",
+                }}
+              >
+                <span className={"addfolder__check" + (sel ? " is-on" : "")}>{sel && <Icon name="check" size={11} />}</span>
+                <span
+                  style={{
+                    fontFamily: "var(--font-mono)",
+                    fontSize: "var(--text-xs)",
+                    fontWeight: 500,
+                    color: "var(--color-fg)",
+                    flex: "none",
                   }}
                 >
-                  {hint}
+                  {m.id}
                 </span>
-              )
-            )}
-          </button>
-        );
-      })}
+                {disabled ? (
+                  <span style={{ flex: 1, minWidth: 0, fontSize: "var(--text-xs)", color: "var(--color-faint)" }}>
+                    connect {provider.name} to use
+                  </span>
+                ) : (
+                  hint && (
+                    <span
+                      style={{
+                        flex: 1,
+                        minWidth: 0,
+                        fontSize: "var(--text-xs)",
+                        color: "var(--color-muted)",
+                        whiteSpace: "nowrap",
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                      }}
+                    >
+                      {hint}
+                    </span>
+                  )
+                )}
+              </button>
+            );
+          })}
+        </>
+      )}
     </div>
   );
 }
@@ -232,6 +267,7 @@ export function CreateView({
   models,
   registry,
   appOrigin,
+  workspaceSlug,
   onBack,
   onCreated,
 }: {
@@ -240,6 +276,7 @@ export function CreateView({
   models: AgentModelsResponse;
   registry: SkillVM[];
   appOrigin: string;
+  workspaceSlug: string;
   onBack: () => void;
   onCreated: (detail: AgentDetail) => void;
 }) {
@@ -386,7 +423,7 @@ export function CreateView({
             <p style={{ margin: "7px 0 0", fontSize: "var(--text-xs)", color: "var(--color-faint)", maxWidth: "68ch" }}>
               Lowercase, dashes. Becomes the chat URL:{" "}
               <span className="mono">
-                {appOrigin}/agents/{slug || "<name>"}/chat
+                {appOrigin}/w/{workspaceSlug}/agents/{slug || "<name>"}/chat
               </span>
             </p>
           </div>

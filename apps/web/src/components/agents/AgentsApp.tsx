@@ -476,6 +476,7 @@ export function AgentsApp({
         models={initialModels}
         registry={registrySkills}
         appOrigin={appOrigin}
+        workspaceSlug={currentOrg.slug}
         onBack={backToList}
         onCreated={(detail) => {
           applyDetail(detail);
@@ -517,11 +518,11 @@ export function AgentsApp({
         main = (
           <DetailView
             agent={detailAgent}
-            chatUrl={`${appOrigin}/agents/${detailAgent.id}/chat`}
+            chatUrl={`${appOrigin}${agentChatHref(currentOrg.slug, detailAgent.id)}`}
             onBack={backToList}
-            onOpenChat={() => router.push(agentChatHref(detailAgent.id))}
+            onOpenChat={() => router.push(agentChatHref(currentOrg.slug, detailAgent.id))}
             onOpenSession={(sessionId) =>
-              router.push(`${agentChatHref(detailAgent.id)}?session=${encodeURIComponent(sessionId)}`)
+              router.push(`${agentChatHref(currentOrg.slug, detailAgent.id)}?session=${encodeURIComponent(sessionId)}`)
             }
             onPauseWake={() => pauseWake(detailAgent.id)}
             onRetry={() => retryAgentProvision(detailAgent.id)}

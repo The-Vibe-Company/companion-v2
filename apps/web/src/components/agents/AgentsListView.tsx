@@ -42,21 +42,21 @@ export function AgentsListView({
   const rows = useMemo(() => filterAgents(agents, { label, query: q, sort }), [agents, label, q, sort]);
   const notice = updates[0] ?? null;
 
+  const breadcrumb = label ? [label] : [LIB_NAMES[lib], "Agents"];
+  const title = breadcrumb[breadcrumb.length - 1]!;
+
   return (
     <div data-screen-label="Agents list" style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
       <header className="sh">
         <nav className="sh__crumb" aria-label="Library">
-          <span className="sh__crumbseg">
-            <span className="sh__crumbpar">{LIB_NAMES[lib]}</span>
-          </span>
-          {label && (
-            <span className="sh__crumbseg">
-              <Icon name="chevron-right" size={12} />
-              <span className="sh__crumbpar">Agents</span>
+          {breadcrumb.slice(0, -1).map((seg, i) => (
+            <span className="sh__crumbseg" key={i}>
+              {i > 0 && <Icon name="chevron-right" size={12} />}
+              <span className="sh__crumbpar">{seg}</span>
             </span>
-          )}
+          ))}
         </nav>
-        <h2 className="sh__title">{label ?? "Agents"}</h2>
+        <h2 className="sh__title">{title}</h2>
         <span className="sh__count tnum">{scoped.length}</span>
         <span className="sh__spacer" />
         <span

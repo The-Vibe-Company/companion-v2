@@ -14,7 +14,7 @@ import { statusDot, toolIcon } from "./derive";
 import { agentsRouteHref } from "./route";
 
 /**
- * The full-viewport end-user chat surface for one agent (`/agents/<slug>/chat`) — NO console
+ * The full-viewport end-user chat surface for one agent (`/w/<workspace>/agents/<slug>/chat`) — NO console
  * sidebar. Boot flow: wake a sleeping sandbox (banner + sys line), create a session, then consume
  * the normalized SSE event stream via `openChatStream` (AbortController teardown, StrictMode-safe).
  */
@@ -333,10 +333,13 @@ function WorkingLine({ label }: { label: string }) {
 
 export function ChatApp({
   agent,
+  orgId,
   orgName,
   initialSessionId,
 }: {
   agent: AgentVM;
+  /** Workspace org id — synced to the companion_org cookie on mount for API calls. */
+  orgId: string;
   orgName: string;
   /** Resume a specific past session (from `?session=`); overrides the cached most-recent session. */
   initialSessionId?: string;
@@ -379,6 +382,7 @@ export function ChatApp({
   useEffect(() => {
     if (bootRef.current) return;
     bootRef.current = true;
+    document.cookie = `companion_org=${encodeURIComponent(orgId)}; path=/; SameSite=Lax`;
     const resumeId = initialSessionId ?? agent.sessions[0]?.id ?? null;
     void (async () => {
       if (agent.status === "error") {

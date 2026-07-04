@@ -4,7 +4,7 @@
  * org-wide fleet). Screens: the fleet list (optionally filtered to a group label), the create form,
  * an agent detail (which renders the provisioning card while the agent is provisioning — same URL,
  * reload-safe), and the skill-update fan-out. The chat surface is a separate page
- * (`/agents/<slug>/chat`), not a query view.
+ * (`/w/<workspace>/agents/<slug>/chat`), not a query view.
  */
 export type AgentsLibrary = "mine" | "org";
 
@@ -93,6 +93,6 @@ export function agentsRouteKey(route: AgentsRoute): string {
 }
 
 /** The full-viewport chat page for one agent (outside the console shell). */
-export function agentChatHref(slug: string): string {
-  return `/agents/${encodeURIComponent(slug)}/chat`;
+export function agentChatHref(workspaceSlug: string, agentSlug: string): string {
+  return `/w/${encodeURIComponent(workspaceSlug)}/agents/${encodeURIComponent(agentSlug)}/chat`;
 }

@@ -354,9 +354,8 @@ export function DetailView({
   );
 
   const copyUrl = () => {
-    const url = chatUrl || `${window.location.origin}/agents/${agent.id}/chat`;
     if (navigator.clipboard) {
-      void navigator.clipboard.writeText(url).catch(() => {});
+      void navigator.clipboard.writeText(chatUrl).catch(() => {});
     }
     setCopied(true);
     if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current);

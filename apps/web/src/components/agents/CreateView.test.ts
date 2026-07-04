@@ -66,6 +66,7 @@ async function mount(props: Partial<React.ComponentProps<typeof CreateView>> = {
         models: models({}),
         registry: [],
         appOrigin: "http://test.local",
+        workspaceSlug: "acme",
         onBack: vi.fn(),
         onCreated: vi.fn(),
         ...props,
@@ -87,6 +88,14 @@ function modelButton(container: HTMLElement, id: string): HTMLButtonElement {
   const btn = Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.includes(id));
   if (!btn) throw new Error(`No model button for ${id}`);
   return btn;
+}
+
+/** Provider groups render collapsed; expand one so its model rows (and connect hint) mount. */
+async function expandProvider(container: HTMLElement, name: string) {
+  const btn = Array.from(container.querySelectorAll("button")).find(
+    (b) => b.getAttribute("aria-label") === `Expand ${name}`,
+  );
+  if (btn) await act(async () => btn.dispatchEvent(new MouseEvent("click", { bubbles: true })));
 }
 
 // React tracks the input value via the native setter; bypassing it (plain `.value =`) makes the
@@ -113,6 +122,8 @@ afterEach(async () => {
 describe("CreateView grouped model picker", () => {
   it("disables models of unconnected providers and preselects the connected one", async () => {
     const container = await mount({ models: models({ anthropic: true }) });
+    await expandProvider(container, "Anthropic");
+    await expandProvider(container, "OpenAI");
 
     // The connected provider's model is a selectable radio; the unconnected one is disabled.
     const claude = modelButton(container, "anthropic/claude-sonnet-4-5");
@@ -131,7 +142,8 @@ describe("CreateView grouped model picker", () => {
 
     // No provider connected → provisioning is gated with the connect hint.
     expect(container.textContent).toContain("Connect at least one model provider");
-    // Both provider models are disabled up front.
+    // Expand Anthropic; its model is disabled up front.
+    await expandProvider(container, "Anthropic");
     expect(modelButton(container, "anthropic/claude-sonnet-4-5").disabled).toBe(true);
 
     // Groups sort alphabetically when none is connected, so Anthropic is first. Reveal + fill its key.
