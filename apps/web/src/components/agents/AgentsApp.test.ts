@@ -276,7 +276,7 @@ describe("AgentsApp detail route", () => {
     agentQueryMocks.fetchAgent.mockResolvedValue(
       agentDetailRow({
         slug: "mail-digest",
-        secrets: [{ key: "NOTION_TOKEN", set: true, required_by: ["meeting-digest"], required: true }],
+        secrets: [{ key: "NOTION_TOKEN", set: true, required_by: ["meeting-digest"], required: true, kind: "secret", note: null }],
       }),
     );
 
@@ -341,7 +341,7 @@ describe("AgentsApp detail route", () => {
     agentQueryMocks.fetchAgent.mockResolvedValue(
       agentDetailRow({
         slug: "mail-digest",
-        secrets: [{ key: "NOTION_TOKEN", set: true, required_by: ["meeting-digest"], required: true }],
+        secrets: [{ key: "NOTION_TOKEN", set: true, required_by: ["meeting-digest"], required: true, kind: "secret", note: null }],
       }),
     );
     agentQueryMocks.setAgentSecrets.mockResolvedValue({ secrets: [], restarting: true });

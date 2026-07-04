@@ -11,6 +11,7 @@ import {
   sandboxNameFor,
   sealSecret,
   agentSecretAad,
+  providerConnectionAad,
   wakeAgent,
   type ActorContext,
   type AgentControlContext,
@@ -329,8 +330,36 @@ describe("provisionAgent — the 4-step executor", () => {
       message: expect.stringContaining("model anthropic/claude-x requires ANTHROPIC_API_KEY"),
       step: "push",
     });
-    expect((row.provisionError as { detail: string }).detail).toContain("ITS OWNER's key");
+    expect((row.provisionError as { detail: string }).detail).toContain("Connect it in Settings → Model providers");
     expect(calls.some((c) => c.op === "push")).toBe(false);
+  });
+
+  it("injects the model provider key LIVE from the owner's connection when not set as a secret", async () => {
+    const store = emptyStore();
+    const agentId = seedProvisionScenario(store, { modelKeySet: false });
+    // Owner connected Anthropic once; the key is resolved live at serve time — no agent secret.
+    const sealed = sealSecret({ kek: KEK, plaintext: "sk-live-anthropic", aad: providerConnectionAad(ORG, me.id, "anthropic") });
+    store.providerConnections.push({
+      orgId: ORG,
+      userId: me.id,
+      provider: "anthropic",
+      keyName: "ANTHROPIC_API_KEY",
+      wrappedDek: sealed.wrappedDek,
+      ciphertext: sealed.ciphertext,
+      keyVersion: 1,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    } as (typeof store.providerConnections)[number]);
+    const database = fakeAgentsDb(store);
+    const { runtime, calls } = scriptedRuntime();
+
+    await provisionAgent({ orgId: ORG, actorId: me.id, agentId, ctx: await ctxWith(database, runtime) });
+
+    expect(store.agents[0]!.lifecycle).toBe("ready");
+    const serve = calls.find((c) => c.op === "serve")?.args as { env: Record<string, string> };
+    expect(serve.env.ANTHROPIC_API_KEY).toBe("sk-live-anthropic");
+    // Never copied onto the agent's own secrets.
+    expect(store.agentSecrets.find((s) => s.key === "ANTHROPIC_API_KEY")).toBeUndefined();
   });
 
   it("serve/health failures persist onto their steps", async () => {

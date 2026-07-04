@@ -2453,15 +2453,12 @@ app.get("/v1/agents/:slug", async (c) => {
       getAgentBySlug({ actor, orgId, slug: c.req.param("slug"), database }),
     );
     if (!detail) return jsonError(c, "agent not found", 404);
-    // The model's provider key is a per-agent secret; make an UNSET one visible on the detail so
-    // the operator sees exactly what to fix before a retry (set keys already appear).
+    // The model provider key is referenced LIVE from the owner's connection (managed in Settings →
+    // Model providers), never an agent variable. Hide any such key from the variable list — including
+    // one copied onto an agent created before this behavior — so operators see only real skill inputs.
     const modelKeys = await agentModelCatalog.resolveModel(detail.model).catch(() => null);
-    if (modelKeys && !modelKeys.envKeys.some((key) => detail.secrets.some((s) => s.key === key && s.set))) {
-      const wanted = modelKeys.envKeys[0];
-      if (wanted && !detail.secrets.some((s) => s.key === wanted)) {
-        detail.secrets.push({ key: wanted, set: false, required_by: [detail.model], required: true });
-        detail.secrets.sort((a, b) => a.key.localeCompare(b.key));
-      }
+    if (modelKeys) {
+      detail.secrets = detail.secrets.filter((s) => !modelKeys.envKeys.includes(s.key));
     }
     return c.json(detail);
   } catch (error) {

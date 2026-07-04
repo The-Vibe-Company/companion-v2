@@ -297,10 +297,11 @@ describe("createAgent", () => {
     expect(detail.secrets).toEqual([expect.objectContaining({ key: "SLACK_BOT_TOKEN", set: false })]);
   });
 
-  it("seeds the model provider key from the owner's saved connection when not typed in", async () => {
+  it("does NOT copy the model provider key into the agent (referenced live from the connection)", async () => {
     const store = emptyStore();
     seedSkill(store, "meeting-digest", "1.3.0");
-    // The owner connected Anthropic once; creating an agent without re-typing the key copies it.
+    // The owner connected Anthropic once. Creating an agent must NOT copy that key into the agent's
+    // secrets — it is resolved live at serve time, so it never becomes a visible agent variable.
     store.providerConnections.push({
       orgId: ORG,
       userId: me.id,
@@ -313,10 +314,10 @@ describe("createAgent", () => {
     } as (typeof store.providerConnections)[number]);
     const database = fakeAgentsDb(store);
 
-    await createAgent({ actor: me, orgId: ORG, input: { ...input, secrets: {} }, ctx: ctxFor(database), database });
-    const keyRow = store.agentSecrets.find((s) => s.key === "ANTHROPIC_API_KEY");
-    expect(keyRow).toBeDefined();
-    expect(keyRow?.ciphertext).not.toContain("sk-connected");
+    const detail = await createAgent({ actor: me, orgId: ORG, input: { ...input, secrets: {} }, ctx: ctxFor(database), database });
+    expect(store.agentSecrets.find((s) => s.key === "ANTHROPIC_API_KEY")).toBeUndefined();
+    // And it is absent from the agent's variable list (managed, not user-facing).
+    expect(detail.secrets.some((s) => s.key === "ANTHROPIC_API_KEY")).toBe(false);
   });
 
   it("rejects duplicate slugs, unknown models, unknown/archived/foreign-personal skills", async () => {

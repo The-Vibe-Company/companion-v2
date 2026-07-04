@@ -103,6 +103,10 @@ export const agentSecretStateSchema = z.object({
   /** Skill slugs whose manifests require this key. */
   required_by: z.array(z.string()).default([]),
   required: z.boolean().default(true),
+  /** "secret" (masked) or "env" (plain config value) — from the declaring skill; defaults to secret. */
+  kind: z.enum(["secret", "env"]).default("secret"),
+  /** Human description of what this value is for, from the skill's requirement note (if any). */
+  note: z.string().nullable().default(null),
 });
 export type AgentSecretState = z.infer<typeof agentSecretStateSchema>;
 

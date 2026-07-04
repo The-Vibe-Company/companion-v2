@@ -144,13 +144,20 @@ function SecretRow({
       }}
     >
       <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
-        <Icon name="key" size={12} style={{ color: "var(--color-faint)" }} />
-        <span className="mono" style={{ fontSize: "var(--text-xs)", color: "var(--color-fg)" }}>
-          {secret.key}
+        <Icon name={secret.kind === "env" ? "settings" : "key"} size={12} style={{ color: "var(--color-faint)" }} />
+        <span style={{ display: "flex", flexDirection: "column", minWidth: 0 }}>
+          <span style={{ fontSize: "var(--text-xs)", color: "var(--color-fg)", fontWeight: secret.note ? 500 : 400 }} className={secret.note ? undefined : "mono"}>
+            {secret.note ?? secret.key}
+          </span>
+          {secret.note && (
+            <span className="mono" style={{ fontSize: 10, color: "var(--color-faint)" }}>
+              {secret.key}
+            </span>
+          )}
         </span>
         {secret.requiredBy.length > 0 && (
           <span style={{ fontSize: 11, color: "var(--color-faint)" }}>
-            required by <span className="mono">{secret.requiredBy.join(", ")}</span>
+            for <span className="mono">{secret.requiredBy.join(", ")}</span>
           </span>
         )}
         <span style={{ flex: 1 }} />
@@ -184,10 +191,10 @@ function SecretRow({
       {showInput && (
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <input
-            type="password"
+            type={secret.kind === "env" ? "text" : "password"}
             value={value}
             onChange={(e) => setValue(e.target.value)}
-            placeholder="Paste value. Stored encrypted, never shown again."
+            placeholder={secret.kind === "env" ? "Enter a value." : "Paste value. Stored encrypted, never shown again."}
             aria-label={`Value for ${secret.key}`}
             onKeyDown={(e) => {
               if (e.key === "Enter") {

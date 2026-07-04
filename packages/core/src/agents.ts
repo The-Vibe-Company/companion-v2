@@ -249,14 +249,22 @@ function secretStates(pins: PinJoin[], setKeys: Set<string>): AgentSecretState[]
       if (existing) {
         if (!existing.required_by.includes(pin.slug)) existing.required_by.push(pin.slug);
         existing.required = existing.required || req.required;
+        if (!existing.note && req.note) existing.note = req.note;
       } else {
-        byKey.set(req.key, { key: req.key, set: setKeys.has(req.key), required_by: [pin.slug], required: req.required });
+        byKey.set(req.key, {
+          key: req.key,
+          set: setKeys.has(req.key),
+          required_by: [pin.slug],
+          required: req.required,
+          kind: req.type === "env" ? "env" : "secret",
+          note: req.note || null,
+        });
       }
     }
   }
   // Keys the operator set that no current pin declares still show (they exist and will be injected).
   for (const key of setKeys) {
-    if (!byKey.has(key)) byKey.set(key, { key, set: true, required_by: [], required: false });
+    if (!byKey.has(key)) byKey.set(key, { key, set: true, required_by: [], required: false, kind: "secret", note: null });
   }
   return [...byKey.values()].sort((a, b) => a.key.localeCompare(b.key));
 }
@@ -458,23 +466,11 @@ export async function createAgent(input: {
     }),
   );
 
+  // Only the skill-required variables the user typed are stored on the agent. The model provider
+  // key is NOT copied here — it is referenced LIVE from the owner's saved connection at serve time
+  // (see injectProviderConnectionKey), so rotating it in Settings propagates to every agent and it
+  // never shows up as an agent variable. Reserved keys are already rejected by the contract schema.
   const secretEntries = Object.entries(spec.secrets).filter(([, value]) => value.trim() !== "");
-  // Seed the model provider key from the owner's saved connection when they didn't type one in —
-  // each agent stays self-contained (runs on its own copy of the key), the connection is just the
-  // convenience source. Reserved keys are already rejected by the contract schema.
-  const provider = spec.model.slice(0, spec.model.indexOf("/"));
-  if (provider && !modelKeys.envKeys.some((key) => secretEntries.some(([k]) => k === key))) {
-    const connection = await getDecryptedProviderKey({
-      database,
-      orgId: input.orgId,
-      userId: input.actor.id,
-      provider,
-      secretsKey: input.ctx.secretsKey,
-    });
-    if (connection && modelKeys.envKeys.includes(connection.keyName)) {
-      secretEntries.push([connection.keyName, connection.value]);
-    }
-  }
   if (secretEntries.length > 0) {
     await database.insert(schema.agentSecrets).values(
       secretEntries.map(([key, value]) => {
@@ -665,7 +661,7 @@ export async function provisionAgent(input: {
     if (!modelKeys.some((key) => secrets.has(key))) {
       const wanted = modelKeys[0] ?? "the provider API key";
       throw new AgentRuntimeError(`model ${row.model} requires ${wanted}`, {
-        detail: `No secret named ${wanted} is set on this agent — each agent runs on ITS OWNER's key.\nThe sandbox was stopped. Set the secret, then retry.`,
+        detail: `No API key is available for this model's provider. Connect it in Settings → Model providers (or set ${wanted} as a variable), then retry.\nThe sandbox was stopped.`,
       });
     }
     const missing = missingRequiredSecrets(pins, new Set(secrets.keys()));
@@ -841,7 +837,37 @@ async function loadDecryptedSecrets(
       }),
     );
   }
+  await injectProviderConnectionKey(database, orgId, row, ctx, out);
   return out;
+}
+
+/**
+ * Reference the owner's model-provider connection LIVE (it is never copied into the agent's secrets):
+ * resolve the provider API key at serve time so rotating it in Settings propagates to every agent,
+ * and so it never surfaces as an agent variable. A manually-set secret of the same name still wins.
+ */
+async function injectProviderConnectionKey(
+  database: Db,
+  orgId: string,
+  row: AgentRow,
+  ctx: AgentControlContext,
+  out: Map<string, string>,
+): Promise<void> {
+  const slash = row.model.indexOf("/");
+  const provider = slash > 0 ? row.model.slice(0, slash) : "";
+  if (!provider) return;
+  const resolved = await ctx.resolveModelKeys(row.model);
+  if (!resolved || resolved.envKeys.some((key) => out.has(key))) return;
+  const connection = await getDecryptedProviderKey({
+    database,
+    orgId,
+    userId: row.creatorId,
+    provider,
+    secretsKey: ctx.secretsKey,
+  });
+  if (connection && resolved.envKeys.includes(connection.keyName)) {
+    out.set(connection.keyName, connection.value);
+  }
 }
 
 async function modelKeysOrThrow(ctx: AgentControlContext, model: string): Promise<string[]> {

@@ -198,6 +198,10 @@ export interface AgentSecretVM {
   key: string;
   set: boolean;
   requiredBy: string[];
+  /** "secret" (masked) or "env" (plain config value). */
+  kind: "secret" | "env";
+  /** Human description of what the value is for (from the skill's requirement note), if any. */
+  note: string | null;
 }
 
 export interface AgentSessionVM {
@@ -264,7 +268,13 @@ function mapAgentSession(session: AgentSessionSummary): AgentSessionVM {
 }
 
 function mapAgentSecret(secret: AgentSecretState): AgentSecretVM {
-  return { key: secret.key, set: secret.set, requiredBy: secret.required_by ?? [] };
+  return {
+    key: secret.key,
+    set: secret.set,
+    requiredBy: secret.required_by ?? [],
+    kind: secret.kind ?? "secret",
+    note: secret.note ?? null,
+  };
 }
 
 /** Relative-time labels are applied here (at data-mapping time), never per render — see SkillVM. */
