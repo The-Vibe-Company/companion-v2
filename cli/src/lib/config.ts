@@ -1,5 +1,5 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { COMPANION_HOME, configPath } from "./paths";
+import { companionHome, configPath } from "./paths";
 import { CliError } from "./errors";
 
 export interface ProfileConfig {
@@ -26,6 +26,6 @@ export async function getProfileConfig(profile: string): Promise<ProfileConfig> 
 export async function saveProfileConfig(profile: string, cfg: ProfileConfig): Promise<void> {
   const all = await loadConfig();
   all[profile] = { url: cfg.url.replace(/\/$/, ""), orgId: cfg.orgId };
-  await mkdir(COMPANION_HOME, { recursive: true });
+  await mkdir(companionHome(), { recursive: true });
   await writeFile(configPath(), JSON.stringify(all, null, 2));
 }

@@ -73,6 +73,11 @@ const serviceMocks = vi.hoisted(() => {
     deletePersonalLabel: noop,
     ensureUserBootstrap: noop,
     resolveApiToken: vi.fn(),
+    resolveDeviceToken: vi.fn(),
+    registerDevice: noop,
+    recordHeartbeat: noop,
+    listDevices: noop,
+    revokeDevice: noop,
     resolveDependencyReferences: vi.fn(async (input: { slugs: string[] }) =>
       input.slugs.map((slug) => ({ declaredSlug: slug, slug, skillId: null })),
     ),

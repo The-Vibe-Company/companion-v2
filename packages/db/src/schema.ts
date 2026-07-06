@@ -567,6 +567,36 @@ export const apiTokens = pgTable(
   }),
 );
 
+/**
+ * Local machines that run the Companion headless agent. The device token plaintext is shown once
+ * at registration; only its sha256 `token_hash` is stored. Inventory is a bounded JSON snapshot of
+ * the user's local skills lockfile, not an authorization source.
+ */
+export const devices = pgTable(
+  "devices",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    platform: text("platform").notNull(),
+    agentVersion: text("agent_version"),
+    tokenHash: text("token_hash").notNull().unique(),
+    inventory: jsonb("inventory").$type<Record<string, unknown>>().notNull().default({}),
+    inventoryReportedAt: timestamp("inventory_reported_at", { withTimezone: true }),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
+    createdAt: now(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+  },
+  (t) => ({
+    byOrgUser: index("devices_org_user_idx").on(t.orgId, t.userId),
+  }),
+);
+
 export const auditLog = pgTable("audit_log", {
   id: uuid("id").primaryKey().defaultRandom(),
   orgId: uuid("org_id")

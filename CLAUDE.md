@@ -52,7 +52,7 @@ packages/
   skills/     # SKILL.md parse / validate / version / package
   contracts/  # shared Zod schemas + tRPC types (consumed by web, api, worker, cli)
   auth/       # Better Auth config
-cli/          # `companion` CLI — talks REST/OpenAPI
+cli/          # `companion` CLI — login/whoami + local agent manager over REST
 deploy/       # docker-compose.yaml (self-host) + helm/ chart
 docs/         # vision / product / design / PRD
 ```

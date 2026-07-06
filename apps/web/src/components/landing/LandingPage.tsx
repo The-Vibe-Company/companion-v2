@@ -585,7 +585,7 @@ function Builders({ c }: { c: Copy }) {
           <strong>{c.buildersStrong}</strong>
           {c.buildersText}
         </span>
-        <span className="v5-builders__code">companion skills push · pull · sync</span>
+        <span className="v5-builders__code">companion agent install · status</span>
         <span className="v5-builders__spacer"></span>
         <Button variant="secondary" size="sm" onClick={() => window.open(GITHUB_URL, "_blank", "noopener,noreferrer")}>
           GitHub ↗

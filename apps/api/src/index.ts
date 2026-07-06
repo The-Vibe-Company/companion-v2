@@ -83,8 +83,14 @@ import {
   setPersonalLabelIcon,
   renamePersonalLabel,
   deletePersonalLabel,
+  listDevices,
+  recordHeartbeat,
+  registerDevice,
+  revokeDevice,
 } from "@companion/core/services";
 import {
+  agentHeartbeatInputSchema,
+  agentHeartbeatOutputSchema,
   addCommentInputSchema,
   addOrgAccessDomainInputSchema,
   archiveSkillInputSchema,
@@ -118,6 +124,7 @@ import {
   sniffCommentImageMime,
   MAX_COMMENT_IMAGES,
   MAX_COMMENT_IMAGE_BYTES,
+  registerDeviceInputSchema,
   updateUserProfileInputSchema,
   type CompanionManifest,
   type SkillFrontmatter,
@@ -158,6 +165,7 @@ import { inviteEmail, sendTransactionalEmail } from "@companion/email";
 import {
   actorFromContext,
   attachSession,
+  deviceFromContext,
   isTokenRequest,
   jsonError,
   orgIdFromContext,
@@ -441,6 +449,10 @@ app.post("/v1/auth/login", (c) => authForward(c, "/auth/sign-in/email"));
 app.post("/v1/auth/signup", (c) => authForward(c, "/auth/sign-up/email"));
 app.post("/v1/auth/logout", (c) => authForward(c, "/auth/sign-out"));
 
+function apiExternalBase(c: Context<{ Variables: ApiVariables }>): string {
+  return (process.env.COMPANION_API_URL ?? new URL(c.req.url).origin).replace(/\/$/, "");
+}
+
 function safeAuthNext(value: unknown): string {
   const next = typeof value === "string" ? value : "";
   if (!next.startsWith("/") || next.startsWith("//") || next.includes("\\")) {
@@ -558,6 +570,89 @@ app.get("/v1/auth/whoami", async (c) => {
     });
   } catch (error) {
     return jsonError(c, error, 401);
+  }
+});
+
+/** Register this machine for the local headless agent. Cookie session only; returns the token once. */
+app.post(
+  "/v1/agent/devices",
+  bodyLimit({
+    maxSize: 8 * 1024,
+    onError: (c) => jsonError(c, "device registration exceeds the 8 KB limit", 413),
+  }),
+  async (c) => {
+    try {
+      if (isTokenRequest(c)) throw new Error("personal access tokens cannot register devices");
+      let input;
+      try {
+        input = registerDeviceInputSchema.parse(await c.req.json());
+      } catch (error) {
+        return c.json({ ok: false, error: error instanceof Error ? error.message : String(error) }, 422);
+      }
+      const result = await withTenant(c, ({ actor, orgId, database }) =>
+        registerDevice({ actor, orgId, apiUrl: apiExternalBase(c), device: input, database }),
+      );
+      return c.json(result);
+    } catch (error) {
+      return jsonError(c, error, 401);
+    }
+  },
+);
+
+app.post(
+  "/v1/agent/heartbeat",
+  async (c, next) => {
+    try {
+      await deviceFromContext(c);
+    } catch (error) {
+      return jsonError(c, error, 401);
+    }
+    await next();
+  },
+  bodyLimit({
+    maxSize: 256 * 1024,
+    onError: (c) => jsonError(c, "heartbeat exceeds the 256 KB limit", 413),
+  }),
+  async (c) => {
+    try {
+      const device = await deviceFromContext(c);
+      let input;
+      try {
+        input = agentHeartbeatInputSchema.parse(await c.req.json());
+      } catch (error) {
+        return c.json({ ok: false, error: error instanceof Error ? error.message : String(error) }, 422);
+      }
+      const result = await withTenantContext({ orgId: device.orgId, userId: device.actor.id }, (database) =>
+        recordHeartbeat({ device, heartbeat: input, database }),
+      );
+      return c.json(agentHeartbeatOutputSchema.parse(result));
+    } catch (error) {
+      return jsonError(c, error, 401);
+    }
+  },
+);
+
+/** List the signed-in member's own local-agent devices. */
+app.get("/v1/devices", async (c) => {
+  try {
+    if (isTokenRequest(c)) throw new Error("personal access tokens cannot list devices");
+    const rows = await withTenant(c, ({ actor, orgId, database }) => listDevices({ actor, orgId, database }));
+    return c.json(rows);
+  } catch (error) {
+    return jsonError(c, error, 401);
+  }
+});
+
+/** Revoke one of the signed-in member's local-agent devices. */
+app.delete("/v1/devices/:id", async (c) => {
+  try {
+    if (isTokenRequest(c)) throw new Error("personal access tokens cannot revoke devices");
+    await withTenant(c, ({ actor, orgId, database }) =>
+      revokeDevice({ actor, orgId, deviceId: c.req.param("id"), database }),
+    );
+    return c.json({ ok: true as const });
+  } catch (error) {
+    return jsonError(c, error);
   }
 });
 

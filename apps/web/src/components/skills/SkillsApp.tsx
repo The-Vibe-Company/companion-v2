@@ -8,6 +8,7 @@ import type {
   LabelsResponse,
   LabelVM,
   LocalSkillRow,
+  DeviceRow,
   SkillFilterPreferences,
   SkillSharePlan,
 } from "@companion/contracts";
@@ -254,6 +255,8 @@ export function SkillsApp({
   initialMineSkills,
   initialOrgSkills,
   initialLocalSkills,
+  initialDevices = [],
+  initialDevicesError = null,
   initialFilterPreferences,
   initialPersonalLabels,
   initialLabels,
@@ -266,6 +269,8 @@ export function SkillsApp({
   initialMineSkills: SkillVM[];
   initialOrgSkills: SkillVM[];
   initialLocalSkills: LocalSkillRow[];
+  initialDevices?: DeviceRow[];
+  initialDevicesError?: string | null;
   initialFilterPreferences: SkillFilterPreferences;
   initialPersonalLabels: LabelsResponse;
   initialLabels: LabelsResponse;
@@ -1493,7 +1498,13 @@ export function SkillsApp({
       )}
       <div className="main" aria-hidden={mobileSidebarOpen || undefined} inert={mobileSidebarOpen ? true : undefined}>
         {currentView === "local" ? (
-          <LocalSkillsView skills={localSkills} workspaceId={currentOrg.id} workspaceName={currentOrg.name} />
+          <LocalSkillsView
+            skills={localSkills}
+            devices={initialDevices}
+            devicesError={initialDevicesError}
+            workspaceId={currentOrg.id}
+            workspaceName={currentOrg.name}
+          />
         ) : skill ? (
           <DetailView
             skill={skill}

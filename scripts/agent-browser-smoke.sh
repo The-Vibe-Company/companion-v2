@@ -177,10 +177,41 @@ box_center() {
   agent-browser get box "$1" | awk '/^x:/{x=$2}/^y:/{y=$2}/^width:/{w=$2}/^height:/{h=$2}END{printf "%d %d\n", x + w / 2, y + h / 2}'
 }
 
+skill_info_json() {
+  local slug="$1" api profile
+  api="$(api_url)"
+  profile="$SMOKE_PROFILE"
+  PROFILE="$profile" API_URL="$api" SLUG="$slug" node <<'NODE'
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+
+const profile = process.env.PROFILE;
+const api = process.env.API_URL.replace(/\/$/, "");
+const slug = process.env.SLUG;
+const suffix = profile === "default" ? "" : `.${profile}`;
+const sessionPath = path.join(process.env.COMPANION_HOME || path.join(os.homedir(), ".companion"), `session${suffix}.json`);
+const session = JSON.parse(fs.readFileSync(sessionPath, "utf8"));
+const headers = { cookie: session.cookie };
+if (session.orgId) headers["x-companion-org"] = session.orgId;
+
+(async () => {
+  const response = await fetch(`${api}/v1/skills/${encodeURIComponent(slug)}`, { headers });
+  if (!response.ok) {
+    process.exit(response.status === 404 ? 4 : 1);
+  }
+  process.stdout.write(JSON.stringify(await response.json()));
+})().catch((error) => {
+  console.error(error.message);
+  process.exit(1);
+});
+NODE
+}
+
 # Ground truth (independent of the browser): does the skill now carry `label` directly?
 assert_skill_filed_under() {
   local label="$1" info_json filed
-  if ! info_json="$(pnpm --silent --filter @companion/cli dev --json skills info "$SMOKE_SKILL" --profile "$SMOKE_PROFILE" 2>/dev/null)"; then
+  if ! info_json="$(skill_info_json "$SMOKE_SKILL")"; then
     printf '[agent-browser-smoke] Could not read skill info to confirm the drop\n' >&2
     exit 1
   fi
@@ -278,15 +309,7 @@ prepare_fixtures() {
   mark_companion_skill_installed "$api" "$profile"
   SMOKE_SKILL_DIR="$(prepare_smoke_skill_dir "$profile")"
 
-  local push_output
-  if ! push_output="$(pnpm --filter @companion/cli dev skills push "$SMOKE_SKILL_DIR" \
-    --label "$SMOKE_SKILL_LABEL" \
-    --profile "$profile" 2>&1)"; then
-    if ! printf '%s' "$push_output" | grep -Fi "version already exists" >/dev/null; then
-      printf '%s\n' "$push_output" >&2
-      exit 1
-    fi
-  fi
+  publish_smoke_skill "$api" "$profile" "$SMOKE_SKILL_DIR" "$SMOKE_SKILL_LABEL"
 }
 
 mark_companion_skill_installed() {
@@ -331,7 +354,8 @@ prepare_smoke_skill_dir() {
   local fixture="$PWD/examples/skills/incident-summary"
   local info_json existing_id tmp
 
-  if ! info_json="$(pnpm --silent --filter @companion/cli dev --json skills info "$SMOKE_SKILL" --profile "$profile" 2>/dev/null)"; then
+  SMOKE_PROFILE="$profile"
+  if ! info_json="$(skill_info_json "$SMOKE_SKILL" 2>/dev/null)"; then
     printf '%s\n' "$fixture"
     return
   fi
@@ -353,6 +377,64 @@ manifest.metadata.companionSkillId = process.env.SKILL_ID;
 fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
 NODE
   printf '%s\n' "$tmp"
+}
+
+publish_smoke_skill() {
+  local api="$1" profile="$2" skill_dir="$3" label="$4" script
+  script="$(mktemp "${TMPDIR:-/tmp}/companion-smoke-publish.XXXXXX").ts"
+  cat >"$script" <<'TS'
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { packDir } from "@companion/skills";
+
+const profile = process.env.PROFILE!;
+const api = process.env.API_URL!.replace(/\/$/, "");
+const skillDir = process.env.SKILL_DIR!;
+const slug = process.env.SLUG!;
+const label = process.env.LABEL!;
+const suffix = profile === "default" ? "" : `.${profile}`;
+const sessionPath = path.join(process.env.COMPANION_HOME || path.join(os.homedir(), ".companion"), `session${suffix}.json`);
+const session = JSON.parse(fs.readFileSync(sessionPath, "utf8")) as { cookie: string; orgId?: string };
+const headers: Record<string, string> = { cookie: session.cookie };
+if (session.orgId) headers["x-companion-org"] = session.orgId;
+
+async function getExisting(): Promise<{ id: string } | null> {
+  const response = await fetch(`${api}/v1/skills/${encodeURIComponent(slug)}`, { headers });
+  if (response.status === 404) return null;
+  if (!response.ok) throw new Error(`GET /v1/skills/${slug} failed: ${response.status}`);
+  return (await response.json()) as { id: string };
+}
+
+async function main() {
+  const existing = await getExisting();
+  const params = new URLSearchParams({ scope: "org" });
+  params.append("label", label);
+  if (existing?.id) {
+    params.set("expect_slug", slug);
+    params.set("expect_skill_id", existing.id);
+  }
+  const packed = await packDir(skillDir);
+  const response = await fetch(`${api}/v1/skills?${params.toString()}`, {
+    method: "POST",
+    headers: { ...headers, "content-type": "application/gzip" },
+    body: packed.archive,
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    if (!text.toLowerCase().includes("version already exists")) {
+      throw new Error(`POST /v1/skills failed: ${response.status} ${text}`);
+    }
+  }
+}
+
+main().catch((error) => {
+  console.error(error.message);
+  process.exit(1);
+});
+TS
+  PROFILE="$profile" API_URL="$api" SKILL_DIR="$skill_dir" SLUG="$SMOKE_SKILL" LABEL="$label" pnpm --silent --filter @companion/api exec tsx "$script"
+  rm -f "$script"
 }
 
 require_command agent-browser
