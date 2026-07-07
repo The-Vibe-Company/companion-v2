@@ -77,6 +77,7 @@ type ArchiveEntryClassification =
       type: string;
       path: string;
       size: number;
+      mode: number | null;
       countable: true;
     }
   | {
@@ -89,10 +90,16 @@ type ArchiveEntryClassification =
       violation: string | null;
     };
 
-function classifyArchiveEntry(header: { name?: string; type?: string | null; size?: number }): ArchiveEntryClassification {
+function classifyArchiveEntry(header: {
+  name?: string;
+  type?: string | null;
+  size?: number;
+  mode?: number | null;
+}): ArchiveEntryClassification {
   const rawName = header.name ?? "";
   const type = (header.type ?? "file") as string;
   const size = header.size ?? 0;
+  const mode = typeof header.mode === "number" ? header.mode : null;
   const norm = normalizePosix(rawName);
 
   if (norm.violation) {
@@ -113,7 +120,7 @@ function classifyArchiveEntry(header: { name?: string; type?: string | null; siz
   if (isExcluded(norm.path)) {
     return { kind: "skip", rawName, type, path: norm.path, size, countable: true, violation: null };
   }
-  return { kind: "file", rawName, type, path: norm.path, size, countable: true };
+  return { kind: "file", rawName, type, path: norm.path, size, mode, countable: true };
 }
 
 function countArchiveEntry(counters: ArchiveCounters, entry: ArchiveEntryClassification): void {
@@ -493,6 +500,75 @@ export async function extractArchiveFiles(
 
   files.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
   return { files, oversize: counters.oversize, violations };
+}
+
+/** Default per-file cap when extracting FULL file bytes (deploy path, not display). */
+const MAX_ENTRY_BUFFER_BYTES = 5 * 1024 * 1024; // 5 MB
+
+export interface ArchiveEntryBuffer {
+  path: string;
+  data: Buffer;
+  /** Any execute bit in the tar mode — preserved so bundled scripts stay runnable after push. */
+  executable: boolean;
+}
+
+export interface ArchiveEntryBuffersResult {
+  files: ArchiveEntryBuffer[];
+  violations: string[];
+  oversize: boolean;
+}
+
+/**
+ * Extract EVERY safe entry's full bytes (unlike {@link extractArchiveFiles}, which caps text at the
+ * display limit and returns no binary content). Used to push a skill folder into a sandbox: the
+ * bytes must be exact and executable bits must survive. Same traversal/symlink/special-entry guards
+ * as every other reader; a file above the per-file cap flags `oversize` and is skipped — callers
+ * must refuse to deploy archives with violations or oversize.
+ */
+export async function extractArchiveEntryBuffers(
+  tar: Buffer,
+  opts: { maxFileBytes?: number } = {},
+): Promise<ArchiveEntryBuffersResult> {
+  const cap = opts.maxFileBytes ?? MAX_ENTRY_BUFFER_BYTES;
+  const files: ArchiveEntryBuffer[] = [];
+  const violations: string[] = [];
+  let anyOversize = false;
+
+  const counters = await walkArchive(
+    tar,
+    (entry, stream, next, reject) => {
+      if (entry.size > cap) {
+        anyOversize = true;
+        violations.push(`file exceeds deploy cap (${entry.size} bytes): ${entry.path}`);
+        drainArchiveStream(stream, next);
+        return;
+      }
+      const chunks: Buffer[] = [];
+      let read = 0;
+      stream.on("data", (c: Buffer) => {
+        read += c.length;
+        if (read <= cap) chunks.push(c);
+      });
+      stream.on("end", () => {
+        if (read > cap) {
+          anyOversize = true;
+          violations.push(`file exceeds deploy cap (${read} bytes): ${entry.path}`);
+        } else {
+          files.push({
+            path: entry.path,
+            data: Buffer.concat(chunks),
+            executable: entry.mode !== null && (entry.mode & 0o111) !== 0,
+          });
+        }
+        next();
+      });
+      stream.on("error", reject);
+    },
+    (violation) => violations.push(violation),
+  );
+
+  files.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  return { files, violations, oversize: counters.oversize || anyOversize };
 }
 
 export type ExtractArchiveFileContentResult =
