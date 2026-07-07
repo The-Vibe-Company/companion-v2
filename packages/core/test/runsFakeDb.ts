@@ -11,6 +11,9 @@ import { schema, type Db } from "@companion/db";
 
 export type FakeProviderConnectionRow = typeof schema.userProviderConnections.$inferSelect;
 export type FakeOrgProviderConnectionRow = typeof schema.orgProviderConnections.$inferSelect;
+export type FakeRunRow = typeof schema.skillRuns.$inferSelect;
+export type FakeRunAttachmentRow = typeof schema.skillRunAttachments.$inferSelect;
+export type FakeRunArtifactRow = typeof schema.skillRunArtifacts.$inferSelect;
 
 export interface FakeSkillRow {
   id: string;
@@ -38,6 +41,9 @@ export interface FakeStore {
   skillVersions: FakeSkillVersionRow[];
   providerConnections: FakeProviderConnectionRow[];
   orgProviderConnections: FakeOrgProviderConnectionRow[];
+  runs: FakeRunRow[];
+  runAttachments: FakeRunAttachmentRow[];
+  runArtifacts: FakeRunArtifactRow[];
   audit: Array<Record<string, unknown>>;
 }
 
@@ -48,6 +54,9 @@ export function emptyStore(overrides: Partial<FakeStore> = {}): FakeStore {
     skillVersions: [],
     providerConnections: [],
     orgProviderConnections: [],
+    runs: [],
+    runAttachments: [],
+    runArtifacts: [],
     audit: [],
     ...overrides,
   };
@@ -90,6 +99,33 @@ const SKILL_KEYS = ["id", "slug"];
 const SKILL_VERSION_KEYS = ["skillId", "id"];
 const PROVIDER_CONN_KEYS = ["userId", "provider"];
 const ORG_PROVIDER_CONN_KEYS = ["provider"];
+const RUN_KEYS = ["id", "skillId", "creatorId"];
+const RUN_ATTACHMENT_KEYS = ["runId", "id"];
+const RUN_ARTIFACT_KEYS = ["runId", "id"];
+
+function runDefaults(values: Record<string, unknown>): FakeRunRow {
+  return {
+    id: crypto.randomUUID(),
+    skillVersion: null,
+    status: "starting",
+    statusDetail: null,
+    sandboxName: null,
+    sandboxId: null,
+    sandboxDomain: null,
+    goldenSnapshotId: null,
+    opencodeVersion: null,
+    opencodeSessionId: null,
+    serverPasswordEnc: null,
+    timeoutMs: 300000,
+    transcript: [],
+    transcriptUpdatedAt: null,
+    lastActiveAt: null,
+    frozenAt: null,
+    createdAt: new Date("2026-07-01T00:00:00Z"),
+    updatedAt: new Date("2026-07-01T00:00:00Z"),
+    ...values,
+  } as unknown as FakeRunRow;
+}
 
 export function fakeRunsDb(store: FakeStore): Db {
   function filterRows<T extends Record<string, unknown>>(rows: T[], keys: string[], cond: unknown): T[] {
@@ -98,10 +134,30 @@ export function fakeRunsDb(store: FakeStore): Db {
   }
 
   function selectFrom(projection: Record<string, unknown> | undefined, table: unknown) {
+    const resolveRows = async (cond: unknown): Promise<unknown[]> => {
+      if (table === schema.skillRuns) {
+        return filterRows(store.runs as unknown as Record<string, unknown>[], RUN_KEYS, cond);
+      }
+      if (table === schema.skillRunAttachments) {
+        return filterRows(store.runAttachments as unknown as Record<string, unknown>[], RUN_ATTACHMENT_KEYS, cond);
+      }
+      if (table === schema.skillRunArtifacts) {
+        return filterRows(store.runArtifacts as unknown as Record<string, unknown>[], RUN_ARTIFACT_KEYS, cond);
+      }
+      return resolveOtherRows(cond);
+    };
     const chain = {
       innerJoin: () => chain,
       leftJoin: () => chain,
-      where: async (cond: unknown): Promise<unknown[]> => {
+      // Selects on run tables support the trailing `.orderBy(...)` the service chains on.
+      where: (cond: unknown) => {
+        const promise = resolveRows(cond);
+        return Object.assign(promise, {
+          orderBy: () => promise,
+        }) as Promise<unknown[]> & { orderBy: () => Promise<unknown[]> };
+      },
+    };
+    async function resolveOtherRows(cond: unknown): Promise<unknown[]> {
         if (table === schema.skillVersions) {
           const rows = filterRows(store.skillVersions as unknown as Record<string, unknown>[], SKILL_VERSION_KEYS, cond);
           return rows.map((r) => ({
@@ -153,8 +209,7 @@ export function fakeRunsDb(store: FakeStore): Db {
           return rows;
         }
         throw new Error("fakeRunsDb: unexpected select target");
-      },
-    };
+    }
     return chain;
   }
 
@@ -170,6 +225,43 @@ export function fakeRunsDb(store: FakeStore): Db {
     insert: (table: unknown) => ({
       values: (values: Record<string, unknown> | Record<string, unknown>[]) => {
         const list = Array.isArray(values) ? values : [values];
+        if (table === schema.skillRuns) {
+          const rows = list.map((v) => runDefaults(v));
+          store.runs.push(...rows);
+          return {
+            returning: async () => rows,
+            then: (resolve: (value: unknown) => void) => resolve(rows),
+          };
+        }
+        if (table === schema.skillRunAttachments) {
+          store.runAttachments.push(
+            ...list.map(
+              (v) =>
+                ({
+                  id: crypto.randomUUID(),
+                  createdAt: new Date(),
+                  ...v,
+                }) as FakeRunAttachmentRow,
+            ),
+          );
+          return Promise.resolve();
+        }
+        if (table === schema.skillRunArtifacts) {
+          store.runArtifacts.push(
+            ...list.map(
+              (v) =>
+                ({
+                  id: crypto.randomUUID(),
+                  vanishId: null,
+                  contentType: null,
+                  expiresAt: null,
+                  publishedAt: new Date(),
+                  ...v,
+                }) as FakeRunArtifactRow,
+            ),
+          );
+          return Promise.resolve();
+        }
         if (table === schema.userProviderConnections) {
           return {
             onConflictDoUpdate: async (opts: { set: Record<string, unknown> }) => {
@@ -213,9 +305,15 @@ export function fakeRunsDb(store: FakeStore): Db {
         throw new Error("fakeRunsDb: unexpected insert target");
       },
     }),
-    update: () => ({
-      set: () => ({
-        where: async () => {
+    update: (table: unknown) => ({
+      set: (patch: Record<string, unknown>) => ({
+        where: async (cond: unknown) => {
+          if (table === schema.skillRuns) {
+            for (const row of filterRows(store.runs as unknown as Record<string, unknown>[], RUN_KEYS, cond)) {
+              Object.assign(row, patch);
+            }
+            return;
+          }
           throw new Error("fakeRunsDb: unexpected update target");
         },
       }),
@@ -246,4 +344,9 @@ export function fakeRunsDb(store: FakeStore): Db {
   };
 
   return handle as unknown as Db;
+}
+
+/** Passthrough tenant runner backed by the same fake db. */
+export function fakeTenantRunner(database: Db): import("../src/skillRuns").TenantRunner {
+  return async (_input, fn) => fn(database);
 }

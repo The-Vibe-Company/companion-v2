@@ -151,7 +151,10 @@ export async function getDecryptedProviderKey(input: {
         eq(schema.userProviderConnections.provider, input.provider),
       ),
     );
-  const own = personal[0];
+  // Defensive post-filter: never open a blob against the wrong row's AAD.
+  const own = (Array.isArray(personal) ? personal : []).find(
+    (row) => row.userId === input.userId && row.provider === input.provider,
+  );
   if (own) {
     return {
       keyName: own.keyName,
@@ -291,7 +294,8 @@ export async function getDecryptedOrgProviderKey(input: {
     .select()
     .from(schema.orgProviderConnections)
     .where(and(eq(schema.orgProviderConnections.orgId, input.orgId), eq(schema.orgProviderConnections.provider, input.provider)));
-  const row = rows[0];
+  // Defensive post-filter: never open a blob against the wrong row's AAD.
+  const row = (Array.isArray(rows) ? rows : []).find((r) => r.provider === input.provider);
   if (!row) return null;
   return {
     keyName: row.keyName,

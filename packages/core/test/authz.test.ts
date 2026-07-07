@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { OrgRole } from "@companion/contracts";
 import {
+  canAccessRun,
   canAccessSkill,
   canManageOrg,
   canManagePersonalSkill,
@@ -110,5 +111,24 @@ describe("isLastOwner (an org must always keep at least one owner)", () => {
     expect(isLastOwner(1, true)).toBe(true);
     expect(isLastOwner(2, true)).toBe(false);
     expect(isLastOwner(1, false)).toBe(false);
+  });
+});
+
+describe("canAccessRun — creator-only run privacy (no admin override)", () => {
+  const run = { creatorId: "u-launcher" };
+  const cases: Array<[string, string, boolean]> = [
+    ["the creator (launcher)", "u-launcher", true],
+    ["another developer", "u-dev", false],
+    ["an admin", "u-admin", false],
+    ["an owner", "u-owner", false],
+  ];
+  it.each(cases)("%s -> %s", (_label, actorId, expected) => {
+    expect(canAccessRun(actorId, run)).toBe(expected);
+  });
+
+  it("org role is irrelevant: runs mirror personal-skill privacy, not the flat org library", () => {
+    // The load-bearing assertion — a member never sees another member's runs, admins included.
+    expect(canAccessRun("u-admin", { creatorId: "u-dev" })).toBe(false);
+    expect(canAccessRun("u-dev", { creatorId: "u-dev" })).toBe(true);
   });
 });

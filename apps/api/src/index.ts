@@ -92,6 +92,19 @@ import {
   parseSecretsKey,
   setOrgProviderConnection,
   setProviderConnection,
+  createRun,
+  launchAndRecordRun,
+  listRuns,
+  getRun,
+  getRunAttachment,
+  getRunChatTarget,
+  promptRun,
+  runJobAlive,
+  subscribeRunSideEvents,
+  publishRunArtifact,
+  RunBusyError,
+  RunValidationError,
+  type RunControlContext,
 } from "@companion/core/services";
 import {
   addCommentInputSchema,
@@ -129,13 +142,27 @@ import {
   MAX_COMMENT_IMAGE_BYTES,
   updateUserProfileInputSchema,
   setProviderConnectionInputSchema,
+  launchRunFieldsSchema,
+  runPromptInputSchema,
+  RUN_ATTACHMENT_MAX_FILES,
+  RUN_ATTACHMENT_MAX_BYTES,
   type CompanionManifest,
   type SkillFrontmatter,
   type SkillScope,
 } from "@companion/contracts";
-import { createModelCatalog } from "@companion/sandbox";
+import {
+  createChatClient,
+  createChatSession,
+  createModelCatalog,
+  createVercelRuntime,
+  loadSessionItems,
+  sendPromptAsync,
+  streamChatEvents,
+  vercelConfigFromEnv,
+} from "@companion/sandbox";
 import {
   commentImageKey,
+  runAttachmentKey,
   deleteSkillArchive,
   getSkillArchive,
   getOrgLogo,
@@ -2358,6 +2385,292 @@ app.delete("/v1/org-provider-connections/:provider", async (c) => {
     return jsonError(c, error);
   }
 });
+
+/* ---- Skill runs (one-shot sandboxed sessions; session-only, PATs rejected) ------------------ */
+
+let runControlCtx: RunControlContext | null = null;
+function runCtx(): RunControlContext {
+  if (runControlCtx) return runControlCtx;
+  const vercel = vercelConfigFromEnv();
+  if (!vercel) {
+    throw new Error("Skill runs are not configured: set VERCEL_TOKEN, VERCEL_TEAM_ID and VERCEL_PROJECT_ID");
+  }
+  runControlCtx = {
+    runtime: createVercelRuntime(vercel),
+    runTenant: withTenantContext,
+    fetchArchive: (key) => getSkillArchive({ key }),
+    fetchObject: (key) => getSkillArchive({ key }),
+    secretsKey: parseSecretsKey(process.env.COMPANION_SECRETS_KEY),
+    goldenSnapshotId: process.env.COMPANION_GOLDEN_SNAPSHOT_ID?.trim() || null,
+    opencodeVersion: process.env.OPENCODE_VERSION?.trim() || null,
+    region: "iad1",
+    timeoutMs: Number(process.env.COMPANION_SANDBOX_TIMEOUT_MS ?? 300000),
+    resolveModelKeys: (model) => modelCatalog.resolveModel(model),
+    publishArtifact: publishRunArtifact,
+    chat: {
+      createSession: (target, title) => createChatSession(createChatClient(target), title),
+      sendPrompt: (target, sessionId, text) => sendPromptAsync(createChatClient(target), sessionId, text),
+      loadItems: (target, sessionId) => loadSessionItems(createChatClient(target), sessionId),
+      streamEvents: (target, sessionId, signal) =>
+        streamChatEvents({ client: createChatClient(target), sessionId, signal }),
+    },
+  };
+  return runControlCtx;
+}
+
+/**
+ * In-process fire-and-forget launch+record jobs, deduped per run so a double-POST can never run two
+ * pipelines concurrently in one process. Status is persisted on the run row, so a crash surfaces as
+ * the designed "interrupted" state at the next read (see markRunInterrupted in core).
+ */
+const runJobs = new Map<string, Promise<void>>();
+function kickRunJob(key: string, job: () => Promise<void>): void {
+  if (runJobs.has(key)) return;
+  const promise = job()
+    .catch((error) => {
+      console.error(`[runs] background job ${key} failed:`, error instanceof Error ? error.message : error);
+    })
+    .finally(() => {
+      runJobs.delete(key);
+    });
+  runJobs.set(key, promise);
+}
+
+/** Map run service failures onto the HTTP statuses the run UI expects. */
+function runError(c: Context, error: unknown): Response {
+  if (error instanceof RunBusyError) return jsonError(c, error, 409);
+  if (error instanceof RunValidationError) {
+    return jsonError(c, error, error.message.endsWith("not found") ? 404 : 422);
+  }
+  const message = error instanceof Error ? error.message : "";
+  if (message === "not authenticated" || message.startsWith("personal access tokens")) {
+    return jsonError(c, error, 401);
+  }
+  return jsonError(c, error);
+}
+
+app.post(
+  "/v1/skills/:slug/runs",
+  // Authenticate before the body-reading bodyLimit middleware, so an unauthenticated caller can't
+  // make the server read or measure a large upload body.
+  async (c, next) => {
+    try {
+      if (isTokenRequest(c)) return jsonError(c, "personal access tokens cannot use skill runs", 401);
+      actorFromContext(c);
+    } catch (error) {
+      return jsonError(c, error, 401);
+    }
+    await next();
+  },
+  // 5 files x 10 MB + form overhead.
+  bodyLimit({ maxSize: 64 * 1024 * 1024, onError: (c) => jsonError(c, "run upload exceeds the 64 MB limit", 413) }),
+  async (c) => {
+    try {
+      const slug = c.req.param("slug");
+      const actor = actorFromContext(c);
+      const orgId = await orgIdFromContext(c);
+
+      const form = await c.req.formData();
+      const fields = launchRunFieldsSchema.parse({
+        prompt: typeof form.get("prompt") === "string" ? form.get("prompt") : "",
+        model: typeof form.get("model") === "string" ? form.get("model") : "",
+      });
+      // File entries only (the other branch of FormDataEntryValue is `string`).
+      const files = form.getAll("file").filter((f): f is Exclude<typeof f, string> => typeof f !== "string");
+      if (files.length > RUN_ATTACHMENT_MAX_FILES) {
+        throw new Error(`a run can have at most ${RUN_ATTACHMENT_MAX_FILES} attachments`);
+      }
+      for (const file of files) {
+        if (file.size === 0) throw new Error("an attached file is empty");
+        if (file.size > RUN_ATTACHMENT_MAX_BYTES) throw new Error("each attachment must be 10 MB or smaller");
+      }
+
+      // Upload the bytes to object storage OUTSIDE any DB transaction (slow uploads must not hold a
+      // pooled connection idle-in-transaction); createRun below persists metadata only.
+      const uploadedKeys: string[] = [];
+      const attachments: Array<{ id: string; fileName: string; contentType: string; byteSize: number; storageKey: string }> = [];
+      try {
+        for (const file of files) {
+          const buf = Buffer.from(await file.arrayBuffer());
+          const attachmentId = randomUUID();
+          const key = runAttachmentKey({ orgId, attachmentId });
+          const contentType = file.type || "application/octet-stream";
+          await putSkillArchive({ key, body: buf, contentType });
+          uploadedKeys.push(key);
+          attachments.push({
+            id: attachmentId,
+            fileName: sanitizeAttachmentName(file.name || `attachment-${attachments.length + 1}`),
+            contentType,
+            byteSize: buf.length,
+            storageKey: key,
+          });
+        }
+        const detail = await withTenantContext({ orgId, userId: actor.id }, (database) =>
+          createRun({
+            actor,
+            orgId,
+            slug,
+            prompt: fields.prompt,
+            model: fields.model,
+            attachments,
+            ctx: runCtx(),
+            database,
+          }),
+        );
+        kickRunJob(`run:${orgId}:${detail.id}`, () =>
+          launchAndRecordRun({ orgId, actorId: actor.id, runId: detail.id, ctx: runCtx() }),
+        );
+        return c.json(detail, 201);
+      } catch (e) {
+        // The run insert rolled back (or upload failed); drop any objects we stored so they don't orphan.
+        await Promise.allSettled(uploadedKeys.map((key) => deleteSkillArchive({ key })));
+        throw e;
+      }
+    } catch (error) {
+      return runError(c, error);
+    }
+  },
+);
+
+app.get("/v1/skills/:slug/runs", async (c) => {
+  try {
+    if (isTokenRequest(c)) return jsonError(c, "personal access tokens cannot use skill runs", 401);
+    const runs = await withTenant(c, ({ actor, orgId, database }) =>
+      listRuns({ actor, orgId, slug: c.req.param("slug"), jobAlive: runJobAlive, database }),
+    );
+    return c.json({ runs });
+  } catch (error) {
+    return runError(c, error);
+  }
+});
+
+app.get("/v1/runs/:id", async (c) => {
+  try {
+    if (isTokenRequest(c)) return jsonError(c, "personal access tokens cannot use skill runs", 401);
+    const detail = await withTenant(c, ({ actor, orgId, database }) =>
+      getRun({ actor, orgId, runId: c.req.param("id"), jobAlive: runJobAlive, database }),
+    );
+    return c.json(detail);
+  } catch (error) {
+    return runError(c, error);
+  }
+});
+
+app.post("/v1/runs/:id/prompt", async (c) => {
+  try {
+    if (isTokenRequest(c)) return jsonError(c, "personal access tokens cannot use skill runs", 401);
+    const input = runPromptInputSchema.parse(await c.req.json());
+    await withTenant(c, ({ actor, orgId, database }) =>
+      promptRun({ actor, orgId, runId: c.req.param("id"), text: input.text, ctx: runCtx(), database }),
+    );
+    return c.json({ ok: true }, 202);
+  } catch (error) {
+    return runError(c, error);
+  }
+});
+
+/** SSE proxy to the run's sandbox event stream. Frozen runs 409 (the client renders the transcript). */
+app.get("/v1/runs/:id/events", async (c) => {
+  try {
+    if (isTokenRequest(c)) return jsonError(c, "personal access tokens cannot use skill runs", 401);
+    const runId = c.req.param("id");
+    const target = await withTenant(c, ({ actor, orgId, database }) =>
+      getRunChatTarget({ actor, orgId, runId, ctx: runCtx(), database }),
+    );
+    const client = createChatClient({ domain: target.domain, password: target.password });
+
+    const abort = new AbortController();
+    const encoder = new TextEncoder();
+    let closed = false;
+    let unsubscribeSide = () => {};
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const send = (payload: string) => {
+          if (closed) return;
+          try {
+            controller.enqueue(encoder.encode(payload));
+          } catch {
+            closed = true;
+          }
+        };
+        send(`data: ${JSON.stringify({ type: "ready", session_id: target.sessionId })}\n\n`);
+        const ping = setInterval(() => send(": ping\n\n"), 15_000);
+        // Recorder-side events (artifact publish failures) merge into the same stream.
+        unsubscribeSide = subscribeRunSideEvents(runId, (event) => send(`data: ${JSON.stringify(event)}\n\n`));
+        void (async () => {
+          try {
+            for await (const event of streamChatEvents({ client, sessionId: target.sessionId, signal: abort.signal })) {
+              send(`data: ${JSON.stringify(event)}\n\n`);
+              if (closed) break;
+            }
+          } catch (error) {
+            send(`data: ${JSON.stringify({ type: "error", message: error instanceof Error ? error.message : "stream failed" })}\n\n`);
+          } finally {
+            clearInterval(ping);
+            unsubscribeSide();
+            closed = true;
+            try {
+              controller.close();
+            } catch {
+              /* already closed */
+            }
+          }
+        })();
+      },
+      cancel() {
+        closed = true;
+        unsubscribeSide();
+        abort.abort();
+      },
+    });
+    return new Response(stream, {
+      headers: {
+        "content-type": "text/event-stream",
+        "cache-control": "no-cache, no-transform",
+        "x-accel-buffering": "no",
+        connection: "keep-alive",
+      },
+    });
+  } catch (error) {
+    return runError(c, error);
+  }
+});
+
+/** Stream a run attachment back to its creator. */
+app.get("/v1/runs/:id/attachments/:attachmentId", async (c) => {
+  try {
+    if (isTokenRequest(c)) return jsonError(c, "personal access tokens cannot use skill runs", 401);
+    const asset = await withTenant(c, ({ actor, orgId, database }) =>
+      getRunAttachment({
+        actor,
+        orgId,
+        runId: c.req.param("id"),
+        attachmentId: c.req.param("attachmentId"),
+        database,
+      }),
+    );
+    const body = await getSkillArchive({ key: asset.storageKey });
+    return new Response(body, {
+      headers: {
+        "Content-Type": asset.contentType,
+        "Cache-Control": "private, no-cache",
+        // User-uploaded bytes: never let the browser sniff them into an executable type.
+        "X-Content-Type-Options": "nosniff",
+        "Content-Disposition": `attachment; filename="${asset.fileName.replace(/[^\w. -]/g, "_")}"`,
+      },
+    });
+  } catch (error) {
+    // Not-visible run / unknown attachment / cross-tenant all surface as a 404.
+    return jsonError(c, error, 404);
+  }
+});
+
+/** Keep attachment names path-safe inside the sandbox (written under attachments/<name>). */
+function sanitizeAttachmentName(raw: string): string {
+  const base = raw.split(/[\\/]/).pop() || "attachment";
+  const clean = base.replace(/[^\w. ()\[\]-]/g, "_").slice(0, 120);
+  return clean.startsWith(".") ? `_${clean}` : clean || "attachment";
+}
 
 const port = Number(process.env.COMPANION_API_PORT ?? process.env.PORT ?? 3001);
 const hostname = process.env.COMPANION_API_HOST;

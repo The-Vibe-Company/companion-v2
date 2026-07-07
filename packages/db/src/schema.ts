@@ -713,3 +713,140 @@ export const orgProviderConnections = pgTable(
     keyCheck: check("org_provider_connections_key_check", sql`${t.keyName} ~ '^[A-Za-z_][A-Za-z0-9_]*$'`),
   }),
 );
+
+/* ---------------------------------- skill runs ---------------------------------- */
+
+export const skillRunStatusEnum = pgEnum("skill_run_status", ["starting", "running", "frozen", "error"]);
+
+/**
+ * Structural mirror of the contracts `RunChatHistoryItem` (db stays contracts-free). The transcript
+ * is a server-side snapshot: replaced wholesale from the sandbox on every `session.idle`.
+ */
+export type SkillRunTranscriptItem =
+  | { kind: "user"; text: string }
+  | { kind: "assistant"; text: string }
+  | {
+      kind: "tool";
+      call_id: string;
+      tool: string;
+      skill: string | null;
+      title: string | null;
+      input: string;
+      output: string;
+      duration_ms: number | null;
+    };
+
+/**
+ * One skill run: a one-shot sandboxed session launched from a skill's page. A FRESH sandbox is
+ * forked from the golden snapshot per run (no wake — the run freezes into a read-only transcript
+ * when the sandbox stops). Runs are PRIVATE to their creator: like personal skills, there is no
+ * admin override (`canAccessRun`).
+ */
+export const skillRuns = pgTable(
+  "skill_runs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    skillId: uuid("skill_id").notNull(),
+    /** Who launched the run — the only member who can ever see it. */
+    creatorId: text("creator_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    /** Published skill version pinned at launch (what actually ran). */
+    skillVersion: text("skill_version"),
+    /** OpenCode model ref `provider/model-id` (validated against the models.dev catalog). */
+    model: text("model").notNull(),
+    /** The original launch prompt (list rows show an excerpt). */
+    prompt: text("prompt").notNull(),
+    status: skillRunStatusEnum("status").notNull().default("starting"),
+    /** Launch step in progress (while `starting`) or a human error message (when `error`). */
+    statusDetail: text("status_detail"),
+    /** Deterministic sandbox name: run-<org8>-<run8>. */
+    sandboxName: text("sandbox_name"),
+    sandboxId: text("sandbox_id"),
+    /** Public https URL of port 4096; reached only by the API proxy, never exposed to browsers. */
+    sandboxDomain: text("sandbox_domain"),
+    /** Provenance: which golden snapshot the run forked, and the OpenCode pin. */
+    goldenSnapshotId: text("golden_snapshot_id"),
+    opencodeVersion: text("opencode_version"),
+    opencodeSessionId: text("opencode_session_id"),
+    /** Per-run OPENCODE_SERVER_PASSWORD as "wrappedDek|ciphertext" (secretbox). Write-only. */
+    serverPasswordEnc: text("server_password_enc"),
+    /** Sandbox inactivity window; also the freeze window for the recorder. */
+    timeoutMs: integer("timeout_ms").notNull().default(300000),
+    transcript: jsonb("transcript").$type<SkillRunTranscriptItem[]>().notNull().default([]),
+    transcriptUpdatedAt: timestamp("transcript_updated_at", { withTimezone: true }),
+    lastActiveAt: timestamp("last_active_at", { withTimezone: true }),
+    frozenAt: timestamp("frozen_at", { withTimezone: true }),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    // Supports org-scoped composite FKs from the attachment/artifact tables (skills pattern).
+    uniqueOrgId: unique("skill_runs_org_id_id_uq").on(t.orgId, t.id),
+    skillFk: foreignKey({
+      columns: [t.orgId, t.skillId],
+      foreignColumns: [skills.orgId, skills.id],
+      name: "skill_runs_skill_org_fk",
+    }).onDelete("cascade"),
+    // The Sessions tab query: this user's runs of this skill, newest first.
+    bySessions: index("skill_runs_sessions_idx").on(t.orgId, t.skillId, t.creatorId, t.createdAt),
+  }),
+);
+
+/** A file the launcher attached to a run (bytes in S3 under run-attachments/, metadata here). */
+export const skillRunAttachments = pgTable(
+  "skill_run_attachments",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    runId: uuid("run_id").notNull(),
+    fileName: text("file_name").notNull(),
+    contentType: text("content_type").notNull(),
+    byteSize: integer("byte_size").notNull(),
+    storageKey: text("storage_key").notNull(),
+    createdAt: now(),
+  },
+  (t) => ({
+    runFk: foreignKey({
+      columns: [t.orgId, t.runId],
+      foreignColumns: [skillRuns.orgId, skillRuns.id],
+      name: "skill_run_attachments_run_fk",
+    }).onDelete("cascade"),
+    byRun: index("skill_run_attachments_run_idx").on(t.orgId, t.runId),
+  }),
+);
+
+/**
+ * A published run artifact: a file the agent saved into `artifacts/`, collected server-side and
+ * uploaded to Vanish with the launcher's key (the key never enters the sandbox). Only metadata +
+ * the public URL live here — the bytes are on Vanish.
+ */
+export const skillRunArtifacts = pgTable(
+  "skill_run_artifacts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    runId: uuid("run_id").notNull(),
+    /** Path relative to the sandbox artifacts/ directory (dedup key per run). */
+    path: text("path").notNull(),
+    fileName: text("file_name").notNull(),
+    contentType: text("content_type"),
+    byteSize: integer("byte_size").notNull(),
+    vanishId: text("vanish_id"),
+    url: text("url").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+    publishedAt: timestamp("published_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    uniqueRunPath: unique("skill_run_artifacts_run_path_uq").on(t.runId, t.path),
+    runFk: foreignKey({
+      columns: [t.orgId, t.runId],
+      foreignColumns: [skillRuns.orgId, skillRuns.id],
+      name: "skill_run_artifacts_run_fk",
+    }).onDelete("cascade"),
+    byRun: index("skill_run_artifacts_run_idx").on(t.orgId, t.runId),
+  }),
+);

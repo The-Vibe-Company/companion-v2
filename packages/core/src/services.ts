@@ -3666,3 +3666,8 @@ export * from "./secretbox";
 
 // Saved model-provider connections (API keys). Same load-order reasoning as `./labels`.
 export * from "./providerConnections";
+
+// Skill runs (one-shot sandboxed sessions) + the Vanish artifact client. Same load-order reasoning
+// as `./labels`: `skillRuns.ts` imports only hoisted functions and types from here.
+export * from "./skillRuns";
+export * from "./vanish";
