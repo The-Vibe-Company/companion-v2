@@ -127,6 +127,18 @@ export function SettingsSidebar({
               onClick={() => goTo({ view: "preferences" })}
             />
             <NavItem
+              active={is("providers")}
+              icon="cpu"
+              label="Model providers"
+              onClick={() => goTo({ view: "providers" })}
+            />
+            <NavItem
+              active={is("artifacts")}
+              icon="link-2"
+              label="Artifacts (Vanish)"
+              onClick={() => goTo({ view: "artifacts" })}
+            />
+            <NavItem
               active={is("apikeys")}
               icon="key"
               label="API keys"
@@ -150,6 +162,12 @@ export function SettingsSidebar({
               }
               label="General"
               onClick={() => goTo({ view: "general" })}
+            />
+            <NavItem
+              active={is("org-providers")}
+              icon="cpu"
+              label="Shared providers"
+              onClick={() => goTo({ view: "org-providers" })}
             />
             <NavItem
               active={is("members")}

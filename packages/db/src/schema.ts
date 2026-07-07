@@ -650,3 +650,66 @@ export const skillInstalls = pgTable(
     byOrgUser: index("skill_installs_org_user_idx").on(t.orgId, t.userId),
   }),
 );
+
+/**
+ * A member's saved connection to a model provider: their own API key for e.g. Anthropic/OpenAI,
+ * envelope-encrypted. Connecting a provider ONCE enables its models in the run launcher's picker;
+ * the key is resolved LIVE at serve time (personal beats workspace) and never copied onto a run.
+ * Write-only: the API exposes the key NAME + connected state only, never the value. One row per
+ * member per provider per workspace. (`provider = "vanish"` stores the member's Vanish API key for
+ * run artifact publishing — it never appears in the model picker, which is built from models.dev.)
+ */
+export const userProviderConnections = pgTable(
+  "user_provider_connections",
+  {
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    /** models.dev provider id, e.g. "anthropic" (or the reserved "vanish"). */
+    provider: text("provider").notNull(),
+    /** The env var name the key is stored/injected under, e.g. ANTHROPIC_API_KEY. */
+    keyName: text("key_name").notNull(),
+    wrappedDek: text("wrapped_dek").notNull(),
+    ciphertext: text("ciphertext").notNull(),
+    keyVersion: integer("key_version").notNull().default(1),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.orgId, t.userId, t.provider] }),
+    keyCheck: check("user_provider_connections_key_check", sql`${t.keyName} ~ '^[A-Za-z_][A-Za-z0-9_]*$'`),
+  }),
+);
+
+/**
+ * A workspace-shared model provider connection: one API key an owner/admin connects for the whole
+ * org (envelope-encrypted, write-only). Members without their own {@link userProviderConnections} row
+ * for a provider fall back to the workspace key at serve time (personal beats workspace).
+ */
+export const orgProviderConnections = pgTable(
+  "org_provider_connections",
+  {
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    /** models.dev provider id, e.g. "anthropic". */
+    provider: text("provider").notNull(),
+    /** The env var name the key is stored/injected under, e.g. ANTHROPIC_API_KEY. */
+    keyName: text("key_name").notNull(),
+    wrappedDek: text("wrapped_dek").notNull(),
+    ciphertext: text("ciphertext").notNull(),
+    keyVersion: integer("key_version").notNull().default(1),
+    createdBy: text("created_by")
+      .notNull()
+      .references(() => user.id),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.orgId, t.provider] }),
+    keyCheck: check("org_provider_connections_key_check", sql`${t.keyName} ~ '^[A-Za-z_][A-Za-z0-9_]*$'`),
+  }),
+);

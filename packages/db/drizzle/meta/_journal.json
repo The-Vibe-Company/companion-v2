@@ -225,6 +225,20 @@
       "when": 1781052000000,
       "tag": "0031_org_skill_naming_policy",
       "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1781052200000,
+      "tag": "0033_user_provider_connections",
+      "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1781052300000,
+      "tag": "0034_org_provider_connections",
+      "breakpoints": true
     }
   ]
 }

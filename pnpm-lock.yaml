@@ -47,6 +47,9 @@ importers:
       '@companion/email':
         specifier: workspace:*
         version: link:../../packages/email
+      '@companion/sandbox':
+        specifier: workspace:*
+        version: link:../../packages/sandbox
       '@companion/skills':
         specifier: workspace:*
         version: link:../../packages/skills

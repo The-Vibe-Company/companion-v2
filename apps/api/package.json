@@ -22,6 +22,7 @@
     "@companion/core": "workspace:*",
     "@companion/db": "workspace:*",
     "@companion/email": "workspace:*",
+    "@companion/sandbox": "workspace:*",
     "@companion/skills": "workspace:*",
     "@companion/storage": "workspace:*",
     "@hono/node-server": "^1.18.2",

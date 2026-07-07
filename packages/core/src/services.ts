@@ -3659,3 +3659,10 @@ export async function uninstallSkill(input: {
     metadata: { slug: skill.slug },
   });
 }
+
+// Envelope encryption for stored secrets (node:crypto — kept off the framework-free `index` entry so
+// the browser-safe authz exports never pull a Node built-in into a client bundle).
+export * from "./secretbox";
+
+// Saved model-provider connections (API keys). Same load-order reasoning as `./labels`.
+export * from "./providerConnections";

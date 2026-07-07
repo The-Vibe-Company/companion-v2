@@ -83,6 +83,15 @@ import {
   setPersonalLabelIcon,
   renamePersonalLabel,
   deletePersonalLabel,
+  connectedOrgProviderIds,
+  connectedProviderIds,
+  deleteOrgProviderConnection,
+  deleteProviderConnection,
+  listOrgProviderConnections,
+  listProviderConnections,
+  parseSecretsKey,
+  setOrgProviderConnection,
+  setProviderConnection,
 } from "@companion/core/services";
 import {
   addCommentInputSchema,
@@ -119,10 +128,12 @@ import {
   MAX_COMMENT_IMAGES,
   MAX_COMMENT_IMAGE_BYTES,
   updateUserProfileInputSchema,
+  setProviderConnectionInputSchema,
   type CompanionManifest,
   type SkillFrontmatter,
   type SkillScope,
 } from "@companion/contracts";
+import { createModelCatalog } from "@companion/sandbox";
 import {
   commentImageKey,
   deleteSkillArchive,
@@ -2215,6 +2226,132 @@ app.delete("/v1/tokens/:id", async (c) => {
     if (isTokenRequest(c)) throw new Error("personal access tokens cannot revoke tokens");
     await withTenant(c, ({ actor, orgId, database }) =>
       revokeApiToken({ actor, orgId, tokenId: c.req.param("id"), database }),
+    );
+    return c.json({ ok: true });
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
+/* ---- Model catalog + provider connections (session-only; PATs rejected) ------------------- */
+
+const modelCatalog = createModelCatalog();
+let secretsKeyCache: Buffer | null = null;
+/** The envelope KEK, independent of the full run ctx — provider connections work pre-Vercel. */
+function secretsKey(): Buffer {
+  if (!secretsKeyCache) secretsKeyCache = parseSecretsKey(process.env.COMPANION_SECRETS_KEY);
+  return secretsKeyCache;
+}
+
+app.get("/v1/models", async (c) => {
+  try {
+    if (isTokenRequest(c)) return jsonError(c, "personal access tokens cannot use provider connections", 401);
+    const catalog = await modelCatalog.listModels();
+    // Mark which providers are usable: the user's own connection OR one shared by the workspace.
+    const connected = await withTenant(c, async ({ actor, orgId, database }) => {
+      const [personal, shared] = await Promise.all([
+        connectedProviderIds({ actor, orgId, database }),
+        connectedOrgProviderIds({ actor, orgId, database }),
+      ]);
+      return new Set<string>([...personal, ...shared]);
+    });
+    return c.json({
+      models: catalog.models,
+      providers: catalog.providers.map((p) => {
+        const envKeys = catalog.models.find((m) => m.provider === p.id)?.env_keys ?? [];
+        return { ...p, env_keys: envKeys, connected: connected.has(p.id) };
+      }),
+    });
+  } catch (error) {
+    return jsonError(c, error, 401);
+  }
+});
+
+app.get("/v1/provider-connections", async (c) => {
+  try {
+    if (isTokenRequest(c)) return jsonError(c, "personal access tokens cannot use provider connections", 401);
+    const connections = await withTenant(c, ({ actor, orgId, database }) =>
+      listProviderConnections({ actor, orgId, database }),
+    );
+    return c.json({ connections });
+  } catch (error) {
+    return jsonError(c, error, 401);
+  }
+});
+
+app.put("/v1/provider-connections", async (c) => {
+  try {
+    if (isTokenRequest(c)) return jsonError(c, "personal access tokens cannot use provider connections", 401);
+    const input = setProviderConnectionInputSchema.parse(await c.req.json());
+    const connection = await withTenant(c, ({ actor, orgId, database }) =>
+      setProviderConnection({
+        actor,
+        orgId,
+        provider: input.provider,
+        keyName: input.key_name,
+        key: input.key,
+        secretsKey: secretsKey(),
+        database,
+      }),
+    );
+    return c.json({ connection });
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
+app.delete("/v1/provider-connections/:provider", async (c) => {
+  try {
+    if (isTokenRequest(c)) return jsonError(c, "personal access tokens cannot use provider connections", 401);
+    await withTenant(c, ({ actor, orgId, database }) =>
+      deleteProviderConnection({ actor, orgId, provider: c.req.param("provider"), database }),
+    );
+    return c.json({ ok: true });
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
+/* ---- Workspace-shared provider connections (owner/admin write; any member reads) ---- */
+
+app.get("/v1/org-provider-connections", async (c) => {
+  try {
+    if (isTokenRequest(c)) return jsonError(c, "personal access tokens cannot use provider connections", 401);
+    const connections = await withTenant(c, ({ actor, orgId, database }) =>
+      listOrgProviderConnections({ actor, orgId, database }),
+    );
+    return c.json({ connections });
+  } catch (error) {
+    return jsonError(c, error, 401);
+  }
+});
+
+app.put("/v1/org-provider-connections", async (c) => {
+  try {
+    if (isTokenRequest(c)) return jsonError(c, "personal access tokens cannot use provider connections", 401);
+    const input = setProviderConnectionInputSchema.parse(await c.req.json());
+    const connection = await withTenant(c, ({ actor, orgId, database }) =>
+      setOrgProviderConnection({
+        actor,
+        orgId,
+        provider: input.provider,
+        keyName: input.key_name,
+        key: input.key,
+        secretsKey: secretsKey(),
+        database,
+      }),
+    );
+    return c.json({ connection });
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
+app.delete("/v1/org-provider-connections/:provider", async (c) => {
+  try {
+    if (isTokenRequest(c)) return jsonError(c, "personal access tokens cannot use provider connections", 401);
+    await withTenant(c, ({ actor, orgId, database }) =>
+      deleteOrgProviderConnection({ actor, orgId, provider: c.req.param("provider"), database }),
     );
     return c.json({ ok: true });
   } catch (error) {
