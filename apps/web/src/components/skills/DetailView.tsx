@@ -6,6 +6,7 @@ import type {
   SkillCommentRow,
   SkillDependenciesResponse,
   SkillFile,
+  SkillRunRow,
   SkillVersionRow,
 } from "@companion/contracts";
 import { Icon } from "../Icon";
@@ -29,6 +30,9 @@ import {
   StatusCard,
 } from "./detailParts";
 import { DependenciesTab } from "./DependenciesTab";
+import { RunSessionsTab } from "../runs/RunSessionsTab";
+import { RunLauncherDialog } from "../runs/RunLauncherDialog";
+import { fetchRuns } from "@/lib/runQueries";
 import { FileExplorer } from "./fileview";
 import { MarkdownView } from "./markdown";
 import { Discussion } from "./discussion";
@@ -179,7 +183,7 @@ function DetailMoreMenu({
 }
 
 /** The detail page's top-level sections, shown as a tab bar under the breadcrumb. */
-type DetailTab = "overview" | "files" | "dependencies" | "activity" | "discussion";
+type DetailTab = "overview" | "files" | "dependencies" | "activity" | "discussion" | "sessions";
 
 // Only the active tabpanel is mounted (the Files explorer + scroll-spy shouldn't run
 // hidden). All tabs therefore point `aria-controls` at one stable panel id so no tab
@@ -299,6 +303,10 @@ export function DetailView({
   onOpenSkill,
   onRestore,
   onArchive,
+  onOpenRun,
+  initialTab,
+  runAgainPrompt,
+  onRunAgainConsumed,
 }: {
   skill: SkillVM;
   index: number;
@@ -325,18 +333,35 @@ export function DetailView({
   onOpenSkill: (slug: string) => void;
   onRestore: () => void;
   onArchive: () => void;
+  /** Open a run transcript/chat (`?skill=…&run=…`). */
+  onOpenRun: (runId: string) => void;
+  /** Land on this tab when opening the skill (Back from a run returns to Sessions). */
+  initialTab?: "overview" | "sessions";
+  /** Prefill for the launcher (the "Run again" path from a frozen transcript). */
+  runAgainPrompt?: string | null;
+  /** Consume the one-shot launcher-open request (run-again). */
+  onRunAgainConsumed?: () => void;
 }) {
   const invalid = skill.validation === "invalid";
   const [versions, setVersions] = useState<SkillVersionRow[]>([]);
   const [comments, setComments] = useState<SkillCommentRow[]>([]);
   const [files, setFiles] = useState<SkillFile[]>([]);
   const [deps, setDeps] = useState<SkillDependenciesResponse | null>(null);
-  const [tab, setTab] = useState<DetailTab>("overview");
+  const [runs, setRuns] = useState<SkillRunRow[]>([]);
+  const [launcherOpen, setLauncherOpen] = useState(false);
+  const [tab, setTab] = useState<DetailTab>(initialTab ?? "overview");
 
-  // Reset to Overview when opening a different skill (not on a version bump).
+  // Reset to the initial tab when opening a different skill (not on a version bump).
   useEffect(() => {
-    setTab("overview");
-  }, [skill.id]);
+    setTab(initialTab ?? "overview");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [skill.id, initialTab]);
+
+  // The "Run again" path (from a frozen/errored transcript) opens the launcher prefilled.
+  useEffect(() => {
+    if (runAgainPrompt == null) return;
+    setLauncherOpen(true);
+  }, [runAgainPrompt]);
 
   useEffect(() => {
     let active = true;
@@ -387,6 +412,21 @@ export function DetailView({
       active = false;
     };
   }, [skill.id, skill.version]);
+
+  // The caller's runs of this skill (Sessions tab + tab count). Fail-soft to an empty list —
+  // an unconfigured runs backend must never break the detail page.
+  useEffect(() => {
+    let active = true;
+    setRuns([]);
+    fetchRuns(skill.id)
+      .then((r) => {
+        if (active) setRuns(r.runs);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [skill.id]);
 
   const download = async () => {
     const url = await fetchSkillDownloadUrl(skill.id, skill.version);
@@ -486,6 +526,7 @@ export function DetailView({
       : []),
     { id: "activity", label: "Activity", icon: "activity", count: versions.length },
     { id: "discussion", label: "Discussion", icon: "message-square", count: comments.length },
+    { id: "sessions", label: "Sessions", icon: "play", count: runs.length },
   ];
   // Guard against a stale "dependencies" tab if the count just dropped to zero.
   const activeTab: DetailTab = tab === "dependencies" && !showDeps ? "overview" : tab;
@@ -523,6 +564,23 @@ export function DetailView({
           {index + 1} / {total}
         </span>
         <StarButton starred={skill.starred} count={skill.stars} onToggle={onToggleStar} />
+        {!skill.archived && (
+          <button
+            className="btn-ghost"
+            disabled={invalid || !skill.version}
+            onClick={() => setLauncherOpen(true)}
+            title={
+              invalid
+                ? "Resolve validation errors first"
+                : !skill.version
+                  ? "No published version yet"
+                  : "Run this skill in a sandboxed session"
+            }
+          >
+            <Icon name="play" size={14} />
+            Run skill
+          </button>
+        )}
         {skill.archived ? (
           <button className="btn-ghost" onClick={onRestore} title="Restore this skill">
             <Icon name="rotate-ccw" size={14} />
@@ -698,7 +756,40 @@ export function DetailView({
             />
           </div>
         )}
+
+        {activeTab === "sessions" && <RunSessionsTab runs={runs} onOpen={onOpenRun} />}
       </div>
+
+      {launcherOpen && (
+        <RunLauncherDialog
+          slug={skill.id}
+          initialPrompt={runAgainPrompt ?? undefined}
+          onLaunched={(run) => {
+            setLauncherOpen(false);
+            onRunAgainConsumed?.();
+            setRuns((prev) => [
+              {
+                id: run.id,
+                skill_slug: run.skill_slug,
+                skill_version: run.skill_version,
+                model: run.model,
+                prompt_excerpt: run.prompt_excerpt,
+                status: run.status,
+                status_detail: run.status_detail,
+                artifacts_count: 0,
+                created_at: run.created_at,
+                last_active_at: run.last_active_at,
+              },
+              ...prev,
+            ]);
+            onOpenRun(run.id);
+          }}
+          onClose={() => {
+            setLauncherOpen(false);
+            onRunAgainConsumed?.();
+          }}
+        />
+      )}
     </div>
   );
 }

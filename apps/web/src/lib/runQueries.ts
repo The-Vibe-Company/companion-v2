@@ -4,6 +4,8 @@ import type {
   ModelsResponse,
   ProviderConnectionRow,
   ProviderConnectionsResponse,
+  SkillRunDetail,
+  SkillRunsResponse,
 } from "@companion/contracts";
 import { apiFetch } from "./apiClient";
 
@@ -59,4 +61,44 @@ export async function deleteOrgProviderConnection(provider: string): Promise<{ o
   return apiFetch<{ ok: true }>(`/v1/org-provider-connections/${encodeURIComponent(provider)}`, {
     method: "DELETE",
   });
+}
+
+/* ---- Skill runs ---- */
+
+/** Launch a run: multipart (prompt + model + up to 5 files). Returns the `starting` run detail. */
+export async function launchRun(
+  slug: string,
+  input: { prompt: string; model: string; files: File[] },
+): Promise<SkillRunDetail> {
+  const form = new FormData();
+  form.set("prompt", input.prompt);
+  form.set("model", input.model);
+  for (const file of input.files) form.append("file", file, file.name);
+  return apiFetch<SkillRunDetail>(`/v1/skills/${encodeURIComponent(slug)}/runs`, {
+    method: "POST",
+    body: form,
+  });
+}
+
+/** The caller's runs of one skill (Sessions tab), newest first. */
+export async function fetchRuns(slug: string): Promise<SkillRunsResponse> {
+  return apiFetch<SkillRunsResponse>(`/v1/skills/${encodeURIComponent(slug)}/runs`);
+}
+
+/** Full run detail (transcript + attachments + artifacts). Polled at 1.5s while `starting`. */
+export async function fetchRun(runId: string): Promise<SkillRunDetail> {
+  return apiFetch<SkillRunDetail>(`/v1/runs/${encodeURIComponent(runId)}`);
+}
+
+/** Fire-and-forget follow-up prompt (202); the reply arrives over the `/events` SSE stream. */
+export async function sendRunPrompt(runId: string, text: string): Promise<{ ok: true }> {
+  return apiFetch<{ ok: true }>(`/v1/runs/${encodeURIComponent(runId)}/prompt`, {
+    method: "POST",
+    body: JSON.stringify({ text }),
+  });
+}
+
+/** Download href for a run attachment (streamed by the API, creator-only). */
+export function runAttachmentHref(runId: string, attachmentId: string): string {
+  return `/v1/runs/${encodeURIComponent(runId)}/attachments/${encodeURIComponent(attachmentId)}`;
 }

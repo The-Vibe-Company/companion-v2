@@ -69,6 +69,7 @@ function renderDetailFor(nextSkill: SkillVM) {
       onOpenSkill: vi.fn(),
       onRestore: vi.fn(),
       onArchive: vi.fn(),
+      onOpenRun: vi.fn(),
     }),
   );
 }
@@ -236,5 +237,66 @@ describe("DetailView tabbed detail layout", () => {
     expect(html).toContain('id="skill-detail-panel"');
     expect(html).toContain('aria-labelledby="dtab-overview"');
     expect(html).not.toContain("No files in this package.");
+  });
+});
+
+describe("Run skill (sandboxed sessions)", () => {
+  it("renders the Sessions tab and an enabled Run skill button for a published, valid skill", () => {
+    const html = renderDetail();
+    expect(html).toContain("dtab-sessions");
+    expect(html).toContain("Sessions");
+    expect(html).toContain("Run skill");
+    // Enabled: no disabled attribute between the button's title and its label.
+    expect(html).toContain("Run this skill in a sandboxed session");
+  });
+
+  it("disables Run skill when the skill has no published version", () => {
+    const html = renderDetailFor({ ...skill, version: null, installStatus: "none", installedVersion: null });
+    expect(html).toContain("Run skill");
+    expect(html).toContain("No published version yet");
+  });
+
+  it("disables Run skill on an invalid skill", () => {
+    const html = renderDetailFor({ ...skill, validation: "invalid", error: "bad frontmatter" });
+    expect(html).toContain("Run skill");
+    expect(html).toContain("Resolve validation errors first");
+  });
+
+  it("hides Run skill on an archived skill", () => {
+    const html = renderDetailFor({ ...skill, archived: true });
+    expect(html).not.toContain("Run skill");
+  });
+
+  it("lands on the Sessions tab when initialTab requests it (Back from a run)", () => {
+    const html = renderToString(
+      React.createElement(DetailView, {
+        skill,
+        index: 0,
+        total: 1,
+        me,
+        myRole: "owner",
+        orgName: "The Vibe Company",
+        allLabels: [],
+        onBack: vi.fn(),
+        onPrev: vi.fn(),
+        onNext: vi.fn(),
+        onToggleStar: vi.fn(),
+        onToggleInstalled: vi.fn(),
+        onToggleLabel: vi.fn(),
+        onSelectLabel: vi.fn(),
+        onShare: vi.fn(),
+        onInstall: vi.fn(),
+        onUpdate: vi.fn(),
+        onOpenSkill: vi.fn(),
+        onRestore: vi.fn(),
+        onArchive: vi.fn(),
+        onOpenRun: vi.fn(),
+        initialTab: "sessions",
+      }),
+    );
+    // SSR renders only the active tabpanel — the sessions empty state proves the tab is active
+    // and makes the privacy model visible.
+    expect(html).toContain("You haven");
+    expect(html).toContain("private to you");
   });
 });

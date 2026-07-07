@@ -105,6 +105,7 @@ describe("skill update flow", () => {
         onOpenSkill: vi.fn(),
         onRestore: vi.fn(),
         onArchive: vi.fn(),
+        onOpenRun: vi.fn(),
       }),
     );
 

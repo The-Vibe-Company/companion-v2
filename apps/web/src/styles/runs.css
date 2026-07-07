@@ -1,0 +1,146 @@
+/* ============================== Skill runs (chat surface) ==============================
+   Screens reuse the skills design system (skills.css). This file holds only the run-specific
+   additions: the starting-banner sweep, the streaming caret, and repeated chat patterns. Spinners
+   reuse the existing `ls-spin` keyframe from skills.css. */
+
+/* Indeterminate sweep inside the chat wake banner (a loading bar on a hairline track — not a
+   pulsing status dot; DESIGN.md status rules still pair every dot with its status word). */
+@keyframes ca-bar {
+  0% { left: -34%; }
+  100% { left: 104%; }
+}
+
+/* Streaming-text caret blink. */
+@keyframes ca-caret {
+  0%, 55% { opacity: 1; }
+  56%, 100% { opacity: 0; }
+}
+
+.chat-caret {
+  display: inline-block;
+  width: 7px;
+  height: 14px;
+  margin-left: 2px;
+  vertical-align: -2px;
+  background: var(--color-fg);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .chat-caret { animation: ca-caret 1s step-end infinite; }
+}
+
+.chat-wake__track {
+  position: relative;
+  height: 3px;
+  margin-top: 10px;
+  border-radius: 2px;
+  background: var(--color-line);
+  overflow: hidden;
+}
+.chat-wake__bar {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 34%;
+  border-radius: 2px;
+  background: var(--color-accent);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .chat-wake__bar { animation: ca-bar 1.1s var(--ease-out-quint) infinite; }
+}
+
+/* Amber "N outdated" pill (list rows + detail skill rows). */
+.ag-outpill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  color: var(--color-warn);
+  background: var(--color-warn-tint);
+  border: 1px solid var(--color-warn-line);
+  border-radius: var(--radius-sm);
+  padding: 1px 6px;
+  white-space: nowrap;
+}
+
+/* set / not set state labels on secret rows. */
+.ag-set { font-family: var(--font-mono); font-size: 10px; }
+.ag-set--ok { color: var(--color-ok); }
+.ag-set--warn { color: var(--color-warn); }
+.ag-set--danger { color: var(--color-danger); }
+
+/* Plain secondary button (Pause / Wake / Back to form). */
+.ag-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  color: var(--color-fg);
+  font-family: var(--font-ui);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  cursor: pointer;
+}
+.ag-btn:hover { background: var(--color-surface-raised); }
+
+/* Create-form inputs (mono name field / instructions textarea). */
+.ag-field {
+  width: 100%;
+  height: 34px;
+  padding: 0 11px;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-sunken);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--color-fg);
+  outline: none;
+}
+.ag-textarea {
+  width: 100%;
+  min-height: 130px;
+  padding: 10px 11px;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-sunken);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: 1.6;
+  color: var(--color-fg);
+  outline: none;
+  resize: vertical;
+}
+.ag-field:focus, .ag-textarea:focus { border-color: var(--color-line-strong); }
+
+/* Faint mono annotation (sleeping · wakes to update, sandbox ids, timings). */
+.ag-note { font-family: var(--font-mono); font-size: 11px; color: var(--color-faint); }
+
+/* Chat "the agent is working" indicator: three dots that fade in sequence (not a status dot — it
+   carries its own label, so DESIGN.md's dot-needs-a-word rule is satisfied by the adjacent text). */
+@keyframes ca-dot {
+  0%, 80%, 100% { opacity: 0.25; }
+  40% { opacity: 1; }
+}
+.ca-working__dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+.ca-working__dots > span {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--color-muted);
+  opacity: 0.25;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .ca-working__dots > span { animation: ca-dot 1.2s ease-in-out infinite; }
+  .ca-working__dots > span:nth-child(2) { animation-delay: 0.18s; }
+  .ca-working__dots > span:nth-child(3) { animation-delay: 0.36s; }
+}
+
+/* The currently-running tool row gets a faint accent edge so the live step stands out. */
+.ca-tool--running > button { border-color: var(--color-line-strong); }

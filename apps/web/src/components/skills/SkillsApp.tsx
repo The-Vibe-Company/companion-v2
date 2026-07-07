@@ -36,6 +36,7 @@ import { treeRowKey } from "./dragGeometry";
 import { useSkillDrag, type PointerLike } from "./useSkillDrag";
 import { ArchivedListView } from "./ArchivedListView";
 import { DetailView } from "./DetailView";
+import { RunChatView } from "../runs/RunChatView";
 import { LocalSkillsView } from "./LocalSkillsView";
 import { CommandPalette } from "./CommandPalette";
 import { UploadDialog, InstallDialog } from "./UploadDialog";
@@ -48,6 +49,7 @@ import {
   skillsRouteSource,
   skillsRouteWithSkill,
   skillsRouteWithoutSkill,
+  skillsRouteWithRun,
   type SkillsLibrary,
   type SkillsRoute,
   type SkillsRouteSource,
@@ -410,6 +412,14 @@ export function SkillsApp({
   const [openId, setOpenId] = useState<string | null>(() =>
     initialRoute.kind === "local" ? null : initialRoute.skill ?? null,
   );
+  // The open run transcript/chat (`?skill=…&run=…`); rendered instead of the skill detail.
+  const [openRunId, setOpenRunId] = useState<string | null>(() =>
+    initialRoute.kind === "local" ? null : initialRoute.run ?? null,
+  );
+  // Back from a run lands the detail on its Sessions tab; opening a skill normally resets it.
+  const [detailInitialTab, setDetailInitialTab] = useState<"overview" | "sessions" | undefined>(undefined);
+  // "Run again" from a frozen/errored transcript: reopen the launcher prefilled with this prompt.
+  const [runAgainPrompt, setRunAgainPrompt] = useState<string | null>(null);
   const [lastId, setLastId] = useState<string | null>(() =>
     initialRoute.kind === "local" ? null : initialRoute.skill ?? null,
   );
@@ -1145,6 +1155,7 @@ export function SkillsApp({
       const nextOpenId = route.kind === "local" ? null : route.skill ?? null;
       setOpenId(nextOpenId);
       setLastId(nextOpenId);
+      setOpenRunId(route.kind === "local" ? null : route.run ?? null);
       if (history === "none" || typeof window === "undefined") return;
       writeSkillsUrl(route, history);
     },
@@ -1243,6 +1254,9 @@ export function SkillsApp({
     const openingFromWorkspace = currentView === "workspace";
     if (!openingFromWorkspace) setCurrentView("workspace");
     setUploadOpen(false);
+    setOpenRunId(null);
+    setDetailInitialTab(undefined);
+    setRunAgainPrompt(null);
     setOpenId(id);
     setLastId(id);
     pushSkillsUrl(openingFromWorkspace ? routeForCurrentSurface(id) : { lib: "mine", kind: "all", skill: id });
@@ -1282,6 +1296,9 @@ export function SkillsApp({
     [loadArchived, pushSkillsUrl],
   );
   const back = useCallback(() => {
+    setOpenRunId(null);
+    setDetailInitialTab(undefined);
+    setRunAgainPrompt(null);
     if (
       typeof window !== "undefined" &&
       window.history.state &&
@@ -1296,6 +1313,37 @@ export function SkillsApp({
       parseSkillShareTokenPath(window.location.pathname) ? { lib: "org", kind: "all" } : routeForCurrentSurface(),
     );
   }, [replaceSkillsUrl, routeForCurrentSurface]);
+  /** Open one of the current skill's runs (`?skill=…&run=…`) — deep-linkable transcript/chat. */
+  const openRun = useCallback(
+    (runId: string) => {
+      const skillId = openIdRef.current;
+      if (!skillId) return;
+      setOpenRunId(runId);
+      pushSkillsUrl(skillsRouteWithRun(routeForCurrentSurface(skillId), skillId, runId));
+    },
+    [pushSkillsUrl, routeForCurrentSurface],
+  );
+
+  /** Back from a run: return to the skill detail on its Sessions tab. */
+  const closeRun = useCallback(() => {
+    setOpenRunId(null);
+    setDetailInitialTab("sessions");
+    const skillId = openIdRef.current;
+    replaceSkillsUrl(routeForCurrentSurface(skillId ?? undefined));
+  }, [replaceSkillsUrl, routeForCurrentSurface]);
+
+  /** "Run again" from a frozen/errored transcript: back to the detail with the launcher prefilled. */
+  const runAgain = useCallback(
+    (prompt: string) => {
+      setOpenRunId(null);
+      setDetailInitialTab("sessions");
+      setRunAgainPrompt(prompt);
+      const skillId = openIdRef.current;
+      replaceSkillsUrl(routeForCurrentSurface(skillId ?? undefined));
+    },
+    [replaceSkillsUrl, routeForCurrentSurface],
+  );
+
   const go = useCallback(
     (delta: number) => {
       setOpenId((cur) => {
@@ -1494,6 +1542,8 @@ export function SkillsApp({
       <div className="main" aria-hidden={mobileSidebarOpen || undefined} inert={mobileSidebarOpen ? true : undefined}>
         {currentView === "local" ? (
           <LocalSkillsView skills={localSkills} workspaceId={currentOrg.id} workspaceName={currentOrg.name} />
+        ) : skill && openRunId ? (
+          <RunChatView runId={openRunId} onBack={closeRun} onRunAgain={runAgain} />
         ) : skill ? (
           <DetailView
             skill={skill}
@@ -1516,6 +1566,10 @@ export function SkillsApp({
             onOpenSkill={openSkillBySlug}
             onRestore={() => restoreSkillById(skill.id)}
             onArchive={() => archiveSkillById(skill.id)}
+            onOpenRun={openRun}
+            initialTab={detailInitialTab}
+            runAgainPrompt={runAgainPrompt}
+            onRunAgainConsumed={() => setRunAgainPrompt(null)}
           />
         ) : currentView === "archived" ? (
           <ArchivedListView
