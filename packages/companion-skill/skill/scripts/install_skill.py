@@ -82,27 +82,45 @@ def extract_package(zip_bytes: bytes, dest: Path) -> Path:
     fail("downloaded package has no SKILL.md at its root")
 
 
+def remove_swap_path(path: Path) -> None:
+    """Remove a transient swap path whether it is a directory, file, or symlink."""
+    if not os.path.lexists(path):
+        return
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+        return
+    shutil.rmtree(path)
+
+
 def deploy_to_target(package_dir: Path, target_dir: Path) -> None:
-    """Replace `target_dir` with a fresh copy of the package: stage, then swap via a backup so a
-    failed rename restores the previous folder instead of leaving the target missing."""
+    """Replace `target_dir` with a fresh copy of the package using transient swap folders.
+
+    The backup folder exists only during the swap. It is restored if the new folder fails to land, and
+    otherwise deleted before this function returns so local skill scanners never discover stale copies.
+    """
     target_dir.parent.mkdir(parents=True, exist_ok=True)
-    staging = target_dir.with_name(target_dir.name + ".companion-staging")
-    backup = target_dir.with_name(target_dir.name + ".companion-backup")
-    if staging.exists():
-        shutil.rmtree(staging)
-    shutil.copytree(package_dir, staging)
-    if backup.exists():
-        shutil.rmtree(backup)
-    if target_dir.exists():
-        target_dir.rename(backup)
+    staging = Path(tempfile.mkdtemp(prefix=f".{target_dir.name}.companion-staging.", dir=str(target_dir.parent)))
+    shutil.rmtree(staging)
+    backup = Path(tempfile.mkdtemp(prefix=f".{target_dir.name}.companion-backup.", dir=str(target_dir.parent)))
+    backup.rmdir()
     try:
-        staging.rename(target_dir)
-    except OSError:
-        if backup.exists() and not target_dir.exists():
-            backup.rename(target_dir)  # restore the previous folder
-        raise
-    if backup.exists():
-        shutil.rmtree(backup)
+        shutil.copytree(package_dir, staging)
+        if target_dir.exists():
+            target_dir.rename(backup)
+        try:
+            staging.rename(target_dir)
+        except OSError:
+            if backup.exists() and not target_dir.exists():
+                backup.rename(target_dir)  # restore the previous folder
+            raise
+    finally:
+        if os.path.lexists(staging):
+            remove_swap_path(staging)
+        if os.path.lexists(backup):
+            if not target_dir.exists():
+                backup.rename(target_dir)
+            else:
+                remove_swap_path(backup)
 
 
 def plan_targets(tools: list[str], scopes: list[str], project_root: Path | None) -> list[tuple[str, str]]:
