@@ -118,6 +118,9 @@ export async function openRunStream(
       if (!res.ok || !res.body) throw new Error(`stream failed: ${res.status}`);
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
+      // A connection was established — the reconnect budget only limits consecutive
+      // failures, not the run's lifetime reconnect count.
+      attempts = 0;
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;

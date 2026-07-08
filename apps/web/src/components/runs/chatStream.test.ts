@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RunChatEvent } from "@companion/contracts";
-import { chatReducer, createSseParser, decodeChatEvent, initChatState, type ChatState } from "./chatStream";
+import { chatReducer, createSseParser, decodeChatEvent, initChatState, openRunStream, type ChatState } from "./chatStream";
 
 const resolveToolLabel = (tool: string, skill: string | null) => ({
   label: skill ? `${skill}@1.0.0` : tool,
@@ -42,6 +42,54 @@ describe("createSseParser", () => {
   it("ignores comment/heartbeat lines", () => {
     const parser = createSseParser();
     expect(parser.push(": ping\n\n")).toEqual([]);
+  });
+});
+
+describe("openRunStream", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  function closedStreamResponse(): Response {
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.close();
+      },
+    });
+    return new Response(body, { status: 200 });
+  }
+
+  it("resets the reconnect budget on every successful connection, so a long-lived run survives more reconnects than STREAM_MAX_RECONNECTS", async () => {
+    let calls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        calls += 1;
+        return closedStreamResponse();
+      }),
+    );
+
+    const events: RunChatEvent[] = [];
+    const controller = new AbortController();
+    const done = openRunStream("run-1", (event) => events.push(event), controller.signal);
+
+    // Each cycle is a clean "server closed the stream" reconnect (200 + immediately-closed
+    // body). Drive far more cycles than the reconnect cap (3) — with the reset in place this
+    // never trips the terminal "Lost connection" error.
+    for (let i = 0; i < 6; i++) {
+      await vi.advanceTimersByTimeAsync(2000);
+    }
+    controller.abort();
+    await vi.advanceTimersByTimeAsync(2000);
+    await done;
+
+    expect(calls).toBeGreaterThan(6);
+    expect(events.find((e) => e.type === "error")).toBeUndefined();
   });
 });
 
