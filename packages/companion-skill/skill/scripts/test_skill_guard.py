@@ -107,6 +107,27 @@ class ConflictDetectionTests(unittest.TestCase):
         self.assertEqual("warn", duplicate[0]["severity"])
         self.assertFalse(skill_guard.has_blocking(conflicts))
 
+    def test_stale_backup_skill_folder_blocks(self):
+        entries = [
+            entry("ship-pr", None, source="skill:/tmp/ship-pr", path="/tmp/ship-pr"),
+            entry("ship-pr", None, source="skill:/tmp/ship-pr.backup-1.0.3", path="/tmp/ship-pr.backup-1.0.3"),
+        ]
+        conflicts = skill_guard.detect_conflicts(entries, online_index())
+        stale = [c for c in conflicts if c["kind"] == skill_guard.KIND_STALE_BACKUP_SKILL_FOLDER]
+        self.assertEqual(1, len(stale))
+        self.assertEqual("block", stale[0]["severity"])
+        self.assertIn("must be deleted", stale[0]["detail"])
+        self.assertTrue(skill_guard.has_blocking(conflicts))
+        self.assertNotIn(skill_guard.KIND_DUPLICATE_LOCAL_SKILL_NAME, kinds(conflicts))
+
+    def test_hidden_companion_backup_skill_folder_blocks(self):
+        entries = [
+            entry("companion", None, source="skill:/tmp/.companion-backup.abc", path="/tmp/.companion-backup.abc"),
+        ]
+        conflicts = skill_guard.detect_conflicts(entries, online_index())
+        self.assertIn(skill_guard.KIND_STALE_BACKUP_SKILL_FOLDER, kinds(conflicts))
+        self.assertTrue(skill_guard.has_blocking(conflicts))
+
     def test_duplicate_local_skill_name_different_ids_still_blocks(self):
         entries = [
             entry("ship-pr", "SHIP-ID-1", source="manifest:/tmp/one", path="/tmp/one"),
@@ -276,6 +297,27 @@ class ManifestDiscoveryTests(unittest.TestCase):
                 entry("ship-pr", None, source=f"skill:{folder}", path=str(folder)),
                 entries,
             )
+
+    def test_build_inventory_finds_sibling_backup_when_scanning_skill_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            folder = self._write_skill(root, "ship-pr", None, skill_name="ship-pr")
+            backup = self._write_skill(root, "ship-pr.backup-1.0.3", None, skill_name="ship-pr")
+            previous_home = os.environ.get("COMPANION_HOME")
+            with tempfile.TemporaryDirectory() as home:
+                os.environ["COMPANION_HOME"] = home
+                try:
+                    entries = skill_guard.build_local_inventory("ws-1", "https://api.example/v1", [folder])
+                finally:
+                    if previous_home is None:
+                        os.environ.pop("COMPANION_HOME", None)
+                    else:
+                        os.environ["COMPANION_HOME"] = previous_home
+            paths = {entry["path"] for entry in entries}
+            self.assertIn(str(folder), paths)
+            self.assertIn(str(backup), paths)
+            conflicts = skill_guard.detect_conflicts(entries, online_index())
+            self.assertIn(skill_guard.KIND_STALE_BACKUP_SKILL_FOLDER, kinds(conflicts))
 
 
 class MigrationTests(unittest.TestCase):

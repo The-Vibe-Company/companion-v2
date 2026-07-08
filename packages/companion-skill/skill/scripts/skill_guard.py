@@ -45,12 +45,24 @@ KIND_DUP_COMPANION_ID = "duplicate_companion_id_manifests"
 KIND_LOCK_TWO_SLUGS = "lock_two_slugs_one_id"
 KIND_MISSING_OR_ARCHIVED = "missing_or_archived"
 KIND_DUPLICATE_LOCAL_SKILL_NAME = "duplicate_local_skill_name"
+KIND_STALE_BACKUP_SKILL_FOLDER = "stale_backup_skill_folder"
 
 # Directories that never contain a sibling skill worth scanning.
 SKIP_DIRS = {
     "node_modules", ".git", ".hg", ".svn", "dist", "build", ".next", "out",
     "__pycache__", ".venv", "venv", ".turbo", "coverage", ".cache",
 }
+
+
+def is_backup_dir_name(name: str) -> bool:
+    """Return true for transient/legacy Companion backup folders that must not hold SKILL.md."""
+    lower = name.lower()
+    return (
+        ".companion-backup" in lower
+        or ".companion-staging" in lower
+        or ".backup-" in lower
+        or lower.endswith(".backup")
+    )
 
 # The only fields copied out of the legacy log during migration. Anything else
 # (notably a stray token) is dropped on the floor.
@@ -136,8 +148,12 @@ def _candidate_skill_dirs(scan_roots: list[Path]) -> list[Path]:
         for child in sorted(root.iterdir()):
             if child.is_dir() and child.name not in SKIP_DIRS:
                 root_candidates.append(child)
+        if (root / "SKILL.md").exists():
+            for sibling in sorted(root.parent.iterdir()):
+                if sibling.is_dir() and is_backup_dir_name(sibling.name):
+                    root_candidates.append(sibling)
         for candidate in root_candidates:
-            key = str(candidate.resolve())
+            key = str(candidate.absolute())
             if key in seen_dirs:
                 continue
             seen_dirs.add(key)
@@ -220,6 +236,11 @@ def _is_local_skill_folder(entry: dict[str, Any]) -> bool:
     return source.startswith("manifest:") or source.startswith("skill:")
 
 
+def _is_stale_backup_skill_folder(entry: dict[str, Any]) -> bool:
+    path = entry.get("path")
+    return _is_local_skill_folder(entry) and bool(path) and is_backup_dir_name(Path(str(path)).name)
+
+
 def _lock_records(path: Path, workspace_id: str | None, api_url: str) -> list[dict[str, Any]]:
     raw = load_json(path)
     if raw is None:
@@ -297,6 +318,22 @@ def detect_conflicts(local_entries: list[dict[str, Any]], online: dict[str, Any]
     by_slug = online.get("by_slug", {})
     archived_slugs = online.get("archived_slugs", set())
 
+    # 0. Any backup/staging folder that still contains SKILL.md is stale local state. Backups are
+    # transient implementation details and must not be discoverable as real skills.
+    for entry in local_entries:
+        if _is_stale_backup_skill_folder(entry):
+            conflicts.append(
+                {
+                    "kind": KIND_STALE_BACKUP_SKILL_FOLDER,
+                    "severity": "block",
+                    "slug": entry.get("slug"),
+                    "skill_id": entry.get("skill_id"),
+                    "detail": f"backup skill folder contains SKILL.md and must be deleted: {entry.get('path')}",
+                    "evidence": [_evidence(entry)],
+                    "remediation": "delete the stale backup folder; Companion backups must not be retained",
+                }
+            )
+
     # 1. one id -> multiple slugs (across any local source).
     by_id: dict[str, list[dict[str, Any]]] = {}
     for entry in local_entries:
@@ -338,7 +375,11 @@ def detect_conflicts(local_entries: list[dict[str, Any]], online: dict[str, Any]
 
     # 3. same SKILL.md name visible from multiple local folders.
     for slug, group in by_slug_local.items():
-        local_folder_group = [entry for entry in group if _is_local_skill_folder(entry) and entry.get("path")]
+        local_folder_group = [
+            entry
+            for entry in group
+            if _is_local_skill_folder(entry) and entry.get("path") and not _is_stale_backup_skill_folder(entry)
+        ]
         paths = sorted({entry["path"] for entry in local_folder_group if entry.get("path")})
         ids = sorted({entry["skill_id"] for entry in local_folder_group if entry.get("skill_id")})
         if len(paths) > 1 and len(ids) <= 1:
@@ -634,7 +675,9 @@ def build_report(
     archived_slugs = online.get("archived_slugs", set())
     inventory = []
     for entry in local_entries:
-        if _is_local_skill_folder(entry):
+        if _is_stale_backup_skill_folder(entry):
+            status, reason = "stale_backup", "backup folder containing SKILL.md must be deleted"
+        elif _is_local_skill_folder(entry):
             status, reason = "local", "local skill folder (not from the lockfile)"
         else:
             status, reason = status_for_local_guarded(

@@ -44,7 +44,7 @@ describe("companion skill package + row", () => {
     const pkg = await getCompanionSkillPackage();
     expect(pkg.key).toBe("companion");
     expect(pkg.checksum).toMatch(/^sha256:[0-9a-f]{64}$/);
-    expect(pkg.version).toBe("1.18.0");
+    expect(pkg.version).toBe("1.18.1");
     expect(pkg.sizeBytes).toBeGreaterThan(0);
     expect(pkg.integrity.packageChecksum).toBe(pkg.checksum);
     expect(pkg.integrity.files["SKILL.md"]).toMatch(/^sha256:[0-9a-f]{64}$/);
@@ -111,8 +111,8 @@ describe("companion skill package + row", () => {
       desc: "Create or repair manifest v2 with identity, env/secrets, dependency ids, notes, commands, and changelog.",
     });
     const changelog = row.changes.join("\n");
-    expect(changelog).toContain("workspace skill naming policy");
-    expect(changelog).toContain("GET /orgs/current/skill-naming-policy");
+    expect(changelog).toContain("Deletes transient install and self-update backup folders");
+    expect(changelog).toContain("Blocks stale backup folders containing SKILL.md");
     // The install prompt drives the report-back call and leaves placeholders for the client.
     expect(row.prompts.install).toContain("/local-skills/companion/package");
     expect(row.prompts.install).toContain("/local-skills/companion/installed");
@@ -140,8 +140,8 @@ describe("companion skill package + row", () => {
     expect(row.prompts.update).toContain("/local-skills/companion/package");
     expect(row.prompts.update).toContain("python3 scripts/bootstrap.py --json --auto-update-companion");
     expect(row.prompts.update).toContain("local_customizations");
-    expect(row.prompts.update).toContain("move it to a backup path");
-    expect(row.prompts.update).toContain("Do not delete the existing folder");
+    expect(row.prompts.update).toContain("transient backup only for the duration of the swap");
+    expect(row.prompts.update).toContain("Do not leave backup folders");
     expect(row.prompts.update).not.toContain("Unzip it over");
     expect(row.prompts.install).toContain("/local-skills/companion/installed");
     expect(row.prompts.update).toContain("/local-skills/companion/installed");

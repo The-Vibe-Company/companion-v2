@@ -536,9 +536,11 @@ temporary directory, verify `SKILL.md` is at the package root, verify its `compa
 equals the `availableVersion` from `/local-skills/companion`, and verify the staged
 `companion.integrity.json` matches the staged package files. Only then replace the installed
 Companion skill folder. After replacement, call `POST /local-skills/companion/installed` with the
-installed version so the workspace status updates. After that install report succeeds, delete only
-the backup folder created for this self-update. Keep the backup if install reporting fails, and never
-delete older Companion backup folders that existed before this update.
+installed version so the workspace status updates. Delete the transient backup folder created for
+this self-update whether or not that install report succeeds. If reporting fails after replacement,
+keep the newly installed folder in place, delete the transient backup, and report that confirmation
+failed. Any older `companion.backup-*`, `.companion-backup.*`, `*.companion-backup*`, or
+`*.backup-*` folder containing `SKILL.md` is stale local state and should be deleted.
 
 Do not use `/skills/{slug}/download` or `/skills/{slug}/versions/{version}/package` to update the
 built-in Companion skill. Those endpoints are for workspace-published skills.

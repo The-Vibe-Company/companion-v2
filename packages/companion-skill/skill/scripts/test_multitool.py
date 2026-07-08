@@ -184,6 +184,13 @@ class FanOutTests(EnvSandbox):
         (pkg / "ref.md").write_text("body\n", encoding="utf-8")
         return pkg
 
+    def _swap_dirs(self, parent: Path) -> list[str]:
+        return sorted(
+            child.name
+            for child in parent.iterdir()
+            if ".companion-backup" in child.name or ".companion-staging" in child.name or ".backup-" in child.name
+        )
+
     def test_installs_into_every_planned_target(self) -> None:
         pkg = self._package()
         project_root = self.root / "repo"
@@ -195,6 +202,46 @@ class FanOutTests(EnvSandbox):
         self.assertTrue((self.home / ".agents" / "skills" / "demo" / "SKILL.md").exists())
         self.assertTrue((project_root / ".claude" / "skills" / "demo" / "SKILL.md").exists())
         self.assertTrue((project_root / ".agents" / "skills" / "demo" / "SKILL.md").exists())
+        self.assertEqual([], self._swap_dirs(self.home / ".claude" / "skills"))
+        self.assertEqual([], self._swap_dirs(self.home / ".codex" / "skills"))
+        self.assertEqual([], self._swap_dirs(self.home / ".agents" / "skills"))
+
+    def test_deploy_to_target_restores_and_deletes_backup_after_rename_failure(self) -> None:
+        pkg = self._package()
+        target = companion_lib.resolve_target_dir("claude-code", "user", "demo", None, REGISTRY)
+        target.mkdir(parents=True)
+        (target / "SKILL.md").write_text("old version\n", encoding="utf-8")
+        original_rename = Path.rename
+
+        def flaky_rename(self: Path, target_path: Path) -> Path:
+            if ".companion-staging." in self.name:
+                raise OSError("simulated rename failure")
+            return original_rename(self, target_path)
+
+        Path.rename = flaky_rename
+        try:
+            with self.assertRaises(OSError):
+                install_skill.deploy_to_target(pkg, target)
+        finally:
+            Path.rename = original_rename
+
+        self.assertEqual((target / "SKILL.md").read_text(encoding="utf-8"), "old version\n")
+        self.assertEqual([], self._swap_dirs(target.parent))
+
+    def test_deploy_to_target_deletes_backup_symlink(self) -> None:
+        pkg = self._package()
+        target = companion_lib.resolve_target_dir("claude-code", "user", "demo", None, REGISTRY)
+        real_target = self.root / "real-demo"
+        real_target.mkdir()
+        (real_target / "SKILL.md").write_text("old version\n", encoding="utf-8")
+        target.parent.mkdir(parents=True)
+        target.symlink_to(real_target, target_is_directory=True)
+
+        install_skill.deploy_to_target(pkg, target)
+
+        self.assertFalse(target.is_symlink())
+        self.assertEqual((target / "SKILL.md").read_text(encoding="utf-8"), "# demo\n")
+        self.assertEqual([], self._swap_dirs(target.parent))
 
     def test_skips_customized_target_unless_forced(self) -> None:
         pkg = self._package()
@@ -257,6 +304,7 @@ class FanOutTests(EnvSandbox):
         results = install_skill.fan_out_install(pkg, "demo", [("claude-code", "user")], REGISTRY, None, prior, {}, force=False)
         self.assertEqual(results[0]["status"], "installed")
         self.assertEqual((target / "SKILL.md").read_text(), "# demo\n")
+        self.assertEqual([], self._swap_dirs(target.parent))
 
     def test_write_lock_records_merges_instead_of_dropping_targets(self) -> None:
         # Installing a subset of tools must not erase previously tracked targets — cubic P1 regression.

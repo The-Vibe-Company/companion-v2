@@ -124,10 +124,11 @@ original Companion command unless this runtime can safely reload the updated ski
 in-process.
 
 If download, extraction, verification, replacement, or install reporting fails, stop without changing
-other skills. If replacement fails after moving files, restore the backup and stop. If install
-reporting fails after replacement, keep the backup and report its path so the user can recover
-manually. Never delete older Companion backup folders that predate this self-update. Avoid infinite
-loops by comparing exact semver and by reporting the installed version after replacement.
+other skills. If replacement fails after moving files, restore the original folder during the same
+operation and remove transient staging/backup folders before stopping. If install reporting fails
+after replacement, keep the new folder in place, delete the transient backup, and report the failed
+confirmation. Avoid infinite loops by comparing exact semver and by reporting the installed version
+after replacement.
 
 ## Mandatory preflight guard (run before create, update, install, or lockfile write)
 
@@ -885,16 +886,18 @@ current folder, replaces it, and reports the install with
 folder; report the modified or missing files and ask the user whether to merge or reinstall the
 official package manually.
 
-After a successful replacement and successful install report, delete only the backup folder created
-for that self-update:
+Backups are transient implementation details. After replacement, delete the backup folder created for
+that self-update whether or not the install report succeeds:
 
 ```sh
 rm -rf "$backup"
-echo "Deleted Companion self-update backup at $backup"
+echo "Deleted transient Companion self-update backup at $backup"
 ```
 
-Do not delete older `companion.backup-*` or `.companion-backup.*` folders that existed before this
-self-update. If install reporting fails, keep the backup and report its path.
+If install reporting fails after replacement, keep the newly installed folder in place, delete the
+transient backup, and report that confirmation failed. Any older `companion.backup-*`,
+`.companion-backup.*`, `*.companion-backup*`, or `*.backup-*` folder containing `SKILL.md` is stale
+local state and should be deleted rather than kept as a rollback copy.
 
 ## Confirm installation (run once, at the end of install)
 
