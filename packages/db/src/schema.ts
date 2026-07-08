@@ -714,6 +714,52 @@ export const orgProviderConnections = pgTable(
   }),
 );
 
+/**
+ * A member's ACTIVATED models for the run launcher: the short, personally curated list the model
+ * picker shows (the full models.dev catalog lives only in Settings → Models). The effective set a
+ * member can run = their personal list ∪ the workspace list ({@link orgModelPreferences}) — enforced
+ * hard in `createRun`, not just hidden in the picker. Model ids are OpenCode `provider/model-id`
+ * refs, validated against the catalog at write time and pruned against it at read time.
+ */
+export const userModelPreferences = pgTable(
+  "user_model_preferences",
+  {
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    activatedModels: jsonb("activated_models").$type<string[]>().notNull().default([]),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.orgId, t.userId] }),
+  }),
+);
+
+/**
+ * The workspace-shared activated-model list, curated by owners/admins and unioned into every
+ * member's effective set. `created_by` is nullable so `pnpm db:seed` (which creates no user) can
+ * seed a default list.
+ */
+export const orgModelPreferences = pgTable(
+  "org_model_preferences",
+  {
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    activatedModels: jsonb("activated_models").$type<string[]>().notNull().default([]),
+    createdBy: text("created_by").references(() => user.id, { onDelete: "set null" }),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.orgId] }),
+  }),
+);
+
 /* ---------------------------------- skill runs ---------------------------------- */
 
 export const skillRunStatusEnum = pgEnum("skill_run_status", ["starting", "running", "frozen", "error"]);
@@ -780,6 +826,8 @@ export const skillRuns = pgTable(
     transcriptUpdatedAt: timestamp("transcript_updated_at", { withTimezone: true }),
     lastActiveAt: timestamp("last_active_at", { withTimezone: true }),
     frozenAt: timestamp("frozen_at", { withTimezone: true }),
+    /** Set once the provider sandbox is confirmed destroyed; NULL = the sweeper still owes a destroy. */
+    sandboxCleanedAt: timestamp("sandbox_cleaned_at", { withTimezone: true }),
     createdAt: now(),
     updatedAt: updatedAt(),
   },

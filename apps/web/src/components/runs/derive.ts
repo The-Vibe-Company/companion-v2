@@ -1,4 +1,4 @@
-import type { ModelRow, ModelsResponse } from "@companion/contracts";
+import type { ActivatedModels, ModelRow, ModelsResponse } from "@companion/contracts";
 
 /** Pure derivations for the run launcher's model picker and chat surface. */
 
@@ -66,6 +66,24 @@ export function groupModelsByProvider(
     return a.provider.name.localeCompare(b.provider.name);
   });
   return groups;
+}
+
+/** Effective activated set for the launcher = personal ∪ org. */
+export function effectiveActivatedSet(activated: ActivatedModels): Set<string> {
+  return new Set([...activated.personal, ...activated.org]);
+}
+
+/**
+ * Keep only activated models, then drop groups left empty. Provider connect state is preserved:
+ * an activated model whose provider is not connected keeps its group (and its inline Connect flow).
+ */
+export function filterGroupsToActivated(groups: ModelGroupVM[], activated: ReadonlySet<string>): ModelGroupVM[] {
+  const out: ModelGroupVM[] = [];
+  for (const group of groups) {
+    const models = group.models.filter((m) => activated.has(m.id));
+    if (models.length > 0) out.push({ provider: group.provider, models });
+  }
+  return out;
 }
 
 /** Filter model groups by a search query, keeping a provider header whenever it has any match. */

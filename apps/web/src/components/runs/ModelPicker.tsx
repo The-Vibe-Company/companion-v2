@@ -4,7 +4,13 @@ import { useMemo, useRef, useState } from "react";
 import type { ModelRow, ModelsResponse } from "@companion/contracts";
 import { Icon } from "../Icon";
 import { setProviderConnection } from "@/lib/runQueries";
-import { filterModelGroups, groupModelsByProvider, toModelProviders, type ModelGroupVM } from "./derive";
+import {
+  filterGroupsToActivated,
+  filterModelGroups,
+  groupModelsByProvider,
+  toModelProviders,
+  type ModelGroupVM,
+} from "./derive";
 
 /**
  * The grouped-by-provider model picker for the run launcher: connected providers first, an inline
@@ -256,13 +262,19 @@ function ProviderGroup({
   );
 }
 
-/** Search box + grouped provider list. `connectedNow` flips a provider connected without a refetch. */
+/**
+ * Search box + grouped provider list, restricted to the ACTIVATED set (personal ∪ workspace) —
+ * the full catalog lives in Settings → Models, reached via `onAddModels`. `connectedNow` flips a
+ * provider connected without a refetch.
+ */
 export function ModelPicker({
   models,
   model,
   onSelectModel,
   connectedNow,
   onConnected,
+  activated,
+  onAddModels,
 }: {
   models: ModelsResponse;
   model: string;
@@ -270,14 +282,44 @@ export function ModelPicker({
   /** Providers connected during this dialog session (inline Connect) — local catalog override. */
   connectedNow: ReadonlySet<string>;
   onConnected: (providerId: string) => void;
+  /** Effective activated model ids; the picker never shows anything else. */
+  activated: ReadonlySet<string>;
+  /** Deep-link to Settings → Models (the only way to grow the list). */
+  onAddModels: () => void;
 }) {
   const [query, setQuery] = useState("");
   const providers = useMemo(() => toModelProviders(models), [models]);
   const groups = useMemo(
-    () => groupModelsByProvider(models.models, providers, connectedNow),
-    [models.models, providers, connectedNow],
+    () => filterGroupsToActivated(groupModelsByProvider(models.models, providers, connectedNow), activated),
+    [models.models, providers, connectedNow, activated],
   );
   const visibleGroups = useMemo(() => filterModelGroups(groups, query), [groups, query]);
+
+  // Empty-state decision is on the PRE-search groups — searching must never flash this state.
+  if (groups.length === 0) {
+    return (
+      <div
+        style={{
+          border: "1px solid var(--color-line)",
+          borderRadius: "var(--radius-md)",
+          padding: "22px 16px",
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          gap: 10,
+          textAlign: "center",
+        }}
+      >
+        <span style={{ fontSize: "var(--text-xs)", color: "var(--color-faint)" }}>
+          No models activated yet — pick the models this launcher should offer in Settings.
+        </span>
+        <button type="button" className="btn-primary" onClick={onAddModels}>
+          <Icon name="plus" size={13} />
+          Add models
+        </button>
+      </div>
+    );
+  }
 
   return (
     <div style={{ border: "1px solid var(--color-line)", borderRadius: "var(--radius-md)", overflow: "hidden" }}>
@@ -323,6 +365,12 @@ export function ModelPicker({
             No models match.
           </div>
         )}
+      </div>
+      <div style={{ borderTop: "1px solid var(--color-line)", padding: "7px 9px" }}>
+        <button type="button" className="ag-btn" onClick={onAddModels}>
+          <Icon name="plus" size={13} />
+          Add more models
+        </button>
       </div>
     </div>
   );

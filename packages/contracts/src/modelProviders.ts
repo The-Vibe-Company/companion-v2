@@ -39,6 +39,16 @@ export const modelRowSchema = z.object({
 });
 export type ModelRow = z.infer<typeof modelRowSchema>;
 
+/**
+ * Activated (curated) model ids per scope, pruned to the live catalog by the API. The effective
+ * set a member can pick AND run = `personal ∪ org` (enforced hard in `createRun`).
+ */
+export const activatedModelsSchema = z.object({
+  personal: z.array(z.string()).max(200).default([]),
+  org: z.array(z.string()).max(200).default([]),
+});
+export type ActivatedModels = z.infer<typeof activatedModelsSchema>;
+
 export const modelsResponseSchema = z.object({
   models: z.array(modelRowSchema),
   providers: z.array(
@@ -51,8 +61,15 @@ export const modelsResponseSchema = z.object({
       connected: z.boolean().default(false),
     }),
   ),
+  activated: activatedModelsSchema.default({ personal: [], org: [] }),
 });
 export type ModelsResponse = z.infer<typeof modelsResponseSchema>;
+
+/** Body of `PUT /v1/model-preferences` and `PUT /v1/org-model-preferences` — full replacement list. */
+export const setActivatedModelsInputSchema = z.object({
+  models: z.array(z.string().min(1).max(200)).max(200),
+});
+export type SetActivatedModelsInput = z.infer<typeof setActivatedModelsInputSchema>;
 
 /* ---- Provider connections (saved model-provider API keys) ------------------------- */
 

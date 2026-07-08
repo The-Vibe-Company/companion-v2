@@ -304,6 +304,7 @@ export function DetailView({
   onRestore,
   onArchive,
   onOpenRun,
+  onOpenModelSettings,
   initialTab,
   runAgainPrompt,
   onRunAgainConsumed,
@@ -335,6 +336,8 @@ export function DetailView({
   onArchive: () => void;
   /** Open a run transcript/chat (`?skill=…&run=…`). */
   onOpenRun: (runId: string) => void;
+  /** Open Settings → Models (the launcher's "Add more models" — the shell owns the surface). */
+  onOpenModelSettings?: () => void;
   /** Land on this tab when opening the skill (Back from a run returns to Sessions). */
   initialTab?: "overview" | "sessions";
   /** Prefill for the launcher (the "Run again" path from a frozen transcript). */
@@ -343,6 +346,9 @@ export function DetailView({
   onRunAgainConsumed?: () => void;
 }) {
   const invalid = skill.validation === "invalid";
+  // Composed-but-unlaunched run draft, preserved across the launcher's "Add more models" detour
+  // (the dialog unmounts on close; without this the prompt and attachments would be lost).
+  const runDraftRef = useRef<{ prompt: string; files: File[] } | null>(null);
   const [versions, setVersions] = useState<SkillVersionRow[]>([]);
   const [comments, setComments] = useState<SkillCommentRow[]>([]);
   const [files, setFiles] = useState<SkillFile[]>([]);
@@ -763,9 +769,15 @@ export function DetailView({
       {launcherOpen && (
         <RunLauncherDialog
           slug={skill.id}
-          initialPrompt={runAgainPrompt ?? undefined}
+          initialPrompt={runAgainPrompt ?? runDraftRef.current?.prompt}
+          initialFiles={runDraftRef.current?.files}
+          onOpenModelSettings={onOpenModelSettings}
+          onStashDraft={(draft) => {
+            runDraftRef.current = draft;
+          }}
           onLaunched={(run) => {
             setLauncherOpen(false);
+            runDraftRef.current = null;
             onRunAgainConsumed?.();
             setRuns((prev) => [
               {

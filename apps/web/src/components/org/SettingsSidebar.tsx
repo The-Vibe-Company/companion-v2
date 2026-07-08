@@ -127,10 +127,10 @@ export function SettingsSidebar({
               onClick={() => goTo({ view: "preferences" })}
             />
             <NavItem
-              active={is("providers")}
-              icon="cpu"
-              label="Model providers"
-              onClick={() => goTo({ view: "providers" })}
+              active={is("models") || is("providers")}
+              icon="boxes"
+              label="Models"
+              onClick={() => goTo({ view: "models" })}
             />
             <NavItem
               active={is("artifacts")}
@@ -164,10 +164,10 @@ export function SettingsSidebar({
               onClick={() => goTo({ view: "general" })}
             />
             <NavItem
-              active={is("org-providers")}
-              icon="cpu"
-              label="Shared providers"
-              onClick={() => goTo({ view: "org-providers" })}
+              active={is("org-models") || is("org-providers")}
+              icon="boxes"
+              label="Shared models"
+              onClick={() => goTo({ view: "org-models" })}
             />
             <NavItem
               active={is("members")}

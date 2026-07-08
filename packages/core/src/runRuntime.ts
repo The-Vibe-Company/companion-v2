@@ -65,7 +65,10 @@ export interface RunSandboxRuntime {
   healthCheck(input: { ref: SandboxRef; domain: string; password: string }): Promise<{ ok: true; ms: number }>;
   /** Stop now (freeze). Idempotent. */
   stop(ref: SandboxRef): Promise<void>;
-  /** Delete the sandbox entirely. Idempotent. */
+  /**
+   * Delete the sandbox entirely. Idempotent (a missing/already-deleted sandbox is success), but
+   * MUST throw on transient provider failures so callers keep the cleanup owed and retry later.
+   */
   destroy(ref: SandboxRef): Promise<void>;
   /**
    * Push the sandbox's hard timeout out by `ms` (Vercel's clock runs from boot, NOT from traffic —

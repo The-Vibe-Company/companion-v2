@@ -23,6 +23,7 @@ import {
 } from "./runRuntime";
 import { assertMember, type ActorContext } from "./services";
 import { getDecryptedProviderKey } from "./providerConnections";
+import { getActivatedModelSets } from "./modelPreferences";
 import { publishRunArtifact, vanishBlockedExtension, VanishError } from "./vanish";
 
 /**
@@ -89,7 +90,7 @@ export class RunBusyError extends Error {}
 
 /* ------------------------------------ derivations --------------------------------------- */
 
-type RunRow = typeof schema.skillRuns.$inferSelect;
+export type RunRow = typeof schema.skillRuns.$inferSelect;
 type AttachmentRow = typeof schema.skillRunAttachments.$inferSelect;
 type ArtifactRow = typeof schema.skillRunArtifacts.$inferSelect;
 
@@ -361,7 +362,7 @@ async function resolveProviderEnv(
   if (!connection || !resolved.envKeys.includes(connection.keyName)) {
     const wanted = resolved.envKeys[0] ?? "the provider API key";
     throw new RunValidationError(
-      `no API key is available for this model's provider — connect ${provider || "it"} in Settings → Model providers (${wanted})`,
+      `no API key is available for this model's provider — connect ${provider || "it"} in Settings → Models (${wanted})`,
     );
   }
   return new Map([[connection.keyName, connection.value]]);
@@ -437,6 +438,13 @@ export async function createRun(input: {
   }
   if (!skill.currentVersion) throw new RunValidationError(`skill ${input.slug} has no published version`);
 
+  // HARD gate: the launcher may only run models in their effective activated set (personal ∪ org)
+  // — the picker filter alone would leave the raw API wide open.
+  const activated = await getActivatedModelSets({ database, orgId: input.orgId, userId: input.actor.id });
+  if (!activated.personal.includes(input.model) && !activated.org.includes(input.model)) {
+    throw new RunValidationError(`model ${input.model} is not activated for you — add it in Settings → Models`);
+  }
+
   // Both validations up front: model exists in the catalog AND a decryptable key reaches it.
   await resolveProviderEnv(database, input.orgId, input.actor.id, input.model, input.ctx);
 
@@ -500,6 +508,26 @@ export async function createRun(input: {
 /* ------------------------------------ launch + record --------------------------------------- */
 
 /**
+ * Best-effort stop + destroy of the run's sandbox; returns true when the provider confirmed the
+ * teardown. A frozen/error run is terminal (no wake) and its transcript/artifacts are persisted
+ * before this is called, so a destroyed sandbox loses nothing. On `false` the row keeps
+ * `sandbox_cleaned_at` NULL and the sweeper retries later.
+ */
+export async function teardownSandbox(ctx: RunControlContext, ref: SandboxRef): Promise<boolean> {
+  try {
+    await ctx.runtime.stop(ref);
+  } catch {
+    /* idempotent */
+  }
+  try {
+    await ctx.runtime.destroy(ref);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * The background job: launch the sandbox, start the session, then record until freeze. Runs OUTSIDE
  * any request transaction: every DB touch opens its own short tenant transaction; runtime calls
  * happen in between. Fire-and-forget callers must catch — this function itself persists failures
@@ -537,10 +565,10 @@ async function launchAndRecordRunInner(input: {
     });
   };
 
-  const failRun = async (error: unknown) => {
+  const failRun = async (error: unknown, extra: Partial<typeof schema.skillRuns.$inferInsert> = {}) => {
     const message = error instanceof Error ? error.message : String(error);
     const detail = error instanceof RunRuntimeError && error.detail ? `\n${error.detail}` : "";
-    await setRun({ status: "error", statusDetail: `${message}${detail}` });
+    await setRun({ status: "error", statusDetail: `${message}${detail}`, ...extra });
   };
 
   // Prelude — load everything and decrypt OUTSIDE the step flow. Any failure here (rotated KEK,
@@ -595,7 +623,8 @@ async function launchAndRecordRunInner(input: {
       };
     });
   } catch (error) {
-    await failRun(error);
+    // No sandbox exists yet (fork happens below), so there is nothing to destroy.
+    await failRun(error, { sandboxCleanedAt: new Date() });
     return;
   }
   const { row, skillSlug } = loaded;
@@ -666,11 +695,7 @@ async function launchAndRecordRunInner(input: {
   } catch (error) {
     await failRun(error);
     // Best-effort teardown so a broken sandbox never lingers half-alive.
-    try {
-      await ctx.runtime.stop(ref);
-    } catch {
-      /* idempotent */
-    }
+    if (await teardownSandbox(ctx, ref)) await setRun({ sandboxCleanedAt: new Date() });
     return;
   }
 
@@ -731,14 +756,11 @@ async function recordRun(input: {
   } finally {
     clearInterval(poll);
     activityRegistry.delete(runId);
-    // Freeze: final snapshot + final artifact collection, then stop the sandbox.
+    // Freeze: final snapshot + final artifact collection, then destroy the sandbox (no wake —
+    // the frozen status must persist first so a crash mid-teardown degrades to a sweeper retry).
     await snapshot();
     await setRun({ status: "frozen", statusDetail: null, frozenAt: new Date() });
-    try {
-      await ctx.runtime.stop(ref);
-    } catch {
-      /* idempotent */
-    }
+    if (await teardownSandbox(ctx, ref)) await setRun({ sandboxCleanedAt: new Date() });
   }
 }
 
@@ -850,7 +872,7 @@ async function collectAndPublishArtifacts(input: {
  * job means the API restarted (or the job died). Freeze it (or error it, when it never left
  * `starting`) with the designed message so the UI renders the last snapshot.
  */
-async function markRunInterrupted(database: Db, row: RunRow): Promise<RunRow> {
+export async function markRunInterrupted(database: Db, row: RunRow): Promise<RunRow> {
   const interrupted: Partial<typeof schema.skillRuns.$inferInsert> =
     row.status === "starting"
       ? { status: "error", statusDetail: "Interrupted — the server restarted during this run." }

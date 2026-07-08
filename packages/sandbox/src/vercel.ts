@@ -1,4 +1,4 @@
-import { Sandbox } from "@vercel/sandbox";
+import { APIError, Sandbox } from "@vercel/sandbox";
 import {
   RunRuntimeError,
   OPENCODE_SERVER_USERNAME,
@@ -161,8 +161,11 @@ export function createVercelRuntime(config: VercelRuntimeConfig): RunSandboxRunt
       try {
         const sandbox = await Sandbox.get({ ...credentials, name: ref.sandboxName, resume: false });
         await sandbox.delete();
-      } catch {
-        // Never provisioned or already deleted — destroy is idempotent.
+      } catch (error) {
+        // Never provisioned or already deleted — destroy is idempotent. Anything else (API outage,
+        // revoked token) must propagate so callers keep the cleanup owed and retry it later.
+        if (error instanceof APIError && (error.response.status === 404 || error.response.status === 410)) return;
+        throw error;
       }
     },
 

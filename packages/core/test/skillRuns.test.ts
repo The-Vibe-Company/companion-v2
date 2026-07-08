@@ -177,7 +177,19 @@ async function makeHarness(store: FakeStore, script: HarnessScript = {}) {
   return { database, ctx, calls, published, statusAt };
 }
 
+/** Activate a model for the launcher (createRun hard-rejects non-activated models). */
+function activateModel(store: FakeStore, model: string = MODEL, scope: "personal" | "org" = "personal"): void {
+  const stamps = { createdAt: new Date(), updatedAt: new Date() };
+  if (scope === "org") {
+    store.orgModelPreferences.push({ orgId: ORG, activatedModels: [model], createdBy: me.id, ...stamps });
+  } else {
+    store.userModelPreferences.push({ orgId: ORG, userId: me.id, activatedModels: [model], ...stamps });
+  }
+}
+
 async function connectAnthropicKey(store: FakeStore, actor: ActorContext = me): Promise<void> {
+  // Connecting the key and activating the model go together in every launch-capable fixture.
+  activateModel(store, MODEL);
   await setProviderConnection({
     actor,
     orgId: ORG,
@@ -235,11 +247,58 @@ describe("createRun", () => {
   it("rejects a model whose provider has no decryptable key (fails at submit, not 30s later)", async () => {
     const store = emptyStore();
     seedSkill(store);
+    activateModel(store, MODEL); // activated, so the failure below is the KEY check, not the gate
     const { database, ctx } = await makeHarness(store);
     await expect(
       createRun({ actor: me, orgId: ORG, slug: "meeting-digest", prompt: "go", model: MODEL, attachments: [], ctx, database }),
     ).rejects.toThrow(/no API key is available/);
     expect(store.runs).toHaveLength(0);
+  });
+
+  it("hard-rejects a catalog-valid, key-connected model that is not activated", async () => {
+    const store = emptyStore();
+    seedSkill(store);
+    const { database, ctx } = await makeHarness(store);
+    await setProviderConnection({
+      actor: me,
+      orgId: ORG,
+      provider: "anthropic",
+      keyName: "ANTHROPIC_API_KEY",
+      key: "sk-live-key",
+      secretsKey: KEK,
+      database,
+    });
+    await expect(
+      createRun({ actor: me, orgId: ORG, slug: "meeting-digest", prompt: "go", model: MODEL, attachments: [], ctx, database }),
+    ).rejects.toThrow(/not activated/);
+    expect(store.runs).toHaveLength(0);
+  });
+
+  it("accepts a model activated by the org even when the launcher activated nothing personally", async () => {
+    const store = emptyStore();
+    seedSkill(store);
+    activateModel(store, MODEL, "org");
+    await setProviderConnection({
+      actor: me,
+      orgId: ORG,
+      provider: "anthropic",
+      keyName: "ANTHROPIC_API_KEY",
+      key: "sk-live-key",
+      secretsKey: KEK,
+      database: fakeRunsDb(store),
+    });
+    const { database, ctx } = await makeHarness(store);
+    const detail = await createRun({
+      actor: me,
+      orgId: ORG,
+      slug: "meeting-digest",
+      prompt: "go",
+      model: MODEL,
+      attachments: [],
+      ctx,
+      database,
+    });
+    expect(detail.status).toBe("starting");
   });
 
   it("never reveals another member's personal skill (404-shaped, no admin override)", async () => {
@@ -309,11 +368,13 @@ describe("launchAndRecordRun", () => {
     const row = store.runs[0]!;
     expect(row.id).toBe(runId);
     expect(row.opencodeSessionId).toBe("ses-1");
-    // The stream ended → the run froze with a final snapshot and a stopped sandbox.
+    // The stream ended → the run froze with a final snapshot and a destroyed sandbox.
     expect(row.status).toBe("frozen");
     expect(row.frozenAt).not.toBeNull();
     expect(row.transcript).toEqual(items);
     expect(calls.some((c) => c.op === "stop")).toBe(true);
+    expect(calls.some((c) => c.op === "destroy")).toBe(true);
+    expect(row.sandboxCleanedAt).not.toBeNull();
   });
 
   it("composes the first prompt with the skill nudge (attachments/artifacts lines only when relevant)", async () => {
@@ -341,7 +402,7 @@ describe("launchAndRecordRun", () => {
     const store = emptyStore();
     seedSkill(store);
     await connectAnthropicKey(store);
-    const { database, ctx } = await makeHarness(store);
+    const { database, ctx, calls } = await makeHarness(store);
     const detail = await createRun({
       actor: me,
       orgId: ORG,
@@ -356,9 +417,12 @@ describe("launchAndRecordRun", () => {
     await launchAndRecordRun({ orgId: ORG, actorId: me.id, runId: detail.id, ctx });
     expect(store.runs[0]!.status).toBe("error");
     expect(store.runs[0]!.statusDetail).toMatch(/malformed/);
+    // No sandbox was ever provisioned: the row is marked cleaned without any runtime call.
+    expect(store.runs[0]!.sandboxCleanedAt).not.toBeNull();
+    expect(calls.some((c) => c.op === "stop" || c.op === "destroy")).toBe(false);
   });
 
-  it("a step failure lands in error with the step message and stops the sandbox", async () => {
+  it("a step failure lands in error with the step message and destroys the sandbox", async () => {
     const store = emptyStore();
     seedSkill(store);
     await connectAnthropicKey(store);
@@ -366,6 +430,8 @@ describe("launchAndRecordRun", () => {
     expect(store.runs[0]!.status).toBe("error");
     expect(store.runs[0]!.statusDetail).toMatch(/serve exploded/);
     expect(calls.some((c) => c.op === "stop")).toBe(true);
+    expect(calls.some((c) => c.op === "destroy")).toBe(true);
+    expect(store.runs[0]!.sandboxCleanedAt).not.toBeNull();
   });
 
   it("freezes after the inactivity window even when the stream stays open", async () => {

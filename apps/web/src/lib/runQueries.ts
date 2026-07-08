@@ -1,6 +1,7 @@
 "use client";
 
 import type {
+  ActivatedModels,
   ModelsResponse,
   ProviderConnectionRow,
   ProviderConnectionsResponse,
@@ -14,6 +15,24 @@ import { apiFetch } from "./apiClient";
 /** The models.dev catalog with per-provider connected flags (personal ∪ workspace). */
 export async function fetchModels(): Promise<ModelsResponse> {
   return apiFetch<ModelsResponse>("/v1/models");
+}
+
+/* ---- Activated models (the curated lists the launcher's picker shows) ---- */
+
+/** Replace the caller's personal activated-model list. */
+export async function saveActivatedModels(models: string[]): Promise<{ activated: ActivatedModels }> {
+  return apiFetch<{ activated: ActivatedModels }>("/v1/model-preferences", {
+    method: "PUT",
+    body: JSON.stringify({ models }),
+  });
+}
+
+/** Replace the workspace-shared activated-model list (owner/admin only). */
+export async function saveOrgActivatedModels(models: string[]): Promise<{ activated: ActivatedModels }> {
+  return apiFetch<{ activated: ActivatedModels }>("/v1/org-model-preferences", {
+    method: "PUT",
+    body: JSON.stringify({ models }),
+  });
 }
 
 /* ---- Saved per-user model-provider connections (API keys) ---- */

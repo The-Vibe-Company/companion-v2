@@ -246,6 +246,20 @@
       "when": 1781052300000,
       "tag": "0034_org_provider_connections",
       "breakpoints": true
+    },
+    {
+      "idx": 35,
+      "version": "7",
+      "when": 1781052400000,
+      "tag": "0035_skill_runs_sandbox_cleanup",
+      "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1781052500000,
+      "tag": "0036_model_preferences",
+      "breakpoints": true
     }
   ]
 }

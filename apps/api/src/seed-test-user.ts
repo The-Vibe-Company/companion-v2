@@ -157,6 +157,17 @@ async function seedDemoContent(actor: ActorContext): Promise<void> {
   // Seed one empty label so the folder tree has a non-trivial, skill-less node out of the box.
   await db.insert(schema.labels).values({ orgId, path: "growth", createdBy: actor.id }).onConflictDoNothing();
 
+  // Default workspace-activated models (ids from the sandbox catalog's offline fallback registry)
+  // so the hard createRun activation gate never bricks a fresh dev workspace.
+  await db
+    .insert(schema.orgModelPreferences)
+    .values({
+      orgId,
+      activatedModels: ["anthropic/claude-haiku-4-5", "anthropic/claude-opus-4-5", "anthropic/claude-sonnet-4-5"],
+      createdBy: actor.id,
+    })
+    .onConflictDoNothing();
+
   if (!storageConfigured()) {
     console.warn("Skipping demo skills: S3 storage is not configured (S3_ENDPOINT and related env vars)");
     return;

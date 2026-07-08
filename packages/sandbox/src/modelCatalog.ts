@@ -77,8 +77,11 @@ async function loadRegistry(fetcher: typeof fetch): Promise<Registry> {
   }
 }
 
+/** The stateless part of the models response — `connected`/`activated` are API-layer concerns. */
+export type ModelCatalogListing = Pick<ModelsResponse, "models" | "providers">;
+
 export interface ModelCatalog {
-  listModels(): Promise<ModelsResponse>;
+  listModels(): Promise<ModelCatalogListing>;
   /** Validate a `provider/model` ref; returns the provider's API-key env var name(s), or null. */
   resolveModel(modelRef: string): Promise<{ envKeys: string[] } | null>;
   /** Test seam. */

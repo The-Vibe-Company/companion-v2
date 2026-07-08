@@ -1,11 +1,19 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import type { ModelsResponse, SkillRunDetail } from "@companion/contracts";
 import { Icon } from "../Icon";
 import { Dialog } from "../org/primitives";
 import { fetchModels, fetchProviderConnections, launchRun } from "@/lib/runQueries";
-import { firstConnectedModel, groupModelsByProvider, modelProviderConnected, toModelProviders } from "./derive";
+import {
+  effectiveActivatedSet,
+  filterGroupsToActivated,
+  firstConnectedModel,
+  groupModelsByProvider,
+  modelProviderConnected,
+  toModelProviders,
+} from "./derive";
 import { ModelPicker } from "./ModelPicker";
 
 /**
@@ -26,19 +34,33 @@ function formatBytes(bytes: number): string {
 export function RunLauncherDialog({
   slug,
   initialPrompt,
+  initialFiles,
   onLaunched,
   onClose,
+  onOpenModelSettings,
+  onStashDraft,
 }: {
   slug: string;
-  /** Prefill (the "Run again" path from a frozen transcript). */
+  /** Prefill (the "Run again" path from a frozen transcript, or a stashed add-models draft). */
   initialPrompt?: string;
+  /** Prefill attachments (restored from a stashed add-models draft). */
+  initialFiles?: File[];
   onLaunched: (run: SkillRunDetail) => void;
   onClose: () => void;
+  /**
+   * Open Settings → Models. The skills shell renders Settings as a LOCAL surface (not a route),
+   * so a plain router.push would be swallowed — the shell passes its own opener; the router path
+   * is only the fallback for hosts without one.
+   */
+  onOpenModelSettings?: () => void;
+  /** Save the composed prompt/attachments before the add-models detour unmounts the dialog. */
+  onStashDraft?: (draft: { prompt: string; files: File[] }) => void;
 }) {
+  const router = useRouter();
   const [models, setModels] = useState<ModelsResponse | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [prompt, setPrompt] = useState(initialPrompt ?? "");
-  const [files, setFiles] = useState<File[]>([]);
+  const [files, setFiles] = useState<File[]>(initialFiles ?? []);
   const [model, setModel] = useState("");
   const [connectedNow, setConnectedNow] = useState<Set<string>>(() => new Set());
   const [vanishConnected, setVanishConnected] = useState<boolean | null>(null);
@@ -61,10 +83,25 @@ export function RunLauncherDialog({
     };
   }, []);
 
+  const activated = useMemo(
+    () => effectiveActivatedSet(models?.activated ?? { personal: [], org: [] }),
+    [models],
+  );
+  // Only activated models exist for this dialog — default selection and canLaunch never see more.
   const groups = useMemo(() => {
     if (!models) return [];
-    return groupModelsByProvider(models.models, toModelProviders(models), connectedNow);
-  }, [models, connectedNow]);
+    return filterGroupsToActivated(groupModelsByProvider(models.models, toModelProviders(models), connectedNow), activated);
+  }, [models, connectedNow, activated]);
+
+  // The full catalog lives in Settings → Models; close first — the model list is fetched on mount,
+  // so reopening the launcher after activating picks up the fresh list. Stash the composition
+  // first: closing unmounts the dialog and would otherwise discard the prompt and attachments.
+  const goAddModels = () => {
+    onStashDraft?.({ prompt, files });
+    onClose();
+    if (onOpenModelSettings) onOpenModelSettings();
+    else router.push("/settings?view=models");
+  };
 
   // Preselect the first connected provider's first model; keep the selection valid as providers
   // connect. Never auto-select a disabled (unconnected) model.
@@ -227,10 +264,12 @@ export function RunLauncherDialog({
                     return next;
                   })
                 }
+                activated={activated}
+                onAddModels={goAddModels}
               />
-              {!anyConnected && (
+              {groups.length > 0 && !anyConnected && (
                 <p style={{ margin: "7px 0 0", fontSize: "var(--text-xs)", color: "var(--color-faint)" }}>
-                  Connect a model provider above to run this skill — or manage keys in Settings → Model providers.
+                  Connect a model provider above to run this skill — or manage keys in Settings → Models.
                 </p>
               )}
             </>

@@ -445,13 +445,18 @@ port (`packages/core/src/runRuntime.ts`), implemented by `packages/sandbox` (`@v
   domain, golden provenance), `opencode_session_id`, `server_password_enc` (secretbox
   `wrappedDek|ciphertext`, AAD `org:runId:OPENCODE_SERVER_PASSWORD`), `timeout_ms` (sandbox
   lifetime AND the freeze window), the `transcript` (jsonb — see below), `last_active_at`,
-  `frozen_at`.
+  `frozen_at`, `sandbox_cleaned_at` (set once the provider sandbox is confirmed destroyed;
+  NULL = the sweep still owes a destroy — partial index `skill_runs_sweep_idx`, mig 0035).
 - `skill_run_attachments` — files the launcher attached (≤5 × 10 MB): bytes in S3 under
   `{org}/run-attachments/{id}`, metadata here, streamed back creator-only with `nosniff` +
   `Content-Disposition: attachment`.
 - `skill_run_artifacts` — files the agent saved into `artifacts/`, published to Vanish
   (path-deduped per run via `UNIQUE(run_id, path)`); only metadata + the public URL live here.
 - All three tables carry the tenant RLS policy (migration `0032_skill_runs.sql`).
+- `user_model_preferences` / `org_model_preferences` (mig 0036) — the ACTIVATED-model lists (see
+  "Activated models" below): a jsonb array of `provider/model-id` refs per member (PK
+  `org_id+user_id`, user-scoped RLS) and per workspace (PK `org_id`, tenant RLS, nullable
+  `created_by` so `db:seed` can seed it).
 
 **No state machine**: a run's lifecycle is 4 enum values + `status_detail`. A FRESH sandbox is
 forked per run; there is no pause/wake/retry — retry means a new run. The launcher polls
@@ -461,6 +466,7 @@ forked per run; there is no pause/wake/retry — retry means a new run. The laun
 
 `createRun` (packages/core/src/skillRuns.ts) validates at submit time — the skill must be visible
 (personal-skill privacy via the same predicate as everywhere), unarchived and published, the model
+must be in the launcher's ACTIVATED set (personal ∪ org — the hard gate behind the picker filter),
 must exist in the catalog AND a decryptable provider key must reach it — then persists the row
 (status `starting`) and the attachment metadata, and audits `skill.run`. The API kicks
 `launchAndRecordRun` fire-and-forget in-process (deduped per run): fork golden → push
@@ -476,12 +482,34 @@ on every `session.idle` it snapshots the FULL transcript (`loadSessionItems` →
 `skill_runs.transcript`, capped ~512 KB by trimming oldest tool outputs first) and collects
 artifacts. When nothing has happened for `timeout_ms` (~5 min, refreshed by events and by the
 prompt route), or the stream dies, the run **freezes**: final snapshot + final artifact collection,
-`status = frozen`, `runtime.stop()` (the Vercel snapshot survives; wake is documented future work,
-not built). `withTenantContext` opens a transaction, so the job interleaves short tenant
-transactions with un-transacted runtime calls. The in-process job assumes a mono-process API (same
-precedent as before a worker/Temporal takes this over); a read that finds `starting`/`running`
-with no live job lazily flips the row to the designed "interrupted" state (`error` if it never left
-`starting`, else `frozen` keeping the last snapshot).
+`status = frozen`, then sandbox teardown. `withTenantContext` opens a transaction, so the job
+interleaves short tenant transactions with un-transacted runtime calls. The in-process job assumes
+a mono-process API (same precedent as before a worker/Temporal takes this over); a read that finds
+`starting`/`running` with no live job lazily flips the row to the designed "interrupted" state
+(`error` if it never left `starting`, else `frozen` keeping the last snapshot) — DB-only, so reads
+never make network calls.
+
+### Sandbox cleanup
+
+A terminal run's sandbox has zero residual value (no wake; transcript + artifacts are persisted
+BEFORE teardown), so it is **destroyed, not just stopped** — two layers, with Vercel's own hard
+`timeout` as the compute backstop:
+
+1. **In-path** (`teardownSandbox` in `packages/core/src/skillRuns.ts`): every terminal transition
+   (freeze, launch-step failure) persists the terminal status first, then best-effort
+   `runtime.stop()` + `runtime.destroy()`; on confirmed destroy the row gets
+   `sandbox_cleaned_at`. A prelude failure (no sandbox forked yet) marks the row cleaned
+   directly. The port contract: `destroy` treats a missing sandbox as success (idempotent) but
+   MUST throw on transient provider failures so the cleanup stays owed.
+2. **Sweep** (`sweepRunSandboxes` in `packages/core/src/runSweeper.ts`, `setInterval` in apps/api
+   every `COMPANION_RUN_SWEEP_INTERVAL_MS`, default 10 min, `0` disables, plus one pass ~30 s
+   after boot): cross-org drain of terminal rows with `sandbox_cleaned_at IS NULL` (failed
+   in-path destroys, historical backlog) and **orphan kill** of `starting`/`running` rows whose
+   in-process job is gone — rewritten via the same `markRunInterrupted`, then destroyed. Orphans
+   are only killed past `updated_at + 2×timeout_ms + grace` (never on "no local job" alone; the
+   2× covers the SDK's ADDITIVE `extendTimeout`), and destroys are idempotent so double-sweeps
+   are harmless. Like `liveRunJobs`, the orphan kill assumes the documented mono-process API —
+   fix run-liveness tracking before scaling the API horizontally.
 
 ### Privacy
 
@@ -509,8 +537,9 @@ binds each blob to its exact row — `packages/core/src/secretbox.ts`) and write
 scopes: **personal** (`user_provider_connections`, mig 0033, per-user) and **workspace-shared**
 (`org_provider_connections`, mig 0034, PK `org_id+provider`, AAD
 `${orgId}:workspace:provider:${provider}`, **owner/admin write** via `canManageOrg`, any member
-reads). Both are managed in **Settings** — Account → *Model providers* and Workspace → *Shared
-providers* — and the raw env var name is never shown to the user.
+reads). Both are managed on the merged **Settings** Models panes — Account → *Models* and
+Workspace → *Shared models* (see "Activated models" below) — and the raw env var name is never
+shown to the user.
 
 The key is **referenced live, not copied**: `createRun` validates that a key exists but stores
 nothing; the launch job resolves it at serve time (`getDecryptedProviderKey`) with
@@ -519,6 +548,30 @@ in Settings affects the next run and the key never appears anywhere in the run's
 `GET /v1/models` marks a provider connected when the caller has a personal key **or** the
 workspace shares one. Reserved runtime env names (`OPENCODE_SERVER_*`) can never be used as key
 names.
+
+### Activated models (curated picker + hard gate)
+
+The run launcher's picker does NOT show the full models.dev catalog — it shows only the
+**activated** set: the member's personal list (`user_model_preferences`) ∪ the workspace list
+(`org_model_preferences`, owner/admin write via `canManageOrg` + `models.activate.org` audit).
+Both lists are curated in Settings — Account → **Models** and Workspace → **Shared models**
+(`ModelsPane`, one component keyed per scope; the old *Model providers*/*Shared providers* panes
+are MERGED into it, `?view=providers`/`org-providers` are normalized aliases). The pane is
+organized around READINESS: a top "deck" mirroring exactly what the launcher offers (each row
+`Ready` or `Needs key`, with inline write-only key capture on the row; the personal pane also
+shows the workspace's contributions read-only), then a search-first add bar over the full catalog
+(flat one-click Activate rows, capped at 50 visible matches), then a per-provider browse accordion
+whose headers carry connect/disconnect for THIS scope's keys. The launcher's "Add more models"
+button opens the pane via the shell's `openSettings({view:"models"})` (the skills shell renders
+Settings as a LOCAL surface with `history.pushState`, so a plain `router.push` would be swallowed —
+the opener is threaded SkillsApp → DetailView → RunLauncherDialog) and an empty effective set
+renders an empty state instead of a picker. Enforcement is **hard**: `createRun` rejects a
+non-activated model (`RunValidationError`), so the raw API honors the same rule as the UI. Core
+(`packages/core/src/modelPreferences.ts`) is catalog-agnostic: ids are validated against the live
+catalog at the API layer on write (400 on unknown ids) and pruned against it at read time
+(`GET /v1/models` returns `activated: { personal, org }`), and run time stays safe regardless via
+`resolveModelKeys`. Seeds activate a default Anthropic trio so fresh workspaces are not bricked by
+the gate; real deployments must activate models before members can run skills.
 
 ### Artifacts via Vanish
 
@@ -538,7 +591,9 @@ per-file uploads only; Vanish's multi-file `/sites` API is a noted follow-up.
 
 ### Endpoints (session-only — PATs are rejected; not a skills API surface)
 
-`GET /v1/models` (full tool-capable models.dev catalog + `connected` flags),
+`GET /v1/models` (full tool-capable models.dev catalog + `connected` flags + the caller's
+`activated` lists, pruned to the catalog), `PUT /v1/model-preferences` +
+`PUT /v1/org-model-preferences` (replace the activated lists; owner/admin for the org one),
 `GET/PUT /v1/provider-connections` + `DELETE /v1/provider-connections/:provider`,
 `GET/PUT /v1/org-provider-connections` + `DELETE /v1/org-provider-connections/:provider`,
 `POST /v1/skills/:slug/runs` (multipart: `prompt`, `model`, repeatable `file`; 201 → run detail),
@@ -565,6 +620,7 @@ Environment: `VERCEL_TOKEN`, `VERCEL_TEAM_ID`, `VERCEL_PROJECT_ID`,
 `COMPANION_GOLDEN_SNAPSHOT_ID`, `OPENCODE_VERSION` (pin, e.g. `1.17.13`),
 `COMPANION_SECRETS_KEY` (base64 32 B; `generateSecretsKey()` helper — the Conductor dev script
 persists a per-workspace key in `.conductor-pg/companion-secrets.key`),
-`COMPANION_SANDBOX_TIMEOUT_MS` (default `300000`), `VANISH_API_URL` (default
+`COMPANION_SANDBOX_TIMEOUT_MS` (default `300000`), `COMPANION_RUN_SWEEP_INTERVAL_MS` (sandbox
+cleanup sweep, default `600000`, `0` disables), `VANISH_API_URL` (default
 `https://vanish.sh`). Provider connections and Settings work without the Vercel variables; only
 launching runs requires them.

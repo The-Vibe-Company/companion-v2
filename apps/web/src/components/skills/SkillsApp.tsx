@@ -69,6 +69,7 @@ import { Onboarding } from "../org/Onboarding";
 import { settingsHref } from "../org/SettingsApp";
 import { SettingsDrawer, SettingsDrawerError } from "../org/SettingsDrawer";
 import { useOrgActions } from "../org/useOrgActions";
+import { parseSettingsView } from "../org/model";
 import type { SettingsAppData, SettingsDialog, SettingsIntent, SettingsRoute, SettingsView } from "../org/model";
 import { matchFilters, type Filter } from "./filters";
 
@@ -84,19 +85,6 @@ type LocalSettingsSurface =
   | ({ kind: "ready"; data: SettingsAppData } & SettingsState)
   | ({ kind: "error"; message: string; busy: boolean } & SettingsState);
 
-const SETTINGS_VIEWS: readonly SettingsView[] = [
-  "profile",
-  "preferences",
-  "apikeys",
-  "general",
-  "members",
-  "invitations",
-];
-
-function isSettingsView(value: string | null): value is SettingsView {
-  return value !== null && (SETTINGS_VIEWS as readonly string[]).includes(value);
-}
-
 function settingsStateFromIntent(intent?: SettingsIntent): SettingsState {
   const view: SettingsView = intent?.view ?? "profile";
   return {
@@ -107,8 +95,8 @@ function settingsStateFromIntent(intent?: SettingsIntent): SettingsState {
 
 function settingsStateFromSearch(search: string): SettingsState {
   const params = new URLSearchParams(search);
-  const viewRaw = params.get("view");
-  const view: SettingsView = isSettingsView(viewRaw) ? viewRaw : "profile";
+  // Shared parser (org/model.ts): whitelist + legacy `providers → models` normalization.
+  const view: SettingsView = parseSettingsView(params.get("view"));
   const dialogRaw = params.get("dialog");
   return {
     initialRoute: { view },
@@ -1567,6 +1555,7 @@ export function SkillsApp({
             onRestore={() => restoreSkillById(skill.id)}
             onArchive={() => archiveSkillById(skill.id)}
             onOpenRun={openRun}
+            onOpenModelSettings={() => openSettings({ view: "models" })}
             initialTab={detailInitialTab}
             runAgainPrompt={runAgainPrompt}
             onRunAgainConsumed={() => setRunAgainPrompt(null)}

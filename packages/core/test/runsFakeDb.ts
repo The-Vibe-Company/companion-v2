@@ -11,6 +11,8 @@ import { schema, type Db } from "@companion/db";
 
 export type FakeProviderConnectionRow = typeof schema.userProviderConnections.$inferSelect;
 export type FakeOrgProviderConnectionRow = typeof schema.orgProviderConnections.$inferSelect;
+export type FakeUserModelPreferencesRow = typeof schema.userModelPreferences.$inferSelect;
+export type FakeOrgModelPreferencesRow = typeof schema.orgModelPreferences.$inferSelect;
 export type FakeRunRow = typeof schema.skillRuns.$inferSelect;
 export type FakeRunAttachmentRow = typeof schema.skillRunAttachments.$inferSelect;
 export type FakeRunArtifactRow = typeof schema.skillRunArtifacts.$inferSelect;
@@ -41,6 +43,8 @@ export interface FakeStore {
   skillVersions: FakeSkillVersionRow[];
   providerConnections: FakeProviderConnectionRow[];
   orgProviderConnections: FakeOrgProviderConnectionRow[];
+  userModelPreferences: FakeUserModelPreferencesRow[];
+  orgModelPreferences: FakeOrgModelPreferencesRow[];
   runs: FakeRunRow[];
   runAttachments: FakeRunAttachmentRow[];
   runArtifacts: FakeRunArtifactRow[];
@@ -54,6 +58,8 @@ export function emptyStore(overrides: Partial<FakeStore> = {}): FakeStore {
     skillVersions: [],
     providerConnections: [],
     orgProviderConnections: [],
+    userModelPreferences: [],
+    orgModelPreferences: [],
     runs: [],
     runAttachments: [],
     runArtifacts: [],
@@ -99,6 +105,10 @@ const SKILL_KEYS = ["id", "slug"];
 const SKILL_VERSION_KEYS = ["skillId", "id"];
 const PROVIDER_CONN_KEYS = ["userId", "provider"];
 const ORG_PROVIDER_CONN_KEYS = ["provider"];
+const USER_MODEL_PREF_KEYS = ["userId"];
+// Nothing distinguishes org rows in a single-org fake (every row shares the org id) — empty keys
+// mean match-all; the service's JS re-filter is the real guard.
+const ORG_MODEL_PREF_KEYS: string[] = [];
 const RUN_KEYS = ["id", "skillId", "creatorId"];
 const RUN_ATTACHMENT_KEYS = ["runId", "id"];
 const RUN_ARTIFACT_KEYS = ["runId", "id"];
@@ -121,6 +131,7 @@ function runDefaults(values: Record<string, unknown>): FakeRunRow {
     transcriptUpdatedAt: null,
     lastActiveAt: null,
     frozenAt: null,
+    sandboxCleanedAt: null,
     createdAt: new Date("2026-07-01T00:00:00Z"),
     updatedAt: new Date("2026-07-01T00:00:00Z"),
     ...values,
@@ -208,6 +219,12 @@ export function fakeRunsDb(store: FakeStore): Db {
           }
           return rows;
         }
+        if (table === schema.userModelPreferences) {
+          return filterRows(store.userModelPreferences as unknown as Record<string, unknown>[], USER_MODEL_PREF_KEYS, cond);
+        }
+        if (table === schema.orgModelPreferences) {
+          return filterRows(store.orgModelPreferences as unknown as Record<string, unknown>[], ORG_MODEL_PREF_KEYS, cond);
+        }
         throw new Error("fakeRunsDb: unexpected select target");
     }
     return chain;
@@ -294,6 +311,40 @@ export function fakeRunsDb(store: FakeStore): Db {
                     updatedAt: new Date(),
                     ...v,
                   } as FakeOrgProviderConnectionRow);
+              }
+            },
+          };
+        }
+        if (table === schema.userModelPreferences) {
+          return {
+            onConflictDoUpdate: async (opts: { set: Record<string, unknown> }) => {
+              for (const v of list) {
+                const existing = store.userModelPreferences.find(
+                  (r) => r.orgId === v.orgId && r.userId === v.userId,
+                );
+                if (existing) Object.assign(existing, opts.set);
+                else
+                  store.userModelPreferences.push({
+                    createdAt: new Date(),
+                    updatedAt: new Date(),
+                    ...v,
+                  } as FakeUserModelPreferencesRow);
+              }
+            },
+          };
+        }
+        if (table === schema.orgModelPreferences) {
+          return {
+            onConflictDoUpdate: async (opts: { set: Record<string, unknown> }) => {
+              for (const v of list) {
+                const existing = store.orgModelPreferences.find((r) => r.orgId === v.orgId);
+                if (existing) Object.assign(existing, opts.set);
+                else
+                  store.orgModelPreferences.push({
+                    createdAt: new Date(),
+                    updatedAt: new Date(),
+                    ...v,
+                  } as FakeOrgModelPreferencesRow);
               }
             },
           };

@@ -92,6 +92,9 @@ import {
   parseSecretsKey,
   setOrgProviderConnection,
   setProviderConnection,
+  getActivatedModels,
+  setUserActivatedModels,
+  setOrgActivatedModels,
   createRun,
   launchAndRecordRun,
   listRuns,
@@ -101,6 +104,7 @@ import {
   promptRun,
   runJobAlive,
   subscribeRunSideEvents,
+  sweepRunSandboxes,
   publishRunArtifact,
   RunBusyError,
   RunValidationError,
@@ -142,6 +146,7 @@ import {
   MAX_COMMENT_IMAGE_BYTES,
   updateUserProfileInputSchema,
   setProviderConnectionInputSchema,
+  setActivatedModelsInputSchema,
   launchRunFieldsSchema,
   runPromptInputSchema,
   RUN_ATTACHMENT_MAX_FILES,
@@ -2275,22 +2280,72 @@ app.get("/v1/models", async (c) => {
     if (isTokenRequest(c)) return jsonError(c, "personal access tokens cannot use provider connections", 401);
     const catalog = await modelCatalog.listModels();
     // Mark which providers are usable: the user's own connection OR one shared by the workspace.
-    const connected = await withTenant(c, async ({ actor, orgId, database }) => {
-      const [personal, shared] = await Promise.all([
+    const { connected, activated } = await withTenant(c, async ({ actor, orgId, database }) => {
+      const [personal, shared, activatedLists] = await Promise.all([
         connectedProviderIds({ actor, orgId, database }),
         connectedOrgProviderIds({ actor, orgId, database }),
+        getActivatedModels({ actor, orgId, database }),
       ]);
-      return new Set<string>([...personal, ...shared]);
+      return { connected: new Set<string>([...personal, ...shared]), activated: activatedLists };
     });
+    // Prune stored activations against the live catalog so models.dev drift never shows ghosts.
+    const known = new Set(catalog.models.map((m) => m.id));
     return c.json({
       models: catalog.models,
       providers: catalog.providers.map((p) => {
         const envKeys = catalog.models.find((m) => m.provider === p.id)?.env_keys ?? [];
         return { ...p, env_keys: envKeys, connected: connected.has(p.id) };
       }),
+      activated: {
+        personal: activated.personal.filter((id) => known.has(id)),
+        org: activated.org.filter((id) => known.has(id)),
+      },
     });
   } catch (error) {
     return jsonError(c, error, 401);
+  }
+});
+
+/**
+ * Activated-model lists (personal + workspace) — the short lists the run launcher's picker shows.
+ * Ids are validated against the live catalog here (core is catalog-agnostic); createRun enforces
+ * the activation gate at run time.
+ */
+async function rejectUnknownModels(c: Context, models: string[]): Promise<Response | null> {
+  const catalog = await modelCatalog.listModels();
+  const known = new Set(catalog.models.map((m) => m.id));
+  const unknown = models.filter((m) => !known.has(m));
+  if (unknown.length > 0) return jsonError(c, `unknown model(s): ${unknown.slice(0, 3).join(", ")}`, 400);
+  return null;
+}
+
+app.put("/v1/model-preferences", async (c) => {
+  try {
+    if (isTokenRequest(c)) return jsonError(c, "personal access tokens cannot use model preferences", 401);
+    const input = setActivatedModelsInputSchema.parse(await c.req.json());
+    const rejected = await rejectUnknownModels(c, input.models);
+    if (rejected) return rejected;
+    const activated = await withTenant(c, ({ actor, orgId, database }) =>
+      setUserActivatedModels({ actor, orgId, models: input.models, database }),
+    );
+    return c.json({ activated });
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
+app.put("/v1/org-model-preferences", async (c) => {
+  try {
+    if (isTokenRequest(c)) return jsonError(c, "personal access tokens cannot use model preferences", 401);
+    const input = setActivatedModelsInputSchema.parse(await c.req.json());
+    const rejected = await rejectUnknownModels(c, input.models);
+    if (rejected) return rejected;
+    const activated = await withTenant(c, ({ actor, orgId, database }) =>
+      setOrgActivatedModels({ actor, orgId, models: input.models, database }),
+    );
+    return c.json({ activated });
+  } catch (error) {
+    return jsonError(c, error);
   }
 });
 
@@ -2670,6 +2725,31 @@ function sanitizeAttachmentName(raw: string): string {
   const base = raw.split(/[\\/]/).pop() || "attachment";
   const clean = base.replace(/[^\w. ()\[\]-]/g, "_").slice(0, 120);
   return clean.startsWith(".") ? `_${clean}` : clean || "attachment";
+}
+
+/**
+ * Sandbox sweep: destroys the provider sandboxes of terminal runs whose in-path teardown failed
+ * (or never ran — API death mid-run) and kills stale orphans. See `sweepRunSandboxes` in core.
+ * Disabled when skill runs are unconfigured or the interval is set to 0.
+ */
+const sweepMs = Number(process.env.COMPANION_RUN_SWEEP_INTERVAL_MS ?? 600_000);
+if (sweepMs > 0 && vercelConfigFromEnv()) {
+  let sweeping = false;
+  const sweep = async () => {
+    if (sweeping) return;
+    sweeping = true;
+    try {
+      const result = await sweepRunSandboxes({ ctx: runCtx(), jobAlive: runJobAlive });
+      if (result.destroyed || result.orphansKilled || result.failed) console.log("[runs] sweep:", result);
+    } catch (error) {
+      console.error("[runs] sweep failed:", error instanceof Error ? error.message : error);
+    } finally {
+      sweeping = false;
+    }
+  };
+  // First pass shortly after boot so a restart drains its orphans immediately.
+  setTimeout(sweep, 30_000).unref();
+  setInterval(sweep, sweepMs).unref();
 }
 
 const port = Number(process.env.COMPANION_API_PORT ?? process.env.PORT ?? 3001);
