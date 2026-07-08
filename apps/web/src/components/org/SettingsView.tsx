@@ -95,9 +95,12 @@ export function SettingsView({
   let pane: React.ReactNode;
   if (route.view === "profile") pane = <ProfilePane ctx={ctx} />;
   else if (route.view === "preferences") pane = <PreferencesPane ctx={ctx} />;
-  else if (route.view === "providers") pane = <ProvidersPane scope={personalProviders} />;
+  // Distinct keys: the two provider panes are the SAME component type at the same tree position,
+  // so without a key React would reuse the state (loaded connected ids) across a direct
+  // personal ↔ workspace view switch.
+  else if (route.view === "providers") pane = <ProvidersPane key="providers" scope={personalProviders} />;
   else if (route.view === "artifacts") pane = <ArtifactsPane />;
-  else if (route.view === "org-providers") pane = <ProvidersPane scope={workspaceProviders} />;
+  else if (route.view === "org-providers") pane = <ProvidersPane key="org-providers" scope={workspaceProviders} />;
   else if (route.view === "apikeys") pane = <ApiKeysPane ctx={ctx} keys={apiKeys} />;
   else if (route.view === "general") pane = <WorkspaceGeneralPane ctx={ctx} />;
   else if (route.view === "members") pane = <MembersPane ctx={ctx} onInvite={() => onDialog("invite")} />;
