@@ -92,6 +92,18 @@ export {
   removeOrgAccessDomain,
 } from "./domainAccess";
 
+// Envelope encryption for agent secrets (node:crypto — kept off the framework-free `index` entry so
+// the browser-safe authz exports never pull a Node built-in into a client bundle).
+export * from "./secretbox";
+
+// Companion Agents services. Same load-order reasoning as `./labels`: `agents.ts` imports only
+// `assertMember` (hoisted) and the `ActorContext` type from here.
+export * from "./agents";
+export * from "./agentRuntime";
+
+// Saved per-user model-provider connections (API keys). Same load-order reasoning as `./labels`.
+export * from "./providerConnections";
+
 export interface ActorContext {
   id: string;
   email: string;

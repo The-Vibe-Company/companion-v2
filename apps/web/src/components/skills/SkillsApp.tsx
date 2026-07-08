@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import type {
+  AgentsListResponse,
   LabelColor,
   LabelIcon,
   LabelsResponse,
@@ -29,8 +30,11 @@ import {
   unassignSkillLabel,
 } from "@/lib/queries";
 import { fetchSettingsAppData } from "@/lib/settingsClient";
-import { mapSkill, type MeVM, type OrgVM, type SkillVM } from "@/lib/types";
-import { Sidebar } from "./Sidebar";
+import { mapAgent, mapSkill, type MeVM, type OrgVM, type SkillVM } from "@/lib/types";
+import { LIB_NAMES } from "../libraryNames";
+import { deriveAgentNav } from "../agents/derive";
+import { agentsRouteHref } from "../agents/route";
+import { Sidebar, type SidebarAgentsNav } from "./Sidebar";
 import { ListView } from "./ListView";
 import { treeRowKey } from "./dragGeometry";
 import { useSkillDrag, type PointerLike } from "./useSkillDrag";
@@ -150,7 +154,7 @@ export type DragItem =
  * once for `a` and once for `a/b`). Sorted lexicographically by path for a stable (hydration-safe)
  * order regardless of insertion order.
  */
-function deriveTreeRows(skills: SkillVM[], labels: LabelVM[]): TreeRow[] {
+export function deriveTreeRows(skills: SkillVM[], labels: LabelVM[]): TreeRow[] {
   const appearance = new Map<string, { displayName: string | null; color: LabelColor | null; icon: LabelIcon | null }>();
   const paths = new Set<string>();
   const childPaths = new Set<string>(); // any path that has at least one child (for chevrons)
@@ -262,6 +266,7 @@ export function SkillsApp({
   currentOrg,
   initialRoute,
   initialRouteSource,
+  initialAgentsNav,
 }: {
   initialMineSkills: SkillVM[];
   initialOrgSkills: SkillVM[];
@@ -274,6 +279,8 @@ export function SkillsApp({
   currentOrg: OrgVM;
   initialRoute: SkillsRoute;
   initialRouteSource: SkillsRouteSource;
+  /** Best-effort agents lists (per library) for the sidebar Agents roots; null/absent hides them. */
+  initialAgentsNav?: { mine: AgentsListResponse | null; org: AgentsListResponse | null };
 }) {
   const router = useRouter();
   const orgActions = useOrgActions();
@@ -1107,7 +1114,7 @@ export function SkillsApp({
     if (selection.kind === "starred") return ["Starred"];
     if (selection.kind === "installed") return ["Installed"];
     if (selection.kind === "label" && selection.label) return selection.label.split("/");
-    return selection.lib === "org" ? ["All skills"] : ["My Skills"];
+    return selection.lib === "org" ? ["All skills"] : [LIB_NAMES.mine];
   }, [selection]);
 
   const routeForCurrentSurface = useCallback(
@@ -1410,6 +1417,21 @@ export function SkillsApp({
     return [...mineSkills, ...orgSkills.filter((s) => !seen.has(s.id))];
   }, [mineSkills, orgSkills]);
 
+  // The sidebar Agents roots (option 1a): derived from the best-effort agents lists the page
+  // fetched. Never active on the skills surface; selecting navigates to the /agents console.
+  const agentsNav = useMemo<SidebarAgentsNav | null>(() => {
+    if (!initialAgentsNav || (!initialAgentsNav.mine && !initialAgentsNav.org)) return null;
+    const mineAgents = (initialAgentsNav.mine?.agents ?? []).map(mapAgent);
+    const orgAgents = (initialAgentsNav.org?.agents ?? []).map(mapAgent);
+    return {
+      ...deriveAgentNav(mineAgents, orgAgents),
+      active: null,
+      onSelectAgents: (lib: SkillsLibrary) => router.push(agentsRouteHref({ lib, kind: "list" })),
+      onSelectAgentLabel: (lib: SkillsLibrary, label: string) =>
+        router.push(agentsRouteHref({ lib, kind: "list", label })),
+    };
+  }, [initialAgentsNav, router]);
+
   // Pointer-based drag-and-drop (skills + folders). The hook owns the live mechanics
   // (ghost, hit-testing, dwell auto-open, teardown); we feed it the DOM-agnostic
   // orchestration callbacks + the per-(lib,path) folder lookup for the dwell check.
@@ -1482,6 +1504,7 @@ export function SkillsApp({
         mobileOpen={mobileSidebarOpen}
         onToggleMobile={() => setMobileSidebarOpen((open) => !open)}
         onCloseMobile={() => setMobileSidebarOpen(false)}
+        agentsNav={agentsNav}
       />
       {mobileSidebarOpen && (
         <button

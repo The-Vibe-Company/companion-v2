@@ -33,3 +33,22 @@ export function formatDate(iso: string): string {
 export function clockTime(date = new Date()): string {
   return date.toISOString().slice(11, 19);
 }
+
+/** Compact duration for provision steps / tool runs: 0.6s, 1.2s, 12s, 60s. */
+export function formatDurationSeconds(ms: number | null): string {
+  if (ms == null) return "";
+  const s = ms / 1000;
+  if (s < 10) return `${(Math.round(s * 10) / 10).toFixed(1)}s`;
+  return `${Math.round(s)}s`;
+}
+
+/** "Mar 12, 2026" — pinned to UTC so SSR and client render identical text. */
+export function formatHumanDateUTC(iso: string | null): string {
+  if (!iso) return "—";
+  return new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    timeZone: "UTC",
+  }).format(new Date(iso));
+}

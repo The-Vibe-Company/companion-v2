@@ -311,7 +311,7 @@ function queryFolderRow(container: HTMLElement, path: string): HTMLElement | nul
   return button?.closest<HTMLElement>(".lblrow") ?? null;
 }
 
-function libraryHeader(container: HTMLElement, title: "My Skills" | "Organization"): HTMLElement {
+function libraryHeader(container: HTMLElement, title: "My Companions" | "Organization"): HTMLElement {
   const button = findButton(container, title);
   const row = button.closest<HTMLElement>(".ml-libhead");
   if (!row) throw new Error(`Could not find library header: ${title}`);
@@ -702,11 +702,32 @@ describe("SkillsApp sidebar label tree derivation", () => {
     });
     await flushEffects();
 
-    // The first `.ml-libhead__count` belongs to the My Skills section.
+    // The first `.ml-libhead__count` belongs to the My Companions section (agents + skills total;
+    // no agentsNav is wired here, so it equals the skills count).
     const mineCount = container.querySelector(".ml-libhead__count");
     expect(mineCount?.textContent?.trim()).toBe("3");
     const starred = findButton(container, "Starred skills");
     expect(starred.querySelector(".navitem__count")?.textContent?.trim()).toBe("1");
+  });
+
+  it("renders the option-1a structure: renamed libraries + per-library Skills roots, expanded by default", async () => {
+    const { container } = await mountSkillsApp({ lib: "mine", kind: "all" }, {
+      props: {
+        initialMineSkills: [skill({ id: "seo-helper", scope: "personal", source: "authored" })],
+      },
+    });
+    await flushEffects();
+
+    // Renamed personal library; the org library keeps its name.
+    expect(libraryHeader(container, "My Companions")).not.toBeNull();
+    expect(libraryHeader(container, "Organization")).not.toBeNull();
+    // One Skills root per library (title carries the library name), counting only skills.
+    expect(findButton(container, "My Companions skills")).not.toBeNull();
+    expect(findButton(container, "Organization skills")).not.toBeNull();
+    // The skills subtrees are expanded by default on the skills surface, so the mine shortcuts stay visible.
+    expect(findButton(container, "Starred skills")).not.toBeNull();
+    // No Agents root without agentsNav (the agents API may not be reachable).
+    expect(container.textContent).not.toContain("Agents");
   });
 });
 

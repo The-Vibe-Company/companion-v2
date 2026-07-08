@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { OrgRole } from "@companion/contracts";
 import {
+  canAccessAgent,
   canAccessSkill,
+  canManageAgent,
   canManageOrg,
   canManagePersonalSkill,
   canPerform,
@@ -9,6 +11,7 @@ import {
   isLastOwner,
   isOrgAdmin,
   type Actor,
+  type AgentScopeRef,
   type SkillAction,
   type SkillScopeRef,
 } from "../src/index";
@@ -76,6 +79,30 @@ describe("canManagePersonalSkill — owner-only mutate (Share / personal-folder 
 
   it("org skills are not managed through the personal gate", () => {
     expect(canManagePersonalSkill("u-creator", { scope: "org", creatorId: "u-creator" })).toBe(false);
+  });
+});
+
+describe("canAccessAgent / canManageAgent — agents mirror the skill scope gates", () => {
+  const orgAgent: AgentScopeRef = { scope: "org", creatorId: "u-creator" };
+  const personalAgent: AgentScopeRef = { scope: "personal", creatorId: "u-owner" };
+
+  it("org agent is visible to and manageable by any member (flat, like org skills)", () => {
+    for (const actorId of ["u-creator", "u-stranger"]) {
+      expect(canAccessAgent(actorId, orgAgent)).toBe(true);
+      expect(canManageAgent(actorId, orgAgent)).toBe(true);
+    }
+  });
+
+  it("personal agent is visible/manageable ONLY by its creator", () => {
+    expect(canAccessAgent("u-owner", personalAgent)).toBe(true);
+    expect(canManageAgent("u-owner", personalAgent)).toBe(true);
+    expect(canAccessAgent("u-someone-else", personalAgent)).toBe(false);
+    expect(canManageAgent("u-someone-else", personalAgent)).toBe(false);
+  });
+
+  it("an admin/owner who is NOT the creator still cannot see a personal agent (no admin override)", () => {
+    expect(canAccessAgent("u-admin", personalAgent)).toBe(false);
+    expect(canManageAgent("u-admin", personalAgent)).toBe(false);
   });
 });
 

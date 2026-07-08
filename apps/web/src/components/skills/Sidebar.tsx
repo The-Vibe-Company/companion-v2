@@ -5,6 +5,8 @@ import type { LabelColor, LabelIcon } from "@companion/contracts";
 import { LABEL_COLORS, LABEL_ICONS, labelDisplayNameToPath } from "@companion/contracts";
 import { Icon } from "../Icon";
 import { OrgSwitcher } from "../org/OrgSwitcher";
+import { LIB_NAMES } from "../libraryNames";
+import type { AgentsNavData } from "../agents/derive";
 import type { OrgVM } from "@/lib/types";
 import type { SkillsLibrary } from "./route";
 import type { ResolvedTarget } from "./dragGeometry";
@@ -12,6 +14,18 @@ import type { DragItem, TreeRow } from "./SkillsApp";
 
 type SidebarSelection = { lib: SkillsLibrary; kind: "all" | "starred" | "installed" | "label"; label?: string } | null;
 type MoveTarget = { path: string; label: string };
+
+/**
+ * The Agents half of the sidebar (design option 1a: each library exposes an Agents root above the
+ * Skills root). Provided by whichever surface renders the sidebar; undefined hides the Agents rows
+ * (e.g. while the agents API is unavailable).
+ */
+export interface SidebarAgentsNav extends AgentsNavData {
+  /** The active agents selection; non-null only on the /agents surface. */
+  active: { lib: SkillsLibrary; label: string | null } | null;
+  onSelectAgents: (lib: SkillsLibrary) => void;
+  onSelectAgentLabel: (lib: SkillsLibrary, label: string) => void;
+}
 
 function labelParent(path: string): string | null {
   const i = path.lastIndexOf("/");
@@ -279,6 +293,7 @@ function LabelTreeRows({
   hovered,
   openPendingPath,
   dropDone,
+  readOnly = false,
   onToggleExpand,
   onSelect,
   onOpenMenu,
@@ -292,6 +307,8 @@ function LabelTreeRows({
   hovered: ResolvedTarget | null;
   openPendingPath: string | null;
   dropDone: ResolvedTarget | null;
+  /** True on surfaces that only navigate (no folder menus / drags), e.g. the agents console. */
+  readOnly?: boolean;
   onToggleExpand: (path: string) => void;
   onSelect: (path: string) => void;
   onOpenMenu: (row: TreeRow, pos: { x: number; y: number }) => void;
@@ -333,7 +350,7 @@ function LabelTreeRows({
             }
             key={row.path}
             onPointerDown={(e) => {
-              if (e.button !== 0) return;
+              if (readOnly || e.button !== 0) return;
               onStartDrag({ kind: "label", lib, path: row.path, leaf: row.leafName }, e);
             }}
             data-skill-drop-kind="label"
@@ -370,19 +387,21 @@ function LabelTreeRows({
               <span className="lblrow__name">{row.displayName ?? row.leafName}</span>
               <span className="lblrow__count tnum">{row.count}</span>
             </button>
-            <button
-              type="button"
-              className="lblrow__more"
-              aria-label={row.path + " options"}
-              title="Folder options"
-              onClick={(e) => {
-                e.stopPropagation();
-                const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-                onOpenMenu(row, { x: r.left, y: r.bottom + 4 });
-              }}
-            >
-              <Icon name="more-horizontal" size={15} />
-            </button>
+            {!readOnly && (
+              <button
+                type="button"
+                className="lblrow__more"
+                aria-label={row.path + " options"}
+                title="Folder options"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                  onOpenMenu(row, { x: r.left, y: r.bottom + 4 });
+                }}
+              >
+                <Icon name="more-horizontal" size={15} />
+              </button>
+            )}
           </div>
         );
       })}
@@ -433,6 +452,9 @@ export function Sidebar({
   mobileOpen,
   onToggleMobile,
   onCloseMobile,
+  surface = "skills",
+  agentsNav,
+  skillsReadOnly = false,
 }: {
   orgs: OrgVM[];
   currentOrg: OrgVM;
@@ -477,6 +499,12 @@ export function Sidebar({
   mobileOpen: boolean;
   onToggleMobile: () => void;
   onCloseMobile: () => void;
+  /** Which surface renders the sidebar; drives the default Agents/Skills root expansion. */
+  surface?: "skills" | "agents";
+  /** Per-library Agents rows (option 1a). Undefined hides the Agents roots entirely. */
+  agentsNav?: SidebarAgentsNav | null;
+  /** True on surfaces where the skills tree only navigates (no folders menu, no "+", no drag). */
+  skillsReadOnly?: boolean;
 }) {
   const [menu, setMenu] = useState<{ row: TreeRow; lib: SkillsLibrary; pos: { x: number; y: number } } | null>(null);
   // The inline new-folder input, scoped to the library whose `+` (or "add sublabel") opened it.
@@ -485,6 +513,18 @@ export function Sidebar({
   const newFolderInputRef = useRef<HTMLInputElement>(null);
   const [mineOpen, setMineOpen] = useState(true);
   const [orgOpen, setOrgOpen] = useState(true);
+  // Per-library sub-roots (option 1a). Defaults follow the surface: the skills pages open the Skills
+  // subtrees (keeping today's tree visible), the agents console opens the Agents rows instead.
+  const [agentsOpen, setAgentsOpen] = useState<Record<SkillsLibrary, boolean>>({
+    mine: surface === "agents",
+    org: surface === "agents",
+  });
+  const [skillsOpen, setSkillsOpen] = useState<Record<SkillsLibrary, boolean>>({
+    mine: surface === "skills",
+    org: surface === "skills",
+  });
+  const toggleAgentsOpen = (lib: SkillsLibrary) => setAgentsOpen((open) => ({ ...open, [lib]: !open[lib] }));
+  const toggleSkillsOpen = (lib: SkillsLibrary) => setSkillsOpen((open) => ({ ...open, [lib]: !open[lib] }));
 
   const warmSettings = () => onWarmSettings();
   const runAndClose = (action: () => void) => {
@@ -529,6 +569,114 @@ export function Sidebar({
     } catch {
       return;
     }
+  };
+
+  /** The per-library Agents root + its group-label rows (design option 1a). */
+  const agentsRootRows = (lib: SkillsLibrary) => {
+    if (!agentsNav) return null;
+    const side = agentsNav[lib];
+    const active = agentsNav.active?.lib === lib ? agentsNav.active : null;
+    const rootActive = active !== null && active.label === null;
+    const isOpen = agentsOpen[lib];
+    return (
+      <>
+        <div className={"lblrow" + (rootActive ? " lblrow--active" : "")}>
+          {side.labels.length > 0 ? (
+            <button
+              type="button"
+              className={"lblrow__chev" + (isOpen ? " is-open" : "")}
+              aria-label={isOpen ? `Collapse ${LIB_NAMES[lib]} agent labels` : `Expand ${LIB_NAMES[lib]} agent labels`}
+              aria-expanded={isOpen}
+              onClick={() => toggleAgentsOpen(lib)}
+            >
+              <Icon name="chevron-right" size={13} />
+            </button>
+          ) : (
+            <span className="lblrow__chev lblrow__chev--leaf" aria-hidden="true" />
+          )}
+          <button
+            type="button"
+            className="lblrow__main"
+            aria-current={rootActive ? "page" : undefined}
+            title={`${LIB_NAMES[lib]} agents`}
+            onClick={() => runAndClose(() => agentsNav.onSelectAgents(lib))}
+          >
+            <span className="lblrow__ico">
+              <Icon name="bot" size={15} />
+            </span>
+            <span className="lblrow__name">Agents</span>
+            <span className="lblrow__count tnum" style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
+              {side.updateDot && <span className="ml-updot" style={{ marginLeft: 0 }} title="Skill updates available" />}
+              {side.count}
+            </span>
+          </button>
+        </div>
+        {isOpen && side.labels.length > 0 && (
+          <div style={{ paddingLeft: 14, display: "flex", flexDirection: "column", gap: 1 }}>
+            {side.labels.map((label) => {
+              const labelActive = active?.label === label.name;
+              return (
+                <div key={label.name} className={"lblrow" + (labelActive ? " lblrow--active" : "")}>
+                  <span className="lblrow__chev lblrow__chev--leaf" aria-hidden="true" />
+                  <button
+                    type="button"
+                    className="lblrow__main"
+                    aria-current={labelActive ? "page" : undefined}
+                    title={label.name}
+                    onClick={() => runAndClose(() => agentsNav.onSelectAgentLabel(lib, label.name))}
+                  >
+                    <span className="lblrow__ico" style={{ color: label.color }}>
+                      <Icon name={label.icon} size={14} />
+                    </span>
+                    <span className="lblrow__name">{label.name}</span>
+                    <span className="lblrow__count tnum">{label.count}</span>
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </>
+    );
+  };
+
+  /** The per-library Skills root; its subtree holds the existing shortcuts + folder tree. */
+  const skillsRootRow = (lib: SkillsLibrary, count: number, onOpenAll: () => void) => {
+    const isOpen = skillsOpen[lib];
+    const dropOk = skillDropMode && rootDropOk(lib);
+    return (
+      <div
+        className={"lblrow" + (dropOk ? " lblrow--dropok" : "") + (rootDropDone(lib) ? " lblrow--dropdone" : "")}
+        {...(skillsReadOnly ? {} : rootDropProps(lib))}
+      >
+        <button
+          type="button"
+          className={"lblrow__chev" + (isOpen ? " is-open" : "")}
+          aria-label={isOpen ? `Collapse ${LIB_NAMES[lib]} skills` : `Expand ${LIB_NAMES[lib]} skills`}
+          aria-expanded={isOpen}
+          onClick={() => toggleSkillsOpen(lib)}
+        >
+          <Icon name="chevron-right" size={13} />
+        </button>
+        <button
+          type="button"
+          className="lblrow__main"
+          title={`${LIB_NAMES[lib]} skills`}
+          onClick={() => {
+            // On the skills surface the row is a pure disclosure (the libhead opens the all-view);
+            // on other surfaces it navigates back to the skills pages.
+            if (surface === "skills") toggleSkillsOpen(lib);
+            else runAndClose(onOpenAll);
+          }}
+        >
+          <span className="lblrow__ico">
+            <Icon name="package" size={15} />
+          </span>
+          <span className="lblrow__name">Skills</span>
+          <span className="lblrow__count tnum">{count}</span>
+        </button>
+      </div>
+    );
   };
 
   const newFolderRow = (lib: SkillsLibrary, placeholder: string) =>
@@ -601,7 +749,7 @@ export function Sidebar({
           <button
             type="button"
             className={"ml-libhead__chev" + (mineOpen ? " is-open" : "")}
-            aria-label={mineOpen ? "Collapse My Skills" : "Expand My Skills"}
+            aria-label={mineOpen ? `Collapse ${LIB_NAMES.mine}` : `Expand ${LIB_NAMES.mine}`}
             aria-expanded={mineOpen}
             onClick={() => setMineOpen((o) => !o)}
           >
@@ -615,67 +763,76 @@ export function Sidebar({
               setMineOpen(true);
               runAndClose(onSelectMineAll);
             }}
-            title="My Skills"
+            title={LIB_NAMES.mine}
           >
             <span className="ml-libhead__ico">
               <Icon name="user" size={16} />
             </span>
-            <span className="ml-libhead__name">My Skills</span>
+            <span className="ml-libhead__name">{LIB_NAMES.mine}</span>
           </button>
-          <span className="ml-libhead__count tnum">{mineCount}</span>
-          <button className="side__addteam" title="New personal folder" aria-label="New personal folder" onClick={() => openNewFolder("mine", "")}>
-            <Icon name="plus" size={14} />
-          </button>
+          <span className="ml-libhead__count tnum">{mineCount + (agentsNav?.mine.count ?? 0)}</span>
+          {!skillsReadOnly && (
+            <button className="side__addteam" title="New personal folder" aria-label="New personal folder" onClick={() => openNewFolder("mine", "")}>
+              <Icon name="plus" size={14} />
+            </button>
+          )}
         </div>
         {mineOpen && (
           <div className="ml-kids">
-            <button
-              className={"navitem" + (inWorkspace && selection!.kind === "starred" ? " navitem--active" : "")}
-              aria-current={inWorkspace && selection!.kind === "starred" ? "page" : undefined}
-              onClick={() => runAndClose(onSelectStarred)}
-              title="Starred skills"
-            >
-              <span className="navitem__ico">
-                <Icon name="star" />
-              </span>
-              <span className="navitem__label">Starred</span>
-              <span className="navitem__count tnum">{starredCount}</span>
-            </button>
-            <button
-              className={"navitem" + (inWorkspace && selection!.kind === "installed" ? " navitem--active" : "")}
-              aria-current={inWorkspace && selection!.kind === "installed" ? "page" : undefined}
-              onClick={() => runAndClose(onSelectInstalled)}
-              title={installedUpdateCount > 0 ? `${installedUpdateCount} update${installedUpdateCount === 1 ? "" : "s"} available` : "Installed from the organization"}
-            >
-              <span className="navitem__ico">
-                <Icon name="download" />
-              </span>
-              <span className="navitem__label">Installed</span>
-              {installedUpdateCount > 0 ? (
-                <span
-                  className="ml-updot"
-                  title={`${installedUpdateCount} update${installedUpdateCount === 1 ? "" : "s"} available`}
-                  aria-label={`${installedUpdateCount} update${installedUpdateCount === 1 ? "" : "s"} available`}
+            {agentsRootRows("mine")}
+            {skillsRootRow("mine", mineCount, onSelectMineAll)}
+            {skillsOpen.mine && (
+              <div style={{ paddingLeft: 14, display: "flex", flexDirection: "column", gap: 1 }}>
+                <button
+                  className={"navitem" + (inWorkspace && selection!.kind === "starred" ? " navitem--active" : "")}
+                  aria-current={inWorkspace && selection!.kind === "starred" ? "page" : undefined}
+                  onClick={() => runAndClose(onSelectStarred)}
+                  title="Starred skills"
+                >
+                  <span className="navitem__ico">
+                    <Icon name="star" />
+                  </span>
+                  <span className="navitem__label">Starred</span>
+                  <span className="navitem__count tnum">{starredCount}</span>
+                </button>
+                <button
+                  className={"navitem" + (inWorkspace && selection!.kind === "installed" ? " navitem--active" : "")}
+                  aria-current={inWorkspace && selection!.kind === "installed" ? "page" : undefined}
+                  onClick={() => runAndClose(onSelectInstalled)}
+                  title={installedUpdateCount > 0 ? `${installedUpdateCount} update${installedUpdateCount === 1 ? "" : "s"} available` : "Installed from the organization"}
+                >
+                  <span className="navitem__ico">
+                    <Icon name="download" />
+                  </span>
+                  <span className="navitem__label">Installed</span>
+                  {installedUpdateCount > 0 ? (
+                    <span
+                      className="ml-updot"
+                      title={`${installedUpdateCount} update${installedUpdateCount === 1 ? "" : "s"} available`}
+                      aria-label={`${installedUpdateCount} update${installedUpdateCount === 1 ? "" : "s"} available`}
+                    />
+                  ) : (
+                    <span className="navitem__count tnum">{installedCount}</span>
+                  )}
+                </button>
+                {newFolderRow("mine", "drafts/research…")}
+                <LabelTreeRows
+                  lib="mine"
+                  rows={mineTreeRows}
+                  expanded={expanded}
+                  activePath={activeMineLabel}
+                  drag={drag}
+                  hovered={hovered}
+                  openPendingPath={openPendingPath}
+                  dropDone={dropDone}
+                  readOnly={skillsReadOnly}
+                  onToggleExpand={onToggleExpand}
+                  onSelect={(path) => runAndClose(() => onSelectLabel("mine", path))}
+                  onOpenMenu={(row, pos) => setMenu({ row, lib: "mine", pos })}
+                  onStartDrag={onLabelStartDrag}
                 />
-              ) : (
-                <span className="navitem__count tnum">{installedCount}</span>
-              )}
-            </button>
-            {newFolderRow("mine", "drafts/research…")}
-            <LabelTreeRows
-              lib="mine"
-              rows={mineTreeRows}
-              expanded={expanded}
-              activePath={activeMineLabel}
-              drag={drag}
-              hovered={hovered}
-              openPendingPath={openPendingPath}
-              dropDone={dropDone}
-              onToggleExpand={onToggleExpand}
-              onSelect={(path) => runAndClose(() => onSelectLabel("mine", path))}
-              onOpenMenu={(row, pos) => setMenu({ row, lib: "mine", pos })}
-              onStartDrag={onLabelStartDrag}
-            />
+              </div>
+            )}
           </div>
         )}
 
@@ -707,35 +864,44 @@ export function Sidebar({
               setOrgOpen(true);
               runAndClose(onSelectOrgAll);
             }}
-            title="Organization"
+            title={LIB_NAMES.org}
           >
             <span className="ml-libhead__ico">
               <Icon name="building-2" size={16} />
             </span>
-            <span className="ml-libhead__name">Organization</span>
+            <span className="ml-libhead__name">{LIB_NAMES.org}</span>
           </button>
-          <span className="ml-libhead__count tnum">{orgCount}</span>
-          <button className="side__addteam" title="New org folder" aria-label="New org folder" onClick={() => openNewFolder("org", "")}>
-            <Icon name="plus" size={14} />
-          </button>
+          <span className="ml-libhead__count tnum">{orgCount + (agentsNav?.org.count ?? 0)}</span>
+          {!skillsReadOnly && (
+            <button className="side__addteam" title="New org folder" aria-label="New org folder" onClick={() => openNewFolder("org", "")}>
+              <Icon name="plus" size={14} />
+            </button>
+          )}
         </div>
         {orgOpen && (
           <div className="ml-kids">
-            {newFolderRow("org", "marketing/seo…")}
-            <LabelTreeRows
-              lib="org"
-              rows={orgTreeRows}
-              expanded={expanded}
-              activePath={activeOrgLabel}
-              drag={drag}
-              hovered={hovered}
-              openPendingPath={openPendingPath}
-              dropDone={dropDone}
-              onToggleExpand={onToggleExpand}
-              onSelect={(path) => runAndClose(() => onSelectLabel("org", path))}
-              onOpenMenu={(row, pos) => setMenu({ row, lib: "org", pos })}
-              onStartDrag={onLabelStartDrag}
-            />
+            {agentsRootRows("org")}
+            {skillsRootRow("org", orgCount, onSelectOrgAll)}
+            {skillsOpen.org && (
+              <div style={{ paddingLeft: 14, display: "flex", flexDirection: "column", gap: 1 }}>
+                {newFolderRow("org", "marketing/seo…")}
+                <LabelTreeRows
+                  lib="org"
+                  rows={orgTreeRows}
+                  expanded={expanded}
+                  activePath={activeOrgLabel}
+                  drag={drag}
+                  hovered={hovered}
+                  openPendingPath={openPendingPath}
+                  dropDone={dropDone}
+                  readOnly={skillsReadOnly}
+                  onToggleExpand={onToggleExpand}
+                  onSelect={(path) => runAndClose(() => onSelectLabel("org", path))}
+                  onOpenMenu={(row, pos) => setMenu({ row, lib: "org", pos })}
+                  onStartDrag={onLabelStartDrag}
+                />
+              </div>
+            )}
           </div>
         )}
 

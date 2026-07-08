@@ -11,6 +11,37 @@ import { setCookie } from "hono/cookie";
 import {
   acceptInvitation,
   addComment,
+  AgentBusyError,
+  AgentValidationError,
+  createAgent,
+  destroyAgent,
+  connectedOrgProviderIds,
+  connectedProviderIds,
+  deleteOrgProviderConnection,
+  deleteProviderConnection,
+  getAgentBySlug,
+  getAgentChatTarget,
+  getProvisionProgress,
+  listOrgProviderConnections,
+  listProviderConnections,
+  setOrgProviderConnection,
+  setProviderConnection,
+  listAffectedAgents,
+  listAgents,
+  markProvisionInterrupted,
+  parseSecretsKey,
+  pauseAgent,
+  provisionAgent,
+  pushSkillUpdate,
+  retryProvision,
+  runSkillPush,
+  sandboxNameFor,
+  setAgentSecrets,
+  updateAgentConfig,
+  touchAgentActivity,
+  updateAgentSessionsCache,
+  wakeAgent,
+  type AgentControlContext,
   assertCommentTarget,
   addOrgAccessDomain,
   archiveSkill,
@@ -89,6 +120,13 @@ import {
   addOrgAccessDomainInputSchema,
   archiveSkillInputSchema,
   assignLabelInputSchema,
+  agentPromptInputSchema,
+  createAgentInputSchema,
+  destroyAgentInputSchema,
+  setProviderConnectionInputSchema,
+  pushAgentSkillInputSchema,
+  updateAgentInputSchema,
+  updateAgentSecretsInputSchema,
   completeOnboardingInputSchema,
   createLabelInputSchema,
   createSkillInputSchema,
@@ -136,6 +174,16 @@ import {
   putSkillArchive,
   signedSkillArchiveUrl,
 } from "@companion/storage";
+import {
+  createChatClient,
+  createChatSession,
+  createModelCatalog,
+  createVercelRuntime,
+  loadSessionItems,
+  sendPromptAsync,
+  streamChatEvents,
+  vercelConfigFromEnv,
+} from "@companion/sandbox";
 import {
   bumpSemver,
   compareSemver,
@@ -2219,6 +2267,583 @@ app.delete("/v1/tokens/:id", async (c) => {
     return c.json({ ok: true });
   } catch (error) {
     return jsonError(c, error);
+  }
+});
+
+
+/* ================================ Companion Agents ================================ */
+
+/**
+ * Session-only surface (PATs are rejected by the default `actorFromContext`). The runtime control
+ * context is composed lazily so an instance without agent env vars still boots for everything else.
+ */
+const agentModelCatalog = createModelCatalog();
+let agentSecretsKeyCache: Buffer | null = null;
+/** The envelope KEK, independent of the full runtime ctx — provider connections work pre-Vercel. */
+function agentSecretsKey(): Buffer {
+  if (!agentSecretsKeyCache) agentSecretsKeyCache = parseSecretsKey(process.env.COMPANION_SECRETS_KEY);
+  return agentSecretsKeyCache;
+}
+let agentControlCtx: AgentControlContext | null = null;
+function agentCtx(): AgentControlContext {
+  if (agentControlCtx) return agentControlCtx;
+  const vercel = vercelConfigFromEnv();
+  if (!vercel) {
+    throw new Error("Companion Agents is not configured: set VERCEL_TOKEN, VERCEL_TEAM_ID and VERCEL_PROJECT_ID");
+  }
+  agentControlCtx = {
+    runtime: createVercelRuntime(vercel),
+    runTenant: withTenantContext,
+    fetchArchive: (key) => getSkillArchive({ key }),
+    secretsKey: parseSecretsKey(process.env.COMPANION_SECRETS_KEY),
+    goldenSnapshotId: process.env.COMPANION_GOLDEN_SNAPSHOT_ID?.trim() || null,
+    opencodeVersion: process.env.OPENCODE_VERSION?.trim() || null,
+    region: "iad1",
+    timeoutMs: Number(process.env.COMPANION_SANDBOX_TIMEOUT_MS ?? 300000),
+    // Key NAMES only — each agent runs on its owner's key, stored as a write-only agent secret.
+    resolveModelKeys: (model) => agentModelCatalog.resolveModel(model),
+  };
+  return agentControlCtx;
+}
+
+/**
+ * In-process fire-and-forget jobs (provision pipeline, skill pushes), deduped per agent so a
+ * double-POST can never run two pipelines concurrently in one process. Progress is persisted on the
+ * agent row, so a crash surfaces as the designed "interrupted" error with a fresh-fork retry.
+ */
+const agentJobs = new Map<string, Promise<void>>();
+function kickAgentJob(key: string, job: () => Promise<void>): void {
+  if (agentJobs.has(key)) return;
+  const promise = job()
+    .catch((error) => {
+      console.error(`[agents] background job ${key} failed:`, error instanceof Error ? error.message : error);
+    })
+    .finally(() => {
+      agentJobs.delete(key);
+    });
+  agentJobs.set(key, promise);
+}
+const provisionJobKey = (orgId: string, slug: string) => `provision:${orgId}:${slug}`;
+const pushJobKey = (orgId: string, slug: string) => `push:${orgId}:${slug}`;
+const wakeJobKey = (orgId: string, slug: string) => `wake:${orgId}:${slug}`;
+
+/** Coalesce concurrent wakes of the same agent so serve is relaunched at most once at a time. */
+const inFlightWakes = new Map<string, Promise<unknown>>();
+function sharedWake<T>(orgId: string, slug: string, run: () => Promise<T>): Promise<T> {
+  const key = wakeJobKey(orgId, slug);
+  const existing = inFlightWakes.get(key);
+  if (existing) return existing as Promise<T>;
+  const promise = run().finally(() => inFlightWakes.delete(key));
+  inFlightWakes.set(key, promise);
+  return promise;
+}
+
+/** Map agent service failures onto the HTTP statuses the console expects. */
+function agentError(c: Context, error: unknown): Response {
+  if (error instanceof AgentBusyError) return jsonError(c, error, 409);
+  if (error instanceof AgentValidationError) {
+    return jsonError(c, error, error.message === "agent not found" ? 404 : 422);
+  }
+  const message = error instanceof Error ? error.message : "";
+  if (message === "not authenticated" || message.startsWith("personal access tokens")) {
+    return jsonError(c, error, 401);
+  }
+  return jsonError(c, error);
+}
+
+app.get("/v1/agents", async (c) => {
+  try {
+    const library = c.req.query("lib") === "org" ? ("org" as const) : ("mine" as const);
+    return c.json(await withTenant(c, ({ actor, orgId, database }) => listAgents({ actor, orgId, library, database })));
+  } catch (error) {
+    return jsonError(c, error, 401);
+  }
+});
+
+app.get("/v1/agents/models", async (c) => {
+  try {
+    const catalog = await agentModelCatalog.listModels();
+    // Mark which providers are usable: the user's own connection OR one shared by the workspace.
+    const connected = await withTenant(c, async ({ actor, orgId, database }) => {
+      const [personal, shared] = await Promise.all([
+        connectedProviderIds({ actor, orgId, database }),
+        connectedOrgProviderIds({ actor, orgId, database }),
+      ]);
+      return new Set<string>([...personal, ...shared]);
+    });
+    return c.json({
+      models: catalog.models,
+      providers: catalog.providers.map((p) => {
+        const envKeys = catalog.models.find((m) => m.provider === p.id)?.env_keys ?? [];
+        return { ...p, env_keys: envKeys, connected: connected.has(p.id) };
+      }),
+    });
+  } catch (error) {
+    return jsonError(c, error, 401);
+  }
+});
+
+/* ---- Provider connections (saved per-user model-provider API keys; session-only) ---- */
+
+app.get("/v1/provider-connections", async (c) => {
+  try {
+    const connections = await withTenant(c, ({ actor, orgId, database }) =>
+      listProviderConnections({ actor, orgId, database }),
+    );
+    return c.json({ connections });
+  } catch (error) {
+    return jsonError(c, error, 401);
+  }
+});
+
+app.put("/v1/provider-connections", async (c) => {
+  try {
+    const input = setProviderConnectionInputSchema.parse(await c.req.json());
+    const connection = await withTenant(c, ({ actor, orgId, database }) =>
+      setProviderConnection({
+        actor,
+        orgId,
+        provider: input.provider,
+        keyName: input.key_name,
+        key: input.key,
+        secretsKey: agentSecretsKey(),
+        database,
+      }),
+    );
+    return c.json({ connection });
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
+app.delete("/v1/provider-connections/:provider", async (c) => {
+  try {
+    await withTenant(c, ({ actor, orgId, database }) =>
+      deleteProviderConnection({ actor, orgId, provider: c.req.param("provider"), database }),
+    );
+    return c.json({ ok: true });
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
+/* ---- Workspace-shared provider connections (owner/admin write; any member reads) ---- */
+
+app.get("/v1/org-provider-connections", async (c) => {
+  try {
+    const connections = await withTenant(c, ({ actor, orgId, database }) =>
+      listOrgProviderConnections({ actor, orgId, database }),
+    );
+    return c.json({ connections });
+  } catch (error) {
+    return jsonError(c, error, 401);
+  }
+});
+
+app.put("/v1/org-provider-connections", async (c) => {
+  try {
+    const input = setProviderConnectionInputSchema.parse(await c.req.json());
+    const connection = await withTenant(c, ({ actor, orgId, database }) =>
+      setOrgProviderConnection({
+        actor,
+        orgId,
+        provider: input.provider,
+        keyName: input.key_name,
+        key: input.key,
+        secretsKey: agentSecretsKey(),
+        database,
+      }),
+    );
+    return c.json({ connection });
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
+app.delete("/v1/org-provider-connections/:provider", async (c) => {
+  try {
+    await withTenant(c, ({ actor, orgId, database }) =>
+      deleteOrgProviderConnection({ actor, orgId, provider: c.req.param("provider"), database }),
+    );
+    return c.json({ ok: true });
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
+app.post("/v1/agents", async (c) => {
+  try {
+    const input = createAgentInputSchema.parse(await c.req.json());
+    const ctx = agentCtx();
+    const detail = await withTenant(c, ({ actor, orgId, database }) =>
+      createAgent({ actor, orgId, input, ctx, database }),
+    );
+    const orgId = await orgIdFromContext(c);
+    const actor = actorFromContext(c);
+    kickAgentJob(provisionJobKey(orgId, detail.slug), () =>
+      provisionAgent({ orgId, actorId: actor.id, agentId: detail.id, ctx }),
+    );
+    return c.json(detail, 201);
+  } catch (error) {
+    return agentError(c, error);
+  }
+});
+
+app.get("/v1/agents/skill-updates/:skillSlug", async (c) => {
+  try {
+    const res = await withTenant(c, ({ actor, orgId, database }) =>
+      listAffectedAgents({ actor, orgId, skillSlug: c.req.param("skillSlug"), database }),
+    );
+    if (!res) return jsonError(c, "skill not found", 404);
+    return c.json(res);
+  } catch (error) {
+    return jsonError(c, error, 401);
+  }
+});
+
+app.get("/v1/agents/:slug", async (c) => {
+  try {
+    const detail = await withTenant(c, ({ actor, orgId, database }) =>
+      getAgentBySlug({ actor, orgId, slug: c.req.param("slug"), database }),
+    );
+    if (!detail) return jsonError(c, "agent not found", 404);
+    // The model provider key is referenced LIVE from the owner's connection (managed in Settings →
+    // Model providers), never an agent variable. Hide any such key from the variable list — including
+    // one copied onto an agent created before this behavior — so operators see only real skill inputs.
+    const modelKeys = await agentModelCatalog.resolveModel(detail.model).catch(() => null);
+    if (modelKeys) {
+      detail.secrets = detail.secrets.filter((s) => !modelKeys.envKeys.includes(s.key));
+    }
+    return c.json(detail);
+  } catch (error) {
+    return jsonError(c, error, 401);
+  }
+});
+
+app.get("/v1/agents/:slug/provision", async (c) => {
+  try {
+    const slug = c.req.param("slug");
+    const orgId = await orgIdFromContext(c);
+    // Crash recovery: still "provisioning" with no live in-process job means the pipeline died with
+    // the process. Flip to the designed interrupted-error state (retry provisions a fresh fork).
+    let progress = await withTenant(c, ({ actor, orgId: org, database }) =>
+      getProvisionProgress({ actor, orgId: org, slug, database }),
+    );
+    if (progress?.lifecycle === "provisioning" && !agentJobs.has(provisionJobKey(orgId, slug))) {
+      await withTenant(c, ({ actor, orgId: org, database }) =>
+        markProvisionInterrupted({ actor, orgId: org, slug, database }),
+      );
+      progress = await withTenant(c, ({ actor, orgId: org, database }) =>
+        getProvisionProgress({ actor, orgId: org, slug, database }),
+      );
+    }
+    if (!progress) return jsonError(c, "agent not found", 404);
+    return c.json(progress);
+  } catch (error) {
+    return jsonError(c, error, 401);
+  }
+});
+
+app.post("/v1/agents/:slug/provision/retry", async (c) => {
+  try {
+    const slug = c.req.param("slug");
+    const ctx = agentCtx();
+    const retried = await withTenant(c, ({ actor, orgId, database }) =>
+      retryProvision({ actor, orgId, slug, ctx, database }),
+    );
+    const orgId = await orgIdFromContext(c);
+    const actor = actorFromContext(c);
+    kickAgentJob(provisionJobKey(orgId, slug), async () => {
+      // Destroy the previous fork best-effort before re-running (fresh-fork idempotency).
+      await ctx.runtime.destroy({
+        sandboxName: sandboxNameFor(orgId, slug, retried.attempt - 1),
+        sandboxId: null,
+        region: ctx.region,
+        timeoutMs: ctx.timeoutMs,
+      });
+      await provisionAgent({ orgId, actorId: actor.id, agentId: retried.agentId, ctx });
+    });
+    const progress = await withTenant(c, ({ actor: a, orgId: org, database }) =>
+      getProvisionProgress({ actor: a, orgId: org, slug, database }),
+    );
+    return c.json(progress, 202);
+  } catch (error) {
+    return agentError(c, error);
+  }
+});
+
+app.put("/v1/agents/:slug/secrets", async (c) => {
+  try {
+    const input = updateAgentSecretsInputSchema.parse(await c.req.json());
+    const slug = c.req.param("slug");
+    const ctx = agentCtx();
+    const result = await withTenant(c, ({ actor, orgId, database }) =>
+      setAgentSecrets({ actor, orgId, slug, secrets: input.secrets, ctx, database }),
+    );
+    // A running agent has its env baked into serve — relaunch it (deduped) so the change applies.
+    if (result.shouldRestart) {
+      const actor = actorFromContext(c);
+      const orgId = await orgIdFromContext(c);
+      kickAgentJob(wakeJobKey(orgId, slug), () => wakeAgent({ actor, orgId, slug, ctx }).then(() => undefined));
+    }
+    return c.json({ secrets: result.secrets, restarting: result.shouldRestart });
+  } catch (error) {
+    return agentError(c, error);
+  }
+});
+
+app.patch("/v1/agents/:slug", async (c) => {
+  try {
+    const input = updateAgentInputSchema.parse(await c.req.json());
+    const slug = c.req.param("slug");
+    const actor = actorFromContext(c);
+    const orgId = await orgIdFromContext(c);
+    const ctx = agentCtx();
+    // Persists, then (if the agent is provisioned) re-pushes config + relaunches serve synchronously.
+    const detail = await updateAgentConfig({ actor, orgId, slug, patch: input, ctx });
+    // Hide the managed provider key from the returned variable list (mirror GET).
+    const modelKeys = await agentModelCatalog.resolveModel(detail.model).catch(() => null);
+    if (modelKeys) detail.secrets = detail.secrets.filter((s) => !modelKeys.envKeys.includes(s.key));
+    return c.json(detail);
+  } catch (error) {
+    return agentError(c, error);
+  }
+});
+
+app.post("/v1/agents/:slug/pause", async (c) => {
+  try {
+    const ctx = agentCtx();
+    const res = await withTenant(c, ({ actor, orgId, database }) =>
+      pauseAgent({ actor, orgId, slug: c.req.param("slug"), database }),
+    );
+    // Stop the sandbox OUTSIDE the tenant transaction (network call; FS auto-snapshots).
+    if (res.sandbox) await ctx.runtime.stop(res.sandbox);
+    return c.json({ ok: true });
+  } catch (error) {
+    return agentError(c, error);
+  }
+});
+
+app.post("/v1/agents/:slug/wake", async (c) => {
+  try {
+    const actor = actorFromContext(c);
+    const orgId = await orgIdFromContext(c);
+    // wakeAgent manages its own short tenant transactions around the runtime calls.
+    const res = await wakeAgent({ actor, orgId, slug: c.req.param("slug"), ctx: agentCtx() });
+    return c.json({ ok: true, resume_ms: res.resumeMs, status: res.status });
+  } catch (error) {
+    return agentError(c, error);
+  }
+});
+
+app.delete("/v1/agents/:slug", async (c) => {
+  try {
+    const input = destroyAgentInputSchema.parse(await c.req.json());
+    const ctx = agentCtx();
+    const res = await withTenant(c, ({ actor, orgId, database }) =>
+      destroyAgent({ actor, orgId, slug: c.req.param("slug"), confirm: input.confirm, ctx, database }),
+    );
+    // Best-effort sandbox teardown after the row is gone; destroy is idempotent.
+    if (res.sandbox) await ctx.runtime.destroy(res.sandbox);
+    return c.json({ ok: true });
+  } catch (error) {
+    return agentError(c, error);
+  }
+});
+
+app.post("/v1/agents/:slug/skills/:skillSlug/push", async (c) => {
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    const input = pushAgentSkillInputSchema.parse(body ?? {});
+    const slug = c.req.param("slug");
+    const skillSlug = c.req.param("skillSlug");
+    const ctx = agentCtx();
+    const res = await withTenant(c, ({ actor, orgId, database }) =>
+      pushSkillUpdate({ actor, orgId, slug, skillSlug, ...(input.version ? { toVersion: input.version } : {}), database }),
+    );
+    const orgId = await orgIdFromContext(c);
+    const actor = actorFromContext(c);
+    kickAgentJob(pushJobKey(orgId, slug), () =>
+      runSkillPush({
+        orgId,
+        actorId: actor.id,
+        agentId: res.agentId,
+        skillSlug,
+        toVersion: res.op.to_version,
+        ctx,
+      }),
+    );
+    return c.json({ pending_op: res.op }, 202);
+  } catch (error) {
+    return agentError(c, error);
+  }
+});
+
+
+/* ---- Agent chat (session-only; the sandbox basic-auth password never leaves this process) ---- */
+
+/** True when the sandbox behind `domain` answers as a live OpenCode server (not 410/dead). */
+async function sandboxAnswers(domain: string, password: string): Promise<boolean> {
+  try {
+    const auth = Buffer.from(`companion:${password}`).toString("base64");
+    const res = await fetch(`${domain}/doc`, {
+      headers: { authorization: `Basic ${auth}` },
+      signal: AbortSignal.timeout(6_000),
+    });
+    return res.status < 500 && res.status !== 410;
+  } catch {
+    return false;
+  }
+}
+
+async function agentChatTargetFor(c: Context<{ Variables: ApiVariables }>, slug: string) {
+  const ctx = agentCtx();
+  let target = await withTenant(c, ({ actor, orgId, database }) =>
+    getAgentChatTarget({ actor, orgId, slug, ctx, database }),
+  );
+  // A derived "running" status can lie: Vercel's hard timeout runs from boot/resume, not from our
+  // last_active_at, so the sandbox may already be stopped (410 SANDBOX_STOPPED). Preflight the
+  // domain and wake whenever the server does not actually answer — waking relaunches serve, which
+  // is exactly what a dead/stopped sandbox needs. Live servers are never restarted.
+  const needsWake = target.status === "sleeping" || !(await sandboxAnswers(target.domain, target.password));
+  if (needsWake) {
+    const actor = actorFromContext(c);
+    const orgId = await orgIdFromContext(c);
+    // Share the in-flight wake across concurrent chat opens so serve is relaunched only once.
+    await sharedWake(orgId, slug, () => wakeAgent({ actor, orgId, slug, ctx }));
+    target = await withTenant(c, ({ actor: a, orgId: org, database }) =>
+      getAgentChatTarget({ actor: a, orgId: org, slug, ctx, database }),
+    );
+  } else {
+    // Keep an actively-used sandbox alive past its hard timeout (best-effort).
+    void ctx.runtime.extendTimeout?.(target.sandbox, ctx.timeoutMs);
+  }
+  return target;
+}
+
+app.post("/v1/agents/:slug/sessions", async (c) => {
+  try {
+    const body = (await c.req.json().catch(() => ({}))) as { title?: string };
+    const target = await agentChatTargetFor(c, c.req.param("slug"));
+    const client = createChatClient({ domain: target.domain, password: target.password });
+    const session = await createChatSession(client, typeof body.title === "string" ? body.title : undefined);
+    const actor = actorFromContext(c);
+    const orgId = await orgIdFromContext(c);
+    await updateAgentSessionsCache({
+      orgId,
+      actorId: actor.id,
+      agentId: target.agentId,
+      session: { id: session.id, title: session.title, message_count: 0, last_at: new Date().toISOString() },
+    });
+    return c.json({ session_id: session.id }, 201);
+  } catch (error) {
+    return agentError(c, error);
+  }
+});
+
+app.get("/v1/agents/:slug/sessions/:sessionId/messages", async (c) => {
+  try {
+    const target = await agentChatTargetFor(c, c.req.param("slug"));
+    const client = createChatClient({ domain: target.domain, password: target.password });
+    const items = await loadSessionItems(client, c.req.param("sessionId"));
+    return c.json({ items });
+  } catch (error) {
+    return agentError(c, error);
+  }
+});
+
+app.post("/v1/agents/:slug/sessions/:sessionId/prompt", async (c) => {
+  try {
+    const input = agentPromptInputSchema.parse({
+      session_id: c.req.param("sessionId"),
+      ...(await c.req.json()),
+    });
+    const slug = c.req.param("slug");
+    const target = await agentChatTargetFor(c, slug);
+    const client = createChatClient({ domain: target.domain, password: target.password });
+    await sendPromptAsync(client, input.session_id, input.text);
+
+    const actor = actorFromContext(c);
+    const orgId = await orgIdFromContext(c);
+    await touchAgentActivity({ orgId, actorId: actor.id, agentId: target.agentId });
+    // Refresh the no-wake session cache: bump the count, keep/derive the title.
+    const detail = await withTenant(c, ({ actor: a, orgId: org, database }) =>
+      getAgentBySlug({ actor: a, orgId: org, slug, database }),
+    );
+    const existing = detail?.sessions.find((s) => s.id === input.session_id);
+    await updateAgentSessionsCache({
+      orgId,
+      actorId: actor.id,
+      agentId: target.agentId,
+      session: {
+        id: input.session_id,
+        title: existing?.title && existing.title !== "New session" ? existing.title : input.text.slice(0, 60),
+        message_count: (existing?.message_count ?? 0) + 2,
+        last_at: new Date().toISOString(),
+      },
+    });
+    return c.json({ ok: true }, 202);
+  } catch (error) {
+    return agentError(c, error);
+  }
+});
+
+app.get("/v1/agents/:slug/events", async (c) => {
+  try {
+    const sessionId = c.req.query("session");
+    if (!sessionId) return jsonError(c, "session query parameter is required");
+    const target = await agentChatTargetFor(c, c.req.param("slug"));
+    const client = createChatClient({ domain: target.domain, password: target.password });
+
+    const abort = new AbortController();
+    const encoder = new TextEncoder();
+    let closed = false;
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const send = (payload: string) => {
+          if (closed) return;
+          try {
+            controller.enqueue(encoder.encode(payload));
+          } catch {
+            closed = true;
+          }
+        };
+        send(`data: ${JSON.stringify({ type: "ready", session_id: sessionId })}\n\n`);
+        const ping = setInterval(() => send(": ping\n\n"), 15_000);
+        void (async () => {
+          try {
+            for await (const event of streamChatEvents({ client, sessionId, signal: abort.signal })) {
+              send(`data: ${JSON.stringify(event)}\n\n`);
+              if (closed) break;
+            }
+          } catch (error) {
+            send(`data: ${JSON.stringify({ type: "error", message: error instanceof Error ? error.message : "stream failed" })}\n\n`);
+          } finally {
+            clearInterval(ping);
+            closed = true;
+            try {
+              controller.close();
+            } catch {
+              /* already closed */
+            }
+          }
+        })();
+      },
+      cancel() {
+        closed = true;
+        abort.abort();
+      },
+    });
+    return new Response(stream, {
+      headers: {
+        "content-type": "text/event-stream",
+        "cache-control": "no-cache, no-transform",
+        "x-accel-buffering": "no",
+        connection: "keep-alive",
+      },
+    });
+  } catch (error) {
+    return agentError(c, error);
   }
 });
 
