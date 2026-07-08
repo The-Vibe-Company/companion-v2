@@ -1,8 +1,9 @@
 # Design - Companion v2
 
 > **Status:** greenfield self-host slice. The Skills Hub is implemented around the target
-> stack: Postgres + Drizzle, Better Auth, MinIO/S3, Hono API, Next.js web, and CLI. Agents,
-> the Container Catalog, and Temporal workflows are prepared conceptually but not implemented.
+> stack: Postgres + Drizzle, Better Auth, MinIO/S3, Hono API, Next.js web, and CLI. The local
+> headless agent is implemented for device heartbeats; runtime agents, the Container Catalog, and
+> Temporal workflows are prepared conceptually but not implemented.
 
 ## Stack
 
@@ -12,7 +13,8 @@
 - **Storage:** `packages/storage` wraps S3-compatible storage. MinIO is the local default.
 - **Email:** `packages/email` supports local log/Mailpit mode and Resend for production.
 - **Web:** Next.js App Router in `apps/web`; it calls the API, not Postgres or MinIO directly.
-- **CLI:** `cli` stores an API URL plus Better Auth session cookie and uses REST endpoints.
+- **CLI:** `cli` handles `login`/`whoami` and installs/controls the local headless agent. Skill
+  management is done by the bundled Companion skill and the web UI, not by CLI skill commands.
 
 Redis/BullMQ are intentionally excluded. Temporal is the intended future workflow engine for
 deployments, reconcile loops, retries, compensation, and schedules.
@@ -51,7 +53,7 @@ packages/
   email/      # Mailpit/log/Resend providers
   contracts/  # shared Zod schemas and types
   skills/     # SKILL.md validation, packing, unpacking
-cli/          # companion CLI
+cli/          # companion CLI: auth + local agent manager
 ```
 
 ## Data Model
@@ -60,7 +62,8 @@ Better Auth owns the core `user`, `session`, `account`, and `verification` table
 adds `profiles`, `organizations`, `memberships`, `invitations`,
 `skills`, `skill_versions`, `skill_version_dependencies`, `skill_stars`, `labels`, `skill_labels`,
 `skill_filter_preferences`, `skill_comments`, `skill_comment_images`, `local_skill_installs`,
-`api_tokens`, and `audit_log`. There are **no teams**: the hierarchy is `Organization → User`.
+`api_tokens`, `devices`, and `audit_log`. There are **no teams**: the hierarchy is
+`Organization → User`.
 
 Every tenant-owned table carries `org_id`. A skill lives in one of two libraries, set by a single
 `skills.scope` enum (`'org'` default, or `'personal'`):
@@ -114,7 +117,7 @@ and any present `companion.json.metadata.companionSkillId` (or legacy
 Renaming a skill is not a publish side effect: `POST /v1/skills/:slug/rename` updates the existing
 `skills` row's `slug` (and optional display title) in place, keeps the same `id`, and leaves the
 normal anti-retargeting guard on `POST /v1/skills` intact.
-On re-publish of an existing Companion package, reserved version metadata is treated as provenance; the API/CLI still assigns the
+On re-publish of an existing Companion package, reserved version metadata is treated as provenance; the API still assigns the
 next registry version unless the caller passes an explicit version. Legacy top-level `version`,
 `tools`, and unknown fields are warnings and are not preserved as top-level fields in newly stored
 packages; top-level `scope` or `visibility` is still rejected because a skill never self-declares
@@ -204,6 +207,44 @@ optional `agent_label`, `installed_at`, and `last_reported_at`). The skill repor
 at the end of its install flow, and status is derived (Not installed / Installed / Update available)
 by comparing the reported version against the bundled version. Installs are recorded with an
 `audit_log` `local_skill.install` entry.
+
+**Local headless agent devices.** The Companion CLI now manages a small Node/TypeScript daemon rather
+than skill registry commands. `companion login` stores a Better Auth cookie for registration, and
+`companion agent install` registers the current machine through `POST /v1/agent/devices`, writes
+`~/.companion/agent.json` with mode `0600`, and installs a macOS `launchd` service. The stored agent
+credential is a device token (`cmp_dev_<48 hex>`), not a PAT: it has no expiry, is revocable, and is
+bound one-to-one to a row in `devices`. Only the token's SHA-256 hash is stored in
+`devices.token_hash`; resolving a device token re-checks that the original user still belongs to the
+organization, so removing a member kills that member's devices.
+
+`devices` is tenant-scoped by `org_id`, carries `user_id`, `name`, `platform`, `agent_version`,
+`inventory` JSONB, `inventory_reported_at`, `last_seen_at`, `created_at`, and `revoked_at`, and has
+org-only RLS like other tenant tables. The web v1 intentionally lists only the signed-in member's own
+non-revoked devices (`GET /v1/devices`); the table is not user-RLS-scoped so a future admin view can be
+added without a migration. `DELETE /v1/devices/:id` is owner-only and soft-revokes the row.
+
+The daemon posts `POST /v1/agent/heartbeat` with a device token only; cookies and PATs are rejected.
+The request is bounded to 256 KB and contains `agent_version`, `platform`, `hostname`, `tools`,
+`companion_skill_version`, and a normalized snapshot of the user's `~/.companion/skills.lock.json`
+workspace entry. The inventory is used only for status, never authorization. The response contains
+`interval_seconds` (900), `latest_agent_version`, `agent_update_available`, a current-version map for
+known skills, `rotate_token: null`, and `commands: []` reserved for future remote operations. The
+daemon sends one beat at startup, then every 15 minutes with jitter; web treats `last_seen_at` within
+2 intervals as online.
+
+On macOS, `launchd` uses absolute `ProgramArguments`: `[nodePath, entryPath, "agent", "run"]`,
+`RunAtLoad`, and `KeepAlive`. `companion agent stop` uses `launchctl bootout` (not just killing the
+process), so KeepAlive does not immediately restart it; `start` re-bootstraps and kickstarts the
+plist. Windows service management is intentionally out of v1; non-macOS service commands return a
+clear unsupported-platform error, while foreground `companion agent run` remains usable. Self-update is
+notify-only in v1: the server only marks `agent_update_available` when its contract version is newer
+than the reported daemon version, and the CLI/web surface that as an actionable reinstall/update
+instruction. Real npm/tarball self-update is a future channel behind the strategy seam.
+
+**CLI migration note.** `companion skills list/info/versions/validate/push/pull/install/status/sync`
+are removed. Skill management now goes through the bundled Companion skill (Python scripts running on
+the user's machine) and the web UI; the CLI's remaining scope is `login`, `logout`, `whoami`, and
+`agent install|start|stop|status|run|uninstall`.
 
 `GET /v1/skills` is token-readable with `skills:read`: `lib=org` returns the org library, `lib=mine`
 returns the caller's authored personal skills plus reported installed org skills, and
@@ -385,6 +426,10 @@ slug-keyed detail route, where the client replaces the address bar back to `/s/:
   key credentials and local lockfiles without calling session-only org endpoints, plus `integrity`
   metadata used by the bootstrap to verify current packages and as a same-version fallback for local
   customization detection before replacement.
+- Local agent devices: `POST /v1/agent/devices` (session-only registration, returns the plaintext
+  `cmp_dev_…` token once), `POST /v1/agent/heartbeat` (device-token-only heartbeat, rejects cookies
+  and PATs), `GET /v1/devices` (session-only list of the caller's own active devices), and
+  `DELETE /v1/devices/:id` (session-only owner revoke).
 - Schemas: `GET /v1/schemas/companion-manifest.v2.schema.json` serves the public JSON Schema used by
   assistants and editors to create or repair `companion.json`.
 - Orgs & settings: `/v1/orgs`, `GET`/`POST`/`PUT /v1/orgs/current` (read/select/rename+reslug the org,
@@ -401,7 +446,9 @@ accepted **only** on the PAT-enabled skills endpoints (`GET /v1/skills`, `POST /
 `GET /v1/skills/:slug/versions/:version/package`,
 `GET /v1/skills/:slug/versions/:version/files`, the skills install/dependency/archive/share/label
 surfaces, `GET /v1/orgs/current/skill-naming-policy`, and the `/v1/local-skills*` endpoints); every
-other endpoint rejects tokens. Token requests are scope-gated (`skills:write` to publish/create/rename/mutate,
+other endpoint rejects PATs. Device tokens (`cmp_dev_…`) are accepted only by
+`POST /v1/agent/heartbeat`; agent registration/list/revoke remain cookie-session routes. Token
+requests are scope-gated (`skills:write` to publish/create/rename/mutate,
 `skills:read` to read/download and read the org skill-naming policy).
 Reading the local-skills catalog
 and downloading its package require `skills:read`; the install callback

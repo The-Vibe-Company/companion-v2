@@ -1,6 +1,7 @@
 "use client";
 
 import type {
+  DeviceRow,
   DependencyPlan,
   IssuedToken,
   LabelColor,
@@ -440,4 +441,14 @@ export async function reportLocalSkillInstalled(
     `/v1/local-skills/${encodeURIComponent(key)}/installed`,
     { method: "POST", body: JSON.stringify({ version, agent }) },
   );
+}
+
+// --- Local agent devices -----------------------------------------------------
+
+export async function fetchDevices(): Promise<DeviceRow[]> {
+  return apiFetch<DeviceRow[]>("/v1/devices");
+}
+
+export async function revokeDevice(deviceId: string): Promise<void> {
+  await apiFetch<{ ok: true }>(`/v1/devices/${encodeURIComponent(deviceId)}`, { method: "DELETE" });
 }

@@ -1,5 +1,5 @@
 import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { COMPANION_HOME, sessionPath } from "./paths";
+import { companionHome, sessionPath } from "./paths";
 
 export interface Session {
   cookie: string;
@@ -16,7 +16,7 @@ export async function loadSession(profile: string): Promise<Session | null> {
 }
 
 export async function saveSession(profile: string, s: Session): Promise<void> {
-  await mkdir(COMPANION_HOME, { recursive: true });
+  await mkdir(companionHome(), { recursive: true });
   await writeFile(sessionPath(profile), JSON.stringify(s, null, 2));
   try {
     await chmod(sessionPath(profile), 0o600);

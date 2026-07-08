@@ -139,7 +139,7 @@ jobs:
       - name: Smoke CLI
         run: |
           node cli/dist/index.js --version
-          node cli/dist/index.js skills --help
+          node cli/dist/index.js agent --help
 
       - name: Migrate database
         run: pnpm db:migrate

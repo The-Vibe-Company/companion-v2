@@ -1,7 +1,8 @@
 # `companion` CLI
 
-Upload, download, and keep your `SKILL.md` packages up to date against a Companion API registry.
-TypeScript/Node; shares the exact validation + packaging code (`@companion/skills`) with the web portal.
+Authenticate to a Companion workspace and install/control the local headless Companion agent.
+Skill package validation, publishing, installs, and updates are handled by the bundled Companion skill
+and the web UI, not by CLI commands.
 
 ## Install / run
 
@@ -23,40 +24,47 @@ companion logout
 Config + session live in `~/.companion/`. `--profile <name>` keeps multiple instances/orgs separate.
 The CLI holds only your user session cookie and API URL. It never receives Postgres, MinIO, or email provider credentials.
 
+## Local agent
+
+```bash
+companion agent install
+companion agent status
+companion agent stop
+companion agent start
+companion agent run        # foreground daemon loop
+companion agent uninstall
+```
+
+`agent install` registers the current machine with the selected workspace, stores the one-time
+`cmp_dev_…` device token in `~/.companion/agent.json` (mode 600), and on macOS installs a `launchd`
+service. The daemon sends heartbeat inventory to `/v1/agent/heartbeat`; it does not execute skills or
+containers.
+
 ## Commands
 
 | Command | What it does |
 |---|---|
-| `skills list [--visibility private\|team\|everyone] [--mine]` | List registry skills you can see |
-| `skills info <name>` | Show a skill's metadata |
-| `skills versions <name>` | Immutable version history |
-| `skills validate <dir>` | Validate a local package — offline, no network |
-| `skills push <dir> [--owner-team slug --private --everyone --team slug --bump patch\|minor\|major --set-version --message --dry-run]` | Validate → package → upload → publish an immutable version |
-| `skills pull <name>[@version] [--dir --force]` | Download + unpack a skill; record it in `companion.lock` |
-| `skills status [--exit-code]` | Diff tracked skills vs the registry and your working tree |
-| `skills sync [--dry-run --force]` | Fast-forward outdated, unpinned, unmodified skills |
+| `login` / `logout` / `whoami` | Manage the Better Auth session used by registration and `whoami` |
+| `agent install` | Register this machine and install/start the background agent |
+| `agent status` | Show local credentials, pid, last heartbeat, and update notification status |
+| `agent run` | Run the daemon in the foreground |
+| `agent start` / `agent stop` / `agent uninstall` | Manage the macOS `launchd` service |
 
 Add `--json` for machine-readable output on any command.
 
-## Keeping skills up to date
+## Skill workflows
 
-Pulled/pushed skills are tracked in a committed **`companion.lock`** (pin, resolved version, checksum).
-`status` classifies each tracked skill by comparing three checksums — the local working tree, the lock
-baseline, and the registry target (resolved from its pin):
-
-`up-to-date` · `outdated` · `modified` · `conflict` · `pinned` · `not-published` · `missing`
-
-`sync` fast-forwards `outdated` clean skills and **never** clobbers `modified`/`conflict` ones (use
-`--force` to override). Exact pins never move; ranges (`^1.4.0`) move within range; unpinned floats to current.
+The old `companion skills list/info/versions/validate/push/pull/install/status/sync` commands are
+removed. Use the bundled Companion skill for local deterministic skill workflows and the web UI for
+reviewing, organizing, and sharing skills.
 
 ## Exit codes
 
 `0` ok · `2` usage · `3` auth required/expired · `4` not found · `5` validation failed ·
-`6` conflict / immutability (version exists, downgrade, local changes) · `7` permission denied ·
-`8` network/server · `9` drift detected (`status --exit-code`).
+`6` conflict · `7` permission denied · `8` network/server · `9` agent already running.
 
 ## Security
 
-Validation is **metadata-only** — the CLI never executes a script in a package. Packing rejects
-symlinks and enforces size caps; unpacking verifies the published `sha256` and re-applies
-traversal/symlink guards before writing.
+The control-plane CLI never executes untrusted skill scripts or pulled images. The local agent reads
+local lockfile/config state and sends status heartbeats; deterministic skill changes still happen in
+the bundled Companion skill scripts running on the user's machine.

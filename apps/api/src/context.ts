@@ -6,7 +6,9 @@ import {
   ensureUserBootstrap,
   listOrgs,
   resolveApiToken,
+  resolveDeviceToken,
   type ActorContext,
+  type ResolvedDeviceToken,
 } from "@companion/core/services";
 
 export interface ApiVariables {
@@ -16,10 +18,12 @@ export interface ApiVariables {
   tokenActor: ActorContext | null;
   tokenOrgId: string | null;
   tokenScopes: TokenScope[] | null;
+  /** Set only by device-token-only agent routes. */
+  deviceActor: ResolvedDeviceToken | null;
 }
 
 /** Extract a bearer credential from an `Authorization` header, if present. */
-function bearerFrom(header: string | undefined): string | null {
+export function bearerFrom(header: string | undefined): string | null {
   if (!header) return null;
   const match = /^Bearer\s+(.+)$/i.exec(header.trim());
   return match ? match[1]!.trim() : null;
@@ -32,6 +36,7 @@ export async function attachSession(c: Context<{ Variables: ApiVariables }>, nex
   c.set("tokenActor", null);
   c.set("tokenOrgId", null);
   c.set("tokenScopes", null);
+  c.set("deviceActor", null);
   if (session?.user) {
     await ensureUserBootstrap({
       id: session.user.id,
@@ -51,6 +56,20 @@ export async function attachSession(c: Context<{ Variables: ApiVariables }>, nex
     }
   }
   await next();
+}
+
+/** Resolve a device bearer token for `/v1/agent/*`. Cookies and PATs are deliberately rejected. */
+export async function deviceFromContext(c: Context<{ Variables: ApiVariables }>): Promise<ResolvedDeviceToken> {
+  const cached = c.get("deviceActor");
+  if (cached) return cached;
+  if (c.get("user")) throw new Error("agent endpoints require a device token");
+  if (c.get("tokenActor")) throw new Error("agent endpoints do not accept personal access tokens");
+  const bearer = bearerFrom(c.req.header("authorization"));
+  if (!bearer) throw new Error("missing device token");
+  const resolved = await resolveDeviceToken(bearer);
+  if (!resolved) throw new Error("invalid device token");
+  c.set("deviceActor", resolved);
+  return resolved;
 }
 
 /**

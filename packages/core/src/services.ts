@@ -79,6 +79,17 @@ export {
   deletePersonalLabel,
 } from "./personalLabels";
 
+// Local headless-agent device services. `devices.ts` imports the hoisted `getOrgRole` function and
+// `ActorContext` type from this module, matching the label-service load-order pattern above.
+export {
+  registerDevice,
+  resolveDeviceToken,
+  recordHeartbeat,
+  listDevices,
+  revokeDevice,
+  type ResolvedDeviceToken,
+} from "./devices";
+
 // Domain-driven onboarding services (create/join/context). Re-exported so callers keep importing
 // everything from `@companion/core/services`. `onboarding.ts` only imports `uniqueSlug` (a hoisted
 // function declaration) and the `ActorContext` type from here, so the cycle is load-order safe.

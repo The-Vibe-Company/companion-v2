@@ -1,5 +1,6 @@
 import { redirect } from "next/navigation";
 import type {
+  DeviceRow,
   LabelsResponse,
   LocalSkillRow,
   SkillFilterPreferences,
@@ -45,6 +46,7 @@ export default async function SkillsPage({
   const localSkillsResult = await serverApiFetch<LocalSkillRow[]>("/v1/local-skills", { headers: orgHeaders }).catch(
     () => null,
   );
+  const devicesResult = await serverApiFetch<DeviceRow[]>("/v1/devices", { headers: orgHeaders }).catch(() => null);
 
   const [mineResult, orgResult, filterPreferences, personalLabelsResult, labelsResult] =
     await Promise.all([
@@ -74,6 +76,8 @@ export default async function SkillsPage({
       initialMineSkills={mineSkills}
       initialOrgSkills={orgSkills}
       initialLocalSkills={localSkillsResult ?? []}
+      initialDevices={devicesResult ?? []}
+      initialDevicesError={devicesResult === null ? "Could not load devices." : null}
       initialFilterPreferences={filterPreferences}
       initialPersonalLabels={personalLabelsResult ?? EMPTY_LABELS}
       initialLabels={labelsResult ?? EMPTY_LABELS}

@@ -2,12 +2,13 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import type { LocalSkillRow, LocalSkillStatus, TokenScope } from "@companion/contracts";
+import type { DeviceRow, LocalSkillRow, LocalSkillStatus, TokenScope } from "@companion/contracts";
 import { TOKEN_SCOPES } from "@companion/contracts";
 import { apiBase, fetchLocalSkills, issueToken } from "@/lib/queries";
 import { REQUIRED_LOCAL_SKILL_KEY } from "@/lib/companionSkillGate";
 import { Icon } from "../Icon";
 import { CodeBlock, useModalA11y } from "./UploadDialog";
+import { DevicesSection } from "./DevicesSection";
 
 const STATUS_META: Record<LocalSkillStatus, { label: string; badge: string; action: string }> = {
   none: { label: "Not installed", badge: "ls-badge--neutral", action: "Install" },
@@ -203,10 +204,14 @@ function gateStorageKey(workspaceName: string, key: string): string {
 
 export function LocalSkillsView({
   skills,
+  devices = [],
+  devicesError = null,
   workspaceId,
   workspaceName,
 }: {
   skills: LocalSkillRow[];
+  devices?: DeviceRow[];
+  devicesError?: string | null;
   workspaceId: string;
   workspaceName: string;
 }) {
@@ -363,19 +368,23 @@ export function LocalSkillsView({
                 onOpen={() => setOpenKey(featured.key)}
                 onInstall={reopenGate}
               />
+              <DevicesSection initialDevices={devices} initialError={devicesError} />
               <p className="ls-foot">
                 Companion publishes this skill. It runs on your machine, and nothing is installed
                 until you copy a prompt or send it to your assistant.
               </p>
             </div>
           ) : (
-            <div className="ls-state ls-state--empty">
-              <Icon name="laptop" size={20} />
-              <div className="ls-state__title">You&rsquo;re all set</div>
-              <div className="ls-state__sub">
-                Companion publishes these skills and keeps them current, so there&rsquo;s usually
-                nothing to do here. New skills appear automatically when they&rsquo;re available.
+            <div className="ls-list">
+              <div className="ls-state ls-state--empty">
+                <Icon name="laptop" size={20} />
+                <div className="ls-state__title">You&rsquo;re all set</div>
+                <div className="ls-state__sub">
+                  Companion publishes these skills and keeps them current, so there&rsquo;s usually
+                  nothing to do here. New skills appear automatically when they&rsquo;re available.
+                </div>
               </div>
+              <DevicesSection initialDevices={devices} initialError={devicesError} />
             </div>
           )}
         </div>

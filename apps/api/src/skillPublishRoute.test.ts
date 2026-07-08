@@ -87,6 +87,11 @@ const serviceMocks = vi.hoisted(() => {
     deletePersonalLabel: noop,
     ensureUserBootstrap: noop,
     resolveApiToken: vi.fn(),
+    resolveDeviceToken: vi.fn(),
+    registerDevice: noop,
+    recordHeartbeat: noop,
+    listDevices: noop,
+    revokeDevice: noop,
   };
 });
 

@@ -56,7 +56,8 @@ team, and team-owned skills can be edited by that team's Admins and Editors.
 
 > 🚧 **Early.** The **Skills Hub (Pillar 3)** is implemented as a greenfield self-host slice:
 > Postgres + Drizzle, Better Auth, MinIO/S3 storage, a Hono API, a Next.js portal, and the
-> `companion` CLI to upload, download, and keep skills up to date. Agents and the Container Catalog are stubbed. See
+> bundled Companion skill for local skill workflows. The `companion` CLI handles auth and the local
+> headless agent. Runtime agents and the Container Catalog are stubbed. See
 > [Architecture](docs/design.md) for what exists and [PRD](docs/PRD.md) for the roadmap.
 
 ## Quickstart — Skills Hub (local)
@@ -71,10 +72,8 @@ pnpm dev                                    # infra + migrations + seed + API :3
 # 2) CLI
 pnpm --filter @companion/cli build
 node cli/dist/index.js login --url http://127.0.0.1:3001 --signup --email you@example.com
-node cli/dist/index.js skills push examples/skills/incident-summary --everyone
-node cli/dist/index.js skills list
-node cli/dist/index.js skills pull incident-summary
-node cli/dist/index.js skills status        # diff local copies vs the registry
+node cli/dist/index.js agent install --no-service
+node cli/dist/index.js agent status
 ```
 
 `cli/README.md` has the full command + exit-code reference. The self-host target is a single

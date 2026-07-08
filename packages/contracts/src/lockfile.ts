@@ -35,7 +35,7 @@ export const lockfileSchema = z.object({
 });
 export type Lockfile = z.infer<typeof lockfileSchema>;
 
-/** Drift classification used by `companion skills status` / `sync`. */
+/** Drift classification retained for legacy lockfile readers. */
 export type DriftState =
   | "up-to-date"
   | "outdated"
