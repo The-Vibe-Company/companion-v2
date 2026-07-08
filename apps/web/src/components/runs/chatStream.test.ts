@@ -182,6 +182,17 @@ describe("chatReducer", () => {
     expect(state.error).toBe("sandbox unreachable");
   });
 
+  // Regression: reconnecting after a dead stream (the server re-sends "ready" at the start of
+  // every connection) must clear a stale error banner from the prior dead stream, or a healthy
+  // reconnected session looks permanently broken.
+  it("clears a stale error once the stream reconnects (ready)", () => {
+    let state = initChatState();
+    state = apply(state, { type: "error", message: "Lost connection to the agent stream." });
+    expect(state.error).toBe("Lost connection to the agent stream.");
+    state = apply(state, { type: "ready", session_id: "s-10" });
+    expect(state.error).toBeNull();
+  });
+
   it("seeds prior-session history above existing sys lines and maps tool rows as completed", () => {
     let state = initChatState();
     state = chatReducer(state, { kind: "sys", text: "resumed from snapshot" });

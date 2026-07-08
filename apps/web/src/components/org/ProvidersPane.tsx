@@ -28,6 +28,7 @@ export function ProvidersPane({ scope }: { scope: ProviderScope }) {
   const [connectedIds, setConnectedIds] = useState<Set<string>>(() => new Set());
   const [error, setError] = useState<string | null>(null);
   const [connecting, setConnecting] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
   const [tick, setTick] = useState(0);
   const reload = () => setTick((t) => t + 1);
 
@@ -49,6 +50,8 @@ export function ProvidersPane({ scope }: { scope: ProviderScope }) {
 
   const connected = (providers ?? []).filter((p) => connectedIds.has(p.id));
   const available = (providers ?? []).filter((p) => !connectedIds.has(p.id) && p.envKeys.length > 0);
+  const q = query.trim().toLowerCase();
+  const visibleAvailable = q ? available.filter((p) => p.name.toLowerCase().includes(q)) : available;
 
   const disconnect = async (id: string) => {
     setError(null);
@@ -113,41 +116,61 @@ export function ProvidersPane({ scope }: { scope: ProviderScope }) {
             <>
               <div className="mlist__lbl" style={{ marginTop: connected.length ? 16 : 0 }}>
                 <span>Available</span>
+                <span className="n">{available.length}</span>
               </div>
               {available.length === 0 ? (
                 <div className="sx-empty">Every provider is connected.</div>
               ) : (
-                <div className="mlist">
-                  {available.map((p) =>
-                    connecting === p.id ? (
-                      <ConnectRow
-                        key={p.id}
-                        provider={p}
-                        onConnect={scope.connect}
-                        onCancel={() => setConnecting(null)}
-                        onConnected={() => {
-                          setConnecting(null);
-                          reload();
-                        }}
-                        onError={setError}
-                      />
-                    ) : (
-                      <div className="mrow" key={p.id}>
-                        <span className="keyic">
-                          <Icon name="cpu" size={16} />
-                        </span>
-                        <div className="mrow__id">
-                          <div className="og-mname">{p.name}</div>
-                        </div>
-                        <div className="mrow__end">
-                          <button className="btn-sec" onClick={() => setConnecting(p.id)}>
-                            Connect
-                          </button>
-                        </div>
+                <>
+                  {available.length > 8 && (
+                    <div className="og-toolbar" style={{ marginBottom: 10 }}>
+                      <div className="og-search">
+                        <Icon name="search" size={15} />
+                        <input
+                          value={query}
+                          onChange={(e) => setQuery(e.target.value)}
+                          placeholder="Search providers"
+                          aria-label="Search providers"
+                        />
                       </div>
-                    ),
+                    </div>
                   )}
-                </div>
+                  {visibleAvailable.length === 0 ? (
+                    <div className="sx-empty">No providers match &ldquo;{query.trim()}&rdquo;.</div>
+                  ) : (
+                    <div className="mlist" style={{ maxHeight: 420, overflowY: "auto" }}>
+                      {visibleAvailable.map((p) =>
+                        connecting === p.id ? (
+                          <ConnectRow
+                            key={p.id}
+                            provider={p}
+                            onConnect={scope.connect}
+                            onCancel={() => setConnecting(null)}
+                            onConnected={() => {
+                              setConnecting(null);
+                              reload();
+                            }}
+                            onError={setError}
+                          />
+                        ) : (
+                          <div className="mrow" key={p.id}>
+                            <span className="keyic">
+                              <Icon name="cpu" size={16} />
+                            </span>
+                            <div className="mrow__id">
+                              <div className="og-mname">{p.name}</div>
+                            </div>
+                            <div className="mrow__end">
+                              <button className="btn-sec" onClick={() => setConnecting(p.id)}>
+                                Connect
+                              </button>
+                            </div>
+                          </div>
+                        ),
+                      )}
+                    </div>
+                  )}
+                </>
               )}
             </>
           )}

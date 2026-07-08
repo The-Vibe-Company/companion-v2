@@ -266,7 +266,9 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
 function applyEvent(state: ChatState, event: RunChatEvent, resolveToolLabel: ResolveToolLabel): ChatState {
   switch (event.type) {
     case "ready":
-      return { ...state, sessionId: event.session_id };
+      // The server re-sends "ready" at the start of every connection, including a manual
+      // reconnect — clear any stale terminal-error banner from a prior dead stream.
+      return { ...state, sessionId: event.session_id, error: null };
     case "status": {
       // The reliable "is it running?" signal from OpenCode's session.status — never inferred.
       if (event.state === "idle") {
