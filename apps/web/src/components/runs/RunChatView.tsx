@@ -284,6 +284,11 @@ export function RunChatView({
   const [chat, dispatch] = useReducer(chatReducer, undefined, initChatState);
   const runRef = useRef<SkillRunDetail | null>(null);
   runRef.current = run;
+  // Set once `openRunStream` gives up on reconnecting (distinct from a server-driven freeze,
+  // which flips `run.status` instead). Gates the composer so a follow-up isn't silently accepted
+  // by the API and never displayed, and drives the "Reconnect" affordance below.
+  const [streamDead, setStreamDead] = useState(false);
+  const [reconnectNonce, setReconnectNonce] = useState(0);
 
   /** `slug@version` when the tool run maps to the mounted skill; otherwise the raw tool name. */
   const resolveToolLabel = useCallback(
@@ -331,13 +336,14 @@ export function RunChatView({
     seededRef.current = run.id;
     setShowPromptBubble(!run.transcript.some((item) => item.kind === "user"));
     dispatch({ kind: "history", items: run.transcript, resolveToolLabel });
+    setStreamDead(false);
   }, [run, resolveToolLabel]);
 
   // --- Stream lifecycle: open the live stream only while `running`; aborted on cleanup
   // (StrictMode-safe). A terminal stream error re-fetches the run — it usually means freeze.
   const status = run?.status ?? "starting";
   useEffect(() => {
-    if (status !== "running") return;
+    if (status !== "running" || streamDead) return;
     const controller = new AbortController();
     void openRunStream(
       runId,
@@ -352,12 +358,18 @@ export function RunChatView({
           void fetchRun(runId)
             .then((detail) => setRun(detail))
             .catch(() => {});
+        } else if (event.type === "error") {
+          // The reconnect budget is exhausted — the stream is dead even though the run may
+          // still be healthy server-side. Refresh in case it actually froze, and stop the
+          // composer from accepting input the user would never see a reply to.
+          setStreamDead(true);
+          void fetchRun(runId).then((detail) => setRun(detail)).catch(() => {});
         }
       },
       controller.signal,
     );
     return () => controller.abort();
-  }, [status, runId, resolveToolLabel]);
+  }, [status, runId, resolveToolLabel, streamDead, reconnectNonce]);
 
   // --- Auto-scroll the message area to the bottom on new items / streamed deltas.
   const listRef = useRef<HTMLDivElement | null>(null);
@@ -366,7 +378,7 @@ export function RunChatView({
     if (el) el.scrollTop = el.scrollHeight;
   }, [chat.items]);
 
-  const sendDisabled = status !== "running" || chat.busy || !text.trim();
+  const sendDisabled = status !== "running" || streamDead || chat.busy || !text.trim();
   const streamingAssistant = chat.items.some((item) => item.kind === "asst" && item.streaming);
   const showWorking = chat.working.active && !streamingAssistant && status === "running";
 
@@ -432,12 +444,6 @@ export function RunChatView({
           Back
         </button>
         <span style={{ flex: 1 }} />
-        {run && (status === "frozen" || status === "error") && (
-          <button type="button" className="btn-sec" onClick={() => onRunAgain(run.prompt)}>
-            <Icon name="play" size={13} />
-            Run again
-          </button>
-        )}
       </div>
 
       <div style={{ flex: 1, minHeight: 0, display: "flex", alignItems: "stretch", justifyContent: "center", padding: "0 16px 16px" }}>
@@ -618,8 +624,24 @@ export function RunChatView({
             })}
             {showWorking && <WorkingLine label={chat.working.label} />}
             {chat.error && chat.error !== "This session has ended." && (
-              <div style={{ textAlign: "center", fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--color-danger)" }} role="alert">
+              <div
+                style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--color-danger)" }}
+                role="alert"
+              >
                 {chat.error}
+                {streamDead && status === "running" && (
+                  <button
+                    type="button"
+                    className="btn-sec"
+                    style={{ fontFamily: "var(--font-ui)" }}
+                    onClick={() => {
+                      setStreamDead(false);
+                      setReconnectNonce((n) => n + 1);
+                    }}
+                  >
+                    Reconnect
+                  </button>
+                )}
               </div>
             )}
           </div>

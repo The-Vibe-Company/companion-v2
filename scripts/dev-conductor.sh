@@ -542,8 +542,9 @@ launch_apps() {
   # `ps` / /proc/<pid>/cmdline to any local user).
   local secrets_key_file="$STATE_DIR/companion-secrets.key"
   if [ ! -s "$secrets_key_file" ]; then
-    openssl rand -base64 32 > "$secrets_key_file" 2>/dev/null || true
+    ( umask 077 && openssl rand -base64 32 > "$secrets_key_file" ) 2>/dev/null || true
   fi
+  chmod 600 "$secrets_key_file" 2>/dev/null || true
   if [ -s "$secrets_key_file" ] && [ -z "${COMPANION_SECRETS_KEY:-}" ]; then
     export COMPANION_SECRETS_KEY="$(cat "$secrets_key_file")"
   fi

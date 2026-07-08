@@ -51,9 +51,16 @@ export async function loadSessionItems(client: OpencodeClient, sessionId: string
     const role = entry.info.role;
     // Tool runs render inline before the assistant text they belong to.
     for (const part of entry.parts) {
-      if (part.type === "tool" && part.state.status === "completed") {
+      if (part.type === "tool" && (part.state.status === "completed" || part.state.status === "error")) {
         const inputJson = safeJson("input" in part.state ? part.state.input : {});
-        const { title, skill } = toolTitleAndSkill({ tool: part.tool, title: part.state.title, inputJson });
+        const rawTitle = "title" in part.state ? (part.state.title ?? null) : null;
+        const { title, skill } = toolTitleAndSkill({ tool: part.tool, title: rawTitle, inputJson });
+        // Same completed/error handling as the live path in streamChatEvents: a failed tool call
+        // still gets a history item so it survives into the persisted transcript.
+        const output =
+          part.state.status === "completed"
+            ? (part.state.output ?? "")
+            : ("error" in part.state ? String(part.state.error) : "tool failed") || "tool failed";
         items.push({
           kind: "tool",
           call_id: part.callID,
@@ -61,8 +68,8 @@ export async function loadSessionItems(client: OpencodeClient, sessionId: string
           skill,
           title,
           input: inputJson,
-          output: truncate(part.state.output ?? "", 4000),
-          duration_ms: part.state.time ? Math.max(0, part.state.time.end - part.state.time.start) : null,
+          output: truncate(output, 4000),
+          duration_ms: part.state.status === "completed" && part.state.time ? Math.max(0, part.state.time.end - part.state.time.start) : null,
         });
       }
     }
