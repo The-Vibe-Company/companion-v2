@@ -10,14 +10,20 @@ import { ModelsPane, type ModelScope } from "./ModelsPane";
 import { ArtifactsPane, type ArtifactScope } from "./ArtifactsPane";
 import { WorkspaceGeneralPane } from "./WorkspaceGeneralPane";
 import {
-  deleteOrgProviderConnection,
-  deleteProviderConnection,
-  fetchOrgProviderConnections,
-  fetchProviderConnections,
+  deleteModelProviderConnection,
+  deleteOrgModelProviderConnection,
+  deleteOrgVanishConnection,
+  deleteVanishConnection,
+  fetchModelProviderConnections,
+  fetchOrgModelProviderConnections,
+  fetchOrgVanishConnection,
+  fetchVanishConnection,
   saveActivatedModels,
   saveOrgActivatedModels,
-  setOrgProviderConnection,
-  setProviderConnection,
+  setModelProviderConnection,
+  setOrgModelProviderConnection,
+  setOrgVanishConnection,
+  setVanishConnection,
 } from "@/lib/runQueries";
 import { MembersPane } from "./MembersPane";
 import { InvitationsPane } from "./InvitationsPane";
@@ -84,33 +90,31 @@ export function SettingsView({
   onClose: () => void;
 }) {
   const personalModels: ModelScope = {
-    orgId: ctx.currentOrg.id,
     title: "Models",
-    desc: "Compose your run launcher: activate models and bind each provider to an accessible vault secret.",
-    lockText: "Personal to you — combined with the workspace's shared models in the run launcher.",
+    desc: "Compose your run launcher: activate models and connect each provider with its own write-only API key.",
+    lockText: "Provider keys are stored separately from Secrets. Your personal key takes precedence over a workspace key.",
     locked: false,
     readiness: "any",
     select: (activated) => activated.personal,
     ghost: { label: "From workspace", select: (activated) => activated.org },
     save: (models) => saveActivatedModels(models).then((r) => r.activated),
-    loadConnected: () => fetchProviderConnections().then((r) => r.connections),
-    connect: (provider, keyName, secretId) => setProviderConnection({ provider, key_name: keyName, secret_id: secretId }).then((r) => r.connection),
-    connectionAudience: "personal",
-    disconnect: (provider) => deleteProviderConnection(provider).then(() => {}),
+    loadConnected: () => fetchModelProviderConnections().then((r) => r.connections),
+    connect: (provider, keyName, apiKey) => setModelProviderConnection({ provider, key_name: keyName, api_key: apiKey }).then((r) => r.connection),
+    connectionScope: "personal",
+    disconnect: (provider) => deleteModelProviderConnection(provider).then(() => {}),
   };
   const workspaceModels: ModelScope = {
-    orgId: ctx.currentOrg.id,
     title: "Shared models",
-    desc: "Curate the models every member can run and bind shared providers to Organization vault secrets. Members can add personal bindings in Account → Models.",
+    desc: "Curate the models every member can run and connect shared providers with dedicated write-only API keys.",
     lockText: "Shared with every member. Only owners and admins can change these.",
     locked: !ctx.canManage,
     readiness: "scope",
     select: (activated) => activated.org,
     save: (models) => saveOrgActivatedModels(models).then((r) => r.activated),
-    loadConnected: () => fetchOrgProviderConnections().then((r) => r.connections),
-    connect: (provider, keyName, secretId) => setOrgProviderConnection({ provider, key_name: keyName, secret_id: secretId }).then((r) => r.connection),
-    connectionAudience: "organization",
-    disconnect: (provider) => deleteOrgProviderConnection(provider).then(() => {}),
+    loadConnected: () => fetchOrgModelProviderConnections().then((r) => r.connections),
+    connect: (provider, keyName, apiKey) => setOrgModelProviderConnection({ provider, key_name: keyName, api_key: apiKey }).then((r) => r.connection),
+    connectionScope: "organization",
+    disconnect: (provider) => deleteOrgModelProviderConnection(provider).then(() => {}),
   };
   const personalArtifacts: ArtifactScope = {
     id: "personal",
@@ -119,9 +123,9 @@ export function SettingsView({
     desc: "Bind Vanish to an accessible vault secret so your runs can publish files saved under artifacts/. Your personal binding takes precedence over the workspace binding.",
     lockText: "Personal to you. The binding stores only a secret reference, and disconnecting never deletes the vault secret.",
     locked: false,
-    loadConnected: () => fetchProviderConnections().then((r) => r.connections),
-    connect: (provider, keyName, secretId) => setProviderConnection({ provider, key_name: keyName, secret_id: secretId }).then((r) => r.connection),
-    disconnect: (provider) => deleteProviderConnection(provider).then(() => {}),
+    loadConnected: () => fetchVanishConnection().then((r) => r.connection),
+    connect: (secretId) => setVanishConnection(secretId).then((r) => r.connection),
+    disconnect: () => deleteVanishConnection().then(() => {}),
   };
   const workspaceArtifacts: ArtifactScope = {
     id: "organization",
@@ -130,9 +134,9 @@ export function SettingsView({
     desc: "Bind Vanish for every member who has no personal Vanish binding. Shared bindings can reference Organization vault secrets only.",
     lockText: "Shared with every member. Only owners and admins can change this binding; disconnecting never deletes the vault secret.",
     locked: !ctx.canManage,
-    loadConnected: () => fetchOrgProviderConnections().then((r) => r.connections),
-    connect: (provider, keyName, secretId) => setOrgProviderConnection({ provider, key_name: keyName, secret_id: secretId }).then((r) => r.connection),
-    disconnect: (provider) => deleteOrgProviderConnection(provider).then(() => {}),
+    loadConnected: () => fetchOrgVanishConnection().then((r) => r.connection),
+    connect: (secretId) => setOrgVanishConnection(secretId).then((r) => r.connection),
+    disconnect: () => deleteOrgVanishConnection().then(() => {}),
   };
 
   let pane: React.ReactNode;

@@ -393,10 +393,39 @@ describe("atomic run failure transition", () => {
 });
 
 describe("cross-tenant job claim seam", () => {
-  it("delegates only bounded claims to the SECURITY DEFINER function", async () => {
-    const claimed = [{ id: "job-1", orgId: ORG, runId: RUN }];
+  it("delegates only bounded claims and decodes raw PostgreSQL timestamps", async () => {
+    const claimed = [{
+      id: "job-1",
+      orgId: ORG,
+      runId: RUN,
+      creatorId: actor.id,
+      status: "leased",
+      phase: "queued",
+      attempt: 1,
+      maxAttempts: 3,
+      leaseReclaimCount: 0,
+      availableAt: "2026-07-13T20:00:00.000Z",
+      leaseOwner: "worker-a",
+      leaseExpiresAt: "2026-07-13T20:00:30.000Z",
+      heartbeatAt: null,
+      lastErrorCode: null,
+      createdAt: "2026-07-13T19:59:00.000Z",
+      updatedAt: "2026-07-13T20:00:00.000Z",
+    }];
     const database = { execute: async () => claimed } as unknown as Db;
-    await expect(claimRunJobs({ workerId: "worker-a", limit: 2, leaseSeconds: 30, database })).resolves.toEqual(claimed);
+    const rows = await claimRunJobs({ workerId: "worker-a", limit: 2, leaseSeconds: 30, database });
+    expect(rows).toEqual([
+      expect.objectContaining({
+        id: "job-1",
+        availableAt: new Date("2026-07-13T20:00:00.000Z"),
+        leaseExpiresAt: new Date("2026-07-13T20:00:30.000Z"),
+        heartbeatAt: null,
+        createdAt: new Date("2026-07-13T19:59:00.000Z"),
+        updatedAt: new Date("2026-07-13T20:00:00.000Z"),
+      }),
+    ]);
+    expect(rows[0]?.leaseExpiresAt).toBeInstanceOf(Date);
+    expect(rows[0]?.leaseExpiresAt?.getTime()).toBe(Date.parse("2026-07-13T20:00:30.000Z"));
     await expect(claimRunJobs({ workerId: "", database })).rejects.toThrow("worker id");
     await expect(claimRunJobs({ workerId: "worker-a", limit: 33, database })).rejects.toThrow("claim limits");
   });

@@ -2,6 +2,7 @@ import { createOpencodeClient, type OpencodeClient } from "@opencode-ai/sdk";
 import type { RunChatEvent, RunChatHistoryItem } from "@companion/contracts";
 import {
   OPENCODE_SERVER_USERNAME,
+  RunRuntimeError,
   type RunChatMessageState,
   type RunChatRuntime,
   type RunChatSessionState,
@@ -178,7 +179,9 @@ export async function sendPromptAsync(
     body: { messageID: options.messageId, parts: [{ type: "text", text }] },
     signal: options.signal,
   });
-  if (res.error) throw new Error("opencode rejected the prompt");
+  // Keep the SDK response body out of logs and persisted run errors: it may echo prompt/tool
+  // content. The bounded runtime error still gives the durable worker a useful, non-generic code.
+  if (res.error) throw new RunRuntimeError("OpenCode rejected the prompt");
 }
 
 /**

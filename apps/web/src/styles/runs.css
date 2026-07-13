@@ -242,11 +242,15 @@
 .modelsel__readiness--provider_disconnected { color: var(--color-warn); }
 .modelsel__item-check { color: var(--color-accent); }
 
-/* Settings provider/Vanish vault bindings. */
-.provider-secret-editor { flex: 1 0 100%; min-width: 0; padding: 0 0 4px 37px; }
-.provider-secret-editor__actions, .artifact-secret-bind { display: flex; align-items: center; gap: 8px; }
-.provider-secret-editor__actions { justify-content: flex-end; margin-top: 8px; }
-.provider-secret-meta { max-width: 130px; color: var(--color-muted); font: 10px/1.4 var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Dedicated write-only model-provider credentials; Vanish remains a generic vault binding. */
+.provider-key-editor { flex: 1 0 100%; min-width: 0; padding: 0 0 4px 37px; }
+.provider-key-editor > label { display: block; margin-bottom: 5px; color: var(--color-fg); font-size: var(--text-xs); font-weight: 600; }
+.provider-key-editor > input { width: 100%; }
+.provider-key-editor > p { margin: 5px 0 0; color: var(--color-faint); font-size: 10px; line-height: 1.45; }
+.provider-key-editor > .vault-field__error { color: var(--color-danger); }
+.provider-key-editor__actions, .artifact-secret-bind { display: flex; align-items: center; gap: 8px; }
+.provider-key-editor__actions { justify-content: flex-end; margin-top: 8px; }
+.provider-key-meta { max-width: 180px; color: var(--color-muted); font: 10px/1.4 var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .artifact-secret-bind { align-items: flex-end; padding: 14px; border: 1px solid var(--color-line); border-radius: var(--radius-md); }
 .artifact-secret-bind .vault-field { flex: 1; }
 .settings-load-error { display: flex; align-items: center; gap: 10px; color: var(--color-danger); }
@@ -304,7 +308,9 @@
   .run-exposure li { grid-template-columns: 1fr auto; }
   .run-exposure li span { grid-column: 1; grid-row: 2; }
   .run-exposure li small { grid-column: 2; grid-row: 1 / span 2; }
-  .provider-secret-editor { padding-inline-start: 0; }
+  .provider-key-editor { padding-inline-start: 0; }
+  .provider-key-meta { display: none; }
+  .provider-group__head { gap: 6px !important; padding-inline-end: 6px !important; }
   .run-chat__config, .run-chat__meta > .mono { display: none; }
   .run-session { grid-template-columns: auto minmax(0, 1fr) auto auto; gap: 7px; }
   .run-session__model { grid-column: 2 / -1; grid-row: 2; max-width: 100%; }
@@ -313,7 +319,8 @@
 }
 
 @media (pointer: coarse) {
-  .run-launcher button, .run-launcher select, .provider-secret-editor button, .artifact-secret-bind button { min-width: 44px; min-height: 44px; }
+  .run-launcher button, .run-launcher select, .provider-key-editor button, .artifact-secret-bind button, [data-provider-key-trigger] { min-width: 44px; min-height: 44px; }
+  .provider-group__head .mrow__x { min-width: 44px; min-height: 44px; opacity: 1; }
   .run-launcher .run-variable__include, .run-launcher .run-input-group > summary { min-height: 44px; }
   .run-launcher .launch-file__x { width: 44px; min-height: 44px; margin: -8px; }
   .modelsel__item, .modelsel__add { min-height: 44px; }

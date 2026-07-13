@@ -1,101 +1,24 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { schema, type Db } from "@companion/db";
-
-const vault = vi.hoisted(() => new Map<string, {
-  id: string;
-  orgId: string;
-  key: string;
-  name: string;
-  ownerId: string;
-  ownerName: string;
-  audience: "personal" | "restricted" | "organization";
-  recipients: string[];
-  active: boolean;
-  currentVersion: number;
-  values: Map<number, string>;
-}>());
-
-vi.mock("../src/secrets", () => {
-  function accessible(secretId: string, actorId: string, orgId: string) {
-    const secret = vault.get(secretId);
-    if (
-      !secret ||
-      secret.orgId !== orgId ||
-      !secret.active ||
-      (secret.ownerId !== actorId && secret.audience !== "organization" && !secret.recipients.includes(actorId))
-    ) throw new Error("secret not found");
-    return secret;
-  }
-  return {
-    pinAccessibleSecret: vi.fn(async (input: { actor: { id: string }; orgId: string; secretId: string }) => {
-      const secret = accessible(input.secretId, input.actor.id, input.orgId);
-      return {
-        secretId: secret.id,
-        version: secret.currentVersion,
-        key: secret.key,
-        name: secret.name,
-        ownerId: secret.ownerId,
-        ownerName: secret.ownerName,
-        audience: secret.audience,
-      };
-    }),
-    decryptPinnedSecret: vi.fn(async (input: {
-      actor: { id: string };
-      orgId: string;
-      secretId: string;
-      version: number;
-    }) => {
-      const secret = accessible(input.secretId, input.actor.id, input.orgId);
-      const value = secret.values.get(input.version);
-      if (value === undefined) throw new Error("secret not found");
-      return {
-        pin: {
-          secretId: secret.id,
-          version: input.version,
-          key: secret.key,
-          name: secret.name,
-          ownerId: secret.ownerId,
-          ownerName: secret.ownerName,
-          audience: secret.audience,
-        },
-        value,
-      };
-    }),
-  };
-});
-
 import {
-  connectedOrgProviderIds,
-  connectedProviderIds,
   deleteOrgProviderConnection,
   deleteProviderConnection,
   getDecryptedProviderKey,
   listOrgProviderConnections,
   listProviderConnections,
-  resolveProviderSecretPin,
+  resolveProviderCredentialPin,
   setOrgProviderConnection,
   setProviderConnection,
 } from "../src/providerConnections";
-import { pinAccessibleSecret } from "../src/secrets";
 
 const ORG = "00000000-0000-0000-0000-0000000000cc";
 const OTHER_ORG = "00000000-0000-0000-0000-0000000000dd";
-const PERSONAL_SECRET = "00000000-0000-0000-0000-000000000101";
-const SHARED_SECRET = "00000000-0000-0000-0000-000000000102";
-const RESTRICTED_SECRET = "00000000-0000-0000-0000-000000000103";
 const me = { id: "user-me", email: "me@example.com", name: "Me" };
-const other = { id: "user-other", email: "o@example.com", name: "Other" };
+const other = { id: "user-other", email: "other@example.com", name: "Other" };
+const MASTER_KEY = Buffer.alloc(32, 7);
 
-type Binding = {
-  orgId: string;
-  userId?: string;
-  provider: string;
-  keyName: string;
-  secretId: string;
-  createdBy?: string | null;
-  createdAt: Date;
-  updatedAt: Date;
-};
+type Connection = typeof schema.modelProviderConnections.$inferSelect;
+type Version = typeof schema.modelProviderCredentialVersions.$inferSelect;
 
 function conditionParams(condition: unknown, output: unknown[] = [], seen = new Set<unknown>()): unknown[] {
   if (condition === null || typeof condition !== "object" || seen.has(condition)) return output;
@@ -111,216 +34,240 @@ function conditionParams(condition: unknown, output: unknown[] = [], seen = new 
 }
 
 function providerDatabase(role: "owner" | "admin" | "developer" | null = "developer") {
-  const personal: Binding[] = [];
-  const shared: Binding[] = [];
+  const connections: Connection[] = [];
+  const versions: Version[] = [];
   const audit: Record<string, unknown>[] = [];
-  const knownFilterValues = new Set<unknown>([
-    ORG,
-    OTHER_ORG,
-    me.id,
-    other.id,
-    "anthropic",
-    "openai",
-    "vanish",
-    PERSONAL_SECRET,
-    SHARED_SECRET,
-    RESTRICTED_SECRET,
-  ]);
 
-  const matches = (row: Binding, condition: unknown) =>
+  const matches = (record: Record<string, unknown>, condition: unknown) =>
     conditionParams(condition)
-      .filter((value) => knownFilterValues.has(value))
-      .every((value) => (Object.values(row) as unknown[]).includes(value));
-
-  const project = (row: Binding, projection?: Record<string, unknown>) => {
-    if (!projection) return row;
-    return Object.fromEntries(Object.keys(projection).map((key) => [key, row[key as keyof Binding]]));
-  };
+      .filter((value) => typeof value === "string" || typeof value === "number")
+      .every((value) => Object.values(record).includes(value));
 
   const database = {
     query: { memberships: { findFirst: async () => (role ? { orgRole: role } : undefined) } },
-    select: (projection?: Record<string, unknown>) => ({
+    transaction: async (fn: (tx: Db) => Promise<unknown>) => fn(database as unknown as Db),
+    select: () => ({
       from: (table: unknown) => ({
         where: (condition: unknown) => {
-          const source = table === schema.userProviderConnections
-            ? personal
-            : table === schema.orgProviderConnections
-              ? shared
-              : [];
-          const result = Promise.resolve(source.filter((row) => matches(row, condition)).map((row) => project(row, projection)));
+          const source = table === schema.modelProviderConnections ? connections : versions;
+          const result = Promise.resolve(source.filter((item) => matches(item as unknown as Record<string, unknown>, condition)));
           return Object.assign(result, { limit: async (limit: number) => (await result).slice(0, limit) });
         },
       }),
     }),
     insert: (table: unknown) => ({
-      values: (value: Record<string, unknown>) => {
+      values: (raw: Record<string, unknown>) => {
         if (table === schema.auditLog) {
-          audit.push(value);
+          audit.push(raw);
           return Promise.resolve();
         }
-        const source = table === schema.userProviderConnections ? personal : shared;
+        if (table === schema.modelProviderCredentialVersions) {
+          versions.push({
+            ...(raw as unknown as Version),
+            createdAt: new Date("2026-07-13T12:00:00Z"),
+          });
+          return Promise.resolve();
+        }
         return {
-          onConflictDoUpdate: async (input: { set: Record<string, unknown> }) => {
-            const secret = vault.get(String(value.secretId));
-            if (!secret || secret.key !== value.keyName) throw new Error("provider key must match the bound secret key");
-            const existing = source.find((row) =>
-              row.orgId === value.orgId &&
-              row.provider === value.provider &&
-              (table !== schema.userProviderConnections || row.userId === value.userId),
-            );
-            if (existing) Object.assign(existing, input.set);
-            else source.push({
-              ...(value as Omit<Binding, "createdAt" | "updatedAt">),
-              createdAt: new Date("2026-07-13T12:00:00Z"),
-              updatedAt: new Date("2026-07-13T12:00:00Z"),
-            });
-          },
+          onConflictDoUpdate: () => ({
+            returning: async () => {
+              const existing = connections.find((candidate) =>
+                candidate.orgId === raw.orgId &&
+                candidate.scope === raw.scope &&
+                candidate.provider === raw.provider &&
+                (raw.scope === "organization" || candidate.userId === raw.userId),
+              );
+              const now = raw.updatedAt as Date;
+              if (existing) {
+                existing.keyName = String(raw.keyName);
+                existing.currentVersion += 1;
+                existing.createdBy = String(raw.createdBy);
+                existing.updatedAt = now;
+                return [existing];
+              }
+              const connection = {
+                ...(raw as unknown as Connection),
+                createdAt: new Date("2026-07-13T12:00:00Z"),
+                updatedAt: now,
+              };
+              connections.push(connection);
+              return [connection];
+            },
+          }),
         };
       },
     }),
     delete: (table: unknown) => ({
       where: async (condition: unknown) => {
-        const source = table === schema.userProviderConnections ? personal : shared;
-        const doomed = new Set(source.filter((row) => matches(row, condition)));
-        if (table === schema.userProviderConnections) personal.splice(0, personal.length, ...personal.filter((row) => !doomed.has(row)));
-        else shared.splice(0, shared.length, ...shared.filter((row) => !doomed.has(row)));
+        if (table !== schema.modelProviderConnections) return;
+        const removed = connections.filter((item) => matches(item as unknown as Record<string, unknown>, condition));
+        const removedIds = new Set(removed.map((item) => item.id));
+        connections.splice(0, connections.length, ...connections.filter((item) => !removedIds.has(item.id)));
+        versions.splice(0, versions.length, ...versions.filter((item) => !removedIds.has(item.connectionId)));
       },
     }),
   } as unknown as Db;
 
-  return { database, personal, shared, audit };
+  return { database, connections, versions, audit };
 }
 
-function seedVault(): void {
-  vault.clear();
-  vault.set(PERSONAL_SECRET, {
-    id: PERSONAL_SECRET,
-    orgId: ORG,
-    key: "ANTHROPIC_API_KEY",
-    name: "My Anthropic key",
-    ownerId: me.id,
-    ownerName: me.name,
-    audience: "personal",
-    recipients: [],
-    active: true,
-    currentVersion: 1,
-    values: new Map([[1, "sk-personal-v1"]]),
-  });
-  vault.set(SHARED_SECRET, {
-    id: SHARED_SECRET,
-    orgId: ORG,
-    key: "ANTHROPIC_API_KEY",
-    name: "Workspace Anthropic key",
-    ownerId: me.id,
-    ownerName: me.name,
-    audience: "organization",
-    recipients: [],
-    active: true,
-    currentVersion: 1,
-    values: new Map([[1, "sk-workspace-v1"]]),
-  });
-  vault.set(RESTRICTED_SECRET, {
-    id: RESTRICTED_SECRET,
-    orgId: ORG,
-    key: "OPENAI_API_KEY",
-    name: "Restricted OpenAI key",
-    ownerId: me.id,
-    ownerName: me.name,
-    audience: "restricted",
-    recipients: [other.id],
-    active: true,
-    currentVersion: 1,
-    values: new Map([[1, "sk-restricted-v1"]]),
-  });
-}
-
-beforeEach(() => {
-  vi.clearAllMocks();
-  seedVault();
-});
-
-describe("personal provider vault bindings", () => {
-  it("stores and returns only a secret reference, then decrypts the pinned version at the last moment", async () => {
+describe("dedicated model-provider credentials", () => {
+  it("stores encrypted immutable versions and never returns or audits plaintext", async () => {
     const store = providerDatabase();
     const saved = await setProviderConnection({
       actor: me,
       orgId: ORG,
       provider: "anthropic",
       keyName: "ANTHROPIC_API_KEY",
-      secretId: PERSONAL_SECRET,
+      apiKey: "sk-provider-v1",
+      masterKey: MASTER_KEY,
       database: store.database,
     });
 
-    expect(saved).toMatchObject({ provider: "anthropic", secret_id: PERSONAL_SECRET, secret_name: "My Anthropic key" });
-    expect(JSON.stringify(saved)).not.toContain("sk-personal-v1");
-    expect(store.personal).toEqual([expect.objectContaining({ secretId: PERSONAL_SECRET })]);
-    expect(JSON.stringify(store.personal)).not.toContain("sk-personal-v1");
-    expect(await connectedProviderIds({ actor: me, orgId: ORG, database: store.database })).toEqual(new Set(["anthropic"]));
+    expect(saved).toMatchObject({ provider: "anthropic", scope: "personal", credential_version: 1, set: true });
+    expect(JSON.stringify(saved)).not.toContain("sk-provider-v1");
+    expect(JSON.stringify(store.versions)).not.toContain("sk-provider-v1");
+    expect(JSON.stringify(store.audit)).not.toContain("sk-provider-v1");
+    expect(JSON.stringify(store.audit)).not.toContain("api_key");
 
-    const pin = await resolveProviderSecretPin({ database: store.database, actor: me, orgId: ORG, provider: "anthropic" });
-    expect(pin?.secret.version).toBe(1);
-    vault.get(PERSONAL_SECRET)!.currentVersion = 2;
-    vault.get(PERSONAL_SECRET)!.values.set(2, "sk-personal-v2");
-    expect(await getDecryptedProviderKey({
-      database: store.database,
+    const firstPin = await resolveProviderCredentialPin({
       actor: me,
       orgId: ORG,
       provider: "anthropic",
-      secretId: pin!.secret.secretId,
-      secretVersion: pin!.secret.version,
-      keyName: pin!.keyName,
-    })).toMatchObject({ value: "sk-personal-v1", secretVersion: 1 });
+      database: store.database,
+    });
+    expect(firstPin).toMatchObject({ connectionId: saved.id, credentialVersion: 1, scope: "personal" });
+
+    await setProviderConnection({
+      actor: me,
+      orgId: ORG,
+      provider: "anthropic",
+      keyName: "ANTHROPIC_AUTH_TOKEN",
+      apiKey: "sk-provider-v2",
+      masterKey: MASTER_KEY,
+      database: store.database,
+    });
+    expect(store.versions.map((version) => version.version)).toEqual([1, 2]);
+    expect(store.versions.map((version) => version.keyName)).toEqual([
+      "ANTHROPIC_API_KEY",
+      "ANTHROPIC_AUTH_TOKEN",
+    ]);
+    const pinnedFirstVersion = await getDecryptedProviderKey({
+      actor: me,
+      orgId: ORG,
+      provider: "anthropic",
+      connectionId: firstPin!.connectionId,
+      credentialVersion: firstPin!.credentialVersion,
+      keyName: firstPin!.keyName,
+      masterKey: MASTER_KEY,
+      database: store.database,
+    });
+    expect(pinnedFirstVersion).toMatchObject({
+      keyName: "ANTHROPIC_API_KEY",
+      credentialVersion: 1,
+      value: "sk-provider-v1",
+    });
+    await expect(getDecryptedProviderKey({
+      actor: me,
+      orgId: ORG,
+      provider: "anthropic",
+      connectionId: firstPin!.connectionId,
+      credentialVersion: firstPin!.credentialVersion,
+      keyName: "ANTHROPIC_AUTH_TOKEN",
+      masterKey: MASTER_KEY,
+      database: store.database,
+    })).resolves.toBeNull();
+    expect(await resolveProviderCredentialPin({
+      actor: me,
+      orgId: ORG,
+      provider: "anthropic",
+      database: store.database,
+    })).toMatchObject({ keyName: "ANTHROPIC_AUTH_TOKEN", credentialVersion: 2 });
   });
 
-  it("hides a binding after access is revoked and disconnect never deletes the vault secret", async () => {
-    const store = providerDatabase();
-    await setProviderConnection({ actor: other, orgId: ORG, provider: "openai", keyName: "OPENAI_API_KEY", secretId: RESTRICTED_SECRET, database: store.database });
-    expect(await listProviderConnections({ actor: other, orgId: ORG, database: store.database })).toHaveLength(1);
-    vault.get(RESTRICTED_SECRET)!.recipients = [];
-    expect(await listProviderConnections({ actor: other, orgId: ORG, database: store.database })).toEqual([]);
-    await deleteProviderConnection({ actor: other, orgId: ORG, provider: "openai", database: store.database });
-    expect(vault.has(RESTRICTED_SECRET)).toBe(true);
-  });
-
-  it("does not turn infrastructure failures into a misleading disconnected state", async () => {
-    const store = providerDatabase();
-    await setProviderConnection({ actor: me, orgId: ORG, provider: "anthropic", keyName: "ANTHROPIC_API_KEY", secretId: PERSONAL_SECRET, database: store.database });
-    vi.mocked(pinAccessibleSecret).mockRejectedValueOnce(new Error("database unavailable"));
-
-    await expect(listProviderConnections({ actor: me, orgId: ORG, database: store.database })).rejects.toThrow(
-      "database unavailable",
-    );
-  });
-
-  it("rejects non-members", async () => {
-    await expect(listProviderConnections({ actor: me, orgId: ORG, database: providerDatabase(null).database })).rejects.toThrow("not a member");
-  });
-});
-
-describe("workspace provider vault bindings", () => {
-  it("requires an organization secret and resolves personal before workspace", async () => {
+  it("resolves personal before workspace and exposes workspace metadata to members", async () => {
     const store = providerDatabase("admin");
-    await expect(setOrgProviderConnection({ actor: me, orgId: ORG, provider: "anthropic", keyName: "ANTHROPIC_API_KEY", secretId: PERSONAL_SECRET, database: store.database })).rejects.toThrow(/organization secret/);
-    await setOrgProviderConnection({ actor: me, orgId: ORG, provider: "anthropic", keyName: "ANTHROPIC_API_KEY", secretId: SHARED_SECRET, database: store.database });
-    expect(await connectedOrgProviderIds({ actor: other, orgId: ORG, database: store.database })).toEqual(new Set(["anthropic"]));
-    expect((await getDecryptedProviderKey({ database: store.database, actor: other, orgId: ORG, provider: "anthropic" }))?.value).toBe("sk-workspace-v1");
+    await setOrgProviderConnection({
+      actor: me,
+      orgId: ORG,
+      provider: "anthropic",
+      keyName: "ANTHROPIC_API_KEY",
+      apiKey: "sk-workspace",
+      masterKey: MASTER_KEY,
+      database: store.database,
+    });
+    expect(await listOrgProviderConnections({ actor: other, orgId: ORG, database: store.database })).toHaveLength(1);
+    expect((await resolveProviderCredentialPin({ actor: other, orgId: ORG, provider: "anthropic", database: store.database }))?.scope).toBe("organization");
 
-    vault.get(PERSONAL_SECRET)!.audience = "restricted";
-    vault.get(PERSONAL_SECRET)!.recipients = [other.id];
-    await setProviderConnection({ actor: other, orgId: ORG, provider: "anthropic", keyName: "ANTHROPIC_API_KEY", secretId: PERSONAL_SECRET, database: store.database });
-    expect((await getDecryptedProviderKey({ database: store.database, actor: other, orgId: ORG, provider: "anthropic" }))?.value).toBe("sk-personal-v1");
-
-    vault.get(PERSONAL_SECRET)!.recipients = [];
-    expect((await getDecryptedProviderKey({ database: store.database, actor: other, orgId: ORG, provider: "anthropic" }))?.value).toBe("sk-workspace-v1");
-
-    await deleteOrgProviderConnection({ actor: me, orgId: ORG, provider: "anthropic", database: store.database });
-    expect(await listOrgProviderConnections({ actor: me, orgId: ORG, database: store.database })).toEqual([]);
-    expect(vault.has(SHARED_SECRET)).toBe(true);
+    await setProviderConnection({
+      actor: other,
+      orgId: ORG,
+      provider: "anthropic",
+      keyName: "ANTHROPIC_API_KEY",
+      apiKey: "sk-personal",
+      masterKey: MASTER_KEY,
+      database: store.database,
+    });
+    expect((await resolveProviderCredentialPin({ actor: other, orgId: ORG, provider: "anthropic", database: store.database }))?.scope).toBe("personal");
+    expect(await listProviderConnections({ actor: other, orgId: ORG, database: store.database })).toHaveLength(1);
   });
 
-  it("rejects non-admin workspace mutations", async () => {
-    const store = providerDatabase("developer");
-    await expect(setOrgProviderConnection({ actor: me, orgId: ORG, provider: "anthropic", keyName: "ANTHROPIC_API_KEY", secretId: SHARED_SECRET, database: store.database })).rejects.toThrow(/owners and admins/);
-    await expect(deleteOrgProviderConnection({ actor: me, orgId: ORG, provider: "anthropic", database: store.database })).rejects.toThrow(/owners and admins/);
+  it("disconnect deletes ciphertext while an already-persisted redacted run pin remains", async () => {
+    const store = providerDatabase();
+    const saved = await setProviderConnection({
+      actor: me,
+      orgId: ORG,
+      provider: "openai",
+      keyName: "OPENAI_API_KEY",
+      apiKey: "sk-delete-me",
+      masterKey: MASTER_KEY,
+      database: store.database,
+    });
+    const runSnapshot = { connectionId: saved.id, credentialVersion: 1, provider: "openai", keyName: "OPENAI_API_KEY" };
+    await deleteProviderConnection({ actor: me, orgId: ORG, provider: "openai", database: store.database });
+
+    expect(runSnapshot).toMatchObject({ connectionId: saved.id, credentialVersion: 1 });
+    expect(store.connections).toEqual([]);
+    expect(store.versions).toEqual([]);
+    expect(await getDecryptedProviderKey({
+      actor: me,
+      orgId: ORG,
+      ...runSnapshot,
+      masterKey: MASTER_KEY,
+      database: store.database,
+    })).toBeNull();
+  });
+
+  it("rejects Vanish and protects workspace mutations with role checks", async () => {
+    const developerStore = providerDatabase("developer");
+    await expect(setProviderConnection({
+      actor: me,
+      orgId: ORG,
+      provider: "VaNiSh",
+      keyName: "VANISH_API_KEY",
+      apiKey: "token",
+      masterKey: MASTER_KEY,
+      database: developerStore.database,
+    })).rejects.toThrow(/own connection API/);
+    await expect(setProviderConnection({
+      actor: me,
+      orgId: ORG,
+      provider: "openai",
+      keyName: "OPENAI_API_KEY",
+      apiKey: "   ",
+      masterKey: MASTER_KEY,
+      database: developerStore.database,
+    })).rejects.toThrow(/invalid/);
+    await expect(setOrgProviderConnection({
+      actor: me,
+      orgId: ORG,
+      provider: "openai",
+      keyName: "OPENAI_API_KEY",
+      apiKey: "key",
+      masterKey: MASTER_KEY,
+      database: developerStore.database,
+    })).rejects.toThrow(/owners and admins/);
+    await expect(deleteOrgProviderConnection({ actor: me, orgId: ORG, provider: "openai", database: developerStore.database })).rejects.toThrow(/owners and admins/);
+    await expect(listProviderConnections({ actor: me, orgId: OTHER_ORG, database: providerDatabase(null).database })).rejects.toThrow(/not a member/);
   });
 });

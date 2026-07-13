@@ -9,8 +9,6 @@ import { schema, type Db } from "@companion/db";
  * shares) are ignored.
  */
 
-export type FakeProviderConnectionRow = typeof schema.userProviderConnections.$inferSelect;
-export type FakeOrgProviderConnectionRow = typeof schema.orgProviderConnections.$inferSelect;
 export type FakeUserModelPreferencesRow = typeof schema.userModelPreferences.$inferSelect;
 export type FakeOrgModelPreferencesRow = typeof schema.orgModelPreferences.$inferSelect;
 export type FakeRunRow = typeof schema.skillRuns.$inferSelect;
@@ -41,8 +39,6 @@ export interface FakeStore {
   role: "owner" | "admin" | "developer" | null;
   skills: FakeSkillRow[];
   skillVersions: FakeSkillVersionRow[];
-  providerConnections: FakeProviderConnectionRow[];
-  orgProviderConnections: FakeOrgProviderConnectionRow[];
   userModelPreferences: FakeUserModelPreferencesRow[];
   orgModelPreferences: FakeOrgModelPreferencesRow[];
   runs: FakeRunRow[];
@@ -56,8 +52,6 @@ export function emptyStore(overrides: Partial<FakeStore> = {}): FakeStore {
     role: "developer",
     skills: [],
     skillVersions: [],
-    providerConnections: [],
-    orgProviderConnections: [],
     userModelPreferences: [],
     orgModelPreferences: [],
     runs: [],
@@ -103,8 +97,6 @@ function distinctOf(rows: Array<Record<string, unknown>>, keys: string[]): Set<u
 
 const SKILL_KEYS = ["id", "slug"];
 const SKILL_VERSION_KEYS = ["skillId", "id"];
-const PROVIDER_CONN_KEYS = ["userId", "provider"];
-const ORG_PROVIDER_CONN_KEYS = ["provider"];
 const USER_MODEL_PREF_KEYS = ["userId"];
 // Nothing distinguishes org rows in a single-org fake (every row shares the org id) — empty keys
 // mean match-all; the service's JS re-filter is the real guard.
@@ -202,28 +194,6 @@ export function fakeRunsDb(store: FakeStore): Db {
             };
           });
         }
-        if (table === schema.userProviderConnections) {
-          const rows = filterRows(
-            store.providerConnections as unknown as Record<string, unknown>[],
-            PROVIDER_CONN_KEYS,
-            cond,
-          );
-          if (projection && "provider" in projection && "keyName" in projection) {
-            return rows.map((r) => ({ provider: r.provider, keyName: r.keyName, createdAt: r.createdAt }));
-          }
-          return rows;
-        }
-        if (table === schema.orgProviderConnections) {
-          const rows = filterRows(
-            store.orgProviderConnections as unknown as Record<string, unknown>[],
-            ORG_PROVIDER_CONN_KEYS,
-            cond,
-          );
-          if (projection && "provider" in projection && "keyName" in projection) {
-            return rows.map((r) => ({ provider: r.provider, keyName: r.keyName, createdAt: r.createdAt }));
-          }
-          return rows;
-        }
         if (table === schema.userModelPreferences) {
           return filterRows(store.userModelPreferences as unknown as Record<string, unknown>[], USER_MODEL_PREF_KEYS, cond);
         }
@@ -284,40 +254,6 @@ export function fakeRunsDb(store: FakeStore): Db {
           );
           return Promise.resolve();
         }
-        if (table === schema.userProviderConnections) {
-          return {
-            onConflictDoUpdate: async (opts: { set: Record<string, unknown> }) => {
-              for (const v of list) {
-                const existing = store.providerConnections.find(
-                  (r) => r.userId === v.userId && r.provider === v.provider,
-                );
-                if (existing) Object.assign(existing, opts.set);
-                else
-                  store.providerConnections.push({
-                    createdAt: new Date(),
-                    updatedAt: new Date(),
-                    ...v,
-                  } as unknown as FakeProviderConnectionRow);
-              }
-            },
-          };
-        }
-        if (table === schema.orgProviderConnections) {
-          return {
-            onConflictDoUpdate: async (opts: { set: Record<string, unknown> }) => {
-              for (const v of list) {
-                const existing = store.orgProviderConnections.find((r) => r.provider === v.provider);
-                if (existing) Object.assign(existing, opts.set);
-                else
-                  store.orgProviderConnections.push({
-                    createdAt: new Date(),
-                    updatedAt: new Date(),
-                    ...v,
-                  } as unknown as FakeOrgProviderConnectionRow);
-              }
-            },
-          };
-        }
         if (table === schema.userModelPreferences) {
           return {
             onConflictDoUpdate: async (opts: { set: Record<string, unknown> }) => {
@@ -374,24 +310,6 @@ export function fakeRunsDb(store: FakeStore): Db {
     }),
     delete: (table: unknown) => ({
       where: async (cond: unknown) => {
-        if (table === schema.userProviderConnections) {
-          const doomed = filterRows(
-            store.providerConnections as unknown as Record<string, unknown>[],
-            PROVIDER_CONN_KEYS,
-            cond,
-          ) as unknown as FakeProviderConnectionRow[];
-          store.providerConnections = store.providerConnections.filter((r) => !doomed.includes(r));
-          return;
-        }
-        if (table === schema.orgProviderConnections) {
-          const doomed = filterRows(
-            store.orgProviderConnections as unknown as Record<string, unknown>[],
-            ORG_PROVIDER_CONN_KEYS,
-            cond,
-          ) as unknown as FakeOrgProviderConnectionRow[];
-          store.orgProviderConnections = store.orgProviderConnections.filter((r) => !doomed.includes(r));
-          return;
-        }
         throw new Error("fakeRunsDb: unexpected delete target");
       },
     }),

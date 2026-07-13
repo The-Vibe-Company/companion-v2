@@ -5,8 +5,8 @@ import { SKILL_REQUIREMENT_KEY_RE } from "./frontmatter";
  * Model provider connections: saved per-user (and workspace-shared) model-provider API keys, plus
  * the model catalog surfaced by `GET /v1/models`. The catalog is the FULL tool-capable models.dev
  * registry — the control plane never injects its own provider keys; each user (or the workspace)
- * supplies the chosen model's key (`env_keys`) as a write-only connection, decrypted live at serve
- * time and never copied onto a run.
+ * supplies the chosen model's key (`env_keys`) through dedicated write-only credential storage.
+ * Provider credentials deliberately do not belong to the generic Secrets vault.
  */
 
 /** The runtime owns this whole namespace; provider bindings must never shadow it. */
@@ -71,29 +71,41 @@ export type SetActivatedModelsInput = z.infer<typeof setActivatedModelsInputSche
 
 /* ---- Provider connections (saved model-provider API keys) ------------------------- */
 
-/** One saved provider connection. It references vault metadata and never contains a value. */
-export const providerConnectionRowSchema = z.object({
+export const modelProviderConnectionScopeSchema = z.enum(["personal", "organization"]);
+export type ModelProviderConnectionScope = z.infer<typeof modelProviderConnectionScopeSchema>;
+
+/** One saved provider connection. Credential values are permanently write-only. */
+export const modelProviderConnectionRowSchema = z.object({
+  id: z.string().uuid(),
   provider: z.string(),
   key_name: z.string(),
-  secret_id: z.string().uuid(),
-  secret_name: z.string(),
-  secret_audience: z.enum(["personal", "restricted", "organization"]),
-  secret_owner_name: z.string(),
+  scope: modelProviderConnectionScopeSchema,
+  credential_version: z.number().int().positive(),
   set: z.literal(true),
   created_at: z.string(),
+  updated_at: z.string(),
 });
-export type ProviderConnectionRow = z.infer<typeof providerConnectionRowSchema>;
+export type ModelProviderConnectionRow = z.infer<typeof modelProviderConnectionRowSchema>;
 
-export const providerConnectionsResponseSchema = z.object({
-  connections: z.array(providerConnectionRowSchema),
+export const modelProviderConnectionsResponseSchema = z.object({
+  connections: z.array(modelProviderConnectionRowSchema),
 });
-export type ProviderConnectionsResponse = z.infer<typeof providerConnectionsResponseSchema>;
+export type ModelProviderConnectionsResponse = z.infer<typeof modelProviderConnectionsResponseSchema>;
 
-/** Body of `PUT /v1/provider-connections` — bind a provider to an accessible vault secret. */
-export const setProviderConnectionInputSchema = z.object({
-  provider: z.string().min(1).max(120),
+/** Body of `PUT /v1/provider-connections` — replace the provider's write-only credential. */
+export const setModelProviderConnectionInputSchema = z.object({
+  provider: z.string().min(1).max(120).refine(
+    (provider) => provider.toLowerCase() !== "vanish",
+    "Vanish uses its own connection API",
+  ),
   /** Env name expected by the provider (from the model catalog's `env_keys`). */
   key_name: secretKeyNameSchema,
-  secret_id: z.string().uuid(),
+  /** Plaintext exists only for this write request and is never returned, audited, or logged. */
+  api_key: z
+    .string()
+    .min(1)
+    .max(65_536)
+    .refine((value) => value.trim().length > 0, "provider keys must not be blank")
+    .refine((value) => !value.includes("\0"), "provider keys must not contain NUL"),
 }).strict();
-export type SetProviderConnectionInput = z.infer<typeof setProviderConnectionInputSchema>;
+export type SetModelProviderConnectionInput = z.infer<typeof setModelProviderConnectionInputSchema>;

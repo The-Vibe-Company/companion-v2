@@ -129,7 +129,14 @@ async function main(): Promise<void> {
     const chatAbort = new AbortController();
     const chatDeadline = setTimeout(() => chatAbort.abort(), 180_000);
     const events = streamChatEvents({ client, sessionId: session.id, signal: chatAbort.signal });
+    const promptCreatedAt = Date.now();
+    const promptTime = ((BigInt(promptCreatedAt) * 0x1000n + 1n) & ((1n << 48n) - 1n))
+      .toString(16)
+      .padStart(12, "0");
     await sendPromptAsync(client, session.id, "Run a smoke probe and tell me the exact output.", {
+      // Exercise the durable worker's caller-supplied id path. Omitting this would let the smoke
+      // pass while RunSkill fails at OpenCode's stricter, time-ordered MessageID boundary.
+      messageId: `msg_${promptTime}${randomBytes(7).toString("hex")}`,
       signal: chatAbort.signal,
     });
     try {

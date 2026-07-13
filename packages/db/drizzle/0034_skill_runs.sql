@@ -1,6 +1,6 @@
 CREATE TYPE "skill_run_status" AS ENUM ('queued', 'starting', 'running', 'frozen', 'error', 'canceled');--> statement-breakpoint
 CREATE TYPE "skill_run_phase" AS ENUM ('queued', 'resolve_inputs', 'fork', 'push_workspace', 'start_server', 'healthcheck', 'create_session', 'prompt', 'record', 'collect_artifacts', 'freeze', 'cancel', 'cleanup', 'complete');--> statement-breakpoint
-CREATE TYPE "skill_run_secret_provenance" AS ENUM ('skill', 'model_provider', 'runtime');--> statement-breakpoint
+CREATE TYPE "skill_run_secret_provenance" AS ENUM ('skill', 'runtime');--> statement-breakpoint
 CREATE TYPE "skill_run_job_status" AS ENUM ('queued', 'leased', 'completed', 'failed', 'canceled');--> statement-breakpoint
 CREATE TYPE "skill_run_prompt_kind" AS ENUM ('initial', 'follow_up');--> statement-breakpoint
 CREATE TYPE "skill_run_prompt_status" AS ENUM ('queued', 'processing', 'completed', 'error', 'canceled');--> statement-breakpoint
@@ -131,7 +131,7 @@ CREATE TABLE "skill_run_secret_inputs" (
   CONSTRAINT "skill_run_secret_inputs_key_check" CHECK ("env_key" ~ '^[A-Za-z_][A-Za-z0-9_]*$' AND ("provenance" = 'runtime' OR "env_key" !~ '^OPENCODE_SERVER_')),
   CONSTRAINT "skill_run_secret_inputs_provenance_check" CHECK (
     (("provenance" = 'runtime' AND "secret_id" IS NULL AND "secret_version" IS NULL)
-      OR ("provenance" IN ('skill', 'model_provider') AND "secret_id" IS NOT NULL AND "secret_version" IS NOT NULL))
+      OR ("provenance" = 'skill' AND "secret_id" IS NOT NULL AND "secret_version" IS NOT NULL))
     AND ("provenance" <> 'skill' OR ("skill_id" IS NOT NULL AND "slot_id" IS NOT NULL))
   )
 );--> statement-breakpoint
@@ -208,7 +208,8 @@ CREATE TABLE "skill_run_prompts" (
   CONSTRAINT "skill_run_prompts_attempt_check" CHECK ("attempt" BETWEEN 0 AND 10),
   CONSTRAINT "skill_run_prompts_lease_reclaim_check" CHECK ("lease_reclaim_count" >= 0),
   CONSTRAINT "skill_run_prompts_idempotency_key_check" CHECK (char_length("idempotency_key") BETWEEN 8 AND 200),
-  CONSTRAINT "skill_run_prompts_payload_hash_check" CHECK (char_length("payload_hash") BETWEEN 32 AND 128)
+  CONSTRAINT "skill_run_prompts_payload_hash_check" CHECK (char_length("payload_hash") BETWEEN 32 AND 128),
+  CONSTRAINT "skill_run_prompts_message_id_check" CHECK ("message_id" ~ '^msg_[0-9A-Za-z]{26}$')
 );--> statement-breakpoint
 
 CREATE TABLE "skill_run_events" (

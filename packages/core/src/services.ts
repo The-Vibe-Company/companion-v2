@@ -3687,6 +3687,7 @@ export async function uninstallSkill(input: {
 
 // Saved model-provider connections (API keys). Same load-order reasoning as `./labels`.
 export * from "./providerConnections";
+export * from "./vanishConnections";
 
 // Activated-model lists (personal + workspace). Same load-order reasoning as `./labels`.
 export * from "./modelPreferences";

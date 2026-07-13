@@ -39,6 +39,10 @@ export const secretSlotStatusEnum = pgEnum("secret_slot_status", [
   "required",
   "optional_missing",
 ]);
+export const modelProviderConnectionScopeEnum = pgEnum("model_provider_connection_scope", [
+  "personal",
+  "organization",
+]);
 
 const now = () => timestamp("created_at", { withTimezone: true }).notNull().defaultNow();
 const updatedAt = () => timestamp("updated_at", { withTimezone: true }).notNull().defaultNow();
@@ -724,71 +728,134 @@ export const skillInstalls = pgTable(
   }),
 );
 
-/**
- * A member's saved model-provider or Vanish connection. The binding references the generic vault;
- * it never owns ciphertext. Personal bindings take precedence over workspace bindings at run time.
- */
-export const userProviderConnections = pgTable(
-  "user_provider_connections",
+/** Dedicated, write-only model-provider connection. It never references the generic Secrets vault. */
+export const modelProviderConnections = pgTable(
+  "model_provider_connections",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    scope: modelProviderConnectionScopeEnum("scope").notNull(),
+    /** Set only for personal connections; workspace connections have no owner override. */
+    userId: text("user_id").references(() => user.id, { onDelete: "cascade" }),
+    /** models.dev provider id, e.g. "anthropic". Vanish is stored separately. */
+    provider: text("provider").notNull(),
+    /** Exact environment key expected by the provider. */
+    keyName: text("key_name").notNull(),
+    currentVersion: integer("current_version").notNull().default(1),
+    createdBy: text("created_by").references(() => user.id, { onDelete: "set null" }),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    uniqueOrgId: unique("model_provider_connections_org_id_id_uq").on(t.orgId, t.id),
+    personalProvider: uniqueIndex("model_provider_connections_personal_provider_uq")
+      .on(t.orgId, t.userId, t.provider)
+      .where(sql`${t.scope} = 'personal'`),
+    orgProvider: uniqueIndex("model_provider_connections_org_provider_uq")
+      .on(t.orgId, t.provider)
+      .where(sql`${t.scope} = 'organization'`),
+    providerCheck: check(
+      "model_provider_connections_provider_check",
+      sql`char_length(${t.provider}) BETWEEN 1 AND 120 AND lower(${t.provider}) <> 'vanish'`,
+    ),
+    keyCheck: check("model_provider_connections_key_check", sql`${t.keyName} ~ '^[A-Za-z_][A-Za-z0-9_]*$' AND ${t.keyName} !~ '^OPENCODE_SERVER_'`),
+    scopeOwnerCheck: check(
+      "model_provider_connections_scope_owner_check",
+      sql`(${t.scope} = 'personal' AND ${t.userId} IS NOT NULL) OR (${t.scope} = 'organization' AND ${t.userId} IS NULL)`,
+    ),
+    versionCheck: check("model_provider_connections_version_check", sql`${t.currentVersion} >= 1`),
+    memberOrgFk: foreignKey({
+      columns: [t.orgId, t.userId],
+      foreignColumns: [memberships.orgId, memberships.userId],
+      name: "model_provider_connections_member_org_fk",
+    }).onDelete("cascade"),
+  }),
+);
+
+/** Immutable encrypted versions retained across rotations and erased with their connection. */
+export const modelProviderCredentialVersions = pgTable(
+  "model_provider_credential_versions",
   {
     orgId: uuid("org_id")
       .notNull()
       .references(() => organizations.id, { onDelete: "cascade" }),
-    userId: text("user_id")
-      .notNull()
-      .references(() => user.id, { onDelete: "cascade" }),
-    /** models.dev provider id, e.g. "anthropic" (or the reserved "vanish"). */
-    provider: text("provider").notNull(),
-    /** Exact environment key expected by the provider. It must match the bound secret's key. */
+    connectionId: uuid("connection_id").notNull(),
+    version: integer("version").notNull(),
+    /** Exact environment key paired with this immutable credential version. */
     keyName: text("key_name").notNull(),
+    ciphertext: text("ciphertext").notNull(),
+    iv: text("iv").notNull(),
+    authTag: text("auth_tag").notNull(),
+    wrappedDek: text("wrapped_dek").notNull(),
+    wrapIv: text("wrap_iv").notNull(),
+    wrapAuthTag: text("wrap_auth_tag").notNull(),
+    keyId: text("key_id").notNull(),
+    createdAt: now(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.orgId, t.connectionId, t.version] }),
+    connectionFk: foreignKey({
+      columns: [t.orgId, t.connectionId],
+      foreignColumns: [modelProviderConnections.orgId, modelProviderConnections.id],
+      name: "model_provider_credential_versions_connection_org_fk",
+    }).onDelete("cascade"),
+    versionCheck: check("model_provider_credential_versions_version_check", sql`${t.version} >= 1`),
+    keyCheck: check(
+      "model_provider_credential_versions_key_check",
+      sql`${t.keyName} ~ '^[A-Za-z_][A-Za-z0-9_]*$' AND ${t.keyName} !~ '^OPENCODE_SERVER_'`,
+    ),
+  }),
+);
+
+/** Personal Vanish binding; unlike model providers, it intentionally references Secrets. */
+export const userVanishConnections = pgTable(
+  "user_vanish_connections",
+  {
+    orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+    userId: text("user_id").notNull().references(() => user.id, { onDelete: "cascade" }),
+    keyName: text("key_name").notNull().default("VANISH_API_KEY"),
     secretId: uuid("secret_id").notNull(),
     createdAt: now(),
     updatedAt: updatedAt(),
   },
   (t) => ({
-    pk: primaryKey({ columns: [t.orgId, t.userId, t.provider] }),
-    bySecret: index("user_provider_connections_secret_idx").on(t.orgId, t.secretId),
-    keyCheck: check("user_provider_connections_key_check", sql`${t.keyName} ~ '^[A-Za-z_][A-Za-z0-9_]*$'`),
+    pk: primaryKey({ columns: [t.orgId, t.userId] }),
+    bySecret: index("user_vanish_connections_secret_idx").on(t.orgId, t.secretId),
+    keyCheck: check("user_vanish_connections_key_check", sql`${t.keyName} = 'VANISH_API_KEY'`),
     memberOrgFk: foreignKey({
       columns: [t.orgId, t.userId],
       foreignColumns: [memberships.orgId, memberships.userId],
-      name: "user_provider_connections_member_org_fk",
+      name: "user_vanish_connections_member_org_fk",
     }).onDelete("cascade"),
     secretOrgFk: foreignKey({
       columns: [t.orgId, t.secretId],
       foreignColumns: [secrets.orgId, secrets.id],
-      name: "user_provider_connections_secret_org_fk",
+      name: "user_vanish_connections_secret_org_fk",
     }).onDelete("restrict"),
   }),
 );
 
-/**
- * A workspace-shared model-provider or Vanish connection. Its secret must be an active
- * organization-audience vault entry; the migration trigger enforces that invariant on every write.
- */
-export const orgProviderConnections = pgTable(
-  "org_provider_connections",
+/** Workspace Vanish binding; its generic secret must have organization audience. */
+export const orgVanishConnections = pgTable(
+  "org_vanish_connections",
   {
-    orgId: uuid("org_id")
-      .notNull()
-      .references(() => organizations.id, { onDelete: "cascade" }),
-    /** models.dev provider id, e.g. "anthropic". */
-    provider: text("provider").notNull(),
-    /** Exact environment key expected by the provider. It must match the bound secret's key. */
-    keyName: text("key_name").notNull(),
+    orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+    keyName: text("key_name").notNull().default("VANISH_API_KEY"),
     secretId: uuid("secret_id").notNull(),
     createdBy: text("created_by").references(() => user.id, { onDelete: "set null" }),
     createdAt: now(),
     updatedAt: updatedAt(),
   },
   (t) => ({
-    pk: primaryKey({ columns: [t.orgId, t.provider] }),
-    bySecret: index("org_provider_connections_secret_idx").on(t.orgId, t.secretId),
-    keyCheck: check("org_provider_connections_key_check", sql`${t.keyName} ~ '^[A-Za-z_][A-Za-z0-9_]*$'`),
+    pk: primaryKey({ columns: [t.orgId] }),
+    bySecret: index("org_vanish_connections_secret_idx").on(t.orgId, t.secretId),
+    keyCheck: check("org_vanish_connections_key_check", sql`${t.keyName} = 'VANISH_API_KEY'`),
     secretOrgFk: foreignKey({
       columns: [t.orgId, t.secretId],
       foreignColumns: [secrets.orgId, secrets.id],
-      name: "org_provider_connections_secret_org_fk",
+      name: "org_vanish_connections_secret_org_fk",
     }).onDelete("restrict"),
   }),
 );
@@ -976,7 +1043,6 @@ export const skillRunPhaseEnum = pgEnum("skill_run_phase", [
 ]);
 export const skillRunSecretProvenanceEnum = pgEnum("skill_run_secret_provenance", [
   "skill",
-  "model_provider",
   "runtime",
 ]);
 export const skillRunJobStatusEnum = pgEnum("skill_run_job_status", [
@@ -1169,7 +1235,7 @@ export const skillRunSkills = pgTable(
   }),
 );
 
-/** Immutable references to the exact vault versions selected for a run. */
+/** Immutable references to the exact generic-vault versions selected for a run. */
 export const skillRunSecretInputs = pgTable(
   "skill_run_secret_inputs",
   {
@@ -1225,8 +1291,41 @@ export const skillRunSecretInputs = pgTable(
     provenanceCheck: check(
       "skill_run_secret_inputs_provenance_check",
       sql`((${t.provenance} = 'runtime' AND ${t.secretId} IS NULL AND ${t.secretVersion} IS NULL)
-          OR (${t.provenance} IN ('skill', 'model_provider') AND ${t.secretId} IS NOT NULL AND ${t.secretVersion} IS NOT NULL))
+          OR (${t.provenance} = 'skill' AND ${t.secretId} IS NOT NULL AND ${t.secretVersion} IS NOT NULL))
         AND (${t.provenance} <> 'skill' OR (${t.skillId} IS NOT NULL AND ${t.slotId} IS NOT NULL))`,
+    ),
+  }),
+);
+
+/** Immutable dedicated model-provider credential pin, stored outside generic secret inputs. */
+export const skillRunModelProviderInputs = pgTable(
+  "skill_run_model_provider_inputs",
+  {
+    orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+    runId: uuid("run_id").notNull(),
+    provider: text("provider").notNull(),
+    envKey: text("env_key").notNull(),
+    connectionId: uuid("connection_id").notNull(),
+    credentialVersion: integer("credential_version").notNull(),
+    connectionScope: modelProviderConnectionScopeEnum("connection_scope").notNull(),
+    createdAt: now(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.orgId, t.runId] }),
+    runFk: foreignKey({
+      columns: [t.orgId, t.runId],
+      foreignColumns: [skillRuns.orgId, skillRuns.id],
+      name: "skill_run_model_provider_inputs_run_org_fk",
+    }).onDelete("cascade"),
+    // Deliberately no FK to the credential version: disconnect must remove ciphertext immediately.
+    // The redacted run snapshot remains for history while queued/active runs fail closed on lookup.
+    envKeyCheck: check(
+      "skill_run_model_provider_inputs_key_check",
+      sql`${t.envKey} ~ '^[A-Za-z_][A-Za-z0-9_]*$' AND ${t.envKey} !~ '^OPENCODE_SERVER_'`,
+    ),
+    versionCheck: check(
+      "skill_run_model_provider_inputs_version_check",
+      sql`${t.credentialVersion} >= 1`,
     ),
   }),
 );
@@ -1390,6 +1489,10 @@ export const skillRunPrompts = pgTable(
     payloadHashCheck: check(
       "skill_run_prompts_payload_hash_check",
       sql`char_length(${t.payloadHash}) BETWEEN 32 AND 128`,
+    ),
+    messageIdCheck: check(
+      "skill_run_prompts_message_id_check",
+      sql`${t.messageId} ~ '^msg_[0-9A-Za-z]{26}$'`,
     ),
   }),
 );

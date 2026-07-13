@@ -156,7 +156,7 @@ export function ModelSelect({
       <div className="modelsel__foot">
         <button type="button" className="modelsel__add" onClick={onManageModels}>
           <Icon name="settings" size={12} />
-          Manage models and provider secrets
+          Manage models and provider keys
         </button>
       </div>
     </div>

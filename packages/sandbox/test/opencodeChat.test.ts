@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 import type { OpencodeClient } from "@opencode-ai/sdk";
+import { RunRuntimeError } from "@companion/core";
 import {
   createOpencodeRunChatRuntime,
   createOpencodeStreamState,
   getSessionMessageState,
   getSessionState,
   loadSessionItems,
+  sendPromptAsync,
   streamChatEvents,
 } from "../src/opencodeChat";
 
@@ -16,6 +18,24 @@ function clientWithMessages(messages: unknown[]): OpencodeClient {
     },
   } as unknown as OpencodeClient;
 }
+
+describe("sendPromptAsync", () => {
+  it("classifies an OpenCode payload rejection without exposing the SDK error body", async () => {
+    const client = {
+      session: {
+        promptAsync: async () => ({ error: { data: "sensitive upstream payload" } }),
+      },
+    } as unknown as OpencodeClient;
+
+    const error = await sendPromptAsync(client, "session-1", "hello", {
+      messageId: "msg_00000000000100000000000000",
+    }).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(RunRuntimeError);
+    expect(error).toMatchObject({ message: "OpenCode rejected the prompt" });
+    expect(String(error)).not.toContain("sensitive upstream payload");
+  });
+});
 
 describe("loadSessionItems", () => {
   it("includes a completed tool call as a history item", async () => {

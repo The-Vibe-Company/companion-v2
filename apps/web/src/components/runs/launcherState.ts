@@ -130,21 +130,21 @@ export function runDraftBlockers(options: RunOptions, model: string, inputs: Run
   else if (modelOption.readiness !== "ready") {
     blockers.push(modelOption.message ?? {
       not_activated: "This model is not activated.",
-      provider_disconnected: "Connect this model provider to a vault secret.",
+      provider_disconnected: "Connect this model provider with its dedicated API key.",
       runtime_unavailable: "The model runtime is unavailable.",
       ready: "",
     }[modelOption.readiness]);
-  } else if (!modelOption.provider_secret_pin) {
-    blockers.push("Reload run options to select the model provider secret explicitly.");
+  } else if (!modelOption.provider_credential_pin) {
+    blockers.push("Reload run options to pin the model provider credential explicitly.");
   }
 
   const secretBySlot = new Map(inputs.secrets.map((item) => [secretSelectionKey(item.skill_id, item.slot_id), item]));
   const variableBySlot = new Map(inputs.variables.map((item) => [variableSelectionKey(item.skill_id, item.env_key), item]));
-  const envValues = new Map<string, { kind: "secret" | "variable"; identity: string }>();
-  if (modelOption?.provider_secret_pin) {
-    envValues.set(modelOption.provider_secret_pin.env_key, {
-      kind: "secret",
-      identity: modelOption.provider_secret_pin.secret_id,
+  const envValues = new Map<string, { kind: "provider" | "secret" | "variable"; identity: string }>();
+  if (modelOption?.provider_credential_pin) {
+    envValues.set(modelOption.provider_credential_pin.env_key, {
+      kind: "provider",
+      identity: `${modelOption.provider_credential_pin.connection_id}:${modelOption.provider_credential_pin.credential_version}`,
     });
   }
 
@@ -159,7 +159,9 @@ export function runDraftBlockers(options: RunOptions, model: string, inputs: Run
       continue;
     }
     const current = envValues.get(slot.env_key);
-    if (current && (current.kind !== "secret" || current.identity !== selected.secret_id)) {
+    if (current?.kind === "provider") {
+      blockers.push(`${slot.env_key} conflicts with the model provider key.`);
+    } else if (current && (current.kind !== "secret" || current.identity !== selected.secret_id)) {
       blockers.push(`${slot.env_key} has conflicting values across the dependency closure.`);
     } else envValues.set(slot.env_key, { kind: "secret", identity: selected.secret_id });
   }
@@ -171,7 +173,9 @@ export function runDraftBlockers(options: RunOptions, model: string, inputs: Run
       continue;
     }
     const current = envValues.get(declaration.env_key);
-    if (current && (current.kind !== "variable" || current.identity !== selected.value)) {
+    if (current?.kind === "provider") {
+      blockers.push(`${declaration.env_key} conflicts with the model provider key.`);
+    } else if (current && (current.kind !== "variable" || current.identity !== selected.value)) {
       blockers.push(`${declaration.env_key} has conflicting values across the dependency closure.`);
     } else envValues.set(declaration.env_key, { kind: "variable", identity: selected.value });
   }

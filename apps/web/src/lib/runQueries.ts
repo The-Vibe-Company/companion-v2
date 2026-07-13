@@ -3,9 +3,9 @@
 import type {
   ActivatedModels,
   CreateRunConfigurationInput,
+  ModelProviderConnectionRow,
+  ModelProviderConnectionsResponse,
   ModelsResponse,
-  ProviderConnectionRow,
-  ProviderConnectionsResponse,
   RunConfiguration,
   RunDependencyPin,
   RunInputSelection,
@@ -13,6 +13,8 @@ import type {
   SkillRunDetail,
   SkillRunsResponse,
   UpdateRunConfigurationInput,
+  VanishConnectionResponse,
+  VanishConnectionRow,
 } from "@companion/contracts";
 import { apiFetch } from "./apiClient";
 
@@ -41,25 +43,25 @@ export async function saveOrgActivatedModels(models: string[]): Promise<{ activa
   });
 }
 
-/* ---- Saved per-user model-provider connections (API keys) ---- */
+/* ---- Dedicated model-provider credentials (write-only API keys) ---- */
 
-export async function fetchProviderConnections(): Promise<ProviderConnectionsResponse> {
-  return apiFetch<ProviderConnectionsResponse>("/v1/provider-connections");
+export async function fetchModelProviderConnections(): Promise<ModelProviderConnectionsResponse> {
+  return apiFetch<ModelProviderConnectionsResponse>("/v1/provider-connections");
 }
 
-/** Bind a provider to an accessible vault secret. The secret value never crosses this route. */
-export async function setProviderConnection(input: {
+/** Encrypt a personal provider key. It is write-only and never enters the generic Secrets vault. */
+export async function setModelProviderConnection(input: {
   provider: string;
   key_name: string;
-  secret_id: string;
-}): Promise<{ connection: ProviderConnectionRow }> {
-  return apiFetch<{ connection: ProviderConnectionRow }>("/v1/provider-connections", {
+  api_key: string;
+}): Promise<{ connection: ModelProviderConnectionRow }> {
+  return apiFetch<{ connection: ModelProviderConnectionRow }>("/v1/provider-connections", {
     method: "PUT",
     body: JSON.stringify(input),
   });
 }
 
-export async function deleteProviderConnection(provider: string): Promise<{ ok: true }> {
+export async function deleteModelProviderConnection(provider: string): Promise<{ ok: true }> {
   return apiFetch<{ ok: true }>(`/v1/provider-connections/${encodeURIComponent(provider)}`, {
     method: "DELETE",
   });
@@ -67,25 +69,57 @@ export async function deleteProviderConnection(provider: string): Promise<{ ok: 
 
 /* ---- Workspace-shared provider connections (owner/admin write; any member reads) ---- */
 
-export async function fetchOrgProviderConnections(): Promise<ProviderConnectionsResponse> {
-  return apiFetch<ProviderConnectionsResponse>("/v1/org-provider-connections");
+export async function fetchOrgModelProviderConnections(): Promise<ModelProviderConnectionsResponse> {
+  return apiFetch<ModelProviderConnectionsResponse>("/v1/org-provider-connections");
 }
 
-export async function setOrgProviderConnection(input: {
+export async function setOrgModelProviderConnection(input: {
   provider: string;
   key_name: string;
-  secret_id: string;
-}): Promise<{ connection: ProviderConnectionRow }> {
-  return apiFetch<{ connection: ProviderConnectionRow }>("/v1/org-provider-connections", {
+  api_key: string;
+}): Promise<{ connection: ModelProviderConnectionRow }> {
+  return apiFetch<{ connection: ModelProviderConnectionRow }>("/v1/org-provider-connections", {
     method: "PUT",
     body: JSON.stringify(input),
   });
 }
 
-export async function deleteOrgProviderConnection(provider: string): Promise<{ ok: true }> {
+export async function deleteOrgModelProviderConnection(provider: string): Promise<{ ok: true }> {
   return apiFetch<{ ok: true }>(`/v1/org-provider-connections/${encodeURIComponent(provider)}`, {
     method: "DELETE",
   });
+}
+
+/* ---- Vanish bindings (references to the generic Secrets vault) ---- */
+
+export async function fetchVanishConnection(): Promise<VanishConnectionResponse> {
+  return apiFetch<VanishConnectionResponse>("/v1/vanish-connection");
+}
+
+export async function setVanishConnection(secretId: string): Promise<{ connection: VanishConnectionRow }> {
+  return apiFetch<{ connection: VanishConnectionRow }>("/v1/vanish-connection", {
+    method: "PUT",
+    body: JSON.stringify({ secret_id: secretId }),
+  });
+}
+
+export async function deleteVanishConnection(): Promise<{ ok: true }> {
+  return apiFetch<{ ok: true }>("/v1/vanish-connection", { method: "DELETE" });
+}
+
+export async function fetchOrgVanishConnection(): Promise<VanishConnectionResponse> {
+  return apiFetch<VanishConnectionResponse>("/v1/org-vanish-connection");
+}
+
+export async function setOrgVanishConnection(secretId: string): Promise<{ connection: VanishConnectionRow }> {
+  return apiFetch<{ connection: VanishConnectionRow }>("/v1/org-vanish-connection", {
+    method: "PUT",
+    body: JSON.stringify({ secret_id: secretId }),
+  });
+}
+
+export async function deleteOrgVanishConnection(): Promise<{ ok: true }> {
+  return apiFetch<{ ok: true }>("/v1/org-vanish-connection", { method: "DELETE" });
 }
 
 /* ---- Skill runs ---- */
@@ -136,7 +170,8 @@ export async function launchRun(
     skillVersionId: string;
     dependencyPins: RunDependencyPin[];
     inputs: RunInputSelection;
-    modelProviderSecretId: string;
+    modelProviderConnectionId: string;
+    modelProviderCredentialVersion: number;
     runConfigId: string | null;
     files: File[];
     idempotencyKey: string;
@@ -148,7 +183,8 @@ export async function launchRun(
   form.set("skill_version_id", input.skillVersionId);
   form.set("dependency_pins", JSON.stringify(input.dependencyPins));
   form.set("inputs", JSON.stringify(input.inputs));
-  form.set("model_provider_secret_id", input.modelProviderSecretId);
+  form.set("model_provider_connection_id", input.modelProviderConnectionId);
+  form.set("model_provider_credential_version", String(input.modelProviderCredentialVersion));
   if (input.runConfigId) form.set("run_config_id", input.runConfigId);
   for (const file of input.files) form.append("file", file, file.name);
   return apiFetch<SkillRunDetail>(`/v1/skills/${encodeURIComponent(slug)}/runs`, {

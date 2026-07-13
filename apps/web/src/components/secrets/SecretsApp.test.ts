@@ -128,6 +128,7 @@ describe("SecretsApp", () => {
 
   it("keeps the complete Skills navigation shell with Secrets selected", async () => {
     const container = await mount();
+    expect(container.textContent).toContain("Model provider keys stay separate in Settings → Models.");
     const primary = container.querySelector('nav[aria-label="Primary"]') as HTMLElement;
     expect(primary.textContent).toContain("My Skills");
     expect(primary.textContent).toContain("Organization");

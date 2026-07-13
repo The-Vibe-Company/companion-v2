@@ -32,6 +32,9 @@ describe("Postgres tenant isolation", () => {
   let fixture: IntegrationFixture;
   let skillA: SeededSkill;
   let skillB: SeededSkill;
+  const personalProviderId = randomUUID();
+  const orgProviderId = randomUUID();
+  const vanishSecretId = randomUUID();
   const role = `companion_rls_${randomUUID().replaceAll("-", "").slice(0, 20)}`;
 
   beforeAll(async () => {
@@ -49,6 +52,24 @@ describe("Postgres tenant isolation", () => {
       scope: "org",
     });
     await seedPersonalLabel({ orgId: fixture.orgA, owner: fixture.owner, skillId: skillA.id, path: "private/rls" });
+    await integrationSql`
+      insert into model_provider_connections
+        (id, org_id, scope, user_id, provider, key_name, current_version, created_by)
+      values
+        (${personalProviderId}::uuid, ${fixture.orgA}::uuid, 'personal', ${fixture.owner.id}, 'anthropic', 'ANTHROPIC_API_KEY', 1, ${fixture.owner.id}),
+        (${orgProviderId}::uuid, ${fixture.orgA}::uuid, 'organization', null, 'openai', 'OPENAI_API_KEY', 1, ${fixture.owner.id})
+    `;
+    await integrationSql`
+      insert into model_provider_credential_versions
+        (org_id, connection_id, version, key_name, ciphertext, iv, auth_tag, wrapped_dek, wrap_iv, wrap_auth_tag, key_id)
+      values
+        (${fixture.orgA}::uuid, ${personalProviderId}::uuid, 1, 'ANTHROPIC_API_KEY', 'cipher-personal', 'iv', 'tag', 'dek', 'wrap-iv', 'wrap-tag', 'key-id'),
+        (${fixture.orgA}::uuid, ${orgProviderId}::uuid, 1, 'OPENAI_API_KEY', 'cipher-org', 'iv', 'tag', 'dek', 'wrap-iv', 'wrap-tag', 'key-id')
+    `;
+    await integrationSql`
+      insert into secrets (id, org_id, owner_id, name, key, audience)
+      values (${vanishSecretId}::uuid, ${fixture.orgA}::uuid, ${fixture.owner.id}, 'Vanish RLS', 'VANISH_API_KEY', 'organization')
+    `;
     await integrationSql.unsafe(`create role ${role} nologin`);
     await integrationSql.unsafe(`grant ${role} to current_user with inherit true, set true`);
     await integrationSql.unsafe(`grant usage on schema public to ${role}`);
@@ -122,6 +143,67 @@ describe("Postgres tenant isolation", () => {
       return tx<Array<{ path: string }>>`select path from personal_labels order by path`;
     });
     expect(paths).toEqual([]);
+  });
+
+  it("keeps personal provider credentials owner-only and workspace credential mutations manager-only", async () => {
+    const adminVisible = await integrationSql.begin(async (tx) => {
+      await tx.unsafe(`set local role ${role}`);
+      await tx`select set_config('app.org_id', ${fixture.orgA}, true), set_config('app.user_id', ${fixture.admin.id}, true)`;
+      return tx<Array<{ id: string; scope: string }>>`select id, scope from model_provider_connections order by id`;
+    });
+    expect(adminVisible).toEqual([{ id: orgProviderId, scope: "organization" }]);
+
+    const developerChanged = await integrationSql.begin(async (tx) => {
+      await tx.unsafe(`set local role ${role}`);
+      await tx`select set_config('app.org_id', ${fixture.orgA}, true), set_config('app.user_id', ${fixture.developer.id}, true)`;
+      return tx<Array<{ id: string }>>`
+        update model_provider_connections set key_name = 'STOLEN_KEY'
+        where id = ${orgProviderId}::uuid returning id
+      `;
+    });
+    expect(developerChanged).toEqual([]);
+
+    await expect(integrationSql.begin(async (tx) => {
+      await tx.unsafe(`set local role ${role}`);
+      await tx`select set_config('app.org_id', ${fixture.orgA}, true), set_config('app.user_id', ${fixture.developer.id}, true)`;
+      await tx`
+        insert into model_provider_connections
+          (org_id, scope, provider, key_name, current_version, created_by)
+        values (${fixture.orgA}::uuid, 'organization', 'mistral', 'MISTRAL_API_KEY', 1, ${fixture.developer.id})
+      `;
+    })).rejects.toThrow(/row-level security/);
+
+    await expect(integrationSql.begin(async (tx) => {
+      await tx.unsafe(`set local role ${role}`);
+      await tx`select set_config('app.org_id', ${fixture.orgA}, true), set_config('app.user_id', ${fixture.developer.id}, true)`;
+      await tx`
+        insert into model_provider_credential_versions
+          (org_id, connection_id, version, key_name, ciphertext, iv, auth_tag, wrapped_dek, wrap_iv, wrap_auth_tag, key_id)
+        values (${fixture.orgA}::uuid, ${orgProviderId}::uuid, 2, 'OPENAI_API_KEY', 'cipher', 'iv', 'tag', 'dek', 'wrap-iv', 'wrap-tag', 'key-id')
+      `;
+    })).rejects.toThrow(/row-level security/);
+  });
+
+  it("lets members read shared Vanish while refusing direct developer mutations", async () => {
+    await expect(integrationSql.begin(async (tx) => {
+      await tx.unsafe(`set local role ${role}`);
+      await tx`select set_config('app.org_id', ${fixture.orgA}, true), set_config('app.user_id', ${fixture.developer.id}, true)`;
+      await tx`
+        insert into org_vanish_connections (org_id, secret_id, created_by)
+        values (${fixture.orgA}::uuid, ${vanishSecretId}::uuid, ${fixture.developer.id})
+      `;
+    })).rejects.toThrow(/row-level security/);
+
+    await integrationSql`
+      insert into org_vanish_connections (org_id, secret_id, created_by)
+      values (${fixture.orgA}::uuid, ${vanishSecretId}::uuid, ${fixture.owner.id})
+    `;
+    const visible = await integrationSql.begin(async (tx) => {
+      await tx.unsafe(`set local role ${role}`);
+      await tx`select set_config('app.org_id', ${fixture.orgA}, true), set_config('app.user_id', ${fixture.developer.id}, true)`;
+      return tx<Array<{ secret_id: string }>>`select secret_id from org_vanish_connections`;
+    });
+    expect(visible).toEqual([{ secret_id: vanishSecretId }]);
   });
 
   it("uses transaction-local tenant identifiers that are cleared after withTenantContext returns", async () => {

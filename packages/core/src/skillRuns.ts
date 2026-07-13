@@ -21,6 +21,7 @@ import {
   type RunDependencyPin,
   type RunInputSelection,
   type RunInputSnapshot,
+  type RunModelProviderInputSnapshot,
   type RunSecretInputSnapshot,
   type RunVariableInputSnapshot,
   type SkillRunArtifactRow,
@@ -31,8 +32,13 @@ import {
 } from "@companion/contracts";
 import { canAccessRun, canAccessSkill } from "./authz";
 import { getActivatedModelSets } from "./modelPreferences";
-import { resolveProviderSecretPin } from "./providerConnections";
+import {
+  getDecryptedProviderKey,
+  resolveProviderCredentialPin,
+  type ProviderCredentialPin,
+} from "./providerConnections";
 import { decryptPinnedSecret, pinAccessibleSecret, type AccessibleSecretPin } from "./secrets";
+import { resolveVanishSecretPin } from "./vanishConnections";
 import {
   decryptOpaqueValue,
   encryptOpaqueValue,
@@ -141,7 +147,7 @@ export interface ResolvedRunDeclarations {
 }
 
 export interface ResolvedSkillSecretInput {
-  provenance: "skill" | "model_provider";
+  provenance: "skill";
   skillId: string | null;
   skillSlug: string | null;
   slotId: string | null;
@@ -149,6 +155,10 @@ export interface ResolvedSkillSecretInput {
   required: boolean;
   pin: AccessibleSecretPin;
   sourceKey: string;
+}
+
+export interface ResolvedModelProviderInput extends ProviderCredentialPin {
+  envKey: string;
 }
 
 export interface ResolvedVariableInput {
@@ -161,6 +171,7 @@ export interface ResolvedVariableInput {
 export interface ResolvedRunInputs {
   secrets: ResolvedSkillSecretInput[];
   variables: ResolvedVariableInput[];
+  modelProvider: ResolvedModelProviderInput | null;
 }
 
 export interface CreateRunAttachment {
@@ -282,7 +293,7 @@ export function hashRunPayload(value: unknown): string {
 
 /**
  * Canonical launch identity shared by the early replay lookup and the transactional insert path.
- * Keep every caller-visible input here, including the explicit model-provider vault reference;
+ * Keep every caller-visible input here, including the exact dedicated model-provider credential;
  * object-storage keys are derived from the attachment ids and are intentionally not authoritative.
  */
 export function hashRunCreationPayload(input: {
@@ -291,7 +302,8 @@ export function hashRunCreationPayload(input: {
   dependencyPins: RunDependencyPin[];
   prompt: string;
   model: string;
-  modelProviderSecretId: string;
+  modelProviderConnectionId: string;
+  modelProviderCredentialVersion: number;
   inputs: RunInputSelection;
   runConfigId?: string | null;
   attachments: CreateRunAttachment[];
@@ -304,7 +316,8 @@ export function hashRunCreationPayload(input: {
     ),
     prompt: input.prompt,
     model: input.model,
-    modelProviderSecretId: input.modelProviderSecretId,
+    modelProviderConnectionId: input.modelProviderConnectionId,
+    modelProviderCredentialVersion: input.modelProviderCredentialVersion,
     inputs: {
       secrets: [...input.inputs.secrets].sort((a, b) =>
         `${a.skill_id}:${a.slot_id}`.localeCompare(`${b.skill_id}:${b.slot_id}`),
@@ -320,13 +333,23 @@ export function hashRunCreationPayload(input: {
   });
 }
 
-/** UUID-shaped deterministic OpenCode id derived from a durable logical prompt identity. */
-export function deterministicRunMessageId(runId: string, ordinal: number): string {
-  const bytes = createHash("sha256").update(`companion-run-prompt:v1:${runId}:${ordinal}`).digest().subarray(0, 16);
-  bytes[6] = (bytes[6]! & 0x0f) | 0x50;
-  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
-  const hex = bytes.toString("hex");
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+/** OpenCode-compatible, time-ordered id derived from one durable prompt row. */
+export function deterministicRunMessageId(runId: string, ordinal: number, createdAtMs: number): string {
+  if (!Number.isSafeInteger(ordinal) || ordinal < 0 || !Number.isSafeInteger(createdAtMs) || createdAtMs < 0) {
+    throw new Error("invalid durable prompt identity");
+  }
+  // OpenCode 1.17.13 uses `msg_`, then six timestamp/counter bytes, then 14 base62 characters.
+  // Its prompt loop compares message ids, so merely satisfying the `msg` schema prefix is unsafe:
+  // a hash in the timestamp field can sort the user message after its native assistant child and
+  // make OpenCode continue forever. Persist the same createdAt alongside this id and hash only the
+  // random suffix so retries remain stable and native chronological ordering is preserved.
+  const encodedTime = (BigInt(createdAtMs) * 0x1000n + BigInt(ordinal + 1)) & ((1n << 48n) - 1n);
+  const timeHex = encodedTime.toString(16).padStart(12, "0");
+  const stableSuffix = createHash("sha256")
+    .update(`companion-run-prompt:v2:${runId}:${ordinal}:${createdAtMs}`)
+    .digest("hex")
+    .slice(0, 14);
+  return `msg_${timeHex}${stableSuffix}`;
 }
 
 function isUniqueViolation(error: unknown): boolean {
@@ -641,8 +664,9 @@ export async function validateRunInputSelection(input: {
   orgId: string;
   model: string;
   modelEnvKeys: string[];
-  /** Explicit vault reference displayed by run-options for the selected model. */
-  modelProviderSecretId?: string | null;
+  /** Exact dedicated credential displayed by run-options for the selected model. */
+  modelProviderConnectionId?: string | null;
+  modelProviderCredentialVersion?: number | null;
   selection: RunInputSelection;
   declarations: ResolvedRunDeclarations;
   database: Db;
@@ -652,8 +676,8 @@ export async function validateRunInputSelection(input: {
   requireExplicitProviderSelection?: boolean;
   /** Unit-test/domain seam; production callers use the vault service above. */
   pinSecret?: (secretId: string) => Promise<AccessibleSecretPin>;
-  /** Unit-test/domain seam; production callers resolve personal-then-workspace bindings. */
-  providerPin?: { keyName: string; secret: AccessibleSecretPin } | null;
+  /** Unit-test/domain seam; production callers resolve personal-then-workspace credentials. */
+  providerPin?: ProviderCredentialPin | null;
 }): Promise<ResolvedRunInputs> {
   const secretDeclarations = new Map(
     input.declarations.secrets.map((declaration) => [
@@ -749,45 +773,47 @@ export async function validateRunInputSelection(input: {
 
   const provider = input.model.split("/", 1)[0] ?? "";
   if (!provider) throw new RunValidationError("the model provider is invalid", "model_unavailable");
-  let providerBinding = input.providerPin;
-  if (providerBinding === undefined) {
+  let providerCredential = input.providerPin;
+  if (providerCredential === undefined) {
     try {
-      providerBinding = await resolveProviderSecretPin({
+      providerCredential = await resolveProviderCredentialPin({
         actor: input.actor,
         orgId: input.orgId,
         provider,
         database: input.database,
       });
     } catch {
-      providerBinding = null;
+      providerCredential = null;
     }
   }
-  if (!providerBinding || !input.modelEnvKeys.includes(providerBinding.keyName)) {
-    if (input.modelProviderSecretId) {
-      throw new RunValidationError("the selected model provider secret is unavailable", "provider_secret_unavailable");
+  if (!providerCredential || !input.modelEnvKeys.includes(providerCredential.keyName)) {
+    if (input.modelProviderConnectionId || input.modelProviderCredentialVersion) {
+      throw new RunValidationError(
+        "the selected model provider credential is unavailable",
+        "provider_credential_unavailable",
+      );
     }
-    if (input.providerRequired !== false || providerBinding) {
+    if (input.providerRequired !== false || providerCredential) {
       throw new RunValidationError("the model provider is not connected", "provider_disconnected");
     }
   } else {
     if (input.requireExplicitProviderSelection !== false) {
-      if (!input.modelProviderSecretId) {
-        throw new RunValidationError("select the model provider secret shown in the launcher", "provider_secret_missing");
+      if (!input.modelProviderConnectionId || !input.modelProviderCredentialVersion) {
+        throw new RunValidationError(
+          "select the model provider credential shown in the launcher",
+          "provider_credential_missing",
+        );
       }
-      if (input.modelProviderSecretId !== providerBinding.secret.secretId) {
-        throw new RunValidationError("the selected model provider secret changed; reload run options", "provider_secret_unavailable");
+      if (
+        input.modelProviderConnectionId !== providerCredential.connectionId ||
+        input.modelProviderCredentialVersion !== providerCredential.credentialVersion
+      ) {
+        throw new RunValidationError(
+          "the selected model provider credential changed; reload run options",
+          "provider_credential_unavailable",
+        );
       }
     }
-    resolvedSecrets.push({
-      provenance: "model_provider",
-      skillId: null,
-      skillSlug: null,
-      slotId: null,
-      envKey: providerBinding.keyName,
-      required: true,
-      pin: providerBinding.secret,
-      sourceKey: `${provider}:${providerBinding.keyName}`,
-    });
   }
 
   const byEnv = new Map<string, { kind: "secret"; pin: AccessibleSecretPin } | { kind: "variable"; value: string }>();
@@ -811,7 +837,27 @@ export async function validateRunInputSelection(input: {
     }
     byEnv.set(variable.envKey, { kind: "variable", value: variable.value });
   }
-  return { secrets: resolvedSecrets, variables };
+  if (providerCredential) {
+    if (providerCredential.keyName.startsWith(RUN_RESERVED_ENV_PREFIX)) {
+      throw new RunValidationError(
+        `${providerCredential.keyName} is reserved by the runtime`,
+        "reserved_environment_key",
+      );
+    }
+    if (byEnv.has(providerCredential.keyName)) {
+      throw new RunValidationError(
+        `environment key ${providerCredential.keyName} conflicts with the model provider credential`,
+        "input_collision",
+      );
+    }
+  }
+  return {
+    secrets: resolvedSecrets,
+    variables,
+    modelProvider: providerCredential
+      ? { ...providerCredential, envKey: providerCredential.keyName }
+      : null,
+  };
 }
 
 function serializeOpaque(ciphertext: OpaqueCiphertext): string {
@@ -927,7 +973,7 @@ function toRunRow(row: RunRow, skillSlug: string, artifactsCount: number): Skill
 }
 
 async function loadInputSnapshot(database: Db, row: RunRow): Promise<RunInputSnapshot> {
-  const [skillRows, secretRows, variableRows] = await Promise.all([
+  const [skillRows, secretRows, variableRows, modelProviderRows] = await Promise.all([
     database
       .select({
         skillId: schema.skillRunSkills.skillId,
@@ -967,6 +1013,15 @@ async function loadInputSnapshot(database: Db, row: RunRow): Promise<RunInputSna
       .from(schema.skillRunVariableInputs)
       .where(
         and(eq(schema.skillRunVariableInputs.orgId, row.orgId), eq(schema.skillRunVariableInputs.runId, row.id)),
+      ),
+    database
+      .select()
+      .from(schema.skillRunModelProviderInputs)
+      .where(
+        and(
+          eq(schema.skillRunModelProviderInputs.orgId, row.orgId),
+          eq(schema.skillRunModelProviderInputs.runId, row.id),
+        ),
       ),
   ]);
   const dependencyRows = skillRows.length
@@ -1041,7 +1096,17 @@ async function loadInputSnapshot(database: Db, row: RunRow): Promise<RunInputSna
     env_key: variable.envKey,
     value: variable.value,
   }));
-  return { skills, secrets, variables };
+  const providerRow = modelProviderRows[0];
+  const modelProvider: RunModelProviderInputSnapshot | null = providerRow
+    ? {
+        provider: providerRow.provider,
+        env_key: providerRow.envKey,
+        connection_id: providerRow.connectionId,
+        credential_version: providerRow.credentialVersion,
+        scope: providerRow.connectionScope,
+      }
+    : null;
+  return { skills, secrets, variables, model_provider: modelProvider };
 }
 
 async function toDetail(
@@ -1148,7 +1213,8 @@ async function createRunInTransaction(input: {
   prompt: string;
   model: string;
   inputs: RunInputSelection;
-  modelProviderSecretId: string;
+  modelProviderConnectionId: string;
+  modelProviderCredentialVersion: number;
   runConfigId?: string | null;
   idempotencyKey: string;
   attachments: CreateRunAttachment[];
@@ -1217,10 +1283,15 @@ async function createRunInTransaction(input: {
     model: input.model,
     modelEnvKeys: input.modelEnvKeys,
     selection: input.inputs,
-    modelProviderSecretId: input.modelProviderSecretId,
+    modelProviderConnectionId: input.modelProviderConnectionId,
+    modelProviderCredentialVersion: input.modelProviderCredentialVersion,
     declarations,
     database: input.database,
   });
+  const modelProviderInput = resolvedInputs.modelProvider;
+  if (!modelProviderInput) {
+    throw new RunValidationError("the model provider is not connected", "provider_disconnected");
+  }
 
   let configNameSnapshot: string | null = null;
   if (input.runConfigId) {
@@ -1243,10 +1314,9 @@ async function createRunInTransaction(input: {
   let artifactsEnabled = false;
   try {
     artifactsEnabled =
-      (await resolveProviderSecretPin({
+      (await resolveVanishSecretPin({
         actor: input.actor,
         orgId: input.orgId,
-        provider: "vanish",
         database: input.database,
       })) !== null;
   } catch {
@@ -1331,6 +1401,15 @@ async function createRunInTransaction(input: {
       required: true,
     },
   ]);
+  await input.database.insert(schema.skillRunModelProviderInputs).values({
+    orgId: input.orgId,
+    runId,
+    provider: modelProviderInput.provider,
+    envKey: modelProviderInput.envKey,
+    connectionId: modelProviderInput.connectionId,
+    credentialVersion: modelProviderInput.credentialVersion,
+    connectionScope: modelProviderInput.scope,
+  });
   if (resolvedInputs.variables.length > 0) {
     await input.database.insert(schema.skillRunVariableInputs).values(
       resolvedInputs.variables.map((variable) => ({
@@ -1365,6 +1444,7 @@ async function createRunInTransaction(input: {
     })),
     artifactsEnabled,
   });
+  const promptCreatedAt = new Date();
   await input.database.insert(schema.skillRunPrompts).values({
     orgId: input.orgId,
     runId,
@@ -1372,9 +1452,11 @@ async function createRunInTransaction(input: {
     kind: "initial",
     idempotencyKey: `initial:${input.idempotencyKey}`,
     payloadHash: hashRunPayload({ prompt: composedPrompt }),
-    messageId: deterministicRunMessageId(runId, 0),
+    messageId: deterministicRunMessageId(runId, 0, promptCreatedAt.getTime()),
     prompt: composedPrompt,
     status: "queued",
+    createdAt: promptCreatedAt,
+    updatedAt: promptCreatedAt,
   });
   await input.database.insert(schema.skillRunJobs).values({
     orgId: input.orgId,
@@ -1429,7 +1511,8 @@ export async function createRun(input: {
   prompt: string;
   model: string;
   inputs: RunInputSelection;
-  modelProviderSecretId: string;
+  modelProviderConnectionId: string;
+  modelProviderCredentialVersion: number;
   runConfigId?: string | null;
   idempotencyKey: string;
   attachments: CreateRunAttachment[];
@@ -1659,8 +1742,9 @@ export interface RunExecutionPlan {
 }
 
 /**
- * Revalidate every pinned vault reference immediately before sandbox injection, then decrypt into
- * an ephemeral map. The caller must clear `env` and `injectedLiterals` after creating its redactor.
+ * Revalidate every pinned skill secret and the dedicated model-provider credential immediately
+ * before sandbox injection, then decrypt into an ephemeral map. The caller must clear `env` and
+ * `injectedLiterals` after creating its redactor.
  */
 export async function loadRunExecutionPlan(input: {
   actor: ActorContext;
@@ -1678,7 +1762,7 @@ export async function loadRunExecutionPlan(input: {
   if (["frozen", "error", "canceled"].includes(row.status)) {
     throw new RunBusyError("this run is terminal", "run_terminal");
   }
-  const [skills, attachments, secretInputs, variables] = await Promise.all([
+  const [skills, attachments, secretInputs, variables, providerInputs] = await Promise.all([
     database
       .select({
         slug: schema.skills.slug,
@@ -1719,12 +1803,23 @@ export async function loadRunExecutionPlan(input: {
           eq(schema.skillRunVariableInputs.runId, input.runId),
         ),
       ),
+    database
+      .select()
+      .from(schema.skillRunModelProviderInputs)
+      .where(
+        and(
+          eq(schema.skillRunModelProviderInputs.orgId, input.orgId),
+          eq(schema.skillRunModelProviderInputs.runId, input.runId),
+        ),
+      ),
   ]);
 
   const env: Record<string, string> = {};
   const envSources = new Map<
     string,
-    { kind: "variable"; value: string } | { kind: "secret"; secretId: string; version: number }
+    | { kind: "variable"; value: string }
+    | { kind: "secret"; secretId: string; version: number }
+    | { kind: "model_provider"; connectionId: string; version: number }
   >();
   for (const variable of variables) {
     if (variable.envKey.startsWith(RUN_RESERVED_ENV_PREFIX)) {
@@ -1776,6 +1871,47 @@ export async function loadRunExecutionPlan(input: {
       throw new RunValidationError("secret unavailable", "secret_unavailable");
     }
   }
+  const providerInput = providerInputs[0];
+  if (!providerInput) throw new RunRuntimeError("run model provider snapshot is missing");
+  if (providerInput.envKey.startsWith(RUN_RESERVED_ENV_PREFIX)) {
+    throw new RunRuntimeError("run model provider snapshot contains a reserved environment key");
+  }
+  if (envSources.has(providerInput.envKey)) {
+    throw new RunRuntimeError(`run input snapshot has a collision for ${providerInput.envKey}`);
+  }
+  let providerCredential: Awaited<ReturnType<typeof getDecryptedProviderKey>> = null;
+  try {
+    providerCredential = await getDecryptedProviderKey({
+      actor: input.actor,
+      orgId: input.orgId,
+      provider: providerInput.provider,
+      connectionId: providerInput.connectionId,
+      credentialVersion: providerInput.credentialVersion,
+      keyName: providerInput.envKey,
+      masterKey: input.masterKey,
+      database,
+    });
+  } catch {
+    providerCredential = null;
+  }
+  if (
+    !providerCredential ||
+    providerCredential.connectionId !== providerInput.connectionId ||
+    providerCredential.credentialVersion !== providerInput.credentialVersion ||
+    providerCredential.scope !== providerInput.connectionScope
+  ) {
+    throw new RunValidationError(
+      "model provider credential unavailable",
+      "provider_credential_unavailable",
+    );
+  }
+  env[providerInput.envKey] = providerCredential.value;
+  envSources.set(providerInput.envKey, {
+    kind: "model_provider",
+    connectionId: providerInput.connectionId,
+    version: providerInput.credentialVersion,
+  });
+  injectedLiterals.push(providerCredential.value);
   if (!row.serverPasswordEnc) throw new RunRuntimeError("run has no server password");
   const serverPassword = decryptRunServerPassword({
     orgId: input.orgId,

@@ -23,6 +23,39 @@ import { assertMember, type ActorContext } from "./services";
 export type ClaimedRunJob = typeof schema.skillRunJobs.$inferSelect;
 export type RunPromptRow = typeof schema.skillRunPrompts.$inferSelect;
 
+type RawClaimedRunJob = Omit<
+  ClaimedRunJob,
+  "availableAt" | "leaseExpiresAt" | "heartbeatAt" | "createdAt" | "updatedAt"
+> & {
+  availableAt: unknown;
+  leaseExpiresAt: unknown;
+  heartbeatAt: unknown;
+  createdAt: unknown;
+  updatedAt: unknown;
+};
+
+/** Raw `execute(sql)` results bypass Drizzle's column decoders, so PostgreSQL timestamps are strings. */
+function claimedRunTimestamp(value: unknown): Date {
+  if (value instanceof Date) return value;
+  if (typeof value === "string" || typeof value === "number") return new Date(value);
+  return new Date(Number.NaN);
+}
+
+function optionalClaimedRunTimestamp(value: unknown): Date | null {
+  return value === null || value === undefined ? null : claimedRunTimestamp(value);
+}
+
+function parseClaimedRunJob(row: RawClaimedRunJob): ClaimedRunJob {
+  return {
+    ...row,
+    availableAt: claimedRunTimestamp(row.availableAt),
+    leaseExpiresAt: optionalClaimedRunTimestamp(row.leaseExpiresAt),
+    heartbeatAt: optionalClaimedRunTimestamp(row.heartbeatAt),
+    createdAt: claimedRunTimestamp(row.createdAt),
+    updatedAt: claimedRunTimestamp(row.updatedAt),
+  };
+}
+
 /** Minimal non-secret state exposed only to the worker that currently owns this exact run lease. */
 export interface RunWorkerLeaseControl {
   status: SkillRunStatus;
@@ -166,7 +199,7 @@ export async function claimRunJobs(input: {
       ${leaseSeconds}
     ) as claimed
   `);
-  return Array.from(result as unknown as Iterable<ClaimedRunJob>);
+  return Array.from(result as unknown as Iterable<RawClaimedRunJob>, parseClaimedRunJob);
 }
 
 /**
@@ -590,6 +623,7 @@ export async function enqueueRunPrompt(input: {
         and(eq(schema.skillRunPrompts.orgId, input.orgId), eq(schema.skillRunPrompts.runId, input.runId)),
       );
     const ordinal = Number(ordinalRows[0]?.value ?? 0) + 1;
+    const promptCreatedAt = new Date();
     const inserted = await transaction
       .insert(schema.skillRunPrompts)
       .values({
@@ -599,16 +633,18 @@ export async function enqueueRunPrompt(input: {
         kind: "follow_up",
         idempotencyKey: input.idempotencyKey,
         payloadHash,
-        messageId: deterministicRunMessageId(input.runId, ordinal),
+        messageId: deterministicRunMessageId(input.runId, ordinal, promptCreatedAt.getTime()),
         prompt: text,
         status: "queued",
+        createdAt: promptCreatedAt,
+        updatedAt: promptCreatedAt,
       })
       .returning();
     const row = inserted[0];
     if (!row) throw new Error("prompt insert returned no row");
     await transaction
       .update(schema.skillRuns)
-      .set({ lastActiveAt: new Date(), updatedAt: new Date() })
+      .set({ lastActiveAt: promptCreatedAt, updatedAt: promptCreatedAt })
       .where(
         and(
           eq(schema.skillRuns.orgId, input.orgId),

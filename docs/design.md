@@ -571,9 +571,11 @@ content; only the sandbox does.
   sandbox/session identity, opaque-encrypted internal server password, final transcript with its
   folded event cursor, and a bounded redacted warning snapshot that survives event retention. Public
   lifecycle is `queued → starting → running → frozen | error | canceled`.
-- `skill_run_skills`, `skill_run_secret_inputs`, and `skill_run_variable_inputs` are immutable input
-  snapshots. Secret inputs contain references and exact versions only, with provenance `skill`,
-  `model_provider`, or `runtime`; ordinary responses never contain plaintext.
+- `skill_run_skills`, `skill_run_secret_inputs`, `skill_run_model_provider_inputs`, and
+  `skill_run_variable_inputs` are immutable input snapshots. Generic secret inputs contain vault
+  references and exact versions only, with provenance `skill` or `runtime`. The model-provider row
+  instead pins a dedicated connection id and credential version; it never appears in the generic
+  secret collection. Ordinary responses never contain plaintext.
 - `skill_run_jobs` is the retryable orchestration queue. `skill_run_prompts` is the initial/follow-up
   outbox with deterministic OpenCode `messageID`s. `skill_run_events` holds redacted, monotonically
   sequenced events for replayable SSE.
@@ -616,10 +618,12 @@ The runs supervisor advertises a short-lived PostgreSQL readiness heartbeat; run
 creation fail closed when no configured worker heartbeat is live, without disabling the rest of the
 API. It claims short leases with `FOR UPDATE SKIP LOCKED`, heartbeats them, limits local
 concurrency, and retries transient failures at most three times with backoff. Validation failures are
-terminal. A separate exact-lease control watcher aborts in-flight work promptly on cancellation,
-membership loss, or lease loss. S3, sandbox control, OpenCode request, probe, recorder-connect, and
-artifact calls all carry cancellation signals and strict time budgets. Each external step has
-persisted before/after progress:
+terminal. Raw SQL claim timestamps are decoded and validated before execution; malformed claim
+metadata enters the same durable retry/error transition instead of leaving an expiring lease to be
+reclaimed forever. A separate exact-lease control watcher aborts in-flight work promptly on
+cancellation, membership loss, or lease loss. S3, sandbox control, OpenCode request, probe,
+recorder-connect, and artifact calls all carry cancellation signals and strict time budgets. Each
+external step has persisted before/after progress:
 
 1. revalidate snapshot access and decrypt exact secret versions;
 2. get or fork the deterministic sandbox;
@@ -670,20 +674,31 @@ recovery reconstructs only the in-memory matcher after revalidating and decrypti
 This protects Companion surfaces from literal leakage, not from a malicious skill encoding or
 exfiltrating a credential it can read inside the sandbox.
 
-### Model provider connections (personal + workspace keys, referenced live)
+### Model provider credentials (personal + workspace, separate from Secrets)
 
-Provider and Vanish connections are bindings to the generic vault, never separate ciphertext rows.
-Migration `0035_provider_secret_bindings.sql` stores `secret_id` on personal and workspace
-connections. Personal rows have forced owner-only RLS. Workspace connections require an active
-`organization`-audience secret and owner/admin mutation. Disconnect deletes only the binding.
+Model-provider keys have a dedicated write-only domain; they are not Secrets rows, vault candidates,
+recipients, or bindings. Migration `0035_runtime_credentials.sql` creates
+`model_provider_connections` plus immutable `model_provider_credential_versions`. Personal
+connections are forced owner-only (admins included, with no override); workspace connections are
+readable by members and writable only by owners/admins. The API accepts a key only on PUT and returns
+redacted connection metadata. Encryption uses `COMPANION_SECRETS_MASTER_KEY`, but a provider-specific
+opaque AAD domain (`model-provider-credential` plus connection id and version) keeps ciphertext
+cryptographically distinct from vault secret versions and internal run credentials.
 
-Resolution keeps personal-over-workspace precedence, but `createRun` pins the selected provider
-secret version in `skill_run_secret_inputs`; rotation affects future runs, not an existing snapshot.
-Membership, audience, recipients, disable/delete state, and provider readiness are rechecked when
-options load, when the run is created, immediately before injection, before every follow-up, and
-periodically during an active lease. Loss of access before injection fails without starting a
-sandbox; loss during a run takes a final snapshot and tears down best-effort. All
+Resolution keeps personal-over-workspace precedence. `createRun` requires the exact redacted
+connection/version pin shown by run-options and stores it in `skill_run_model_provider_inputs`, never
+in `skill_run_secret_inputs`. Each immutable encrypted version also owns its exact environment key,
+so rotating either the key value or its accepted env name leaves already-created runs deterministic;
+future runs pin the new version. Disconnect removes the dedicated
+connection and its ciphertext without touching any generic Secret, so queued/active pins fail their
+next revalidation and cannot be revived by a later reconnect. Provider connection, membership and
+version are checked when options load, when the run is created, immediately before injection, before
+every follow-up, and periodically during an active lease. Loss before injection fails without
+starting a sandbox; loss during a run takes a final snapshot and tears down best-effort. All
 `OPENCODE_SERVER_*` names are reserved.
+
+Vanish is not a model provider. Its personal/workspace connection tables remain explicit bindings to
+an accessible generic Secret, and only those Vanish bindings contribute to vault `usage_count`.
 
 ### Activated models (curated picker + hard gate)
 
@@ -694,8 +709,8 @@ Both lists are curated in Settings — Account → **Models** and Workspace → 
 (`ModelsPane`, one component keyed per scope; the old *Model providers*/*Shared providers* panes
 are MERGED into it, `?view=providers`/`org-providers` are normalized aliases). The pane is
 organized around READINESS: a top "deck" mirroring exactly what the launcher offers (each row
-`Ready` or `Needs secret`, with an accessible-secret picker and inline personal secret creation; the personal pane also
-shows the workspace's contributions read-only), then a search-first add bar over the full catalog
+`Ready` or `Needs key`, with a dedicated write-only provider-key form; the personal pane also shows
+the workspace's contributions read-only), then a search-first add bar over the full catalog
 (flat one-click Activate rows, capped at 50 visible matches), then a per-provider browse accordion
 whose headers carry connect/disconnect for THIS scope's bindings. The launcher's "Add more models"
 button opens the pane via the shell's `openSettings({view:"models"})` (the skills shell renders
@@ -726,18 +741,20 @@ required declaration or inaccessible secret makes a configuration `Needs attenti
 
 There is no silent environment precedence. Secret/variable collisions fail. The same key across
 dependencies is allowed only for the same variable value or exact pinned secret id+version. A model
-provider collision is allowed only for that same pinned secret. Any `OPENCODE_SERVER_*` collision
-fails. The launcher always summarizes credentials exposed to sandbox code and explains that literal
-redaction is not an exfiltration boundary.
+provider key belongs to a separate credential domain, so any collision with a skill secret or
+variable fails. Any `OPENCODE_SERVER_*` collision fails. The launcher always summarizes credentials
+exposed to sandbox code and explains that literal redaction is not an exfiltration boundary.
 
 For each model, run-options also returns a redacted provider pin containing only environment key,
-secret id, and exact current version. This lets the launcher reject a provider/skill collision before
-submit without exposing a value or stale secret metadata; the server remains authoritative.
+connection id, scope, and exact credential version. This lets the launcher reject a provider/skill
+collision before submit without exposing a value or any vault metadata; the server remains
+authoritative.
 
 ### Artifacts via Vanish
 
 A run can publish deliverables as shareable links. Settings → Account → *Artifacts (Vanish)* binds
-the reserved provider id `vanish` to an accessible vault secret; the model picker never lists it.
+the Vanish integration to an accessible vault Secret through its own connection API; the model
+provider APIs and picker never handle it.
 Its presence ENABLES artifacts: the composed prompt tells the agent to save deliverables into
 `./artifacts/`, and on every `session.idle` (and at freeze) the recorder collects that directory
 **server-side** (`collectFiles`: BFS depth ≤ 3, skip dotfiles, ≤20 files × ≤10 MB), filters
@@ -755,6 +772,7 @@ per-file uploads only; Vanish's multi-file `/sites` API is a noted follow-up.
 `PUT /v1/org-model-preferences` (replace the activated lists; owner/admin for the org one),
 `GET/PUT /v1/provider-connections` + `DELETE /v1/provider-connections/:provider`,
 `GET/PUT /v1/org-provider-connections` + `DELETE /v1/org-provider-connections/:provider`,
+`GET/PUT/DELETE /v1/vanish-connection` and `/v1/org-vanish-connection`,
 `GET /v1/skills/:slug/run-options`, `GET/POST /v1/skills/:slug/run-configurations`,
 `PATCH/DELETE /v1/run-configurations/:id`,
 `POST /v1/skills/:slug/runs` (multipart: prompt, model, exact version, authoritative JSON inputs,
@@ -781,8 +799,9 @@ pnpm --filter @companion/sandbox golden` → export the printed `COMPANION_GOLDE
 
 Environment: `VERCEL_TOKEN`, `VERCEL_TEAM_ID`, `VERCEL_PROJECT_ID`,
 `COMPANION_GOLDEN_SNAPSHOT_ID`, `OPENCODE_VERSION` (pin, e.g. `1.17.13`),
-`COMPANION_SECRETS_MASTER_KEY` (the same base64 32-byte root used by the vault and opaque internal
-run credentials), `COMPANION_RUNS_ENABLED`, `COMPANION_SANDBOX_REGION`,
+`COMPANION_SECRETS_MASTER_KEY` (the same base64 32-byte root used with distinct AAD domains for the
+vault, dedicated provider credentials, and opaque internal run credentials),
+`COMPANION_RUNS_ENABLED`, `COMPANION_SANDBOX_REGION`,
 `COMPANION_SANDBOX_TIMEOUT_MS` (default `300000`), `COMPANION_RUN_CONCURRENCY`,
 `COMPANION_RUN_CLAIM_INTERVAL_MS`, `COMPANION_RUN_LEASE_SECONDS`,
 `COMPANION_RUN_HEARTBEAT_MS`, `COMPANION_RUN_INACTIVITY_MS`, bounded recorder reconnect settings,

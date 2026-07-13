@@ -20,7 +20,7 @@ import {
   failOrRetryRunJob,
   failRunPrompt,
   getRunWorkerLeaseControl,
-  getDecryptedProviderKey,
+  getDecryptedVanishKey,
   heartbeatRunWorker,
   heartbeatRunJob,
   heartbeatRunPrompt,
@@ -205,6 +205,16 @@ export function isTransientRunFailure(error: unknown): boolean {
   // Unknown database/network/provider errors receive the bounded three-attempt job policy. Only
   // explicit validation, authorization/configuration, and concurrency conflicts fail immediately.
   return true;
+}
+
+/** Fail through the durable job transition when a database claim is malformed, never before it. */
+export function claimedRunLeaseDeadline(job: Pick<ClaimedRunJob, "leaseExpiresAt">): number {
+  if (!(job.leaseExpiresAt instanceof Date)) {
+    throw new RunRuntimeError("the claimed run job has invalid lease metadata");
+  }
+  const deadline = job.leaseExpiresAt.getTime();
+  if (!Number.isFinite(deadline)) throw new RunRuntimeError("the claimed run job has invalid lease metadata");
+  return deadline;
 }
 
 export function runFailureEvent(
@@ -728,12 +738,11 @@ async function loadVanishKey(input: {
   job: ClaimedRunJob;
   actor: ActorContext;
   ctx: RunControlContext;
-}): Promise<Awaited<ReturnType<typeof getDecryptedProviderKey>>> {
+}): Promise<Awaited<ReturnType<typeof getDecryptedVanishKey>>> {
   return tenant(input.job, (database) =>
-    getDecryptedProviderKey({
+    getDecryptedVanishKey({
       actor: input.actor,
       orgId: input.job.orgId,
-      provider: "vanish",
       masterKey: input.ctx.masterKey,
       database,
     }),
@@ -744,7 +753,7 @@ async function guardedArtifactPublish(input: {
   job: ClaimedRunJob;
   actor: ActorContext;
   ctx: RunControlContext;
-  key: NonNullable<Awaited<ReturnType<typeof getDecryptedProviderKey>>>;
+  key: NonNullable<Awaited<ReturnType<typeof getDecryptedVanishKey>>>;
   filename: string;
   bytes: Buffer;
   idempotencyKey: string;
@@ -880,7 +889,7 @@ async function collectAndPublishArtifacts(input: {
   redactor: RunRedactor;
   shutdownSignal: AbortSignal;
 }): Promise<void> {
-  let vanish: Awaited<ReturnType<typeof getDecryptedProviderKey>> = null;
+  let vanish: Awaited<ReturnType<typeof getDecryptedVanishKey>> = null;
   try {
     vanish = await loadVanishKey(input);
   } catch {
@@ -924,7 +933,7 @@ async function collectAndPublishArtifacts(input: {
       if (input.shutdownSignal.aborted) throw abortFailure(input.shutdownSignal);
       const control = await readRunControl(input.job);
       if (control.cancelRequestedAt || control.status === "canceled") throw new CancellationRequested();
-      let current: Awaited<ReturnType<typeof getDecryptedProviderKey>> = null;
+      let current: Awaited<ReturnType<typeof getDecryptedVanishKey>> = null;
       try {
         current = await loadVanishKey(input);
       } catch (error) {
@@ -1127,7 +1136,9 @@ async function processClaimedJob(input: {
   let leaseLost = false;
   let heartbeating = false;
   let activePromptId: string | null = null;
-  let leaseDeadline = job.leaseExpiresAt?.getTime() ?? Date.now() + config.leaseSeconds * 1_000;
+  // Keep all claim-data validation inside the durable error handler below. A malformed decoder must
+  // release/retry the lease instead of rejecting before `try` and leaving an eternal reclaim loop.
+  let leaseDeadline = Date.now() + config.leaseSeconds * 1_000;
   const heartbeat = setInterval(() => {
     if (heartbeating || jobAbort.signal.aborted) return;
     heartbeating = true;
@@ -1216,6 +1227,7 @@ async function processClaimedJob(input: {
   let sessionId: string | null = null;
   const timeoutExtender = createSandboxTimeoutExtender(ctx.runtime!);
   try {
+    leaseDeadline = claimedRunLeaseDeadline(job);
     const leaseControl = await getRunWorkerLeaseControl({
       orgId: job.orgId,
       runId: job.runId,
@@ -1316,8 +1328,8 @@ async function processClaimedJob(input: {
     });
 
     await setPhase(job, actor, workerId, "start_server");
-    // Access can change while the sandbox boots or archives upload. Revalidate every pinned vault
-    // reference at the last possible boundary before any credential reaches the workload.
+    // Access can change while the sandbox boots or archives upload. Revalidate every pinned skill
+    // secret and the dedicated provider credential before anything reaches the workload.
     const beforeSecretInjection = await readRunControl(job);
     if (beforeSecretInjection.cancelRequestedAt || beforeSecretInjection.status === "canceled") {
       throw new CancellationRequested();
@@ -1731,7 +1743,15 @@ export async function startRunSupervisor(): Promise<Supervisor | null> {
       for (const job of jobs) {
         if (active.has(job.id)) continue;
         const task = processClaimedJob({ job, workerId, ctx, config, shutdownSignal: shutdown.signal })
-          .catch(() => undefined)
+          .catch((error) => {
+            // `processClaimedJob` normally persists every failure itself. If an invariant escapes that
+            // boundary, log identifiers + a bounded classification only; never an SDK error/message.
+            console.error("run job processor escaped durable failure handling", {
+              jobId: job.id,
+              runId: job.runId,
+              code: errorCode(error),
+            });
+          })
           .finally(() => { active.delete(job.id); });
         active.set(job.id, task);
       }

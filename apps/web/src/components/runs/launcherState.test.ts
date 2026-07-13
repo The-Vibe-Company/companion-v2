@@ -13,7 +13,7 @@ const ROOT_ID = "11111111-1111-4111-8111-111111111111";
 const VERSION_ID = "22222222-2222-4222-8222-222222222222";
 const SLOT_ID = "33333333-3333-4333-8333-333333333333";
 const SECRET_ID = "44444444-4444-4444-8444-444444444444";
-const PROVIDER_SECRET_ID = "55555555-5555-4555-8555-555555555555";
+const PROVIDER_CONNECTION_ID = "55555555-5555-4555-8555-555555555555";
 
 function options(): RunOptions {
   return {
@@ -60,13 +60,11 @@ function options(): RunOptions {
       },
       readiness: "ready",
       message: null,
-      provider_secret_pin: {
+      provider_credential_pin: {
         env_key: "OPENAI_API_KEY",
-        secret_id: PROVIDER_SECRET_ID,
-        secret_version: 2,
-        secret_name: "OpenAI personal",
-        secret_audience: "personal",
-        secret_owner_name: "Ada Lovelace",
+        connection_id: PROVIDER_CONNECTION_ID,
+        credential_version: 2,
+        scope: "personal",
       },
     }],
     runtime: { available: true, message: null },
@@ -111,33 +109,33 @@ describe("run launcher state", () => {
     }, "openai/gpt-5", { variables: [], secrets: [{ secret_id: SECRET_ID, slot_id: SLOT_ID, skill_id: ROOT_ID }] })).toBe(false);
   });
 
-  it("blocks a model-provider env collision unless the same vault secret is selected", () => {
+  it("always blocks a model-provider env collision because provider keys are isolated from Secrets", () => {
     const base = options();
     base.declared_secrets[0] = {
       ...base.declared_secrets[0]!,
       env_key: "OPENAI_API_KEY",
       candidates: [
         ...base.declared_secrets[0]!.candidates,
-        { ...base.declared_secrets[0]!.candidates[0]!, id: PROVIDER_SECRET_ID, key: "OPENAI_API_KEY" },
+        { ...base.declared_secrets[0]!.candidates[0]!, id: PROVIDER_CONNECTION_ID, key: "OPENAI_API_KEY" },
       ],
     };
     expect(runDraftBlockers(base, "openai/gpt-5", {
       secrets: [{ skill_id: ROOT_ID, slot_id: SLOT_ID, secret_id: SECRET_ID }],
       variables: [],
-    })).toContain("OPENAI_API_KEY has conflicting values across the dependency closure.");
+    })).toContain("OPENAI_API_KEY conflicts with the model provider key.");
     expect(runDraftBlockers(base, "openai/gpt-5", {
-      secrets: [{ skill_id: ROOT_ID, slot_id: SLOT_ID, secret_id: PROVIDER_SECRET_ID }],
+      secrets: [{ skill_id: ROOT_ID, slot_id: SLOT_ID, secret_id: PROVIDER_CONNECTION_ID }],
       variables: [],
-    })).toEqual([]);
+    })).toContain("OPENAI_API_KEY conflicts with the model provider key.");
   });
 
   it("blocks launch when ready model options no longer carry the explicit provider reference", () => {
     const base = options();
     base.declared_secrets = [];
-    base.models[0] = { ...base.models[0]!, provider_secret_pin: null };
+    base.models[0] = { ...base.models[0]!, provider_credential_pin: null };
 
     expect(runDraftBlockers(base, "openai/gpt-5", { secrets: [], variables: [] })).toEqual([
-      "Reload run options to select the model provider secret explicitly.",
+      "Reload run options to pin the model provider credential explicitly.",
     ]);
   });
 

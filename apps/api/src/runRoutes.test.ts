@@ -40,6 +40,12 @@ const serviceMocks = vi.hoisted(() => ({
   isRunWorkerReady: vi.fn(async () => true),
   setProviderConnection: vi.fn(),
   setOrgProviderConnection: vi.fn(),
+  getVanishConnection: vi.fn(),
+  getOrgVanishConnection: vi.fn(),
+  setVanishConnection: vi.fn(),
+  setOrgVanishConnection: vi.fn(),
+  deleteVanishConnection: vi.fn(),
+  deleteOrgVanishConnection: vi.fn(),
 }));
 
 const authMocks = vi.hoisted(() => ({
@@ -55,7 +61,7 @@ const storageMocks = vi.hoisted(() => ({
 const catalogMocks = vi.hoisted(() => ({
   listModels: vi.fn(async () => ({
     models: [{ id: "openai/gpt-5", provider: "openai", provider_name: "OpenAI", name: "GPT-5", description: null, context: null, cost_input: null, cost_output: null, env_keys: ["OPENAI_API_KEY"] }],
-    providers: [],
+    providers: [{ id: "openai", name: "OpenAI", env_keys: ["OPENAI_API_KEY"] }],
   })),
   resolveModel: vi.fn(async () => ({ envKeys: ["OPENAI_API_KEY"] })),
   clearCache: vi.fn(),
@@ -85,6 +91,7 @@ const actor = { id: "run-user", email: "run-user@example.test", name: "Run User"
 const skillVersionId = "00000000-0000-4000-8000-000000000001";
 const configId = "00000000-0000-4000-8000-000000000002";
 const secretId = "00000000-0000-4000-8000-000000000003";
+const providerConnectionId = "00000000-0000-4000-8000-000000000004";
 const dependencySkillId = "00000000-0000-4000-8000-000000000004";
 const dependencyVersionId = "00000000-0000-4000-8000-000000000005";
 
@@ -152,7 +159,8 @@ describe("session-only RunSkill routes", () => {
       { skill_id: dependencySkillId, skill_version_id: dependencyVersionId },
     ]));
     form.set("inputs", JSON.stringify({ secrets: [], variables: [] }));
-    form.set("model_provider_secret_id", secretId);
+    form.set("model_provider_connection_id", providerConnectionId);
+    form.set("model_provider_credential_version", "1");
     form.set("run_config_id", configId);
 
     const missingKey = await app.request("/v1/skills/demo/runs", { method: "POST", body: form });
@@ -173,7 +181,8 @@ describe("session-only RunSkill routes", () => {
         runConfigId: configId,
         idempotencyKey: "launch-request-1",
         inputs: { secrets: [], variables: [] },
-        modelProviderSecretId: secretId,
+        modelProviderConnectionId: providerConnectionId,
+        modelProviderCredentialVersion: 1,
       }),
     );
     expect(catalogMocks.listModels).not.toHaveBeenCalled();
@@ -192,7 +201,8 @@ describe("session-only RunSkill routes", () => {
     form.set("skill_version_id", skillVersionId);
     form.set("dependency_pins", "[]");
     form.set("inputs", JSON.stringify({ secrets: [], variables: [] }));
-    form.set("model_provider_secret_id", secretId);
+    form.set("model_provider_connection_id", providerConnectionId);
+    form.set("model_provider_credential_version", "1");
     form.set("file", new Blob(["durable bytes"], { type: "text/plain" }), "notes.txt");
 
     const response = await app.request("/v1/skills/demo/runs", {
@@ -222,7 +232,8 @@ describe("session-only RunSkill routes", () => {
     form.set("skill_version_id", skillVersionId);
     form.set("dependency_pins", "[]");
     form.set("inputs", JSON.stringify({ secrets: [], variables: [] }));
-    form.set("model_provider_secret_id", secretId);
+    form.set("model_provider_connection_id", providerConnectionId);
+    form.set("model_provider_credential_version", "1");
     form.set("file", new Blob(["uncertain bytes"], { type: "text/plain" }), "notes.txt");
 
     const response = await app.request("/v1/skills/demo/runs", {
@@ -246,7 +257,8 @@ describe("session-only RunSkill routes", () => {
     form.set("skill_version_id", skillVersionId);
     form.set("dependency_pins", "[]");
     form.set("inputs", JSON.stringify({ secrets: [], variables: [] }));
-    form.set("model_provider_secret_id", secretId);
+    form.set("model_provider_connection_id", providerConnectionId);
+    form.set("model_provider_credential_version", "1");
     form.set("file", new Blob(["orphan bytes"], { type: "text/plain" }), "notes.txt");
 
     const response = await app.request("/v1/skills/demo/runs", {
@@ -279,19 +291,56 @@ describe("session-only RunSkill routes", () => {
   });
 });
 
-describe("provider vault bindings", () => {
-  it("forwards a secret reference and never accepts plaintext provider keys", async () => {
+describe("dedicated provider credentials", () => {
+  it("accepts a write-only key and returns metadata only", async () => {
     signIn();
-    serviceMocks.setProviderConnection.mockResolvedValue({ provider: "openai", secret_id: secretId, set: true });
+    serviceMocks.setProviderConnection.mockResolvedValue({
+      id: providerConnectionId,
+      provider: "openai",
+      key_name: "OPENAI_API_KEY",
+      scope: "personal",
+      credential_version: 1,
+      set: true,
+      created_at: "2026-07-13T00:00:00.000Z",
+      updated_at: "2026-07-13T00:00:00.000Z",
+    });
     const response = await app.request("/v1/provider-connections", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ provider: "openai", key_name: "OPENAI_API_KEY", api_key: "sk-write-only" }),
+    });
+    expect(response.status).toBe(200);
+    expect(serviceMocks.setProviderConnection).toHaveBeenCalledWith(
+      expect.objectContaining({ provider: "openai", keyName: "OPENAI_API_KEY", apiKey: "sk-write-only" }),
+    );
+    expect(JSON.stringify(await response.json())).not.toContain("sk-write-only");
+    const vaultReference = await app.request("/v1/provider-connections", {
       method: "PUT",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ provider: "openai", key_name: "OPENAI_API_KEY", secret_id: secretId }),
     });
+    expect(vaultReference.status).toBeGreaterThanOrEqual(400);
+  });
+
+  it("keeps Vanish on a dedicated generic-secret route", async () => {
+    signIn();
+    serviceMocks.setVanishConnection.mockResolvedValue({
+      key_name: "VANISH_API_KEY",
+      secret_id: secretId,
+      secret_name: "Vanish",
+      secret_audience: "personal",
+      secret_owner_name: "Run User",
+      scope: "personal",
+      set: true,
+      created_at: "2026-07-13T00:00:00.000Z",
+      updated_at: "2026-07-13T00:00:00.000Z",
+    });
+    const response = await app.request("/v1/vanish-connection", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ secret_id: secretId }),
+    });
     expect(response.status).toBe(200);
-    expect(serviceMocks.setProviderConnection).toHaveBeenCalledWith(
-      expect.objectContaining({ provider: "openai", keyName: "OPENAI_API_KEY", secretId }),
-    );
-    expect(JSON.stringify(serviceMocks.setProviderConnection.mock.calls)).not.toContain('"key"');
+    expect(serviceMocks.setVanishConnection).toHaveBeenCalledWith(expect.objectContaining({ secretId }));
   });
 });

@@ -33,7 +33,7 @@ const ROOT_VERSION = "20000000-0000-0000-0000-000000000001";
 const DEP_VERSION = "20000000-0000-0000-0000-000000000002";
 const SLOT = "30000000-0000-0000-0000-000000000001";
 const SECRET = "40000000-0000-0000-0000-000000000001";
-const PROVIDER_SECRET = "40000000-0000-0000-0000-000000000002";
+const PROVIDER_CONNECTION = "40000000-0000-0000-0000-000000000002";
 const actor: ActorContext = { id: "user-me", email: "me@example.com", name: "Me" };
 
 interface ClosureStore {
@@ -217,13 +217,21 @@ describe("declarations and explicit inputs", () => {
     ownerName: actor.name,
     audience: "personal" as const,
   });
+  const providerPin = {
+    connectionId: PROVIDER_CONNECTION,
+    credentialVersion: 3,
+    provider: "anthropic",
+    keyName: "ANTHROPIC_API_KEY",
+    scope: "personal" as const,
+  };
   const validate = (overrides: Partial<Parameters<typeof validateRunInputSelection>[0]> = {}) =>
     validateRunInputSelection({
       actor,
       orgId: ORG,
       model: "anthropic/claude-sonnet",
       modelEnvKeys: ["ANTHROPIC_API_KEY"],
-      modelProviderSecretId: PROVIDER_SECRET,
+      modelProviderConnectionId: PROVIDER_CONNECTION,
+      modelProviderCredentialVersion: 3,
       selection: {
         secrets: [{ skill_id: ROOT, slot_id: SLOT, secret_id: SECRET }],
         variables: [{ skill_id: ROOT, env_key: "REGION", value: "eu-west-1" }],
@@ -231,7 +239,7 @@ describe("declarations and explicit inputs", () => {
       declarations: { secrets: [secretDeclaration], variables: [variableDeclaration] },
       database: {} as Db,
       pinSecret: async (id) => pin(id),
-      providerPin: { keyName: "ANTHROPIC_API_KEY", secret: pin(PROVIDER_SECRET) },
+      providerPin,
       ...overrides,
     });
 
@@ -265,20 +273,27 @@ describe("declarations and explicit inputs", () => {
     expect(declarations.variables.map((row) => row.env_key)).toEqual(["REGION"]);
   });
 
-  it("pins selected secrets and adds exactly one model-provider snapshot", async () => {
+  it("keeps selected vault secrets separate from the exact model-provider snapshot", async () => {
     const resolved = await validate();
     expect(resolved.secrets.map((row) => [row.provenance, row.envKey, row.pin.secretId])).toEqual([
       ["skill", "API_TOKEN", SECRET],
-      ["model_provider", "ANTHROPIC_API_KEY", PROVIDER_SECRET],
     ]);
+    expect(resolved.modelProvider).toEqual({ ...providerPin, envKey: "ANTHROPIC_API_KEY" });
     expect(resolved.variables).toEqual([
       { skillId: ROOT, skillSlug: "root-skill", envKey: "REGION", value: "eu-west-1" },
     ]);
   });
 
-  it("never adds a model provider binding that was not explicit in the launch payload", async () => {
-    await expect(validate({ modelProviderSecretId: null })).rejects.toMatchObject({ code: "provider_secret_missing" });
-    await expect(validate({ modelProviderSecretId: SECRET })).rejects.toMatchObject({ code: "provider_secret_unavailable" });
+  it("never adds a model provider credential that was not explicitly pinned by the launcher", async () => {
+    await expect(
+      validate({ modelProviderConnectionId: null, modelProviderCredentialVersion: null }),
+    ).rejects.toMatchObject({ code: "provider_credential_missing" });
+    await expect(
+      validate({ modelProviderConnectionId: SECRET }),
+    ).rejects.toMatchObject({ code: "provider_credential_unavailable" });
+    await expect(
+      validate({ modelProviderCredentialVersion: 2 }),
+    ).rejects.toMatchObject({ code: "provider_credential_unavailable" });
   });
 
   it("rejects missing required, unknown, duplicate and invalid variable inputs", async () => {
@@ -314,15 +329,15 @@ describe("declarations and explicit inputs", () => {
     ).rejects.toMatchObject({ code: "invalid_variable_value" });
   });
 
-  it("allows identical shared env inputs and rejects every silent precedence collision", async () => {
+  it("rejects every provider/vault collision because the credential domains are separate", async () => {
     const sameProviderDeclaration = { ...secretDeclaration, env_key: "ANTHROPIC_API_KEY" };
     await expect(
       validate({
         declarations: { secrets: [sameProviderDeclaration], variables: [] },
         selection: { secrets: [{ skill_id: ROOT, slot_id: SLOT, secret_id: SECRET }], variables: [] },
-        pinSecret: async () => pin(PROVIDER_SECRET),
+        pinSecret: async () => pin(SECRET),
       }),
-    ).resolves.toBeDefined();
+    ).rejects.toMatchObject({ code: "input_collision" });
 
     await expect(
       validate({
@@ -351,9 +366,11 @@ describe("declarations and explicit inputs", () => {
       selection: { secrets: [], variables: [] },
       providerRequired: false,
       providerPin: null,
-      modelProviderSecretId: null,
+      modelProviderConnectionId: null,
+      modelProviderCredentialVersion: null,
     });
     expect(resolved.secrets).toEqual([]);
+    expect(resolved.modelProvider).toBeNull();
   });
 });
 
@@ -404,8 +421,24 @@ describe("workspace and durable helper invariants", () => {
   });
 
   it("keeps deterministic ids/hashes stable and payload-sensitive", () => {
-    expect(deterministicRunMessageId("run-1", 2)).toBe(deterministicRunMessageId("run-1", 2));
-    expect(deterministicRunMessageId("run-1", 2)).not.toBe(deterministicRunMessageId("run-1", 3));
+    const createdAt = Date.UTC(2026, 6, 13, 12, 0, 0);
+    const messageId = deterministicRunMessageId("run-1", 2, createdAt);
+    expect(messageId).toBe(deterministicRunMessageId("run-1", 2, createdAt));
+    expect(messageId).not.toBe(deterministicRunMessageId("run-1", 3, createdAt));
+    expect(messageId).toMatch(/^msg_[0-9A-Za-z]{26}$/);
+
+    const assistantOneTime = ((BigInt(createdAt + 1) * 0x1000n + 1n) & ((1n << 48n) - 1n))
+      .toString(16)
+      .padStart(12, "0");
+    const assistantOneId = `msg_${assistantOneTime}${"0".repeat(14)}`;
+    const nextMessage = deterministicRunMessageId("run-1", 3, createdAt + 2);
+    const assistantTwoTime = ((BigInt(createdAt + 3) * 0x1000n + 1n) & ((1n << 48n) - 1n))
+      .toString(16)
+      .padStart(12, "0");
+    const assistantTwoId = `msg_${assistantTwoTime}${"0".repeat(14)}`;
+    expect([messageId, assistantOneId, nextMessage, assistantTwoId]).toEqual(
+      [...[messageId, assistantOneId, nextMessage, assistantTwoId]].sort(),
+    );
     expect(hashRunPayload({ b: 2, a: 1 })).toBe(hashRunPayload({ a: 1, b: 2 }));
     expect(hashRunPayload({ a: 1 })).not.toBe(hashRunPayload({ a: 2 }));
   });
@@ -497,7 +530,8 @@ describe("createRun committed idempotent replay", () => {
     dependencyPins: [{ skill_id: DEP, skill_version_id: DEP_VERSION }],
     prompt: "Run the report",
     model: "anthropic/claude-sonnet",
-    modelProviderSecretId: PROVIDER_SECRET,
+    modelProviderConnectionId: PROVIDER_CONNECTION,
+    modelProviderCredentialVersion: 3,
     inputs: {
       secrets: [{ skill_id: ROOT, slot_id: SLOT, secret_id: SECRET }],
       variables: [{ skill_id: ROOT, env_key: "REGION", value: "eu-west-1" }],
@@ -574,13 +608,13 @@ describe("createRun committed idempotent replay", () => {
 
     expect(detail.id).toBe("50000000-0000-4000-8000-000000000001");
     expect(detail.skill_slug).toBe("renamed-after-commit");
-    expect(detail.input_snapshot).toEqual({ skills: [], secrets: [], variables: [] });
+    expect(detail.input_snapshot).toEqual({ skills: [], secrets: [], variables: [], model_provider: null });
     expect(ctx.resolveModelKeys).not.toHaveBeenCalled();
     expect(ctx.resolveRuntimeReadiness).not.toHaveBeenCalled();
     expect(database.transaction).not.toHaveBeenCalled();
   });
 
-  it("still rejects an exact-key replay when the explicit provider secret changes", async () => {
+  it("still rejects an exact-key replay when the explicit provider credential changes", async () => {
     const payloadHash = hashRunCreationPayload(request);
     const database = committedReplayDb(existingRow(payloadHash));
     const ctx = unavailableContext();
@@ -588,7 +622,7 @@ describe("createRun committed idempotent replay", () => {
     await expect(
       createRun({
         ...request,
-        modelProviderSecretId: SECRET,
+        modelProviderConnectionId: SECRET,
         actor,
         orgId: ORG,
         ctx,

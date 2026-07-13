@@ -14,6 +14,7 @@ export * from "./preferences";
 export * from "./orgSettings";
 export * from "./avatar";
 export * from "./modelProviders";
+export * from "./vanishConnections";
 export * from "./skillRuns";
 export * from "./secrets";
 export * from "./billing";

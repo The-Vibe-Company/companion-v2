@@ -91,6 +91,12 @@ import {
   listProviderConnections,
   setOrgProviderConnection,
   setProviderConnection,
+  deleteOrgVanishConnection,
+  deleteVanishConnection,
+  getOrgVanishConnection,
+  getVanishConnection,
+  setOrgVanishConnection,
+  setVanishConnection,
   getActivatedModels,
   setUserActivatedModels,
   setOrgActivatedModels,
@@ -163,7 +169,8 @@ import {
   MAX_COMMENT_IMAGES,
   MAX_COMMENT_IMAGE_BYTES,
   updateUserProfileInputSchema,
-  setProviderConnectionInputSchema,
+  setModelProviderConnectionInputSchema,
+  setVanishConnectionInputSchema,
   setActivatedModelsInputSchema,
   launchRunFieldsSchema,
   runPromptInputSchema,
@@ -2698,22 +2705,32 @@ app.get("/v1/provider-connections", async (c) => {
 });
 
 app.put("/v1/provider-connections", async (c) => {
+  let masterKey: Buffer | null = null;
   try {
     if (isTokenRequest(c)) return jsonError(c, "personal access tokens cannot use provider connections", 401);
-    const input = setProviderConnectionInputSchema.parse(await c.req.json());
+    const input = setModelProviderConnectionInputSchema.parse(await c.req.json());
+    const catalog = await modelCatalog.listModels();
+    const provider = catalog.providers.find((candidate) => candidate.id === input.provider);
+    if (!provider || !provider.env_keys.includes(input.key_name)) {
+      return jsonError(c, "the model provider or key name is unavailable", 422);
+    }
+    masterKey = loadSecretsMasterKey();
     const connection = await withTenant(c, ({ actor, orgId, database }) =>
       setProviderConnection({
         actor,
         orgId,
         provider: input.provider,
         keyName: input.key_name,
-        secretId: input.secret_id,
+        apiKey: input.api_key,
+        masterKey: masterKey!,
         database,
       }),
     );
     return c.json({ connection });
   } catch (error) {
     return jsonError(c, error);
+  } finally {
+    masterKey?.fill(0);
   }
 });
 
@@ -2744,22 +2761,32 @@ app.get("/v1/org-provider-connections", async (c) => {
 });
 
 app.put("/v1/org-provider-connections", async (c) => {
+  let masterKey: Buffer | null = null;
   try {
     if (isTokenRequest(c)) return jsonError(c, "personal access tokens cannot use provider connections", 401);
-    const input = setProviderConnectionInputSchema.parse(await c.req.json());
+    const input = setModelProviderConnectionInputSchema.parse(await c.req.json());
+    const catalog = await modelCatalog.listModels();
+    const provider = catalog.providers.find((candidate) => candidate.id === input.provider);
+    if (!provider || !provider.env_keys.includes(input.key_name)) {
+      return jsonError(c, "the model provider or key name is unavailable", 422);
+    }
+    masterKey = loadSecretsMasterKey();
     const connection = await withTenant(c, ({ actor, orgId, database }) =>
       setOrgProviderConnection({
         actor,
         orgId,
         provider: input.provider,
         keyName: input.key_name,
-        secretId: input.secret_id,
+        apiKey: input.api_key,
+        masterKey: masterKey!,
         database,
       }),
     );
     return c.json({ connection });
   } catch (error) {
     return jsonError(c, error);
+  } finally {
+    masterKey?.fill(0);
   }
 });
 
@@ -2769,6 +2796,78 @@ app.delete("/v1/org-provider-connections/:provider", async (c) => {
     await withTenant(c, ({ actor, orgId, database }) =>
       deleteOrgProviderConnection({ actor, orgId, provider: c.req.param("provider"), database }),
     );
+    return c.json({ ok: true });
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
+/* ---- Vanish bindings remain generic-vault references on a dedicated API surface. ---- */
+
+app.get("/v1/vanish-connection", async (c) => {
+  try {
+    if (isTokenRequest(c)) return jsonError(c, "personal access tokens cannot use Vanish connections", 401);
+    const connection = await withTenant(c, ({ actor, orgId, database }) =>
+      getVanishConnection({ actor, orgId, database }),
+    );
+    return c.json({ connection });
+  } catch (error) {
+    return jsonError(c, error, 401);
+  }
+});
+
+app.put("/v1/vanish-connection", async (c) => {
+  try {
+    if (isTokenRequest(c)) return jsonError(c, "personal access tokens cannot use Vanish connections", 401);
+    const input = setVanishConnectionInputSchema.parse(await c.req.json());
+    const connection = await withTenant(c, ({ actor, orgId, database }) =>
+      setVanishConnection({ actor, orgId, secretId: input.secret_id, database }),
+    );
+    return c.json({ connection });
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
+app.delete("/v1/vanish-connection", async (c) => {
+  try {
+    if (isTokenRequest(c)) return jsonError(c, "personal access tokens cannot use Vanish connections", 401);
+    await withTenant(c, ({ actor, orgId, database }) => deleteVanishConnection({ actor, orgId, database }));
+    return c.json({ ok: true });
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
+app.get("/v1/org-vanish-connection", async (c) => {
+  try {
+    if (isTokenRequest(c)) return jsonError(c, "personal access tokens cannot use Vanish connections", 401);
+    const connection = await withTenant(c, ({ actor, orgId, database }) =>
+      getOrgVanishConnection({ actor, orgId, database }),
+    );
+    return c.json({ connection });
+  } catch (error) {
+    return jsonError(c, error, 401);
+  }
+});
+
+app.put("/v1/org-vanish-connection", async (c) => {
+  try {
+    if (isTokenRequest(c)) return jsonError(c, "personal access tokens cannot use Vanish connections", 401);
+    const input = setVanishConnectionInputSchema.parse(await c.req.json());
+    const connection = await withTenant(c, ({ actor, orgId, database }) =>
+      setOrgVanishConnection({ actor, orgId, secretId: input.secret_id, database }),
+    );
+    return c.json({ connection });
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
+app.delete("/v1/org-vanish-connection", async (c) => {
+  try {
+    if (isTokenRequest(c)) return jsonError(c, "personal access tokens cannot use Vanish connections", 401);
+    await withTenant(c, ({ actor, orgId, database }) => deleteOrgVanishConnection({ actor, orgId, database }));
     return c.json({ ok: true });
   } catch (error) {
     return jsonError(c, error);
@@ -3007,8 +3106,12 @@ app.post(
         skill_version_id: typeof form.get("skill_version_id") === "string" ? form.get("skill_version_id") : "",
         dependency_pins: typeof form.get("dependency_pins") === "string" ? form.get("dependency_pins") : "",
         inputs: typeof form.get("inputs") === "string" ? form.get("inputs") : "",
-        model_provider_secret_id:
-          typeof form.get("model_provider_secret_id") === "string" ? form.get("model_provider_secret_id") : "",
+        model_provider_connection_id:
+          typeof form.get("model_provider_connection_id") === "string" ? form.get("model_provider_connection_id") : "",
+        model_provider_credential_version:
+          typeof form.get("model_provider_credential_version") === "string"
+            ? form.get("model_provider_credential_version")
+            : "",
         run_config_id:
           typeof form.get("run_config_id") === "string" && form.get("run_config_id") !== ""
             ? form.get("run_config_id")
@@ -3063,7 +3166,8 @@ app.post(
               prompt: fields.prompt,
               model: fields.model,
               inputs: fields.inputs,
-              modelProviderSecretId: fields.model_provider_secret_id,
+              modelProviderConnectionId: fields.model_provider_connection_id,
+              modelProviderCredentialVersion: fields.model_provider_credential_version,
               runConfigId: fields.run_config_id,
               idempotencyKey: requestKey,
               attachments,

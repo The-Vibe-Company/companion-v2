@@ -117,7 +117,7 @@ export function RunLauncherDialog({
     prompt,
     model,
     inputs,
-    modelProviderSecretId: options?.models.find((option) => option.model.id === model)?.provider_secret_pin?.secret_id ?? null,
+    modelProviderCredential: options?.models.find((option) => option.model.id === model)?.provider_credential_pin ?? null,
     selectedConfigId,
     files: files.map((file) => [file.name, file.size, file.type, file.lastModified]),
     skillVersionId: options?.root.skill_version_id ?? null,
@@ -401,8 +401,8 @@ export function RunLauncherDialog({
 
   const launch = () => {
     if (!canLaunch || !effectiveOptions || submittingRef.current) return;
-    const modelProviderSecretId = effectiveOptions.models.find((option) => option.model.id === model)?.provider_secret_pin?.secret_id;
-    if (!modelProviderSecretId) return;
+    const providerCredential = effectiveOptions.models.find((option) => option.model.id === model)?.provider_credential_pin;
+    if (!providerCredential) return;
     submittingRef.current = true;
     setBusy(true);
     setError(null);
@@ -418,7 +418,8 @@ export function RunLauncherDialog({
         skill_version_id,
       })),
       inputs: authoritativeInputs(effectiveOptions, inputs),
-      modelProviderSecretId,
+      modelProviderConnectionId: providerCredential.connection_id,
+      modelProviderCredentialVersion: providerCredential.credential_version,
       runConfigId: selectedConfigId,
       files,
       idempotencyKey: requestKey,
@@ -436,7 +437,7 @@ export function RunLauncherDialog({
   };
 
   const selectedModelOption = effectiveOptions?.models.find((option) => option.model.id === model) ?? null;
-  const selectedSecrets = effectiveOptions?.declared_secrets.flatMap((declaration) => {
+  const selectedSkillSecrets = effectiveOptions?.declared_secrets.flatMap((declaration) => {
     const selection = inputs.secrets.find((item) =>
       secretSelectionKey(item.skill_id, item.slot_id) === secretSelectionKey(declaration.skill_id, declaration.slot_id),
     );
@@ -450,13 +451,13 @@ export function RunLauncherDialog({
         : "Secret unavailable",
     }];
   }) ?? [];
-  if (selectedModelOption?.provider_secret_pin) {
-    selectedSecrets.push({
-      envKey: selectedModelOption.provider_secret_pin.env_key,
+  const providerCredentialExposure = selectedModelOption?.provider_credential_pin
+    ? {
+      envKey: selectedModelOption.provider_credential_pin.env_key,
       skill: `${selectedModelOption.model.provider_name} model provider`,
-      name: `${selectedModelOption.provider_secret_pin.secret_name} · ${selectedModelOption.provider_secret_pin.secret_audience} · ${selectedModelOption.provider_secret_pin.secret_owner_name}`,
-    });
-  }
+      name: `${selectedModelOption.provider_credential_pin.scope} provider key · v${selectedModelOption.provider_credential_pin.credential_version}`,
+    }
+    : null;
   const selectedVariables = effectiveOptions?.declared_variables.flatMap((declaration) => {
     const selection = inputs.variables.find((item) =>
       variableSelectionKey(item.skill_id, item.env_key) === variableSelectionKey(declaration.skill_id, declaration.env_key),
@@ -611,7 +612,9 @@ export function RunLauncherDialog({
                   <h4 id="run-inputs-title">Secrets &amp; variables</h4>
                   <p>Only manifest-declared inputs can be injected. Non-secret variables remain visible in your private configuration and run history.</p>
                 </div>
-                <span>{selectedSecrets.length + selectedVariables.length} exposed</span>
+                <span>
+                  {selectedSkillSecrets.length + selectedVariables.length + Number(!!providerCredentialExposure)} exposed
+                </span>
               </div>
               {groups.map((group) => (
                 <details className="run-input-group" key={group.skill.skill_version_id} open={group.skill.root || group.secrets.some((item) => item.required) || group.variables.some((item) => item.required)}>
@@ -685,11 +688,18 @@ export function RunLauncherDialog({
               <Icon name="shield" size={14} />
               <h4 id="run-exposure-title">Credentials exposed to sandbox code</h4>
             </div>
-            {selectedSecrets.length + selectedVariables.length === 0 ? (
+            {selectedSkillSecrets.length + selectedVariables.length + Number(!!providerCredentialExposure) === 0 ? (
               <p>No credentials or variables selected.</p>
             ) : (
               <ul>
-                {selectedSecrets.map((item) => <li key={`${item.skill}:${item.envKey}`}><code>{item.envKey}</code><span>{item.name}</span><small>{item.skill}</small></li>)}
+                {providerCredentialExposure && (
+                  <li key={`provider:${providerCredentialExposure.envKey}`}>
+                    <code>{providerCredentialExposure.envKey}</code>
+                    <span>{providerCredentialExposure.name}</span>
+                    <small>{providerCredentialExposure.skill} · separate store</small>
+                  </li>
+                )}
+                {selectedSkillSecrets.map((item) => <li key={`${item.skill}:${item.envKey}`}><code>{item.envKey}</code><span>{item.name}</span><small>{item.skill}</small></li>)}
                 {selectedVariables.map((item) => <li key={`${item.skill}:${item.envKey}`}><code>{item.envKey}</code><span>Visible value</span><small>{item.skill}</small></li>)}
               </ul>
             )}

@@ -19,6 +19,7 @@ import {
   beginRunFreeze,
   claimNextRunPrompt,
   deleteRunConfiguration,
+  deterministicRunMessageId,
   enqueueRunPrompt,
   heartbeatRunJob,
   heartbeatRunWorker,
@@ -39,6 +40,7 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
   const versionId = randomUUID();
   const configId = randomUUID();
   const sharedSecretId = randomUUID();
+  const providerConnectionId = randomUUID();
   const runId = randomUUID();
   const terminalRunId = randomUUID();
   const cleanupRunId = randomUUID();
@@ -62,6 +64,7 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
         "skill_runs",
         "skill_run_skills",
         "skill_run_secret_inputs",
+        "skill_run_model_provider_inputs",
         "skill_run_variable_inputs",
         "skill_run_jobs",
         "skill_run_prompts",
@@ -160,11 +163,23 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
     `;
     await sql`
       insert into secrets (id, org_id, owner_id, name, key, audience)
-      values (${sharedSecretId}::uuid, ${orgA}::uuid, ${owner.id}, 'Shared provider key', 'OPENAI_API_KEY', 'organization')
+      values (${sharedSecretId}::uuid, ${orgA}::uuid, ${owner.id}, 'Shared Vanish key', 'VANISH_API_KEY', 'organization')
     `;
     await sql`
-      insert into user_provider_connections (org_id, user_id, provider, key_name, secret_id)
-      values (${orgA}::uuid, ${admin.id}, 'openai', 'OPENAI_API_KEY', ${sharedSecretId}::uuid)
+      insert into user_vanish_connections (org_id, user_id, secret_id)
+      values (${orgA}::uuid, ${admin.id}, ${sharedSecretId}::uuid)
+    `;
+    await sql`
+      insert into model_provider_connections
+        (id, org_id, scope, user_id, provider, key_name, current_version, created_by)
+      values
+        (${providerConnectionId}::uuid, ${orgA}::uuid, 'personal', ${owner.id}, 'openai', 'OPENAI_API_KEY', 1, ${owner.id})
+    `;
+    await sql`
+      insert into model_provider_credential_versions
+        (org_id, connection_id, version, key_name, ciphertext, iv, auth_tag, wrapped_dek, wrap_iv, wrap_auth_tag, key_id)
+      values
+        (${orgA}::uuid, ${providerConnectionId}::uuid, 1, 'OPENAI_API_KEY', 'cipher', 'iv', 'tag', 'dek', 'wrap-iv', 'wrap-tag', 'key-id')
     `;
     await sql`
       insert into skill_run_config_variables (org_id, config_id, skill_id, env_key, value)
@@ -228,6 +243,12 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
       values (${orgA}::uuid, ${runId}::uuid, 'opencode-server-password', 'OPENCODE_SERVER_PASSWORD', 'runtime', true)
     `;
     await sql`
+      insert into skill_run_model_provider_inputs
+        (org_id, run_id, provider, env_key, connection_id, credential_version, connection_scope)
+      values
+        (${orgA}::uuid, ${runId}::uuid, 'openai', 'OPENAI_API_KEY', ${providerConnectionId}::uuid, 1, 'personal')
+    `;
+    await sql`
       insert into skill_run_variable_inputs (org_id, run_id, skill_id, env_key, value)
       values (${orgA}::uuid, ${runId}::uuid, ${skillId}::uuid, 'OUTPUT_FORMAT', 'json')
     `;
@@ -253,14 +274,15 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
       insert into skill_run_prompts
         (org_id, run_id, ordinal, kind, idempotency_key, payload_hash, message_id, prompt)
       values
-        (${orgA}::uuid, ${runId}::uuid, 0, 'initial', 'integration-prompt', ${"c".repeat(64)}, ${randomUUID()}, 'prompt')
+        (${orgA}::uuid, ${runId}::uuid, 0, 'initial', 'integration-prompt', ${"c".repeat(64)},
+         ${deterministicRunMessageId(runId, 0, Date.now())}, 'prompt')
     `;
     await sql`
       insert into skill_run_prompts
         (org_id, run_id, ordinal, kind, idempotency_key, payload_hash, message_id, prompt)
       values
         (${orgA}::uuid, ${revokedRunId}::uuid, 1, 'follow_up', 'revoked-prompt',
-         ${"f".repeat(64)}, ${randomUUID()}, 'pending after departure')
+         ${"f".repeat(64)}, ${deterministicRunMessageId(revokedRunId, 1, Date.now())}, 'pending after departure')
     `;
     await sql`
       insert into skill_run_attachments (id, org_id, run_id, file_name, content_type, byte_size, storage_key)
@@ -321,7 +343,21 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
     expect(result).toEqual({ runs: 0, jobs: 0, deleted: 0 });
   });
 
-  it("reports cross-owner secret usage only to the secret owner", async () => {
+  it("keeps model-provider credentials outside Secrets while counting Vanish usage", async () => {
+    const genericProviderSecrets = await sql<{ count: number }[]>`
+      select count(*)::int as count
+      from secrets
+      where org_id = ${orgA}::uuid and key = 'OPENAI_API_KEY'
+    `;
+    expect(genericProviderSecrets).toEqual([{ count: 0 }]);
+
+    await expect(sql`
+      insert into model_provider_connections
+        (org_id, scope, user_id, provider, key_name, current_version, created_by)
+      values
+        (${orgA}::uuid, 'personal', ${owner.id}, 'VaNiSh', 'VANISH_API_KEY', 1, ${owner.id})
+    `).rejects.toMatchObject({ constraint_name: "model_provider_connections_provider_check" });
+
     const usageFor = (userId: string) => sql.begin(async (tx) => {
       await tx.unsafe(`set local role ${rlsRole}`);
       await tx`select set_config('app.org_id', ${orgA}, true), set_config('app.user_id', ${userId}, true)`;
@@ -545,7 +581,7 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
         (org_id, run_id, ordinal, kind, idempotency_key, payload_hash, message_id, prompt)
       values
         (${orgA}::uuid, ${freezeRunId}::uuid, 1, 'follow_up', 'freeze-pending-prompt',
-         ${"2".repeat(64)}, ${randomUUID()}, 'won the run lock first')
+         ${"2".repeat(64)}, ${deterministicRunMessageId(freezeRunId, 1, Date.now())}, 'won the run lock first')
     `;
     await expect(
       withTenantContext({ orgId: orgA, userId: owner.id }, (database) =>

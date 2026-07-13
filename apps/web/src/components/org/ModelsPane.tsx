@@ -1,24 +1,21 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import type { ActivatedModels, ModelRow, ModelsResponse, ProviderConnectionRow, SecretRow } from "@companion/contracts";
+import { useEffect, useId, useMemo, useState } from "react";
+import type { ActivatedModels, ModelProviderConnectionRow, ModelRow, ModelsResponse } from "@companion/contracts";
 import { Icon } from "../Icon";
 import { PaneHead } from "./paneKit";
 import { fetchModels } from "@/lib/runQueries";
-import { fetchSecrets } from "@/lib/secrets";
-import { VaultSecretField, secretReferenceFromRow } from "@/components/secrets/VaultSecretField";
 import { filterModelGroups, groupModelsByProvider, toModelProviders, type ModelGroupVM } from "@/components/runs/derive";
 
-/* ============================ Models (activation + provider vault bindings) ============================
+/* ============================ Models (activation + dedicated provider credentials) =====================
    One pane per scope (Account → Models, Workspace → Shared models; same keyed-usage rule as the old
    provider panes). The organizing concept is READINESS, not configuration: the deck at the top
    mirrors exactly what the run launcher will offer, each row telling the one truth that matters —
-   `Ready` (activated + a reachable vault reference) or `Needs secret` (bound inline on the row).
+   `Ready` (activated + a provider credential) or `Needs key` (entered write-only on the row).
    Below it, a search-first add bar over the full models.dev catalog, then a per-provider browse
    accordion for exploration. Activation is a hard gate: createRun rejects non-activated models. */
 
 export interface ModelScope {
-  orgId: string;
   title: string;
   desc: string;
   lockText: string;
@@ -35,10 +32,10 @@ export interface ModelScope {
   ghost?: { label: string; select: (activated: ActivatedModels) => string[] };
   /** Persist the full replacement list; returns both lists back. */
   save: (models: string[]) => Promise<ActivatedModels>;
-  /** Provider bindings in THIS scope (disconnect is offered only for these). */
-  loadConnected: () => Promise<ProviderConnectionRow[]>;
-  connect: (provider: string, keyName: string, secretId: string) => Promise<ProviderConnectionRow>;
-  connectionAudience: "personal" | "organization";
+  /** Dedicated model-provider credentials in THIS scope (disconnect is offered only for these). */
+  loadConnected: () => Promise<ModelProviderConnectionRow[]>;
+  connect: (provider: string, keyName: string, apiKey: string) => Promise<ModelProviderConnectionRow>;
+  connectionScope: "personal" | "organization";
   disconnect: (provider: string) => Promise<void>;
 }
 
@@ -55,16 +52,20 @@ export function ModelsPane({ scope }: { scope: ModelScope }) {
   const [catalog, setCatalog] = useState<ModelsResponse | null>(null);
   const [activated, setActivated] = useState<string[]>([]);
   const [ghostIds, setGhostIds] = useState<string[]>([]);
-  /** Providers with a vault binding in THIS scope (drives disconnect affordances). */
-  const [scopeConnections, setScopeConnections] = useState<Map<string, ProviderConnectionRow>>(() => new Map());
-  const [secrets, setSecrets] = useState<SecretRow[]>([]);
+  /** Providers with a dedicated credential in THIS scope (drives disconnect affordances). */
+  const [scopeConnections, setScopeConnections] = useState<Map<string, ModelProviderConnectionRow>>(() => new Map());
   /** Providers connected during this visit — flips rows to Ready without a refetch. */
   const [connectedNow, setConnectedNow] = useState<Set<string>>(() => new Set());
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [savingId, setSavingId] = useState<string | null>(null);
-  /** The ONE spot whose inline secret binding editor is open. */
-  const [keyEntry, setKeyEntry] = useState<{ anchor: string; providerId: string } | null>(null);
+  const [disconnectingProvider, setDisconnectingProvider] = useState<string | null>(null);
+  /** The ONE spot whose inline write-only credential editor is open. */
+  const [keyEntry, setKeyEntry] = useState<{
+    anchor: string;
+    providerId: string;
+    returnFocus: HTMLButtonElement;
+  } | null>(null);
   const [open, setOpen] = useState<Set<string>>(() => new Set());
   const [tick, setTick] = useState(0);
   /** Full refetch — the server recomputes `connected`, so disconnects can't leave stale "Ready". */
@@ -73,14 +74,13 @@ export function ModelsPane({ scope }: { scope: ModelScope }) {
   useEffect(() => {
     let live = true;
     setError(null);
-    Promise.all([fetchModels(), scope.loadConnected(), fetchSecrets(scope.orgId)])
-      .then(([response, connections, secretRows]) => {
+    Promise.all([fetchModels(), scope.loadConnected()])
+      .then(([response, connections]) => {
         if (!live) return;
         setCatalog(response);
         setActivated(scope.select(response.activated));
         setGhostIds(scope.ghost ? scope.ghost.select(response.activated) : []);
         setScopeConnections(new Map(connections.map((connection) => [connection.provider, connection])));
-        setSecrets(secretRows.filter((secret) => secret.can_use && !secret.disabled_at && !secret.deleted_at));
         setConnectedNow(new Set());
       })
       .catch((e) => live && setError(e instanceof Error ? e.message : "Could not load the model catalog."));
@@ -106,7 +106,7 @@ export function ModelsPane({ scope }: { scope: ModelScope }) {
   const ghost = ghostIds.filter((id) => !activatedSet.has(id)).map((id) => byId.get(id)).filter((m): m is ModelRow => !!m);
   const launcher = [...deck, ...ghost];
   const readyCount = launcher.filter((m) => usable(m.provider)).length;
-  const needsSecretCount = launcher.length - readyCount;
+  const needsKeyCount = launcher.length - readyCount;
 
   const groups = useMemo(() => {
     if (!catalog) return [];
@@ -143,6 +143,8 @@ export function ModelsPane({ scope }: { scope: ModelScope }) {
   const toggleModel = (id: string) => (activatedSet.has(id) ? removeModel(id) : addModel(id));
 
   const disconnect = async (providerId: string) => {
+    if (disconnectingProvider) return;
+    setDisconnectingProvider(providerId);
     setError(null);
     try {
       await scope.disconnect(providerId);
@@ -150,29 +152,47 @@ export function ModelsPane({ scope }: { scope: ModelScope }) {
       reload();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not disconnect.");
+    } finally {
+      setDisconnectingProvider(null);
     }
   };
 
-  const onKeySaved = (providerId: string, connection: ProviderConnectionRow) => {
+  const restoreKeyFocus = (entry: typeof keyEntry) => {
+    requestAnimationFrame(() => {
+      const replacement = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-provider-key-trigger]"))
+        .find((button) => button.dataset.providerKeyTrigger === entry?.anchor);
+      const target = entry?.returnFocus.isConnected ? entry.returnFocus : replacement;
+      target?.focus();
+    });
+  };
+  const onKeySaved = (providerId: string, connection: ModelProviderConnectionRow) => {
+    const entry = keyEntry;
     setKeyEntry(null);
     setConnectedNow((prev) => new Set(prev).add(providerId));
     setScopeConnections((previous) => new Map(previous).set(providerId, connection));
+    restoreKeyFocus(entry);
+  };
+  const openKeyEntry = (anchor: string, providerId: string, returnFocus: HTMLButtonElement) => {
+    setError(null);
+    setKeyEntry({ anchor, providerId, returnFocus });
+  };
+  const closeKeyEntry = () => {
+    const entry = keyEntry;
+    setKeyEntry(null);
+    restoreKeyFocus(entry);
   };
 
   /** Render the binding editor at exactly ONE anchor. */
   const keyRowAt = (anchor: string) =>
     keyEntry?.anchor === anchor ? (
-      <SecretBindingRow
-        orgId={scope.orgId}
+      <ProviderKeyRow
         providerId={keyEntry.providerId}
         providerName={providersById.get(keyEntry.providerId)?.name ?? keyEntry.providerId}
         envKey={providersById.get(keyEntry.providerId)?.envKeys[0] ?? null}
-        candidates={secrets}
-        audience={scope.connectionAudience}
+        scope={scope.connectionScope}
         onConnect={scope.connect}
         onSaved={(connection) => onKeySaved(keyEntry.providerId, connection)}
-        onCancel={() => setKeyEntry(null)}
-        onError={setError}
+        onCancel={closeKeyEntry}
       />
     ) : null;
 
@@ -201,7 +221,7 @@ export function ModelsPane({ scope }: { scope: ModelScope }) {
             <span>
               {launcher.length === 0
                 ? "In your launcher"
-                : `${launcher.length} ${launcher.length === 1 ? "model" : "models"} in ${scope.ghost ? "your" : "the"} launcher · ${readyCount} ready${needsSecretCount ? ` · ${needsSecretCount} ${needsSecretCount === 1 ? "needs" : "need"} a secret` : ""}`}
+                : `${launcher.length} ${launcher.length === 1 ? "model" : "models"} in ${scope.ghost ? "your" : "the"} launcher · ${readyCount} ready${needsKeyCount ? ` · ${needsKeyCount} ${needsKeyCount === 1 ? "needs" : "need"} a provider key` : ""}`}
             </span>
           </div>
           {launcher.length === 0 ? (
@@ -217,11 +237,15 @@ export function ModelsPane({ scope }: { scope: ModelScope }) {
                   key={m.id}
                   model={m}
                   ready={usable(m.provider)}
+                  hasScopeConnection={scopeConnections.has(m.provider)}
+                  connectionScope={scope.connectionScope}
+                  canConnect={(providersById.get(m.provider)?.envKeys.length ?? 0) > 0}
+                  keyTriggerId={`deck:${m.id}`}
                   locked={scope.locked}
                   pending={savingId === m.id}
                   keyRow={keyRowAt(`deck:${m.id}`)}
                   keyEntryOpenForProvider={keyEntry?.providerId === m.provider}
-                  onAskKey={() => setKeyEntry({ anchor: `deck:${m.id}`, providerId: m.provider })}
+                  onAskKey={(trigger) => openKeyEntry(`deck:${m.id}`, m.provider, trigger)}
                   onRemove={() => removeModel(m.id)}
                 />
               ))}
@@ -244,12 +268,16 @@ export function ModelsPane({ scope }: { scope: ModelScope }) {
                       key={m.id}
                       model={m}
                       ready={usable(m.provider)}
+                      hasScopeConnection={scopeConnections.has(m.provider)}
+                      connectionScope={scope.connectionScope}
+                      canConnect={(providersById.get(m.provider)?.envKeys.length ?? 0) > 0}
+                      keyTriggerId={`ghost:${m.id}`}
                       locked={scope.locked}
                       pending={false}
                       shared
                       keyRow={keyRowAt(`ghost:${m.id}`)}
                       keyEntryOpenForProvider={keyEntry?.providerId === m.provider}
-                      onAskKey={() => setKeyEntry({ anchor: `ghost:${m.id}`, providerId: m.provider })}
+                      onAskKey={(trigger) => openKeyEntry(`ghost:${m.id}`, m.provider, trigger)}
                     />
                   ))}
                 </>
@@ -315,7 +343,7 @@ export function ModelsPane({ scope }: { scope: ModelScope }) {
                   </>
                 )
               ) : (
-                /* ---- Browse: per-provider accordion, vault bindings on the headers ---- */
+                /* ---- Browse: per-provider accordion, dedicated credentials on the headers ---- */
                 <div
                   style={{
                     border: "1px solid var(--color-line)",
@@ -331,6 +359,9 @@ export function ModelsPane({ scope }: { scope: ModelScope }) {
                       activated={activatedSet}
                       usable={usable(group.provider.id)}
                       connection={scopeConnections.get(group.provider.id) ?? null}
+                      connectionScope={scope.connectionScope}
+                      keyTriggerId={`browse:${group.provider.id}`}
+                      disconnecting={disconnectingProvider === group.provider.id}
                       expanded={open.has(group.provider.id)}
                       onToggleExpanded={() =>
                         setOpen((prev) => {
@@ -342,8 +373,8 @@ export function ModelsPane({ scope }: { scope: ModelScope }) {
                       }
                       savingId={savingId}
                       keyRow={keyRowAt(`browse:${group.provider.id}`)}
-                      onAskKey={() => {
-                        setKeyEntry({ anchor: `browse:${group.provider.id}`, providerId: group.provider.id });
+                      onAskKey={(trigger) => {
+                        openKeyEntry(`browse:${group.provider.id}`, group.provider.id, trigger);
                         setOpen((prev) => new Set(prev).add(group.provider.id));
                       }}
                       onDisconnect={() => void disconnect(group.provider.id)}
@@ -379,7 +410,7 @@ function ReadyBadge({ ready }: { ready: boolean }) {
         aria-hidden
         style={{ width: 7, height: 7, borderRadius: "50%", background: "currentColor", flex: "none" }}
       />
-      {ready ? "Ready" : "Needs secret"}
+      {ready ? "Ready" : "Needs key"}
     </span>
   );
 }
@@ -388,6 +419,10 @@ function ReadyBadge({ ready }: { ready: boolean }) {
 function DeckRow({
   model,
   ready,
+  hasScopeConnection,
+  connectionScope,
+  canConnect,
+  keyTriggerId,
   locked,
   pending,
   shared,
@@ -398,13 +433,17 @@ function DeckRow({
 }: {
   model: ModelRow;
   ready: boolean;
+  hasScopeConnection: boolean;
+  connectionScope: "personal" | "organization";
+  canConnect: boolean;
+  keyTriggerId: string;
   locked: boolean;
   pending: boolean;
   shared?: boolean;
   keyRow: React.ReactNode;
   /** True when this provider's binding editor is already open elsewhere. */
   keyEntryOpenForProvider?: boolean;
-  onAskKey: () => void;
+  onAskKey: (trigger: HTMLButtonElement) => void;
   onRemove?: () => void;
 }) {
   const meta = modelMeta(model);
@@ -421,10 +460,26 @@ function DeckRow({
         </div>
         <div className="mrow__end">
           {shared && <span className="badge scopebadge">shared</span>}
-          {!ready && !locked && !keyEntryOpenForProvider && (
-            <button className="btn-sec" onClick={onAskKey}>
-              Choose {model.provider_name} secret
+          {!locked && !keyEntryOpenForProvider && canConnect && (
+            <button
+              type="button"
+              className="btn-sec"
+              data-provider-key-trigger={keyTriggerId}
+              onClick={(event) => onAskKey(event.currentTarget)}
+            >
+              {!ready
+                ? `Connect ${model.provider_name}`
+                : hasScopeConnection
+                  ? "Replace provider key"
+                  : connectionScope === "personal"
+                    ? "Add personal key"
+                    : `Connect ${model.provider_name}`}
             </button>
+          )}
+          {!locked && !keyEntryOpenForProvider && !canConnect && !ready && (
+            <span className="mono" title="This provider does not declare a supported API-key environment variable.">
+              Unavailable
+            </span>
           )}
           {!locked && onRemove && (
             <button className="mrow__x" title={`Remove ${model.name}`} disabled={pending} onClick={onRemove}>
@@ -444,6 +499,9 @@ function ProviderModelsGroup({
   activated,
   usable,
   connection,
+  connectionScope,
+  keyTriggerId,
+  disconnecting,
   expanded,
   onToggleExpanded,
   savingId,
@@ -456,13 +514,16 @@ function ProviderModelsGroup({
   activated: ReadonlySet<string>;
   /** A key reaches this provider from any scope. */
   usable: boolean;
-  /** THIS scope holds this vault binding (disconnect is offered). */
-  connection: ProviderConnectionRow | null;
+  /** THIS scope holds this provider credential (disconnect is offered). */
+  connection: ModelProviderConnectionRow | null;
+  connectionScope: "personal" | "organization";
+  keyTriggerId: string;
+  disconnecting: boolean;
   expanded: boolean;
   onToggleExpanded: () => void;
   savingId: string | null;
   keyRow: React.ReactNode;
-  onAskKey: () => void;
+  onAskKey: (trigger: HTMLButtonElement) => void;
   onDisconnect: () => void;
   onToggleModel: (id: string) => void;
 }) {
@@ -473,6 +534,7 @@ function ProviderModelsGroup({
   return (
     <div>
       <div
+        className="provider-group__head"
         style={{
           display: "flex",
           alignItems: "center",
@@ -524,23 +586,34 @@ function ProviderModelsGroup({
             <Icon name="check" size={11} />
             connected
           </span>
-        ) : keyRow !== null ? null : (
+        ) : null}
+        {keyRow === null && canConnect && (
           <button
+            type="button"
             className="btn-sec"
-            disabled={!canConnect}
-            title={canConnect ? undefined : "This provider can't be connected here."}
-            style={{ opacity: canConnect ? 1 : 0.55 }}
-            onClick={onAskKey}
+            data-provider-key-trigger={keyTriggerId}
+            onClick={(event) => onAskKey(event.currentTarget)}
           >
-            Connect
+            {connection
+              ? "Replace"
+              : usable && connectionScope === "personal"
+                ? "Add personal key"
+                : "Connect"}
           </button>
         )}
         {connection && (
           <>
-            <span className="provider-secret-meta" title={`${connection.secret_name} · ${connection.secret_audience} · ${connection.secret_owner_name}`}>
-              {connection.secret_name}
+            <span className="provider-key-meta" title={`${connection.key_name} · credential version ${connection.credential_version}`}>
+              {connection.key_name} · v{connection.credential_version}
             </span>
-            <button className="mrow__x" title={`Disconnect ${provider.name}; the vault secret is kept`} onClick={onDisconnect}>
+            <button
+              type="button"
+              className="mrow__x"
+              title={`Disconnect ${provider.name}`}
+              aria-label={`Disconnect ${provider.name}`}
+              disabled={disconnecting}
+              onClick={onDisconnect}
+            >
               <Icon name="trash-2" size={15} />
             </button>
           </>
@@ -586,44 +659,51 @@ function ProviderModelsGroup({
   );
 }
 
-/** Bind a provider to a vault reference. Only the generic vault create form accepts plaintext. */
-function SecretBindingRow({
-  orgId,
+/** Store one model-provider key in its dedicated write-only credential store. */
+export function ProviderKeyRow({
   providerId,
   providerName,
   envKey,
-  candidates,
-  audience,
+  scope,
   onConnect,
   onSaved,
   onCancel,
-  onError,
 }: {
-  orgId: string;
   providerId: string;
   providerName: string;
   envKey: string | null;
-  candidates: SecretRow[];
-  audience: "personal" | "organization";
-  onConnect: (provider: string, keyName: string, secretId: string) => Promise<ProviderConnectionRow>;
-  onSaved: (connection: ProviderConnectionRow) => void;
+  scope: "personal" | "organization";
+  onConnect: (provider: string, keyName: string, apiKey: string) => Promise<ModelProviderConnectionRow>;
+  onSaved: (connection: ModelProviderConnectionRow) => void;
   onCancel: () => void;
-  onError: (message: string | null) => void;
 }) {
-  const [selected, setSelected] = useState<string | null>(null);
-  const [localCandidates, setLocalCandidates] = useState(candidates.map(secretReferenceFromRow));
+  const inputId = useId();
+  const helpId = `${inputId}-help`;
+  const errorId = `${inputId}-error`;
+  const [apiKey, setApiKey] = useState("");
+  const [fieldError, setFieldError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const save = async () => {
-    if (!selected || busy || !envKey) return;
+    if (!apiKey.trim() || busy || !envKey) return;
     setBusy(true);
-    onError(null);
+    setFieldError(null);
     try {
-      const connection = await onConnect(providerId, envKey, selected);
+      const connection = await onConnect(providerId, envKey, apiKey);
+      setApiKey("");
       onSaved(connection);
     } catch (e) {
-      onError(e instanceof Error ? e.message : "Could not bind the provider secret.");
+      // Provider credentials are write-only. Do not retain a submitted value after any response.
+      const message = e instanceof Error ? e.message : "Could not save the provider key. Enter it again to retry.";
+      setApiKey("");
+      setFieldError(message);
       setBusy(false);
     }
+  };
+  const cancel = () => {
+    if (busy) return;
+    setApiKey("");
+    setFieldError(null);
+    onCancel();
   };
   return (
     // data-esc-guard: the settings drawer's capture-phase Escape handler yields to this widget,
@@ -636,7 +716,7 @@ function SecretBindingRow({
         if (event.key === "Escape") {
           event.preventDefault();
           event.stopPropagation();
-          onCancel();
+          cancel();
         }
       }}
     >
@@ -644,30 +724,47 @@ function SecretBindingRow({
         <Icon name="key" size={15} />
       </span>
       <div className="mrow__id">
-        <div className="og-mname">{providerName} provider secret</div>
-        <div className="og-memail">Choose an accessible vault secret. Disconnecting later keeps the secret in the vault.</div>
+        <div className="og-mname">{providerName} provider key</div>
+        <div className="og-memail">
+          This credential is stored separately from Secrets and is never displayed again.
+        </div>
       </div>
-      <div className="provider-secret-editor">
-        <VaultSecretField
-          orgId={orgId}
-          envKey={envKey ?? "PROVIDER_API_KEY"}
-          candidates={localCandidates.filter((candidate) => audience !== "organization" || candidate.audience === "organization")}
-          value={selected}
-          onChange={setSelected}
-          audience={audience}
-          label={`${providerName} credential`}
-          required
+      <div className="provider-key-editor">
+        <label htmlFor={inputId}>{providerName} API key</label>
+        <input
+          id={inputId}
+          className="sx-input mono"
+          type="password"
+          value={apiKey}
+          autoFocus
+          autoComplete="new-password"
+          autoCapitalize="none"
+          spellCheck={false}
           disabled={!envKey || busy}
-          helper={audience === "organization"
-            ? "Workspace bindings require an active Organization secret."
-            : "The selected secret is revalidated before every run."}
-          onCreated={(secret) => setLocalCandidates((rows) => [...rows, secret])}
+          aria-invalid={!!fieldError || undefined}
+          aria-describedby={`${helpId}${fieldError ? ` ${errorId}` : ""}`}
+          onChange={(event) => {
+            setApiKey(event.target.value);
+            if (fieldError) setFieldError(null);
+          }}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              void save();
+            }
+          }}
         />
-        <div className="provider-secret-editor__actions">
-          <button className="btn-primary" disabled={!selected || busy || !envKey} onClick={() => void save()}>
+        <p id={helpId}>
+          {scope === "organization"
+            ? "Available to workspace runs. The plaintext is encrypted immediately and cannot be read back."
+            : "Personal to you. The plaintext is encrypted immediately and cannot be read back."}
+        </p>
+        {fieldError && <p className="vault-field__error" id={errorId} role="alert">{fieldError} Enter the key again to retry.</p>}
+        <div className="provider-key-editor__actions">
+          <button type="button" className="btn-primary" disabled={!apiKey.trim() || busy || !envKey} onClick={() => void save()}>
             {busy ? "Connecting…" : "Connect"}
           </button>
-          <button className="btn-sec" onClick={onCancel}>Cancel</button>
+          <button type="button" className="btn-sec" disabled={busy} onClick={cancel}>Cancel</button>
         </div>
       </div>
     </div>

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { RunRuntimeError, type RunSandboxRuntime, type SandboxRef } from "@companion/core";
 import { RunBusyError, RunValidationError } from "@companion/core/services";
 import {
+  claimedRunLeaseDeadline,
   createSandboxTimeoutExtender,
   isTransientRunFailure,
   runFailureEvent,
@@ -24,6 +25,17 @@ describe("run worker retry classification", () => {
     expect(isTransientRunFailure(new RunValidationError("secret unavailable", "secret_unavailable"))).toBe(false);
     expect(isTransientRunFailure(new RunBusyError("run is terminal", "run_terminal"))).toBe(false);
     expect(isTransientRunFailure(new Error("database connection reset"))).toBe(true);
+  });
+});
+
+describe("claimed run lease decoding boundary", () => {
+  it("accepts decoded dates and routes malformed claims through durable runtime failure handling", () => {
+    expect(claimedRunLeaseDeadline({ leaseExpiresAt: new Date("2026-07-13T20:00:30.000Z") }))
+      .toBe(Date.parse("2026-07-13T20:00:30.000Z"));
+    expect(() => claimedRunLeaseDeadline({ leaseExpiresAt: new Date(Number.NaN) }))
+      .toThrow("invalid lease metadata");
+    expect(() => claimedRunLeaseDeadline({ leaseExpiresAt: null }))
+      .toThrow("invalid lease metadata");
   });
 });
 

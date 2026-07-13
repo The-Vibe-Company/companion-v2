@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { SEMVER_RE, SKILL_NAME_RE, SKILL_REQUIREMENT_KEY_RE } from "./frontmatter";
 import { modelRowSchema } from "./modelProviders";
-import { secretAudienceSchema, secretCandidateSchema } from "./secrets";
+import { secretCandidateSchema } from "./secrets";
 
 /**
  * Skill runs are private, durable sandbox sessions launched from a published skill version.
@@ -83,7 +83,7 @@ export const runWarningSnapshotSchema = z
   .strict();
 export type RunWarningSnapshot = z.infer<typeof runWarningSnapshotSchema>;
 
-export const runSecretProvenanceSchema = z.enum(["skill", "model_provider", "runtime"]);
+export const runSecretProvenanceSchema = z.enum(["skill", "runtime"]);
 export type RunSecretProvenance = z.infer<typeof runSecretProvenanceSchema>;
 
 /* ---- Resolved launch options ------------------------------------------------------------ */
@@ -179,25 +179,23 @@ export const runModelReadinessSchema = z.enum([
 ]);
 export type RunModelReadiness = z.infer<typeof runModelReadinessSchema>;
 
-/** Exact accessible vault pin that will supply the model provider key; never contains plaintext. */
-export const runModelProviderSecretPinSchema = z
+/** Exact dedicated provider credential that will supply the model key; never contains plaintext. */
+export const runModelProviderCredentialPinSchema = z
   .object({
     env_key: runEnvKeySchema,
-    secret_id: runUuidSchema,
-    secret_version: z.number().int().positive(),
-    secret_name: z.string().min(1).max(240),
-    secret_audience: secretAudienceSchema,
-    secret_owner_name: z.string().min(1).max(240),
+    connection_id: runUuidSchema,
+    credential_version: z.number().int().positive(),
+    scope: z.enum(["personal", "organization"]),
   })
   .strict();
-export type RunModelProviderSecretPin = z.infer<typeof runModelProviderSecretPinSchema>;
+export type RunModelProviderCredentialPin = z.infer<typeof runModelProviderCredentialPinSchema>;
 
 export const runModelOptionSchema = z
   .object({
     model: modelRowSchema,
     readiness: runModelReadinessSchema,
     message: z.string().max(2_000).nullable().default(null),
-    provider_secret_pin: runModelProviderSecretPinSchema.nullable().default(null),
+    provider_credential_pin: runModelProviderCredentialPinSchema.nullable().default(null),
   })
   .strict();
 export type RunModelOption = z.infer<typeof runModelOptionSchema>;
@@ -384,10 +382,10 @@ export const runSecretInputSnapshotSchema = z
   })
   .strict()
   .superRefine((value, ctx) => {
-    if (value.provenance !== "runtime" && (!value.secret_id || !value.secret_version)) {
+    if (value.provenance === "skill" && (!value.secret_id || !value.secret_version)) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "skill and model provider snapshots require an exact secret version",
+        message: "skill snapshots require an exact secret version",
       });
     }
     if (value.provenance === "runtime" && (value.secret_id !== null || value.secret_version !== null)) {
@@ -398,6 +396,18 @@ export const runSecretInputSnapshotSchema = z
     }
   });
 export type RunSecretInputSnapshot = z.infer<typeof runSecretInputSnapshotSchema>;
+
+/** Redacted immutable reference to the dedicated model-provider credential used by a run. */
+export const runModelProviderInputSnapshotSchema = z
+  .object({
+    provider: z.string().min(1).max(120),
+    env_key: runEnvKeySchema,
+    connection_id: runUuidSchema,
+    credential_version: z.number().int().positive(),
+    scope: z.enum(["personal", "organization"]),
+  })
+  .strict();
+export type RunModelProviderInputSnapshot = z.infer<typeof runModelProviderInputSnapshotSchema>;
 
 export const runVariableInputSnapshotSchema = z
   .object({
@@ -414,6 +424,7 @@ export const runInputSnapshotSchema = z
     skills: z.array(runDependencySchema).max(RUN_MAX_DEPENDENCIES + 1),
     secrets: z.array(runSecretInputSnapshotSchema).max(RUN_MAX_SECRET_INPUTS),
     variables: z.array(runVariableInputSnapshotSchema).max(RUN_MAX_VARIABLE_INPUTS),
+    model_provider: runModelProviderInputSnapshotSchema.nullable(),
   })
   .strict();
 export type RunInputSnapshot = z.infer<typeof runInputSnapshotSchema>;
@@ -591,8 +602,8 @@ export type RunPromptInput = z.infer<typeof runPromptInputSchema>;
 
 /**
  * Text fields of multipart `POST /v1/skills/:slug/runs`. Files arrive as repeated `file` parts.
- * `skill_version_id` makes stale launchers fail closed. Skill inputs and the model-provider vault
- * reference are both authoritative; the server must not add a provider binding implicitly.
+ * `skill_version_id` makes stale launchers fail closed. Skill inputs and the exact dedicated
+ * model-provider credential pin are authoritative; the server must not add a connection implicitly.
  */
 export const launchRunFieldsSchema = z
   .object({
@@ -602,7 +613,8 @@ export const launchRunFieldsSchema = z
     /** Exact non-root closure displayed by run-options; stale pins reject the launch. */
     dependency_pins: runDependencyPinsJsonSchema,
     inputs: runInputSelectionJsonSchema,
-    model_provider_secret_id: runUuidSchema,
+    model_provider_connection_id: runUuidSchema,
+    model_provider_credential_version: z.coerce.number().int().positive(),
     /** Optional provenance only; the selected payload remains authoritative. */
     run_config_id: runUuidSchema.nullable().optional(),
   })

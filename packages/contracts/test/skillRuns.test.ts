@@ -21,6 +21,7 @@ const dependencySkillId = "0f232fd8-c852-4bab-9c12-1e1d4ed66634";
 const dependencyVersionId = "2bc55a52-3320-47cd-aa66-9859cda981ed";
 const slotId = "df80d275-30c9-5f0d-9a46-d77e6fca8448";
 const secretId = "a57b0803-6afb-47d0-a307-e8fb80c56511";
+const providerConnectionId = "f7a3b3fa-2d55-4c59-bf70-6cf2048df48f";
 
 describe("skill run contracts", () => {
   it("exposes the complete public lifecycle", () => {
@@ -60,7 +61,8 @@ describe("skill run contracts", () => {
       dependency_pins: JSON.stringify([
         { skill_id: dependencySkillId, skill_version_id: dependencyVersionId },
       ]),
-      model_provider_secret_id: secretId,
+      model_provider_connection_id: providerConnectionId,
+      model_provider_credential_version: "4",
       inputs: JSON.stringify({ secrets: [{ skill_id: skillId, slot_id: slotId, secret_id: secretId }], variables: [] }),
     });
     expect(parsed.skill_version_id).toBe(versionId);
@@ -68,9 +70,10 @@ describe("skill run contracts", () => {
       { skill_id: dependencySkillId, skill_version_id: dependencyVersionId },
     ]);
     expect(parsed.inputs.secrets[0]?.secret_id).toBe(secretId);
+    expect(parsed.model_provider_credential_version).toBe(4);
     expect(() => launchRunFieldsSchema.parse({ prompt: "x", model: "provider/model", inputs: "{}" })).toThrow();
     expect(() =>
-      launchRunFieldsSchema.parse({ prompt: "x", model: "provider/model", skill_version_id: versionId, dependency_pins: "[]", model_provider_secret_id: secretId, inputs: "not-json" }),
+      launchRunFieldsSchema.parse({ prompt: "x", model: "provider/model", skill_version_id: versionId, dependency_pins: "[]", model_provider_connection_id: providerConnectionId, model_provider_credential_version: "4", inputs: "not-json" }),
     ).toThrow();
     expect(() =>
       launchRunFieldsSchema.parse({
@@ -81,7 +84,8 @@ describe("skill run contracts", () => {
           { skill_id: dependencySkillId, skill_version_id: dependencyVersionId },
           { skill_id: dependencySkillId, skill_version_id: versionId },
         ]),
-        model_provider_secret_id: secretId,
+        model_provider_connection_id: providerConnectionId,
+        model_provider_credential_version: "4",
         inputs: "{}",
       }),
     ).toThrow(/duplicate dependency pin/);
@@ -150,7 +154,7 @@ describe("skill run contracts", () => {
     expect(() => runOptionsSchema.parse({ ...parsed, root: dependency, dependencies: [] })).toThrow(/root/);
   });
 
-  it("exposes only the exact redacted model-provider secret pin", () => {
+  it("exposes only the exact redacted dedicated model-provider credential pin", () => {
     const model = {
       id: "anthropic/claude-sonnet-4",
       provider: "anthropic",
@@ -162,13 +166,11 @@ describe("skill run contracts", () => {
       model,
       readiness: "ready",
       message: null,
-      provider_secret_pin: {
+      provider_credential_pin: {
         env_key: "ANTHROPIC_API_KEY",
-        secret_id: secretId,
-        secret_version: 4,
-        secret_name: "Anthropic production",
-        secret_audience: "personal",
-        secret_owner_name: "Ada Lovelace",
+        connection_id: providerConnectionId,
+        credential_version: 4,
+        scope: "personal",
       },
     };
     const root = {
@@ -189,7 +191,7 @@ describe("skill run contracts", () => {
       models: [option],
       runtime: { available: true },
     });
-    expect(parsed.models[0]?.provider_secret_pin).toEqual(option.provider_secret_pin);
+    expect(parsed.models[0]?.provider_credential_pin).toEqual(option.provider_credential_pin);
     expect(() =>
       runOptionsSchema.parse({
         root,
@@ -197,7 +199,7 @@ describe("skill run contracts", () => {
         declared_secrets: [],
         declared_variables: [],
         configurations: [],
-        models: [{ ...option, provider_secret_pin: { ...option.provider_secret_pin, value: "plaintext" } }],
+        models: [{ ...option, provider_credential_pin: { ...option.provider_credential_pin, value: "plaintext" } }],
         runtime: { available: true },
       }),
     ).toThrow();
@@ -289,6 +291,13 @@ describe("skill run contracts", () => {
         },
       ],
       variables: [],
+      model_provider: {
+        provider: "anthropic",
+        env_key: "ANTHROPIC_API_KEY",
+        connection_id: providerConnectionId,
+        credential_version: 4,
+        scope: "personal",
+      },
     };
     const snapshot = runInputSnapshotSchema.parse(input);
     expect(snapshot.secrets[0]?.secret_version).toBe(4);
@@ -316,6 +325,7 @@ describe("skill run contracts", () => {
         },
       ],
       variables: [],
+      model_provider: null,
     });
     expect(runtimeCredential.secrets[0]?.provenance).toBe("runtime");
   });

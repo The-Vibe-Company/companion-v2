@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import type { ProviderConnectionRow, SecretRow } from "@companion/contracts";
+import type { SecretRow, VanishConnectionRow } from "@companion/contracts";
 import { Icon } from "../Icon";
 import { PaneHead } from "./paneKit";
 import { fetchSecrets } from "@/lib/secrets";
@@ -16,9 +16,9 @@ export interface ArtifactScope {
   lockText: string;
   /** Workspace members can inspect the shared binding, but only owners/admins may change it. */
   locked: boolean;
-  loadConnected: () => Promise<ProviderConnectionRow[]>;
-  connect: (provider: string, keyName: string, secretId: string) => Promise<ProviderConnectionRow>;
-  disconnect: (provider: string) => Promise<void>;
+  loadConnected: () => Promise<VanishConnectionRow | null>;
+  connect: (secretId: string) => Promise<VanishConnectionRow>;
+  disconnect: () => Promise<void>;
 }
 
 /** Keep the workspace selector organization-only even when the actor can access other audiences. */
@@ -39,7 +39,7 @@ export function selectArtifactSecretReferences(
 
 /** Scoped Vanish binding. Disconnect removes only the binding, never the referenced vault secret. */
 export function ArtifactsPane({ scope }: { scope: ArtifactScope }) {
-  const [connection, setConnection] = useState<ProviderConnectionRow | null>(null);
+  const [connection, setConnection] = useState<VanishConnectionRow | null>(null);
   const [secrets, setSecrets] = useState<VaultSecretReference[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -54,9 +54,9 @@ export function ArtifactsPane({ scope }: { scope: ArtifactScope }) {
     setError(null);
     const secretsRequest = scope.locked ? Promise.resolve([] as SecretRow[]) : fetchSecrets(scope.orgId);
     Promise.all([scope.loadConnected(), secretsRequest])
-      .then(([connections, rows]) => {
+      .then(([loadedConnection, rows]) => {
         if (!live) return;
-        setConnection(connections.find((candidate) => candidate.provider === "vanish") ?? null);
+        setConnection(loadedConnection);
         setSecrets(selectArtifactSecretReferences(rows, scope.id));
         setLoadedSuccessfully(true);
       })
@@ -74,7 +74,7 @@ export function ArtifactsPane({ scope }: { scope: ArtifactScope }) {
     setBusy(true);
     setError(null);
     try {
-      const nextConnection = await scope.connect("vanish", "VANISH_API_KEY", selected);
+      const nextConnection = await scope.connect(selected);
       setConnection(nextConnection);
       setSelected(null);
     } catch (cause) {
@@ -89,7 +89,7 @@ export function ArtifactsPane({ scope }: { scope: ArtifactScope }) {
     setBusy(true);
     setError(null);
     try {
-      await scope.disconnect("vanish");
+      await scope.disconnect();
       setConnection(null);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not disconnect Vanish.");

@@ -392,7 +392,11 @@ export function SecretsApp({
 
       <main className="sec-main" ref={mainRef} aria-hidden={mobileSidebarOpen || undefined} inert={mobileSidebarOpen ? true : undefined}>
         <header className="sec-head">
-          <div><p className="sec-kicker">Workspace vault</p><h1>Secrets</h1><p>Store credentials once, then choose where they may be used.</p></div>
+          <div>
+            <p className="sec-kicker">Workspace vault</p>
+            <h1>Secrets</h1>
+            <p>Store skill and Vanish credentials here. Model provider keys stay separate in Settings → Models.</p>
+          </div>
           <button className="cds-btn cds-btn--md cds-btn--primary" onClick={(event) => { drawerOpenerRef.current = event.currentTarget; setCreating(true); setSelectedId(null); setForm(EMPTY_FORM); }}>
             <Icon name="plus" size={15} /> New secret
           </button>

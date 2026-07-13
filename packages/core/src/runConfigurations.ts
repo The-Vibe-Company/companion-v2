@@ -10,7 +10,7 @@ import type {
   UpdateRunConfigurationInput,
 } from "@companion/contracts";
 import { getActivatedModelSets } from "./modelPreferences";
-import { resolveProviderSecretPin } from "./providerConnections";
+import { resolveProviderCredentialPin } from "./providerConnections";
 import {
   RunBusyError,
   RunValidationError,
@@ -692,13 +692,13 @@ export async function getRunOptions(input: {
   });
   const activated = new Set([...activatedRows.personal, ...activatedRows.org]);
   const catalog = (ctx.models ?? []).filter((model) => activated.has(model.id));
-  const providerPins = new Map<string, Awaited<ReturnType<typeof resolveProviderSecretPin>>>();
+  const providerPins = new Map<string, Awaited<ReturnType<typeof resolveProviderCredentialPin>>>();
   const models: RunOptions["models"] = [];
   for (const model of catalog) {
     let pin = providerPins.get(model.provider);
     if (pin === undefined) {
       try {
-        pin = await resolveProviderSecretPin({
+        pin = await resolveProviderCredentialPin({
           actor: input.actor,
           orgId: input.orgId,
           provider: model.provider,
@@ -719,15 +719,13 @@ export async function getRunOptions(input: {
         : connected
           ? null
           : "Connect this model provider in Settings → Models.",
-      provider_secret_pin:
+      provider_credential_pin:
         connected && pin
           ? {
               env_key: pin.keyName,
-              secret_id: pin.secret.secretId,
-              secret_version: pin.secret.version,
-              secret_name: pin.secret.name,
-              secret_audience: pin.secret.audience,
-              secret_owner_name: pin.secret.ownerName,
+              connection_id: pin.connectionId,
+              credential_version: pin.credentialVersion,
+              scope: pin.scope,
             }
           : null,
     });
