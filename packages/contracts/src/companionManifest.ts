@@ -36,17 +36,48 @@ export const companionEnvironmentDeclarationSchema = z
 
 export type CompanionEnvironmentDeclaration = z.infer<typeof companionEnvironmentDeclarationSchema>;
 
-const declarationRecordSchema = z
+export const companionSecretDeclarationSchema = z
+  .object({
+    slotId: z.string().uuid("secret slotId must be a UUID").optional(),
+    required: z.boolean().default(true),
+    description: z.string().max(2000, "environment description must be at most 2000 characters").default(""),
+  })
+  .passthrough()
+  .superRefine((value, ctx) => {
+    if ("value" in value) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["value"],
+        message: "environment declarations must not include values",
+      });
+    }
+  })
+  .transform((value) => ({
+    ...(value.slotId ? { slotId: value.slotId } : {}),
+    required: value.required,
+    description: value.description,
+  }));
+
+export type CompanionSecretDeclaration = z.infer<typeof companionSecretDeclarationSchema>;
+
+const envDeclarationRecordSchema = z
   .record(
     z.string().regex(SKILL_REQUIREMENT_KEY_RE, "environment keys must look like environment variables"),
     companionEnvironmentDeclarationSchema,
   )
   .default({});
 
+const secretDeclarationRecordSchema = z
+  .record(
+    z.string().regex(SKILL_REQUIREMENT_KEY_RE, "environment keys must look like environment variables"),
+    companionSecretDeclarationSchema,
+  )
+  .default({});
+
 export const companionEnvironmentSchema = z
   .object({
-    env: declarationRecordSchema,
-    secrets: declarationRecordSchema,
+    env: envDeclarationRecordSchema,
+    secrets: secretDeclarationRecordSchema,
   })
   .strip()
   .default({ env: {}, secrets: {} });
@@ -159,6 +190,7 @@ function requirementsToEnvironment(requirements: SkillRequirement[] | undefined)
   for (const requirement of requirements ?? []) {
     const target = requirement.type === "env" ? env : secrets;
     target[requirement.key] = {
+      ...(requirement.type === "secret" && requirement.slot_id ? { slotId: requirement.slot_id } : {}),
       required: requirement.required,
       description: requirement.note,
     };
@@ -177,6 +209,7 @@ export function companionEnvironmentToRequirements(environment: CompanionEnviron
     ...Object.entries(environment.secrets).map(([key, value]) => ({
       key,
       type: "secret" as const,
+      slot_id: value.slotId,
       required: value.required,
       note: value.description,
     })),

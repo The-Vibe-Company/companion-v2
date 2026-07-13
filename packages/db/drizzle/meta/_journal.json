@@ -225,6 +225,13 @@
       "when": 1781052000000,
       "tag": "0031_org_skill_naming_policy",
       "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1783937500000,
+      "tag": "0032_personal_shared_secrets",
+      "breakpoints": true
     }
   ]
 }

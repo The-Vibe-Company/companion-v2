@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, type PointerEvent } from "react";
+import { useEffect, useRef, useState, type PointerEvent, type Ref } from "react";
 import type { LabelColor, LabelIcon } from "@companion/contracts";
 import { LABEL_COLORS, LABEL_ICONS, labelDisplayNameToPath } from "@companion/contracts";
 import { Icon } from "../Icon";
@@ -8,7 +8,8 @@ import { OrgSwitcher } from "../org/OrgSwitcher";
 import type { OrgVM } from "@/lib/types";
 import type { SkillsLibrary } from "./route";
 import type { ResolvedTarget } from "./dragGeometry";
-import type { DragItem, TreeRow } from "./SkillsApp";
+import type { DragItem } from "./SkillsApp";
+import type { TreeRow } from "./sidebarTree";
 
 type SidebarSelection = { lib: SkillsLibrary; kind: "all" | "starred" | "installed" | "label"; label?: string } | null;
 type MoveTarget = { path: string; label: string };
@@ -283,6 +284,7 @@ function LabelTreeRows({
   onSelect,
   onOpenMenu,
   onStartDrag,
+  canManage,
 }: {
   lib: SkillsLibrary;
   rows: TreeRow[];
@@ -296,6 +298,7 @@ function LabelTreeRows({
   onSelect: (path: string) => void;
   onOpenMenu: (row: TreeRow, pos: { x: number; y: number }) => void;
   onStartDrag: (item: DragItem, e: PointerEvent<HTMLElement>) => void;
+  canManage: boolean;
 }) {
   const labelIcon = (row: TreeRow): string => {
     if (row.icon) return row.icon;
@@ -332,13 +335,13 @@ function LabelTreeRows({
               (dropJustDone ? " lblrow--dropdone" : "")
             }
             key={row.path}
-            onPointerDown={(e) => {
+            onPointerDown={canManage ? (e) => {
               if (e.button !== 0) return;
               onStartDrag({ kind: "label", lib, path: row.path, leaf: row.leafName }, e);
-            }}
-            data-skill-drop-kind="label"
-            data-skill-drop-lib={lib}
-            data-skill-drop-path={row.path}
+            } : undefined}
+            data-skill-drop-kind={canManage ? "label" : undefined}
+            data-skill-drop-lib={canManage ? lib : undefined}
+            data-skill-drop-path={canManage ? row.path : undefined}
             style={{ paddingLeft: 8 + row.depth * 14 }}
           >
             {row.hasChildren ? (
@@ -370,19 +373,21 @@ function LabelTreeRows({
               <span className="lblrow__name">{row.displayName ?? row.leafName}</span>
               <span className="lblrow__count tnum">{row.count}</span>
             </button>
-            <button
-              type="button"
-              className="lblrow__more"
-              aria-label={row.path + " options"}
-              title="Folder options"
-              onClick={(e) => {
-                e.stopPropagation();
-                const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-                onOpenMenu(row, { x: r.left, y: r.bottom + 4 });
-              }}
-            >
-              <Icon name="more-horizontal" size={15} />
-            </button>
+            {canManage && (
+              <button
+                type="button"
+                className="lblrow__more"
+                aria-label={row.path + " options"}
+                title="Folder options"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                  onOpenMenu(row, { x: r.left, y: r.bottom + 4 });
+                }}
+              >
+                <Icon name="more-horizontal" size={15} />
+              </button>
+            )}
           </div>
         );
       })}
@@ -426,6 +431,9 @@ export function Sidebar({
   onLabelStartDrag,
   onSelectLocal,
   onSelectArchived,
+  onSelectSecrets,
+  secretsActive = false,
+  navigationOnly = false,
   localActive,
   localUpdateCount,
   archivedActive,
@@ -433,6 +441,7 @@ export function Sidebar({
   mobileOpen,
   onToggleMobile,
   onCloseMobile,
+  asideRef,
 }: {
   orgs: OrgVM[];
   currentOrg: OrgVM;
@@ -470,6 +479,10 @@ export function Sidebar({
   onLabelStartDrag: (item: DragItem, e: PointerEvent<HTMLElement>) => void;
   onSelectLocal: () => void;
   onSelectArchived: () => void;
+  onSelectSecrets: () => void;
+  secretsActive?: boolean;
+  /** Render the complete shared navigation without exposing label mutation affordances. */
+  navigationOnly?: boolean;
   localActive: boolean;
   localUpdateCount: number;
   archivedActive: boolean;
@@ -477,6 +490,7 @@ export function Sidebar({
   mobileOpen: boolean;
   onToggleMobile: () => void;
   onCloseMobile: () => void;
+  asideRef?: Ref<HTMLElement>;
 }) {
   const [menu, setMenu] = useState<{ row: TreeRow; lib: SkillsLibrary; pos: { x: number; y: number } } | null>(null);
   // The inline new-folder input, scoped to the library whose `+` (or "add sublabel") opened it.
@@ -497,7 +511,7 @@ export function Sidebar({
   const skillDropMode = drag?.kind === "skill";
 
   // Library headers are pure drop targets — the pointer hook hit-tests these data attributes.
-  const rootDropProps = (lib: SkillsLibrary) => ({
+  const rootDropProps = (lib: SkillsLibrary) => navigationOnly ? {} : ({
     "data-skill-drop-kind": "root" as const,
     "data-skill-drop-lib": lib,
   });
@@ -559,7 +573,7 @@ export function Sidebar({
     ) : null;
 
   return (
-    <aside className={"side" + (mobileOpen ? " side--mobile-open" : "") + (skillDropMode ? " side--skill-drop" : "")}>
+    <aside ref={asideRef} className={"side" + (mobileOpen ? " side--mobile-open" : "") + (skillDropMode ? " side--skill-drop" : "")}>
       <div className="side__brand">
         <button
           className="side__toggle"
@@ -623,9 +637,11 @@ export function Sidebar({
             <span className="ml-libhead__name">My Skills</span>
           </button>
           <span className="ml-libhead__count tnum">{mineCount}</span>
-          <button className="side__addteam" title="New personal folder" aria-label="New personal folder" onClick={() => openNewFolder("mine", "")}>
-            <Icon name="plus" size={14} />
-          </button>
+          {!navigationOnly && (
+            <button className="side__addteam" title="New personal folder" aria-label="New personal folder" onClick={() => openNewFolder("mine", "")}>
+              <Icon name="plus" size={14} />
+            </button>
+          )}
         </div>
         {mineOpen && (
           <div className="ml-kids">
@@ -675,6 +691,7 @@ export function Sidebar({
               onSelect={(path) => runAndClose(() => onSelectLabel("mine", path))}
               onOpenMenu={(row, pos) => setMenu({ row, lib: "mine", pos })}
               onStartDrag={onLabelStartDrag}
+              canManage={!navigationOnly}
             />
           </div>
         )}
@@ -715,9 +732,11 @@ export function Sidebar({
             <span className="ml-libhead__name">Organization</span>
           </button>
           <span className="ml-libhead__count tnum">{orgCount}</span>
-          <button className="side__addteam" title="New org folder" aria-label="New org folder" onClick={() => openNewFolder("org", "")}>
-            <Icon name="plus" size={14} />
-          </button>
+          {!navigationOnly && (
+            <button className="side__addteam" title="New org folder" aria-label="New org folder" onClick={() => openNewFolder("org", "")}>
+              <Icon name="plus" size={14} />
+            </button>
+          )}
         </div>
         {orgOpen && (
           <div className="ml-kids">
@@ -735,9 +754,22 @@ export function Sidebar({
               onSelect={(path) => runAndClose(() => onSelectLabel("org", path))}
               onOpenMenu={(row, pos) => setMenu({ row, lib: "org", pos })}
               onStartDrag={onLabelStartDrag}
+              canManage={!navigationOnly}
             />
           </div>
         )}
+
+        <button
+          className={"navitem side__resource-link" + (secretsActive ? " navitem--active" : "")}
+          aria-current={secretsActive ? "page" : undefined}
+          onClick={() => runAndClose(onSelectSecrets)}
+          title="Secrets"
+        >
+          <span className="navitem__ico">
+            <Icon name="key-round" />
+          </span>
+          <span className="navitem__label">Secrets</span>
+        </button>
 
         {/* ===== BOTTOM ===== */}
         <button
@@ -779,7 +811,7 @@ export function Sidebar({
       >
         <Icon name="settings" size={14} /> <span className="side__foot__label">Settings</span>
       </button>
-      {menu && (
+      {!navigationOnly && menu && (
         <LabelMenu
           row={menu.row}
           pos={menu.pos}

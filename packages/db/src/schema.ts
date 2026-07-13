@@ -31,6 +31,14 @@ export const invitationStatusEnum = pgEnum("invitation_status", [
   "revoked",
   "expired",
 ]);
+export const secretAudienceEnum = pgEnum("secret_audience", ["personal", "restricted", "organization"]);
+export const secretBindingSourceEnum = pgEnum("secret_binding_source", ["manual", "suggestion"]);
+export const secretSlotStatusEnum = pgEnum("secret_slot_status", [
+  "personal",
+  "shared",
+  "required",
+  "optional_missing",
+]);
 
 const now = () => timestamp("created_at", { withTimezone: true }).notNull().defaultNow();
 const updatedAt = () => timestamp("updated_at", { withTimezone: true }).notNull().defaultNow();
@@ -540,7 +548,7 @@ export const skillCommentImages = pgTable(
 /**
  * Personal access tokens for programmatic publish/install over the API. The plaintext
  * `cmp_pat_<hex>` is shown to the caller once; only its sha256 `token_hash` is stored.
- * `scopes` gates capability (`skills:read` / `skills:write`); tokens expire
+ * `scopes` gates capability (`skills:read` / `skills:write` / `secrets:read` / `secrets:write`); tokens expire
  * (90 days by default) and can be revoked.
  */
 export const apiTokens = pgTable(
@@ -648,5 +656,296 @@ export const skillInstalls = pgTable(
   (t) => ({
     pk: primaryKey({ columns: [t.orgId, t.userId, t.skillId] }),
     byOrgUser: index("skill_installs_org_user_idx").on(t.orgId, t.userId),
+  }),
+);
+
+/** Metadata for one owner-controlled secret. Plaintext never lives in this row. */
+export const secrets = pgTable(
+  "secrets",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+    ownerId: text("owner_id").notNull().references(() => user.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    key: text("key").notNull(),
+    audience: secretAudienceEnum("audience").notNull().default("personal"),
+    currentVersion: integer("current_version").notNull().default(1),
+    lastRotatedAt: timestamp("last_rotated_at", { withTimezone: true }).notNull().defaultNow(),
+    disabledAt: timestamp("disabled_at", { withTimezone: true }),
+    deletedAt: timestamp("deleted_at", { withTimezone: true }),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    uniqueOrgId: unique("secrets_org_id_id_uq").on(t.orgId, t.id),
+    uniqueOrgIdOwner: unique("secrets_org_id_id_owner_uq").on(t.orgId, t.id, t.ownerId),
+    byOwner: index("secrets_org_owner_idx").on(t.orgId, t.ownerId),
+    byAudience: index("secrets_org_audience_idx").on(t.orgId, t.audience),
+    keyShape: check("secrets_key_check", sql`${t.key} ~ '^[A-Za-z_][A-Za-z0-9_]*$'`),
+  }),
+);
+
+/** Envelope-encrypted immutable value version. All binary fields are base64 text. */
+export const secretVersions = pgTable(
+  "secret_versions",
+  {
+    orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+    secretId: uuid("secret_id").notNull(),
+    version: integer("version").notNull(),
+    ciphertext: text("ciphertext").notNull(),
+    iv: text("iv").notNull(),
+    authTag: text("auth_tag").notNull(),
+    wrappedDek: text("wrapped_dek").notNull(),
+    wrapIv: text("wrap_iv").notNull(),
+    wrapAuthTag: text("wrap_auth_tag").notNull(),
+    keyId: text("key_id").notNull(),
+    createdBy: text("created_by").notNull().references(() => user.id, { onDelete: "cascade" }),
+    createdAt: now(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.orgId, t.secretId, t.version] }),
+    byOrg: index("secret_versions_org_idx").on(t.orgId),
+    positiveVersion: check("secret_versions_positive_check", sql`${t.version} > 0`),
+    secretOrgFk: foreignKey({
+      columns: [t.orgId, t.secretId],
+      foreignColumns: [secrets.orgId, secrets.id],
+      name: "secret_versions_secret_org_fk",
+    }).onDelete("cascade"),
+  }),
+);
+
+/** Explicit recipients for a restricted secret. The owner is implicit and never inserted here. */
+export const secretRecipients = pgTable(
+  "secret_recipients",
+  {
+    orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+    secretId: uuid("secret_id").notNull(),
+    ownerId: text("owner_id").notNull().references(() => user.id, { onDelete: "cascade" }),
+    userId: text("user_id").notNull().references(() => user.id, { onDelete: "cascade" }),
+    createdAt: now(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.orgId, t.secretId, t.userId] }),
+    byRecipient: index("secret_recipients_org_user_idx").on(t.orgId, t.userId),
+    secretOrgFk: foreignKey({
+      columns: [t.orgId, t.secretId, t.ownerId],
+      foreignColumns: [secrets.orgId, secrets.id, secrets.ownerId],
+      name: "secret_recipients_secret_org_fk",
+    }).onDelete("cascade"),
+    memberOrgFk: foreignKey({
+      columns: [t.orgId, t.userId],
+      foreignColumns: [memberships.orgId, memberships.userId],
+      name: "secret_recipients_member_org_fk",
+    }).onDelete("cascade"),
+  }),
+);
+
+/** Stable slot identity, retained after a slot disappears so bindings can emit tombstones. */
+export const skillSecretSlots = pgTable(
+  "skill_secret_slots",
+  {
+    orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+    skillId: uuid("skill_id").notNull(),
+    slotId: uuid("slot_id").notNull(),
+    firstSeenAt: now(),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.orgId, t.skillId, t.slotId] }),
+    skillOrgFk: foreignKey({
+      columns: [t.orgId, t.skillId],
+      foreignColumns: [skills.orgId, skills.id],
+      name: "skill_secret_slots_skill_org_fk",
+    }).onDelete("cascade"),
+  }),
+);
+
+/** Versioned presentation of a stable secret slot. */
+export const skillVersionSecretSlots = pgTable(
+  "skill_version_secret_slots",
+  {
+    orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+    skillId: uuid("skill_id").notNull(),
+    skillVersionId: uuid("skill_version_id").notNull(),
+    slotId: uuid("slot_id").notNull(),
+    envKey: text("env_key").notNull(),
+    description: text("description").notNull().default(""),
+    required: boolean("required").notNull().default(true),
+    createdAt: now(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.skillVersionId, t.slotId] }),
+    bySkillSlot: index("skill_version_secret_slots_skill_idx").on(t.orgId, t.skillId, t.slotId),
+    stableSlotFk: foreignKey({
+      columns: [t.orgId, t.skillId, t.slotId],
+      foreignColumns: [skillSecretSlots.orgId, skillSecretSlots.skillId, skillSecretSlots.slotId],
+      name: "skill_version_secret_slots_stable_fk",
+    }).onDelete("cascade"),
+    versionOrgFk: foreignKey({
+      columns: [t.orgId, t.skillVersionId],
+      foreignColumns: [skillVersions.orgId, skillVersions.id],
+      name: "skill_version_secret_slots_version_org_fk",
+    }).onDelete("cascade"),
+    envKeyShape: check("skill_version_secret_slots_key_check", sql`${t.envKey} ~ '^[A-Za-z_][A-Za-z0-9_]*$'`),
+  }),
+);
+
+/** One personal binding per user + skill + stable slot. Rows are soft-revoked for tombstones. */
+export const skillSecretBindings = pgTable(
+  "skill_secret_bindings",
+  {
+    orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+    userId: text("user_id").notNull().references(() => user.id, { onDelete: "cascade" }),
+    skillId: uuid("skill_id").notNull(),
+    slotId: uuid("slot_id").notNull(),
+    secretId: uuid("secret_id").notNull(),
+    projectionId: uuid("projection_id").notNull().defaultRandom(),
+    source: secretBindingSourceEnum("source").notNull().default("manual"),
+    confirmedAt: timestamp("confirmed_at", { withTimezone: true }).notNull().defaultNow(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.orgId, t.userId, t.skillId, t.slotId] }),
+    uniqueProjection: unique("skill_secret_bindings_projection_uq").on(t.projectionId),
+    bySecret: index("skill_secret_bindings_secret_idx").on(t.orgId, t.secretId),
+    memberOrgFk: foreignKey({
+      columns: [t.orgId, t.userId],
+      foreignColumns: [memberships.orgId, memberships.userId],
+      name: "skill_secret_bindings_member_org_fk",
+    }).onDelete("cascade"),
+    stableSlotFk: foreignKey({
+      columns: [t.orgId, t.skillId, t.slotId],
+      foreignColumns: [skillSecretSlots.orgId, skillSecretSlots.skillId, skillSecretSlots.slotId],
+      name: "skill_secret_bindings_slot_fk",
+    }).onDelete("cascade"),
+    secretOrgFk: foreignKey({
+      columns: [t.orgId, t.secretId],
+      foreignColumns: [secrets.orgId, secrets.id],
+      name: "skill_secret_bindings_secret_org_fk",
+    }).onDelete("cascade"),
+  }),
+);
+
+/** Workspace suggestion for a slot. Access to the suggested secret is still checked per user. */
+export const skillSecretSuggestions = pgTable(
+  "skill_secret_suggestions",
+  {
+    orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+    skillId: uuid("skill_id").notNull(),
+    slotId: uuid("slot_id").notNull(),
+    secretId: uuid("secret_id").notNull(),
+    suggestedBy: text("suggested_by").notNull().references(() => user.id, { onDelete: "cascade" }),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.orgId, t.skillId, t.slotId] }),
+    stableSlotFk: foreignKey({
+      columns: [t.orgId, t.skillId, t.slotId],
+      foreignColumns: [skillSecretSlots.orgId, skillSecretSlots.skillId, skillSecretSlots.slotId],
+      name: "skill_secret_suggestions_slot_fk",
+    }).onDelete("cascade"),
+    secretOrgFk: foreignKey({
+      columns: [t.orgId, t.secretId],
+      foreignColumns: [secrets.orgId, secrets.id],
+      name: "skill_secret_suggestions_secret_org_fk",
+    }).onDelete("cascade"),
+  }),
+);
+
+export const secretRetrievalPlans = pgTable(
+  "secret_retrieval_plans",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+    userId: text("user_id").notNull().references(() => user.id, { onDelete: "cascade" }),
+    operationId: uuid("operation_id").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    grantedAt: timestamp("granted_at", { withTimezone: true }),
+    createdAt: now(),
+  },
+  (t) => ({
+    uniqueOrgId: unique("secret_retrieval_plans_org_id_id_uq").on(t.orgId, t.id),
+    uniqueOperation: unique("secret_retrieval_plans_operation_uq").on(t.orgId, t.userId, t.operationId),
+    byRateWindow: index("secret_retrieval_plans_rate_idx").on(t.orgId, t.userId, t.createdAt),
+    memberOrgFk: foreignKey({
+      columns: [t.orgId, t.userId],
+      foreignColumns: [memberships.orgId, memberships.userId],
+      name: "secret_retrieval_plans_member_org_fk",
+    }).onDelete("cascade"),
+  }),
+);
+
+export const secretRetrievalPlanItems = pgTable(
+  "secret_retrieval_plan_items",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+    planId: uuid("plan_id").notNull().references(() => secretRetrievalPlans.id, { onDelete: "cascade" }),
+    projectionId: uuid("projection_id").notNull(),
+    skill: text("skill").notNull(),
+    skillId: uuid("skill_id"),
+    skillVersionId: uuid("skill_version_id"),
+    skillVersion: text("skill_version"),
+    slotId: uuid("slot_id"),
+    envKey: text("env_key").notNull(),
+    required: boolean("required").notNull().default(true),
+    status: secretSlotStatusEnum("status").notNull(),
+    secretId: uuid("secret_id"),
+    secretVersion: integer("secret_version"),
+    secretName: text("secret_name"),
+    ownerName: text("owner_name"),
+    tombstone: boolean("tombstone").notNull().default(false),
+    createdAt: now(),
+  },
+  (t) => ({
+    uniqueProjection: unique("secret_retrieval_plan_items_projection_uq").on(t.planId, t.projectionId),
+    byPlan: index("secret_retrieval_plan_items_plan_idx").on(t.orgId, t.planId),
+    planOrgFk: foreignKey({
+      columns: [t.orgId, t.planId],
+      foreignColumns: [secretRetrievalPlans.orgId, secretRetrievalPlans.id],
+      name: "secret_retrieval_plan_items_plan_org_fk",
+    }).onDelete("cascade"),
+    skillVersionOrgFk: foreignKey({
+      columns: [t.orgId, t.skillVersionId],
+      foreignColumns: [skillVersions.orgId, skillVersions.id],
+      name: "secret_retrieval_plan_items_skill_version_org_fk",
+    }).onDelete("cascade"),
+    secretVersionOrgFk: foreignKey({
+      columns: [t.orgId, t.secretId, t.secretVersion],
+      foreignColumns: [secretVersions.orgId, secretVersions.secretId, secretVersions.version],
+      name: "secret_retrieval_plan_items_secret_version_org_fk",
+    }).onDelete("cascade"),
+  }),
+);
+
+export const secretRetrievalGrants = pgTable(
+  "secret_retrieval_grants",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+    userId: text("user_id").notNull().references(() => user.id, { onDelete: "cascade" }),
+    planId: uuid("plan_id").notNull().references(() => secretRetrievalPlans.id, { onDelete: "cascade" }),
+    tokenPrefix: text("token_prefix").notNull(),
+    tokenHash: text("token_hash").notNull().unique(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    redeemedAt: timestamp("redeemed_at", { withTimezone: true }),
+    failedAt: timestamp("failed_at", { withTimezone: true }),
+    createdAt: now(),
+  },
+  (t) => ({
+    byRateWindow: index("secret_retrieval_grants_rate_idx").on(t.orgId, t.userId, t.createdAt),
+    planOrgFk: foreignKey({
+      columns: [t.orgId, t.planId],
+      foreignColumns: [secretRetrievalPlans.orgId, secretRetrievalPlans.id],
+      name: "secret_retrieval_grants_plan_org_fk",
+    }).onDelete("cascade"),
+    memberOrgFk: foreignKey({
+      columns: [t.orgId, t.userId],
+      foreignColumns: [memberships.orgId, memberships.userId],
+      name: "secret_retrieval_grants_member_org_fk",
+    }).onDelete("cascade"),
   }),
 );

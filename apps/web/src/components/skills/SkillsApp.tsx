@@ -69,6 +69,8 @@ import { SettingsDrawer, SettingsDrawerError } from "../org/SettingsDrawer";
 import { useOrgActions } from "../org/useOrgActions";
 import type { SettingsAppData, SettingsDialog, SettingsIntent, SettingsRoute, SettingsView } from "../org/model";
 import { matchFilters, type Filter } from "./filters";
+import { deriveTreeRows } from "./sidebarTree";
+import type { TreeRow } from "./sidebarTree";
 
 const SETTINGS_LOAD_ERROR =
   "Refresh the page to try again. If the problem continues, check that the API and database are reachable.";
@@ -125,17 +127,6 @@ function settingsErrorMessage(error: unknown): string {
  * in the client from skills + explicit `labels` rows so optimistic assigns / renames re-derive
  * without a refetch.
  */
-export interface TreeRow {
-  path: string;
-  leafName: string;
-  displayName: string | null;
-  depth: number;
-  count: number; // de-duped roll-up of skills filed at this path OR any descendant
-  color: LabelColor | null;
-  icon: LabelIcon | null;
-  hasChildren: boolean;
-}
-
 type ScopeKind = "all" | "starred" | "installed" | "label";
 /** The active workspace slice: a library (`mine`/`org`) + a kind within it. */
 type Selection = { lib: SkillsLibrary; kind: ScopeKind; label?: string };
@@ -150,58 +141,6 @@ export type DragItem =
  * once for `a` and once for `a/b`). Sorted lexicographically by path for a stable (hydration-safe)
  * order regardless of insertion order.
  */
-function deriveTreeRows(skills: SkillVM[], labels: LabelVM[]): TreeRow[] {
-  const appearance = new Map<string, { displayName: string | null; color: LabelColor | null; icon: LabelIcon | null }>();
-  const paths = new Set<string>();
-  const childPaths = new Set<string>(); // any path that has at least one child (for chevrons)
-  // Per-path set of skill ids contributing to its roll-up count (de-dupe across descendants).
-  const counts = new Map<string, Set<string>>();
-
-  const ensureAncestors = (path: string) => {
-    const segs = path.split("/");
-    for (let i = 1; i <= segs.length; i += 1) {
-      const p = segs.slice(0, i).join("/");
-      paths.add(p);
-      if (i < segs.length) childPaths.add(p);
-    }
-  };
-
-  for (const label of labels) {
-    appearance.set(label.path, { displayName: label.displayName, color: label.color, icon: label.icon });
-    ensureAncestors(label.path);
-  }
-  for (const skill of skills) {
-    for (const raw of skill.labels ?? []) {
-      if (!raw) continue;
-      ensureAncestors(raw);
-      const segs = raw.split("/");
-      for (let i = 1; i <= segs.length; i += 1) {
-        const p = segs.slice(0, i).join("/");
-        let set = counts.get(p);
-        if (!set) counts.set(p, (set = new Set()));
-        set.add(skill.uuid);
-      }
-    }
-  }
-
-  return [...paths]
-    .sort((a, b) => a.localeCompare(b))
-    .map((path) => {
-      const segs = path.split("/");
-      const appr = appearance.get(path);
-      return {
-        path,
-        leafName: segs[segs.length - 1] ?? path,
-        displayName: appr?.displayName ?? null,
-        depth: segs.length - 1,
-        count: counts.get(path)?.size ?? 0,
-        color: appr?.color ?? null,
-        icon: appr?.icon ?? null,
-        hasChildren: childPaths.has(path),
-      };
-    });
-}
-
 /** Whether a skill is filed under `path` OR any descendant of it. */
 function skillUnderLabel(skill: SkillVM, path: string): boolean {
   return (skill.labels ?? []).some((p) => p === path || p.startsWith(path + "/"));
@@ -424,6 +363,10 @@ export function SkillsApp({
   const skipNextDebouncedPersistRef = useRef(false);
   const preferenceKey = JSON.stringify(initialFilterPreferences);
   const initialRouteKey = skillsRouteKey(initialRoute);
+
+  useEffect(() => {
+    router.prefetch("/secrets");
+  }, [router]);
 
   const shareableSkillForSlug = useCallback((slug: string): SkillVM | null => {
     const isShareable = (s: SkillVM) => s.id === slug && s.scope === "org" && !s.archived;
@@ -1475,6 +1418,7 @@ export function SkillsApp({
         onLabelStartDrag={skillDrag.startDrag}
         onSelectLocal={selectLocal}
         onSelectArchived={selectArchived}
+        onSelectSecrets={() => router.push("/secrets")}
         localActive={localActive}
         localUpdateCount={localUpdateCount}
         archivedActive={archivedActive}
@@ -1563,6 +1507,7 @@ export function SkillsApp({
           scope={activeLib === "org" ? "org" : "personal"}
           allLabels={activeTreePaths}
           defaultLabels={activeLabel ? [activeLabel] : []}
+          knownSkillSlugs={paletteSkills.map((item) => item.id)}
           onClose={closeUpload}
           onPublished={() => router.refresh()}
         />
@@ -1573,6 +1518,7 @@ export function SkillsApp({
           skill={updateSkill}
           scope={updateSkill.scope === "personal" ? "personal" : "org"}
           allLabels={(updateSkill.scope === "personal" ? personalTreeRows : orgTreeRows).map((r) => r.path)}
+          knownSkillSlugs={paletteSkills.map((item) => item.id)}
           onClose={() => setUpdateSkill(null)}
           onPublished={() => router.refresh()}
         />

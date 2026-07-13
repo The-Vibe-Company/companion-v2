@@ -32,6 +32,7 @@ import { DependenciesTab } from "./DependenciesTab";
 import { FileExplorer } from "./fileview";
 import { MarkdownView } from "./markdown";
 import { Discussion } from "./discussion";
+import { SkillSecretConfiguration } from "../secrets/SkillSecretConfiguration";
 
 export function DetailMoreMenuContent({
   canModifySkill,
@@ -642,6 +643,7 @@ export function DetailView({
               {skill.requirements.length > 0 && (
                 <Section label="Setup & secrets" count={skill.requirements.length} defaultOpen>
                   <Requirements requirements={skill.requirements} />
+                  <SkillSecretConfiguration slug={skill.id} canSuggest={skill.scope === "org" || skill.authorId === me.id} />
                 </Section>
               )}
 

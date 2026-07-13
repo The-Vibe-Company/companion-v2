@@ -44,7 +44,7 @@ describe("companion skill package + row", () => {
     const pkg = await getCompanionSkillPackage();
     expect(pkg.key).toBe("companion");
     expect(pkg.checksum).toMatch(/^sha256:[0-9a-f]{64}$/);
-    expect(pkg.version).toBe("1.18.1");
+    expect(pkg.version).toBe("1.19.0");
     expect(pkg.sizeBytes).toBeGreaterThan(0);
     expect(pkg.integrity.packageChecksum).toBe(pkg.checksum);
     expect(pkg.integrity.files["SKILL.md"]).toMatch(/^sha256:[0-9a-f]{64}$/);
@@ -68,8 +68,11 @@ describe("companion skill package + row", () => {
       "scripts/bootstrap_update.py",
       "scripts/check_updates.py",
       "scripts/companion_lib.py",
+      "scripts/create_secret.py",
       "scripts/install_skill.py",
+      "scripts/secrets_runtime.py",
       "scripts/skill_guard.py",
+      "scripts/sync_secrets.py",
       "scripts/tools.json",
     ]);
     for (const [relPath, digest] of Object.entries(baseline.files ?? {})) {
@@ -111,8 +114,9 @@ describe("companion skill package + row", () => {
       desc: "Create or repair manifest v2 with identity, env/secrets, dependency ids, notes, commands, and changelog.",
     });
     const changelog = row.changes.join("\n");
-    expect(changelog).toContain("Deletes transient install and self-update backup folders");
-    expect(changelog).toContain("Blocks stale backup folders containing SKILL.md");
+    expect(changelog).toContain("non-replayable sixty-second grants");
+    expect(changelog).toContain("private atomic .env projections");
+    expect(changelog).toContain("offline stale-copy reporting");
     // The install prompt drives the report-back call and leaves placeholders for the client.
     expect(row.prompts.install).toContain("/local-skills/companion/package");
     expect(row.prompts.install).toContain("/local-skills/companion/installed");

@@ -140,6 +140,23 @@ describe("parseOrgSettingsResponse", () => {
     });
   });
 
+  it("marks a secrets:write token as write-capable in settings", async () => {
+    const { mapApiKey } = await import("./settingsViewModel");
+
+    expect(mapApiKey({
+      id: "tok_secret_write",
+      org_id: "org_1",
+      user_id: "user_1",
+      name: "Companion secrets",
+      prefix: "cmp_pat_secret",
+      scopes: ["secrets:write"],
+      expires_at: "2026-08-01T00:00:00.000Z",
+      last_used_at: null,
+      revoked_at: null,
+      created_at: "2026-07-13T00:00:00.000Z",
+    }).scope).toBe("write");
+  });
+
   it("makes loadSettingsPageData return null for malformed settings data", async () => {
     const { loadSettingsPageData } = await import("./settingsData");
     serverApiFetch.mockResolvedValueOnce(whoami).mockResolvedValueOnce({ members: {} });

@@ -49,6 +49,14 @@ from companion_lib import (  # noqa: E402
     upsert_skill_lock_record,
     workspace_lock_entry,
 )
+from secrets_runtime import (  # noqa: E402
+    deploy_packages_with_projection,
+    preflight_skills,
+    recover_pending_transactions,
+    redacted_preflight,
+    redeem_plan,
+    update_projection_state,
+)
 
 import urllib.error  # noqa: E402
 import urllib.parse  # noqa: E402
@@ -458,10 +466,78 @@ def install_node(
     prior_user: dict[str, Any],
     prior_project: dict[str, Any],
     force: bool,
+    secret_context: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     zip_bytes = api_download_bytes(api_url, token, f"/skills/{api_quote(node['slug'])}/versions/{api_quote(node['version'])}/package")
     with tempfile.TemporaryDirectory(prefix="companion-install-") as tmp:
         package_dir = extract_package(zip_bytes, Path(tmp))
+        return install_prepared_node(api_url, workspace_id, node, package_dir, plan, registry, project_root, prior_user, prior_project, force, secret_context)
+
+
+def install_prepared_node(
+    api_url: str,
+    workspace_id: str | None,
+    node: dict[str, Any],
+    package_dir: Path,
+    plan: list[tuple[str, str]],
+    registry: dict[str, Any],
+    project_root: Path | None,
+    prior_user: dict[str, Any],
+    prior_project: dict[str, Any],
+    force: bool,
+    secret_context: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    preflight = secret_context.get("preflight", {}) if isinstance(secret_context, dict) else {}
+    redeemed = secret_context.get("redeemed", {}) if isinstance(secret_context, dict) else {}
+    preflight_skills_set = {
+        str(row.get("skill") or "")
+        for row in [*(preflight.get("items", []) or []), *(preflight.get("tombstones", []) or [])]
+        if isinstance(row, dict)
+    }
+    projection_items = [
+        row for row in (redeemed.get("items", []) or [])
+        if isinstance(row, dict) and row.get("skill") == node["slug"]
+    ]
+    active_preflight_items = [
+        row for row in (preflight.get("items", []) or [])
+        if isinstance(row, dict) and row.get("skill") == node["slug"]
+    ]
+    if workspace_id and node["slug"] in preflight_skills_set:
+        target_dirs = [resolve_target_dir(tool, scope, node["skill"]["name"], project_root, registry) for tool, scope in plan]
+        try:
+            projection_path = deploy_packages_with_projection(
+                package_dir,
+                target_dirs,
+                workspace_id,
+                node["slug"],
+                projection_items,
+                remove_projection_if_empty=not active_preflight_items,
+            )
+            results = [
+                {
+                    "tool": tool,
+                    "scope": scope,
+                    "status": "installed",
+                    "reason": None,
+                    "path": str(target_dir),
+                    "checksum": compute_dir_checksum(target_dir),
+                }
+                for (tool, scope), target_dir in zip(plan, target_dirs)
+            ]
+            filtered_redeemed = {
+                "items": projection_items,
+                "tombstones": [
+                    row for row in (redeemed.get("tombstones", []) or [])
+                    if isinstance(row, dict) and row.get("skill") == node["slug"]
+                ],
+            }
+            update_projection_state(workspace_id, filtered_redeemed, {node["slug"]: projection_path})
+        except (OSError, ValueError) as exc:
+            results = [
+                {"tool": tool, "scope": scope, "status": "error", "reason": str(exc), "path": str(target_dir), "checksum": None}
+                for (tool, scope), target_dir in zip(plan, target_dirs)
+            ]
+    else:
         results = fan_out_install(package_dir, node["skill"]["name"], plan, registry, project_root, prior_user, prior_project, force)
 
     for row in results:
@@ -488,18 +564,40 @@ def install_nodes(
     prior_user: dict[str, Any],
     prior_project: dict[str, Any],
     force: bool,
+    secret_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     all_results: list[dict[str, Any]] = []
     completed: list[str] = []
     skipped: list[str] = []
-    for index, node in enumerate(nodes):
-        results = install_node(api_url, token, workspace_id, node, plan, registry, project_root, prior_user, prior_project, force)
-        all_results.extend(results)
-        complete = bool(results) and len([row for row in results if row["status"] == "installed"]) == len(plan)
-        if not complete:
-            skipped = [later["slug"] for later in nodes[index + 1:]]
-            break
-        completed.append(node["slug"])
+    prepared: dict[str, Path] = {}
+    temp_packages = tempfile.TemporaryDirectory(prefix="companion-install-set-") if secret_context is not None else None
+    try:
+        if temp_packages is not None:
+            # The grant is redeemed before this point. Download and validate the complete package set
+            # before mutating any target, so a network/package error preserves every previous install.
+            for index, node in enumerate(nodes):
+                zip_bytes = api_download_bytes(api_url, token, f"/skills/{api_quote(node['slug'])}/versions/{api_quote(node['version'])}/package")
+                destination = Path(temp_packages.name) / str(index)
+                destination.mkdir()
+                prepared[node["slug"]] = extract_package(zip_bytes, destination)
+
+        for index, node in enumerate(nodes):
+            results = install_prepared_node(
+                api_url, workspace_id, node, prepared[node["slug"]], plan, registry, project_root,
+                prior_user, prior_project, force, secret_context
+            ) if temp_packages is not None else install_node(
+                api_url, token, workspace_id, node, plan, registry, project_root,
+                prior_user, prior_project, force, secret_context
+            )
+            all_results.extend(results)
+            complete = bool(results) and len([row for row in results if row["status"] == "installed"]) == len(plan)
+            if not complete:
+                skipped = [later["slug"] for later in nodes[index + 1:]]
+                break
+            completed.append(node["slug"])
+    finally:
+        if temp_packages is not None:
+            temp_packages.cleanup()
     return {"targets": all_results, "completed": completed, "skipped": skipped}
 
 
@@ -550,16 +648,28 @@ def main() -> None:
     parser.add_argument("--project", help="project root for project-scope installs (defaults to the current repo root)")
     parser.add_argument("--force", action="store_true", help="overwrite locally customized targets")
     parser.add_argument(
+        "--confirm-secrets",
+        action="store_true",
+        help="confirm the server preflight and permit one-time secret retrieval",
+    )
+    parser.add_argument(
         "--confirm-required-secrets",
         action="store_true",
-        help="confirm that required secrets for the skill and its dependencies are already configured",
+        help="deprecated metadata-only confirmation flag; use --confirm-secrets for retrieval",
     )
     parser.add_argument("--report", action="store_true", help="send the aggregate POST /skills/:slug/install report")
     parser.add_argument("--agent", default=os.environ.get("COMPANION_AGENT"), help="agent label for the install report")
     parser.add_argument("--json", action="store_true", help="print a machine-readable result")
     args = parser.parse_args()
 
+    if args.confirm_required_secrets:
+        fail("--confirm-required-secrets no longer authorizes secret retrieval; review the preflight and use --confirm-secrets explicitly")
+
     api_url, token, workspace_id = resolve_credentials()
+    # Legacy flat credentials do not carry a workspace id. They remain valid for package-only
+    # installs; secret projections are disabled until credentials are refreshed to schema v2.
+    if workspace_id:
+        recover_pending_transactions(workspace_id)
     registry = load_tool_registry()
     tools = resolve_tools(args.tools, registry)
     scopes = ["user", "project"] if args.scope == "both" else [args.scope]
@@ -594,12 +704,16 @@ def main() -> None:
         fail(f"skill {args.slug!r} not found in this workspace")
     root = install_plan["root"]
 
-    required_secrets = collect_required_secrets(api_url, token, nodes)
-    if required_secrets and not args.confirm_required_secrets:
+    secret_preflight = preflight_skills(
+        api_url,
+        token,
+        [{"slug": root["slug"], "version": root["version"]}],
+    )
+    if int(secret_preflight.get("blockers") or 0) > 0:
         fail_preflight(
             args.json,
-            format_required_secrets(required_secrets),
-            requiredSecrets=required_secrets,
+            "server secret preflight found required configuration that is missing",
+            secretPreflight=redacted_preflight(secret_preflight),
         )
 
     conflicts = preflight_target_conflicts(
@@ -614,6 +728,23 @@ def main() -> None:
     if conflicts:
         fail_preflight(args.json, format_target_conflicts(conflicts), conflicts=conflicts)
 
+    needs_secret_confirmation = bool(secret_preflight.get("items") or secret_preflight.get("tombstones"))
+    if needs_secret_confirmation and not workspace_id:
+        fail_preflight(
+            args.json,
+            "legacy credentials have no workspace id; refresh the Companion credentials before installing skills with secrets",
+            secretPreflight=redacted_preflight(secret_preflight),
+        )
+    if needs_secret_confirmation and not args.confirm_secrets:
+        fail_preflight(
+            args.json,
+            "review the secret preflight, then rerun with --confirm-secrets",
+            secretPreflight=redacted_preflight(secret_preflight),
+        )
+    redeemed = {"items": [], "tombstones": []}
+    if needs_secret_confirmation:
+        redeemed = redeem_plan(api_url, token, str(secret_preflight["plan_id"]))
+
     install_result = install_nodes(
         api_url,
         token,
@@ -625,6 +756,7 @@ def main() -> None:
         prior_user,
         prior_project,
         args.force,
+        {"preflight": secret_preflight, "redeemed": redeemed},
     )
     results = install_result["targets"]
     installed = [row for row in results if row["status"] == "installed"]
@@ -649,8 +781,8 @@ def main() -> None:
         "projectRoot": str(project_root) if project_root else None,
         "installOrder": [node["slug"] for node in nodes],
         "dependencies": [node["slug"] for node in nodes if node["slug"] != root["slug"]],
-        "requiredSecrets": required_secrets,
-        "confirmedRequiredSecrets": bool(required_secrets and args.confirm_required_secrets),
+        "secretPreflight": redacted_preflight(secret_preflight),
+        "confirmedSecrets": bool(needs_secret_confirmation and args.confirm_secrets),
         "targets": results,
         "rootTargets": root_results,
         "installedCount": len(installed),

@@ -1442,7 +1442,7 @@ describe("Companion skills install gate", () => {
 
     clickGateCopy(container);
     await flushEffects();
-    expect(queryMocks.issueToken).toHaveBeenCalledWith(["skills:read", "skills:write"]);
+    expect(queryMocks.issueToken).toHaveBeenCalledWith(["skills:read", "skills:write", "secrets:read", "secrets:write"]);
     expect(clipboardWrite).toHaveBeenCalledWith("install http://127.0.0.1:3001 org-1 cmp_pat_test");
     expect(container.textContent).toContain("Copied");
   });
@@ -1495,7 +1495,7 @@ describe("Companion skills install gate", () => {
     clickGateCopy(container);
     await flushEffects();
     // The token still minted, but the UI must not falsely report a copy.
-    expect(queryMocks.issueToken).toHaveBeenCalledWith(["skills:read", "skills:write"]);
+    expect(queryMocks.issueToken).toHaveBeenCalledWith(["skills:read", "skills:write", "secrets:read", "secrets:write"]);
     expect(container.textContent).toContain("Select the prompt above");
     expect(container.textContent).not.toContain("Copied");
   });

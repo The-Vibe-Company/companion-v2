@@ -30,6 +30,8 @@ export const skillRequirementSchema = z
       .max(128, "requirement key must be at most 128 characters")
       .regex(SKILL_REQUIREMENT_KEY_RE, "requirement key must look like an environment variable (letters, digits, underscores)"),
     type: z.enum(["secret", "env"]).default("secret"),
+    /** Stable identity for a secret declaration across skill versions and env-key renames. */
+    slot_id: z.string().uuid().nullable().optional(),
     required: z.boolean().default(true),
     note: z.string().max(2000, "requirement note must be at most 2000 characters").default(""),
   })
@@ -201,6 +203,7 @@ export function parseStoredSkillFrontmatter(value: string | null | undefined): S
         .map((requirement) => ({
           key: requirement.key,
           type: requirement.type,
+          ...(requirement.slot_id ? { slot_id: requirement.slot_id } : {}),
           required: requirement.required,
           note: requirement.note,
         }));

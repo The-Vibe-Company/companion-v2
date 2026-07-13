@@ -94,7 +94,7 @@ describe("buildInlineCompanionManifest", () => {
         summary: "Old summary.",
         description: "Long detail copy.",
       },
-      carriedRequirements: [{ key: "OPENAI_API_KEY", type: "secret", required: true, note: "Ask an admin." }],
+      carriedRequirements: [{ key: "OPENAI_API_KEY", type: "secret", slot_id: "c8868fb3-c654-5615-b477-ce8d807ab722", required: true, note: "Ask an admin." }],
       carriedDependencies: ["markdown-report"],
     });
 
@@ -105,6 +105,7 @@ describe("buildInlineCompanionManifest", () => {
     });
     expect(manifest.notes).toBe("Long detail copy.");
     expect(manifest.requirements.map((req) => req.key)).toEqual(["OPENAI_API_KEY"]);
+    expect(manifest.environment.secrets.OPENAI_API_KEY?.slotId).toBe("c8868fb3-c654-5615-b477-ce8d807ab722");
     expect(manifest.dependencies).toEqual({});
     expect(manifest.legacyDependencySlugs).toEqual(["markdown-report"]);
   });

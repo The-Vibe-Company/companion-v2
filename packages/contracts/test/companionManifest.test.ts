@@ -23,7 +23,13 @@ describe("companionManifestSchema", () => {
       },
       environment: {
         env: { OPENAI_BASE_URL: { required: false, description: "Optional gateway." } },
-        secrets: { OPENAI_API_KEY: { required: true, description: "Ask an admin." } },
+        secrets: {
+          OPENAI_API_KEY: {
+            slotId: "df80d275-30c9-5f0d-9a46-d77e6fca8448",
+            required: true,
+            description: "Ask an admin.",
+          },
+        },
       },
       dependencies: { "markdown-report": "84d8bee1-5ad3-4676-8c16-730e2a15ba70" },
       commands: [{ name: "Publish", desc: "Publish safely." }],
@@ -38,6 +44,9 @@ describe("companionManifestSchema", () => {
       "OPENAI_API_KEY",
       "OPENAI_BASE_URL",
     ]);
+    expect(companionEnvironmentToRequirements(parsed.environment)[0]?.slot_id).toBe(
+      "df80d275-30c9-5f0d-9a46-d77e6fca8448",
+    );
     expect(parsed.notes).toBe("## Notes\n\nMarkdown notes.");
     expect(parsed.display.summary).toBe("Generate clean incident handoffs from raw notes.");
     expect(companionManifestJson(parsed)).toMatchObject({
