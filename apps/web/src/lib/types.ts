@@ -146,7 +146,6 @@ export interface OrgVM {
   name: string;
   slug: string;
   kind: "personal" | "team";
-  plan: "free" | "team";
   myRole: OrgRole; // this user's role in THIS org
   color: string | null;
   logoUrl: string | null;

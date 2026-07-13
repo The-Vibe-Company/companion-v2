@@ -193,10 +193,30 @@ import { buildInlineCompanionManifest, uploadDependencyValues, withResolvedManif
 import { buildCompanionSkillRow, getCompanionSkillPackage } from "./companionSkillPackage";
 import { parseSkillListQuery } from "./skillListQuery";
 import { COMPANION_SKILL_KEY } from "@companion/companion-skill";
+import { StripeBillingGateway } from "@companion/billing";
+import {
+  billingRuntimeConfig,
+  assertBillingEnvironmentConfigured,
+  createBillingCheckout,
+  createBillingPortal,
+  getBillingOverview,
+  processStripeWebhook,
+} from "@companion/core";
 
 const app = new Hono<{ Variables: ApiVariables }>();
 
 export { app };
+
+function stripeBillingGateway(): StripeBillingGateway {
+  const secretKey = process.env.STRIPE_SECRET_KEY?.trim();
+  const priceId = process.env.STRIPE_PRO_PRICE_ID?.trim();
+  const portalId = process.env.STRIPE_PORTAL_CONFIGURATION_ID?.trim();
+  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET?.trim();
+  if (!secretKey || !priceId || !portalId || !webhookSecret) {
+    throw new Error("Stripe billing is not fully configured");
+  }
+  return new StripeBillingGateway(secretKey, priceId, portalId, webhookSecret);
+}
 
 app.get("/v1/schemas/companion-manifest.v2.schema.json", (c) => c.json(companionManifestV2JsonSchema));
 
@@ -210,6 +230,45 @@ app.get("/v1/public/skills/:token", async (c) => {
     return jsonError(c, error);
   }
 });
+
+app.post(
+  "/v1/billing/webhooks/stripe",
+  bodyLimit({ maxSize: 2 * 1024 * 1024, onError: (c) => jsonError(c, "Stripe webhook exceeds the 2 MB limit", 413) }),
+  async (c) => {
+    try {
+      if (!billingRuntimeConfig().webhooksEnabled) return jsonError(c, "Stripe webhooks are disabled", 404);
+      const signature = c.req.header("stripe-signature");
+      if (!signature) return jsonError(c, "missing Stripe signature", 400);
+      const gateway = stripeBillingGateway();
+      const event = gateway.constructWebhookEvent(await c.req.text(), signature);
+      const object = event.data.object as unknown as Record<string, unknown>;
+      const objectType = typeof object.object === "string" ? object.object : null;
+      const subscriptionId =
+        objectType === "subscription" && typeof object.id === "string"
+          ? object.id
+          : typeof object.subscription === "string"
+            ? object.subscription
+            : null;
+      const customerId = typeof object.customer === "string" ? object.customer : null;
+      const outcome = await processStripeWebhook({
+        eventId: event.id,
+        eventType: event.type,
+        subscriptionId,
+        customerId,
+        gateway,
+      });
+      if (outcome === "ignored") {
+        console.info("ignored Stripe event with no matching organization", {
+          eventId: event.id,
+          eventType: event.type,
+        });
+      }
+      return c.json({ received: true, outcome });
+    } catch (error) {
+      return jsonError(c, error, 400);
+    }
+  },
+);
 
 /** Set the `companion_org` selection cookie (readable client-side, so not httpOnly). */
 function setOrgCookie(c: Context<{ Variables: ApiVariables }>, orgId: string): void {
@@ -472,6 +531,51 @@ async function authForward(c: { req: { url: string; method: string; raw: Request
 app.post("/v1/auth/login", (c) => authForward(c, "/auth/sign-in/email"));
 app.post("/v1/auth/signup", (c) => authForward(c, "/auth/sign-up/email"));
 app.post("/v1/auth/logout", (c) => authForward(c, "/auth/sign-out"));
+
+app.get("/v1/billing", async (c) => {
+  try {
+    const overview = await withTenant(c, ({ actor, orgId, database }) =>
+      getBillingOverview({ actorId: actor.id, orgId, database }),
+    );
+    return c.json(overview);
+  } catch (error) {
+    return jsonError(c, error, 401);
+  }
+});
+
+app.post("/v1/billing/checkout", async (c) => {
+  try {
+    const result = await withTenant(c, ({ actor, orgId, database }) =>
+      createBillingCheckout({
+        actorId: actor.id,
+        orgId,
+        database,
+        gateway: stripeBillingGateway(),
+        appUrl: process.env.COMPANION_WEB_URL ?? "http://127.0.0.1:3000",
+      }),
+    );
+    return c.json(result);
+  } catch (error) {
+    return jsonError(c, error, 403);
+  }
+});
+
+app.post("/v1/billing/portal", async (c) => {
+  try {
+    const result = await withTenant(c, ({ actor, orgId, database }) =>
+      createBillingPortal({
+        actorId: actor.id,
+        orgId,
+        database,
+        gateway: stripeBillingGateway(),
+        appUrl: process.env.COMPANION_WEB_URL ?? "http://127.0.0.1:3000",
+      }),
+    );
+    return c.json(result);
+  } catch (error) {
+    return jsonError(c, error, 403);
+  }
+});
 
 function safeAuthNext(value: unknown): string {
   const next = typeof value === "string" ? value : "";
@@ -768,7 +872,7 @@ app.post("/v1/orgs/current/domains", async (c) => {
   try {
     if (isTokenRequest(c)) throw new Error("personal access tokens cannot manage workspace domains");
     const input = addOrgAccessDomainInputSchema.parse(await c.req.json());
-    return c.json(await withTenant(c, ({ actor, orgId, database }) => addOrgAccessDomain({ actor, orgId, domain: input.domain, database })));
+    return c.json(await withTenant(c, ({ actor, orgId, database }) => addOrgAccessDomain({ actor, orgId, domain: input.domain, acknowledgeSeatBilling: input.acknowledgeSeatBilling, database })));
   } catch (error) {
     return jsonError(c, error);
   }
@@ -910,11 +1014,11 @@ app.post("/v1/invitations", async (c) => {
     const orgId = await orgIdFromContext(c);
     createdActor = actor;
     createdOrgId = orgId;
-    const body = await c.req.json<{ email: string; role?: "admin" | "developer" }>();
+    const body = await c.req.json<{ email: string; role?: "admin" | "developer"; acknowledgeSeatBilling?: boolean }>();
     const role = body.role ?? "developer";
     if (role !== "admin" && role !== "developer") throw new Error("invalid invitation role");
     const invite = await withTenantContext({ orgId, userId: actor.id }, (database) =>
-      createInvitation({ actor, orgId, email: body.email, role, database }),
+      createInvitation({ actor, orgId, email: body.email, role, acknowledgeSeatBilling: body.acknowledgeSeatBilling, database }),
     );
     createdInvite = invite;
     const org = (await listOrgs(actor)).find((o) => o.org_id === orgId);
@@ -2430,6 +2534,7 @@ app.delete("/v1/tokens/:id", async (c) => {
 
 const port = Number(process.env.COMPANION_API_PORT ?? process.env.PORT ?? 3001);
 const hostname = process.env.COMPANION_API_HOST;
+assertBillingEnvironmentConfigured();
 serve({ fetch: app.fetch, port, ...(hostname ? { hostname } : {}) }, (info) => {
   console.log(`Companion API listening on ${hostname ? `http://${hostname}:${info.port}` : `port ${info.port}`}`);
 });

@@ -14,3 +14,4 @@ export * from "./preferences";
 export * from "./orgSettings";
 export * from "./avatar";
 export * from "./secrets";
+export * from "./billing";

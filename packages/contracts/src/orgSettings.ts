@@ -41,7 +41,6 @@ export const orgSettingsOrgSchema = z.object({
   name: z.string(),
   slug: z.string(),
   kind: z.enum(["personal", "team"]),
-  plan: z.enum(["free", "team"]),
   createdAt: z.string(),
   domain: z.string().nullable().default(null),
   domainAutoJoin: z.boolean().default(false),
@@ -118,6 +117,7 @@ export type SkillNamingPolicyResponse = z.infer<typeof skillNamingPolicyResponse
 
 export const addOrgAccessDomainInputSchema = z.object({
   domain: z.string().min(1).max(253),
+  acknowledgeSeatBilling: z.boolean().default(false),
 });
 export type AddOrgAccessDomainInput = z.infer<typeof addOrgAccessDomainInputSchema>;
 

@@ -113,6 +113,8 @@ export function ListView({
   onRetryPreferences,
   dragSkillId,
   onSkillStartDrag,
+  upgradeNotice = null,
+  onUpgrade = () => {},
 }: {
   skills: SkillVM[];
   /** Which library this list shows (drives scope-aware empty + upload copy). */
@@ -136,6 +138,8 @@ export function ListView({
   /** Begin a pointer drag from a skill row (the hook gates it behind a small move threshold,
    *  so a plain click still opens the skill). */
   onSkillStartDrag: (id: string, e: PointerEvent<HTMLElement>) => void;
+  upgradeNotice?: string | null;
+  onUpgrade?: () => void;
 }) {
   // Search + sort are local list-view affordances (label/status filtering lives in the sidebar / chips).
   const [q, setQ] = useState("");
@@ -177,6 +181,14 @@ export function ListView({
           {activeLabel ? `Upload to ${title}` : "Upload skill"}
         </button>
       </header>
+
+      {upgradeNotice && (
+        <div className="entitlement-bar" role="status">
+          <Icon name="lock" size={14} />
+          <span>{upgradeNotice}</span>
+          <button className="btn-sec" onClick={onUpgrade}>View plans</button>
+        </div>
+      )}
 
       <div className="listbar">
         <span className="listbar__search">

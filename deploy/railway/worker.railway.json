@@ -1,0 +1,23 @@
+{
+  "$schema": "https://railway.com/railway.schema.json",
+  "build": {
+    "builder": "RAILPACK",
+    "buildCommand": "pnpm --filter @companion/worker build",
+    "watchPatterns": [
+      "/apps/worker/**",
+      "/packages/billing/**",
+      "/packages/contracts/**",
+      "/packages/core/**",
+      "/packages/db/**",
+      "/package.json",
+      "/pnpm-lock.yaml",
+      "/pnpm-workspace.yaml",
+      "/tsconfig.base.json"
+    ]
+  },
+  "deploy": {
+    "startCommand": "node apps/worker/dist/index.js",
+    "restartPolicyType": "ALWAYS",
+    "drainingSeconds": 15
+  }
+}

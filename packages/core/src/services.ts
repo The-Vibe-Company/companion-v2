@@ -50,6 +50,13 @@ import { listOrgAccessDomains } from "./domainAccess";
 import { classifyEmailDomain } from "./email-domains";
 import { canManageOrg, canManagePersonalSkill, canTouchOwner, isLastOwner } from "./authz";
 import { disableSecretsForDepartingMember, persistSkillSecretSlots } from "./secrets";
+import {
+  assertOrgSkillMutationEntitled,
+  assertPersonalSkillsEntitled,
+  assertSkillHistoryEntitled,
+  getEntitlements,
+  markSeatSyncPending,
+} from "./billing";
 
 export * from "./secrets";
 
@@ -106,7 +113,6 @@ export interface OrgSummary {
   name: string;
   slug: string;
   kind: "personal" | "team";
-  plan: "free" | "team";
   org_role: OrgRole;
   member_count: number;
   color: string | null;
@@ -238,7 +244,6 @@ export async function listOrgs(actor: ActorContext, database: Db = db): Promise<
       name: schema.organizations.name,
       slug: schema.organizations.slug,
       kind: schema.organizations.kind,
-      plan: schema.organizations.plan,
       org_role: schema.memberships.orgRole,
       color: schema.organizations.color,
       logo_url: schema.organizations.logoUrl,
@@ -281,7 +286,7 @@ export async function createOrg(input: {
   const slug = uniqueSlug(input.name, crypto.randomUUID());
   const [org] = await database
     .insert(schema.organizations)
-    .values({ name: input.name, slug, kind: input.kind, plan: input.kind === "team" ? "team" : "free" })
+    .values({ name: input.name, slug, kind: input.kind })
     .returning();
   if (!org) throw new Error("could not create organization");
   await database.insert(schema.memberships).values({ orgId: org.id, userId: input.actor.id, orgRole: "owner" });
@@ -553,7 +558,6 @@ export async function getOrgSettings(input: {
     name: orgRow.name,
     slug: orgRow.slug,
     kind: orgRow.kind,
-    plan: orgRow.plan,
     createdAt: orgRow.createdAt.toISOString(),
     domain: orgRow.domain,
     domainAutoJoin: orgRow.domainAutoJoin,
@@ -716,6 +720,7 @@ export async function removeMember(input: {
   await database
     .delete(schema.memberships)
     .where(and(eq(schema.memberships.orgId, input.orgId), eq(schema.memberships.userId, input.userId)));
+  await markSeatSyncPending(input.orgId, database);
 }
 
 /** Which library a skill read targets. Org skills are flat; personal skills are owner-private. */
@@ -737,14 +742,34 @@ async function visibleSkillPredicate(
   library: SkillLibrary = "org",
 ) {
   await assertMember(database, actor, orgId);
+  const entitlements = await getEntitlements({ orgId, database });
   const orgScope = eq(schema.skills.orgId, orgId);
   if (library === "org") {
     return and(orgScope, eq(schema.skills.scope, "org"));
   }
   if (library === "accessible") {
+    if (!entitlements.personalSkills) return and(orgScope, eq(schema.skills.scope, "org"));
     return and(
       orgScope,
       sql`(${schema.skills.scope} = 'org' or ${schema.skills.creatorId} = ${actor.id})`,
+    );
+  }
+  if (!entitlements.personalSkills) {
+    return and(
+      orgScope,
+      eq(schema.skills.scope, "org"),
+      exists(
+        database
+          .select({ one: sql`1` })
+          .from(schema.skillInstalls)
+          .where(
+            and(
+              eq(schema.skillInstalls.orgId, orgId),
+              eq(schema.skillInstalls.skillId, schema.skills.id),
+              eq(schema.skillInstalls.userId, actor.id),
+            ),
+          ),
+      ),
     );
   }
   // `mine`: personal skills I authored, OR org skills I have installed.
@@ -1347,6 +1372,19 @@ export async function getSkillBySlug(input: {
   slug: string;
   database?: Db;
 }): Promise<SkillListRow | null> {
+  const database = input.database ?? db;
+  const entitlements = await getEntitlements({ orgId: input.orgId, database });
+  if (!entitlements.personalSkills) {
+    const hidden = await database.query.skills.findFirst({
+      where: and(
+        eq(schema.skills.orgId, input.orgId),
+        eq(schema.skills.slug, input.slug),
+        eq(schema.skills.scope, "personal"),
+        eq(schema.skills.creatorId, input.actor.id),
+      ),
+    });
+    if (hidden) await assertPersonalSkillsEntitled({ orgId: input.orgId, database });
+  }
   // Resolve by slug across both live and archived skills — archived ones stay viewable. Uses the
   // `accessible` library so an org skill resolves for anyone and a personal skill only for its owner
   // (every single-skill mutate — install/archive/share/star/deps — funnels through here).
@@ -1354,7 +1392,7 @@ export async function getSkillBySlug(input: {
     ...input,
     library: "accessible",
     includeArchived: true,
-    database: input.database ?? db,
+    database,
   });
   return rows.find((r) => r.slug === input.slug) ?? null;
 }
@@ -1495,9 +1533,11 @@ export async function listSkillVersions(input: {
     .from(schema.skillVersions)
     .where(and(eq(schema.skillVersions.orgId, input.orgId), eq(schema.skillVersions.skillId, skill.id)))
     .orderBy(desc(schema.skillVersions.createdAt));
+  const entitlements = await getEntitlements({ orgId: input.orgId, database });
+  const visibleRows = entitlements.skillHistory ? rows : rows.slice(0, 1);
   // Per-version attribution: resolve the member who published each version (name/initials/avatar).
-  const authorById = await loadVersionAuthors(database, rows.map((r) => r.createdBy));
-  return rows.map((r) => skillVersionRowFromRecord(r, skill, authorById.get(r.createdBy) ?? null));
+  const authorById = await loadVersionAuthors(database, visibleRows.map((r) => r.createdBy));
+  return visibleRows.map((r) => skillVersionRowFromRecord(r, skill, authorById.get(r.createdBy) ?? null));
 }
 
 /** Display fields for a version publisher, with the avatar already resolved (custom or Gravatar). */
@@ -2002,14 +2042,25 @@ export async function assertCanPublishSkillVersion(input: {
   const existing = await database.query.skills.findFirst({
     where: and(eq(schema.skills.orgId, input.orgId), eq(schema.skills.slug, payload.slug)),
   });
+  if (existing?.scope === "personal" && existing.creatorId !== input.actor.id) {
+    throw new Error(`a skill named ${payload.slug} already exists in this workspace`);
+  }
+  const targetScope = existing?.scope ?? payload.scope ?? "org";
+  if (targetScope === "personal") {
+    await assertPersonalSkillsEntitled({ orgId: input.orgId, database });
+  } else {
+    await assertOrgSkillMutationEntitled({
+      orgId: input.orgId,
+      feature: existing ? "org_skill_publish" : "org_skill_create",
+      isCreate: !existing,
+      database,
+    });
+  }
   if (existing) {
     // Slugs are workspace-unique across scopes. A non-owner can neither see nor re-publish another
     // member's personal skill, and you cannot publish over a skill of a different scope (Share is the
     // only personal→org transition). Surface a generic name-collision error so a private skill is
     // never revealed.
-    if (existing.scope === "personal" && existing.creatorId !== input.actor.id) {
-      throw new Error(`a skill named ${payload.slug} already exists in this workspace`);
-    }
     if (payload.scope && payload.scope !== existing.scope) {
       throw new Error(`a skill named ${payload.slug} already exists in this workspace`);
     }
@@ -2040,6 +2091,18 @@ async function writeSkillVersion(input: {
   const existing = await database.query.skills.findFirst({
     where: and(eq(schema.skills.orgId, input.orgId), eq(schema.skills.slug, payload.slug)),
   });
+  const targetScope = existing?.scope ?? payload.scope ?? "org";
+  if (targetScope === "personal") {
+    await assertPersonalSkillsEntitled({ orgId: input.orgId, database });
+  } else {
+    await assertOrgSkillMutationEntitled({
+      orgId: input.orgId,
+      feature: existing ? "org_skill_publish" : "org_skill_create",
+      isCreate: !existing,
+      database,
+      lock: true,
+    });
+  }
   if (existing && payload.skill_id && payload.skill_id !== existing.id) {
     throw new Error("skill_id does not match existing skill");
   }
@@ -2188,11 +2251,16 @@ export async function createInvitation(input: {
   orgId: string;
   email: string;
   role: Exclude<OrgRole, "owner">;
+  acknowledgeSeatBilling?: boolean;
   database?: Db;
 }): Promise<{ id: string; token: string }> {
   const database = input.database ?? db;
   const role = await getOrgRole(input.orgId, input.actor.id, database);
   if (!role || !canManageOrg(role)) throw new Error("not allowed to invite members");
+  const entitlements = await getEntitlements({ orgId: input.orgId, database });
+  if (entitlements.billingMode === "stripe" && entitlements.computedPlan === "pro" && !input.acknowledgeSeatBilling) {
+    throw new Error("acknowledgeSeatBilling is required because an accepted invitation adds a $10/month prorated seat");
+  }
   const token = crypto.randomUUID().replaceAll("-", "");
   const [invite] = await database.insert(schema.invitations).values({
     orgId: input.orgId,
@@ -2234,6 +2302,7 @@ export async function acceptInvitation(input: {
       .update(schema.profiles)
       .set({ onboardedAt: new Date() })
       .where(and(eq(schema.profiles.id, input.actor.id), isNull(schema.profiles.onboardedAt)));
+    await markSeatSyncPending(invite.orgId, tx as unknown as Db);
   });
   return { orgId: invite.orgId };
 }
@@ -2279,6 +2348,9 @@ export async function getDownloadVersion(input: {
     if (referenced.length === 0) throw new Error("skill not found");
   }
   const versions = await listSkillVersions({ ...input, database });
+  if (input.version && input.version !== visible.current_version) {
+    await assertSkillHistoryEntitled({ orgId: input.orgId, database });
+  }
   const row = input.version ? versions.find((v) => v.version === input.version) : versions[0];
   if (!row) throw new Error("version not found");
   const depRows = await database
@@ -3001,6 +3073,14 @@ export async function restoreSkill(input: {
   const database = input.database ?? db;
   const skill = await getSkillBySlug(input);
   if (!skill) throw new Error("skill not found");
+  if (skill.scope === "org") {
+    await assertOrgSkillMutationEntitled({
+      orgId: input.orgId,
+      feature: "org_skill_restore",
+      isCreate: false,
+      database,
+    });
+  }
   await assertCanModifySkillRow({
     actor: input.actor,
     orgId: input.orgId,
@@ -3037,6 +3117,14 @@ export async function renameSkill(input: {
   });
   if (!skill) throw new Error("skill not found");
   if (skill.scope === "personal" && skill.creatorId !== input.actor.id) throw new Error("skill not found");
+  if (skill.scope === "org") {
+    await assertOrgSkillMutationEntitled({
+      orgId: input.orgId,
+      feature: "org_skill_rename",
+      isCreate: false,
+      database,
+    });
+  }
   await assertCanModifySkillRow({
     actor: input.actor,
     orgId: input.orgId,
@@ -3112,6 +3200,7 @@ async function buildShareMigrationPlan(input: {
   database?: Db;
 }): Promise<ShareMigrationPlan> {
   const database = input.database ?? db;
+  await assertPersonalSkillsEntitled({ orgId: input.orgId, database, feature: "skill_share" });
   await assertMember(database, input.actor, input.orgId);
   const skill = await database.query.skills.findFirst({
     where: and(eq(schema.skills.orgId, input.orgId), eq(schema.skills.slug, input.slug)),
@@ -3160,6 +3249,7 @@ export async function shareSkill(input: {
   database?: Db;
 }): Promise<{ scope: "org"; shared_dependencies: string[] }> {
   const database = input.database ?? db;
+  await assertPersonalSkillsEntitled({ orgId: input.orgId, database, feature: "skill_share" });
   const result = await database.transaction(async (txDb) => {
     const tx = txDb as unknown as Db;
     const plan = await buildShareMigrationPlan({ actor: input.actor, orgId: input.orgId, slug: input.slug, database: tx });
@@ -3203,6 +3293,9 @@ async function assertCanModifySkillRow(input: {
   database: Db;
 }): Promise<void> {
   await assertMember(input.database, input.actor, input.orgId);
+  if (input.skill.scope === "personal") {
+    await assertPersonalSkillsEntitled({ orgId: input.orgId, database: input.database });
+  }
   if (input.skill.scope === "personal" && input.skill.creatorId !== input.actor.id) {
     throw new Error("only the owner can modify a personal skill");
   }

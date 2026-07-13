@@ -442,6 +442,8 @@ export function Sidebar({
   onToggleMobile,
   onCloseMobile,
   asideRef,
+  personalSkillsEnabled = true,
+  onUpgrade = () => {},
 }: {
   orgs: OrgVM[];
   currentOrg: OrgVM;
@@ -491,6 +493,8 @@ export function Sidebar({
   onToggleMobile: () => void;
   onCloseMobile: () => void;
   asideRef?: Ref<HTMLElement>;
+  personalSkillsEnabled?: boolean;
+  onUpgrade?: () => void;
 }) {
   const [menu, setMenu] = useState<{ row: TreeRow; lib: SkillsLibrary; pos: { x: number; y: number } } | null>(null);
   // The inline new-folder input, scoped to the library whose `+` (or "add sublabel") opened it.
@@ -638,8 +642,13 @@ export function Sidebar({
           </button>
           <span className="ml-libhead__count tnum">{mineCount}</span>
           {!navigationOnly && (
-            <button className="side__addteam" title="New personal folder" aria-label="New personal folder" onClick={() => openNewFolder("mine", "")}>
-              <Icon name="plus" size={14} />
+            <button
+              className="side__addteam"
+              title={personalSkillsEnabled ? "New personal folder" : "Personal skills require Pro"}
+              aria-label={personalSkillsEnabled ? "New personal folder" : "View plans for personal skills"}
+              onClick={() => personalSkillsEnabled ? openNewFolder("mine", "") : onUpgrade()}
+            >
+              <Icon name={personalSkillsEnabled ? "plus" : "lock"} size={14} />
             </button>
           )}
         </div>

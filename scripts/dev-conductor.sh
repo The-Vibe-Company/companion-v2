@@ -523,7 +523,7 @@ print_header() {
 # Launch apps via concurrently (inline env, no .env mutation)
 # ---------------------------------------------------------------------------
 launch_apps() {
-  step "Launching API + web via concurrently"
+  step "Launching API + worker + web via concurrently"
 
   # Shared API env: storage + email vary with what's installed.
   local api_storage_env="" api_email_env
@@ -539,6 +539,7 @@ launch_apps() {
   # The master key is exported by ensure_secrets_master_key and inherited by the API process. Never
   # interpolate it into concurrently's command argument, where process listings could expose it.
   local api_cmd="COMPANION_API_HOST=127.0.0.1 COMPANION_API_PORT=$API_PORT DATABASE_URL=\"$DATABASE_URL\" BETTER_AUTH_URL=\"$API_URL\" BETTER_AUTH_COOKIE_PREFIX=\"$PROJECT\" COMPANION_WEB_URL=\"$WEB_URL\" COMPANION_API_URL=\"$API_URL\" NEXT_PUBLIC_COMPANION_API_URL=\"$API_URL\" $api_storage_env $api_email_env pnpm --filter @companion/api dev"
+  local worker_cmd="DATABASE_URL=\"$DATABASE_URL\" COMPANION_WEB_URL=\"$WEB_URL\" pnpm --filter @companion/worker dev"
   local web_cmd="COMPANION_API_URL=\"$API_URL\" NEXT_PUBLIC_COMPANION_API_URL=\"$API_URL\" pnpm --filter @companion/web dev --hostname 127.0.0.1 --port $WEB_PORT"
 
   free_port "$API_PORT" "api"
@@ -548,12 +549,12 @@ launch_apps() {
   # after concurrently returns (Ctrl+C → SIGINT → concurrently kills the apps
   # → bash exits → trap → pg_ctl stop / kill minio,mailpit).
   pnpm exec concurrently \
-    --names api,web \
-    --prefix-colors blue,green \
+    --names api,worker,web \
+    --prefix-colors blue,magenta,green \
     --prefix "[{name}]" \
     --kill-others-on-fail \
     --restart-tries 0 \
-    "$api_cmd" "$web_cmd"
+    "$api_cmd" "$worker_cmd" "$web_cmd"
 }
 
 # ---------------------------------------------------------------------------

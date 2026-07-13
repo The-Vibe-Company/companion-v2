@@ -19,6 +19,7 @@ export default defineConfig({
     "hono",
     "postgres",
     "resend",
+    "stripe",
     "tar-stream",
     "yaml",
     "zod",

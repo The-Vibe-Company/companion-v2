@@ -19,6 +19,7 @@ describe("SettingsController", () => {
     expect(settingsHref({ view: "general" }, null)).toBe("/settings?view=general");
     expect(settingsHref({ view: "members" }, "invite")).toBe("/settings?view=members&dialog=invite");
     expect(settingsHref({ view: "profile" }, null)).toBe("/settings?view=profile");
+    expect(settingsHref({ view: "billing" }, null)).toBe("/settings?view=billing");
   });
 
   it("normalizes malformed member collections before rendering", async () => {
@@ -36,7 +37,6 @@ describe("SettingsController", () => {
         name: "Acme",
         slug: "acme",
         kind: "team",
-        plan: "team",
         myRole: "owner",
         created: "2025-01-12",
         domain: null,

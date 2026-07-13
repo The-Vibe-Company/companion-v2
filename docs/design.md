@@ -13,6 +13,8 @@
 - **Email:** `packages/email` supports local log/Mailpit mode and Resend for production.
 - **Web:** Next.js App Router in `apps/web`; it calls the API, not Postgres or MinIO directly.
 - **CLI:** `cli` stores an API URL plus Better Auth session cookie and uses REST endpoints.
+- **Billing:** `packages/billing` is the framework-free Stripe adapter shared by the API and
+  `apps/worker`; `packages/core` owns plan computation, entitlements, quotas, and reconciliation.
 
 Redis/BullMQ are intentionally excluded. Temporal is the intended future workflow engine for
 deployments, reconcile loops, retries, compensation, and schedules.
@@ -21,14 +23,14 @@ deployments, reconcile loops, retries, compensation, and schedules.
 
 Manual local development uses `pnpm dev` as the idempotent full-stack entrypoint. The script starts
 Postgres, MinIO, and Mailpit with the defaults from `.env.example`, applies Drizzle migrations, seeds
-the local test user, and starts only the long-running API and web processes. Local Docker ports bind
+the local test user, and starts the long-running API, billing worker, and web processes. Local Docker ports bind
 to `COMPOSE_BIND_HOST`, which defaults to `127.0.0.1`. `pnpm dev:app` is the app-only loop when infra
 is already prepared.
 
 Conductor workspaces use a separate, **native (Docker-free)** entrypoint, `scripts/dev-conductor.sh`
 (modeled on `~/Dev/monkapps`). It starts a per-workspace Postgres cluster — plus optional native MinIO
 and Mailpit — under `.conductor-pg/`, applies migrations, seeds the test user, and runs only the
-long-running API and web processes via `concurrently`. All services are allocated from
+long-running API, billing worker, and web processes via `concurrently`. All services are allocated from
 `CONDUCTOR_PORT`: web `+0`, API `+1`, Postgres `+2`, MinIO API `+3`, MinIO console `+4`, Mailpit SMTP
 `+5`, and Mailpit UI `+6`. It injects workspace-specific `DATABASE_URL`, API URLs, S3 endpoint,
 Mailpit ports, and a `companion-<workspace>` Better Auth cookie prefix inline — without mutating
@@ -41,13 +43,23 @@ falls back to `EMAIL_PROVIDER=log`). A cleanup trap stops every native service o
 workspace runs `scripts/dev-conductor.sh archive`, which stops the services and removes
 `.conductor-pg/`.
 
+Production Railway deployments use three services from the same repository plus Railway Postgres. The public
+`web` service proxies browser, CLI, auth, and Stripe webhook traffic to the private `api` service over Railway
+private DNS; the `worker` is private and has no HTTP surface. Per-service configuration lives in
+`deploy/railway/*.railway.json`. Only the API runs Drizzle migrations, as a Railway pre-deploy command guarded by
+the existing Postgres advisory lock. The web and API bind Railway's injected/fixed `PORT` on `0.0.0.0`, while the
+worker is restarted as a long-running process. `deploy/railway/README.md` is the operational source of truth for
+service references, public domains, Stripe webhook registration, initial deployment order, and rollback.
+
 ## Repository Layout
 
 ```
 apps/
   api/        # Hono backend, Better Auth, REST + tRPC
+  worker/     # Stripe seat sync + periodic billing reconciliation
   web/        # Next.js portal
 packages/
+  billing/    # framework-free Stripe gateway
   db/         # Drizzle schema, migrations, seeds
   auth/       # Better Auth config
   core/       # framework-free services, RBAC, scoping
@@ -64,7 +76,11 @@ Better Auth owns the core `user`, `session`, `account`, and `verification` table
 adds `profiles`, `organizations`, `memberships`, `invitations`,
 `skills`, `skill_versions`, `skill_version_dependencies`, `skill_stars`, `labels`, `skill_labels`,
 `skill_filter_preferences`, `skill_comments`, `skill_comment_images`, `local_skill_installs`,
-`api_tokens`, `audit_log`, and the secret-vault tables described below. There are **no teams**: the hierarchy is `Organization → User`.
+`api_tokens`, `billing_subscriptions`, `stripe_webhook_events`, `audit_log`, and the secret-vault
+tables described below. There are **no teams**:
+the hierarchy is `Organization → User`. The former decorative `organizations.plan` column no longer
+exists: raw provider state lives in at most one `billing_subscriptions` row per organization, while
+the effective plan is derived centrally at request time.
 
 Every tenant-owned table carries `org_id`. A skill lives in one of two libraries, set by a single
 `skills.scope` enum (`'org'` default, or `'personal'`):
@@ -348,8 +364,8 @@ requires the admin's own verified corporate email domain to match the requested 
 The service layer in `packages/core` is the primary enforcement point. It applies:
 
 - tenant/membership gate (`assertMember`): every service call resolves the actor's org role or throws;
-  all queries are scoped to the selected `org_id`. Skill visibility collapses to `eq(skills.org_id,
-  orgId)` — every member sees every skill in the org;
+  all queries are scoped to the selected `org_id`. Org skills are visible to every member; personal
+  skills add an owner-only predicate, with no admin override;
 - capability gate (org role): skill actions (read/create/update/delete/publish, archive/restore, and
   all label create/assign/rename/recolor/delete operations) are allowed for **any** member; the org-role
   gate (`isOrgAdmin` / `canManageOrg`) still governs org-level actions like member management, role
@@ -363,8 +379,9 @@ The service layer in `packages/core` is the primary enforcement point. It applie
 
 Postgres RLS scopes tenant tables by the `app.org_id` and `app.user_id` GUCs. Secret tables use
 composite tenant foreign keys and forced RLS so even the table owner cannot bypass tenant, user, and
-audience policies. Browser and CLI clients never connect directly to Postgres; the framework-free
-service layer remains the primary authorization boundary.
+audience policies. Billing, `labels` / `skill_labels`, and the other tenant tables are also scoped by
+the tenant GUCs as defense-in-depth. Browser and CLI clients never connect directly to Postgres; the
+framework-free service layer remains the primary authorization boundary.
 
 The public skill preview service is the only intentional unauthenticated skill read. It does not take
 an actor or org id, resolves only by `share_token`, and hard-filters to non-archived org skills before
@@ -373,6 +390,48 @@ The signed-in web deep link uses a separate authenticated resolver,
 `GET /v1/skills/share-target/:token`, which returns `{org_id, slug}` only when the user is already a
 member of the token's workspace; `/s/:token/go` then sets `companion_org` before redirecting to the
 slug-keyed detail route, where the client replaces the address bar back to `/s/:token`.
+
+## Billing And Entitlements
+
+Self-hosted installations default to `COMPANION_BILLING_MODE=disabled` and are fully unlocked without
+Stripe. SaaS enables `stripe` billing separately from entitlement rollout
+(`off → observe → pilot → enforce`), with pilot and temporary Pro allowlists. Disabling Checkout,
+webhooks, or enforcement is a non-destructive rollback: Stripe identifiers and subscriptions remain
+stored and no cancellation is sent.
+
+Pro is $10 USD per active `memberships` row per month. Checkout fixes the initial quantity server-side,
+uses Stripe Tax, disallows quantity adjustment and promotion codes, and uses durable idempotency keys.
+The configured Price must be active, licensed, monthly USD at exactly 1000 cents. The Customer Portal
+may manage payment methods, invoices, and end-of-period cancellation, but subscription and quantity
+updates must be disabled. Checkout creation is serialized per organization, reuses an open session,
+and checks Stripe for an existing subscription before creating another.
+
+`active` subscriptions are Pro, including a scheduled cancellation before `current_period_end`.
+`past_due` and `unpaid` keep Pro through one non-renewable seven-day grace window. Missing,
+`incomplete`, `incomplete_expired`, `paused`, and `canceled` subscriptions are Free. A later successful
+payment or new active subscription clears the grace state.
+
+Free keeps all data but narrows reads and mutations:
+
+- My Skills contains installed org skills only; authored personal skills and their folder tree are
+  hidden and locked, including Share.
+- Org skills count active and archived rows toward a 20-skill quota. Creation uses an organization
+  advisory lock and checks both before S3 upload and again inside the publishing transaction; a race
+  loser removes its uploaded object. At exactly 20, existing skills can still publish versions. Above
+  20, create, publish, rename, restore, and Share are frozen while reads, installs, downloads, and
+  archive remain available.
+- Only the current version is readable; historical version requests return the structured 403
+  Upgrade response.
+
+The structured entitlement rejection is `{ code, feature, message, effectivePlan, limit?, current?,
+upgradeUrl? }`, using `upgrade_required`, `org_skill_limit_reached`, or `catalog_frozen`.
+
+Membership acceptance, domain join, and removal mark the tenant billing row `pending` in the same
+database transaction. `apps/worker` claims rows with `FOR UPDATE SKIP LOCKED` every 15 seconds, updates
+Stripe quantities with `proration_behavior=create_prorations`, retries from 30 seconds up to one hour,
+and refreshes all subscriptions every 15 minutes. Stripe webhook signatures are verified against the
+raw body; event ids are deduplicated, then the current Stripe subscription is always re-read before
+persisting so delivery order cannot corrupt local state.
 
 ## Public API
 
@@ -383,6 +442,10 @@ slug-keyed detail route, where the client replaces the address bar back to `/s/:
   domain-access orgs), `POST /v1/onboarding/join` (join a selected org after server-side domain
   revalidation),
   `POST /v1/onboarding/create` (create org + invites, finish onboarding).
+- Billing: session-only `GET /v1/billing` for any member; session-only
+  `POST /v1/billing/checkout` and `/portal` for Owners/Admins; public
+  `POST /v1/billing/webhooks/stripe` authenticated only by the Stripe signature. Billing endpoints
+  never accept PATs. Pro invitations and domain-access additions require `acknowledgeSeatBilling`.
 - Tokens: `GET /v1/tokens` (list the caller's own active keys, no plaintext — it backs the personal
   Account pane, so it is caller-scoped even for admins), `POST /v1/tokens` (issue a scoped `cmp_pat_…`,
   plaintext returned once), `DELETE /v1/tokens/:id` (an org admin may revoke any token by id).

@@ -315,6 +315,37 @@ plus org skills reported as installed. `installed=true` narrows any list to skil
 not prove the files still exist on disk. Skill rows include `share_token`; for live org skills only,
 use it to build a clean public preview URL such as `/s/$share_token`.
 
+### Free and Pro workspace gates
+
+Self-hosted workspaces keep the full skills API. A managed SaaS workspace may enforce Free
+entitlements. The billing overview is session-only and PATs must not call it, so detect a gate from
+the skills API's structured HTTP 403 response and explain it instead of retrying:
+
+```json
+{
+  "code": "upgrade_required",
+  "feature": "personal_skills",
+  "message": "Personal skills are available on Pro.",
+  "effectivePlan": "free",
+  "upgradeUrl": "/settings?view=billing"
+}
+```
+
+The other codes are `org_skill_limit_reached` and `catalog_frozen`; quota responses can include
+`limit` and `current`. On Free:
+
+- `GET /skills?lib=mine` returns installed org skills only. Authored personal skills remain stored
+  but hidden; personal folder routes and Share are locked.
+- The org library includes up to 20 skills, counting active and archived rows. A new org publish can
+  be refused at the limit. If a legacy catalog is already above 20, publish, rename, restore, and
+  Share stay frozen; reading, installing, downloading, and archiving remain available.
+- Only the current version is exposed. Requests for an older package, file list, or file preview
+  return `upgrade_required` for `skill_history`.
+
+Do not work around a gate by switching scope, renaming, restoring, or retrying another endpoint. Tell
+the user what remains available and direct a signed-in Owner/Admin to `upgradeUrl`. Never request or
+use Billing routes with `COMPANION_TOKEN`.
+
 ### Public org-skill preview links
 
 Org skills have an anyone-with-the-link metadata preview. Personal skills do not; the user must first
@@ -938,7 +969,7 @@ skills view shows the correct status and version. Report the version from this s
 curl -s "$COMPANION_API_URL/local-skills/companion/installed" \
   -H "Authorization: Bearer $COMPANION_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"version":"1.19.0","agent":"<your assistant name>"}'
+  -d '{"version":"1.20.0","agent":"<your assistant name>"}'
 ```
 
 A `{ "ok": true, "status": "installed" }` response confirms the workspace now knows this machine has
