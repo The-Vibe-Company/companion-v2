@@ -29,6 +29,7 @@ jobs:
       docs: ${{ steps.scope.outputs.docs }}
       design: ${{ steps.scope.outputs.design }}
       quality: ${{ steps.scope.outputs.quality }}
+      build: ${{ steps.scope.outputs.build }}
       database: ${{ steps.scope.outputs.database }}
       browser: ${{ steps.scope.outputs.browser }}
       containers: ${{ steps.scope.outputs.containers }}
@@ -176,7 +177,7 @@ jobs:
     name: Application Build
     runs-on: ubuntu-latest
     needs: scope
-    if: needs.scope.outputs.quality == 'true'
+    if: needs.scope.outputs.build == 'true'
     timeout-minutes: 15
     env:
       COMPANION_API_URL: http://127.0.0.1:13301
@@ -380,7 +381,6 @@ jobs:
         with:
           path: .turbo
           key: turbo-build-${{ runner.os }}-22-${{ hashFiles('pnpm-lock.yaml') }}-${{ github.sha }}-${{ github.run_attempt }}
-          fail-on-cache-miss: true
 
       - name: Restore Playwright Chromium
         id: playwright-cache

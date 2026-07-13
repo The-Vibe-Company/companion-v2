@@ -7,6 +7,7 @@ const OUTPUT_KEYS = [
   "docs",
   "design",
   "quality",
+  "build",
   "database",
   "browser",
   "containers",
@@ -67,6 +68,15 @@ export function classifyFiles(files, { forceFull = false } = {}) {
   const dependencies = full || uniqueFiles.some((file) => file === "pnpm-lock.yaml" || /(^|\/)package\.json$/.test(file));
   const skill = full || uniqueFiles.some((file) => file.startsWith("packages/companion-skill/skill/"));
   const quality = full || uniqueFiles.some((file) => !isDocumentation(file));
+  const build =
+    full ||
+    uniqueFiles.some(
+      (file) =>
+        !isDocumentation(file) &&
+        (matchesRuntimePackage(file) ||
+          file.startsWith("e2e/") ||
+          matchesAny(file, ["scripts/ci-rsc-smoke.sh", "scripts/rsc-smoke.mjs"])),
+    );
   const database =
     full ||
     uniqueFiles.some((file) =>
@@ -115,10 +125,16 @@ export function classifyFiles(files, { forceFull = false } = {}) {
       (file) =>
         !isDocumentation(file) &&
         (matchesRuntimePackage(file) ||
-          matchesAny(file, ["deploy/railway/", "docker-compose.yml", ".dockerignore", "tsconfig.base.json"])),
+          matchesAny(file, [
+            "deploy/railway/",
+            "scripts/ci-container-smoke.sh",
+            "docker-compose.yml",
+            ".dockerignore",
+            "tsconfig.base.json",
+          ])),
     );
 
-  return { docs, design, quality, database, browser, containers, dependencies, skill, full };
+  return { docs, design, quality, build, database, browser, containers, dependencies, skill, full };
 }
 
 function readArguments(argv) {
@@ -132,9 +148,10 @@ function readArguments(argv) {
   return values;
 }
 
-function changedFiles(base, head) {
+export function changedFiles(base, head, { cwd } = {}) {
   if (!base || !head) throw new Error("pull_request scope requires --base and --head");
-  return execFileSync("git", ["diff", "--name-only", "--diff-filter=ACMR", base, head, "--"], {
+  return execFileSync("git", ["diff", "--name-only", "--diff-filter=ACMRD", base, head, "--"], {
+    cwd,
     encoding: "utf8",
   })
     .split("\n")
