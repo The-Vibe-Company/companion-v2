@@ -16,7 +16,7 @@ export async function getClient(profile: string, orgId?: string): Promise<Authed
   const session = await loadSession(profile);
   if (!session?.cookie) throw new CliError("not logged in. Run: companion login", 3);
   const cookie = session.cookie;
-  const selectedOrgId = orgId ?? process.env.COMPANION_ORG_ID ?? configuredOrgId ?? session.orgId ?? null;
+  let selectedOrgId = orgId ?? process.env.COMPANION_ORG_ID ?? configuredOrgId ?? session.orgId ?? null;
 
   async function request<T>(path: string, init?: RequestInit): Promise<T> {
     const res = await fetch(`${url}${path}`, {
@@ -34,7 +34,10 @@ export async function getClient(profile: string, orgId?: string): Promise<Authed
   }
 
   const me = await request<{ userId: string; email: string; org?: { org_id?: string } | null }>("/v1/auth/whoami");
-  return { url, cookie, orgId: selectedOrgId ?? me.org?.org_id ?? null, userId: me.userId, email: me.email, request };
+  // The API deliberately falls back to an accessible organization when a remembered header is
+  // stale. Adopt that response before issuing the command's real request.
+  selectedOrgId = me.org?.org_id ?? null;
+  return { url, cookie, orgId: selectedOrgId, userId: me.userId, email: me.email, request };
 }
 
 export async function getOrgId(client: AuthedClient): Promise<string> {

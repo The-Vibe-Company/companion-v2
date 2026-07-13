@@ -53,7 +53,12 @@ export async function login(opts: LoginOpts, g: GlobalOpts): Promise<void> {
     org?: { org_id?: string } | null;
   };
   if (!whoami.ok) throw new CliError(`login failed: ${me.error ?? "could not resolve current user"}`, 3);
-  await saveSession(g.profile, { cookie, orgId: selectedOrgId ?? me.org?.org_id, user: { id: me.userId, email: me.email } });
+  // `whoami` falls back to the actor's first accessible organization when a remembered organization
+  // was deleted or the actor lost membership. Persist that authoritative result so a reset local
+  // workspace (or an org removal in production) cannot leave every later CLI request on a stale id.
+  const resolvedOrgId = me.org?.org_id;
+  await saveProfileConfig(g.profile, { url, orgId: resolvedOrgId });
+  await saveSession(g.profile, { cookie, orgId: resolvedOrgId, user: { id: me.userId, email: me.email } });
 
   if (g.json) emitJson({ ok: true, user: { id: me.userId, email: me.email } });
   else out(`logged in as ${me.email}`);

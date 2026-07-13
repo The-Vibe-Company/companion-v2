@@ -1943,10 +1943,15 @@ app.post("/v1/skills", bodyLimit({ maxSize: 32 * 1024 * 1024, onError: (c) => js
     // declared Companion id resolves to (org-scoped). The declared id (== skills.id) is authoritative.
     const declaredCompanionId =
       result.companion_manifest?.metadata.companionSkillId ?? fm.metadata.companion_skill_id ?? undefined;
-    const slugSkill = await getSkillBySlug({ actor, orgId, slug: fm.name });
-    const companionIdSkill = declaredCompanionId
-      ? await getSkillById({ actor, orgId, id: declaredCompanionId })
-      : null;
+    const { slugSkill, companionIdSkill } = await withTenantContext(
+      { orgId, userId: actor.id },
+      async (database) => ({
+        slugSkill: await getSkillBySlug({ actor, orgId, slug: fm.name, database }),
+        companionIdSkill: declaredCompanionId
+          ? await getSkillById({ actor, orgId, id: declaredCompanionId, database })
+          : null,
+      }),
+    );
     try {
       assertNoCompanionRetarget({
         frontmatter: fm,
@@ -1960,10 +1965,11 @@ app.post("/v1/skills", bodyLimit({ maxSize: 32 * 1024 * 1024, onError: (c) => js
       }
       // When the caller does send expect_*, also bind the upload to that exact slug + id.
       if (expectSlug || expectSkillId) {
-        const expectedSkill =
-          expectSlug && expectSlug !== fm.name
-            ? await getSkillBySlug({ actor, orgId, slug: expectSlug })
-            : slugSkill;
+        const expectedSkill = expectSlug && expectSlug !== fm.name
+          ? await withTenantContext({ orgId, userId: actor.id }, (database) =>
+              getSkillBySlug({ actor, orgId, slug: expectSlug, database }),
+            )
+          : slugSkill;
         assertTargetedSkillUpdate({
           frontmatter: fm,
           companionSkillId: declaredCompanionId,
@@ -1984,12 +1990,15 @@ app.post("/v1/skills", bodyLimit({ maxSize: 32 * 1024 * 1024, onError: (c) => js
     });
     let preparedDependencies;
     try {
-      preparedDependencies = await prepareSkillPublishDependencies({
-        actor,
-        orgId,
-        slugs: dependencyValues,
-        manifest: result.companion_manifest,
-      });
+      preparedDependencies = await withTenantContext({ orgId, userId: actor.id }, (database) =>
+        prepareSkillPublishDependencies({
+          actor,
+          orgId,
+          slugs: dependencyValues,
+          manifest: result.companion_manifest,
+          database,
+        }),
+      );
     } catch (error) {
       return c.json({ result, error: error instanceof Error ? error.message : String(error) }, 422);
     }
@@ -2091,7 +2100,10 @@ app.post("/v1/skills/create", bodyLimit({ maxSize: 2 * 1024 * 1024, onError: (c)
       },
       true,
     );
-    const preparedCarriedDependencies = await prepareSkillPublishDependencies({ actor, orgId, slugs: carriedDependencies });
+    const preparedCarriedDependencies = await withTenantContext(
+      { orgId, userId: actor.id },
+      (database) => prepareSkillPublishDependencies({ actor, orgId, slugs: carriedDependencies, database }),
+    );
     const companionManifest = buildInlineCompanionManifest({
       description: input.description,
       carriedDisplay,

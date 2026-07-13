@@ -1,15 +1,31 @@
+/**
+ * Product promise:
+ * Companion runs with a NOBYPASSRLS login and exposes only narrow identity-discovery operations
+ * before an organization is selected.
+ *
+ * Regression caught:
+ * Deployments previously needed an owner/superuser connection for login, PAT, invite, share, avatar,
+ * billing, and domain discovery paths.
+ *
+ * Why this test is integrated:
+ * The boundary depends on real PostgreSQL role attributes, grants, forced RLS, and definer functions.
+ *
+ * Failure proof:
+ * Removing a required narrow grant or allowing direct tenant-table visibility must fail this suite.
+ */
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { extractRuntimeRoleGrantBlock, resolveRuntimeRoleGrantsFile } from "./migrate";
+import { extractRuntimeRoleGrantBlock, resolveRuntimeRoleGrantsFile } from "../../src/migrate";
 
-const enabled = process.env.RUN_SKILL_DB_INTEGRATION === "1";
 const databaseUrl = process.env.DATABASE_MIGRATION_URL
-  ?? process.env.DATABASE_URL
-  ?? "postgres://companion:companion@127.0.0.1:5432/companion";
+  ?? process.env.DATABASE_URL;
+if (!databaseUrl?.trim()) {
+  throw new Error("pre-tenant RLS integration tests require an explicit disposable DATABASE_URL");
+}
 
-describe.skipIf(!enabled)("pre-tenant PostgreSQL RLS boundary", () => {
+describe("pre-tenant PostgreSQL RLS boundary", () => {
   const sql = postgres(databaseUrl, { max: 4 });
   const suffix = randomUUID();
   const orgA = randomUUID();
@@ -146,6 +162,7 @@ describe.skipIf(!enabled)("pre-tenant PostgreSQL RLS boundary", () => {
     `;
 
     await sql.unsafe(`create role ${rlsRole} login nosuperuser nobypassrls noinherit`);
+    await sql.unsafe(`grant ${rlsRole} to current_user with inherit true, set true`);
     const grantsFile = await resolveRuntimeRoleGrantsFile();
     const grantBlock = extractRuntimeRoleGrantBlock(await readFile(grantsFile, "utf8"));
     await sql.begin(async (tx) => {
@@ -158,6 +175,7 @@ describe.skipIf(!enabled)("pre-tenant PostgreSQL RLS boundary", () => {
     await sql`delete from organizations where id in (${orgA}::uuid, ${orgB}::uuid)`;
     await sql`delete from "user" where id in (${owner.id}, ${colleague.id}, ${outsider.id})`;
     await sql.unsafe(`drop owned by ${rlsRole}`);
+    await sql.unsafe(`revoke ${rlsRole} from current_user`);
     await sql.unsafe(`drop role ${rlsRole}`);
     await sql.end();
   });

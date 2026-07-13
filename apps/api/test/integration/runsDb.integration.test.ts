@@ -1,3 +1,17 @@
+/**
+ * Product promise:
+ * Skill runs and saved configurations are creator-only, while durable queue leases remain unique
+ * and recoverable across worker failure.
+ *
+ * Regression caught:
+ * A same-tenant admin could read private run state, or two workers could claim the same command.
+ *
+ * Why this test is integrated:
+ * Mocked builders cannot prove forced child-table RLS or PostgreSQL locking and lease semantics.
+ *
+ * Failure proof:
+ * Relaxing a creator policy or a claim/heartbeat owner predicate must fail this suite.
+ */
 import { randomUUID } from "node:crypto";
 import postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -13,10 +27,10 @@ import {
 } from "@companion/core/services";
 import { withTenantContext } from "@companion/db";
 
-const enabled = process.env.RUN_SKILL_DB_INTEGRATION === "1";
-const databaseUrl = process.env.DATABASE_URL ?? "postgres://companion:companion@127.0.0.1:5432/companion";
+const databaseUrl = process.env.DATABASE_URL?.trim();
+if (!databaseUrl) throw new Error("RunSkill integration tests require an explicit disposable DATABASE_URL");
 
-describe.skipIf(!enabled)("RunSkill PostgreSQL security and queue boundary", () => {
+describe("RunSkill PostgreSQL security and queue boundary", () => {
   const sql = postgres(databaseUrl, { max: 8 });
   const suffix = randomUUID();
   const orgA = randomUUID();
@@ -260,6 +274,7 @@ describe.skipIf(!enabled)("RunSkill PostgreSQL security and queue boundary", () 
     `;
 
     await sql.unsafe(`create role ${rlsRole} nologin nosuperuser nobypassrls`);
+    await sql.unsafe(`grant ${rlsRole} to current_user with inherit true, set true`);
     await sql.unsafe(`grant usage on schema public to ${rlsRole}`);
     await sql.unsafe(`grant select, insert, update, delete on all tables in schema public to ${rlsRole}`);
     await sql.unsafe(`grant usage, select on all sequences in schema public to ${rlsRole}`);
@@ -279,6 +294,7 @@ describe.skipIf(!enabled)("RunSkill PostgreSQL security and queue boundary", () 
     await sql`delete from organizations where id in (${orgA}::uuid, ${orgB}::uuid)`;
     await sql`delete from "user" where id in (${owner.id}, ${admin.id}, ${outsider.id}, ${departed.id})`;
     await sql.unsafe(`drop owned by ${rlsRole}`);
+    await sql.unsafe(`revoke ${rlsRole} from current_user`);
     await sql.unsafe(`drop role ${rlsRole}`);
     await sql.end();
   });

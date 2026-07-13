@@ -15,6 +15,8 @@ concurrency:
 
 env:
   DATABASE_URL: postgres://companion:companion@127.0.0.1:5432/companion
+  DATABASE_MIGRATION_URL: postgres://companion:companion@127.0.0.1:5432/companion
+  DATABASE_RUNTIME_URL: postgres://companion_runtime:companion-runtime@127.0.0.1:5432/companion
 
 jobs:
   fast:
@@ -120,6 +122,18 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Create NOBYPASSRLS runtime database role
+        run: |
+          docker run --rm --network host postgres:16-alpine \
+            psql "$DATABASE_MIGRATION_URL" -v ON_ERROR_STOP=1 -c \
+            "DO \$\$ BEGIN
+               IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'companion_runtime') THEN
+                 CREATE ROLE companion_runtime LOGIN PASSWORD 'companion-runtime'
+                   NOSUPERUSER NOBYPASSRLS NOINHERIT;
+               END IF;
+             END \$\$;
+             ALTER ROLE companion_runtime NOSUPERUSER NOBYPASSRLS NOINHERIT;"
+
       - name: Build API
         run: pnpm --filter @companion/api build
 
@@ -166,7 +180,9 @@ jobs:
           docker run --rm companion-api:ci test -f dist/runtime-role-grants.sql
 
           docker run --rm --network host \
-            -e DATABASE_URL="$DATABASE_URL" \
+            -e DATABASE_URL="$DATABASE_RUNTIME_URL" \
+            -e DATABASE_MIGRATION_URL="$DATABASE_MIGRATION_URL" \
+            -e DATABASE_RUNTIME_ROLE=companion_runtime \
             companion-api:ci node dist/migrate.js
 
           worker_id="$(docker run -d -e COMPANION_BILLING_MODE=off companion-worker:ci)"
@@ -183,7 +199,7 @@ jobs:
           api_id="$(docker run -d --network host \
             -e PORT=18082 \
             -e COMPANION_API_HOST=0.0.0.0 \
-            -e DATABASE_URL="$DATABASE_URL" \
+            -e DATABASE_URL="$DATABASE_RUNTIME_URL" \
             -e COMPANION_WEB_URL=http://127.0.0.1:18080 \
             -e COMPANION_API_URL=http://127.0.0.1:18080 \
             -e BETTER_AUTH_URL=http://127.0.0.1:18080 \
@@ -214,11 +230,16 @@ jobs:
           node cli/dist/index.js skills --help
 
       - name: Migrate database
-        run: pnpm db:migrate
+        run: pnpm --filter @companion/api migrate
+        env:
+          DATABASE_URL: ${{ env.DATABASE_RUNTIME_URL }}
+          DATABASE_RUNTIME_ROLE: companion_runtime
 
       - name: Start API and smoke test
         run: |
-          DATABASE_URL="$DATABASE_URL" \
+          DATABASE_URL="$DATABASE_RUNTIME_URL" \
+          DATABASE_MIGRATION_URL="$DATABASE_MIGRATION_URL" \
+          DATABASE_RUNTIME_ROLE=companion_runtime \
           COMPANION_API_PORT=18081 \
           BETTER_AUTH_SECRET=ci-api-smoke-better-auth-secret-with-enough-entropy-for-tests \
           BETTER_AUTH_URL=http://127.0.0.1:18081 \
@@ -273,6 +294,18 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Create NOBYPASSRLS runtime database role
+        run: |
+          docker run --rm --network host postgres:16-alpine \
+            psql "$DATABASE_MIGRATION_URL" -v ON_ERROR_STOP=1 -c \
+            "DO \$\$ BEGIN
+               IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'companion_runtime') THEN
+                 CREATE ROLE companion_runtime LOGIN PASSWORD 'companion-runtime'
+                   NOSUPERUSER NOBYPASSRLS NOINHERIT;
+               END IF;
+             END \$\$;
+             ALTER ROLE companion_runtime NOSUPERUSER NOBYPASSRLS NOINHERIT;"
+
       - name: Build API
         run: pnpm --filter @companion/api build
 
@@ -290,17 +323,15 @@ jobs:
         run: docker compose config
 
       - name: Migrate database
-        run: pnpm db:migrate
+        run: pnpm --filter @companion/api migrate
+        env:
+          DATABASE_URL: ${{ env.DATABASE_RUNTIME_URL }}
+          DATABASE_RUNTIME_ROLE: companion_runtime
 
       - name: Tenant, Skills, and Secrets integration
         run: pnpm test:integration
         env:
           COMPANION_SECRETS_MASTER_KEY: CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk=
-
-      - name: RunSkill database integration
-        run: pnpm --filter @companion/api test -- src/runsDb.integration.test.ts src/preTenantRls.integration.test.ts
-        env:
-          RUN_SKILL_DB_INTEGRATION: "1"
 
       - name: Install Playwright Chromium
         run: pnpm exec playwright install --with-deps chromium
@@ -309,7 +340,8 @@ jobs:
         run: pnpm smoke:rsc
         env:
           CI_USE_GHA_POSTGRES: "1"
-          DATABASE_URL: postgres://companion:companion@127.0.0.1:5432/companion
+          DATABASE_URL: ${{ env.DATABASE_RUNTIME_URL }}
+          DATABASE_RUNTIME_ROLE: companion_runtime
           RUN_PLAYWRIGHT: "1"
 
       - name: Upload RSC smoke logs
