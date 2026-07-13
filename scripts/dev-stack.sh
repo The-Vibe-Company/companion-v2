@@ -92,17 +92,19 @@ configure_conductor_env() {
   WEB_PORT="$(port_at "$base_port" 0)"
   API_PORT="$(port_at "$base_port" 1)"
 
-  export COMPOSE_PROJECT_NAME="$(sanitize_project_name)"
+  COMPOSE_PROJECT_NAME="$(sanitize_project_name)"
+  export COMPOSE_PROJECT_NAME
   export COMPOSE_BIND_HOST="127.0.0.1"
   export COMPANION_WEB_PORT="$WEB_PORT"
   export COMPANION_WEB_HOST="127.0.0.1"
   export COMPANION_API_PORT="$API_PORT"
   export COMPANION_API_HOST="127.0.0.1"
-  export POSTGRES_PORT="$(port_at "$base_port" 2)"
-  export MINIO_PORT="$(port_at "$base_port" 3)"
-  export MINIO_CONSOLE_PORT="$(port_at "$base_port" 4)"
-  export MAILPIT_SMTP_PORT="$(port_at "$base_port" 5)"
-  export MAILPIT_WEB_PORT="$(port_at "$base_port" 6)"
+  POSTGRES_PORT="$(port_at "$base_port" 2)"
+  MINIO_PORT="$(port_at "$base_port" 3)"
+  MINIO_CONSOLE_PORT="$(port_at "$base_port" 4)"
+  MAILPIT_SMTP_PORT="$(port_at "$base_port" 5)"
+  MAILPIT_WEB_PORT="$(port_at "$base_port" 6)"
+  export POSTGRES_PORT MINIO_PORT MINIO_CONSOLE_PORT MAILPIT_SMTP_PORT MAILPIT_WEB_PORT
 
   export DATABASE_URL="postgres://companion:companion@127.0.0.1:${POSTGRES_PORT}/companion"
   export COMPANION_API_URL="http://${COMPANION_API_HOST}:${API_PORT}"
@@ -199,7 +201,8 @@ ensure_local_secrets_master_key() {
     node -e "process.stdout.write(require('crypto').randomBytes(32).toString('base64'))" >"$key_file"
   fi
   chmod 600 "$key_file"
-  export COMPANION_SECRETS_MASTER_KEY="$(cat "$key_file")"
+  COMPANION_SECRETS_MASTER_KEY="$(cat "$key_file")"
+  export COMPANION_SECRETS_MASTER_KEY
 }
 
 should_use_derived_value() {
@@ -255,7 +258,7 @@ is_dev_process_group() {
 
   command="$(ps -o command= -p "$pgid" 2>/dev/null || true)"
   case "$command" in
-    *"pnpm"*"dev"*|*"pnpm"*"dev:app"*|*"concurrently"*)
+    *"pnpm"*"dev:app"*|*"pnpm"*"dev"*|*"concurrently"*)
       return 0
       ;;
     *)
@@ -270,6 +273,7 @@ stop_port_listeners() {
   local pids
   local repo_pids=""
   local foreign_pids=""
+  local -a repo_pid_array
 
   if ! command -v lsof >/dev/null 2>&1; then
     log "lsof is unavailable; skipping cleanup for port ${port}"
@@ -295,9 +299,10 @@ stop_port_listeners() {
     exit 1
   fi
 
-  repo_pids="$(printf '%s\n' $repo_pids | sort -u | tr '\n' ' ')"
+  repo_pids="$(printf '%s' "$repo_pids" | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ')"
+  read -r -a repo_pid_array <<< "$repo_pids"
   log "Stopping existing repo process group for port ${port}: ${repo_pids}"
-  kill -TERM -- $repo_pids 2>/dev/null || true
+  kill -TERM -- "${repo_pid_array[@]}" 2>/dev/null || true
 
   for _ in $(seq 1 20); do
     sleep 0.1
@@ -323,9 +328,10 @@ stop_port_listeners() {
     exit 1
   fi
 
-  repo_pids="$(printf '%s\n' $repo_pids | sort -u | tr '\n' ' ')"
+  repo_pids="$(printf '%s' "$repo_pids" | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ')"
+  read -r -a repo_pid_array <<< "$repo_pids"
   log "Force stopping repo process group still listening on port ${port}: ${repo_pids}"
-  kill -KILL -- $repo_pids 2>/dev/null || true
+  kill -KILL -- "${repo_pid_array[@]}" 2>/dev/null || true
 
   sleep 0.1
   pids="$(listener_pids_for_port "$port" "$host")"

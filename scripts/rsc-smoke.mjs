@@ -53,14 +53,15 @@ async function requestUrl(url, init = {}) {
 }
 
 function assertNoDigest(path, body) {
-  // The React prod error digest serializes as a `digest` JSON key (escaped `\"digest\":` in the
-  // flight stream) and the error UI says "Application error". Match those precisely — a bare
-  // `\bdigest\b` also matches legitimate page content like the "email-digest" skill slug.
-  const markers = [/Application error/i, /Server Components render/i, /\\?"digest\\?":/i];
+  // A real React production error digest has an alphanumeric value. Next also emits
+  // `"digest":"$undefined"` in healthy metadata records, so do not treat the key alone as an error.
+  const markers = [/Application error/i, /Server Components render/i, /\\?"digest\\?":\\?"[a-z0-9]/i];
   for (const marker of markers) {
-    if (marker.test(body)) {
-      fail(`${path} rendered a production server-component error marker: ${marker}`);
-    }
+    const match = marker.exec(body);
+    if (!match) continue;
+    const start = Math.max(0, match.index - 160);
+    const context = body.slice(start, match.index + match[0].length + 240).replace(/\s+/g, " ");
+    fail(`${path} rendered a production server-component error marker: ${marker}; context: ${context}`);
   }
 }
 

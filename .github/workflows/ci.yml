@@ -4,235 +4,227 @@ on:
   pull_request:
   push:
     branches: [main]
+  merge_group:
+    types: [checks_requested]
+  schedule:
+    - cron: "17 3 * * 1"
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.event.merge_group.head_sha || github.ref }}
   cancel-in-progress: true
 
 env:
   DATABASE_URL: postgres://companion:companion@127.0.0.1:5432/companion
 
 jobs:
-  fast:
-    name: Fast checks (Node ${{ matrix.node-version }})
+  scope:
+    name: Scope
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: true
-      matrix:
-        node-version: [20, 22]
+    timeout-minutes: 5
+    outputs:
+      docs: ${{ steps.scope.outputs.docs }}
+      design: ${{ steps.scope.outputs.design }}
+      quality: ${{ steps.scope.outputs.quality }}
+      database: ${{ steps.scope.outputs.database }}
+      browser: ${{ steps.scope.outputs.browser }}
+      containers: ${{ steps.scope.outputs.containers }}
+      dependencies: ${{ steps.scope.outputs.dependencies }}
+      skill: ${{ steps.scope.outputs.skill }}
+      full: ${{ steps.scope.outputs.full }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Classify change risk
+        id: scope
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: >-
+          node scripts/ci-scope.mjs
+          --event "$EVENT_NAME"
+          --base "${BASE_SHA:-$GITHUB_SHA}"
+          --head "${HEAD_SHA:-$GITHUB_SHA}"
+          --github-output "$GITHUB_OUTPUT"
+
+  hygiene:
+    name: Hygiene
+    runs-on: ubuntu-latest
+    needs: scope
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Test CI scope classifier
+        run: node --test scripts/ci-scope.test.mjs scripts/ci-playwright-policy.test.mjs
+
+      - name: Validate GitHub Actions workflows
+        run: >-
+          docker run --rm
+          --volume "$PWD:/repo"
+          --workdir /repo
+          rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
+          -color
+
+      - name: Validate shell scripts
+        run: git ls-files -z '*.sh' | xargs -0 shellcheck
+
+      - name: Scan changed history for secrets
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          MERGE_BASE: ${{ github.event.merge_group.base_sha }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          case "$EVENT_NAME" in
+            schedule|workflow_dispatch) log_opts="$GITHUB_SHA" ;;
+            pull_request) log_opts="${PR_BASE}..${PR_HEAD}" ;;
+            merge_group) log_opts="${MERGE_BASE}..${GITHUB_SHA}" ;;
+            push)
+              if [[ "$BEFORE_SHA" =~ ^0+$ ]]; then log_opts="${GITHUB_SHA}^..${GITHUB_SHA}"; else log_opts="${BEFORE_SHA}..${GITHUB_SHA}"; fi
+              ;;
+            *) log_opts="${GITHUB_SHA}^..${GITHUB_SHA}" ;;
+          esac
+          docker run --rm \
+            --volume "$PWD:/repo" \
+            --workdir /repo \
+            zricethezav/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f \
+            detect --source . --redact --no-banner --log-opts="$log_opts"
+
+      - name: Set up pnpm
+        if: needs.scope.outputs.skill == 'true' || needs.scope.outputs.design == 'true'
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+
+      - name: Set up Node.js
+        if: needs.scope.outputs.skill == 'true' || needs.scope.outputs.design == 'true'
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+
+      - name: Check bundled Companion skill version
+        if: needs.scope.outputs.skill == 'true'
+        run: pnpm --filter @companion/companion-skill check:version-bump
+
+      - name: Set up Python
+        if: needs.scope.outputs.skill == 'true'
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Test bundled Companion skill guards
+        if: needs.scope.outputs.skill == 'true'
+        run: python -m unittest discover -s packages/companion-skill/skill/scripts -p 'test_*.py'
+
+      - name: Validate DESIGN.md
+        if: needs.scope.outputs.design == 'true'
+        run: pnpm design:lint
+
+  quality:
+    name: Quality Node 22
+    runs-on: ubuntu-latest
+    needs: scope
+    if: needs.scope.outputs.quality == 'true'
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
 
       - name: Set up pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ matrix.node-version }}
-          cache: pnpm
-
-      - name: Restore Turbo cache
-        uses: actions/cache@v4
-        with:
-          path: .turbo
-          key: turbo-${{ runner.os }}-${{ matrix.node-version }}-${{ hashFiles('pnpm-lock.yaml') }}-${{ github.sha }}
-          restore-keys: |
-            turbo-${{ runner.os }}-${{ matrix.node-version }}-${{ hashFiles('pnpm-lock.yaml') }}-
-            turbo-${{ runner.os }}-${{ matrix.node-version }}-
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Check bundled Companion skill version
-        run: pnpm --filter @companion/companion-skill check:version-bump
-
-      - name: Set up Python
-        if: matrix.node-version == 22
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Companion skill guard tests (Python)
-        if: matrix.node-version == 22
-        run: python -m unittest discover -s packages/companion-skill/skill/scripts -p 'test_*.py'
-
-      - name: Typecheck
-        run: pnpm -r typecheck
-
-      - name: Test
-        run: pnpm -r test
-
-      - name: Lint
-        run: pnpm lint
-
-      - name: Audit dependencies
-        run: pnpm audit --audit-level=high
-        continue-on-error: true
-
-  build:
-    name: Build and API smoke (Node 22)
-    runs-on: ubuntu-latest
-    needs: fast
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_USER: companion
-          POSTGRES_PASSWORD: companion
-          POSTGRES_DB: companion
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U companion -d companion"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 20
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up pnpm
-        uses: pnpm/action-setup@v4
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           cache: pnpm
 
-      - name: Restore Turbo cache
-        uses: actions/cache@v4
+      - name: Restore quality cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: .turbo
-          key: turbo-${{ runner.os }}-22-${{ hashFiles('pnpm-lock.yaml') }}-${{ github.sha }}
+          key: turbo-quality-${{ runner.os }}-22-${{ hashFiles('pnpm-lock.yaml') }}-${{ github.sha }}-${{ github.run_attempt }}
           restore-keys: |
-            turbo-${{ runner.os }}-22-${{ hashFiles('pnpm-lock.yaml') }}-
-            turbo-${{ runner.os }}-22-
+            turbo-quality-${{ runner.os }}-22-${{ hashFiles('pnpm-lock.yaml') }}-
+            turbo-quality-${{ runner.os }}-22-
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Build API
-        run: pnpm --filter @companion/api build
+      - name: Run affected quality checks
+        if: github.event_name == 'pull_request' && needs.scope.outputs.full != 'true'
+        run: pnpm exec turbo run lint typecheck test --affected --continue=dependencies-successful --output-logs=errors-only
 
-      - name: Build web
-        run: pnpm --filter @companion/web build
-        env:
-          COMPANION_API_URL: http://127.0.0.1:13301
-          COMPANION_WEB_URL: http://127.0.0.1:13300
-          BETTER_AUTH_URL: http://127.0.0.1:13301
-          NEXT_PUBLIC_COMPANION_API_URL: http://127.0.0.1:13301
-          NEXT_PUBLIC_SUPABASE_URL: http://127.0.0.1:54321
-          NEXT_PUBLIC_SUPABASE_ANON_KEY: ci-placeholder-anon-key
+      - name: Run full quality checks
+        if: github.event_name != 'pull_request' || needs.scope.outputs.full == 'true'
+        run: pnpm ci:quality --output-logs=errors-only
 
-      - name: Build CLI
-        run: pnpm --filter @companion/cli build
+  application-build:
+    name: Application Build
+    runs-on: ubuntu-latest
+    needs: scope
+    if: needs.scope.outputs.quality == 'true'
+    timeout-minutes: 15
+    env:
+      COMPANION_API_URL: http://127.0.0.1:13301
+      COMPANION_WEB_URL: http://127.0.0.1:13300
+      BETTER_AUTH_URL: http://127.0.0.1:13301
+      NEXT_PUBLIC_COMPANION_API_URL: http://127.0.0.1:13301
+      NEXT_PUBLIC_COMPANION_API_BASE: http://127.0.0.1:13300/v1
+      NEXT_PUBLIC_SUPABASE_URL: http://127.0.0.1:54321
+      NEXT_PUBLIC_SUPABASE_ANON_KEY: ci-placeholder-anon-key
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      - name: Build Railway Docker images
-        run: |
-          docker build \
-            --file deploy/railway/Dockerfile.backend \
-            --build-arg RAILWAY_SERVICE_NAME=api \
-            --tag companion-api:ci \
-            .
-          docker build \
-            --file deploy/railway/Dockerfile.backend \
-            --build-arg RAILWAY_SERVICE_NAME=worker \
-            --tag companion-worker:ci \
-            .
-          docker build \
-            --file deploy/railway/Dockerfile.web \
-            --build-arg COMPANION_API_URL=http://127.0.0.1:18082 \
-            --build-arg COMPANION_WEB_URL=http://127.0.0.1:18080 \
-            --build-arg NEXT_PUBLIC_COMPANION_API_BASE=http://127.0.0.1:18080/v1 \
-            --tag companion-web:ci \
-            .
+      - name: Set up pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
 
-      - name: Smoke Railway Docker images
-        run: |
-          set -euo pipefail
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: pnpm
 
-          for image in companion-api:ci companion-worker:ci companion-web:ci; do
-            test "$(docker image inspect --format '{{.Config.User}}' "$image")" = "node"
-          done
+      - name: Restore application build cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: .turbo
+          key: turbo-build-${{ runner.os }}-22-${{ hashFiles('pnpm-lock.yaml') }}-${{ github.sha }}-${{ github.run_attempt }}
+          restore-keys: |
+            turbo-build-${{ runner.os }}-22-${{ hashFiles('pnpm-lock.yaml') }}-
+            turbo-build-${{ runner.os }}-22-
 
-          docker run --rm --network host \
-            -e DATABASE_URL="$DATABASE_URL" \
-            companion-api:ci node dist/migrate.js
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
 
-          worker_id="$(docker run -d -e COMPANION_BILLING_MODE=off companion-worker:ci)"
-          api_id=""
-          web_id=""
-          cleanup() {
-            docker rm -f "$web_id" "$api_id" "$worker_id" >/dev/null 2>&1 || true
-          }
-          trap cleanup EXIT
-
-          sleep 2
-          test "$(docker inspect --format '{{.State.Running}}' "$worker_id")" = "true"
-
-          api_id="$(docker run -d --network host \
-            -e PORT=18082 \
-            -e COMPANION_API_HOST=0.0.0.0 \
-            -e DATABASE_URL="$DATABASE_URL" \
-            -e COMPANION_WEB_URL=http://127.0.0.1:18080 \
-            -e COMPANION_API_URL=http://127.0.0.1:18080 \
-            -e BETTER_AUTH_URL=http://127.0.0.1:18080 \
-            -e BETTER_AUTH_SECRET=ci-railway-smoke-better-auth-secret-with-enough-entropy \
-            -e EMAIL_PROVIDER=log \
-            companion-api:ci)"
-
-          for _ in $(seq 1 30); do
-            if curl -fsS http://127.0.0.1:18082/health >/dev/null; then break; fi
-            sleep 1
-          done
-          curl -fsS http://127.0.0.1:18082/health
-
-          web_id="$(docker run -d --network host \
-            -e PORT=18080 \
-            -e HOSTNAME=0.0.0.0 \
-            companion-web:ci)"
-
-          for _ in $(seq 1 30); do
-            if curl -fsS http://127.0.0.1:18080/login >/dev/null; then break; fi
-            sleep 1
-          done
-          curl -fsS http://127.0.0.1:18080/login >/dev/null
+      - name: Build applications
+        run: pnpm exec turbo run build --output-logs=errors-only
 
       - name: Smoke CLI
         run: |
           node cli/dist/index.js --version
           node cli/dist/index.js skills --help
 
-      - name: Migrate database
-        run: pnpm db:migrate
-
-      - name: Start API and smoke test
-        run: |
-          DATABASE_URL="$DATABASE_URL" \
-          COMPANION_API_PORT=18081 \
-          BETTER_AUTH_SECRET=ci-api-smoke-better-auth-secret-with-enough-entropy-for-tests \
-          BETTER_AUTH_URL=http://127.0.0.1:18081 \
-          COMPANION_API_URL=http://127.0.0.1:18081 \
-          pnpm --filter @companion/api start &
-          api_pid=$!
-          trap 'kill "$api_pid" 2>/dev/null || true' EXIT
-          bash scripts/ci-api-smoke.sh
-        env:
-          COMPANION_API_URL: http://127.0.0.1:18081
-
-  integration:
-    name: Integration smoke (Node 22)
+  database-integration:
+    name: Database Integration
     runs-on: ubuntu-latest
-    needs: build
+    needs: scope
+    if: needs.scope.outputs.database == 'true'
+    timeout-minutes: 15
     services:
       postgres:
         image: postgres:16-alpine
@@ -249,70 +241,311 @@ jobs:
           --health-retries 20
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Set up pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           cache: pnpm
 
-      - name: Restore Turbo cache
-        uses: actions/cache@v4
-        with:
-          path: .turbo
-          key: turbo-${{ runner.os }}-22-${{ hashFiles('pnpm-lock.yaml') }}-${{ github.sha }}
-          restore-keys: |
-            turbo-${{ runner.os }}-22-${{ hashFiles('pnpm-lock.yaml') }}-
-            turbo-${{ runner.os }}-22-
-
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Build API
-        run: pnpm --filter @companion/api build
-
-      - name: Build web
-        run: pnpm --filter @companion/web build
-        env:
-          COMPANION_API_URL: http://127.0.0.1:13301
-          COMPANION_WEB_URL: http://127.0.0.1:13300
-          BETTER_AUTH_URL: http://127.0.0.1:13301
-          NEXT_PUBLIC_COMPANION_API_URL: http://127.0.0.1:13301
-          NEXT_PUBLIC_SUPABASE_URL: http://127.0.0.1:54321
-          NEXT_PUBLIC_SUPABASE_ANON_KEY: ci-placeholder-anon-key
-
-      - name: Validate Docker Compose
-        run: docker compose config
-
-      - name: Migrate database
+      - name: Apply migrations
         run: pnpm db:migrate
 
-      - name: Tenant, Skills, and Secrets integration
+      - name: Test tenant, Skills, labels, secrets, and RLS
         run: pnpm test:integration
         env:
           COMPANION_SECRETS_MASTER_KEY: CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk=
 
-      - name: Install Playwright Chromium
-        run: pnpm exec playwright install --with-deps chromium
-
-      - name: RSC smoke and critical browser flows
-        run: pnpm smoke:rsc
+  railway-containers:
+    name: Railway Containers
+    runs-on: ubuntu-latest
+    needs: scope
+    if: needs.scope.outputs.containers == 'true'
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16-alpine
         env:
-          CI_USE_GHA_POSTGRES: "1"
-          DATABASE_URL: postgres://companion:companion@127.0.0.1:5432/companion
-          RUN_PLAYWRIGHT: "1"
+          POSTGRES_USER: companion
+          POSTGRES_PASSWORD: companion
+          POSTGRES_DB: companion
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U companion -d companion"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      - name: Upload RSC smoke logs
-        if: failure()
-        uses: actions/upload-artifact@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Build API image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
-          name: rsc-smoke-logs
+          context: .
+          file: deploy/railway/Dockerfile.backend
+          build-args: RAILWAY_SERVICE_NAME=api
+          tags: companion-api:ci
+          load: true
+          cache-from: type=gha,scope=railway-api
+          cache-to: type=gha,mode=max,scope=railway-api
+
+      - name: Build worker image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: deploy/railway/Dockerfile.backend
+          build-args: RAILWAY_SERVICE_NAME=worker
+          tags: companion-worker:ci
+          load: true
+          cache-from: type=gha,scope=railway-worker
+          cache-to: type=gha,mode=max,scope=railway-worker
+
+      - name: Build web image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: deploy/railway/Dockerfile.web
+          build-args: |
+            COMPANION_API_URL=http://127.0.0.1:18082
+            COMPANION_WEB_URL=http://127.0.0.1:18080
+            NEXT_PUBLIC_COMPANION_API_BASE=http://127.0.0.1:18080/v1
+          tags: companion-web:ci
+          load: true
+          cache-from: type=gha,scope=railway-web
+          cache-to: type=gha,mode=max,scope=railway-web
+
+      - name: Smoke Railway images
+        run: bash scripts/ci-container-smoke.sh
+
+  browser:
+    name: Browser Critical Flows
+    runs-on: ubuntu-latest
+    needs: [scope, application-build]
+    if: >-
+      always() &&
+      needs.scope.result == 'success' &&
+      needs.application-build.result == 'success' &&
+      needs.scope.outputs.browser == 'true'
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: companion
+          POSTGRES_PASSWORD: companion
+          POSTGRES_DB: companion
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U companion -d companion"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      CI_USE_GHA_POSTGRES: "1"
+      COMPANION_API_URL: http://127.0.0.1:13301
+      COMPANION_WEB_URL: http://127.0.0.1:13300
+      BETTER_AUTH_URL: http://127.0.0.1:13301
+      NEXT_PUBLIC_COMPANION_API_URL: http://127.0.0.1:13301
+      NEXT_PUBLIC_COMPANION_API_BASE: http://127.0.0.1:13300/v1
+      NEXT_PUBLIC_SUPABASE_URL: http://127.0.0.1:54321
+      NEXT_PUBLIC_SUPABASE_ANON_KEY: ci-placeholder-anon-key
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Restore application build outputs
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: .turbo
+          key: turbo-build-${{ runner.os }}-22-${{ hashFiles('pnpm-lock.yaml') }}-${{ github.sha }}-${{ github.run_attempt }}
+          fail-on-cache-miss: true
+
+      - name: Restore Playwright Chromium
+        id: playwright-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-1.61.1-chromium
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Hydrate application build outputs
+        run: pnpm exec turbo run build --output-logs=errors-only
+
+      - name: Install Chromium system dependencies
+        run: pnpm exec playwright install-deps chromium
+
+      - name: Install Chromium
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: pnpm exec playwright install chromium
+
+      - name: Start browser test stack
+        run: bash scripts/ci-rsc-smoke.sh start
+
+      - name: RSC smoke
+        run: bash scripts/ci-rsc-smoke.sh rsc
+
+      - name: Critical Playwright flows
+        run: bash scripts/ci-rsc-smoke.sh e2e
+
+      - name: Stop browser test stack
+        if: always()
+        run: bash scripts/ci-rsc-smoke.sh stop
+
+      - name: Upload browser failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: browser-smoke-logs
           path: |
             .context/rsc-smoke/
             playwright-report/
             test-results/
           if-no-files-found: ignore
+
+  dependency-audit:
+    name: Dependency Audit
+    runs-on: ubuntu-latest
+    needs: scope
+    if: needs.scope.outputs.dependencies == 'true'
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+
+      - name: Audit production dependencies
+        run: pnpm audit --prod --audit-level=high
+
+  compatibility-node20:
+    name: Compatibility Node 20
+    runs-on: ubuntu-latest
+    needs: scope
+    if: github.event_name == 'push' || github.event_name == 'schedule'
+    timeout-minutes: 20
+    env:
+      COMPANION_API_URL: http://127.0.0.1:13301
+      COMPANION_WEB_URL: http://127.0.0.1:13300
+      BETTER_AUTH_URL: http://127.0.0.1:13301
+      NEXT_PUBLIC_COMPANION_API_URL: http://127.0.0.1:13301
+      NEXT_PUBLIC_COMPANION_API_BASE: http://127.0.0.1:13300/v1
+      NEXT_PUBLIC_SUPABASE_URL: http://127.0.0.1:54321
+      NEXT_PUBLIC_SUPABASE_ANON_KEY: ci-placeholder-anon-key
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Restore Node 20 cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: .turbo
+          key: turbo-node20-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}-${{ github.sha }}-${{ github.run_attempt }}
+          restore-keys: turbo-node20-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}-
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify Node 20 compatibility
+        run: pnpm exec turbo run lint typecheck test build --continue=dependencies-successful --output-logs=errors-only
+
+  coverage:
+    name: Diagnostic Coverage
+    runs-on: ubuntu-latest
+    needs: scope
+    if: github.event_name == 'schedule'
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate diagnostic coverage
+        run: pnpm test:coverage --output-logs=errors-only
+
+      - name: Upload coverage summaries
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: diagnostic-coverage
+          path: '**/coverage/coverage-summary.json'
+          if-no-files-found: error
+
+  gate:
+    name: CI Gate
+    runs-on: ubuntu-latest
+    if: always()
+    needs:
+      - scope
+      - hygiene
+      - quality
+      - application-build
+      - database-integration
+      - railway-containers
+      - browser
+      - dependency-audit
+      - compatibility-node20
+      - coverage
+    timeout-minutes: 5
+    steps:
+      - name: Verify required jobs
+        env:
+          JOB_RESULTS: ${{ toJSON(needs) }}
+        run: |
+          node <<'NODE'
+          const jobs = JSON.parse(process.env.JOB_RESULTS);
+          const bad = Object.entries(jobs).filter(([, job]) => !["success", "skipped"].includes(job.result));
+          if (bad.length) {
+            console.error("CI Gate rejected:", bad.map(([name, job]) => `${name}=${job.result}`).join(", "));
+            process.exit(1);
+          }
+          console.log("CI Gate accepted all required and intentionally skipped jobs.");
+          NODE

@@ -11,12 +11,13 @@
     "start": "node dist/migrate.js && node dist/index.js",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json",
     "test": "vitest run",
+    "coverage": "vitest run --coverage --coverage.reporter=text-summary --coverage.reporter=json-summary",
     "test:integration": "COMPANION_INTEGRATION_TESTS=1 vitest run --config vitest.integration.config.ts --exclude test/integration/rls.integration.test.ts && COMPANION_INTEGRATION_TESTS=1 COMPANION_DATABASE_POOL_MAX=1 vitest run --config vitest.integration.config.ts test/integration/rls.integration.test.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.744.0",
     "@aws-sdk/s3-request-presigner": "^3.744.0",
-    "@better-auth/drizzle-adapter": "^1.6.4",
+    "@better-auth/drizzle-adapter": "^1.6.23",
     "@companion/auth": "workspace:*",
     "@companion/billing": "workspace:*",
     "@companion/companion-skill": "workspace:*",
@@ -28,10 +29,10 @@
     "@companion/storage": "workspace:*",
     "@hono/node-server": "^1.18.2",
     "@trpc/server": "^10.45.2",
-    "better-auth": "^1.6.4",
-    "drizzle-orm": "^0.38.4",
+    "better-auth": "^1.6.23",
+    "drizzle-orm": "^0.45.2",
     "fflate": "^0.8.2",
-    "hono": "^4.10.3",
+    "hono": "^4.12.30",
     "postgres": "^3.4.5",
     "resend": "^6.5.1",
     "stripe": "^18.5.0",
@@ -44,6 +45,6 @@
     "tsup": "^8.3.5",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
-    "vitest": "^2.1.8"
+    "vitest": "3.2.7"
   }
 }

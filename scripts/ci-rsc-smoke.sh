@@ -4,7 +4,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+MODE="${1:-all}"
 LOG_DIR="${RSC_SMOKE_LOG_DIR:-$ROOT/.context/rsc-smoke}"
+API_PID_FILE="$LOG_DIR/api.pid"
+WEB_PID_FILE="$LOG_DIR/web.pid"
 mkdir -p "$LOG_DIR"
 
 export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-companion-ci-rsc}"
@@ -13,10 +16,10 @@ export COMPOSE_BIND_HOST="${COMPOSE_BIND_HOST:-127.0.0.1}"
 if [ -n "${CI_USE_GHA_POSTGRES:-}" ]; then
   export POSTGRES_PORT="${POSTGRES_PORT:-5432}"
   export DATABASE_URL="${DATABASE_URL:-postgres://companion:companion@127.0.0.1:${POSTGRES_PORT}/companion}"
-  COMPOSE_SERVICES="minio mailpit"
+  COMPOSE_SERVICES=(minio mailpit)
 else
   export POSTGRES_PORT="${POSTGRES_PORT:-15432}"
-  COMPOSE_SERVICES="postgres minio mailpit"
+  COMPOSE_SERVICES=(postgres minio mailpit)
 fi
 export MINIO_PORT="${MINIO_PORT:-19000}"
 export MINIO_CONSOLE_PORT="${MINIO_CONSOLE_PORT:-19001}"
@@ -47,25 +50,37 @@ export MAILPIT_SMTP_HOST="${MAILPIT_SMTP_HOST:-127.0.0.1}"
 export COMPANION_SECRETS_MASTER_KEY="${COMPANION_SECRETS_MASTER_KEY:-CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk=}"
 export APP_URL="$COMPANION_WEB_URL"
 
-api_pid=""
-web_pid=""
-
 log() {
   printf '[ci-rsc-smoke] %s\n' "$*"
 }
 
-cleanup() {
-  if [ -n "$web_pid" ]; then
-    kill "$web_pid" >/dev/null 2>&1 || true
-    wait "$web_pid" >/dev/null 2>&1 || true
+stop_pid_file() {
+  local file="$1"
+  local pid
+  if [ ! -f "$file" ]; then
+    return
   fi
-  if [ -n "$api_pid" ]; then
-    kill "$api_pid" >/dev/null 2>&1 || true
-    wait "$api_pid" >/dev/null 2>&1 || true
+  pid="$(cat "$file")"
+  if kill -0 "$pid" >/dev/null 2>&1; then
+    pkill -TERM -P "$pid" >/dev/null 2>&1 || true
+    kill "$pid" >/dev/null 2>&1 || true
+    for _ in $(seq 1 20); do
+      if ! kill -0 "$pid" >/dev/null 2>&1; then
+        break
+      fi
+      sleep 0.1
+    done
+    pkill -KILL -P "$pid" >/dev/null 2>&1 || true
+    kill -KILL "$pid" >/dev/null 2>&1 || true
   fi
+  rm -f "$file"
+}
+
+stop_stack() {
+  stop_pid_file "$WEB_PID_FILE"
+  stop_pid_file "$API_PID_FILE"
   docker compose -p "$COMPOSE_PROJECT_NAME" down -v --remove-orphans >/dev/null 2>&1 || true
 }
-trap cleanup EXIT
 
 wait_for_url() {
   local url="$1"
@@ -77,46 +92,73 @@ wait_for_url() {
     sleep 1
   done
   log "$name did not become ready at $url"
-  if [ -f "$LOG_DIR/api.log" ]; then
-    sed -n '1,220p' "$LOG_DIR/api.log" >&2 || true
-  fi
-  if [ -f "$LOG_DIR/web.log" ]; then
-    sed -n '1,220p' "$LOG_DIR/web.log" >&2 || true
-  fi
-  exit 1
+  sed -n '1,220p' "$LOG_DIR/api.log" >&2 2>/dev/null || true
+  sed -n '1,220p' "$LOG_DIR/web.log" >&2 2>/dev/null || true
+  return 1
 }
 
-if [ -n "${CI_USE_GHA_POSTGRES:-}" ]; then
-  log "Starting Docker services (minio, mailpit) — using external Postgres at $DATABASE_URL"
-else
-  log "Starting isolated Docker services (postgres, minio, mailpit)"
-fi
-docker compose -p "$COMPOSE_PROJECT_NAME" down -v --remove-orphans >/dev/null 2>&1 || true
-# shellcheck disable=SC2086
-docker compose -p "$COMPOSE_PROJECT_NAME" up -d --wait $COMPOSE_SERVICES
-docker compose -p "$COMPOSE_PROJECT_NAME" up -d minio-init
+start_stack() {
+  stop_stack
+  if [ -n "${CI_USE_GHA_POSTGRES:-}" ]; then
+    log "Starting Docker services (minio, mailpit) — using external Postgres at $DATABASE_URL"
+  else
+    log "Starting isolated Docker services (postgres, minio, mailpit)"
+  fi
+  docker compose -p "$COMPOSE_PROJECT_NAME" up -d --wait "${COMPOSE_SERVICES[@]}"
+  docker compose -p "$COMPOSE_PROJECT_NAME" up -d minio-init
 
-log "Applying migrations and seeding test user"
-NODE_ENV=development pnpm db:migrate
-NODE_ENV=development pnpm --filter @companion/api seed:test-user
+  log "Applying migrations and seeding test user"
+  NODE_ENV=development pnpm db:migrate
+  NODE_ENV=development pnpm --filter @companion/api seed:test-user
 
-log "Starting built API"
-NODE_ENV=production pnpm --filter @companion/api start >"$LOG_DIR/api.log" 2>&1 &
-api_pid="$!"
-wait_for_url "$COMPANION_API_URL/health" "API"
+  log "Starting built API"
+  NODE_ENV=production pnpm --filter @companion/api start >"$LOG_DIR/api.log" 2>&1 < /dev/null &
+  printf '%s\n' "$!" >"$API_PID_FILE"
+  wait_for_url "$COMPANION_API_URL/health" "API"
 
-log "Starting built web"
-(
-  cd apps/web
-  NODE_ENV=production pnpm start --hostname "$COMPANION_WEB_HOST" --port "$COMPANION_WEB_PORT"
-) >"$LOG_DIR/web.log" 2>&1 &
-web_pid="$!"
-wait_for_url "$COMPANION_WEB_URL/login" "web"
+  log "Starting built web"
+  (
+    cd apps/web
+    NODE_ENV=production exec pnpm start --hostname "$COMPANION_WEB_HOST" --port "$COMPANION_WEB_PORT"
+  ) >"$LOG_DIR/web.log" 2>&1 < /dev/null &
+  printf '%s\n' "$!" >"$WEB_PID_FILE"
+  wait_for_url "$COMPANION_WEB_URL/login" "web"
+}
 
-log "Running RSC smoke"
-node scripts/rsc-smoke.mjs
-if [ "${RUN_PLAYWRIGHT:-0}" = "1" ]; then
+run_rsc() {
+  log "Running RSC smoke"
+  node scripts/rsc-smoke.mjs
+}
+
+run_e2e() {
   log "Running critical browser flows"
   pnpm test:e2e
-fi
-log "OK"
+}
+
+case "$MODE" in
+  start)
+    start_stack
+    ;;
+  rsc)
+    run_rsc
+    ;;
+  e2e)
+    run_e2e
+    ;;
+  stop)
+    stop_stack
+    ;;
+  all)
+    trap stop_stack EXIT
+    start_stack
+    run_rsc
+    if [ "${RUN_PLAYWRIGHT:-0}" = "1" ]; then
+      run_e2e
+    fi
+    log "OK"
+    ;;
+  *)
+    printf 'Usage: %s [start|rsc|e2e|stop|all]\n' "$0" >&2
+    exit 2
+    ;;
+esac

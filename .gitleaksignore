@@ -1,0 +1,8 @@
+# Audited false positives already present on main before Gitleaks enforcement.
+# Keep these fingerprint-specific so new findings in the same files still fail CI.
+25bf7103b34a09e003eba641a886d80f59b94657:packages/companion-skill/skill/reference/api.md:generic-api-key:169
+25bf7103b34a09e003eba641a886d80f59b94657:packages/companion-skill/skill/scripts/test_secrets_runtime.py:generic-api-key:43
+25bf7103b34a09e003eba641a886d80f59b94657:packages/contracts/test/secrets.test.ts:generic-api-key:58
+25bf7103b34a09e003eba641a886d80f59b94657:packages/core/test/secretsCrypto.test.ts:generic-api-key:14
+4203f12bcacf654811c94ca319bbae501271486f:apps/api/src/skillListRoute.test.ts:generic-api-key:188
+9bbff31672ee93b60a6cb6cda7ff41c87ffd0f57:CLAUDE.md:generic-api-key:70

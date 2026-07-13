@@ -220,6 +220,7 @@ is_repo_pid() {
 
 free_port() {
   local port="$1" label="$2" pids pid repo_pids="" foreign_pids="" waited=0
+  local -a repo_pid_array
   is_port_open "$port" || return 0
   pids="$(lsof -ti :"$port" 2>/dev/null || true)"
   if [ -z "$pids" ]; then
@@ -239,10 +240,11 @@ free_port() {
   fi
 
   warn "$label port $port busy (our PID ${repo_pids}) — terminating stale process"
-  kill ${repo_pids} 2>/dev/null || true
+  read -r -a repo_pid_array <<< "$repo_pids"
+  kill "${repo_pid_array[@]}" 2>/dev/null || true
   while [ "$waited" -lt 3 ] && is_port_open "$port"; do sleep 1; waited=$((waited + 1)); done
   if is_port_open "$port"; then
-    kill -9 ${repo_pids} 2>/dev/null || true
+    kill -9 "${repo_pid_array[@]}" 2>/dev/null || true
     sleep 1
   fi
   is_port_open "$port" && die "Port $port still busy after stopping our process. Manual kill: lsof -ti :$port | xargs kill -9"

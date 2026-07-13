@@ -7,7 +7,7 @@
 Self-hostable, multi-tenant control plane to **deploy**, **govern**, and **share** AI agents,
 curated containers, and skills across your organization — with permissions from day one.
 
-[Vision](docs/vision.md) · [Product](docs/product.md) · [Architecture](docs/design.md) · [PRD](docs/PRD.md) · [Contributing](CLAUDE.md)
+[Vision](docs/vision.md) · [Product](docs/product.md) · [Architecture](docs/design.md) · [PRD](docs/PRD.md) · [Contributing](CONTRIBUTING.md)
 
 `MIT licensed` · `self-host first` · successor to [Companion v1](https://github.com/The-Vibe-Company/companion)
 

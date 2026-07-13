@@ -9,7 +9,8 @@
     "start": "next start",
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "coverage": "vitest run --coverage --coverage.reporter=text-summary --coverage.reporter=json-summary"
   },
   "dependencies": {
     "@companion/contracts": "workspace:*",
@@ -18,7 +19,7 @@
     "@posthog/react": "^1.10.3",
     "@trpc/client": "^10.45.2",
     "lucide-react": "^0.469.0",
-    "next": "15.1.11",
+    "next": "15.5.20",
     "posthog-js": "^1.396.4",
     "react": "19.0.0",
     "react-dom": "19.0.0",
@@ -31,9 +32,9 @@
     "@types/react": "^19.0.2",
     "@types/react-dom": "^19.0.2",
     "eslint": "^9.39.4",
-    "eslint-config-next": "15.1.11",
+    "eslint-config-next": "15.5.20",
     "happy-dom": "^20.10.6",
     "typescript": "^5.7.2",
-    "vitest": "^2.1.8"
+    "vitest": "3.2.7"
   }
 }

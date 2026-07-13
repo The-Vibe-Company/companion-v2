@@ -27,7 +27,7 @@ require_command() {
 
 is_loopback_url() {
   case "$APP_URL" in
-    http://127.0.0.1|http://127.0.0.1:*|http://localhost|http://localhost:*|http://[::1]|http://[::1]:*)
+    http://127.0.0.1|http://127.0.0.1:*|http://localhost|http://localhost:*|http://\[::1\]|http://\[::1\]:*)
       return 0
       ;;
     *)
