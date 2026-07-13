@@ -68,6 +68,9 @@ describe("StripeBillingGateway", () => {
       expect.objectContaining({
         line_items: [{ price: "price_pro", quantity: 3 }],
         automatic_tax: { enabled: true },
+        billing_address_collection: "required",
+        customer_update: { address: "auto", name: "auto" },
+        tax_id_collection: { enabled: true },
         allow_promotion_codes: false,
         metadata: { companion_org_id: "org_1" },
       }),
