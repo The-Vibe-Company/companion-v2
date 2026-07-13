@@ -86,6 +86,33 @@ export function filterGroupsToActivated(groups: ModelGroupVM[], activated: Reado
   return out;
 }
 
+/** Flat list of models from connected providers (the launcher's runnable set). */
+export function availableModelsFromGroups(groups: ModelGroupVM[]): ModelRow[] {
+  const out: ModelRow[] = [];
+  for (const group of groups) {
+    if (group.provider.connected) out.push(...group.models);
+  }
+  return out;
+}
+
+/** Provider groups that still need a key before their activated models can run. */
+export function disconnectedGroups(groups: ModelGroupVM[]): ModelGroupVM[] {
+  return groups.filter((g) => !g.provider.connected);
+}
+
+/** Filter a flat model list by id, name, or provider. */
+export function filterModels(models: ModelRow[], query: string): ModelRow[] {
+  const q = query.trim().toLowerCase();
+  if (!q) return models;
+  return models.filter(
+    (m) =>
+      m.id.toLowerCase().includes(q) ||
+      m.name.toLowerCase().includes(q) ||
+      m.provider_name.toLowerCase().includes(q) ||
+      m.provider.toLowerCase().includes(q),
+  );
+}
+
 /** Filter model groups by a search query, keeping a provider header whenever it has any match. */
 export function filterModelGroups(groups: ModelGroupVM[], query: string): ModelGroupVM[] {
   const q = query.trim().toLowerCase();

@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { ModelRow } from "@companion/contracts";
 import {
+  availableModelsFromGroups,
+  disconnectedGroups,
   effectiveActivatedSet,
   filterGroupsToActivated,
+  filterModels,
   firstConnectedModel,
   groupModelsByProvider,
   type ModelProviderVM,
@@ -65,5 +68,34 @@ describe("filterGroupsToActivated", () => {
     expect(firstConnectedModel(filtered)).toBe("anthropic/opus");
     const noneConnected = filterGroupsToActivated(groups, new Set(["openai/gpt"]));
     expect(firstConnectedModel(noneConnected)).toBeNull();
+  });
+});
+
+describe("availableModelsFromGroups", () => {
+  const groups = groupModelsByProvider(MODELS, PROVIDERS);
+
+  it("flattens only connected providers' models", () => {
+    expect(availableModelsFromGroups(groups).map((m) => m.id)).toEqual(["anthropic/sonnet", "anthropic/opus"]);
+  });
+
+  it("returns nothing when no provider is connected", () => {
+    const disconnected = groupModelsByProvider(MODELS, PROVIDERS.map((p) => ({ ...p, connected: false })));
+    expect(availableModelsFromGroups(disconnected)).toEqual([]);
+  });
+});
+
+describe("disconnectedGroups", () => {
+  const groups = groupModelsByProvider(MODELS, PROVIDERS);
+
+  it("returns groups whose provider is not connected", () => {
+    expect(disconnectedGroups(groups).map((g) => g.provider.id)).toEqual(["openai"]);
+  });
+});
+
+describe("filterModels", () => {
+  it("matches id, name, or provider", () => {
+    const rows = MODELS;
+    expect(filterModels(rows, "sonnet").map((m) => m.id)).toEqual(["anthropic/sonnet"]);
+    expect(filterModels(rows, "openai").map((m) => m.id)).toEqual(["openai/gpt"]);
   });
 });
