@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { OpencodeClient } from "@opencode-ai/sdk";
-import { loadSessionItems } from "../src/opencodeChat";
+import { loadSessionItems, streamChatEvents } from "../src/opencodeChat";
 
 function clientWithMessages(messages: unknown[]): OpencodeClient {
   return {
@@ -98,5 +98,58 @@ describe("loadSessionItems", () => {
       { kind: "user", text: "hi" },
       { kind: "assistant", text: "hello" },
     ]);
+  });
+});
+
+describe("streamChatEvents", () => {
+  it("does not replay a delta-first update when cumulative text follows", async () => {
+    const events = [
+      {
+        type: "message.updated",
+        properties: { info: { sessionID: "session-1", role: "assistant", id: "message-1" } },
+      },
+      {
+        type: "message.part.updated",
+        properties: {
+          part: {
+            id: "part-1",
+            sessionID: "session-1",
+            messageID: "message-1",
+            type: "text",
+            text: "",
+          },
+          delta: "Hel",
+        },
+      },
+      {
+        type: "message.part.updated",
+        properties: {
+          part: {
+            id: "part-1",
+            sessionID: "session-1",
+            messageID: "message-1",
+            type: "text",
+            text: "Hello",
+          },
+        },
+      },
+    ];
+    const client = {
+      event: {
+        subscribe: async () => ({
+          stream: (async function* () {
+            for (const event of events) yield event;
+          })(),
+        }),
+      },
+    } as unknown as OpencodeClient;
+
+    const deltas: string[] = [];
+    for await (const event of streamChatEvents({ client, sessionId: "session-1" })) {
+      if (event.type === "text.delta") deltas.push(event.delta);
+    }
+
+    expect(deltas).toEqual(["Hel", "lo"]);
+    expect(deltas.join("")).toBe("Hello");
   });
 });

@@ -117,7 +117,7 @@ export function createVercelRuntime(config: VercelRuntimeConfig): RunSandboxRunt
           path: `${WORKDIR}/opencode.json`,
           content: Buffer.from(files.opencodeJson, "utf8") as Uint8Array,
         },
-        ...skillFilePayloads(files.skill),
+        ...files.skills.flatMap(skillFilePayloads),
         ...files.attachments.map((attachment) => ({
           path: `${WORKDIR}/attachments/${attachment.path}`,
           content: attachment.data as Uint8Array,

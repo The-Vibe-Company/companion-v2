@@ -139,7 +139,9 @@ async function main(): Promise<void> {
     }
     return sawIdle;
   })();
-  await sendPromptAsync(client, session.id, PROMPT);
+  await timed(Math.min(WINDOW_MS, 30_000), (signal) =>
+    sendPromptAsync(client, session.id, PROMPT, { signal }),
+  );
   const sawIdle = await dump.catch((error) => {
     console.error(`  event dump failed: ${error instanceof Error ? error.message : error}`);
     return false;

@@ -16,17 +16,30 @@ import type { SandboxRef } from "@companion/core";
 
 const SKILL_MD = `---
 name: smoke-probe
-description: Answers smoke-test probes by running its bundled Python script.
+description: Answers smoke-test probes by delegating to its smoke-helper dependency.
 ---
 
 # smoke-probe
 
-When the user asks for a "smoke probe", run \`scripts/probe.py\` with bash, report its output
-verbatim, and write that output into \`./artifacts/probe.txt\`.
+When the user asks for a "smoke probe", use the installed \`smoke-helper\` skill. Run its
+\`scripts/probe.py\` with bash, report its non-sensitive output verbatim, and write that output into
+\`./artifacts/probe.txt\`. Never print environment variable values.
+`;
+
+const HELPER_SKILL_MD = `---
+name: smoke-helper
+description: Dependency used by smoke-probe to verify dependency closure mounts and secret injection.
+---
+
+# smoke-helper
+
+Run \`scripts/probe.py\` for the smoke-probe skill. Never print environment variable values.
 `;
 
 const PROBE_PY = `#!/usr/bin/env python3
+import os
 print("PROBE-OK-4242")
+print("SECRET-AVAILABLE" if os.environ.get("SMOKE_SECRET_SENTINEL") else "SECRET-MISSING")
 `;
 
 function required(name: string): string {
@@ -50,6 +63,7 @@ async function main(): Promise<void> {
 
   const runtime = createVercelRuntime(config);
   const password = randomBytes(24).toString("base64url");
+  const secretSentinel = `smoke-secret-${randomBytes(18).toString("hex")}`;
   const ref: SandboxRef = {
     sandboxName: `cmp-smoke-${Date.now().toString(36)}`,
     sandboxId: null,
@@ -60,6 +74,7 @@ async function main(): Promise<void> {
     OPENCODE_SERVER_PASSWORD: password,
     OPENCODE_SERVER_USERNAME: "companion",
     ANTHROPIC_API_KEY: anthropicKey,
+    SMOKE_SECRET_SENTINEL: secretSentinel,
   };
   const report: Record<string, string> = {};
 
@@ -76,14 +91,21 @@ async function main(): Promise<void> {
       ref,
       files: {
         opencodeJson: `${JSON.stringify({ $schema: "https://opencode.ai/config.json", model, permission: { edit: "allow", bash: "allow" } }, null, 2)}\n`,
-        skill: {
-          slug: "smoke-probe",
-          version: "0.0.1",
-          files: [
-            { path: "SKILL.md", data: Buffer.from(SKILL_MD), executable: false },
-            { path: "scripts/probe.py", data: Buffer.from(PROBE_PY), executable: true },
-          ],
-        },
+        skills: [
+          {
+            slug: "smoke-probe",
+            version: "0.0.1",
+            files: [{ path: "SKILL.md", data: Buffer.from(SKILL_MD), executable: false }],
+          },
+          {
+            slug: "smoke-helper",
+            version: "0.0.1",
+            files: [
+              { path: "SKILL.md", data: Buffer.from(HELPER_SKILL_MD), executable: false },
+              { path: "scripts/probe.py", data: Buffer.from(PROBE_PY), executable: true },
+            ],
+          },
+        ],
         attachments: [{ path: "note.txt", data: Buffer.from("smoke attachment\n") }],
       },
     });
@@ -100,16 +122,22 @@ async function main(): Promise<void> {
     const session = await createChatSession(client, "smoke");
     let sawTool = false;
     let sawProbeOutput = false;
+    let sawSecretAvailable = false;
+    let leakedSecret = false;
     let text = "";
     // Hard deadline: abort the underlying SSE fetch so a silent stream can NEVER hang the smoke.
     const chatAbort = new AbortController();
     const chatDeadline = setTimeout(() => chatAbort.abort(), 180_000);
     const events = streamChatEvents({ client, sessionId: session.id, signal: chatAbort.signal });
-    await sendPromptAsync(client, session.id, "Run a smoke probe and tell me the exact output.");
+    await sendPromptAsync(client, session.id, "Run a smoke probe and tell me the exact output.", {
+      signal: chatAbort.signal,
+    });
     try {
       for await (const event of events) {
         if (event.type === "tool.start") sawTool = true;
         if (event.type === "tool.done" && event.output.includes("PROBE-OK-4242")) sawProbeOutput = true;
+        if (event.type === "tool.done" && event.output.includes("SECRET-AVAILABLE")) sawSecretAvailable = true;
+        if (JSON.stringify(event).includes(secretSentinel)) leakedSecret = true;
         if (event.type === "text.delta") text += event.delta;
         if (event.type === "session.idle") break;
       }
@@ -122,6 +150,8 @@ async function main(): Promise<void> {
     }
     report["skill_triggered"] = String(sawTool);
     report["script_ran"] = String(sawProbeOutput || text.includes("PROBE-OK-4242"));
+    report["dependency_ran"] = String(sawSecretAvailable || text.includes("SECRET-AVAILABLE"));
+    report["secret_not_leaked"] = String(!leakedSecret && !text.includes(secretSentinel));
     console.log(`  skill triggered=${report["skill_triggered"]} script ran=${report["script_ran"]}`);
 
     console.log("collect artifacts…");
@@ -135,6 +165,7 @@ async function main(): Promise<void> {
     report["collect_ms"] = String(Date.now() - t);
     report["artifacts"] = artifacts.map((a) => `${a.path} (${a.byteSize}B)`).join(", ") || "(none)";
     report["artifact_ok"] = String(artifacts.some((a) => a.data.toString("utf8").includes("PROBE-OK-4242")));
+    report["artifact_secret_safe"] = String(artifacts.every((a) => !a.data.toString("utf8").includes(secretSentinel)));
 
     console.log("stop (freeze)…");
     await runtime.stop(ref);
@@ -145,7 +176,13 @@ async function main(): Promise<void> {
 
   console.log("\n=== smoke report ===");
   for (const [key, value] of Object.entries(report)) console.log(`${key.padEnd(18)} ${value}`);
-  const pass = report["skill_triggered"] === "true" && report["script_ran"] === "true";
+  const pass =
+    report["skill_triggered"] === "true" &&
+    report["script_ran"] === "true" &&
+    report["dependency_ran"] === "true" &&
+    report["secret_not_leaked"] === "true" &&
+    report["artifact_ok"] === "true" &&
+    report["artifact_secret_safe"] === "true";
   console.log(pass ? "\nPASS" : "\nFAIL (see criteria above)");
   process.exit(pass ? 0 : 1);
 }

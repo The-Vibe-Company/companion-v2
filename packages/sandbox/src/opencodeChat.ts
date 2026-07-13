@@ -1,6 +1,6 @@
 import { createOpencodeClient, type OpencodeClient } from "@opencode-ai/sdk";
 import type { RunChatEvent, RunChatHistoryItem } from "@companion/contracts";
-import { OPENCODE_SERVER_USERNAME } from "@companion/core";
+import { OPENCODE_SERVER_USERNAME, type RunChatRuntime, type RunChatTarget } from "@companion/core";
 import { toolTitleAndSkill } from "./chatMapping";
 
 /**
@@ -84,10 +84,16 @@ export async function loadSessionItems(client: OpencodeClient, sessionId: string
 }
 
 /** Fire a prompt without waiting for the reply — deltas arrive on the event stream. */
-export async function sendPromptAsync(client: OpencodeClient, sessionId: string, text: string): Promise<void> {
+export async function sendPromptAsync(
+  client: OpencodeClient,
+  sessionId: string,
+  text: string,
+  options: { messageId?: string; signal?: AbortSignal } = {},
+): Promise<void> {
   const res = await client.session.promptAsync({
     path: { id: sessionId },
-    body: { parts: [{ type: "text", text }] },
+    body: { messageID: options.messageId, parts: [{ type: "text", text }] },
+    signal: options.signal,
   });
   if (res.error) throw new Error("opencode rejected the prompt");
 }
@@ -175,6 +181,9 @@ export async function* streamChatEvents(input: {
             textEmitted.set(key, full.length);
             yield { type: "text.delta", message_id: part.messageID, delta: full.slice(already) };
           } else if (delta && already === 0) {
+            // Some OpenCode builds emit delta-first and only later send cumulative text. Account
+            // for the fallback bytes now so the next cumulative update does not replay them.
+            textEmitted.set(key, delta.length);
             yield { type: "text.delta", message_id: part.messageID, delta };
           }
           if (part.time?.end && !doneTexts.has(part.messageID)) {
@@ -219,7 +228,7 @@ export async function* streamChatEvents(input: {
             err && typeof err === "object" && "data" in err && err.data && typeof err.data === "object" && "message" in err.data
               ? String((err.data as { message?: unknown }).message ?? "agent error")
               : "agent error";
-          yield { type: "error", message };
+          yield { type: "run.error", code: "opencode_session_error", message, phase: null };
         }
         break;
       }
@@ -227,6 +236,30 @@ export async function* streamChatEvents(input: {
         break;
     }
   }
+}
+
+/** SDK-backed chat adapter composed by the durable worker, never by a browser-facing route. */
+export function createOpencodeRunChatRuntime(): RunChatRuntime {
+  const clientFor = (target: RunChatTarget) => createChatClient(target);
+  return {
+    async findSessionByTitle(target, title) {
+      const response = await clientFor(target).session.list();
+      const session = (response.data ?? []).find((candidate) => candidate.title === title);
+      return session ? { id: session.id, title: session.title ?? title } : null;
+    },
+    createSession(target, title) {
+      return createChatSession(clientFor(target), title);
+    },
+    sendPrompt(target, sessionId, text, messageId) {
+      return sendPromptAsync(clientFor(target), sessionId, text, { messageId });
+    },
+    loadItems(target, sessionId) {
+      return loadSessionItems(clientFor(target), sessionId);
+    },
+    streamEvents(target, sessionId, signal) {
+      return streamChatEvents({ client: clientFor(target), sessionId, signal });
+    },
+  };
 }
 
 function safeJson(value: unknown): string {

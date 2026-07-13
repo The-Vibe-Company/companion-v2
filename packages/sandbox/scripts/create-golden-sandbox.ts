@@ -29,9 +29,7 @@ async function run(sandbox: Sandbox, label: string, cmd: string, args: string[],
   const stdout = await result.stdout();
   const stderr = await result.stderr();
   if (result.exitCode !== 0) {
-    console.error(`FAILED (exit ${result.exitCode})\n${stdout}\n${stderr}`);
-    await sandbox.stop().catch(() => {});
-    process.exit(1);
+    throw new Error(`${label} failed (exit ${result.exitCode})\n${stdout}\n${stderr}`);
   }
   console.log("ok");
   return stdout.trim();
@@ -53,28 +51,32 @@ async function main(): Promise<void> {
     timeout: 15 * 60 * 1000,
     resources: { vcpus: 2 },
   });
-  console.log(`Sandbox ${sandbox.name} booted.`);
+  try {
+    console.log(`Sandbox ${sandbox.name} booted.`);
 
-  await run(sandbox, "install python3 (dnf)", "dnf", ["install", "-y", "python3"], true);
-  await run(sandbox, `install opencode-ai@${opencodeVersion} (npm -g)`, "npm", [
-    "install",
-    "--global",
-    `opencode-ai@${opencodeVersion}`,
-  ]);
-  const reported = await run(sandbox, "verify opencode version", "opencode", ["--version"]);
-  if (!reported.includes(opencodeVersion)) {
-    console.error(`opencode reports "${reported}" but the pin is ${opencodeVersion} — aborting.`);
+    await run(sandbox, "install python3 (dnf)", "dnf", ["install", "-y", "python3"], true);
+    await run(sandbox, `install opencode-ai@${opencodeVersion} (npm -g)`, "npm", [
+      "install",
+      "--global",
+      `opencode-ai@${opencodeVersion}`,
+    ]);
+    const reported = await run(sandbox, "verify opencode version", "opencode", ["--version"]);
+    if (!reported.includes(opencodeVersion)) {
+      throw new Error(`opencode reports "${reported}" but the pin is ${opencodeVersion} — aborting.`);
+    }
+    await run(sandbox, "verify python3", "python3", ["--version"]);
+
+    console.log("Snapshotting (the sandbox shuts down when the snapshot completes)…");
+    const snapshot = await sandbox.snapshot();
+    console.log("\nGolden snapshot ready. Export this before starting the worker:\n");
+    console.log(`  COMPANION_GOLDEN_SNAPSHOT_ID=${snapshot.snapshotId}`);
+    console.log(`  OPENCODE_VERSION=${opencodeVersion}\n`);
+    console.log("Note: unused snapshots expire after ~30 days; re-run this script to refresh.");
+  } finally {
+    // snapshot() normally stops the sandbox. This remains deliberately idempotent so every error
+    // path also releases compute instead of waiting for the provider timeout.
     await sandbox.stop().catch(() => {});
-    process.exit(1);
   }
-  await run(sandbox, "verify python3", "python3", ["--version"]);
-
-  console.log("Snapshotting (the sandbox shuts down when the snapshot completes)…");
-  const snapshot = await sandbox.snapshot();
-  console.log("\nGolden snapshot ready. Export this before starting the API:\n");
-  console.log(`  COMPANION_GOLDEN_SNAPSHOT_ID=${snapshot.snapshotId}`);
-  console.log(`  OPENCODE_VERSION=${opencodeVersion}\n`);
-  console.log("Note: unused snapshots expire after ~30 days; re-run this script to refresh.");
 }
 
 main().catch((error) => {
