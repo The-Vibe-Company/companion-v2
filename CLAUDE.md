@@ -121,6 +121,10 @@ still uses Docker Compose (`scripts/dev-stack.sh`).
 
 ## Tests & quality gates
 
+- **Testing standard:** follow [`docs/testing.md`](docs/testing.md). Critical suites must explain the
+  product promise, regression caught, reason for their test level, and the fault that proves the test
+  is sensitive. Prefer fewer behavior-level tests over mocks of internal query builders.
+
 - **RBAC is table-driven and exhaustive.** Add cases to the membership × org-role × action matrix whenever
   you touch authorization; assert that non-members and cross-tenant access are denied.
 - **Frontend browser validation is required after frontend changes.** After any UI, route, auth, style,

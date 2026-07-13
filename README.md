@@ -63,7 +63,8 @@ libraries are organized with their own label trees.
 
 ```bash
 pnpm install
-pnpm test                                   # shared packages: validation + authz matrix
+pnpm test                                   # fast unit and contract tests
+DATABASE_URL=postgres://... pnpm test:integration # critical tenant/Skills/Secrets tests on disposable Postgres
 
 # 1) Full local stack. Needs Docker.
 pnpm dev                                    # infra + migrations + seed + API :3001 + worker + web :3000

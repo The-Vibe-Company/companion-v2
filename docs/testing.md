@@ -1,0 +1,102 @@
+# Testing standard
+
+Companion tests protect product promises, not implementation details. A test is valuable when its
+failure identifies a user-visible, security, or data-integrity regression that we would refuse to
+ship.
+
+## Protection map
+
+Keep this table synchronized with critical suites. Removing or weakening one of these tests requires
+updating the corresponding promise and explaining how it remains protected.
+
+| Product promise | Incident prevented | Owning suite | Level | Failure proof |
+| --- | --- | --- | --- | --- |
+| A personal skill is visible and manageable only by its creator | Private data exposed to an admin, another member, or another tenant | `skillLifecycle.integration.test.ts` | HTTP + Postgres | Removing the creator/scope predicate makes the visibility scenario fail |
+| Share is a one-way, atomic move into the organization library | Duplicated skills, leaked personal labels, or a partially shared dependency graph | `skillLifecycle.integration.test.ts` | HTTP + Postgres | Updating only the root or mutating before closure validation fails the positive or blocked dependency scenario |
+| Org labels are shared; personal labels are owner-private; empty folders persist | A folder disappears, silently merges, or a rename/delete corrupts another user or tenant | `labelLifecycle.integration.test.ts` | HTTP + Postgres | Removing creation, collision/self-subtree guards, `org_id`, or `owner_id` scoping fails the empty-folder, rename-rejection, or foreign-sentinel assertion |
+| Secret plaintext is write-only and never persisted or audited | Credential disclosure through an API response, database row, or audit entry | `secretLifecycle.integration.test.ts` | Service + Postgres | Returning or storing the submitted sentinel makes the persistence scenario fail |
+| Secret retrieval follows the current ACL, quotas, and single-use grants | Unauthorized, unbounded, or replayed credential retrieval | `secretLifecycle.integration.test.ts` | Service + Postgres | Relaxing UPDATE RLS, quota locking, or the atomic redemption guard fails its concurrent scenario |
+| Tenant RLS policies isolate organizations for a non-bypass role | Cross-tenant data disclosure or corruption when RLS is active | `rls.integration.test.ts` | Postgres non-superuser | Removing an `org_id` policy or making tenant GUCs session-scoped fails the behavioral scenario |
+| Browser flows preserve the same privacy guarantees as the API | A working backend hidden behind a broken or misleading UI | `e2e/critical-flows.spec.ts` | Playwright | Dropping the selected folder, breaking Share, or rendering a saved secret value fails the relevant journey |
+
+Future providers, Hermès, and reconcile implementations must add their conformance promises here
+when their production code lands. Do not add placeholder tests for code that does not exist.
+
+## Critical-suite header
+
+Every critical suite starts with a docblock that records why it exists:
+
+```ts
+/**
+ * Product promise:
+ * A personal skill is visible and manageable only by its creator.
+ *
+ * Regression caught:
+ * Missing creator_id or scope filters could expose it to an admin or another member.
+ *
+ * Why this test is integrated:
+ * A mocked database cannot prove that the Drizzle query and Postgres RLS enforce the rule.
+ *
+ * Failure proof:
+ * Removing the creator filter must make this suite fail.
+ */
+```
+
+Comments explain risk, test level, and non-obvious traps. They must not narrate assertions line by
+line. Reference the issue or pull request when a test protects a known regression.
+
+## Choosing the test level
+
+- **Unit:** pure authorization matrices, encryption primitives, parsing, validation, dependency
+  graph algorithms, and contract schemas.
+- **Integration:** SQL predicates, transactions, migrations, RLS, ownership, tenant isolation, and
+  secret lifecycle. Use a real disposable Postgres database.
+- **HTTP integration:** request validation plus a critical domain workflow. Keep the real service and
+  database layers; replace only authentication identity and external providers.
+- **Browser:** a small number of journeys where rendering, browser state, or user interaction is the
+  risk. Do not duplicate every API case in Playwright.
+
+Mock Stripe, S3, Resend, and other external systems. Do not mock the service-to-database boundary when
+the promise depends on tenant, scope, transaction, or RLS behavior.
+
+RLS tests prove policy semantics only when they execute as a non-owner role with neither `SUPERUSER`
+nor `BYPASSRLS`. They do not certify a deployment that connects its application as a table owner or
+superuser; runtime credentials must independently satisfy that operational requirement.
+
+## Test quality rules
+
+- Name a test after the business rule and observable outcome.
+- Assert public results and durable state, not internal call counts or Drizzle builder shapes.
+- A bug fix includes a test that fails on the previous implementation.
+- Unit tests perform no undeclared network or database I/O.
+- Tests restore globals, timers, DOM roots, and mocks that they change.
+- Do not commit `.only`, conditional skips, or ignored console/browser errors.
+- Integration tests require an explicit disposable `DATABASE_URL`; they never silently fall back to a
+  developer or production database.
+- Coverage is diagnostic. A percentage is not a substitute for demonstrating that a critical test
+  fails when its protected invariant is broken.
+
+## Verified failure sensitivity
+
+The following temporary mutations were applied locally on 2026-07-13 and reverted immediately.
+They check the tests themselves; none of these faults belongs in the repository.
+
+| Injected fault | Scenario that failed |
+| --- | --- |
+| Removed the `skills.org_id` predicate from shared skill reads | `hides a personal skill from same-org admins and cross-tenant actors until its owner shares it` returned a foreign-tenant row |
+| Allowed every member through the personal-skill detail predicate | The same visibility scenario returned the owner's private skill to the admin instead of the indistinguishable 404 |
+| Added the submitted secret value to the create response | `never returns or persists plaintext and gives an admin no implicit access` found its sentinel in the HTTP body |
+| Removed the atomic `redeemed_at is null` grant claim | `allows an authorized read token to redeem once and rejects replay or changed access` observed two 200 responses instead of 200 + 409 |
+| Made `withTenantContext` settings session-scoped | `uses transaction-local tenant identifiers that are cleared after withTenantContext returns` observed the leaked Org/User values on the same application connection |
+
+## Commands
+
+```bash
+pnpm test
+
+# Requires an explicit disposable Postgres DATABASE_URL. Migrations must already be applied.
+DATABASE_URL=postgres://... pnpm test:integration
+
+# Requires a built/seeded local stack; see playwright.config.ts for ports and credentials.
+pnpm test:e2e
+```
