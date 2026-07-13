@@ -7,11 +7,12 @@ import type {
   SkillDependenciesResponse,
   ValidationResult,
 } from "@companion/contracts";
-import type { SkillVM } from "@/lib/types";
+import { mapSkill, type SkillVM } from "@/lib/types";
 import {
   apiBase,
   archiveSkill,
   createSkillInline,
+  fetchSkillBySlug,
   fetchSkillDependencies,
   issueToken,
   publishSkillPackage,
@@ -451,20 +452,20 @@ const UP_METHODS = [
   {
     id: "prompt",
     icon: "sparkles",
-    name: "Assistant IA",
+    name: "Use an AI assistant",
     tag: "AI",
     desc: "Hand a guided prompt and a scoped token to an agent.",
   },
   {
     id: "zip",
     icon: "file-archive",
-    name: "Upload a package",
+    name: "Upload package",
     desc: "Drop a zipped SKILL.md package and let Companion validate it.",
   },
   {
     id: "create",
     icon: "square-pen",
-    name: "Create in the browser",
+    name: "Create in browser",
     desc: "Write the SKILL.md inline and publish without leaving the page.",
   },
 ] as const;
@@ -1302,7 +1303,7 @@ export function UploadDialog({
         ? ["git-branch", "Companion previews dependency changes before anything is published."]
         : ["file-archive", "The package must contain SKILL.md at its root."],
       cta: {
-        label: hasDepReview ? "Review dependencies" : isUpdate ? "Publish update" : "Upload package",
+        label: hasDepReview ? "Review dependencies" : isUpdate ? "Publish new version" : "Upload package",
         icon: hasDepReview ? "git-branch" : "upload",
         disabled: !canZip || busy,
         run: hasDepReview ? openPreflight : runZip,
@@ -1311,7 +1312,7 @@ export function UploadDialog({
     create: {
       hint: ["git-commit", isUpdate ? `Publishes ${skill?.id} as v${ver}.` : "Publishes as v1.0.0 in this workspace."],
       cta: {
-        label: isUpdate ? "Publish update" : "Create skill",
+        label: isUpdate ? "Publish new version" : "Create skill",
         icon: "check",
         disabled: !canCreate || busy,
         run: runCreate,
@@ -1331,7 +1332,13 @@ export function UploadDialog({
         className="up"
         role="dialog"
         aria-modal="true"
-        aria-label={isUpdate ? "Update skill" : "Upload skill"}
+        aria-label={
+          isUpdate
+            ? "Publish new version"
+            : scope === "org"
+              ? "Add an organization skill"
+              : "Add a personal skill"
+        }
         ref={dialogRef}
         tabIndex={-1}
       >
@@ -1341,13 +1348,11 @@ export function UploadDialog({
               {result ? (
                 "Done"
               ) : isUpdate ? (
-                <>
-                  Update <span className="mono" style={{ fontWeight: 600 }}>{skill!.id}</span>
-                </>
+                "Publish new version"
               ) : scope === "org" ? (
-                "Upload an organization skill"
+                "Add an organization skill"
               ) : (
-                "Upload a personal skill"
+                "Add a personal skill"
               )}
             </h2>
             <p className="up__sub">
@@ -1384,7 +1389,7 @@ export function UploadDialog({
               {!isUpdate && (
                 <button className="btn-ghost" type="button" onClick={reset}>
                   <Icon name="plus" size={14} />
-                  Upload another
+                  Add another skill
                 </button>
               )}
               <button className="btn-primary" type="button" onClick={onClose}>
@@ -1456,7 +1461,7 @@ export function UploadDialog({
                     </span>
                     <span className="method__txt">
                       <span className="method__name">
-                        {m.id === "create" && isUpdate ? "Edit in the browser" : m.name}
+                        {m.name}
                         {"tag" in m && m.tag && <span className="tag">{m.tag}</span>}
                       </span>
                       <span className="method__desc">
@@ -1558,7 +1563,7 @@ const INSTALL_METHODS = [
   {
     id: "prompt",
     icon: "sparkles",
-    name: "Assistant IA",
+    name: "Use an AI assistant",
     tag: "AI",
     desc: "Paste into an agent. It downloads and installs the skill for you.",
   },
@@ -1627,9 +1632,20 @@ function InstallDone({ result }: { result: { id: string; version: string; target
   );
 }
 
-export function InstallDialog({ skill, onClose }: { skill: SkillVM; onClose: () => void }) {
+export function InstallDialog({
+  skill,
+  onClose,
+  onReported,
+}: {
+  skill: SkillVM;
+  onClose: () => void;
+  onReported: (skill: SkillVM) => void;
+}) {
   const id = skill.id;
   const version = skill.version ?? "latest";
+  const updating = skill.installStatus === "update";
+  const actionLabel = updating ? "Update skill" : "Install skill";
+  const actionVerb = updating ? "Update" : "Install";
   const [method, setMethod] = useState<InstallMethod>("prompt");
   const [token, setToken] = useState<string | null>(null);
   const [target, setTarget] = useState<TargetId>("claude");
@@ -1640,6 +1656,7 @@ export function InstallDialog({ skill, onClose }: { skill: SkillVM; onClose: () 
     path: string;
     via: string;
   } | null>(null);
+  const [reported, setReported] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [deps, setDeps] = useState<SkillDependenciesResponse | null>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
@@ -1657,6 +1674,33 @@ export function InstallDialog({ skill, onClose }: { skill: SkillVM; onClose: () 
     };
   }, [id, skill.version]);
   const installSet = (deps?.requires ?? []).filter((r) => r.status !== "missing");
+
+  // The assistant reports install completion out of band. Read the existing detail endpoint
+  // immediately, then every three seconds until the current registry version is confirmed.
+  useEffect(() => {
+    if (!skill.version || reported) return;
+    let active = true;
+    let timer: number | null = null;
+    const check = async () => {
+      try {
+        const next = mapSkill(await fetchSkillBySlug(id));
+        if (!active) return;
+        if (next.installStatus === "installed" && next.installedVersion === skill.version) {
+          setReported(true);
+          onReported(next);
+          return;
+        }
+      } catch {
+        // Transient read failures leave the current action untouched; the next check can recover.
+      }
+      if (active) timer = window.setTimeout(() => void check(), 3000);
+    };
+    void check();
+    return () => {
+      active = false;
+      if (timer !== null) window.clearTimeout(timer);
+    };
+  }, [id, onReported, reported, skill.version]);
 
   // skills:read covers both downloading the package and confirming the install back to Companion
   // (recording your own install is personal state, so it needs no write authority).
@@ -1677,13 +1721,13 @@ export function InstallDialog({ skill, onClose }: { skill: SkillVM; onClose: () 
   const path = targetPath(target, id);
   const base = apiBase();
   const buildPrompt = (tok: string) =>
-    `You are installing the Companion skill ${id}.
+    `You are ${updating ? "updating" : "installing"} the Companion skill ${id}.
 
 Version: ${version}
 Package URL: ${base}/skills/${id}/versions/${version}/package
 Authorization header: Bearer ${tok}
 
-Choose the right local skills folder for the user's agent, download the package, extract it there, and confirm SKILL.md sits at the package root. Report the installed location when done.
+Choose the right local skills folder for the user's agent, download the package, extract it there, and confirm SKILL.md sits at the package root. Report the ${updating ? "updated" : "installed"} location when done.
 
 When the skill is installed, confirm it to Companion so it shows as installed in the workspace: send POST ${base}/skills/${id}/install with header "Authorization: Bearer ${tok}" and JSON body {"version":"${version}","agent":"<the agent you are>","source":"agent"}.`;
   const displayPrompt = buildPrompt(token ?? "cmp_pat_…");
@@ -1720,7 +1764,7 @@ When the skill is installed, confirm it to Companion so it shows as installed in
     prompt: { hint: ["info", "The agent downloads the skill and installs it wherever it keeps skills."] },
     manual: {
       hint: skill.version ? ["folder", "Download the package, then extract it into " + path + "."] : ["info", "No published version to download yet."],
-      cta: { label: "Download .zip", icon: "download", run: download, disabled: !skill.version },
+      cta: { label: "Download package", icon: "download", run: download, disabled: !skill.version },
     },
   };
   const foot = FOOT[method];
@@ -1732,24 +1776,26 @@ When the skill is installed, confirm it to Companion so it shows as installed in
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      <div className="up" role="dialog" aria-modal="true" aria-label="Install skill" ref={dialogRef} tabIndex={-1}>
+      <div className="up" role="dialog" aria-modal="true" aria-label={actionLabel} ref={dialogRef} tabIndex={-1}>
         <div className="up__head">
           <div className="up__titles">
             <h2 className="up__title">
-              {result ? (
+              {reported || result ? (
                 "Done"
               ) : (
                 <>
-                  Install <span className="mono" style={{ fontWeight: 600 }}>{id}</span>
+                  {actionVerb} <span className="mono" style={{ fontWeight: 600 }}>{id}</span>
                 </>
               )}
             </h2>
             <p className="up__sub">
-              {result ? (
+              {reported ? (
+                updating ? "The newest version is installed." : "The skill is installed."
+              ) : result ? (
                 "The package is on your machine."
               ) : (
                 <>
-                  Install <span className="mono">{id}@{version}</span> on your machine, Claude Code,
+                  {actionVerb} <span className="mono">{id}@{version}</span> on your machine, Claude Code,
                   Codex, or OpenCode.
                 </>
               )}
@@ -1760,7 +1806,29 @@ When the skill is installed, confirm it to Companion so it shows as installed in
           </button>
         </div>
 
-        {result ? (
+        {reported ? (
+          <>
+            <div className="up__panel" role="status" aria-live="polite">
+              <div className="up-done">
+                <span className="up-done__badge">
+                  <Icon name="check" size={26} />
+                </span>
+                <h3 className="up-done__title">{updating ? "Skill updated" : "Skill installed"}</h3>
+                <p className="up-done__sub">
+                  Companion received the {updating ? "update" : "install"} report for{" "}
+                  <span className="mono">{id}@{version}</span>.
+                </p>
+              </div>
+            </div>
+            <div className="up__foot">
+              <span className="up__footspacer" />
+              <button className="btn-primary" type="button" onClick={onClose}>
+                <Icon name="arrow-right" size={14} />
+                Done
+              </button>
+            </div>
+          </>
+        ) : result ? (
           <>
             <div className="up__panel" role="status" aria-live="polite">
               <InstallDone result={result} />

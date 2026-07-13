@@ -4,17 +4,24 @@ import { useEffect, useRef, useState } from "react";
 import { Icon } from "../Icon";
 import { mapSkill, type SkillVM } from "@/lib/types";
 import { fetchSkillSearch } from "@/lib/queries";
+import { resolveSkillActions, skillActionPermissions, type SkillAction } from "./skillActions";
 
 export function CommandPalette({
   allSkills,
   onPick,
   onClose,
   onUpload,
+  currentSkill,
+  actorId,
+  onPrimaryAction,
 }: {
   allSkills: SkillVM[];
   onPick: (id: string) => void;
   onClose: () => void;
   onUpload: () => void;
+  currentSkill: SkillVM | null;
+  actorId: string;
+  onPrimaryAction: (skill: SkillVM, action: SkillAction) => void;
 }) {
   const [q, setQ] = useState("");
   const [sel, setSel] = useState(0);
@@ -50,14 +57,31 @@ export function CommandPalette({
   const matched = ql !== "" && results.q === ql;
   const loading = ql !== "" && !matched;
   const skills = ql === "" ? allSkills.slice(0, 7) : matched ? results.items : [];
-  const actions = [{ id: "upload", label: "Upload skill", icon: "upload" }].filter(
-    (a) => !ql || a.label.toLowerCase().includes(ql),
+  const currentPrimary = currentSkill
+    ? resolveSkillActions(currentSkill, skillActionPermissions(currentSkill, actorId)).primary
+    : null;
+  const actions = [
+    { id: "add", label: "Add skill", icon: "plus", description: null, action: null },
+    ...(currentSkill && currentPrimary
+      ? [
+          {
+            id: `skill:${currentSkill.id}:${currentPrimary.id}`,
+            label: currentPrimary.label,
+            icon: currentPrimary.icon,
+            description: currentSkill.id,
+            action: currentPrimary,
+          },
+        ]
+      : []),
+  ].filter((action) =>
+    !ql || action.label.toLowerCase().includes(ql) || action.description?.toLowerCase().includes(ql),
   );
   type Item = { kind: "action"; id: string } | { kind: "skill"; id: string };
   const items: Item[] = [
     ...actions.map((a) => ({ kind: "action" as const, id: a.id })),
     ...skills.map((s) => ({ kind: "skill" as const, id: s.id })),
   ];
+  const activeOptionId = items[sel] ? `command-palette-option-${sel}` : undefined;
   useEffect(() => {
     setSel(0);
   }, [q]);
@@ -66,14 +90,16 @@ export function CommandPalette({
     if (!it) return;
     if (it.kind === "skill") onPick(it.id);
     else {
+      const action = actions.find((candidate) => candidate.id === it.id);
       onClose();
-      onUpload();
+      if (action?.action && currentSkill) onPrimaryAction(currentSkill, action.action);
+      else onUpload();
     }
   };
   const onKey = (e: React.KeyboardEvent) => {
     if (e.key === "ArrowDown") {
       e.preventDefault();
-      setSel((v) => Math.min(v + 1, items.length - 1));
+      setSel((v) => (items.length > 0 ? Math.min(v + 1, items.length - 1) : 0));
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
       setSel((v) => Math.max(v - 1, 0));
@@ -99,17 +125,26 @@ export function CommandPalette({
           <input
             ref={inputRef}
             className="cpal__input"
+            role="combobox"
+            aria-label="Search skills or commands"
+            aria-autocomplete="list"
+            aria-expanded="true"
+            aria-controls="command-palette-results"
+            aria-activedescendant={activeOptionId}
             placeholder="Search skills or run a command…"
             value={q}
             onChange={(e) => setQ(e.target.value)}
           />
           <span className="cpal__kbd">esc</span>
         </div>
-        <div className="cpal__results">
-          {actions.length > 0 && <div className="cpal__group">Actions</div>}
+        <div className="cpal__results" id="command-palette-results" role="listbox" aria-label="Commands and skills">
+          {actions.length > 0 && <div className="cpal__group" role="presentation">Actions</div>}
           {actions.map((a, idx) => (
             <div
               key={a.id}
+              id={`command-palette-option-${idx}`}
+              role="option"
+              aria-selected={sel === idx}
               className={"cpal__item" + (sel === idx ? " is-sel" : "")}
               onMouseEnter={() => setSel(idx)}
               onClick={() => run(items[idx])}
@@ -118,15 +153,19 @@ export function CommandPalette({
                 <Icon name={a.icon} size={16} />
               </span>
               <span className="cpal__name cpal__name--ui">{a.label}</span>
+              {a.description && <span className="cpal__desc">{a.description}</span>}
             </div>
           ))}
-          {skills.length > 0 && <div className="cpal__group">Skills</div>}
+          {skills.length > 0 && <div className="cpal__group" role="presentation">Skills</div>}
           {skills.map((s, idx) => {
             const fi = actions.length + idx;
             const label = s.labels[0];
             return (
               <div
                 key={s.id}
+                id={`command-palette-option-${fi}`}
+                role="option"
+                aria-selected={sel === fi}
                 className={"cpal__item" + (sel === fi ? " is-sel" : "")}
                 onMouseEnter={() => setSel(fi)}
                 onClick={() => run(items[fi])}
