@@ -3,7 +3,7 @@ import { renderToString } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import type { SkillVersionRow } from "@companion/contracts";
 import type { SkillVM } from "@/lib/types";
-import { Activity, FiledIn, PropList, Requirements, StatusCard } from "./detailParts";
+import { Activity, FiledIn, PropList, Requirements } from "./detailParts";
 
 const skill: SkillVM = {
   uuid: "skill-1",
@@ -106,20 +106,6 @@ describe("FiledIn folder chips", () => {
     );
     expect(html).toContain("No folders yet");
     expect(html).toContain("Add to folder");
-  });
-});
-
-describe("StatusCard updated-by row", () => {
-  it("renders an 'Updated by' row showing the last updater, distinct from the owner", () => {
-    const html = renderToString(
-      React.createElement(StatusCard, {
-        skill: { ...skill, updaterId: "user-2", updaterName: "Beth Updater", updaterInitials: "BU" },
-      }),
-    );
-    expect(html).toContain("Owner");
-    expect(html).toContain("Alice Nardon"); // creator/owner
-    expect(html).toContain("Updated by");
-    expect(html).toContain("Beth Updater"); // last updater
   });
 });
 

@@ -6,7 +6,6 @@ import { Icon } from "../Icon";
 import { UserAvatar } from "../UserAvatar";
 import { relativeTime } from "@/lib/format";
 import type { MeVM, SkillVM } from "@/lib/types";
-import { InstallBadge } from "./blocks";
 
 function metadataKeyLabel(key: string): string {
   return key.startsWith("companion_") ? key.slice("companion_".length).replaceAll("_", " ") : key;
@@ -229,79 +228,7 @@ export function FiledIn({
   );
 }
 
-/* --------------------------------------------------------- status + section */
-
-/** Maps the validation state to its colored badge tone + label for the status card. */
-function statusBadge(validation: SkillVM["validation"]): { tone: "ok" | "warn" | "danger"; label: string } {
-  if (validation === "invalid") return { tone: "danger", label: "Invalid" };
-  if (validation === "validating") return { tone: "warn", label: "Validating" };
-  return { tone: "ok", label: "Valid" };
-}
-
-/**
- * The detail head's status card: Status (colored badge + dot), Version, Updated, Stars.
- * Version/Updated/Stars live here so the stacked sections below never repeat them.
- */
-export function StatusCard({ skill, libLabel }: { skill: SkillVM; libLabel?: string }) {
-  const badge = statusBadge(skill.validation);
-  // For a personal skill the owner is the viewer; org skills show the publisher.
-  const owner = skill.scope === "personal" ? "You" : skill.authorName;
-  return (
-    <div className="statuscard">
-      {libLabel && (
-        <div className="statuscard__row">
-          <span className="statuscard__k">Library</span>
-          <span className="statuscard__v">{libLabel}</span>
-        </div>
-      )}
-      <div className="statuscard__row">
-        <span className="statuscard__k">Owner</span>
-        <span className="statuscard__v">{owner}</span>
-      </div>
-      <div className="statuscard__row">
-        <span className="statuscard__k">Status</span>
-        <span className={"statuscard__badge statuscard__badge--" + badge.tone}>
-          <span className="statuscard__dot" />
-          {badge.label}
-        </span>
-      </div>
-      {skill.scope === "org" && skill.installStatus !== "none" && (
-        <div className="statuscard__row">
-          <span className="statuscard__k">Installation</span>
-          <InstallBadge state={skill.installStatus} />
-        </div>
-      )}
-      <div className="statuscard__row">
-        <span className="statuscard__k">Version</span>
-        <span className="statuscard__v mono">{skill.version ?? "—"}</span>
-      </div>
-      <div className="statuscard__row">
-        <span className="statuscard__k">Updated</span>
-        <span className="statuscard__v statuscard__v--muted">{skill.updated}</span>
-      </div>
-      <div className="statuscard__row">
-        <span className="statuscard__k">Updated by</span>
-        <span
-          className="statuscard__v"
-          style={{ display: "inline-flex", alignItems: "center", justifyContent: "flex-end", gap: 6 }}
-        >
-          <UserAvatar
-            className="avatar"
-            avatarUrl={skill.updaterAvatarUrl}
-            initials={skill.updaterInitials}
-            size={16}
-            style={{ fontSize: 8 }}
-          />
-          {skill.updaterName}
-        </span>
-      </div>
-      <div className="statuscard__row">
-        <span className="statuscard__k">Stars</span>
-        <span className="statuscard__v mono tnum">{skill.stars}</span>
-      </div>
-    </div>
-  );
-}
+/* ----------------------------------------------------------------- section */
 
 /**
  * A stacked, collapsible detail section: an uppercase faint label with a chevron that rotates when
@@ -342,8 +269,7 @@ export function Section({
 
 /**
  * The manifest facts — compatibility, allowed tools, license, checksum, metadata. Shared by the
- * detail's Manifest section and the standalone `PropList`. Version/created/updated are deliberately
- * excluded here (they live in the status card) so nothing is duplicated.
+ * detail's Manifest section and the standalone `PropList`.
  */
 export function ManifestRows({ skill }: { skill: SkillVM }) {
   const metadataEntries = Object.entries(skill.metadata).sort(([a], [b]) => a.localeCompare(b));

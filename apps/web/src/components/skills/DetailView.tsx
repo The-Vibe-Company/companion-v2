@@ -25,7 +25,6 @@ import {
   ManifestRows,
   Requirements,
   Section,
-  StatusCard,
 } from "./detailParts";
 import { DependenciesTab } from "./DependenciesTab";
 import { RunSessionsTab } from "../runs/RunSessionsTab";
@@ -576,53 +575,48 @@ export function DetailView({
         {activeTab === "overview" && (
           <div className="ddoc">
             <div className="dhead">
-              <div className="dhead__main">
-                <p className="lin-eyebrow">
-                  <Icon name={eyebrowIcon} size={13} />
-                  {eyebrow}
-                </p>
-                <div className="dtitlebar">
-                  <h1 className="dtitle dtitle--linear">{skill.display?.name ?? skill.id}</h1>
-                </div>
-                {skill.display?.name ? <p className="dslug mono">{skill.id}</p> : null}
-                <p className="ov__lead ov__lead--linear">{description}</p>
-                <p className="dbyline">
-                  <Avatar initials={skill.authorInitials} avatarUrl={skill.authorAvatarUrl} size={16} />
-                  <span>
-                    Created by <span className="dbyline__name">{skill.authorName}</span>
-                  </span>
-                  {skill.updaterId !== skill.authorId && (
-                    <>
-                      <span aria-hidden="true">·</span>
-                      <Avatar initials={skill.updaterInitials} avatarUrl={skill.updaterAvatarUrl} size={16} />
-                      <span>
-                        Updated by <span className="dbyline__name">{skill.updaterName}</span>
-                      </span>
-                    </>
-                  )}
-                </p>
-                {isInstalledCopy && (
-                  <div className="ls-confirm dinstalled-note">
-                    <Icon name="info" size={15} />
+              <p className="lin-eyebrow">
+                <Icon name={eyebrowIcon} size={13} />
+                {eyebrow}
+              </p>
+              <div className="dtitlebar">
+                <h1 className="dtitle dtitle--linear">{skill.display?.name ?? skill.id}</h1>
+              </div>
+              {skill.display?.name ? <p className="dslug mono">{skill.id}</p> : null}
+              <p className="ov__lead ov__lead--linear">{description}</p>
+              <p className="dbyline">
+                <Avatar initials={skill.authorInitials} avatarUrl={skill.authorAvatarUrl} size={16} />
+                <span>
+                  Created by <span className="dbyline__name">{skill.authorName}</span>
+                </span>
+                {skill.updaterId !== skill.authorId && (
+                  <>
+                    <span aria-hidden="true">·</span>
+                    <Avatar initials={skill.updaterInitials} avatarUrl={skill.updaterAvatarUrl} size={16} />
                     <span>
-                      Installed from <b>{orgName}</b>. The original lives in the organization library. Personal
-                      folders do not apply to installed skills.
+                      Updated by <span className="dbyline__name">{skill.updaterName}</span>
                     </span>
-                  </div>
+                  </>
                 )}
-                {/* Installed copies are not personally filed — hide the folder picker for them. */}
-                {!isInstalledCopy && (
-                  <FiledIn
-                    skill={skill}
-                    allLabels={allLabels}
-                    onToggleLabel={onToggleLabel}
-                    onSelectLabel={onSelectLabel}
-                  />
-                )}
-              </div>
-              <div className="dhead__aside">
-                <StatusCard skill={skill} libLabel={isInstalledCopy ? "My Skills · installed" : libLabel} />
-              </div>
+              </p>
+              {isInstalledCopy && (
+                <div className="ls-confirm dinstalled-note">
+                  <Icon name="info" size={15} />
+                  <span>
+                    Installed from <b>{orgName}</b>. The original lives in the organization library. Personal
+                    folders do not apply to installed skills.
+                  </span>
+                </div>
+              )}
+              {/* Installed copies are not personally filed — hide the folder picker for them. */}
+              {!isInstalledCopy && (
+                <FiledIn
+                  skill={skill}
+                  allLabels={allLabels}
+                  onToggleLabel={onToggleLabel}
+                  onSelectLabel={onSelectLabel}
+                />
+              )}
             </div>
 
             {invalid && skill.error && (
