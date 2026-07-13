@@ -122,6 +122,10 @@ describe("skill update flow", () => {
     );
 
     expect(editable).toContain("Publish new version");
+    expect(editable).toContain('aria-label="Archive skill"');
+    expect(editable).toContain('title="Archive skill"');
+    expect(editable).toMatch(/class="menu__label">Archive<\/span>/);
+    expect(editable).not.toMatch(/class="menu__label">Archive skill<\/span>/);
     expect(readOnly).not.toContain("Publish new version");
     expect(readOnly).toContain("Download package");
   });

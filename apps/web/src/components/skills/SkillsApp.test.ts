@@ -324,6 +324,12 @@ function clickButton(container: HTMLElement, label: string) {
   });
 }
 
+function expectContextualInstallButton(container: HTMLElement) {
+  const button = findButton(container, "Install skill");
+  expect(button.textContent?.trim()).toBe("Install");
+  expect(button.getAttribute("title")).toBe("Install skill");
+}
+
 function skillRow(container: HTMLElement, id: string): HTMLElement {
   const button = findButton(container, `Open skill ${id}`);
   const row = button.closest<HTMLElement>(".crow");
@@ -1078,7 +1084,7 @@ describe("SkillsApp optimistic label assignment", () => {
       { url: "/skills?lib=org&skill=seo-helper" },
     );
     await flushEffects();
-    expect(container.textContent).toContain("Install skill");
+    expectContextualInstallButton(container);
     expect(container.textContent).toContain("Filed in");
     expect(container.querySelector('button[aria-label="Remove from marketing/seo"]')).not.toBeNull();
 
@@ -1090,7 +1096,7 @@ describe("SkillsApp optimistic label assignment", () => {
     expect(queryMocks.unassignSkillLabel).toHaveBeenCalledTimes(1);
     expect(queryMocks.unassignSkillLabel).toHaveBeenCalledWith("seo-helper", "marketing/seo");
     expect(queryMocks.assignSkillLabel).not.toHaveBeenCalled();
-    expect(container.textContent).toContain("Install skill");
+    expectContextualInstallButton(container);
     expect(container.textContent).toContain("No folders yet");
     expect(container.querySelector('button[aria-label="Remove from marketing/seo"]')).toBeNull();
   });
@@ -1108,7 +1114,7 @@ describe("SkillsApp optimistic label assignment", () => {
 
     expect(queryMocks.unassignSkillLabel).toHaveBeenCalledTimes(1);
     // The chip is restored after the failure; the detail never closed.
-    expect(container.textContent).toContain("Install skill");
+    expectContextualInstallButton(container);
     expect(container.querySelector('button[aria-label="Remove from marketing/seo"]')).not.toBeNull();
   });
 
@@ -1140,7 +1146,7 @@ describe("SkillsApp optimistic label assignment", () => {
     // The press never blocked the row's click, so opening the skill still works.
     clickButton(container, "Open skill loose-skill");
     await flushEffects();
-    expect(container.textContent).toContain("Install skill");
+    expectContextualInstallButton(container);
   });
 
   it("marks only the hovered same-library folder while dragging a skill, and follows the cursor", async () => {
@@ -1439,7 +1445,7 @@ describe("SkillsApp navigation", () => {
     clickButton(container, "Open skill loose-skill");
     await flushEffects();
     expect(window.location.pathname + window.location.search).toBe("/s/share-loose-skill");
-    expect(container.textContent).toContain("Install skill");
+    expectContextualInstallButton(container);
 
     // Browser Back returns to the org list (the entry before the pushed detail).
     window.history.replaceState({}, "", "/skills?lib=org");
@@ -1463,7 +1469,7 @@ describe("SkillsApp navigation", () => {
     await flushEffects();
 
     expect(window.location.pathname + window.location.search).toBe("/s/share-seo-helper");
-    expect(container.textContent).toContain("Install skill");
+    expectContextualInstallButton(container);
   });
 
   it("re-opens an org skill from a public share URL history entry", async () => {
@@ -1478,7 +1484,7 @@ describe("SkillsApp navigation", () => {
 
     expect(window.location.pathname + window.location.search).toBe("/s/share-brand-kit");
     expect(container.textContent).toContain("brand-kit");
-    expect(container.textContent).toContain("Install skill");
+    expectContextualInstallButton(container);
   });
 
   it("keeps personal skill detail URLs on the signed-in skills route", async () => {
@@ -1584,7 +1590,7 @@ describe("SkillsApp navigation", () => {
       { url: "/skills?lib=org&skill=seo-helper" },
     );
     await flushEffects();
-    expect(container.textContent).toContain("Install skill");
+    expectContextualInstallButton(container);
     expect(window.location.pathname + window.location.search).toBe("/s/share-seo-helper");
 
     // The detail crumb's back button is labeled by the library (the org name for an org skill).
