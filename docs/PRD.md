@@ -61,10 +61,11 @@ one person. There is no open, self-hostable answer for a **team**.
 | **Dashboard** | Basic list/detail views of agents, containers, and skills (skills filterable by label, status, dependencies, and stars); deployment status & logs. |
 | **Secrets** | Encrypted, write-only secret storage; OpenRouter and provider credentials referenced, never inlined. |
 | **Audit** | Append-only audit log of mutating, deploy, and exec actions (in-app view minimal). |
+| **Managed SaaS billing** | Free and Pro plans; Pro is $10 USD/month per active member with Stripe Tax, automatic prorations, a seven-day delinquency grace period, and transactional skill quotas. Self-hosted remains fully unlocked without Stripe. |
 
 ### Out of scope (deferred)
 
-SSO/SAML & SCIM · billing, quotas, cost dashboards · community marketplace & cross-org sharing ·
+SSO/SAML & SCIM · usage cost dashboards · community marketplace & cross-org sharing ·
 **Kubernetes** and **Modal** providers · audit export & compliance certifications · skill-execution
 sandbox hardening · skill ratings/reviews · agent observability/tracing · Tailscale-style private
 networking parity with v1.
@@ -131,6 +132,21 @@ Each requirement has user stories with acceptance criteria. Priorities: **P0** =
   never returned by the API and never persisted in plaintext.
 - As an Org Admin, I can **view an audit log** of who did what and to which resource.
 
+### 5.8 SaaS plans and seat billing (P0 managed service)
+
+- As a workspace Owner/Admin, I can upgrade from Free to Pro through Stripe Checkout at $10 USD per
+  active member per month and manage payment methods, invoices, and end-of-period cancellation in the
+  Customer Portal. *AC:* Checkout quantity is server-controlled, Stripe Tax is enabled, and a second
+  active subscription cannot be created.
+- As any member, I can see the effective plan, active and confirmed seats, estimated pre-tax monthly
+  subtotal, payment/grace/cancellation state, and seat-sync health. *AC:* PATs cannot read or manage
+  billing and Developers cannot open Checkout or Portal sessions.
+- As a Free member, I retain org catalog access with up to 20 active-or-archived org skills, installed
+  org skills in My Skills, and current-version downloads. *AC:* personal skills remain preserved but
+  hidden, history is Pro-only, and over-limit catalogs freeze non-destructive mutations.
+- As a self-hosted operator, I receive all Pro capabilities without Stripe. *AC:* Billing navigation
+  and Upgrade CTAs are absent when billing is disabled.
+
 ---
 
 ## 6. Non-functional requirements
@@ -155,10 +171,11 @@ Each requirement has user stories with acceptance criteria. Priorities: **P0** =
 |---|---|---|
 | **V0 — MVP** | Self-host + 3 thin pillars + RBAC | Org/User + RBAC + org-wide skills with shared labels · Local Docker (Fly fast-follow) · deploy Hermès agent · curated container 1-click · `SKILL.md` upload/version/label/attach · Granite + OpenRouter concrete · basic dashboard |
 | **V1 — Collaboration & trust** | Make teams productive & observable | **Kubernetes** + **Modal** providers · **SSO/SAML** · **in-app audit** & usage · agent observability/logs · skill ratings/reviews + dependency pinning · private networking (Tailscale-style) · **pluggable runtime** beyond Hermes |
-| **V2 — Scale & ecosystem** | Marketplace, monetization, compliance | Community **marketplace** (skills, agent + container templates) · **billing + quotas/cost controls** · **compliance** (audit export, SCIM, SOC2-ready, retention) · optional **managed cloud** · multi-org / federation |
+| **V2 — Scale & ecosystem** | Marketplace, usage economics, compliance | Community **marketplace** (skills, agent + container templates) · usage/cost controls · **compliance** (audit export, SCIM, SOC2-ready, retention) · multi-org / federation |
 
 **Where notable features land:** SSO/SAML → **V1**. In-app audit → **V1**, export/compliance → **V2**.
-Marketplace → **V2**. Billing → **V2**. Kubernetes & Modal → **V1**.
+Marketplace → **V2**. Free/Pro seat billing ships with the managed SaaS slice; usage cost dashboards
+remain **V2**. Kubernetes & Modal → **V1**.
 
 ---
 

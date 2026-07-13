@@ -23,7 +23,7 @@ It was built for **one person, one workspace**. It has no notion of organization
 or permissions.
 
 **Companion v2 is the team version.** It takes that engine and wraps it in a web portal where an
-**Organization → Team → User** hierarchy with RBAC governs every resource. Publish a versioned
+**Organization → User** hierarchy with RBAC governs every resource. Publish a versioned
 skill once, approve a container image once, define an agent template once — and the right people
 across your org get **one-click, permissioned access**. No shell, no TOML, no infrastructure tickets.
 
@@ -37,10 +37,9 @@ Think *"GitHub for your team's agents"* — but open-source and running on **you
 | 📦 **Curated Container Catalog** | One-click deploy of admin-approved images & templates — databases, MCP servers, tools, web UIs. | Org Admins approve, members deploy |
 | 🧩 **Skills Hub** | Upload, version, and share `SKILL.md` packages. Attach them opt-in to the agents that should have them. | Anyone publishes, owners attach |
 
-Skills use explicit workspace visibility: **Private** by default, **Everyone** for the whole
-workspace, and optional team shares for one or more teams. Everyone is organization-local; there is no
-internet-wide or cross-org visibility. Ownership is separate: a skill is owned by a user or by a
-team, and team-owned skills can be edited by that team's Admins and Editors.
+Skills live in one of two libraries: private **My Skills** entries owned by their creator, or the
+org-wide library editable by every member. A personal skill can be shared one-way to the org and both
+libraries are organized with their own label trees.
 
 ## Why Companion
 
@@ -56,7 +55,8 @@ team, and team-owned skills can be edited by that team's Admins and Editors.
 
 > 🚧 **Early.** The **Skills Hub (Pillar 3)** is implemented as a greenfield self-host slice:
 > Postgres + Drizzle, Better Auth, MinIO/S3 storage, a Hono API, a Next.js portal, and the
-> `companion` CLI to upload, download, and keep skills up to date. Agents and the Container Catalog are stubbed. See
+> `companion` CLI to upload, download, and keep skills up to date. Managed SaaS adds Free/Pro seat
+> billing while self-hosted remains fully unlocked without Stripe. Agents and the Container Catalog are stubbed. See
 > [Architecture](docs/design.md) for what exists and [PRD](docs/PRD.md) for the roadmap.
 
 ## Quickstart — Skills Hub (local)
@@ -66,7 +66,7 @@ pnpm install
 pnpm test                                   # shared packages: validation + authz matrix
 
 # 1) Full local stack. Needs Docker.
-pnpm dev                                    # infra + migrations + seed + API :3001 + web :3000
+pnpm dev                                    # infra + migrations + seed + API :3001 + worker + web :3000
 
 # 2) CLI
 pnpm --filter @companion/cli build
@@ -89,7 +89,7 @@ If migrations fail, startup fails rather than serving newer code against an olde
 
 Conductor's Run button calls `bash scripts/dev-conductor.sh` — a **native, Docker-free** launcher
 (modeled on `~/Dev/monkapps`). It starts a per-workspace Postgres cluster, plus optional native MinIO
-and Mailpit, under `.conductor-pg/`, applies migrations, seeds the test user, then runs the API + web
+and Mailpit, under `.conductor-pg/`, applies migrations, seeds the test user, then runs the API + billing worker + web
 with `concurrently`. All ports derive from `CONDUCTOR_PORT` (fallback `3000` outside Conductor):
 
 | Service | Port |
@@ -116,7 +116,7 @@ The non-Conductor `pnpm dev` path is unchanged and still uses Docker Compose (`s
 |---|---|---|
 | Primary user | Single operator | Organizations & teams |
 | Interface | CLI + IaC (TOML) | Web portal + API (+ CLI) |
-| Access control | None | Org → Team → User, RBAC, workspace visibility |
+| Access control | None | Org → User, RBAC, personal + org skill libraries |
 | State | Local SQLite + files | Postgres, multi-tenant |
 | Deploy targets | Fly.io | Docker · Fly · Kubernetes · Modal |
 | Skills | Ad-hoc | Versioned registry + opt-in attach |

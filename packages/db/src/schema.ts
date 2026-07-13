@@ -24,7 +24,7 @@ export const validationStateEnum = pgEnum("validation_state", ["valid", "validat
 // even admins do not. Share flips 'personal' → 'org'; there is no reverse transition.
 export const skillScopeEnum = pgEnum("skill_scope", ["personal", "org"]);
 export const orgKindEnum = pgEnum("org_kind", ["personal", "team"]);
-export const orgPlanEnum = pgEnum("org_plan", ["free", "team"]);
+export const billingSeatSyncStatusEnum = pgEnum("billing_seat_sync_status", ["synced", "pending", "error"]);
 export const invitationStatusEnum = pgEnum("invitation_status", [
   "pending",
   "accepted",
@@ -112,7 +112,6 @@ export const organizations = pgTable(
     name: text("name").notNull(),
     slug: text("slug").notNull().unique(),
     kind: orgKindEnum("kind").notNull().default("team"),
-    plan: orgPlanEnum("plan").notNull().default("free"),
     /** Verified email domain that grants membership (e.g. "acme.com"); null for personal/unclaimed orgs. */
     domain: text("domain"),
     /** When true, anyone signing up with a matching verified `domain` is auto-added as a member. */
@@ -188,6 +187,70 @@ export const invitations = pgTable(
   },
   (t) => ({
     activeInvite: uniqueIndex("invitations_pending_email_uq").on(t.orgId, t.email).where(sql`${t.status} = 'pending'`),
+  }),
+);
+
+/**
+ * Stripe's raw subscription state, kept separate from the effective Free/Pro decision. One row per
+ * organization also acts as the durable seat-sync/Checkout outbox for the billing worker.
+ */
+export const billingSubscriptions = pgTable(
+  "billing_subscriptions",
+  {
+    orgId: uuid("org_id")
+      .primaryKey()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    stripeCustomerId: text("stripe_customer_id").unique(),
+    stripeSubscriptionId: text("stripe_subscription_id").unique(),
+    stripeSubscriptionItemId: text("stripe_subscription_item_id"),
+    stripePriceId: text("stripe_price_id"),
+    stripeStatus: text("stripe_status"),
+    syncedQuantity: integer("synced_quantity"),
+    currentPeriodStart: timestamp("current_period_start", { withTimezone: true }),
+    currentPeriodEnd: timestamp("current_period_end", { withTimezone: true }),
+    cancelAtPeriodEnd: boolean("cancel_at_period_end").notNull().default(false),
+    canceledAt: timestamp("canceled_at", { withTimezone: true }),
+    graceEndsAt: timestamp("grace_ends_at", { withTimezone: true }),
+    lastStripeEventId: text("last_stripe_event_id"),
+    lastReconciledAt: timestamp("last_reconciled_at", { withTimezone: true }),
+    seatSyncStatus: billingSeatSyncStatusEnum("seat_sync_status").notNull().default("synced"),
+    seatSyncRequestedAt: timestamp("seat_sync_requested_at", { withTimezone: true }),
+    seatSyncAttempts: integer("seat_sync_attempts").notNull().default(0),
+    nextRetryAt: timestamp("next_retry_at", { withTimezone: true }),
+    lastError: text("last_error"),
+    lastErrorAt: timestamp("last_error_at", { withTimezone: true }),
+    checkoutSessionId: text("checkout_session_id").unique(),
+    checkoutExpiresAt: timestamp("checkout_expires_at", { withTimezone: true }),
+    checkoutGeneration: integer("checkout_generation").notNull().default(0),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    pendingSeatSync: index("billing_subscriptions_pending_idx").on(t.seatSyncStatus, t.nextRetryAt),
+    reconcileDue: index("billing_subscriptions_reconcile_idx").on(t.lastReconciledAt),
+    positiveQuantity: check("billing_subscriptions_quantity_check", sql`${t.syncedQuantity} is null or ${t.syncedQuantity} >= 1`),
+    nonnegativeAttempts: check("billing_subscriptions_attempts_check", sql`${t.seatSyncAttempts} >= 0`),
+    nonnegativeCheckoutGeneration: check("billing_subscriptions_checkout_generation_check", sql`${t.checkoutGeneration} >= 0`),
+  }),
+);
+
+/** Processed Stripe event ids. Events are tenant-bound before insertion; unknown events are logged only. */
+export const stripeWebhookEvents = pgTable(
+  "stripe_webhook_events",
+  {
+    eventId: text("event_id").primaryKey(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    eventType: text("event_type").notNull(),
+    status: text("status", { enum: ["processing", "processed", "failed"] }).notNull().default("processing"),
+    error: text("error"),
+    receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
+    processedAt: timestamp("processed_at", { withTimezone: true }),
+  },
+  (t) => ({
+    byOrg: index("stripe_webhook_events_org_idx").on(t.orgId, t.receivedAt),
+    validStatus: check("stripe_webhook_events_status_check", sql`${t.status} in ('processing', 'processed', 'failed')`),
   }),
 );
 

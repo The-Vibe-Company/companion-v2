@@ -9,6 +9,7 @@ import { ApiKeysPane } from "./ApiKeysPane";
 import { WorkspaceGeneralPane } from "./WorkspaceGeneralPane";
 import { MembersPane } from "./MembersPane";
 import { InvitationsPane } from "./InvitationsPane";
+import { BillingPane } from "./BillingPane";
 import { InviteDialog } from "./dialogs";
 import type { ApiKeyVM, Invite, OrgCtx, SettingsDialog, SettingsRoute } from "./model";
 
@@ -28,6 +29,8 @@ function crumbFor(ctx: OrgCtx, route: SettingsRoute): string[] {
       return [ws.name, "Members"];
     case "invitations":
       return [ws.name, "Invitations"];
+    case "billing":
+      return [ws.name, "Billing"];
     default:
       return [ws.name];
   }
@@ -57,23 +60,25 @@ export function SettingsView({
   onDialog: (dialog: SettingsDialog) => void;
   onClose: () => void;
 }) {
+  const visibleRoute: SettingsRoute = route.view === "billing" && !ctx.billing?.billingEnabled ? { view: "general" } : route;
   let pane: React.ReactNode;
-  if (route.view === "profile") pane = <ProfilePane ctx={ctx} />;
-  else if (route.view === "preferences") pane = <PreferencesPane ctx={ctx} />;
-  else if (route.view === "apikeys") pane = <ApiKeysPane ctx={ctx} keys={apiKeys} />;
-  else if (route.view === "general") pane = <WorkspaceGeneralPane ctx={ctx} />;
-  else if (route.view === "members") pane = <MembersPane ctx={ctx} onInvite={() => onDialog("invite")} />;
-  else if (route.view === "invitations")
+  if (visibleRoute.view === "profile") pane = <ProfilePane ctx={ctx} />;
+  else if (visibleRoute.view === "preferences") pane = <PreferencesPane ctx={ctx} />;
+  else if (visibleRoute.view === "apikeys") pane = <ApiKeysPane ctx={ctx} keys={apiKeys} />;
+  else if (visibleRoute.view === "general") pane = <WorkspaceGeneralPane ctx={ctx} />;
+  else if (visibleRoute.view === "members") pane = <MembersPane ctx={ctx} onInvite={() => onDialog("invite")} />;
+  else if (visibleRoute.view === "invitations")
     pane = <InvitationsPane ctx={ctx} invites={invites} onInvite={() => onDialog("invite")} />;
+  else if (visibleRoute.view === "billing" && ctx.billing?.billingEnabled) pane = <BillingPane ctx={ctx} />;
   else pane = <WorkspaceGeneralPane ctx={ctx} />;
 
-  const crumb = crumbFor(ctx, route);
+  const crumb = crumbFor(ctx, visibleRoute);
 
   return (
     <div className="sx">
       <SettingsSidebar
         ctx={ctx}
-        route={route}
+        route={visibleRoute}
         go={onView}
         onClose={onClose}
         apiKeyCount={apiKeys.length}

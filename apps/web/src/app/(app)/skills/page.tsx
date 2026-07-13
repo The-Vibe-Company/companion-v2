@@ -4,6 +4,7 @@ import type {
   LocalSkillRow,
   SkillFilterPreferences,
   SkillListRow,
+  BillingOverview,
 } from "@companion/contracts";
 import { loadOrgContext } from "@/lib/currentOrg";
 import { serverApiFetch } from "@/lib/apiServer";
@@ -46,6 +47,8 @@ export default async function SkillsPage({
     () => null,
   );
 
+  const billing = await serverApiFetch<BillingOverview>("/v1/billing", { headers: orgHeaders }).catch(() => null);
+  if (!billing) return <WorkspaceLoadError />;
   const [mineResult, orgResult, filterPreferences, personalLabelsResult, labelsResult] =
     await Promise.all([
       // "My Skills": the caller's authored personal skills + org skills they installed.
@@ -54,7 +57,9 @@ export default async function SkillsPage({
       serverApiFetch<SkillListRow[]>("/v1/skills?lib=org", { headers: orgHeaders }).catch(() => null),
       serverApiFetch<SkillFilterPreferences>("/v1/skill-filter-preferences", { headers: orgHeaders }).catch(() => null),
       // Best-effort: each tree degrades gracefully to empty if its fetch fails.
-      serverApiFetch<LabelsResponse>("/v1/personal-labels", { headers: orgHeaders }).catch(() => EMPTY_LABELS),
+      billing.entitlements.personalSkills
+        ? serverApiFetch<LabelsResponse>("/v1/personal-labels", { headers: orgHeaders }).catch(() => EMPTY_LABELS)
+        : Promise.resolve(EMPTY_LABELS),
       serverApiFetch<LabelsResponse>("/v1/labels", { headers: orgHeaders }).catch(() => EMPTY_LABELS),
     ]);
   if (!mineResult || !orgResult || !filterPreferences) return <WorkspaceLoadError />;
@@ -77,6 +82,7 @@ export default async function SkillsPage({
       initialFilterPreferences={filterPreferences}
       initialPersonalLabels={personalLabelsResult ?? EMPTY_LABELS}
       initialLabels={labelsResult ?? EMPTY_LABELS}
+      initialBilling={billing}
       me={me}
       orgs={orgs}
       currentOrg={current}

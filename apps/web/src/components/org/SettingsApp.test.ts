@@ -36,7 +36,6 @@ describe("SettingsController", () => {
         name: "Acme",
         slug: "acme",
         kind: "team",
-        plan: "team",
         myRole: "owner",
         created: "2025-01-12",
         domain: null,
