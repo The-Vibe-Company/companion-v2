@@ -58,7 +58,7 @@ export function mapApiKey(row: ApiTokenRow): ApiKeyVM {
   return {
     id: row.id,
     name: row.name,
-    scope: row.scopes.includes("skills:write") ? "write" : "read",
+    scope: row.scopes.some((scope) => scope.endsWith(":write")) ? "write" : "read",
     prefix: row.prefix,
     // The raw secret is never stored; the prefix is the only post-creation visible part.
     last4: row.prefix.slice(-4),

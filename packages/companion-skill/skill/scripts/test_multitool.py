@@ -15,6 +15,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import companion_lib  # noqa: E402
+import create_secret  # noqa: E402
 import install_skill  # noqa: E402
 
 REGISTRY = {
@@ -107,6 +108,46 @@ class ConfigTests(EnvSandbox):
         self.assertEqual(saved["tools"], ["claude-code", "codex", "opencode"])  # sorted + deduped
         self.assertEqual(saved["detectedAt"], "2026-06-26T00:00:00Z")
         self.assertEqual(companion_lib.load_tool_config(), ["claude-code", "codex", "opencode"])
+
+
+class SecretCreationTests(EnvSandbox):
+    def test_create_secret_reads_stdin_and_never_prints_plaintext(self) -> None:
+        sentinel = "private-value-sentinel"
+        captured: dict[str, object] = {}
+        old_argv = sys.argv
+        old_stdin = sys.stdin
+        original_credentials = create_secret.resolve_credentials
+        original_post = create_secret.api_post_json
+        create_secret.resolve_credentials = lambda: ("https://api/v1", "token", "workspace-1")
+
+        def fake_post(base: str, token: str, path: str, payload: dict[str, object]):
+            captured.update({"base": base, "token": token, "path": path, "payload": payload})
+            return {"id": "secret-1", "name": "Deploy key", "key": "DEPLOY_KEY", "audience": "organization"}
+
+        create_secret.api_post_json = fake_post
+        sys.argv = [
+            "create_secret.py",
+            "--name", "Deploy key",
+            "--key", "DEPLOY_KEY",
+            "--audience", "organization",
+            "--value-stdin",
+            "--json",
+        ]
+        sys.stdin = io.StringIO(sentinel)
+        stdout = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(stdout):
+                create_secret.main()
+        finally:
+            sys.argv = old_argv
+            sys.stdin = old_stdin
+            create_secret.resolve_credentials = original_credentials
+            create_secret.api_post_json = original_post
+
+        self.assertEqual(captured["path"], "/secrets")
+        self.assertEqual(captured["payload"]["value"], sentinel)
+        self.assertNotIn(sentinel, stdout.getvalue())
+        self.assertNotIn("value", json.loads(stdout.getvalue()))
 
 
 class LockRecordTests(EnvSandbox):
@@ -427,6 +468,39 @@ class DependencyInstallPlanTests(EnvSandbox):
             sys.argv = old_argv
         return code, stdout.getvalue(), stderr.getvalue()
 
+    def test_legacy_secret_confirmation_cannot_authorize_retrieval(self) -> None:
+        old_argv = sys.argv
+        sys.argv = ["install_skill.py", "demo", "--confirm-required-secrets"]
+        try:
+            with self.assertRaisesRegex(SystemExit, "no longer authorizes secret retrieval"):
+                install_skill.main()
+        finally:
+            sys.argv = old_argv
+
+    def test_legacy_credentials_skip_workspace_recovery(self) -> None:
+        old_argv = sys.argv
+        original_credentials = install_skill.resolve_credentials
+        original_recover = install_skill.recover_pending_transactions
+        original_registry = install_skill.load_tool_registry
+        recovered: list[str] = []
+        install_skill.resolve_credentials = lambda: ("https://api/v1", "token", None)
+        install_skill.recover_pending_transactions = lambda workspace_id: recovered.append(workspace_id)
+
+        def registry_reached():
+            raise SystemExit("registry reached")
+
+        install_skill.load_tool_registry = registry_reached
+        sys.argv = ["install_skill.py", "demo"]
+        try:
+            with self.assertRaisesRegex(SystemExit, "registry reached"):
+                install_skill.main()
+        finally:
+            sys.argv = old_argv
+            install_skill.resolve_credentials = original_credentials
+            install_skill.recover_pending_transactions = original_recover
+            install_skill.load_tool_registry = original_registry
+        self.assertEqual(recovered, [])
+
     def test_transitive_install_plan_is_dependency_first(self) -> None:
         originals = self._patch_dependency_api(
             {
@@ -642,14 +716,21 @@ class DependencyInstallPlanTests(EnvSandbox):
         node = {"slug": "root", "version": "1.0.0", "skill": {"name": "root", "slug": "root", "version": "1.0.0"}}
         originals = (
             install_skill.build_install_plan,
-            install_skill.collect_required_secrets,
+            install_skill.preflight_skills,
             install_skill.api_download_bytes,
             install_skill.install_nodes,
             install_skill.report_install,
         )
 
         install_skill.build_install_plan = lambda *_args: {"root": node, "nodes": [node], "blockers": []}
-        install_skill.collect_required_secrets = lambda *_args: [{"slug": "root", "version": "1.0.0", "secret": "OPENAI_API_KEY"}]
+        install_skill.preflight_skills = lambda *_args: {
+            "plan_id": "1c70dfff-85d0-4770-99c8-937a10dde901",
+            "expires_at": "2026-07-13T12:05:00Z",
+            "items": [{"skill": "root", "env_key": "OPENAI_API_KEY", "required": True}],
+            "tombstones": [],
+            "blockers": 1,
+            "warnings": 0,
+        }
         install_skill.api_download_bytes = lambda *_args: calls.__setitem__("downloads", calls["downloads"] + 1)
         install_skill.install_nodes = lambda *_args: calls.__setitem__("installs", calls["installs"] + 1)
         install_skill.report_install = lambda *_args: calls.__setitem__("reports", calls["reports"] + 1)
@@ -658,7 +739,7 @@ class DependencyInstallPlanTests(EnvSandbox):
         finally:
             (
                 install_skill.build_install_plan,
-                install_skill.collect_required_secrets,
+                install_skill.preflight_skills,
                 install_skill.api_download_bytes,
                 install_skill.install_nodes,
                 install_skill.report_install,
@@ -666,7 +747,7 @@ class DependencyInstallPlanTests(EnvSandbox):
 
         self.assertEqual(code, 2)
         payload = json.loads(out)
-        self.assertEqual(payload["requiredSecrets"][0]["secret"], "OPENAI_API_KEY")
+        self.assertEqual(payload["secretPreflight"]["items"][0]["env_key"], "OPENAI_API_KEY")
         self.assertEqual(calls, {"downloads": 0, "installs": 0, "reports": 0})
         self.assertFalse(companion_lib.lockfile_path().exists())
 
@@ -675,7 +756,7 @@ class DependencyInstallPlanTests(EnvSandbox):
         node = {"slug": "root", "version": "1.0.0", "skill": {"name": "root", "slug": "root", "version": "1.0.0"}}
         originals = (
             install_skill.build_install_plan,
-            install_skill.collect_required_secrets,
+            install_skill.preflight_skills,
             install_skill.preflight_target_conflicts,
             install_skill.api_download_bytes,
             install_skill.install_nodes,
@@ -683,7 +764,7 @@ class DependencyInstallPlanTests(EnvSandbox):
         )
 
         install_skill.build_install_plan = lambda *_args: {"root": node, "nodes": [node], "blockers": []}
-        install_skill.collect_required_secrets = lambda *_args: []
+        install_skill.preflight_skills = lambda *_args: {"plan_id": "7b36fa22-2457-46e5-9b6b-e0123cd140fa", "items": [], "tombstones": [], "blockers": 0, "warnings": 0}
         install_skill.preflight_target_conflicts = lambda *_args, **_kwargs: [
             {"slug": "root", "version": "1.0.0", "tool": "claude-code", "scope": "user", "status": "skipped_untracked", "path": "/x"}
         ]
@@ -695,7 +776,7 @@ class DependencyInstallPlanTests(EnvSandbox):
         finally:
             (
                 install_skill.build_install_plan,
-                install_skill.collect_required_secrets,
+                install_skill.preflight_skills,
                 install_skill.preflight_target_conflicts,
                 install_skill.api_download_bytes,
                 install_skill.install_nodes,
@@ -714,14 +795,14 @@ class DependencyInstallPlanTests(EnvSandbox):
         root = {"slug": "root", "version": "1.0.0", "skill": {"name": "root", "slug": "root", "version": "1.0.0"}}
         originals = (
             install_skill.build_install_plan,
-            install_skill.collect_required_secrets,
+            install_skill.preflight_skills,
             install_skill.preflight_target_conflicts,
             install_skill.install_nodes,
             install_skill.report_install,
         )
 
         install_skill.build_install_plan = lambda *_args: {"root": root, "nodes": [dep, root], "blockers": []}
-        install_skill.collect_required_secrets = lambda *_args: []
+        install_skill.preflight_skills = lambda *_args: {"plan_id": "9ff7df41-ed2a-4df8-bb3e-585231c5277b", "items": [], "tombstones": [], "blockers": 0, "warnings": 0}
         install_skill.preflight_target_conflicts = lambda *_args, **_kwargs: []
         install_skill.install_nodes = lambda *_args, **_kwargs: {
             "targets": [{"slug": "dep", "version": "1.0.0", "tool": "claude-code", "scope": "user", "status": "installed"}],
@@ -734,7 +815,7 @@ class DependencyInstallPlanTests(EnvSandbox):
         finally:
             (
                 install_skill.build_install_plan,
-                install_skill.collect_required_secrets,
+                install_skill.preflight_skills,
                 install_skill.preflight_target_conflicts,
                 install_skill.install_nodes,
                 install_skill.report_install,
@@ -752,14 +833,14 @@ class DependencyInstallPlanTests(EnvSandbox):
         root = {"slug": "root", "version": "1.0.0", "skill": {"name": "root", "slug": "root", "version": "1.0.0"}}
         originals = (
             install_skill.build_install_plan,
-            install_skill.collect_required_secrets,
+            install_skill.preflight_skills,
             install_skill.preflight_target_conflicts,
             install_skill.install_nodes,
             install_skill.report_install,
         )
 
         install_skill.build_install_plan = lambda *_args: {"root": root, "nodes": [dep, root], "blockers": []}
-        install_skill.collect_required_secrets = lambda *_args: []
+        install_skill.preflight_skills = lambda *_args: {"plan_id": "d584eb67-e9de-4d0b-b91c-c809fd4c911f", "items": [], "tombstones": [], "blockers": 0, "warnings": 0}
         install_skill.preflight_target_conflicts = lambda *_args, **_kwargs: []
         install_skill.install_nodes = lambda *_args, **_kwargs: {
             "targets": [
@@ -780,7 +861,7 @@ class DependencyInstallPlanTests(EnvSandbox):
         finally:
             (
                 install_skill.build_install_plan,
-                install_skill.collect_required_secrets,
+                install_skill.preflight_skills,
                 install_skill.preflight_target_conflicts,
                 install_skill.install_nodes,
                 install_skill.report_install,

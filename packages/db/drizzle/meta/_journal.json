@@ -232,6 +232,13 @@
       "when": 1783936000000,
       "tag": "0032_billing",
       "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1783937500000,
+      "tag": "0033_personal_shared_secrets",
+      "breakpoints": true
     }
   ]
 }

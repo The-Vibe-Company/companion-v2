@@ -2,7 +2,8 @@
 
 Base URL is `COMPANION_API_URL` (ends in `/v1`). The active workspace id is
 `COMPANION_WORKSPACE_ID` (`organizations.id`). Authenticate management requests with
-`Authorization: Bearer $COMPANION_TOKEN`. The token is scoped to `skills:read` + `skills:write`.
+`Authorization: Bearer $COMPANION_TOKEN`. The token is scoped to `skills:read` + `skills:write` +
+`secrets:read` + `secrets:write`.
 The public preview endpoint documented below intentionally does not use this token.
 
 Resolve those values from the environment first. If either variable is missing, read the dedicated
@@ -32,8 +33,7 @@ For the legacy flat shape `{ "apiUrl": "...", "token": "..." }`, use those value
 token-supported `GET /local-skills/companion` to read its `workspaceId` before writing local
 inventory. Never print the token back to the user.
 
-These are the Companion skill-management endpoints a personal access token (`skills:read` +
-`skills:write`) can call:
+These are the Companion skill-management endpoints a personal access token can call:
 
 | Action | Method & path | Scope |
 | --- | --- | --- |
@@ -73,7 +73,110 @@ These are the Companion skill-management endpoints a personal access token (`ski
 | Current bundled Companion skill status + workspace id | `GET /local-skills/companion` | `skills:read` |
 | Download bundled Companion skill package | `GET /local-skills/companion/package` | `skills:read` |
 | Confirm this skill installed | `POST /local-skills/companion/installed` | `skills:write` |
+| Create a write-only secret | `POST /secrets` | `secrets:write` |
+| List authorized secret metadata | `GET /secrets` | `secrets:read` |
+| Read authorized secret metadata | `GET /secrets/{id}` | `secrets:read` |
+| Read skill secret configuration | `GET /skills/{slug}/secret-configuration?version={version}` | `secrets:read` |
+| Preflight exact skill/dependency secret versions | `POST /secret-retrievals/preflight` | `secrets:read` |
+| Create a 60-second retrieval grant | `POST /secret-retrievals/{planId}/grant` | `secrets:read` |
+| Redeem a grant once | `POST /secret-grants/redeem` | `secrets:read` |
 | Fetch companion.json v2 schema | `GET /v1/schemas/companion-manifest.v2.schema.json` | Public |
+
+## Secret bindings and retrieval
+
+`companion.json.environment.secrets[ENV_KEY].slotId` is an optional UUID on input and always stable
+after normalization. Preserve an existing `slotId` when renaming its environment key. Requirements
+returned by skill endpoints expose the same identity as `slot_id`; ordinary `environment.env`
+variables do not use the vault.
+
+PAT automation may create a write-only secret, but cannot rotate, reveal, update, share, bind, or
+delete one. Prefer the bundled helper so the value never enters argv or output:
+
+```sh
+python3 scripts/create_secret.py --name "Production API key" --key SERVICE_API_KEY
+printf '%s' "$SECRET_VALUE" | python3 scripts/create_secret.py \
+  --name "Production API key" --key SERVICE_API_KEY --audience organization --value-stdin --json
+```
+
+The helper calls:
+
+```http
+POST /secrets
+Content-Type: application/json
+
+{
+  "name": "Production API key",
+  "key": "SERVICE_API_KEY",
+  "value": "<write-only value>",
+  "audience": "personal | restricted | organization",
+  "recipient_ids": []
+}
+```
+
+The `201` response is metadata-only and never contains `value`. For `restricted`, pass one or more
+recipient user ids with repeated `--recipient`; the server rejects non-members. Always confirm the
+audience and recipients with the user before creation. A token needs `secrets:write`; older Companion
+tokens must be regenerated from the Use prompt.
+
+The web session exclusively owns every other vault and binding mutation:
+
+- `PATCH/DELETE /secrets/{id}`, `POST /secrets/{id}/rotate`;
+- `PUT/DELETE /skills/{slug}/secret-bindings/{slotId}`;
+- `PUT/DELETE /skills/{slug}/secret-suggestions/{slotId}` and
+  `POST /skills/{slug}/secret-suggestions/{slotId}/accept`.
+
+Retrieval uses `secrets:read`. Start an install/sync with a metadata-only preflight:
+
+```http
+POST /secret-retrievals/preflight
+Content-Type: application/json
+
+{
+  "operation_id": "5e90cf51-d5c9-47a9-bf23-a78bf717c649",
+  "skills": [{ "slug": "incident-summary", "version": "1.4.0" }],
+  "direct": []
+}
+```
+
+The response contains `plan_id`, five-minute `expires_at`, the exact root/dependency versions and
+slot statuses, opaque tombstones, and `blockers`/`warnings`. It never contains a value. A required
+missing slot blocks before local mutation; an optional missing slot only warns.
+
+After one global user confirmation:
+
+```http
+POST /secret-retrievals/{planId}/grant
+{}
+
+POST /secret-grants/redeem
+{ "grant": "cmp_grant_…" }
+```
+
+The grant expires after 60 seconds, is stored server-side only as a hash, and is consumed once. The
+server rechecks membership, ACL, revocation, and the planned exact version during preflight, grant,
+and redemption. Keep the redemption response in memory and write only the final private `.env`;
+never put a value or grant in logs, errors, analytics, packages, credentials, manifests, or lockfiles.
+Rotation after preflight preserves the planned version. Any access loss invalidates the entire
+redemption and requires a new preflight.
+
+For a manual profile, send no skills and one `direct` item:
+
+```json
+{
+  "operation_id": "5e90cf51-d5c9-47a9-bf23-a78bf717c649",
+  "skills": [],
+  "direct": [{
+    "secret_id": "a6b47409-4a02-4d8a-9df7-c50d2b1365e1",
+    "env_key": "SERVICE_TOKEN",
+    "profile": "operations"
+  }]
+}
+```
+
+The bundled scripts project skill values under
+`~/.companion/secrets/<workspace>/<skill>/.env` and manual values under
+`~/.companion/secrets/<workspace>/_manual/<profile>/.env` with `0700` directories, `0600` files,
+same-filesystem staging, exclusive locks, symlink/traversal refusal, and rollback markers.
 
 Public org-skill previews are separate from PAT-authenticated management. Use the `share_token`
 returned on skill rows to build the web URL `/s/{share_token}` or to fetch metadata directly:
@@ -466,17 +569,16 @@ treat it as a version identity reference, not a byte check of the download. To c
 check that `SKILL.md` is at the package root and `companion.json.version` matches the version you
 fetched.
 
-Before the Companion skill installs or updates a workspace-published skill, it must resolve the
-transitive `GET /skills/{slug}/dependencies` closure, inspect every target package's
-`companion.json.environment.secrets`, and install dependencies before the requested root skill.
-Secrets marked `required: true` block installation until the user confirms they are already
-available/configured, or explicitly authorizes installing without them; `install_skill.py` records
-that confirmation with `--confirm-required-secrets`. The agent must never ask the user to paste
-secret values. Optional secrets and non-secret environment variables are surfaced as setup notes only.
-If required secrets are not confirmed and no override is given, stop before downloading/replacing
-files, calling install endpoints, or writing `~/.companion/skills.lock.json`. Missing, archived,
-cycle-blocked, not-openable, locally customized, or untracked dependencies also stop the root install.
-This guard does not apply to the bundled Companion self-update endpoints under `/local-skills/companion`.
+Before install/update/sync, Companion sends the requested root/version to
+`POST /secret-retrievals/preflight`; the server resolves its exact dependency closure and bindings.
+Required missing slots block before mutation and optional missing slots warn. After one global
+confirmation, `install_skill.py --confirm-secrets` creates and redeems the one-time grant, prepares
+all packages, and commits packages with private `.env` projections. It never asks for or prints a
+value. Legacy flat credentials may still install packages with no secret projection, but a
+secret-bearing install requires refreshed schema-v2 credentials with a stable workspace id before
+grant creation. Missing, archived, cycle-blocked, not-openable, locally customized, or untracked dependencies
+also stop the root install. The bundled Companion self-update endpoints remain value-free and do not
+use this retrieval flow.
 
 ## Local manifest checks
 

@@ -37,6 +37,7 @@ companion.lock
 
 # Conductor native dev stack (Postgres/MinIO/Mailpit state)
 .conductor-pg/
+.companion-local/
 
 # OS / editor
 .DS_Store

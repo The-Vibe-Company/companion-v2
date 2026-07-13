@@ -141,6 +141,7 @@ PROJECT="$(workspace_slug)"
 # Paths (all workspace state under .conductor-pg/)
 # ---------------------------------------------------------------------------
 STATE_DIR="$REPO_ROOT/.conductor-pg"
+SECRETS_KEY_FILE="$STATE_DIR/secrets-master-key"
 PG_DATA="$STATE_DIR/postgres/data"
 # Socket lives in a short /tmp path, NOT under the (long) workspace dir: the
 # Unix-domain socket path has a hard 103-byte limit and Conductor workspace
@@ -251,6 +252,24 @@ free_port() {
 # ---------------------------------------------------------------------------
 # Prerequisites
 # ---------------------------------------------------------------------------
+ensure_secrets_master_key() {
+  # An explicit key is authoritative (for example when reopening an existing encrypted database).
+  # Only generate/read the workspace-local key when the caller did not provide one.
+  if [ -n "${COMPANION_SECRETS_MASTER_KEY:-}" ]; then
+    export COMPANION_SECRETS_MASTER_KEY
+    return
+  fi
+  mkdir -p "$STATE_DIR"
+  chmod 700 "$STATE_DIR"
+  if [ ! -s "$SECRETS_KEY_FILE" ]; then
+    umask 077
+    node -e "process.stdout.write(require('crypto').randomBytes(32).toString('base64'))" >"$SECRETS_KEY_FILE"
+  fi
+  chmod 600 "$SECRETS_KEY_FILE"
+  COMPANION_SECRETS_MASTER_KEY="$(cat "$SECRETS_KEY_FILE")"
+  export COMPANION_SECRETS_MASTER_KEY
+}
+
 check_prerequisites() {
   step "Checking prerequisites"
   require_command node "install Node.js >= 20"
@@ -517,6 +536,8 @@ launch_apps() {
     api_email_env="EMAIL_PROVIDER=log"
   fi
 
+  # The master key is exported by ensure_secrets_master_key and inherited by the API process. Never
+  # interpolate it into concurrently's command argument, where process listings could expose it.
   local api_cmd="COMPANION_API_HOST=127.0.0.1 COMPANION_API_PORT=$API_PORT DATABASE_URL=\"$DATABASE_URL\" BETTER_AUTH_URL=\"$API_URL\" BETTER_AUTH_COOKIE_PREFIX=\"$PROJECT\" COMPANION_WEB_URL=\"$WEB_URL\" COMPANION_API_URL=\"$API_URL\" NEXT_PUBLIC_COMPANION_API_URL=\"$API_URL\" $api_storage_env $api_email_env pnpm --filter @companion/api dev"
   local worker_cmd="DATABASE_URL=\"$DATABASE_URL\" COMPANION_WEB_URL=\"$WEB_URL\" pnpm --filter @companion/worker dev"
   local web_cmd="COMPANION_API_URL=\"$API_URL\" NEXT_PUBLIC_COMPANION_API_URL=\"$API_URL\" pnpm --filter @companion/web dev --hostname 127.0.0.1 --port $WEB_PORT"
@@ -542,6 +563,7 @@ launch_apps() {
 cmd_run() {
   trap cleanup INT TERM EXIT
   check_prerequisites
+  ensure_secrets_master_key
   start_postgres
   start_minio
   start_mailpit

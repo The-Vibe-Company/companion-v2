@@ -20,6 +20,7 @@ import {
   versionPackageUrl,
 } from "@/lib/queries";
 import { Icon } from "../Icon";
+import { SkillSecretConfiguration } from "../secrets/SkillSecretConfiguration";
 
 /* ------------------------------------------------------------------ helpers */
 
@@ -314,11 +315,21 @@ const FOCUSABLE =
  * opener on close, and close on Escape. Escape is handled in the capture phase + `stopPropagation`
  * so it never reaches the list/detail keyboard handler behind the scrim.
  */
-export function useModalA11y(ref: React.RefObject<HTMLElement | null>, onClose: () => void) {
+export function useModalA11y(
+  ref: React.RefObject<HTMLElement | null>,
+  onClose: () => void,
+  active = true,
+  restoreFocusTo?: React.RefObject<HTMLElement | null>,
+) {
   useEffect(() => {
-    const opener = document.activeElement as HTMLElement | null;
+    if (!active) return;
+    const opener = restoreFocusTo?.current ?? document.activeElement as HTMLElement | null;
     const el = ref.current;
-    (el?.querySelector<HTMLElement>(FOCUSABLE) ?? el)?.focus();
+    const focusDialog = () => (el?.querySelector<HTMLElement>(FOCUSABLE) ?? el)?.focus();
+    focusDialog();
+    // A parent may make the opener's background inert in its own effect. Re-assert focus after that
+    // commit so browsers that move focus to <body> when inert changes still enter the dialog.
+    const focusFrame = requestAnimationFrame(focusDialog);
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         if (el?.querySelector('[data-modal-menu-open="true"]')) return;
@@ -344,10 +355,15 @@ export function useModalA11y(ref: React.RefObject<HTMLElement | null>, onClose: 
     };
     document.addEventListener("keydown", onKey, true);
     return () => {
+      cancelAnimationFrame(focusFrame);
       document.removeEventListener("keydown", onKey, true);
-      opener?.focus?.();
+      // Background inert state is cleared by a sibling effect cleanup. Restore on the next frame so
+      // the opener is focusable again in real browsers (React's effect cleanup order is not enough).
+      requestAnimationFrame(() => {
+        if (opener?.isConnected && !opener.closest("[inert]")) opener.focus();
+      });
     };
-  }, [ref, onClose]);
+  }, [active, ref, onClose, restoreFocusTo]);
 }
 
 /** Token row: lazily mints a scoped token on first reveal / copy / regenerate. */
@@ -600,6 +616,8 @@ function ZipPanel({
   validation,
   validating,
   validationError,
+  currentSlug,
+  knownSkillSlugs,
 }: {
   labels: string[];
   setLabels: (labels: string[]) => void;
@@ -611,10 +629,14 @@ function ZipPanel({
   validation: ValidationResult | null;
   validating: boolean;
   validationError: string | null;
+  currentSlug?: string;
+  knownSkillSlugs: string[];
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const dropHelpId = useId();
   const [over, setOver] = useState(false);
+  const detectedSlug = validation?.frontmatter?.name;
+  const configurationSlug = currentSlug ?? (detectedSlug && knownSkillSlugs.includes(detectedSlug) ? detectedSlug : undefined);
   return (
     <>
       <p className="up-panel__lede">
@@ -684,6 +706,23 @@ function ZipPanel({
             )}
             {validationError && <div className="up-errblock" role="alert">{validationError}</div>}
             {validation && <ValidationList result={validation} />}
+            {validation && Object.keys(validation.companion_manifest?.environment.secrets ?? {}).length > 0 && (
+              <div className="up-secret-detected">
+                <div className="up-fieldlabel">Detected secret slots</div>
+                {Object.entries(validation.companion_manifest?.environment.secrets ?? {}).map(([key, declaration]) => (
+                  <div className="up-secret-detected__row" key={declaration.slotId ?? key}>
+                    <Icon name={declaration.required ? "key-round" : "info"} size={14} />
+                    <code>{key}</code>
+                    <span>{declaration.description || "Secret credential"}</span>
+                    <b>{declaration.required ? "Required" : "Optional"}</b>
+                  </div>
+                ))}
+                {!configurationSlug && <p>Bindings start empty after publish. Configure them before the first install or sync.</p>}
+              </div>
+            )}
+            {validation && configurationSlug && Object.keys(validation.companion_manifest?.environment.secrets ?? {}).length > 0 && (
+              <SkillSecretConfiguration slug={configurationSlug} canSuggest={false} />
+            )}
           </div>
         )}
       </div>
@@ -1081,6 +1120,7 @@ export function UploadDialog({
   scope = "personal",
   allLabels = [],
   defaultLabels = [],
+  knownSkillSlugs = [],
   onClose,
   onPublished,
 }: {
@@ -1093,6 +1133,8 @@ export function UploadDialog({
   /** Folders to pre-file a brand-new skill under on create (e.g. the active sidebar folder), so the
    *  "Upload to <folder>" CTA actually files the skill there. Ignored on update. */
   defaultLabels?: string[];
+  /** Accessible workspace slugs, used to distinguish an update package from a new publish after validation. */
+  knownSkillSlugs?: string[];
   onClose: () => void;
   onPublished: () => void;
 }) {
@@ -1506,6 +1548,8 @@ export function UploadDialog({
                     validation={validation}
                     validating={validating}
                     validationError={validationError}
+                    currentSlug={isUpdate ? skill?.id : undefined}
+                    knownSkillSlugs={knownSkillSlugs}
                   />
                 )}
                 {method === "create" && (
@@ -1702,16 +1746,16 @@ export function InstallDialog({
     };
   }, [id, onReported, reported, skill.version]);
 
-  // skills:read covers both downloading the package and confirming the install back to Companion
-  // (recording your own install is personal state, so it needs no write authority).
+  // The Companion installer reads packages, confirms personal install state, and performs the
+  // non-replayable secret retrieval flow with read-only skill and secret scopes.
   const ensureToken = useCallback(async () => {
     if (token) return token;
-    const issued = await issueToken(["skills:read"]);
+    const issued = await issueToken(["skills:read", "secrets:read"]);
     setToken(issued.token);
     return issued.token;
   }, [token]);
   const regenToken = useCallback(async () => {
-    const issued = await issueToken(["skills:read"]);
+    const issued = await issueToken(["skills:read", "secrets:read"]);
     setToken(issued.token);
     return issued.token;
   }, []);
@@ -1727,7 +1771,7 @@ Version: ${version}
 Package URL: ${base}/skills/${id}/versions/${version}/package
 Authorization header: Bearer ${tok}
 
-Choose the right local skills folder for the user's agent, download the package, extract it there, and confirm SKILL.md sits at the package root. Report the ${updating ? "updated" : "installed"} location when done.
+Use the installed Companion helper skill to install this exact skill and version into the appropriate local skills folder for the user's agent. Its workflow must run the server secret preflight, stop if required configuration is missing, ask for one global confirmation, redeem the one-time grant only after confirmation, and commit the package with its .env projection atomically. Confirm SKILL.md sits at the package root, report warnings for optional secrets, and report the ${updating ? "updated" : "installed"} location when done. Do not print, log, or persist any secret value outside that projection.
 
 When the skill is installed, confirm it to Companion so it shows as installed in the workspace: send POST ${base}/skills/${id}/install with header "Authorization: Bearer ${tok}" and JSON body {"version":"${version}","agent":"<the agent you are>","source":"agent"}.`;
   const displayPrompt = buildPrompt(token ?? "cmp_pat_…");
@@ -1908,20 +1952,24 @@ When the skill is installed, confirm it to Companion so it shows as installed in
                       <span className="inline-code">{id}</span> and installs it in the right skills folder.
                     </p>
                     <div className="up-step">
-                      <StepLabel n="1">Access token</StepLabel>
+                      <StepLabel n="1">Secret configuration</StepLabel>
+                      <SkillSecretConfiguration slug={id} canSuggest={false} />
+                    </div>
+                    <div className="up-step">
+                      <StepLabel n="2">Access token</StepLabel>
                       <TokenRow
                         token={token}
                         ensure={ensureToken}
                         regen={regenToken}
                         hint={
                           <>
-                            Scoped to <b>skills:read</b>, expires in 90 days.
+                            Scoped to <b>skills:read + secrets:read</b>, expires in 90 days.
                           </>
                         }
                       />
                     </div>
                     <div className="up-step">
-                      <StepLabel n="2">Prompt</StepLabel>
+                      <StepLabel n="3">Prompt</StepLabel>
                       <CodeBlock
                         text={displayPrompt}
                         scroll
@@ -1936,6 +1984,9 @@ When the skill is installed, confirm it to Companion so it shows as installed in
                     <p className="up-panel__lede">
                       Download the packaged skill and extract it into the selected skills folder.
                     </p>
+                    <div className="up-errblock up-errblock--warn" role="note">
+                      Manual download does not configure secrets and does not mark this installation ready.
+                    </div>
                     <div className="up-step">
                       <StepLabel n="1">Install location</StepLabel>
                       <TargetSeg value={target} onChange={setTarget} />

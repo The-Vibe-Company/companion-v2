@@ -217,6 +217,15 @@ jobs:
       - name: Validate Docker Compose
         run: docker compose config
 
+      - name: Migrate database
+        run: pnpm db:migrate
+
+      - name: Secrets database integration
+        run: pnpm --filter @companion/api test -- src/secretsDb.integration.test.ts
+        env:
+          RUN_SECRET_DB_INTEGRATION: "1"
+          COMPANION_SECRETS_MASTER_KEY: CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk=
+
       - name: RSC smoke
         run: pnpm smoke:rsc
         env:

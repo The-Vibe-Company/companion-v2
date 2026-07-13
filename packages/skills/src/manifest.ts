@@ -1,4 +1,5 @@
 import { readFile, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { stringify as stringifyYaml } from "yaml";
 import {
@@ -27,6 +28,31 @@ export interface PreparedSkillDir {
   companionManifestPath: string;
   warnings: FrontmatterWarning[];
   legacy: SkillLegacyFrontmatter;
+}
+
+/**
+ * Stable UUID for legacy declarations that predate explicit slot ids. This intentionally uses only
+ * the immutable workspace skill id and the original env key: republishing the same declaration is
+ * stable, while a rename without carrying the old slotId is treated as a new incompatible slot.
+ */
+export function deterministicSecretSlotId(skillId: string, envKey: string): string {
+  const hex = createHash("md5").update(`${skillId}:secret:${envKey}`, "utf8").digest("hex").split("");
+  hex[12] = "5";
+  hex[16] = ((parseInt(hex[16]!, 16) & 0x3) | 0x8).toString(16);
+  const value = hex.join("");
+  return `${value.slice(0, 8)}-${value.slice(8, 12)}-${value.slice(12, 16)}-${value.slice(16, 20)}-${value.slice(20)}`;
+}
+
+export function withSecretSlotIds(environment: CompanionManifest["environment"], skillId: string): CompanionManifest["environment"] {
+  return {
+    env: environment.env,
+    secrets: Object.fromEntries(
+      Object.entries(environment.secrets).map(([key, declaration]) => [
+        key,
+        { ...declaration, slotId: declaration.slotId ?? deterministicSecretSlotId(skillId, key) },
+      ]),
+    ),
+  };
 }
 
 export function withCompanionMetadata(
@@ -130,7 +156,7 @@ export async function prepareSkillDirForPublish(
   const companionPath = join(rootDir, "companion.json");
   const rawCompanionJson = await readFile(companionPath, "utf8").catch(() => null);
   const existingManifest = parseCompanionJson(rawCompanionJson, frontmatter);
-  const companionManifest = fallbackCompanionManifest({
+  const normalizedManifest = fallbackCompanionManifest({
     summary: existingManifest.description ?? frontmatter.description,
     name: frontmatter.name,
     version: companion.version,
@@ -143,6 +169,19 @@ export async function prepareSkillDirForPublish(
     commands: existingManifest.commands,
     checks: existingManifest.checks,
     notes: existingManifest.notes,
+  });
+  const companionManifest = fallbackCompanionManifest({
+    summary: normalizedManifest.description ?? frontmatter.description,
+    name: normalizedManifest.name,
+    version: normalizedManifest.version,
+    companionSkillId: normalizedManifest.metadata.companionSkillId,
+    display: normalizedManifest.display,
+    environment: withSecretSlotIds(normalizedManifest.environment, companion.skillId ?? frontmatter.name),
+    dependencies: normalizedManifest.dependencies,
+    changelog: normalizedManifest.metadata.changelog,
+    commands: normalizedManifest.commands,
+    checks: normalizedManifest.checks,
+    notes: normalizedManifest.notes,
   });
   await writeFile(companionPath, buildNormalizedCompanionJson(companionManifest), "utf8");
   await writeFile(skillMdPath, buildNormalizedSkillMd(frontmatter, reparsed.body), "utf8");

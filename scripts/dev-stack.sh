@@ -186,6 +186,22 @@ configure_local_env() {
   export MAILPIT_SMTP_HOST="${MAILPIT_SMTP_HOST:-127.0.0.1}"
 }
 
+ensure_local_secrets_master_key() {
+  local state_dir="$REPO_ROOT/.companion-local"
+  local key_file="$state_dir/secrets-master-key"
+  if [ -n "${COMPANION_SECRETS_MASTER_KEY:-}" ]; then
+    return
+  fi
+  mkdir -p "$state_dir"
+  chmod 700 "$state_dir"
+  if [ ! -s "$key_file" ]; then
+    umask 077
+    node -e "process.stdout.write(require('crypto').randomBytes(32).toString('base64'))" >"$key_file"
+  fi
+  chmod 600 "$key_file"
+  export COMPANION_SECRETS_MASTER_KEY="$(cat "$key_file")"
+}
+
 should_use_derived_value() {
   local was_explicit="$1"
   local is_set="$2"
@@ -421,6 +437,7 @@ start_infra() {
 run_dev() {
   configure_local_env
   ensure_tooling
+  ensure_local_secrets_master_key
   print_urls
 
   stop_port_listeners "$WEB_PORT" "$COMPANION_WEB_HOST"

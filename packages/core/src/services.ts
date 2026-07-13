@@ -49,6 +49,7 @@ import { initialsFor, slugify } from "@companion/db/ids";
 import { listOrgAccessDomains } from "./domainAccess";
 import { classifyEmailDomain } from "./email-domains";
 import { canManageOrg, canManagePersonalSkill, canTouchOwner, isLastOwner } from "./authz";
+import { disableSecretsForDepartingMember, persistSkillSecretSlots } from "./secrets";
 import {
   assertOrgSkillMutationEntitled,
   assertPersonalSkillsEntitled,
@@ -56,6 +57,8 @@ import {
   getEntitlements,
   markSeatSyncPending,
 } from "./billing";
+
+export * from "./secrets";
 
 // Org-wide shared label ("folder") services. Re-exported so callers keep importing everything from
 // `@companion/core/services`. `labels.ts` imports `getOrgRole`/`ActorContext` from here (both hoisted
@@ -713,6 +716,7 @@ export async function removeMember(input: {
   if (isLastOwner(await ownerCount(input.orgId, database), targetRole === "owner")) {
     throw new Error("organization must keep at least one owner");
   }
+  await disableSecretsForDepartingMember({ orgId: input.orgId, userId: input.userId, actorId: input.actor.id, database });
   await database
     .delete(schema.memberships)
     .where(and(eq(schema.memberships.orgId, input.orgId), eq(schema.memberships.userId, input.userId)));
@@ -2199,6 +2203,14 @@ async function writeSkillVersion(input: {
     })
     .returning();
   if (!version) throw new Error("could not write skill version");
+
+  await persistSkillSecretSlots({
+    orgId: input.orgId,
+    skillId: skill.id,
+    skillVersionId: version.id,
+    frontmatter: payload.frontmatter,
+    database,
+  });
 
   await database
     .update(schema.skills)
