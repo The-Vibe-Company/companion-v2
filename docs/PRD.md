@@ -137,7 +137,8 @@ Each requirement has user stories with acceptance criteria. Priorities: **P0** =
 - As a workspace Owner/Admin, I can upgrade from Free to Pro through Stripe Checkout at $10 USD per
   active member per month and manage payment methods, invoices, and end-of-period cancellation in the
   Customer Portal. *AC:* Checkout quantity is server-controlled, Stripe Tax is enabled, and a second
-  active subscription cannot be created.
+  active subscription cannot be created. Stripe-managed promotion codes can be applied during Checkout;
+  their discount duration, validity window, and redemption limits remain controlled by the SaaS operator in Stripe.
 - As any member, I can see the effective plan, active and confirmed seats, estimated pre-tax monthly
   subtotal, payment/grace/cancellation state, and seat-sync health. *AC:* PATs cannot read or manage
   billing and Developers cannot open Checkout or Portal sessions.

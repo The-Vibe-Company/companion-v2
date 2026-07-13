@@ -53,7 +53,7 @@ describe("StripeBillingGateway", () => {
     await expect(gateway.validateConfiguration()).rejects.toThrow("cancellation at period end");
   });
 
-  it("creates fixed-quantity Tax-enabled Checkout with durable metadata", async () => {
+  it("creates fixed-quantity Tax-enabled Checkout with promotion codes and durable metadata", async () => {
     const create = vi.fn().mockResolvedValue({ id: "cs_1", url: "https://checkout.test", expires_at: 2_000_000_000, status: "open" });
     const gateway = gatewayWith({ checkout: { sessions: { create } } });
     await gateway.createCheckoutSession({
@@ -71,7 +71,7 @@ describe("StripeBillingGateway", () => {
         billing_address_collection: "required",
         customer_update: { address: "auto", name: "auto" },
         tax_id_collection: { enabled: true },
-        allow_promotion_codes: false,
+        allow_promotion_codes: true,
         metadata: { companion_org_id: "org_1" },
       }),
       { idempotencyKey: "billing:checkout:org_1:1" },

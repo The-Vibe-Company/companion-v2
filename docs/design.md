@@ -354,7 +354,9 @@ webhooks, or enforcement is a non-destructive rollback: Stripe identifiers and s
 stored and no cancellation is sent.
 
 Pro is $10 USD per active `memberships` row per month. Checkout fixes the initial quantity server-side,
-uses Stripe Tax, disallows quantity adjustment and promotion codes, and uses durable idempotency keys.
+uses Stripe Tax, disallows quantity adjustment, accepts Stripe-managed promotion codes, and uses durable
+idempotency keys. Coupons, validity windows, redemption limits, and promotion codes are created and audited in
+Stripe; customers can apply a valid code only during Checkout.
 The configured Price must be active, licensed, monthly USD at exactly 1000 cents. The Customer Portal
 may manage payment methods, invoices, and end-of-period cancellation, but subscription and quantity
 updates must be disabled. Checkout creation is serialized per organization, reuses an open session,
