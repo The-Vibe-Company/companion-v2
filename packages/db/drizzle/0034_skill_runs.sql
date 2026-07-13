@@ -77,16 +77,25 @@ CREATE TABLE "skill_runs" (
   "server_password_enc" text,
   "timeout_ms" integer DEFAULT 300000 NOT NULL,
   "transcript" jsonb DEFAULT '[]'::jsonb NOT NULL,
+  "warnings" jsonb DEFAULT '[]'::jsonb NOT NULL,
+  "transcript_event_sequence" integer DEFAULT 0 NOT NULL,
   "transcript_updated_at" timestamp with time zone,
   "last_active_at" timestamp with time zone,
   "frozen_at" timestamp with time zone,
   "sandbox_cleaned_at" timestamp with time zone,
+  "cleanup_lease_owner" text,
+  "cleanup_lease_expires_at" timestamp with time zone,
+  "cleanup_attempt" integer DEFAULT 0 NOT NULL,
   "created_at" timestamp with time zone DEFAULT now() NOT NULL,
   "updated_at" timestamp with time zone DEFAULT now() NOT NULL,
   CONSTRAINT "skill_runs_org_id_id_uq" UNIQUE("org_id", "id"),
   CONSTRAINT "skill_runs_org_id_id_creator_uq" UNIQUE("org_id", "id", "creator_id"),
   CONSTRAINT "skill_runs_idempotency_uq" UNIQUE("org_id", "creator_id", "skill_id", "idempotency_key"),
   CONSTRAINT "skill_runs_timeout_check" CHECK ("timeout_ms" BETWEEN 10000 AND 3600000),
+  CONSTRAINT "skill_runs_warnings_array_check" CHECK (jsonb_typeof("warnings") = 'array'),
+  CONSTRAINT "skill_runs_transcript_event_sequence_check" CHECK ("transcript_event_sequence" >= 0),
+  CONSTRAINT "skill_runs_cleanup_attempt_check" CHECK ("cleanup_attempt" >= 0),
+  CONSTRAINT "skill_runs_cleanup_lease_check" CHECK (("cleanup_lease_owner" IS NULL) = ("cleanup_lease_expires_at" IS NULL)),
   CONSTRAINT "skill_runs_idempotency_key_check" CHECK (char_length("idempotency_key") BETWEEN 8 AND 200),
   CONSTRAINT "skill_runs_payload_hash_check" CHECK (char_length("payload_hash") BETWEEN 32 AND 128)
 );--> statement-breakpoint
@@ -274,7 +283,7 @@ CREATE UNIQUE INDEX "skill_run_configs_default_uq" ON "skill_run_configs" ("org_
 CREATE INDEX "skill_run_configs_owner_skill_idx" ON "skill_run_configs" ("org_id", "creator_id", "skill_id", "updated_at" DESC);--> statement-breakpoint
 CREATE INDEX "skill_run_config_secrets_secret_idx" ON "skill_run_config_secrets" ("org_id", "secret_id");--> statement-breakpoint
 CREATE INDEX "skill_runs_sessions_idx" ON "skill_runs" ("org_id", "skill_id", "creator_id", "created_at" DESC);--> statement-breakpoint
-CREATE INDEX "skill_runs_cleanup_idx" ON "skill_runs" ("status", "updated_at") WHERE "sandbox_cleaned_at" IS NULL;--> statement-breakpoint
+CREATE INDEX "skill_runs_cleanup_idx" ON "skill_runs" ("status", "cleanup_lease_expires_at", "updated_at") WHERE "sandbox_cleaned_at" IS NULL;--> statement-breakpoint
 CREATE UNIQUE INDEX "skill_run_skills_root_uq" ON "skill_run_skills" ("org_id", "run_id") WHERE "is_root" = true;--> statement-breakpoint
 CREATE INDEX "skill_run_secret_inputs_run_env_idx" ON "skill_run_secret_inputs" ("org_id", "run_id", "env_key");--> statement-breakpoint
 CREATE INDEX "skill_run_variable_inputs_run_env_idx" ON "skill_run_variable_inputs" ("org_id", "run_id", "env_key");--> statement-breakpoint
@@ -369,6 +378,7 @@ CREATE POLICY "skill_runs_creator" ON "skill_runs" USING (
   AND EXISTS (SELECT 1 FROM "memberships" m WHERE m."org_id" = "skill_runs"."org_id" AND m."user_id" = "skill_runs"."creator_id")
 );--> statement-breakpoint
 CREATE POLICY "skill_runs_worker_cleanup" ON "skill_runs" FOR SELECT USING (current_setting('app.run_worker', true) = 'cleanup');--> statement-breakpoint
+CREATE POLICY "skill_runs_worker_cleanup_update" ON "skill_runs" FOR UPDATE USING (current_setting('app.run_worker', true) = 'cleanup') WITH CHECK (current_setting('app.run_worker', true) = 'cleanup');--> statement-breakpoint
 
 CREATE POLICY "skill_run_skills_creator" ON "skill_run_skills" USING ("org_id" = NULLIF(current_setting('app.org_id', true), '')::uuid AND EXISTS (SELECT 1 FROM "skill_runs" r WHERE r."org_id" = "skill_run_skills"."org_id" AND r."id" = "skill_run_skills"."run_id" AND r."creator_id" = NULLIF(current_setting('app.user_id', true), ''))) WITH CHECK ("org_id" = NULLIF(current_setting('app.org_id', true), '')::uuid AND EXISTS (SELECT 1 FROM "skill_runs" r WHERE r."org_id" = "skill_run_skills"."org_id" AND r."id" = "skill_run_skills"."run_id" AND r."creator_id" = NULLIF(current_setting('app.user_id', true), '')));--> statement-breakpoint
 CREATE POLICY "skill_run_secret_inputs_creator" ON "skill_run_secret_inputs" USING ("org_id" = NULLIF(current_setting('app.org_id', true), '')::uuid AND EXISTS (SELECT 1 FROM "skill_runs" r WHERE r."org_id" = "skill_run_secret_inputs"."org_id" AND r."id" = "skill_run_secret_inputs"."run_id" AND r."creator_id" = NULLIF(current_setting('app.user_id', true), ''))) WITH CHECK ("org_id" = NULLIF(current_setting('app.org_id', true), '')::uuid AND EXISTS (SELECT 1 FROM "skill_runs" r WHERE r."org_id" = "skill_run_secret_inputs"."org_id" AND r."id" = "skill_run_secret_inputs"."run_id" AND r."creator_id" = NULLIF(current_setting('app.user_id', true), '')));--> statement-breakpoint
@@ -425,6 +435,92 @@ BEGIN
 END
 $$;--> statement-breakpoint
 REVOKE ALL ON FUNCTION companion_claim_skill_run_jobs(text, integer, integer) FROM PUBLIC;--> statement-breakpoint
+
+CREATE FUNCTION companion_claim_skill_run_cleanups(p_worker_id text, p_limit integer DEFAULT 1, p_lease_seconds integer DEFAULT 30)
+RETURNS TABLE (
+  "org_id" uuid,
+  "run_id" uuid,
+  "creator_id" text,
+  "sandbox_id" text,
+  "sandbox_name" text,
+  "cleanup_attempt" integer
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+DECLARE
+  previous_worker_context text;
+BEGIN
+  IF p_worker_id IS NULL OR btrim(p_worker_id) = '' THEN
+    RAISE EXCEPTION 'worker id is required' USING ERRCODE = '22023';
+  END IF;
+  IF p_limit < 1 OR p_limit > 32 OR p_lease_seconds < 5 OR p_lease_seconds > 300 THEN
+    RAISE EXCEPTION 'invalid cleanup claim limits' USING ERRCODE = '22023';
+  END IF;
+  previous_worker_context := current_setting('app.run_worker', true);
+  PERFORM set_config('app.run_worker', 'cleanup', true);
+  RETURN QUERY
+  WITH candidates AS (
+    SELECT r."org_id", r."id"
+    FROM public."skill_runs" r
+    WHERE r."status" IN ('frozen', 'error', 'canceled')
+      AND r."sandbox_cleaned_at" IS NULL
+      AND (r."cleanup_lease_expires_at" IS NULL OR r."cleanup_lease_expires_at" <= clock_timestamp())
+    ORDER BY r."updated_at", r."id"
+    FOR UPDATE SKIP LOCKED
+    LIMIT p_limit
+  ), claimed AS (
+    UPDATE public."skill_runs" r
+    SET "cleanup_lease_owner" = p_worker_id,
+        "cleanup_lease_expires_at" = clock_timestamp() + make_interval(secs => p_lease_seconds),
+        "cleanup_attempt" = r."cleanup_attempt" + 1
+    FROM candidates c
+    WHERE r."org_id" = c."org_id" AND r."id" = c."id"
+    RETURNING r."org_id", r."id", r."creator_id", r."sandbox_id", r."sandbox_name", r."cleanup_attempt"
+  )
+  SELECT c."org_id", c."id", c."creator_id", c."sandbox_id", c."sandbox_name", c."cleanup_attempt"
+  FROM claimed c;
+  PERFORM set_config('app.run_worker', COALESCE(previous_worker_context, ''), true);
+EXCEPTION WHEN OTHERS THEN
+  PERFORM set_config('app.run_worker', COALESCE(previous_worker_context, ''), true);
+  RAISE;
+END
+$$;--> statement-breakpoint
+REVOKE ALL ON FUNCTION companion_claim_skill_run_cleanups(text, integer, integer) FROM PUBLIC;--> statement-breakpoint
+
+CREATE FUNCTION companion_complete_skill_run_cleanup(p_org_id uuid, p_run_id uuid, p_worker_id text)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+DECLARE
+  updated_count integer;
+  previous_worker_context text;
+BEGIN
+  IF p_worker_id IS NULL OR btrim(p_worker_id) = '' THEN
+    RAISE EXCEPTION 'worker id is required' USING ERRCODE = '22023';
+  END IF;
+  previous_worker_context := current_setting('app.run_worker', true);
+  PERFORM set_config('app.run_worker', 'cleanup', true);
+  UPDATE public."skill_runs" r
+  SET "sandbox_cleaned_at" = clock_timestamp(),
+      "cleanup_lease_owner" = NULL,
+      "cleanup_lease_expires_at" = NULL
+  WHERE r."org_id" = p_org_id
+    AND r."id" = p_run_id
+    AND r."sandbox_cleaned_at" IS NULL
+    AND r."cleanup_lease_owner" = p_worker_id;
+  GET DIAGNOSTICS updated_count = ROW_COUNT;
+  PERFORM set_config('app.run_worker', COALESCE(previous_worker_context, ''), true);
+  RETURN updated_count = 1;
+EXCEPTION WHEN OTHERS THEN
+  PERFORM set_config('app.run_worker', COALESCE(previous_worker_context, ''), true);
+  RAISE;
+END
+$$;--> statement-breakpoint
+REVOKE ALL ON FUNCTION companion_complete_skill_run_cleanup(uuid, uuid, text) FROM PUBLIC;--> statement-breakpoint
 
 CREATE FUNCTION companion_notify_skill_run_event() RETURNS trigger
 LANGUAGE plpgsql

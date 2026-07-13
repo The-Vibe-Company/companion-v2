@@ -8,6 +8,7 @@ import {
   runInputSelectionSchema,
   runInputSnapshotSchema,
   runOptionsSchema,
+  skillRunDetailSchema,
   skillRunStatusSchema,
   updateRunConfigurationInputSchema,
 } from "../src/skillRuns";
@@ -125,12 +126,89 @@ describe("skill run contracts", () => {
     expect(() => runOptionsSchema.parse({ ...parsed, root: dependency, dependencies: [] })).toThrow(/root/);
   });
 
+  it("exposes only the exact redacted model-provider secret pin", () => {
+    const model = {
+      id: "anthropic/claude-sonnet-4",
+      provider: "anthropic",
+      provider_name: "Anthropic",
+      name: "Claude Sonnet 4",
+      env_keys: ["ANTHROPIC_API_KEY"],
+    };
+    const option = {
+      model,
+      readiness: "ready",
+      message: null,
+      provider_secret_pin: {
+        env_key: "ANTHROPIC_API_KEY",
+        secret_id: secretId,
+        secret_version: 4,
+        secret_name: "Anthropic production",
+        secret_audience: "personal",
+        secret_owner_name: "Ada Lovelace",
+      },
+    };
+    const root = {
+      skill_id: skillId,
+      skill_version_id: versionId,
+      slug: "weekly-summary",
+      version: "2.0.0",
+      root: true,
+      depth: 0,
+      via: null,
+    };
+    const parsed = runOptionsSchema.parse({
+      root,
+      dependencies: [],
+      declared_secrets: [],
+      declared_variables: [],
+      configurations: [],
+      models: [option],
+      runtime: { available: true },
+    });
+    expect(parsed.models[0]?.provider_secret_pin).toEqual(option.provider_secret_pin);
+    expect(() =>
+      runOptionsSchema.parse({
+        root,
+        dependencies: [],
+        declared_secrets: [],
+        declared_variables: [],
+        configurations: [],
+        models: [{ ...option, provider_secret_pin: { ...option.provider_secret_pin, value: "plaintext" } }],
+        runtime: { available: true },
+      }),
+    ).toThrow();
+  });
+
   it("distinguishes non-terminal warnings from terminal run errors", () => {
     expect(
       runChatEventSchema.parse({ type: "run.warning", code: "vanish_publish_failed", message: "Artifact sharing failed" }).type,
     ).toBe("run.warning");
     expect(runChatEventSchema.parse({ type: "run.error", code: "runtime_failed", message: "Run failed" }).type).toBe("run.error");
     expect(runChatEventSchema.parse({ type: "error", message: "legacy" }).type).toBe("error");
+  });
+
+  it("requires a non-negative event cursor alongside transcript snapshots", () => {
+    const base = {
+      id: secretId,
+      skill_slug: "weekly-summary",
+      skill_version: "2.0.0",
+      model: "anthropic/claude-sonnet-4",
+      prompt_excerpt: "Summarize",
+      status: "running",
+      status_detail: null,
+      artifacts_count: 0,
+      created_at: "2026-07-13T10:00:00.000Z",
+      last_active_at: null,
+      prompt: "Summarize",
+      transcript: [],
+      warnings: [{ code: "vanish_publish_failed", message: "Artifact sharing failed", phase: "collect_artifacts" }],
+      transcript_event_sequence: 12,
+      attachments: [],
+      artifacts: [],
+    };
+    expect(skillRunDetailSchema.parse(base).transcript_event_sequence).toBe(12);
+    expect(skillRunDetailSchema.parse(base).warnings).toHaveLength(1);
+    expect(() => skillRunDetailSchema.parse({ ...base, transcript_event_sequence: -1 })).toThrow();
   });
 
   it("pins redacted secret versions without accepting a value field", () => {

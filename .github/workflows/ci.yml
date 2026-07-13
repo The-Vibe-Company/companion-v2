@@ -297,6 +297,11 @@ jobs:
           RUN_SECRET_DB_INTEGRATION: "1"
           COMPANION_SECRETS_MASTER_KEY: CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk=
 
+      - name: RunSkill database integration
+        run: pnpm --filter @companion/api test -- src/runsDb.integration.test.ts
+        env:
+          RUN_SKILL_DB_INTEGRATION: "1"
+
       - name: RSC smoke
         run: pnpm smoke:rsc
         env:

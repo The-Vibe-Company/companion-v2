@@ -89,23 +89,23 @@ import {
   deleteProviderConnection,
   listOrgProviderConnections,
   listProviderConnections,
-  parseSecretsKey,
   setOrgProviderConnection,
   setProviderConnection,
   getActivatedModels,
   setUserActivatedModels,
   setOrgActivatedModels,
+  getRunOptions,
+  listRunConfigurations,
+  createRunConfiguration,
+  updateRunConfiguration,
+  deleteRunConfiguration,
   createRun,
-  launchAndRecordRun,
+  enqueueRunPrompt,
+  requestRunCancellation,
+  listRunEvents,
   listRuns,
   getRun,
   getRunAttachment,
-  getRunChatTarget,
-  promptRun,
-  runJobAlive,
-  subscribeRunSideEvents,
-  sweepRunSandboxes,
-  publishRunArtifact,
   RunBusyError,
   RunValidationError,
   type RunControlContext,
@@ -165,6 +165,9 @@ import {
   setActivatedModelsInputSchema,
   launchRunFieldsSchema,
   runPromptInputSchema,
+  createRunConfigurationInputSchema,
+  updateRunConfigurationInputSchema,
+  deleteRunConfigurationInputSchema,
   RUN_ATTACHMENT_MAX_FILES,
   RUN_ATTACHMENT_MAX_BYTES,
   type CompanionManifest,
@@ -178,16 +181,7 @@ import {
   secretRetrievalPreflightInputSchema,
   redeemSecretGrantInputSchema,
 } from "@companion/contracts";
-import {
-  createChatClient,
-  createChatSession,
-  createModelCatalog,
-  createVercelRuntime,
-  loadSessionItems,
-  sendPromptAsync,
-  streamChatEvents,
-  vercelConfigFromEnv,
-} from "@companion/sandbox";
+import { createModelCatalog } from "@companion/sandbox";
 import {
   commentImageKey,
   runAttachmentKey,
@@ -218,7 +212,7 @@ import {
   unpackAnyTo,
   validateSkillArchive,
 } from "@companion/skills";
-import { withTenantContext, type Db } from "@companion/db";
+import { sql as postgresSql, withTenantContext, type Db } from "@companion/db";
 import { auth } from "@companion/auth";
 import { inviteEmail, sendTransactionalEmail } from "@companion/email";
 import {
@@ -235,6 +229,14 @@ import { assertNoCompanionRetarget, assertTargetedSkillUpdate, assertUpdateIsTar
 import { buildInlineCompanionManifest, uploadDependencyValues, withResolvedManifestDependencies } from "./skillCompanionManifest";
 import { buildCompanionSkillRow, getCompanionSkillPackage } from "./companionSkillPackage";
 import { parseSkillListQuery } from "./skillListQuery";
+import {
+  parseLastEventId,
+  parseRunEventNotification,
+  runDrainAction,
+  runEventFrame,
+  runReadyFrame,
+} from "./runEvents";
+import { deterministicRunAttachmentId, putRunAttachmentOnce } from "./runAttachments";
 import { COMPANION_SKILL_KEY } from "@companion/companion-skill";
 import { StripeBillingGateway } from "@companion/billing";
 import {
@@ -510,7 +512,7 @@ app.use(
   "*",
   cors({
     origin: [process.env.COMPANION_WEB_URL ?? "http://127.0.0.1:3000"],
-    allowHeaders: ["Content-Type", "Authorization", "x-companion-org"],
+    allowHeaders: ["Content-Type", "Authorization", "Idempotency-Key", "Last-Event-ID", "x-companion-org"],
     allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     credentials: true,
   }),
@@ -2586,12 +2588,6 @@ app.delete("/v1/tokens/:id", async (c) => {
 /* ---- Model catalog + provider connections (session-only; PATs rejected) ------------------- */
 
 const modelCatalog = createModelCatalog();
-let secretsKeyCache: Buffer | null = null;
-/** The envelope KEK, independent of the full run ctx — provider connections work pre-Vercel. */
-function secretsKey(): Buffer {
-  if (!secretsKeyCache) secretsKeyCache = parseSecretsKey(process.env.COMPANION_SECRETS_KEY);
-  return secretsKeyCache;
-}
 
 app.get("/v1/models", async (c) => {
   try {
@@ -2689,8 +2685,7 @@ app.put("/v1/provider-connections", async (c) => {
         orgId,
         provider: input.provider,
         keyName: input.key_name,
-        key: input.key,
-        secretsKey: secretsKey(),
+        secretId: input.secret_id,
         database,
       }),
     );
@@ -2736,8 +2731,7 @@ app.put("/v1/org-provider-connections", async (c) => {
         orgId,
         provider: input.provider,
         keyName: input.key_name,
-        key: input.key,
-        secretsKey: secretsKey(),
+        secretId: input.secret_id,
         database,
       }),
     );
@@ -2761,59 +2755,78 @@ app.delete("/v1/org-provider-connections/:provider", async (c) => {
 
 /* ---- Skill runs (one-shot sandboxed sessions; session-only, PATs rejected) ------------------ */
 
-let runControlCtx: RunControlContext | null = null;
-function runCtx(): RunControlContext {
-  if (runControlCtx) return runControlCtx;
-  const vercel = vercelConfigFromEnv();
-  if (!vercel) {
-    throw new Error("Skill runs are not configured: set VERCEL_TOKEN, VERCEL_TEAM_ID and VERCEL_PROJECT_ID");
-  }
-  runControlCtx = {
-    runtime: createVercelRuntime(vercel),
-    runTenant: withTenantContext,
-    fetchArchive: (key) => getSkillArchive({ key }),
-    fetchObject: (key) => getSkillArchive({ key }),
-    secretsKey: parseSecretsKey(process.env.COMPANION_SECRETS_KEY),
-    goldenSnapshotId: process.env.COMPANION_GOLDEN_SNAPSHOT_ID?.trim() || null,
-    opencodeVersion: process.env.OPENCODE_VERSION?.trim() || null,
-    region: "iad1",
-    timeoutMs: Number(process.env.COMPANION_SANDBOX_TIMEOUT_MS ?? 300000),
-    resolveModelKeys: (model) => modelCatalog.resolveModel(model),
-    publishArtifact: publishRunArtifact,
-    chat: {
-      createSession: (target, title) => createChatSession(createChatClient(target), title),
-      sendPrompt: (target, sessionId, text) => sendPromptAsync(createChatClient(target), sessionId, text),
-      loadItems: (target, sessionId) => loadSessionItems(createChatClient(target), sessionId),
-      streamEvents: (target, sessionId, signal) =>
-        streamChatEvents({ client: createChatClient(target), sessionId, signal }),
-    },
-  };
-  return runControlCtx;
+function boundedInteger(raw: string | undefined, fallback: number, min: number, max: number): number {
+  if (!raw) return fallback;
+  const parsed = Number(raw);
+  return Number.isSafeInteger(parsed) && parsed >= min && parsed <= max ? parsed : fallback;
 }
 
-/**
- * In-process fire-and-forget launch+record jobs, deduped per run so a double-POST can never run two
- * pipelines concurrently in one process. Status is persisted on the run row, so a crash surfaces as
- * the designed "interrupted" state at the next read (see markRunInterrupted in core).
- */
-const runJobs = new Map<string, Promise<void>>();
-function kickRunJob(key: string, job: () => Promise<void>): void {
-  if (runJobs.has(key)) return;
-  const promise = job()
-    .catch((error) => {
-      console.error(`[runs] background job ${key} failed:`, error instanceof Error ? error.message : error);
-    })
-    .finally(() => {
-      runJobs.delete(key);
-    });
-  runJobs.set(key, promise);
+/** API-side run context contains catalog/readiness only. Runtime SDKs are composed by apps/worker. */
+async function apiRunContext(): Promise<RunControlContext> {
+  let masterKey: Buffer;
+  let secretsAvailable = true;
+  try {
+    masterKey = loadSecretsMasterKey();
+  } catch {
+    // Options and saved configurations remain readable when execution is disabled. createRun fails
+    // closed on runtimeAvailable before this placeholder can ever encrypt anything.
+    masterKey = Buffer.alloc(32);
+    secretsAvailable = false;
+  }
+  const catalog = await modelCatalog.listModels();
+  const goldenSnapshotId = process.env.COMPANION_GOLDEN_SNAPSHOT_ID?.trim() || null;
+  const enabledSetting = process.env.COMPANION_RUNS_ENABLED?.trim().toLowerCase();
+  // The API intentionally does not receive Vercel credentials. Operators enable this only when the
+  // separately configured runs worker is ready; absent/invalid flags fail closed instead of queuing
+  // work that no worker can execute.
+  const enabled = enabledSetting === "true" || enabledSetting === "1";
+  const missing = [
+    !enabled ? "RunSkill" : null,
+    !goldenSnapshotId ? "golden snapshot" : null,
+    !secretsAvailable ? "secrets master key" : null,
+  ].filter((value): value is string => Boolean(value));
+  return {
+    masterKey,
+    goldenSnapshotId,
+    opencodeVersion: process.env.OPENCODE_VERSION?.trim() || null,
+    region: process.env.COMPANION_SANDBOX_REGION?.trim() || "iad1",
+    timeoutMs: boundedInteger(process.env.COMPANION_SANDBOX_TIMEOUT_MS, 300_000, 10_000, 3_600_000),
+    resolveModelKeys: (model) => modelCatalog.resolveModel(model),
+    models: catalog.models,
+    runtimeAvailable: missing.length === 0,
+    runtimeMessage: missing.length === 0 ? null : `RunSkill is unavailable: configure ${missing.join(", ")}`,
+  };
+}
+
+async function withApiRunContext<T>(fn: (ctx: RunControlContext) => Promise<T>): Promise<T> {
+  const ctx = await apiRunContext();
+  try {
+    return await fn(ctx);
+  } finally {
+    ctx.masterKey.fill(0);
+  }
+}
+
+function assertRunSession(c: Context): void {
+  if (isTokenRequest(c)) throw new Error("personal access tokens cannot use skill runs");
+  actorFromContext(c);
+}
+
+function idempotencyKey(c: Context): string {
+  const value = c.req.header("Idempotency-Key")?.trim();
+  if (!value || value.length < 8 || value.length > 200 || !/^[\x21-\x7e]+$/.test(value)) {
+    throw new RunValidationError("a valid Idempotency-Key header is required", "invalid_idempotency_key");
+  }
+  return value;
 }
 
 /** Map run service failures onto the HTTP statuses the run UI expects. */
 function runError(c: Context, error: unknown): Response {
   if (error instanceof RunBusyError) return jsonError(c, error, 409);
   if (error instanceof RunValidationError) {
-    return jsonError(c, error, error.message.endsWith("not found") ? 404 : 422);
+    if (error.code.endsWith("not_found")) return jsonError(c, error, 404);
+    if (error.code === "runtime_unavailable") return jsonError(c, error, 503);
+    return jsonError(c, error, 422);
   }
   const message = error instanceof Error ? error.message : "";
   if (message === "not authenticated" || message.startsWith("personal access tokens")) {
@@ -2821,6 +2834,108 @@ function runError(c: Context, error: unknown): Response {
   }
   return jsonError(c, error);
 }
+
+// One process-wide LISTEN connection fans cursor-only notifications out to all active SSE streams.
+// A dedicated PostgreSQL connection per browser stream would eventually starve the API pool.
+const runEventSubscribers = new Map<string, Set<(sequence: number) => void>>();
+let runEventListenerPromise: Promise<void> | null = null;
+
+async function subscribeRunEventCursor(runId: string, callback: (sequence: number) => void): Promise<() => void> {
+  if (!runEventListenerPromise) {
+    runEventListenerPromise = postgresSql
+      .listen("skill_run_events", (payload) => {
+        const notification = parseRunEventNotification(payload);
+        if (!notification) return;
+        for (const subscriber of runEventSubscribers.get(notification.runId) ?? []) {
+          subscriber(notification.sequence);
+        }
+      })
+      .then(() => undefined)
+      .catch((error) => {
+        runEventListenerPromise = null;
+        throw error;
+      });
+  }
+  await runEventListenerPromise;
+  const subscribers = runEventSubscribers.get(runId) ?? new Set<(sequence: number) => void>();
+  subscribers.add(callback);
+  runEventSubscribers.set(runId, subscribers);
+  return () => {
+    subscribers.delete(callback);
+    if (subscribers.size === 0) runEventSubscribers.delete(runId);
+  };
+}
+
+app.get("/v1/skills/:slug/run-options", async (c) => {
+  try {
+    assertRunSession(c);
+    const options = await withApiRunContext((ctx) =>
+      withTenant(c, ({ actor, orgId, database }) =>
+        getRunOptions({ actor, orgId, slug: c.req.param("slug"), ctx, database }),
+      ),
+    );
+    return c.json(options);
+  } catch (error) {
+    return runError(c, error);
+  }
+});
+
+app.get("/v1/skills/:slug/run-configurations", async (c) => {
+  try {
+    assertRunSession(c);
+    const configurations = await withApiRunContext((ctx) =>
+      withTenant(c, ({ actor, orgId, database }) =>
+        listRunConfigurations({ actor, orgId, slug: c.req.param("slug"), ctx, database }),
+      ),
+    );
+    return c.json({ configurations });
+  } catch (error) {
+    return runError(c, error);
+  }
+});
+
+app.post("/v1/skills/:slug/run-configurations", async (c) => {
+  try {
+    assertRunSession(c);
+    const value = createRunConfigurationInputSchema.parse(await c.req.json());
+    const configuration = await withApiRunContext((ctx) =>
+      withTenant(c, ({ actor, orgId, database }) =>
+        createRunConfiguration({ actor, orgId, slug: c.req.param("slug"), value, ctx, database }),
+      ),
+    );
+    return c.json(configuration, 201);
+  } catch (error) {
+    return runError(c, error);
+  }
+});
+
+app.patch("/v1/run-configurations/:id", async (c) => {
+  try {
+    assertRunSession(c);
+    const value = updateRunConfigurationInputSchema.parse(await c.req.json());
+    const configuration = await withApiRunContext((ctx) =>
+      withTenant(c, ({ actor, orgId, database }) =>
+        updateRunConfiguration({ actor, orgId, configId: c.req.param("id"), value, ctx, database }),
+      ),
+    );
+    return c.json(configuration);
+  } catch (error) {
+    return runError(c, error);
+  }
+});
+
+app.delete("/v1/run-configurations/:id", async (c) => {
+  try {
+    assertRunSession(c);
+    const value = deleteRunConfigurationInputSchema.parse(await c.req.json());
+    await withTenant(c, ({ actor, orgId, database }) =>
+      deleteRunConfiguration({ actor, orgId, configId: c.req.param("id"), value, database }),
+    );
+    return c.json({ ok: true });
+  } catch (error) {
+    return runError(c, error);
+  }
+});
 
 app.post(
   "/v1/skills/:slug/runs",
@@ -2842,11 +2957,18 @@ app.post(
       const slug = c.req.param("slug");
       const actor = actorFromContext(c);
       const orgId = await orgIdFromContext(c);
+      const requestKey = idempotencyKey(c);
 
       const form = await c.req.formData();
       const fields = launchRunFieldsSchema.parse({
         prompt: typeof form.get("prompt") === "string" ? form.get("prompt") : "",
         model: typeof form.get("model") === "string" ? form.get("model") : "",
+        skill_version_id: typeof form.get("skill_version_id") === "string" ? form.get("skill_version_id") : "",
+        inputs: typeof form.get("inputs") === "string" ? form.get("inputs") : "",
+        run_config_id:
+          typeof form.get("run_config_id") === "string" && form.get("run_config_id") !== ""
+            ? form.get("run_config_id")
+            : undefined,
       });
       // File entries only (the other branch of FormDataEntryValue is `string`).
       const files = form.getAll("file").filter((f): f is Exclude<typeof f, string> => typeof f !== "string");
@@ -2865,11 +2987,19 @@ app.post(
       try {
         for (const file of files) {
           const buf = Buffer.from(await file.arrayBuffer());
-          const attachmentId = randomUUID();
+          const attachmentId = deterministicRunAttachmentId({
+            orgId,
+            actorId: actor.id,
+            idempotencyKey: requestKey,
+            index: attachments.length,
+            fileName: file.name,
+            contentType: file.type || "application/octet-stream",
+            bytes: buf,
+          });
           const key = runAttachmentKey({ orgId, attachmentId });
           const contentType = file.type || "application/octet-stream";
-          await putSkillArchive({ key, body: buf, contentType });
-          uploadedKeys.push(key);
+          const stored = await putRunAttachmentOnce({ key, body: buf, contentType });
+          if (stored === "created") uploadedKeys.push(key);
           attachments.push({
             id: attachmentId,
             fileName: sanitizeAttachmentName(file.name || `attachment-${attachments.length + 1}`),
@@ -2878,20 +3008,23 @@ app.post(
             storageKey: key,
           });
         }
-        const detail = await withTenantContext({ orgId, userId: actor.id }, (database) =>
-          createRun({
-            actor,
-            orgId,
-            slug,
-            prompt: fields.prompt,
-            model: fields.model,
-            attachments,
-            ctx: runCtx(),
-            database,
-          }),
-        );
-        kickRunJob(`run:${orgId}:${detail.id}`, () =>
-          launchAndRecordRun({ orgId, actorId: actor.id, runId: detail.id, ctx: runCtx() }),
+        const detail = await withApiRunContext((ctx) =>
+          withTenantContext({ orgId, userId: actor.id }, (database) =>
+            createRun({
+              actor,
+              orgId,
+              slug,
+              skillVersionId: fields.skill_version_id,
+              prompt: fields.prompt,
+              model: fields.model,
+              inputs: fields.inputs,
+              runConfigId: fields.run_config_id,
+              idempotencyKey: requestKey,
+              attachments,
+              ctx,
+              database,
+            }),
+          ),
         );
         return c.json(detail, 201);
       } catch (e) {
@@ -2907,9 +3040,9 @@ app.post(
 
 app.get("/v1/skills/:slug/runs", async (c) => {
   try {
-    if (isTokenRequest(c)) return jsonError(c, "personal access tokens cannot use skill runs", 401);
+    assertRunSession(c);
     const runs = await withTenant(c, ({ actor, orgId, database }) =>
-      listRuns({ actor, orgId, slug: c.req.param("slug"), jobAlive: runJobAlive, database }),
+      listRuns({ actor, orgId, slug: c.req.param("slug"), database }),
     );
     return c.json({ runs });
   } catch (error) {
@@ -2919,9 +3052,9 @@ app.get("/v1/skills/:slug/runs", async (c) => {
 
 app.get("/v1/runs/:id", async (c) => {
   try {
-    if (isTokenRequest(c)) return jsonError(c, "personal access tokens cannot use skill runs", 401);
+    assertRunSession(c);
     const detail = await withTenant(c, ({ actor, orgId, database }) =>
-      getRun({ actor, orgId, runId: c.req.param("id"), jobAlive: runJobAlive, database }),
+      getRun({ actor, orgId, runId: c.req.param("id"), database }),
     );
     return c.json(detail);
   } catch (error) {
@@ -2931,33 +3064,57 @@ app.get("/v1/runs/:id", async (c) => {
 
 app.post("/v1/runs/:id/prompt", async (c) => {
   try {
-    if (isTokenRequest(c)) return jsonError(c, "personal access tokens cannot use skill runs", 401);
+    assertRunSession(c);
+    const requestKey = idempotencyKey(c);
     const input = runPromptInputSchema.parse(await c.req.json());
-    await withTenant(c, ({ actor, orgId, database }) =>
-      promptRun({ actor, orgId, runId: c.req.param("id"), text: input.text, ctx: runCtx(), database }),
+    const prompt = await withTenant(c, ({ actor, orgId, database }) =>
+      enqueueRunPrompt({
+        actor,
+        orgId,
+        runId: c.req.param("id"),
+        text: input.text,
+        idempotencyKey: requestKey,
+        database,
+      }),
     );
-    return c.json({ ok: true }, 202);
+    return c.json({ accepted: true, prompt_id: prompt.id }, 202);
   } catch (error) {
     return runError(c, error);
   }
 });
 
-/** SSE proxy to the run's sandbox event stream. Frozen runs 409 (the client renders the transcript). */
+app.post("/v1/runs/:id/cancel", async (c) => {
+  try {
+    assertRunSession(c);
+    const run = await withTenant(c, ({ actor, orgId, database }) =>
+      requestRunCancellation({ actor, orgId, runId: c.req.param("id"), database }),
+    );
+    return c.json(run, 202);
+  } catch (error) {
+    return runError(c, error);
+  }
+});
+
+/** Replay durable redacted events, then follow PostgreSQL cursor notifications without a race. */
 app.get("/v1/runs/:id/events", async (c) => {
   try {
-    if (isTokenRequest(c)) return jsonError(c, "personal access tokens cannot use skill runs", 401);
+    assertRunSession(c);
     const runId = c.req.param("id");
-    const target = await withTenant(c, ({ actor, orgId, database }) =>
-      getRunChatTarget({ actor, orgId, runId, ctx: runCtx(), database }),
+    const actor = actorFromContext(c);
+    const orgId = await orgIdFromContext(c);
+    // Fail before opening a stream, with the same creator-only not-found behavior as GET /runs/:id.
+    await withTenantContext({ orgId, userId: actor.id }, (database) =>
+      getRun({ actor, orgId, runId, database }),
     );
-    const client = createChatClient({ domain: target.domain, password: target.password });
-
-    const abort = new AbortController();
+    let cursor = parseLastEventId(c.req.header("Last-Event-ID") ?? c.req.query("last_event_id"));
     const encoder = new TextEncoder();
     let closed = false;
-    let unsubscribeSide = () => {};
+    let unsubscribe: () => void = () => undefined;
+    let wake: (() => void) | null = null;
+    let notified = false;
+    let readySent = false;
     const stream = new ReadableStream<Uint8Array>({
-      start(controller) {
+      async start(controller) {
         const send = (payload: string) => {
           if (closed) return;
           try {
@@ -2966,34 +3123,84 @@ app.get("/v1/runs/:id/events", async (c) => {
             closed = true;
           }
         };
-        send(`data: ${JSON.stringify({ type: "ready", session_id: target.sessionId })}\n\n`);
-        const ping = setInterval(() => send(": ping\n\n"), 15_000);
-        // Recorder-side events (artifact publish failures) merge into the same stream.
-        unsubscribeSide = subscribeRunSideEvents(runId, (event) => send(`data: ${JSON.stringify(event)}\n\n`));
-        void (async () => {
-          try {
-            for await (const event of streamChatEvents({ client, sessionId: target.sessionId, signal: abort.signal })) {
-              send(`data: ${JSON.stringify(event)}\n\n`);
-              if (closed) break;
+        const waitForWake = () =>
+          new Promise<void>((resolve) => {
+            let settled = false;
+            const finish = () => {
+              if (settled) return;
+              settled = true;
+              clearTimeout(timer);
+              resolve();
+            };
+            const timer = setTimeout(finish, 15_000);
+            timer.unref();
+            wake = finish;
+            // Close the tiny gap between deciding to wait and installing this resolver. LISTEN was
+            // established before replay, so the flag is the durable cursor wake-up barrier.
+            if (notified) finish();
+          });
+        unsubscribe = await subscribeRunEventCursor(runId, (sequence) => {
+          if (sequence <= cursor) return;
+          notified = true;
+          wake?.();
+        });
+        if (c.req.raw.signal.aborted) {
+          closed = true;
+          unsubscribe();
+          controller.close();
+          return;
+        }
+        c.req.raw.signal.addEventListener("abort", () => {
+          closed = true;
+          wake?.();
+        }, { once: true });
+
+        try {
+          while (!closed) {
+            notified = false;
+            const events = await withTenantContext({ orgId, userId: actor.id }, (database) =>
+              listRunEvents({ actor, orgId, runId, afterSequence: cursor, limit: 500, database }),
+            );
+            for (const envelope of events) {
+              if (envelope.sequence <= cursor) continue;
+              cursor = envelope.sequence;
+              send(runEventFrame(envelope));
             }
-          } catch (error) {
-            send(`data: ${JSON.stringify({ type: "error", message: error instanceof Error ? error.message : "stream failed" })}\n\n`);
-          } finally {
-            clearInterval(ping);
-            unsubscribeSide();
-            closed = true;
-            try {
-              controller.close();
-            } catch {
-              /* already closed */
+            if (events.length >= 500 || notified) continue;
+            const run = await withTenantContext({ orgId, userId: actor.id }, (database) =>
+              getRun({ actor, orgId, runId, database }),
+            );
+            const action = runDrainAction({
+              eventCount: events.length,
+              pageSize: 500,
+              notified,
+              terminal: ["frozen", "error", "canceled"].includes(run.status),
+              readySent,
+            });
+            if (action === "continue") continue;
+            // The listener was installed before replay. With no notification during the terminal
+            // read, EOF is a race-free terminal signal.
+            if (action === "close") break;
+            if (action === "ready") {
+              send(runReadyFrame());
+              readySent = true;
             }
+            send(": keepalive\n\n");
+            await waitForWake();
+            wake = null;
           }
-        })();
+        } catch {
+          // Network/database failures close the response; EventSource reconnects with Last-Event-ID.
+        } finally {
+          closed = true;
+          unsubscribe();
+          try { controller.close(); } catch { /* already closed */ }
+        }
       },
-      cancel() {
+      async cancel() {
         closed = true;
-        unsubscribeSide();
-        abort.abort();
+        wake?.();
+        unsubscribe();
       },
     });
     return new Response(stream, {
@@ -3043,31 +3250,6 @@ function sanitizeAttachmentName(raw: string): string {
   const base = raw.split(/[\\/]/).pop() || "attachment";
   const clean = base.replace(/[^\w. ()\[\]-]/g, "_").slice(0, 120);
   return clean.startsWith(".") ? `_${clean}` : clean || "attachment";
-}
-
-/**
- * Sandbox sweep: destroys the provider sandboxes of terminal runs whose in-path teardown failed
- * (or never ran — API death mid-run) and kills stale orphans. See `sweepRunSandboxes` in core.
- * Disabled when skill runs are unconfigured or the interval is set to 0.
- */
-const sweepMs = Number(process.env.COMPANION_RUN_SWEEP_INTERVAL_MS ?? 600_000);
-if (sweepMs > 0 && vercelConfigFromEnv()) {
-  let sweeping = false;
-  const sweep = async () => {
-    if (sweeping) return;
-    sweeping = true;
-    try {
-      const result = await sweepRunSandboxes({ ctx: runCtx(), jobAlive: runJobAlive });
-      if (result.destroyed || result.orphansKilled || result.failed) console.log("[runs] sweep:", result);
-    } catch (error) {
-      console.error("[runs] sweep failed:", error instanceof Error ? error.message : error);
-    } finally {
-      sweeping = false;
-    }
-  };
-  // First pass shortly after boot so a restart drains its orphans immediately.
-  setTimeout(sweep, 30_000).unref();
-  setInterval(sweep, sweepMs).unref();
 }
 
 const port = Number(process.env.COMPANION_API_PORT ?? process.env.PORT ?? 3001);

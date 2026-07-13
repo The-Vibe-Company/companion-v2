@@ -184,12 +184,21 @@ importers:
       '@companion/billing':
         specifier: workspace:*
         version: link:../../packages/billing
+      '@companion/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
       '@companion/core':
         specifier: workspace:*
         version: link:../../packages/core
       '@companion/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@companion/sandbox':
+        specifier: workspace:*
+        version: link:../../packages/sandbox
+      '@companion/storage':
+        specifier: workspace:*
+        version: link:../../packages/storage
       drizzle-orm:
         specifier: ^0.38.4
         version: 0.38.4(@types/react@19.2.17)(kysely@0.29.2)(postgres@3.4.9)(react@19.0.0)

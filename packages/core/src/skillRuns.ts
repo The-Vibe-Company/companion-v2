@@ -1,107 +1,150 @@
-import { randomBytes } from "node:crypto";
-import { and, desc, eq, inArray } from "drizzle-orm";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { and, asc, desc, eq, inArray } from "drizzle-orm";
 import { db, schema, type Db } from "@companion/db";
-import type {
-  RunChatEvent,
-  RunChatHistoryItem,
-  SkillRunArtifactRow,
-  SkillRunAttachmentRow,
-  SkillRunDetail,
-  SkillRunRow,
-  SkillRunStatus,
+import {
+  RUN_MAX_DEPENDENCIES,
+  RUN_RESERVED_ENV_PREFIX,
+  RUN_VARIABLE_VALUE_MAX_BYTES,
+  companionManifestSchema,
+  parseStoredSkillFrontmatter,
+  type ModelRow,
+  type RunChatHistoryItem,
+  type RunDeclaredSecret,
+  type RunDeclaredVariable,
+  type RunDependency,
+  type RunInputSelection,
+  type RunInputSnapshot,
+  type RunSecretInputSnapshot,
+  type RunVariableInputSnapshot,
+  type SkillRunArtifactRow,
+  type SkillRunAttachmentRow,
+  type SkillRunDetail,
+  type SkillRunRow,
+  type SkillRunStatus,
 } from "@companion/contracts";
 import { canAccessRun, canAccessSkill } from "./authz";
-import { openSecret, sealSecret, secretAad } from "./secretbox";
+import { getActivatedModelSets } from "./modelPreferences";
+import { resolveProviderSecretPin } from "./providerConnections";
+import { decryptPinnedSecret, pinAccessibleSecret, type AccessibleSecretPin } from "./secrets";
 import {
-  RunRuntimeError,
+  decryptOpaqueValue,
+  encryptOpaqueValue,
+  type OpaqueCiphertext,
+} from "./secretsCrypto";
+import {
   OPENCODE_SERVER_USERNAME,
+  RunRuntimeError,
+  type RunChatRuntime,
   type RunSandboxRuntime,
-  type SandboxRef,
-  type ServeEnv,
+  type RunWorkspaceFiles,
   type SkillArchiveFetcher,
   type SkillBundle,
 } from "./runRuntime";
 import { assertMember, type ActorContext } from "./services";
-import { getDecryptedProviderKey } from "./providerConnections";
-import { getActivatedModelSets } from "./modelPreferences";
-import { publishRunArtifact, vanishBlockedExtension, VanishError } from "./vanish";
 
-/**
- * Skill run services: one-shot sandboxed sessions launched from a skill's page. Every function
- * keeps the house shape `fn({ actor, orgId, ..., database? })` and its OWN queries (never shared
- * with the skill list paths — the hand-rolled fakeDbs in the test suites depend on that isolation).
- *
- * TRANSACTION RULE: `withTenantContext` opens a Postgres transaction, so no sandbox/network call
- * ever runs inside one. The launch job interleaves short tenant transactions (status persistence)
- * with long, un-transacted runtime calls.
- *
- * LIFECYCLE (no state machine): `starting → running → frozen | error`, with `status_detail` as a
- * free-text launch step / error message. A FRESH sandbox is forked per run; there is no wake —
- * retry means a new run. The recorder (same in-process job) snapshots the transcript on every
- * `session.idle` and freezes the run after `timeoutMs` of inactivity.
- */
+/** Opens a short tenant transaction. Kept in the context so the worker can use forced RLS. */
+export type TenantRunner = <T>(
+  input: { orgId: string; userId: string },
+  fn: (database: Db) => Promise<T>,
+) => Promise<T>;
 
-/* ------------------------------------ control context ----------------------------------- */
-
-/** Opens a short tenant transaction (`withTenantContext` in production; a passthrough in tests). */
-export type TenantRunner = <T>(input: { orgId: string; userId: string }, fn: (database: Db) => Promise<T>) => Promise<T>;
-
-/** The chat target the seam functions operate on (sandbox domain + basic-auth password). */
-export interface RunChatTarget {
-  domain: string;
-  password: string;
-}
-
-/** Everything the runtime-facing services need beyond the DB; composed once in apps/api. */
+/** Framework-free dependencies shared by the API validation path and the durable worker. */
 export interface RunControlContext {
-  runtime: RunSandboxRuntime;
-  /** Usually `withTenantContext`; injectable so unit tests can run against a fake database. */
-  runTenant: TenantRunner;
-  /** Fetches a stored skill archive by its storage path (S3 in production). */
-  fetchArchive: SkillArchiveFetcher;
-  /** Fetches an arbitrary stored object by key (run attachments). */
-  fetchObject: (key: string) => Promise<Buffer>;
-  /** Parsed COMPANION_SECRETS_KEY (see secretbox). */
-  secretsKey: Buffer;
+  masterKey: Buffer;
   goldenSnapshotId: string | null;
   opencodeVersion: string | null;
   region: string;
-  /** Sandbox lifetime AND the recorder's inactivity freeze window (COMPANION_SANDBOX_TIMEOUT_MS). */
   timeoutMs: number;
-  /** How often the recorder checks for inactivity; tests shrink it. Default 15s. */
-  activityPollMs?: number;
-  /** Resolve a `provider/model` ref to the provider's API-key env var NAME(s); null = unknown model. */
+  /** Catalog lookup only. It is deliberately called before opening the create transaction. */
   resolveModelKeys: (model: string) => Promise<{ envKeys: string[] } | null>;
-  /** Vanish upload seam (stubbed in tests). */
-  publishArtifact: typeof publishRunArtifact;
-  /** OpenCode chat seam (stubbed in tests; wraps @companion/sandbox in production). */
-  chat: {
-    createSession(target: RunChatTarget, title?: string): Promise<{ id: string; title: string }>;
-    sendPrompt(target: RunChatTarget, sessionId: string, text: string): Promise<void>;
-    loadItems(target: RunChatTarget, sessionId: string): Promise<RunChatHistoryItem[]>;
-    streamEvents(target: RunChatTarget, sessionId: string, signal: AbortSignal): AsyncIterable<RunChatEvent>;
-  };
+  /** Optional catalog/readiness data used by `getRunOptions`. */
+  models?: ModelRow[];
+  runtimeAvailable?: boolean;
+  runtimeMessage?: string | null;
+  /** Worker-only seams. API request handlers do not need to provide them. */
+  runtime?: RunSandboxRuntime;
+  chat?: RunChatRuntime;
+  runTenant?: TenantRunner;
+  fetchArchive?: SkillArchiveFetcher;
+  fetchObject?: (key: string) => Promise<Buffer>;
 }
 
-/** Validation failures the routes surface as 404/422s. */
-export class RunValidationError extends Error {}
-/** Wrong-state failures the routes surface as 409s (e.g. prompting a frozen run). */
-export class RunBusyError extends Error {}
+export class RunValidationError extends Error {
+  readonly code: string;
 
-/* ------------------------------------ derivations --------------------------------------- */
+  constructor(message: string, code = "invalid_run") {
+    super(message);
+    this.name = "RunValidationError";
+    this.code = code;
+  }
+}
+
+/** Optimistic revision, duplicate name, active prompt and idempotency conflicts map to HTTP 409. */
+export class RunBusyError extends Error {
+  readonly code: string;
+
+  constructor(message: string, code = "run_conflict") {
+    super(message);
+    this.name = "RunBusyError";
+    this.code = code;
+  }
+}
 
 export type RunRow = typeof schema.skillRuns.$inferSelect;
 type AttachmentRow = typeof schema.skillRunAttachments.$inferSelect;
 type ArtifactRow = typeof schema.skillRunArtifacts.$inferSelect;
 
-/** Deterministic per-run sandbox name (fresh sandbox per run — never reused). */
+export interface ResolvedRunSkill extends RunDependency {
+  scope: "personal" | "org";
+  creatorId: string;
+  frontmatter: string;
+  storagePath: string;
+  mountOrder: number;
+}
+
+export interface ResolvedRunDeclarations {
+  secrets: RunDeclaredSecret[];
+  variables: RunDeclaredVariable[];
+}
+
+export interface ResolvedSkillSecretInput {
+  provenance: "skill" | "model_provider";
+  skillId: string | null;
+  skillSlug: string | null;
+  slotId: string | null;
+  envKey: string;
+  required: boolean;
+  pin: AccessibleSecretPin;
+  sourceKey: string;
+}
+
+export interface ResolvedVariableInput {
+  skillId: string;
+  skillSlug: string;
+  envKey: string;
+  value: string;
+}
+
+export interface ResolvedRunInputs {
+  secrets: ResolvedSkillSecretInput[];
+  variables: ResolvedVariableInput[];
+}
+
+export interface CreateRunAttachment {
+  id: string;
+  fileName: string;
+  contentType: string;
+  byteSize: number;
+  storageKey: string;
+}
+
+/** Deterministic per-run sandbox name, reused by worker retries. */
 export function sandboxNameForRun(orgId: string, runId: string): string {
   const org8 = orgId.replace(/-/g, "").slice(0, 8);
   const run8 = runId.replace(/-/g, "").slice(0, 8);
   return `run-${org8}-${run8}`;
 }
 
-/** `opencode.json` — model pin + run permissions (file edits allowed: deliverables land in artifacts/). */
 export function buildOpencodeJson(input: { model: string }): string {
   return `${JSON.stringify(
     {
@@ -114,18 +157,12 @@ export function buildOpencodeJson(input: { model: string }): string {
   )}\n`;
 }
 
-/**
- * The composed first prompt: the user's text plus a skill-usage nudge, the attachment listing, and
- * (when the launcher can publish artifacts) the artifacts instruction. No persona markdown — the
- * skill is auto-discovered from `.claude/skills/<slug>/`.
- */
 export function composeRunPrompt(input: {
   prompt: string;
   skillSlug: string;
   attachmentNames: string[];
   artifactsEnabled: boolean;
 }): string {
-  const parts = [input.prompt.trim()];
   const notes = [`Use your installed "${input.skillSlug}" skill to handle this request.`];
   if (input.attachmentNames.length > 0) {
     notes.push(
@@ -135,7 +172,7 @@ export function composeRunPrompt(input: {
   if (input.artifactsEnabled) {
     notes.push("Save any deliverable files into ./artifacts/ — they will be shared with the user as links.");
   }
-  return `${parts.join("\n\n")}\n\n---\n${notes.join("\n")}\n`;
+  return `${input.prompt.trim()}\n\n---\n${notes.join("\n")}\n`;
 }
 
 const PROMPT_EXCERPT_MAX = 140;
@@ -145,7 +182,6 @@ function promptExcerpt(prompt: string): string {
   return flat.length > PROMPT_EXCERPT_MAX ? `${flat.slice(0, PROMPT_EXCERPT_MAX)}…` : flat;
 }
 
-/** Cap the stored transcript at ~512 KB: blank the oldest tool outputs first, then drop oldest items. */
 export function capTranscript(items: RunChatHistoryItem[], maxBytes = 512 * 1024): RunChatHistoryItem[] {
   const size = (list: RunChatHistoryItem[]) => Buffer.byteLength(JSON.stringify(list), "utf8");
   if (size(items) <= maxBytes) return items;
@@ -158,53 +194,548 @@ export function capTranscript(items: RunChatHistoryItem[], maxBytes = 512 * 1024
   return trimmed;
 }
 
-/* ------------------------------------ in-process activity + side events -------------------- */
-
-/** Per-run activity bump hooks, registered by the live recorder (mono-process API assumption). */
-const activityRegistry = new Map<string, () => void>();
-
-/** Runs whose launch+record job is alive in THIS process (covers the whole `starting` phase too). */
-const liveRunJobs = new Set<string>();
-
-/** Refresh the recorder's inactivity clock for a run (called by the prompt route). No-op when dead. */
-export function noteRunActivity(runId: string): void {
-  activityRegistry.get(runId)?.();
+function canonicalize(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, child]) => [key, canonicalize(child)]),
+  );
 }
 
-/** True when the launch/record job for this run is alive in THIS process. */
-export function runJobAlive(runId: string): boolean {
-  return liveRunJobs.has(runId);
+export function hashRunPayload(value: unknown): string {
+  return createHash("sha256").update(JSON.stringify(canonicalize(value))).digest("hex");
 }
 
-type SideEventListener = (event: RunChatEvent) => void;
-const sideEventListeners = new Map<string, Set<SideEventListener>>();
+/** UUID-shaped deterministic OpenCode id derived from a durable logical prompt identity. */
+export function deterministicRunMessageId(runId: string, ordinal: number): string {
+  const bytes = createHash("sha256").update(`companion-run-prompt:v1:${runId}:${ordinal}`).digest().subarray(0, 16);
+  bytes[6] = (bytes[6]! & 0x0f) | 0x50;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = bytes.toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
 
-/**
- * Recorder-side events (artifact publish failures) surfaced onto the live SSE stream. The recorder
- * and the SSE proxy are independent consumers of the sandbox stream, so this tiny in-process bus is
- * how recorder-only errors reach the browser.
- */
-export function subscribeRunSideEvents(runId: string, listener: SideEventListener): () => void {
-  const set = sideEventListeners.get(runId) ?? new Set();
-  set.add(listener);
-  sideEventListeners.set(runId, set);
-  return () => {
-    set.delete(listener);
-    if (set.size === 0) sideEventListeners.delete(runId);
+function isUniqueViolation(error: unknown): boolean {
+  return Boolean(
+    error &&
+      typeof error === "object" &&
+      "code" in error &&
+      (error as { code?: unknown }).code === "23505",
+  );
+}
+
+function parseManifestEnvironment(frontmatter: string): {
+  env: Record<string, { required: boolean; description: string }>;
+} {
+  let raw: { companion?: unknown };
+  try {
+    raw = JSON.parse(frontmatter) as { companion?: unknown };
+  } catch {
+    const legacy = parseStoredSkillFrontmatter(frontmatter);
+    if (!legacy) throw new RunValidationError("stored skill environment is invalid", "invalid_skill_manifest");
+    return {
+      env: Object.fromEntries(
+        (legacy.requirements ?? [])
+          .filter((requirement) => requirement.type === "env")
+          .map((requirement) => [
+            requirement.key,
+            { required: requirement.required, description: requirement.note },
+          ]),
+      ),
+    };
+  }
+  if (raw.companion !== undefined) {
+    const parsed = companionManifestSchema.safeParse(raw.companion);
+    if (!parsed.success) {
+      throw new RunValidationError("stored skill environment is invalid", "invalid_skill_manifest");
+    }
+    return { env: parsed.data.environment.env };
+  }
+  const legacy = parseStoredSkillFrontmatter(frontmatter);
+  return {
+    env: Object.fromEntries(
+      (legacy?.requirements ?? [])
+        .filter((requirement) => requirement.type === "env")
+        .map((requirement) => [
+          requirement.key,
+          { required: requirement.required, description: requirement.note },
+        ]),
+    ),
   };
 }
 
-function emitRunSideEvent(runId: string, event: RunChatEvent): void {
-  for (const listener of sideEventListeners.get(runId) ?? []) {
-    try {
-      listener(event);
-    } catch {
-      /* listener errors never reach the recorder */
-    }
+/**
+ * Resolve the exact current root plus the complete exact-current dependency closure. Dependency
+ * edges belong to source versions, so every traversal step uses the version pinned for that node.
+ */
+export async function resolveRunDependencyClosure(input: {
+  actor: ActorContext;
+  orgId: string;
+  slug: string;
+  skillVersionId: string;
+  database: Db;
+}): Promise<ResolvedRunSkill[]> {
+  const [skillRows, versionRows, dependencyRows] = await Promise.all([
+    input.database
+      .select({
+        id: schema.skills.id,
+        slug: schema.skills.slug,
+        scope: schema.skills.scope,
+        creatorId: schema.skills.creatorId,
+        archivedAt: schema.skills.archivedAt,
+        currentVersionId: schema.skills.currentVersionId,
+      })
+      .from(schema.skills)
+      .where(eq(schema.skills.orgId, input.orgId)),
+    input.database
+      .select({
+        id: schema.skillVersions.id,
+        skillId: schema.skillVersions.skillId,
+        version: schema.skillVersions.version,
+        frontmatter: schema.skillVersions.frontmatter,
+        storagePath: schema.skillVersions.storagePath,
+      })
+      .from(schema.skillVersions)
+      .where(eq(schema.skillVersions.orgId, input.orgId)),
+    input.database
+      .select({
+        skillVersionId: schema.skillVersionDependencies.skillVersionId,
+        dependsOnSlug: schema.skillVersionDependencies.dependsOnSlug,
+        dependsOnSkillId: schema.skillVersionDependencies.dependsOnSkillId,
+      })
+      .from(schema.skillVersionDependencies)
+      .where(eq(schema.skillVersionDependencies.orgId, input.orgId)),
+  ]);
+
+  const skillsById = new Map(skillRows.map((skill) => [skill.id, skill]));
+  const versionsById = new Map(versionRows.map((version) => [version.id, version]));
+  const root = skillRows.find((skill) => skill.slug === input.slug);
+  if (!root || root.archivedAt || !canAccessSkill(input.actor.id, root)) {
+    throw new RunValidationError("skill not found", "skill_not_found");
   }
+  if (!root.currentVersionId) {
+    throw new RunValidationError(`skill ${input.slug} has no published version`, "version_unavailable");
+  }
+  if (root.currentVersionId !== input.skillVersionId) {
+    throw new RunValidationError("the skill changed since the launcher was opened", "stale_skill_version");
+  }
+
+  const edges = new Map<string, typeof dependencyRows>();
+  for (const edge of dependencyRows) {
+    const list = edges.get(edge.skillVersionId) ?? [];
+    list.push(edge);
+    edges.set(edge.skillVersionId, list);
+  }
+  for (const list of edges.values()) list.sort((a, b) => a.dependsOnSlug.localeCompare(b.dependsOnSlug));
+
+  const visiting = new Set<string>();
+  const visited = new Set<string>();
+  const closure: ResolvedRunSkill[] = [];
+
+  const visit = (skillId: string, depth: number, via: string | null, isRoot: boolean): void => {
+    if (visiting.has(skillId)) {
+      const skill = skillsById.get(skillId);
+      throw new RunValidationError(`dependency cycle detected at ${skill?.slug ?? "unknown"}`, "dependency_cycle");
+    }
+    if (visited.has(skillId)) return;
+    if (closure.length >= RUN_MAX_DEPENDENCIES + 1) {
+      throw new RunValidationError("the dependency closure is too large", "dependency_limit");
+    }
+
+    const skill = skillsById.get(skillId);
+    if (!skill || skill.archivedAt || !skill.currentVersionId || !canAccessSkill(input.actor.id, skill)) {
+      throw new RunValidationError("a required dependency is unavailable", "dependency_unavailable");
+    }
+    const version = versionsById.get(skill.currentVersionId);
+    if (!version || version.skillId !== skill.id) {
+      throw new RunValidationError("a required dependency version is unavailable", "dependency_version_unavailable");
+    }
+
+    visiting.add(skillId);
+    closure.push({
+      skill_id: skill.id,
+      skill_version_id: version.id,
+      slug: skill.slug,
+      version: version.version,
+      root: isRoot,
+      depth,
+      via,
+      scope: skill.scope,
+      creatorId: skill.creatorId,
+      frontmatter: version.frontmatter,
+      storagePath: version.storagePath,
+      mountOrder: closure.length,
+    });
+
+    for (const edge of edges.get(version.id) ?? []) {
+      if (!edge.dependsOnSkillId) {
+        throw new RunValidationError(`dependency ${edge.dependsOnSlug} is missing`, "dependency_missing");
+      }
+      const target = skillsById.get(edge.dependsOnSkillId);
+      if (!target || target.slug !== edge.dependsOnSlug) {
+        throw new RunValidationError(`dependency ${edge.dependsOnSlug} is unavailable`, "dependency_unavailable");
+      }
+      visit(target.id, depth + 1, skill.slug, false);
+    }
+    visiting.delete(skillId);
+    visited.add(skillId);
+  };
+
+  visit(root.id, 0, null, true);
+  return closure;
 }
 
-/* ------------------------------------ row mapping ----------------------------------------- */
+export async function loadRunDeclarations(input: {
+  actor: ActorContext;
+  orgId: string;
+  closure: ResolvedRunSkill[];
+  database: Db;
+  includeCandidates?: boolean;
+}): Promise<ResolvedRunDeclarations> {
+  const versionIds = input.closure.map((skill) => skill.skill_version_id);
+  const slotRows = versionIds.length
+    ? await input.database
+        .select()
+        .from(schema.skillVersionSecretSlots)
+        .where(
+          and(
+            eq(schema.skillVersionSecretSlots.orgId, input.orgId),
+            inArray(schema.skillVersionSecretSlots.skillVersionId, versionIds),
+          ),
+        )
+    : [];
+
+  const candidateRows = input.includeCandidates
+    ? await import("./secrets").then(({ listSecrets }) =>
+        listSecrets({ actor: input.actor, orgId: input.orgId, database: input.database }),
+      )
+    : [];
+  const candidates = candidateRows
+    .filter((secret) => secret.can_use && !secret.disabled_at && !secret.deleted_at)
+    .map((secret) => ({
+      id: secret.id,
+      name: secret.name,
+      key: secret.key,
+      owner: secret.owner,
+      audience: secret.audience,
+      personal: secret.owner.id === input.actor.id,
+    }));
+  const candidateIds = new Set(candidates.map((candidate) => candidate.id));
+
+  const bindings = await input.database
+    .select()
+    .from(schema.skillSecretBindings)
+    .where(
+      and(
+        eq(schema.skillSecretBindings.orgId, input.orgId),
+        eq(schema.skillSecretBindings.userId, input.actor.id),
+      ),
+    );
+  const prefill = new Map(
+    bindings
+      .filter((binding) => binding.revokedAt === null)
+      .map((binding) => [`${binding.skillId}:${binding.slotId}`, binding.secretId]),
+  );
+
+  const order = new Map(input.closure.map((skill, index) => [skill.skill_id, index]));
+  const skillById = new Map(input.closure.map((skill) => [skill.skill_id, skill]));
+  const secrets: RunDeclaredSecret[] = slotRows
+    .map((slot) => {
+      const skill = skillById.get(slot.skillId);
+      if (!skill || slot.skillVersionId !== skill.skill_version_id) return null;
+      if (slot.envKey.startsWith(RUN_RESERVED_ENV_PREFIX)) {
+        throw new RunValidationError(
+          `${skill.slug} declares reserved environment key ${slot.envKey}`,
+          "reserved_environment_key",
+        );
+      }
+      return {
+        skill_id: skill.skill_id,
+        skill_version_id: skill.skill_version_id,
+        skill_slug: skill.slug,
+        slot_id: slot.slotId,
+        env_key: slot.envKey,
+        description: slot.description,
+        required: slot.required,
+        candidates,
+        prefill_secret_id: candidateIds.has(prefill.get(`${skill.skill_id}:${slot.slotId}`) ?? "")
+          ? prefill.get(`${skill.skill_id}:${slot.slotId}`) ?? null
+          : null,
+      } satisfies RunDeclaredSecret;
+    })
+    .filter((value): value is RunDeclaredSecret => value !== null)
+    .sort(
+      (a, b) =>
+        (order.get(a.skill_id) ?? 0) - (order.get(b.skill_id) ?? 0) || a.env_key.localeCompare(b.env_key),
+    );
+
+  const variables: RunDeclaredVariable[] = [];
+  for (const skill of input.closure) {
+    const manifest = parseManifestEnvironment(skill.frontmatter);
+    for (const [envKey, declaration] of Object.entries(manifest.env).sort(([a], [b]) => a.localeCompare(b))) {
+      if (envKey.startsWith(RUN_RESERVED_ENV_PREFIX)) {
+        throw new RunValidationError(
+          `${skill.slug} declares reserved environment key ${envKey}`,
+          "reserved_environment_key",
+        );
+      }
+      variables.push({
+        skill_id: skill.skill_id,
+        skill_version_id: skill.skill_version_id,
+        skill_slug: skill.slug,
+        env_key: envKey,
+        description: declaration.description,
+        required: declaration.required,
+      });
+    }
+  }
+  return { secrets, variables };
+}
+
+function samePin(left: AccessibleSecretPin, right: AccessibleSecretPin): boolean {
+  return left.secretId === right.secretId && left.version === right.version;
+}
+
+/** Validate explicit selections and resolve immutable pins. No binding is ever added implicitly. */
+export async function validateRunInputSelection(input: {
+  actor: ActorContext;
+  orgId: string;
+  model: string;
+  modelEnvKeys: string[];
+  selection: RunInputSelection;
+  declarations: ResolvedRunDeclarations;
+  database: Db;
+  allowMissingRequired?: boolean;
+  providerRequired?: boolean;
+  /** Unit-test/domain seam; production callers use the vault service above. */
+  pinSecret?: (secretId: string) => Promise<AccessibleSecretPin>;
+  /** Unit-test/domain seam; production callers resolve personal-then-workspace bindings. */
+  providerPin?: { keyName: string; secret: AccessibleSecretPin } | null;
+}): Promise<ResolvedRunInputs> {
+  const secretDeclarations = new Map(
+    input.declarations.secrets.map((declaration) => [
+      `${declaration.skill_id}:${declaration.slot_id}`,
+      declaration,
+    ]),
+  );
+  const variableDeclarations = new Map(
+    input.declarations.variables.map((declaration) => [
+      `${declaration.skill_id}:${declaration.env_key}`,
+      declaration,
+    ]),
+  );
+  const selectedSecrets = new Map(
+    input.selection.secrets.map((selection) => [`${selection.skill_id}:${selection.slot_id}`, selection]),
+  );
+  const selectedVariables = new Map(
+    input.selection.variables.map((selection) => [`${selection.skill_id}:${selection.env_key}`, selection]),
+  );
+  if (selectedSecrets.size !== input.selection.secrets.length) {
+    throw new RunValidationError("a secret slot was selected more than once", "duplicate_secret_slot");
+  }
+  if (selectedVariables.size !== input.selection.variables.length) {
+    throw new RunValidationError("a variable was supplied more than once", "duplicate_variable");
+  }
+
+  for (const key of selectedSecrets.keys()) {
+    if (!secretDeclarations.has(key)) {
+      throw new RunValidationError("an unknown or obsolete secret slot was selected", "unknown_secret_slot");
+    }
+  }
+  for (const key of selectedVariables.keys()) {
+    if (!variableDeclarations.has(key)) {
+      throw new RunValidationError("an unknown or obsolete variable was supplied", "unknown_variable");
+    }
+  }
+  if (!input.allowMissingRequired) {
+    for (const [key, declaration] of secretDeclarations) {
+      if (declaration.required && !selectedSecrets.has(key)) {
+        throw new RunValidationError(`${declaration.env_key} is required`, "required_secret_missing");
+      }
+    }
+    for (const [key, declaration] of variableDeclarations) {
+      if (declaration.required && !selectedVariables.has(key)) {
+        throw new RunValidationError(`${declaration.env_key} is required`, "required_variable_missing");
+      }
+    }
+  }
+
+  const resolvedSecrets: ResolvedSkillSecretInput[] = [];
+  for (const [key, selection] of selectedSecrets) {
+    const declaration = secretDeclarations.get(key)!;
+    let pin: AccessibleSecretPin;
+    try {
+      pin = input.pinSecret
+        ? await input.pinSecret(selection.secret_id)
+        : await pinAccessibleSecret({
+            actor: input.actor,
+            orgId: input.orgId,
+            secretId: selection.secret_id,
+            database: input.database,
+          });
+    } catch {
+      throw new RunValidationError("secret unavailable", "secret_unavailable");
+    }
+    resolvedSecrets.push({
+      provenance: "skill",
+      skillId: declaration.skill_id,
+      skillSlug: declaration.skill_slug,
+      slotId: declaration.slot_id,
+      envKey: declaration.env_key,
+      required: declaration.required,
+      pin,
+      sourceKey: `${declaration.skill_id}:${declaration.slot_id}`,
+    });
+  }
+
+  const variables: ResolvedVariableInput[] = input.selection.variables.map((selection) => {
+    const declaration = variableDeclarations.get(`${selection.skill_id}:${selection.env_key}`)!;
+    if (
+      selection.value.includes("\0") ||
+      Buffer.byteLength(selection.value, "utf8") > RUN_VARIABLE_VALUE_MAX_BYTES
+    ) {
+      throw new RunValidationError(`${declaration.env_key} has an invalid value`, "invalid_variable_value");
+    }
+    return {
+      skillId: declaration.skill_id,
+      skillSlug: declaration.skill_slug,
+      envKey: declaration.env_key,
+      value: selection.value,
+    };
+  });
+
+  const provider = input.model.split("/", 1)[0] ?? "";
+  if (!provider) throw new RunValidationError("the model provider is invalid", "model_unavailable");
+  let providerBinding = input.providerPin;
+  if (providerBinding === undefined) {
+    try {
+      providerBinding = await resolveProviderSecretPin({
+        actor: input.actor,
+        orgId: input.orgId,
+        provider,
+        database: input.database,
+      });
+    } catch {
+      providerBinding = null;
+    }
+  }
+  if (!providerBinding || !input.modelEnvKeys.includes(providerBinding.keyName)) {
+    if (input.providerRequired !== false || providerBinding) {
+      throw new RunValidationError("the model provider is not connected", "provider_disconnected");
+    }
+  } else {
+    resolvedSecrets.push({
+      provenance: "model_provider",
+      skillId: null,
+      skillSlug: null,
+      slotId: null,
+      envKey: providerBinding.keyName,
+      required: true,
+      pin: providerBinding.secret,
+      sourceKey: `${provider}:${providerBinding.keyName}`,
+    });
+  }
+
+  const byEnv = new Map<string, { kind: "secret"; pin: AccessibleSecretPin } | { kind: "variable"; value: string }>();
+  for (const secret of resolvedSecrets) {
+    if (secret.envKey.startsWith(RUN_RESERVED_ENV_PREFIX)) {
+      throw new RunValidationError(`${secret.envKey} is reserved by the runtime`, "reserved_environment_key");
+    }
+    const existing = byEnv.get(secret.envKey);
+    if (existing && (existing.kind !== "secret" || !samePin(existing.pin, secret.pin))) {
+      throw new RunValidationError(`environment key ${secret.envKey} has conflicting inputs`, "input_collision");
+    }
+    byEnv.set(secret.envKey, { kind: "secret", pin: secret.pin });
+  }
+  for (const variable of variables) {
+    if (variable.envKey.startsWith(RUN_RESERVED_ENV_PREFIX)) {
+      throw new RunValidationError(`${variable.envKey} is reserved by the runtime`, "reserved_environment_key");
+    }
+    const existing = byEnv.get(variable.envKey);
+    if (existing && (existing.kind !== "variable" || existing.value !== variable.value)) {
+      throw new RunValidationError(`environment key ${variable.envKey} has conflicting inputs`, "input_collision");
+    }
+    byEnv.set(variable.envKey, { kind: "variable", value: variable.value });
+  }
+  return { secrets: resolvedSecrets, variables };
+}
+
+function serializeOpaque(ciphertext: OpaqueCiphertext): string {
+  return JSON.stringify(ciphertext);
+}
+
+function parseOpaque(serialized: string): OpaqueCiphertext {
+  let value: unknown;
+  try {
+    value = JSON.parse(serialized);
+  } catch {
+    throw new RunRuntimeError("run server password is malformed");
+  }
+  const record = value as Partial<OpaqueCiphertext> | null;
+  const keys: Array<keyof OpaqueCiphertext> = [
+    "ciphertext",
+    "iv",
+    "authTag",
+    "wrappedDek",
+    "wrapIv",
+    "wrapAuthTag",
+    "keyId",
+  ];
+  if (!record || keys.some((key) => typeof record[key] !== "string" || record[key] === "")) {
+    throw new RunRuntimeError("run server password is malformed");
+  }
+  return record as OpaqueCiphertext;
+}
+
+export function decryptRunServerPassword(input: {
+  orgId: string;
+  runId: string;
+  encrypted: string;
+  masterKey: Buffer;
+}): string {
+  return decryptOpaqueValue(
+    {
+      orgId: input.orgId,
+      purpose: "opencode-server-password",
+      subjectId: input.runId,
+      ...parseOpaque(input.encrypted),
+    },
+    input.masterKey,
+  );
+}
+
+async function loadRunRow(database: Db, orgId: string, runId: string): Promise<RunRow | null> {
+  const rows = await database
+    .select()
+    .from(schema.skillRuns)
+    .where(and(eq(schema.skillRuns.orgId, orgId), eq(schema.skillRuns.id, runId)));
+  return rows[0] ?? null;
+}
+
+async function loadAttachments(database: Db, orgId: string, runId: string): Promise<AttachmentRow[]> {
+  return database
+    .select()
+    .from(schema.skillRunAttachments)
+    .where(and(eq(schema.skillRunAttachments.orgId, orgId), eq(schema.skillRunAttachments.runId, runId)));
+}
+
+async function loadArtifacts(database: Db, orgId: string, runId: string): Promise<ArtifactRow[]> {
+  return database
+    .select()
+    .from(schema.skillRunArtifacts)
+    .where(and(eq(schema.skillRunArtifacts.orgId, orgId), eq(schema.skillRunArtifacts.runId, runId)))
+    .orderBy(asc(schema.skillRunArtifacts.path));
+}
+
+async function loadSkillSlug(database: Db, orgId: string, skillId: string): Promise<string> {
+  const rows = await database
+    .select({ id: schema.skills.id, slug: schema.skills.slug })
+    .from(schema.skills)
+    .where(and(eq(schema.skills.orgId, orgId), eq(schema.skills.id, skillId)));
+  return rows.find((row) => row.id === skillId)?.slug ?? "?";
+}
 
 function toAttachmentRow(row: AttachmentRow): SkillRunAttachmentRow {
   return { id: row.id, file_name: row.fileName, content_type: row.contentType, byte_size: row.byteSize };
@@ -218,7 +749,7 @@ function toArtifactRow(row: ArtifactRow): SkillRunArtifactRow {
     content_type: row.contentType,
     byte_size: row.byteSize,
     url: row.url,
-    expires_at: row.expiresAt ? row.expiresAt.toISOString() : null,
+    expires_at: row.expiresAt?.toISOString() ?? null,
     published_at: row.publishedAt.toISOString(),
   };
 }
@@ -231,145 +762,596 @@ function toRunRow(row: RunRow, skillSlug: string, artifactsCount: number): Skill
     model: row.model,
     prompt_excerpt: promptExcerpt(row.prompt),
     status: row.status as SkillRunStatus,
-    status_detail: row.statusDetail,
+    status_detail: row.userMessage,
+    phase: row.phase,
+    error_code: row.errorCode,
+    error_message: row.userMessage,
+    run_config_id: row.runConfigId,
+    run_config_name_snapshot: row.runConfigNameSnapshot,
     artifacts_count: artifactsCount,
     created_at: row.createdAt.toISOString(),
-    last_active_at: row.lastActiveAt ? row.lastActiveAt.toISOString() : null,
+    last_active_at: row.lastActiveAt?.toISOString() ?? null,
   };
 }
 
-function toDetail(
+async function loadInputSnapshot(database: Db, row: RunRow): Promise<RunInputSnapshot> {
+  const [skillRows, secretRows, variableRows] = await Promise.all([
+    database
+      .select({
+        skillId: schema.skillRunSkills.skillId,
+        skillVersionId: schema.skillRunSkills.skillVersionId,
+        isRoot: schema.skillRunSkills.isRoot,
+        mountOrder: schema.skillRunSkills.mountOrder,
+        slug: schema.skills.slug,
+        version: schema.skillVersions.version,
+      })
+      .from(schema.skillRunSkills)
+      .innerJoin(
+        schema.skills,
+        and(
+          eq(schema.skills.orgId, schema.skillRunSkills.orgId),
+          eq(schema.skills.id, schema.skillRunSkills.skillId),
+        ),
+      )
+      .innerJoin(
+        schema.skillVersions,
+        and(
+          eq(schema.skillVersions.orgId, schema.skillRunSkills.orgId),
+          eq(schema.skillVersions.id, schema.skillRunSkills.skillVersionId),
+        ),
+      )
+      .where(
+        and(eq(schema.skillRunSkills.orgId, row.orgId), eq(schema.skillRunSkills.runId, row.id)),
+      )
+      .orderBy(asc(schema.skillRunSkills.mountOrder)),
+    database
+      .select()
+      .from(schema.skillRunSecretInputs)
+      .where(
+        and(eq(schema.skillRunSecretInputs.orgId, row.orgId), eq(schema.skillRunSecretInputs.runId, row.id)),
+      ),
+    database
+      .select()
+      .from(schema.skillRunVariableInputs)
+      .where(
+        and(eq(schema.skillRunVariableInputs.orgId, row.orgId), eq(schema.skillRunVariableInputs.runId, row.id)),
+      ),
+  ]);
+  const dependencyRows = skillRows.length
+    ? await database
+        .select({
+          skillVersionId: schema.skillVersionDependencies.skillVersionId,
+          dependsOnSkillId: schema.skillVersionDependencies.dependsOnSkillId,
+          dependsOnSlug: schema.skillVersionDependencies.dependsOnSlug,
+        })
+        .from(schema.skillVersionDependencies)
+        .where(
+          and(
+            eq(schema.skillVersionDependencies.orgId, row.orgId),
+            inArray(
+              schema.skillVersionDependencies.skillVersionId,
+              skillRows.map((skill) => skill.skillVersionId),
+            ),
+          ),
+        )
+    : [];
+  const slugBySkill = new Map(skillRows.map((skill) => [skill.skillId, skill.slug]));
+  const skillById = new Map(skillRows.map((skill) => [skill.skillId, skill]));
+  const edgesByVersion = new Map<string, typeof dependencyRows>();
+  for (const edge of dependencyRows) {
+    const edges = edgesByVersion.get(edge.skillVersionId) ?? [];
+    edges.push(edge);
+    edgesByVersion.set(edge.skillVersionId, edges);
+  }
+  for (const edges of edgesByVersion.values()) {
+    edges.sort((left, right) => left.dependsOnSlug.localeCompare(right.dependsOnSlug));
+  }
+  const topology = new Map<string, { depth: number; via: string | null }>();
+  const visited = new Set<string>();
+  const visit = (skillId: string, depth: number, via: string | null): void => {
+    if (visited.has(skillId)) return;
+    const skill = skillById.get(skillId);
+    if (!skill) return;
+    visited.add(skillId);
+    topology.set(skillId, { depth, via });
+    for (const edge of edgesByVersion.get(skill.skillVersionId) ?? []) {
+      if (edge.dependsOnSkillId) visit(edge.dependsOnSkillId, depth + 1, skill.slug);
+    }
+  };
+  const rootSkill = skillRows.find((skill) => skill.isRoot);
+  if (rootSkill) visit(rootSkill.skillId, 0, null);
+  const skills: RunDependency[] = skillRows.map((skill) => {
+    const relation = topology.get(skill.skillId);
+    return {
+      skill_id: skill.skillId,
+      skill_version_id: skill.skillVersionId,
+      slug: skill.slug,
+      version: skill.version,
+      root: skill.isRoot,
+      depth: relation?.depth ?? (skill.isRoot ? 0 : 1),
+      via: relation?.via ?? (skill.isRoot ? null : rootSkill?.slug ?? null),
+    };
+  });
+  const secrets: RunSecretInputSnapshot[] = secretRows.map((secret) => ({
+    provenance: secret.provenance,
+    skill_id: secret.skillId,
+    skill_slug: secret.skillId ? slugBySkill.get(secret.skillId) ?? null : null,
+    slot_id: secret.slotId,
+    env_key: secret.envKey,
+    required: secret.required,
+    secret_id: secret.secretId,
+    secret_version: secret.secretVersion,
+    secret_name: secret.secretNameSnapshot,
+  }));
+  const variables: RunVariableInputSnapshot[] = variableRows.map((variable) => ({
+    skill_id: variable.skillId,
+    skill_slug: slugBySkill.get(variable.skillId) ?? "unknown",
+    env_key: variable.envKey,
+    value: variable.value,
+  }));
+  return { skills, secrets, variables };
+}
+
+async function toDetail(
+  database: Db,
   row: RunRow,
   skillSlug: string,
   attachments: AttachmentRow[],
   artifacts: ArtifactRow[],
-): SkillRunDetail {
+): Promise<SkillRunDetail> {
   return {
     ...toRunRow(row, skillSlug, artifacts.length),
     prompt: row.prompt,
     transcript: (row.transcript ?? []) as RunChatHistoryItem[],
+    warnings: row.warnings ?? [],
+    transcript_event_sequence: row.transcriptEventSequence,
     attachments: attachments.map(toAttachmentRow),
     artifacts: artifacts.map(toArtifactRow),
+    input_snapshot: await loadInputSnapshot(database, row),
   };
 }
 
-/* ------------------------------------ internal loads --------------------------------------- */
+async function createRunInTransaction(input: {
+  actor: ActorContext;
+  orgId: string;
+  slug: string;
+  skillVersionId: string;
+  prompt: string;
+  model: string;
+  inputs: RunInputSelection;
+  runConfigId?: string | null;
+  idempotencyKey: string;
+  attachments: CreateRunAttachment[];
+  modelEnvKeys: string[];
+  ctx: RunControlContext;
+  database: Db;
+}): Promise<SkillRunDetail> {
+  const rootRows = await input.database
+    .select({ id: schema.skills.id })
+    .from(schema.skills)
+    .where(and(eq(schema.skills.orgId, input.orgId), eq(schema.skills.slug, input.slug)));
+  const rootSkillId = rootRows[0]?.id;
+  if (!rootSkillId) throw new RunValidationError("skill not found", "skill_not_found");
+  const existingRows = await input.database
+    .select()
+    .from(schema.skillRuns)
+    .where(
+      and(
+        eq(schema.skillRuns.orgId, input.orgId),
+        eq(schema.skillRuns.creatorId, input.actor.id),
+        eq(schema.skillRuns.skillId, rootSkillId),
+        eq(schema.skillRuns.idempotencyKey, input.idempotencyKey),
+      ),
+    );
+  const payloadHash = hashRunPayload({
+    slug: input.slug,
+    skillVersionId: input.skillVersionId,
+    prompt: input.prompt,
+    model: input.model,
+    inputs: {
+      secrets: [...input.inputs.secrets].sort((a, b) =>
+        `${a.skill_id}:${a.slot_id}`.localeCompare(`${b.skill_id}:${b.slot_id}`),
+      ),
+      variables: [...input.inputs.variables].sort((a, b) =>
+        `${a.skill_id}:${a.env_key}`.localeCompare(`${b.skill_id}:${b.env_key}`),
+      ),
+    },
+    runConfigId: input.runConfigId ?? null,
+    attachments: [...input.attachments]
+      .sort((a, b) => a.id.localeCompare(b.id))
+      .map(({ id, fileName, contentType, byteSize }) => ({ id, fileName, contentType, byteSize })),
+  });
+  const existing = existingRows[0];
+  if (existing) {
+    if (existing.payloadHash !== payloadHash) {
+      throw new RunBusyError("this idempotency key was already used with a different payload", "idempotency_conflict");
+    }
+    const [attachments, artifacts, slug] = await Promise.all([
+      loadAttachments(input.database, input.orgId, existing.id),
+      loadArtifacts(input.database, input.orgId, existing.id),
+      loadSkillSlug(input.database, input.orgId, existing.skillId),
+    ]);
+    return toDetail(input.database, existing, slug, attachments, artifacts);
+  }
 
-async function loadRunRow(database: Db, orgId: string, runId: string): Promise<RunRow | null> {
+  const closure = await resolveRunDependencyClosure({
+    actor: input.actor,
+    orgId: input.orgId,
+    slug: input.slug,
+    skillVersionId: input.skillVersionId,
+    database: input.database,
+  });
+  const root = closure[0]!;
+  const lockedSkills = await input.database
+    .select({ id: schema.skills.id, currentVersionId: schema.skills.currentVersionId, archivedAt: schema.skills.archivedAt })
+    .from(schema.skills)
+    .where(
+      and(
+        eq(schema.skills.orgId, input.orgId),
+        inArray(schema.skills.id, closure.map((skill) => skill.skill_id)),
+      ),
+    )
+    .for("share");
+  const lockedById = new Map(lockedSkills.map((skill) => [skill.id, skill]));
+  if (
+    closure.some((skill) => {
+      const locked = lockedById.get(skill.skill_id);
+      return !locked || locked.archivedAt !== null || locked.currentVersionId !== skill.skill_version_id;
+    })
+  ) {
+    throw new RunValidationError("the skill dependency graph changed during launch", "stale_skill_version");
+  }
+  const declarations = await loadRunDeclarations({
+    actor: input.actor,
+    orgId: input.orgId,
+    closure,
+    database: input.database,
+  });
+  const activated = await getActivatedModelSets({
+    database: input.database,
+    orgId: input.orgId,
+    userId: input.actor.id,
+  });
+  if (!activated.personal.includes(input.model) && !activated.org.includes(input.model)) {
+    throw new RunValidationError("the selected model is not activated", "model_not_activated");
+  }
+  const resolvedInputs = await validateRunInputSelection({
+    actor: input.actor,
+    orgId: input.orgId,
+    model: input.model,
+    modelEnvKeys: input.modelEnvKeys,
+    selection: input.inputs,
+    declarations,
+    database: input.database,
+  });
+
+  let configNameSnapshot: string | null = null;
+  if (input.runConfigId) {
+    const configs = await input.database
+      .select()
+      .from(schema.skillRunConfigs)
+      .where(
+        and(
+          eq(schema.skillRunConfigs.orgId, input.orgId),
+          eq(schema.skillRunConfigs.id, input.runConfigId),
+          eq(schema.skillRunConfigs.creatorId, input.actor.id),
+          eq(schema.skillRunConfigs.skillId, root.skill_id),
+        ),
+      );
+    const config = configs[0];
+    if (!config) throw new RunValidationError("run configuration not found", "configuration_not_found");
+    configNameSnapshot = config.name;
+  }
+
+  let artifactsEnabled = false;
+  try {
+    artifactsEnabled =
+      (await resolveProviderSecretPin({
+        actor: input.actor,
+        orgId: input.orgId,
+        provider: "vanish",
+        database: input.database,
+      })) !== null;
+  } catch {
+    artifactsEnabled = false;
+  }
+
+  const runId = randomUUID();
+  const serverPassword = randomBytes(32).toString("base64url");
+  const serverPasswordEnc = serializeOpaque(
+    encryptOpaqueValue(
+      {
+        orgId: input.orgId,
+        purpose: "opencode-server-password",
+        subjectId: runId,
+        value: serverPassword,
+      },
+      input.ctx.masterKey,
+    ),
+  );
+  const inserted = await input.database
+    .insert(schema.skillRuns)
+    .values({
+      id: runId,
+      orgId: input.orgId,
+      skillId: root.skill_id,
+      creatorId: input.actor.id,
+      skillVersionId: root.skill_version_id,
+      skillVersion: root.version,
+      runConfigId: input.runConfigId ?? null,
+      runConfigNameSnapshot: configNameSnapshot,
+      idempotencyKey: input.idempotencyKey,
+      payloadHash,
+      model: input.model,
+      prompt: input.prompt,
+      status: "queued",
+      phase: "queued",
+      sandboxName: sandboxNameForRun(input.orgId, runId),
+      goldenSnapshotId: input.ctx.goldenSnapshotId,
+      opencodeVersion: input.ctx.opencodeVersion,
+      serverPasswordEnc,
+      timeoutMs: input.ctx.timeoutMs,
+    })
+    .returning();
+  const row = inserted[0];
+  if (!row) throw new Error("run insert returned no row");
+
+  await input.database.insert(schema.skillRunSkills).values(
+    closure.map((skill) => ({
+      orgId: input.orgId,
+      runId,
+      skillId: skill.skill_id,
+      skillVersionId: skill.skill_version_id,
+      isRoot: skill.root,
+      mountOrder: skill.mountOrder,
+    })),
+  );
+  await input.database.insert(schema.skillRunSecretInputs).values([
+    ...resolvedInputs.secrets.map((secret) => ({
+        orgId: input.orgId,
+        runId,
+        skillId: secret.skillId,
+        slotId: secret.slotId,
+        sourceKey: secret.sourceKey,
+        envKey: secret.envKey,
+        secretId: secret.pin.secretId,
+        secretVersion: secret.pin.version,
+        secretNameSnapshot: secret.pin.name,
+        provenance: secret.provenance,
+        required: secret.required,
+      })),
+    {
+      orgId: input.orgId,
+      runId,
+      skillId: null,
+      slotId: null,
+      sourceKey: "opencode-server-password",
+      envKey: "OPENCODE_SERVER_PASSWORD",
+      secretId: null,
+      secretVersion: null,
+      secretNameSnapshot: null,
+      provenance: "runtime" as const,
+      required: true,
+    },
+  ]);
+  if (resolvedInputs.variables.length > 0) {
+    await input.database.insert(schema.skillRunVariableInputs).values(
+      resolvedInputs.variables.map((variable) => ({
+        orgId: input.orgId,
+        runId,
+        skillId: variable.skillId,
+        envKey: variable.envKey,
+        value: variable.value,
+      })),
+    );
+  }
+  if (input.attachments.length > 0) {
+    await input.database.insert(schema.skillRunAttachments).values(
+      input.attachments.map((attachment) => ({
+        id: attachment.id,
+        orgId: input.orgId,
+        runId,
+        fileName: attachment.fileName,
+        contentType: attachment.contentType,
+        byteSize: attachment.byteSize,
+        storageKey: attachment.storageKey,
+      })),
+    );
+  }
+
+  const composedPrompt = composeRunPrompt({
+    prompt: input.prompt,
+    skillSlug: root.slug,
+    attachmentNames: input.attachments.map((attachment) => attachment.fileName),
+    artifactsEnabled,
+  });
+  await input.database.insert(schema.skillRunPrompts).values({
+    orgId: input.orgId,
+    runId,
+    ordinal: 0,
+    kind: "initial",
+    idempotencyKey: `initial:${input.idempotencyKey}`,
+    payloadHash: hashRunPayload({ prompt: composedPrompt }),
+    messageId: deterministicRunMessageId(runId, 0),
+    prompt: composedPrompt,
+    status: "queued",
+  });
+  await input.database.insert(schema.skillRunJobs).values({
+    orgId: input.orgId,
+    runId,
+    creatorId: input.actor.id,
+    status: "queued",
+    phase: "queued",
+  });
+  if (input.runConfigId) {
+    await input.database
+      .update(schema.skillRunConfigs)
+      .set({ lastUsedAt: new Date(), updatedAt: new Date() })
+      .where(
+        and(
+          eq(schema.skillRunConfigs.orgId, input.orgId),
+          eq(schema.skillRunConfigs.id, input.runConfigId),
+          eq(schema.skillRunConfigs.creatorId, input.actor.id),
+        ),
+      );
+  }
+  await input.database.insert(schema.auditLog).values({
+    orgId: input.orgId,
+    actorId: input.actor.id,
+    action: "skill.run.queued",
+    targetType: "skill",
+    targetId: root.skill_id,
+    metadata: {
+      slug: root.slug,
+      run_id: runId,
+      model: input.model,
+      version: root.version,
+      dependency_count: closure.length - 1,
+      secret_count: resolvedInputs.secrets.length,
+      variable_count: resolvedInputs.variables.length,
+    },
+  });
+  const attachments = await loadAttachments(input.database, input.orgId, runId);
+  return toDetail(input.database, row, root.slug, attachments, []);
+}
+
+/**
+ * Create one immutable run snapshot and enqueue both its orchestration job and initial prompt.
+ * Catalog lookup occurs before the transaction; every operation inside the transaction is DB-only.
+ */
+export async function createRun(input: {
+  actor: ActorContext;
+  orgId: string;
+  slug: string;
+  skillVersionId: string;
+  prompt: string;
+  model: string;
+  inputs: RunInputSelection;
+  runConfigId?: string | null;
+  idempotencyKey: string;
+  attachments: CreateRunAttachment[];
+  ctx: RunControlContext;
+  database?: Db;
+}): Promise<SkillRunDetail> {
+  const database = input.database ?? db;
+  await assertMember(database, input.actor, input.orgId);
+  if (input.ctx.runtimeAvailable === false || !input.ctx.goldenSnapshotId) {
+    throw new RunValidationError(
+      input.ctx.runtimeMessage ?? "RunSkill is not configured for this workspace",
+      "runtime_unavailable",
+    );
+  }
+  const model = await input.ctx.resolveModelKeys(input.model);
+  if (!model || model.envKeys.length === 0) {
+    throw new RunValidationError("the selected model is unavailable", "model_unavailable");
+  }
+  const execute = (transaction: Db) =>
+    createRunInTransaction({ ...input, modelEnvKeys: model.envKeys, database: transaction });
+  try {
+    return await database.transaction(async (transaction) => execute(transaction as unknown as Db));
+  } catch (error) {
+    if (!isUniqueViolation(error)) throw error;
+    // A concurrent retry may have won the idempotency unique constraint. Re-run the normal lookup
+    // path in a fresh transaction; it verifies the payload hash before returning the existing run.
+    return database.transaction(async (transaction) => execute(transaction as unknown as Db));
+  }
+}
+
+export async function listRuns(input: {
+  actor: ActorContext;
+  orgId: string;
+  slug: string;
+  database?: Db;
+}): Promise<SkillRunRow[]> {
+  const database = input.database ?? db;
+  await assertMember(database, input.actor, input.orgId);
+  const skills = await database
+    .select({ id: schema.skills.id, scope: schema.skills.scope, creatorId: schema.skills.creatorId })
+    .from(schema.skills)
+    .where(and(eq(schema.skills.orgId, input.orgId), eq(schema.skills.slug, input.slug)));
+  const skill = skills[0];
+  if (!skill || !canAccessSkill(input.actor.id, skill)) throw new RunValidationError("skill not found", "skill_not_found");
   const rows = await database
     .select()
     .from(schema.skillRuns)
-    .where(and(eq(schema.skillRuns.orgId, orgId), eq(schema.skillRuns.id, runId)));
-  return (Array.isArray(rows) ? (rows as RunRow[]) : [])[0] ?? null;
+    .where(
+      and(
+        eq(schema.skillRuns.orgId, input.orgId),
+        eq(schema.skillRuns.skillId, skill.id),
+        eq(schema.skillRuns.creatorId, input.actor.id),
+      ),
+    )
+    .orderBy(desc(schema.skillRuns.createdAt));
+  const artifacts = rows.length
+    ? await database
+        .select({ runId: schema.skillRunArtifacts.runId })
+        .from(schema.skillRunArtifacts)
+        .where(
+          and(
+            eq(schema.skillRunArtifacts.orgId, input.orgId),
+            inArray(schema.skillRunArtifacts.runId, rows.map((row) => row.id)),
+          ),
+        )
+    : [];
+  const counts = new Map<string, number>();
+  for (const artifact of artifacts) counts.set(artifact.runId, (counts.get(artifact.runId) ?? 0) + 1);
+  return rows.map((row) => toRunRow(row, input.slug, counts.get(row.id) ?? 0));
 }
 
-async function loadAttachments(database: Db, orgId: string, runId: string): Promise<AttachmentRow[]> {
-  const rows = await database
-    .select()
-    .from(schema.skillRunAttachments)
-    .where(and(eq(schema.skillRunAttachments.orgId, orgId), eq(schema.skillRunAttachments.runId, runId)));
-  return Array.isArray(rows) ? (rows as AttachmentRow[]) : [];
-}
-
-async function loadArtifacts(database: Db, orgId: string, runId: string): Promise<ArtifactRow[]> {
-  const rows = await database
-    .select()
-    .from(schema.skillRunArtifacts)
-    .where(and(eq(schema.skillRunArtifacts.orgId, orgId), eq(schema.skillRunArtifacts.runId, runId)));
-  const list = Array.isArray(rows) ? (rows as ArtifactRow[]) : [];
-  return list.sort((a, b) => a.path.localeCompare(b.path));
-}
-
-interface RunSkillRow {
-  id: string;
-  slug: string;
-  scope: "personal" | "org";
-  creatorId: string;
-  archivedAt: Date | null;
-  currentVersion: string | null;
-}
-
-/**
- * Direct skill lookup (its OWN query, per the house rule — never shared with the skill list paths).
- * Visibility is re-applied post-query via `canAccessSkill`, matching the accessible-library
- * predicate: org skills for anyone, personal skills only for their owner.
- */
-async function loadSkillBySlug(database: Db, orgId: string, slug: string): Promise<RunSkillRow | null> {
-  const rows = await database
-    .select({
-      id: schema.skills.id,
-      slug: schema.skills.slug,
-      scope: schema.skills.scope,
-      creatorId: schema.skills.creatorId,
-      archivedAt: schema.skills.archivedAt,
-      currentVersion: schema.skillVersions.version,
-    })
-    .from(schema.skills)
-    .leftJoin(schema.skillVersions, eq(schema.skills.currentVersionId, schema.skillVersions.id))
-    .where(and(eq(schema.skills.orgId, orgId), eq(schema.skills.slug, slug)));
-  const list = Array.isArray(rows) ? (rows as RunSkillRow[]) : [];
-  return list.find((r) => r.slug === slug) ?? list[0] ?? null;
-}
-
-async function loadSkillSlug(database: Db, orgId: string, skillId: string): Promise<string> {
-  const rows = await database
-    .select({ id: schema.skills.id, slug: schema.skills.slug })
-    .from(schema.skills)
-    .where(and(eq(schema.skills.orgId, orgId), eq(schema.skills.id, skillId)));
-  const list = Array.isArray(rows) ? rows : [];
-  return (list.find((r) => r.id === skillId)?.slug as string | undefined) ?? list[0]?.slug ?? "?";
-}
-
-function decryptServerPassword(orgId: string, row: RunRow, ctx: RunControlContext): string {
-  const enc = row.serverPasswordEnc;
-  if (!enc) throw new RunRuntimeError("run has no server password (corrupt row)");
-  const [wrappedDek, ciphertext] = enc.split("|");
-  if (!wrappedDek || !ciphertext) throw new RunRuntimeError("run server password is malformed");
-  return openSecret({
-    kek: ctx.secretsKey,
-    sealed: { wrappedDek, ciphertext },
-    aad: secretAad(orgId, row.id, "OPENCODE_SERVER_PASSWORD"),
-  });
-}
-
-function buildServeEnv(serverPassword: string, secrets: Map<string, string>): ServeEnv {
-  return {
-    OPENCODE_SERVER_PASSWORD: serverPassword,
-    OPENCODE_SERVER_USERNAME,
-    ...Object.fromEntries(secrets),
-  };
-}
-
-/**
- * Resolve the model provider's API key LIVE (never copied onto the run): the launcher's personal
- * connection wins, else the workspace-shared one (`getDecryptedProviderKey` implements the
- * fallback). Returns the env map to inject, or throws the designed error when no key exists.
- */
-async function resolveProviderEnv(
-  database: Db,
-  orgId: string,
-  creatorId: string,
-  model: string,
-  ctx: RunControlContext,
-): Promise<Map<string, string>> {
-  const resolved = await ctx.resolveModelKeys(model);
-  if (!resolved) throw new RunValidationError(`model ${model} is not available (unknown or not tool-capable)`);
-  const slash = model.indexOf("/");
-  const provider = slash > 0 ? model.slice(0, slash) : "";
-  const connection = provider
-    ? await getDecryptedProviderKey({ database, orgId, userId: creatorId, provider, secretsKey: ctx.secretsKey })
-    : null;
-  if (!connection || !resolved.envKeys.includes(connection.keyName)) {
-    const wanted = resolved.envKeys[0] ?? "the provider API key";
-    throw new RunValidationError(
-      `no API key is available for this model's provider — connect ${provider || "it"} in Settings → Models (${wanted})`,
-    );
+export async function getRun(input: {
+  actor: ActorContext;
+  orgId: string;
+  runId: string;
+  database?: Db;
+}): Promise<SkillRunDetail> {
+  const database = input.database ?? db;
+  await assertMember(database, input.actor, input.orgId);
+  const row = await loadRunRow(database, input.orgId, input.runId);
+  if (!row || !canAccessRun(input.actor.id, row)) {
+    throw new RunValidationError("run not found", "run_not_found");
   }
-  return new Map([[connection.keyName, connection.value]]);
+  const [slug, attachments, artifacts] = await Promise.all([
+    loadSkillSlug(database, input.orgId, row.skillId),
+    loadAttachments(database, input.orgId, row.id),
+    loadArtifacts(database, input.orgId, row.id),
+  ]);
+  return toDetail(database, row, slug, attachments, artifacts);
 }
 
-/** Extract the single skill bundle from its stored archive, refusing unsafe archives. */
-async function buildSkillBundle(
+export async function getRunAttachment(input: {
+  actor: ActorContext;
+  orgId: string;
+  runId: string;
+  attachmentId: string;
+  database?: Db;
+}): Promise<{ fileName: string; contentType: string; storageKey: string }> {
+  const database = input.database ?? db;
+  await assertMember(database, input.actor, input.orgId);
+  const row = await loadRunRow(database, input.orgId, input.runId);
+  if (!row || !canAccessRun(input.actor.id, row)) {
+    throw new RunValidationError("run not found", "run_not_found");
+  }
+  const attachments = await loadAttachments(database, input.orgId, row.id);
+  const attachment = attachments.find((candidate) => candidate.id === input.attachmentId);
+  if (!attachment) throw new RunValidationError("attachment not found", "attachment_not_found");
+  return { fileName: attachment.fileName, contentType: attachment.contentType, storageKey: attachment.storageKey };
+}
+
+function safeAttachmentName(fileName: string): string {
+  const basename = fileName.split(/[\\/]/).at(-1) ?? "";
+  const normalized = basename
+    .normalize("NFKC")
+    .replace(/[\\/\0-\x1f\x7f]+/g, "-")
+    .replace(/^\.+/, "")
+    .trim();
+  return normalized || "attachment";
+}
+
+export function attachmentWorkspacePath(attachment: Pick<CreateRunAttachment, "id" | "fileName">): string {
+  return `${attachment.id}-${safeAttachmentName(attachment.fileName)}`;
+}
+
+export async function buildSkillBundle(
   slug: string,
   version: string,
   storagePath: string,
@@ -387,666 +1369,213 @@ async function buildSkillBundle(
   const extracted = await extractArchiveEntryBuffers(tar);
   if (extracted.violations.length > 0 || extracted.oversize) {
     throw new RunRuntimeError(`${slug}@${version}: archive failed safety checks`, {
-      detail: extracted.violations.slice(0, 3).join("\n"),
+      detail: extracted.violations.slice(0, 3).join("\n") || "size limits exceeded",
     });
   }
-  // Strip the package root folder when present so SKILL.md lands at .claude/skills/<slug>/SKILL.md.
-  const skillMdPath = extracted.files.find((f) => f.path.split("/").pop() === "SKILL.md")?.path ?? "SKILL.md";
+  const skillMdPath = extracted.files.find((file) => file.path.split("/").pop() === "SKILL.md")?.path ?? "SKILL.md";
   const root = skillMdPath.includes("/") ? skillMdPath.slice(0, skillMdPath.lastIndexOf("/") + 1) : "";
   return {
     slug,
     version,
     files: extracted.files
-      .filter((f) => (root ? f.path.startsWith(root) : true))
-      .map((f) => ({ path: root ? f.path.slice(root.length) : f.path, data: f.data, executable: f.executable })),
+      .filter((file) => (root ? file.path.startsWith(root) : true))
+      .map((file) => ({
+        path: root ? file.path.slice(root.length) : file.path,
+        data: file.data,
+        executable: file.executable,
+      })),
   };
 }
 
-/* ------------------------------------ createRun -------------------------------------------- */
-
-export interface CreateRunAttachment {
-  id: string;
-  fileName: string;
-  contentType: string;
-  byteSize: number;
-  storageKey: string;
+export interface RunExecutionPlan {
+  row: RunRow;
+  creator: ActorContext;
+  skills: Array<{ slug: string; version: string; storagePath: string }>;
+  attachments: CreateRunAttachment[];
+  env: Record<string, string>;
+  injectedLiterals: string[];
+  serverPassword: string;
 }
 
 /**
- * Validate + persist a new run (status `starting`). Any member may run any skill they can SEE
- * (personal-skill privacy re-applied via `canAccessSkill`). Fails at submit —
- * not 30 seconds later — when the skill has no published version or no provider key is available
- * for the chosen model. The caller kicks `launchAndRecordRun` after this returns.
+ * Revalidate every pinned vault reference immediately before sandbox injection, then decrypt into
+ * an ephemeral map. The caller must clear `env` and `injectedLiterals` after creating its redactor.
  */
-export async function createRun(input: {
+export async function loadRunExecutionPlan(input: {
   actor: ActorContext;
   orgId: string;
-  slug: string;
-  prompt: string;
-  model: string;
-  attachments: CreateRunAttachment[];
-  ctx: RunControlContext;
+  runId: string;
+  masterKey: Buffer;
   database?: Db;
-}): Promise<SkillRunDetail> {
+}): Promise<RunExecutionPlan> {
   const database = input.database ?? db;
   await assertMember(database, input.actor, input.orgId);
-
-  const skill = await loadSkillBySlug(database, input.orgId, input.slug);
-  if (!skill || skill.archivedAt) throw new RunValidationError("skill not found");
-  if (!canAccessSkill(input.actor.id, { scope: skill.scope, creatorId: skill.creatorId })) {
-    throw new RunValidationError("skill not found");
+  const row = await loadRunRow(database, input.orgId, input.runId);
+  if (!row || row.creatorId !== input.actor.id) {
+    throw new RunValidationError("run not found", "run_not_found");
   }
-  if (!skill.currentVersion) throw new RunValidationError(`skill ${input.slug} has no published version`);
-
-  // HARD gate: the launcher may only run models in their effective activated set (personal ∪ org)
-  // — the picker filter alone would leave the raw API wide open.
-  const activated = await getActivatedModelSets({ database, orgId: input.orgId, userId: input.actor.id });
-  if (!activated.personal.includes(input.model) && !activated.org.includes(input.model)) {
-    throw new RunValidationError(`model ${input.model} is not activated for you — add it in Settings → Models`);
+  if (["frozen", "error", "canceled"].includes(row.status)) {
+    throw new RunBusyError("this run is terminal", "run_terminal");
   }
+  const [skills, attachments, secretInputs, variables] = await Promise.all([
+    database
+      .select({
+        slug: schema.skills.slug,
+        version: schema.skillVersions.version,
+        storagePath: schema.skillVersions.storagePath,
+        mountOrder: schema.skillRunSkills.mountOrder,
+      })
+      .from(schema.skillRunSkills)
+      .innerJoin(
+        schema.skills,
+        and(eq(schema.skills.orgId, schema.skillRunSkills.orgId), eq(schema.skills.id, schema.skillRunSkills.skillId)),
+      )
+      .innerJoin(
+        schema.skillVersions,
+        and(
+          eq(schema.skillVersions.orgId, schema.skillRunSkills.orgId),
+          eq(schema.skillVersions.id, schema.skillRunSkills.skillVersionId),
+        ),
+      )
+      .where(and(eq(schema.skillRunSkills.orgId, input.orgId), eq(schema.skillRunSkills.runId, input.runId)))
+      .orderBy(asc(schema.skillRunSkills.mountOrder)),
+    loadAttachments(database, input.orgId, input.runId),
+    database
+      .select()
+      .from(schema.skillRunSecretInputs)
+      .where(
+        and(
+          eq(schema.skillRunSecretInputs.orgId, input.orgId),
+          eq(schema.skillRunSecretInputs.runId, input.runId),
+        ),
+      ),
+    database
+      .select()
+      .from(schema.skillRunVariableInputs)
+      .where(
+        and(
+          eq(schema.skillRunVariableInputs.orgId, input.orgId),
+          eq(schema.skillRunVariableInputs.runId, input.runId),
+        ),
+      ),
+  ]);
 
-  // Both validations up front: model exists in the catalog AND a decryptable key reaches it.
-  await resolveProviderEnv(database, input.orgId, input.actor.id, input.model, input.ctx);
-
-  const runId = crypto.randomUUID();
-  const serverPassword = randomBytes(24).toString("base64url");
-  const sealed = sealSecret({
-    kek: input.ctx.secretsKey,
-    plaintext: serverPassword,
-    aad: secretAad(input.orgId, runId, "OPENCODE_SERVER_PASSWORD"),
-  });
-
-  const inserted = await database
-    .insert(schema.skillRuns)
-    .values({
-      id: runId,
-      orgId: input.orgId,
-      skillId: skill.id,
-      creatorId: input.actor.id,
-      skillVersion: skill.currentVersion,
-      model: input.model,
-      prompt: input.prompt,
-      status: "starting",
-      statusDetail: "Queued",
-      sandboxName: sandboxNameForRun(input.orgId, runId),
-      goldenSnapshotId: input.ctx.goldenSnapshotId,
-      opencodeVersion: input.ctx.opencodeVersion,
-      serverPasswordEnc: `${sealed.wrappedDek}|${sealed.ciphertext}`,
-      timeoutMs: input.ctx.timeoutMs,
-    })
-    .returning();
-  const row = (Array.isArray(inserted) ? (inserted as RunRow[]) : [])[0];
-  if (!row) throw new Error("run insert returned no row");
-
-  if (input.attachments.length > 0) {
-    await database.insert(schema.skillRunAttachments).values(
-      input.attachments.map((a) => ({
-        id: a.id,
+  const env: Record<string, string> = {};
+  const envSources = new Map<
+    string,
+    { kind: "variable"; value: string } | { kind: "secret"; secretId: string; version: number }
+  >();
+  for (const variable of variables) {
+    if (variable.envKey.startsWith(RUN_RESERVED_ENV_PREFIX)) {
+      throw new RunRuntimeError("run variable snapshot contains a reserved environment key");
+    }
+    const existing = envSources.get(variable.envKey);
+    if (existing && (existing.kind !== "variable" || existing.value !== variable.value)) {
+      throw new RunRuntimeError(`run input snapshot has a collision for ${variable.envKey}`);
+    }
+    envSources.set(variable.envKey, { kind: "variable", value: variable.value });
+    env[variable.envKey] = variable.value;
+  }
+  const injectedLiterals: string[] = [];
+  for (const secret of secretInputs) {
+    if (secret.provenance === "runtime") continue;
+    if (!secret.secretId || !secret.secretVersion) {
+      throw new RunRuntimeError("run secret snapshot is malformed");
+    }
+    if (secret.envKey.startsWith(RUN_RESERVED_ENV_PREFIX)) {
+      throw new RunRuntimeError("run secret snapshot contains a reserved environment key");
+    }
+    const existing = envSources.get(secret.envKey);
+    if (
+      existing &&
+      (existing.kind !== "secret" ||
+        existing.secretId !== secret.secretId ||
+        existing.version !== secret.secretVersion)
+    ) {
+      throw new RunRuntimeError(`run input snapshot has a collision for ${secret.envKey}`);
+    }
+    if (existing) continue;
+    try {
+      const opened = await decryptPinnedSecret({
+        actor: input.actor,
         orgId: input.orgId,
-        runId,
-        fileName: a.fileName,
-        contentType: a.contentType,
-        byteSize: a.byteSize,
-        storageKey: a.storageKey,
-      })),
-    );
+        secretId: secret.secretId,
+        version: secret.secretVersion,
+        masterKey: input.masterKey,
+        database,
+      });
+      env[secret.envKey] = opened.value;
+      envSources.set(secret.envKey, {
+        kind: "secret",
+        secretId: secret.secretId,
+        version: secret.secretVersion,
+      });
+      injectedLiterals.push(opened.value);
+    } catch {
+      throw new RunValidationError("secret unavailable", "secret_unavailable");
+    }
   }
-
-  await database.insert(schema.auditLog).values({
+  if (!row.serverPasswordEnc) throw new RunRuntimeError("run has no server password");
+  const serverPassword = decryptRunServerPassword({
     orgId: input.orgId,
-    actorId: input.actor.id,
-    action: "skill.run",
-    targetType: "skill",
-    targetId: skill.id,
-    metadata: { slug: input.slug, run_id: runId, model: input.model, version: skill.currentVersion },
+    runId: row.id,
+    encrypted: row.serverPasswordEnc,
+    masterKey: input.masterKey,
   });
-
-  const attachments = await loadAttachments(database, input.orgId, runId);
-  return toDetail(row, input.slug, attachments, []);
+  env.OPENCODE_SERVER_USERNAME = OPENCODE_SERVER_USERNAME;
+  env.OPENCODE_SERVER_PASSWORD = serverPassword;
+  injectedLiterals.push(serverPassword);
+  return {
+    row,
+    creator: input.actor,
+    skills,
+    attachments: attachments.map((attachment) => ({
+      id: attachment.id,
+      fileName: attachment.fileName,
+      contentType: attachment.contentType,
+      byteSize: attachment.byteSize,
+      storageKey: attachment.storageKey,
+    })),
+    env,
+    injectedLiterals,
+    serverPassword,
+  };
 }
 
-/* ------------------------------------ launch + record --------------------------------------- */
+/** Fetch archive and attachment bytes outside any DB transaction. */
+export async function materializeRunWorkspace(input: {
+  plan: RunExecutionPlan;
+  fetchArchive: SkillArchiveFetcher;
+  fetchObject: (storageKey: string) => Promise<Buffer>;
+}): Promise<RunWorkspaceFiles> {
+  const skills: SkillBundle[] = [];
+  for (const skill of input.plan.skills) {
+    skills.push(await buildSkillBundle(skill.slug, skill.version, skill.storagePath, input.fetchArchive));
+  }
+  const attachments: RunWorkspaceFiles["attachments"] = [];
+  for (const attachment of input.plan.attachments) {
+    attachments.push({
+      path: attachmentWorkspacePath(attachment),
+      data: await input.fetchObject(attachment.storageKey),
+    });
+  }
+  return { opencodeJson: buildOpencodeJson({ model: input.plan.row.model }), skills, attachments };
+}
 
-/**
- * Best-effort stop + destroy of the run's sandbox; returns true when the provider confirmed the
- * teardown. A frozen/error run is terminal (no wake) and its transcript/artifacts are persisted
- * before this is called, so a destroyed sandbox loses nothing. On `false` the row keeps
- * `sandbox_cleaned_at` NULL and the sweeper retries later.
- */
-export async function teardownSandbox(ctx: RunControlContext, ref: SandboxRef): Promise<boolean> {
+/** Best-effort, idempotent teardown shared by the worker and terminal sweeper. */
+export async function teardownSandbox(
+  runtime: RunSandboxRuntime,
+  ref: Parameters<RunSandboxRuntime["stop"]>[0],
+): Promise<boolean> {
   try {
-    await ctx.runtime.stop(ref);
+    await runtime.stop(ref);
   } catch {
-    /* idempotent */
+    // A stop failure does not excuse the destroy attempt.
   }
   try {
-    await ctx.runtime.destroy(ref);
+    await runtime.destroy(ref);
     return true;
   } catch {
     return false;
-  }
-}
-
-/**
- * The background job: launch the sandbox, start the session, then record until freeze. Runs OUTSIDE
- * any request transaction: every DB touch opens its own short tenant transaction; runtime calls
- * happen in between. Fire-and-forget callers must catch — this function itself persists failures
- * onto the row instead of throwing (a crash mid-way is recovered lazily by `markRunInterrupted`).
- */
-export async function launchAndRecordRun(input: {
-  orgId: string;
-  actorId: string;
-  runId: string;
-  ctx: RunControlContext;
-}): Promise<void> {
-  const { orgId, actorId, runId, ctx } = input;
-  liveRunJobs.add(runId);
-  try {
-    await launchAndRecordRunInner(input);
-  } finally {
-    liveRunJobs.delete(runId);
-  }
-}
-
-async function launchAndRecordRunInner(input: {
-  orgId: string;
-  actorId: string;
-  runId: string;
-  ctx: RunControlContext;
-}): Promise<void> {
-  const { orgId, actorId, runId, ctx } = input;
-
-  const setRun = async (patch: Partial<typeof schema.skillRuns.$inferInsert>) => {
-    await ctx.runTenant({ orgId, userId: actorId }, async (database) => {
-      await database
-        .update(schema.skillRuns)
-        .set({ ...patch, updatedAt: new Date() })
-        .where(eq(schema.skillRuns.id, runId));
-    });
-  };
-
-  const failRun = async (error: unknown, extra: Partial<typeof schema.skillRuns.$inferInsert> = {}) => {
-    const message = error instanceof Error ? error.message : String(error);
-    const detail = error instanceof RunRuntimeError && error.detail ? `\n${error.detail}` : "";
-    await setRun({ status: "error", statusDetail: `${message}${detail}`, ...extra });
-  };
-
-  // Prelude — load everything and decrypt OUTSIDE the step flow. Any failure here (rotated KEK,
-  // missing version, S3 outage) must never leave the row stuck in `starting`.
-  let loaded: {
-    row: RunRow;
-    skillSlug: string;
-    storagePath: string;
-    attachments: Array<{ path: string; data: Buffer }>;
-    attachmentNames: string[];
-    serverPassword: string;
-    providerEnv: Map<string, string>;
-    artifactsEnabled: boolean;
-  };
-  try {
-    loaded = await ctx.runTenant({ orgId, userId: actorId }, async (database) => {
-      const row = await loadRunRow(database, orgId, runId);
-      if (!row) throw new RunValidationError("run not found");
-      const skillSlug = await loadSkillSlug(database, orgId, row.skillId);
-      const versions = await database
-        .select({
-          skillId: schema.skillVersions.skillId,
-          version: schema.skillVersions.version,
-          storagePath: schema.skillVersions.storagePath,
-        })
-        .from(schema.skillVersions)
-        .where(and(eq(schema.skillVersions.orgId, orgId), eq(schema.skillVersions.skillId, row.skillId)));
-      const version = (Array.isArray(versions) ? versions : []).find(
-        (v) => v.skillId === row.skillId && v.version === row.skillVersion,
-      );
-      if (!version) throw new RunValidationError(`stored package for version ${row.skillVersion ?? "?"} not found`);
-      const attachmentRows = await loadAttachments(database, orgId, runId);
-      const serverPassword = decryptServerPassword(orgId, row, ctx);
-      const providerEnv = await resolveProviderEnv(database, orgId, row.creatorId, row.model, ctx);
-      const vanishKey = await getDecryptedProviderKey({
-        database,
-        orgId,
-        userId: row.creatorId,
-        provider: "vanish",
-        secretsKey: ctx.secretsKey,
-      });
-      return {
-        row,
-        skillSlug,
-        storagePath: version.storagePath as string,
-        // Attachment bytes are fetched below, outside the transaction.
-        attachments: attachmentRows.map((a) => ({ path: a.fileName, data: Buffer.alloc(0), storageKey: a.storageKey })),
-        attachmentNames: attachmentRows.map((a) => a.fileName),
-        serverPassword,
-        providerEnv,
-        artifactsEnabled: vanishKey !== null,
-      };
-    });
-  } catch (error) {
-    // No sandbox exists yet (fork happens below), so there is nothing to destroy.
-    await failRun(error, { sandboxCleanedAt: new Date() });
-    return;
-  }
-  const { row, skillSlug } = loaded;
-
-  const ref: SandboxRef = {
-    sandboxName: row.sandboxName ?? sandboxNameForRun(orgId, runId),
-    sandboxId: row.sandboxId,
-    region: ctx.region,
-    timeoutMs: row.timeoutMs,
-  };
-
-  let domain: string;
-  let sessionId: string;
-  try {
-    // Fetch attachment bytes from object storage (never inside a transaction).
-    const attachments: Array<{ path: string; data: Buffer }> = [];
-    for (const a of loaded.attachments as Array<{ path: string; data: Buffer; storageKey: string }>) {
-      attachments.push({ path: a.path, data: await ctx.fetchObject(a.storageKey) });
-    }
-
-    // Step 1 — fork.
-    await setRun({ statusDetail: "Preparing sandbox" });
-    if (!ctx.goldenSnapshotId) {
-      throw new RunRuntimeError("COMPANION_GOLDEN_SNAPSHOT_ID is not configured");
-    }
-    const forked = await ctx.runtime.forkFromGolden({ ref, goldenSnapshotId: ctx.goldenSnapshotId });
-    ref.sandboxId = forked.sandboxId;
-    domain = forked.domain;
-    await setRun({ sandboxId: forked.sandboxId, sandboxDomain: forked.domain });
-
-    // Step 2 — push the skill + attachments.
-    await setRun({ statusDetail: "Installing skill" });
-    const bundle = await buildSkillBundle(skillSlug, row.skillVersion ?? "?", loaded.storagePath, ctx.fetchArchive);
-    await ctx.runtime.pushWorkspace({
-      ref,
-      files: {
-        opencodeJson: buildOpencodeJson({ model: row.model }),
-        skill: bundle,
-        attachments,
-      },
-    });
-
-    // Step 3 — start the server with the injected env (never persisted, never logged).
-    await setRun({ statusDetail: "Starting agent" });
-    await ctx.runtime.startServer({ ref, env: buildServeEnv(loaded.serverPassword, loaded.providerEnv) });
-    await ctx.runtime.healthCheck({ ref, domain, password: loaded.serverPassword });
-
-    // Step 4 — create the session and fire the composed prompt.
-    const target: RunChatTarget = { domain, password: loaded.serverPassword };
-    const session = await ctx.chat.createSession(target, promptExcerpt(row.prompt));
-    sessionId = session.id;
-    await ctx.chat.sendPrompt(
-      target,
-      sessionId,
-      composeRunPrompt({
-        prompt: row.prompt,
-        skillSlug,
-        attachmentNames: loaded.attachmentNames,
-        artifactsEnabled: loaded.artifactsEnabled,
-      }),
-    );
-    await setRun({
-      opencodeSessionId: sessionId,
-      status: "running",
-      statusDetail: null,
-      lastActiveAt: new Date(),
-    });
-  } catch (error) {
-    await failRun(error);
-    // Best-effort teardown so a broken sandbox never lingers half-alive.
-    if (await teardownSandbox(ctx, ref)) await setRun({ sandboxCleanedAt: new Date() });
-    return;
-  }
-
-  // Recorder — same job, independent consumer of the sandbox event stream. Everything is wrapped
-  // so an unexpected crash FREEZES the run instead of leaking a live row.
-  await recordRun({ orgId, actorId, runId, ctx, ref, target: { domain, password: loaded.serverPassword }, sessionId });
-}
-
-async function recordRun(input: {
-  orgId: string;
-  actorId: string;
-  runId: string;
-  ctx: RunControlContext;
-  ref: SandboxRef;
-  target: RunChatTarget;
-  sessionId: string;
-}): Promise<void> {
-  const { orgId, actorId, runId, ctx, ref, target, sessionId } = input;
-  const abort = new AbortController();
-  let lastActivity = Date.now();
-  activityRegistry.set(runId, () => {
-    lastActivity = Date.now();
-  });
-  const poll = setInterval(() => {
-    if (Date.now() - lastActivity > ctx.timeoutMs) abort.abort();
-  }, ctx.activityPollMs ?? 15_000);
-
-  const setRun = async (patch: Partial<typeof schema.skillRuns.$inferInsert>) => {
-    await ctx.runTenant({ orgId, userId: actorId }, async (database) => {
-      await database
-        .update(schema.skillRuns)
-        .set({ ...patch, updatedAt: new Date() })
-        .where(eq(schema.skillRuns.id, runId));
-    });
-  };
-
-  const snapshot = async () => {
-    try {
-      const items = capTranscript(await ctx.chat.loadItems(target, sessionId));
-      await setRun({ transcript: items, transcriptUpdatedAt: new Date(), lastActiveAt: new Date() });
-    } catch {
-      // Snapshot is best-effort: the sandbox may already be gone.
-    }
-    try {
-      await collectAndPublishArtifacts({ orgId, actorId, runId, ctx, ref });
-    } catch (error) {
-      console.error(`[runs] artifact collection for ${runId} failed:`, error instanceof Error ? error.message : error);
-    }
-  };
-
-  try {
-    for await (const event of ctx.chat.streamEvents(target, sessionId, abort.signal)) {
-      lastActivity = Date.now();
-      if (event.type === "session.idle") await snapshot();
-    }
-  } catch {
-    // Stream died (sandbox timeout / network) — freeze below.
-  } finally {
-    clearInterval(poll);
-    activityRegistry.delete(runId);
-    // Freeze: final snapshot + final artifact collection, then destroy the sandbox (no wake —
-    // the frozen status must persist first so a crash mid-teardown degrades to a sweeper retry).
-    await snapshot();
-    await setRun({ status: "frozen", statusDetail: null, frozenAt: new Date() });
-    if (await teardownSandbox(ctx, ref)) await setRun({ sandboxCleanedAt: new Date() });
-  }
-}
-
-/* ------------------------------------ artifacts --------------------------------------------- */
-
-const ARTIFACTS_DIR = "/vercel/sandbox/artifacts";
-const ARTIFACT_MAX_FILES = 20;
-const ARTIFACT_MAX_BYTES = 10 * 1024 * 1024;
-
-const ARTIFACT_CONTENT_TYPES: Record<string, string> = {
-  html: "text/html",
-  htm: "text/html",
-  png: "image/png",
-  jpg: "image/jpeg",
-  jpeg: "image/jpeg",
-  gif: "image/gif",
-  webp: "image/webp",
-  svg: "image/svg+xml",
-  pdf: "application/pdf",
-  csv: "text/csv",
-  json: "application/json",
-  md: "text/markdown",
-  txt: "text/plain",
-};
-
-function artifactContentType(filename: string): string {
-  const ext = filename.split(".").pop()?.toLowerCase() ?? "";
-  return ARTIFACT_CONTENT_TYPES[ext] ?? "application/octet-stream";
-}
-
-/**
- * Collect `artifacts/` from the sandbox and publish new files to Vanish with the LAUNCHER's key.
- * Fully skipped when no key is connected. The decrypted key lives only in this scope — it is never
- * injected into the sandbox env and never persisted. Publish failures insert nothing; they surface
- * on the live SSE stream as normalized `error` events (and in the server log).
- */
-async function collectAndPublishArtifacts(input: {
-  orgId: string;
-  actorId: string;
-  runId: string;
-  ctx: RunControlContext;
-  ref: SandboxRef;
-}): Promise<void> {
-  const { orgId, actorId, runId, ctx, ref } = input;
-
-  const prelude = await ctx.runTenant({ orgId, userId: actorId }, async (database) => {
-    const row = await loadRunRow(database, orgId, runId);
-    if (!row) return null;
-    const key = await getDecryptedProviderKey({
-      database,
-      orgId,
-      userId: row.creatorId,
-      provider: "vanish",
-      secretsKey: ctx.secretsKey,
-    });
-    if (!key) return null;
-    const existing = await loadArtifacts(database, orgId, runId);
-    return { apiKey: key.value, existingPaths: new Set(existing.map((a) => a.path)) };
-  });
-  if (!prelude) return;
-
-  const files = await ctx.runtime.collectFiles({
-    ref,
-    dir: ARTIFACTS_DIR,
-    maxFiles: ARTIFACT_MAX_FILES,
-    maxFileBytes: ARTIFACT_MAX_BYTES,
-  });
-
-  for (const file of files) {
-    if (prelude.existingPaths.has(file.path)) continue;
-    if (vanishBlockedExtension(file.path)) continue;
-    const fileName = file.path.split("/").pop() || file.path;
-    try {
-      const published = await ctx.publishArtifact({
-        apiKey: prelude.apiKey,
-        filename: fileName,
-        bytes: file.data,
-        idempotencyKey: `${runId}:${file.path}:${file.byteSize}`,
-      });
-      await ctx.runTenant({ orgId, userId: actorId }, async (database) => {
-        await database.insert(schema.skillRunArtifacts).values({
-          orgId,
-          runId,
-          path: file.path,
-          fileName,
-          contentType: artifactContentType(fileName),
-          byteSize: file.byteSize,
-          vanishId: published.id,
-          url: published.url,
-          expiresAt: published.expiresAt ? new Date(published.expiresAt) : null,
-        });
-      });
-      prelude.existingPaths.add(file.path);
-    } catch (error) {
-      const message =
-        error instanceof VanishError
-          ? `Could not publish ${fileName}: ${error.message}${error.hint ? ` — ${error.hint}` : ""}`
-          : `Could not publish ${fileName}`;
-      console.error(`[runs] ${message}`);
-      emitRunSideEvent(runId, { type: "error", message });
-    }
-  }
-}
-
-/* ------------------------------------ reads + prompt --------------------------------------- */
-
-/**
- * Crash recovery, applied lazily at read time: a `starting`/`running` row with NO live in-process
- * job means the API restarted (or the job died). Freeze it (or error it, when it never left
- * `starting`) with the designed message so the UI renders the last snapshot.
- */
-export async function markRunInterrupted(database: Db, row: RunRow): Promise<RunRow> {
-  const interrupted: Partial<typeof schema.skillRuns.$inferInsert> =
-    row.status === "starting"
-      ? { status: "error", statusDetail: "Interrupted — the server restarted during this run." }
-      : { status: "frozen", statusDetail: "Interrupted — the server restarted during this run.", frozenAt: new Date() };
-  await database
-    .update(schema.skillRuns)
-    .set({ ...interrupted, updatedAt: new Date() })
-    .where(eq(schema.skillRuns.id, row.id));
-  return { ...row, ...(interrupted as Partial<RunRow>) } as RunRow;
-}
-
-/** The caller's runs of one skill, newest first. NEVER returns another member's runs. */
-export async function listRuns(input: {
-  actor: ActorContext;
-  orgId: string;
-  slug: string;
-  jobAlive?: (runId: string) => boolean;
-  database?: Db;
-}): Promise<SkillRunRow[]> {
-  const database = input.database ?? db;
-  await assertMember(database, input.actor, input.orgId);
-  const skill = await loadSkillBySlug(database, input.orgId, input.slug);
-  if (skill && !canAccessSkill(input.actor.id, { scope: skill.scope, creatorId: skill.creatorId })) {
-    throw new RunValidationError("skill not found");
-  }
-  if (!skill) throw new RunValidationError("skill not found");
-
-  const alive = input.jobAlive ?? runJobAlive;
-  const rows = await database
-    .select()
-    .from(schema.skillRuns)
-    .where(
-      and(
-        eq(schema.skillRuns.orgId, input.orgId),
-        eq(schema.skillRuns.skillId, skill.id),
-        eq(schema.skillRuns.creatorId, input.actor.id),
-      ),
-    )
-    .orderBy(desc(schema.skillRuns.createdAt));
-  let list = (Array.isArray(rows) ? (rows as RunRow[]) : []).filter((r) => r.creatorId === input.actor.id);
-  list = await Promise.all(
-    list.map(async (row) =>
-      (row.status === "starting" || row.status === "running") && !alive(row.id)
-        ? markRunInterrupted(database, row)
-        : row,
-    ),
-  );
-
-  const artifactRows = list.length
-    ? await database
-        .select({ runId: schema.skillRunArtifacts.runId, id: schema.skillRunArtifacts.id })
-        .from(schema.skillRunArtifacts)
-        .where(
-          and(
-            eq(schema.skillRunArtifacts.orgId, input.orgId),
-            inArray(
-              schema.skillRunArtifacts.runId,
-              list.map((r) => r.id),
-            ),
-          ),
-        )
-    : [];
-  const counts = new Map<string, number>();
-  for (const a of Array.isArray(artifactRows) ? artifactRows : []) {
-    counts.set(a.runId as string, (counts.get(a.runId as string) ?? 0) + 1);
-  }
-  return list
-    .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
-    .map((row) => toRunRow(row, input.slug, counts.get(row.id) ?? 0));
-}
-
-/** Full run detail (transcript + attachments + artifacts). Creator-only; anyone else sees 404. */
-export async function getRun(input: {
-  actor: ActorContext;
-  orgId: string;
-  runId: string;
-  jobAlive?: (runId: string) => boolean;
-  database?: Db;
-}): Promise<SkillRunDetail> {
-  const database = input.database ?? db;
-  await assertMember(database, input.actor, input.orgId);
-  let row = await loadRunRow(database, input.orgId, input.runId);
-  if (!row || !canAccessRun(input.actor.id, { creatorId: row.creatorId })) {
-    throw new RunValidationError("run not found");
-  }
-  const alive = input.jobAlive ?? runJobAlive;
-  if ((row.status === "starting" || row.status === "running") && !alive(row.id)) {
-    row = await markRunInterrupted(database, row);
-  }
-  const skillSlug = await loadSkillSlug(database, input.orgId, row.skillId);
-  const attachments = await loadAttachments(database, input.orgId, input.runId);
-  const artifacts = await loadArtifacts(database, input.orgId, input.runId);
-  return toDetail(row, skillSlug, attachments, artifacts);
-}
-
-/** One attachment row + its storage key, creator-only (the download route streams it from S3). */
-export async function getRunAttachment(input: {
-  actor: ActorContext;
-  orgId: string;
-  runId: string;
-  attachmentId: string;
-  database?: Db;
-}): Promise<{ fileName: string; contentType: string; storageKey: string }> {
-  const database = input.database ?? db;
-  await assertMember(database, input.actor, input.orgId);
-  const row = await loadRunRow(database, input.orgId, input.runId);
-  if (!row || !canAccessRun(input.actor.id, { creatorId: row.creatorId })) {
-    throw new RunValidationError("run not found");
-  }
-  const attachments = await loadAttachments(database, input.orgId, input.runId);
-  const attachment = attachments.find((a) => a.id === input.attachmentId);
-  if (!attachment) throw new RunValidationError("attachment not found");
-  return { fileName: attachment.fileName, contentType: attachment.contentType, storageKey: attachment.storageKey };
-}
-
-/**
- * The live chat target for a run (SSE proxy + prompt route). Creator-only. Throws `RunBusyError`
- * when the run is frozen (the client renders the persisted transcript instead) and
- * `RunValidationError` while it is still starting or errored.
- */
-export async function getRunChatTarget(input: {
-  actor: ActorContext;
-  orgId: string;
-  runId: string;
-  ctx: RunControlContext;
-  database?: Db;
-}): Promise<{ domain: string; password: string; sessionId: string; status: SkillRunStatus }> {
-  const database = input.database ?? db;
-  await assertMember(database, input.actor, input.orgId);
-  const row = await loadRunRow(database, input.orgId, input.runId);
-  if (!row || !canAccessRun(input.actor.id, { creatorId: row.creatorId })) {
-    throw new RunValidationError("run not found");
-  }
-  if (row.status === "frozen") throw new RunBusyError("This session has ended — start a new run.");
-  if (row.status !== "running" || !row.sandboxDomain || !row.opencodeSessionId) {
-    throw new RunValidationError("this run is not live yet");
-  }
-  return {
-    domain: row.sandboxDomain,
-    password: decryptServerPassword(input.orgId, row, input.ctx),
-    sessionId: row.opencodeSessionId,
-    status: row.status as SkillRunStatus,
-  };
-}
-
-/**
- * A follow-up prompt on a live run: 409 when frozen, refreshes the recorder's inactivity clock and
- * best-effort extends the sandbox timeout so an active conversation doesn't die mid-stream.
- */
-export async function promptRun(input: {
-  actor: ActorContext;
-  orgId: string;
-  runId: string;
-  text: string;
-  ctx: RunControlContext;
-  database?: Db;
-}): Promise<void> {
-  const database = input.database ?? db;
-  const target = await getRunChatTarget(input);
-  await input.ctx.chat.sendPrompt({ domain: target.domain, password: target.password }, target.sessionId, input.text);
-  await database
-    .update(schema.skillRuns)
-    .set({ lastActiveAt: new Date(), updatedAt: new Date() })
-    .where(eq(schema.skillRuns.id, input.runId));
-  noteRunActivity(input.runId);
-  const row = await loadRunRow(database, input.orgId, input.runId);
-  if (row?.sandboxName && input.ctx.runtime.extendTimeout) {
-    try {
-      await input.ctx.runtime.extendTimeout(
-        { sandboxName: row.sandboxName, sandboxId: row.sandboxId, region: input.ctx.region, timeoutMs: row.timeoutMs },
-        row.timeoutMs,
-      );
-    } catch {
-      /* best-effort */
-    }
   }
 }

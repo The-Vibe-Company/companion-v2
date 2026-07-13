@@ -12,8 +12,11 @@
   },
   "dependencies": {
     "@companion/billing": "workspace:*",
+    "@companion/contracts": "workspace:*",
     "@companion/core": "workspace:*",
     "@companion/db": "workspace:*",
+    "@companion/sandbox": "workspace:*",
+    "@companion/storage": "workspace:*",
     "drizzle-orm": "^0.38.4",
     "postgres": "^3.4.5",
     "stripe": "^18.5.0"

@@ -106,8 +106,10 @@ export async function* streamChatEvents(input: {
   client: OpencodeClient;
   sessionId: string;
   signal?: AbortSignal;
+  /** Handshake used by the worker to prove the subscription exists before dispatching a prompt. */
+  onConnected?: () => void;
 }): AsyncGenerator<RunChatEvent> {
-  const { client, sessionId, signal } = input;
+  const { client, sessionId, signal, onConnected } = input;
   const assistantMessages = new Set<string>();
   const startedTools = new Set<string>();
   const doneTools = new Set<string>();
@@ -125,6 +127,7 @@ export async function* streamChatEvents(input: {
   // in its read loop and the fetch carries the signal, so aborting a stalled stream (no bytes
   // flowing) rejects the in-flight read and ends this loop — it can never hang the caller.
   const subscription = await client.event.subscribe(signal ? { signal } : {});
+  onConnected?.();
   for await (const event of subscription.stream) {
     if (signal?.aborted) return;
     switch (event.type) {
@@ -256,8 +259,8 @@ export function createOpencodeRunChatRuntime(): RunChatRuntime {
     loadItems(target, sessionId) {
       return loadSessionItems(clientFor(target), sessionId);
     },
-    streamEvents(target, sessionId, signal) {
-      return streamChatEvents({ client: clientFor(target), sessionId, signal });
+    streamEvents(target, sessionId, signal, onConnected) {
+      return streamChatEvents({ client: clientFor(target), sessionId, signal, onConnected });
     },
   };
 }

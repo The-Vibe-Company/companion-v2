@@ -178,8 +178,8 @@ async function seedDemoContent(actor: ActorContext): Promise<void> {
     (await listSkills({ actor, orgId, includeArchived: true })).map((skill) => skill.slug),
   );
   // Ordered so every declared dependency is published before its dependents (publish blocks
-  // missing/cycle). The showcase edges below (missing/cycle/archived) are inserted directly
-  // afterwards, since those states cannot pass the publish-time check.
+  // missing/cycle). Keep the primary incident-summary demo runnable: invalid dependency states
+  // belong in tests, not on the skill used by the browser smoke path.
   const specs: SeedSkillSpec[] = [
     {
       slug: "markdown-report",
@@ -303,11 +303,7 @@ async function seedDemoContent(actor: ActorContext): Promise<void> {
   await seedDependencyShowcase(actor, orgId);
 }
 
-/**
- * Insert the showcase dependency states (missing / cycle / archived) directly, since
- * these deliberately cannot pass the publish-time check. Idempotent: edges use onConflictDoNothing
- * and archive flags are set unconditionally.
- */
+/** Insert the cycle showcase directly, since it deliberately cannot pass publish-time checks. */
 async function seedDependencyShowcase(actor: ActorContext, orgId: string): Promise<void> {
   const rows = await db
     .select({ id: schema.skills.id, slug: schema.skills.slug, currentVersionId: schema.skills.currentVersionId })
@@ -332,17 +328,28 @@ async function seedDependencyShowcase(actor: ActorContext, orgId: string): Promi
     // Cycle: vault-index ↔ granite-recall.
     edge("vault-index", "granite-recall"),
     edge("granite-recall", "vault-index"),
-    // Missing: a declared dependency that was never published to the workspace.
-    edge("incident-summary", "html-sanitize"),
-    // Archived dependency, still referenced by a live version (keeps it downloadable).
-    edge("incident-summary", "screenshot-grab"),
   ].filter((e): e is NonNullable<typeof e> => e != null);
 
   if (edges.length) {
     await db.insert(schema.skillVersionDependencies).values(edges).onConflictDoNothing();
   }
 
-  // Archive screenshot-grab (referenced by incident-summary → downloadable) and html-export (unreferenced).
+  // Clean up legacy invalid showcase edges so an existing local workspace becomes runnable
+  // after the seed command is re-run. These edges were never declared by incident-summary.
+  const incidentSummary = bySlug.get("incident-summary");
+  if (incidentSummary?.currentVersionId) {
+    await db
+      .delete(schema.skillVersionDependencies)
+      .where(
+        and(
+          eq(schema.skillVersionDependencies.orgId, orgId),
+          eq(schema.skillVersionDependencies.skillVersionId, incidentSummary.currentVersionId),
+          inArray(schema.skillVersionDependencies.dependsOnSlug, ["html-sanitize", "screenshot-grab"]),
+        ),
+      );
+  }
+
+  // Keep two unrelated archived rows for archive-list and restore flows.
   const toArchive = ["screenshot-grab", "html-export"].map((slug) => bySlug.get(slug)?.id).filter((id): id is string => !!id);
   if (toArchive.length) {
     await db
@@ -350,7 +357,7 @@ async function seedDependencyShowcase(actor: ActorContext, orgId: string): Promi
       .set({ archivedAt: new Date(), archivedBy: actor.id, archiveReason: "Superseded — seeded archive demo" })
       .where(and(eq(schema.skills.orgId, orgId), inArray(schema.skills.id, toArchive)));
   }
-  console.log("Seeded dependency showcase (cycle, missing, archived)");
+  console.log("Seeded dependency showcase (cycle and archived rows)");
 }
 
 async function createAuthUser(input: { email: string; password: string; name: string }): Promise<void> {

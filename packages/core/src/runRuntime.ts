@@ -1,13 +1,13 @@
 /**
- * The skill-run runtime port — the seam between the control plane (skill_runs rows, the in-process
- * launch job + recorder) and the sandbox provider actually running OpenCode. Types only:
- * `@vercel/sandbox` / `@opencode-ai/sdk` live in `@companion/sandbox`, which apps/api composes and
+ * The skill-run runtime port — the seam between the durable PostgreSQL worker and the sandbox
+ * provider actually running OpenCode. Types only:
+ * `@vercel/sandbox` / `@opencode-ai/sdk` live in `@companion/sandbox`, which apps/worker composes and
  * injects into core services the same way `database` is injected. Core stays framework- and
  * SDK-free so the fakeDb test suites can drive the launch pipeline with scripted stubs.
  *
  * Contract notes the implementations must honor:
- * - Every run gets a FRESH sandbox forked from the golden snapshot; there is no wake — once the
- *   sandbox stops, the run is frozen and retry means a new run.
+ * - Every run gets a deterministic sandbox name. A retry first looks that sandbox up through the
+ *   provider's idempotent get-or-create operation, so a worker crash cannot double-provision it.
  * - `destroy`/`stop` swallow "not found" (idempotent teardown).
  * - Env values (server password, provider keys) are injected at serve launch and never written to
  *   the sandbox filesystem.
@@ -47,8 +47,8 @@ export type ServeEnv = Record<string, string>;
 export interface RunWorkspaceFiles {
   /** `opencode.json` — model + permissions config. */
   opencodeJson: string;
-  /** Exactly one skill, auto-discovered from `.claude/skills/<slug>/`. */
-  skill: SkillBundle;
+  /** Root skill first, followed by its complete pinned dependency closure. */
+  skills: SkillBundle[];
   /** User-attached files, written under `attachments/`. */
   attachments: Array<{ path: string; data: Buffer }>;
 }
@@ -88,7 +88,33 @@ export interface RunSandboxRuntime {
   }): Promise<Array<{ path: string; data: Buffer; byteSize: number }>>;
 }
 
-/** Fetches a stored skill archive (tar.gz bytes) by its storage path — wired to S3 in apps/api. */
+/** Basic-auth target for the OpenCode instance running inside a sandbox. */
+export interface RunChatTarget {
+  domain: string;
+  password: string;
+}
+
+/**
+ * OpenCode port consumed by the durable worker. Implementations own all SDK-specific types and
+ * normalize them into the stable contracts package. `messageId` is persisted before dispatch and
+ * must be forwarded as OpenCode's `messageID`, making prompt retries idempotent.
+ */
+export interface RunChatRuntime {
+  /** Find a session created by an earlier worker attempt using its deterministic title. */
+  findSessionByTitle(target: RunChatTarget, title: string): Promise<{ id: string; title: string } | null>;
+  createSession(target: RunChatTarget, title: string): Promise<{ id: string; title: string }>;
+  sendPrompt(target: RunChatTarget, sessionId: string, text: string, messageId: string): Promise<void>;
+  loadItems(target: RunChatTarget, sessionId: string): Promise<import("@companion/contracts").RunChatHistoryItem[]>;
+  streamEvents(
+    target: RunChatTarget,
+    sessionId: string,
+    signal: AbortSignal,
+    /** Called only after the SDK has established the upstream event subscription. */
+    onConnected?: () => void,
+  ): AsyncIterable<import("@companion/contracts").RunChatEvent>;
+}
+
+/** Fetches a stored skill archive (tar.gz bytes) by its storage path — wired to S3 in apps/worker. */
 export type SkillArchiveFetcher = (storagePath: string) => Promise<Buffer>;
 
 /** Provider error with the fields the run error state renders. */

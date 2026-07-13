@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { SEMVER_RE, SKILL_NAME_RE, SKILL_REQUIREMENT_KEY_RE } from "./frontmatter";
 import { modelRowSchema } from "./modelProviders";
-import { secretCandidateSchema } from "./secrets";
+import { secretAudienceSchema, secretCandidateSchema } from "./secrets";
 
 /**
  * Skill runs are private, durable sandbox sessions launched from a published skill version.
@@ -22,6 +22,7 @@ export const RUN_VARIABLE_VALUE_MAX_BYTES = 32 * 1024;
 export const RUN_CONFIGURATION_NAME_MAX = 120;
 export const RUN_MODEL_ID_MAX = 240;
 export const RUN_ERROR_CODE_MAX = 80;
+export const RUN_WARNING_SNAPSHOT_MAX = 100;
 
 /** Runtime-owned names may never be supplied by a skill or saved configuration. */
 export const RUN_RESERVED_ENV_PREFIX = "OPENCODE_SERVER_";
@@ -71,6 +72,16 @@ export const runPhaseSchema = z.enum([
   "complete",
 ]);
 export type RunPhase = z.infer<typeof runPhaseSchema>;
+
+/** Redacted, non-terminal warning retained after live-event rows expire. */
+export const runWarningSnapshotSchema = z
+  .object({
+    code: runErrorCodeSchema,
+    message: z.string().min(1).max(4_000),
+    phase: runPhaseSchema.nullable().default(null),
+  })
+  .strict();
+export type RunWarningSnapshot = z.infer<typeof runWarningSnapshotSchema>;
 
 export const runSecretProvenanceSchema = z.enum(["skill", "model_provider", "runtime"]);
 export type RunSecretProvenance = z.infer<typeof runSecretProvenanceSchema>;
@@ -132,11 +143,25 @@ export const runModelReadinessSchema = z.enum([
 ]);
 export type RunModelReadiness = z.infer<typeof runModelReadinessSchema>;
 
+/** Exact accessible vault pin that will supply the model provider key; never contains plaintext. */
+export const runModelProviderSecretPinSchema = z
+  .object({
+    env_key: runEnvKeySchema,
+    secret_id: runUuidSchema,
+    secret_version: z.number().int().positive(),
+    secret_name: z.string().min(1).max(240),
+    secret_audience: secretAudienceSchema,
+    secret_owner_name: z.string().min(1).max(240),
+  })
+  .strict();
+export type RunModelProviderSecretPin = z.infer<typeof runModelProviderSecretPinSchema>;
+
 export const runModelOptionSchema = z
   .object({
     model: modelRowSchema,
     readiness: runModelReadinessSchema,
     message: z.string().max(2_000).nullable().default(null),
+    provider_secret_pin: runModelProviderSecretPinSchema.nullable().default(null),
   })
   .strict();
 export type RunModelOption = z.infer<typeof runModelOptionSchema>;
@@ -487,6 +512,9 @@ export type SkillRunArtifactRow = z.infer<typeof skillRunArtifactRowSchema>;
 export const skillRunDetailSchema = skillRunRowSchema.extend({
   prompt: z.string(),
   transcript: z.array(runChatHistoryItemSchema),
+  warnings: z.array(runWarningSnapshotSchema).max(RUN_WARNING_SNAPSHOT_MAX),
+  /** Highest replay sequence already folded into `transcript`. */
+  transcript_event_sequence: z.number().int().nonnegative(),
   attachments: z.array(skillRunAttachmentRowSchema),
   artifacts: z.array(skillRunArtifactRowSchema),
   input_snapshot: runInputSnapshotSchema.optional(),

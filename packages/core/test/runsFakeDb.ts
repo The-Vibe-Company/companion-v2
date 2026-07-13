@@ -128,10 +128,15 @@ function runDefaults(values: Record<string, unknown>): FakeRunRow {
     serverPasswordEnc: null,
     timeoutMs: 300000,
     transcript: [],
+    warnings: [],
+    transcriptEventSequence: 0,
     transcriptUpdatedAt: null,
     lastActiveAt: null,
     frozenAt: null,
     sandboxCleanedAt: null,
+    cleanupLeaseOwner: null,
+    cleanupLeaseExpiresAt: null,
+    cleanupAttempt: 0,
     createdAt: new Date("2026-07-01T00:00:00Z"),
     updatedAt: new Date("2026-07-01T00:00:00Z"),
     ...values,
@@ -289,11 +294,10 @@ export function fakeRunsDb(store: FakeStore): Db {
                 if (existing) Object.assign(existing, opts.set);
                 else
                   store.providerConnections.push({
-                    keyVersion: 1,
                     createdAt: new Date(),
                     updatedAt: new Date(),
                     ...v,
-                  } as FakeProviderConnectionRow);
+                  } as unknown as FakeProviderConnectionRow);
               }
             },
           };
@@ -306,11 +310,10 @@ export function fakeRunsDb(store: FakeStore): Db {
                 if (existing) Object.assign(existing, opts.set);
                 else
                   store.orgProviderConnections.push({
-                    keyVersion: 1,
                     createdAt: new Date(),
                     updatedAt: new Date(),
                     ...v,
-                  } as FakeOrgProviderConnectionRow);
+                  } as unknown as FakeOrgProviderConnectionRow);
               }
             },
           };

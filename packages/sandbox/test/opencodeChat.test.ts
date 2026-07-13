@@ -102,6 +102,32 @@ describe("loadSessionItems", () => {
 });
 
 describe("streamChatEvents", () => {
+  it("signals readiness only after the upstream event subscription is established", async () => {
+    const order: string[] = [];
+    const client = {
+      event: {
+        subscribe: async () => {
+          order.push("subscribed");
+          return {
+            stream: (async function* () {
+              order.push("streamed");
+              yield { type: "session.idle", properties: { sessionID: "session-1" } };
+            })(),
+          };
+        },
+      },
+    } as unknown as OpencodeClient;
+
+    const iterator = streamChatEvents({
+      client,
+      sessionId: "session-1",
+      onConnected: () => order.push("connected"),
+    });
+    await iterator.next();
+
+    expect(order).toEqual(["subscribed", "connected", "streamed"]);
+  });
+
   it("does not replay a delta-first update when cumulative text follows", async () => {
     const events = [
       {

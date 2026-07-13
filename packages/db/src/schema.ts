@@ -1013,6 +1013,13 @@ export type SkillRunTranscriptItem =
       duration_ms: number | null;
     };
 
+/** Durable non-terminal warnings that must survive live-event retention and page reloads. */
+export type SkillRunWarning = {
+  code: string;
+  message: string;
+  phase: (typeof skillRunPhaseEnum.enumValues)[number] | null;
+};
+
 /**
  * One skill run: a one-shot sandboxed session launched from a skill's page. A FRESH sandbox is
  * forked from the golden snapshot per run (no wake — the run freezes into a read-only transcript
@@ -1061,11 +1068,18 @@ export const skillRuns = pgTable(
     /** Sandbox inactivity window; also the freeze window for the recorder. */
     timeoutMs: integer("timeout_ms").notNull().default(300000),
     transcript: jsonb("transcript").$type<SkillRunTranscriptItem[]>().notNull().default([]),
+    warnings: jsonb("warnings").$type<SkillRunWarning[]>().notNull().default([]),
+    /** Highest durable event sequence already represented by the transcript snapshot. */
+    transcriptEventSequence: integer("transcript_event_sequence").notNull().default(0),
     transcriptUpdatedAt: timestamp("transcript_updated_at", { withTimezone: true }),
     lastActiveAt: timestamp("last_active_at", { withTimezone: true }),
     frozenAt: timestamp("frozen_at", { withTimezone: true }),
     /** Set once the provider sandbox is confirmed destroyed; NULL = the sweeper still owes a destroy. */
     sandboxCleanedAt: timestamp("sandbox_cleaned_at", { withTimezone: true }),
+    /** Short system lease used only to retry terminal sandbox teardown across worker replicas. */
+    cleanupLeaseOwner: text("cleanup_lease_owner"),
+    cleanupLeaseExpiresAt: timestamp("cleanup_lease_expires_at", { withTimezone: true }),
+    cleanupAttempt: integer("cleanup_attempt").notNull().default(0),
     createdAt: now(),
     updatedAt: updatedAt(),
   },
@@ -1100,9 +1114,19 @@ export const skillRuns = pgTable(
     }),
     bySessions: index("skill_runs_sessions_idx").on(t.orgId, t.skillId, t.creatorId, t.createdAt),
     byCleanup: index("skill_runs_cleanup_idx")
-      .on(t.status, t.updatedAt)
+      .on(t.status, t.cleanupLeaseExpiresAt, t.updatedAt)
       .where(sql`${t.sandboxCleanedAt} IS NULL`),
     timeoutCheck: check("skill_runs_timeout_check", sql`${t.timeoutMs} BETWEEN 10000 AND 3600000`),
+    warningsArrayCheck: check("skill_runs_warnings_array_check", sql`jsonb_typeof(${t.warnings}) = 'array'`),
+    transcriptEventSequenceCheck: check(
+      "skill_runs_transcript_event_sequence_check",
+      sql`${t.transcriptEventSequence} >= 0`,
+    ),
+    cleanupAttemptCheck: check("skill_runs_cleanup_attempt_check", sql`${t.cleanupAttempt} >= 0`),
+    cleanupLeaseCheck: check(
+      "skill_runs_cleanup_lease_check",
+      sql`(${t.cleanupLeaseOwner} IS NULL) = (${t.cleanupLeaseExpiresAt} IS NULL)`,
+    ),
     idempotencyKeyCheck: check(
       "skill_runs_idempotency_key_check",
       sql`char_length(${t.idempotencyKey}) BETWEEN 8 AND 200`,

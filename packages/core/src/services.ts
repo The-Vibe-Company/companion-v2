@@ -3765,10 +3765,6 @@ export async function uninstallSkill(input: {
   });
 }
 
-// Envelope encryption for stored secrets (node:crypto — kept off the framework-free `index` entry so
-// the browser-safe authz exports never pull a Node built-in into a client bundle).
-export * from "./secretbox";
-
 // Saved model-provider connections (API keys). Same load-order reasoning as `./labels`.
 export * from "./providerConnections";
 
@@ -3778,5 +3774,7 @@ export * from "./modelPreferences";
 // Skill runs (one-shot sandboxed sessions) + the Vanish artifact client. Same load-order reasoning
 // as `./labels`: `skillRuns.ts` imports only hoisted functions and types from here.
 export * from "./skillRuns";
+export * from "./runConfigurations";
+export * from "./runJobs";
 export * from "./runSweeper";
 export * from "./vanish";
