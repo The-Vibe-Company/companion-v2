@@ -159,7 +159,7 @@ export class StripeBillingGateway implements BillingGateway {
         billing_address_collection: "required",
         customer_update: { address: "auto", name: "auto" },
         tax_id_collection: { enabled: true },
-        allow_promotion_codes: false,
+        allow_promotion_codes: true,
         success_url: input.successUrl,
         cancel_url: input.cancelUrl,
         metadata: { companion_org_id: input.orgId },
