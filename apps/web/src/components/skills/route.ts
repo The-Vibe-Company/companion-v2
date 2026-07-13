@@ -126,6 +126,17 @@ export function skillsRouteHref(route: SkillsRoute): string {
   return params.length ? `/skills?${params.join("&")}` : "/skills";
 }
 
+/**
+ * Public org-skill details use their share URL, but a private run transcript must remain on the
+ * authenticated skills route so its creator-only `run` cursor survives reload and browser Back.
+ */
+export function canonicalSkillsRouteHref(route: SkillsRoute, shareToken: string | null): string {
+  if (shareToken && route.kind !== "local" && route.kind !== "archived" && route.skill && !route.run) {
+    return skillShareHref(shareToken);
+  }
+  return skillsRouteHref(route);
+}
+
 export function skillsRouteKey(route: SkillsRoute): string {
   let base: string;
   if (route.kind === "local" || route.kind === "archived") base = route.kind;

@@ -46,6 +46,7 @@ import { UploadDialog, InstallDialog } from "./UploadDialog";
 import {
   parseSkillShareTokenPath,
   parseSkillsRoute,
+  canonicalSkillsRouteHref,
   skillShareHref,
   skillsRouteHref,
   skillsRouteKey,
@@ -426,9 +427,9 @@ export function SkillsApp({
     (route: SkillsRoute): string => {
       if (route.kind !== "local" && route.kind !== "archived" && route.skill) {
         const shared = shareableSkillForSlug(route.skill);
-        if (shared) return skillShareHref(shared.shareToken);
+        return canonicalSkillsRouteHref(route, shared?.shareToken ?? null);
       }
-      return skillsRouteHref(route);
+      return canonicalSkillsRouteHref(route, null);
     },
     [shareableSkillForSlug],
   );

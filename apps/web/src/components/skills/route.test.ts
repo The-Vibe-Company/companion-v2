@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  canonicalSkillsRouteHref,
   parseSkillShareTokenPath,
   parseSkillsRoute,
   skillShareHref,
@@ -177,6 +178,14 @@ describe("run transcript routing (?skill=…&run=…)", () => {
     const route = { lib: "org" as const, kind: "all" as const, skill: "digest", run: "r-1" };
     expect(skillsRouteHref(route)).toBe("/skills?lib=org&skill=digest&run=r-1");
     expect(parseSkillsRoute(skillsRouteHref(route))).toEqual(route);
+  });
+
+  it("keeps creator-only org runs on the authenticated route instead of the public share URL", () => {
+    const detail = { lib: "org" as const, kind: "all" as const, skill: "digest" };
+    expect(canonicalSkillsRouteHref(detail, "public-token")).toBe("/s/public-token");
+    expect(canonicalSkillsRouteHref({ ...detail, run: "r-1" }, "public-token")).toBe(
+      "/skills?lib=org&skill=digest&run=r-1",
+    );
   });
 
   it("keys run routes distinctly from the bare skill detail", () => {
