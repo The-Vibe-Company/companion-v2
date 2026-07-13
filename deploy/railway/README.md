@@ -10,6 +10,11 @@ Companion runs as three Railway services from this repository plus a Railway Pos
 Keeping application traffic on the web origin avoids cross-origin session cookies. Stripe and CLI clients use the
 same public web domain: the Stripe endpoint is `/v1/billing/webhooks/stripe`, and the CLI API base ends in `/v1`.
 
+The application services build from the checked-in multi-stage Dockerfiles. Each build prunes the pnpm workspace to
+the selected service before installing dependencies; the API and worker ship only their production bundle and the web
+ships the Next.js standalone server. The service names must remain `api`, `worker`, and `web` because the shared backend
+Dockerfile selects its target from Railway's `RAILWAY_SERVICE_NAME` build variable.
+
 ## 1. Create the services
 
 Create `Postgres`, `api`, `worker`, and `web` in one Railway project/environment. Connect all three application
@@ -21,6 +26,11 @@ configuration-file path:
 | `api` | `/deploy/railway/api.railway.json` | No |
 | `worker` | `/deploy/railway/worker.railway.json` | No |
 | `web` | `/deploy/railway/web.railway.json` | Yes |
+
+The config-file path is required: Railway does not discover these nested files automatically. Confirm the staged
+service settings show the `DOCKERFILE` builder and the matching `deploy/railway/Dockerfile.*` path before deploying.
+The Dockerfiles declare every build-time variable they consume; secrets remain runtime-only variables and must never
+be added as Docker build arguments.
 
 Generate the `web` Railway domain before adding variables that reference `web.RAILWAY_PUBLIC_DOMAIN`. The API and
 worker communicate only over Railway private networking. Deploy `api` once before enabling the billing worker so
@@ -77,11 +87,14 @@ NODE_ENV=production
 PORT=3000
 COMPANION_API_URL=http://${{api.RAILWAY_PRIVATE_DOMAIN}}:3001
 COMPANION_WEB_URL=https://${{web.RAILWAY_PUBLIC_DOMAIN}}
-NEXT_PUBLIC_COMPANION_API_URL=https://${{web.RAILWAY_PUBLIC_DOMAIN}}
+NEXT_PUBLIC_COMPANION_API_BASE=https://${{web.RAILWAY_PUBLIC_DOMAIN}}/v1
+NEXT_PUBLIC_POSTHOG_PROJECT_TOKEN=<public project token, optional>
+NEXT_PUBLIC_POSTHOG_HOST=https://us.i.posthog.com
 ```
 
 `COMPANION_API_URL` is consumed while Next.js builds its rewrites, so add it before the first web build. Railway's
-private DNS is not reachable from a browser; browser requests intentionally stay on the public web origin.
+private DNS is not reachable from a browser; browser requests intentionally stay on the public web origin. The
+`NEXT_PUBLIC_*` values are public by definition and are baked into the browser bundle.
 
 ### `worker`
 
@@ -126,6 +139,11 @@ After the first API deploy, confirm its `/health` check is green and that its pr
 4. Enable webhooks and send a Stripe test event; the endpoint must return a 2xx response.
 5. Enable Checkout for a pilot org, complete a low-risk live verification, and confirm the worker changes the Stripe
    subscription quantity after adding or removing an active membership.
+
+For build-performance validation, record the build duration and pushed image size from `railway logs --build`. Run a
+second build from the same source snapshot and confirm the dependency-install layers are cached. The expected outcome
+is a combined image payload at least 50% below the former Railpack baseline (1,089 MB across the three services) and a
+warm web build below 120 seconds.
 
 Rollback is non-destructive: set `COMPANION_CHECKOUT_ENABLED=false`,
 `COMPANION_STRIPE_WEBHOOKS_ENABLED=false`, and `COMPANION_ENTITLEMENTS_MODE=off`. Do not delete Stripe identifiers or

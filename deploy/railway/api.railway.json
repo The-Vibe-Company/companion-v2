@@ -1,20 +1,24 @@
 {
   "$schema": "https://railway.com/railway.schema.json",
   "build": {
-    "builder": "RAILPACK",
-    "buildCommand": "pnpm --filter @companion/api build",
+    "builder": "DOCKERFILE",
+    "dockerfilePath": "deploy/railway/Dockerfile.backend",
     "watchPatterns": [
+      "/.dockerignore",
       "/apps/api/**",
       "/packages/**",
+      "/deploy/railway/Dockerfile.backend",
+      "/deploy/railway/api.railway.json",
       "/package.json",
       "/pnpm-lock.yaml",
       "/pnpm-workspace.yaml",
-      "/tsconfig.base.json"
+      "/tsconfig.base.json",
+      "/turbo.json"
     ]
   },
   "deploy": {
-    "preDeployCommand": "pnpm --filter @companion/api migrate",
-    "startCommand": "node apps/api/dist/index.js",
+    "preDeployCommand": "node dist/migrate.js",
+    "startCommand": "node dist/index.js",
     "healthcheckPath": "/health",
     "healthcheckTimeout": 30,
     "restartPolicyType": "ON_FAILURE",

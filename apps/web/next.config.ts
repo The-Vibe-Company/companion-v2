@@ -1,6 +1,12 @@
 import type { NextConfig } from "next";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "../..");
 
 const config: NextConfig = {
+  output: "standalone",
+  outputFileTracingRoot: repoRoot,
   // Internal workspace packages ship TypeScript source; transpile them.
   transpilePackages: ["@companion/contracts", "@companion/skills", "@companion/core"],
   async rewrites() {
