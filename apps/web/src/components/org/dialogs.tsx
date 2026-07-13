@@ -14,11 +14,13 @@ import type { OrgCtx } from "./model";
 export function InviteDialog({ ctx, onClose }: { ctx: OrgCtx; onClose: () => void }) {
   const [email, setEmail] = useState("");
   const [role, setRole] = useState<OrgRole>("developer");
+  const [acknowledgeSeatBilling, setAcknowledgeSeatBilling] = useState(false);
+  const requiresSeatConsent = ctx.billing?.billingEnabled && ctx.billing.entitlements.computedPlan === "pro";
   const order = (ctx.isOwner ? ORG_ROLE_ORDER : ORG_ROLE_ORDER.filter((r) => r !== "owner")).slice().reverse();
-  const valid = /\S+@\S+\.\S+/.test(email);
+  const valid = /\S+@\S+\.\S+/.test(email) && (!requiresSeatConsent || acknowledgeSeatBilling);
   const submit = () => {
     if (!valid) return;
-    void ctx.inviteMember(ctx.currentOrg.id, email.trim(), role);
+    void ctx.inviteMember(ctx.currentOrg.id, email.trim(), role, acknowledgeSeatBilling);
     onClose();
   };
   return (
@@ -65,6 +67,12 @@ export function InviteDialog({ ctx, onClose }: { ctx: OrgCtx; onClose: () => voi
         </div>
         <span className="og-field__hint">{orgRole(role).desc}</span>
       </div>
+      {requiresSeatConsent && (
+        <label className="sx-billing-consent">
+          <input type="checkbox" checked={acknowledgeSeatBilling} onChange={(event) => setAcknowledgeSeatBilling(event.target.checked)} />
+          <span>An accepted invitation adds one $10 USD/month seat. Stripe prorates the change for the current billing period.</span>
+        </label>
+      )}
     </Dialog>
   );
 }

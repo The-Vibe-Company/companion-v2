@@ -299,6 +299,8 @@ export function DetailView({
   onOpenSkill,
   onRestore,
   onArchive,
+  historyEnabled = true,
+  onUpgrade = () => {},
 }: {
   skill: SkillVM;
   index: number;
@@ -325,6 +327,8 @@ export function DetailView({
   onOpenSkill: (slug: string) => void;
   onRestore: () => void;
   onArchive: () => void;
+  historyEnabled?: boolean;
+  onUpgrade?: () => void;
 }) {
   const invalid = skill.validation === "invalid";
   const [versions, setVersions] = useState<SkillVersionRow[]>([]);
@@ -675,6 +679,13 @@ export function DetailView({
 
         {activeTab === "activity" && (
           <div className="ddoc">
+            {!historyEnabled && (
+              <div className="entitlement-bar entitlement-bar--detail" role="status">
+                <Icon name="lock" size={14} />
+                <span>Free shows the current version only. Upgrade to Pro to browse the full version history.</span>
+                <button className="btn-sec" onClick={onUpgrade}>View plans</button>
+              </div>
+            )}
             <Activity
               versions={versions}
               fallbackAuthor={{

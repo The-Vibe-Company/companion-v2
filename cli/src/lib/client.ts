@@ -28,8 +28,8 @@ export async function getClient(profile: string, orgId?: string): Promise<Authed
         ...(init?.headers ?? {}),
       },
     });
-    const json = (await res.json().catch(() => ({}))) as { error?: string };
-    if (!res.ok) throw new CliError(json.error ?? `request failed: ${res.status}`, res.status === 401 ? 3 : 8);
+    const json = (await res.json().catch(() => ({}))) as { error?: string; message?: string };
+    if (!res.ok) throw new CliError(json.message ?? json.error ?? `request failed: ${res.status}`, res.status === 401 ? 3 : 8);
     return json as T;
   }
 

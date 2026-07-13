@@ -8,6 +8,7 @@ import {
   initialsOf,
   parseApiTokensResponse,
   parseOrgSettingsResponse,
+  parseBillingOverview,
 } from "@/lib/settingsViewModel";
 import type { SettingsAppData, SettingsDialog, SettingsRoute, SettingsView } from "@/components/org/model";
 import type { MeVM } from "@/lib/types";
@@ -22,6 +23,7 @@ const SETTINGS_VIEWS: readonly SettingsView[] = [
   "general",
   "members",
   "invitations",
+  "billing",
 ];
 
 function isSettingsView(value: string): value is SettingsView {
@@ -76,14 +78,16 @@ export async function loadSettingsPageData(searchParams: SettingsSearchParams): 
   if (!settings) return null;
 
   // Personal access tokens live on their own endpoint; a failed fetch degrades to an empty list.
-  const tokensRaw = await serverApiFetch<unknown>("/v1/tokens", {
-    headers: orgHeaders,
-  }).catch(() => null);
+  const [tokensRaw, billingRaw] = await Promise.all([
+    serverApiFetch<unknown>("/v1/tokens", { headers: orgHeaders }).catch(() => null),
+    serverApiFetch<unknown>("/v1/billing", { headers: orgHeaders }).catch(() => null),
+  ]);
   const tokens = parseApiTokensResponse(tokensRaw);
+  const billing = parseBillingOverview(billingRaw);
 
   const state = parseSettingsState(await searchParams);
   return {
     ...state,
-    data: buildSettingsAppData({ me, current, settings, tokens }),
+    data: buildSettingsAppData({ me, current, settings, tokens, billing }),
   };
 }
