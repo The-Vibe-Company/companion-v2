@@ -78,14 +78,24 @@ describe("StripeBillingGateway", () => {
   it("delegates seat prorations to Stripe", async () => {
     const update = vi.fn().mockResolvedValue({
       id: "sub_1", customer: "cus_1", status: "active", cancel_at_period_end: false, canceled_at: null,
-      items: { data: [{ id: "si_1", quantity: 4, price: { id: "price_pro" } }] },
+      items: {
+        data: [{
+          id: "si_1",
+          quantity: 4,
+          price: { id: "price_pro" },
+          current_period_start: 2_000_000_000,
+          current_period_end: 2_002_592_000,
+        }],
+      },
     });
     const gateway = gatewayWith({ subscriptions: { update } });
-    await gateway.updateSeatQuantity({ subscriptionId: "sub_1", itemId: "si_1", quantity: 4, idempotencyKey: "billing:seats:org_1:4:1" });
+    const snapshot = await gateway.updateSeatQuantity({ subscriptionId: "sub_1", itemId: "si_1", quantity: 4, idempotencyKey: "billing:seats:org_1:4:1" });
     expect(update).toHaveBeenCalledWith(
       "sub_1",
       { items: [{ id: "si_1", quantity: 4 }], proration_behavior: "create_prorations" },
       { idempotencyKey: "billing:seats:org_1:4:1" },
     );
+    expect(snapshot.currentPeriodStart).toEqual(new Date(2_000_000_000_000));
+    expect(snapshot.currentPeriodEnd).toEqual(new Date(2_002_592_000_000));
   });
 });

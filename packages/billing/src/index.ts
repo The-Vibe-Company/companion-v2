@@ -51,7 +51,9 @@ function dateFromUnix(value: number | null | undefined): Date | null {
 function subscriptionSnapshot(subscription: Stripe.Subscription): BillingSubscriptionSnapshot {
   const item = subscription.items.data[0];
   if (!item) throw new Error("Stripe subscription has no item");
-  const raw = subscription as Stripe.Subscription & { current_period_start?: number; current_period_end?: number };
+  // Stripe's Basil API moved billing-period bounds from the subscription to each subscription item.
+  // Keep the root fallback so stored snapshots also work with older pinned Stripe API versions.
+  const legacy = subscription as Stripe.Subscription & { current_period_start?: number; current_period_end?: number };
   return {
     customerId: typeof subscription.customer === "string" ? subscription.customer : subscription.customer.id,
     subscriptionId: subscription.id,
@@ -59,8 +61,8 @@ function subscriptionSnapshot(subscription: Stripe.Subscription): BillingSubscri
     priceId: item.price.id,
     status: subscription.status,
     quantity: item.quantity ?? 1,
-    currentPeriodStart: dateFromUnix(raw.current_period_start),
-    currentPeriodEnd: dateFromUnix(raw.current_period_end),
+    currentPeriodStart: dateFromUnix(item.current_period_start ?? legacy.current_period_start),
+    currentPeriodEnd: dateFromUnix(item.current_period_end ?? legacy.current_period_end),
     cancelAtPeriodEnd: subscription.cancel_at_period_end,
     canceledAt: dateFromUnix(subscription.canceled_at),
   };
