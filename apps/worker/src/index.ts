@@ -1,15 +1,17 @@
 import { closeDb } from "@companion/db";
-import { startWorkerSupervisors } from "./supervisors";
+import { keepWorkerProcessAliveWhenIdle, startWorkerSupervisors } from "./supervisors";
 
 async function main(): Promise<void> {
   const { billing, runs } = await startWorkerSupervisors();
   if (!billing && !runs) console.info("worker idle: no supervisor is configured");
+  const idleKeepAlive = keepWorkerProcessAliveWhenIdle({ billing, runs });
 
   await new Promise<void>((resolve) => {
     let stopping = false;
     const stop = async () => {
       if (stopping) return;
       stopping = true;
+      if (idleKeepAlive) clearInterval(idleKeepAlive);
       // Run shutdown stops claims/heartbeats and leaves active leases to expire for safe resume.
       await Promise.allSettled([billing?.stop(), runs?.stop()]);
       await closeDb();
