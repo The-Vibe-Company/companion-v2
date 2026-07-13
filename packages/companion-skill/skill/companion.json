@@ -1,7 +1,7 @@
 {
   "$schema": "https://thecompanion.sh/schemas/companion-manifest.v2.schema.json",
   "name": "companion",
-  "version": "1.20.0",
+  "version": "1.21.0",
   "title": "Companion",
   "description": "Manage local SKILL.md packages with Companion: bootstrap context, self-update first, validate, publish, update, resolve dependencies, track installs, and repair manifests.",
   "notes": "## What it does\n\nThe Companion skill gives your assistant one reliable workflow for local SKILL.md packages: validate, publish, update, organize, install, audit, and self-update.\n\n## Safety model\n\n- Reads only skill folders you point it at and Companion's own local state under ~/.companion.\n- Stores credentials in ~/.companion/credentials.json by workspace id and never prints tokens.\n- Confirms publishing or archival changes before mutating workspace skills.\n- Uses companion.json as the source of truth for package identity, version, env/secrets, dependencies, notes, commands, and changelog.\n\n## Local tracking\n\nCompanion records installed skills in ~/.companion/skills.lock.json under workspace-id keys so audits can compare local versions, checksums, and dependency snapshots against the workspace registry without storing tokens. Installs fan out into every tool the user works with (Claude Code, Codex, OpenCode, …); each record's targets[] array tracks the per-tool and per-project install locations, with project-scope installs kept in a per-project <repo>/.companion/skills.lock.json.",
@@ -20,9 +20,19 @@
       "scripts/secrets_runtime.py",
       "scripts/sync_secrets.py",
       "scripts/skill_guard.py",
-      "scripts/tools.json"
+      "scripts/tools.json",
+      "evals/evals.json"
     ],
     "changelog": [
+      {
+        "version": "1.21.0",
+        "date": "2026-07-13",
+        "changes": [
+          "Gives Companion PATs parity with signed-in users for secret vault, binding, and suggestion mutations inside their workspace.",
+          "Adds create_secret.py --skill so agents resolve the declared slot, create a write-only secret, and bind it without a browser.",
+          "Keeps plaintext out of arguments and output while preserving workspace, ownership, audience, skill-access, and stable-slot checks."
+        ]
+      },
       {
         "version": "1.20.0",
         "date": "2026-07-13",
@@ -266,7 +276,7 @@
     { "name": "Resolve dependencies", "desc": "Analyze packages and sync companion.json before upload." },
     { "name": "Sync companion.json", "desc": "Create or repair manifest v2 with identity, env/secrets, dependency ids, notes, commands, and changelog." },
     { "name": "Manage skill API calls", "desc": "Use the supported skills API surface without crossing into workspace admin." },
-    { "name": "Create and retrieve secrets", "desc": "Create write-only personal or shared secrets, then preflight and retrieve authorized values through one-time grants." },
+    { "name": "Manage and retrieve secrets", "desc": "Create and bind write-only personal or shared secrets without a browser, manage their lifecycle, then retrieve authorized values through one-time grants." },
     { "name": "Update Companion skill", "desc": "Check and install the latest bundled Companion skill safely." },
     { "name": "Guard against duplicates", "desc": "Preflight the local inventory and workspace catalog before create/update/install to block duplicate slugs and skill-id retargets." },
     { "name": "Check for updates", "desc": "Compare installed skills and dependencies against the workspace registry." },

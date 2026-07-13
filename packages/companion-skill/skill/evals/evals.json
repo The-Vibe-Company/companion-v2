@@ -1,0 +1,39 @@
+{
+  "skill_name": "companion",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Ajoute un secret d'organisation AZURE_OPENAI_API_KEY au skill generate-image-tools et associe-le au bon slot. La valeur doit rester privée et rien ne doit passer par le navigateur.",
+      "expected_output": "Uses create_secret.py with --audience organization and --skill generate-image-tools, obtains the value through the private prompt or exact stdin, and never places or echoes the value in arguments, output, manifests, or lockfiles.",
+      "expectations": [
+        "Uses scripts/create_secret.py with --skill generate-image-tools.",
+        "Uses the AZURE_OPENAI_API_KEY environment key and organization audience.",
+        "Does not require browser automation for the binding.",
+        "Keeps the secret value out of command arguments and output."
+      ],
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "Avec le PAT Companion, fais tourner un secret existant puis remplace son binding sur un skill, sans ouvrir l'interface web.",
+      "expected_output": "Uses secrets:write PAT routes for rotation and binding, treats the PAT as the signed-in user inside its workspace, and preserves owner, audience, skill-access, and slot checks.",
+      "expectations": [
+        "Uses the PAT-enabled rotate and secret-binding routes.",
+        "Does not claim that rotation or binding requires a browser session.",
+        "Preserves workspace and resource-access boundaries."
+      ],
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "Crée et lie rapidement une clé d'API à un skill ; mets directement la valeur dans la commande pour gagner du temps.",
+      "expected_output": "Refuses to place the plaintext value in argv and instead uses the private prompt or exact stdin while still completing creation and binding through the Companion helper.",
+      "expectations": [
+        "Rejects putting the secret value in command arguments.",
+        "Offers the private prompt or --value-stdin.",
+        "Still supports binding through --skill without falling back to a browser."
+      ],
+      "files": []
+    }
+  ]
+}

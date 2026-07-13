@@ -149,6 +149,102 @@ class SecretCreationTests(EnvSandbox):
         self.assertNotIn(sentinel, stdout.getvalue())
         self.assertNotIn("value", json.loads(stdout.getvalue()))
 
+    def test_create_secret_preflights_and_binds_matching_skill_slot(self) -> None:
+        sentinel = "private-image-key"
+        calls: list[tuple[str, str, dict[str, object] | None]] = []
+        old_argv = sys.argv
+        old_stdin = sys.stdin
+        original_credentials = create_secret.resolve_credentials
+        original_get = create_secret.api_get
+        original_post = create_secret.api_post_json
+        original_put = create_secret.api_put_json
+        create_secret.resolve_credentials = lambda: ("https://api/v1", "token", "workspace-1")
+        create_secret.api_get = lambda base, token, path: {
+            "slots": [
+                {"slot_id": "slot-image", "env_key": "AZURE_OPENAI_API_KEY"},
+                {"slot_id": "slot-fallback", "env_key": "OPENAI_API_KEY"},
+            ]
+        }
+
+        def fake_post(base: str, token: str, path: str, payload: dict[str, object]):
+            calls.append(("POST", path, payload))
+            return {
+                "id": "secret-image",
+                "name": "Azure image generation",
+                "key": "AZURE_OPENAI_API_KEY",
+                "audience": "organization",
+            }
+
+        def fake_put(base: str, token: str, path: str, payload: dict[str, object]):
+            calls.append(("PUT", path, payload))
+            return {"configured": True}
+
+        create_secret.api_post_json = fake_post
+        create_secret.api_put_json = fake_put
+        sys.argv = [
+            "create_secret.py",
+            "--name", "Azure image generation",
+            "--key", "AZURE_OPENAI_API_KEY",
+            "--audience", "organization",
+            "--skill", "generate-image-tools",
+            "--value-stdin",
+            "--json",
+        ]
+        sys.stdin = io.StringIO(sentinel)
+        stdout = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(stdout):
+                create_secret.main()
+        finally:
+            sys.argv = old_argv
+            sys.stdin = old_stdin
+            create_secret.resolve_credentials = original_credentials
+            create_secret.api_get = original_get
+            create_secret.api_post_json = original_post
+            create_secret.api_put_json = original_put
+
+        self.assertEqual(calls[0][0:2], ("POST", "/secrets"))
+        self.assertEqual(calls[0][2]["value"], sentinel)
+        self.assertEqual(
+            calls[1],
+            (
+                "PUT",
+                "/skills/generate-image-tools/secret-bindings/slot-image",
+                {"secret_id": "secret-image"},
+            ),
+        )
+        result = json.loads(stdout.getvalue())
+        self.assertEqual(result["binding"]["slot_id"], "slot-image")
+        self.assertNotIn(sentinel, stdout.getvalue())
+
+    def test_create_secret_rejects_missing_skill_slot_before_reading_value(self) -> None:
+        old_argv = sys.argv
+        old_stdin = sys.stdin
+        original_credentials = create_secret.resolve_credentials
+        original_get = create_secret.api_get
+        create_secret.resolve_credentials = lambda: ("https://api/v1", "token", "workspace-1")
+        create_secret.api_get = lambda base, token, path: {"slots": []}
+        sys.argv = [
+            "create_secret.py",
+            "--name", "Azure image generation",
+            "--key", "AZURE_OPENAI_API_KEY",
+            "--skill", "generate-image-tools",
+            "--value-stdin",
+        ]
+        provided_stdin = io.StringIO("must-not-be-read")
+        sys.stdin = provided_stdin
+        try:
+            with self.assertRaises(SystemExit) as raised:
+                create_secret.main()
+        finally:
+            sys.argv = old_argv
+            sys.stdin = old_stdin
+            create_secret.resolve_credentials = original_credentials
+            create_secret.api_get = original_get
+
+        self.assertIn("does not declare exactly one secret slot", str(raised.exception))
+        self.assertEqual(provided_stdin.tell(), 0)
+
 
 class LockRecordTests(EnvSandbox):
     def test_normalize_targets_reads_modern_and_legacy(self) -> None:

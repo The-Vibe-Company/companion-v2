@@ -74,9 +74,15 @@ These are the Companion skill-management endpoints a personal access token can c
 | Download bundled Companion skill package | `GET /local-skills/companion/package` | `skills:read` |
 | Confirm this skill installed | `POST /local-skills/companion/installed` | `skills:write` |
 | Create a write-only secret | `POST /secrets` | `secrets:write` |
+| Update secret metadata, audience, or recipients | `PATCH /secrets/{id}` | `secrets:write` |
+| Rotate a secret value | `POST /secrets/{id}/rotate` | `secrets:write` |
+| Delete a secret | `DELETE /secrets/{id}` | `secrets:write` |
 | List authorized secret metadata | `GET /secrets` | `secrets:read` |
 | Read authorized secret metadata | `GET /secrets/{id}` | `secrets:read` |
 | Read skill secret configuration | `GET /skills/{slug}/secret-configuration?version={version}` | `secrets:read` |
+| Bind/unbind a secret for the current user | `PUT/DELETE /skills/{slug}/secret-bindings/{slotId}` | `secrets:write` |
+| Manage a shared suggestion | `PUT/DELETE /skills/{slug}/secret-suggestions/{slotId}` | `secrets:write` |
+| Accept a shared suggestion | `POST /skills/{slug}/secret-suggestions/{slotId}/accept` | `secrets:write` |
 | Preflight exact skill/dependency secret versions | `POST /secret-retrievals/preflight` | `secrets:read` |
 | Create a 60-second retrieval grant | `POST /secret-retrievals/{planId}/grant` | `secrets:read` |
 | Redeem a grant once | `POST /secret-grants/redeem` | `secrets:read` |
@@ -89,13 +95,16 @@ after normalization. Preserve an existing `slotId` when renaming its environment
 returned by skill endpoints expose the same identity as `slot_id`; ordinary `environment.env`
 variables do not use the vault.
 
-PAT automation may create a write-only secret, but cannot rotate, reveal, update, share, bind, or
-delete one. Prefer the bundled helper so the value never enters argv or output:
+PAT automation has the same Secrets-management capabilities as its user inside the token's workspace.
+Prefer the bundled helper so a new value never enters argv or output and can be bound to a declared
+skill slot in the same workflow:
 
 ```sh
 python3 scripts/create_secret.py --name "Production API key" --key SERVICE_API_KEY
 printf '%s' "$SECRET_VALUE" | python3 scripts/create_secret.py \
   --name "Production API key" --key SERVICE_API_KEY --audience organization --value-stdin --json
+python3 scripts/create_secret.py \
+  --name "Production API key" --key SERVICE_API_KEY --audience organization --skill deploy-service
 ```
 
 The helper calls:
@@ -118,12 +127,20 @@ recipient user ids with repeated `--recipient`; the server rejects non-members. 
 audience and recipients with the user before creation. A token needs `secrets:write`; older Companion
 tokens must be regenerated from the Use prompt.
 
-The web session exclusively owns every other vault and binding mutation:
+With `--skill`, the helper first calls `GET /skills/{slug}/secret-configuration`, resolves the unique
+slot whose `env_key` matches `--key`, then calls `PUT /skills/{slug}/secret-bindings/{slotId}` with the
+new metadata-only `secret_id`. Slot validation happens before the helper reads the secret value.
+
+The same PAT may perform every other vault and binding mutation with `secrets:write`:
 
 - `PATCH/DELETE /secrets/{id}`, `POST /secrets/{id}/rotate`;
 - `PUT/DELETE /skills/{slug}/secret-bindings/{slotId}`;
 - `PUT/DELETE /skills/{slug}/secret-suggestions/{slotId}` and
   `POST /skills/{slug}/secret-suggestions/{slotId}/accept`.
+
+These routes still enforce the token's workspace, the user's ownership or audience access, the target
+skill's visibility, and stable slot existence. A PAT never gains cross-workspace or another owner's
+secret access.
 
 Retrieval uses `secrets:read`. Start an install/sync with a metadata-only preflight:
 

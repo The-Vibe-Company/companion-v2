@@ -44,7 +44,7 @@ describe("companion skill package + row", () => {
     const pkg = await getCompanionSkillPackage();
     expect(pkg.key).toBe("companion");
     expect(pkg.checksum).toMatch(/^sha256:[0-9a-f]{64}$/);
-    expect(pkg.version).toBe("1.20.0");
+    expect(pkg.version).toBe("1.21.0");
     expect(pkg.sizeBytes).toBeGreaterThan(0);
     expect(pkg.integrity.packageChecksum).toBe(pkg.checksum);
     expect(pkg.integrity.files["SKILL.md"]).toMatch(/^sha256:[0-9a-f]{64}$/);
@@ -63,6 +63,7 @@ describe("companion skill package + row", () => {
     expect(Object.keys(baseline.files ?? {}).sort()).toEqual([
       "SKILL.md",
       "companion.json",
+      "evals/evals.json",
       "scripts/bootstrap.py",
       "scripts/bootstrap_integrity.py",
       "scripts/bootstrap_update.py",
@@ -114,9 +115,9 @@ describe("companion skill package + row", () => {
       desc: "Create or repair manifest v2 with identity, env/secrets, dependency ids, notes, commands, and changelog.",
     });
     const changelog = row.changes.join("\n");
-    expect(changelog).toContain("non-replayable sixty-second grants");
-    expect(changelog).toContain("private atomic .env projections");
-    expect(changelog).toContain("offline stale-copy reporting");
+    expect(changelog).toContain("parity with signed-in users");
+    expect(changelog).toContain("create_secret.py --skill");
+    expect(changelog).toContain("Keeps plaintext out of arguments and output");
     const manifest = JSON.parse(await readFile(join(companionSkillDir(), "companion.json"), "utf8")) as {
       metadata?: { changelog?: Array<{ version?: string; changes?: string[] }> };
     };

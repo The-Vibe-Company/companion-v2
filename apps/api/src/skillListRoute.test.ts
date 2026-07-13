@@ -164,7 +164,7 @@ describe("Secrets PAT boundary and retrieval protocol", () => {
     expect(denied.status).toBe(401);
   });
 
-  it("lets secrets:write create a write-only value but keeps other vault mutations session-only", async () => {
+  it("lets secrets:write create a write-only value", async () => {
     const sentinel = "secret-value-that-must-not-return";
     serviceMocks.createSecret.mockResolvedValue({ id: "secret-1", name: "Deploy key", key: "DEPLOY_KEY", audience: "personal" });
     const denied = await app.request("/v1/secrets", {
@@ -182,14 +182,83 @@ describe("Secrets PAT boundary and retrieval protocol", () => {
     expect(created.status).toBe(201);
     expect(JSON.stringify(await created.json())).not.toContain(sentinel);
     expect(serviceMocks.createSecret).toHaveBeenCalledWith(expect.objectContaining({ actor: actorA, orgId: "org-1", value: expect.objectContaining({ value: sentinel }) }));
+  });
 
-    const rotate = await app.request("/v1/secrets/secret-1/rotate", {
-      method: "POST",
-      headers: { Authorization: "Bearer secrets-write-a", "content-type": "application/json" },
-      body: JSON.stringify({ value: sentinel }),
+  it("gives a secrets:write PAT parity with signed-in secret management", async () => {
+    const secretId = "a6b47409-4a02-4d8a-9df7-c50d2b1365e1";
+    const slotId = "4c2fb48c-55a6-51b5-a7e9-0ec2c36f38f4";
+    const metadata = { id: secretId, name: "Deploy key", key: "DEPLOY_KEY", audience: "organization" };
+    const configuration = { skill_id: "skill-1", slug: "demo-skill", configured: true, blockers: 0, warnings: 0, slots: [] };
+    serviceMocks.updateSecret.mockResolvedValue(metadata);
+    serviceMocks.rotateSecret.mockResolvedValue(metadata);
+    serviceMocks.deleteSecret.mockResolvedValue(undefined);
+    serviceMocks.setSkillSecretBinding.mockResolvedValue(configuration);
+    serviceMocks.removeSkillSecretBinding.mockResolvedValue(configuration);
+    serviceMocks.setSkillSecretSuggestion.mockResolvedValue(configuration);
+    serviceMocks.removeSkillSecretSuggestion.mockResolvedValue(configuration);
+    serviceMocks.acceptSkillSecretSuggestion.mockResolvedValue(configuration);
+
+    const headers = { Authorization: "Bearer secrets-write-a", "content-type": "application/json" };
+    const update = await app.request(`/v1/secrets/${secretId}`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ name: "Updated deploy key" }),
     });
-    expect(rotate.status).toBe(400);
-    expect(serviceMocks.rotateSecret).not.toHaveBeenCalled();
+    expect(update.status).toBe(200);
+
+    const rotate = await app.request(`/v1/secrets/${secretId}/rotate`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ value: "rotated-value" }),
+    });
+    expect(rotate.status).toBe(200);
+
+    const bind = await app.request(`/v1/skills/demo-skill/secret-bindings/${slotId}`, {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ secret_id: secretId }),
+    });
+    expect(bind.status).toBe(200);
+
+    const unbind = await app.request(`/v1/skills/demo-skill/secret-bindings/${slotId}`, {
+      method: "DELETE",
+      headers,
+    });
+    expect(unbind.status).toBe(200);
+
+    const suggest = await app.request(`/v1/skills/demo-skill/secret-suggestions/${slotId}`, {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ secret_id: secretId }),
+    });
+    expect(suggest.status).toBe(200);
+
+    const unsuggest = await app.request(`/v1/skills/demo-skill/secret-suggestions/${slotId}`, {
+      method: "DELETE",
+      headers,
+    });
+    expect(unsuggest.status).toBe(200);
+
+    const accept = await app.request(`/v1/skills/demo-skill/secret-suggestions/${slotId}/accept`, {
+      method: "POST",
+      headers,
+    });
+    expect(accept.status).toBe(200);
+
+    const remove = await app.request(`/v1/secrets/${secretId}`, { method: "DELETE", headers });
+    expect(remove.status).toBe(200);
+
+    expect(serviceMocks.updateSecret).toHaveBeenCalledWith(expect.objectContaining({ actor: actorA, orgId: "org-1" }));
+    expect(serviceMocks.rotateSecret).toHaveBeenCalledWith(expect.objectContaining({ actor: actorA, orgId: "org-1" }));
+    expect(serviceMocks.setSkillSecretBinding).toHaveBeenCalledWith(expect.objectContaining({ actor: actorA, orgId: "org-1", slug: "demo-skill", slotId, secretId }));
+    expect(serviceMocks.setSkillSecretSuggestion).toHaveBeenCalledWith(expect.objectContaining({ actor: actorA, orgId: "org-1", slug: "demo-skill", slotId, secretId }));
+
+    const denied = await app.request(`/v1/skills/demo-skill/secret-bindings/${slotId}`, {
+      method: "PUT",
+      headers: { Authorization: "Bearer secrets-a", "content-type": "application/json" },
+      body: JSON.stringify({ secret_id: secretId }),
+    });
+    expect(denied.status).toBe(400);
   });
 
   it("rejects an oversized secret request before calling the service", async () => {

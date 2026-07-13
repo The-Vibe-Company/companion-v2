@@ -533,8 +533,26 @@ recipients with the user, then run `python3 scripts/create_secret.py --name <nam
 Use `--audience personal|restricted|organization` and repeat `--recipient <user-id>` for restricted
 access. Let the helper prompt privately for the value, or pipe exact stdin with `--value-stdin`;
 never place the value in a command argument, chat response, log, manifest, or lockfile. The
-`secrets:write` response is value-free. Rotation, deletion, ACL changes, bindings, and suggestions
-still require the browser.
+`secrets:write` response is value-free.
+
+When the secret belongs to a skill declaration, add `--skill <slug>`. The helper reads that skill's
+metadata-only secret configuration first, resolves the stable slot whose environment key matches
+`--key`, creates the secret, and immediately binds it for the current user. This is the preferred
+agent workflow because it completes creation and association without a browser:
+
+```sh
+python3 scripts/create_secret.py \
+  --name "Azure image generation" \
+  --key AZURE_OPENAI_API_KEY \
+  --audience organization \
+  --skill generate-image-tools
+```
+
+A Companion PAT has the same Secrets-management capabilities as its user inside the token's
+workspace. Use `secrets:write` for create, update, rotation, deletion, binding, and shared suggestion
+mutations; use `secrets:read` for metadata, configuration, and retrieval. The normal owner, audience,
+workspace, and skill-access checks still apply. Never use browser automation merely to work around a
+PAT restriction on these routes.
 
 Before install/update/sync, call `POST /secret-retrievals/preflight` for the requested root skill and
 version. The server resolves the exact dependency closure and returns metadata-only statuses. A
@@ -860,11 +878,13 @@ Allowed skills API tasks:
 - Preview one browser-native file with
   `GET /skills/$SLUG/versions/$VERSION/files/content?path=$PATH` when the file list marks it as
   text, image, or PDF. Unsupported files return 415; download the package to inspect them.
-- Create a write-only secret with `secrets:write` through `scripts/create_secret.py`; the helper reads
+- Manage write-only secrets with `secrets:write` through `scripts/create_secret.py`; the helper reads
   the value from a private prompt or exact stdin, never from an argument, and never prints it. It can
   create `personal`, `restricted`, or `organization` audiences after the user explicitly confirms
-  the audience and recipients. Rotation, deletion, ACL changes, bindings, and suggestions remain
-  browser-session-only.
+  the audience and recipients. Pass `--skill <slug>` to resolve the matching stable slot and bind the
+  newly created secret without a browser. PAT callers may also update, rotate, delete, bind, unbind,
+  suggest, or accept suggestions with `secrets:write`, subject to the same ownership and workspace
+  checks as the signed-in user.
 - Read authorized secret metadata and skill configuration, then run preflight/grant/redemption with
   `secrets:read`. Use retrieval routes only through `install_skill.py` or `sync_secrets.py`; never log
   or persist the grant/redemption response.
@@ -969,7 +989,7 @@ skills view shows the correct status and version. Report the version from this s
 curl -s "$COMPANION_API_URL/local-skills/companion/installed" \
   -H "Authorization: Bearer $COMPANION_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"version":"1.20.0","agent":"<your assistant name>"}'
+  -d '{"version":"1.21.0","agent":"<your assistant name>"}'
 ```
 
 A `{ "ok": true, "status": "installed" }` response confirms the workspace now knows this machine has
