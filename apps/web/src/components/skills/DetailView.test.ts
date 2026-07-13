@@ -72,18 +72,12 @@ function renderDetail() {
 }
 
 describe("DetailView tabbed detail layout", () => {
-  it("renders the head facts, the status card, the filed folders, and the tab bar", () => {
+  it("renders the head facts, the filed folders, and the tab bar", () => {
     const html = renderDetail();
 
     expect(html).toContain("linear-demo");
     expect(html).toContain("A focused skill for incident handoffs.");
-    // Status card facts.
-    expect(html).toContain("statuscard");
-    expect(html).toContain("Status");
-    expect(html).toContain("Valid");
-    expect(html).toContain("Installed");
-    expect(html).toContain("1.2.3");
-    expect(html).toContain("just now");
+    expect(html).not.toContain("statuscard");
     // Author provenance byline.
     expect(html).toContain("Ada Lovelace");
     expect(html).toContain("Filed in");
