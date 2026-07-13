@@ -77,6 +77,13 @@ test("the Railway smoke script triggers its own container lane", () => {
   assert.equal(result.containers, true);
 });
 
+test("the bundled Companion runtime triggers its direct browser smoke", () => {
+  const result = classifyFiles(["packages/companion-skill/src/index.ts"]);
+  assert.equal(result.build, true);
+  assert.equal(result.browser, true);
+  assert.equal(result.containers, true);
+});
+
 test("deletion-only diffs retain the deleted runtime path", (context) => {
   const directory = mkdtempSync(join(tmpdir(), "companion-ci-scope-"));
   context.after(() => rmSync(directory, { recursive: true, force: true }));
@@ -102,8 +109,14 @@ test("deletion-only diffs retain the deleted runtime path", (context) => {
   assert.equal(result.containers, true);
 });
 
-test("lockfile and workflow changes force the full pipeline", () => {
-  for (const file of ["pnpm-lock.yaml", ".github/workflows/ci.yml", ".gitleaksignore", "tsconfig.base.json"]) {
+test("lockfile, workflow, and CI gate changes force the full pipeline", () => {
+  for (const file of [
+    "pnpm-lock.yaml",
+    ".github/workflows/ci.yml",
+    ".gitleaksignore",
+    "tsconfig.base.json",
+    "scripts/ci-gate.mjs",
+  ]) {
     const result = classifyFiles([file]);
     assert.equal(result.full, true);
     assert.equal(result.database, true);

@@ -60,6 +60,7 @@ export function classifyFiles(files, { forceFull = false } = {}) {
       /^playwright\.config\.[cm]?[jt]s$/,
       /^scripts\/ci-scope(?:\.test)?\.mjs$/,
       /^scripts\/ci-playwright-policy(?:\.test)?\.mjs$/,
+      /^scripts\/ci-gate(?:\.test)?\.mjs$/,
     ]),
   );
   const full = forceFull || workflowOrRootConfig;
@@ -109,6 +110,7 @@ export function classifyFiles(files, { forceFull = false } = {}) {
             "packages/auth/",
             "packages/contracts/",
             "packages/core/",
+            "packages/companion-skill/",
             "packages/db/",
             "packages/email/",
             "packages/skills/",

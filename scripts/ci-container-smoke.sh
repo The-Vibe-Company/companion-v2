@@ -35,6 +35,8 @@ for _ in $(seq 1 20); do
   sleep 0.25
 done
 test "$(docker inspect --format '{{.State.Running}}' "$worker_id")" = "true"
+sleep 2
+test "$(docker inspect --format '{{.State.Running}}' "$worker_id")" = "true"
 
 api_id="$(docker run -d "${network_args[@]}" "${api_publish_args[@]}" \
   -e PORT=18082 \

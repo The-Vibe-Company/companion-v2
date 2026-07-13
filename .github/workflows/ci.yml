@@ -67,7 +67,7 @@ jobs:
           fetch-depth: 0
 
       - name: Test CI scope classifier
-        run: node --test scripts/ci-scope.test.mjs scripts/ci-playwright-policy.test.mjs
+        run: node --test scripts/ci-scope.test.mjs scripts/ci-playwright-policy.test.mjs scripts/ci-gate.test.mjs
 
       - name: Validate GitHub Actions workflows
         run: >-
@@ -538,14 +538,6 @@ jobs:
     steps:
       - name: Verify required jobs
         env:
+          EVENT_NAME: ${{ github.event_name }}
           JOB_RESULTS: ${{ toJSON(needs) }}
-        run: |
-          node <<'NODE'
-          const jobs = JSON.parse(process.env.JOB_RESULTS);
-          const bad = Object.entries(jobs).filter(([, job]) => !["success", "skipped"].includes(job.result));
-          if (bad.length) {
-            console.error("CI Gate rejected:", bad.map(([name, job]) => `${name}=${job.result}`).join(", "));
-            process.exit(1);
-          }
-          console.log("CI Gate accepted all required and intentionally skipped jobs.");
-          NODE
+        run: node scripts/ci-gate.mjs

@@ -8,12 +8,13 @@ const FORBIDDEN = [
   { label: "exclusive test", pattern: /\b(?:test|describe)\.only\s*\(/g },
   { label: "skipped test", pattern: /\b(?:test|describe)\.(?:skip|fixme)\s*\(/g },
 ];
+const PLAYWRIGHT_SOURCE_EXTENSIONS = new Set([".cjs", ".cts", ".js", ".jsx", ".mjs", ".mts", ".ts", ".tsx"]);
 
 function sourceFiles(directory) {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
     const path = join(directory, entry.name);
     if (entry.isDirectory()) return sourceFiles(path);
-    return [".js", ".jsx", ".ts", ".tsx"].includes(extname(path)) ? [path] : [];
+    return PLAYWRIGHT_SOURCE_EXTENSIONS.has(extname(path)) ? [path] : [];
   });
 }
 

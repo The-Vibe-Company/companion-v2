@@ -54,14 +54,37 @@ log() {
   printf '[ci-rsc-smoke] %s\n' "$*"
 }
 
+process_start_time() {
+  ps -p "$1" -o lstart= 2>/dev/null | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'
+}
+
+write_pid_file() {
+  local file="$1"
+  local pid="$2"
+  local started
+  started="$(process_start_time "$pid")"
+  if [ -z "$started" ]; then
+    log "Process $pid exited before its identity could be recorded"
+    return 1
+  fi
+  printf '%s|%s\n' "$pid" "$started" >"$file"
+}
+
 stop_pid_file() {
   local file="$1"
   local pid
+  local expected_start
+  local current_start
   if [ ! -f "$file" ]; then
     return
   fi
-  pid="$(cat "$file")"
+  IFS='|' read -r pid expected_start <"$file"
   if kill -0 "$pid" >/dev/null 2>&1; then
+    current_start="$(process_start_time "$pid")"
+    if [ -z "$expected_start" ] || [ "$current_start" != "$expected_start" ]; then
+      log "Refusing to stop PID $pid because its identity does not match $file"
+      return 1
+    fi
     pkill -TERM -P "$pid" >/dev/null 2>&1 || true
     kill "$pid" >/dev/null 2>&1 || true
     for _ in $(seq 1 20); do
@@ -113,7 +136,7 @@ start_stack() {
 
   log "Starting built API"
   NODE_ENV=production pnpm --filter @companion/api start >"$LOG_DIR/api.log" 2>&1 < /dev/null &
-  printf '%s\n' "$!" >"$API_PID_FILE"
+  write_pid_file "$API_PID_FILE" "$!"
   wait_for_url "$COMPANION_API_URL/health" "API"
 
   log "Starting built web"
@@ -121,7 +144,7 @@ start_stack() {
     cd apps/web
     NODE_ENV=production exec pnpm start --hostname "$COMPANION_WEB_HOST" --port "$COMPANION_WEB_PORT"
   ) >"$LOG_DIR/web.log" 2>&1 < /dev/null &
-  printf '%s\n' "$!" >"$WEB_PID_FILE"
+  write_pid_file "$WEB_PID_FILE" "$!"
   wait_for_url "$COMPANION_WEB_URL/login" "web"
 }
 
