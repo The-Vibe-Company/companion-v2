@@ -310,6 +310,9 @@ describe("workspace provider vault bindings", () => {
     await setProviderConnection({ actor: other, orgId: ORG, provider: "anthropic", keyName: "ANTHROPIC_API_KEY", secretId: PERSONAL_SECRET, database: store.database });
     expect((await getDecryptedProviderKey({ database: store.database, actor: other, orgId: ORG, provider: "anthropic" }))?.value).toBe("sk-personal-v1");
 
+    vault.get(PERSONAL_SECRET)!.recipients = [];
+    expect((await getDecryptedProviderKey({ database: store.database, actor: other, orgId: ORG, provider: "anthropic" }))?.value).toBe("sk-workspace-v1");
+
     await deleteOrgProviderConnection({ actor: me, orgId: ORG, provider: "anthropic", database: store.database });
     expect(await listOrgProviderConnections({ actor: me, orgId: ORG, database: store.database })).toEqual([]);
     expect(vault.has(SHARED_SECRET)).toBe(true);

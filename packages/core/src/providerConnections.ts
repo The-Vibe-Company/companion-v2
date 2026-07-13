@@ -16,6 +16,10 @@ type ProviderBinding = {
   createdAt: Date;
 };
 
+function isUnavailableSecret(error: unknown): boolean {
+  return error instanceof Error && error.message === "secret not found";
+}
+
 async function visibleConnection(
   database: Db,
   actor: ActorContext,
@@ -37,7 +41,7 @@ async function visibleConnection(
   } catch (error) {
     // A revoked binding is intentionally indistinguishable from no connection. Its former secret
     // metadata must not leak after access changes.
-    if (error instanceof Error && error.message === "secret not found") return null;
+    if (isUnavailableSecret(error)) return null;
     throw error;
   }
 }
@@ -270,13 +274,19 @@ export async function resolveProviderSecretPin(input: {
     )
     .limit(1);
   if (personal) {
-    const secret = await pinAccessibleSecret({
-      actor: input.actor,
-      orgId: input.orgId,
-      secretId: personal.secretId,
-      database: input.database,
-    });
-    return { keyName: personal.keyName, secret };
+    try {
+      const secret = await pinAccessibleSecret({
+        actor: input.actor,
+        orgId: input.orgId,
+        secretId: personal.secretId,
+        database: input.database,
+      });
+      return { keyName: personal.keyName, secret };
+    } catch (error) {
+      // A stale personal reference must not shadow a valid workspace binding. ACL failures are
+      // intentionally treated as unavailable; database/crypto failures still fail closed loudly.
+      if (!isUnavailableSecret(error)) throw error;
+    }
   }
   const [shared] = await input.database
     .select()
@@ -289,12 +299,18 @@ export async function resolveProviderSecretPin(input: {
     )
     .limit(1);
   if (!shared) return null;
-  const secret = await pinAccessibleSecret({
-    actor: input.actor,
-    orgId: input.orgId,
-    secretId: shared.secretId,
-    database: input.database,
-  });
+  let secret: AccessibleSecretPin;
+  try {
+    secret = await pinAccessibleSecret({
+      actor: input.actor,
+      orgId: input.orgId,
+      secretId: shared.secretId,
+      database: input.database,
+    });
+  } catch (error) {
+    if (isUnavailableSecret(error)) return null;
+    throw error;
+  }
   if (secret.audience !== "organization") return null;
   return { keyName: shared.keyName, secret };
 }
