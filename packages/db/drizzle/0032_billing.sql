@@ -27,6 +27,7 @@ CREATE TABLE "billing_subscriptions" (
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "billing_subscriptions_stripe_customer_id_unique" UNIQUE("stripe_customer_id"),
 	CONSTRAINT "billing_subscriptions_stripe_subscription_id_unique" UNIQUE("stripe_subscription_id"),
+	CONSTRAINT "billing_subscriptions_stripe_subscription_item_id_unique" UNIQUE("stripe_subscription_item_id"),
 	CONSTRAINT "billing_subscriptions_checkout_session_id_unique" UNIQUE("checkout_session_id"),
 	CONSTRAINT "billing_subscriptions_quantity_check" CHECK ("synced_quantity" is null or "synced_quantity" >= 1),
 	CONSTRAINT "billing_subscriptions_attempts_check" CHECK ("seat_sync_attempts" >= 0),

@@ -86,6 +86,6 @@ export const entitlementErrorSchema = z.object({
   effectivePlan: effectivePlanSchema,
   limit: z.number().int().positive().optional(),
   current: z.number().int().nonnegative().optional(),
-  upgradeUrl: z.string(),
+  upgradeUrl: z.string().optional(),
 });
 export type EntitlementErrorBody = z.infer<typeof entitlementErrorSchema>;

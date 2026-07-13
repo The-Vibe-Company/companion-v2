@@ -202,7 +202,7 @@ export const billingSubscriptions = pgTable(
       .references(() => organizations.id, { onDelete: "cascade" }),
     stripeCustomerId: text("stripe_customer_id").unique(),
     stripeSubscriptionId: text("stripe_subscription_id").unique(),
-    stripeSubscriptionItemId: text("stripe_subscription_item_id"),
+    stripeSubscriptionItemId: text("stripe_subscription_item_id").unique(),
     stripePriceId: text("stripe_price_id"),
     stripeStatus: text("stripe_status"),
     syncedQuantity: integer("synced_quantity"),
