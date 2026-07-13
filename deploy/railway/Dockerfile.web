@@ -1,0 +1,61 @@
+# syntax=docker/dockerfile:1
+
+ARG NODE_VERSION=22
+
+FROM node:${NODE_VERSION}-bookworm-slim AS tooling
+
+ENV PNPM_HOME=/pnpm
+ENV PATH=${PNPM_HOME}:${PATH}
+
+RUN npm install --global pnpm@9.12.0 turbo@2.9.16
+
+WORKDIR /app
+
+FROM tooling AS pruner
+
+COPY . .
+
+RUN turbo prune @companion/web --docker
+
+FROM tooling AS dependencies
+
+COPY --from=pruner /app/out/json/ .
+COPY --from=pruner /app/out/pnpm-lock.yaml ./pnpm-lock.yaml
+
+RUN pnpm install --frozen-lockfile --prefer-offline
+
+FROM dependencies AS builder
+
+ARG COMPANION_API_URL
+ARG COMPANION_WEB_URL
+ARG NEXT_PUBLIC_COMPANION_API_BASE
+ARG NEXT_PUBLIC_POSTHOG_HOST
+ARG NEXT_PUBLIC_POSTHOG_PROJECT_TOKEN
+
+ENV COMPANION_API_URL=${COMPANION_API_URL}
+ENV COMPANION_WEB_URL=${COMPANION_WEB_URL}
+ENV NEXT_PUBLIC_COMPANION_API_BASE=${NEXT_PUBLIC_COMPANION_API_BASE}
+ENV NEXT_PUBLIC_POSTHOG_HOST=${NEXT_PUBLIC_POSTHOG_HOST}
+ENV NEXT_PUBLIC_POSTHOG_PROJECT_TOKEN=${NEXT_PUBLIC_POSTHOG_PROJECT_TOKEN}
+ENV NEXT_TELEMETRY_DISABLED=1
+
+COPY --from=pruner /app/out/full/ .
+COPY --from=pruner /app/tsconfig.base.json ./tsconfig.base.json
+
+RUN pnpm --filter @companion/web build
+
+FROM node:${NODE_VERSION}-bookworm-slim AS runner
+
+ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
+ENV HOSTNAME=0.0.0.0
+
+WORKDIR /app
+
+COPY --from=builder --chown=node:node /app/apps/web/.next/standalone ./
+COPY --from=builder --chown=node:node /app/apps/web/.next/static ./apps/web/.next/static
+COPY --from=builder --chown=node:node /app/apps/web/public ./apps/web/public
+
+USER node
+
+CMD ["node", "apps/web/server.js"]
