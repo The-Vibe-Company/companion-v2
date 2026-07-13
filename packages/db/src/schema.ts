@@ -336,6 +336,8 @@ export const skillVersions = pgTable(
     uniqueSkillVersion: unique("skill_versions_skill_version_uq").on(t.skillId, t.version),
     // Supports org-scoped composite FKs from skill_version_dependencies.
     uniqueOrgId: unique("skill_versions_org_id_id_uq").on(t.orgId, t.id),
+    // Pins a version to its owning skill for immutable run snapshots.
+    uniqueOrgSkillId: unique("skill_versions_org_skill_id_uq").on(t.orgId, t.skillId, t.id),
     byOrg: index("skill_versions_org_idx").on(t.orgId),
     checksumCheck: check("skill_versions_checksum_check", sql`${t.checksum} ~ '^sha256:[0-9a-f]{64}$'`),
   }),
@@ -723,12 +725,8 @@ export const skillInstalls = pgTable(
 );
 
 /**
- * A member's saved connection to a model provider: their own API key for e.g. Anthropic/OpenAI,
- * envelope-encrypted. Connecting a provider ONCE enables its models in the run launcher's picker;
- * the key is resolved LIVE at serve time (personal beats workspace) and never copied onto a run.
- * Write-only: the API exposes the key NAME + connected state only, never the value. One row per
- * member per provider per workspace. (`provider = "vanish"` stores the member's Vanish API key for
- * run artifact publishing — it never appears in the model picker, which is built from models.dev.)
+ * A member's saved model-provider or Vanish connection. The binding references the generic vault;
+ * it never owns ciphertext. Personal bindings take precedence over workspace bindings at run time.
  */
 export const userProviderConnections = pgTable(
   "user_provider_connections",
@@ -741,24 +739,32 @@ export const userProviderConnections = pgTable(
       .references(() => user.id, { onDelete: "cascade" }),
     /** models.dev provider id, e.g. "anthropic" (or the reserved "vanish"). */
     provider: text("provider").notNull(),
-    /** The env var name the key is stored/injected under, e.g. ANTHROPIC_API_KEY. */
+    /** Exact environment key expected by the provider. It must match the bound secret's key. */
     keyName: text("key_name").notNull(),
-    wrappedDek: text("wrapped_dek").notNull(),
-    ciphertext: text("ciphertext").notNull(),
-    keyVersion: integer("key_version").notNull().default(1),
+    secretId: uuid("secret_id").notNull(),
     createdAt: now(),
     updatedAt: updatedAt(),
   },
   (t) => ({
     pk: primaryKey({ columns: [t.orgId, t.userId, t.provider] }),
+    bySecret: index("user_provider_connections_secret_idx").on(t.orgId, t.secretId),
     keyCheck: check("user_provider_connections_key_check", sql`${t.keyName} ~ '^[A-Za-z_][A-Za-z0-9_]*$'`),
+    memberOrgFk: foreignKey({
+      columns: [t.orgId, t.userId],
+      foreignColumns: [memberships.orgId, memberships.userId],
+      name: "user_provider_connections_member_org_fk",
+    }).onDelete("cascade"),
+    secretOrgFk: foreignKey({
+      columns: [t.orgId, t.secretId],
+      foreignColumns: [secrets.orgId, secrets.id],
+      name: "user_provider_connections_secret_org_fk",
+    }).onDelete("restrict"),
   }),
 );
 
 /**
- * A workspace-shared model provider connection: one API key an owner/admin connects for the whole
- * org (envelope-encrypted, write-only). Members without their own {@link userProviderConnections} row
- * for a provider fall back to the workspace key at serve time (personal beats workspace).
+ * A workspace-shared model-provider or Vanish connection. Its secret must be an active
+ * organization-audience vault entry; the migration trigger enforces that invariant on every write.
  */
 export const orgProviderConnections = pgTable(
   "org_provider_connections",
@@ -768,20 +774,131 @@ export const orgProviderConnections = pgTable(
       .references(() => organizations.id, { onDelete: "cascade" }),
     /** models.dev provider id, e.g. "anthropic". */
     provider: text("provider").notNull(),
-    /** The env var name the key is stored/injected under, e.g. ANTHROPIC_API_KEY. */
+    /** Exact environment key expected by the provider. It must match the bound secret's key. */
     keyName: text("key_name").notNull(),
-    wrappedDek: text("wrapped_dek").notNull(),
-    ciphertext: text("ciphertext").notNull(),
-    keyVersion: integer("key_version").notNull().default(1),
-    createdBy: text("created_by")
-      .notNull()
-      .references(() => user.id),
+    secretId: uuid("secret_id").notNull(),
+    createdBy: text("created_by").references(() => user.id, { onDelete: "set null" }),
     createdAt: now(),
     updatedAt: updatedAt(),
   },
   (t) => ({
     pk: primaryKey({ columns: [t.orgId, t.provider] }),
+    bySecret: index("org_provider_connections_secret_idx").on(t.orgId, t.secretId),
     keyCheck: check("org_provider_connections_key_check", sql`${t.keyName} ~ '^[A-Za-z_][A-Za-z0-9_]*$'`),
+    secretOrgFk: foreignKey({
+      columns: [t.orgId, t.secretId],
+      foreignColumns: [secrets.orgId, secrets.id],
+      name: "org_provider_connections_secret_org_fk",
+    }).onDelete("restrict"),
+  }),
+);
+
+/* ----------------------------- saved run configs ----------------------------- */
+
+/** Personal, named launcher defaults. Prompt and attachments are deliberately excluded. */
+export const skillRunConfigs = pgTable(
+  "skill_run_configs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    skillId: uuid("skill_id").notNull(),
+    creatorId: text("creator_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    model: text("model").notNull(),
+    revision: integer("revision").notNull().default(1),
+    isDefault: boolean("is_default").notNull().default(false),
+    lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    uniqueOrgId: unique("skill_run_configs_org_id_id_uq").on(t.orgId, t.id),
+    uniqueIdentity: unique("skill_run_configs_identity_uq").on(t.orgId, t.id, t.creatorId, t.skillId),
+    uniqueName: unique("skill_run_configs_name_uq").on(t.orgId, t.creatorId, t.skillId, t.name),
+    oneDefault: uniqueIndex("skill_run_configs_default_uq")
+      .on(t.orgId, t.creatorId, t.skillId)
+      .where(sql`${t.isDefault} = true`),
+    byOwnerSkill: index("skill_run_configs_owner_skill_idx").on(t.orgId, t.creatorId, t.skillId, t.updatedAt),
+    skillFk: foreignKey({
+      columns: [t.orgId, t.skillId],
+      foreignColumns: [skills.orgId, skills.id],
+      name: "skill_run_configs_skill_org_fk",
+    }).onDelete("cascade"),
+    revisionCheck: check("skill_run_configs_revision_check", sql`${t.revision} >= 1`),
+    nameCheck: check("skill_run_configs_name_check", sql`char_length(btrim(${t.name})) BETWEEN 1 AND 120`),
+  }),
+);
+
+/** Secret references saved by stable slot; values and versions are resolved only when a run starts. */
+export const skillRunConfigSecrets = pgTable(
+  "skill_run_config_secrets",
+  {
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    configId: uuid("config_id").notNull(),
+    skillId: uuid("skill_id").notNull(),
+    slotId: uuid("slot_id").notNull(),
+    secretId: uuid("secret_id").notNull(),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.orgId, t.configId, t.skillId, t.slotId] }),
+    bySecret: index("skill_run_config_secrets_secret_idx").on(t.orgId, t.secretId),
+    configFk: foreignKey({
+      columns: [t.orgId, t.configId],
+      foreignColumns: [skillRunConfigs.orgId, skillRunConfigs.id],
+      name: "skill_run_config_secrets_config_org_fk",
+    }).onDelete("cascade"),
+    slotFk: foreignKey({
+      columns: [t.orgId, t.skillId, t.slotId],
+      foreignColumns: [skillSecretSlots.orgId, skillSecretSlots.skillId, skillSecretSlots.slotId],
+      name: "skill_run_config_secrets_slot_org_fk",
+    }).onDelete("cascade"),
+    secretFk: foreignKey({
+      columns: [t.orgId, t.secretId],
+      foreignColumns: [secrets.orgId, secrets.id],
+      name: "skill_run_config_secrets_secret_org_fk",
+    }).onDelete("restrict"),
+  }),
+);
+
+/** Non-sensitive values saved for manifest-declared environment variables. */
+export const skillRunConfigVariables = pgTable(
+  "skill_run_config_variables",
+  {
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    configId: uuid("config_id").notNull(),
+    skillId: uuid("skill_id").notNull(),
+    envKey: text("env_key").notNull(),
+    value: text("value").notNull(),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.orgId, t.configId, t.skillId, t.envKey] }),
+    configFk: foreignKey({
+      columns: [t.orgId, t.configId],
+      foreignColumns: [skillRunConfigs.orgId, skillRunConfigs.id],
+      name: "skill_run_config_variables_config_org_fk",
+    }).onDelete("cascade"),
+    skillFk: foreignKey({
+      columns: [t.orgId, t.skillId],
+      foreignColumns: [skills.orgId, skills.id],
+      name: "skill_run_config_variables_skill_org_fk",
+    }).onDelete("cascade"),
+    envKeyCheck: check(
+      "skill_run_config_variables_key_check",
+      sql`${t.envKey} ~ '^[A-Za-z_][A-Za-z0-9_]*$' AND ${t.envKey} !~ '^OPENCODE_SERVER_'`,
+    ),
+    valueSizeCheck: check("skill_run_config_variables_value_size_check", sql`octet_length(${t.value}) <= 32768`),
   }),
 );
 
@@ -833,7 +950,50 @@ export const orgModelPreferences = pgTable(
 
 /* ---------------------------------- skill runs ---------------------------------- */
 
-export const skillRunStatusEnum = pgEnum("skill_run_status", ["starting", "running", "frozen", "error"]);
+export const skillRunStatusEnum = pgEnum("skill_run_status", [
+  "queued",
+  "starting",
+  "running",
+  "frozen",
+  "error",
+  "canceled",
+]);
+export const skillRunPhaseEnum = pgEnum("skill_run_phase", [
+  "queued",
+  "resolve_inputs",
+  "fork",
+  "push_workspace",
+  "start_server",
+  "healthcheck",
+  "create_session",
+  "prompt",
+  "record",
+  "collect_artifacts",
+  "freeze",
+  "cancel",
+  "cleanup",
+  "complete",
+]);
+export const skillRunSecretProvenanceEnum = pgEnum("skill_run_secret_provenance", [
+  "skill",
+  "model_provider",
+  "runtime",
+]);
+export const skillRunJobStatusEnum = pgEnum("skill_run_job_status", [
+  "queued",
+  "leased",
+  "completed",
+  "failed",
+  "canceled",
+]);
+export const skillRunPromptKindEnum = pgEnum("skill_run_prompt_kind", ["initial", "follow_up"]);
+export const skillRunPromptStatusEnum = pgEnum("skill_run_prompt_status", [
+  "queued",
+  "processing",
+  "completed",
+  "error",
+  "canceled",
+]);
 
 /**
  * Structural mirror of the contracts `RunChatHistoryItem` (db stays contracts-free). The transcript
@@ -871,15 +1031,22 @@ export const skillRuns = pgTable(
     creatorId: text("creator_id")
       .notNull()
       .references(() => user.id, { onDelete: "cascade" }),
-    /** Published skill version pinned at launch (what actually ran). */
-    skillVersion: text("skill_version"),
+    /** Exact root version and its display snapshot at launch. */
+    skillVersionId: uuid("skill_version_id").notNull(),
+    skillVersion: text("skill_version").notNull(),
+    runConfigId: uuid("run_config_id"),
+    runConfigNameSnapshot: text("run_config_name_snapshot"),
+    idempotencyKey: text("idempotency_key").notNull(),
+    payloadHash: text("payload_hash").notNull(),
     /** OpenCode model ref `provider/model-id` (validated against the models.dev catalog). */
     model: text("model").notNull(),
     /** The original launch prompt (list rows show an excerpt). */
     prompt: text("prompt").notNull(),
-    status: skillRunStatusEnum("status").notNull().default("starting"),
-    /** Launch step in progress (while `starting`) or a human error message (when `error`). */
-    statusDetail: text("status_detail"),
+    status: skillRunStatusEnum("status").notNull().default("queued"),
+    phase: skillRunPhaseEnum("phase").notNull().default("queued"),
+    errorCode: text("error_code"),
+    userMessage: text("user_message"),
+    cancelRequestedAt: timestamp("cancel_requested_at", { withTimezone: true }),
     /** Deterministic sandbox name: run-<org8>-<run8>. */
     sandboxName: text("sandbox_name"),
     sandboxId: text("sandbox_id"),
@@ -889,7 +1056,7 @@ export const skillRuns = pgTable(
     goldenSnapshotId: text("golden_snapshot_id"),
     opencodeVersion: text("opencode_version"),
     opencodeSessionId: text("opencode_session_id"),
-    /** Per-run OPENCODE_SERVER_PASSWORD as "wrappedDek|ciphertext" (secretbox). Write-only. */
+    /** Opaque master-key encrypted OPENCODE_SERVER_PASSWORD. Never returned by ordinary queries. */
     serverPasswordEnc: text("server_password_enc"),
     /** Sandbox inactivity window; also the freeze window for the recorder. */
     timeoutMs: integer("timeout_ms").notNull().default(300000),
@@ -903,15 +1070,300 @@ export const skillRuns = pgTable(
     updatedAt: updatedAt(),
   },
   (t) => ({
-    // Supports org-scoped composite FKs from the attachment/artifact tables (skills pattern).
     uniqueOrgId: unique("skill_runs_org_id_id_uq").on(t.orgId, t.id),
+    uniqueOrgIdCreator: unique("skill_runs_org_id_id_creator_uq").on(t.orgId, t.id, t.creatorId),
+    uniqueIdempotency: unique("skill_runs_idempotency_uq").on(
+      t.orgId,
+      t.creatorId,
+      t.skillId,
+      t.idempotencyKey,
+    ),
     skillFk: foreignKey({
       columns: [t.orgId, t.skillId],
       foreignColumns: [skills.orgId, skills.id],
       name: "skill_runs_skill_org_fk",
     }).onDelete("cascade"),
-    // The Sessions tab query: this user's runs of this skill, newest first.
+    skillVersionFk: foreignKey({
+      columns: [t.orgId, t.skillId, t.skillVersionId],
+      foreignColumns: [skillVersions.orgId, skillVersions.skillId, skillVersions.id],
+      name: "skill_runs_skill_version_org_fk",
+    }).onDelete("restrict"),
+    configFk: foreignKey({
+      columns: [t.orgId, t.runConfigId, t.creatorId, t.skillId],
+      foreignColumns: [
+        skillRunConfigs.orgId,
+        skillRunConfigs.id,
+        skillRunConfigs.creatorId,
+        skillRunConfigs.skillId,
+      ],
+      name: "skill_runs_config_fk",
+    }),
     bySessions: index("skill_runs_sessions_idx").on(t.orgId, t.skillId, t.creatorId, t.createdAt),
+    byCleanup: index("skill_runs_cleanup_idx")
+      .on(t.status, t.updatedAt)
+      .where(sql`${t.sandboxCleanedAt} IS NULL`),
+    timeoutCheck: check("skill_runs_timeout_check", sql`${t.timeoutMs} BETWEEN 10000 AND 3600000`),
+    idempotencyKeyCheck: check(
+      "skill_runs_idempotency_key_check",
+      sql`char_length(${t.idempotencyKey}) BETWEEN 8 AND 200`,
+    ),
+    payloadHashCheck: check("skill_runs_payload_hash_check", sql`char_length(${t.payloadHash}) BETWEEN 32 AND 128`),
+  }),
+);
+
+/** Immutable root + dependency closure, pinned to exact published version rows. */
+export const skillRunSkills = pgTable(
+  "skill_run_skills",
+  {
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    runId: uuid("run_id").notNull(),
+    skillId: uuid("skill_id").notNull(),
+    skillVersionId: uuid("skill_version_id").notNull(),
+    isRoot: boolean("is_root").notNull().default(false),
+    mountOrder: integer("mount_order").notNull(),
+    createdAt: now(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.orgId, t.runId, t.skillId] }),
+    oneRoot: uniqueIndex("skill_run_skills_root_uq")
+      .on(t.orgId, t.runId)
+      .where(sql`${t.isRoot} = true`),
+    uniqueMountOrder: unique("skill_run_skills_mount_order_uq").on(t.orgId, t.runId, t.mountOrder),
+    runFk: foreignKey({
+      columns: [t.orgId, t.runId],
+      foreignColumns: [skillRuns.orgId, skillRuns.id],
+      name: "skill_run_skills_run_org_fk",
+    }).onDelete("cascade"),
+    versionFk: foreignKey({
+      columns: [t.orgId, t.skillId, t.skillVersionId],
+      foreignColumns: [skillVersions.orgId, skillVersions.skillId, skillVersions.id],
+      name: "skill_run_skills_version_org_fk",
+    }).onDelete("restrict"),
+    mountOrderCheck: check("skill_run_skills_mount_order_check", sql`${t.mountOrder} >= 0`),
+  }),
+);
+
+/** Immutable references to the exact vault versions selected for a run. */
+export const skillRunSecretInputs = pgTable(
+  "skill_run_secret_inputs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    runId: uuid("run_id").notNull(),
+    skillId: uuid("skill_id"),
+    slotId: uuid("slot_id"),
+    sourceKey: text("source_key").notNull(),
+    envKey: text("env_key").notNull(),
+    secretId: uuid("secret_id"),
+    secretVersion: integer("secret_version"),
+    secretNameSnapshot: text("secret_name_snapshot"),
+    provenance: skillRunSecretProvenanceEnum("provenance").notNull(),
+    required: boolean("required").notNull().default(true),
+    createdAt: now(),
+  },
+  (t) => ({
+    uniqueSource: unique("skill_run_secret_inputs_source_uq").on(
+      t.orgId,
+      t.runId,
+      t.provenance,
+      t.sourceKey,
+    ),
+    byRunEnv: index("skill_run_secret_inputs_run_env_idx").on(t.orgId, t.runId, t.envKey),
+    runFk: foreignKey({
+      columns: [t.orgId, t.runId],
+      foreignColumns: [skillRuns.orgId, skillRuns.id],
+      name: "skill_run_secret_inputs_run_org_fk",
+    }).onDelete("cascade"),
+    skillFk: foreignKey({
+      columns: [t.orgId, t.skillId],
+      foreignColumns: [skills.orgId, skills.id],
+      name: "skill_run_secret_inputs_skill_org_fk",
+    }).onDelete("restrict"),
+    slotFk: foreignKey({
+      columns: [t.orgId, t.skillId, t.slotId],
+      foreignColumns: [skillSecretSlots.orgId, skillSecretSlots.skillId, skillSecretSlots.slotId],
+      name: "skill_run_secret_inputs_slot_org_fk",
+    }).onDelete("restrict"),
+    secretVersionFk: foreignKey({
+      columns: [t.orgId, t.secretId, t.secretVersion],
+      foreignColumns: [secretVersions.orgId, secretVersions.secretId, secretVersions.version],
+      name: "skill_run_secret_inputs_secret_version_org_fk",
+    }).onDelete("restrict"),
+    envKeyCheck: check(
+      "skill_run_secret_inputs_key_check",
+      sql`${t.envKey} ~ '^[A-Za-z_][A-Za-z0-9_]*$'
+        AND (${t.provenance} = 'runtime' OR ${t.envKey} !~ '^OPENCODE_SERVER_')`,
+    ),
+    provenanceCheck: check(
+      "skill_run_secret_inputs_provenance_check",
+      sql`((${t.provenance} = 'runtime' AND ${t.secretId} IS NULL AND ${t.secretVersion} IS NULL)
+          OR (${t.provenance} IN ('skill', 'model_provider') AND ${t.secretId} IS NOT NULL AND ${t.secretVersion} IS NOT NULL))
+        AND (${t.provenance} <> 'skill' OR (${t.skillId} IS NOT NULL AND ${t.slotId} IS NOT NULL))`,
+    ),
+  }),
+);
+
+/** Immutable non-sensitive environment values actually injected into the sandbox. */
+export const skillRunVariableInputs = pgTable(
+  "skill_run_variable_inputs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    runId: uuid("run_id").notNull(),
+    skillId: uuid("skill_id").notNull(),
+    envKey: text("env_key").notNull(),
+    value: text("value").notNull(),
+    createdAt: now(),
+  },
+  (t) => ({
+    uniqueDeclaration: unique("skill_run_variable_inputs_declaration_uq").on(
+      t.orgId,
+      t.runId,
+      t.skillId,
+      t.envKey,
+    ),
+    byRunEnv: index("skill_run_variable_inputs_run_env_idx").on(t.orgId, t.runId, t.envKey),
+    runFk: foreignKey({
+      columns: [t.orgId, t.runId],
+      foreignColumns: [skillRuns.orgId, skillRuns.id],
+      name: "skill_run_variable_inputs_run_org_fk",
+    }).onDelete("cascade"),
+    skillFk: foreignKey({
+      columns: [t.orgId, t.skillId],
+      foreignColumns: [skills.orgId, skills.id],
+      name: "skill_run_variable_inputs_skill_org_fk",
+    }).onDelete("restrict"),
+    envKeyCheck: check(
+      "skill_run_variable_inputs_key_check",
+      sql`${t.envKey} ~ '^[A-Za-z_][A-Za-z0-9_]*$' AND ${t.envKey} !~ '^OPENCODE_SERVER_'`,
+    ),
+    valueSizeCheck: check("skill_run_variable_inputs_value_size_check", sql`octet_length(${t.value}) <= 32768`),
+  }),
+);
+
+/** One durable orchestration row per run, reclaimed through a short PostgreSQL lease. */
+export const skillRunJobs = pgTable(
+  "skill_run_jobs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    runId: uuid("run_id").notNull(),
+    creatorId: text("creator_id").notNull(),
+    status: skillRunJobStatusEnum("status").notNull().default("queued"),
+    phase: skillRunPhaseEnum("phase").notNull().default("queued"),
+    attempt: integer("attempt").notNull().default(0),
+    maxAttempts: integer("max_attempts").notNull().default(3),
+    availableAt: timestamp("available_at", { withTimezone: true }).notNull().defaultNow(),
+    leaseOwner: text("lease_owner"),
+    leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
+    heartbeatAt: timestamp("heartbeat_at", { withTimezone: true }),
+    lastErrorCode: text("last_error_code"),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    uniqueRun: unique("skill_run_jobs_run_uq").on(t.orgId, t.runId),
+    claimable: index("skill_run_jobs_claim_idx").on(t.status, t.availableAt, t.leaseExpiresAt),
+    runFk: foreignKey({
+      columns: [t.orgId, t.runId, t.creatorId],
+      foreignColumns: [skillRuns.orgId, skillRuns.id, skillRuns.creatorId],
+      name: "skill_run_jobs_run_creator_fk",
+    }).onDelete("cascade"),
+    attemptCheck: check(
+      "skill_run_jobs_attempt_check",
+      sql`${t.attempt} >= 0 AND ${t.maxAttempts} BETWEEN 1 AND 10 AND ${t.attempt} <= ${t.maxAttempts}`,
+    ),
+    leaseCheck: check(
+      "skill_run_jobs_lease_check",
+      sql`(${t.status} = 'leased') = (${t.leaseOwner} IS NOT NULL AND ${t.leaseExpiresAt} IS NOT NULL)`,
+    ),
+  }),
+);
+
+/** Durable initial/follow-up prompt outbox. Deterministic message ids make retries idempotent. */
+export const skillRunPrompts = pgTable(
+  "skill_run_prompts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    runId: uuid("run_id").notNull(),
+    ordinal: integer("ordinal").notNull(),
+    kind: skillRunPromptKindEnum("kind").notNull(),
+    idempotencyKey: text("idempotency_key").notNull(),
+    payloadHash: text("payload_hash").notNull(),
+    messageId: text("message_id").notNull(),
+    prompt: text("prompt").notNull(),
+    status: skillRunPromptStatusEnum("status").notNull().default("queued"),
+    attempt: integer("attempt").notNull().default(0),
+    availableAt: timestamp("available_at", { withTimezone: true }).notNull().defaultNow(),
+    leaseOwner: text("lease_owner"),
+    leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
+    heartbeatAt: timestamp("heartbeat_at", { withTimezone: true }),
+    errorCode: text("error_code"),
+    userMessage: text("user_message"),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    uniqueOrdinal: unique("skill_run_prompts_ordinal_uq").on(t.orgId, t.runId, t.ordinal),
+    uniqueMessage: unique("skill_run_prompts_message_uq").on(t.orgId, t.runId, t.messageId),
+    uniqueIdempotency: unique("skill_run_prompts_idempotency_uq").on(t.orgId, t.runId, t.idempotencyKey),
+    onePending: uniqueIndex("skill_run_prompts_pending_uq")
+      .on(t.orgId, t.runId)
+      .where(sql`${t.status} IN ('queued', 'processing')`),
+    byAvailability: index("skill_run_prompts_available_idx").on(t.status, t.availableAt),
+    runFk: foreignKey({
+      columns: [t.orgId, t.runId],
+      foreignColumns: [skillRuns.orgId, skillRuns.id],
+      name: "skill_run_prompts_run_org_fk",
+    }).onDelete("cascade"),
+    ordinalCheck: check("skill_run_prompts_ordinal_check", sql`${t.ordinal} >= 0`),
+    attemptCheck: check("skill_run_prompts_attempt_check", sql`${t.attempt} BETWEEN 0 AND 10`),
+    idempotencyKeyCheck: check(
+      "skill_run_prompts_idempotency_key_check",
+      sql`char_length(${t.idempotencyKey}) BETWEEN 8 AND 200`,
+    ),
+    payloadHashCheck: check(
+      "skill_run_prompts_payload_hash_check",
+      sql`char_length(${t.payloadHash}) BETWEEN 32 AND 128`,
+    ),
+  }),
+);
+
+/** Redacted, normalized, monotonically sequenced events used for replayable SSE. */
+export const skillRunEvents = pgTable(
+  "skill_run_events",
+  {
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    runId: uuid("run_id").notNull(),
+    sequence: integer("sequence").notNull(),
+    type: text("type").notNull(),
+    payload: jsonb("payload").$type<Record<string, unknown>>().notNull().default({}),
+    createdAt: now(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.orgId, t.runId, t.sequence] }),
+    byRetention: index("skill_run_events_retention_idx").on(t.createdAt),
+    runFk: foreignKey({
+      columns: [t.orgId, t.runId],
+      foreignColumns: [skillRuns.orgId, skillRuns.id],
+      name: "skill_run_events_run_org_fk",
+    }).onDelete("cascade"),
+    sequenceCheck: check("skill_run_events_sequence_check", sql`${t.sequence} > 0`),
+    typeCheck: check("skill_run_events_type_check", sql`char_length(${t.type}) BETWEEN 1 AND 100`),
   }),
 );
 
@@ -925,7 +1377,7 @@ export const skillRunAttachments = pgTable(
     fileName: text("file_name").notNull(),
     contentType: text("content_type").notNull(),
     byteSize: integer("byte_size").notNull(),
-    storageKey: text("storage_key").notNull(),
+    storageKey: text("storage_key").notNull().unique(),
     createdAt: now(),
   },
   (t) => ({
@@ -935,6 +1387,10 @@ export const skillRunAttachments = pgTable(
       name: "skill_run_attachments_run_fk",
     }).onDelete("cascade"),
     byRun: index("skill_run_attachments_run_idx").on(t.orgId, t.runId),
+    sizeCheck: check(
+      "skill_run_attachments_size_check",
+      sql`${t.byteSize} > 0 AND ${t.byteSize} <= 10485760`,
+    ),
   }),
 );
 
@@ -960,13 +1416,17 @@ export const skillRunArtifacts = pgTable(
     publishedAt: timestamp("published_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => ({
-    uniqueRunPath: unique("skill_run_artifacts_run_path_uq").on(t.runId, t.path),
+    uniqueRunPath: unique("skill_run_artifacts_run_path_uq").on(t.orgId, t.runId, t.path),
     runFk: foreignKey({
       columns: [t.orgId, t.runId],
       foreignColumns: [skillRuns.orgId, skillRuns.id],
       name: "skill_run_artifacts_run_fk",
     }).onDelete("cascade"),
     byRun: index("skill_run_artifacts_run_idx").on(t.orgId, t.runId),
+    sizeCheck: check(
+      "skill_run_artifacts_size_check",
+      sql`${t.byteSize} >= 0 AND ${t.byteSize} <= 10485760`,
+    ),
   }),
 );
 
