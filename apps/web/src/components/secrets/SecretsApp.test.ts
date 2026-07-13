@@ -85,8 +85,8 @@ async function mount(initialSecrets = rows) {
       initialSecrets,
       members,
       me: { id: owner.id, name: owner.name, email: "ada@example.com", initials: owner.initials, avatarUrl: null },
-      orgs: [{ id: "org-1", name: "Acme", slug: "acme", kind: "team", plan: "team", myRole: "owner", color: null, logoUrl: null }],
-      currentOrg: { id: "org-1", name: "Acme", slug: "acme", kind: "team", plan: "team", myRole: "owner", color: null, logoUrl: null },
+      orgs: [{ id: "org-1", name: "Acme", slug: "acme", kind: "team", myRole: "owner", color: null, logoUrl: null }],
+      currentOrg: { id: "org-1", name: "Acme", slug: "acme", kind: "team", myRole: "owner", color: null, logoUrl: null },
       initialCreateKey: null,
       navigation: {
         mineTreeRows: [],
