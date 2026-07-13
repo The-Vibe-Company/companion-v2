@@ -181,15 +181,21 @@ export async function processStripeWebhook(input: {
   database?: Db;
 }): Promise<"processed" | "duplicate" | "ignored"> {
   const database = input.database ?? db;
-  const billing = input.subscriptionId
+  // A new Checkout subscription is not linked in our row yet: Stripe's first event already carries
+  // the subscription id, while our durable correlation key is still the Customer id. Try both so
+  // checkout.session.completed and customer.subscription.created can bootstrap the relationship.
+  const bySubscription = input.subscriptionId
     ? await database.query.billingSubscriptions.findFirst({
         where: eq(schema.billingSubscriptions.stripeSubscriptionId, input.subscriptionId),
       })
-    : input.customerId
+    : null;
+  const billing =
+    bySubscription ??
+    (input.customerId
       ? await database.query.billingSubscriptions.findFirst({
           where: eq(schema.billingSubscriptions.stripeCustomerId, input.customerId),
         })
-      : null;
+      : null);
   if (!billing) return "ignored";
   const [inserted] = await database
     .insert(schema.stripeWebhookEvents)
