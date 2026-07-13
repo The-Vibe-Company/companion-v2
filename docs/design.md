@@ -237,8 +237,11 @@ Companion-reported install state; exact disk inventory remains local in `~/.comp
 `api_tokens` holds scoped personal access tokens for programmatic publish/install.
 Only the `sha256` `token_hash` is stored (the plaintext `cmp_pat_…` is shown once); each row carries
 `scopes` (`skills:read` / `skills:write` / `secrets:read` / `secrets:write`), an `expires_at`
-(90-day default), and `revoked_at`. `secrets:write` is deliberately narrow: it permits write-only
-creation but not rotation, ACL changes, binding, deletion, or any plaintext read.
+(90-day default), and `revoked_at`. `secrets:write` gives a PAT the same metadata and binding mutation
+capabilities as its signed-in user: create, rename, rotate, change audience/recipients, bind/unbind,
+manage suggestions, and delete. The service still enforces workspace membership, secret
+ownership/audience access, skill access, and slot identity. Plaintext remains write-only except
+through the separate `secrets:read` one-time retrieval protocol.
 
 **Secret vault and skill projections.** `secrets` stores metadata, owner, audience (`personal`,
 `restricted`, or dynamic `organization`), current version, and soft-disable/delete timestamps.
@@ -488,15 +491,15 @@ persisting so delivery order cannot corrupt local state.
   session-authenticated, tenant-scoped, and allowed for any member.
 - Secrets: `GET/POST /v1/secrets`, `GET/PATCH/DELETE /v1/secrets/:id`, and
   `POST /v1/secrets/:id/rotate` back the metadata-only `/secrets` vault. A PAT with `secrets:write`
-  may call only `POST /v1/secrets`; every other vault and binding mutation requires a browser session.
+  has the same mutation capabilities as its signed-in user; there is no browser-only Secrets gate.
   Skill configuration uses
   `GET /v1/skills/:slug/secret-configuration`, `PUT/DELETE
   /v1/skills/:slug/secret-bindings/:slotId`, `PUT/DELETE
   /v1/skills/:slug/secret-suggestions/:slotId`, and the suggestion acceptance endpoint. Retrieval uses
   `POST /v1/secret-retrievals/preflight`, `POST /v1/secret-retrievals/:planId/grant`, and
   `POST /v1/secret-grants/redeem`. A PAT with `secrets:read` may read authorized metadata and run the
-  retrieval protocol; `secrets:write` may create a write-only personal/restricted/organization
-  secret, but cannot rotate, share, bind, suggest, or delete it.
+  retrieval protocol; `secrets:write` covers all vault, binding, and suggestion mutations while the
+  service keeps the normal owner, audience, workspace, skill-access, and stable-slot checks.
 - Local skills (Companion skills): `GET /v1/local-skills` (built-in catalog with the caller's
   per-machine status), `GET /v1/local-skills/:key`, `GET /v1/local-skills/:key/package` (download the
   bundled skill as `.zip`), and `POST /v1/local-skills/:key/installed` (the install callback: the
@@ -521,10 +524,10 @@ accepted **only** on the PAT-enabled skills endpoints (`GET /v1/skills`, `POST /
 `GET /v1/skills/:slug/versions/:version/package`,
 `GET /v1/skills/:slug/versions/:version/files`, the skills install/dependency/archive/share/label
 surfaces, `GET /v1/orgs/current/skill-naming-policy`, the `/v1/local-skills*` endpoints, and the
-metadata/configuration/retrieval Secrets reads and write-only secret creation listed above); every
+Secrets metadata, configuration, retrieval, vault, binding, and suggestion routes listed above); every
 other endpoint rejects tokens. Token requests are scope-gated (`skills:write` to publish/create/rename/mutate,
 `skills:read` to read/download and read the org skill-naming policy, `secrets:read` to read authorized
-secret metadata and perform preflight/grant/redemption, `secrets:write` to create a write-only secret).
+secret metadata and perform preflight/grant/redemption, `secrets:write` for every Secrets mutation).
 Reading the local-skills catalog
 and downloading its package require `skills:read`; the install callback
 (`POST /v1/local-skills/:key/installed`) mutates state and writes an audit row, so it requires
@@ -541,7 +544,8 @@ using the slug at publish time; a later rename does not move historical archive 
 per-version package endpoint repackages them as `.zip` on the fly. Clients never receive S3
 admin credentials.
 
-The bundled Companion skill performs write-only secret creation and secret-aware install/update/sync.
+The bundled Companion skill performs write-only secret creation and binding plus secret-aware
+install/update/sync.
 Its general Use prompt requests `skills:read + skills:write + secrets:read + secrets:write`; focused
 skill-install prompts request only `skills:read + secrets:read`. It creates through the dedicated
 stdin/private-prompt helper, then preflights the exact requested versions and dependency closure before

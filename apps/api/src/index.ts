@@ -2310,8 +2310,8 @@ app.post("/v1/local-skills/:key/installed", async (c) => {
   }
 });
 
-// Secrets metadata/retrieval use `secrets:read`. A Companion PAT may create write-only values with
-// `secrets:write`; rotation, ACL changes, binding, and deletion stay browser-session only.
+// Secrets metadata/retrieval use `secrets:read`; every Secrets mutation uses `secrets:write`.
+// PAT callers have the same Secrets capabilities as their signed-in user inside the token's workspace.
 app.get("/v1/secrets", async (c) => {
   try {
     assertSecretsConfigured();
@@ -2355,9 +2355,10 @@ app.get("/v1/secrets/:id", async (c) => {
 app.patch("/v1/secrets/:id", async (c) => {
   try {
     assertSecretsConfigured();
-    if (isTokenRequest(c)) throw new Error("personal access tokens cannot manage secrets");
+    actorFromContext(c, true);
+    requireScope(c, "secrets:write");
     const value = updateSecretInputSchema.parse(await c.req.json());
-    return c.json(await withTenant(c, ({ actor, orgId, database }) => updateSecret({ actor, orgId, secretId: c.req.param("id"), value, database })));
+    return c.json(await withTenant(c, ({ actor, orgId, database }) => updateSecret({ actor, orgId, secretId: c.req.param("id"), value, database }), true));
   } catch (error) {
     return secretRouteError(c, error);
   }
@@ -2366,8 +2367,9 @@ app.patch("/v1/secrets/:id", async (c) => {
 app.delete("/v1/secrets/:id", async (c) => {
   try {
     assertSecretsConfigured();
-    if (isTokenRequest(c)) throw new Error("personal access tokens cannot manage secrets");
-    await withTenant(c, ({ actor, orgId, database }) => deleteSecret({ actor, orgId, secretId: c.req.param("id"), database }));
+    actorFromContext(c, true);
+    requireScope(c, "secrets:write");
+    await withTenant(c, ({ actor, orgId, database }) => deleteSecret({ actor, orgId, secretId: c.req.param("id"), database }), true);
     return c.json({ ok: true as const });
   } catch (error) {
     return secretRouteError(c, error);
@@ -2377,9 +2379,10 @@ app.delete("/v1/secrets/:id", async (c) => {
 app.post("/v1/secrets/:id/rotate", async (c) => {
   try {
     assertSecretsConfigured();
-    if (isTokenRequest(c)) throw new Error("personal access tokens cannot manage secrets");
+    actorFromContext(c, true);
+    requireScope(c, "secrets:write");
     const value = rotateSecretInputSchema.parse(await c.req.json());
-    return c.json(await withTenant(c, ({ actor, orgId, database }) => rotateSecret({ actor, orgId, secretId: c.req.param("id"), value: value.value, database })));
+    return c.json(await withTenant(c, ({ actor, orgId, database }) => rotateSecret({ actor, orgId, secretId: c.req.param("id"), value: value.value, database }), true));
   } catch (error) {
     return secretRouteError(c, error);
   }
@@ -2399,9 +2402,10 @@ app.get("/v1/skills/:slug/secret-configuration", async (c) => {
 app.put("/v1/skills/:slug/secret-bindings/:slotId", async (c) => {
   try {
     assertSecretsConfigured();
-    if (isTokenRequest(c)) throw new Error("personal access tokens cannot change secret bindings");
+    actorFromContext(c, true);
+    requireScope(c, "secrets:write");
     const value = setSecretBindingInputSchema.parse(await c.req.json());
-    return c.json(await withTenant(c, ({ actor, orgId, database }) => setSkillSecretBinding({ actor, orgId, slug: c.req.param("slug"), slotId: c.req.param("slotId"), secretId: value.secret_id, database })));
+    return c.json(await withTenant(c, ({ actor, orgId, database }) => setSkillSecretBinding({ actor, orgId, slug: c.req.param("slug"), slotId: c.req.param("slotId"), secretId: value.secret_id, database }), true));
   } catch (error) {
     return secretRouteError(c, error);
   }
@@ -2410,8 +2414,9 @@ app.put("/v1/skills/:slug/secret-bindings/:slotId", async (c) => {
 app.delete("/v1/skills/:slug/secret-bindings/:slotId", async (c) => {
   try {
     assertSecretsConfigured();
-    if (isTokenRequest(c)) throw new Error("personal access tokens cannot change secret bindings");
-    return c.json(await withTenant(c, ({ actor, orgId, database }) => removeSkillSecretBinding({ actor, orgId, slug: c.req.param("slug"), slotId: c.req.param("slotId"), database })));
+    actorFromContext(c, true);
+    requireScope(c, "secrets:write");
+    return c.json(await withTenant(c, ({ actor, orgId, database }) => removeSkillSecretBinding({ actor, orgId, slug: c.req.param("slug"), slotId: c.req.param("slotId"), database }), true));
   } catch (error) {
     return secretRouteError(c, error);
   }
@@ -2420,9 +2425,10 @@ app.delete("/v1/skills/:slug/secret-bindings/:slotId", async (c) => {
 app.put("/v1/skills/:slug/secret-suggestions/:slotId", async (c) => {
   try {
     assertSecretsConfigured();
-    if (isTokenRequest(c)) throw new Error("personal access tokens cannot change secret suggestions");
+    actorFromContext(c, true);
+    requireScope(c, "secrets:write");
     const value = setSecretSuggestionInputSchema.parse(await c.req.json());
-    return c.json(await withTenant(c, ({ actor, orgId, database }) => setSkillSecretSuggestion({ actor, orgId, slug: c.req.param("slug"), slotId: c.req.param("slotId"), secretId: value.secret_id, database })));
+    return c.json(await withTenant(c, ({ actor, orgId, database }) => setSkillSecretSuggestion({ actor, orgId, slug: c.req.param("slug"), slotId: c.req.param("slotId"), secretId: value.secret_id, database }), true));
   } catch (error) {
     return secretRouteError(c, error);
   }
@@ -2431,8 +2437,9 @@ app.put("/v1/skills/:slug/secret-suggestions/:slotId", async (c) => {
 app.delete("/v1/skills/:slug/secret-suggestions/:slotId", async (c) => {
   try {
     assertSecretsConfigured();
-    if (isTokenRequest(c)) throw new Error("personal access tokens cannot change secret suggestions");
-    return c.json(await withTenant(c, ({ actor, orgId, database }) => removeSkillSecretSuggestion({ actor, orgId, slug: c.req.param("slug"), slotId: c.req.param("slotId"), database })));
+    actorFromContext(c, true);
+    requireScope(c, "secrets:write");
+    return c.json(await withTenant(c, ({ actor, orgId, database }) => removeSkillSecretSuggestion({ actor, orgId, slug: c.req.param("slug"), slotId: c.req.param("slotId"), database }), true));
   } catch (error) {
     return secretRouteError(c, error);
   }
@@ -2441,8 +2448,9 @@ app.delete("/v1/skills/:slug/secret-suggestions/:slotId", async (c) => {
 app.post("/v1/skills/:slug/secret-suggestions/:slotId/accept", async (c) => {
   try {
     assertSecretsConfigured();
-    if (isTokenRequest(c)) throw new Error("personal access tokens cannot accept secret suggestions");
-    return c.json(await withTenant(c, ({ actor, orgId, database }) => acceptSkillSecretSuggestion({ actor, orgId, slug: c.req.param("slug"), slotId: c.req.param("slotId"), database })));
+    actorFromContext(c, true);
+    requireScope(c, "secrets:write");
+    return c.json(await withTenant(c, ({ actor, orgId, database }) => acceptSkillSecretSuggestion({ actor, orgId, slug: c.req.param("slug"), slotId: c.req.param("slotId"), database }), true));
   } catch (error) {
     return secretRouteError(c, error);
   }
