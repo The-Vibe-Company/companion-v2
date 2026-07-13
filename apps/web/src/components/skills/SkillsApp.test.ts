@@ -52,6 +52,10 @@ const queryMocks = vi.hoisted(() => ({
   shareSkillToOrg: vi.fn(),
 }));
 
+const settingsMocks = vi.hoisted(() => ({
+  fetchSettingsAppData: vi.fn(),
+}));
+
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: vi.fn(), refresh: vi.fn(), prefetch: vi.fn() }),
 }));
@@ -61,6 +65,8 @@ vi.mock("@/lib/queries", () => ({
   versionPackageUrl: (slug: string, version: string) => `/v1/skills/${slug}/versions/${version}/package`,
   ...queryMocks,
 }));
+
+vi.mock("@/lib/settingsClient", () => settingsMocks);
 
 const me: MeVM = { id: "user-1", name: "Ada Lovelace", email: "ada@example.com", initials: "AL", avatarUrl: null };
 const currentOrg: OrgVM = {
@@ -474,6 +480,7 @@ beforeEach(() => {
   queryMocks.setPersonalLabelColor.mockResolvedValue(undefined);
   queryMocks.setPersonalLabelIcon.mockResolvedValue(undefined);
   queryMocks.shareSkillToOrg.mockResolvedValue({ ok: true, slug: "x", scope: "org", shared_dependencies: [] });
+  settingsMocks.fetchSettingsAppData.mockResolvedValue(null);
   mountedRoots = [];
 });
 

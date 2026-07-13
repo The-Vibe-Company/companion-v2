@@ -9,8 +9,9 @@
     "build": "tsup && node scripts/copy-migrations.cjs",
     "migrate": "node dist/migrate.js",
     "start": "node dist/migrate.js && node dist/index.js",
-    "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json",
+    "test": "vitest run",
+    "test:integration": "COMPANION_INTEGRATION_TESTS=1 vitest run --config vitest.integration.config.ts --exclude test/integration/rls.integration.test.ts && COMPANION_INTEGRATION_TESTS=1 COMPANION_DATABASE_POOL_MAX=1 vitest run --config vitest.integration.config.ts test/integration/rls.integration.test.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.744.0",

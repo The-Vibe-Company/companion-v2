@@ -11,7 +11,10 @@ export function getDatabaseUrl(): string {
   return url;
 }
 
-export const sql = postgres(getDatabaseUrl(), { max: 10 });
+const configuredPoolMax = Number.parseInt(process.env.COMPANION_DATABASE_POOL_MAX ?? "10", 10);
+const poolMax = Number.isSafeInteger(configuredPoolMax) && configuredPoolMax > 0 ? configuredPoolMax : 10;
+
+export const sql = postgres(getDatabaseUrl(), { max: poolMax });
 export const db = drizzle(sql, { schema });
 export type Db = typeof db;
 
