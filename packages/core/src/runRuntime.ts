@@ -56,25 +56,40 @@ export interface RunWorkspaceFiles {
 export interface RunSandboxRuntime {
   readonly provider: "vercel";
   /** Step 1 — fork/boot the named sandbox from the golden snapshot; returns id + public domain. */
-  forkFromGolden(input: { ref: SandboxRef; goldenSnapshotId: string }): Promise<{ sandboxId: string; domain: string }>;
+  forkFromGolden(input: {
+    ref: SandboxRef;
+    goldenSnapshotId: string;
+    signal?: AbortSignal;
+  }): Promise<{ sandboxId: string; domain: string }>;
   /** Step 2 — write opencode.json, the skill folder and the attachments into the sandbox FS. */
-  pushWorkspace(input: { ref: SandboxRef; files: RunWorkspaceFiles }): Promise<void>;
+  pushWorkspace(input: { ref: SandboxRef; files: RunWorkspaceFiles; signal?: AbortSignal }): Promise<void>;
   /** Step 3 — launch `opencode serve` detached with the injected env. */
-  startServer(input: { ref: SandboxRef; env: ServeEnv }): Promise<void>;
+  startServer(input: {
+    ref: SandboxRef;
+    env: ServeEnv;
+    /** Abort before/during credential injection when run authority changes. */
+    signal?: AbortSignal;
+  }): Promise<void>;
   /** Step 4 — poll the server through the public domain (basic auth) until healthy. */
-  healthCheck(input: { ref: SandboxRef; domain: string; password: string }): Promise<{ ok: true; ms: number }>;
+  healthCheck(input: {
+    ref: SandboxRef;
+    domain: string;
+    password: string;
+    /** Abort promptly when cancellation, membership, or secret ACL changes while probing. */
+    signal?: AbortSignal;
+  }): Promise<{ ok: true; ms: number }>;
   /** Stop now (freeze). Idempotent. */
-  stop(ref: SandboxRef): Promise<void>;
+  stop(ref: SandboxRef, signal?: AbortSignal): Promise<void>;
   /**
    * Delete the sandbox entirely. Idempotent (a missing/already-deleted sandbox is success), but
    * MUST throw on transient provider failures so callers keep the cleanup owed and retry later.
    */
-  destroy(ref: SandboxRef): Promise<void>;
+  destroy(ref: SandboxRef, signal?: AbortSignal): Promise<void>;
   /**
    * Push the sandbox's hard timeout out by `ms` (Vercel's clock runs from boot, NOT from traffic —
    * without this an active conversation dies mid-stream). Optional: best-effort feature.
    */
-  extendTimeout?(ref: SandboxRef, ms: number): Promise<void>;
+  extendTimeout?(ref: SandboxRef, ms: number, signal?: AbortSignal): Promise<void>;
   /**
    * List + read the files of one sandbox directory (artifact collection). Bounded: depth ≤ 3,
    * files above `maxFileBytes` are skipped, traversal stops at `maxFiles`. Paths are relative
@@ -85,6 +100,8 @@ export interface RunSandboxRuntime {
     dir: string;
     maxFiles: number;
     maxFileBytes: number;
+    /** Bound provider/filesystem calls during cancel, deploy shutdown, or ACL revocation. */
+    signal?: AbortSignal;
   }): Promise<Array<{ path: string; data: Buffer; byteSize: number }>>;
 }
 
@@ -94,6 +111,9 @@ export interface RunChatTarget {
   password: string;
 }
 
+export type RunChatSessionState = "idle" | "busy" | "retry" | "missing";
+export type RunChatMessageState = "missing" | "pending" | "completed" | "error";
+
 /**
  * OpenCode port consumed by the durable worker. Implementations own all SDK-specific types and
  * normalize them into the stable contracts package. `messageId` is persisted before dispatch and
@@ -101,21 +121,27 @@ export interface RunChatTarget {
  */
 export interface RunChatRuntime {
   /** Find a session created by an earlier worker attempt using its deterministic title. */
-  findSessionByTitle(target: RunChatTarget, title: string): Promise<{ id: string; title: string } | null>;
-  createSession(target: RunChatTarget, title: string): Promise<{ id: string; title: string }>;
-  sendPrompt(target: RunChatTarget, sessionId: string, text: string, messageId: string): Promise<void>;
-  loadItems(target: RunChatTarget, sessionId: string): Promise<import("@companion/contracts").RunChatHistoryItem[]>;
+  findSessionByTitle(target: RunChatTarget, title: string, signal?: AbortSignal): Promise<{ id: string; title: string } | null>;
+  createSession(target: RunChatTarget, title: string, signal?: AbortSignal): Promise<{ id: string; title: string }>;
+  /** Reconcile one persisted session after worker crash or recorder reconnect. */
+  getSessionState(target: RunChatTarget, sessionId: string, signal?: AbortSignal): Promise<RunChatSessionState>;
+  /** Exact deterministic user-message + assistant-parent state used for crash-safe completion. */
+  getMessageState(target: RunChatTarget, sessionId: string, messageId: string, signal?: AbortSignal): Promise<RunChatMessageState>;
+  sendPrompt(target: RunChatTarget, sessionId: string, text: string, messageId: string, signal?: AbortSignal): Promise<void>;
+  loadItems(target: RunChatTarget, sessionId: string, signal?: AbortSignal): Promise<import("@companion/contracts").RunChatHistoryItem[]>;
   streamEvents(
     target: RunChatTarget,
     sessionId: string,
     signal: AbortSignal,
     /** Called only after the SDK has established the upstream event subscription. */
     onConnected?: () => void,
+    /** Stable recorder-local identity used to preserve cumulative cursors across reconnects. */
+    cursorKey?: object,
   ): AsyncIterable<import("@companion/contracts").RunChatEvent>;
 }
 
 /** Fetches a stored skill archive (tar.gz bytes) by its storage path — wired to S3 in apps/worker. */
-export type SkillArchiveFetcher = (storagePath: string) => Promise<Buffer>;
+export type SkillArchiveFetcher = (storagePath: string, signal?: AbortSignal) => Promise<Buffer>;
 
 /** Provider error with the fields the run error state renders. */
 export class RunRuntimeError extends Error {

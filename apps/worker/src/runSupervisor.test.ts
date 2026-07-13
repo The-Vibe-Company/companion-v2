@@ -1,7 +1,16 @@
-import { describe, expect, it } from "vitest";
-import { RunRuntimeError } from "@companion/core";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { RunRuntimeError, type RunSandboxRuntime, type SandboxRef } from "@companion/core";
 import { RunBusyError, RunValidationError } from "@companion/core/services";
-import { isTransientRunFailure, runFailureEvent } from "./runSupervisor";
+import {
+  createSandboxTimeoutExtender,
+  isTransientRunFailure,
+  runFailureEvent,
+  sandboxTimeoutExtensionSchedule,
+} from "./runSupervisor";
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 describe("run worker retry classification", () => {
   it("retries provider/runtime outages", () => {
@@ -28,5 +37,38 @@ describe("run worker failure events", () => {
       .toBeNull();
     expect(runFailureEvent("lost_lease", { attempt: 1, code: "runtime_error", message: "Unavailable" }))
       .toBeNull();
+  });
+});
+
+describe("active sandbox hard-timeout extension", () => {
+  it("bounds both the provider extension and refresh cadence", () => {
+    expect(sandboxTimeoutExtensionSchedule(1)).toEqual({ extensionMs: 10_000, intervalMs: 5_000 });
+    expect(sandboxTimeoutExtensionSchedule(300_000)).toEqual({ extensionMs: 300_000, intervalMs: 60_000 });
+    expect(sandboxTimeoutExtensionSchedule(Number.MAX_SAFE_INTEGER)).toEqual({
+      extensionMs: 3_600_000,
+      intervalMs: 60_000,
+    });
+  });
+
+  it("extends immediately and periodically, then stops before teardown", async () => {
+    vi.useFakeTimers();
+    const extendTimeout = vi.fn(async () => undefined);
+    const runtime = { extendTimeout } as unknown as RunSandboxRuntime;
+    const ref: SandboxRef = {
+      sandboxName: "run-test",
+      sandboxId: "sandbox-test",
+      region: "iad1",
+      timeoutMs: 20_000,
+    };
+    const extender = createSandboxTimeoutExtender(runtime);
+    extender.activate(ref);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(extendTimeout).toHaveBeenCalledWith(ref, 20_000, expect.any(AbortSignal));
+
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(extendTimeout).toHaveBeenCalledTimes(3);
+    await extender.stop();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(extendTimeout).toHaveBeenCalledTimes(3);
   });
 });

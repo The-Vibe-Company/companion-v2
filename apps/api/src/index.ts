@@ -100,12 +100,14 @@ import {
   updateRunConfiguration,
   deleteRunConfiguration,
   createRun,
+  listReferencedRunAttachmentKeys,
   enqueueRunPrompt,
   requestRunCancellation,
   listRunEvents,
   listRuns,
   getRun,
   getRunAttachment,
+  isRunWorkerReady,
   RunBusyError,
   RunValidationError,
   type RunControlContext,
@@ -236,7 +238,11 @@ import {
   runEventFrame,
   runReadyFrame,
 } from "./runEvents";
-import { deterministicRunAttachmentId, putRunAttachmentOnce } from "./runAttachments";
+import {
+  cleanupUnreferencedRunAttachments,
+  deterministicRunAttachmentId,
+  putRunAttachmentOnce,
+} from "./runAttachments";
 import { COMPANION_SKILL_KEY } from "@companion/companion-skill";
 import { StripeBillingGateway } from "@companion/billing";
 import {
@@ -966,7 +972,9 @@ app.get("/v1/orgs/:orgId/logo", async (c) => {
   try {
     const actor = actorFromContext(c, true);
     const orgId = c.req.param("orgId");
-    await getOrgLogoAsset({ actor, orgId });
+    await withTenantContext({ orgId, userId: actor.id }, (database) =>
+      getOrgLogoAsset({ actor, orgId, database }),
+    );
     const asset = await getOrgLogo({ orgId });
     if (!asset) return c.json({ error: "logo not found" }, 404);
     return new Response(asset.body, {
@@ -1078,7 +1086,9 @@ app.post("/v1/invitations", async (c) => {
     return c.json(invite);
   } catch (error) {
     if (createdInvite && createdOrgId && createdActor) {
-      await revokeInvitation({ actor: createdActor, orgId: createdOrgId, inviteId: createdInvite.id }).catch((cleanupError) => {
+      await withTenantContext({ orgId: createdOrgId, userId: createdActor.id }, (database) =>
+        revokeInvitation({ actor: createdActor!, orgId: createdOrgId!, inviteId: createdInvite!.id, database }),
+      ).catch((cleanupError) => {
         console.error(`failed to revoke invitation ${createdInvite?.id} after email failure`, cleanupError);
       });
     }
@@ -2762,7 +2772,7 @@ function boundedInteger(raw: string | undefined, fallback: number, min: number, 
 }
 
 /** API-side run context contains catalog/readiness only. Runtime SDKs are composed by apps/worker. */
-async function apiRunContext(): Promise<RunControlContext> {
+async function apiRunContext(input: { includeModels?: boolean } = {}): Promise<RunControlContext> {
   let masterKey: Buffer;
   let secretsAvailable = true;
   try {
@@ -2773,7 +2783,9 @@ async function apiRunContext(): Promise<RunControlContext> {
     masterKey = Buffer.alloc(32);
     secretsAvailable = false;
   }
-  const catalog = await modelCatalog.listModels();
+  // Only run-options needs the complete catalog. Launches resolve their selected model lazily after
+  // createRun has had a chance to return an already-committed idempotent replay.
+  const catalog = input.includeModels ? await modelCatalog.listModels() : null;
   const goldenSnapshotId = process.env.COMPANION_GOLDEN_SNAPSHOT_ID?.trim() || null;
   const enabledSetting = process.env.COMPANION_RUNS_ENABLED?.trim().toLowerCase();
   // The API intentionally does not receive Vercel credentials. Operators enable this only when the
@@ -2792,14 +2804,29 @@ async function apiRunContext(): Promise<RunControlContext> {
     region: process.env.COMPANION_SANDBOX_REGION?.trim() || "iad1",
     timeoutMs: boundedInteger(process.env.COMPANION_SANDBOX_TIMEOUT_MS, 300_000, 10_000, 3_600_000),
     resolveModelKeys: (model) => modelCatalog.resolveModel(model),
-    models: catalog.models,
+    models: catalog?.models,
     runtimeAvailable: missing.length === 0,
     runtimeMessage: missing.length === 0 ? null : `RunSkill is unavailable: configure ${missing.join(", ")}`,
+    resolveRuntimeReadiness:
+      missing.length === 0
+        ? async (database) => {
+            const available = await isRunWorkerReady({ database });
+            return {
+              available,
+              message: available
+                ? null
+                : "RunSkill is unavailable because no configured run worker is currently online.",
+            };
+          }
+        : undefined,
   };
 }
 
-async function withApiRunContext<T>(fn: (ctx: RunControlContext) => Promise<T>): Promise<T> {
-  const ctx = await apiRunContext();
+async function withApiRunContext<T>(
+  fn: (ctx: RunControlContext) => Promise<T>,
+  input: { includeModels?: boolean } = {},
+): Promise<T> {
+  const ctx = await apiRunContext(input);
   try {
     return await fn(ctx);
   } finally {
@@ -2869,10 +2896,12 @@ async function subscribeRunEventCursor(runId: string, callback: (sequence: numbe
 app.get("/v1/skills/:slug/run-options", async (c) => {
   try {
     assertRunSession(c);
-    const options = await withApiRunContext((ctx) =>
-      withTenant(c, ({ actor, orgId, database }) =>
-        getRunOptions({ actor, orgId, slug: c.req.param("slug"), ctx, database }),
-      ),
+    const options = await withApiRunContext(
+      (ctx) =>
+        withTenant(c, ({ actor, orgId, database }) =>
+          getRunOptions({ actor, orgId, slug: c.req.param("slug"), ctx, database }),
+        ),
+      { includeModels: true },
     );
     return c.json(options);
   } catch (error) {
@@ -2964,7 +2993,10 @@ app.post(
         prompt: typeof form.get("prompt") === "string" ? form.get("prompt") : "",
         model: typeof form.get("model") === "string" ? form.get("model") : "",
         skill_version_id: typeof form.get("skill_version_id") === "string" ? form.get("skill_version_id") : "",
+        dependency_pins: typeof form.get("dependency_pins") === "string" ? form.get("dependency_pins") : "",
         inputs: typeof form.get("inputs") === "string" ? form.get("inputs") : "",
+        model_provider_secret_id:
+          typeof form.get("model_provider_secret_id") === "string" ? form.get("model_provider_secret_id") : "",
         run_config_id:
           typeof form.get("run_config_id") === "string" && form.get("run_config_id") !== ""
             ? form.get("run_config_id")
@@ -3015,9 +3047,11 @@ app.post(
               orgId,
               slug,
               skillVersionId: fields.skill_version_id,
+              dependencyPins: fields.dependency_pins,
               prompt: fields.prompt,
               model: fields.model,
               inputs: fields.inputs,
+              modelProviderSecretId: fields.model_provider_secret_id,
               runConfigId: fields.run_config_id,
               idempotencyKey: requestKey,
               attachments,
@@ -3028,8 +3062,17 @@ app.post(
         );
         return c.json(detail, 201);
       } catch (e) {
-        // The run insert rolled back (or upload failed); drop any objects we stored so they don't orphan.
-        await Promise.allSettled(uploadedKeys.map((key) => deleteSkillArchive({ key })));
+        // A createRun rejection can be ambiguous (for example, the transaction committed but its
+        // acknowledgement was lost). Query durable attachment rows in a fresh tenant transaction and
+        // delete only keys proven unreferenced. If that verification itself fails, retain the bytes.
+        await cleanupUnreferencedRunAttachments({
+          storageKeys: uploadedKeys,
+          findReferencedKeys: (storageKeys) =>
+            withTenantContext({ orgId, userId: actor.id }, (database) =>
+              listReferencedRunAttachmentKeys({ actor, orgId, storageKeys, database }),
+            ),
+          deleteObject: (key) => deleteSkillArchive({ key }),
+        });
         throw e;
       }
     } catch (error) {
@@ -3113,6 +3156,7 @@ app.get("/v1/runs/:id/events", async (c) => {
     let wake: (() => void) | null = null;
     let notified = false;
     let readySent = false;
+    let terminalObserved = false;
     const stream = new ReadableStream<Uint8Array>({
       async start(controller) {
         const send = (payload: string) => {
@@ -3170,16 +3214,19 @@ app.get("/v1/runs/:id/events", async (c) => {
             const run = await withTenantContext({ orgId, userId: actor.id }, (database) =>
               getRun({ actor, orgId, runId, database }),
             );
+            const terminal = ["frozen", "error", "canceled"].includes(run.status);
             const action = runDrainAction({
               eventCount: events.length,
               pageSize: 500,
               notified,
-              terminal: ["frozen", "error", "canceled"].includes(run.status),
+              terminal,
+              terminalObserved,
               readySent,
             });
+            terminalObserved = terminal;
             if (action === "continue") continue;
-            // The listener was installed before replay. With no notification during the terminal
-            // read, EOF is a race-free terminal signal.
+            // `runDrainAction` requires a second durable replay after observing terminal state, so
+            // a terminal event is not lost when its NOTIFY callback arrives behind the DB commit.
             if (action === "close") break;
             if (action === "ready") {
               send(runReadyFrame());

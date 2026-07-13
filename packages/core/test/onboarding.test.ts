@@ -50,7 +50,7 @@ describe("completeOnboarding", () => {
 
     await expect(
       completeOnboarding(actor, input({ org: { name: "Acme", color } }), database),
-    ).resolves.toEqual({ orgId: "org-1", inviteTokens: [] });
+    ).resolves.toEqual({ orgId: expect.any(String), inviteTokens: [] });
 
     // org + membership only — no team and no team membership inserts.
     expect(tx.insert).toHaveBeenCalledTimes(2);
@@ -58,6 +58,7 @@ describe("completeOnboarding", () => {
 
   it("creates a domain access row when the owner enables domain access", async () => {
     const tx = {
+      execute: vi.fn(async () => undefined),
       insert: vi
         .fn()
         .mockReturnValueOnce({ values: () => ({ returning: async () => [{ id: "org-1" }] }) }) // organizations
@@ -71,7 +72,7 @@ describe("completeOnboarding", () => {
     } as unknown as Db;
 
     await expect(completeOnboarding(actor, input({ org: { name: "Acme", autoJoin: true } }), database)).resolves.toEqual({
-      orgId: "org-1",
+      orgId: expect.any(String),
       inviteTokens: [],
     });
 
@@ -83,23 +84,11 @@ describe("completeOnboarding", () => {
 describe("domain onboarding context", () => {
   it("returns multiple organizations for the actor's corporate domain", async () => {
     const domainRows = [
-      { orgId: "org-1", name: "Client A", domain: "acme.test" },
-      { orgId: "org-2", name: "Client B", domain: "acme.test" },
+      { org_id: "org-1", name: "Client A", domain: "acme.test", member_count: 2 },
+      { org_id: "org-2", name: "Client B", domain: "acme.test", member_count: 4 },
     ];
-    // One member-count query per matched org.
-    const counts = [{ value: 2 }, { value: 4 }];
     const database = {
-      select: vi.fn((cols: Record<string, unknown>) => {
-        const rows = "orgId" in cols ? domainRows : [counts.shift() ?? { value: 0 }];
-        const builder = {
-          from: () => builder,
-          innerJoin: () => builder,
-          where: () => builder,
-          orderBy: async () => rows,
-          then: (resolve: (value: unknown) => unknown) => Promise.resolve(rows).then(resolve),
-        };
-        return builder;
-      }),
+      execute: vi.fn(async () => domainRows),
     } as unknown as Db;
 
     await expect(getOnboardingContext(actor, database)).resolves.toMatchObject({
@@ -112,13 +101,16 @@ describe("domain onboarding context", () => {
   });
 
   it("rejects joining a selected org that does not allow the actor's domain", async () => {
-    const database = {
+    const tx = {
+      execute: vi.fn(async () => undefined),
       query: { organizationDomains: { findFirst: vi.fn(async () => null) } },
-      transaction: vi.fn(),
+    };
+    const database = {
+      transaction: vi.fn(async (cb: (txArg: typeof tx) => Promise<unknown>) => cb(tx)),
     } as unknown as Db;
 
     await expect(joinOrgByDomain(actor, "org-1", database)).rejects.toThrow("no organization to join for this email domain");
-    expect(database.transaction).not.toHaveBeenCalled();
+    expect(database.transaction).toHaveBeenCalledOnce();
   });
 
   it("rejects domain joining for personal email domains", async () => {

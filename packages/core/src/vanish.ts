@@ -1,7 +1,7 @@
 /**
  * Minimal Vanish (vanish.sh) upload client for run artifacts. Framework-free; the ONLY place that
  * talks to the Vanish API, so any contract drift is isolated here. Uploads happen in the API
- * process with the launcher's decrypted key — the key never enters a sandbox.
+ * worker process with the member's decrypted vault binding — the key never enters a sandbox.
  *
  * Contract (vanish-cli 0.1.22 / vanish.sh): `POST ${apiUrl}/upload` with `Authorization: Bearer`,
  * raw bytes as the body, `X-Filename` for the name, optional `Idempotency-Key`; JSON response with
@@ -9,6 +9,7 @@
  */
 
 const DEFAULT_API_URL = "https://vanish.sh";
+export const VANISH_PUBLIC_URL_MAX = 2_048;
 
 /** Extensions Vanish rejects (executables/scripts) — filtered before upload, never sent. */
 export const VANISH_BLOCKED_EXTENSIONS = [
@@ -48,6 +49,21 @@ export class VanishError extends Error {
   }
 }
 
+export function normalizeVanishPublicUrl(value: string): string {
+  if (value.length > VANISH_PUBLIC_URL_MAX) throw new VanishError("vanish returned an invalid public url");
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new VanishError("vanish returned an invalid public url");
+  }
+  const localHttp = parsed.protocol === "http:" && ["localhost", "127.0.0.1", "::1"].includes(parsed.hostname);
+  if ((parsed.protocol !== "https:" && !localHttp) || parsed.username || parsed.password) {
+    throw new VanishError("vanish returned an invalid public url");
+  }
+  return parsed.toString();
+}
+
 /**
  * Publish one artifact file. `X-Expires-Days` is deliberately omitted — the account tier's default
  * applies. Field-name drift in the response is normalized here (url/id/expiresAt aliases).
@@ -58,6 +74,8 @@ export async function publishRunArtifact(input: {
   bytes: Buffer;
   idempotencyKey?: string;
   apiUrl?: string;
+  /** Cancels promptly on run cancellation, membership loss, provider revocation, or budget expiry. */
+  signal?: AbortSignal;
   /** Test seam. */
   fetcher?: typeof fetch;
 }): Promise<VanishPublishResult> {
@@ -76,7 +94,9 @@ export async function publishRunArtifact(input: {
         ...(input.idempotencyKey ? { "idempotency-key": input.idempotencyKey } : {}),
       },
       body: new Uint8Array(input.bytes),
-      signal: AbortSignal.timeout(60_000),
+      signal: input.signal
+        ? AbortSignal.any([input.signal, AbortSignal.timeout(60_000)])
+        : AbortSignal.timeout(60_000),
     });
   } catch (error) {
     throw new VanishError(`vanish upload failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -101,7 +121,7 @@ export async function publishRunArtifact(input: {
   const url = firstString(payload, ["url", "publicUrl", "public_url", "link"]);
   if (!url) throw new VanishError("vanish upload succeeded but returned no url");
   return {
-    url,
+    url: normalizeVanishPublicUrl(url),
     id: firstString(payload, ["id", "uploadId", "upload_id"]),
     expiresAt: firstString(payload, ["expiresAt", "expires_at", "expiry"]),
   };

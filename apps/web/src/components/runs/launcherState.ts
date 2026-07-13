@@ -134,6 +134,8 @@ export function runDraftBlockers(options: RunOptions, model: string, inputs: Run
       runtime_unavailable: "The model runtime is unavailable.",
       ready: "",
     }[modelOption.readiness]);
+  } else if (!modelOption.provider_secret_pin) {
+    blockers.push("Reload run options to select the model provider secret explicitly.");
   }
 
   const secretBySlot = new Map(inputs.secrets.map((item) => [secretSelectionKey(item.skill_id, item.slot_id), item]));

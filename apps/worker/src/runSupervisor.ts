@@ -12,22 +12,28 @@ import {
 } from "@companion/core";
 import {
   appendRunEvents,
+  beginRunFreeze,
   claimNextRunPrompt,
   claimRunJobs,
   cleanupExpiredRunEvents,
   completeRunPrompt,
   failOrRetryRunJob,
   failRunPrompt,
+  getRunWorkerLeaseControl,
   getDecryptedProviderKey,
+  heartbeatRunWorker,
   heartbeatRunJob,
   heartbeatRunPrompt,
   loadRunExecutionPlan,
   materializeRunWorkspace,
   persistRunTranscript,
   publishRunArtifact,
+  removeRunWorkerHeartbeat,
   RunBusyError,
   RunValidationError,
+  sandboxNameForRun,
   teardownSandbox,
+  terminalizeRevokedRunLease,
   updateRunWorkerState,
   type ActorContext,
   type ClaimedRunJob,
@@ -48,21 +54,35 @@ import { createRunCleanupScheduler } from "./runCleanup";
 
 const ARTIFACT_MAX_FILES = 20;
 const ARTIFACT_MAX_FILE_BYTES = 10 * 1024 * 1024;
+const ARTIFACT_PUBLISH_BUDGET_MS = 120_000;
+const ARTIFACT_PROVIDER_RECHECK_MS = 5_000;
 const PROMPT_POLL_MS = 250;
 const ACL_RECHECK_MS = 15_000;
+const OPENCODE_CALL_TIMEOUT_MS = 30_000;
+const SANDBOX_CONTROL_TIMEOUT_MS = 60_000;
 
 class WorkerShutdown extends Error {}
 class LostLease extends Error {}
 class CancellationRequested extends Error {}
+class ArtifactProviderUnavailable extends Error {}
+
+function abortFailure(signal: AbortSignal): Error {
+  return signal.reason instanceof Error ? signal.reason : new WorkerShutdown();
+}
 
 interface RunControlState {
   status: "queued" | "starting" | "running" | "frozen" | "error" | "canceled";
+  phase: RunPhase;
   cancelRequestedAt: Date | null;
+  sandboxName: string | null;
+  sandboxId: string | null;
+  sandboxDomain: string | null;
+  opencodeSessionId: string | null;
+  timeoutMs: number;
 }
 
 interface RecorderState {
   busy: boolean;
-  idleGeneration: number;
   idleAt: number | null;
   fatal: { code: string; message: string } | null;
 }
@@ -73,25 +93,101 @@ interface RecorderHandle {
   stop(): Promise<void>;
 }
 
+const SANDBOX_TIMEOUT_MIN_MS = 10_000;
+const SANDBOX_TIMEOUT_MAX_MS = 3_600_000;
+
+export function sandboxTimeoutExtensionSchedule(timeoutMs: number): {
+  extensionMs: number;
+  intervalMs: number;
+} {
+  const extensionMs = Math.max(SANDBOX_TIMEOUT_MIN_MS, Math.min(SANDBOX_TIMEOUT_MAX_MS, timeoutMs));
+  return {
+    extensionMs,
+    // Refresh no later than halfway through the provider lease, without hammering its control API.
+    intervalMs: Math.max(5_000, Math.min(60_000, Math.floor(extensionMs / 2))),
+  };
+}
+
+export function createSandboxTimeoutExtender(runtime: NonNullable<RunControlContext["runtime"]>): {
+  activate(ref: SandboxRef): void;
+  stop(): Promise<void>;
+} {
+  let timer: ReturnType<typeof setInterval> | null = null;
+  let activeRef: SandboxRef | null = null;
+  let inFlight: Promise<void> | null = null;
+  let stopped = false;
+
+  const refresh = () => {
+    if (stopped || !activeRef || !runtime.extendTimeout || inFlight) return;
+    const { extensionMs } = sandboxTimeoutExtensionSchedule(activeRef.timeoutMs);
+    inFlight = runtime.extendTimeout(activeRef, extensionMs, AbortSignal.timeout(10_000)).catch(() => undefined).finally(() => {
+      inFlight = null;
+    });
+  };
+
+  return {
+    activate(ref) {
+      if (stopped || timer || !runtime.extendTimeout) return;
+      activeRef = ref;
+      const { intervalMs } = sandboxTimeoutExtensionSchedule(ref.timeoutMs);
+      // Extending immediately gives a deployment at any point in the first interval a full lease.
+      refresh();
+      timer = setInterval(refresh, intervalMs);
+    },
+    async stop() {
+      stopped = true;
+      if (timer) clearInterval(timer);
+      timer = null;
+      await inFlight?.catch(() => undefined);
+      activeRef = null;
+    },
+  };
+}
+
 function actorForJob(job: ClaimedRunJob): ActorContext {
   // Core authorization uses the stable user id. Display fields are intentionally never logged.
   return { id: job.creatorId, email: "", name: "Run owner" };
 }
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
-  if (signal?.aborted) return Promise.reject(new WorkerShutdown());
+  const abortReason = () => signal ? abortFailure(signal) : new WorkerShutdown();
+  if (signal?.aborted) return Promise.reject(abortReason());
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(resolve, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(abortReason());
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
     if (!signal) return;
-    signal.addEventListener(
-      "abort",
-      () => {
-        clearTimeout(timer);
-        reject(new WorkerShutdown());
-      },
-      { once: true },
-    );
+    signal.addEventListener("abort", onAbort, { once: true });
   });
+}
+
+async function withBoundedSignal<T>(input: {
+  parent: AbortSignal;
+  timeoutMs: number;
+  timeoutMessage: string;
+  operation: (signal: AbortSignal) => Promise<T>;
+}): Promise<T> {
+  const abort = new AbortController();
+  const onParentAbort = () => abort.abort(
+    abortFailure(input.parent),
+  );
+  if (input.parent.aborted) onParentAbort();
+  else input.parent.addEventListener("abort", onParentAbort, { once: true });
+  const timer = setTimeout(
+    () => abort.abort(new RunRuntimeError(input.timeoutMessage)),
+    Math.max(1, input.timeoutMs),
+  );
+  try {
+    return await input.operation(abort.signal);
+  } finally {
+    clearTimeout(timer);
+    input.parent.removeEventListener("abort", onParentAbort);
+  }
 }
 
 function errorCode(error: unknown): string {
@@ -147,7 +243,16 @@ async function tenant<T>(job: ClaimedRunJob, fn: (database: Db) => Promise<T>): 
 async function readRunControl(job: ClaimedRunJob): Promise<RunControlState> {
   return tenant(job, async (database) => {
     const rows = await database
-      .select({ status: schema.skillRuns.status, cancelRequestedAt: schema.skillRuns.cancelRequestedAt })
+      .select({
+        status: schema.skillRuns.status,
+        phase: schema.skillRuns.phase,
+        cancelRequestedAt: schema.skillRuns.cancelRequestedAt,
+        sandboxName: schema.skillRuns.sandboxName,
+        sandboxId: schema.skillRuns.sandboxId,
+        sandboxDomain: schema.skillRuns.sandboxDomain,
+        opencodeSessionId: schema.skillRuns.opencodeSessionId,
+        timeoutMs: schema.skillRuns.timeoutMs,
+      })
       .from(schema.skillRuns)
       .where(
         and(
@@ -187,10 +292,19 @@ async function appendEvents(
   actor: ActorContext,
   events: RunChatEvent[],
   redactor: RunRedactor,
+  requireLease = true,
 ): Promise<void> {
   if (events.length === 0) return;
   await tenant(job, (database) =>
-    appendRunEvents({ actor, orgId: job.orgId, runId: job.runId, events, redactor, database }),
+    appendRunEvents({
+      actor,
+      orgId: job.orgId,
+      runId: job.runId,
+      events,
+      redactor,
+      workerId: requireLease ? job.leaseOwner ?? undefined : undefined,
+      database,
+    }),
   );
 }
 
@@ -228,10 +342,6 @@ function redactStreamEvent(
   return [event];
 }
 
-function eventFingerprint(event: RunChatEvent): string {
-  return createHash("sha256").update(JSON.stringify(event)).digest("base64url");
-}
-
 function startRecorder(input: {
   job: ClaimedRunJob;
   actor: ActorContext;
@@ -243,27 +353,22 @@ function startRecorder(input: {
   shutdownSignal: AbortSignal;
 }): RecorderHandle {
   const chat = input.ctx.chat!;
-  const state: RecorderState = { busy: false, idleGeneration: 0, idleAt: null, fatal: null };
+  const state: RecorderState = { busy: false, idleAt: null, fatal: null };
   const abort = new AbortController();
+  const recorderSignal = AbortSignal.any([abort.signal, input.shutdownSignal]);
   const streams = new Map<string, RunStreamingRedactor>();
   let stopped = false;
   let resolveStarted!: () => void;
   const started = new Promise<void>((resolve) => { resolveStarted = resolve; });
-  const recent: string[] = [];
-  const recentSet = new Set<string>();
-
-  const remember = (event: RunChatEvent) => {
-    const fingerprint = eventFingerprint(event);
-    recent.push(fingerprint);
-    recentSet.add(fingerprint);
-    if (recent.length > 200) {
-      const removed = recent.shift()!;
-      if (!recent.includes(removed)) recentSet.delete(removed);
-    }
-  };
-
-  const persistSnapshot = async () => {
-    const items = await chat.loadItems(input.target, input.sessionId);
+  let startedResolved = false;
+  let idleSnapshotFresh = false;
+  const persistSnapshot = async (emitIdleBarrier = false) => {
+    const items = await withBoundedSignal({
+      parent: recorderSignal,
+      timeoutMs: OPENCODE_CALL_TIMEOUT_MS,
+      timeoutMessage: "the OpenCode transcript read timed out",
+      operation: (signal) => chat.loadItems(input.target, input.sessionId, signal),
+    });
     await tenant(input.job, (database) =>
       persistRunTranscript({
         actor: input.actor,
@@ -271,40 +376,99 @@ function startRecorder(input: {
         runId: input.job.runId,
         items,
         redactor: input.redactor,
+        barrierEvent: emitIdleBarrier
+          ? { type: "session.idle", session_id: input.sessionId }
+          : undefined,
+        workerId: input.job.leaseOwner ?? undefined,
         database,
       }),
     );
   };
 
   const loop = (async () => {
-    let first = true;
     let reconnectMs = input.config.recorderReconnectMinMs;
-    while (!stopped && !input.shutdownSignal.aborted) {
-      let replaying = !first;
-      first = false;
+    recorderLoop: while (!stopped && !input.shutdownSignal.aborted) {
       try {
+        let connected = false;
+        let resolveConnected!: () => void;
+        const connection = new Promise<void>((resolve) => { resolveConnected = resolve; });
+        const connectionAbort = new AbortController();
+        const connectionTimer = setTimeout(
+          () => connectionAbort.abort(new RunRuntimeError("the run recorder could not connect")),
+          OPENCODE_CALL_TIMEOUT_MS,
+        );
+        const streamSignal = AbortSignal.any([recorderSignal, connectionAbort.signal]);
         const iterator = chat
-          .streamEvents(input.target, input.sessionId, abort.signal, resolveStarted)
+          .streamEvents(input.target, input.sessionId, streamSignal, () => {
+            connected = true;
+            clearTimeout(connectionTimer);
+            resolveConnected();
+          }, abort.signal)
           [Symbol.asyncIterator]();
         let next = iterator.next();
+        try {
+          await Promise.race([
+            connection,
+            next.then(() => {
+              if (!connected) throw new RunRuntimeError("the run recorder closed before connecting");
+            }),
+          ]);
+        } finally {
+          clearTimeout(connectionTimer);
+        }
+        const sessionState = await withBoundedSignal({
+          parent: recorderSignal,
+          timeoutMs: OPENCODE_CALL_TIMEOUT_MS,
+          timeoutMessage: "the OpenCode session status read timed out",
+          operation: (signal) => chat.getSessionState(input.target, input.sessionId, signal),
+        });
+        if (sessionState === "missing") throw new RunRuntimeError("the OpenCode session is unavailable");
+        if (sessionState === "idle" && !idleSnapshotFresh) {
+          // A history read may already include bytes buffered by this subscription. Discard the
+          // subscription first so a persisted snapshot and later event replay can never append the
+          // same delta twice, then reconnect before another prompt is allowed to start.
+          connectionAbort.abort();
+          await iterator.return?.().catch(() => undefined);
+          state.busy = true;
+          await persistSnapshot(true);
+          state.idleAt = Date.now();
+          idleSnapshotFresh = true;
+          continue;
+        }
+        state.busy = sessionState !== "idle";
+        if (state.busy) {
+          state.idleAt = null;
+          idleSnapshotFresh = false;
+        }
+        if (!startedResolved) {
+          startedResolved = true;
+          resolveStarted();
+        }
         while (!stopped && !input.shutdownSignal.aborted) {
           const result = await next;
           if (result.done) break;
           const event = result.value;
           next = iterator.next();
-          const fingerprint = eventFingerprint(event);
-          if (replaying && recentSet.has(fingerprint)) continue;
-          replaying = false;
-          remember(event);
-          if (event.type === "status") state.busy = event.state !== "idle";
+          // Only the atomic transcript + session.idle barrier is allowed to mark the recorder
+          // dispatch-ready. A generic status:idle can arrive before that snapshot is durable.
+          if (event.type === "status" && event.state !== "idle") state.busy = true;
           if (event.type === "run.error") state.fatal = { code: event.code, message: event.message };
+          if (event.type !== "session.idle") idleSnapshotFresh = false;
           const normalized = redactStreamEvent(event, input.redactor, streams);
-          await appendEvents(input.job, input.actor, normalized, input.redactor);
-          if (event.type === "session.idle") {
-            await persistSnapshot();
-            state.busy = false;
+          if (event.type === "session.idle" || (event.type === "status" && event.state === "idle")) {
+            // Stop this subscription before reading history: otherwise an eagerly requested next
+            // event could already be represented in the snapshot and later be persisted twice.
+            // Stay busy until a fresh subscription is established, so no follow-up can race the
+            // snapshot or lose its first response.
+            state.busy = true;
+            connectionAbort.abort();
+            await iterator.return?.().catch(() => undefined);
+            await persistSnapshot(true);
             state.idleAt = Date.now();
-            state.idleGeneration += 1;
+            idleSnapshotFresh = true;
+            continue recorderLoop;
+          } else {
+            await appendEvents(input.job, input.actor, normalized, input.redactor);
           }
           reconnectMs = input.config.recorderReconnectMinMs;
         }
@@ -318,7 +482,7 @@ function startRecorder(input: {
         [{ type: "status", state: "retry", attempt: null, message: "Reconnecting to the run recorder" }],
         input.redactor,
       ).catch(() => undefined);
-      await sleep(reconnectMs).catch(() => undefined);
+      await sleep(reconnectMs, recorderSignal).catch(() => undefined);
       reconnectMs = Math.min(input.config.recorderReconnectMaxMs, reconnectMs * 2);
     }
   })();
@@ -349,22 +513,166 @@ async function revalidatePinnedSecrets(
   plan.serverPassword = "";
 }
 
-async function waitForPromptIdle(input: {
+async function guardedStartServer(input: {
+  job: ClaimedRunJob;
+  actor: ActorContext;
+  ctx: RunControlContext;
+  ref: SandboxRef;
+  env: Record<string, string>;
+  shutdownSignal: AbortSignal;
+}): Promise<void> {
+  const initialControl = await readRunControl(input.job);
+  if (initialControl.cancelRequestedAt || initialControl.status === "canceled") {
+    throw new CancellationRequested();
+  }
+  await revalidatePinnedSecrets(input.job, input.actor, input.ctx.masterKey);
+  const operationAbort = new AbortController();
+  const monitorAbort = new AbortController();
+  let failure: unknown = null;
+  let finished = false;
+  let nextAclCheck = Date.now() + ACL_RECHECK_MS;
+  const fail = (error: unknown) => {
+    if (failure) return;
+    failure = error;
+    operationAbort.abort(error);
+    monitorAbort.abort(error);
+  };
+  const onShutdown = () => fail(new WorkerShutdown());
+  input.shutdownSignal.addEventListener("abort", onShutdown, { once: true });
+  const strictTimeout = setTimeout(
+    () => fail(new RunRuntimeError("the OpenCode server did not start before its timeout")),
+    30_000,
+  );
+
+  const monitor = (async () => {
+    while (!finished && !monitorAbort.signal.aborted) {
+      try {
+        const control = await readRunControl(input.job);
+        if (control.cancelRequestedAt || control.status === "canceled") {
+          throw new CancellationRequested();
+        }
+        if (Date.now() >= nextAclCheck) {
+          await revalidatePinnedSecrets(input.job, input.actor, input.ctx.masterKey);
+          nextAclCheck = Date.now() + ACL_RECHECK_MS;
+        }
+      } catch (error) {
+        fail(error);
+        return;
+      }
+      await sleep(1_000, monitorAbort.signal).catch(() => undefined);
+    }
+  })();
+
+  try {
+    await input.ctx.runtime!.startServer({ ref: input.ref, env: input.env, signal: operationAbort.signal });
+    if (failure) throw failure;
+  } catch (error) {
+    if (failure) throw failure;
+    throw error;
+  } finally {
+    finished = true;
+    clearTimeout(strictTimeout);
+    monitorAbort.abort();
+    input.shutdownSignal.removeEventListener("abort", onShutdown);
+    await monitor;
+  }
+}
+
+async function guardedHealthCheck(input: {
+  job: ClaimedRunJob;
+  actor: ActorContext;
+  ctx: RunControlContext;
+  ref: SandboxRef;
+  domain: string;
+  password: string;
+  shutdownSignal: AbortSignal;
+}): Promise<{ ok: true; ms: number }> {
+  const abort = new AbortController();
+  let failure: unknown = null;
+  let finished = false;
+  let nextAclCheck = Date.now() + ACL_RECHECK_MS;
+  const onShutdown = () => {
+    failure = new WorkerShutdown();
+    abort.abort(failure);
+  };
+  input.shutdownSignal.addEventListener("abort", onShutdown, { once: true });
+
+  const monitor = (async () => {
+    while (!finished && !abort.signal.aborted) {
+      try {
+        const control = await readRunControl(input.job);
+        if (control.cancelRequestedAt || control.status === "canceled") {
+          throw new CancellationRequested();
+        }
+        if (Date.now() >= nextAclCheck) {
+          await revalidatePinnedSecrets(input.job, input.actor, input.ctx.masterKey);
+          nextAclCheck = Date.now() + ACL_RECHECK_MS;
+        }
+      } catch (error) {
+        failure = error;
+        abort.abort(error);
+        return;
+      }
+      await sleep(1_000, abort.signal).catch(() => undefined);
+    }
+  })();
+
+  try {
+    const result = await input.ctx.runtime!.healthCheck({
+      ref: input.ref,
+      domain: input.domain,
+      password: input.password,
+      signal: abort.signal,
+    });
+    if (failure) throw failure;
+    return result;
+  } catch (error) {
+    if (failure) throw failure;
+    throw error;
+  } finally {
+    finished = true;
+    abort.abort();
+    input.shutdownSignal.removeEventListener("abort", onShutdown);
+    await monitor;
+  }
+}
+
+async function waitForPromptCompletion(input: {
   job: ClaimedRunJob;
   actor: ActorContext;
   recorder: RecorderHandle;
-  generation: number;
+  ctx: RunControlContext;
+  target: { domain: string; password: string };
+  sessionId: string;
+  messageId: string;
   masterKey: Buffer;
   timeoutMs: number;
   shutdownSignal: AbortSignal;
 }): Promise<void> {
   const deadline = Date.now() + Math.max(60_000, input.timeoutMs);
   let nextAclCheck = Date.now() + ACL_RECHECK_MS;
-  while (input.recorder.state.idleGeneration <= input.generation) {
-    if (input.shutdownSignal.aborted) throw new WorkerShutdown();
+  while (true) {
+    if (input.shutdownSignal.aborted) throw abortFailure(input.shutdownSignal);
     if (input.recorder.state.fatal) {
       throw new RunRuntimeError(input.recorder.state.fatal.message);
     }
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) throw new RunRuntimeError("the prompt did not become idle before its timeout");
+    const messageState = await withBoundedSignal({
+      parent: input.shutdownSignal,
+      timeoutMs: Math.min(OPENCODE_CALL_TIMEOUT_MS, remainingMs),
+      timeoutMessage: "the OpenCode prompt status read timed out",
+      operation: (signal) => input.ctx.chat!.getMessageState(
+        input.target,
+        input.sessionId,
+        input.messageId,
+        signal,
+      ),
+    });
+    if (messageState === "completed") {
+      return;
+    }
+    if (messageState === "error") throw new RunRuntimeError("OpenCode could not complete the prompt");
     const control = await readRunControl(input.job);
     if (control.cancelRequestedAt || control.status === "canceled") throw new CancellationRequested();
     if (Date.now() >= nextAclCheck) {
@@ -383,10 +691,24 @@ async function saveFinalTranscript(
   target: { domain: string; password: string },
   sessionId: string,
   redactor: RunRedactor,
+  signal: AbortSignal,
 ): Promise<void> {
-  const items = await ctx.chat!.loadItems(target, sessionId);
+  const items = await withBoundedSignal({
+    parent: signal,
+    timeoutMs: OPENCODE_CALL_TIMEOUT_MS,
+    timeoutMessage: "the final OpenCode transcript read timed out",
+    operation: (operationSignal) => ctx.chat!.loadItems(target, sessionId, operationSignal),
+  });
   await tenant(job, (database) =>
-    persistRunTranscript({ actor, orgId: job.orgId, runId: job.runId, items, redactor, database }),
+    persistRunTranscript({
+      actor,
+      orgId: job.orgId,
+      runId: job.runId,
+      items,
+      redactor,
+      workerId: job.leaseOwner ?? undefined,
+      database,
+    }),
   );
 }
 
@@ -402,24 +724,165 @@ function artifactContentType(path: string): string {
   return "application/octet-stream";
 }
 
+async function loadVanishKey(input: {
+  job: ClaimedRunJob;
+  actor: ActorContext;
+  ctx: RunControlContext;
+}): Promise<Awaited<ReturnType<typeof getDecryptedProviderKey>>> {
+  return tenant(input.job, (database) =>
+    getDecryptedProviderKey({
+      actor: input.actor,
+      orgId: input.job.orgId,
+      provider: "vanish",
+      masterKey: input.ctx.masterKey,
+      database,
+    }),
+  );
+}
+
+async function guardedArtifactPublish(input: {
+  job: ClaimedRunJob;
+  actor: ActorContext;
+  ctx: RunControlContext;
+  key: NonNullable<Awaited<ReturnType<typeof getDecryptedProviderKey>>>;
+  filename: string;
+  bytes: Buffer;
+  idempotencyKey: string;
+  signal: AbortSignal;
+}): Promise<Awaited<ReturnType<typeof publishRunArtifact>>> {
+  const abort = new AbortController();
+  let failure: unknown = null;
+  let finished = false;
+  let nextProviderCheck = Date.now() + ARTIFACT_PROVIDER_RECHECK_MS;
+  const fail = (error: unknown) => {
+    if (failure) return;
+    failure = error;
+    abort.abort(error);
+  };
+  const onAbort = () => fail(
+    input.signal.reason instanceof Error
+      ? input.signal.reason
+      : new RunRuntimeError("artifact publishing exceeded its run budget"),
+  );
+  input.signal.addEventListener("abort", onAbort, { once: true });
+
+  const monitor = (async () => {
+    while (!finished && !abort.signal.aborted) {
+      try {
+        const control = await readRunControl(input.job);
+        if (control.cancelRequestedAt || control.status === "canceled") {
+          throw new CancellationRequested();
+        }
+        if (Date.now() >= nextProviderCheck) {
+          const current = await loadVanishKey(input);
+          try {
+            if (
+              !current ||
+              current.secretId !== input.key.secretId ||
+              current.secretVersion !== input.key.secretVersion
+            ) {
+              throw new ArtifactProviderUnavailable();
+            }
+          } finally {
+            if (current) current.value = "";
+          }
+          nextProviderCheck = Date.now() + ARTIFACT_PROVIDER_RECHECK_MS;
+        }
+      } catch (error) {
+        fail(error);
+        return;
+      }
+      await sleep(1_000, abort.signal).catch(() => undefined);
+    }
+  })();
+
+  try {
+    const published = await publishRunArtifact({
+      apiKey: input.key.value,
+      filename: input.filename,
+      bytes: input.bytes,
+      idempotencyKey: input.idempotencyKey,
+      signal: abort.signal,
+    });
+    if (failure) throw failure;
+    return published;
+  } catch (error) {
+    if (failure) throw failure;
+    throw error;
+  } finally {
+    finished = true;
+    abort.abort();
+    input.signal.removeEventListener("abort", onAbort);
+    await monitor;
+  }
+}
+
+async function guardedArtifactCollection(input: {
+  job: ClaimedRunJob;
+  actor: ActorContext;
+  ctx: RunControlContext;
+  ref: SandboxRef;
+  signal: AbortSignal;
+}): Promise<Awaited<ReturnType<NonNullable<RunControlContext["runtime"]>["collectFiles"]>>> {
+  const abort = new AbortController();
+  let failure: unknown = null;
+  let finished = false;
+  const fail = (error: unknown) => {
+    if (failure) return;
+    failure = error;
+    abort.abort(error);
+  };
+  const onAbort = () => fail(
+    input.signal.reason instanceof Error
+      ? input.signal.reason
+      : new RunRuntimeError("artifact collection exceeded its run budget"),
+  );
+  input.signal.addEventListener("abort", onAbort, { once: true });
+  const monitor = (async () => {
+    while (!finished && !abort.signal.aborted) {
+      try {
+        const control = await readRunControl(input.job);
+        if (control.cancelRequestedAt || control.status === "canceled") throw new CancellationRequested();
+        await revalidatePinnedSecrets(input.job, input.actor, input.ctx.masterKey);
+      } catch (error) {
+        fail(error);
+        return;
+      }
+      await sleep(ARTIFACT_PROVIDER_RECHECK_MS, abort.signal).catch(() => undefined);
+    }
+  })();
+  try {
+    const files = await input.ctx.runtime!.collectFiles({
+      ref: input.ref,
+      dir: "artifacts",
+      maxFiles: ARTIFACT_MAX_FILES,
+      maxFileBytes: ARTIFACT_MAX_FILE_BYTES,
+      signal: abort.signal,
+    });
+    if (failure) throw failure;
+    return files;
+  } catch (error) {
+    if (failure) throw failure;
+    throw error;
+  } finally {
+    finished = true;
+    abort.abort();
+    input.signal.removeEventListener("abort", onAbort);
+    await monitor;
+  }
+}
+
 async function collectAndPublishArtifacts(input: {
   job: ClaimedRunJob;
   actor: ActorContext;
   ctx: RunControlContext;
   ref: SandboxRef;
   redactor: RunRedactor;
+  shutdownSignal: AbortSignal;
 }): Promise<void> {
   let vanish: Awaited<ReturnType<typeof getDecryptedProviderKey>> = null;
   try {
-    vanish = await tenant(input.job, (database) =>
-      getDecryptedProviderKey({
-        actor: input.actor,
-        orgId: input.job.orgId,
-        provider: "vanish",
-        masterKey: input.ctx.masterKey,
-        database,
-      }),
-    );
+    vanish = await loadVanishKey(input);
   } catch {
     await appendEvents(
       input.job,
@@ -432,15 +895,22 @@ async function collectAndPublishArtifacts(input: {
   if (!vanish) return;
 
   try {
+    const publishDeadline = Date.now() + ARTIFACT_PUBLISH_BUDGET_MS;
+    const budgetSignal = AbortSignal.timeout(ARTIFACT_PUBLISH_BUDGET_MS);
+    const artifactSignal = AbortSignal.any([input.shutdownSignal, budgetSignal]);
     let files: Awaited<ReturnType<NonNullable<RunControlContext["runtime"]>["collectFiles"]>>;
     try {
-      files = await input.ctx.runtime!.collectFiles({
+      files = await guardedArtifactCollection({
+        job: input.job,
+        actor: input.actor,
+        ctx: input.ctx,
         ref: input.ref,
-        dir: "artifacts",
-        maxFiles: ARTIFACT_MAX_FILES,
-        maxFileBytes: ARTIFACT_MAX_FILE_BYTES,
+        signal: artifactSignal,
       });
-    } catch {
+    } catch (error) {
+      if (input.shutdownSignal.aborted) throw abortFailure(input.shutdownSignal);
+      if (error instanceof CancellationRequested || error instanceof SecretConfigurationError) throw error;
+      if (error instanceof RunValidationError && error.code === "run_not_found") throw error;
       await appendEvents(
         input.job,
         input.actor,
@@ -451,6 +921,37 @@ async function collectAndPublishArtifacts(input: {
     }
 
     for (const [index, file] of files.entries()) {
+      if (input.shutdownSignal.aborted) throw abortFailure(input.shutdownSignal);
+      const control = await readRunControl(input.job);
+      if (control.cancelRequestedAt || control.status === "canceled") throw new CancellationRequested();
+      let current: Awaited<ReturnType<typeof getDecryptedProviderKey>> = null;
+      try {
+        current = await loadVanishKey(input);
+      } catch (error) {
+        if (error instanceof RunValidationError && error.code === "run_not_found") throw error;
+        current = null;
+      }
+      vanish.value = "";
+      vanish = current;
+      if (!vanish) {
+        await appendEvents(
+          input.job,
+          input.actor,
+          [{ type: "run.warning", code: "vanish_unavailable", message: "Artifact sharing is no longer available", phase: "collect_artifacts" }],
+          input.redactor,
+        );
+        return;
+      }
+      const remainingMs = publishDeadline - Date.now();
+      if (remainingMs <= 0) {
+        await appendEvents(
+          input.job,
+          input.actor,
+          [{ type: "run.warning", code: "vanish_publish_failed", message: "Artifact sharing exceeded its time budget", phase: "collect_artifacts" }],
+          input.redactor,
+        );
+        return;
+      }
       const redactedPath = input.redactor.redactText(file.path);
       const safePath = redactedPath === file.path ? file.path : `artifact-${index + 1}`;
       try {
@@ -459,11 +960,16 @@ async function collectAndPublishArtifacts(input: {
           .update("\0")
           .update(file.data)
           .digest("base64url");
-        const published = await publishRunArtifact({
-          apiKey: vanish.value,
+        const fileBudgetSignal = AbortSignal.timeout(remainingMs);
+        const published = await guardedArtifactPublish({
+          job: input.job,
+          actor: input.actor,
+          ctx: input.ctx,
+          key: vanish,
           filename: safePath,
           bytes: file.data,
           idempotencyKey: `run:${input.job.runId}:artifact:${file.byteSize}:${contentDigest}`,
+          signal: AbortSignal.any([input.shutdownSignal, fileBudgetSignal]),
         });
         await tenant(input.job, (database) =>
           database
@@ -490,7 +996,28 @@ async function collectAndPublishArtifacts(input: {
               },
             }),
         );
-      } catch {
+      } catch (error) {
+        if (input.shutdownSignal.aborted) throw abortFailure(input.shutdownSignal);
+        if (error instanceof CancellationRequested) throw error;
+        if (error instanceof RunValidationError && error.code === "run_not_found") throw error;
+        if (error instanceof ArtifactProviderUnavailable) {
+          await appendEvents(
+            input.job,
+            input.actor,
+            [{ type: "run.warning", code: "vanish_unavailable", message: "Artifact sharing is no longer available", phase: "collect_artifacts" }],
+            input.redactor,
+          );
+          return;
+        }
+        if (Date.now() >= publishDeadline) {
+          await appendEvents(
+            input.job,
+            input.actor,
+            [{ type: "run.warning", code: "vanish_publish_failed", message: "Artifact sharing exceeded its time budget", phase: "collect_artifacts" }],
+            input.redactor,
+          );
+          return;
+        }
         await appendEvents(
           input.job,
           input.actor,
@@ -500,7 +1027,7 @@ async function collectAndPublishArtifacts(input: {
       }
     }
   } finally {
-    vanish.value = "";
+    if (vanish) vanish.value = "";
   }
 }
 
@@ -512,7 +1039,7 @@ async function markCanceled(input: {
 }): Promise<void> {
   const now = new Date();
   await tenant(input.job, async (database) => {
-    await updateRunWorkerState({
+    const updated = await updateRunWorkerState({
       actor: input.actor,
       orgId: input.job.orgId,
       runId: input.job.runId,
@@ -523,6 +1050,7 @@ async function markCanceled(input: {
       ...(input.cleaned ? { sandboxCleanedAt: now } : {}),
       database,
     });
+    if (!updated) throw new LostLease();
     await database
       .update(schema.skillRunPrompts)
       .set({ status: "canceled", leaseOwner: null, leaseExpiresAt: null, updatedAt: now })
@@ -536,6 +1064,51 @@ async function markCanceled(input: {
   });
 }
 
+function sandboxRefFromPersisted(
+  job: ClaimedRunJob,
+  ctx: RunControlContext,
+  state: Pick<RunControlState, "sandboxName" | "sandboxId" | "timeoutMs">,
+): SandboxRef {
+  return {
+    sandboxName: state.sandboxName ?? sandboxNameForRun(job.orgId, job.runId),
+    sandboxId: state.sandboxId,
+    region: ctx.region,
+    timeoutMs: state.timeoutMs,
+  };
+}
+
+/**
+ * Creator RLS intentionally disappears with membership. The worker's exact lease RPC exposes only
+ * the sandbox identity needed to destroy the workload and a fixed terminalization transition.
+ */
+async function terminalizeRevokedMembership(input: {
+  job: ClaimedRunJob;
+  workerId: string;
+  ctx: RunControlContext;
+  control?: Awaited<ReturnType<typeof getRunWorkerLeaseControl>>;
+}): Promise<boolean> {
+  const control = input.control ?? await getRunWorkerLeaseControl({
+    orgId: input.job.orgId,
+    runId: input.job.runId,
+    creatorId: input.job.creatorId,
+    workerId: input.workerId,
+    database: db,
+  });
+  if (!control || control.membershipActive) return false;
+  const cleaned = await teardownSandbox(
+    input.ctx.runtime!,
+    sandboxRefFromPersisted(input.job, input.ctx, control),
+  );
+  return terminalizeRevokedRunLease({
+    orgId: input.job.orgId,
+    runId: input.job.runId,
+    creatorId: input.job.creatorId,
+    workerId: input.workerId,
+    cleanupConfirmed: cleaned,
+    database: db,
+  });
+}
+
 async function processClaimedJob(input: {
   job: ClaimedRunJob;
   workerId: string;
@@ -546,7 +1119,10 @@ async function processClaimedJob(input: {
   const { job, workerId, ctx, config } = input;
   const actor = actorForJob(job);
   const jobAbort = new AbortController();
-  const onShutdown = () => jobAbort.abort();
+  const abortJob = (reason: Error) => {
+    if (!jobAbort.signal.aborted) jobAbort.abort(reason);
+  };
+  const onShutdown = () => abortJob(new WorkerShutdown());
   input.shutdownSignal.addEventListener("abort", onShutdown, { once: true });
   let leaseLost = false;
   let heartbeating = false;
@@ -564,7 +1140,9 @@ async function processClaimedJob(input: {
         leaseSeconds: config.leaseSeconds,
         database,
       });
-      const promptOwned = activePromptId
+      const promptOwned = !jobOwned
+        ? false
+        : activePromptId
         ? await heartbeatRunPrompt({
             actor,
             orgId: job.orgId,
@@ -580,7 +1158,7 @@ async function processClaimedJob(input: {
       .then((owned) => {
         if (!owned) {
           leaseLost = true;
-          jobAbort.abort();
+          abortJob(new LostLease());
         } else {
           leaseDeadline = Date.now() + config.leaseSeconds * 1_000;
         }
@@ -589,7 +1167,7 @@ async function processClaimedJob(input: {
         // A transient DB outage is allowed only until the last confirmed lease deadline.
         if (Date.now() >= leaseDeadline) {
           leaseLost = true;
-          jobAbort.abort();
+          abortJob(new LostLease());
         }
       })
       .finally(() => { heartbeating = false; });
@@ -597,62 +1175,207 @@ async function processClaimedJob(input: {
   const leaseWatchdog = setInterval(() => {
     if (Date.now() < leaseDeadline || jobAbort.signal.aborted) return;
     leaseLost = true;
-    jobAbort.abort();
+    abortJob(new LostLease());
   }, Math.min(config.heartbeatMs, 1_000));
+  let controlChecking = false;
+  const controlWatcher = setInterval(() => {
+    if (controlChecking || jobAbort.signal.aborted) return;
+    controlChecking = true;
+    void getRunWorkerLeaseControl({
+      orgId: job.orgId,
+      runId: job.runId,
+      creatorId: job.creatorId,
+      workerId,
+      database: db,
+    })
+      .then((control) => {
+        if (jobAbort.signal.aborted) return;
+        if (!control) {
+          leaseLost = true;
+          abortJob(new LostLease());
+        } else if (!control.membershipActive) {
+          abortJob(new RunValidationError("the run owner is no longer a member", "membership_revoked"));
+        } else if (control.status === "canceled" || control.cancelRequestedAt) {
+          abortJob(new CancellationRequested());
+        }
+      })
+      .catch(() => {
+        if (Date.now() >= leaseDeadline) {
+          leaseLost = true;
+          abortJob(new LostLease());
+        }
+      })
+      .finally(() => { controlChecking = false; });
+  }, 1_000);
 
   let recorder: RecorderHandle | null = null;
   let plan: RunExecutionPlan | null = null;
+  let ref: SandboxRef | null = null;
   let redactor = createRunRedactor([]);
   let target: { domain: string; password: string } | null = null;
   let sessionId: string | null = null;
+  const timeoutExtender = createSandboxTimeoutExtender(ctx.runtime!);
   try {
+    const leaseControl = await getRunWorkerLeaseControl({
+      orgId: job.orgId,
+      runId: job.runId,
+      creatorId: job.creatorId,
+      workerId,
+      database: db,
+    });
+    if (!leaseControl) throw new LostLease();
+    if (!leaseControl.membershipActive) {
+      await terminalizeRevokedMembership({ job, workerId, ctx, control: leaseControl });
+      return;
+    }
     const initialControl = await readRunControl(job);
-    if (initialControl.status === "canceled" || initialControl.cancelRequestedAt) throw new CancellationRequested();
+    ref = sandboxRefFromPersisted(job, ctx, initialControl);
+    if (initialControl.status === "canceled" || initialControl.cancelRequestedAt) {
+      // Recover enough persisted state for a best-effort final snapshot, but sandbox teardown never
+      // depends on secrets still being accessible: `ref` was loaded before this cancellation check.
+      plan = await tenant(job, (database) =>
+        loadRunExecutionPlan({ actor, orgId: job.orgId, runId: job.runId, masterKey: ctx.masterKey, database }),
+      ).catch(() => null);
+      if (plan) {
+        redactor = createRunRedactor(plan.injectedLiterals);
+        if (plan.row.sandboxDomain && plan.row.opencodeSessionId) {
+          target = { domain: plan.row.sandboxDomain, password: plan.serverPassword };
+          sessionId = plan.row.opencodeSessionId;
+        }
+      }
+      throw new CancellationRequested();
+    }
+    if (initialControl.phase === "freeze") {
+      // The previous replica persisted freeze before provider teardown. Repeating destroy is safe;
+      // forking here would recreate an empty sandbox and trust a dead OpenCode session. Reconcile a
+      // final snapshot/artifact pass from the existing session when its pinned inputs remain valid.
+      plan = await tenant(job, (database) =>
+        loadRunExecutionPlan({ actor, orgId: job.orgId, runId: job.runId, masterKey: ctx.masterKey, database }),
+      ).catch(() => null);
+      if (plan) {
+        redactor = createRunRedactor(plan.injectedLiterals);
+        timeoutExtender.activate(ref);
+        if (plan.row.sandboxDomain && plan.row.opencodeSessionId) {
+          target = { domain: plan.row.sandboxDomain, password: plan.serverPassword };
+          sessionId = plan.row.opencodeSessionId;
+          await saveFinalTranscript(job, actor, ctx, target, sessionId, redactor, jobAbort.signal).catch(() => undefined);
+        }
+        await collectAndPublishArtifacts({ job, actor, ctx, ref, redactor, shutdownSignal: jobAbort.signal });
+      }
+      await timeoutExtender.stop();
+      const cleaned = await teardownSandbox(ctx.runtime!, ref);
+      await setPhase(job, actor, workerId, "complete", {
+        status: "frozen",
+        frozenAt: new Date(),
+        ...(cleaned ? { sandboxCleanedAt: new Date() } : {}),
+      });
+      return;
+    }
     await setPhase(job, actor, workerId, "resolve_inputs", { status: "starting", errorCode: null, userMessage: null });
-    plan = await tenant(job, (database) =>
+    const activePlan = await tenant(job, (database) =>
       loadRunExecutionPlan({ actor, orgId: job.orgId, runId: job.runId, masterKey: ctx.masterKey, database }),
     );
-    redactor = createRunRedactor(plan.injectedLiterals);
-    const workspace = await materializeRunWorkspace({
-      plan,
-      fetchArchive: ctx.fetchArchive!,
-      fetchObject: ctx.fetchObject!,
+    plan = activePlan;
+    redactor = createRunRedactor(activePlan.injectedLiterals);
+    const workspace = await withBoundedSignal({
+      parent: jobAbort.signal,
+      timeoutMs: SANDBOX_CONTROL_TIMEOUT_MS,
+      timeoutMessage: "the run workspace download timed out",
+      operation: (signal) => materializeRunWorkspace({
+        plan: activePlan,
+        fetchArchive: ctx.fetchArchive!,
+        fetchObject: ctx.fetchObject!,
+        signal,
+      }),
     });
-    const ref = sandboxRef(plan, ctx);
+    const activeRef = sandboxRef(activePlan, ctx);
+    ref = activeRef;
 
     await setPhase(job, actor, workerId, "fork");
-    const sandbox = await ctx.runtime!.forkFromGolden({ ref, goldenSnapshotId: plan.row.goldenSnapshotId! });
-    ref.sandboxId = sandbox.sandboxId;
+    const sandbox = await withBoundedSignal({
+      parent: jobAbort.signal,
+      timeoutMs: SANDBOX_CONTROL_TIMEOUT_MS,
+      timeoutMessage: "the sandbox fork timed out",
+      operation: (signal) => ctx.runtime!.forkFromGolden({
+        ref: activeRef,
+        goldenSnapshotId: activePlan.row.goldenSnapshotId!,
+        signal,
+      }),
+    });
+    activeRef.sandboxId = sandbox.sandboxId;
+    timeoutExtender.activate(activeRef);
     await setPhase(job, actor, workerId, "push_workspace", {
       sandboxId: sandbox.sandboxId,
       sandboxDomain: sandbox.domain,
     });
-    await ctx.runtime!.pushWorkspace({ ref, files: workspace });
+    await withBoundedSignal({
+      parent: jobAbort.signal,
+      timeoutMs: SANDBOX_CONTROL_TIMEOUT_MS,
+      timeoutMessage: "the sandbox workspace upload timed out",
+      operation: (signal) => ctx.runtime!.pushWorkspace({ ref: activeRef, files: workspace, signal }),
+    });
 
     await setPhase(job, actor, workerId, "start_server");
     // Access can change while the sandbox boots or archives upload. Revalidate every pinned vault
     // reference at the last possible boundary before any credential reaches the workload.
+    const beforeSecretInjection = await readRunControl(job);
+    if (beforeSecretInjection.cancelRequestedAt || beforeSecretInjection.status === "canceled") {
+      throw new CancellationRequested();
+    }
     await revalidatePinnedSecrets(job, actor, ctx.masterKey);
-    const env = plan.env;
-    await ctx.runtime!.startServer({ ref, env });
+    const beforeServerStart = await readRunControl(job);
+    if (beforeServerStart.cancelRequestedAt || beforeServerStart.status === "canceled") {
+      throw new CancellationRequested();
+    }
+    const env = activePlan.env;
+    await guardedStartServer({ job, actor, ctx, ref: activeRef, env, shutdownSignal: jobAbort.signal });
     for (const key of Object.keys(env)) delete env[key];
-    plan.injectedLiterals.length = 0;
+    activePlan.injectedLiterals.length = 0;
 
     await setPhase(job, actor, workerId, "healthcheck");
-    await ctx.runtime!.healthCheck({ ref, domain: sandbox.domain, password: plan.serverPassword });
-    target = { domain: sandbox.domain, password: plan.serverPassword };
+    await guardedHealthCheck({
+      job,
+      actor,
+      ctx,
+      ref: activeRef,
+      domain: sandbox.domain,
+      password: activePlan.serverPassword,
+      shutdownSignal: jobAbort.signal,
+    });
+    const chatTarget = { domain: sandbox.domain, password: activePlan.serverPassword };
+    target = chatTarget;
 
     await setPhase(job, actor, workerId, "create_session");
     const title = `companion-run:${job.runId}`;
-    if (plan.row.opencodeSessionId) {
-      sessionId = plan.row.opencodeSessionId;
+    const persistedSessionState = activePlan.row.opencodeSessionId
+      ? await withBoundedSignal({
+          parent: jobAbort.signal,
+          timeoutMs: OPENCODE_CALL_TIMEOUT_MS,
+          timeoutMessage: "the persisted OpenCode session lookup timed out",
+          operation: (signal) => ctx.chat!.getSessionState(chatTarget, activePlan.row.opencodeSessionId!, signal),
+        })
+      : "missing";
+    let activeSessionId: string;
+    if (activePlan.row.opencodeSessionId && persistedSessionState !== "missing") {
+      activeSessionId = activePlan.row.opencodeSessionId;
     } else {
-      const existing = await ctx.chat!.findSessionByTitle(target, title);
-      sessionId = existing?.id ?? (await ctx.chat!.createSession(target, title)).id;
+      const existing = await withBoundedSignal({
+        parent: jobAbort.signal,
+        timeoutMs: OPENCODE_CALL_TIMEOUT_MS,
+        timeoutMessage: "the OpenCode session lookup timed out",
+        operation: (signal) => ctx.chat!.findSessionByTitle(chatTarget, title, signal),
+      });
+      activeSessionId = existing?.id ?? (await withBoundedSignal({
+        parent: jobAbort.signal,
+        timeoutMs: OPENCODE_CALL_TIMEOUT_MS,
+        timeoutMessage: "the OpenCode session creation timed out",
+        operation: (signal) => ctx.chat!.createSession(chatTarget, title, signal),
+      })).id;
     }
+    sessionId = activeSessionId;
     await setPhase(job, actor, workerId, "prompt", {
       status: "running",
-      opencodeSessionId: sessionId,
+      opencodeSessionId: activeSessionId,
       lastActiveAt: new Date(),
     });
 
@@ -660,8 +1383,8 @@ async function processClaimedJob(input: {
       job,
       actor,
       ctx,
-      target,
-      sessionId,
+      target: chatTarget,
+      sessionId: activeSessionId,
       redactor,
       config,
       shutdownSignal: jobAbort.signal,
@@ -685,6 +1408,14 @@ async function processClaimedJob(input: {
         nextAclCheck = Date.now() + ACL_RECHECK_MS;
       }
 
+      // A new prompt is safe only after the recorder has committed the previous idle snapshot and
+      // re-established its upstream subscription. This also enforces one active OpenCode message
+      // even if a follow-up is queued immediately after the prior outbox row completes.
+      if (recorder.state.busy) {
+        await sleep(PROMPT_POLL_MS, jobAbort.signal);
+        continue;
+      }
+
       const prompt = await tenant(job, (database) =>
         claimNextRunPrompt({
           actor,
@@ -698,7 +1429,6 @@ async function processClaimedJob(input: {
       if (prompt) {
         activePromptId = prompt.id;
         await revalidatePinnedSecrets(job, actor, ctx.masterKey);
-        const generation = recorder.state.idleGeneration;
         recorder.state.busy = true;
         await setPhase(job, actor, workerId, "prompt", { status: "running", lastActiveAt: new Date() });
         try {
@@ -706,26 +1436,54 @@ async function processClaimedJob(input: {
           if (beforeSend.cancelRequestedAt || beforeSend.status === "canceled") {
             throw new CancellationRequested();
           }
-          await ctx.chat!.sendPrompt(target, sessionId, prompt.prompt, prompt.messageId);
-          await waitForPromptIdle({
+          // A prior worker may have dispatched this exact deterministic id and crashed. Only send
+          // when the user message is absent; completion is tied to its assistant child rather than
+          // to a global idle generation, which can advance during an unrelated reconnect.
+          const messageState = await withBoundedSignal({
+            parent: jobAbort.signal,
+            timeoutMs: OPENCODE_CALL_TIMEOUT_MS,
+            timeoutMessage: "the OpenCode prompt lookup timed out",
+            operation: (signal) => ctx.chat!.getMessageState(chatTarget, activeSessionId, prompt.messageId, signal),
+          });
+          if (messageState === "missing") {
+            await withBoundedSignal({
+              parent: jobAbort.signal,
+              timeoutMs: OPENCODE_CALL_TIMEOUT_MS,
+              timeoutMessage: "the OpenCode prompt dispatch timed out",
+              operation: (signal) => ctx.chat!.sendPrompt(
+                chatTarget,
+                activeSessionId,
+                prompt.prompt,
+                prompt.messageId,
+                signal,
+              ),
+            });
+          } else if (messageState === "error") {
+            throw new RunRuntimeError("OpenCode could not complete the prompt");
+          }
+          await waitForPromptCompletion({
             job,
             actor,
             recorder,
-            generation,
+            ctx,
+            target: chatTarget,
+            sessionId: activeSessionId,
+            messageId: prompt.messageId,
             masterKey: ctx.masterKey,
-            timeoutMs: plan.row.timeoutMs,
+            timeoutMs: activePlan.row.timeoutMs,
             shutdownSignal: jobAbort.signal,
           });
-          await tenant(job, (database) =>
+          const promptCompleted = await tenant(job, (database) =>
             completeRunPrompt({ actor, orgId: job.orgId, runId: job.runId, promptId: prompt.id, workerId, database }),
           );
+          if (!promptCompleted) throw new LostLease();
           activePromptId = null;
           await setPhase(job, actor, workerId, "collect_artifacts", { status: "running", lastActiveAt: new Date() });
-          await collectAndPublishArtifacts({ job, actor, ctx, ref, redactor });
+          await collectAndPublishArtifacts({ job, actor, ctx, ref: activeRef, redactor, shutdownSignal: jobAbort.signal });
           await setPhase(job, actor, workerId, "record", { status: "running", lastActiveAt: new Date() });
         } catch (error) {
           if (error instanceof WorkerShutdown || error instanceof LostLease || error instanceof CancellationRequested) throw error;
-          await tenant(job, (database) =>
+          const promptFailed = await tenant(job, (database) =>
             failRunPrompt({
               actor,
               orgId: job.orgId,
@@ -739,6 +1497,7 @@ async function processClaimedJob(input: {
               database,
             }),
           );
+          if (!promptFailed) throw new LostLease();
           activePromptId = null;
           throw error;
         }
@@ -746,28 +1505,45 @@ async function processClaimedJob(input: {
       }
 
       if (!recorder.state.busy && recorder.state.idleAt && Date.now() - recorder.state.idleAt >= config.inactivityMs) {
+        const gate = await tenant(job, (database) =>
+          beginRunFreeze({ actor, orgId: job.orgId, runId: job.runId, workerId, database }),
+        );
+        if (gate === "prompt_pending") continue;
+        if (gate === "cancel_requested") throw new CancellationRequested();
+        if (gate === "lost_lease") throw new LostLease();
         break;
       }
       await sleep(PROMPT_POLL_MS, jobAbort.signal);
     }
     if (leaseLost) throw new LostLease();
-    if (jobAbort.signal.aborted) throw new WorkerShutdown();
+    if (jobAbort.signal.aborted) {
+      throw abortFailure(jobAbort.signal);
+    }
 
-    await setPhase(job, actor, workerId, "collect_artifacts");
-    await saveFinalTranscript(job, actor, ctx, target, sessionId, redactor);
-    await collectAndPublishArtifacts({ job, actor, ctx, ref, redactor });
-    if (jobAbort.signal.aborted) throw leaseLost ? new LostLease() : new WorkerShutdown();
+    // `beginRunFreeze` already closed prompt admission under the run lock. Keep that phase through
+    // final transcript/artifact collection so a racing API request cannot enqueue abandoned work.
+    await saveFinalTranscript(job, actor, ctx, chatTarget, activeSessionId, redactor, jobAbort.signal);
+    await collectAndPublishArtifacts({ job, actor, ctx, ref: activeRef, redactor, shutdownSignal: jobAbort.signal });
+    if (jobAbort.signal.aborted) throw leaseLost ? new LostLease() : abortFailure(jobAbort.signal);
     await setPhase(job, actor, workerId, "freeze");
+    await timeoutExtender.stop();
     await recorder.stop();
     recorder = null;
-    if (jobAbort.signal.aborted) throw leaseLost ? new LostLease() : new WorkerShutdown();
-    const cleaned = await teardownSandbox(ctx.runtime!, ref);
+    if (jobAbort.signal.aborted) throw leaseLost ? new LostLease() : abortFailure(jobAbort.signal);
+    const cleaned = await teardownSandbox(ctx.runtime!, activeRef);
     await setPhase(job, actor, workerId, "complete", {
       status: "frozen",
       frozenAt: new Date(),
       ...(cleaned ? { sandboxCleanedAt: new Date() } : {}),
     });
   } catch (error) {
+    await timeoutExtender.stop();
+    await recorder?.stop();
+    recorder = null;
+    if (!input.shutdownSignal.aborted) {
+      const revoked = await terminalizeRevokedMembership({ job, workerId, ctx }).catch(() => false);
+      if (revoked) return;
+    }
     if (error instanceof WorkerShutdown || error instanceof LostLease || leaseLost || input.shutdownSignal.aborted) {
       // Deliberately keep the job leased. Another replica resumes it after expiry without tearing
       // down a healthy sandbox during a normal deployment.
@@ -779,21 +1555,37 @@ async function processClaimedJob(input: {
       cancellationRequested = Boolean(latest?.cancelRequestedAt || latest?.status === "canceled");
     }
     if (cancellationRequested) {
-      await recorder?.stop();
-      recorder = null;
       if (target && sessionId) {
-        await saveFinalTranscript(job, actor, ctx, target, sessionId, redactor).catch(() => undefined);
+        await saveFinalTranscript(
+          job,
+          actor,
+          ctx,
+          target,
+          sessionId,
+          redactor,
+          AbortSignal.timeout(10_000),
+        ).catch(() => undefined);
       }
-      const cleaned = plan ? await teardownSandbox(ctx.runtime!, sandboxRef(plan, ctx)) : true;
-      await markCanceled({ job, actor, workerId, cleaned });
+      const cleaned = ref ? await teardownSandbox(ctx.runtime!, ref) : false;
+      try {
+        await markCanceled({ job, actor, workerId, cleaned });
+      } catch {
+        await terminalizeRevokedMembership({ job, workerId, ctx }).catch(() => false);
+      }
       return;
     }
 
-    await recorder?.stop();
-    recorder = null;
     if (input.shutdownSignal.aborted || leaseLost) return;
     if (target && sessionId) {
-      await saveFinalTranscript(job, actor, ctx, target, sessionId, redactor).catch(() => undefined);
+      await saveFinalTranscript(
+        job,
+        actor,
+        ctx,
+        target,
+        sessionId,
+        redactor,
+        AbortSignal.timeout(10_000),
+      ).catch(() => undefined);
     }
     const code = errorCode(error);
     const message = userFacingError(error, redactor);
@@ -813,22 +1605,30 @@ async function processClaimedJob(input: {
     ).catch(() => "lost_lease" as const);
     const failureEvent = runFailureEvent(outcome, { attempt: job.attempt, code, message });
     if (failureEvent) {
-      await appendEvents(job, actor, [failureEvent], redactor).catch(() => undefined);
+      // failOrRetryRunJob atomically released this worker's lease before returning the retry
+      // outcome. The resulting status event is still legitimate, but no longer lease-guarded.
+      await appendEvents(job, actor, [failureEvent], redactor, false).catch(() => undefined);
     }
     if (outcome === "cancel_requested") {
-      const cleaned = plan ? await teardownSandbox(ctx.runtime!, sandboxRef(plan, ctx)) : true;
-      await markCanceled({ job, actor, workerId, cleaned });
+      const cleaned = ref ? await teardownSandbox(ctx.runtime!, ref) : false;
+      try {
+        await markCanceled({ job, actor, workerId, cleaned });
+      } catch {
+        await terminalizeRevokedMembership({ job, workerId, ctx }).catch(() => false);
+      }
       return;
     }
-    if (outcome === "failed" && plan) {
-      const cleaned = await teardownSandbox(ctx.runtime!, sandboxRef(plan, ctx));
+    if (outcome === "lost_lease") {
+      await terminalizeRevokedMembership({ job, workerId, ctx }).catch(() => false);
+    }
+    if (outcome === "failed" && ref) {
+      const cleaned = await teardownSandbox(ctx.runtime!, ref);
       if (cleaned) {
         await tenant(job, (database) =>
           updateRunWorkerState({
             actor,
             orgId: job.orgId,
             runId: job.runId,
-            phase: "cleanup",
             sandboxCleanedAt: new Date(),
             database,
           }),
@@ -838,7 +1638,9 @@ async function processClaimedJob(input: {
   } finally {
     clearInterval(heartbeat);
     clearInterval(leaseWatchdog);
+    clearInterval(controlWatcher);
     input.shutdownSignal.removeEventListener("abort", onShutdown);
+    await timeoutExtender.stop();
     await recorder?.stop();
     if (plan) {
       for (const key of Object.keys(plan.env)) delete plan.env[key];
@@ -887,13 +1689,32 @@ export async function startRunSupervisor(): Promise<Supervisor | null> {
     runtime,
     chat,
     runTenant: withTenantContext,
-    fetchArchive: (key) => getSkillArchive({ key }),
-    fetchObject: (key) => getSkillArchive({ key }),
+    fetchArchive: (key, signal) => getSkillArchive({ key, signal }),
+    fetchObject: (key, signal) => getSkillArchive({ key, signal }),
   };
   const workerId = `${process.env.HOSTNAME?.trim() || "worker"}:${process.pid}:${randomUUID()}`;
   const shutdown = new AbortController();
   const active = new Map<string, Promise<void>>();
   let claimRunning = false;
+  const readinessIntervalMs = Math.min(config.heartbeatMs, 5_000);
+  const readinessTtlSeconds = Math.max(5, Math.min(300, Math.ceil(readinessIntervalMs * 3 / 1_000)));
+  let readinessHeartbeating = false;
+  const advertiseReadiness = async () => {
+    if (shutdown.signal.aborted || readinessHeartbeating) return;
+    readinessHeartbeating = true;
+    try {
+      await heartbeatRunWorker({ workerId, ttlSeconds: readinessTtlSeconds, database: db });
+    } finally {
+      readinessHeartbeating = false;
+    }
+  };
+  try {
+    await advertiseReadiness();
+  } catch (error) {
+    masterKey.fill(0);
+    throw error;
+  }
+  const readinessTimer = setInterval(() => void advertiseReadiness().catch(() => undefined), readinessIntervalMs);
 
   const claim = async () => {
     if (shutdown.signal.aborted || claimRunning) return;
@@ -957,7 +1778,9 @@ export async function startRunSupervisor(): Promise<Supervisor | null> {
       clearInterval(timer);
       clearInterval(cleanupTimer);
       clearInterval(retentionTimer);
+      clearInterval(readinessTimer);
       shutdown.abort();
+      await removeRunWorkerHeartbeat({ workerId, database: db }).catch(() => undefined);
       await cleanupScheduler.stop();
       await Promise.allSettled(active.values());
       masterKey.fill(0);

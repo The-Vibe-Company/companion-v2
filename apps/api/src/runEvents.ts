@@ -25,9 +25,14 @@ export function runDrainAction(input: {
   pageSize: number;
   notified: boolean;
   terminal: boolean;
+  /** A terminal snapshot was already followed by one extra durable replay query. */
+  terminalObserved: boolean;
   readySent: boolean;
 }): "continue" | "close" | "ready" | "wait" {
   if (input.eventCount >= input.pageSize || input.notified) return "continue";
+  // NOTIFY delivery can lag a terminal row/event commit observed on another connection. Force one
+  // more durable page read after the first terminal observation before emitting EOF.
+  if (input.terminal && !input.terminalObserved) return "continue";
   if (input.terminal) return "close";
   return input.readySent ? "wait" : "ready";
 }

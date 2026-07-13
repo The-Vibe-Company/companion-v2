@@ -1,8 +1,14 @@
 import { describe, expect, it } from "vitest";
+import {
+  RUN_CHAT_DELTA_MAX,
+  RUN_CHAT_TOOL_INPUT_MAX,
+  RUN_CHAT_TOOL_OUTPUT_MAX,
+} from "@companion/contracts";
 import { schema, type Db } from "@companion/db";
 import { createRunRedactor } from "../src/runRedaction";
 import {
   appendRunEvents,
+  claimNextRunPrompt,
   claimRunJobs,
   failOrRetryRunJob,
   persistRunTranscript,
@@ -42,14 +48,20 @@ function eventDb() {
       }),
     }),
     insert: (table: unknown) => ({
-      values: (values: Array<Record<string, unknown>>) => ({
-        returning: async () => {
-          if (table !== schema.skillRunEvents) throw new Error("unexpected insert");
-          const rows = values.map((value) => ({ createdAt: new Date(), ...value })) as typeof events;
-          events.push(...rows);
-          return rows;
-        },
-      }),
+      values: (values: Record<string, unknown> | Array<Record<string, unknown>>) => {
+        if (table !== schema.skillRunEvents) throw new Error("unexpected insert");
+        if (!Array.isArray(values)) {
+          events.push({ createdAt: new Date(), ...values } as typeof events[number]);
+          return Promise.resolve();
+        }
+        return {
+          returning: async () => {
+            const rows = values.map((value) => ({ createdAt: new Date(), ...value })) as typeof events;
+            events.push(...rows);
+            return rows;
+          },
+        };
+      },
     }),
     update: (table: unknown) => ({
       set: (patch: Record<string, unknown>) => ({
@@ -91,8 +103,46 @@ describe("durable run events", () => {
     expect(JSON.stringify(events)).toContain("[REDACTED]");
   });
 
+  it("redacts before bounding tool payloads and splits oversized deltas losslessly", async () => {
+    const { database, events } = eventDb();
+    const secret = "SENTINEL-SECRET-123456789";
+    const input = `${"i".repeat(RUN_CHAT_TOOL_INPUT_MAX - 5)}${secret} tail`;
+    const output = `${"o".repeat(RUN_CHAT_TOOL_OUTPUT_MAX - 5)}${secret} tail`;
+    const delta = "🤖".repeat(RUN_CHAT_DELTA_MAX);
+
+    const rows = await appendRunEvents({
+      actor,
+      orgId: ORG,
+      runId: RUN,
+      events: [
+        { type: "tool.start", call_id: "call-1", skill: null, tool: "bash", title: null, input },
+        { type: "tool.done", call_id: "call-1", title: null, output, duration_ms: 1 },
+        { type: "text.delta", message_id: "message-1", delta },
+      ],
+      redactor: createRunRedactor([secret]),
+      database,
+    });
+
+    const serialized = JSON.stringify(events);
+    expect(serialized).not.toContain(secret);
+    expect(serialized).not.toContain("SENTI");
+    expect(rows[0]?.event).toMatchObject({ type: "tool.start" });
+    if (rows[0]?.event.type === "tool.start") {
+      expect(Buffer.byteLength(rows[0].event.input, "utf8")).toBeLessThanOrEqual(RUN_CHAT_TOOL_INPUT_MAX);
+    }
+    if (rows[1]?.event.type === "tool.done") {
+      expect(Buffer.byteLength(rows[1].event.output, "utf8")).toBeLessThanOrEqual(RUN_CHAT_TOOL_OUTPUT_MAX);
+    }
+    expect(
+      rows
+        .filter((row) => row.event.type === "text.delta")
+        .map((row) => row.event.type === "text.delta" ? row.event.delta : "")
+        .join(""),
+    ).toBe(delta);
+  });
+
   it("snapshots the transcript and its highest folded event sequence atomically", async () => {
-    const { database, run } = eventDb();
+    const { database, events, run } = eventDb();
     const redactor = createRunRedactor(["snapshot-secret"]);
     await appendRunEvents({
       actor,
@@ -112,10 +162,12 @@ describe("durable run events", () => {
         runId: RUN,
         items: [{ kind: "assistant", text: "snapshot-secret answer" }],
         redactor,
+        barrierEvent: { type: "session.idle", session_id: "session-1" },
         database,
       }),
     ).resolves.toBe(true);
-    expect(run.transcriptEventSequence).toBe(2);
+    expect(run.transcriptEventSequence).toBe(3);
+    expect(events.at(-1)).toMatchObject({ sequence: 3, type: "session.idle" });
     expect(JSON.stringify(run.transcript)).toContain("[REDACTED]");
     expect(JSON.stringify(run.transcript)).not.toContain("snapshot-secret");
   });
@@ -264,10 +316,22 @@ function failureDb(cancelRequestedAt: Date | null = null) {
     }),
     update: (table: unknown) => ({
       set: (patch: Record<string, unknown>) => ({
-        where: async () => {
-          if (table === schema.skillRuns) Object.assign(run, patch);
-          else if (table === schema.skillRunJobs) Object.assign(job, patch);
-          else throw new Error("unexpected update");
+        where: () => {
+          const apply = () => {
+            if (table === schema.skillRuns) Object.assign(run, patch);
+            else if (table === schema.skillRunJobs) Object.assign(job, patch);
+            else throw new Error("unexpected update");
+          };
+          return {
+            returning: async () => {
+              apply();
+              return [{ id: String(table === schema.skillRuns ? run.id : job.id) }];
+            },
+            then: (resolve: (value: undefined) => unknown) => {
+              apply();
+              return Promise.resolve(undefined).then(resolve);
+            },
+          };
         },
       }),
     }),
@@ -298,13 +362,13 @@ describe("atomic run failure transition", () => {
         database: state.database,
       }),
     ).resolves.toBe("failed");
-    expect(state.run).toMatchObject({ status: "error", phase: "cleanup" });
-    expect(state.job).toMatchObject({ status: "failed", phase: "cleanup", leaseOwner: null });
+    expect(state.run).toMatchObject({ status: "error", phase: "record" });
+    expect(state.job).toMatchObject({ status: "failed", phase: "record", leaseOwner: null });
     expect(state.events).toEqual([
       expect.objectContaining({
         sequence: 1,
         type: "run.error",
-        payload: { code: "runtime_failed", message: "[REDACTED] failed", phase: "cleanup" },
+        payload: { code: "runtime_failed", message: "[REDACTED] failed", phase: "record" },
       }),
     ]);
   });
@@ -335,5 +399,82 @@ describe("cross-tenant job claim seam", () => {
     await expect(claimRunJobs({ workerId: "worker-a", limit: 2, leaseSeconds: 30, database })).resolves.toEqual(claimed);
     await expect(claimRunJobs({ workerId: "", database })).rejects.toThrow("worker id");
     await expect(claimRunJobs({ workerId: "worker-a", limit: 33, database })).rejects.toThrow("claim limits");
+  });
+});
+
+function promptClaimDb(prompt: Record<string, unknown>) {
+  const run = {
+    id: RUN,
+    orgId: ORG,
+    creatorId: actor.id,
+    status: "running",
+    phase: "record",
+    cancelRequestedAt: null,
+  };
+  const job = {
+    id: "50000000-0000-4000-8000-000000000002",
+    orgId: ORG,
+    runId: RUN,
+    creatorId: actor.id,
+    status: "leased",
+    leaseOwner: "worker-a",
+  };
+  const handle = {
+    transaction: async (fn: (transaction: Db) => Promise<unknown>) => fn(handle as unknown as Db),
+    select: () => ({
+      from: (table: unknown) => ({
+        where: () => {
+          if (table === schema.skillRuns) {
+            return Object.assign(Promise.resolve([run]), { for: async () => [run] });
+          }
+          if (table === schema.skillRunPrompts) {
+            return {
+              orderBy: () => ({
+                limit: () => ({ for: async () => [prompt] }),
+              }),
+            };
+          }
+          if (table === schema.skillRunJobs) {
+            return { for: async () => [job] };
+          }
+          throw new Error("unexpected select");
+        },
+      }),
+    }),
+    update: (table: unknown) => ({
+      set: (patch: Record<string, unknown>) => ({
+        where: () => ({
+          returning: async () => {
+            if (table !== schema.skillRunPrompts) throw new Error("unexpected update");
+            Object.assign(prompt, patch);
+            return [prompt];
+          },
+        }),
+      }),
+    }),
+  };
+  return handle as unknown as Db;
+}
+
+describe("prompt lease recovery budget", () => {
+  it("increments execution attempts for queued dispatch but not an expired processing lease", async () => {
+    const prompt = {
+      id: "60000000-0000-4000-8000-000000000001",
+      orgId: ORG,
+      runId: RUN,
+      status: "queued",
+      attempt: 0,
+      leaseReclaimCount: 0,
+      ordinal: 1,
+    } as Record<string, unknown>;
+    const database = promptClaimDb(prompt);
+    await claimNextRunPrompt({ actor, orgId: ORG, runId: RUN, workerId: "worker-a", database });
+    expect(prompt).toMatchObject({ status: "processing", attempt: 1, leaseReclaimCount: 0 });
+
+    // A deployment/crash resumes the same deterministic message id even at the old safety ceiling.
+    Object.assign(prompt, { status: "processing", attempt: 10, leaseReclaimCount: 4, leaseOwner: "worker-a" });
+    // Simulate the expired prompt lease being resumed by the still-current job owner.
+    await claimNextRunPrompt({ actor, orgId: ORG, runId: RUN, workerId: "worker-b", database });
+    expect(prompt).toMatchObject({ status: "processing", attempt: 10, leaseReclaimCount: 5, leaseOwner: "worker-b" });
   });
 });

@@ -179,10 +179,13 @@ MAILPIT_PID="$STATE_DIR/mailpit/mailpit.pid"
 # ---------------------------------------------------------------------------
 # Derived runtime config
 # ---------------------------------------------------------------------------
+PG_OWNER_USER="companion_owner"
+PG_OWNER_PASS="companion-owner"
 PG_USER="companion"
 PG_PASS="companion"
 PG_DB="companion"
 DATABASE_URL="postgres://${PG_USER}:${PG_PASS}@127.0.0.1:${PG_PORT}/${PG_DB}"
+DATABASE_MIGRATION_URL="postgres://${PG_OWNER_USER}:${PG_OWNER_PASS}@127.0.0.1:${PG_PORT}/${PG_DB}"
 
 WEB_URL="http://127.0.0.1:${WEB_PORT}"
 API_URL="http://127.0.0.1:${API_PORT}"
@@ -376,15 +379,23 @@ start_postgres() {
 }
 
 bootstrap_database() {
-  step "Ensuring role + database"
+  step "Ensuring migration-owner + NOBYPASSRLS runtime roles"
   local PSQL=("$PG_BIN/psql" -h 127.0.0.1 -p "$PG_PORT" -U postgres -d postgres -v ON_ERROR_STOP=1)
   "${PSQL[@]}" -c "DO \$\$ BEGIN
+    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '$PG_OWNER_USER') THEN
+      CREATE ROLE $PG_OWNER_USER LOGIN PASSWORD '$PG_OWNER_PASS' NOSUPERUSER BYPASSRLS;
+    END IF;
     IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '$PG_USER') THEN
-      CREATE ROLE $PG_USER LOGIN PASSWORD '$PG_PASS' SUPERUSER;
+      CREATE ROLE $PG_USER LOGIN PASSWORD '$PG_PASS' NOSUPERUSER NOBYPASSRLS;
     END IF;
   END \$\$;" >/dev/null
-  "${PSQL[@]}" -c "CREATE DATABASE $PG_DB OWNER $PG_USER;" 2>/dev/null || true
-  ok "Role '$PG_USER' + database '$PG_DB' ready"
+  "${PSQL[@]}" -c "ALTER ROLE $PG_OWNER_USER NOSUPERUSER BYPASSRLS;" >/dev/null
+  "${PSQL[@]}" -c "ALTER ROLE $PG_USER NOSUPERUSER NOBYPASSRLS NOINHERIT;" >/dev/null
+  "${PSQL[@]}" -c "CREATE DATABASE $PG_DB OWNER $PG_OWNER_USER;" 2>/dev/null || true
+  "${PSQL[@]}" -c "ALTER DATABASE $PG_DB OWNER TO $PG_OWNER_USER;" >/dev/null
+  # Upgrade old Conductor clusters whose application role used to own every migrated object.
+  "${PSQL[@]}" -d "$PG_DB" -c "REASSIGN OWNED BY $PG_USER TO $PG_OWNER_USER;" >/dev/null
+  ok "Owner '$PG_OWNER_USER' + runtime '$PG_USER' + database '$PG_DB' ready"
 }
 
 # ---------------------------------------------------------------------------
@@ -491,7 +502,10 @@ cleanup() {
 # ---------------------------------------------------------------------------
 migrate_and_seed() {
   step "Applying migrations + seeding test user"
-  DATABASE_URL="$DATABASE_URL" pnpm db:migrate || die "Migrations failed"
+  DATABASE_URL="$DATABASE_MIGRATION_URL" DATABASE_MIGRATION_URL="$DATABASE_MIGRATION_URL" pnpm db:migrate || die "Migrations failed"
+  local OWNER_PSQL=("$PG_BIN/psql" "$DATABASE_MIGRATION_URL" -v ON_ERROR_STOP=1)
+  "${OWNER_PSQL[@]}" -v runtime_role="$PG_USER" \
+    -f "$REPO_ROOT/packages/db/runtime-role-grants.sql" >/dev/null || die "Runtime database grants failed"
   ok "Migrations applied"
 
   local seed_env=(

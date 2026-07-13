@@ -1,6 +1,17 @@
 import { randomUUID } from "node:crypto";
 import postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import {
+  beginRunFreeze,
+  claimNextRunPrompt,
+  deleteRunConfiguration,
+  enqueueRunPrompt,
+  heartbeatRunJob,
+  heartbeatRunWorker,
+  isRunWorkerReady,
+  removeRunWorkerHeartbeat,
+} from "@companion/core/services";
+import { withTenantContext } from "@companion/db";
 
 const enabled = process.env.RUN_SKILL_DB_INTEGRATION === "1";
 const databaseUrl = process.env.DATABASE_URL ?? "postgres://companion:companion@127.0.0.1:5432/companion";
@@ -13,14 +24,18 @@ describe.skipIf(!enabled)("RunSkill PostgreSQL security and queue boundary", () 
   const skillId = randomUUID();
   const versionId = randomUUID();
   const configId = randomUUID();
+  const sharedSecretId = randomUUID();
   const runId = randomUUID();
   const terminalRunId = randomUUID();
   const cleanupRunId = randomUUID();
+  const revokedRunId = randomUUID();
+  const freezeRunId = randomUUID();
   const attachmentId = randomUUID();
   const artifactId = randomUUID();
   const owner = { id: `run-owner-${suffix}`, email: `run-owner-${suffix}@example.test` };
   const admin = { id: `run-admin-${suffix}`, email: `run-admin-${suffix}@example.test` };
   const outsider = { id: `run-outsider-${suffix}`, email: `run-outsider-${suffix}@example.test` };
+  const departed = { id: `run-departed-${suffix}`, email: `run-departed-${suffix}@example.test` };
   const rlsRole = `companion_run_rls_${suffix.replaceAll("-", "").slice(0, 20)}`;
 
   async function countsFor(orgId: string, userId: string): Promise<Record<string, number>> {
@@ -49,11 +64,15 @@ describe.skipIf(!enabled)("RunSkill PostgreSQL security and queue boundary", () 
     });
   }
 
-  async function claim(workerId: string, leaseSeconds = 30): Promise<Array<{ id: string; attempt: number }>> {
+  async function claim(workerId: string, leaseSeconds = 30): Promise<Array<{
+    id: string;
+    attempt: number;
+    leaseReclaimCount: number;
+  }>> {
     return sql.begin(async (tx) => {
       await tx.unsafe(`set local role ${rlsRole}`);
-      return tx<{ id: string; attempt: number }[]>`
-        select id, attempt
+      return tx<{ id: string; attempt: number; leaseReclaimCount: number }[]>`
+        select id, attempt, lease_reclaim_count as "leaseReclaimCount"
         from companion_claim_skill_run_jobs(${workerId}, 1, ${leaseSeconds})
       `;
     });
@@ -92,7 +111,8 @@ describe.skipIf(!enabled)("RunSkill PostgreSQL security and queue boundary", () 
       values
         (${owner.id}, 'Run Owner', ${owner.email}, true),
         (${admin.id}, 'Run Admin', ${admin.email}, true),
-        (${outsider.id}, 'Run Outsider', ${outsider.email}, true)
+        (${outsider.id}, 'Run Outsider', ${outsider.email}, true),
+        (${departed.id}, 'Run Departed', ${departed.email}, true)
     `;
     await sql`
       insert into organizations (id, name, slug)
@@ -105,6 +125,7 @@ describe.skipIf(!enabled)("RunSkill PostgreSQL security and queue boundary", () 
       values
         (${orgA}::uuid, ${owner.id}, 'owner'),
         (${orgA}::uuid, ${admin.id}, 'admin'),
+        (${orgA}::uuid, ${departed.id}, 'developer'),
         (${orgB}::uuid, ${outsider.id}, 'owner')
     `;
     await sql`
@@ -122,6 +143,14 @@ describe.skipIf(!enabled)("RunSkill PostgreSQL security and queue boundary", () 
     await sql`
       insert into skill_run_configs (id, org_id, skill_id, creator_id, name, model)
       values (${configId}::uuid, ${orgA}::uuid, ${skillId}::uuid, ${owner.id}, 'Private config', 'openai/gpt-5')
+    `;
+    await sql`
+      insert into secrets (id, org_id, owner_id, name, key, audience)
+      values (${sharedSecretId}::uuid, ${orgA}::uuid, ${owner.id}, 'Shared provider key', 'OPENAI_API_KEY', 'organization')
+    `;
+    await sql`
+      insert into user_provider_connections (org_id, user_id, provider, key_name, secret_id)
+      values (${orgA}::uuid, ${admin.id}, 'openai', 'OPENAI_API_KEY', ${sharedSecretId}::uuid)
     `;
     await sql`
       insert into skill_run_config_variables (org_id, config_id, skill_id, env_key, value)
@@ -158,6 +187,24 @@ describe.skipIf(!enabled)("RunSkill PostgreSQL security and queue boundary", () 
          'error', 'complete', ${`run-${cleanupRunId.slice(0, 8)}`})
     `;
     await sql`
+      insert into skill_runs
+        (id, org_id, skill_id, creator_id, skill_version_id, skill_version, idempotency_key,
+         payload_hash, model, prompt, status, phase, sandbox_name)
+      values
+        (${freezeRunId}::uuid, ${orgA}::uuid, ${skillId}::uuid, ${owner.id}, ${versionId}::uuid,
+         '1.0.0', 'integration-freeze', ${"1".repeat(64)}, 'openai/gpt-5', 'freeze prompt',
+         'running', 'record', ${`run-${freezeRunId.slice(0, 8)}`})
+    `;
+    await sql`
+      insert into skill_runs
+        (id, org_id, skill_id, creator_id, skill_version_id, skill_version, idempotency_key,
+         payload_hash, model, prompt, status, phase, sandbox_name, sandbox_id)
+      values
+        (${revokedRunId}::uuid, ${orgA}::uuid, ${skillId}::uuid, ${departed.id}, ${versionId}::uuid,
+         '1.0.0', 'integration-revoked', ${"e".repeat(64)}, 'openai/gpt-5', 'revoked prompt',
+         'running', 'record', ${`run-${revokedRunId.slice(0, 8)}`}, 'sandbox-revoked')
+    `;
+    await sql`
       insert into skill_run_skills (org_id, run_id, skill_id, skill_version_id, is_root, mount_order)
       values (${orgA}::uuid, ${runId}::uuid, ${skillId}::uuid, ${versionId}::uuid, true, 0)
     `;
@@ -175,10 +222,31 @@ describe.skipIf(!enabled)("RunSkill PostgreSQL security and queue boundary", () 
       values (${orgA}::uuid, ${runId}::uuid, ${owner.id})
     `;
     await sql`
+      insert into skill_run_jobs
+        (org_id, run_id, creator_id, status, phase, attempt, lease_owner, lease_expires_at)
+      values
+        (${orgA}::uuid, ${revokedRunId}::uuid, ${departed.id}, 'leased', 'record', 1,
+         'revoked-worker', now() + interval '5 minutes')
+    `;
+    await sql`
+      insert into skill_run_jobs
+        (org_id, run_id, creator_id, status, phase, attempt, lease_owner, lease_expires_at)
+      values
+        (${orgA}::uuid, ${freezeRunId}::uuid, ${owner.id}, 'leased', 'record', 1,
+         'freeze-worker', now() + interval '5 minutes')
+    `;
+    await sql`
       insert into skill_run_prompts
         (org_id, run_id, ordinal, kind, idempotency_key, payload_hash, message_id, prompt)
       values
         (${orgA}::uuid, ${runId}::uuid, 0, 'initial', 'integration-prompt', ${"c".repeat(64)}, ${randomUUID()}, 'prompt')
+    `;
+    await sql`
+      insert into skill_run_prompts
+        (org_id, run_id, ordinal, kind, idempotency_key, payload_hash, message_id, prompt)
+      values
+        (${orgA}::uuid, ${revokedRunId}::uuid, 1, 'follow_up', 'revoked-prompt',
+         ${"f".repeat(64)}, ${randomUUID()}, 'pending after departure')
     `;
     await sql`
       insert into skill_run_attachments (id, org_id, run_id, file_name, content_type, byte_size, storage_key)
@@ -196,14 +264,20 @@ describe.skipIf(!enabled)("RunSkill PostgreSQL security and queue boundary", () 
     await sql.unsafe(`grant select, insert, update, delete on all tables in schema public to ${rlsRole}`);
     await sql.unsafe(`grant usage, select on all sequences in schema public to ${rlsRole}`);
     await sql.unsafe(`grant execute on function companion_claim_skill_run_jobs(text, integer, integer) to ${rlsRole}`);
+    await sql.unsafe(`grant execute on function companion_get_skill_run_worker_control(uuid, uuid, text, text) to ${rlsRole}`);
+    await sql.unsafe(`grant execute on function companion_terminalize_revoked_skill_run(uuid, uuid, text, text, boolean) to ${rlsRole}`);
     await sql.unsafe(`grant execute on function companion_claim_skill_run_cleanups(text, integer, integer) to ${rlsRole}`);
     await sql.unsafe(`grant execute on function companion_complete_skill_run_cleanup(uuid, uuid, text) to ${rlsRole}`);
     await sql.unsafe(`grant execute on function companion_cleanup_skill_run_events(integer) to ${rlsRole}`);
+    await sql.unsafe(`grant execute on function companion_heartbeat_skill_run_worker(text, integer) to ${rlsRole}`);
+    await sql.unsafe(`grant execute on function companion_remove_skill_run_worker(text) to ${rlsRole}`);
+    await sql.unsafe(`grant execute on function companion_skill_run_worker_ready() to ${rlsRole}`);
+    await sql.unsafe(`grant execute on function companion_secret_usage_count(uuid, uuid) to ${rlsRole}`);
   });
 
   afterAll(async () => {
     await sql`delete from organizations where id in (${orgA}::uuid, ${orgB}::uuid)`;
-    await sql`delete from "user" where id in (${owner.id}, ${admin.id}, ${outsider.id})`;
+    await sql`delete from "user" where id in (${owner.id}, ${admin.id}, ${outsider.id}, ${departed.id})`;
     await sql.unsafe(`drop owned by ${rlsRole}`);
     await sql.unsafe(`drop role ${rlsRole}`);
     await sql.end();
@@ -216,10 +290,62 @@ describe.skipIf(!enabled)("RunSkill PostgreSQL security and queue boundary", () 
     expect(Object.values(await countsFor(orgB, outsider.id)).every((count) => count === 0)).toBe(true);
   });
 
+  it("does not treat caller-controlled worker GUCs as an RLS authority", async () => {
+    const result = await sql.begin(async (tx) => {
+      await tx.unsafe(`set local role ${rlsRole}`);
+      await tx`select set_config('app.run_worker', 'cleanup', true)`;
+      const runs = await tx<{ count: number }[]>`select count(*)::int as count from skill_runs`;
+      const deleted = await tx<{ runId: string }[]>`
+        delete from skill_run_events where org_id = ${orgA}::uuid returning run_id::text as "runId"
+      `;
+      await tx`select set_config('app.run_worker', 'claim', true)`;
+      const jobs = await tx<{ count: number }[]>`select count(*)::int as count from skill_run_jobs`;
+      return { runs: runs[0]?.count ?? -1, jobs: jobs[0]?.count ?? -1, deleted: deleted.length };
+    });
+    expect(result).toEqual({ runs: 0, jobs: 0, deleted: 0 });
+  });
+
+  it("reports cross-owner secret usage only to the secret owner", async () => {
+    const usageFor = (userId: string) => sql.begin(async (tx) => {
+      await tx.unsafe(`set local role ${rlsRole}`);
+      await tx`select set_config('app.org_id', ${orgA}, true), set_config('app.user_id', ${userId}, true)`;
+      const rows = await tx<{ count: number }[]>`
+        select companion_secret_usage_count(${orgA}::uuid, ${sharedSecretId}::uuid)::int as count
+      `;
+      return rows[0]?.count ?? -1;
+    });
+    await expect(usageFor(owner.id)).resolves.toBe(1);
+    await expect(usageFor(admin.id)).resolves.toBe(0);
+  });
+
+  it("deletes a used configuration while preserving the run name snapshot", async () => {
+    await sql`
+      update skill_runs
+      set run_config_id = ${configId}::uuid, run_config_name_snapshot = 'Private config'
+      where org_id = ${orgA}::uuid and id = ${runId}::uuid
+    `;
+    await expect(
+      withTenantContext({ orgId: orgA, userId: owner.id }, (database) =>
+        deleteRunConfiguration({
+          actor: { id: owner.id, email: owner.email, name: "Run Owner" },
+          orgId: orgA,
+          configId,
+          value: { revision: 1 },
+          database,
+        }),
+      ),
+    ).resolves.toBeUndefined();
+    const rows = await sql<{ configId: string | null; name: string | null }[]>`
+      select run_config_id::text as "configId", run_config_name_snapshot as name
+      from skill_runs where org_id = ${orgA}::uuid and id = ${runId}::uuid
+    `;
+    expect(rows).toEqual([{ configId: null, name: "Private config" }]);
+  });
+
   it("claims a job once across workers and reclaims it only after lease expiry", async () => {
     const firstClaims = await Promise.all([claim("worker-a"), claim("worker-b")]);
     expect(firstClaims.flat()).toHaveLength(1);
-    expect(firstClaims.flat()[0]).toMatchObject({ attempt: 1 });
+    expect(firstClaims.flat()[0]).toMatchObject({ attempt: 1, leaseReclaimCount: 0 });
     expect(await claim("worker-c")).toHaveLength(0);
 
     await sql`
@@ -229,7 +355,197 @@ describe.skipIf(!enabled)("RunSkill PostgreSQL security and queue boundary", () 
     `;
     const reclaimed = await claim("worker-c");
     expect(reclaimed).toHaveLength(1);
-    expect(reclaimed[0]).toMatchObject({ attempt: 2 });
+    expect(reclaimed[0]).toMatchObject({ attempt: 1, leaseReclaimCount: 1 });
+
+    // Only an explicit transient-failure requeue consumes the next execution attempt.
+    await sql`
+      update skill_run_jobs
+      set status = 'queued', lease_owner = null, lease_expires_at = null, available_at = now()
+      where org_id = ${orgA}::uuid and run_id = ${runId}::uuid
+    `;
+    const retried = await claim("worker-d");
+    expect(retried).toHaveLength(1);
+    expect(retried[0]).toMatchObject({ attempt: 2, leaseReclaimCount: 1 });
+  });
+
+  it("rejects stale lease heartbeats and exposes only live worker readiness", async () => {
+    await sql`
+      update skill_run_jobs
+      set lease_expires_at = now() - interval '1 second'
+      where org_id = ${orgA}::uuid and run_id = ${runId}::uuid
+    `;
+    const actor = { id: owner.id, email: owner.email, name: "Run Owner" };
+    await expect(
+      withTenantContext({ orgId: orgA, userId: owner.id }, (database) =>
+        heartbeatRunJob({
+          actor,
+          orgId: orgA,
+          runId,
+          workerId: "worker-d",
+          leaseSeconds: 30,
+          database,
+        }),
+      ),
+    ).resolves.toBe(false);
+    await expect(
+      withTenantContext({ orgId: orgA, userId: owner.id }, (database) =>
+        claimNextRunPrompt({
+          actor,
+          orgId: orgA,
+          runId,
+          workerId: "worker-d",
+          leaseSeconds: 30,
+          database,
+        }),
+      ),
+    ).rejects.toMatchObject({ name: "LostRunLeaseError" });
+
+    await withTenantContext({ orgId: orgA, userId: owner.id }, async (database) => {
+      expect(await isRunWorkerReady({ database })).toBe(false);
+      await heartbeatRunWorker({ workerId: "readiness-worker", ttlSeconds: 15, database });
+      expect(await isRunWorkerReady({ database })).toBe(true);
+      await removeRunWorkerHeartbeat({ workerId: "readiness-worker", database });
+      expect(await isRunWorkerReady({ database })).toBe(false);
+    });
+  });
+
+  it("terminalizes and leaves cleanup owed when a leased run owner loses membership", async () => {
+    await sql`delete from memberships where org_id = ${orgA}::uuid and user_id = ${departed.id}`;
+    const result = await sql.begin(async (tx) => {
+      await tx.unsafe(`set local role ${rlsRole}`);
+      await tx`select set_config('app.org_id', ${orgA}, true), set_config('app.user_id', ${departed.id}, true)`;
+      const hidden = await tx<{ count: number }[]>`
+        select count(*)::int as count from skill_runs where id = ${revokedRunId}::uuid
+      `;
+      const wrong = await tx`
+        select * from companion_get_skill_run_worker_control(
+          ${orgA}::uuid, ${revokedRunId}::uuid, ${departed.id}, 'wrong-worker'
+        )
+      `;
+      const control = await tx<{
+        membershipActive: boolean;
+        sandboxName: string;
+        sandboxId: string;
+      }[]>`
+        select membership_active as "membershipActive", sandbox_name as "sandboxName", sandbox_id as "sandboxId"
+        from companion_get_skill_run_worker_control(
+          ${orgA}::uuid, ${revokedRunId}::uuid, ${departed.id}, 'revoked-worker'
+        )
+      `;
+      const terminalized = await tx<{ completed: boolean }[]>`
+        select companion_terminalize_revoked_skill_run(
+          ${orgA}::uuid, ${revokedRunId}::uuid, ${departed.id}, 'revoked-worker', false
+        ) as completed
+      `;
+      const context = await tx<{ worker: string; org: string }[]>`
+        select current_setting('app.run_worker', true) as worker,
+               current_setting('app.run_worker_org_id', true) as org
+      `;
+      return {
+        hidden: hidden[0]?.count,
+        wrong: wrong.length,
+        control,
+        terminalized: terminalized[0]?.completed,
+        context: context[0],
+      };
+    });
+    expect(result).toEqual({
+      hidden: 0,
+      wrong: 0,
+      control: [{
+        membershipActive: false,
+        sandboxName: `run-${revokedRunId.slice(0, 8)}`,
+        sandboxId: "sandbox-revoked",
+      }],
+      terminalized: true,
+      context: { worker: "", org: "" },
+    });
+    const rows = await sql<{
+      status: string;
+      phase: string;
+      errorCode: string | null;
+      cleaned: boolean;
+      jobStatus: string;
+      promptStatus: string;
+      eventType: string;
+    }[]>`
+      select r.status::text, r.phase::text, r.error_code as "errorCode",
+             r.sandbox_cleaned_at is not null as cleaned, j.status::text as "jobStatus",
+             p.status::text as "promptStatus", e.type as "eventType"
+      from skill_runs r
+      join skill_run_jobs j on j.org_id = r.org_id and j.run_id = r.id
+      join skill_run_prompts p on p.org_id = r.org_id and p.run_id = r.id
+      join skill_run_events e on e.org_id = r.org_id and e.run_id = r.id
+      where r.org_id = ${orgA}::uuid and r.id = ${revokedRunId}::uuid
+    `;
+    expect(rows).toEqual([{
+      status: "error",
+      phase: "record",
+      errorCode: "membership_revoked",
+      cleaned: false,
+      jobStatus: "failed",
+      promptStatus: "canceled",
+      eventType: "run.error",
+    }]);
+    // Keep the following cleanup-lease test isolated after proving the failed destroy remains owed.
+    await sql`
+      update skill_runs set sandbox_cleaned_at = now()
+      where org_id = ${orgA}::uuid and id = ${revokedRunId}::uuid
+    `;
+  });
+
+  it("closes prompt admission atomically before inactivity teardown", async () => {
+    const runActor = { id: owner.id, email: owner.email, name: "Run Owner" };
+    await expect(
+      withTenantContext({ orgId: orgA, userId: owner.id }, (database) =>
+        beginRunFreeze({
+          actor: runActor,
+          orgId: orgA,
+          runId: freezeRunId,
+          workerId: "freeze-worker",
+          database,
+        }),
+      ),
+    ).resolves.toBe("ready");
+    await expect(
+      withTenantContext({ orgId: orgA, userId: owner.id }, (database) =>
+        enqueueRunPrompt({
+          actor: runActor,
+          orgId: orgA,
+          runId: freezeRunId,
+          text: "too late",
+          idempotencyKey: "freeze-rejected-prompt",
+          database,
+        }),
+      ),
+    ).rejects.toMatchObject({ code: "run_not_running" });
+
+    await sql`
+      update skill_runs set phase = 'record'
+      where org_id = ${orgA}::uuid and id = ${freezeRunId}::uuid
+    `;
+    await sql`
+      insert into skill_run_prompts
+        (org_id, run_id, ordinal, kind, idempotency_key, payload_hash, message_id, prompt)
+      values
+        (${orgA}::uuid, ${freezeRunId}::uuid, 1, 'follow_up', 'freeze-pending-prompt',
+         ${"2".repeat(64)}, ${randomUUID()}, 'won the run lock first')
+    `;
+    await expect(
+      withTenantContext({ orgId: orgA, userId: owner.id }, (database) =>
+        beginRunFreeze({
+          actor: runActor,
+          orgId: orgA,
+          runId: freezeRunId,
+          workerId: "freeze-worker",
+          database,
+        }),
+      ),
+    ).resolves.toBe("prompt_pending");
+    const phases = await sql<{ phase: string }[]>`
+      select phase::text from skill_runs where org_id = ${orgA}::uuid and id = ${freezeRunId}::uuid
+    `;
+    expect(phases).toEqual([{ phase: "record" }]);
   });
 
   it("leases terminal cleanup once and retries after a failed provider attempt", async () => {
@@ -267,6 +583,7 @@ describe.skipIf(!enabled)("RunSkill PostgreSQL security and queue boundary", () 
       select run_id::text as "runId" from skill_run_events
       where org_id = ${orgA}::uuid order by run_id
     `;
-    expect(events.map((event) => event.runId)).toEqual([runId]);
+    expect(events.map((event) => event.runId)).toEqual(expect.arrayContaining([runId, revokedRunId]));
+    expect(events).toHaveLength(2);
   });
 });

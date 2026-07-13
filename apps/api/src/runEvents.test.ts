@@ -33,14 +33,15 @@ describe("run event SSE helpers", () => {
   });
 
   it("emits ready after an empty caught-up replay, even when the cursor is already current", () => {
-    expect(runDrainAction({ eventCount: 0, pageSize: 500, notified: false, terminal: false, readySent: false })).toBe("ready");
+    expect(runDrainAction({ eventCount: 0, pageSize: 500, notified: false, terminal: false, terminalObserved: false, readySent: false })).toBe("ready");
     expect(runReadyFrame()).toBe('event: message\ndata: {"type":"ready","session_id":""}\n\n');
-    expect(runDrainAction({ eventCount: 0, pageSize: 500, notified: false, terminal: false, readySent: true })).toBe("wait");
+    expect(runDrainAction({ eventCount: 0, pageSize: 500, notified: false, terminal: false, terminalObserved: false, readySent: true })).toBe("wait");
   });
 
   it("drains notifications before ready and closes a caught-up terminal stream", () => {
-    expect(runDrainAction({ eventCount: 500, pageSize: 500, notified: false, terminal: false, readySent: false })).toBe("continue");
-    expect(runDrainAction({ eventCount: 0, pageSize: 500, notified: true, terminal: false, readySent: false })).toBe("continue");
-    expect(runDrainAction({ eventCount: 0, pageSize: 500, notified: false, terminal: true, readySent: false })).toBe("close");
+    expect(runDrainAction({ eventCount: 500, pageSize: 500, notified: false, terminal: false, terminalObserved: false, readySent: false })).toBe("continue");
+    expect(runDrainAction({ eventCount: 0, pageSize: 500, notified: true, terminal: false, terminalObserved: false, readySent: false })).toBe("continue");
+    expect(runDrainAction({ eventCount: 0, pageSize: 500, notified: false, terminal: true, terminalObserved: false, readySent: false })).toBe("continue");
+    expect(runDrainAction({ eventCount: 0, pageSize: 500, notified: false, terminal: true, terminalObserved: true, readySent: false })).toBe("close");
   });
 });

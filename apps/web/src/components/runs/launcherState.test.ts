@@ -131,6 +131,16 @@ describe("run launcher state", () => {
     })).toEqual([]);
   });
 
+  it("blocks launch when ready model options no longer carry the explicit provider reference", () => {
+    const base = options();
+    base.declared_secrets = [];
+    base.models[0] = { ...base.models[0]!, provider_secret_pin: null };
+
+    expect(runDraftBlockers(base, "openai/gpt-5", { secrets: [], variables: [] })).toEqual([
+      "Reload run options to select the model provider secret explicitly.",
+    ]);
+  });
+
   it("keeps complete drafts isolated by skill slug", () => {
     const first = { prompt: "first", files: [], model: "openai/gpt-5", inputs: { secrets: [], variables: [] }, configurationId: null };
     const second = { ...first, prompt: "second" };

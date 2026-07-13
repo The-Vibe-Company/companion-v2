@@ -30,12 +30,14 @@ const serviceMocks = vi.hoisted(() => ({
   updateRunConfiguration: vi.fn(),
   deleteRunConfiguration: vi.fn(async () => undefined),
   createRun: vi.fn(),
+  listReferencedRunAttachmentKeys: vi.fn(async (_input: unknown): Promise<string[]> => []),
   listRuns: vi.fn(),
   getRun: vi.fn(),
   enqueueRunPrompt: vi.fn(),
   requestRunCancellation: vi.fn(),
   listRunEvents: vi.fn(),
   getRunAttachment: vi.fn(),
+  isRunWorkerReady: vi.fn(async () => true),
   setProviderConnection: vi.fn(),
   setOrgProviderConnection: vi.fn(),
 }));
@@ -43,6 +45,20 @@ const serviceMocks = vi.hoisted(() => ({
 const authMocks = vi.hoisted(() => ({
   getSession: vi.fn(async (): Promise<unknown | null> => null),
   handler: vi.fn(),
+}));
+
+const storageMocks = vi.hoisted(() => ({
+  putSkillArchive: vi.fn(async (_input: { key: string }) => undefined),
+  deleteSkillArchive: vi.fn(async (_input: { key: string }) => undefined),
+}));
+
+const catalogMocks = vi.hoisted(() => ({
+  listModels: vi.fn(async () => ({
+    models: [{ id: "openai/gpt-5", provider: "openai", provider_name: "OpenAI", name: "GPT-5", description: null, context: null, cost_input: null, cost_output: null, env_keys: ["OPENAI_API_KEY"] }],
+    providers: [],
+  })),
+  resolveModel: vi.fn(async () => ({ envKeys: ["OPENAI_API_KEY"] })),
+  clearCache: vi.fn(),
 }));
 
 vi.mock("@hono/node-server", () => ({ serve: vi.fn() }));
@@ -55,19 +71,12 @@ vi.mock("@companion/db", () => ({
   sql: { listen: vi.fn() },
 }));
 vi.mock("@companion/sandbox", () => ({
-  createModelCatalog: () => ({
-    listModels: async () => ({
-      models: [{ id: "openai/gpt-5", provider: "openai", provider_name: "OpenAI", name: "GPT-5", description: null, context: null, cost_input: null, cost_output: null, env_keys: ["OPENAI_API_KEY"] }],
-      providers: [],
-    }),
-    resolveModel: async () => ({ envKeys: ["OPENAI_API_KEY"] }),
-    clearCache: () => undefined,
-  }),
+  createModelCatalog: () => catalogMocks,
 }));
 vi.mock("@companion/storage", () => ({
   runAttachmentKey: ({ orgId, attachmentId }: { orgId: string; attachmentId: string }) => `${orgId}/${attachmentId}`,
-  putSkillArchive: vi.fn(async () => undefined),
-  deleteSkillArchive: vi.fn(async () => undefined),
+  putSkillArchive: storageMocks.putSkillArchive,
+  deleteSkillArchive: storageMocks.deleteSkillArchive,
 }));
 
 import { app } from "./index";
@@ -76,6 +85,8 @@ const actor = { id: "run-user", email: "run-user@example.test", name: "Run User"
 const skillVersionId = "00000000-0000-4000-8000-000000000001";
 const configId = "00000000-0000-4000-8000-000000000002";
 const secretId = "00000000-0000-4000-8000-000000000003";
+const dependencySkillId = "00000000-0000-4000-8000-000000000004";
+const dependencyVersionId = "00000000-0000-4000-8000-000000000005";
 
 function signIn(): void {
   authMocks.getSession.mockResolvedValue({ user: actor, session: { id: "session-1" } });
@@ -137,7 +148,11 @@ describe("session-only RunSkill routes", () => {
     form.set("prompt", "Run this skill");
     form.set("model", "openai/gpt-5");
     form.set("skill_version_id", skillVersionId);
+    form.set("dependency_pins", JSON.stringify([
+      { skill_id: dependencySkillId, skill_version_id: dependencyVersionId },
+    ]));
     form.set("inputs", JSON.stringify({ secrets: [], variables: [] }));
+    form.set("model_provider_secret_id", secretId);
     form.set("run_config_id", configId);
 
     const missingKey = await app.request("/v1/skills/demo/runs", { method: "POST", body: form });
@@ -154,11 +169,96 @@ describe("session-only RunSkill routes", () => {
       expect.objectContaining({
         slug: "demo",
         skillVersionId,
+        dependencyPins: [{ skill_id: dependencySkillId, skill_version_id: dependencyVersionId }],
         runConfigId: configId,
         idempotencyKey: "launch-request-1",
         inputs: { secrets: [], variables: [] },
+        modelProviderSecretId: secretId,
       }),
     );
+    expect(catalogMocks.listModels).not.toHaveBeenCalled();
+  });
+
+  it("keeps a newly uploaded object when an ambiguous createRun failure has a durable attachment row", async () => {
+    signIn();
+    serviceMocks.createRun.mockRejectedValueOnce(new Error("commit acknowledgement lost"));
+    serviceMocks.listReferencedRunAttachmentKeys.mockImplementationOnce(async () => {
+      const upload = storageMocks.putSkillArchive.mock.calls[0]?.[0] as { key?: string } | undefined;
+      return upload?.key ? [upload.key] : [];
+    });
+    const form = new FormData();
+    form.set("prompt", "Run this skill");
+    form.set("model", "openai/gpt-5");
+    form.set("skill_version_id", skillVersionId);
+    form.set("dependency_pins", "[]");
+    form.set("inputs", JSON.stringify({ secrets: [], variables: [] }));
+    form.set("model_provider_secret_id", secretId);
+    form.set("file", new Blob(["durable bytes"], { type: "text/plain" }), "notes.txt");
+
+    const response = await app.request("/v1/skills/demo/runs", {
+      method: "POST",
+      headers: { "Idempotency-Key": "ambiguous-launch-1" },
+      body: form,
+    });
+
+    expect(response.status).toBe(400);
+    expect(storageMocks.putSkillArchive).toHaveBeenCalledTimes(1);
+    expect(serviceMocks.listReferencedRunAttachmentKeys).toHaveBeenCalledWith(
+      expect.objectContaining({
+        actor,
+        storageKeys: [expect.stringContaining("/")],
+      }),
+    );
+    expect(storageMocks.deleteSkillArchive).not.toHaveBeenCalled();
+  });
+
+  it("fails safe and retains uploaded objects when durable attachment verification fails", async () => {
+    signIn();
+    serviceMocks.createRun.mockRejectedValueOnce(new Error("commit acknowledgement lost"));
+    serviceMocks.listReferencedRunAttachmentKeys.mockRejectedValueOnce(new Error("database unavailable"));
+    const form = new FormData();
+    form.set("prompt", "Run this skill");
+    form.set("model", "openai/gpt-5");
+    form.set("skill_version_id", skillVersionId);
+    form.set("dependency_pins", "[]");
+    form.set("inputs", JSON.stringify({ secrets: [], variables: [] }));
+    form.set("model_provider_secret_id", secretId);
+    form.set("file", new Blob(["uncertain bytes"], { type: "text/plain" }), "notes.txt");
+
+    const response = await app.request("/v1/skills/demo/runs", {
+      method: "POST",
+      headers: { "Idempotency-Key": "ambiguous-launch-2" },
+      body: form,
+    });
+
+    expect(response.status).toBe(400);
+    expect(serviceMocks.listReferencedRunAttachmentKeys).toHaveBeenCalledTimes(1);
+    expect(storageMocks.deleteSkillArchive).not.toHaveBeenCalled();
+  });
+
+  it("deletes a newly uploaded object only after durable verification proves it unreferenced", async () => {
+    signIn();
+    serviceMocks.createRun.mockRejectedValueOnce(new Error("launch rejected before commit"));
+    serviceMocks.listReferencedRunAttachmentKeys.mockResolvedValueOnce([]);
+    const form = new FormData();
+    form.set("prompt", "Run this skill");
+    form.set("model", "openai/gpt-5");
+    form.set("skill_version_id", skillVersionId);
+    form.set("dependency_pins", "[]");
+    form.set("inputs", JSON.stringify({ secrets: [], variables: [] }));
+    form.set("model_provider_secret_id", secretId);
+    form.set("file", new Blob(["orphan bytes"], { type: "text/plain" }), "notes.txt");
+
+    const response = await app.request("/v1/skills/demo/runs", {
+      method: "POST",
+      headers: { "Idempotency-Key": "rejected-launch-1" },
+      body: form,
+    });
+
+    expect(response.status).toBe(400);
+    const uploadedKey = (storageMocks.putSkillArchive.mock.calls[0]?.[0] as { key: string }).key;
+    expect(serviceMocks.listReferencedRunAttachmentKeys).toHaveBeenCalledTimes(1);
+    expect(storageMocks.deleteSkillArchive).toHaveBeenCalledWith({ key: uploadedKey });
   });
 
   it("enqueues follow-ups and cancellation without contacting a sandbox", async () => {

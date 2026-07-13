@@ -1,6 +1,12 @@
 import { createOpencodeClient, type OpencodeClient } from "@opencode-ai/sdk";
 import type { RunChatEvent, RunChatHistoryItem } from "@companion/contracts";
-import { OPENCODE_SERVER_USERNAME, type RunChatRuntime, type RunChatTarget } from "@companion/core";
+import {
+  OPENCODE_SERVER_USERNAME,
+  type RunChatMessageState,
+  type RunChatRuntime,
+  type RunChatSessionState,
+  type RunChatTarget,
+} from "@companion/core";
 import { toolTitleAndSkill } from "./chatMapping";
 
 /**
@@ -33,8 +39,12 @@ export function createChatClient(target: ChatTarget): OpencodeClient {
   });
 }
 
-export async function createChatSession(client: OpencodeClient, title?: string): Promise<{ id: string; title: string }> {
-  const res = await client.session.create({ body: title ? { title } : {} });
+export async function createChatSession(
+  client: OpencodeClient,
+  title?: string,
+  signal?: AbortSignal,
+): Promise<{ id: string; title: string }> {
+  const res = await client.session.create({ body: title ? { title } : {}, signal });
   if (!res.data) throw new Error("opencode did not return a session");
   return { id: res.data.id, title: res.data.title ?? title ?? "New session" };
 }
@@ -43,8 +53,13 @@ export async function createChatSession(client: OpencodeClient, title?: string):
  * Load a session's prior messages as normalized history items (for reopening a chat). Same
  * parts→item translation as {@link streamChatEvents}, kept next to the pinned SDK.
  */
-export async function loadSessionItems(client: OpencodeClient, sessionId: string): Promise<RunChatHistoryItem[]> {
-  const res = await client.session.messages({ path: { id: sessionId } });
+export async function loadSessionItems(
+  client: OpencodeClient,
+  sessionId: string,
+  signal?: AbortSignal,
+): Promise<RunChatHistoryItem[]> {
+  const res = await client.session.messages({ path: { id: sessionId }, signal });
+  if (res.error) throw new Error("opencode could not load the session transcript");
   const messages = res.data ?? [];
   const items: RunChatHistoryItem[] = [];
   for (const entry of messages) {
@@ -68,7 +83,10 @@ export async function loadSessionItems(client: OpencodeClient, sessionId: string
           skill,
           title,
           input: inputJson,
-          output: truncate(output, 4000),
+          // Keep the complete SDK payload here. The worker redacts every injected literal before
+          // applying persistence bounds; truncating in the SDK adapter first could retain a secret
+          // prefix while cutting off the bytes needed by the redactor to recognize it.
+          output,
           duration_ms: part.state.status === "completed" && part.state.time ? Math.max(0, part.state.time.end - part.state.time.start) : null,
         });
       }
@@ -76,11 +94,76 @@ export async function loadSessionItems(client: OpencodeClient, sessionId: string
     const text = entry.parts
       .filter((part): part is Extract<typeof part, { type: "text" }> => part.type === "text")
       .map((part) => part.text)
-      .join("")
-      .trim();
-    if (text) items.push({ kind: role === "user" ? "user" : "assistant", text });
+      .join("");
+    // Use trim only as the empty-message predicate. The worker must see the exact bytes so a
+    // credential containing leading/trailing whitespace is redacted before any normalization.
+    if (text.trim()) items.push({ kind: role === "user" ? "user" : "assistant", text });
   }
   return items;
+}
+
+/** Validate the persisted session and reconcile its current state after a worker interruption. */
+export async function getSessionState(
+  client: OpencodeClient,
+  sessionId: string,
+  signal?: AbortSignal,
+): Promise<RunChatSessionState> {
+  const session = await client.session.get({ path: { id: sessionId }, signal });
+  if (session.error) {
+    if (session.error.name === "NotFoundError") return "missing";
+    throw new Error("opencode could not validate the persisted session");
+  }
+  if (!session.data) throw new Error("opencode returned an invalid session response");
+  const response = await client.session.status({ signal });
+  if (response.error) throw new Error("opencode could not report the session status");
+  return response.data?.[sessionId]?.type ?? "idle";
+}
+
+/** Reconcile the deterministic user message with its exact assistant child. */
+export async function getSessionMessageState(
+  client: OpencodeClient,
+  sessionId: string,
+  messageId: string,
+  signal?: AbortSignal,
+): Promise<RunChatMessageState> {
+  const response = await client.session.messages({ path: { id: sessionId }, signal });
+  if (response.error) throw new Error("opencode could not inspect the session messages");
+  const messages = response.data ?? [];
+  if (!messages.some((entry) => entry.info.role === "user" && entry.info.id === messageId)) return "missing";
+  const replies = messages.filter(
+    (entry) => entry.info.role === "assistant" && entry.info.parentID === messageId,
+  );
+  if (replies.some((entry) => entry.info.role === "assistant" && entry.info.error)) return "error";
+  if (replies.some((entry) => entry.info.role === "assistant" && entry.info.time.completed !== undefined)) {
+    return "completed";
+  }
+  return "pending";
+}
+
+/**
+ * Cursor shared by successive subscriptions for one recorder. OpenCode sends cumulative part
+ * updates, so reconnecting with a fresh cursor would replay every byte already persisted.
+ */
+export interface OpencodeStreamState {
+  assistantMessages: Set<string>;
+  startedTools: Set<string>;
+  doneTools: Set<string>;
+  doneTexts: Set<string>;
+  textEmitted: Map<string, number>;
+  reasoningEmitted: Map<string, number>;
+  doneReasoning: Set<string>;
+}
+
+export function createOpencodeStreamState(): OpencodeStreamState {
+  return {
+    assistantMessages: new Set(),
+    startedTools: new Set(),
+    doneTools: new Set(),
+    doneTexts: new Set(),
+    textEmitted: new Map(),
+    reasoningEmitted: new Map(),
+    doneReasoning: new Set(),
+  };
 }
 
 /** Fire a prompt without waiting for the reply — deltas arrive on the event stream. */
@@ -106,22 +189,21 @@ export async function* streamChatEvents(input: {
   client: OpencodeClient;
   sessionId: string;
   signal?: AbortSignal;
+  /** Reused across recorder reconnects to derive deltas from cumulative OpenCode parts. */
+  state?: OpencodeStreamState;
   /** Handshake used by the worker to prove the subscription exists before dispatching a prompt. */
   onConnected?: () => void;
 }): AsyncGenerator<RunChatEvent> {
   const { client, sessionId, signal, onConnected } = input;
-  const assistantMessages = new Set<string>();
-  const startedTools = new Set<string>();
-  const doneTools = new Set<string>();
-  const doneTexts = new Set<string>();
+  const state = input.state ?? createOpencodeStreamState();
+  const { assistantMessages, startedTools, doneTools, doneTexts } = state;
   // Length already emitted per text part id. `message.part.updated` carries the CUMULATIVE text of
   // an assistant text part (the server also emits a separate `message.part.delta` event that the
   // pinned SDK types don't model), so we diff against what we've emitted to derive the increment —
   // version-independent, no reliance on an optional `delta` field.
-  const textEmitted = new Map<string, number>();
+  const { textEmitted } = state;
   // Same cumulative-diff bookkeeping for the model's reasoning ("thinking") parts.
-  const reasoningEmitted = new Map<string, number>();
-  const doneReasoning = new Set<string>();
+  const { reasoningEmitted, doneReasoning } = state;
 
   // The signal must reach the SDK's underlying fetch: the SDK's SSE client checks `signal.aborted`
   // in its read loop and the fetch carries the signal, so aborting a stalled stream (no bytes
@@ -161,7 +243,7 @@ export async function* streamChatEvents(input: {
               type: "tool.done",
               call_id: part.callID,
               title: humanTitle,
-              output: truncate(part.state.output ?? "", 4000),
+              output: part.state.output ?? "",
               duration_ms: part.state.time ? Math.max(0, part.state.time.end - part.state.time.start) : null,
             };
           } else if (status === "error" && !doneTools.has(part.callID)) {
@@ -170,7 +252,7 @@ export async function* streamChatEvents(input: {
               type: "tool.done",
               call_id: part.callID,
               title: humanTitle,
-              output: truncate(("error" in part.state ? String(part.state.error) : "tool failed") || "tool failed", 4000),
+              output: ("error" in part.state ? String(part.state.error) : "tool failed") || "tool failed",
               duration_ms: null,
             };
           }
@@ -242,37 +324,51 @@ export async function* streamChatEvents(input: {
 }
 
 /** SDK-backed chat adapter composed by the durable worker, never by a browser-facing route. */
-export function createOpencodeRunChatRuntime(): RunChatRuntime {
-  const clientFor = (target: RunChatTarget) => createChatClient(target);
+export function createOpencodeRunChatRuntime(
+  clientFor: (target: RunChatTarget) => OpencodeClient = createChatClient,
+): RunChatRuntime {
+  // The worker supplies one recorder-local key across transient connection AbortSignals. This
+  // preserves cumulative cursors without sharing state between runs and remains garbage-collectable.
+  const streamStates = new WeakMap<object, OpencodeStreamState>();
   return {
-    async findSessionByTitle(target, title) {
-      const response = await clientFor(target).session.list();
+    async findSessionByTitle(target, title, signal) {
+      const response = await clientFor(target).session.list({ signal });
+      if (response.error) throw new Error("opencode could not list sessions");
       const session = (response.data ?? []).find((candidate) => candidate.title === title);
       return session ? { id: session.id, title: session.title ?? title } : null;
     },
-    createSession(target, title) {
-      return createChatSession(clientFor(target), title);
+    createSession(target, title, signal) {
+      return createChatSession(clientFor(target), title, signal);
     },
-    sendPrompt(target, sessionId, text, messageId) {
-      return sendPromptAsync(clientFor(target), sessionId, text, { messageId });
+    getSessionState(target, sessionId, signal) {
+      return getSessionState(clientFor(target), sessionId, signal);
     },
-    loadItems(target, sessionId) {
-      return loadSessionItems(clientFor(target), sessionId);
+    getMessageState(target, sessionId, messageId, signal) {
+      return getSessionMessageState(clientFor(target), sessionId, messageId, signal);
     },
-    streamEvents(target, sessionId, signal, onConnected) {
-      return streamChatEvents({ client: clientFor(target), sessionId, signal, onConnected });
+    sendPrompt(target, sessionId, text, messageId, signal) {
+      return sendPromptAsync(clientFor(target), sessionId, text, { messageId, signal });
+    },
+    loadItems(target, sessionId, signal) {
+      return loadSessionItems(clientFor(target), sessionId, signal);
+    },
+    streamEvents(target, sessionId, signal, onConnected, cursorKey) {
+      const key = cursorKey ?? signal;
+      let state = streamStates.get(key);
+      if (!state) {
+        state = createOpencodeStreamState();
+        streamStates.set(key, state);
+      }
+      return streamChatEvents({ client: clientFor(target), sessionId, signal, state, onConnected });
     },
   };
 }
 
 function safeJson(value: unknown): string {
   try {
-    return truncate(JSON.stringify(value, null, 2) ?? "{}", 2000);
+    // Redaction intentionally happens in the worker before any persistence bound is applied.
+    return JSON.stringify(value, null, 2) ?? "{}";
   } catch {
     return "{}";
   }
-}
-
-function truncate(text: string, max: number): string {
-  return text.length > max ? `${text.slice(0, max)}…` : text;
 }

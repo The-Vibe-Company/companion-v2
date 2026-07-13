@@ -102,6 +102,42 @@ export const runDependencySchema = z
   .strict();
 export type RunDependency = z.infer<typeof runDependencySchema>;
 
+/** Exact dependency-version identity returned by run-options and echoed by the launch payload. */
+export const runDependencyPinSchema = z
+  .object({
+    skill_id: runUuidSchema,
+    skill_version_id: runUuidSchema,
+  })
+  .strict();
+export type RunDependencyPin = z.infer<typeof runDependencyPinSchema>;
+
+export const runDependencyPinsSchema = z
+  .array(runDependencyPinSchema)
+  .max(RUN_MAX_DEPENDENCIES)
+  .superRefine((pins, ctx) => {
+    const skillIds = new Set<string>();
+    pins.forEach((pin, index) => {
+      if (skillIds.has(pin.skill_id)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [index, "skill_id"],
+          message: "duplicate dependency pin",
+        });
+      }
+      skillIds.add(pin.skill_id);
+    });
+  });
+
+/** Multipart fields encode dependency pins as JSON. */
+export const runDependencyPinsJsonSchema = z.preprocess((value) => {
+  if (typeof value !== "string") return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return value;
+  }
+}, runDependencyPinsSchema);
+
 export const runSecretCandidateSchema = secretCandidateSchema;
 export type RunSecretCandidate = z.infer<typeof runSecretCandidateSchema>;
 
@@ -384,18 +420,28 @@ export type RunInputSnapshot = z.infer<typeof runInputSnapshotSchema>;
 
 /* ---- Chat vocabulary ------------------------------------------------------------------- */
 
+/** Persistence/SSE bounds are applied only after injected literals have been redacted. */
+export const RUN_CHAT_ID_MAX = 512;
+export const RUN_CHAT_NAME_MAX = 256;
+export const RUN_CHAT_TITLE_MAX = 512;
+export const RUN_CHAT_TOOL_INPUT_MAX = 2_000;
+export const RUN_CHAT_TOOL_OUTPUT_MAX = 4_000;
+export const RUN_CHAT_DELTA_MAX = 32_768;
+export const RUN_CHAT_MESSAGE_MAX = 4_000;
+export const RUN_CHAT_TRANSCRIPT_TEXT_MAX = 256 * 1024;
+
 /** A prior message when reloading a run's transcript. */
 export const runChatHistoryItemSchema = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("user"), text: z.string() }),
-  z.object({ kind: z.literal("assistant"), text: z.string() }),
+  z.object({ kind: z.literal("user"), text: z.string().max(RUN_CHAT_TRANSCRIPT_TEXT_MAX) }),
+  z.object({ kind: z.literal("assistant"), text: z.string().max(RUN_CHAT_TRANSCRIPT_TEXT_MAX) }),
   z.object({
     kind: z.literal("tool"),
-    call_id: z.string(),
-    tool: z.string(),
-    skill: z.string().nullable().default(null),
-    title: z.string().nullable().default(null),
-    input: z.string().default(""),
-    output: z.string().default(""),
+    call_id: z.string().max(RUN_CHAT_ID_MAX),
+    tool: z.string().max(RUN_CHAT_NAME_MAX),
+    skill: z.string().max(RUN_CHAT_NAME_MAX).nullable().default(null),
+    title: z.string().max(RUN_CHAT_TITLE_MAX).nullable().default(null),
+    input: z.string().max(RUN_CHAT_TOOL_INPUT_MAX).default(""),
+    output: z.string().max(RUN_CHAT_TOOL_OUTPUT_MAX).default(""),
     duration_ms: z.number().int().nonnegative().nullable().default(null),
   }),
 ]);
@@ -409,33 +455,33 @@ export const runWorkingStateSchema = z.enum(["busy", "idle", "retry"]);
 export type RunWorkingState = z.infer<typeof runWorkingStateSchema>;
 
 export const runChatEventSchema = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("ready"), session_id: z.string() }),
+  z.object({ type: z.literal("ready"), session_id: z.string().max(RUN_CHAT_ID_MAX) }),
   z.object({
     type: z.literal("tool.start"),
-    call_id: z.string(),
-    skill: z.string().nullable().default(null),
-    tool: z.string(),
-    title: z.string().nullable().default(null),
-    input: z.string().default(""),
+    call_id: z.string().max(RUN_CHAT_ID_MAX),
+    skill: z.string().max(RUN_CHAT_NAME_MAX).nullable().default(null),
+    tool: z.string().max(RUN_CHAT_NAME_MAX),
+    title: z.string().max(RUN_CHAT_TITLE_MAX).nullable().default(null),
+    input: z.string().max(RUN_CHAT_TOOL_INPUT_MAX).default(""),
   }),
   z.object({
     type: z.literal("tool.done"),
-    call_id: z.string(),
-    title: z.string().nullable().default(null),
-    output: z.string().default(""),
+    call_id: z.string().max(RUN_CHAT_ID_MAX),
+    title: z.string().max(RUN_CHAT_TITLE_MAX).nullable().default(null),
+    output: z.string().max(RUN_CHAT_TOOL_OUTPUT_MAX).default(""),
     duration_ms: z.number().int().nonnegative().nullable().default(null),
   }),
-  z.object({ type: z.literal("text.delta"), message_id: z.string(), delta: z.string() }),
-  z.object({ type: z.literal("text.done"), message_id: z.string() }),
-  z.object({ type: z.literal("reasoning.delta"), part_id: z.string(), delta: z.string() }),
-  z.object({ type: z.literal("reasoning.done"), part_id: z.string() }),
+  z.object({ type: z.literal("text.delta"), message_id: z.string().max(RUN_CHAT_ID_MAX), delta: z.string().max(RUN_CHAT_DELTA_MAX) }),
+  z.object({ type: z.literal("text.done"), message_id: z.string().max(RUN_CHAT_ID_MAX) }),
+  z.object({ type: z.literal("reasoning.delta"), part_id: z.string().max(RUN_CHAT_ID_MAX), delta: z.string().max(RUN_CHAT_DELTA_MAX) }),
+  z.object({ type: z.literal("reasoning.done"), part_id: z.string().max(RUN_CHAT_ID_MAX) }),
   z.object({
     type: z.literal("status"),
     state: runWorkingStateSchema,
     attempt: z.number().int().nonnegative().nullable().default(null),
-    message: z.string().nullable().default(null),
+    message: z.string().max(RUN_CHAT_MESSAGE_MAX).nullable().default(null),
   }),
-  z.object({ type: z.literal("session.idle"), session_id: z.string() }),
+  z.object({ type: z.literal("session.idle"), session_id: z.string().max(RUN_CHAT_ID_MAX) }),
   z.object({
     type: z.literal("run.warning"),
     code: runErrorCodeSchema,
@@ -449,7 +495,7 @@ export const runChatEventSchema = z.discriminatedUnion("type", [
     phase: runPhaseSchema.nullable().default(null),
   }),
   /** Legacy PR #133 event; consumers accept it while producers migrate to `run.error`. */
-  z.object({ type: z.literal("error"), message: z.string() }),
+  z.object({ type: z.literal("error"), message: z.string().max(RUN_CHAT_MESSAGE_MAX) }),
 ]);
 export type RunChatEvent = z.infer<typeof runChatEventSchema>;
 
@@ -502,7 +548,16 @@ export const skillRunArtifactRowSchema = z.object({
   path: z.string(),
   content_type: z.string().nullable(),
   byte_size: z.number().int().nonnegative(),
-  url: z.string(),
+  url: z
+    .string()
+    .url()
+    .max(2_048)
+    .refine((value) => {
+      const authority = value.match(/^[a-z][a-z0-9+.-]*:\/\/([^/?#]*)/i)?.[1] ?? "";
+      if (!authority || authority.includes("@")) return false;
+      if (/^https:\/\//i.test(value)) return true;
+      return /^http:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?(?:[/?#]|$)/i.test(value);
+    }, "artifact url must use HTTPS"),
   expires_at: z.string().nullable(),
   published_at: z.string(),
 });
@@ -536,14 +591,18 @@ export type RunPromptInput = z.infer<typeof runPromptInputSchema>;
 
 /**
  * Text fields of multipart `POST /v1/skills/:slug/runs`. Files arrive as repeated `file` parts.
- * `skill_version_id` makes stale launchers fail closed and `inputs` is the complete selection.
+ * `skill_version_id` makes stale launchers fail closed. Skill inputs and the model-provider vault
+ * reference are both authoritative; the server must not add a provider binding implicitly.
  */
 export const launchRunFieldsSchema = z
   .object({
     prompt: z.string().trim().min(1).max(RUN_PROMPT_MAX),
     model: runModelIdSchema,
     skill_version_id: runUuidSchema,
+    /** Exact non-root closure displayed by run-options; stale pins reject the launch. */
+    dependency_pins: runDependencyPinsJsonSchema,
     inputs: runInputSelectionJsonSchema,
+    model_provider_secret_id: runUuidSchema,
     /** Optional provenance only; the selected payload remains authoritative. */
     run_config_id: runUuidSchema.nullable().optional(),
   })

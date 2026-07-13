@@ -1,3 +1,14 @@
+import {
+  RUN_CHAT_DELTA_MAX,
+  RUN_CHAT_ID_MAX,
+  RUN_CHAT_MESSAGE_MAX,
+  RUN_CHAT_NAME_MAX,
+  RUN_CHAT_TITLE_MAX,
+  RUN_CHAT_TOOL_INPUT_MAX,
+  RUN_CHAT_TOOL_OUTPUT_MAX,
+  type RunChatEvent,
+} from "@companion/contracts";
+
 /** Stable marker used everywhere a literal injected into a run is removed. */
 export const RUN_REDACTION_PLACEHOLDER = "[REDACTED]";
 
@@ -203,4 +214,97 @@ export function createRunRedactor(values: Iterable<RunRedactionLiteral>): RunRed
 
 export function createRunStreamingRedactor(values: Iterable<RunRedactionLiteral>): RunStreamingRedactor {
   return new RunStreamingRedactor(values);
+}
+
+function truncateUtf8(value: string, maxBytes: number): string {
+  if (Buffer.byteLength(value, "utf8") <= maxBytes) return value;
+  const marker = "…";
+  const budget = Math.max(0, maxBytes - Buffer.byteLength(marker, "utf8"));
+  let low = 0;
+  let high = value.length;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    if (Buffer.byteLength(value.slice(0, middle), "utf8") <= budget) low = middle;
+    else high = middle - 1;
+  }
+  return `${value.slice(0, low)}${marker}`;
+}
+
+function splitUtf8(value: string, maxBytes: number): string[] {
+  if (Buffer.byteLength(value, "utf8") <= maxBytes) return [value];
+  const chunks: string[] = [];
+  let current: string[] = [];
+  let bytes = 0;
+  for (const character of value) {
+    const width = Buffer.byteLength(character, "utf8");
+    if (current.length > 0 && bytes + width > maxBytes) {
+      chunks.push(current.join(""));
+      current = [];
+      bytes = 0;
+    }
+    current.push(character);
+    bytes += width;
+  }
+  if (current.length > 0) chunks.push(current.join(""));
+  return chunks;
+}
+
+/**
+ * Redact first, then bound every untrusted SDK field before contract parsing or persistence.
+ * Text/reasoning deltas are split rather than truncated so the live transcript remains lossless.
+ */
+export function redactAndBoundRunEvents(
+  events: RunChatEvent[],
+  redactor?: RunRedactor,
+): RunChatEvent[] {
+  return events.flatMap((source): RunChatEvent[] => {
+    const event = redactor ? redactor.redactPayload(source) : source;
+    switch (event.type) {
+      case "ready":
+        return [{ ...event, session_id: truncateUtf8(event.session_id, RUN_CHAT_ID_MAX) }];
+      case "tool.start":
+        return [{
+          ...event,
+          call_id: truncateUtf8(event.call_id, RUN_CHAT_ID_MAX),
+          skill: event.skill === null ? null : truncateUtf8(event.skill, RUN_CHAT_NAME_MAX),
+          tool: truncateUtf8(event.tool, RUN_CHAT_NAME_MAX),
+          title: event.title === null ? null : truncateUtf8(event.title, RUN_CHAT_TITLE_MAX),
+          input: truncateUtf8(event.input, RUN_CHAT_TOOL_INPUT_MAX),
+        }];
+      case "tool.done":
+        return [{
+          ...event,
+          call_id: truncateUtf8(event.call_id, RUN_CHAT_ID_MAX),
+          title: event.title === null ? null : truncateUtf8(event.title, RUN_CHAT_TITLE_MAX),
+          output: truncateUtf8(event.output, RUN_CHAT_TOOL_OUTPUT_MAX),
+        }];
+      case "text.delta":
+        return splitUtf8(event.delta, RUN_CHAT_DELTA_MAX).map((delta) => ({
+          ...event,
+          message_id: truncateUtf8(event.message_id, RUN_CHAT_ID_MAX),
+          delta,
+        }));
+      case "reasoning.delta":
+        return splitUtf8(event.delta, RUN_CHAT_DELTA_MAX).map((delta) => ({
+          ...event,
+          part_id: truncateUtf8(event.part_id, RUN_CHAT_ID_MAX),
+          delta,
+        }));
+      case "text.done":
+        return [{ ...event, message_id: truncateUtf8(event.message_id, RUN_CHAT_ID_MAX) }];
+      case "reasoning.done":
+        return [{ ...event, part_id: truncateUtf8(event.part_id, RUN_CHAT_ID_MAX) }];
+      case "status":
+        return [{
+          ...event,
+          message: event.message === null ? null : truncateUtf8(event.message, RUN_CHAT_MESSAGE_MAX),
+        }];
+      case "session.idle":
+        return [{ ...event, session_id: truncateUtf8(event.session_id, RUN_CHAT_ID_MAX) }];
+      case "run.warning":
+      case "run.error":
+      case "error":
+        return [{ ...event, message: truncateUtf8(event.message, RUN_CHAT_MESSAGE_MAX) }];
+    }
+  });
 }

@@ -314,6 +314,7 @@
 
 @media (pointer: coarse) {
   .run-launcher button, .run-launcher select, .provider-secret-editor button, .artifact-secret-bind button { min-width: 44px; min-height: 44px; }
+  .run-launcher .run-variable__include, .run-launcher .run-input-group > summary { min-height: 44px; }
   .run-launcher .launch-file__x { width: 44px; min-height: 44px; margin: -8px; }
   .modelsel__item, .modelsel__add { min-height: 44px; }
   .run-chat__composer-box .btn-primary, .run-chat__meta .btn-sec, .run-session { min-width: 44px; min-height: 44px; }

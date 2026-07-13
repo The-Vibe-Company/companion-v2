@@ -163,6 +163,7 @@ jobs:
           for image in companion-api:ci companion-worker:ci companion-web:ci; do
             test "$(docker image inspect --format '{{.Config.User}}' "$image")" = "node"
           done
+          docker run --rm companion-api:ci test -f dist/runtime-role-grants.sql
 
           docker run --rm --network host \
             -e DATABASE_URL="$DATABASE_URL" \
@@ -298,7 +299,7 @@ jobs:
           COMPANION_SECRETS_MASTER_KEY: CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk=
 
       - name: RunSkill database integration
-        run: pnpm --filter @companion/api test -- src/runsDb.integration.test.ts
+        run: pnpm --filter @companion/api test -- src/runsDb.integration.test.ts src/preTenantRls.integration.test.ts
         env:
           RUN_SKILL_DB_INTEGRATION: "1"
 

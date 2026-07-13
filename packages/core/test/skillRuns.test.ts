@@ -1,17 +1,20 @@
 import { gzipSync } from "node:zlib";
 import { pack as tarPack } from "tar-stream";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { fallbackCompanionManifest, type RunDeclaredSecret, type RunDeclaredVariable } from "@companion/contracts";
 import { schema, type Db } from "@companion/db";
 import {
   RunBusyError,
   RunValidationError,
+  assertRunDependencyPinsMatch,
   attachmentWorkspacePath,
   buildOpencodeJson,
   buildSkillBundle,
   capTranscript,
   composeRunPrompt,
+  createRun,
   deterministicRunMessageId,
+  hashRunCreationPayload,
   hashRunPayload,
   loadRunDeclarations,
   materializeRunWorkspace,
@@ -19,6 +22,7 @@ import {
   sandboxNameForRun,
   validateRunInputSelection,
   type ResolvedRunSkill,
+  type RunControlContext,
 } from "../src/skillRuns";
 import type { ActorContext } from "../src/services";
 
@@ -118,6 +122,13 @@ describe("dependency closure", () => {
       { slug: "root-skill", version: "1.2.0", root: true, mountOrder: 0 },
       { slug: "dep-skill", version: "2.0.1", root: false, mountOrder: 1 },
     ]);
+    expect(() =>
+      assertRunDependencyPinsMatch(closure, [{ skill_id: DEP, skill_version_id: DEP_VERSION }]),
+    ).not.toThrow();
+    expect(() =>
+      assertRunDependencyPinsMatch(closure, [{ skill_id: DEP, skill_version_id: ROOT_VERSION }]),
+    ).toThrow(/dependency graph changed/);
+    expect(() => assertRunDependencyPinsMatch(closure, [])).toThrow(/dependency graph changed/);
   });
 
   it("fails closed when the launcher version is stale", async () => {
@@ -212,6 +223,7 @@ describe("declarations and explicit inputs", () => {
       orgId: ORG,
       model: "anthropic/claude-sonnet",
       modelEnvKeys: ["ANTHROPIC_API_KEY"],
+      modelProviderSecretId: PROVIDER_SECRET,
       selection: {
         secrets: [{ skill_id: ROOT, slot_id: SLOT, secret_id: SECRET }],
         variables: [{ skill_id: ROOT, env_key: "REGION", value: "eu-west-1" }],
@@ -262,6 +274,11 @@ describe("declarations and explicit inputs", () => {
     expect(resolved.variables).toEqual([
       { skillId: ROOT, skillSlug: "root-skill", envKey: "REGION", value: "eu-west-1" },
     ]);
+  });
+
+  it("never adds a model provider binding that was not explicit in the launch payload", async () => {
+    await expect(validate({ modelProviderSecretId: null })).rejects.toMatchObject({ code: "provider_secret_missing" });
+    await expect(validate({ modelProviderSecretId: SECRET })).rejects.toMatchObject({ code: "provider_secret_unavailable" });
   });
 
   it("rejects missing required, unknown, duplicate and invalid variable inputs", async () => {
@@ -334,6 +351,7 @@ describe("declarations and explicit inputs", () => {
       selection: { secrets: [], variables: [] },
       providerRequired: false,
       providerPin: null,
+      modelProviderSecretId: null,
     });
     expect(resolved.secrets).toEqual([]);
   });
@@ -394,16 +412,19 @@ describe("workspace and durable helper invariants", () => {
 
   it("sanitizes attachment paths and preserves the run prompt contract", () => {
     expect(attachmentWorkspacePath({ id: "file-id", fileName: "../../report.txt" })).toBe("file-id-report.txt");
-    expect(sandboxNameForRun(ORG, ROOT)).toMatch(/^run-/);
+    expect(sandboxNameForRun(ORG, ROOT)).toBe(`run-${ROOT}`);
+    expect(sandboxNameForRun(ORG, "00000000-0000-4000-8000-0000000000aa")).not.toBe(
+      sandboxNameForRun(ORG, "00000000-0000-4000-8000-0000000000bb"),
+    );
     expect(buildOpencodeJson({ model: "anthropic/claude" })).toContain('"model": "anthropic/claude"');
-    expect(
-      composeRunPrompt({
-        prompt: "Summarize",
-        skillSlug: "root-skill",
-        attachmentNames: ["notes.txt"],
-        artifactsEnabled: true,
-      }),
-    ).toContain("./artifacts/");
+    const composed = composeRunPrompt({
+      prompt: "Summarize",
+      skillSlug: "root-skill",
+      attachments: [{ fileName: "notes.txt", workspacePath: "file-id-notes.txt" }],
+      artifactsEnabled: true,
+    });
+    expect(composed).toContain('"notes.txt" → "./attachments/file-id-notes.txt"');
+    expect(composed).toContain("./artifacts/");
   });
 
   it("trims tool output before losing the final assistant response", () => {
@@ -414,11 +435,186 @@ describe("workspace and durable helper invariants", () => {
       { kind: "assistant", text: "final" },
     ]);
     expect(capped.at(-1)).toEqual({ kind: "assistant", text: "final" });
+    expect(capped.filter((item) => item.kind === "tool").every((item) => item.output.length <= 4_000)).toBe(true);
     expect(Buffer.byteLength(JSON.stringify(capped))).toBeLessThanOrEqual(512 * 1024);
+  });
+
+  it("bounds a single multibyte transcript message without dropping it", () => {
+    const capped = capTranscript([{ kind: "assistant", text: "🤖".repeat(300_000) }]);
+
+    expect(capped).toHaveLength(1);
+    expect(capped[0]?.kind).toBe("assistant");
+    expect(Buffer.byteLength(JSON.stringify(capped), "utf8")).toBeLessThanOrEqual(512 * 1024);
   });
 
   it("exposes explicit validation/conflict error classes", () => {
     expect(new RunValidationError("invalid")).toBeInstanceOf(Error);
     expect(new RunBusyError("busy")).toBeInstanceOf(Error);
+  });
+});
+
+function committedReplayDb(
+  row: Record<string, unknown>,
+  currentSkillSlug = "root-skill",
+): Db & { transaction: ReturnType<typeof vi.fn> } {
+  const rowsFor = (table: unknown): Record<string, unknown>[] => {
+    if (table === schema.skills) return [{ id: ROOT, slug: currentSkillSlug }];
+    if (table === schema.skillRuns) return [row];
+    return [];
+  };
+  const queryFor = (rows: Record<string, unknown>[]) => {
+    const query = {
+      innerJoin: () => query,
+      where: () => query,
+      orderBy: () => Promise.resolve(rows),
+      then: <TResult1 = Record<string, unknown>[], TResult2 = never>(
+        onFulfilled?: ((value: Record<string, unknown>[]) => TResult1 | PromiseLike<TResult1>) | null,
+        onRejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
+      ) => Promise.resolve(rows).then(onFulfilled, onRejected),
+    };
+    return query;
+  };
+  const transaction = vi.fn(async () => {
+    throw new Error("a committed replay must not open the creation transaction");
+  });
+  return {
+    query: {
+      memberships: {
+        findFirst: vi.fn(async () => ({ orgRole: "developer" })),
+      },
+    },
+    select: vi.fn(() => ({
+      from: (table: unknown) => queryFor(rowsFor(table)),
+    })),
+    transaction,
+  } as unknown as Db & { transaction: ReturnType<typeof vi.fn> };
+}
+
+describe("createRun committed idempotent replay", () => {
+  const request = {
+    slug: "root-skill",
+    skillVersionId: ROOT_VERSION,
+    dependencyPins: [{ skill_id: DEP, skill_version_id: DEP_VERSION }],
+    prompt: "Run the report",
+    model: "anthropic/claude-sonnet",
+    modelProviderSecretId: PROVIDER_SECRET,
+    inputs: {
+      secrets: [{ skill_id: ROOT, slot_id: SLOT, secret_id: SECRET }],
+      variables: [{ skill_id: ROOT, env_key: "REGION", value: "eu-west-1" }],
+    },
+    runConfigId: null,
+    idempotencyKey: "committed-request",
+    attachments: [],
+  };
+
+  const existingRow = (payloadHash: string) => ({
+    id: "50000000-0000-4000-8000-000000000001",
+    orgId: ORG,
+    skillId: ROOT,
+    creatorId: actor.id,
+    skillVersionId: ROOT_VERSION,
+    skillVersion: "1.2.0",
+    runConfigId: null,
+    runConfigNameSnapshot: null,
+    idempotencyKey: request.idempotencyKey,
+    payloadHash,
+    model: request.model,
+    prompt: request.prompt,
+    status: "queued",
+    phase: "queued",
+    errorCode: null,
+    userMessage: null,
+    cancelRequestedAt: null,
+    sandboxName: "run-existing",
+    sandboxId: null,
+    sandboxDomain: null,
+    goldenSnapshotId: "snapshot-at-creation",
+    opencodeVersion: null,
+    opencodeSessionId: null,
+    serverPasswordEnc: "opaque",
+    timeoutMs: 300_000,
+    transcript: [],
+    warnings: [],
+    transcriptEventSequence: 0,
+    transcriptUpdatedAt: null,
+    lastActiveAt: null,
+    frozenAt: null,
+    sandboxCleanedAt: null,
+    cleanupLeaseOwner: null,
+    cleanupLeaseExpiresAt: null,
+    cleanupAttempt: 0,
+    createdAt: new Date("2026-07-13T12:00:00.000Z"),
+    updatedAt: new Date("2026-07-13T12:00:00.000Z"),
+  });
+
+  const unavailableContext = (): RunControlContext => ({
+    masterKey: Buffer.alloc(32, 7),
+    goldenSnapshotId: null,
+    opencodeVersion: null,
+    region: "iad1",
+    timeoutMs: 300_000,
+    runtimeAvailable: false,
+    runtimeMessage: "runtime disabled after the original commit",
+    resolveModelKeys: vi.fn(async () => {
+      throw new Error("mutable model catalog must not be consulted");
+    }),
+  });
+
+  it("returns the committed run before mutable runtime and catalog validation", async () => {
+    const payloadHash = hashRunCreationPayload(request);
+    const database = committedReplayDb(existingRow(payloadHash), "renamed-after-commit");
+    const ctx = unavailableContext();
+    ctx.goldenSnapshotId = "snapshot-current";
+    ctx.runtimeAvailable = true;
+    ctx.resolveRuntimeReadiness = vi.fn(async () => {
+      throw new Error("live worker readiness must not be consulted for a replay");
+    });
+
+    const detail = await createRun({ ...request, actor, orgId: ORG, ctx, database });
+
+    expect(detail.id).toBe("50000000-0000-4000-8000-000000000001");
+    expect(detail.skill_slug).toBe("renamed-after-commit");
+    expect(detail.input_snapshot).toEqual({ skills: [], secrets: [], variables: [] });
+    expect(ctx.resolveModelKeys).not.toHaveBeenCalled();
+    expect(ctx.resolveRuntimeReadiness).not.toHaveBeenCalled();
+    expect(database.transaction).not.toHaveBeenCalled();
+  });
+
+  it("still rejects an exact-key replay when the explicit provider secret changes", async () => {
+    const payloadHash = hashRunCreationPayload(request);
+    const database = committedReplayDb(existingRow(payloadHash));
+    const ctx = unavailableContext();
+
+    await expect(
+      createRun({
+        ...request,
+        modelProviderSecretId: SECRET,
+        actor,
+        orgId: ORG,
+        ctx,
+        database,
+      }),
+    ).rejects.toMatchObject({ code: "idempotency_conflict" });
+    expect(ctx.resolveModelKeys).not.toHaveBeenCalled();
+    expect(database.transaction).not.toHaveBeenCalled();
+  });
+
+  it("treats the dependency closure as part of the idempotent launch payload", async () => {
+    const payloadHash = hashRunCreationPayload(request);
+    const database = committedReplayDb(existingRow(payloadHash));
+    const ctx = unavailableContext();
+
+    await expect(
+      createRun({
+        ...request,
+        dependencyPins: [{ skill_id: DEP, skill_version_id: ROOT_VERSION }],
+        actor,
+        orgId: ORG,
+        ctx,
+        database,
+      }),
+    ).rejects.toMatchObject({ code: "idempotency_conflict" });
+    expect(ctx.resolveModelKeys).not.toHaveBeenCalled();
+    expect(database.transaction).not.toHaveBeenCalled();
   });
 });

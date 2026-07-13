@@ -1502,16 +1502,17 @@ export function SkillsApp({
 
   const go = useCallback(
     (delta: number) => {
-      setOpenId((cur) => {
-        const i = detailPool.findIndex((s) => s.id === cur);
-        const n = detailPool[i + delta];
-        if (n) {
-          setLastId(n.id);
-          replaceSkillsUrl(routeForCurrentSurface(n.id));
-          return n.id;
-        }
-        return cur;
-      });
+      const i = detailPool.findIndex((row) => row.id === openIdRef.current);
+      const n = detailPool[i + delta];
+      if (!n) return;
+      // Moving to another skill must also leave the current run route. Otherwise keyboard
+      // navigation can render a creator-only run beneath the wrong skill slug.
+      setOpenRunId(null);
+      setDetailInitialTab(undefined);
+      setRunAgainRequest(null);
+      setOpenId(n.id);
+      setLastId(n.id);
+      replaceSkillsUrl(routeForCurrentSurface(n.id));
     },
     [detailPool, replaceSkillsUrl, routeForCurrentSurface],
   );

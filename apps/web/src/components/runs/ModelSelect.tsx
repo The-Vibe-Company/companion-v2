@@ -183,7 +183,7 @@ export function ModelSelect({
         aria-haspopup="dialog"
         aria-expanded={open}
         aria-controls={open ? menuId : undefined}
-        aria-label="Model"
+        aria-label={selected ? `Model: ${selected.model.name}` : "Select model"}
       >
         <Icon name="bot" size={12} className="modelsel__lead" />
         <b>{selected?.model.name ?? "Select model"}</b>

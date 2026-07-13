@@ -217,6 +217,7 @@ export async function deleteSkillArchive(input: {
 
 export async function getSkillArchive(input: {
   key: string;
+  signal?: AbortSignal;
   client?: S3Client;
   config?: StorageConfig;
 }): Promise<Buffer> {
@@ -227,6 +228,7 @@ export async function getSkillArchive(input: {
       Bucket: config.bucket,
       Key: input.key,
     }),
+    { abortSignal: input.signal },
   );
   if (!res.Body) throw new Error(`object not found: ${input.key}`);
   const bytes = await res.Body.transformToByteArray();

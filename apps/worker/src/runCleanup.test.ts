@@ -44,7 +44,10 @@ describe("terminal run cleanup", () => {
     });
 
     expect(result).toBe("completed");
-    expect(sandbox.stop).toHaveBeenCalledWith(expect.objectContaining({ sandboxName: claim.sandboxName }));
+    expect(sandbox.stop).toHaveBeenCalledWith(
+      expect.objectContaining({ sandboxName: claim.sandboxName }),
+      expect.any(AbortSignal),
+    );
     expect(sandbox.destroy).toHaveBeenCalledTimes(1);
     expect(complete).toHaveBeenCalledWith(expect.objectContaining({
       orgId: claim.orgId,

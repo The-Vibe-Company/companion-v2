@@ -46,6 +46,7 @@ const TOOL_PRE: CSSProperties = {
   fontSize: "var(--text-xs)",
   color: "var(--color-muted)",
   whiteSpace: "pre-wrap",
+  overflowWrap: "anywhere",
 };
 
 const STARTING_POLL_MS = 1500;
@@ -120,6 +121,7 @@ function ToolRow({
       <button
         type="button"
         onClick={onToggle}
+        aria-expanded={expanded}
         style={{
           display: "flex",
           alignItems: "center",
@@ -196,6 +198,7 @@ function ReasoningRow({
       <button
         type="button"
         onClick={onToggle}
+        aria-expanded={expanded}
         style={{
           display: "flex",
           alignItems: "center",
@@ -732,7 +735,7 @@ export function RunChatView({
             >
               <Icon name="alert-triangle" size={13} style={{ color: "var(--color-danger)", flex: "none" }} />
               <span style={{ fontWeight: 500, color: "var(--color-fg)" }}>This run failed</span>
-              <span style={{ color: "var(--color-muted)", whiteSpace: "pre-wrap" }}>{run.error_message ?? run.status_detail ?? "The runtime stopped unexpectedly."}</span>
+              <span style={{ minWidth: 0, color: "var(--color-muted)", whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{run.error_message ?? run.status_detail ?? "The runtime stopped unexpectedly."}</span>
               <span style={{ flex: 1 }} />
               <button type="button" className="btn-sec" onClick={rerun}>
                 Try again
@@ -742,6 +745,9 @@ export function RunChatView({
 
           <div
             ref={listRef}
+            role="log"
+            aria-label="Run transcript"
+            aria-live="polite"
             style={{
               flex: 1,
               minHeight: 0,

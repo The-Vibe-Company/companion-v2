@@ -212,28 +212,14 @@ async function recipientRows(database: Db, secret: SecretRecord, actorId: string
 }
 
 async function toSecretRow(database: Db, actorId: string, secret: SecretRecord): Promise<SecretRow> {
-  const usageCount = secret.ownerId === actorId
-    ? (
-        await Promise.all([
-          database
-            .select({ value: count() })
-            .from(schema.skillSecretBindings)
-            .where(and(eq(schema.skillSecretBindings.orgId, secret.orgId), eq(schema.skillSecretBindings.secretId, secret.id), isNull(schema.skillSecretBindings.revokedAt))),
-          database
-            .select({ value: count() })
-            .from(schema.skillRunConfigSecrets)
-            .where(and(eq(schema.skillRunConfigSecrets.orgId, secret.orgId), eq(schema.skillRunConfigSecrets.secretId, secret.id))),
-          database
-            .select({ value: count() })
-            .from(schema.userProviderConnections)
-            .where(and(eq(schema.userProviderConnections.orgId, secret.orgId), eq(schema.userProviderConnections.secretId, secret.id))),
-          database
-            .select({ value: count() })
-            .from(schema.orgProviderConnections)
-            .where(and(eq(schema.orgProviderConnections.orgId, secret.orgId), eq(schema.orgProviderConnections.secretId, secret.id))),
-        ])
-      ).reduce((total, rows) => total + Number(rows[0]?.value ?? 0), 0)
-    : 0;
+  let usageCount = 0;
+  if (secret.ownerId === actorId) {
+    const result = await database.execute(sql`
+      select companion_secret_usage_count(${secret.orgId}::uuid, ${secret.id}::uuid) as count
+    `);
+    const row = Array.from(result as unknown as Iterable<{ count: number | string }>)[0];
+    usageCount = Number(row?.count ?? 0);
+  }
   return {
     id: secret.id,
     org_id: secret.orgId,

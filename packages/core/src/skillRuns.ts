@@ -2,6 +2,12 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { and, asc, desc, eq, inArray } from "drizzle-orm";
 import { db, schema, type Db } from "@companion/db";
 import {
+  RUN_CHAT_ID_MAX,
+  RUN_CHAT_NAME_MAX,
+  RUN_CHAT_TITLE_MAX,
+  RUN_CHAT_TOOL_INPUT_MAX,
+  RUN_CHAT_TOOL_OUTPUT_MAX,
+  RUN_CHAT_TRANSCRIPT_TEXT_MAX,
   RUN_MAX_DEPENDENCIES,
   RUN_RESERVED_ENV_PREFIX,
   RUN_VARIABLE_VALUE_MAX_BYTES,
@@ -12,6 +18,7 @@ import {
   type RunDeclaredSecret,
   type RunDeclaredVariable,
   type RunDependency,
+  type RunDependencyPin,
   type RunInputSelection,
   type RunInputSnapshot,
   type RunSecretInputSnapshot,
@@ -61,12 +68,14 @@ export interface RunControlContext {
   models?: ModelRow[];
   runtimeAvailable?: boolean;
   runtimeMessage?: string | null;
+  /** API-only durable readiness probe, evaluated after idempotent replay checks with the caller DB. */
+  resolveRuntimeReadiness?: (database: Db) => Promise<{ available: boolean; message: string | null }>;
   /** Worker-only seams. API request handlers do not need to provide them. */
   runtime?: RunSandboxRuntime;
   chat?: RunChatRuntime;
   runTenant?: TenantRunner;
   fetchArchive?: SkillArchiveFetcher;
-  fetchObject?: (key: string) => Promise<Buffer>;
+  fetchObject?: (key: string, signal?: AbortSignal) => Promise<Buffer>;
 }
 
 export class RunValidationError extends Error {
@@ -87,6 +96,30 @@ export class RunBusyError extends Error {
     super(message);
     this.name = "RunBusyError";
     this.code = code;
+  }
+}
+
+/** Resolve the API's live worker heartbeat once, while preserving any static fail-closed reason. */
+export async function resolveRunRuntimeContext(
+  ctx: RunControlContext,
+  database: Db,
+): Promise<RunControlContext> {
+  if (ctx.runtimeAvailable === false || !ctx.resolveRuntimeReadiness) return ctx;
+  try {
+    const readiness = await ctx.resolveRuntimeReadiness(database);
+    return {
+      ...ctx,
+      runtimeAvailable: readiness.available,
+      runtimeMessage: readiness.message,
+      resolveRuntimeReadiness: undefined,
+    };
+  } catch {
+    return {
+      ...ctx,
+      runtimeAvailable: false,
+      runtimeMessage: "RunSkill is unavailable because no run worker can be reached.",
+      resolveRuntimeReadiness: undefined,
+    };
   }
 }
 
@@ -140,9 +173,11 @@ export interface CreateRunAttachment {
 
 /** Deterministic per-run sandbox name, reused by worker retries. */
 export function sandboxNameForRun(orgId: string, runId: string): string {
-  const org8 = orgId.replace(/-/g, "").slice(0, 8);
-  const run8 = runId.replace(/-/g, "").slice(0, 8);
-  return `run-${org8}-${run8}`;
+  // Run ids are globally unique UUIDs. Keep all 128 bits in the provider name: truncating to the
+  // first eight hex characters lets unrelated runs reuse a live sandbox and cross the isolation
+  // boundary. `orgId` stays in the signature to make the tenant provenance explicit to callers.
+  void orgId;
+  return `run-${runId.toLowerCase()}`;
 }
 
 export function buildOpencodeJson(input: { model: string }): string {
@@ -160,13 +195,19 @@ export function buildOpencodeJson(input: { model: string }): string {
 export function composeRunPrompt(input: {
   prompt: string;
   skillSlug: string;
-  attachmentNames: string[];
+  attachments: Array<{ fileName: string; workspacePath: string }>;
   artifactsEnabled: boolean;
 }): string {
   const notes = [`Use your installed "${input.skillSlug}" skill to handle this request.`];
-  if (input.attachmentNames.length > 0) {
+  if (input.attachments.length > 0) {
+    const mountedFiles = input.attachments
+      .map(
+        (attachment) =>
+          `${JSON.stringify(attachment.fileName)} → ${JSON.stringify(`./attachments/${attachment.workspacePath}`)}`,
+      )
+      .join(", ");
     notes.push(
-      `The user attached ${input.attachmentNames.length === 1 ? "a file" : "files"} under ./attachments/: ${input.attachmentNames.join(", ")}.`,
+      `The user attached ${input.attachments.length === 1 ? "a file" : "files"}. Use the exact mounted ${input.attachments.length === 1 ? "path" : "paths"}: ${mountedFiles}.`,
     );
   }
   if (input.artifactsEnabled) {
@@ -184,13 +225,44 @@ function promptExcerpt(prompt: string): string {
 
 export function capTranscript(items: RunChatHistoryItem[], maxBytes = 512 * 1024): RunChatHistoryItem[] {
   const size = (list: RunChatHistoryItem[]) => Buffer.byteLength(JSON.stringify(list), "utf8");
-  if (size(items) <= maxBytes) return items;
-  const trimmed = items.map((item) => ({ ...item }));
-  for (const item of trimmed) {
-    if (size(trimmed) <= maxBytes) return trimmed;
-    if (item.kind === "tool" && item.output) item.output = "…(trimmed)";
-  }
+  const trim = (value: string, max: number): string =>
+    value.length <= max ? value : `${value.slice(0, Math.max(0, max - 1))}…`;
+  const trimUtf8 = (value: string, max: number): string => {
+    const charBounded = trim(value, max);
+    if (Buffer.byteLength(charBounded, "utf8") <= max) return charBounded;
+    const marker = "…";
+    const budget = Math.max(0, max - Buffer.byteLength(marker, "utf8"));
+    let low = 0;
+    let high = charBounded.length;
+    while (low < high) {
+      const middle = Math.ceil((low + high) / 2);
+      if (Buffer.byteLength(charBounded.slice(0, middle), "utf8") <= budget) low = middle;
+      else high = middle - 1;
+    }
+    return `${charBounded.slice(0, low)}${marker}`;
+  };
+  // Cap every untrusted OpenCode field before measuring the aggregate. persistRunTranscript calls
+  // this only after recursive redaction, so a credential straddling a limit is replaced whole
+  // before any prefix can be retained.
+  const trimmed = items.map((item): RunChatHistoryItem => {
+    if (item.kind === "user" || item.kind === "assistant") {
+      return { ...item, text: trimUtf8(item.text, RUN_CHAT_TRANSCRIPT_TEXT_MAX) };
+    }
+    return {
+      ...item,
+      call_id: trim(item.call_id, RUN_CHAT_ID_MAX),
+      tool: trim(item.tool, RUN_CHAT_NAME_MAX),
+      skill: item.skill === null ? null : trim(item.skill, RUN_CHAT_NAME_MAX),
+      title: item.title === null ? null : trim(item.title, RUN_CHAT_TITLE_MAX),
+      input: trim(item.input, RUN_CHAT_TOOL_INPUT_MAX),
+      output: trim(item.output, RUN_CHAT_TOOL_OUTPUT_MAX),
+    };
+  });
+  if (size(trimmed) <= maxBytes) return trimmed;
   while (trimmed.length > 1 && size(trimmed) > maxBytes) trimmed.shift();
+  // The normal 512 KiB limit is always larger than one bounded item. Keep this final guard for
+  // callers supplying a deliberately tiny custom limit in tests or maintenance tooling.
+  if (size(trimmed) > maxBytes) return [];
   return trimmed;
 }
 
@@ -206,6 +278,46 @@ function canonicalize(value: unknown): unknown {
 
 export function hashRunPayload(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(canonicalize(value))).digest("hex");
+}
+
+/**
+ * Canonical launch identity shared by the early replay lookup and the transactional insert path.
+ * Keep every caller-visible input here, including the explicit model-provider vault reference;
+ * object-storage keys are derived from the attachment ids and are intentionally not authoritative.
+ */
+export function hashRunCreationPayload(input: {
+  slug: string;
+  skillVersionId: string;
+  dependencyPins: RunDependencyPin[];
+  prompt: string;
+  model: string;
+  modelProviderSecretId: string;
+  inputs: RunInputSelection;
+  runConfigId?: string | null;
+  attachments: CreateRunAttachment[];
+}): string {
+  return hashRunPayload({
+    slug: input.slug,
+    skillVersionId: input.skillVersionId,
+    dependencyPins: [...input.dependencyPins].sort((a, b) =>
+      a.skill_id.localeCompare(b.skill_id) || a.skill_version_id.localeCompare(b.skill_version_id),
+    ),
+    prompt: input.prompt,
+    model: input.model,
+    modelProviderSecretId: input.modelProviderSecretId,
+    inputs: {
+      secrets: [...input.inputs.secrets].sort((a, b) =>
+        `${a.skill_id}:${a.slot_id}`.localeCompare(`${b.skill_id}:${b.slot_id}`),
+      ),
+      variables: [...input.inputs.variables].sort((a, b) =>
+        `${a.skill_id}:${a.env_key}`.localeCompare(`${b.skill_id}:${b.env_key}`),
+      ),
+    },
+    runConfigId: input.runConfigId ?? null,
+    attachments: [...input.attachments]
+      .sort((a, b) => a.id.localeCompare(b.id))
+      .map(({ id, fileName, contentType, byteSize }) => ({ id, fileName, contentType, byteSize })),
+  });
 }
 
 /** UUID-shaped deterministic OpenCode id derived from a durable logical prompt identity. */
@@ -387,6 +499,31 @@ export async function resolveRunDependencyClosure(input: {
   return closure;
 }
 
+/**
+ * Compare the exact non-root closure echoed by the launcher with the versions locked for creation.
+ * This closes the run-options → launch window where a dependency could otherwise advance without
+ * the member ever seeing or accepting that version.
+ */
+export function assertRunDependencyPinsMatch(
+  closure: ResolvedRunSkill[],
+  expectedPins: RunDependencyPin[],
+): void {
+  const expectedBySkill = new Map<string, string>();
+  for (const pin of expectedPins) {
+    if (expectedBySkill.has(pin.skill_id)) {
+      throw new RunValidationError("the skill dependency graph changed since the launcher was opened", "stale_skill_version");
+    }
+    expectedBySkill.set(pin.skill_id, pin.skill_version_id);
+  }
+  const dependencies = closure.filter((skill) => !skill.root);
+  if (
+    dependencies.length !== expectedBySkill.size ||
+    dependencies.some((skill) => expectedBySkill.get(skill.skill_id) !== skill.skill_version_id)
+  ) {
+    throw new RunValidationError("the skill dependency graph changed since the launcher was opened", "stale_skill_version");
+  }
+}
+
 export async function loadRunDeclarations(input: {
   actor: ActorContext;
   orgId: string;
@@ -504,11 +641,15 @@ export async function validateRunInputSelection(input: {
   orgId: string;
   model: string;
   modelEnvKeys: string[];
+  /** Explicit vault reference displayed by run-options for the selected model. */
+  modelProviderSecretId?: string | null;
   selection: RunInputSelection;
   declarations: ResolvedRunDeclarations;
   database: Db;
   allowMissingRequired?: boolean;
   providerRequired?: boolean;
+  /** Configuration health checks may inspect the live binding; actual launches always enforce. */
+  requireExplicitProviderSelection?: boolean;
   /** Unit-test/domain seam; production callers use the vault service above. */
   pinSecret?: (secretId: string) => Promise<AccessibleSecretPin>;
   /** Unit-test/domain seam; production callers resolve personal-then-workspace bindings. */
@@ -622,10 +763,21 @@ export async function validateRunInputSelection(input: {
     }
   }
   if (!providerBinding || !input.modelEnvKeys.includes(providerBinding.keyName)) {
+    if (input.modelProviderSecretId) {
+      throw new RunValidationError("the selected model provider secret is unavailable", "provider_secret_unavailable");
+    }
     if (input.providerRequired !== false || providerBinding) {
       throw new RunValidationError("the model provider is not connected", "provider_disconnected");
     }
   } else {
+    if (input.requireExplicitProviderSelection !== false) {
+      if (!input.modelProviderSecretId) {
+        throw new RunValidationError("select the model provider secret shown in the launcher", "provider_secret_missing");
+      }
+      if (input.modelProviderSecretId !== providerBinding.secret.secretId) {
+        throw new RunValidationError("the selected model provider secret changed; reload run options", "provider_secret_unavailable");
+      }
+    }
     resolvedSecrets.push({
       provenance: "model_provider",
       skillId: null,
@@ -911,68 +1063,111 @@ async function toDetail(
   };
 }
 
-async function createRunInTransaction(input: {
-  actor: ActorContext;
+async function findRunRootSkillId(input: {
+  database: Db;
   orgId: string;
   slug: string;
-  skillVersionId: string;
-  prompt: string;
-  model: string;
-  inputs: RunInputSelection;
-  runConfigId?: string | null;
-  idempotencyKey: string;
-  attachments: CreateRunAttachment[];
-  modelEnvKeys: string[];
-  ctx: RunControlContext;
-  database: Db;
-}): Promise<SkillRunDetail> {
-  const rootRows = await input.database
+}): Promise<string | null> {
+  const rows = await input.database
     .select({ id: schema.skills.id })
     .from(schema.skills)
     .where(and(eq(schema.skills.orgId, input.orgId), eq(schema.skills.slug, input.slug)));
-  const rootSkillId = rootRows[0]?.id;
-  if (!rootSkillId) throw new RunValidationError("skill not found", "skill_not_found");
-  const existingRows = await input.database
+  return rows[0]?.id ?? null;
+}
+
+async function committedRunDetail(database: Db, row: RunRow): Promise<SkillRunDetail> {
+  const [attachments, artifacts, slug] = await Promise.all([
+    loadAttachments(database, row.orgId, row.id),
+    loadArtifacts(database, row.orgId, row.id),
+    loadSkillSlug(database, row.orgId, row.skillId),
+  ]);
+  return toDetail(database, row, slug, attachments, artifacts);
+}
+
+/** Exact-payload lookup survives mutable catalog metadata such as a skill slug rename. */
+async function loadCommittedIdempotentRunByPayload(input: {
+  database: Db;
+  orgId: string;
+  creatorId: string;
+  idempotencyKey: string;
+  payloadHash: string;
+}): Promise<SkillRunDetail | null> {
+  const rows = await input.database
     .select()
     .from(schema.skillRuns)
     .where(
       and(
         eq(schema.skillRuns.orgId, input.orgId),
-        eq(schema.skillRuns.creatorId, input.actor.id),
-        eq(schema.skillRuns.skillId, rootSkillId),
+        eq(schema.skillRuns.creatorId, input.creatorId),
+        eq(schema.skillRuns.idempotencyKey, input.idempotencyKey),
+        eq(schema.skillRuns.payloadHash, input.payloadHash),
+      ),
+    );
+  const existing = rows.find((row) => row.payloadHash === input.payloadHash);
+  return existing ? committedRunDetail(input.database, existing) : null;
+}
+
+/**
+ * Return an already-committed launch before consulting mutable runtime, model-catalog, activation,
+ * provider, secret, configuration, or dependency state. The exact canonical payload hash remains
+ * authoritative: a replay with the same key but different selected inputs is still a conflict.
+ */
+async function loadCommittedIdempotentRun(input: {
+  database: Db;
+  orgId: string;
+  creatorId: string;
+  rootSkillId: string;
+  idempotencyKey: string;
+  payloadHash: string;
+}): Promise<SkillRunDetail | null> {
+  const rows = await input.database
+    .select()
+    .from(schema.skillRuns)
+    .where(
+      and(
+        eq(schema.skillRuns.orgId, input.orgId),
+        eq(schema.skillRuns.creatorId, input.creatorId),
+        eq(schema.skillRuns.skillId, input.rootSkillId),
         eq(schema.skillRuns.idempotencyKey, input.idempotencyKey),
       ),
     );
-  const payloadHash = hashRunPayload({
-    slug: input.slug,
-    skillVersionId: input.skillVersionId,
-    prompt: input.prompt,
-    model: input.model,
-    inputs: {
-      secrets: [...input.inputs.secrets].sort((a, b) =>
-        `${a.skill_id}:${a.slot_id}`.localeCompare(`${b.skill_id}:${b.slot_id}`),
-      ),
-      variables: [...input.inputs.variables].sort((a, b) =>
-        `${a.skill_id}:${a.env_key}`.localeCompare(`${b.skill_id}:${b.env_key}`),
-      ),
-    },
-    runConfigId: input.runConfigId ?? null,
-    attachments: [...input.attachments]
-      .sort((a, b) => a.id.localeCompare(b.id))
-      .map(({ id, fileName, contentType, byteSize }) => ({ id, fileName, contentType, byteSize })),
-  });
-  const existing = existingRows[0];
-  if (existing) {
-    if (existing.payloadHash !== payloadHash) {
-      throw new RunBusyError("this idempotency key was already used with a different payload", "idempotency_conflict");
-    }
-    const [attachments, artifacts, slug] = await Promise.all([
-      loadAttachments(input.database, input.orgId, existing.id),
-      loadArtifacts(input.database, input.orgId, existing.id),
-      loadSkillSlug(input.database, input.orgId, existing.skillId),
-    ]);
-    return toDetail(input.database, existing, slug, attachments, artifacts);
+  const existing = rows[0];
+  if (!existing) return null;
+  if (existing.payloadHash !== input.payloadHash) {
+    throw new RunBusyError("this idempotency key was already used with a different payload", "idempotency_conflict");
   }
+  return committedRunDetail(input.database, existing);
+}
+
+async function createRunInTransaction(input: {
+  actor: ActorContext;
+  orgId: string;
+  slug: string;
+  skillVersionId: string;
+  dependencyPins: RunDependencyPin[];
+  prompt: string;
+  model: string;
+  inputs: RunInputSelection;
+  modelProviderSecretId: string;
+  runConfigId?: string | null;
+  idempotencyKey: string;
+  attachments: CreateRunAttachment[];
+  payloadHash: string;
+  modelEnvKeys: string[];
+  ctx: RunControlContext;
+  database: Db;
+}): Promise<SkillRunDetail> {
+  const rootSkillId = await findRunRootSkillId(input);
+  if (!rootSkillId) throw new RunValidationError("skill not found", "skill_not_found");
+  const existing = await loadCommittedIdempotentRun({
+    database: input.database,
+    orgId: input.orgId,
+    creatorId: input.actor.id,
+    rootSkillId,
+    idempotencyKey: input.idempotencyKey,
+    payloadHash: input.payloadHash,
+  });
+  if (existing) return existing;
 
   const closure = await resolveRunDependencyClosure({
     actor: input.actor,
@@ -1001,6 +1196,7 @@ async function createRunInTransaction(input: {
   ) {
     throw new RunValidationError("the skill dependency graph changed during launch", "stale_skill_version");
   }
+  assertRunDependencyPinsMatch(closure, input.dependencyPins);
   const declarations = await loadRunDeclarations({
     actor: input.actor,
     orgId: input.orgId,
@@ -1021,6 +1217,7 @@ async function createRunInTransaction(input: {
     model: input.model,
     modelEnvKeys: input.modelEnvKeys,
     selection: input.inputs,
+    modelProviderSecretId: input.modelProviderSecretId,
     declarations,
     database: input.database,
   });
@@ -1081,7 +1278,7 @@ async function createRunInTransaction(input: {
       runConfigId: input.runConfigId ?? null,
       runConfigNameSnapshot: configNameSnapshot,
       idempotencyKey: input.idempotencyKey,
-      payloadHash,
+      payloadHash: input.payloadHash,
       model: input.model,
       prompt: input.prompt,
       status: "queued",
@@ -1162,7 +1359,10 @@ async function createRunInTransaction(input: {
   const composedPrompt = composeRunPrompt({
     prompt: input.prompt,
     skillSlug: root.slug,
-    attachmentNames: input.attachments.map((attachment) => attachment.fileName),
+    attachments: input.attachments.map((attachment) => ({
+      fileName: attachment.fileName,
+      workspacePath: attachmentWorkspacePath(attachment),
+    })),
     artifactsEnabled,
   });
   await input.database.insert(schema.skillRunPrompts).values({
@@ -1217,16 +1417,19 @@ async function createRunInTransaction(input: {
 
 /**
  * Create one immutable run snapshot and enqueue both its orchestration job and initial prompt.
- * Catalog lookup occurs before the transaction; every operation inside the transaction is DB-only.
+ * A committed idempotent replay is returned first; fresh launches resolve the catalog before opening
+ * the creation transaction, whose operations remain DB-only.
  */
 export async function createRun(input: {
   actor: ActorContext;
   orgId: string;
   slug: string;
   skillVersionId: string;
+  dependencyPins: RunDependencyPin[];
   prompt: string;
   model: string;
   inputs: RunInputSelection;
+  modelProviderSecretId: string;
   runConfigId?: string | null;
   idempotencyKey: string;
   attachments: CreateRunAttachment[];
@@ -1235,18 +1438,40 @@ export async function createRun(input: {
 }): Promise<SkillRunDetail> {
   const database = input.database ?? db;
   await assertMember(database, input.actor, input.orgId);
-  if (input.ctx.runtimeAvailable === false || !input.ctx.goldenSnapshotId) {
+  const payloadHash = hashRunCreationPayload(input);
+  const exactReplay = await loadCommittedIdempotentRunByPayload({
+    database,
+    orgId: input.orgId,
+    creatorId: input.actor.id,
+    idempotencyKey: input.idempotencyKey,
+    payloadHash,
+  });
+  if (exactReplay) return exactReplay;
+  const rootSkillId = await findRunRootSkillId({ database, orgId: input.orgId, slug: input.slug });
+  if (rootSkillId) {
+    const existing = await loadCommittedIdempotentRun({
+      database,
+      orgId: input.orgId,
+      creatorId: input.actor.id,
+      rootSkillId,
+      idempotencyKey: input.idempotencyKey,
+      payloadHash,
+    });
+    if (existing) return existing;
+  }
+  const ctx = await resolveRunRuntimeContext(input.ctx, database);
+  if (ctx.runtimeAvailable === false || !ctx.goldenSnapshotId) {
     throw new RunValidationError(
-      input.ctx.runtimeMessage ?? "RunSkill is not configured for this workspace",
+      ctx.runtimeMessage ?? "RunSkill is not configured for this workspace",
       "runtime_unavailable",
     );
   }
-  const model = await input.ctx.resolveModelKeys(input.model);
+  const model = await ctx.resolveModelKeys(input.model);
   if (!model || model.envKeys.length === 0) {
     throw new RunValidationError("the selected model is unavailable", "model_unavailable");
   }
   const execute = (transaction: Db) =>
-    createRunInTransaction({ ...input, modelEnvKeys: model.envKeys, database: transaction });
+    createRunInTransaction({ ...input, ctx, payloadHash, modelEnvKeys: model.envKeys, database: transaction });
   try {
     return await database.transaction(async (transaction) => execute(transaction as unknown as Db));
   } catch (error) {
@@ -1318,6 +1543,41 @@ export async function getRun(input: {
   return toDetail(database, row, slug, attachments, artifacts);
 }
 
+/**
+ * Durable cleanup guard for API-uploaded objects. Attachment keys are derived from org + actor +
+ * request payload, and this query additionally proves the reference belongs to one of that actor's
+ * creator-only runs before the API is allowed to consider an object orphaned.
+ */
+export async function listReferencedRunAttachmentKeys(input: {
+  actor: ActorContext;
+  orgId: string;
+  storageKeys: string[];
+  database?: Db;
+}): Promise<string[]> {
+  if (input.storageKeys.length === 0) return [];
+  const database = input.database ?? db;
+  await assertMember(database, input.actor, input.orgId);
+  const storageKeys = [...new Set(input.storageKeys)];
+  const rows = await database
+    .select({ storageKey: schema.skillRunAttachments.storageKey })
+    .from(schema.skillRunAttachments)
+    .innerJoin(
+      schema.skillRuns,
+      and(
+        eq(schema.skillRuns.orgId, schema.skillRunAttachments.orgId),
+        eq(schema.skillRuns.id, schema.skillRunAttachments.runId),
+      ),
+    )
+    .where(
+      and(
+        eq(schema.skillRunAttachments.orgId, input.orgId),
+        eq(schema.skillRuns.creatorId, input.actor.id),
+        inArray(schema.skillRunAttachments.storageKey, storageKeys),
+      ),
+    );
+  return rows.map((row) => row.storageKey);
+}
+
 export async function getRunAttachment(input: {
   actor: ActorContext;
   orgId: string;
@@ -1356,9 +1616,10 @@ export async function buildSkillBundle(
   version: string,
   storagePath: string,
   fetchArchive: SkillArchiveFetcher,
+  signal?: AbortSignal,
 ): Promise<SkillBundle> {
   const { toTar, inspectTar, extractArchiveEntryBuffers } = await import("@companion/skills");
-  const archive = await fetchArchive(storagePath);
+  const archive = await fetchArchive(storagePath, signal);
   const tar = toTar(archive);
   const finding = await inspectTar(tar);
   if (finding.violations.length > 0 || finding.oversize) {
@@ -1546,17 +1807,18 @@ export async function loadRunExecutionPlan(input: {
 export async function materializeRunWorkspace(input: {
   plan: RunExecutionPlan;
   fetchArchive: SkillArchiveFetcher;
-  fetchObject: (storageKey: string) => Promise<Buffer>;
+  fetchObject: (storageKey: string, signal?: AbortSignal) => Promise<Buffer>;
+  signal?: AbortSignal;
 }): Promise<RunWorkspaceFiles> {
   const skills: SkillBundle[] = [];
   for (const skill of input.plan.skills) {
-    skills.push(await buildSkillBundle(skill.slug, skill.version, skill.storagePath, input.fetchArchive));
+    skills.push(await buildSkillBundle(skill.slug, skill.version, skill.storagePath, input.fetchArchive, input.signal));
   }
   const attachments: RunWorkspaceFiles["attachments"] = [];
   for (const attachment of input.plan.attachments) {
     attachments.push({
       path: attachmentWorkspacePath(attachment),
-      data: await input.fetchObject(attachment.storageKey),
+      data: await input.fetchObject(attachment.storageKey, input.signal),
     });
   }
   return { opencodeJson: buildOpencodeJson({ model: input.plan.row.model }), skills, attachments };
@@ -1566,14 +1828,15 @@ export async function materializeRunWorkspace(input: {
 export async function teardownSandbox(
   runtime: RunSandboxRuntime,
   ref: Parameters<RunSandboxRuntime["stop"]>[0],
+  signal: AbortSignal = AbortSignal.timeout(25_000),
 ): Promise<boolean> {
   try {
-    await runtime.stop(ref);
+    await runtime.stop(ref, signal);
   } catch {
     // A stop failure does not excuse the destroy attempt.
   }
   try {
-    await runtime.destroy(ref);
+    await runtime.destroy(ref, signal);
     return true;
   } catch {
     return false;

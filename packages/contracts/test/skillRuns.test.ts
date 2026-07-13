@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  RUN_CHAT_DELTA_MAX,
+  RUN_CHAT_TOOL_INPUT_MAX,
   RUN_VARIABLE_VALUE_MAX_BYTES,
   createRunConfigurationInputSchema,
   launchRunFieldsSchema,
@@ -15,6 +17,8 @@ import {
 
 const skillId = "4c322a19-e5e1-4c30-8be1-83251eb43b1f";
 const versionId = "9a624988-833f-481a-b6b5-4a2407ec8881";
+const dependencySkillId = "0f232fd8-c852-4bab-9c12-1e1d4ed66634";
+const dependencyVersionId = "2bc55a52-3320-47cd-aa66-9859cda981ed";
 const slotId = "df80d275-30c9-5f0d-9a46-d77e6fca8448";
 const secretId = "a57b0803-6afb-47d0-a307-e8fb80c56511";
 
@@ -53,14 +57,34 @@ describe("skill run contracts", () => {
       prompt: "Summarize this",
       model: "anthropic/claude-sonnet-4",
       skill_version_id: versionId,
+      dependency_pins: JSON.stringify([
+        { skill_id: dependencySkillId, skill_version_id: dependencyVersionId },
+      ]),
+      model_provider_secret_id: secretId,
       inputs: JSON.stringify({ secrets: [{ skill_id: skillId, slot_id: slotId, secret_id: secretId }], variables: [] }),
     });
     expect(parsed.skill_version_id).toBe(versionId);
+    expect(parsed.dependency_pins).toEqual([
+      { skill_id: dependencySkillId, skill_version_id: dependencyVersionId },
+    ]);
     expect(parsed.inputs.secrets[0]?.secret_id).toBe(secretId);
     expect(() => launchRunFieldsSchema.parse({ prompt: "x", model: "provider/model", inputs: "{}" })).toThrow();
     expect(() =>
-      launchRunFieldsSchema.parse({ prompt: "x", model: "provider/model", skill_version_id: versionId, inputs: "not-json" }),
+      launchRunFieldsSchema.parse({ prompt: "x", model: "provider/model", skill_version_id: versionId, dependency_pins: "[]", model_provider_secret_id: secretId, inputs: "not-json" }),
     ).toThrow();
+    expect(() =>
+      launchRunFieldsSchema.parse({
+        prompt: "x",
+        model: "provider/model",
+        skill_version_id: versionId,
+        dependency_pins: JSON.stringify([
+          { skill_id: dependencySkillId, skill_version_id: dependencyVersionId },
+          { skill_id: dependencySkillId, skill_version_id: versionId },
+        ]),
+        model_provider_secret_id: secretId,
+        inputs: "{}",
+      }),
+    ).toThrow(/duplicate dependency pin/);
   });
 
   it("validates create/update configuration payloads and optimistic revisions", () => {
@@ -185,6 +209,33 @@ describe("skill run contracts", () => {
     ).toBe("run.warning");
     expect(runChatEventSchema.parse({ type: "run.error", code: "runtime_failed", message: "Run failed" }).type).toBe("run.error");
     expect(runChatEventSchema.parse({ type: "error", message: "legacy" }).type).toBe("error");
+  });
+
+  it("bounds untrusted live event payloads", () => {
+    expect(
+      runChatEventSchema.parse({
+        type: "text.delta",
+        message_id: "message-1",
+        delta: "x".repeat(RUN_CHAT_DELTA_MAX),
+      }).type,
+    ).toBe("text.delta");
+    expect(() =>
+      runChatEventSchema.parse({
+        type: "text.delta",
+        message_id: "message-1",
+        delta: "x".repeat(RUN_CHAT_DELTA_MAX + 1),
+      }),
+    ).toThrow();
+    expect(() =>
+      runChatEventSchema.parse({
+        type: "tool.start",
+        call_id: "call-1",
+        skill: null,
+        tool: "bash",
+        title: null,
+        input: "x".repeat(RUN_CHAT_TOOL_INPUT_MAX + 1),
+      }),
+    ).toThrow();
   });
 
   it("requires a non-negative event cursor alongside transcript snapshots", () => {

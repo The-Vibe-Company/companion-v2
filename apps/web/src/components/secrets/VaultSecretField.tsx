@@ -41,6 +41,7 @@ export function VaultSecretField({
   value,
   onChange,
   onCreated,
+  onBusyChange,
   audience = "personal",
   label = "Secret",
   required = false,
@@ -54,6 +55,8 @@ export function VaultSecretField({
   value: string | null;
   onChange: (secretId: string | null) => void;
   onCreated?: (secret: VaultSecretReference) => void;
+  /** Lets an owning dialog prevent dismissal while vault creation has an ambiguous outcome. */
+  onBusyChange?: (busy: boolean) => void;
   audience?: "personal" | "organization";
   label?: string;
   required?: boolean;
@@ -63,6 +66,7 @@ export function VaultSecretField({
 }) {
   const hintId = useId();
   const errorId = useId();
+  const validationId = useId();
   const selectId = useId();
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState("");
@@ -78,6 +82,11 @@ export function VaultSecretField({
     [candidates, envKey],
   );
   const missingReference = unavailable || (!!value && !sorted.some((candidate) => candidate.id === value));
+  const validationMessage = missingReference
+    ? "Secret unavailable. Select another accessible vault secret."
+    : required && !value
+      ? `${label} requires a secret.`
+      : null;
 
   const closeCreator = () => {
     // Drop plaintext immediately when the inline form closes; reopening always starts clean.
@@ -89,8 +98,9 @@ export function VaultSecretField({
   };
 
   const save = async () => {
-    if (!name.trim() || !secretValue || busy) return;
+    if (!name.trim() || !secretValue || busy || disabled) return;
     setBusy(true);
+    onBusyChange?.(true);
     setError(null);
     try {
       const row = await createSecret(orgId, {
@@ -108,6 +118,7 @@ export function VaultSecretField({
       setError(cause instanceof Error ? cause.message : "Could not create the secret.");
     } finally {
       setBusy(false);
+      onBusyChange?.(false);
     }
   };
 
@@ -116,7 +127,7 @@ export function VaultSecretField({
       className="vault-field"
       data-esc-guard={creating || undefined}
       onKeyDown={(event) => {
-        if (creating && event.key === "Escape") {
+        if (creating && !busy && event.key === "Escape") {
           event.preventDefault();
           event.stopPropagation();
           closeCreator();
@@ -135,7 +146,7 @@ export function VaultSecretField({
           className="sx-input vault-field__select"
           value={missingReference ? "__unavailable__" : value ?? ""}
           disabled={disabled}
-          aria-describedby={`${hintId}${error ? ` ${errorId}` : ""}`}
+          aria-describedby={`${hintId}${validationMessage ? ` ${validationId}` : ""}${error ? ` ${errorId}` : ""}`}
           aria-invalid={(missingReference || (required && !value)) || undefined}
           onChange={(event) => onChange(event.target.value && event.target.value !== "__unavailable__" ? event.target.value : null)}
         >
@@ -167,6 +178,7 @@ export function VaultSecretField({
       <p className="vault-field__hint" id={hintId}>
         {helper ?? <>Injected as <code>{envKey}</code>. The value is never shown here.</>}
       </p>
+      {validationMessage && <p className="vault-field__error" id={validationId}>{validationMessage}</p>}
       {creating && (
         <div className="vault-create">
           <label>
@@ -176,6 +188,7 @@ export function VaultSecretField({
               value={name}
               maxLength={120}
               autoFocus
+              disabled={disabled}
               placeholder={`${envKey} credential`}
               onChange={(event) => setName(event.target.value)}
             />
@@ -189,6 +202,7 @@ export function VaultSecretField({
                 value={secretValue}
                 autoComplete="new-password"
                 spellCheck={false}
+                disabled={disabled}
                 placeholder="Enter once"
                 onChange={(event) => setSecretValue(event.target.value)}
                 onKeyDown={(event) => {
@@ -196,7 +210,7 @@ export function VaultSecretField({
                     event.preventDefault();
                     void save();
                   }
-                  if (event.key === "Escape") {
+                  if (event.key === "Escape" && !busy) {
                     event.preventDefault();
                     event.stopPropagation();
                     closeCreator();
@@ -208,6 +222,7 @@ export function VaultSecretField({
                 className="iconbtn"
                 aria-label={visible ? "Hide secret value" : "Show secret value"}
                 aria-pressed={visible}
+                disabled={disabled}
                 onClick={() => setVisible((current) => !current)}
               >
                 <Icon name={visible ? "eye-off" : "eye"} size={14} />
@@ -218,7 +233,7 @@ export function VaultSecretField({
             <code>{envKey}</code>
             <span>{AUDIENCE_LABEL[audience]}</span>
           </div>
-          <button type="button" className="btn-primary" disabled={!name.trim() || !secretValue || busy} onClick={() => void save()}>
+          <button type="button" className="btn-primary" disabled={disabled || !name.trim() || !secretValue || busy} onClick={() => void save()}>
             {busy ? "Creating…" : "Create and select"}
           </button>
         </div>

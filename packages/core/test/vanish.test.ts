@@ -73,6 +73,15 @@ describe("publishRunArtifact", () => {
     );
   });
 
+  it("rejects unsafe public URL schemes and credentials", async () => {
+    for (const url of ["javascript:alert(1)", "http://example.com/file", "https://user:pass@example.com/file"]) {
+      const fetcher = stubFetch(() => new Response(JSON.stringify({ url }), { status: 200 }));
+      await expect(
+        publishRunArtifact({ apiKey: "k", filename: "a.txt", bytes: Buffer.from("a"), fetcher }),
+      ).rejects.toThrow(/invalid public url/);
+    }
+  });
+
   it("wraps network failures in VanishError", async () => {
     const fetcher = (async () => {
       throw new Error("socket hang up");

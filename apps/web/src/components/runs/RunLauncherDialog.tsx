@@ -98,6 +98,7 @@ export function RunLauncherDialog({
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [configBusy, setConfigBusy] = useState(false);
+  const [vaultBusy, setVaultBusy] = useState(false);
   const [nameMode, setNameMode] = useState<"save" | "rename" | null>(null);
   const [configName, setConfigName] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -116,20 +117,22 @@ export function RunLauncherDialog({
     prompt,
     model,
     inputs,
+    modelProviderSecretId: options?.models.find((option) => option.model.id === model)?.provider_secret_pin?.secret_id ?? null,
     selectedConfigId,
     files: files.map((file) => [file.name, file.size, file.type, file.lastModified]),
     skillVersionId: options?.root.skill_version_id ?? null,
-  }), [files, inputs, model, options?.root.skill_version_id, prompt, selectedConfigId]);
+    dependencyPins: options?.dependencies.map(({ skill_id, skill_version_id }) => ({ skill_id, skill_version_id })) ?? [],
+  }), [files, inputs, model, options, prompt, selectedConfigId]);
   const previousLaunchPayloadRef = useRef(initialDraft?.launchPayloadSignature ?? launchPayloadSignature);
   useEffect(() => {
     // Loading options fills the exact root version. Preserve a retry key when that hydrated
     // signature is the one stashed with it; a genuinely newer root invalidates the attempt.
-    if (!options) return;
+    if (!options || submittingRef.current) return;
     if (previousLaunchPayloadRef.current !== launchPayloadSignature) {
       previousLaunchPayloadRef.current = launchPayloadSignature;
       launchIdempotencyRef.current = null;
     }
-  }, [launchPayloadSignature, options]);
+  }, [busy, launchPayloadSignature, options]);
 
   const loadOptions = () => {
     setLoadError(null);
@@ -199,14 +202,17 @@ export function RunLauncherDialog({
     () => {
       if (!effectiveOptions) return [];
       const current = runDraftBlockers(effectiveOptions, model, authoritativeInputs(effectiveOptions, inputs));
-      if (selectedConfiguration?.status === "needs_attention") {
+      // Configuration issues describe its persisted snapshot. Once the draft diverges, the
+      // authoritative draft blockers below decide whether the edited run can proceed.
+      if (selectedConfiguration?.status === "needs_attention" && !modified) {
         current.push(...selectedConfiguration.issues.map((issue) => issue.message));
       }
       return [...new Set(current)];
     },
-    [effectiveOptions, inputs, model, selectedConfiguration],
+    [effectiveOptions, inputs, model, modified, selectedConfiguration],
   );
-  const canLaunch = !!effectiveOptions && prompt.trim().length > 0 && blockers.length === 0 && !busy;
+  const operationBusy = busy || configBusy || vaultBusy;
+  const canLaunch = !!effectiveOptions && prompt.trim().length > 0 && blockers.length === 0 && !operationBusy;
 
   const stash = (): RunLauncherDraft => ({
     prompt,
@@ -242,7 +248,7 @@ export function RunLauncherDialog({
   }, []);
 
   const close = () => {
-    if (busy) return;
+    if (operationBusy) return;
     explicitStashRef.current = true;
     onStashDraft?.(stashGetterRef.current());
     onClose();
@@ -275,7 +281,7 @@ export function RunLauncherDialog({
   };
 
   const saveNamedConfiguration = async () => {
-    if (!configName.trim() || !effectiveOptions || configBusy) return;
+    if (!configName.trim() || !effectiveOptions || operationBusy) return;
     setConfigBusy(true);
     setError(null);
     try {
@@ -395,6 +401,8 @@ export function RunLauncherDialog({
 
   const launch = () => {
     if (!canLaunch || !effectiveOptions || submittingRef.current) return;
+    const modelProviderSecretId = effectiveOptions.models.find((option) => option.model.id === model)?.provider_secret_pin?.secret_id;
+    if (!modelProviderSecretId) return;
     submittingRef.current = true;
     setBusy(true);
     setError(null);
@@ -405,7 +413,12 @@ export function RunLauncherDialog({
       prompt: prompt.trim(),
       model,
       skillVersionId: effectiveOptions.root.skill_version_id,
+      dependencyPins: effectiveOptions.dependencies.map(({ skill_id, skill_version_id }) => ({
+        skill_id,
+        skill_version_id,
+      })),
       inputs: authoritativeInputs(effectiveOptions, inputs),
+      modelProviderSecretId,
       runConfigId: selectedConfigId,
       files,
       idempotencyKey: requestKey,
@@ -454,15 +467,15 @@ export function RunLauncherDialog({
   const footer = (
     <>
       {effectiveOptions ? (
-        <ModelSelect options={effectiveOptions.models} model={model} onSelectModel={setModel} onManageModels={goManageModels} disabled={busy} />
-      ) : <span className="composer__hint">Loading models…</span>}
+        <ModelSelect options={effectiveOptions.models} model={model} onSelectModel={setModel} onManageModels={goManageModels} disabled={operationBusy} />
+      ) : <span className="composer__hint">{loadError ? "Run options unavailable" : "Loading models…"}</span>}
       <span className="og-spacer" />
       {files.length < MAX_FILES && (
         <>
-          <button type="button" className="composer__attach" title="Attach files" aria-label="Attach files" onClick={() => fileInputRef.current?.click()}>
+          <button type="button" className="composer__attach" title="Attach files" aria-label="Attach files" disabled={operationBusy} onClick={() => fileInputRef.current?.click()}>
             <Icon name="file" size={14} />
           </button>
-          <input ref={fileInputRef} type="file" multiple hidden aria-label="Attach files" onChange={(event) => addFiles(event.target.files)} />
+          <input ref={fileInputRef} type="file" multiple hidden disabled={operationBusy} aria-label="Attach files" onChange={(event) => addFiles(event.target.files)} />
         </>
       )}
       <span className="composer__hint">⌘↵</span>
@@ -474,7 +487,7 @@ export function RunLauncherDialog({
   );
 
   return (
-    <Dialog icon="play" title={`Run ${slug}`} desc="Prompt and files belong to this run only." onClose={close} closeDisabled={busy} foot={footer} className="og-dialog run-launcher">
+    <Dialog icon="play" title={`Run ${slug}`} desc="Prompt and files belong to this run only." onClose={close} closeDisabled={operationBusy} foot={footer} className="og-dialog run-launcher">
       {loadError ? (
         <div className="run-launcher__load-error" role="alert">
           <p>{loadError}</p>
@@ -493,7 +506,7 @@ export function RunLauncherDialog({
               <code className="run-config__version">{effectiveOptions.root.slug}@{effectiveOptions.root.version}</code>
             </div>
             <div className="run-config__select-row">
-              <select id="run-configuration" className="sx-input" value={selectedConfigId ?? ""} onChange={(event) => selectConfiguration(event.target.value)}>
+              <select id="run-configuration" className="sx-input" value={selectedConfigId ?? ""} disabled={operationBusy} onChange={(event) => selectConfiguration(event.target.value)}>
                 <option value="">Custom</option>
                 {configurations.map((configuration) => (
                   <option value={configuration.id} key={configuration.id}>
@@ -501,14 +514,14 @@ export function RunLauncherDialog({
                   </option>
                 ))}
               </select>
-              <button type="button" className="btn-sec" onClick={() => { setNameMode("save"); setConfigName(""); }}>Save as</button>
+              <button type="button" className="btn-sec" disabled={operationBusy} onClick={() => { setNameMode("save"); setConfigName(""); }}>Save as</button>
             </div>
             {selectedConfiguration && (
               <div className="run-config__actions">
-                <button type="button" onClick={() => void updateConfiguration("contents")} disabled={!modified || configBusy}>Update</button>
-                {!selectedConfiguration.is_default && <button type="button" onClick={() => void updateConfiguration("default")} disabled={configBusy}>Set as default</button>}
-                <button type="button" onClick={() => { setNameMode("rename"); setConfigName(selectedConfiguration.name); }}>Rename</button>
-                <button type="button" className={confirmDelete ? "is-danger" : ""} onClick={() => void removeConfiguration()} disabled={configBusy}>
+                <button type="button" onClick={() => void updateConfiguration("contents")} disabled={operationBusy || !modified}>Update</button>
+                {!selectedConfiguration.is_default && <button type="button" onClick={() => void updateConfiguration("default")} disabled={operationBusy}>Set as default</button>}
+                <button type="button" disabled={operationBusy} onClick={() => { setNameMode("rename"); setConfigName(selectedConfiguration.name); }}>Rename</button>
+                <button type="button" className={confirmDelete ? "is-danger" : ""} onClick={() => void removeConfiguration()} disabled={operationBusy}>
                   {confirmDelete ? "Confirm delete" : "Delete"}
                 </button>
               </div>
@@ -532,6 +545,7 @@ export function RunLauncherDialog({
                   value={configName}
                   maxLength={120}
                   autoFocus
+                  disabled={operationBusy}
                   onChange={(event) => setConfigName(event.target.value)}
                   onKeyDown={(event) => {
                     if (event.key === "Enter") void saveNamedConfiguration();
@@ -542,13 +556,13 @@ export function RunLauncherDialog({
                     }
                   }}
                 />
-                <button type="button" className="btn-primary" disabled={!configName.trim() || configBusy} onClick={() => void saveNamedConfiguration()}>
+                <button type="button" className="btn-primary" disabled={operationBusy || !configName.trim()} onClick={() => void saveNamedConfiguration()}>
                   {configBusy ? "Saving…" : "Save"}
                 </button>
-                <button type="button" className="btn-sec" onClick={() => setNameMode(null)}>Cancel</button>
+                <button type="button" className="btn-sec" disabled={operationBusy} onClick={() => setNameMode(null)}>Cancel</button>
               </div>
             )}
-            {selectedConfiguration?.issues.length ? (
+            {selectedConfiguration?.issues.length && !modified ? (
               <ul className="run-config__issues" role="status">
                 {selectedConfiguration.issues.map((issue, index) => <li key={`${issue.code}-${index}`}>{issue.message}</li>)}
               </ul>
@@ -564,6 +578,7 @@ export function RunLauncherDialog({
               autoFocus
               rows={4}
               maxLength={8000}
+              disabled={busy}
               placeholder={`What should ${slug} do?`}
               onChange={(event) => setPrompt(event.target.value)}
               onKeyDown={(event) => {
@@ -580,7 +595,7 @@ export function RunLauncherDialog({
                     <Icon name="file" size={12} />
                     <span className="launch-file__name">{file.name}</span>
                     <span className="launch-file__size">{formatBytes(file.size)}</span>
-                    <button type="button" className="launch-file__x" aria-label={`Remove ${file.name}`} onClick={() => setFiles(files.filter((_, itemIndex) => itemIndex !== index))}>
+                    <button type="button" className="launch-file__x" disabled={busy} aria-label={`Remove ${file.name}`} onClick={() => setFiles(files.filter((_, itemIndex) => itemIndex !== index))}>
                       <Icon name="x" size={11} />
                     </button>
                   </span>
@@ -621,8 +636,10 @@ export function RunLauncherDialog({
                           candidates={references}
                           value={selection?.secret_id ?? null}
                           unavailable={!!selection && !references.some((candidate) => candidate.id === selection.secret_id)}
+                          disabled={busy || configBusy || vaultBusy}
                           onChange={(secretId) => setSecret(declaration, secretId)}
                           onCreated={(secret) => setCreatedSecrets((rows) => rows.some((row) => row.id === secret.id) ? rows : [...rows, secret])}
+                          onBusyChange={setVaultBusy}
                           helper={declaration.description || `Injected into ${declaration.skill_slug} only for this run.`}
                         />
                       );
@@ -632,13 +649,14 @@ export function RunLauncherDialog({
                         variableSelectionKey(item.skill_id, item.env_key) === variableSelectionKey(declaration.skill_id, declaration.env_key),
                       );
                       const fieldId = `run-var-${declaration.skill_id}-${declaration.env_key}`;
+                      const requiredMissing = declaration.required && !selection;
                       return (
                         <div className="run-variable" key={declaration.env_key}>
                           <div className="run-variable__head">
                             <label htmlFor={fieldId}><code>{declaration.env_key}</code> {declaration.required ? <span>Required</span> : <small>Optional</small>}</label>
                             {!declaration.required && (
                               <label className="run-variable__include">
-                                <input type="checkbox" checked={!!selection} onChange={(event) => setVariable(declaration, event.target.checked ? "" : null)} /> Include
+                                <input type="checkbox" checked={!!selection} disabled={operationBusy} onChange={(event) => setVariable(declaration, event.target.checked ? "" : null)} /> Include
                               </label>
                             )}
                           </div>
@@ -646,12 +664,13 @@ export function RunLauncherDialog({
                             id={fieldId}
                             className="sx-input mono"
                             value={selection?.value ?? ""}
-                            disabled={!declaration.required && !selection}
-                            aria-invalid={(declaration.required && !selection) || undefined}
-                            aria-describedby={`${fieldId}-hint`}
+                            disabled={operationBusy || (!declaration.required && !selection)}
+                            aria-invalid={requiredMissing || undefined}
+                            aria-describedby={`${fieldId}-hint${requiredMissing ? ` ${fieldId}-error` : ""}`}
                             onChange={(event) => setVariable(declaration, event.target.value)}
                           />
                           <p id={`${fieldId}-hint`}>{declaration.description || "Visible in your private saved configuration and run history."}</p>
+                          {requiredMissing && <p className="vault-field__error" id={`${fieldId}-error`}>{declaration.env_key} is required.</p>}
                         </div>
                       );
                     })}

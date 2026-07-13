@@ -109,3 +109,46 @@ CREATE POLICY "org_provider_connections_tenant" ON "org_provider_connections" US
   "org_id" = NULLIF(current_setting('app.org_id', true), '')::uuid
   AND EXISTS (SELECT 1 FROM "memberships" m WHERE m."org_id" = "org_provider_connections"."org_id" AND m."user_id" = NULLIF(current_setting('app.user_id', true), ''))
 );
+--> statement-breakpoint
+
+-- RLS deliberately hides other members' personal configs/bindings. A secret owner still needs the
+-- aggregate usage count before rotation/deletion, so expose only that integer through an owner- and
+-- tenant-gated SECURITY DEFINER function.
+CREATE FUNCTION companion_secret_usage_count(p_org_id uuid, p_secret_id uuid)
+RETURNS bigint
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+DECLARE
+  caller_id text;
+  total bigint;
+BEGIN
+  caller_id := NULLIF(current_setting('app.user_id', true), '');
+  IF caller_id IS NULL
+    OR p_org_id <> NULLIF(current_setting('app.org_id', true), '')::uuid
+    OR NOT EXISTS (
+      SELECT 1 FROM public."memberships" m
+      WHERE m."org_id" = p_org_id AND m."user_id" = caller_id
+    )
+    OR NOT EXISTS (
+      SELECT 1 FROM public."secrets" s
+      WHERE s."org_id" = p_org_id AND s."id" = p_secret_id AND s."owner_id" = caller_id
+    ) THEN
+    RETURN 0;
+  END IF;
+
+  SELECT
+    (SELECT count(*) FROM public."skill_secret_bindings" b
+      WHERE b."org_id" = p_org_id AND b."secret_id" = p_secret_id AND b."revoked_at" IS NULL)
+    + (SELECT count(*) FROM public."skill_run_config_secrets" c
+      WHERE c."org_id" = p_org_id AND c."secret_id" = p_secret_id)
+    + (SELECT count(*) FROM public."user_provider_connections" u
+      WHERE u."org_id" = p_org_id AND u."secret_id" = p_secret_id)
+    + (SELECT count(*) FROM public."org_provider_connections" o
+      WHERE o."org_id" = p_org_id AND o."secret_id" = p_secret_id)
+  INTO total;
+  RETURN total;
+END
+$$;--> statement-breakpoint
+REVOKE ALL ON FUNCTION companion_secret_usage_count(uuid, uuid) FROM PUBLIC;

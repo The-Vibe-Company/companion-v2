@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import type { OpencodeClient } from "@opencode-ai/sdk";
-import { loadSessionItems, streamChatEvents } from "../src/opencodeChat";
+import {
+  createOpencodeRunChatRuntime,
+  createOpencodeStreamState,
+  getSessionMessageState,
+  getSessionState,
+  loadSessionItems,
+  streamChatEvents,
+} from "../src/opencodeChat";
 
 function clientWithMessages(messages: unknown[]): OpencodeClient {
   return {
@@ -99,6 +106,84 @@ describe("loadSessionItems", () => {
       { kind: "assistant", text: "hello" },
     ]);
   });
+
+  it("preserves whitespace around transcript text until secret redaction", async () => {
+    const client = clientWithMessages([
+      { info: { role: "assistant" }, parts: [{ type: "text", text: " secret-with-spaces " }] },
+      { info: { role: "assistant" }, parts: [{ type: "text", text: "   " }] },
+    ]);
+
+    await expect(loadSessionItems(client, "session-1")).resolves.toEqual([
+      { kind: "assistant", text: " secret-with-spaces " },
+    ]);
+  });
+
+  it("does not truncate tool payloads before the worker can redact them", async () => {
+    const output = `${"x".repeat(4_100)}secret-after-the-old-cutoff`;
+    const client = clientWithMessages([
+      {
+        info: { role: "assistant" },
+        parts: [
+          {
+            type: "tool",
+            callID: "call-long",
+            tool: "bash",
+            state: { status: "completed", input: { token: output }, output },
+          },
+        ],
+      },
+    ]);
+
+    const items = await loadSessionItems(client, "session-1");
+
+    expect(items[0]).toEqual(expect.objectContaining({ input: expect.stringContaining(output), output }));
+  });
+});
+
+describe("session reconciliation", () => {
+  it("distinguishes missing, idle and active sessions", async () => {
+    const client = {
+      session: {
+        get: async ({ path }: { path: { id: string } }) => path.id === "missing"
+          ? { data: undefined, error: { name: "NotFoundError", data: { message: "missing" } } }
+          : { data: { id: path.id }, error: undefined },
+        status: async () => ({ data: { busy: { type: "busy" }, retry: { type: "retry", attempt: 1, message: "again", next: 0 } } }),
+      },
+    } as unknown as OpencodeClient;
+
+    await expect(getSessionState(client, "missing")).resolves.toBe("missing");
+    await expect(getSessionState(client, "idle")).resolves.toBe("idle");
+    await expect(getSessionState(client, "busy")).resolves.toBe("busy");
+    await expect(getSessionState(client, "retry")).resolves.toBe("retry");
+  });
+
+  it("treats non-not-found lookup errors as transient instead of duplicating a session", async () => {
+    const client = {
+      session: {
+        get: async () => ({ data: undefined, error: { name: "BadRequest", data: { message: "upstream unavailable" } } }),
+      },
+    } as unknown as OpencodeClient;
+
+    await expect(getSessionState(client, "session-1")).rejects.toThrow(/validate the persisted session/);
+  });
+
+  it("reconciles deterministic messages through their exact assistant child", async () => {
+    const client = clientWithMessages([
+      { info: { id: "message-existing", role: "user" }, parts: [] },
+      { info: { id: "message-pending", role: "user" }, parts: [] },
+      { info: { id: "reply-pending", role: "assistant", parentID: "message-pending", time: { created: 1 } }, parts: [] },
+      { info: { id: "message-complete", role: "user" }, parts: [] },
+      { info: { id: "reply-complete", role: "assistant", parentID: "message-complete", time: { created: 1, completed: 2 } }, parts: [] },
+      { info: { id: "message-error", role: "user" }, parts: [] },
+      { info: { id: "reply-error", role: "assistant", parentID: "message-error", time: { created: 1 }, error: { name: "UnknownError" } }, parts: [] },
+    ]);
+
+    await expect(getSessionMessageState(client, "session-1", "message-new")).resolves.toBe("missing");
+    await expect(getSessionMessageState(client, "session-1", "message-existing")).resolves.toBe("pending");
+    await expect(getSessionMessageState(client, "session-1", "message-pending")).resolves.toBe("pending");
+    await expect(getSessionMessageState(client, "session-1", "message-complete")).resolves.toBe("completed");
+    await expect(getSessionMessageState(client, "session-1", "message-error")).resolves.toBe("error");
+  });
 });
 
 describe("streamChatEvents", () => {
@@ -177,5 +262,130 @@ describe("streamChatEvents", () => {
 
     expect(deltas).toEqual(["Hel", "lo"]);
     expect(deltas.join("")).toBe("Hello");
+  });
+
+  it("continues cumulative offsets across recorder reconnects", async () => {
+    const state = createOpencodeStreamState();
+    const clientForText = (text: string) =>
+      ({
+        event: {
+          subscribe: async () => ({
+            stream: (async function* () {
+              yield {
+                type: "message.updated",
+                properties: { info: { sessionID: "session-1", role: "assistant", id: "message-1" } },
+              };
+              yield {
+                type: "message.part.updated",
+                properties: {
+                  part: {
+                    id: "part-1",
+                    sessionID: "session-1",
+                    messageID: "message-1",
+                    type: "text",
+                    text,
+                  },
+                },
+              };
+            })(),
+          }),
+        },
+      }) as unknown as OpencodeClient;
+
+    const deltas: string[] = [];
+    for await (const event of streamChatEvents({
+      client: clientForText("Hello"),
+      sessionId: "session-1",
+      state,
+    })) {
+      if (event.type === "text.delta") deltas.push(event.delta);
+    }
+    for await (const event of streamChatEvents({
+      client: clientForText("Hello world"),
+      sessionId: "session-1",
+      state,
+    })) {
+      if (event.type === "text.delta") deltas.push(event.delta);
+    }
+
+    expect(deltas).toEqual(["Hello", " world"]);
+    expect(deltas.join("")).toBe("Hello world");
+  });
+
+  it("keeps cumulative offsets when reconnects use new connection signals", async () => {
+    let subscription = 0;
+    const runtime = createOpencodeRunChatRuntime(() => ({
+      event: {
+        subscribe: async () => {
+          const text = subscription++ === 0 ? "Hello" : "Hello world";
+          return {
+            stream: (async function* () {
+              yield {
+                type: "message.updated",
+                properties: { info: { sessionID: "session-1", role: "assistant", id: "message-1" } },
+              };
+              yield {
+                type: "message.part.updated",
+                properties: {
+                  part: {
+                    id: "part-1",
+                    sessionID: "session-1",
+                    messageID: "message-1",
+                    type: "text",
+                    text,
+                  },
+                },
+              };
+            })(),
+          };
+        },
+      },
+    }) as unknown as OpencodeClient);
+    const target = { domain: "https://sandbox.invalid", password: "unused" };
+    const recorderKey = {};
+    const deltas: string[] = [];
+    for await (const event of runtime.streamEvents(
+      target,
+      "session-1",
+      new AbortController().signal,
+      undefined,
+      recorderKey,
+    )) {
+      if (event.type === "text.delta") deltas.push(event.delta);
+    }
+    for await (const event of runtime.streamEvents(
+      target,
+      "session-1",
+      new AbortController().signal,
+      undefined,
+      recorderKey,
+    )) {
+      if (event.type === "text.delta") deltas.push(event.delta);
+    }
+
+    expect(deltas).toEqual(["Hello", " world"]);
+  });
+
+  it("keeps distinct identical idle events across reconnects", async () => {
+    const state = createOpencodeStreamState();
+    const client = {
+      event: {
+        subscribe: async () => ({
+          stream: (async function* () {
+            yield { type: "session.idle", properties: { sessionID: "session-1" } };
+          })(),
+        }),
+      },
+    } as unknown as OpencodeClient;
+
+    const idle: string[] = [];
+    for await (const event of streamChatEvents({ client, sessionId: "session-1", state })) {
+      if (event.type === "session.idle") idle.push(event.session_id);
+    }
+    for await (const event of streamChatEvents({ client, sessionId: "session-1", state })) {
+      if (event.type === "session.idle") idle.push(event.session_id);
+    }
+
+    expect(idle).toEqual(["session-1", "session-1"]);
   });
 });

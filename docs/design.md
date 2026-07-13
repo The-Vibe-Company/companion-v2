@@ -564,7 +564,8 @@ content; only the sandbox does.
 - `skill_run_configs`, `skill_run_config_secrets`, and `skill_run_config_variables` store multiple
   named creator-only configurations. Names are unique per creator and root skill, at most one is the
   default, and optimistic `revision` updates reject stale writers. Secret children reference
-  `secrets.id`; deleting a configuration never deletes a vault row.
+  `secrets.id`; deleting a configuration never deletes a vault row and atomically detaches the live
+  foreign key from historical runs, whose immutable configuration-name snapshot remains intact.
 - `skill_runs` stores the creator, root skill/version snapshot, model, prompt, optional configuration
   name snapshot, idempotency key and payload hash, typed status/phase/error fields, deterministic
   sandbox/session identity, opaque-encrypted internal server password, final transcript with its
@@ -585,8 +586,10 @@ content; only the sandbox does.
 - Migration `0034_skill_runs.sql` creates these tables and forces creator-only RLS on runs,
   configurations, snapshots, prompts, events, attachments, and artifacts. Child policies derive the
   creator through their parent run/configuration; admins receive no override. The only cross-tenant
-  queue operation is a narrow internal `SECURITY DEFINER` claim function using `FOR UPDATE SKIP
-  LOCKED`; claimed work then runs under the recorded tenant and creator context.
+  queue operations are narrow internal `SECURITY DEFINER` functions using `FOR UPDATE SKIP LOCKED`
+  and exact unexpired lease identities; claimed work then runs under the recorded tenant and creator
+  context. Caller-controlled GUCs are not authority: policies additionally require the table-owner
+  execution identity used only inside those functions.
 - `user_model_preferences` / `org_model_preferences` (mig 0036) — the ACTIVATED-model lists (see
   "Activated models" below): a jsonb array of `provider/model-id` refs per member (PK
   `org_id+user_id`, user-scoped RLS) and per workspace (PK `org_id`, tenant RLS, nullable
@@ -599,16 +602,24 @@ prompt.
 
 ### Launch pipeline + recorder
 
-`getRunOptions` and `createRun` resolve from the exact root version the launcher displays. They reject
+`getRunOptions` returns the complete ordered set of root/dependency version and edge pins. `createRun`
+requires the client to echo that exact set and compares it under the same transaction locks that
+create the immutable snapshots. It never silently upgrades a dependency between launcher render and
+submit. Both paths reject
 cycles, missing/archived/inaccessible dependencies, stale root versions, excessive closure size,
 undeclared inputs, required omissions, reserved runtime names, and ambiguous environment collisions.
 The selected payload is authoritative: installation bindings may prefill `Custom`, but the server
 never adds or mutates a binding implicitly. Secret ACL and model readiness are checked while loading
 options and again while atomically creating the run snapshots, initial prompt, and queue row.
 
-The runs supervisor claims short leases with `FOR UPDATE SKIP LOCKED`, heartbeats them, limits local
+The runs supervisor advertises a short-lived PostgreSQL readiness heartbeat; run-options and new-run
+creation fail closed when no configured worker heartbeat is live, without disabling the rest of the
+API. It claims short leases with `FOR UPDATE SKIP LOCKED`, heartbeats them, limits local
 concurrency, and retries transient failures at most three times with backoff. Validation failures are
-terminal. Each external step has persisted before/after progress:
+terminal. A separate exact-lease control watcher aborts in-flight work promptly on cancellation,
+membership loss, or lease loss. S3, sandbox control, OpenCode request, probe, recorder-connect, and
+artifact calls all carry cancellation signals and strict time budgets. Each external step has
+persisted before/after progress:
 
 1. revalidate snapshot access and decrypt exact secret versions;
 2. get or fork the deterministic sandbox;
@@ -621,7 +632,10 @@ terminal. Each external step has persisted before/after progress:
 
 Runtime/network calls never occur inside a database transaction. On worker replacement, an expired
 lease resumes the same sandbox/session/message instead of duplicating them. A transient recorder
-closure reconnects with backoff. Normal process shutdown stops claiming work and lets leases expire;
+closure reconnects with backoff while preserving recorder-local cumulative part cursors across new
+network signals. Each idle transcript snapshot and its `session.idle` barrier event are committed in
+one transaction with the same watermark, so SSE can never hydrate an older snapshot after observing
+that event. Normal process shutdown stops claiming work and lets leases expire;
 it does not destroy active sandboxes.
 
 ### Sandbox cleanup
@@ -777,6 +791,16 @@ attachments/packages, and `VANISH_API_URL` (default `https://vanish.sh`). Event 
 fixed at 24 hours after terminal state. The worker receives these settings. Keep the feature flag off
 when Vercel/golden configuration is absent; only RunSkill is disabled, while API, web, billing,
 provider settings, and vault still run.
+
+Production API and worker processes connect through `DATABASE_URL` using a dedicated login with
+`NOSUPERUSER`, `NOBYPASSRLS`, no table ownership, and no membership in the migration-owner role.
+`DATABASE_MIGRATION_URL` is available only to the API migration step. With
+`DATABASE_RUNTIME_ROLE` configured, that step applies `packages/db/runtime-role-grants.sql` under the
+same advisory lock after every migration; the file is also the manual recovery path. It grants
+ordinary table access plus only the narrow cross-tenant discovery functions needed before a tenant
+GUC exists. Organization creation and domain joining generate/select an org id first, then run under
+normal RLS with explicit tenant context. Running application processes as the table owner, superuser,
+or a `BYPASSRLS` role invalidates the forced-RLS security boundary.
 
 The bundled Companion skill performs write-only secret creation and binding plus secret-aware
 install/update/sync.

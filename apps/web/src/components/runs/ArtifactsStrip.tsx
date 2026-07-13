@@ -23,6 +23,18 @@ function formatBytes(bytes: number): string {
   return `${bytes} B`;
 }
 
+export function safeArtifactHref(value: string): string | null {
+  try {
+    const parsed = new URL(value);
+    const localHttp = parsed.protocol === "http:" && ["localhost", "127.0.0.1", "::1"].includes(parsed.hostname);
+    return (parsed.protocol === "https:" || localHttp) && !parsed.username && !parsed.password
+      ? parsed.toString()
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 export function ArtifactsStrip({ artifacts }: { artifacts: SkillRunArtifactRow[] }) {
   if (artifacts.length === 0) return null;
   const now = Date.now();
@@ -54,6 +66,8 @@ export function ArtifactsStrip({ artifacts }: { artifacts: SkillRunArtifactRow[]
       </span>
       {artifacts.map((artifact) => {
         const expired = artifact.expires_at !== null && new Date(artifact.expires_at).getTime() < now;
+        const href = safeArtifactHref(artifact.url);
+        const unavailable = expired || href === null;
         const chipStyle = {
           display: "inline-flex",
           alignItems: "center",
@@ -65,10 +79,10 @@ export function ArtifactsStrip({ artifacts }: { artifacts: SkillRunArtifactRow[]
           background: "var(--color-surface)",
           fontFamily: "var(--font-mono)",
           fontSize: 11,
-          color: expired ? "var(--color-faint)" : "var(--color-fg)",
+          color: unavailable ? "var(--color-faint)" : "var(--color-fg)",
           whiteSpace: "nowrap",
           textDecoration: "none",
-          opacity: expired ? 0.6 : 1,
+          opacity: unavailable ? 0.6 : 1,
           flex: "none",
         } as const;
         const body = (
@@ -76,17 +90,17 @@ export function ArtifactsStrip({ artifacts }: { artifacts: SkillRunArtifactRow[]
             <Icon name={artifactIcon(artifact)} size={12} style={{ color: "var(--color-muted)" }} />
             <span>{artifact.file_name}</span>
             <span style={{ color: "var(--color-faint)" }}>{formatBytes(artifact.byte_size)}</span>
-            {!expired && <Icon name="arrow-right" size={11} style={{ color: "var(--color-faint)" }} />}
+            {!unavailable && <Icon name="arrow-right" size={11} style={{ color: "var(--color-faint)" }} />}
           </>
         );
-        return expired ? (
-          <span key={artifact.id} style={chipStyle} title="expired">
+        return unavailable ? (
+          <span key={artifact.id} style={chipStyle} title={expired ? "expired" : "unavailable"}>
             {body}
           </span>
         ) : (
           <a
             key={artifact.id}
-            href={artifact.url}
+            href={href}
             target="_blank"
             rel="noopener noreferrer"
             style={chipStyle}

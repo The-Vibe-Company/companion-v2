@@ -16,6 +16,7 @@ import {
   RunValidationError,
   loadRunDeclarations,
   resolveRunDependencyClosure,
+  resolveRunRuntimeContext,
   validateRunInputSelection,
   type ResolvedRunDeclarations,
   type ResolvedRunSkill,
@@ -173,6 +174,7 @@ async function inspectConfiguration(input: {
       declarations: input.declarations,
       database: input.database,
       allowMissingRequired: true,
+      requireExplicitProviderSelection: false,
     });
   } catch (error) {
     const code = error instanceof RunValidationError ? error.code : "configuration_invalid";
@@ -199,6 +201,7 @@ async function mapConfigurations(input: {
   ctx: RunControlContext;
   database: Db;
 }): Promise<RunConfiguration[]> {
+  const ctx = await resolveRunRuntimeContext(input.ctx, input.database);
   const inputs = await loadConfigInputs({
     orgId: input.orgId,
     configIds: input.rows.map((row) => row.id),
@@ -215,6 +218,7 @@ async function mapConfigurations(input: {
       const selection = inputs.get(row.id) ?? { secrets: [], variables: [] };
       const issues = await inspectConfiguration({
         ...input,
+        ctx,
         row,
         selection,
         activated,
@@ -307,6 +311,7 @@ async function validateConfigurationSelection(input: {
     database: input.database,
     allowMissingRequired: true,
     providerRequired: false,
+    requireExplicitProviderSelection: false,
   });
 }
 
@@ -597,9 +602,36 @@ export async function deleteRunConfiguration(input: {
 }): Promise<void> {
   const database = input.database ?? db;
   await assertMember(database, input.actor, input.orgId);
-  await ownedConfig({ ...input, database });
   await database.transaction(async (transaction) => {
     const tx = transaction as unknown as Db;
+    const configs = await tx
+      .select({ id: schema.skillRunConfigs.id })
+      .from(schema.skillRunConfigs)
+      .where(
+        and(
+          eq(schema.skillRunConfigs.orgId, input.orgId),
+          eq(schema.skillRunConfigs.id, input.configId),
+          eq(schema.skillRunConfigs.creatorId, input.actor.id),
+          eq(schema.skillRunConfigs.revision, input.value.revision),
+        ),
+      )
+      .for("update");
+    if (!configs[0]) {
+      throw new RunBusyError("the configuration changed; reload it and try again", "configuration_revision_conflict");
+    }
+    // Historical runs keep the immutable name/model/input snapshots, but a live FK must not make
+    // an otherwise personal saved configuration undeletable after its first use. The transaction
+    // rolls this detachment back if the optimistic revision check below loses a race.
+    await tx
+      .update(schema.skillRuns)
+      .set({ runConfigId: null, updatedAt: new Date() })
+      .where(
+        and(
+          eq(schema.skillRuns.orgId, input.orgId),
+          eq(schema.skillRuns.runConfigId, input.configId),
+          eq(schema.skillRuns.creatorId, input.actor.id),
+        ),
+      );
     const rows = await tx
       .delete(schema.skillRunConfigs)
       .where(
@@ -633,6 +665,7 @@ export async function getRunOptions(input: {
 }): Promise<RunOptions> {
   const database = input.database ?? db;
   await assertMember(database, input.actor, input.orgId);
+  const ctx = await resolveRunRuntimeContext(input.ctx, database);
   const closure = await currentClosure({ ...input, database });
   const root = closure[0]!;
   const declarations = await loadRunDeclarations({
@@ -649,7 +682,7 @@ export async function getRunOptions(input: {
     skillSlug: root.slug,
     rows: configRows,
     declarations,
-    ctx: input.ctx,
+    ctx,
     database,
   });
   const activatedRows = await getActivatedModelSets({
@@ -658,7 +691,7 @@ export async function getRunOptions(input: {
     userId: input.actor.id,
   });
   const activated = new Set([...activatedRows.personal, ...activatedRows.org]);
-  const catalog = (input.ctx.models ?? []).filter((model) => activated.has(model.id));
+  const catalog = (ctx.models ?? []).filter((model) => activated.has(model.id));
   const providerPins = new Map<string, Awaited<ReturnType<typeof resolveProviderSecretPin>>>();
   const models: RunOptions["models"] = [];
   for (const model of catalog) {
@@ -676,13 +709,13 @@ export async function getRunOptions(input: {
       }
       providerPins.set(model.provider, pin);
     }
-    const runtimeUnavailable = input.ctx.runtimeAvailable === false || !input.ctx.goldenSnapshotId;
+    const runtimeUnavailable = ctx.runtimeAvailable === false || !ctx.goldenSnapshotId;
     const connected = Boolean(pin && model.env_keys.includes(pin.keyName));
     models.push({
       model,
       readiness: runtimeUnavailable ? "runtime_unavailable" : connected ? "ready" : "provider_disconnected",
       message: runtimeUnavailable
-        ? input.ctx.runtimeMessage ?? "RunSkill is not configured."
+        ? ctx.runtimeMessage ?? "RunSkill is not configured."
         : connected
           ? null
           : "Connect this model provider in Settings → Models.",
@@ -716,11 +749,11 @@ export async function getRunOptions(input: {
     configurations,
     models,
     runtime: {
-      available: input.ctx.runtimeAvailable !== false && Boolean(input.ctx.goldenSnapshotId),
+      available: ctx.runtimeAvailable !== false && Boolean(ctx.goldenSnapshotId),
       message:
-        input.ctx.runtimeAvailable !== false && input.ctx.goldenSnapshotId
+        ctx.runtimeAvailable !== false && ctx.goldenSnapshotId
           ? null
-          : input.ctx.runtimeMessage ?? "RunSkill is not configured.",
+          : ctx.runtimeMessage ?? "RunSkill is not configured.",
     },
   };
 }

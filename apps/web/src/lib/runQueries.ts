@@ -7,6 +7,7 @@ import type {
   ProviderConnectionRow,
   ProviderConnectionsResponse,
   RunConfiguration,
+  RunDependencyPin,
   RunInputSelection,
   RunOptions,
   SkillRunDetail,
@@ -133,7 +134,9 @@ export async function launchRun(
     prompt: string;
     model: string;
     skillVersionId: string;
+    dependencyPins: RunDependencyPin[];
     inputs: RunInputSelection;
+    modelProviderSecretId: string;
     runConfigId: string | null;
     files: File[];
     idempotencyKey: string;
@@ -143,7 +146,9 @@ export async function launchRun(
   form.set("prompt", input.prompt);
   form.set("model", input.model);
   form.set("skill_version_id", input.skillVersionId);
+  form.set("dependency_pins", JSON.stringify(input.dependencyPins));
   form.set("inputs", JSON.stringify(input.inputs));
+  form.set("model_provider_secret_id", input.modelProviderSecretId);
   if (input.runConfigId) form.set("run_config_id", input.runConfigId);
   for (const file of input.files) form.append("file", file, file.name);
   return apiFetch<SkillRunDetail>(`/v1/skills/${encodeURIComponent(slug)}/runs`, {

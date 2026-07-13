@@ -1283,8 +1283,11 @@ export const skillRunJobs = pgTable(
     creatorId: text("creator_id").notNull(),
     status: skillRunJobStatusEnum("status").notNull().default("queued"),
     phase: skillRunPhaseEnum("phase").notNull().default("queued"),
+    /** Execution failures consume this bounded retry budget; an expired lease reclaim does not. */
     attempt: integer("attempt").notNull().default(0),
     maxAttempts: integer("max_attempts").notNull().default(3),
+    /** Operational counter only: how often another replica resumed the same execution attempt. */
+    leaseReclaimCount: integer("lease_reclaim_count").notNull().default(0),
     availableAt: timestamp("available_at", { withTimezone: true }).notNull().defaultNow(),
     leaseOwner: text("lease_owner"),
     leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
@@ -1305,9 +1308,32 @@ export const skillRunJobs = pgTable(
       "skill_run_jobs_attempt_check",
       sql`${t.attempt} >= 0 AND ${t.maxAttempts} BETWEEN 1 AND 10 AND ${t.attempt} <= ${t.maxAttempts}`,
     ),
+    leaseReclaimCheck: check("skill_run_jobs_lease_reclaim_check", sql`${t.leaseReclaimCount} >= 0`),
     leaseCheck: check(
       "skill_run_jobs_lease_check",
       sql`(${t.status} = 'leased') = (${t.leaseOwner} IS NOT NULL AND ${t.leaseExpiresAt} IS NOT NULL)`,
+    ),
+  }),
+);
+
+/**
+ * Ephemeral liveness advertised by fully configured run-worker replicas. The API only accepts new
+ * work while at least one row has an unexpired lease; a crashed process naturally disappears.
+ * This is operational state (not tenant data) and is accessed through narrow SECURITY DEFINER
+ * functions rather than ordinary application queries.
+ */
+export const skillRunWorkerHeartbeats = pgTable(
+  "skill_run_worker_heartbeats",
+  {
+    workerId: text("worker_id").primaryKey(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    expiresIdx: index("skill_run_worker_heartbeats_expires_idx").on(t.expiresAt),
+    workerIdCheck: check(
+      "skill_run_worker_heartbeats_worker_id_check",
+      sql`length(btrim(${t.workerId})) BETWEEN 1 AND 512`,
     ),
   }),
 );
@@ -1328,7 +1354,9 @@ export const skillRunPrompts = pgTable(
     messageId: text("message_id").notNull(),
     prompt: text("prompt").notNull(),
     status: skillRunPromptStatusEnum("status").notNull().default("queued"),
+    /** Prompt dispatch failures consume this budget; lease-only recovery keeps the same attempt. */
     attempt: integer("attempt").notNull().default(0),
+    leaseReclaimCount: integer("lease_reclaim_count").notNull().default(0),
     availableAt: timestamp("available_at", { withTimezone: true }).notNull().defaultNow(),
     leaseOwner: text("lease_owner"),
     leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
@@ -1354,6 +1382,7 @@ export const skillRunPrompts = pgTable(
     }).onDelete("cascade"),
     ordinalCheck: check("skill_run_prompts_ordinal_check", sql`${t.ordinal} >= 0`),
     attemptCheck: check("skill_run_prompts_attempt_check", sql`${t.attempt} BETWEEN 0 AND 10`),
+    leaseReclaimCheck: check("skill_run_prompts_lease_reclaim_check", sql`${t.leaseReclaimCount} >= 0`),
     idempotencyKeyCheck: check(
       "skill_run_prompts_idempotency_key_check",
       sql`char_length(${t.idempotencyKey}) BETWEEN 8 AND 200`,

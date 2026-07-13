@@ -37,6 +37,22 @@ worker communicate through Postgres and external providers. Deploy `api` once be
 supervisor so
 the first database migration has completed; later API deploys run migrations before replacing the live process.
 
+Run the API and worker with a dedicated `NOSUPERUSER NOBYPASSRLS` login that neither owns database
+objects nor belongs to the migration-owner role. Keep the Railway Postgres owner URL only in
+`DATABASE_MIGRATION_URL` on the API (for its pre-deploy migration). Set `DATABASE_RUNTIME_ROLE` to the
+runtime login name: the migration hook then applies the versioned least-privilege grants immediately
+after every migration while it still holds the advisory lock. The checked-in script remains a manual
+recovery/fallback path:
+
+```bash
+psql "$DATABASE_MIGRATION_URL" -v runtime_role=companion_runtime \
+  -f packages/db/runtime-role-grants.sql
+```
+
+Set `DATABASE_URL` on API and worker to that runtime login's URL. This separation is required for
+forced creator-only RLS; using the table owner, a superuser, or a `BYPASSRLS` role at runtime disables
+that security boundary.
+
 ## 2. Configure variables
 
 Use Railway reference variables instead of copying generated hostnames or database credentials. The service names
@@ -48,7 +64,9 @@ below assume the services are named exactly `web`, `api`, and `Postgres`.
 NODE_ENV=production
 PORT=3001
 COMPANION_API_HOST=0.0.0.0
-DATABASE_URL=${{Postgres.DATABASE_URL}}
+DATABASE_URL=<companion_runtime NOSUPERUSER/NOBYPASSRLS URL>
+DATABASE_MIGRATION_URL=${{Postgres.DATABASE_URL}}
+DATABASE_RUNTIME_ROLE=companion_runtime
 COMPANION_WEB_URL=https://${{web.RAILWAY_PUBLIC_DOMAIN}}
 COMPANION_API_URL=https://${{web.RAILWAY_PUBLIC_DOMAIN}}
 BETTER_AUTH_URL=https://${{web.RAILWAY_PUBLIC_DOMAIN}}
@@ -109,7 +127,7 @@ private DNS is not reachable from a browser; browser requests intentionally stay
 
 ```dotenv
 NODE_ENV=production
-DATABASE_URL=${{Postgres.DATABASE_URL}}
+DATABASE_URL=<same companion_runtime URL as api>
 COMPANION_BILLING_MODE=stripe
 COMPANION_ENTITLEMENTS_MODE=observe
 STRIPE_SECRET_KEY=<same live secret key as api>
