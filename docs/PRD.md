@@ -144,8 +144,8 @@ Each requirement has user stories with acceptance criteria. Priorities: **P0** =
 - As a Free member, I retain org catalog access with up to 20 active-or-archived org skills, installed
   org skills in My Skills, and current-version downloads. *AC:* personal skills remain preserved but
   hidden, history is Pro-only, and over-limit catalogs freeze non-destructive mutations.
-- As a self-hosted operator, I receive all Pro capabilities without Stripe. *AC:* Billing navigation
-  and Upgrade CTAs are absent when billing is disabled.
+- As a self-hosted operator, I receive all Pro capabilities without Stripe. *AC:* Billing remains
+  visible as an informational “Pro included” page, while Checkout, Portal, and Upgrade CTAs are absent.
 
 ---
 

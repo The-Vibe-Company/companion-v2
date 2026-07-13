@@ -20,7 +20,37 @@ function statusLabel(value: string | null): string {
 
 export function BillingPane({ ctx }: { ctx: OrgCtx }) {
   const billing = ctx.billing;
-  if (!billing?.billingEnabled) return null;
+  if (!billing) {
+    return (
+      <div className="sx-pane">
+        <PaneHead title="Billing" desc="Billing status is temporarily unavailable for this workspace." />
+        <div className="sx-readline" role="status">
+          <Icon name="alert-triangle" size={14} />
+          Refresh the page to try again.
+        </div>
+      </div>
+    );
+  }
+  if (!billing.billingEnabled) {
+    return (
+      <div className="sx-pane">
+        <PaneHead
+          title="Billing"
+          desc="This self-hosted workspace does not use Companion-managed billing."
+          action={<span className="badge badge--ok">Pro included</span>}
+        />
+        <div className="sx-sec">
+          <h2 className="sx-sec__h">Plan</h2>
+          <p className="sx-sec__d">All product entitlements are enabled without Stripe or a Companion subscription.</p>
+          <div className="sx-defs">
+            <div className="sx-def"><span className="sx-def__k">Current plan</span><span className="sx-def__v"><b>Pro</b></span></div>
+            <div className="sx-def"><span className="sx-def__k">Billing provider</span><span className="sx-def__v">Self-hosted</span></div>
+            <div className="sx-def"><span className="sx-def__k">Subscription</span><span className="sx-def__v">Not required</span></div>
+          </div>
+        </div>
+      </div>
+    );
+  }
   const plan = billing.entitlements.computedPlan;
   const delinquent = billing.stripeStatus === "past_due" || billing.stripeStatus === "unpaid";
 

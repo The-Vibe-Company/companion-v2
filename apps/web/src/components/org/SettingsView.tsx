@@ -60,25 +60,24 @@ export function SettingsView({
   onDialog: (dialog: SettingsDialog) => void;
   onClose: () => void;
 }) {
-  const visibleRoute: SettingsRoute = route.view === "billing" && !ctx.billing?.billingEnabled ? { view: "general" } : route;
   let pane: React.ReactNode;
-  if (visibleRoute.view === "profile") pane = <ProfilePane ctx={ctx} />;
-  else if (visibleRoute.view === "preferences") pane = <PreferencesPane ctx={ctx} />;
-  else if (visibleRoute.view === "apikeys") pane = <ApiKeysPane ctx={ctx} keys={apiKeys} />;
-  else if (visibleRoute.view === "general") pane = <WorkspaceGeneralPane ctx={ctx} />;
-  else if (visibleRoute.view === "members") pane = <MembersPane ctx={ctx} onInvite={() => onDialog("invite")} />;
-  else if (visibleRoute.view === "invitations")
+  if (route.view === "profile") pane = <ProfilePane ctx={ctx} />;
+  else if (route.view === "preferences") pane = <PreferencesPane ctx={ctx} />;
+  else if (route.view === "apikeys") pane = <ApiKeysPane ctx={ctx} keys={apiKeys} />;
+  else if (route.view === "general") pane = <WorkspaceGeneralPane ctx={ctx} />;
+  else if (route.view === "members") pane = <MembersPane ctx={ctx} onInvite={() => onDialog("invite")} />;
+  else if (route.view === "invitations")
     pane = <InvitationsPane ctx={ctx} invites={invites} onInvite={() => onDialog("invite")} />;
-  else if (visibleRoute.view === "billing" && ctx.billing?.billingEnabled) pane = <BillingPane ctx={ctx} />;
+  else if (route.view === "billing") pane = <BillingPane ctx={ctx} />;
   else pane = <WorkspaceGeneralPane ctx={ctx} />;
 
-  const crumb = crumbFor(ctx, visibleRoute);
+  const crumb = crumbFor(ctx, route);
 
   return (
     <div className="sx">
       <SettingsSidebar
         ctx={ctx}
-        route={visibleRoute}
+        route={route}
         go={onView}
         onClose={onClose}
         apiKeyCount={apiKeys.length}
