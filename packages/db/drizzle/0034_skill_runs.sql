@@ -368,6 +368,7 @@ CREATE POLICY "skill_runs_creator" ON "skill_runs" USING (
   AND "creator_id" = NULLIF(current_setting('app.user_id', true), '')
   AND EXISTS (SELECT 1 FROM "memberships" m WHERE m."org_id" = "skill_runs"."org_id" AND m."user_id" = "skill_runs"."creator_id")
 );--> statement-breakpoint
+CREATE POLICY "skill_runs_worker_cleanup" ON "skill_runs" FOR SELECT USING (current_setting('app.run_worker', true) = 'cleanup');--> statement-breakpoint
 
 CREATE POLICY "skill_run_skills_creator" ON "skill_run_skills" USING ("org_id" = NULLIF(current_setting('app.org_id', true), '')::uuid AND EXISTS (SELECT 1 FROM "skill_runs" r WHERE r."org_id" = "skill_run_skills"."org_id" AND r."id" = "skill_run_skills"."run_id" AND r."creator_id" = NULLIF(current_setting('app.user_id', true), ''))) WITH CHECK ("org_id" = NULLIF(current_setting('app.org_id', true), '')::uuid AND EXISTS (SELECT 1 FROM "skill_runs" r WHERE r."org_id" = "skill_run_skills"."org_id" AND r."id" = "skill_run_skills"."run_id" AND r."creator_id" = NULLIF(current_setting('app.user_id', true), '')));--> statement-breakpoint
 CREATE POLICY "skill_run_secret_inputs_creator" ON "skill_run_secret_inputs" USING ("org_id" = NULLIF(current_setting('app.org_id', true), '')::uuid AND EXISTS (SELECT 1 FROM "skill_runs" r WHERE r."org_id" = "skill_run_secret_inputs"."org_id" AND r."id" = "skill_run_secret_inputs"."run_id" AND r."creator_id" = NULLIF(current_setting('app.user_id', true), ''))) WITH CHECK ("org_id" = NULLIF(current_setting('app.org_id', true), '')::uuid AND EXISTS (SELECT 1 FROM "skill_runs" r WHERE r."org_id" = "skill_run_secret_inputs"."org_id" AND r."id" = "skill_run_secret_inputs"."run_id" AND r."creator_id" = NULLIF(current_setting('app.user_id', true), '')));--> statement-breakpoint
@@ -375,6 +376,7 @@ CREATE POLICY "skill_run_variable_inputs_creator" ON "skill_run_variable_inputs"
 CREATE POLICY "skill_run_jobs_creator_or_worker" ON "skill_run_jobs" USING (("org_id" = NULLIF(current_setting('app.org_id', true), '')::uuid AND EXISTS (SELECT 1 FROM "skill_runs" r WHERE r."org_id" = "skill_run_jobs"."org_id" AND r."id" = "skill_run_jobs"."run_id" AND r."creator_id" = NULLIF(current_setting('app.user_id', true), ''))) OR current_setting('app.run_worker', true) = 'claim') WITH CHECK (("org_id" = NULLIF(current_setting('app.org_id', true), '')::uuid AND EXISTS (SELECT 1 FROM "skill_runs" r WHERE r."org_id" = "skill_run_jobs"."org_id" AND r."id" = "skill_run_jobs"."run_id" AND r."creator_id" = NULLIF(current_setting('app.user_id', true), ''))) OR current_setting('app.run_worker', true) = 'claim');--> statement-breakpoint
 CREATE POLICY "skill_run_prompts_creator" ON "skill_run_prompts" USING ("org_id" = NULLIF(current_setting('app.org_id', true), '')::uuid AND EXISTS (SELECT 1 FROM "skill_runs" r WHERE r."org_id" = "skill_run_prompts"."org_id" AND r."id" = "skill_run_prompts"."run_id" AND r."creator_id" = NULLIF(current_setting('app.user_id', true), ''))) WITH CHECK ("org_id" = NULLIF(current_setting('app.org_id', true), '')::uuid AND EXISTS (SELECT 1 FROM "skill_runs" r WHERE r."org_id" = "skill_run_prompts"."org_id" AND r."id" = "skill_run_prompts"."run_id" AND r."creator_id" = NULLIF(current_setting('app.user_id', true), '')));--> statement-breakpoint
 CREATE POLICY "skill_run_events_creator" ON "skill_run_events" USING ("org_id" = NULLIF(current_setting('app.org_id', true), '')::uuid AND EXISTS (SELECT 1 FROM "skill_runs" r WHERE r."org_id" = "skill_run_events"."org_id" AND r."id" = "skill_run_events"."run_id" AND r."creator_id" = NULLIF(current_setting('app.user_id', true), ''))) WITH CHECK ("org_id" = NULLIF(current_setting('app.org_id', true), '')::uuid AND EXISTS (SELECT 1 FROM "skill_runs" r WHERE r."org_id" = "skill_run_events"."org_id" AND r."id" = "skill_run_events"."run_id" AND r."creator_id" = NULLIF(current_setting('app.user_id', true), '')));--> statement-breakpoint
+CREATE POLICY "skill_run_events_worker_cleanup" ON "skill_run_events" FOR DELETE USING (current_setting('app.run_worker', true) = 'cleanup');--> statement-breakpoint
 CREATE POLICY "skill_run_attachments_creator" ON "skill_run_attachments" USING ("org_id" = NULLIF(current_setting('app.org_id', true), '')::uuid AND EXISTS (SELECT 1 FROM "skill_runs" r WHERE r."org_id" = "skill_run_attachments"."org_id" AND r."id" = "skill_run_attachments"."run_id" AND r."creator_id" = NULLIF(current_setting('app.user_id', true), ''))) WITH CHECK ("org_id" = NULLIF(current_setting('app.org_id', true), '')::uuid AND EXISTS (SELECT 1 FROM "skill_runs" r WHERE r."org_id" = "skill_run_attachments"."org_id" AND r."id" = "skill_run_attachments"."run_id" AND r."creator_id" = NULLIF(current_setting('app.user_id', true), '')));--> statement-breakpoint
 CREATE POLICY "skill_run_artifacts_creator" ON "skill_run_artifacts" USING ("org_id" = NULLIF(current_setting('app.org_id', true), '')::uuid AND EXISTS (SELECT 1 FROM "skill_runs" r WHERE r."org_id" = "skill_run_artifacts"."org_id" AND r."id" = "skill_run_artifacts"."run_id" AND r."creator_id" = NULLIF(current_setting('app.user_id', true), ''))) WITH CHECK ("org_id" = NULLIF(current_setting('app.org_id', true), '')::uuid AND EXISTS (SELECT 1 FROM "skill_runs" r WHERE r."org_id" = "skill_run_artifacts"."org_id" AND r."id" = "skill_run_artifacts"."run_id" AND r."creator_id" = NULLIF(current_setting('app.user_id', true), '')));--> statement-breakpoint
 
@@ -438,24 +440,28 @@ END
 $$;--> statement-breakpoint
 CREATE TRIGGER skill_run_events_notify AFTER INSERT ON "skill_run_events" FOR EACH ROW EXECUTE FUNCTION companion_notify_skill_run_event();--> statement-breakpoint
 
-CREATE FUNCTION companion_cleanup_skill_run_events(p_run_id uuid, p_limit integer DEFAULT 1000)
+CREATE FUNCTION companion_cleanup_skill_run_events(p_limit integer DEFAULT 1000)
 RETURNS integer
 LANGUAGE plpgsql
+SECURITY DEFINER
 SET search_path = pg_catalog, public
 AS $$
 DECLARE
   deleted_count integer;
+  previous_worker_context text;
 BEGIN
   IF p_limit < 1 OR p_limit > 10000 THEN
     RAISE EXCEPTION 'invalid cleanup limit' USING ERRCODE = '22023';
   END IF;
+  previous_worker_context := current_setting('app.run_worker', true);
+  PERFORM set_config('app.run_worker', 'cleanup', true);
   WITH victims AS (
     SELECT e.ctid
     FROM public."skill_run_events" e
     JOIN public."skill_runs" r ON r."org_id" = e."org_id" AND r."id" = e."run_id"
-    WHERE e."run_id" = p_run_id
-      AND r."status" IN ('frozen', 'error', 'canceled')
+    WHERE r."status" IN ('frozen', 'error', 'canceled')
       AND COALESCE(r."frozen_at", r."updated_at") < clock_timestamp() - interval '24 hours'
+      AND e."created_at" < clock_timestamp() - interval '24 hours'
     ORDER BY e."created_at"
     FOR UPDATE OF e SKIP LOCKED
     LIMIT p_limit
@@ -464,6 +470,11 @@ BEGIN
   USING victims v
   WHERE e.ctid = v.ctid;
   GET DIAGNOSTICS deleted_count = ROW_COUNT;
+  PERFORM set_config('app.run_worker', COALESCE(previous_worker_context, ''), true);
   RETURN deleted_count;
+EXCEPTION WHEN OTHERS THEN
+  PERFORM set_config('app.run_worker', COALESCE(previous_worker_context, ''), true);
+  RAISE;
 END
-$$;
+$$;--> statement-breakpoint
+REVOKE ALL ON FUNCTION companion_cleanup_skill_run_events(integer) FROM PUBLIC;
