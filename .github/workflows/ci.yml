@@ -292,10 +292,9 @@ jobs:
       - name: Migrate database
         run: pnpm db:migrate
 
-      - name: Secrets database integration
-        run: pnpm --filter @companion/api test -- src/secretsDb.integration.test.ts
+      - name: Tenant, Skills, and Secrets integration
+        run: pnpm test:integration
         env:
-          RUN_SECRET_DB_INTEGRATION: "1"
           COMPANION_SECRETS_MASTER_KEY: CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk=
 
       - name: RunSkill database integration
@@ -303,16 +302,23 @@ jobs:
         env:
           RUN_SKILL_DB_INTEGRATION: "1"
 
-      - name: RSC smoke
+      - name: Install Playwright Chromium
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: RSC smoke and critical browser flows
         run: pnpm smoke:rsc
         env:
           CI_USE_GHA_POSTGRES: "1"
           DATABASE_URL: postgres://companion:companion@127.0.0.1:5432/companion
+          RUN_PLAYWRIGHT: "1"
 
       - name: Upload RSC smoke logs
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: rsc-smoke-logs
-          path: .context/rsc-smoke/
+          path: |
+            .context/rsc-smoke/
+            playwright-report/
+            test-results/
           if-no-files-found: ignore

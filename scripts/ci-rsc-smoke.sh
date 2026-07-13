@@ -44,6 +44,7 @@ export S3_FORCE_PATH_STYLE="${S3_FORCE_PATH_STYLE:-true}"
 export EMAIL_PROVIDER="${EMAIL_PROVIDER:-mailpit}"
 export EMAIL_FROM="${EMAIL_FROM:-Companion <noreply@companion.local>}"
 export MAILPIT_SMTP_HOST="${MAILPIT_SMTP_HOST:-127.0.0.1}"
+export COMPANION_SECRETS_MASTER_KEY="${COMPANION_SECRETS_MASTER_KEY:-CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk=}"
 export APP_URL="$COMPANION_WEB_URL"
 
 api_pid=""
@@ -114,4 +115,8 @@ wait_for_url "$COMPANION_WEB_URL/login" "web"
 
 log "Running RSC smoke"
 node scripts/rsc-smoke.mjs
+if [ "${RUN_PLAYWRIGHT:-0}" = "1" ]; then
+  log "Running critical browser flows"
+  pnpm test:e2e
+fi
 log "OK"
