@@ -310,7 +310,9 @@ start_postgres() {
   step "Starting Postgres (native workspace cluster)"
 
   if [ "$RESET_DB" = true ] && [ -d "$STATE_DIR/postgres" ]; then
-    postgres_running && "$PG_BIN/pg_ctl" -D "$PG_DATA" -m fast stop >/dev/null 2>&1 || true
+    if postgres_running; then
+      "$PG_BIN/pg_ctl" -D "$PG_DATA" -m fast stop >/dev/null 2>&1 || true
+    fi
     info "Purging $STATE_DIR/postgres"
     rm -rf "$STATE_DIR/postgres"
   fi
