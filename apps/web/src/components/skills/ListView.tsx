@@ -359,7 +359,7 @@ export function ListView({
                     onClick={() => onPrimaryAction(s, primary)}
                   >
                     <Icon name={primary.icon} size={12} />
-                    <span className="rowact__label">{primary.compactLabel ?? primary.label}</span>
+                    <span className="rowact__label">{primary.contextualLabel ?? primary.label}</span>
                   </button>
                 ) : null}
               </span>

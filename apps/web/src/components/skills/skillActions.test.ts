@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { SkillVM } from "@/lib/types";
 import {
+  SKILL_ACTIONS,
   resolveSkillActions,
   skillActionPermissions,
   type SkillActionPermissions,
@@ -58,6 +59,20 @@ const allowed: SkillActionPermissions = {
 };
 
 describe("resolveSkillActions", () => {
+  it("keeps explicit action names separate from contextual button labels", () => {
+    expect([
+      SKILL_ACTIONS.install,
+      SKILL_ACTIONS.update,
+      SKILL_ACTIONS.archive,
+      SKILL_ACTIONS.restore,
+    ].map(({ label, contextualLabel }) => [label, contextualLabel])).toEqual([
+      ["Install skill", "Install"],
+      ["Update skill", "Update"],
+      ["Archive skill", "Archive"],
+      ["Restore skill", "Restore"],
+    ]);
+  });
+
   it.each([
     ["active personal", skill({ scope: "personal", source: "authored" }), "share"],
     ["archived personal", skill({ scope: "personal", source: "authored", archived: true }), "restore"],

@@ -147,10 +147,21 @@ describe("DetailView tabbed detail layout", () => {
     expect(renderDetailFor({ ...skill, installStatus: "none", installedVersion: null, version: null })).not.toContain("Install skill");
   });
 
-  it("shows Update skill only for an outdated installation", () => {
+  it("uses a contextual Update label while keeping the explicit accessible name", () => {
     const html = renderDetailFor({ ...skill, installStatus: "update", installedVersion: "1.1.0" });
-    expect(html).toContain("Update skill");
+    expect(html).toContain('aria-label="Update skill"');
+    expect(html).toContain('title="Update skill"');
+    expect(html).toMatch(/class="btn-primary"[^>]*>[\s\S]*?<\/svg>Update<\/button>/);
+    expect(html).not.toMatch(/<\/svg>Update skill<\/button>/);
     expect(html).not.toContain("Install skill");
+  });
+
+  it("uses a contextual Install label while keeping the explicit accessible name", () => {
+    const html = renderDetailFor({ ...skill, installStatus: "none", installedVersion: null });
+    expect(html).toContain('aria-label="Install skill"');
+    expect(html).toContain('title="Install skill"');
+    expect(html).toMatch(/class="btn-primary"[^>]*>[\s\S]*?<\/svg>Install<\/button>/);
+    expect(html).not.toMatch(/<\/svg>Install skill<\/button>/);
   });
 
   it("prefers Companion title and summary for the detail title and lead", () => {

@@ -126,6 +126,33 @@ wait_for_body_contains() {
   exit 1
 }
 
+wait_for_contextual_action() {
+  local explicit="$1" contextual="$2" explicit_js contextual_js result
+  explicit_js="$(json_string "$explicit")"
+  contextual_js="$(json_string "$contextual")"
+
+  for _ in $(seq 1 30); do
+    result="$(
+      agent-browser eval "(() => {
+        const explicit = ${explicit_js};
+        const contextual = ${contextual_js};
+        const button = Array.from(document.querySelectorAll('button[aria-label]'))
+          .find((candidate) => candidate.getAttribute('aria-label') === explicit);
+        return button?.textContent?.trim() === contextual && button?.title === explicit;
+      })()" || true
+    )"
+    if [ "$result" = "true" ]; then
+      return 0
+    fi
+    sleep 1
+  done
+
+  printf '[agent-browser-smoke] Timed out waiting for contextual action: %s / %s\n' "$contextual" "$explicit" >&2
+  agent-browser get url >&2 || true
+  body_text >&2 || true
+  exit 1
+}
+
 fill_input() {
   local selector="$1" value="$2" selector_js value_js result
   selector_js="$(json_string "$selector")"
@@ -432,7 +459,7 @@ log "Checking detail view"
 agent-browser find role button click --name "Open skill $SMOKE_SKILL"
 agent-browser wait 1000
 assert_body_contains "$SMOKE_SKILL"
-assert_body_contains "Install skill"
+wait_for_contextual_action "Install skill" "Install"
 agent-browser open "$APP_URL/skills?lib=org"
 wait_for_skills
 
@@ -462,9 +489,9 @@ assert_body_contains "$SMOKE_SKILL"
 
 log "Checking mobile install targets"
 agent-browser open "$APP_URL/skills?lib=org&skill=$SMOKE_SKILL"
-wait_for_body_contains "Install skill"
 assert_body_contains "$SMOKE_SKILL"
-click_button_text "Install skill"
+wait_for_contextual_action "Install skill" "Install"
+agent-browser find role button click --name "Install skill"
 wait_for_body_contains "Download package"
 click_button_text "Download package"
 wait_for_body_contains "OpenCode"

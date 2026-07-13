@@ -92,9 +92,14 @@ export function ArchivedListView({
               </span>
               <span className="rowacts">
                 {primary && (
-                  <button className="rowact" onClick={() => onPrimaryAction(s, primary)}>
+                  <button
+                    className="rowact"
+                    aria-label={`${primary.label} ${s.id}`}
+                    title={primary.label}
+                    onClick={() => onPrimaryAction(s, primary)}
+                  >
                     <Icon name={primary.icon} size={12} />
-                    {primary.label}
+                    {primary.contextualLabel ?? primary.label}
                   </button>
                 )}
                 {downloadable ? (

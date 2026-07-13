@@ -48,11 +48,18 @@ export function DetailMoreMenuContent({
     <div className="menu dmore__menu" role="menu">
       <div className="menu__head">Actions</div>
       {actions.map((action) => (
-        <button key={action.id} className="menu__item" role="menuitem" onClick={() => onAction(action)}>
+        <button
+          key={action.id}
+          className="menu__item"
+          role="menuitem"
+          aria-label={action.label}
+          title={action.label}
+          onClick={() => onAction(action)}
+        >
           <span className="ico">
             <Icon name={action.icon} size={14} />
           </span>
-          <span className="menu__label">{action.label}</span>
+          <span className="menu__label">{action.contextualLabel ?? action.label}</span>
         </button>
       ))}
     </div>
@@ -461,10 +468,11 @@ export function DetailView({
           <button
             className="btn-primary"
             onClick={() => onAction(actionModel.primary!)}
+            aria-label={actionModel.primary.label}
             title={actionModel.primary.label}
           >
             <Icon name={actionModel.primary.icon} size={14} />
-            {actionModel.primary.label}
+            {actionModel.primary.contextualLabel ?? actionModel.primary.label}
           </button>
         )}
         {actionModel.secondary.length > 0 && (

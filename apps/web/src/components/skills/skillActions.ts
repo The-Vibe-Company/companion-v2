@@ -13,8 +13,10 @@ export type SkillActionId =
 
 export interface SkillAction {
   id: SkillActionId;
+  /** Explicit label for global surfaces, tooltips, and accessible names. */
   label: string;
-  compactLabel?: string;
+  /** Short label for controls that already identify the target as a skill. */
+  contextualLabel?: string;
   icon: string;
 }
 
@@ -33,12 +35,12 @@ export interface SkillActionModel {
 
 export const SKILL_ACTIONS = {
   share: { id: "share", label: "Share to organization", icon: "send" },
-  install: { id: "install", label: "Install skill", compactLabel: "Install", icon: "download" },
-  update: { id: "update", label: "Update skill", icon: "arrow-up-circle" },
+  install: { id: "install", label: "Install skill", contextualLabel: "Install", icon: "download" },
+  update: { id: "update", label: "Update skill", contextualLabel: "Update", icon: "arrow-up-circle" },
   download: { id: "download", label: "Download package", icon: "package-2" },
   publishVersion: { id: "publish-version", label: "Publish new version", icon: "git-commit" },
-  archive: { id: "archive", label: "Archive skill", icon: "archive" },
-  restore: { id: "restore", label: "Restore skill", icon: "rotate-ccw" },
+  archive: { id: "archive", label: "Archive skill", contextualLabel: "Archive", icon: "archive" },
+  restore: { id: "restore", label: "Restore skill", contextualLabel: "Restore", icon: "rotate-ccw" },
   markInstalled: { id: "mark-installed", label: "Mark as installed", icon: "circle-check" },
   markNotInstalled: { id: "mark-not-installed", label: "Mark as not installed", icon: "circle-x" },
 } as const satisfies Record<string, SkillAction>;
