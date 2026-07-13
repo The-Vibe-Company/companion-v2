@@ -39,6 +39,10 @@ load_env_file() {
     fi
 
     if [ -z "${!key+x}" ]; then
+      case "$value" in
+        \"*\") value="${value%\"}"; value="${value#\"}" ;;
+        \'*\') value="${value%\'}"; value="${value#\'}" ;;
+      esac
       export "$key=$value"
     fi
   done < "$file"
@@ -456,7 +460,7 @@ run_dev() {
   fi
   log "Existing local users keep their current password."
 
-  log "Starting API and web"
+  log "Starting API, worker, and web"
   pnpm run dev:app
 }
 

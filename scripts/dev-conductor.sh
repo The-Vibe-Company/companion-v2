@@ -30,7 +30,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # Load the repo-root .env (if present) so secrets like VERCEL_TOKEN / model provider keys reach the
-# API without depending on the launcher's environment. dotenv semantics: never overrides variables
+# API and worker without depending on the launcher's environment. dotenv semantics: never overrides variables
 # already in the environment, and skips empty assignments (a copied .env.example full of empty
 # values must not nuke exported shell vars).
 if [ -f "$REPO_ROOT/.env" ]; then
@@ -41,7 +41,10 @@ if [ -f "$REPO_ROOT/.env" ]; then
     case "$key" in *[!A-Za-z0-9_]*|'') continue ;; esac
     [ -n "$value" ] || continue
     if [ -z "${!key:-}" ]; then
-      value="${value%\"}"; value="${value#\"}"
+      case "$value" in
+        \"*\") value="${value%\"}"; value="${value#\"}" ;;
+        \'*\') value="${value%\'}"; value="${value#\'}" ;;
+      esac
       export "$key=$value"
     fi
   done < "$REPO_ROOT/.env"
@@ -543,10 +546,10 @@ print_header() {
 launch_apps() {
   step "Launching API + worker + web via concurrently"
 
-  # Shared API env: storage + email vary with what's installed.
-  local api_storage_env="" api_email_env
+  # Storage is shared by API uploads and the runs worker; email remains API-only.
+  local shared_storage_env="" api_email_env
   if [ "$HAS_MINIO" = true ]; then
-    api_storage_env="S3_ENDPOINT=\"$S3_ENDPOINT\" S3_REGION=us-east-1 S3_ACCESS_KEY_ID=\"$S3_ACCESS_KEY_ID\" S3_SECRET_ACCESS_KEY=\"$S3_SECRET_ACCESS_KEY\" S3_BUCKET_SKILL_ARCHIVES=\"$S3_BUCKET\" S3_FORCE_PATH_STYLE=true"
+    shared_storage_env="S3_ENDPOINT=\"$S3_ENDPOINT\" S3_REGION=us-east-1 S3_ACCESS_KEY_ID=\"$S3_ACCESS_KEY_ID\" S3_SECRET_ACCESS_KEY=\"$S3_SECRET_ACCESS_KEY\" S3_BUCKET_SKILL_ARCHIVES=\"$S3_BUCKET\" S3_FORCE_PATH_STYLE=true"
   fi
   if [ "$HAS_MAILPIT" = true ]; then
     api_email_env="EMAIL_PROVIDER=mailpit EMAIL_FROM=\"Companion <noreply@companion.local>\" MAILPIT_SMTP_HOST=127.0.0.1 MAILPIT_SMTP_PORT=$MAILPIT_SMTP_PORT"
@@ -554,10 +557,10 @@ launch_apps() {
     api_email_env="EMAIL_PROVIDER=log"
   fi
 
-  # The master key is exported by ensure_secrets_master_key and inherited by the API process. Never
+  # The master key is exported by ensure_secrets_master_key and inherited by API + worker. Never
   # interpolate it into concurrently's command argument, where process listings could expose it.
-  local api_cmd="COMPANION_API_HOST=127.0.0.1 COMPANION_API_PORT=$API_PORT DATABASE_URL=\"$DATABASE_URL\" BETTER_AUTH_URL=\"$API_URL\" BETTER_AUTH_COOKIE_PREFIX=\"$PROJECT\" COMPANION_WEB_URL=\"$WEB_URL\" COMPANION_API_URL=\"$API_URL\" NEXT_PUBLIC_COMPANION_API_URL=\"$API_URL\" $api_storage_env $api_email_env pnpm --filter @companion/api dev"
-  local worker_cmd="DATABASE_URL=\"$DATABASE_URL\" COMPANION_WEB_URL=\"$WEB_URL\" pnpm --filter @companion/worker dev"
+  local api_cmd="COMPANION_API_HOST=127.0.0.1 COMPANION_API_PORT=$API_PORT DATABASE_URL=\"$DATABASE_URL\" BETTER_AUTH_URL=\"$API_URL\" BETTER_AUTH_COOKIE_PREFIX=\"$PROJECT\" COMPANION_WEB_URL=\"$WEB_URL\" COMPANION_API_URL=\"$API_URL\" NEXT_PUBLIC_COMPANION_API_URL=\"$API_URL\" $shared_storage_env $api_email_env pnpm --filter @companion/api dev"
+  local worker_cmd="DATABASE_URL=\"$DATABASE_URL\" COMPANION_WEB_URL=\"$WEB_URL\" $shared_storage_env pnpm --filter @companion/worker dev"
   local web_cmd="COMPANION_API_URL=\"$API_URL\" NEXT_PUBLIC_COMPANION_API_URL=\"$API_URL\" pnpm --filter @companion/web dev --hostname 127.0.0.1 --port $WEB_PORT"
 
   free_port "$API_PORT" "api"
