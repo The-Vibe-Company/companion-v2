@@ -121,6 +121,8 @@ describe("ListView contributors", () => {
     ]);
 
     expect(html).toContain('aria-label="Install skill fresh"');
+    expect(html).toContain('<span class="rowact__label">Install</span>');
+    expect(html).not.toContain('<span class="rowact__label">Install skill</span>');
     expect(html).not.toContain('aria-label="Install skill current"');
     expect(html).toContain('aria-label="Update skill outdated"');
     expect(html).toContain('aria-label="Share to organization personal"');

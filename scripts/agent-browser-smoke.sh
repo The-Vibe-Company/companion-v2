@@ -414,6 +414,10 @@ for width in 1024 760; do
   assert_eval_true "document.documentElement.scrollWidth <= document.documentElement.clientWidth" \
     "contextual row actions introduced horizontal overflow at ${width}px"
 done
+assert_eval_true "(() => {
+  const button = document.querySelector('button[aria-label=\"Install skill $SMOKE_SKILL\"]');
+  return button?.querySelector('.rowact__label')?.textContent?.trim() === 'Install';
+})()" "the compact Install row CTA includes the redundant word skill"
 agent-browser set viewport 1440 1000
 
 log "Checking filter menu"

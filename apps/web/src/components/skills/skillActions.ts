@@ -14,6 +14,7 @@ export type SkillActionId =
 export interface SkillAction {
   id: SkillActionId;
   label: string;
+  compactLabel?: string;
   icon: string;
 }
 
@@ -32,7 +33,7 @@ export interface SkillActionModel {
 
 export const SKILL_ACTIONS = {
   share: { id: "share", label: "Share to organization", icon: "send" },
-  install: { id: "install", label: "Install skill", icon: "download" },
+  install: { id: "install", label: "Install skill", compactLabel: "Install", icon: "download" },
   update: { id: "update", label: "Update skill", icon: "arrow-up-circle" },
   download: { id: "download", label: "Download package", icon: "package-2" },
   publishVersion: { id: "publish-version", label: "Publish new version", icon: "git-commit" },
