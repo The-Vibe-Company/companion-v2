@@ -769,7 +769,7 @@ export function Sidebar({
         )}
 
         <button
-          className={"navitem side__resource-link" + (secretsActive ? " navitem--active" : "")}
+          className={"navitem navitem--bottom" + (secretsActive ? " navitem--active" : "")}
           aria-current={secretsActive ? "page" : undefined}
           onClick={() => runAndClose(onSelectSecrets)}
           title="Secrets"
@@ -782,7 +782,7 @@ export function Sidebar({
 
         {/* ===== BOTTOM ===== */}
         <button
-          className={"navitem navitem--bottom" + (localActive ? " navitem--active" : "")}
+          className={"navitem" + (localActive ? " navitem--active" : "")}
           aria-current={localActive ? "page" : undefined}
           onClick={() => runAndClose(onSelectLocal)}
           title="Companion skills"

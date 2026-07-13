@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import type {
   CreateSecretInput,
@@ -117,6 +117,8 @@ function SecretEditor({
   onSubmit: () => void;
   onCancel?: () => void;
 }) {
+  const valueInputId = useId();
+  const [valueVisible, setValueVisible] = useState(false);
   const valid = form.name.trim().length > 0
     && /^[A-Za-z_][A-Za-z0-9_]*$/.test(form.key)
     && form.value.length > 0
@@ -131,11 +133,30 @@ function SecretEditor({
         <span>Environment key</span>
         <input className="sec-mono" value={form.key} maxLength={128} onChange={(event) => setForm({ ...form, key: event.target.value.toUpperCase() })} placeholder="SERVICE_API_KEY" spellCheck={false} />
       </label>
-      <label>
-        <span>Secret value</span>
-        <input type="password" value={form.value} onChange={(event) => setForm({ ...form, value: event.target.value })} placeholder="Enter once — it cannot be revealed later" autoComplete="new-password" />
+      <div className="sec-field">
+        <label htmlFor={valueInputId}>Secret value</label>
+        <div className="sec-secret-value">
+          <input
+            id={valueInputId}
+            type={valueVisible ? "text" : "password"}
+            value={form.value}
+            onChange={(event) => setForm({ ...form, value: event.target.value })}
+            placeholder="Enter once — it cannot be revealed later"
+            autoComplete="new-password"
+            spellCheck={false}
+          />
+          <button
+            type="button"
+            onClick={() => setValueVisible((visible) => !visible)}
+            aria-label={valueVisible ? "Hide secret value" : "Show secret value"}
+            aria-pressed={valueVisible}
+            title={valueVisible ? "Hide secret value" : "Show secret value"}
+          >
+            <Icon name={valueVisible ? "eye-off" : "eye"} size={15} />
+          </button>
+        </div>
         <small>The value is encrypted immediately and is never shown again.</small>
-      </label>
+      </div>
       <label>
         <span>Who can use it</span>
         <select value={form.audience} onChange={(event) => setForm({ ...form, audience: event.target.value as SecretAudience, recipientIds: [] })}>

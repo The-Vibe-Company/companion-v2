@@ -110,6 +110,14 @@ function clickByText(container: HTMLElement, text: string) {
   act(() => button.click());
 }
 
+function setReactInputValue(input: HTMLInputElement, value: string) {
+  const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
+  act(() => {
+    setter?.call(input, value);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+}
+
 describe("SecretsApp", () => {
   beforeEach(() => vi.clearAllMocks());
 
@@ -128,6 +136,11 @@ describe("SecretsApp", () => {
     expect(primary.textContent).toContain("Companion skills");
     expect(primary.textContent).toContain("Archived");
     expect(primary.querySelector('[aria-current="page"]')?.textContent).toContain("Secrets");
+    const secrets = primary.querySelector('[title="Secrets"]') as HTMLButtonElement;
+    const companionSkills = primary.querySelector('[title="Companion skills"]') as HTMLButtonElement;
+    expect(secrets.classList.contains("navitem--bottom")).toBe(true);
+    expect(companionSkills.classList.contains("navitem--bottom")).toBe(false);
+    expect(secrets.nextElementSibling).toBe(companionSkills);
     expect(primary.querySelector('[aria-label="New personal folder"]')).toBeNull();
     expect(primary.querySelector('[title="1 update available"]')).not.toBeNull();
   });
@@ -160,13 +173,26 @@ describe("SecretsApp", () => {
     const container = await mount([]);
     clickByText(container, "New secret");
     const value = container.querySelector('.sec-form input[type="password"]') as HTMLInputElement;
-    await act(async () => {
-      value.value = "plaintext-that-must-be-discarded";
-      value.dispatchEvent(new Event("input", { bubbles: true }));
-    });
+    setReactInputValue(value, "plaintext-that-must-be-discarded");
     act(() => (container.querySelector('.sec-drawer button[aria-label="Close"]') as HTMLButtonElement).click());
     clickByText(container, "New secret");
     expect((container.querySelector('.sec-form input[type="password"]') as HTMLInputElement).value).toBe("");
+  });
+
+  it("can reveal and hide the secret value while creating it", async () => {
+    const container = await mount([]);
+    clickByText(container, "New secret");
+    const value = container.querySelector('.sec-secret-value input') as HTMLInputElement;
+    const toggle = container.querySelector('button[aria-label="Show secret value"]') as HTMLButtonElement;
+    setReactInputValue(value, "visible-only-during-creation");
+
+    act(() => toggle.click());
+    expect(value.type).toBe("text");
+    expect(value.value).toBe("visible-only-during-creation");
+    expect(toggle.getAttribute("aria-label")).toBe("Hide secret value");
+
+    act(() => toggle.click());
+    expect(value.type).toBe("password");
   });
 
   it("separates owned and shared secrets and renders all audience labels", async () => {
