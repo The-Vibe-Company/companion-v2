@@ -55,7 +55,7 @@ wait_for_skills() {
   for _ in $(seq 1 30); do
     url="$(agent-browser get url || true)"
     body="$(body_text || true)"
-    if [[ "$url" == */skills* ]] && printf '%s' "$body" | grep -F "Upload skill" >/dev/null; then
+    if [[ "$url" == */skills* ]] && printf '%s' "$body" | grep -F "Add skill" >/dev/null; then
       return 0
     fi
     sleep 1
@@ -388,9 +388,37 @@ wait_for_skills
 agent-browser eval "for (const b of Array.from(document.querySelectorAll('button'))) { if (b.textContent && b.textContent.trim() === 'Clear') b.click(); }" >/dev/null
 agent-browser wait 300
 assert_body_contains "$SMOKE_SKILL"
-assert_body_contains "Upload skill"
+assert_body_contains "Add skill"
 # Shared label folder tree (replaces the old owner/visibility sidebar): the smoke skill is filed under "engineering".
 assert_body_contains "engineering"
+
+log "Checking contextual row-action alignment"
+for width in 1024 760; do
+  agent-browser set viewport "$width" 800
+  agent-browser wait 150
+  assert_eval_true "(() => {
+    const header = document.querySelector('.clist--deps .chead span:last-child');
+    const cells = Array.from(document.querySelectorAll('.clist--deps .crow > .crow__primary'));
+    if (!header || cells.length === 0) return false;
+    const expected = header.getBoundingClientRect();
+    const headerColumns = getComputedStyle(header.parentElement).gridTemplateColumns;
+    return cells.every((cell) => {
+      const rect = cell.getBoundingClientRect();
+      const button = cell.querySelector('.rowact--primary');
+      const rowColumns = getComputedStyle(cell.parentElement).gridTemplateColumns;
+      const aligned = Math.abs(rect.right - expected.right) < 1 && rowColumns === headerColumns;
+      const contained = !button || button.getBoundingClientRect().right <= rect.right + 0.5;
+      return aligned && contained;
+    });
+  })()" "contextual action columns are not aligned at ${width}px"
+  assert_eval_true "document.documentElement.scrollWidth <= document.documentElement.clientWidth" \
+    "contextual row actions introduced horizontal overflow at ${width}px"
+done
+assert_eval_true "(() => {
+  const button = document.querySelector('button[aria-label=\"Install skill $SMOKE_SKILL\"]');
+  return button?.querySelector('.rowact__label')?.textContent?.trim() === 'Install';
+})()" "the compact Install row CTA includes the redundant word skill"
+agent-browser set viewport 1440 1000
 
 log "Checking filter menu"
 agent-browser find role button click --name "Filter"
@@ -410,12 +438,13 @@ wait_for_skills
 
 drag_and_drop_smoke
 
-log "Checking upload dialog opens"
-agent-browser find role button click --name "Upload skill"
+log "Checking add-skill dialog opens"
+agent-browser find role button click --name "Add skill"
 agent-browser wait 500
-assert_body_contains "Upload an organization skill"
-assert_body_contains "Assistant IA"
-assert_body_contains "Create in the browser"
+assert_body_contains "Add an organization skill"
+assert_body_contains "Use an AI assistant"
+assert_body_contains "Upload package"
+assert_body_contains "Create in browser"
 agent-browser find role button click --name "Cancel"
 
 log "Checking Companion skills OpenCode support"
@@ -428,7 +457,7 @@ log "Checking mobile viewport"
 agent-browser set device "iPhone 14"
 agent-browser open "$APP_URL/skills?lib=org"
 wait_for_skills
-assert_body_contains "Upload skill"
+assert_body_contains "Add skill"
 assert_body_contains "$SMOKE_SKILL"
 
 log "Checking mobile install targets"

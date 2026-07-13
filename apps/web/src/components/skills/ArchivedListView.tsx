@@ -3,8 +3,13 @@
 import { Icon } from "../Icon";
 import type { SkillVM } from "@/lib/types";
 import { fetchSkillDownloadUrl } from "@/lib/queries";
+import {
+  resolveSkillActions,
+  skillActionPermissions,
+  type SkillAction,
+} from "./skillActions";
 
-const ARCH_GRID = { gridTemplateColumns: "14px minmax(0,1fr) 220px 184px" } as const;
+const ARCH_GRID = { gridTemplateColumns: "14px minmax(0,1fr) 220px 236px" } as const;
 
 /**
  * Archived skills list. Archived skills are hidden from normal lists but stay viewable, restorable,
@@ -13,13 +18,15 @@ const ARCH_GRID = { gridTemplateColumns: "14px minmax(0,1fr) 220px 184px" } as c
 export function ArchivedListView({
   skills,
   onOpen,
-  onRestore,
   onUpload,
+  actorId,
+  onPrimaryAction,
 }: {
   skills: SkillVM[];
   onOpen: (id: string) => void;
-  onRestore: (id: string) => void;
   onUpload: () => void;
+  actorId: string;
+  onPrimaryAction: (skill: SkillVM, action: SkillAction) => void;
 }) {
   const download = async (slug: string) => {
     try {
@@ -37,15 +44,15 @@ export function ArchivedListView({
         <span className="sh__count tnum">{skills.length}</span>
         <span className="sh__spacer" />
         <button className="btn-primary" onClick={onUpload}>
-          <Icon name="upload" size={14} />
-          Upload skill
+          <Icon name="plus" size={14} />
+          Add skill
         </button>
       </header>
 
       <div className="archnote">
         <Icon name="info" size={15} />
         <p>
-          Archived skills are hidden from the workspace, team, and search lists. They stay viewable,{" "}
+          Archived skills are hidden from active organization and search lists. They stay viewable,{" "}
           <b>restorable</b>, and remain <b>downloadable while a published version still references them</b>, so
           existing installs never break.
         </p>
@@ -59,6 +66,7 @@ export function ArchivedListView({
           <span className="r">Actions</span>
         </div>
         {skills.map((s) => {
+          const primary = resolveSkillActions(s, skillActionPermissions(s, actorId)).primary;
           // Downloadable while ANY published version references it (matches the API gate); the count
           // reflects current-version dependents, so an older-version-only reference still enables it.
           const downloadable = s.referenced ?? s.usedByCount > 0;
@@ -83,14 +91,16 @@ export function ArchivedListView({
                 {refLabel}
               </span>
               <span className="rowacts">
-                <button className="rowact" onClick={() => onRestore(s.id)}>
-                  <Icon name="rotate-ccw" size={12} />
-                  Restore
-                </button>
+                {primary && (
+                  <button className="rowact" onClick={() => onPrimaryAction(s, primary)}>
+                    <Icon name={primary.icon} size={12} />
+                    {primary.label}
+                  </button>
+                )}
                 {downloadable ? (
                   <button className="rowact" onClick={() => download(s.id)}>
                     <Icon name="download" size={12} />
-                    Download
+                    Download package
                   </button>
                 ) : (
                   <button
@@ -100,7 +110,7 @@ export function ArchivedListView({
                     title="No published version references this skill"
                   >
                     <Icon name="download" size={12} />
-                    Download
+                    Download package
                   </button>
                 )}
               </span>
@@ -111,7 +121,7 @@ export function ArchivedListView({
           <div className="empty">
             <Icon name="archive" size={22} style={{ color: "var(--color-faint)" }} />
             <div className="empty__title">No archived skills</div>
-            <div className="empty__desc">Skills you archive are hidden from the registry but kept here.</div>
+            <div className="empty__desc">Archived skills are hidden from active lists but kept here for restoration.</div>
           </div>
         )}
       </div>
