@@ -11,6 +11,7 @@ import { db, schema, type Db } from "@companion/db";
 import type { ActorContext } from "./services";
 import { getOrgRole } from "./services";
 import { assembleLabelsResponse, ancestorsOfPath, parseLabelPath, pathWithAncestors } from "./labels";
+import { assertPersonalSkillsEntitled } from "./billing";
 
 /**
  * Personal folders are the per-user counterpart to org {@link labels}: they organize a member's
@@ -54,6 +55,7 @@ export async function listPersonalLabels(input: {
 }): Promise<LabelsResponse> {
   const database = input.database ?? db;
   await assertMember(database, input.actor, input.orgId);
+  await assertPersonalSkillsEntitled({ database, orgId: input.orgId });
 
   const labelRowsRaw = await database
     .select({
@@ -101,6 +103,7 @@ export async function createPersonalLabel(input: {
 }): Promise<void> {
   const database = input.database ?? db;
   await assertMember(database, input.actor, input.orgId);
+  await assertPersonalSkillsEntitled({ database, orgId: input.orgId });
   const path = parseLabelPath(input.path);
   const owner = input.actor.id;
   const displayName = input.displayName !== undefined ? labelDisplayNameSchema.parse(input.displayName) : undefined;
@@ -146,6 +149,7 @@ export async function assignPersonalLabel(input: {
 }): Promise<void> {
   const database = input.database ?? db;
   await assertMember(database, input.actor, input.orgId);
+  await assertPersonalSkillsEntitled({ database, orgId: input.orgId });
   const path = parseLabelPath(input.path);
   const owner = input.actor.id;
   const skillId = await resolveOwnPersonalSkillId(database, input.actor, input.orgId, input.slug);
@@ -181,6 +185,7 @@ export async function unassignPersonalLabel(input: {
 }): Promise<void> {
   const database = input.database ?? db;
   await assertMember(database, input.actor, input.orgId);
+  await assertPersonalSkillsEntitled({ database, orgId: input.orgId });
   const path = parseLabelPath(input.path);
   const skillId = await resolveOwnPersonalSkillId(database, input.actor, input.orgId, input.slug);
   await database
@@ -228,6 +233,7 @@ export async function renamePersonalLabel(input: {
 }): Promise<void> {
   const database = input.database ?? db;
   await assertMember(database, input.actor, input.orgId);
+  await assertPersonalSkillsEntitled({ database, orgId: input.orgId });
   const from = parseLabelPath(input.from);
   const to = parseLabelPath(input.to);
   const owner = input.actor.id;
@@ -311,6 +317,7 @@ export async function deletePersonalLabel(input: {
 }): Promise<void> {
   const database = input.database ?? db;
   await assertMember(database, input.actor, input.orgId);
+  await assertPersonalSkillsEntitled({ database, orgId: input.orgId });
   const path = parseLabelPath(input.path);
   const owner = input.actor.id;
   const prefix = `${path}/`;

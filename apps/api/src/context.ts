@@ -8,6 +8,7 @@ import {
   resolveApiToken,
   type ActorContext,
 } from "@companion/core/services";
+import { EntitlementDeniedError } from "@companion/core";
 
 export interface ApiVariables {
   user: typeof auth.$Infer.Session.user | null;
@@ -106,6 +107,9 @@ export async function orgIdFromContext(c: Context<{ Variables: ApiVariables }>):
 }
 
 export function jsonError(c: Context, error: unknown, status = 400): Response {
+  if (error instanceof EntitlementDeniedError) {
+    return c.json(error.body, 403);
+  }
   const message = error instanceof Error ? error.message : String(error);
   return c.json({ ok: false, error: message }, status as never);
 }

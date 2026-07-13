@@ -12,7 +12,6 @@ function toOrgVM(s: OrgSummary): OrgVM {
     name: s.name,
     slug: s.slug,
     kind: s.kind,
-    plan: s.plan,
     myRole: s.org_role,
     color: s.color ?? null,
     logoUrl: s.logo_url ?? null,

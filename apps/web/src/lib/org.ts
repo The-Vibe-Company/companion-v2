@@ -17,11 +17,11 @@ export async function createOrg(name: string, kind: "personal" | "team"): Promis
   });
 }
 
-export async function inviteMember(_orgId: string, email: string, role: OrgRole): Promise<{ token: string }> {
+export async function inviteMember(_orgId: string, email: string, role: OrgRole, acknowledgeSeatBilling = false): Promise<{ token: string }> {
   const safeRole = role === "owner" ? "admin" : role;
   return apiFetch("/v1/invitations", {
     method: "POST",
-    body: JSON.stringify({ email, role: safeRole }),
+    body: JSON.stringify({ email, role: safeRole, acknowledgeSeatBilling }),
   });
 }
 
@@ -104,11 +104,19 @@ export async function updateOrg(
   });
 }
 
-export async function addAccessDomain(domain: string): Promise<{ id: string; domain: string; createdAt: string }> {
+export async function addAccessDomain(domain: string, acknowledgeSeatBilling = false): Promise<{ id: string; domain: string; createdAt: string }> {
   return apiFetch("/v1/orgs/current/domains", {
     method: "POST",
-    body: JSON.stringify({ domain }),
+    body: JSON.stringify({ domain, acknowledgeSeatBilling }),
   });
+}
+
+export async function startBillingCheckout(): Promise<{ url: string }> {
+  return apiFetch("/v1/billing/checkout", { method: "POST" });
+}
+
+export async function openBillingPortal(): Promise<{ url: string }> {
+  return apiFetch("/v1/billing/portal", { method: "POST" });
 }
 
 export async function removeAccessDomain(domainId: string): Promise<void> {

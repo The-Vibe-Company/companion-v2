@@ -138,6 +138,13 @@
 .sx-domainrow__name { font-family: var(--font-mono); font-size: var(--text-sm); color: var(--color-fg); overflow-wrap: anywhere; }
 .sx-domainrow__sub { margin-top: 2px; font-size: 11px; color: var(--color-faint); }
 
+.sx-billing-alert { margin: 0 0 14px; height: auto; min-height: 36px; padding-top: 8px; padding-bottom: 8px; line-height: 1.45; }
+.sx-billing-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 9px; margin-top: 28px; }
+.sx-billing-actions .sx-readline { width: 100%; height: auto; min-height: 36px; padding-top: 8px; padding-bottom: 8px; }
+.sx-billing-consent { display: flex; align-items: flex-start; gap: 9px; font-size: var(--text-xs); line-height: 1.5; color: var(--color-muted); cursor: pointer; }
+.sx-billing-consent input { margin-top: 2px; accent-color: var(--color-accent); }
+.sx-domainbox__consent { grid-column: 1 / -1; }
+
 /* definition rows (read-only meta) */
 .sx-defs { border: 1px solid var(--color-line); border-radius: var(--radius-md); overflow: hidden; }
 .sx-def { display: grid; grid-template-columns: 168px 1fr; align-items: center; gap: 14px; padding: 12px 14px; background: var(--color-surface); }

@@ -10,6 +10,7 @@ import type {
   LocalSkillRow,
   SkillFilterPreferences,
   SkillSharePlan,
+  BillingOverview,
 } from "@companion/contracts";
 import {
   archiveSkill as archiveSkillRpc,
@@ -91,6 +92,7 @@ const SETTINGS_VIEWS: readonly SettingsView[] = [
   "general",
   "members",
   "invitations",
+  "billing",
 ];
 
 function isSettingsView(value: string | null): value is SettingsView {
@@ -270,6 +272,7 @@ export function SkillsApp({
   initialFilterPreferences,
   initialPersonalLabels,
   initialLabels,
+  initialBilling,
   me,
   orgs,
   currentOrg,
@@ -282,6 +285,7 @@ export function SkillsApp({
   initialFilterPreferences: SkillFilterPreferences;
   initialPersonalLabels: LabelsResponse;
   initialLabels: LabelsResponse;
+  initialBilling: BillingOverview;
   me: MeVM;
   orgs: OrgVM[];
   currentOrg: OrgVM;
@@ -307,6 +311,9 @@ export function SkillsApp({
   const [filters, setFilters] = useState<Filter[]>(() => initialFilterPreferences.active_filters);
   const [shareTarget, setShareTarget] = useState<SkillVM | null>(null);
   const [drag, setDrag] = useState<DragItem | null>(null);
+  const personalSkillsEnabled = initialBilling.entitlements.personalSkills;
+  const orgSkillLimit = initialBilling.entitlements.orgSkillLimit;
+  const orgCreateBlocked = orgSkillLimit !== null && initialBilling.orgSkillCount >= orgSkillLimit;
 
   const activeLib: SkillsLibrary = selection.lib;
   const skills = activeLib === "org" ? orgSkills : mineSkills;
@@ -580,9 +587,13 @@ export function SkillsApp({
   }, [filters, persistPreferences]);
 
   const openUpload = useCallback(() => {
+    if ((!personalSkillsEnabled && activeLibRef.current === "mine") || (orgCreateBlocked && activeLibRef.current === "org")) {
+      openSettings({ view: "billing" });
+      return;
+    }
     uploadReturnRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     setUploadOpen(true);
-  }, []);
+  }, [openSettings, orgCreateBlocked, personalSkillsEnabled]);
   const closeUpload = useCallback(() => {
     setUploadOpen(false);
     queueMicrotask(() => uploadReturnRef.current?.focus());
@@ -1687,6 +1698,8 @@ export function SkillsApp({
         mobileOpen={mobileSidebarOpen}
         onToggleMobile={() => setMobileSidebarOpen((open) => !open)}
         onCloseMobile={() => setMobileSidebarOpen(false)}
+        personalSkillsEnabled={personalSkillsEnabled}
+        onUpgrade={() => openSettings({ view: "billing" })}
       />
       {mobileSidebarOpen && (
         <button
@@ -1715,6 +1728,8 @@ export function SkillsApp({
             onSelectLabel={(path) => selectLabel(detailLib, path)}
             onAction={(action) => runSkillAction(skill, action)}
             onOpenSkill={openSkillBySlug}
+            historyEnabled={initialBilling.entitlements.skillHistory}
+            onUpgrade={() => openSettings({ view: "billing" })}
           />
         ) : currentView === "archived" ? (
           <ArchivedListView
@@ -1744,6 +1759,16 @@ export function SkillsApp({
             onRetryPreferences={retryPreferenceSave}
             dragSkillId={drag?.kind === "skill" && drag.lib === selection.lib ? drag.skillId : null}
             onSkillStartDrag={startSkillDrag}
+            upgradeNotice={
+              !personalSkillsEnabled && selection.lib === "mine"
+                ? `${initialBilling.hiddenPersonalSkillCount} personal skill${initialBilling.hiddenPersonalSkillCount === 1 ? " is" : "s are"} preserved but hidden on Free. Organization skills you install remain available here.`
+                : orgCreateBlocked && selection.lib === "org"
+                  ? initialBilling.entitlements.catalogFrozen
+                    ? `This catalog has ${initialBilling.orgSkillCount} skills and is read-only on Free.`
+                    : `Free includes ${orgSkillLimit} organization skills. Upgrade to add another.`
+                  : null
+            }
+            onUpgrade={() => openSettings({ view: "billing" })}
           />
         )}
       </div>

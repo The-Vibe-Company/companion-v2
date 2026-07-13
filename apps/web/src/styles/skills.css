@@ -685,6 +685,11 @@ body { background: var(--color-canvas); color: var(--color-fg); font-family: var
 .listbar__sort:hover { color: var(--color-fg); border-color: var(--color-line-strong); }
 .listbar__sort svg { color: var(--color-faint); flex: none; }
 .listbar__sortsel { border: none; background: none; outline: none; cursor: pointer; font-family: var(--font-ui); font-size: var(--text-xs); color: inherit; }
+.entitlement-bar { display: flex; align-items: center; gap: 9px; padding: 9px var(--space-5); border-bottom: 1px solid var(--color-warn-line); background: var(--color-warn-tint); color: var(--color-muted); font-size: var(--text-xs); line-height: 1.45; }
+.entitlement-bar > span { flex: 1; min-width: 0; }
+.entitlement-bar > svg { flex: none; color: var(--color-warn); }
+.entitlement-bar .btn-sec { height: 30px; background: var(--color-surface); }
+.entitlement-bar--detail { margin-bottom: 18px; border: 1px solid var(--color-warn-line); border-radius: var(--radius-md); }
 
 /* --- Filter bar + chips -------------------------------------------------- */
 .filterbar { display: flex; align-items: center; gap: 8px; padding: 9px var(--space-5); border-bottom: 1px solid var(--color-line); flex-wrap: wrap; flex: none; }

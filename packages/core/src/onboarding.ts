@@ -11,6 +11,7 @@ import {
 } from "./domainAccess";
 import { classifyEmailDomain } from "./email-domains";
 import { uniqueSlug, type ActorContext } from "./services";
+import { markSeatSyncPending } from "./billing";
 
 export type OnboardingMatchedOrg = DomainJoinableOrg;
 
@@ -78,6 +79,7 @@ export async function joinOrgByDomain(actor: ActorContext, orgId: string, databa
       .update(schema.profiles)
       .set({ onboardedAt: new Date() })
       .where(and(eq(schema.profiles.id, actor.id), isNull(schema.profiles.onboardedAt)));
+    await markSeatSyncPending(orgId, tx as unknown as Db);
   });
 
   return { orgId };
@@ -117,7 +119,6 @@ export async function completeOnboarding(
           name: input.org.name,
           slug: uniqueSlug(input.org.name, crypto.randomUUID()),
           kind: "team",
-          plan: "team",
           domain: orgDomain,
           domainAutoJoin: domainAccessEnabled,
           color: orgColor,

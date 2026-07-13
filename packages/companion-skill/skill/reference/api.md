@@ -188,6 +188,36 @@ personal skill into the org library (owner only, one-way). Sharing is atomic and
 dependencies automatically; the response includes `shared_dependencies`. A skill name (slug) is unique
 across both libraries in a workspace.
 
+## Free and Pro entitlements
+
+Self-hosted workspaces are fully unlocked. Managed SaaS Free workspaces apply the same gates to
+session and PAT skill operations. Billing endpoints are intentionally session-only and are not part
+of this skill's PAT surface.
+
+An entitlement refusal is HTTP `403` with this shape:
+
+```json
+{
+  "code": "org_skill_limit_reached",
+  "feature": "org_skill_create",
+  "message": "Free includes up to 20 organization skills. Upgrade to create another.",
+  "effectivePlan": "free",
+  "limit": 20,
+  "current": 20,
+  "upgradeUrl": "/settings?view=billing"
+}
+```
+
+Codes are `upgrade_required`, `org_skill_limit_reached`, and `catalog_frozen`. Free returns only
+installed org skills from `lib=mine`, locks personal skills/folders/Share, counts active and archived
+org skills toward the 20-skill limit, and exposes only the current version. At exactly 20, updating an
+existing org skill is still allowed. Above 20, publish, rename, restore, and Share are frozen, while
+read, install, download, and archive remain available. Older version package/file requests return
+`upgrade_required` with `feature: "skill_history"`.
+
+Treat these responses as final product gates: do not retry, switch scope, or probe hidden personal
+resources. Surface the message and direct a signed-in Owner/Admin to `upgradeUrl`.
+
 ## Upload bodies and labels
 
 `POST /skills` accepts either:

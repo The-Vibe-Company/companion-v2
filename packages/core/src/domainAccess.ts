@@ -3,6 +3,7 @@ import { db, schema, type Db } from "@companion/db";
 import type { OrgRole } from "@companion/contracts";
 import { canManageOrg } from "./authz";
 import { classifyEmailDomain } from "./email-domains";
+import { getEntitlements } from "./billing";
 import type { ActorContext } from "./services";
 
 export interface OrgAccessDomain {
@@ -131,11 +132,16 @@ export async function addOrgAccessDomain(input: {
   actor: ActorContext;
   orgId: string;
   domain: string;
+  acknowledgeSeatBilling?: boolean;
   database?: Db;
 }): Promise<OrgAccessDomain> {
   const database = input.database ?? db;
   const role = await getOrgRole(input.orgId, input.actor.id, database);
   if (!role || !canManageOrg(role)) throw new Error("not allowed to manage workspace domains");
+  const entitlements = await getEntitlements({ orgId: input.orgId, database });
+  if (entitlements.billingMode === "stripe" && entitlements.computedPlan === "pro" && !input.acknowledgeSeatBilling) {
+    throw new Error("acknowledgeSeatBilling is required because each member who joins this domain is billed at $10/month with proration");
+  }
 
   const org = await database.query.organizations.findFirst({
     where: eq(schema.organizations.id, input.orgId),

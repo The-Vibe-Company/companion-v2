@@ -13,7 +13,6 @@ const org = {
   name: "Acme",
   slug: "acme",
   kind: "team" as const,
-  plan: "team" as const,
   createdAt: "2026-06-01T12:00:00.000Z",
   domain: null,
   domainAutoJoin: false,

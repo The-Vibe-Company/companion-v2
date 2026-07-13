@@ -18,6 +18,8 @@ import {
   uploadWorkspaceLogo as uploadWorkspaceLogoRpc,
   uploadUserAvatar as uploadUserAvatarRpc,
   removeUserAvatar as removeUserAvatarRpc,
+  startBillingCheckout,
+  openBillingPortal,
 } from "@/lib/org";
 import {
   applyAccent,
@@ -82,6 +84,7 @@ export function SettingsController({
   const [users, setUsers] = useState(data.users);
   const [apiKeys, setApiKeys] = useState<ApiKeyVM[]>(data.apiKeys);
   const [invites, setInvites] = useState<Invite[]>(data.invites);
+  const [billing, setBilling] = useState(data.billing);
   useEffect(() => {
     router.prefetch("/skills");
   }, [router]);
@@ -91,10 +94,11 @@ export function SettingsController({
     setUsers(data.users);
     setApiKeys(data.apiKeys);
     setInvites(data.invites);
-  }, [data.current, data.domainJoin, data.users, data.apiKeys, data.invites]);
+    setBilling(data.billing);
+  }, [data]);
   useEffect(() => {
     document.cookie = `companion_org=${encodeURIComponent(data.current.id)}; path=/; SameSite=Lax`;
-  }, [data.current.id]);
+  }, [data]);
   const [busy, setBusy] = useState(false);
 
   const [route, setRoute] = useState<SettingsRoute>(initialRoute);
@@ -169,6 +173,7 @@ export function SettingsController({
       setDomainJoin(next.domainJoin);
       setApiKeys(next.apiKeys);
       setInvites(next.invites);
+      setBilling(next.billing);
     } catch (error) {
       setErr((error as Error).message);
     }
@@ -198,6 +203,7 @@ export function SettingsController({
     isOwner: current.myRole === "owner",
     ownerCount: (org) => org.members.filter((m) => m.role === "owner" && !m.pending).length,
     domainJoin,
+    billing,
     prefs,
     setTheme,
     setAccent,
@@ -294,10 +300,10 @@ export function SettingsController({
         setBusy(false);
       }
     },
-    addAccessDomain: async (domain) => {
+    addAccessDomain: async (domain, acknowledgeSeatBilling) => {
       setBusy(true);
       try {
-        const added = await addAccessDomainRpc(domain);
+        const added = await addAccessDomainRpc(domain, acknowledgeSeatBilling);
         setCurrent((c) => ({
           ...c,
           accessDomains: c.accessDomains.some((item) => item.id === added.id)
@@ -377,10 +383,10 @@ export function SettingsController({
             }
           : undefined,
       ),
-    inviteMember: async (orgId, email, role: OrgRole) => {
+    inviteMember: async (orgId, email, role: OrgRole, acknowledgeSeatBilling) => {
       setBusy(true);
       try {
-        const { token } = await inviteMemberRpc(orgId, email, role);
+        const { token } = await inviteMemberRpc(orgId, email, role, acknowledgeSeatBilling);
         await refreshSettingsData();
         navigate({ view: "invitations" });
         return token;
@@ -402,6 +408,28 @@ export function SettingsController({
           void refreshSettingsData();
         })
         .finally(() => setBusy(false));
+    },
+    startCheckout: async () => {
+      setBusy(true);
+      try {
+        const { url } = await startBillingCheckout();
+        window.location.assign(url);
+      } catch (e) {
+        setErr((e as Error).message);
+      } finally {
+        setBusy(false);
+      }
+    },
+    openBillingPortal: async () => {
+      setBusy(true);
+      try {
+        const { url } = await openBillingPortal();
+        window.location.assign(url);
+      } catch (e) {
+        setErr((e as Error).message);
+      } finally {
+        setBusy(false);
+      }
     },
     error: actions.error,
     setError: actions.setError,

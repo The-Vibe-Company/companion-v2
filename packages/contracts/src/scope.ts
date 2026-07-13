@@ -41,7 +41,6 @@ export const orgSummarySchema = z.object({
   name: z.string(),
   slug: z.string(),
   kind: z.enum(["personal", "team"]),
-  plan: z.enum(["free", "team"]),
   org_role: orgRoleSchema,
   member_count: z.number().int().nonnegative(),
   color: z.string().nullable().optional(),
