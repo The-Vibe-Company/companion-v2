@@ -136,6 +136,77 @@ jobs:
       - name: Build CLI
         run: pnpm --filter @companion/cli build
 
+      - name: Build Railway Docker images
+        run: |
+          docker build \
+            --file deploy/railway/Dockerfile.backend \
+            --build-arg RAILWAY_SERVICE_NAME=api \
+            --tag companion-api:ci \
+            .
+          docker build \
+            --file deploy/railway/Dockerfile.backend \
+            --build-arg RAILWAY_SERVICE_NAME=worker \
+            --tag companion-worker:ci \
+            .
+          docker build \
+            --file deploy/railway/Dockerfile.web \
+            --build-arg COMPANION_API_URL=http://127.0.0.1:18082 \
+            --build-arg COMPANION_WEB_URL=http://127.0.0.1:18080 \
+            --build-arg NEXT_PUBLIC_COMPANION_API_BASE=http://127.0.0.1:18080/v1 \
+            --tag companion-web:ci \
+            .
+
+      - name: Smoke Railway Docker images
+        run: |
+          set -euo pipefail
+
+          for image in companion-api:ci companion-worker:ci companion-web:ci; do
+            test "$(docker image inspect --format '{{.Config.User}}' "$image")" = "node"
+          done
+
+          docker run --rm --network host \
+            -e DATABASE_URL="$DATABASE_URL" \
+            companion-api:ci node dist/migrate.js
+
+          worker_id="$(docker run -d -e COMPANION_BILLING_MODE=off companion-worker:ci)"
+          api_id=""
+          web_id=""
+          cleanup() {
+            docker rm -f "$web_id" "$api_id" "$worker_id" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          sleep 2
+          test "$(docker inspect --format '{{.State.Running}}' "$worker_id")" = "true"
+
+          api_id="$(docker run -d --network host \
+            -e PORT=18082 \
+            -e COMPANION_API_HOST=0.0.0.0 \
+            -e DATABASE_URL="$DATABASE_URL" \
+            -e COMPANION_WEB_URL=http://127.0.0.1:18080 \
+            -e COMPANION_API_URL=http://127.0.0.1:18080 \
+            -e BETTER_AUTH_URL=http://127.0.0.1:18080 \
+            -e BETTER_AUTH_SECRET=ci-railway-smoke-better-auth-secret-with-enough-entropy \
+            -e EMAIL_PROVIDER=log \
+            companion-api:ci)"
+
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:18082/health >/dev/null; then break; fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:18082/health
+
+          web_id="$(docker run -d --network host \
+            -e PORT=18080 \
+            -e HOSTNAME=0.0.0.0 \
+            companion-web:ci)"
+
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:18080/login >/dev/null; then break; fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:18080/login >/dev/null
+
       - name: Smoke CLI
         run: |
           node cli/dist/index.js --version
@@ -216,6 +287,15 @@ jobs:
 
       - name: Validate Docker Compose
         run: docker compose config
+
+      - name: Migrate database
+        run: pnpm db:migrate
+
+      - name: Secrets database integration
+        run: pnpm --filter @companion/api test -- src/secretsDb.integration.test.ts
+        env:
+          RUN_SECRET_DB_INTEGRATION: "1"
+          COMPANION_SECRETS_MASTER_KEY: CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk=
 
       - name: RSC smoke
         run: pnpm smoke:rsc

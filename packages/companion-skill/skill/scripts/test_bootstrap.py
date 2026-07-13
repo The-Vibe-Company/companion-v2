@@ -291,7 +291,7 @@ class BootstrapTests(unittest.TestCase):
         self.assertTrue(result["backupDeleted"])
         self.assertFalse(backup.exists())
 
-    def test_install_update_keeps_backup_when_reporting_fails(self):
+    def test_install_update_deletes_backup_when_reporting_fails(self):
         official_files = {}
 
         def write_package(_api_url, _token, destination, _expected_checksum=None):
@@ -320,8 +320,43 @@ class BootstrapTests(unittest.TestCase):
 
         self.assertEqual("1.1.0", json.loads((self.skill_dir / "companion.json").read_text(encoding="utf-8"))["version"])
         backups = list(self.skill_dir.parent.glob(".companion-backup.*"))
-        self.assertEqual(1, len(backups))
-        self.assertEqual("1.0.0", json.loads((backups[0] / "companion.json").read_text(encoding="utf-8"))["version"])
+        self.assertEqual([], backups)
+        self.assertEqual([], list(self.skill_dir.parent.glob(".companion-update.*")))
+
+    def test_install_update_deletes_backup_symlink(self):
+        official_files = {}
+        link_parent = self.root / "linked-install"
+        link_parent.mkdir()
+        link = link_parent / "companion"
+        link.symlink_to(self.skill_dir, target_is_directory=True)
+
+        def write_package(_api_url, _token, destination, _expected_checksum=None):
+            skill_md = "---\nname: companion\n---\n"
+            manifest = json.dumps({"version": "1.1.0"})
+            files = {
+                "SKILL.md": f"sha256:{sha256(skill_md.encode('utf-8')).hexdigest()}",
+                "companion.json": f"sha256:{sha256(manifest.encode('utf-8')).hexdigest()}",
+                "scripts/bootstrap.py": f"sha256:{sha256(b'# bootstrap\n').hexdigest()}",
+            }
+            baseline = json.dumps({"schemaVersion": 1, "version": "1.1.0", "files": files})
+            official_files.update(files)
+            official_files[bootstrap.INTEGRITY_BASELINE_FILE] = f"sha256:{sha256(baseline.encode('utf-8')).hexdigest()}"
+            with zipfile.ZipFile(destination, "w") as zf:
+                zf.writestr("SKILL.md", skill_md)
+                zf.writestr("companion.json", manifest)
+                zf.writestr("scripts/bootstrap.py", "# bootstrap\n")
+                zf.writestr(bootstrap.INTEGRITY_BASELINE_FILE, baseline)
+
+        with (
+            mock.patch.object(bootstrap_update, "download_package", side_effect=write_package),
+            mock.patch.object(bootstrap_update, "api_post_json", return_value={"status": "installed"}),
+        ):
+            result = bootstrap.install_companion_update("https://api.example/v1", "cmp_pat_SECRET", link, "1.1.0", "Codex", official_files)
+
+        self.assertTrue(result["applied"])
+        self.assertFalse(link.is_symlink())
+        self.assertEqual("1.1.0", json.loads((link / "companion.json").read_text(encoding="utf-8"))["version"])
+        self.assertEqual([], list(link_parent.glob(".companion-backup.*")))
 
     def test_install_update_rejects_self_consistent_package_that_differs_from_workspace_hashes(self):
         def write_package(_api_url, _token, destination, _expected_checksum=None):

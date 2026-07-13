@@ -6,7 +6,7 @@
   "description": "Summarize an incident timeline from logs into a concise postmortem draft.",
   "notes": "Reads local log excerpts and produces a terse incident summary: timeline, impact, suspected cause, and follow-ups.",
   "metadata": {
-    "companionSkillId": "62641a8d-3860-41a9-a9a2-1798006aad29",
+    "companionSkillId": "2f111883-7f11-42e0-81fa-359e5b7b9727",
     "changelog": [
       {
         "version": "0.1.9",

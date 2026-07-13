@@ -13,6 +13,8 @@
 - **Email:** `packages/email` supports local log/Mailpit mode and Resend for production.
 - **Web:** Next.js App Router in `apps/web`; it calls the API, not Postgres or MinIO directly.
 - **CLI:** `cli` stores an API URL plus Better Auth session cookie and uses REST endpoints.
+- **Billing:** `packages/billing` is the framework-free Stripe adapter shared by the API and
+  `apps/worker`; `packages/core` owns plan computation, entitlements, quotas, and reconciliation.
 
 Redis/BullMQ are intentionally excluded. Temporal is the intended future workflow engine for
 deployments, reconcile loops, retries, compensation, and schedules.
@@ -21,29 +23,43 @@ deployments, reconcile loops, retries, compensation, and schedules.
 
 Manual local development uses `pnpm dev` as the idempotent full-stack entrypoint. The script starts
 Postgres, MinIO, and Mailpit with the defaults from `.env.example`, applies Drizzle migrations, seeds
-the local test user, and starts only the long-running API and web processes. Local Docker ports bind
+the local test user, and starts the long-running API, billing worker, and web processes. Local Docker ports bind
 to `COMPOSE_BIND_HOST`, which defaults to `127.0.0.1`. `pnpm dev:app` is the app-only loop when infra
 is already prepared.
 
 Conductor workspaces use a separate, **native (Docker-free)** entrypoint, `scripts/dev-conductor.sh`
 (modeled on `~/Dev/monkapps`). It starts a per-workspace Postgres cluster — plus optional native MinIO
 and Mailpit — under `.conductor-pg/`, applies migrations, seeds the test user, and runs only the
-long-running API and web processes via `concurrently`. All services are allocated from
+long-running API, billing worker, and web processes via `concurrently`. All services are allocated from
 `CONDUCTOR_PORT`: web `+0`, API `+1`, Postgres `+2`, MinIO API `+3`, MinIO console `+4`, Mailpit SMTP
 `+5`, and Mailpit UI `+6`. It injects workspace-specific `DATABASE_URL`, API URLs, S3 endpoint,
 Mailpit ports, and a `companion-<workspace>` Better Auth cookie prefix inline — without mutating
-`.env`. MinIO/Mailpit degrade gracefully when their binaries are absent (S3 uploads disabled, email
+`.env`. It also creates a persistent, gitignored 32-byte `COMPANION_SECRETS_MASTER_KEY` under the
+workspace state directory (mode `0600`). The Docker-backed local script uses the same pattern under
+`.companion-local/`; an explicit environment value always wins. Production never generates this key:
+when it is absent or malformed only the Secrets routes return `503`, while the rest of Companion
+continues to start. MinIO/Mailpit degrade gracefully when their binaries are absent (S3 uploads disabled, email
 falls back to `EMAIL_PROVIDER=log`). A cleanup trap stops every native service on exit; archiving a
 workspace runs `scripts/dev-conductor.sh archive`, which stops the services and removes
 `.conductor-pg/`.
+
+Production Railway deployments use three services from the same repository plus Railway Postgres. The public
+`web` service proxies browser, CLI, auth, and Stripe webhook traffic to the private `api` service over Railway
+private DNS; the `worker` is private and has no HTTP surface. Per-service configuration lives in
+`deploy/railway/*.railway.json`. Only the API runs Drizzle migrations, as a Railway pre-deploy command guarded by
+the existing Postgres advisory lock. The web and API bind Railway's injected/fixed `PORT` on `0.0.0.0`, while the
+worker is restarted as a long-running process. `deploy/railway/README.md` is the operational source of truth for
+service references, public domains, Stripe webhook registration, initial deployment order, and rollback.
 
 ## Repository Layout
 
 ```
 apps/
   api/        # Hono backend, Better Auth, REST + tRPC
+  worker/     # Stripe seat sync + periodic billing reconciliation
   web/        # Next.js portal
 packages/
+  billing/    # framework-free Stripe gateway
   db/         # Drizzle schema, migrations, seeds
   auth/       # Better Auth config
   core/       # framework-free services, RBAC, scoping
@@ -60,7 +76,11 @@ Better Auth owns the core `user`, `session`, `account`, and `verification` table
 adds `profiles`, `organizations`, `memberships`, `invitations`,
 `skills`, `skill_versions`, `skill_version_dependencies`, `skill_stars`, `labels`, `skill_labels`,
 `skill_filter_preferences`, `skill_comments`, `skill_comment_images`, `local_skill_installs`,
-`api_tokens`, and `audit_log`. There are **no teams**: the hierarchy is `Organization → User`.
+`api_tokens`, `billing_subscriptions`, `stripe_webhook_events`, `audit_log`, and the secret-vault
+tables described below. There are **no teams**:
+the hierarchy is `Organization → User`. The former decorative `organizations.plan` column no longer
+exists: raw provider state lives in at most one `billing_subscriptions` row per organization, while
+the effective plan is derived centrally at request time.
 
 Every tenant-owned table carries `org_id`. A skill lives in one of two libraries, set by a single
 `skills.scope` enum (`'org'` default, or `'personal'`):
@@ -101,6 +121,10 @@ Companion-specific package data lives in root `companion.json`, not `SKILL.md`: 
 human-facing `title`/`description`, Markdown-compatible `notes`, `metadata.companionSkillId`,
 `metadata.changelog`, `environment.env` / `environment.secrets` declarations (never values),
 `commands`, local-only `checks`, and un-versioned skill `dependencies` as `{ skillName: skillId }`.
+Each `environment.secrets[ENV_KEY]` declaration has a stable UUID `slotId`. It remains optional at
+the package boundary for backwards compatibility; normalization assigns a deterministic UUID from
+the stable skill id plus the environment key. An explicit id survives a key rename, while an
+unidentified declaration creates a new slot. `environment.env` is intentionally outside this model.
 `description` updates the existing `skills.description` listing field; the full normalized manifest rides in the existing
 `skill_versions.frontmatter` JSON under `companion` and is parsed back into the read shape
 (`skillListRowSchema.display` / `skillListRowSchema.requirements`) for the skill detail view; the
@@ -212,7 +236,38 @@ Companion-reported install state; exact disk inventory remains local in `~/.comp
 
 `api_tokens` holds scoped personal access tokens for programmatic publish/install.
 Only the `sha256` `token_hash` is stored (the plaintext `cmp_pat_…` is shown once); each row carries
-`scopes` (`skills:read` / `skills:write`), an `expires_at` (90-day default), and `revoked_at`.
+`scopes` (`skills:read` / `skills:write` / `secrets:read` / `secrets:write`), an `expires_at`
+(90-day default), and `revoked_at`. `secrets:write` gives a PAT the same metadata and binding mutation
+capabilities as its signed-in user: create, rename, rotate, change audience/recipients, bind/unbind,
+manage suggestions, and delete. The service still enforces workspace membership, secret
+ownership/audience access, skill access, and slot identity. Plaintext remains write-only except
+through the separate `secrets:read` one-time retrieval protocol.
+
+**Secret vault and skill projections.** `secrets` stores metadata, owner, audience (`personal`,
+`restricted`, or dynamic `organization`), current version, and soft-disable/delete timestamps.
+`secret_versions` stores ciphertext only; each version uses a fresh AES-256-GCM DEK and AAD binding
+`org_id + secret_id + version`. The DEK is itself AES-256-GCM-wrapped by the base64 32-byte
+`COMPANION_SECRETS_MASTER_KEY`; plaintext and the root key never enter Postgres. Values are limited to
+64 KiB UTF-8. `secret_recipients` is the explicit restricted audience; the owner is implicit, and an
+organization audience includes every current and future member.
+
+Stable declarations live in `skill_secret_slots`; the exact per-version projection is copied to
+`skill_version_secret_slots`. Existing versions are backfilled but intentionally receive no user
+binding. `skill_secret_bindings` is private per user. `skill_secret_suggestions` is a shared default,
+not an ACL: any member may replace one for an org skill, while a personal skill remains owner-only.
+Sharing a skill changes neither bindings, suggestions, nor secret ACLs. A removed slot only removes
+its local projection at the next sync.
+
+Retrieval is a three-step, non-replayable protocol. `secret_retrieval_plans` plus exact
+`secret_retrieval_plan_items` pin the skill/dependency closure, slot, secret id, and secret version
+for five minutes. `secret_retrieval_grants` stores only a SHA-256 hash, expires after 60 seconds, and
+is consumed once. Membership, audience, recipient access, soft revocation, and the exact version are
+rechecked at preflight, grant creation, and redemption. A rotation after preflight leaves that exact
+planned version usable; loss of access invalidates the whole redemption. Audit rows record metadata
+and denials but never values. Per-user defaults cap preflights at 30/minute and combined grant
+creation/redemption attempts at 10/minute. Each attempt is claimed under a transaction-scoped advisory
+lock before validation or decryption, so parallel requests cannot exceed the budget; an anomaly audit
+signal is emitted after repeated refusals.
 
 `skill_filter_preferences` stores the current user's Skills Hub filter state for one organization.
 The row is keyed by `(org_id, user_id)` and contains `active_filters` JSONB (the status / starred /
@@ -312,15 +367,24 @@ requires the admin's own verified corporate email domain to match the requested 
 The service layer in `packages/core` is the primary enforcement point. It applies:
 
 - tenant/membership gate (`assertMember`): every service call resolves the actor's org role or throws;
-  all queries are scoped to the selected `org_id`. Skill visibility collapses to `eq(skills.org_id,
-  orgId)` — every member sees every skill in the org;
+  all queries are scoped to the selected `org_id`. Org skills are visible to every member; personal
+  skills add an owner-only predicate, with no admin override;
 - capability gate (org role): skill actions (read/create/update/delete/publish, archive/restore, and
   all label create/assign/rename/recolor/delete operations) are allowed for **any** member; the org-role
   gate (`isOrgAdmin` / `canManageOrg`) still governs org-level actions like member management, role
   changes, and token revocation. There is no per-skill owner or visibility check.
+- secret gate: reading/using a secret requires current membership plus owner/audience/recipient
+  access. Creating, renaming, rotating, changing audience or recipients, disabling, and deleting are
+  strictly owner-only; Owner/Admin roles have no override. Removing a membership immediately removes
+  recipient access, disables secrets owned by the departing member without transferring them, and
+  invalidates affected bindings and grants. Metadata returned to a non-owner is deliberately narrow;
+  an inaccessible suggestion is indistinguishable from no suggestion.
 
-Postgres RLS scopes the new `labels` / `skill_labels` tables (and the others) by the `app.org_id` GUC
-as defense-in-depth, but browser and CLI clients never connect directly to Postgres.
+Postgres RLS scopes tenant tables by the `app.org_id` and `app.user_id` GUCs. Secret tables use
+composite tenant foreign keys and forced RLS so even the table owner cannot bypass tenant, user, and
+audience policies. Billing, `labels` / `skill_labels`, and the other tenant tables are also scoped by
+the tenant GUCs as defense-in-depth. Browser and CLI clients never connect directly to Postgres; the
+framework-free service layer remains the primary authorization boundary.
 
 The public skill preview service is the only intentional unauthenticated skill read. It does not take
 an actor or org id, resolves only by `share_token`, and hard-filters to non-archived org skills before
@@ -329,6 +393,50 @@ The signed-in web deep link uses a separate authenticated resolver,
 `GET /v1/skills/share-target/:token`, which returns `{org_id, slug}` only when the user is already a
 member of the token's workspace; `/s/:token/go` then sets `companion_org` before redirecting to the
 slug-keyed detail route, where the client replaces the address bar back to `/s/:token`.
+
+## Billing And Entitlements
+
+Self-hosted installations default to `COMPANION_BILLING_MODE=disabled` and are fully unlocked without
+Stripe. SaaS enables `stripe` billing separately from entitlement rollout
+(`off → observe → pilot → enforce`), with pilot and temporary Pro allowlists. Disabling Checkout,
+webhooks, or enforcement is a non-destructive rollback: Stripe identifiers and subscriptions remain
+stored and no cancellation is sent.
+
+Pro is $10 USD per active `memberships` row per month. Checkout fixes the initial quantity server-side,
+uses Stripe Tax, disallows quantity adjustment, accepts Stripe-managed promotion codes, and uses durable
+idempotency keys. Coupons, validity windows, redemption limits, and promotion codes are created and audited in
+Stripe; customers can apply a valid code only during Checkout.
+The configured Price must be active, licensed, monthly USD at exactly 1000 cents. The Customer Portal
+may manage payment methods, invoices, and end-of-period cancellation, but subscription and quantity
+updates must be disabled. Checkout creation is serialized per organization, reuses an open session,
+and checks Stripe for an existing subscription before creating another.
+
+`active` subscriptions are Pro, including a scheduled cancellation before `current_period_end`.
+`past_due` and `unpaid` keep Pro through one non-renewable seven-day grace window. Missing,
+`incomplete`, `incomplete_expired`, `paused`, and `canceled` subscriptions are Free. A later successful
+payment or new active subscription clears the grace state.
+
+Free keeps all data but narrows reads and mutations:
+
+- My Skills contains installed org skills only; authored personal skills and their folder tree are
+  hidden and locked, including Share.
+- Org skills count active and archived rows toward a 20-skill quota. Creation uses an organization
+  advisory lock and checks both before S3 upload and again inside the publishing transaction; a race
+  loser removes its uploaded object. At exactly 20, existing skills can still publish versions. Above
+  20, create, publish, rename, restore, and Share are frozen while reads, installs, downloads, and
+  archive remain available.
+- Only the current version is readable; historical version requests return the structured 403
+  Upgrade response.
+
+The structured entitlement rejection is `{ code, feature, message, effectivePlan, limit?, current?,
+upgradeUrl? }`, using `upgrade_required`, `org_skill_limit_reached`, or `catalog_frozen`.
+
+Membership acceptance, domain join, and removal mark the tenant billing row `pending` in the same
+database transaction. `apps/worker` claims rows with `FOR UPDATE SKIP LOCKED` every 15 seconds, updates
+Stripe quantities with `proration_behavior=create_prorations`, retries from 30 seconds up to one hour,
+and refreshes all subscriptions every 15 minutes. Stripe webhook signatures are verified against the
+raw body; event ids are deduplicated, then the current Stripe subscription is always re-read before
+persisting so delivery order cannot corrupt local state.
 
 ## Public API
 
@@ -339,6 +447,10 @@ slug-keyed detail route, where the client replaces the address bar back to `/s/:
   domain-access orgs), `POST /v1/onboarding/join` (join a selected org after server-side domain
   revalidation),
   `POST /v1/onboarding/create` (create org + invites, finish onboarding).
+- Billing: session-only `GET /v1/billing` for any member; session-only
+  `POST /v1/billing/checkout` and `/portal` for Owners/Admins; public
+  `POST /v1/billing/webhooks/stripe` authenticated only by the Stripe signature. Billing endpoints
+  never accept PATs. Pro invitations and domain-access additions require `acknowledgeSeatBilling`.
 - Tokens: `GET /v1/tokens` (list the caller's own active keys, no plaintext — it backs the personal
   Account pane, so it is caller-scoped even for admins), `POST /v1/tokens` (issue a scoped `cmp_pat_…`,
   plaintext returned once), `DELETE /v1/tokens/:id` (an org admin may revoke any token by id).
@@ -377,6 +489,17 @@ slug-keyed detail route, where the client replaces the address bar back to `/s/:
   **body/query**, never a URL segment, so embedded slashes survive. Per-skill assignment:
   `POST`/`DELETE /v1/skills/:slug/labels` (assign / unassign one path). Every label route is
   session-authenticated, tenant-scoped, and allowed for any member.
+- Secrets: `GET/POST /v1/secrets`, `GET/PATCH/DELETE /v1/secrets/:id`, and
+  `POST /v1/secrets/:id/rotate` back the metadata-only `/secrets` vault. A PAT with `secrets:write`
+  has the same mutation capabilities as its signed-in user; there is no browser-only Secrets gate.
+  Skill configuration uses
+  `GET /v1/skills/:slug/secret-configuration`, `PUT/DELETE
+  /v1/skills/:slug/secret-bindings/:slotId`, `PUT/DELETE
+  /v1/skills/:slug/secret-suggestions/:slotId`, and the suggestion acceptance endpoint. Retrieval uses
+  `POST /v1/secret-retrievals/preflight`, `POST /v1/secret-retrievals/:planId/grant`, and
+  `POST /v1/secret-grants/redeem`. A PAT with `secrets:read` may read authorized metadata and run the
+  retrieval protocol; `secrets:write` covers all vault, binding, and suggestion mutations while the
+  service keeps the normal owner, audience, workspace, skill-access, and stable-slot checks.
 - Local skills (Companion skills): `GET /v1/local-skills` (built-in catalog with the caller's
   per-machine status), `GET /v1/local-skills/:key`, `GET /v1/local-skills/:key/package` (download the
   bundled skill as `.zip`), and `POST /v1/local-skills/:key/installed` (the install callback: the
@@ -400,9 +523,11 @@ accepted **only** on the PAT-enabled skills endpoints (`GET /v1/skills`, `POST /
 `GET /v1/skills/:slug/download`,
 `GET /v1/skills/:slug/versions/:version/package`,
 `GET /v1/skills/:slug/versions/:version/files`, the skills install/dependency/archive/share/label
-surfaces, `GET /v1/orgs/current/skill-naming-policy`, and the `/v1/local-skills*` endpoints); every
+surfaces, `GET /v1/orgs/current/skill-naming-policy`, the `/v1/local-skills*` endpoints, and the
+Secrets metadata, configuration, retrieval, vault, binding, and suggestion routes listed above); every
 other endpoint rejects tokens. Token requests are scope-gated (`skills:write` to publish/create/rename/mutate,
-`skills:read` to read/download and read the org skill-naming policy).
+`skills:read` to read/download and read the org skill-naming policy, `secrets:read` to read authorized
+secret metadata and perform preflight/grant/redemption, `secrets:write` for every Secrets mutation).
 Reading the local-skills catalog
 and downloading its package require `skills:read`; the install callback
 (`POST /v1/local-skills/:key/installed`) mutates state and writes an audit row, so it requires
@@ -624,3 +749,19 @@ persists a per-workspace key in `.conductor-pg/companion-secrets.key`),
 cleanup sweep, default `600000`, `0` disables), `VANISH_API_URL` (default
 `https://vanish.sh`). Provider connections and Settings work without the Vercel variables; only
 launching runs requires them.
+
+The bundled Companion skill performs write-only secret creation and binding plus secret-aware
+install/update/sync.
+Its general Use prompt requests `skills:read + skills:write + secrets:read + secrets:write`; focused
+skill-install prompts request only `skills:read + secrets:read`. It creates through the dedicated
+stdin/private-prompt helper, then preflights the exact requested versions and dependency closure before
+any mutation, then creates and immediately redeems a one-time grant after global confirmation.
+Values exist only in process memory and the final projection. Per target, projections are written to
+`~/.companion/secrets/<workspace>/<skill>/.env` (`0700` directories, `0600` files) with a same-filesystem
+stage, exclusive lock, symlink/path-traversal rejection, atomic rename, and package+projection rollback.
+Before any later secrets operation, the runtime scans that workspace for interrupted transaction
+markers, restores the last coherent package/projection pair, and deletes transient plaintext backups.
+The separate local state records slot/version/environment key/opaque projection/path but no value.
+Explicit manual retrievals use `_manual/<profile>/.env`. Bulk sync continues after skips/errors and
+reports `updated / skipped / errors`; offline mode keeps the last coherent copy and warns that it may
+be stale rather than claiming immediate revocation.

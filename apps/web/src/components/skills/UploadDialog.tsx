@@ -7,11 +7,12 @@ import type {
   SkillDependenciesResponse,
   ValidationResult,
 } from "@companion/contracts";
-import type { SkillVM } from "@/lib/types";
+import { mapSkill, type SkillVM } from "@/lib/types";
 import {
   apiBase,
   archiveSkill,
   createSkillInline,
+  fetchSkillBySlug,
   fetchSkillDependencies,
   issueToken,
   publishSkillPackage,
@@ -19,6 +20,7 @@ import {
   versionPackageUrl,
 } from "@/lib/queries";
 import { Icon } from "../Icon";
+import { SkillSecretConfiguration } from "../secrets/SkillSecretConfiguration";
 
 /* ------------------------------------------------------------------ helpers */
 
@@ -313,11 +315,21 @@ const FOCUSABLE =
  * opener on close, and close on Escape. Escape is handled in the capture phase + `stopPropagation`
  * so it never reaches the list/detail keyboard handler behind the scrim.
  */
-export function useModalA11y(ref: React.RefObject<HTMLElement | null>, onClose: () => void) {
+export function useModalA11y(
+  ref: React.RefObject<HTMLElement | null>,
+  onClose: () => void,
+  active = true,
+  restoreFocusTo?: React.RefObject<HTMLElement | null>,
+) {
   useEffect(() => {
-    const opener = document.activeElement as HTMLElement | null;
+    if (!active) return;
+    const opener = restoreFocusTo?.current ?? document.activeElement as HTMLElement | null;
     const el = ref.current;
-    (el?.querySelector<HTMLElement>(FOCUSABLE) ?? el)?.focus();
+    const focusDialog = () => (el?.querySelector<HTMLElement>(FOCUSABLE) ?? el)?.focus();
+    focusDialog();
+    // A parent may make the opener's background inert in its own effect. Re-assert focus after that
+    // commit so browsers that move focus to <body> when inert changes still enter the dialog.
+    const focusFrame = requestAnimationFrame(focusDialog);
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         if (el?.querySelector('[data-modal-menu-open="true"]')) return;
@@ -343,10 +355,15 @@ export function useModalA11y(ref: React.RefObject<HTMLElement | null>, onClose: 
     };
     document.addEventListener("keydown", onKey, true);
     return () => {
+      cancelAnimationFrame(focusFrame);
       document.removeEventListener("keydown", onKey, true);
-      opener?.focus?.();
+      // Background inert state is cleared by a sibling effect cleanup. Restore on the next frame so
+      // the opener is focusable again in real browsers (React's effect cleanup order is not enough).
+      requestAnimationFrame(() => {
+        if (opener?.isConnected && !opener.closest("[inert]")) opener.focus();
+      });
     };
-  }, [ref, onClose]);
+  }, [active, ref, onClose, restoreFocusTo]);
 }
 
 /** Token row: lazily mints a scoped token on first reveal / copy / regenerate. */
@@ -451,20 +468,20 @@ const UP_METHODS = [
   {
     id: "prompt",
     icon: "sparkles",
-    name: "Assistant IA",
+    name: "Use an AI assistant",
     tag: "AI",
     desc: "Hand a guided prompt and a scoped token to an agent.",
   },
   {
     id: "zip",
     icon: "file-archive",
-    name: "Upload a package",
+    name: "Upload package",
     desc: "Drop a zipped SKILL.md package and let Companion validate it.",
   },
   {
     id: "create",
     icon: "square-pen",
-    name: "Create in the browser",
+    name: "Create in browser",
     desc: "Write the SKILL.md inline and publish without leaving the page.",
   },
 ] as const;
@@ -599,6 +616,8 @@ function ZipPanel({
   validation,
   validating,
   validationError,
+  currentSlug,
+  knownSkillSlugs,
 }: {
   labels: string[];
   setLabels: (labels: string[]) => void;
@@ -610,10 +629,14 @@ function ZipPanel({
   validation: ValidationResult | null;
   validating: boolean;
   validationError: string | null;
+  currentSlug?: string;
+  knownSkillSlugs: string[];
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const dropHelpId = useId();
   const [over, setOver] = useState(false);
+  const detectedSlug = validation?.frontmatter?.name;
+  const configurationSlug = currentSlug ?? (detectedSlug && knownSkillSlugs.includes(detectedSlug) ? detectedSlug : undefined);
   return (
     <>
       <p className="up-panel__lede">
@@ -683,6 +706,23 @@ function ZipPanel({
             )}
             {validationError && <div className="up-errblock" role="alert">{validationError}</div>}
             {validation && <ValidationList result={validation} />}
+            {validation && Object.keys(validation.companion_manifest?.environment.secrets ?? {}).length > 0 && (
+              <div className="up-secret-detected">
+                <div className="up-fieldlabel">Detected secret slots</div>
+                {Object.entries(validation.companion_manifest?.environment.secrets ?? {}).map(([key, declaration]) => (
+                  <div className="up-secret-detected__row" key={declaration.slotId ?? key}>
+                    <Icon name={declaration.required ? "key-round" : "info"} size={14} />
+                    <code>{key}</code>
+                    <span>{declaration.description || "Secret credential"}</span>
+                    <b>{declaration.required ? "Required" : "Optional"}</b>
+                  </div>
+                ))}
+                {!configurationSlug && <p>Bindings start empty after publish. Configure them before the first install or sync.</p>}
+              </div>
+            )}
+            {validation && configurationSlug && Object.keys(validation.companion_manifest?.environment.secrets ?? {}).length > 0 && (
+              <SkillSecretConfiguration slug={configurationSlug} canSuggest={false} />
+            )}
           </div>
         )}
       </div>
@@ -1080,6 +1120,7 @@ export function UploadDialog({
   scope = "personal",
   allLabels = [],
   defaultLabels = [],
+  knownSkillSlugs = [],
   onClose,
   onPublished,
 }: {
@@ -1092,6 +1133,8 @@ export function UploadDialog({
   /** Folders to pre-file a brand-new skill under on create (e.g. the active sidebar folder), so the
    *  "Upload to <folder>" CTA actually files the skill there. Ignored on update. */
   defaultLabels?: string[];
+  /** Accessible workspace slugs, used to distinguish an update package from a new publish after validation. */
+  knownSkillSlugs?: string[];
   onClose: () => void;
   onPublished: () => void;
 }) {
@@ -1302,7 +1345,7 @@ export function UploadDialog({
         ? ["git-branch", "Companion previews dependency changes before anything is published."]
         : ["file-archive", "The package must contain SKILL.md at its root."],
       cta: {
-        label: hasDepReview ? "Review dependencies" : isUpdate ? "Publish update" : "Upload package",
+        label: hasDepReview ? "Review dependencies" : isUpdate ? "Publish new version" : "Upload package",
         icon: hasDepReview ? "git-branch" : "upload",
         disabled: !canZip || busy,
         run: hasDepReview ? openPreflight : runZip,
@@ -1311,7 +1354,7 @@ export function UploadDialog({
     create: {
       hint: ["git-commit", isUpdate ? `Publishes ${skill?.id} as v${ver}.` : "Publishes as v1.0.0 in this workspace."],
       cta: {
-        label: isUpdate ? "Publish update" : "Create skill",
+        label: isUpdate ? "Publish new version" : "Create skill",
         icon: "check",
         disabled: !canCreate || busy,
         run: runCreate,
@@ -1331,7 +1374,13 @@ export function UploadDialog({
         className="up"
         role="dialog"
         aria-modal="true"
-        aria-label={isUpdate ? "Update skill" : "Upload skill"}
+        aria-label={
+          isUpdate
+            ? "Publish new version"
+            : scope === "org"
+              ? "Add an organization skill"
+              : "Add a personal skill"
+        }
         ref={dialogRef}
         tabIndex={-1}
       >
@@ -1341,13 +1390,11 @@ export function UploadDialog({
               {result ? (
                 "Done"
               ) : isUpdate ? (
-                <>
-                  Update <span className="mono" style={{ fontWeight: 600 }}>{skill!.id}</span>
-                </>
+                "Publish new version"
               ) : scope === "org" ? (
-                "Upload an organization skill"
+                "Add an organization skill"
               ) : (
-                "Upload a personal skill"
+                "Add a personal skill"
               )}
             </h2>
             <p className="up__sub">
@@ -1384,7 +1431,7 @@ export function UploadDialog({
               {!isUpdate && (
                 <button className="btn-ghost" type="button" onClick={reset}>
                   <Icon name="plus" size={14} />
-                  Upload another
+                  Add another skill
                 </button>
               )}
               <button className="btn-primary" type="button" onClick={onClose}>
@@ -1456,7 +1503,7 @@ export function UploadDialog({
                     </span>
                     <span className="method__txt">
                       <span className="method__name">
-                        {m.id === "create" && isUpdate ? "Edit in the browser" : m.name}
+                        {m.name}
                         {"tag" in m && m.tag && <span className="tag">{m.tag}</span>}
                       </span>
                       <span className="method__desc">
@@ -1501,6 +1548,8 @@ export function UploadDialog({
                     validation={validation}
                     validating={validating}
                     validationError={validationError}
+                    currentSlug={isUpdate ? skill?.id : undefined}
+                    knownSkillSlugs={knownSkillSlugs}
                   />
                 )}
                 {method === "create" && (
@@ -1558,7 +1607,7 @@ const INSTALL_METHODS = [
   {
     id: "prompt",
     icon: "sparkles",
-    name: "Assistant IA",
+    name: "Use an AI assistant",
     tag: "AI",
     desc: "Paste into an agent. It downloads and installs the skill for you.",
   },
@@ -1627,9 +1676,20 @@ function InstallDone({ result }: { result: { id: string; version: string; target
   );
 }
 
-export function InstallDialog({ skill, onClose }: { skill: SkillVM; onClose: () => void }) {
+export function InstallDialog({
+  skill,
+  onClose,
+  onReported,
+}: {
+  skill: SkillVM;
+  onClose: () => void;
+  onReported: (skill: SkillVM) => void;
+}) {
   const id = skill.id;
   const version = skill.version ?? "latest";
+  const updating = skill.installStatus === "update";
+  const actionLabel = updating ? "Update skill" : "Install skill";
+  const actionVerb = updating ? "Update" : "Install";
   const [method, setMethod] = useState<InstallMethod>("prompt");
   const [token, setToken] = useState<string | null>(null);
   const [target, setTarget] = useState<TargetId>("claude");
@@ -1640,6 +1700,7 @@ export function InstallDialog({ skill, onClose }: { skill: SkillVM; onClose: () 
     path: string;
     via: string;
   } | null>(null);
+  const [reported, setReported] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [deps, setDeps] = useState<SkillDependenciesResponse | null>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
@@ -1658,16 +1719,43 @@ export function InstallDialog({ skill, onClose }: { skill: SkillVM; onClose: () 
   }, [id, skill.version]);
   const installSet = (deps?.requires ?? []).filter((r) => r.status !== "missing");
 
-  // skills:read covers both downloading the package and confirming the install back to Companion
-  // (recording your own install is personal state, so it needs no write authority).
+  // The assistant reports install completion out of band. Read the existing detail endpoint
+  // immediately, then every three seconds until the current registry version is confirmed.
+  useEffect(() => {
+    if (!skill.version || reported) return;
+    let active = true;
+    let timer: number | null = null;
+    const check = async () => {
+      try {
+        const next = mapSkill(await fetchSkillBySlug(id));
+        if (!active) return;
+        if (next.installStatus === "installed" && next.installedVersion === skill.version) {
+          setReported(true);
+          onReported(next);
+          return;
+        }
+      } catch {
+        // Transient read failures leave the current action untouched; the next check can recover.
+      }
+      if (active) timer = window.setTimeout(() => void check(), 3000);
+    };
+    void check();
+    return () => {
+      active = false;
+      if (timer !== null) window.clearTimeout(timer);
+    };
+  }, [id, onReported, reported, skill.version]);
+
+  // The Companion installer reads packages, confirms personal install state, and performs the
+  // non-replayable secret retrieval flow with read-only skill and secret scopes.
   const ensureToken = useCallback(async () => {
     if (token) return token;
-    const issued = await issueToken(["skills:read"]);
+    const issued = await issueToken(["skills:read", "secrets:read"]);
     setToken(issued.token);
     return issued.token;
   }, [token]);
   const regenToken = useCallback(async () => {
-    const issued = await issueToken(["skills:read"]);
+    const issued = await issueToken(["skills:read", "secrets:read"]);
     setToken(issued.token);
     return issued.token;
   }, []);
@@ -1677,13 +1765,13 @@ export function InstallDialog({ skill, onClose }: { skill: SkillVM; onClose: () 
   const path = targetPath(target, id);
   const base = apiBase();
   const buildPrompt = (tok: string) =>
-    `You are installing the Companion skill ${id}.
+    `You are ${updating ? "updating" : "installing"} the Companion skill ${id}.
 
 Version: ${version}
 Package URL: ${base}/skills/${id}/versions/${version}/package
 Authorization header: Bearer ${tok}
 
-Choose the right local skills folder for the user's agent, download the package, extract it there, and confirm SKILL.md sits at the package root. Report the installed location when done.
+Use the installed Companion helper skill to install this exact skill and version into the appropriate local skills folder for the user's agent. Its workflow must run the server secret preflight, stop if required configuration is missing, ask for one global confirmation, redeem the one-time grant only after confirmation, and commit the package with its .env projection atomically. Confirm SKILL.md sits at the package root, report warnings for optional secrets, and report the ${updating ? "updated" : "installed"} location when done. Do not print, log, or persist any secret value outside that projection.
 
 When the skill is installed, confirm it to Companion so it shows as installed in the workspace: send POST ${base}/skills/${id}/install with header "Authorization: Bearer ${tok}" and JSON body {"version":"${version}","agent":"<the agent you are>","source":"agent"}.`;
   const displayPrompt = buildPrompt(token ?? "cmp_pat_…");
@@ -1720,7 +1808,7 @@ When the skill is installed, confirm it to Companion so it shows as installed in
     prompt: { hint: ["info", "The agent downloads the skill and installs it wherever it keeps skills."] },
     manual: {
       hint: skill.version ? ["folder", "Download the package, then extract it into " + path + "."] : ["info", "No published version to download yet."],
-      cta: { label: "Download .zip", icon: "download", run: download, disabled: !skill.version },
+      cta: { label: "Download package", icon: "download", run: download, disabled: !skill.version },
     },
   };
   const foot = FOOT[method];
@@ -1732,24 +1820,26 @@ When the skill is installed, confirm it to Companion so it shows as installed in
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      <div className="up" role="dialog" aria-modal="true" aria-label="Install skill" ref={dialogRef} tabIndex={-1}>
+      <div className="up" role="dialog" aria-modal="true" aria-label={actionLabel} ref={dialogRef} tabIndex={-1}>
         <div className="up__head">
           <div className="up__titles">
             <h2 className="up__title">
-              {result ? (
+              {reported || result ? (
                 "Done"
               ) : (
                 <>
-                  Install <span className="mono" style={{ fontWeight: 600 }}>{id}</span>
+                  {actionVerb} <span className="mono" style={{ fontWeight: 600 }}>{id}</span>
                 </>
               )}
             </h2>
             <p className="up__sub">
-              {result ? (
+              {reported ? (
+                updating ? "The newest version is installed." : "The skill is installed."
+              ) : result ? (
                 "The package is on your machine."
               ) : (
                 <>
-                  Install <span className="mono">{id}@{version}</span> on your machine, Claude Code,
+                  {actionVerb} <span className="mono">{id}@{version}</span> on your machine, Claude Code,
                   Codex, or OpenCode.
                 </>
               )}
@@ -1760,7 +1850,29 @@ When the skill is installed, confirm it to Companion so it shows as installed in
           </button>
         </div>
 
-        {result ? (
+        {reported ? (
+          <>
+            <div className="up__panel" role="status" aria-live="polite">
+              <div className="up-done">
+                <span className="up-done__badge">
+                  <Icon name="check" size={26} />
+                </span>
+                <h3 className="up-done__title">{updating ? "Skill updated" : "Skill installed"}</h3>
+                <p className="up-done__sub">
+                  Companion received the {updating ? "update" : "install"} report for{" "}
+                  <span className="mono">{id}@{version}</span>.
+                </p>
+              </div>
+            </div>
+            <div className="up__foot">
+              <span className="up__footspacer" />
+              <button className="btn-primary" type="button" onClick={onClose}>
+                <Icon name="arrow-right" size={14} />
+                Done
+              </button>
+            </div>
+          </>
+        ) : result ? (
           <>
             <div className="up__panel" role="status" aria-live="polite">
               <InstallDone result={result} />
@@ -1840,20 +1952,24 @@ When the skill is installed, confirm it to Companion so it shows as installed in
                       <span className="inline-code">{id}</span> and installs it in the right skills folder.
                     </p>
                     <div className="up-step">
-                      <StepLabel n="1">Access token</StepLabel>
+                      <StepLabel n="1">Secret configuration</StepLabel>
+                      <SkillSecretConfiguration slug={id} canSuggest={false} />
+                    </div>
+                    <div className="up-step">
+                      <StepLabel n="2">Access token</StepLabel>
                       <TokenRow
                         token={token}
                         ensure={ensureToken}
                         regen={regenToken}
                         hint={
                           <>
-                            Scoped to <b>skills:read</b>, expires in 90 days.
+                            Scoped to <b>skills:read + secrets:read</b>, expires in 90 days.
                           </>
                         }
                       />
                     </div>
                     <div className="up-step">
-                      <StepLabel n="2">Prompt</StepLabel>
+                      <StepLabel n="3">Prompt</StepLabel>
                       <CodeBlock
                         text={displayPrompt}
                         scroll
@@ -1868,6 +1984,9 @@ When the skill is installed, confirm it to Companion so it shows as installed in
                     <p className="up-panel__lede">
                       Download the packaged skill and extract it into the selected skills folder.
                     </p>
+                    <div className="up-errblock up-errblock--warn" role="note">
+                      Manual download does not configure secrets and does not mark this installation ready.
+                    </div>
                     <div className="up-step">
                       <StepLabel n="1">Install location</StepLabel>
                       <TargetSeg value={target} onChange={setTarget} />

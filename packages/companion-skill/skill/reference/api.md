@@ -2,7 +2,8 @@
 
 Base URL is `COMPANION_API_URL` (ends in `/v1`). The active workspace id is
 `COMPANION_WORKSPACE_ID` (`organizations.id`). Authenticate management requests with
-`Authorization: Bearer $COMPANION_TOKEN`. The token is scoped to `skills:read` + `skills:write`.
+`Authorization: Bearer $COMPANION_TOKEN`. The token is scoped to `skills:read` + `skills:write` +
+`secrets:read` + `secrets:write`.
 The public preview endpoint documented below intentionally does not use this token.
 
 Resolve those values from the environment first. If either variable is missing, read the dedicated
@@ -32,8 +33,7 @@ For the legacy flat shape `{ "apiUrl": "...", "token": "..." }`, use those value
 token-supported `GET /local-skills/companion` to read its `workspaceId` before writing local
 inventory. Never print the token back to the user.
 
-These are the Companion skill-management endpoints a personal access token (`skills:read` +
-`skills:write`) can call:
+These are the Companion skill-management endpoints a personal access token can call:
 
 | Action | Method & path | Scope |
 | --- | --- | --- |
@@ -73,7 +73,127 @@ These are the Companion skill-management endpoints a personal access token (`ski
 | Current bundled Companion skill status + workspace id | `GET /local-skills/companion` | `skills:read` |
 | Download bundled Companion skill package | `GET /local-skills/companion/package` | `skills:read` |
 | Confirm this skill installed | `POST /local-skills/companion/installed` | `skills:write` |
+| Create a write-only secret | `POST /secrets` | `secrets:write` |
+| Update secret metadata, audience, or recipients | `PATCH /secrets/{id}` | `secrets:write` |
+| Rotate a secret value | `POST /secrets/{id}/rotate` | `secrets:write` |
+| Delete a secret | `DELETE /secrets/{id}` | `secrets:write` |
+| List authorized secret metadata | `GET /secrets` | `secrets:read` |
+| Read authorized secret metadata | `GET /secrets/{id}` | `secrets:read` |
+| Read skill secret configuration | `GET /skills/{slug}/secret-configuration?version={version}` | `secrets:read` |
+| Bind/unbind a secret for the current user | `PUT/DELETE /skills/{slug}/secret-bindings/{slotId}` | `secrets:write` |
+| Manage a shared suggestion | `PUT/DELETE /skills/{slug}/secret-suggestions/{slotId}` | `secrets:write` |
+| Accept a shared suggestion | `POST /skills/{slug}/secret-suggestions/{slotId}/accept` | `secrets:write` |
+| Preflight exact skill/dependency secret versions | `POST /secret-retrievals/preflight` | `secrets:read` |
+| Create a 60-second retrieval grant | `POST /secret-retrievals/{planId}/grant` | `secrets:read` |
+| Redeem a grant once | `POST /secret-grants/redeem` | `secrets:read` |
 | Fetch companion.json v2 schema | `GET /v1/schemas/companion-manifest.v2.schema.json` | Public |
+
+## Secret bindings and retrieval
+
+`companion.json.environment.secrets[ENV_KEY].slotId` is an optional UUID on input and always stable
+after normalization. Preserve an existing `slotId` when renaming its environment key. Requirements
+returned by skill endpoints expose the same identity as `slot_id`; ordinary `environment.env`
+variables do not use the vault.
+
+PAT automation has the same Secrets-management capabilities as its user inside the token's workspace.
+Prefer the bundled helper so a new value never enters argv or output and can be bound to a declared
+skill slot in the same workflow:
+
+```sh
+python3 scripts/create_secret.py --name "Production API key" --key SERVICE_API_KEY
+printf '%s' "$SECRET_VALUE" | python3 scripts/create_secret.py \
+  --name "Production API key" --key SERVICE_API_KEY --audience organization --value-stdin --json
+python3 scripts/create_secret.py \
+  --name "Production API key" --key SERVICE_API_KEY --audience organization --skill deploy-service
+```
+
+The helper calls:
+
+```http
+POST /secrets
+Content-Type: application/json
+
+{
+  "name": "Production API key",
+  "key": "SERVICE_API_KEY",
+  "value": "<write-only value>",
+  "audience": "personal | restricted | organization",
+  "recipient_ids": []
+}
+```
+
+The `201` response is metadata-only and never contains `value`. For `restricted`, pass one or more
+recipient user ids with repeated `--recipient`; the server rejects non-members. Always confirm the
+audience and recipients with the user before creation. A token needs `secrets:write`; older Companion
+tokens must be regenerated from the Use prompt.
+
+With `--skill`, the helper first calls `GET /skills/{slug}/secret-configuration`, resolves the unique
+slot whose `env_key` matches `--key`, then calls `PUT /skills/{slug}/secret-bindings/{slotId}` with the
+new metadata-only `secret_id`. Slot validation happens before the helper reads the secret value.
+
+The same PAT may perform every other vault and binding mutation with `secrets:write`:
+
+- `PATCH/DELETE /secrets/{id}`, `POST /secrets/{id}/rotate`;
+- `PUT/DELETE /skills/{slug}/secret-bindings/{slotId}`;
+- `PUT/DELETE /skills/{slug}/secret-suggestions/{slotId}` and
+  `POST /skills/{slug}/secret-suggestions/{slotId}/accept`.
+
+These routes still enforce the token's workspace, the user's ownership or audience access, the target
+skill's visibility, and stable slot existence. A PAT never gains cross-workspace or another owner's
+secret access.
+
+Retrieval uses `secrets:read`. Start an install/sync with a metadata-only preflight:
+
+```http
+POST /secret-retrievals/preflight
+Content-Type: application/json
+
+{
+  "operation_id": "5e90cf51-d5c9-47a9-bf23-a78bf717c649",
+  "skills": [{ "slug": "incident-summary", "version": "1.4.0" }],
+  "direct": []
+}
+```
+
+The response contains `plan_id`, five-minute `expires_at`, the exact root/dependency versions and
+slot statuses, opaque tombstones, and `blockers`/`warnings`. It never contains a value. A required
+missing slot blocks before local mutation; an optional missing slot only warns.
+
+After one global user confirmation:
+
+```http
+POST /secret-retrievals/{planId}/grant
+{}
+
+POST /secret-grants/redeem
+{ "grant": "cmp_grant_…" }
+```
+
+The grant expires after 60 seconds, is stored server-side only as a hash, and is consumed once. The
+server rechecks membership, ACL, revocation, and the planned exact version during preflight, grant,
+and redemption. Keep the redemption response in memory and write only the final private `.env`;
+never put a value or grant in logs, errors, analytics, packages, credentials, manifests, or lockfiles.
+Rotation after preflight preserves the planned version. Any access loss invalidates the entire
+redemption and requires a new preflight.
+
+For a manual profile, send no skills and one `direct` item:
+
+```json
+{
+  "operation_id": "5e90cf51-d5c9-47a9-bf23-a78bf717c649",
+  "skills": [],
+  "direct": [{
+    "secret_id": "a6b47409-4a02-4d8a-9df7-c50d2b1365e1",
+    "env_key": "SERVICE_TOKEN",
+    "profile": "operations"
+  }]
+}
+```
+
+The bundled scripts project skill values under
+`~/.companion/secrets/<workspace>/<skill>/.env` and manual values under
+`~/.companion/secrets/<workspace>/_manual/<profile>/.env` with `0700` directories, `0600` files,
+same-filesystem staging, exclusive locks, symlink/traversal refusal, and rollback markers.
 
 Public org-skill previews are separate from PAT-authenticated management. Use the `share_token`
 returned on skill rows to build the web URL `/s/{share_token}` or to fetch metadata directly:
@@ -187,6 +307,36 @@ skill, plus any blocking dependency issues. **`POST /skills/{slug}/share`** is t
 personal skill into the org library (owner only, one-way). Sharing is atomic and includes those private
 dependencies automatically; the response includes `shared_dependencies`. A skill name (slug) is unique
 across both libraries in a workspace.
+
+## Free and Pro entitlements
+
+Self-hosted workspaces are fully unlocked. Managed SaaS Free workspaces apply the same gates to
+session and PAT skill operations. Billing endpoints are intentionally session-only and are not part
+of this skill's PAT surface.
+
+An entitlement refusal is HTTP `403` with this shape:
+
+```json
+{
+  "code": "org_skill_limit_reached",
+  "feature": "org_skill_create",
+  "message": "Free includes up to 20 organization skills. Upgrade to create another.",
+  "effectivePlan": "free",
+  "limit": 20,
+  "current": 20,
+  "upgradeUrl": "/settings?view=billing"
+}
+```
+
+Codes are `upgrade_required`, `org_skill_limit_reached`, and `catalog_frozen`. Free returns only
+installed org skills from `lib=mine`, locks personal skills/folders/Share, counts active and archived
+org skills toward the 20-skill limit, and exposes only the current version. At exactly 20, updating an
+existing org skill is still allowed. Above 20, publish, rename, restore, and Share are frozen, while
+read, install, download, and archive remain available. Older version package/file requests return
+`upgrade_required` with `feature: "skill_history"`.
+
+Treat these responses as final product gates: do not retry, switch scope, or probe hidden personal
+resources. Surface the message and direct a signed-in Owner/Admin to `upgradeUrl`.
 
 ## Upload bodies and labels
 
@@ -436,17 +586,16 @@ treat it as a version identity reference, not a byte check of the download. To c
 check that `SKILL.md` is at the package root and `companion.json.version` matches the version you
 fetched.
 
-Before the Companion skill installs or updates a workspace-published skill, it must resolve the
-transitive `GET /skills/{slug}/dependencies` closure, inspect every target package's
-`companion.json.environment.secrets`, and install dependencies before the requested root skill.
-Secrets marked `required: true` block installation until the user confirms they are already
-available/configured, or explicitly authorizes installing without them; `install_skill.py` records
-that confirmation with `--confirm-required-secrets`. The agent must never ask the user to paste
-secret values. Optional secrets and non-secret environment variables are surfaced as setup notes only.
-If required secrets are not confirmed and no override is given, stop before downloading/replacing
-files, calling install endpoints, or writing `~/.companion/skills.lock.json`. Missing, archived,
-cycle-blocked, not-openable, locally customized, or untracked dependencies also stop the root install.
-This guard does not apply to the bundled Companion self-update endpoints under `/local-skills/companion`.
+Before install/update/sync, Companion sends the requested root/version to
+`POST /secret-retrievals/preflight`; the server resolves its exact dependency closure and bindings.
+Required missing slots block before mutation and optional missing slots warn. After one global
+confirmation, `install_skill.py --confirm-secrets` creates and redeems the one-time grant, prepares
+all packages, and commits packages with private `.env` projections. It never asks for or prints a
+value. Legacy flat credentials may still install packages with no secret projection, but a
+secret-bearing install requires refreshed schema-v2 credentials with a stable workspace id before
+grant creation. Missing, archived, cycle-blocked, not-openable, locally customized, or untracked dependencies
+also stop the root install. The bundled Companion self-update endpoints remain value-free and do not
+use this retrieval flow.
 
 ## Local manifest checks
 
@@ -536,9 +685,11 @@ temporary directory, verify `SKILL.md` is at the package root, verify its `compa
 equals the `availableVersion` from `/local-skills/companion`, and verify the staged
 `companion.integrity.json` matches the staged package files. Only then replace the installed
 Companion skill folder. After replacement, call `POST /local-skills/companion/installed` with the
-installed version so the workspace status updates. After that install report succeeds, delete only
-the backup folder created for this self-update. Keep the backup if install reporting fails, and never
-delete older Companion backup folders that existed before this update.
+installed version so the workspace status updates. Delete the transient backup folder created for
+this self-update whether or not that install report succeeds. If reporting fails after replacement,
+keep the newly installed folder in place, delete the transient backup, and report that confirmation
+failed. Any older `companion.backup-*`, `.companion-backup.*`, `*.companion-backup*`, or
+`*.backup-*` folder containing `SKILL.md` is stale local state and should be deleted.
 
 Do not use `/skills/{slug}/download` or `/skills/{slug}/versions/{version}/package` to update the
 built-in Companion skill. Those endpoints are for workspace-published skills.

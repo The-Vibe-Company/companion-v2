@@ -4,10 +4,10 @@ import { z } from "zod";
 export const API_TOKEN_PREFIX = "cmp_pat_";
 
 /** Capability scopes a personal access token can carry. */
-export const tokenScopeSchema = z.enum(["skills:read", "skills:write"]);
+export const tokenScopeSchema = z.enum(["skills:read", "skills:write", "secrets:read", "secrets:write"]);
 export type TokenScope = z.infer<typeof tokenScopeSchema>;
 
-export const TOKEN_SCOPES: readonly TokenScope[] = ["skills:read", "skills:write"] as const;
+export const TOKEN_SCOPES: readonly TokenScope[] = ["skills:read", "skills:write", "secrets:read", "secrets:write"] as const;
 
 /** Body of `POST /v1/tokens` — request a scoped token. */
 export const issueTokenInputSchema = z.object({

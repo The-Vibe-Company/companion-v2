@@ -183,6 +183,19 @@ export function SettingsSidebar({
               meta={inviteCount ? String(inviteCount) : undefined}
               onClick={() => goTo({ view: "invitations" })}
             />
+            <NavItem
+              active={is("billing")}
+              icon="credit-card"
+              label="Billing"
+              meta={
+                ctx.billing?.billingEnabled
+                  ? ctx.billing.entitlements.computedPlan === "pro"
+                    ? "Pro"
+                    : "Free"
+                  : "Included"
+              }
+              onClick={() => goTo({ view: "billing" })}
+            />
           </div>
         </div>
       </nav>

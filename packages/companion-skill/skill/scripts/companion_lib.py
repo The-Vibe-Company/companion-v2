@@ -61,6 +61,46 @@ def api_download_bytes(base: str, token: str, path: str) -> bytes:
         fail(f"GET {url} failed: {exc.reason}")
 
 
+def api_post_json(base: str, token: str, path: str, payload: dict[str, Any] | None = None) -> Any:
+    """POST JSON to Companion without ever including the bearer token in errors or persisted state."""
+    url = f"{base.rstrip('/')}{path}"
+    body = json.dumps(payload or {}).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=body,
+        method="POST",
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        response_body = exc.read().decode("utf-8", errors="replace")
+        fail(f"POST {url} failed with HTTP {exc.code}: {response_body}")
+    except urllib.error.URLError as exc:
+        fail(f"POST {url} failed: {exc.reason}")
+
+
+def api_put_json(base: str, token: str, path: str, payload: dict[str, Any] | None = None) -> Any:
+    """PUT JSON to Companion without ever including the bearer token in errors or persisted state."""
+    url = f"{base.rstrip('/')}{path}"
+    body = json.dumps(payload or {}).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=body,
+        method="PUT",
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        response_body = exc.read().decode("utf-8", errors="replace")
+        fail(f"PUT {url} failed with HTTP {exc.code}: {response_body}")
+    except urllib.error.URLError as exc:
+        fail(f"PUT {url} failed: {exc.reason}")
+
+
 def companion_home() -> Path:
     """Return ~/.companion, honoring COMPANION_HOME for tests and overrides."""
     override = os.environ.get("COMPANION_HOME")

@@ -12,6 +12,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@companion/billing": "workspace:*",
     "@companion/contracts": "workspace:*",
     "@companion/db": "workspace:*",
     "@companion/skills": "workspace:*",

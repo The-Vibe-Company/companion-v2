@@ -6,6 +6,7 @@ import { Icon } from "../Icon";
 import { UserAvatar } from "../UserAvatar";
 import { relativeTime } from "@/lib/format";
 import type { MeVM, SkillVM } from "@/lib/types";
+import { InstallBadge } from "./blocks";
 
 function metadataKeyLabel(key: string): string {
   return key.startsWith("companion_") ? key.slice("companion_".length).replaceAll("_", " ") : key;
@@ -264,6 +265,12 @@ export function StatusCard({ skill, libLabel }: { skill: SkillVM; libLabel?: str
           {badge.label}
         </span>
       </div>
+      {skill.scope === "org" && skill.installStatus !== "none" && (
+        <div className="statuscard__row">
+          <span className="statuscard__k">Installation</span>
+          <InstallBadge state={skill.installStatus} />
+        </div>
+      )}
       <div className="statuscard__row">
         <span className="statuscard__k">Version</span>
         <span className="statuscard__v mono">{skill.version ?? "—"}</span>

@@ -55,10 +55,11 @@ function render(skills: SkillVM[]) {
       library: "org",
       scopeKind: "all",
       breadcrumb: ["All skills"],
-      activeLabel: null,
       onOpen: vi.fn(),
       onToggleStar: vi.fn(),
       onUpload: vi.fn(),
+      actorId: "user-1",
+      onPrimaryAction: vi.fn(),
       lastId: null,
       filters: [],
       onToggleFilter: vi.fn(),
@@ -107,5 +108,26 @@ describe("ListView contributors", () => {
     expect(html).toContain("invalid");
     expect(html).toContain("validating");
     expect(html).toContain("invalid-pill--pending");
+    expect(html).not.toContain("Install skill broken-skill");
+    expect(html).not.toContain("Install skill pending-skill");
+  });
+
+  it("uses the contextual action matrix for compact row CTAs", () => {
+    const html = render([
+      skill({ id: "fresh" }),
+      skill({ id: "current", installStatus: "installed", installedVersion: "1.0.0" }),
+      skill({ id: "outdated", installStatus: "update", installedVersion: "0.9.0" }),
+      skill({ id: "personal", scope: "personal", source: "authored" }),
+    ]);
+
+    expect(html).toContain('aria-label="Install skill fresh"');
+    expect(html).toContain('<span class="rowact__label">Install</span>');
+    expect(html).not.toContain('<span class="rowact__label">Install skill</span>');
+    expect(html).not.toContain('aria-label="Install skill current"');
+    expect(html).toContain('aria-label="Update skill outdated"');
+    expect(html).toContain('title="Update skill"');
+    expect(html).toContain('<span class="rowact__label">Update</span>');
+    expect(html).not.toContain('<span class="rowact__label">Update skill</span>');
+    expect(html).toContain('aria-label="Share to organization personal"');
   });
 });

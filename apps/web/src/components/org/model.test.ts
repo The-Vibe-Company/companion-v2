@@ -3,7 +3,7 @@ import { parseSettingsView } from "./model";
 
 describe("parseSettingsView", () => {
   it("accepts every current pane view", () => {
-    for (const view of ["profile", "preferences", "models", "artifacts", "apikeys", "general", "org-models", "members", "invitations"] as const) {
+    for (const view of ["profile", "preferences", "models", "artifacts", "apikeys", "general", "org-models", "members", "invitations", "billing"] as const) {
       expect(parseSettingsView(view)).toBe(view);
     }
   });

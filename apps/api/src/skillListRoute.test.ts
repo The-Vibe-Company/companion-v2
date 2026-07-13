@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+process.env.COMPANION_SECRETS_MASTER_KEY ??= Buffer.alloc(32, 7).toString("base64");
+
 const serviceMocks = vi.hoisted(() => {
   const noop = vi.fn(async () => undefined);
   return {
@@ -71,6 +73,21 @@ const serviceMocks = vi.hoisted(() => {
     setPersonalLabelIcon: noop,
     renamePersonalLabel: noop,
     deletePersonalLabel: noop,
+    listSecrets: vi.fn(),
+    getSecret: vi.fn(),
+    createSecret: vi.fn(),
+    updateSecret: vi.fn(),
+    rotateSecret: vi.fn(),
+    deleteSecret: vi.fn(),
+    getSkillSecretConfiguration: vi.fn(),
+    setSkillSecretBinding: vi.fn(),
+    removeSkillSecretBinding: vi.fn(),
+    setSkillSecretSuggestion: vi.fn(),
+    removeSkillSecretSuggestion: vi.fn(),
+    acceptSkillSecretSuggestion: vi.fn(),
+    preflightSecretRetrieval: vi.fn(),
+    createSecretRetrievalGrant: vi.fn(),
+    redeemSecretRetrievalGrant: vi.fn(),
     ensureUserBootstrap: noop,
     resolveApiToken: vi.fn(),
     resolveDependencyReferences: vi.fn(async (input: { slugs: string[] }) =>
@@ -124,8 +141,178 @@ function tokenFor(header: string | undefined) {
   if (header === "read-b") return { actor: actorB, orgId: "org-1", scopes: ["skills:read"] };
   if (header === "write-only") return { actor: actorA, orgId: "org-1", scopes: ["skills:write"] };
   if (header === "read-write") return { actor: actorA, orgId: "org-1", scopes: ["skills:read", "skills:write"] };
+  if (header === "secrets-a") return { actor: actorA, orgId: "org-1", scopes: ["secrets:read"] };
+  if (header === "secrets-write-a") return { actor: actorA, orgId: "org-1", scopes: ["secrets:write"] };
   return null;
 }
+
+describe("Secrets PAT boundary and retrieval protocol", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    authMocks.getSession.mockResolvedValue(null);
+    serviceMocks.resolveApiToken.mockImplementation(async (token: string) => tokenFor(token));
+  });
+
+  it("allows authorized metadata reads only with secrets:read", async () => {
+    serviceMocks.listSecrets.mockResolvedValue([{ id: "meta-only", name: "Deploy key" }]);
+    const allowed = await app.request("/v1/secrets", { headers: { Authorization: "Bearer secrets-a" } });
+    expect(allowed.status).toBe(200);
+    await expect(allowed.json()).resolves.toEqual([{ id: "meta-only", name: "Deploy key" }]);
+    expect(serviceMocks.listSecrets).toHaveBeenCalledWith(expect.objectContaining({ actor: actorA, orgId: "org-1" }));
+
+    const denied = await app.request("/v1/secrets", { headers: { Authorization: "Bearer read-a" } });
+    expect(denied.status).toBe(401);
+  });
+
+  it("lets secrets:write create a write-only value", async () => {
+    const sentinel = "secret-value-that-must-not-return";
+    serviceMocks.createSecret.mockResolvedValue({ id: "secret-1", name: "Deploy key", key: "DEPLOY_KEY", audience: "personal" });
+    const denied = await app.request("/v1/secrets", {
+      method: "POST",
+      headers: { Authorization: "Bearer secrets-a", "content-type": "application/json" },
+      body: JSON.stringify({ name: "Deploy key", key: "DEPLOY_KEY", value: sentinel, audience: "personal", recipient_ids: [] }),
+    });
+    expect(denied.status).toBe(400);
+
+    const created = await app.request("/v1/secrets", {
+      method: "POST",
+      headers: { Authorization: "Bearer secrets-write-a", "content-type": "application/json" },
+      body: JSON.stringify({ name: "Deploy key", key: "DEPLOY_KEY", value: sentinel, audience: "personal", recipient_ids: [] }),
+    });
+    expect(created.status).toBe(201);
+    expect(JSON.stringify(await created.json())).not.toContain(sentinel);
+    expect(serviceMocks.createSecret).toHaveBeenCalledWith(expect.objectContaining({ actor: actorA, orgId: "org-1", value: expect.objectContaining({ value: sentinel }) }));
+  });
+
+  it("gives a secrets:write PAT parity with signed-in secret management", async () => {
+    const secretId = "a6b47409-4a02-4d8a-9df7-c50d2b1365e1";
+    const slotId = "4c2fb48c-55a6-51b5-a7e9-0ec2c36f38f4";
+    const metadata = { id: secretId, name: "Deploy key", key: "DEPLOY_KEY", audience: "organization" };
+    const configuration = { skill_id: "skill-1", slug: "demo-skill", configured: true, blockers: 0, warnings: 0, slots: [] };
+    serviceMocks.updateSecret.mockResolvedValue(metadata);
+    serviceMocks.rotateSecret.mockResolvedValue(metadata);
+    serviceMocks.deleteSecret.mockResolvedValue(undefined);
+    serviceMocks.setSkillSecretBinding.mockResolvedValue(configuration);
+    serviceMocks.removeSkillSecretBinding.mockResolvedValue(configuration);
+    serviceMocks.setSkillSecretSuggestion.mockResolvedValue(configuration);
+    serviceMocks.removeSkillSecretSuggestion.mockResolvedValue(configuration);
+    serviceMocks.acceptSkillSecretSuggestion.mockResolvedValue(configuration);
+
+    const headers = { Authorization: "Bearer secrets-write-a", "content-type": "application/json" };
+    const update = await app.request(`/v1/secrets/${secretId}`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ name: "Updated deploy key" }),
+    });
+    expect(update.status).toBe(200);
+
+    const rotate = await app.request(`/v1/secrets/${secretId}/rotate`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ value: "rotated-value" }),
+    });
+    expect(rotate.status).toBe(200);
+
+    const bind = await app.request(`/v1/skills/demo-skill/secret-bindings/${slotId}`, {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ secret_id: secretId }),
+    });
+    expect(bind.status).toBe(200);
+
+    const unbind = await app.request(`/v1/skills/demo-skill/secret-bindings/${slotId}`, {
+      method: "DELETE",
+      headers,
+    });
+    expect(unbind.status).toBe(200);
+
+    const suggest = await app.request(`/v1/skills/demo-skill/secret-suggestions/${slotId}`, {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ secret_id: secretId }),
+    });
+    expect(suggest.status).toBe(200);
+
+    const unsuggest = await app.request(`/v1/skills/demo-skill/secret-suggestions/${slotId}`, {
+      method: "DELETE",
+      headers,
+    });
+    expect(unsuggest.status).toBe(200);
+
+    const accept = await app.request(`/v1/skills/demo-skill/secret-suggestions/${slotId}/accept`, {
+      method: "POST",
+      headers,
+    });
+    expect(accept.status).toBe(200);
+
+    const remove = await app.request(`/v1/secrets/${secretId}`, { method: "DELETE", headers });
+    expect(remove.status).toBe(200);
+
+    expect(serviceMocks.updateSecret).toHaveBeenCalledWith(expect.objectContaining({ actor: actorA, orgId: "org-1" }));
+    expect(serviceMocks.rotateSecret).toHaveBeenCalledWith(expect.objectContaining({ actor: actorA, orgId: "org-1" }));
+    expect(serviceMocks.setSkillSecretBinding).toHaveBeenCalledWith(expect.objectContaining({ actor: actorA, orgId: "org-1", slug: "demo-skill", slotId, secretId }));
+    expect(serviceMocks.setSkillSecretSuggestion).toHaveBeenCalledWith(expect.objectContaining({ actor: actorA, orgId: "org-1", slug: "demo-skill", slotId, secretId }));
+
+    const denied = await app.request(`/v1/skills/demo-skill/secret-bindings/${slotId}`, {
+      method: "PUT",
+      headers: { Authorization: "Bearer secrets-a", "content-type": "application/json" },
+      body: JSON.stringify({ secret_id: secretId }),
+    });
+    expect(denied.status).toBe(400);
+  });
+
+  it("rejects an oversized secret request before calling the service", async () => {
+    const oversized = await app.request("/v1/secrets", {
+      method: "POST",
+      headers: { Authorization: "Bearer secrets-write-a", "content-type": "application/json" },
+      body: JSON.stringify({ name: "Oversized", key: "TOO_LARGE", value: "x".repeat(129 * 1024), audience: "personal", recipient_ids: [] }),
+    });
+
+    expect(oversized.status).toBe(413);
+    await expect(oversized.json()).resolves.toMatchObject({ ok: false, error: expect.stringContaining("128 KiB") });
+    expect(serviceMocks.createSecret).not.toHaveBeenCalled();
+  });
+
+  it("runs preflight, grant, and one-time redemption behind secrets:read", async () => {
+    serviceMocks.preflightSecretRetrieval.mockResolvedValue({ plan_id: "plan-1", blockers: 0, warnings: 0, items: [], tombstones: [] });
+    serviceMocks.createSecretRetrievalGrant.mockResolvedValue({ grant: "cmp_grant_value", expires_at: "soon", item_count: 1 });
+    serviceMocks.redeemSecretRetrievalGrant.mockResolvedValue({ ok: true, value: { operation_id: "773941d6-bcb2-4c3b-b1a9-2eea1d17ecfd", items: [], tombstones: [] } });
+
+    const preflight = await app.request("/v1/secret-retrievals/preflight", {
+      method: "POST",
+      headers: { Authorization: "Bearer secrets-a", "content-type": "application/json" },
+      body: JSON.stringify({ operation_id: "773941d6-bcb2-4c3b-b1a9-2eea1d17ecfd", skills: [{ slug: "demo-skill" }], direct: [] }),
+    });
+    expect(preflight.status).toBe(200);
+
+    const grant = await app.request("/v1/secret-retrievals/2decd106-927d-4a99-9515-f9281038f944/grant", { method: "POST", headers: { Authorization: "Bearer secrets-a" } });
+    expect(grant.status).toBe(200);
+
+    const redeem = await app.request("/v1/secret-grants/redeem", {
+      method: "POST",
+      headers: { Authorization: "Bearer secrets-a", "content-type": "application/json" },
+      body: JSON.stringify({ grant: "cmp_grant_value" }),
+    });
+    expect(redeem.status).toBe(200);
+    expect(serviceMocks.redeemSecretRetrievalGrant).toHaveBeenCalledWith(expect.objectContaining({ grant: "cmp_grant_value", actor: actorA }));
+  });
+
+  it("returns 503 for every Secrets surface when the root key is missing without stopping the rest of the API", async () => {
+    const configured = process.env.COMPANION_SECRETS_MASTER_KEY;
+    delete process.env.COMPANION_SECRETS_MASTER_KEY;
+    try {
+      const secretResponse = await app.request("/v1/secrets", { headers: { Authorization: "Bearer secrets-a" } });
+      expect(secretResponse.status).toBe(503);
+      expect(serviceMocks.listSecrets).not.toHaveBeenCalled();
+
+      serviceMocks.getSkillPublicPreviewByShareToken.mockResolvedValue(null);
+      const ordinaryResponse = await app.request("/v1/public/skills/unknown");
+      expect(ordinaryResponse.status).toBe(404);
+    } finally {
+      process.env.COMPANION_SECRETS_MASTER_KEY = configured;
+    }
+  });
+});
 
 describe("GET /v1/public/skills/:token", () => {
   beforeEach(() => {

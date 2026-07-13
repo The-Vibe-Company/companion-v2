@@ -21,8 +21,9 @@ prompt, or set in the environment:
 - `COMPANION_API_URL` — the workspace API base, e.g. `https://companion.acme.dev/v1`.
 - `COMPANION_WORKSPACE_ID` — the Companion workspace id (`organizations.id`), used to key local
   credentials and install inventory.
-- `COMPANION_TOKEN` — a personal access token (`cmp_pat_…`) scoped to `skills:read` and
-  `skills:write`. Send it as `Authorization: Bearer $COMPANION_TOKEN`.
+- `COMPANION_TOKEN` — a personal access token (`cmp_pat_…`) scoped to `skills:read`,
+  `skills:write`, `secrets:read`, and `secrets:write`. Send it as
+  `Authorization: Bearer $COMPANION_TOKEN`.
 
 Resolve credentials in this order before any network call:
 
@@ -124,10 +125,11 @@ original Companion command unless this runtime can safely reload the updated ski
 in-process.
 
 If download, extraction, verification, replacement, or install reporting fails, stop without changing
-other skills. If replacement fails after moving files, restore the backup and stop. If install
-reporting fails after replacement, keep the backup and report its path so the user can recover
-manually. Never delete older Companion backup folders that predate this self-update. Avoid infinite
-loops by comparing exact semver and by reporting the installed version after replacement.
+other skills. If replacement fails after moving files, restore the original folder during the same
+operation and remove transient staging/backup folders before stopping. If install reporting fails
+after replacement, keep the new folder in place, delete the transient backup, and report the failed
+confirmation. Avoid infinite loops by comparing exact semver and by reporting the installed version
+after replacement.
 
 ## Mandatory preflight guard (run before create, update, install, or lockfile write)
 
@@ -199,6 +201,7 @@ Companion-specific declarations in `companion.json` at the package root:
     },
     "secrets": {
       "OPENAI_API_KEY": {
+        "slotId": "7fb1656b-240f-47c6-8728-6103b6f1044f",
         "required": true,
         "description": "Create this in your model gateway or ask an org admin."
       }
@@ -312,6 +315,37 @@ plus org skills reported as installed. `installed=true` narrows any list to skil
 not prove the files still exist on disk. Skill rows include `share_token`; for live org skills only,
 use it to build a clean public preview URL such as `/s/$share_token`.
 
+### Free and Pro workspace gates
+
+Self-hosted workspaces keep the full skills API. A managed SaaS workspace may enforce Free
+entitlements. The billing overview is session-only and PATs must not call it, so detect a gate from
+the skills API's structured HTTP 403 response and explain it instead of retrying:
+
+```json
+{
+  "code": "upgrade_required",
+  "feature": "personal_skills",
+  "message": "Personal skills are available on Pro.",
+  "effectivePlan": "free",
+  "upgradeUrl": "/settings?view=billing"
+}
+```
+
+The other codes are `org_skill_limit_reached` and `catalog_frozen`; quota responses can include
+`limit` and `current`. On Free:
+
+- `GET /skills?lib=mine` returns installed org skills only. Authored personal skills remain stored
+  but hidden; personal folder routes and Share are locked.
+- The org library includes up to 20 skills, counting active and archived rows. A new org publish can
+  be refused at the limit. If a legacy catalog is already above 20, publish, rename, restore, and
+  Share stay frozen; reading, installing, downloading, and archiving remain available.
+- Only the current version is exposed. Requests for an older package, file list, or file preview
+  return `upgrade_required` for `skill_history`.
+
+Do not work around a gate by switching scope, renaming, restoring, or retrying another endpoint. Tell
+the user what remains available and direct a signed-in Owner/Admin to `upgradeUrl`. Never request or
+use Billing routes with `COMPANION_TOKEN`.
+
 ### Public org-skill preview links
 
 Org skills have an anyone-with-the-link metadata preview. Personal skills do not; the user must first
@@ -359,26 +393,31 @@ use right now. Resolve the target tools, confirm with the user, then fan out:
    There can be many projects on the machine, so project-scope installs are tracked per repo in
    `<repo>/.companion/skills.lock.json`. For a project-scope install, confirm the current repo is the
    intended one (project scope requires a repo root).
-3. **Let the installer resolve dependencies and preflight everything.** `install_skill.py` reads the
-   root skill's dependency graph transitively, installs dependencies before the requested skill, and
-   stops before installing the requested skill if any dependency is missing, archived, cycle-blocked,
-   not openable, locally customized, untracked, or blocked on required secrets. Required secrets are
-   read from each package's `companion.json`; do not ask the user to paste values. After the user
-   confirms those secrets are already configured, pass `--confirm-required-secrets`.
+3. **Let the installer resolve dependencies and preflight everything.** `install_skill.py` resolves
+   the requested version and its dependency closure, then calls the server secret preflight before
+   any package download or local mutation. Required missing bindings block only this install;
+   optional missing bindings are warnings. Show the metadata-only plan once, get one global user
+   confirmation, then pass `--confirm-secrets`. Never ask the user to paste or reveal a value.
+   The legacy `--confirm-required-secrets` flag is rejected and never authorizes plaintext retrieval;
+   confirmation must be explicit with `--confirm-secrets`. Legacy flat credentials remain usable
+   for package-only installs, but any secret-bearing install stops before grant creation and asks for
+   a credential refresh so a stable workspace id is available for the projection path.
 
    ```sh
    python3 scripts/install_skill.py <slug> --scope user            # all configured tools, user-global
    python3 scripts/install_skill.py <slug> --scope both            # user-global + the current repo
    python3 scripts/install_skill.py <slug> --tools claude-code,codex,opencode --json
-   python3 scripts/install_skill.py <slug> --confirm-required-secrets --report
+   python3 scripts/install_skill.py <slug> --confirm-secrets --report
    ```
 
-   It checks the graph and local targets before package downloads, downloads each package only after
-   preflight passes, deploys every skill in dependency-first order into each `(tool, scope)` target,
-   records every target in the right lockfile, and prints a summary. A target whose on-disk folder was
-   customized locally is left untouched (`skipped_customized`) unless you pass `--force`, so an install
-   never clobbers local edits. If `--version` requests an older root version, dependencies still
-   resolve to their current published versions because Companion dependencies are not version-pinned.
+   After confirmation it creates and immediately redeems a one-time grant, keeps values in memory,
+   downloads and prepares the complete package set, then swaps each package with its `.env`
+   projection. Projections live under `~/.companion/secrets/<workspace>/<skill>/.env` with private
+   directory/file permissions, an exclusive lock, same-filesystem staging, and rollback markers.
+   Every later secrets operation first recovers interrupted markers across the workspace and removes
+   transient plaintext backups, including tombstone-only syncs.
+   Lockfiles store only projection ids, slots, versions, keys, and paths, never values. A target whose
+   folder was customized locally remains untouched unless `--force` is explicit.
 4. **Report once.** After the dependency-first fan-out, send a single aggregate
    `POST /skills/{slug}/install` for the requested root skill with the
    installed version and an `agent` label listing the tools (for example `"Claude Code, Codex, OpenCode"`). The
@@ -471,6 +510,7 @@ confirmed block into the skill's `companion.json` and **re-validate** before pub
     },
     "secrets": {
       "AZURE_OPENAI_API_KEY": {
+        "slotId": "f52ad9f7-f4f0-4d98-8b13-a1ee4a93b021",
         "required": true,
         "description": "Azure OpenAI key. Ask your org admin to provision an Azure OpenAI resource."
       }
@@ -484,14 +524,50 @@ declares environment entries, surface them to the user so they can set the secre
 variables before running it. Declarations travel inside `companion.json` — there are no extra upload
 parameters and never any secret values.
 
-Before installing or updating a workspace-published skill, inspect the target package's
-`companion.json.environment.secrets`. Treat only secrets with `required: true` as blocking. Never ask
-the user to paste or reveal secret values; ask them to confirm that every required secret is already
-available/configured, or to explicitly authorize installing without those secrets ready. If they do
-neither, stop before downloading, replacing files, calling install endpoints, or writing
-`~/.companion/skills.lock.json`. Optional secrets and non-secret environment variables are setup
-notes only and do not block installation. This guard does not apply to the built-in Companion
-self-update flow under `/local-skills/companion`.
+Every secret declaration has a stable `slotId`. Preserve it when renaming an environment key; omit it
+only for a genuinely new slot. Historical packages without ids are normalized by the server using a
+deterministic id derived from the workspace skill id and original key.
+
+To create a vault entry, confirm its name, environment key, audience, and (for `restricted`) exact
+recipients with the user, then run `python3 scripts/create_secret.py --name <name> --key <ENV_KEY>`.
+Use `--audience personal|restricted|organization` and repeat `--recipient <user-id>` for restricted
+access. Let the helper prompt privately for the value, or pipe exact stdin with `--value-stdin`;
+never place the value in a command argument, chat response, log, manifest, or lockfile. The
+`secrets:write` response is value-free.
+
+When the secret belongs to a skill declaration, add `--skill <slug>`. The helper reads that skill's
+metadata-only secret configuration first, resolves the stable slot whose environment key matches
+`--key`, creates the secret, and immediately binds it for the current user. This is the preferred
+agent workflow because it completes creation and association without a browser:
+
+```sh
+python3 scripts/create_secret.py \
+  --name "Azure image generation" \
+  --key AZURE_OPENAI_API_KEY \
+  --audience organization \
+  --skill generate-image-tools
+```
+
+A Companion PAT has the same Secrets-management capabilities as its user inside the token's
+workspace. Use `secrets:write` for create, update, rotation, deletion, binding, and shared suggestion
+mutations; use `secrets:read` for metadata, configuration, and retrieval. The normal owner, audience,
+workspace, and skill-access checks still apply. Never use browser automation merely to work around a
+PAT restriction on these routes.
+
+Before install/update/sync, call `POST /secret-retrievals/preflight` for the requested root skill and
+version. The server resolves the exact dependency closure and returns metadata-only statuses. A
+required missing binding blocks before any mutation; an optional missing binding is a warning. After
+one global confirmation, create a 60-second grant and redeem it once. A rotation keeps the exact
+version planned; an ACL/membership/revocation change invalidates the whole redemption and requires a
+new preflight. Never print the grant or returned values.
+
+Use `python3 scripts/sync_secrets.py sync <slug> --confirm` after rotations, binding changes, slot
+renames/removals, or tombstones. `sync --all --confirm` continues across skipped/failed skills and
+reports `updated / skipped / errors`. `sync --all --offline` preserves the last coherent local copy
+and explicitly marks it potentially stale; offline mode cannot promise immediate revocation. For an
+explicit retrieval outside a skill, use
+`python3 scripts/sync_secrets.py manual <profile> <secret-id> <ENV_KEY> --confirm`; it writes under
+`~/.companion/secrets/<workspace>/_manual/<profile>/.env`.
 
 ### Publish a skill
 
@@ -802,6 +878,16 @@ Allowed skills API tasks:
 - Preview one browser-native file with
   `GET /skills/$SLUG/versions/$VERSION/files/content?path=$PATH` when the file list marks it as
   text, image, or PDF. Unsupported files return 415; download the package to inspect them.
+- Manage write-only secrets with `secrets:write` through `scripts/create_secret.py`; the helper reads
+  the value from a private prompt or exact stdin, never from an argument, and never prints it. It can
+  create `personal`, `restricted`, or `organization` audiences after the user explicitly confirms
+  the audience and recipients. Pass `--skill <slug>` to resolve the matching stable slot and bind the
+  newly created secret without a browser. PAT callers may also update, rotate, delete, bind, unbind,
+  suggest, or accept suggestions with `secrets:write`, subject to the same ownership and workspace
+  checks as the signed-in user.
+- Read authorized secret metadata and skill configuration, then run preflight/grant/redemption with
+  `secrets:read`. Use retrieval routes only through `install_skill.py` or `sync_secrets.py`; never log
+  or persist the grant/redemption response.
 - Organize skills with labels: list the org tree with `GET /labels` or the personal tree with
   `GET /personal-labels`; create, rename, recolor, set the icon, or delete folders with the matching
   label routes; file or unfile a skill with `POST` / `DELETE /skills/$SLUG/labels` for org skills or
@@ -845,21 +931,16 @@ out of date, or not published yet (a `404` means the slug is not in this workspa
 
 ### Install updates
 
-For an out-of-date folder, take the current `version` from the `download` response above. Before
-fetching the package or replacing files, apply the required-secret readiness guard from "Declare
-required secrets and environment variables": required secrets must be confirmed ready, or the user
-must explicitly authorize installing without them. Then fetch that version's package and replace the
-files in place:
+For an out-of-date folder, re-run the same server preflight and atomic install workflow rather than
+unzipping over the folder manually:
 
 ```sh
-curl -sL "$COMPANION_API_URL/skills/$SLUG/versions/$VERSION/package" \
-  -H "Authorization: Bearer $COMPANION_TOKEN" -o update.zip
+python3 scripts/install_skill.py "$SLUG" --version "$VERSION" --confirm-secrets --report
 ```
 
-Unzip it over the folder, then confirm `SKILL.md` sits at the package root and
-`companion.json.version` matches the version you fetched. (Companion's `checksum` is a hash of
-the canonical tar, not of this repackaged zip, so use it as a version identity reference, not a
-byte hash of `update.zip`.)
+The installer prepares the complete package set before mutation and commits each package with its
+projection. On a swap failure it restores both; after an interrupted process, the private transaction
+marker restores the previous coherent pair on the next attempt.
 
 ### Update this Companion skill
 
@@ -885,16 +966,18 @@ current folder, replaces it, and reports the install with
 folder; report the modified or missing files and ask the user whether to merge or reinstall the
 official package manually.
 
-After a successful replacement and successful install report, delete only the backup folder created
-for that self-update:
+Backups are transient implementation details. After replacement, delete the backup folder created for
+that self-update whether or not the install report succeeds:
 
 ```sh
 rm -rf "$backup"
-echo "Deleted Companion self-update backup at $backup"
+echo "Deleted transient Companion self-update backup at $backup"
 ```
 
-Do not delete older `companion.backup-*` or `.companion-backup.*` folders that existed before this
-self-update. If install reporting fails, keep the backup and report its path.
+If install reporting fails after replacement, keep the newly installed folder in place, delete the
+transient backup, and report that confirmation failed. Any older `companion.backup-*`,
+`.companion-backup.*`, `*.companion-backup*`, or `*.backup-*` folder containing `SKILL.md` is stale
+local state and should be deleted rather than kept as a rollback copy.
 
 ## Confirm installation (run once, at the end of install)
 
@@ -906,7 +989,7 @@ skills view shows the correct status and version. Report the version from this s
 curl -s "$COMPANION_API_URL/local-skills/companion/installed" \
   -H "Authorization: Bearer $COMPANION_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"version":"1.13.0","agent":"<your assistant name>"}'
+  -d '{"version":"1.21.0","agent":"<your assistant name>"}'
 ```
 
 A `{ "ok": true, "status": "installed" }` response confirms the workspace now knows this machine has

@@ -10,6 +10,7 @@ import type {
   LocalSkillRow,
   SkillFilterPreferences,
   SkillSharePlan,
+  BillingOverview,
 } from "@companion/contracts";
 import {
   archiveSkill as archiveSkillRpc,
@@ -17,6 +18,7 @@ import {
   createLabel as createLabelRpc,
   deleteLabel as deleteLabelRpc,
   fetchArchivedSkills,
+  fetchSkillDownloadUrl,
   fetchSkillLibrary,
   markSkillInstalled,
   markSkillUninstalled,
@@ -72,6 +74,9 @@ import { useOrgActions } from "../org/useOrgActions";
 import { parseSettingsView } from "../org/model";
 import type { SettingsAppData, SettingsDialog, SettingsIntent, SettingsRoute, SettingsView } from "../org/model";
 import { matchFilters, type Filter } from "./filters";
+import { deriveTreeRows } from "./sidebarTree";
+import type { TreeRow } from "./sidebarTree";
+import type { SkillAction } from "./skillActions";
 
 const SETTINGS_LOAD_ERROR =
   "Refresh the page to try again. If the problem continues, check that the API and database are reachable.";
@@ -115,17 +120,6 @@ function settingsErrorMessage(error: unknown): string {
  * in the client from skills + explicit `labels` rows so optimistic assigns / renames re-derive
  * without a refetch.
  */
-export interface TreeRow {
-  path: string;
-  leafName: string;
-  displayName: string | null;
-  depth: number;
-  count: number; // de-duped roll-up of skills filed at this path OR any descendant
-  color: LabelColor | null;
-  icon: LabelIcon | null;
-  hasChildren: boolean;
-}
-
 type ScopeKind = "all" | "starred" | "installed" | "label";
 /** The active workspace slice: a library (`mine`/`org`) + a kind within it. */
 type Selection = { lib: SkillsLibrary; kind: ScopeKind; label?: string };
@@ -140,58 +134,6 @@ export type DragItem =
  * once for `a` and once for `a/b`). Sorted lexicographically by path for a stable (hydration-safe)
  * order regardless of insertion order.
  */
-function deriveTreeRows(skills: SkillVM[], labels: LabelVM[]): TreeRow[] {
-  const appearance = new Map<string, { displayName: string | null; color: LabelColor | null; icon: LabelIcon | null }>();
-  const paths = new Set<string>();
-  const childPaths = new Set<string>(); // any path that has at least one child (for chevrons)
-  // Per-path set of skill ids contributing to its roll-up count (de-dupe across descendants).
-  const counts = new Map<string, Set<string>>();
-
-  const ensureAncestors = (path: string) => {
-    const segs = path.split("/");
-    for (let i = 1; i <= segs.length; i += 1) {
-      const p = segs.slice(0, i).join("/");
-      paths.add(p);
-      if (i < segs.length) childPaths.add(p);
-    }
-  };
-
-  for (const label of labels) {
-    appearance.set(label.path, { displayName: label.displayName, color: label.color, icon: label.icon });
-    ensureAncestors(label.path);
-  }
-  for (const skill of skills) {
-    for (const raw of skill.labels ?? []) {
-      if (!raw) continue;
-      ensureAncestors(raw);
-      const segs = raw.split("/");
-      for (let i = 1; i <= segs.length; i += 1) {
-        const p = segs.slice(0, i).join("/");
-        let set = counts.get(p);
-        if (!set) counts.set(p, (set = new Set()));
-        set.add(skill.uuid);
-      }
-    }
-  }
-
-  return [...paths]
-    .sort((a, b) => a.localeCompare(b))
-    .map((path) => {
-      const segs = path.split("/");
-      const appr = appearance.get(path);
-      return {
-        path,
-        leafName: segs[segs.length - 1] ?? path,
-        displayName: appr?.displayName ?? null,
-        depth: segs.length - 1,
-        count: counts.get(path)?.size ?? 0,
-        color: appr?.color ?? null,
-        icon: appr?.icon ?? null,
-        hasChildren: childPaths.has(path),
-      };
-    });
-}
-
 /** Whether a skill is filed under `path` OR any descendant of it. */
 function skillUnderLabel(skill: SkillVM, path: string): boolean {
   return (skill.labels ?? []).some((p) => p === path || p.startsWith(path + "/"));
@@ -236,6 +178,17 @@ function routeFromSelection(selection: Selection, skill?: string): SkillsRoute {
   return skill ? skillsRouteWithSkill(route, skill) : route;
 }
 
+function restoreRowAtSnapshot<T extends { id: string }>(
+  current: T[],
+  row: T | undefined,
+  index: number,
+): T[] {
+  if (!row || current.some((candidate) => candidate.id === row.id)) return current;
+  const next = [...current];
+  next.splice(Math.min(Math.max(index, 0), next.length), 0, row);
+  return next;
+}
+
 function isSkillsClientPath(pathname: string): boolean {
   return pathname === "/skills" || parseSkillShareTokenPath(pathname) !== null;
 }
@@ -247,6 +200,7 @@ export function SkillsApp({
   initialFilterPreferences,
   initialPersonalLabels,
   initialLabels,
+  initialBilling,
   me,
   orgs,
   currentOrg,
@@ -259,6 +213,7 @@ export function SkillsApp({
   initialFilterPreferences: SkillFilterPreferences;
   initialPersonalLabels: LabelsResponse;
   initialLabels: LabelsResponse;
+  initialBilling: BillingOverview;
   me: MeVM;
   orgs: OrgVM[];
   currentOrg: OrgVM;
@@ -284,6 +239,9 @@ export function SkillsApp({
   const [filters, setFilters] = useState<Filter[]>(() => initialFilterPreferences.active_filters);
   const [shareTarget, setShareTarget] = useState<SkillVM | null>(null);
   const [drag, setDrag] = useState<DragItem | null>(null);
+  const personalSkillsEnabled = initialBilling.entitlements.personalSkills;
+  const orgSkillLimit = initialBilling.entitlements.orgSkillLimit;
+  const orgCreateBlocked = orgSkillLimit !== null && initialBilling.orgSkillCount >= orgSkillLimit;
 
   const activeLib: SkillsLibrary = selection.lib;
   const skills = activeLib === "org" ? orgSkills : mineSkills;
@@ -293,12 +251,16 @@ export function SkillsApp({
   // never gate an RPC on a flag set inside a setState updater — the double-invoke would drop it).
   const mineSkillsRef = useRef<SkillVM[]>(initialMineSkills);
   const orgSkillsRef = useRef<SkillVM[]>(initialOrgSkills);
+  const archivedSkillsRef = useRef<SkillVM[]>([]);
+  const refreshGenerationRef = useRef(0);
+  const installCorrectionOpsRef = useRef(new Map<string, symbol>());
   const personalLabelsRef = useRef<LabelVM[]>(initialPersonalLabels.flat);
   const orgLabelsRef = useRef<LabelVM[]>(initialLabels.flat);
   const activeLibRef = useRef<SkillsLibrary>(activeLib);
   const dragRef = useRef<DragItem | null>(null);
   mineSkillsRef.current = mineSkills;
   orgSkillsRef.current = orgSkills;
+  archivedSkillsRef.current = archivedSkills;
   personalLabelsRef.current = personalLabels;
   orgLabelsRef.current = orgLabels;
   activeLibRef.current = activeLib;
@@ -307,6 +269,24 @@ export function SkillsApp({
   const setSkillEverywhere = useCallback((id: string, fn: (s: SkillVM) => SkillVM) => {
     setMineSkills((arr) => arr.map((s) => (s.id === id ? fn(s) : s)));
     setOrgSkills((arr) => arr.map((s) => (s.id === id ? fn(s) : s)));
+  }, []);
+
+  const refreshSkillLibraries = useCallback(async () => {
+    const generation = refreshGenerationRef.current + 1;
+    refreshGenerationRef.current = generation;
+    const [mineRows, orgRows] = await Promise.all([fetchSkillLibrary("mine"), fetchSkillLibrary("org")]);
+    const nextMineSkills = mineRows.map(mapSkill);
+    const nextOrgSkills = orgRows.map(mapSkill);
+    // Multiple successful mutations may refetch concurrently. Only the latest-started refresh may
+    // replace the client snapshot, otherwise an older response can resurrect stale rows/statuses.
+    if (generation !== refreshGenerationRef.current) {
+      return { mine: mineSkillsRef.current, org: orgSkillsRef.current };
+    }
+    mineSkillsRef.current = nextMineSkills;
+    orgSkillsRef.current = nextOrgSkills;
+    setMineSkills(nextMineSkills);
+    setOrgSkills(nextOrgSkills);
+    return { mine: nextMineSkills, org: nextOrgSkills };
   }, []);
 
   useEffect(() => setMineSkills(initialMineSkills), [initialMineSkills]);
@@ -422,6 +402,10 @@ export function SkillsApp({
   const skipNextDebouncedPersistRef = useRef(false);
   const preferenceKey = JSON.stringify(initialFilterPreferences);
   const initialRouteKey = skillsRouteKey(initialRoute);
+
+  useEffect(() => {
+    router.prefetch("/secrets");
+  }, [router]);
 
   const shareableSkillForSlug = useCallback((slug: string): SkillVM | null => {
     const isShareable = (s: SkillVM) => s.id === slug && s.scope === "org" && !s.archived;
@@ -543,9 +527,13 @@ export function SkillsApp({
   }, [filters, persistPreferences]);
 
   const openUpload = useCallback(() => {
+    if ((!personalSkillsEnabled && activeLibRef.current === "mine") || (orgCreateBlocked && activeLibRef.current === "org")) {
+      openSettings({ view: "billing" });
+      return;
+    }
     uploadReturnRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     setUploadOpen(true);
-  }, []);
+  }, [openSettings, orgCreateBlocked, personalSkillsEnabled]);
   const closeUpload = useCallback(() => {
     setUploadOpen(false);
     queueMicrotask(() => uploadReturnRef.current?.focus());
@@ -573,43 +561,77 @@ export function SkillsApp({
       const markVersion = orgRow.version ?? null;
       const prevOrg = { status: orgRow.installStatus, version: orgRow.installedVersion };
       const prevMine = mineSkillsRef.current;
+      const prevMineRow = prevMine.find((row) => row.id === id && row.source === "installed");
+      const prevMineIndex = prevMine.findIndex((row) => row.id === id && row.source === "installed");
+      const operation = Symbol(id);
+      installCorrectionOpsRef.current.set(id, operation);
       // Org row: reflect the new install status.
-      setOrgSkills((arr) =>
-        arr.map((s) =>
-          s.id === id
-            ? installed
-              ? { ...s, installStatus: "installed" as const, installedVersion: markVersion }
-              : { ...s, installStatus: "none" as const, installedVersion: null }
-            : s,
-        ),
+      const nextOrg = orgSkillsRef.current.map((s) =>
+        s.id === id
+          ? installed
+            ? { ...s, installStatus: "installed" as const, installedVersion: markVersion }
+            : { ...s, installStatus: "none" as const, installedVersion: null }
+          : s,
       );
+      orgSkillsRef.current = nextOrg;
+      setOrgSkills(nextOrg);
       // My-Skills mirror: add an installed copy, or drop it.
-      setMineSkills((arr) => {
-        if (!installed) return arr.filter((s) => !(s.id === id && s.source === "installed"));
-        if (arr.some((s) => s.id === id)) return arr;
-        return [
-          ...arr,
-          { ...orgRow, scope: "org", source: "installed", labels: [], installStatus: "installed", installedVersion: markVersion },
-        ];
-      });
+      const nextMine: SkillVM[] = !installed
+        ? prevMine.filter((s) => !(s.id === id && s.source === "installed"))
+        : prevMine.some((s) => s.id === id)
+          ? prevMine
+          : [
+              ...prevMine,
+              {
+                ...orgRow,
+                scope: "org" as const,
+                source: "installed" as const,
+                labels: [],
+                installStatus: "installed" as const,
+                installedVersion: markVersion,
+              },
+            ];
+      mineSkillsRef.current = nextMine;
+      setMineSkills(nextMine);
       const request = installed ? markSkillInstalled(id, markVersion) : markSkillUninstalled(id);
       request
         .then((res) => {
+          if (installCorrectionOpsRef.current.get(id) !== operation) return;
+          installCorrectionOpsRef.current.delete(id);
           if (res.installed && "installed_version" in res) {
             const v = res.installed_version;
             const st = res.status;
-            setOrgSkills((arr) => arr.map((s) => (s.id === id ? { ...s, installStatus: st, installedVersion: v } : s)));
-            setMineSkills((arr) =>
-              arr.map((s) => (s.id === id && s.source === "installed" ? { ...s, installStatus: st, installedVersion: v } : s)),
-            );
+            setOrgSkills((arr) => {
+              const next = arr.map((s) => (s.id === id ? { ...s, installStatus: st, installedVersion: v } : s));
+              orgSkillsRef.current = next;
+              return next;
+            });
+            setMineSkills((arr) => {
+              const next = arr.map((s) =>
+                s.id === id && s.source === "installed" ? { ...s, installStatus: st, installedVersion: v } : s,
+              );
+              mineSkillsRef.current = next;
+              return next;
+            });
           }
           setToast({ msg: installed ? `Marked ${id} as installed` : `Marked ${id} as not installed` });
         })
         .catch((e) => {
-          setOrgSkills((arr) =>
-            arr.map((s) => (s.id === id ? { ...s, installStatus: prevOrg.status, installedVersion: prevOrg.version } : s)),
-          );
-          setMineSkills(prevMine);
+          if (installCorrectionOpsRef.current.get(id) !== operation) return;
+          installCorrectionOpsRef.current.delete(id);
+          setOrgSkills((arr) => {
+            const next = arr.map((s) =>
+              s.id === id ? { ...s, installStatus: prevOrg.status, installedVersion: prevOrg.version } : s,
+            );
+            orgSkillsRef.current = next;
+            return next;
+          });
+          setMineSkills((arr) => {
+            const withoutOptimisticCopy = arr.filter((row) => !(row.id === id && row.source === "installed"));
+            const next = restoreRowAtSnapshot(withoutOptimisticCopy, prevMineRow, prevMineIndex);
+            mineSkillsRef.current = next;
+            return next;
+          });
           orgActions.setError((e as Error).message);
         });
     },
@@ -976,13 +998,7 @@ export function SkillsApp({
       // derived rows, labels, installs, stars, and dependency counters stay server-authoritative.
       shareSkillToOrg(id)
         .then(async (result) => {
-          const [mineRows, orgRows] = await Promise.all([fetchSkillLibrary("mine"), fetchSkillLibrary("org")]);
-          const nextMineSkills = mineRows.map(mapSkill);
-          const nextOrgSkills = orgRows.map(mapSkill);
-          mineSkillsRef.current = nextMineSkills;
-          orgSkillsRef.current = nextOrgSkills;
-          setMineSkills(nextMineSkills);
-          setOrgSkills(nextOrgSkills);
+          await refreshSkillLibraries();
           // Re-point the detail to the org copy so it stays open under the new library.
           setSelection({ lib: "org", kind: "all" });
           setOpenId(id);
@@ -1002,7 +1018,7 @@ export function SkillsApp({
           orgActions.setError((e as Error).message);
         });
     },
-    [currentOrg.name, orgActions, replaceSkillsUrl],
+    [currentOrg.name, orgActions, refreshSkillLibraries, replaceSkillsUrl],
   );
 
   // Auto-dismiss toasts.
@@ -1022,6 +1038,7 @@ export function SkillsApp({
     setArchivedLoaded(false);
     try {
       const rows = (await fetchArchivedSkills()).map(mapSkill);
+      archivedSkillsRef.current = rows;
       setArchivedSkills(rows);
       setArchivedLoaded(true);
       return rows;
@@ -1032,6 +1049,7 @@ export function SkillsApp({
   }, []);
 
   useEffect(() => {
+    archivedSkillsRef.current = [];
     setArchivedSkills([]);
     setArchivedLoaded(false);
     void loadArchived();
@@ -1039,40 +1057,180 @@ export function SkillsApp({
 
   const archiveSkillById = useCallback(
     (id: string) => {
+      installCorrectionOpsRef.current.delete(id);
+      const prevMine = mineSkillsRef.current;
+      const prevOrg = orgSkillsRef.current;
+      const mineRow = prevMine.find((row) => row.id === id);
+      const orgRow = prevOrg.find((row) => row.id === id);
+      const mineIndex = prevMine.findIndex((row) => row.id === id);
+      const orgIndex = prevOrg.findIndex((row) => row.id === id);
+      const wasOpen = openIdRef.current === id;
+      const rollbackRoute = routeFromSelection(selection, id);
+      const optimisticHref = skillsRouteHref(skillsRouteWithoutSkill(rollbackRoute));
+      const nextMine = prevMine.filter((s) => s.id !== id);
+      const nextOrg = prevOrg.filter((s) => s.id !== id);
       // Drop the skill from whichever library it appears in (org skill, or the actor's personal skill).
-      setMineSkills((arr) => arr.filter((s) => s.id !== id));
-      setOrgSkills((arr) => arr.filter((s) => s.id !== id));
+      mineSkillsRef.current = nextMine;
+      orgSkillsRef.current = nextOrg;
+      setMineSkills(nextMine);
+      setOrgSkills(nextOrg);
       setOpenId((cur) => {
         if (cur !== id) return cur;
         clearCurrentSkillUrl();
         return null;
       });
-      archiveSkillRpc(id)
-        .then(() => {
-          loadArchived();
-          router.refresh();
-        })
-        .catch(() => router.refresh());
+      void archiveSkillRpc(id).then(
+        async () => {
+          try {
+            await Promise.all([loadArchived(), refreshSkillLibraries()]);
+          } catch {
+            orgActions.setError("Skill archived, but the active libraries could not be refreshed. Reload to retry the refresh.");
+          }
+        },
+        (error) => {
+          setMineSkills((current) => {
+            const next = restoreRowAtSnapshot(current, mineRow, mineIndex);
+            mineSkillsRef.current = next;
+            return next;
+          });
+          setOrgSkills((current) => {
+            const next = restoreRowAtSnapshot(current, orgRow, orgIndex);
+            orgSkillsRef.current = next;
+            return next;
+          });
+          const currentHref = `${window.location.pathname}${window.location.search}`;
+          if (wasOpen && openIdRef.current === null && currentHref === optimisticHref) {
+            setOpenId(id);
+            setLastId(id);
+            replaceSkillsUrl(rollbackRoute);
+          }
+          orgActions.setError(error instanceof Error ? error.message : "Could not archive the skill.");
+        },
+      );
     },
-    [clearCurrentSkillUrl, loadArchived, router],
+    [clearCurrentSkillUrl, loadArchived, orgActions, refreshSkillLibraries, replaceSkillsUrl, selection],
   );
 
   const restoreSkillById = useCallback(
     (id: string) => {
-      setArchivedSkills((arr) => arr.filter((s) => s.id !== id));
+      const prevArchived = archivedSkillsRef.current;
+      const archivedRow = prevArchived.find((row) => row.id === id);
+      const archivedIndex = prevArchived.findIndex((row) => row.id === id);
+      const wasOpen = openIdRef.current === id;
+      const optimisticHref = skillsRouteHref({ kind: "archived" });
+      const nextArchived = prevArchived.filter((row) => row.id !== id);
+      archivedSkillsRef.current = nextArchived;
+      setArchivedSkills(nextArchived);
       setOpenId((cur) => {
         if (cur !== id) return cur;
         clearCurrentSkillUrl();
         return null;
       });
-      restoreSkillRpc(id)
-        .then(() => {
-          loadArchived();
-          router.refresh();
-        })
-        .catch(() => loadArchived());
+      void restoreSkillRpc(id).then(
+        async () => {
+          try {
+            await Promise.all([loadArchived(), refreshSkillLibraries()]);
+          } catch {
+            orgActions.setError("Skill restored, but the active libraries could not be refreshed. Reload to retry the refresh.");
+          }
+        },
+        (error) => {
+          setArchivedSkills((current) => {
+            const next = restoreRowAtSnapshot(current, archivedRow, archivedIndex);
+            archivedSkillsRef.current = next;
+            return next;
+          });
+          const currentHref = `${window.location.pathname}${window.location.search}`;
+          if (wasOpen && openIdRef.current === null && currentHref === optimisticHref) {
+            setCurrentView("archived");
+            setOpenId(id);
+            setLastId(id);
+            replaceSkillsUrl({ kind: "archived", skill: id });
+          }
+          orgActions.setError(error instanceof Error ? error.message : "Could not restore the skill.");
+        },
+      );
     },
-    [clearCurrentSkillUrl, loadArchived, router],
+    [clearCurrentSkillUrl, loadArchived, orgActions, refreshSkillLibraries, replaceSkillsUrl],
+  );
+
+  const reconcileInstallReport = useCallback((reported: SkillVM) => {
+    // A server-observed report supersedes any older optimistic manual correction for this skill.
+    installCorrectionOpsRef.current.delete(reported.id);
+    const nextOrg = orgSkillsRef.current.map((row) =>
+      row.id === reported.id
+        ? { ...row, installStatus: reported.installStatus, installedVersion: reported.installedVersion }
+        : row,
+    );
+    const orgRow = nextOrg.find((row) => row.id === reported.id) ?? reported;
+    const nextMine = mineSkillsRef.current.some((row) => row.id === reported.id && row.source === "installed")
+      ? mineSkillsRef.current.map((row) =>
+          row.id === reported.id && row.source === "installed"
+            ? { ...row, installStatus: reported.installStatus, installedVersion: reported.installedVersion }
+            : row,
+        )
+      : [
+          ...mineSkillsRef.current,
+          {
+            ...orgRow,
+            scope: "org" as const,
+            source: "installed" as const,
+            labels: [],
+            installStatus: reported.installStatus,
+            installedVersion: reported.installedVersion,
+          },
+        ];
+    orgSkillsRef.current = nextOrg;
+    mineSkillsRef.current = nextMine;
+    setOrgSkills(nextOrg);
+    setMineSkills(nextMine);
+    setToast({
+      msg: reported.installStatus === "installed" ? `${reported.id} is up to date` : `${reported.id} install reported`,
+    });
+    // The report endpoint installs the resolved dependency closure as well as the root. Keep the
+    // immediate root merge above, then authoritatively refresh both libraries so dependency rows,
+    // counts, and update badges converge without a page reload.
+    void refreshSkillLibraries().catch(() => {
+      orgActions.setError("The skill was installed, but its dependency status could not be refreshed. Reload to try again.");
+    });
+  }, [orgActions, refreshSkillLibraries]);
+
+  const runSkillAction = useCallback(
+    (target: SkillVM, action: SkillAction) => {
+      switch (action.id) {
+        case "share":
+          setShareTarget(target);
+          return;
+        case "install":
+        case "update":
+          setInstallSkill(target);
+          return;
+        case "publish-version":
+          setUpdateSkill(target);
+          return;
+        case "archive":
+          archiveSkillById(target.id);
+          return;
+        case "restore":
+          restoreSkillById(target.id);
+          return;
+        case "mark-installed":
+          setInstalled(target.id, true);
+          return;
+        case "mark-not-installed":
+          setInstalled(target.id, false);
+          return;
+        case "download":
+          void fetchSkillDownloadUrl(target.id, target.version)
+            .then((url) => {
+              window.location.href = url;
+            })
+            .catch((error) => {
+              orgActions.setError(error instanceof Error ? error.message : "Could not download the package.");
+            });
+      }
+    },
+    [archiveSkillById, orgActions, restoreSkillById, setInstalled],
   );
 
   // --- Derived ---------------------------------------------------------------
@@ -1235,7 +1393,7 @@ export function SkillsApp({
   // --- Open / navigate -------------------------------------------------------
   const detailPool = currentView === "archived" ? archivedSkills : filtered;
   const index = openId ? detailPool.findIndex((s) => s.id === openId) : -1;
-  const skill = index >= 0 ? detailPool[index] : null;
+  const skill = index >= 0 ? (detailPool[index] ?? null) : null;
   openIdRef.current = openId;
 
   const open = useCallback((id: string) => {
@@ -1511,6 +1669,7 @@ export function SkillsApp({
         onLabelStartDrag={skillDrag.startDrag}
         onSelectLocal={selectLocal}
         onSelectArchived={selectArchived}
+        onSelectSecrets={() => router.push("/secrets")}
         localActive={localActive}
         localUpdateCount={localUpdateCount}
         archivedActive={archivedActive}
@@ -1518,6 +1677,8 @@ export function SkillsApp({
         mobileOpen={mobileSidebarOpen}
         onToggleMobile={() => setMobileSidebarOpen((open) => !open)}
         onCloseMobile={() => setMobileSidebarOpen(false)}
+        personalSkillsEnabled={personalSkillsEnabled}
+        onUpgrade={() => openSettings({ view: "billing" })}
       />
       {mobileSidebarOpen && (
         <button
@@ -1538,34 +1699,31 @@ export function SkillsApp({
             index={index}
             total={detailPool.length}
             me={me}
-            myRole={currentOrg.myRole}
             orgName={currentOrg.name}
             allLabels={detailTreePaths}
             onBack={back}
             onPrev={() => go(-1)}
             onNext={() => go(1)}
             onToggleStar={() => toggleStar(skill.id)}
-            onToggleInstalled={() => setInstalled(skill.id, skill.installStatus === "none")}
             onToggleLabel={(path) => toggleSkillLabel(detailLib, skill.id, path)}
             onSelectLabel={(path) => selectLabel(detailLib, path)}
-            onShare={() => setShareTarget(skill)}
-            onInstall={() => setInstallSkill(skill)}
-            onUpdate={() => setUpdateSkill(skill)}
+            onAction={(action) => runSkillAction(skill, action)}
             onOpenSkill={openSkillBySlug}
-            onRestore={() => restoreSkillById(skill.id)}
-            onArchive={() => archiveSkillById(skill.id)}
             onOpenRun={openRun}
             onOpenModelSettings={() => openSettings({ view: "models" })}
             initialTab={detailInitialTab}
             runAgainPrompt={runAgainPrompt}
             onRunAgainConsumed={() => setRunAgainPrompt(null)}
+            historyEnabled={initialBilling.entitlements.skillHistory}
+            onUpgrade={() => openSettings({ view: "billing" })}
           />
         ) : currentView === "archived" ? (
           <ArchivedListView
             skills={archivedSkills}
             onOpen={openArchived}
-            onRestore={restoreSkillById}
             onUpload={openUpload}
+            actorId={me.id}
+            onPrimaryAction={runSkillAction}
           />
         ) : (
           <ListView
@@ -1573,10 +1731,11 @@ export function SkillsApp({
             library={selection.lib}
             scopeKind={selection.kind}
             breadcrumb={breadcrumb}
-            activeLabel={activeLabel}
             onOpen={open}
             onToggleStar={toggleStar}
             onUpload={openUpload}
+            actorId={me.id}
+            onPrimaryAction={runSkillAction}
             lastId={lastId}
             filters={filters}
             onToggleFilter={toggleFilter}
@@ -1586,6 +1745,16 @@ export function SkillsApp({
             onRetryPreferences={retryPreferenceSave}
             dragSkillId={drag?.kind === "skill" && drag.lib === selection.lib ? drag.skillId : null}
             onSkillStartDrag={startSkillDrag}
+            upgradeNotice={
+              !personalSkillsEnabled && selection.lib === "mine"
+                ? `${initialBilling.hiddenPersonalSkillCount} personal skill${initialBilling.hiddenPersonalSkillCount === 1 ? " is" : "s are"} preserved but hidden on Free. Organization skills you install remain available here.`
+                : orgCreateBlocked && selection.lib === "org"
+                  ? initialBilling.entitlements.catalogFrozen
+                    ? `This catalog has ${initialBilling.orgSkillCount} skills and is read-only on Free.`
+                    : `Free includes ${orgSkillLimit} organization skills. Upgrade to add another.`
+                  : null
+            }
+            onUpgrade={() => openSettings({ view: "billing" })}
           />
         )}
       </div>
@@ -1598,6 +1767,9 @@ export function SkillsApp({
           }}
           onClose={() => setPaletteOpen(false)}
           onUpload={openUpload}
+          currentSkill={skill}
+          actorId={me.id}
+          onPrimaryAction={runSkillAction}
         />
       )}
       {uploadOpen && (
@@ -1606,8 +1778,14 @@ export function SkillsApp({
           scope={activeLib === "org" ? "org" : "personal"}
           allLabels={activeTreePaths}
           defaultLabels={activeLabel ? [activeLabel] : []}
+          knownSkillSlugs={paletteSkills.map((item) => item.id)}
           onClose={closeUpload}
-          onPublished={() => router.refresh()}
+          onPublished={() => {
+            void refreshSkillLibraries().catch((error) => {
+              orgActions.setError(error instanceof Error ? error.message : "Could not refresh skills.");
+            });
+            router.refresh();
+          }}
         />
       )}
       {updateSkill && (
@@ -1616,12 +1794,22 @@ export function SkillsApp({
           skill={updateSkill}
           scope={updateSkill.scope === "personal" ? "personal" : "org"}
           allLabels={(updateSkill.scope === "personal" ? personalTreeRows : orgTreeRows).map((r) => r.path)}
+          knownSkillSlugs={paletteSkills.map((item) => item.id)}
           onClose={() => setUpdateSkill(null)}
-          onPublished={() => router.refresh()}
+          onPublished={() => {
+            void refreshSkillLibraries().catch((error) => {
+              orgActions.setError(error instanceof Error ? error.message : "Could not refresh skills.");
+            });
+            router.refresh();
+          }}
         />
       )}
       {installSkill && (
-        <InstallDialog skill={installSkill} onClose={() => setInstallSkill(null)} />
+        <InstallDialog
+          skill={installSkill}
+          onClose={() => setInstallSkill(null)}
+          onReported={reconcileInstallReport}
+        />
       )}
       {labelNotice && (
         <div className="og-toast" role="alert" onClick={() => setLabelNotice(null)}>

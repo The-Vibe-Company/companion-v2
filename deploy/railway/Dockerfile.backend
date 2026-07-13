@@ -1,0 +1,56 @@
+# syntax=docker/dockerfile:1
+
+ARG NODE_VERSION=22
+
+FROM node:${NODE_VERSION}-bookworm-slim AS tooling
+
+ENV PNPM_HOME=/pnpm
+ENV PATH=${PNPM_HOME}:${PATH}
+
+RUN npm install --global pnpm@9.12.0 turbo@2.9.16
+
+WORKDIR /app
+
+FROM tooling AS pruner
+
+ARG RAILWAY_SERVICE_NAME
+
+RUN case "${RAILWAY_SERVICE_NAME}" in \
+      api|worker) ;; \
+      *) echo "RAILWAY_SERVICE_NAME must be api or worker" >&2; exit 1 ;; \
+    esac
+
+COPY . .
+
+RUN turbo prune "@companion/${RAILWAY_SERVICE_NAME}" --docker
+
+FROM tooling AS dependencies
+
+COPY --from=pruner /app/out/json/ .
+COPY --from=pruner /app/out/pnpm-lock.yaml ./pnpm-lock.yaml
+
+RUN pnpm install --frozen-lockfile --prefer-offline
+
+FROM dependencies AS builder
+
+ARG RAILWAY_SERVICE_NAME
+
+COPY --from=pruner /app/out/full/ .
+COPY --from=pruner /app/tsconfig.base.json ./tsconfig.base.json
+
+RUN pnpm --filter "@companion/${RAILWAY_SERVICE_NAME}" build \
+  && pnpm --filter "@companion/${RAILWAY_SERVICE_NAME}" deploy --prod --no-optional /release
+
+FROM node:${NODE_VERSION}-bookworm-slim AS runner
+
+ENV NODE_ENV=production
+
+WORKDIR /app
+
+COPY --from=builder --chown=node:node /release/package.json ./package.json
+COPY --from=builder --chown=node:node /release/node_modules ./node_modules
+COPY --from=builder --chown=node:node /release/dist ./dist
+
+USER node
+
+CMD ["node", "dist/index.js"]

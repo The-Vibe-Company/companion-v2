@@ -112,6 +112,16 @@ def leave_skill_cwd(skill_dir: Path) -> Path | None:
     return None
 
 
+def remove_swap_path(path: Path) -> None:
+    """Remove a transient swap path whether it is a directory, file, or symlink."""
+    if not os.path.lexists(path):
+        return
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+        return
+    shutil.rmtree(path)
+
+
 def install_companion_update(
     api_url: str,
     token: str,
@@ -153,14 +163,17 @@ def install_companion_update(
 
         report = api_post_json(api_url, token, "/local-skills/companion/installed", {"version": available_version, "agent": agent})
         backup_path = str(backup)
-        shutil.rmtree(backup)
-        backup = None
         return {"applied": True, "version": available_version, "backupPath": backup_path, "backupDeleted": True, "report": report}
     finally:
         if restore_cwd and restore_cwd.exists():
             os.chdir(restore_cwd)
-        if staged and staged.exists():
-            shutil.rmtree(staged, ignore_errors=True)
+        if staged and os.path.lexists(staged):
+            remove_swap_path(staged)
+        if backup and os.path.lexists(backup):
+            if not skill_dir.exists():
+                backup.rename(skill_dir)
+            else:
+                remove_swap_path(backup)
         shutil.rmtree(tmp, ignore_errors=True)
 
 

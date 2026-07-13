@@ -12,6 +12,7 @@ import type { MeVM, OrgVM, SkillVM } from "@/lib/types";
 
 const queryMocks = vi.hoisted(() => ({
   fetchArchivedSkills: vi.fn(),
+  fetchSkillBySlug: vi.fn(),
   fetchSkillDetail: vi.fn(),
   fetchSkillDependencies: vi.fn(),
   fetchSkillDownloadUrl: vi.fn(),
@@ -67,7 +68,6 @@ const currentOrg: OrgVM = {
   name: "Acme",
   slug: "acme",
   kind: "team",
-  plan: "team",
   myRole: "owner",
   color: null,
   logoUrl: null,
@@ -229,6 +229,38 @@ function appProps(
     initialFilterPreferences: { active_filters: [] },
     initialPersonalLabels: emptyLabels(),
     initialLabels: seededLabels,
+    initialBilling: {
+      billingEnabled: false,
+      canManage: true,
+      entitlements: {
+        effectivePlan: "pro",
+        computedPlan: "pro",
+        billingMode: "disabled",
+        entitlementMode: "off",
+        enforced: false,
+        personalSkills: true,
+        skillHistory: true,
+        orgSkillLimit: null,
+        catalogFrozen: false,
+      },
+      unitAmount: 1000,
+      currency: "usd",
+      interval: "month",
+      activeSeats: 1,
+      syncedSeats: null,
+      estimatedMonthlySubtotal: 1000,
+      stripeStatus: null,
+      seatSyncStatus: "not_applicable",
+      currentPeriodEnd: null,
+      cancelAtPeriodEnd: false,
+      graceEndsAt: null,
+      nextReconcileAt: null,
+      lastError: null,
+      orgSkillCount: 0,
+      hiddenPersonalSkillCount: 0,
+      checkoutEnabled: false,
+      portalEnabled: false,
+    },
     me,
     orgs: [currentOrg],
     currentOrg,
@@ -290,6 +322,12 @@ function clickButton(container: HTMLElement, label: string) {
   act(() => {
     button.dispatchEvent(new MouseEvent("click", { bubbles: true }));
   });
+}
+
+function expectContextualInstallButton(container: HTMLElement) {
+  const button = findButton(container, "Install skill");
+  expect(button.textContent?.trim()).toBe("Install");
+  expect(button.getAttribute("title")).toBe("Install skill");
 }
 
 function skillRow(container: HTMLElement, id: string): HTMLElement {
@@ -400,6 +438,7 @@ beforeEach(() => {
   elementUnderPointer = null;
   document.elementFromPoint = ((_x: number, _y: number) => elementUnderPointer) as typeof document.elementFromPoint;
   queryMocks.fetchArchivedSkills.mockResolvedValue([]);
+  queryMocks.fetchSkillBySlug.mockRejectedValue(new Error("not reported"));
   queryMocks.fetchSkillDetail.mockResolvedValue({ versions: [], comments: [], frontmatter: null });
   queryMocks.fetchSkillDependencies.mockResolvedValue(null);
   queryMocks.fetchSkillDownloadUrl.mockResolvedValue("/download");
@@ -710,6 +749,333 @@ describe("SkillsApp sidebar label tree derivation", () => {
   });
 });
 
+describe("SkillsApp contextual skill actions", () => {
+  it("runs a row Install action and removes it when an out-of-band report arrives", async () => {
+    const reported = skill({
+      id: "loose-skill",
+      installStatus: "installed",
+      installedVersion: "1.0.0",
+    });
+    queryMocks.fetchSkillBySlug.mockResolvedValue(skillRowFromVM(reported));
+    queryMocks.fetchSkillLibrary.mockImplementation((lib: "mine" | "org") =>
+      Promise.resolve([
+        skillRowFromVM({
+          ...reported,
+          source: lib === "mine" ? "installed" : null,
+        }),
+      ]),
+    );
+    const { container } = await mountSkillsApp({ lib: "org", kind: "all" });
+    await flushEffects();
+
+    clickButton(container, "Install skill loose-skill");
+    await flushEffects();
+
+    expect(queryMocks.fetchSkillBySlug).toHaveBeenCalledWith("loose-skill");
+    expect(container.textContent).toContain("Skill installed");
+    clickButton(container, "Done");
+    await flushEffects();
+    expect(container.querySelector('button[aria-label="Install skill loose-skill"]')).toBeNull();
+    expect(container.textContent).toContain("Installed1");
+  });
+
+  it("refreshes both libraries after an install report so dependency installs are synchronized", async () => {
+    const root = skill({ id: "loose-skill", installStatus: "installed", installedVersion: "1.0.0" });
+    const dependency = skill({ id: "brand-kit", installStatus: "installed", installedVersion: "1.0.0" });
+    queryMocks.fetchSkillBySlug.mockResolvedValue(skillRowFromVM(root));
+    queryMocks.fetchSkillLibrary.mockImplementation((lib: "mine" | "org") =>
+      Promise.resolve(
+        [root, dependency].map((row) =>
+          skillRowFromVM({ ...row, source: lib === "mine" ? "installed" : null }),
+        ),
+      ),
+    );
+    const { container } = await mountSkillsApp({ lib: "org", kind: "all" });
+    await flushEffects();
+
+    clickButton(container, "Install skill loose-skill");
+    await flushEffects();
+    await flushEffects();
+
+    expect(queryMocks.fetchSkillLibrary).toHaveBeenCalledWith("mine");
+    expect(queryMocks.fetchSkillLibrary).toHaveBeenCalledWith("org");
+    expect(container.textContent).toContain("Installed2");
+    expect(container.querySelector('button[aria-label="Install skill brand-kit"]')).toBeNull();
+  });
+
+  it("retries install-report polling after a transient error and ignores a stale version", async () => {
+    vi.useFakeTimers();
+    const stale = skill({ id: "loose-skill", installStatus: "installed", installedVersion: "0.9.0" });
+    const current = skill({ id: "loose-skill", installStatus: "installed", installedVersion: "1.0.0" });
+    queryMocks.fetchSkillBySlug
+      .mockRejectedValueOnce(new Error("temporarily unavailable"))
+      .mockResolvedValueOnce(skillRowFromVM(stale))
+      .mockResolvedValueOnce(skillRowFromVM(current));
+    queryMocks.fetchSkillLibrary.mockImplementation((lib: "mine" | "org") =>
+      Promise.resolve([
+        skillRowFromVM({ ...current, source: lib === "mine" ? "installed" : null }),
+      ]),
+    );
+    const { container } = await mountSkillsApp({ lib: "org", kind: "all" });
+    await flushEffects();
+
+    clickButton(container, "Install skill loose-skill");
+    await flushEffects();
+    expect(queryMocks.fetchSkillBySlug).toHaveBeenCalledTimes(1);
+    expect(container.textContent).not.toContain("Skill installed");
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    await flushEffects();
+    expect(queryMocks.fetchSkillBySlug).toHaveBeenCalledTimes(2);
+    expect(container.textContent).not.toContain("Skill installed");
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    await flushEffects();
+    expect(queryMocks.fetchSkillBySlug).toHaveBeenCalledTimes(3);
+    expect(container.textContent).toContain("Skill installed");
+  });
+
+  it("cancels install-report polling when the dialog closes", async () => {
+    vi.useFakeTimers();
+    queryMocks.fetchSkillBySlug.mockRejectedValueOnce(new Error("temporarily unavailable"));
+    const { container } = await mountSkillsApp({ lib: "org", kind: "all" });
+    await flushEffects();
+
+    clickButton(container, "Install skill loose-skill");
+    await flushEffects();
+    expect(queryMocks.fetchSkillBySlug).toHaveBeenCalledTimes(1);
+    clickButton(container, "Cancel");
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    await flushEffects();
+    expect(queryMocks.fetchSkillBySlug).toHaveBeenCalledTimes(1);
+  });
+
+  it("restores the Install CTA when manual status correction fails", async () => {
+    let rejectRequest: (reason?: unknown) => void = () => {};
+    queryMocks.markSkillInstalled.mockReturnValueOnce(
+      new Promise<never>((_resolve, reject) => {
+        rejectRequest = reject;
+      }),
+    );
+    const { container } = await mountSkillsApp(
+      { lib: "org", kind: "all", skill: "seo-helper" },
+      { url: "/skills?lib=org&skill=seo-helper" },
+    );
+    await flushEffects();
+
+    clickButton(container, "More actions");
+    clickButton(container, "Mark as installed");
+    expect(container.querySelector('.dtop button[title="Install skill"]')).toBeNull();
+
+    rejectRequest(new Error("report failed"));
+    await flushEffects();
+    expect(container.querySelector('.dtop button[title="Install skill"]')).not.toBeNull();
+  });
+
+  it("rolls back only the failed manual correction and preserves a concurrent install", async () => {
+    let rejectFirst: (reason?: unknown) => void = () => {};
+    queryMocks.markSkillInstalled
+      .mockReturnValueOnce(
+        new Promise<never>((_resolve, reject) => {
+          rejectFirst = reject;
+        }),
+      )
+      .mockResolvedValueOnce({ installed: true, status: "installed", installed_version: "1.0.0" });
+    const { container } = await mountSkillsApp(
+      { lib: "org", kind: "all", skill: "seo-helper" },
+      { url: "/skills?lib=org&skill=seo-helper" },
+    );
+    await flushEffects();
+
+    clickButton(container, "More actions");
+    clickButton(container, "Mark as installed");
+    clickButton(container, "Next skill");
+    clickButton(container, "More actions");
+    clickButton(container, "Mark as installed");
+    await flushEffects();
+    expect(container.textContent).toContain("Installed2");
+
+    rejectFirst(new Error("first correction failed"));
+    await flushEffects();
+
+    expect(container.textContent).toContain("Installed1");
+    clickButton(container, "More actions");
+    expect(container.textContent).toContain("Mark as not installed");
+  });
+
+  it("restores an archived detail and its Restore CTA when restore fails", async () => {
+    const archived = skill({ id: "old-skill", archived: true, referenced: true });
+    queryMocks.fetchArchivedSkills.mockResolvedValue([skillRowFromVM(archived)]);
+    let rejectRequest: (reason?: unknown) => void = () => {};
+    queryMocks.restoreSkill.mockReturnValueOnce(
+      new Promise<never>((_resolve, reject) => {
+        rejectRequest = reject;
+      }),
+    );
+    const { container } = await mountSkillsApp(
+      { kind: "archived", skill: "old-skill" },
+      { url: "/skills?view=archived&skill=old-skill" },
+    );
+    await flushEffects();
+
+    clickButton(container, "Restore skill");
+    expect(container.querySelector(".dpage")).toBeNull();
+    rejectRequest(new Error("restore failed"));
+    await flushEffects();
+    expect(container.querySelector('.dtop button[title="Restore skill"]')).not.toBeNull();
+  });
+
+  it("does not roll back a successful archive when the authoritative refresh fails", async () => {
+    queryMocks.fetchSkillLibrary.mockRejectedValue(new Error("refresh failed"));
+    const { container } = await mountSkillsApp(
+      { lib: "org", kind: "all", skill: "seo-helper" },
+      { url: "/skills?lib=org&skill=seo-helper" },
+    );
+    await flushEffects();
+
+    clickButton(container, "More actions");
+    clickButton(container, "Archive skill");
+    await flushEffects();
+
+    expect(queryMocks.archiveSkill).toHaveBeenCalledWith("seo-helper");
+    expect(container.querySelector('button[aria-label="Open skill seo-helper"]')).toBeNull();
+    expect(container.querySelector(".dpage")).toBeNull();
+  });
+
+  it("does not roll back a successful restore when the authoritative refresh fails", async () => {
+    const archived = skill({ id: "old-skill", archived: true, referenced: true });
+    queryMocks.fetchArchivedSkills
+      .mockResolvedValueOnce([skillRowFromVM(archived)])
+      .mockResolvedValue([]);
+    queryMocks.fetchSkillLibrary.mockRejectedValue(new Error("refresh failed"));
+    const { container } = await mountSkillsApp(
+      { kind: "archived", skill: "old-skill" },
+      { url: "/skills?view=archived&skill=old-skill" },
+    );
+    await flushEffects();
+
+    clickButton(container, "Restore skill");
+    await flushEffects();
+
+    expect(queryMocks.restoreSkill).toHaveBeenCalledWith("old-skill");
+    expect(container.querySelector('.dtop button[title="Restore skill"]')).toBeNull();
+    expect(container.querySelector(".dpage")).toBeNull();
+  });
+
+  it("rolls back only the failed lifecycle row and does not reopen a stale route", async () => {
+    let rejectArchive: (reason?: unknown) => void = () => {};
+    queryMocks.archiveSkill.mockReturnValueOnce(
+      new Promise<never>((_resolve, reject) => {
+        rejectArchive = reject;
+      }),
+    );
+    const { container } = await mountSkillsApp(
+      { lib: "org", kind: "all", skill: "seo-helper" },
+      { url: "/skills?lib=org&skill=seo-helper" },
+    );
+    await flushEffects();
+
+    clickButton(container, "More actions");
+    clickButton(container, "Archive skill");
+    clickButton(container, "Open skill brand-kit");
+    clickButton(container, "More actions");
+    clickButton(container, "Mark as installed");
+    await flushEffects();
+
+    rejectArchive(new Error("archive failed"));
+    await flushEffects();
+
+    expect(container.textContent).toContain("brand-kit");
+    expect(window.location.pathname).toBe("/s/share-brand-kit");
+    clickButton(container, "More actions");
+    expect(container.textContent).toContain("Mark as not installed");
+  });
+
+  it("ignores an older authoritative refresh that completes after a newer one", async () => {
+    const refreshResolvers: Array<(rows: SkillListRow[]) => void> = [];
+    queryMocks.fetchSkillLibrary.mockImplementation(
+      () => new Promise<SkillListRow[]>((resolve) => refreshResolvers.push(resolve)),
+    );
+    const { container } = await mountSkillsApp(
+      { lib: "org", kind: "all", skill: "seo-helper" },
+      { url: "/skills?lib=org&skill=seo-helper" },
+    );
+    await flushEffects();
+
+    clickButton(container, "More actions");
+    clickButton(container, "Archive skill");
+    await flushEffects();
+    expect(refreshResolvers).toHaveLength(2);
+
+    clickButton(container, "Open skill brand-kit");
+    clickButton(container, "More actions");
+    clickButton(container, "Archive skill");
+    await flushEffects();
+    expect(refreshResolvers).toHaveLength(4);
+
+    act(() => {
+      refreshResolvers[2]?.([]);
+      refreshResolvers[3]?.([skillRowFromVM(skill({ id: "loose-skill" }))]);
+    });
+    await flushEffects();
+    expect(container.querySelector('button[aria-label="Open skill brand-kit"]')).toBeNull();
+
+    act(() => {
+      refreshResolvers[0]?.([]);
+      refreshResolvers[1]?.([
+        skillRowFromVM(skill({ id: "brand-kit" })),
+        skillRowFromVM(skill({ id: "loose-skill" })),
+      ]);
+    });
+    await flushEffects();
+
+    expect(container.querySelector('button[aria-label="Open skill brand-kit"]')).toBeNull();
+    expect(container.querySelector('button[aria-label="Open skill loose-skill"]')).not.toBeNull();
+  });
+
+  it("exposes and executes the open skill's contextual command with accessible selection semantics", async () => {
+    const { container } = await mountSkillsApp(
+      { lib: "org", kind: "all", skill: "seo-helper" },
+      { url: "/skills?lib=org&skill=seo-helper" },
+    );
+    await flushEffects();
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", metaKey: true, bubbles: true }));
+    });
+    await flushEffects();
+
+    const palette = container.querySelector(".cpal");
+    const input = container.querySelector<HTMLInputElement>('[role="combobox"]');
+    const options = Array.from(container.querySelectorAll<HTMLElement>('[role="option"]'));
+    expect(palette?.textContent).toContain("Add skill");
+    expect(palette?.textContent).toContain("Install skill");
+    expect(palette?.textContent).toContain("seo-helper");
+    expect(input?.getAttribute("aria-controls")).toBe("command-palette-results");
+    expect(options[0]?.getAttribute("aria-selected")).toBe("true");
+
+    act(() => {
+      input?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    });
+    await flushEffects();
+    expect(options[1]?.getAttribute("aria-selected")).toBe("true");
+    expect(input?.getAttribute("aria-activedescendant")).toBe(options[1]?.id);
+
+    act(() => {
+      input?.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    });
+    await flushEffects();
+    expect(container.textContent).toContain("Install seo-helper");
+    expect(container.textContent).not.toContain("Add an organization skill");
+  });
+});
+
 describe("SkillsApp optimistic label assignment", () => {
   it("fires exactly one unassign RPC per detail toggle and keeps the detail open (StrictMode-safe)", async () => {
     // From the All-skills scope the skill stays in view after unfiling, so the detail does not close.
@@ -718,7 +1084,7 @@ describe("SkillsApp optimistic label assignment", () => {
       { url: "/skills?lib=org&skill=seo-helper" },
     );
     await flushEffects();
-    expect(container.textContent).toContain("Install skill");
+    expectContextualInstallButton(container);
     expect(container.textContent).toContain("Filed in");
     expect(container.querySelector('button[aria-label="Remove from marketing/seo"]')).not.toBeNull();
 
@@ -730,7 +1096,7 @@ describe("SkillsApp optimistic label assignment", () => {
     expect(queryMocks.unassignSkillLabel).toHaveBeenCalledTimes(1);
     expect(queryMocks.unassignSkillLabel).toHaveBeenCalledWith("seo-helper", "marketing/seo");
     expect(queryMocks.assignSkillLabel).not.toHaveBeenCalled();
-    expect(container.textContent).toContain("Install skill");
+    expectContextualInstallButton(container);
     expect(container.textContent).toContain("No folders yet");
     expect(container.querySelector('button[aria-label="Remove from marketing/seo"]')).toBeNull();
   });
@@ -748,7 +1114,7 @@ describe("SkillsApp optimistic label assignment", () => {
 
     expect(queryMocks.unassignSkillLabel).toHaveBeenCalledTimes(1);
     // The chip is restored after the failure; the detail never closed.
-    expect(container.textContent).toContain("Install skill");
+    expectContextualInstallButton(container);
     expect(container.querySelector('button[aria-label="Remove from marketing/seo"]')).not.toBeNull();
   });
 
@@ -780,7 +1146,7 @@ describe("SkillsApp optimistic label assignment", () => {
     // The press never blocked the row's click, so opening the skill still works.
     clickButton(container, "Open skill loose-skill");
     await flushEffects();
-    expect(container.textContent).toContain("Install skill");
+    expectContextualInstallButton(container);
   });
 
   it("marks only the hovered same-library folder while dragging a skill, and follows the cursor", async () => {
@@ -1079,7 +1445,7 @@ describe("SkillsApp navigation", () => {
     clickButton(container, "Open skill loose-skill");
     await flushEffects();
     expect(window.location.pathname + window.location.search).toBe("/s/share-loose-skill");
-    expect(container.textContent).toContain("Install skill");
+    expectContextualInstallButton(container);
 
     // Browser Back returns to the org list (the entry before the pushed detail).
     window.history.replaceState({}, "", "/skills?lib=org");
@@ -1089,7 +1455,7 @@ describe("SkillsApp navigation", () => {
 
     expect(window.location.search).toBe("?lib=org");
     expect(container.textContent).toContain("loose-skill");
-    expect(container.textContent).not.toContain("Install skill");
+    expect(container.querySelector(".dpage")).toBeNull();
   });
 
   it("uses the public share URL when opening an org skill under a label", async () => {
@@ -1103,13 +1469,13 @@ describe("SkillsApp navigation", () => {
     await flushEffects();
 
     expect(window.location.pathname + window.location.search).toBe("/s/share-seo-helper");
-    expect(container.textContent).toContain("Install skill");
+    expectContextualInstallButton(container);
   });
 
   it("re-opens an org skill from a public share URL history entry", async () => {
     const { container } = await mountSkillsApp({ lib: "org", kind: "all" }, { url: "/skills?lib=org" });
     await flushEffects();
-    expect(container.textContent).not.toContain("Install skill");
+    expect(container.querySelector(".dpage")).toBeNull();
 
     window.history.pushState({ companionSkillsDetail: true }, "", "/s/share-brand-kit");
     await act(async () => {
@@ -1118,7 +1484,7 @@ describe("SkillsApp navigation", () => {
 
     expect(window.location.pathname + window.location.search).toBe("/s/share-brand-kit");
     expect(container.textContent).toContain("brand-kit");
-    expect(container.textContent).toContain("Install skill");
+    expectContextualInstallButton(container);
   });
 
   it("keeps personal skill detail URLs on the signed-in skills route", async () => {
@@ -1224,7 +1590,7 @@ describe("SkillsApp navigation", () => {
       { url: "/skills?lib=org&skill=seo-helper" },
     );
     await flushEffects();
-    expect(container.textContent).toContain("Install skill");
+    expectContextualInstallButton(container);
     expect(window.location.pathname + window.location.search).toBe("/s/share-seo-helper");
 
     // The detail crumb's back button is labeled by the library (the org name for an org skill).
@@ -1233,7 +1599,7 @@ describe("SkillsApp navigation", () => {
 
     expect(window.location.pathname + window.location.search).toBe("/skills?lib=org");
     expect(container.textContent).toContain("seo-helper");
-    expect(container.textContent).not.toContain("Install skill");
+    expect(container.querySelector(".dpage")).toBeNull();
   });
 
   it("opens an archived detail after the archived list loads", async () => {
@@ -1442,7 +1808,7 @@ describe("Companion skills install gate", () => {
 
     clickGateCopy(container);
     await flushEffects();
-    expect(queryMocks.issueToken).toHaveBeenCalledWith(["skills:read", "skills:write"]);
+    expect(queryMocks.issueToken).toHaveBeenCalledWith(["skills:read", "skills:write", "secrets:read", "secrets:write"]);
     expect(clipboardWrite).toHaveBeenCalledWith("install http://127.0.0.1:3001 org-1 cmp_pat_test");
     expect(container.textContent).toContain("Copied");
   });
@@ -1495,7 +1861,7 @@ describe("Companion skills install gate", () => {
     clickGateCopy(container);
     await flushEffects();
     // The token still minted, but the UI must not falsely report a copy.
-    expect(queryMocks.issueToken).toHaveBeenCalledWith(["skills:read", "skills:write"]);
+    expect(queryMocks.issueToken).toHaveBeenCalledWith(["skills:read", "skills:write", "secrets:read", "secrets:write"]);
     expect(container.textContent).toContain("Select the prompt above");
     expect(container.textContent).not.toContain("Copied");
   });

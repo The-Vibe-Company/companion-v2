@@ -1,4 +1,4 @@
-import type { OrgRole } from "@companion/contracts";
+import type { BillingOverview, OrgRole } from "@companion/contracts";
 import type { MeVM } from "@/lib/types";
 
 /** Display fields for any user referenced by a membership. */
@@ -33,7 +33,6 @@ export interface OrgFull {
   name: string;
   slug: string;
   kind: "personal" | "team";
-  plan: "free" | "team";
   myRole: OrgRole;
   created: string; // formatted creation date (Workspace › General "Details")
   domain: string | null;
@@ -81,6 +80,7 @@ export interface SettingsAppData {
   users: Record<string, SeedUser>;
   invites: Invite[];
   apiKeys: ApiKeyVM[];
+  billing: BillingOverview | null;
 }
 
 /** Which settings pane is mounted. */
@@ -95,7 +95,8 @@ export type SettingsView =
   | "org-models"
   | "general"
   | "members"
-  | "invitations";
+  | "invitations"
+  | "billing";
 
 /** Every `?view=` value both settings URL parsers accept (client pushState + server searchParams). */
 export const SETTINGS_VIEWS: readonly SettingsView[] = [
@@ -110,6 +111,7 @@ export const SETTINGS_VIEWS: readonly SettingsView[] = [
   "org-models",
   "members",
   "invitations",
+  "billing",
 ];
 
 export function isSettingsView(value: string | null | undefined): value is SettingsView {
@@ -158,6 +160,7 @@ export interface OrgCtx {
   prefs: { theme: "light" | "dark" | "system"; accent: string };
   /** Signed-in actor context for the domain access editor (Workspace › General). */
   domainJoin: DomainJoinVM;
+  billing: BillingOverview | null;
   setTheme: (theme: "light" | "dark" | "system") => void;
   setAccent: (accent: string) => void;
   setMyName: (name: string) => void;
@@ -168,7 +171,7 @@ export interface OrgCtx {
     logoUrl?: string | null;
     skillNamingPolicy?: string | null;
   }) => void;
-  addAccessDomain: (domain: string) => Promise<void>;
+  addAccessDomain: (domain: string, acknowledgeSeatBilling?: boolean) => Promise<void>;
   removeAccessDomain: (domainId: string) => Promise<void>;
   uploadWorkspaceLogo: (file: File) => Promise<void>;
   uploadUserAvatar: (file: File) => Promise<void>;
@@ -177,7 +180,9 @@ export interface OrgCtx {
   revokeApiKey: (id: string) => void;
   setMemberRole: (orgId: string, userId: string, role: OrgRole) => void;
   removeMember: (orgId: string, userId: string) => void;
-  inviteMember: (orgId: string, email: string, role: OrgRole) => Promise<string>;
+  inviteMember: (orgId: string, email: string, role: OrgRole, acknowledgeSeatBilling?: boolean) => Promise<string>;
+  startCheckout: () => Promise<void>;
+  openBillingPortal: () => Promise<void>;
   revokeInvite: (orgId: string, inviteId: string) => void;
   error: string | null;
   setError: (msg: string | null) => void;

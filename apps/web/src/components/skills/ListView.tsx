@@ -7,6 +7,11 @@ import type { SkillContributorVM, SkillVM } from "@/lib/types";
 import { InstallMark } from "./blocks";
 import { chipParts, type Filter } from "./filters";
 import { FilterAdd } from "./FilterMenu";
+import {
+  resolveSkillActions,
+  skillActionPermissions,
+  type SkillAction,
+} from "./skillActions";
 
 type SortKey = "default" | "name" | "stars";
 
@@ -100,10 +105,11 @@ export function ListView({
   library,
   scopeKind,
   breadcrumb,
-  activeLabel,
   onOpen,
   onToggleStar,
   onUpload,
+  actorId,
+  onPrimaryAction,
   lastId,
   filters,
   onToggleFilter,
@@ -113,6 +119,8 @@ export function ListView({
   onRetryPreferences,
   dragSkillId,
   onSkillStartDrag,
+  upgradeNotice = null,
+  onUpgrade = () => {},
 }: {
   skills: SkillVM[];
   /** Which library this list shows (drives scope-aware empty + upload copy). */
@@ -120,11 +128,11 @@ export function ListView({
   scopeKind: "all" | "starred" | "installed" | "label";
   /** Folder breadcrumb for the active sidebar selection (e.g. ["marketing", "seo"]). */
   breadcrumb: string[];
-  /** The active label path, or null when viewing All / Starred / Installed. */
-  activeLabel: string | null;
   onOpen: (id: string) => void;
   onToggleStar: (id: string) => void;
   onUpload: () => void;
+  actorId: string;
+  onPrimaryAction: (skill: SkillVM, action: SkillAction) => void;
   lastId: string | null;
   filters: Filter[];
   onToggleFilter: (type: Filter["type"], value: string) => void;
@@ -136,6 +144,8 @@ export function ListView({
   /** Begin a pointer drag from a skill row (the hook gates it behind a small move threshold,
    *  so a plain click still opens the skill). */
   onSkillStartDrag: (id: string, e: PointerEvent<HTMLElement>) => void;
+  upgradeNotice?: string | null;
+  onUpgrade?: () => void;
 }) {
   // Search + sort are local list-view affordances (label/status filtering lives in the sidebar / chips).
   const [q, setQ] = useState("");
@@ -173,10 +183,18 @@ export function ListView({
         <span className="sh__count tnum">{skills.length}</span>
         <span className="sh__spacer" />
         <button className="btn-primary" onClick={onUpload}>
-          <Icon name="upload" size={14} />
-          {activeLabel ? `Upload to ${title}` : "Upload skill"}
+          <Icon name="plus" size={14} />
+          Add skill
         </button>
       </header>
+
+      {upgradeNotice && (
+        <div className="entitlement-bar" role="status">
+          <Icon name="lock" size={14} />
+          <span>{upgradeNotice}</span>
+          <button className="btn-sec" onClick={onUpgrade}>View plans</button>
+        </div>
+      )}
 
       <div className="listbar">
         <span className="listbar__search">
@@ -255,10 +273,12 @@ export function ListView({
           <span>Deps</span>
           <span className="r">Stars</span>
           <span className="r">Updated</span>
+          <span className="r">Action</span>
         </div>
         {shown.map((s) => {
           const canDrag = !(library === "mine" && s.source === "installed");
           const dragging = canDrag && dragSkillId === s.id;
+          const primary = resolveSkillActions(s, skillActionPermissions(s, actorId)).primary;
           return (
             <div
               key={s.id}
@@ -328,6 +348,21 @@ export function ListView({
                 />
                 {s.updated}
               </span>
+              <span className="crow__primary r">
+                {primary ? (
+                  <button
+                    type="button"
+                    className="rowact rowact--primary"
+                    aria-label={`${primary.label} ${s.id}`}
+                    title={primary.label}
+                    onPointerDown={(event) => event.stopPropagation()}
+                    onClick={() => onPrimaryAction(s, primary)}
+                  >
+                    <Icon name={primary.icon} size={12} />
+                    <span className="rowact__label">{primary.contextualLabel ?? primary.label}</span>
+                  </button>
+                ) : null}
+              </span>
               <span className="crow__mobilemeta">
                 <span>v{s.version ?? "—"}</span>
                 <span>{depsLabel(s)}</span>
@@ -351,7 +386,7 @@ export function ListView({
                   : scopeKind === "starred"
                     ? "No starred skills yet. Star a skill to keep it here."
                     : library === "mine"
-                      ? "No skills in My Skills yet. Upload one, or install a skill from the organization library."
+                      ? "No skills in My Skills yet. Add a skill, or install one from the organization library."
                       : "No organization skills match this view. Clear the filters to see them all."}
             </div>
           </div>

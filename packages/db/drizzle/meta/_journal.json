@@ -229,33 +229,47 @@
     {
       "idx": 32,
       "version": "7",
+      "when": 1783936000000,
+      "tag": "0032_billing",
+      "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1783937500000,
+      "tag": "0033_personal_shared_secrets",
+      "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
       "when": 1781052100000,
       "tag": "0032_skill_runs",
       "breakpoints": true
     },
     {
-      "idx": 33,
+      "idx": 35,
       "version": "7",
       "when": 1781052200000,
       "tag": "0033_user_provider_connections",
       "breakpoints": true
     },
     {
-      "idx": 34,
+      "idx": 36,
       "version": "7",
       "when": 1781052300000,
       "tag": "0034_org_provider_connections",
       "breakpoints": true
     },
     {
-      "idx": 35,
+      "idx": 37,
       "version": "7",
       "when": 1781052400000,
       "tag": "0035_skill_runs_sandbox_cleanup",
       "breakpoints": true
     },
     {
-      "idx": 36,
+      "idx": 38,
       "version": "7",
       "when": 1781052500000,
       "tag": "0036_model_preferences",

@@ -1,8 +1,10 @@
 import {
   apiTokenRowSchema,
+  billingOverviewSchema,
   orgSettingsResponseSchema,
   TEAM_BRAND_COLORS,
   type ApiTokenRow,
+  type BillingOverview,
   type OrgSettingsResponse,
 } from "@companion/contracts";
 import type { ApiKeyVM, Invite, OrgFull, SeedUser, SettingsAppData } from "@/components/org/model";
@@ -46,12 +48,17 @@ export function parseApiTokensResponse(raw: unknown): ApiTokenRow[] {
   return rows;
 }
 
+export function parseBillingOverview(raw: unknown): BillingOverview | null {
+  const result = billingOverviewSchema.safeParse(raw);
+  return result.success ? result.data : null;
+}
+
 /** Map a stored token row to its masked, display-ready view-model. */
 export function mapApiKey(row: ApiTokenRow): ApiKeyVM {
   return {
     id: row.id,
     name: row.name,
-    scope: row.scopes.includes("skills:write") ? "write" : "read",
+    scope: row.scopes.some((scope) => scope.endsWith(":write")) ? "write" : "read",
     prefix: row.prefix,
     // The raw secret is never stored; the prefix is the only post-creation visible part.
     last4: row.prefix.slice(-4),
@@ -66,8 +73,9 @@ export function buildSettingsAppData(input: {
   current: OrgVM;
   settings: OrgSettingsResponse;
   tokens?: ApiTokenRow[];
+  billing?: BillingOverview | null;
 }): SettingsAppData {
-  const { me, current, settings, tokens = [] } = input;
+  const { me, current, settings, tokens = [], billing = null } = input;
   const users: Record<string, SeedUser> = {
     [me.id]: { id: me.id, name: me.name, email: me.email, initials: me.initials, avatarUrl: me.avatarUrl },
   };
@@ -90,7 +98,6 @@ export function buildSettingsAppData(input: {
     name: settings.org.name,
     slug: settings.org.slug,
     kind: settings.org.kind,
-    plan: settings.org.plan,
     myRole: current.myRole,
     created: formatDate(settings.org.createdAt),
     domain: settings.org.domain ?? null,
@@ -134,5 +141,6 @@ export function buildSettingsAppData(input: {
     users,
     invites,
     apiKeys: tokens.map(mapApiKey),
+    billing,
   };
 }

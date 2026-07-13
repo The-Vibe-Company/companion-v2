@@ -5,7 +5,8 @@ import type { LocalSkillRow } from "@companion/contracts";
 import type { SkillVM } from "@/lib/types";
 import { DetailMoreMenuContent, DetailView } from "./DetailView";
 import { LocalSkillDrawer, LocalSkillsView } from "./LocalSkillsView";
-import { UploadDialog } from "./UploadDialog";
+import { InstallDialog, UploadDialog } from "./UploadDialog";
+import { SKILL_ACTIONS } from "./skillActions";
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({
@@ -89,22 +90,16 @@ describe("skill update flow", () => {
         index: 0,
         total: 1,
         me: { id: "user-1", name: "Alice Nardon", email: "alice@example.com", initials: "AN", avatarUrl: null },
-        myRole: "developer",
         orgName: "The Vibe Company",
         allLabels: [],
         onBack: vi.fn(),
         onPrev: vi.fn(),
         onNext: vi.fn(),
         onToggleStar: vi.fn(),
-        onToggleInstalled: vi.fn(),
         onToggleLabel: vi.fn(),
         onSelectLabel: vi.fn(),
-        onShare: vi.fn(),
-        onInstall: vi.fn(),
-        onUpdate: vi.fn(),
+        onAction: vi.fn(),
         onOpenSkill: vi.fn(),
-        onRestore: vi.fn(),
-        onArchive: vi.fn(),
         onOpenRun: vi.fn(),
       }),
     );
@@ -116,30 +111,22 @@ describe("skill update flow", () => {
   it("shows publish in the More menu only for users who can modify the skill", () => {
     const editable = renderToString(
       React.createElement(DetailMoreMenuContent, {
-        canModifySkill: true,
-        canDownload: true,
-        canArchive: true,
-        installed: false,
-        onToggleInstalled: vi.fn(),
-        onUpdate: vi.fn(),
-        onDownload: vi.fn(),
-        onArchive: vi.fn(),
+        actions: [SKILL_ACTIONS.download, SKILL_ACTIONS.publishVersion, SKILL_ACTIONS.archive],
+        onAction: vi.fn(),
       }),
     );
     const readOnly = renderToString(
       React.createElement(DetailMoreMenuContent, {
-        canModifySkill: false,
-        canDownload: true,
-        canArchive: false,
-        installed: false,
-        onToggleInstalled: vi.fn(),
-        onUpdate: vi.fn(),
-        onDownload: vi.fn(),
-        onArchive: vi.fn(),
+        actions: [SKILL_ACTIONS.download],
+        onAction: vi.fn(),
       }),
     );
 
     expect(editable).toContain("Publish new version");
+    expect(editable).toContain('aria-label="Archive skill"');
+    expect(editable).toContain('title="Archive skill"');
+    expect(editable).toMatch(/class="menu__label">Archive<\/span>/);
+    expect(editable).not.toMatch(/class="menu__label">Archive skill<\/span>/);
     expect(readOnly).not.toContain("Publish new version");
     expect(readOnly).toContain("Download package");
   });
@@ -154,9 +141,11 @@ describe("skill update flow", () => {
       }),
     );
 
-    expect(html).toContain("Assistant IA");
-    expect(html).toContain("Upload a package");
-    expect(html).toContain("Edit in the browser");
+    expect(html).toContain("Use an AI assistant");
+    expect(html).toContain("Upload package");
+    expect(html).toContain("Create in browser");
+    expect(html).toContain("Publish new version");
+    expect(html).not.toContain("Update skill");
     expect(html).toContain("Validation endpoint");
     expect(html).toContain("Publish endpoint");
     expect(html).toContain("action=validate");
@@ -167,6 +156,21 @@ describe("skill update flow", () => {
     expect(html).toContain("Never publish after failed validation or ambiguous identity");
     expect(html).not.toContain("Command line");
     expect(html).not.toContain("companion CLI");
+  });
+
+  it("uses Update skill only for installing the newest registry version", () => {
+    const html = renderToString(
+      React.createElement(InstallDialog, {
+        skill: { ...skill, installStatus: "update", installedVersion: "1.1.0" },
+        onClose: vi.fn(),
+        onReported: vi.fn(),
+      }),
+    );
+
+    expect(html).toContain('aria-label="Update skill"');
+    expect(html).toContain("Use an AI assistant");
+    expect(html).toContain("Download package");
+    expect(html).not.toContain("Publish new version");
   });
 
   it("renders create prompt with validation before publish", () => {

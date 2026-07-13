@@ -21,6 +21,7 @@ import {
 } from "@/lib/runQueries";
 import { MembersPane } from "./MembersPane";
 import { InvitationsPane } from "./InvitationsPane";
+import { BillingPane } from "./BillingPane";
 import { InviteDialog } from "./dialogs";
 import type { ApiKeyVM, Invite, OrgCtx, SettingsDialog, SettingsRoute } from "./model";
 
@@ -49,6 +50,8 @@ function crumbFor(ctx: OrgCtx, route: SettingsRoute): string[] {
       return [ws.name, "Members"];
     case "invitations":
       return [ws.name, "Invitations"];
+    case "billing":
+      return [ws.name, "Billing"];
     default:
       return [ws.name];
   }
@@ -121,6 +124,7 @@ export function SettingsView({
   else if (route.view === "members") pane = <MembersPane ctx={ctx} onInvite={() => onDialog("invite")} />;
   else if (route.view === "invitations")
     pane = <InvitationsPane ctx={ctx} invites={invites} onInvite={() => onDialog("invite")} />;
+  else if (route.view === "billing") pane = <BillingPane ctx={ctx} />;
   else pane = <WorkspaceGeneralPane ctx={ctx} />;
 
   const crumb = crumbFor(ctx, route);

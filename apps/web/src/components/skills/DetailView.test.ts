@@ -53,22 +53,16 @@ function renderDetailFor(nextSkill: SkillVM) {
       index: 0,
       total: 1,
       me,
-      myRole: "owner",
       orgName: "The Vibe Company",
       allLabels: ["marketing", "marketing/seo", "growth"],
       onBack: vi.fn(),
       onPrev: vi.fn(),
       onNext: vi.fn(),
       onToggleStar: vi.fn(),
-      onToggleInstalled: vi.fn(),
       onToggleLabel: vi.fn(),
       onSelectLabel: vi.fn(),
-      onShare: vi.fn(),
-      onInstall: vi.fn(),
-      onUpdate: vi.fn(),
+      onAction: vi.fn(),
       onOpenSkill: vi.fn(),
-      onRestore: vi.fn(),
-      onArchive: vi.fn(),
       onOpenRun: vi.fn(),
     }),
   );
@@ -88,6 +82,7 @@ describe("DetailView tabbed detail layout", () => {
     expect(html).toContain("statuscard");
     expect(html).toContain("Status");
     expect(html).toContain("Valid");
+    expect(html).toContain("Installed");
     expect(html).toContain("1.2.3");
     expect(html).toContain("just now");
     // Author provenance byline.
@@ -144,6 +139,30 @@ describe("DetailView tabbed detail layout", () => {
 
     expect(html).not.toContain("Copy public link");
     expect(html).toContain("Share to organization");
+  });
+
+  it("hides installation CTAs for current, invalid, validating, and unpublished skills", () => {
+    expect(renderDetailFor(skill)).not.toContain("Install skill");
+    expect(renderDetailFor({ ...skill, installStatus: "none", installedVersion: null, validation: "invalid" })).not.toContain("Install skill");
+    expect(renderDetailFor({ ...skill, installStatus: "none", installedVersion: null, validation: "validating" })).not.toContain("Install skill");
+    expect(renderDetailFor({ ...skill, installStatus: "none", installedVersion: null, version: null })).not.toContain("Install skill");
+  });
+
+  it("uses a contextual Update label while keeping the explicit accessible name", () => {
+    const html = renderDetailFor({ ...skill, installStatus: "update", installedVersion: "1.1.0" });
+    expect(html).toContain('aria-label="Update skill"');
+    expect(html).toContain('title="Update skill"');
+    expect(html).toMatch(/class="btn-primary"[^>]*>[\s\S]*?<\/svg>Update<\/button>/);
+    expect(html).not.toMatch(/<\/svg>Update skill<\/button>/);
+    expect(html).not.toContain("Install skill");
+  });
+
+  it("uses a contextual Install label while keeping the explicit accessible name", () => {
+    const html = renderDetailFor({ ...skill, installStatus: "none", installedVersion: null });
+    expect(html).toContain('aria-label="Install skill"');
+    expect(html).toContain('title="Install skill"');
+    expect(html).toMatch(/class="btn-primary"[^>]*>[\s\S]*?<\/svg>Install<\/button>/);
+    expect(html).not.toMatch(/<\/svg>Install skill<\/button>/);
   });
 
   it("prefers Companion title and summary for the detail title and lead", () => {
@@ -274,22 +293,16 @@ describe("Run skill (sandboxed sessions)", () => {
         index: 0,
         total: 1,
         me,
-        myRole: "owner",
         orgName: "The Vibe Company",
         allLabels: [],
         onBack: vi.fn(),
         onPrev: vi.fn(),
         onNext: vi.fn(),
         onToggleStar: vi.fn(),
-        onToggleInstalled: vi.fn(),
         onToggleLabel: vi.fn(),
         onSelectLabel: vi.fn(),
-        onShare: vi.fn(),
-        onInstall: vi.fn(),
-        onUpdate: vi.fn(),
+        onAction: vi.fn(),
         onOpenSkill: vi.fn(),
-        onRestore: vi.fn(),
-        onArchive: vi.fn(),
         onOpenRun: vi.fn(),
         initialTab: "sessions",
       }),

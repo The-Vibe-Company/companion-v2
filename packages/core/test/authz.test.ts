@@ -4,6 +4,8 @@ import {
   canAccessRun,
   canAccessSkill,
   canManageOrg,
+  canAccessSecret,
+  canManageSecret,
   canManagePersonalSkill,
   canPerform,
   canTouchOwner,
@@ -95,6 +97,42 @@ describe("isOrgAdmin / canManageOrg (org governance survives the flattening)", (
     expect(canManageOrg("owner")).toBe(true);
     expect(canManageOrg("admin")).toBe(true);
     expect(canManageOrg("developer")).toBe(false);
+  });
+});
+
+describe("secret ACL — audience plus owner, never org role", () => {
+  const base = { ownerId: "u-owner", disabledAt: null, deletedAt: null };
+  it.each(ROLES)("%s has no implicit access to another member's personal secret", (_role) => {
+    expect(canAccessSecret("u-admin", { ...base, audience: "personal" })).toBe(false);
+    expect(canManageSecret("u-admin", base)).toBe(false);
+  });
+  it("allows explicit recipients and every current org member for organization secrets", () => {
+    expect(canAccessSecret("u-recipient", { ...base, audience: "restricted", recipientIds: ["u-recipient"] })).toBe(true);
+    expect(canAccessSecret("u-other", { ...base, audience: "restricted", recipientIds: ["u-recipient"] })).toBe(false);
+    expect(canAccessSecret("u-other", { ...base, audience: "organization" })).toBe(true);
+  });
+  it("denies disabled and deleted secrets, including to their owner", () => {
+    expect(canAccessSecret("u-owner", { ...base, audience: "personal", disabledAt: new Date() })).toBe(false);
+    expect(canAccessSecret("u-owner", { ...base, audience: "personal", deletedAt: new Date() })).toBe(false);
+  });
+
+  const matrix = ROLES.flatMap((role) =>
+    [false, true].flatMap((member) =>
+      [false, true].flatMap((owner) =>
+        (["personal", "restricted", "organization"] as const).map((audience) => ({ role, member, owner, audience })),
+      ),
+    ),
+  );
+  it.each(matrix)("membership=$member role=$role owner=$owner audience=$audience", ({ member, owner, audience }) => {
+    const actorId = owner ? "u-owner" : "u-actor";
+    const allowed = member && canAccessSecret(actorId, {
+      ...base,
+      audience,
+      recipientIds: audience === "restricted" ? ["u-actor"] : [],
+    });
+    const expected = member && (owner || audience === "organization" || audience === "restricted");
+    expect(allowed).toBe(expected);
+    expect(member && canManageSecret(actorId, base)).toBe(member && owner);
   });
 });
 

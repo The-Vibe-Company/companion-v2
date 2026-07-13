@@ -614,7 +614,7 @@ function InstallGate({
               back to copying the masked placeholder when the on-copy token mint fails. */}
           <pre className="ls-gate__prompt">{displayPrompt}</pre>
           <p className="ls-prompt-hint">
-            A scoped skills:read + skills:write token is added when you copy. It expires in 90 days.
+            A scoped skills:read + skills:write + secrets:read + secrets:write token is added when you copy. It expires in 90 days.
           </p>
           {failed && (
             <div className="ls-copied ls-copied--warn" role="alert">
@@ -833,7 +833,7 @@ export function LocalSkillDrawer({
             {phase === "ready" && prompt && (
               <>
                 <CodeBlock text={prompt} scroll copyLabel="Copy prompt" />
-                <p className="ls-prompt-hint">Scoped to skills:read + skills:write, expires in 90 days.</p>
+                <p className="ls-prompt-hint">Scoped to skills:read + skills:write + secrets:read + secrets:write, expires in 90 days.</p>
                 {copied && (
                   <div className="ls-copied" role="status">
                     <Icon name="check" size={14} />

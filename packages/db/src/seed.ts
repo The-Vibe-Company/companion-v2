@@ -14,7 +14,6 @@ async function main(): Promise<void> {
       name: "Acme",
       slug: "acme",
       kind: "team",
-      plan: "free",
       // Legacy fields kept populated for compatibility; domain access now lives in organization_domains.
       domain: "acme.com",
       domainAutoJoin: true,

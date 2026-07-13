@@ -44,7 +44,7 @@ describe("companion skill package + row", () => {
     const pkg = await getCompanionSkillPackage();
     expect(pkg.key).toBe("companion");
     expect(pkg.checksum).toMatch(/^sha256:[0-9a-f]{64}$/);
-    expect(pkg.version).toBe("1.18.0");
+    expect(pkg.version).toBe("1.21.0");
     expect(pkg.sizeBytes).toBeGreaterThan(0);
     expect(pkg.integrity.packageChecksum).toBe(pkg.checksum);
     expect(pkg.integrity.files["SKILL.md"]).toMatch(/^sha256:[0-9a-f]{64}$/);
@@ -63,13 +63,17 @@ describe("companion skill package + row", () => {
     expect(Object.keys(baseline.files ?? {}).sort()).toEqual([
       "SKILL.md",
       "companion.json",
+      "evals/evals.json",
       "scripts/bootstrap.py",
       "scripts/bootstrap_integrity.py",
       "scripts/bootstrap_update.py",
       "scripts/check_updates.py",
       "scripts/companion_lib.py",
+      "scripts/create_secret.py",
       "scripts/install_skill.py",
+      "scripts/secrets_runtime.py",
       "scripts/skill_guard.py",
+      "scripts/sync_secrets.py",
       "scripts/tools.json",
     ]);
     for (const [relPath, digest] of Object.entries(baseline.files ?? {})) {
@@ -111,8 +115,15 @@ describe("companion skill package + row", () => {
       desc: "Create or repair manifest v2 with identity, env/secrets, dependency ids, notes, commands, and changelog.",
     });
     const changelog = row.changes.join("\n");
-    expect(changelog).toContain("workspace skill naming policy");
-    expect(changelog).toContain("GET /orgs/current/skill-naming-policy");
+    expect(changelog).toContain("parity with signed-in users");
+    expect(changelog).toContain("create_secret.py --skill");
+    expect(changelog).toContain("Keeps plaintext out of arguments and output");
+    const manifest = JSON.parse(await readFile(join(companionSkillDir(), "companion.json"), "utf8")) as {
+      metadata?: { changelog?: Array<{ version?: string; changes?: string[] }> };
+    };
+    const billingChanges = manifest.metadata?.changelog?.find((entry) => entry.version === "1.19.0")?.changes?.join("\n") ?? "";
+    expect(billingChanges).toContain("Documents the managed SaaS Free and Pro skill entitlements");
+    expect(billingChanges).toContain("structured entitlement 403 responses");
     // The install prompt drives the report-back call and leaves placeholders for the client.
     expect(row.prompts.install).toContain("/local-skills/companion/package");
     expect(row.prompts.install).toContain("/local-skills/companion/installed");
@@ -140,8 +151,8 @@ describe("companion skill package + row", () => {
     expect(row.prompts.update).toContain("/local-skills/companion/package");
     expect(row.prompts.update).toContain("python3 scripts/bootstrap.py --json --auto-update-companion");
     expect(row.prompts.update).toContain("local_customizations");
-    expect(row.prompts.update).toContain("move it to a backup path");
-    expect(row.prompts.update).toContain("Do not delete the existing folder");
+    expect(row.prompts.update).toContain("transient backup only for the duration of the swap");
+    expect(row.prompts.update).toContain("Do not leave backup folders");
     expect(row.prompts.update).not.toContain("Unzip it over");
     expect(row.prompts.install).toContain("/local-skills/companion/installed");
     expect(row.prompts.update).toContain("/local-skills/companion/installed");

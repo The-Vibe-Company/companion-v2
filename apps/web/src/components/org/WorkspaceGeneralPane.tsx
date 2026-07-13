@@ -16,6 +16,8 @@ export function WorkspaceGeneralPane({ ctx }: { ctx: OrgCtx }) {
   const [host, setHost] = useState("");
   const [domainDraft, setDomainDraft] = useState("");
   const [domainError, setDomainError] = useState<string | null>(null);
+  const [acknowledgeSeatBilling, setAcknowledgeSeatBilling] = useState(false);
+  const requiresSeatConsent = ctx.billing?.billingEnabled && ctx.billing.entitlements.computedPlan === "pro";
   useEffect(() => setHost(window.location.host), []);
   const urlPrefix = host ? `${host}/` : "";
   const domainPlaceholder = ctx.domainJoin.actorDomainIsPersonal || !ctx.domainJoin.actorDomain ? "client.com" : ctx.domainJoin.actorDomain;
@@ -24,8 +26,9 @@ export function WorkspaceGeneralPane({ ctx }: { ctx: OrgCtx }) {
     if (!domain || ctx.busy) return;
     setDomainError(null);
     try {
-      await ctx.addAccessDomain(domain);
+      await ctx.addAccessDomain(domain, acknowledgeSeatBilling);
       setDomainDraft("");
+      setAcknowledgeSeatBilling(false);
     } catch (error) {
       setDomainError(error instanceof Error ? error.message : String(error));
     }
@@ -99,9 +102,15 @@ export function WorkspaceGeneralPane({ ctx }: { ctx: OrgCtx }) {
                     onChange={(e) => setDomainDraft(e.target.value)}
                   />
                 </div>
-                <button className="btn-sec" type="submit" disabled={!domainDraft.trim() || ctx.busy}>
+                <button className="btn-sec" type="submit" disabled={!domainDraft.trim() || ctx.busy || (requiresSeatConsent && !acknowledgeSeatBilling)}>
                   <Icon name="plus" size={14} />Add
                 </button>
+                {requiresSeatConsent && (
+                  <label className="sx-billing-consent sx-domainbox__consent">
+                    <input type="checkbox" checked={acknowledgeSeatBilling} onChange={(event) => setAcknowledgeSeatBilling(event.target.checked)} />
+                    <span>Each member who joins this domain adds a prorated $10 USD/month seat.</span>
+                  </label>
+                )}
                 {domainError && (
                   <div className="sx-field__hint sx-field__hint--error" id="domain-access-error" aria-live="polite">
                     {domainError}
@@ -167,12 +176,6 @@ export function WorkspaceGeneralPane({ ctx }: { ctx: OrgCtx }) {
       <div className="sx-sec">
         <h2 className="sx-sec__h">Details</h2>
         <div className="sx-defs">
-          <div className="sx-def">
-            <span className="sx-def__k">Plan</span>
-            <span className="sx-def__v">
-              <span className="badge badge--accent"><Icon name="sparkles" size={11} />{ws.plan === "team" ? "Team" : "Free"}</span>
-            </span>
-          </div>
           <div className="sx-def">
             <span className="sx-def__k">Kind</span>
             <span className="sx-def__v">{ws.kind === "personal" ? "Personal workspace" : "Team organization"}</span>

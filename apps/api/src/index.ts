@@ -109,7 +109,23 @@ import {
   RunBusyError,
   RunValidationError,
   type RunControlContext,
+  listSecrets,
+  getSecret,
+  createSecret,
+  updateSecret,
+  rotateSecret,
+  deleteSecret,
+  getSkillSecretConfiguration,
+  setSkillSecretBinding,
+  removeSkillSecretBinding,
+  setSkillSecretSuggestion,
+  removeSkillSecretSuggestion,
+  acceptSkillSecretSuggestion,
+  preflightSecretRetrieval,
+  createSecretRetrievalGrant,
+  redeemSecretRetrievalGrant,
 } from "@companion/core/services";
+import { SecretConfigurationError, loadSecretsMasterKey } from "@companion/core";
 import {
   addCommentInputSchema,
   addOrgAccessDomainInputSchema,
@@ -154,6 +170,13 @@ import {
   type CompanionManifest,
   type SkillFrontmatter,
   type SkillScope,
+  createSecretInputSchema,
+  updateSecretInputSchema,
+  rotateSecretInputSchema,
+  setSecretBindingInputSchema,
+  setSecretSuggestionInputSchema,
+  secretRetrievalPreflightInputSchema,
+  redeemSecretGrantInputSchema,
 } from "@companion/contracts";
 import {
   createChatClient,
@@ -213,10 +236,30 @@ import { buildInlineCompanionManifest, uploadDependencyValues, withResolvedManif
 import { buildCompanionSkillRow, getCompanionSkillPackage } from "./companionSkillPackage";
 import { parseSkillListQuery } from "./skillListQuery";
 import { COMPANION_SKILL_KEY } from "@companion/companion-skill";
+import { StripeBillingGateway } from "@companion/billing";
+import {
+  billingRuntimeConfig,
+  assertBillingEnvironmentConfigured,
+  createBillingCheckout,
+  createBillingPortal,
+  getBillingOverview,
+  processStripeWebhook,
+} from "@companion/core";
 
 const app = new Hono<{ Variables: ApiVariables }>();
 
 export { app };
+
+function stripeBillingGateway(): StripeBillingGateway {
+  const secretKey = process.env.STRIPE_SECRET_KEY?.trim();
+  const priceId = process.env.STRIPE_PRO_PRICE_ID?.trim();
+  const portalId = process.env.STRIPE_PORTAL_CONFIGURATION_ID?.trim();
+  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET?.trim();
+  if (!secretKey || !priceId || !portalId || !webhookSecret) {
+    throw new Error("Stripe billing is not fully configured");
+  }
+  return new StripeBillingGateway(secretKey, priceId, portalId, webhookSecret);
+}
 
 app.get("/v1/schemas/companion-manifest.v2.schema.json", (c) => c.json(companionManifestV2JsonSchema));
 
@@ -231,6 +274,45 @@ app.get("/v1/public/skills/:token", async (c) => {
   }
 });
 
+app.post(
+  "/v1/billing/webhooks/stripe",
+  bodyLimit({ maxSize: 2 * 1024 * 1024, onError: (c) => jsonError(c, "Stripe webhook exceeds the 2 MB limit", 413) }),
+  async (c) => {
+    try {
+      if (!billingRuntimeConfig().webhooksEnabled) return jsonError(c, "Stripe webhooks are disabled", 404);
+      const signature = c.req.header("stripe-signature");
+      if (!signature) return jsonError(c, "missing Stripe signature", 400);
+      const gateway = stripeBillingGateway();
+      const event = gateway.constructWebhookEvent(await c.req.text(), signature);
+      const object = event.data.object as unknown as Record<string, unknown>;
+      const objectType = typeof object.object === "string" ? object.object : null;
+      const subscriptionId =
+        objectType === "subscription" && typeof object.id === "string"
+          ? object.id
+          : typeof object.subscription === "string"
+            ? object.subscription
+            : null;
+      const customerId = typeof object.customer === "string" ? object.customer : null;
+      const outcome = await processStripeWebhook({
+        eventId: event.id,
+        eventType: event.type,
+        subscriptionId,
+        customerId,
+        gateway,
+      });
+      if (outcome === "ignored") {
+        console.info("ignored Stripe event with no matching organization", {
+          eventId: event.id,
+          eventType: event.type,
+        });
+      }
+      return c.json({ received: true, outcome });
+    } catch (error) {
+      return jsonError(c, error, 400);
+    }
+  },
+);
+
 /** Set the `companion_org` selection cookie (readable client-side, so not httpOnly). */
 function setOrgCookie(c: Context<{ Variables: ApiVariables }>, orgId: string): void {
   setCookie(c, "companion_org", orgId, {
@@ -239,6 +321,15 @@ function setOrgCookie(c: Context<{ Variables: ApiVariables }>, orgId: string): v
     secure: process.env.NODE_ENV === "production",
     httpOnly: false,
   });
+}
+
+function secretRouteError(c: Context, error: unknown, status = 400): Response {
+  return jsonError(c, error, error instanceof SecretConfigurationError ? 503 : status);
+}
+
+function assertSecretsConfigured(): void {
+  const key = loadSecretsMasterKey();
+  key.fill(0);
 }
 
 async function withTenant<T>(
@@ -483,6 +574,51 @@ async function authForward(c: { req: { url: string; method: string; raw: Request
 app.post("/v1/auth/login", (c) => authForward(c, "/auth/sign-in/email"));
 app.post("/v1/auth/signup", (c) => authForward(c, "/auth/sign-up/email"));
 app.post("/v1/auth/logout", (c) => authForward(c, "/auth/sign-out"));
+
+app.get("/v1/billing", async (c) => {
+  try {
+    const overview = await withTenant(c, ({ actor, orgId, database }) =>
+      getBillingOverview({ actorId: actor.id, orgId, database }),
+    );
+    return c.json(overview);
+  } catch (error) {
+    return jsonError(c, error, 401);
+  }
+});
+
+app.post("/v1/billing/checkout", async (c) => {
+  try {
+    const result = await withTenant(c, ({ actor, orgId, database }) =>
+      createBillingCheckout({
+        actorId: actor.id,
+        orgId,
+        database,
+        gateway: stripeBillingGateway(),
+        appUrl: process.env.COMPANION_WEB_URL ?? "http://127.0.0.1:3000",
+      }),
+    );
+    return c.json(result);
+  } catch (error) {
+    return jsonError(c, error, 403);
+  }
+});
+
+app.post("/v1/billing/portal", async (c) => {
+  try {
+    const result = await withTenant(c, ({ actor, orgId, database }) =>
+      createBillingPortal({
+        actorId: actor.id,
+        orgId,
+        database,
+        gateway: stripeBillingGateway(),
+        appUrl: process.env.COMPANION_WEB_URL ?? "http://127.0.0.1:3000",
+      }),
+    );
+    return c.json(result);
+  } catch (error) {
+    return jsonError(c, error, 403);
+  }
+});
 
 function safeAuthNext(value: unknown): string {
   const next = typeof value === "string" ? value : "";
@@ -779,7 +915,7 @@ app.post("/v1/orgs/current/domains", async (c) => {
   try {
     if (isTokenRequest(c)) throw new Error("personal access tokens cannot manage workspace domains");
     const input = addOrgAccessDomainInputSchema.parse(await c.req.json());
-    return c.json(await withTenant(c, ({ actor, orgId, database }) => addOrgAccessDomain({ actor, orgId, domain: input.domain, database })));
+    return c.json(await withTenant(c, ({ actor, orgId, database }) => addOrgAccessDomain({ actor, orgId, domain: input.domain, acknowledgeSeatBilling: input.acknowledgeSeatBilling, database })));
   } catch (error) {
     return jsonError(c, error);
   }
@@ -921,11 +1057,11 @@ app.post("/v1/invitations", async (c) => {
     const orgId = await orgIdFromContext(c);
     createdActor = actor;
     createdOrgId = orgId;
-    const body = await c.req.json<{ email: string; role?: "admin" | "developer" }>();
+    const body = await c.req.json<{ email: string; role?: "admin" | "developer"; acknowledgeSeatBilling?: boolean }>();
     const role = body.role ?? "developer";
     if (role !== "admin" && role !== "developer") throw new Error("invalid invitation role");
     const invite = await withTenantContext({ orgId, userId: actor.id }, (database) =>
-      createInvitation({ actor, orgId, email: body.email, role, database }),
+      createInvitation({ actor, orgId, email: body.email, role, acknowledgeSeatBilling: body.acknowledgeSeatBilling, database }),
     );
     createdInvite = invite;
     const org = (await listOrgs(actor)).find((o) => o.org_id === orgId);
@@ -2217,6 +2353,188 @@ app.post("/v1/local-skills/:key/installed", async (c) => {
   }
 });
 
+// Secrets metadata/retrieval use `secrets:read`; every Secrets mutation uses `secrets:write`.
+// PAT callers have the same Secrets capabilities as their signed-in user inside the token's workspace.
+app.get("/v1/secrets", async (c) => {
+  try {
+    assertSecretsConfigured();
+    actorFromContext(c, true);
+    requireScope(c, "secrets:read");
+    return c.json(await withTenant(c, ({ actor, orgId, database }) => listSecrets({ actor, orgId, database }), true));
+  } catch (error) {
+    return secretRouteError(c, error, 401);
+  }
+});
+
+app.post(
+  "/v1/secrets",
+  // A secret value is capped at 64 KiB. Keep modest room for JSON framing, metadata and recipient
+  // ids, but reject oversized requests before buffering/parsing them in the handler.
+  bodyLimit({ maxSize: 128 * 1024, onError: (c) => secretRouteError(c, "secret request exceeds the 128 KiB limit", 413) }),
+  async (c) => {
+    try {
+      assertSecretsConfigured();
+      actorFromContext(c, true);
+      requireScope(c, "secrets:write");
+      const value = createSecretInputSchema.parse(await c.req.json());
+      return c.json(await withTenant(c, ({ actor, orgId, database }) => createSecret({ actor, orgId, value, database }), true), 201);
+    } catch (error) {
+      return secretRouteError(c, error);
+    }
+  },
+);
+
+app.get("/v1/secrets/:id", async (c) => {
+  try {
+    assertSecretsConfigured();
+    actorFromContext(c, true);
+    requireScope(c, "secrets:read");
+    return c.json(await withTenant(c, ({ actor, orgId, database }) => getSecret({ actor, orgId, secretId: c.req.param("id"), database }), true));
+  } catch (error) {
+    return secretRouteError(c, error, 404);
+  }
+});
+
+app.patch("/v1/secrets/:id", async (c) => {
+  try {
+    assertSecretsConfigured();
+    actorFromContext(c, true);
+    requireScope(c, "secrets:write");
+    const value = updateSecretInputSchema.parse(await c.req.json());
+    return c.json(await withTenant(c, ({ actor, orgId, database }) => updateSecret({ actor, orgId, secretId: c.req.param("id"), value, database }), true));
+  } catch (error) {
+    return secretRouteError(c, error);
+  }
+});
+
+app.delete("/v1/secrets/:id", async (c) => {
+  try {
+    assertSecretsConfigured();
+    actorFromContext(c, true);
+    requireScope(c, "secrets:write");
+    await withTenant(c, ({ actor, orgId, database }) => deleteSecret({ actor, orgId, secretId: c.req.param("id"), database }), true);
+    return c.json({ ok: true as const });
+  } catch (error) {
+    return secretRouteError(c, error);
+  }
+});
+
+app.post("/v1/secrets/:id/rotate", async (c) => {
+  try {
+    assertSecretsConfigured();
+    actorFromContext(c, true);
+    requireScope(c, "secrets:write");
+    const value = rotateSecretInputSchema.parse(await c.req.json());
+    return c.json(await withTenant(c, ({ actor, orgId, database }) => rotateSecret({ actor, orgId, secretId: c.req.param("id"), value: value.value, database }), true));
+  } catch (error) {
+    return secretRouteError(c, error);
+  }
+});
+
+app.get("/v1/skills/:slug/secret-configuration", async (c) => {
+  try {
+    assertSecretsConfigured();
+    actorFromContext(c, true);
+    requireScope(c, "secrets:read");
+    return c.json(await withTenant(c, ({ actor, orgId, database }) => getSkillSecretConfiguration({ actor, orgId, slug: c.req.param("slug"), version: c.req.query("version"), database }), true));
+  } catch (error) {
+    return secretRouteError(c, error, 404);
+  }
+});
+
+app.put("/v1/skills/:slug/secret-bindings/:slotId", async (c) => {
+  try {
+    assertSecretsConfigured();
+    actorFromContext(c, true);
+    requireScope(c, "secrets:write");
+    const value = setSecretBindingInputSchema.parse(await c.req.json());
+    return c.json(await withTenant(c, ({ actor, orgId, database }) => setSkillSecretBinding({ actor, orgId, slug: c.req.param("slug"), slotId: c.req.param("slotId"), secretId: value.secret_id, database }), true));
+  } catch (error) {
+    return secretRouteError(c, error);
+  }
+});
+
+app.delete("/v1/skills/:slug/secret-bindings/:slotId", async (c) => {
+  try {
+    assertSecretsConfigured();
+    actorFromContext(c, true);
+    requireScope(c, "secrets:write");
+    return c.json(await withTenant(c, ({ actor, orgId, database }) => removeSkillSecretBinding({ actor, orgId, slug: c.req.param("slug"), slotId: c.req.param("slotId"), database }), true));
+  } catch (error) {
+    return secretRouteError(c, error);
+  }
+});
+
+app.put("/v1/skills/:slug/secret-suggestions/:slotId", async (c) => {
+  try {
+    assertSecretsConfigured();
+    actorFromContext(c, true);
+    requireScope(c, "secrets:write");
+    const value = setSecretSuggestionInputSchema.parse(await c.req.json());
+    return c.json(await withTenant(c, ({ actor, orgId, database }) => setSkillSecretSuggestion({ actor, orgId, slug: c.req.param("slug"), slotId: c.req.param("slotId"), secretId: value.secret_id, database }), true));
+  } catch (error) {
+    return secretRouteError(c, error);
+  }
+});
+
+app.delete("/v1/skills/:slug/secret-suggestions/:slotId", async (c) => {
+  try {
+    assertSecretsConfigured();
+    actorFromContext(c, true);
+    requireScope(c, "secrets:write");
+    return c.json(await withTenant(c, ({ actor, orgId, database }) => removeSkillSecretSuggestion({ actor, orgId, slug: c.req.param("slug"), slotId: c.req.param("slotId"), database }), true));
+  } catch (error) {
+    return secretRouteError(c, error);
+  }
+});
+
+app.post("/v1/skills/:slug/secret-suggestions/:slotId/accept", async (c) => {
+  try {
+    assertSecretsConfigured();
+    actorFromContext(c, true);
+    requireScope(c, "secrets:write");
+    return c.json(await withTenant(c, ({ actor, orgId, database }) => acceptSkillSecretSuggestion({ actor, orgId, slug: c.req.param("slug"), slotId: c.req.param("slotId"), database }), true));
+  } catch (error) {
+    return secretRouteError(c, error);
+  }
+});
+
+app.post("/v1/secret-retrievals/preflight", async (c) => {
+  try {
+    assertSecretsConfigured();
+    actorFromContext(c, true);
+    requireScope(c, "secrets:read");
+    const value = secretRetrievalPreflightInputSchema.parse(await c.req.json());
+    return c.json(await withTenant(c, ({ actor, orgId, database }) => preflightSecretRetrieval({ actor, orgId, value, database }), true));
+  } catch (error) {
+    return secretRouteError(c, error);
+  }
+});
+
+app.post("/v1/secret-retrievals/:planId/grant", async (c) => {
+  try {
+    assertSecretsConfigured();
+    actorFromContext(c, true);
+    requireScope(c, "secrets:read");
+    return c.json(await withTenant(c, ({ actor, orgId, database }) => createSecretRetrievalGrant({ actor, orgId, planId: c.req.param("planId"), database }), true));
+  } catch (error) {
+    return secretRouteError(c, error);
+  }
+});
+
+app.post("/v1/secret-grants/redeem", async (c) => {
+  try {
+    assertSecretsConfigured();
+    actorFromContext(c, true);
+    requireScope(c, "secrets:read");
+    const value = redeemSecretGrantInputSchema.parse(await c.req.json());
+    const result = await withTenant(c, ({ actor, orgId, database }) => redeemSecretRetrievalGrant({ actor, orgId, grant: value.grant, database }), true);
+    return result.ok ? c.json(result.value) : secretRouteError(c, result.error, 409);
+  } catch (error) {
+    return secretRouteError(c, error);
+  }
+});
+
 /**
  * List the caller's personal access tokens for the settings UI. Cookie session only — a PAT cannot
  * enumerate tokens. Developers see only their own; org admins see all in the org. No secret is returned.
@@ -2754,6 +3072,7 @@ if (sweepMs > 0 && vercelConfigFromEnv()) {
 
 const port = Number(process.env.COMPANION_API_PORT ?? process.env.PORT ?? 3001);
 const hostname = process.env.COMPANION_API_HOST;
+assertBillingEnvironmentConfigured();
 serve({ fetch: app.fetch, port, ...(hostname ? { hostname } : {}) }, (info) => {
   console.log(`Companion API listening on ${hostname ? `http://${hostname}:${info.port}` : `port ${info.port}`}`);
 });

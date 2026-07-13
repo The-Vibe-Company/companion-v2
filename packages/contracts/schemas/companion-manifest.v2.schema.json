@@ -51,7 +51,7 @@
       "required": ["env", "secrets"],
       "properties": {
         "env": { "$ref": "#/$defs/environmentMap" },
-        "secrets": { "$ref": "#/$defs/environmentMap" }
+        "secrets": { "$ref": "#/$defs/secretMap" }
       }
     },
     "dependencies": {
@@ -104,6 +104,21 @@
         "additionalProperties": false,
         "required": ["required", "description"],
         "properties": {
+          "required": { "type": "boolean" },
+          "description": { "type": "string", "maxLength": 2000 }
+        },
+        "not": { "required": ["value"] }
+      }
+    },
+    "secretMap": {
+      "type": "object",
+      "propertyNames": { "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["required", "description"],
+        "properties": {
+          "slotId": { "type": "string", "format": "uuid" },
           "required": { "type": "boolean" },
           "description": { "type": "string", "maxLength": 2000 }
         },

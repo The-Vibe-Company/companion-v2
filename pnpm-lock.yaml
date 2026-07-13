@@ -32,6 +32,9 @@ importers:
       '@companion/auth':
         specifier: workspace:*
         version: link:../../packages/auth
+      '@companion/billing':
+        specifier: workspace:*
+        version: link:../../packages/billing
       '@companion/companion-skill':
         specifier: workspace:*
         version: link:../../packages/companion-skill
@@ -80,6 +83,9 @@ importers:
       resend:
         specifier: ^6.5.1
         version: 6.12.4
+      stripe:
+        specifier: ^18.5.0
+        version: 18.5.0(@types/node@22.19.20)
       tar-stream:
         specifier: ^3.1.7
         version: 3.2.0
@@ -173,6 +179,43 @@ importers:
         specifier: ^2.1.8
         version: 2.1.9(@types/node@22.19.20)(happy-dom@20.10.6)
 
+  apps/worker:
+    dependencies:
+      '@companion/billing':
+        specifier: workspace:*
+        version: link:../../packages/billing
+      '@companion/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+      '@companion/db':
+        specifier: workspace:*
+        version: link:../../packages/db
+      drizzle-orm:
+        specifier: ^0.38.4
+        version: 0.38.4(@types/react@19.2.17)(kysely@0.29.2)(postgres@3.4.9)(react@19.0.0)
+      postgres:
+        specifier: ^3.4.5
+        version: 3.4.9
+      stripe:
+        specifier: ^18.5.0
+        version: 18.5.0(@types/node@22.19.20)
+    devDependencies:
+      '@types/node':
+        specifier: ^22.10.2
+        version: 22.19.20
+      tsup:
+        specifier: ^8.3.5
+        version: 8.5.1(postcss@8.5.15)(tsx@4.22.4)(typescript@5.9.3)(yaml@2.9.0)
+      tsx:
+        specifier: ^4.19.2
+        version: 4.22.4
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.8
+        version: 2.1.9(@types/node@22.19.20)(happy-dom@20.10.6)
+
   cli:
     dependencies:
       '@clack/prompts':
@@ -241,6 +284,22 @@ importers:
         specifier: ^5.7.2
         version: 5.9.3
 
+  packages/billing:
+    dependencies:
+      stripe:
+        specifier: ^18.5.0
+        version: 18.5.0(@types/node@22.19.20)
+    devDependencies:
+      '@types/node':
+        specifier: ^22.10.2
+        version: 22.19.20
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.8
+        version: 2.1.9(@types/node@22.19.20)(happy-dom@20.10.6)
+
   packages/companion-skill:
     devDependencies:
       '@types/node':
@@ -265,6 +324,9 @@ importers:
 
   packages/core:
     dependencies:
+      '@companion/billing':
+        specifier: workspace:*
+        version: link:../billing
       '@companion/contracts':
         specifier: workspace:*
         version: link:../contracts
@@ -3668,6 +3730,10 @@ packages:
     resolution: {integrity: sha512-vYt7UD1U9Wg6138shLtLOvdAu+8DsC/ilFtEVHcH+wydcSpNE20AfSOduf6MkRFahL5FY7X1oU7nKVZFtfq8Fg==}
     engines: {node: '>=6'}
 
+  qs@6.15.3:
+    resolution: {integrity: sha512-O9gl3zCl5h5blw1KGUzQKhA5oUXSl8rwUIM5o0S3nCXMliSvy5Dzx7/DJcI+SwgICv+IneSZwhBh1oSyEHA71A==}
+    engines: {node: '>=0.6'}
+
   query-selector-shadow-dom@1.0.1:
     resolution: {integrity: sha512-lT5yCqEBgfoMYpf3F2xQRK7zEr1rhIIZuceDK6+xRkJQ4NMbHTwXqk4NkwDwQMNqXgG9r9fyHnzwNVs6zV5KRw==}
 
@@ -3933,6 +3999,15 @@ packages:
   strip-json-comments@3.1.1:
     resolution: {integrity: sha512-6fPc+R4ihwqP6N/aIv2f1gMH8lOVtWQHoqC4yK6oSDVVocumAsfCqjkXnqiYMhmMwS/mEHLp7Vehlt3ql6lEig==}
     engines: {node: '>=8'}
+
+  stripe@18.5.0:
+    resolution: {integrity: sha512-Hp+wFiEQtCB0LlNgcFh5uVyKznpDjzyUZ+CNVEf+I3fhlYvh7rZruIg+jOwzJRCpy0ZTPMjlzm7J2/M2N6d+DA==}
+    engines: {node: '>=12.*'}
+    peerDependencies:
+      '@types/node': '>=12.x.x'
+    peerDependenciesMeta:
+      '@types/node':
+        optional: true
 
   strnum@2.3.0:
     resolution: {integrity: sha512-ums3KNd42PGyx5xaoVTO1mjU1bH3NpY4vsrVlnv9PNGqQj8wd7rJ6nEypLrJ7z5vxK5RP0yMLo6J/Gsm62DI5Q==}
@@ -7589,6 +7664,11 @@ snapshots:
 
   punycode@2.3.1: {}
 
+  qs@6.15.3:
+    dependencies:
+      es-define-property: 1.0.1
+      side-channel: 1.1.1
+
   query-selector-shadow-dom@1.0.1: {}
 
   queue-microtask@1.2.3: {}
@@ -7975,6 +8055,12 @@ snapshots:
   strip-bom@3.0.0: {}
 
   strip-json-comments@3.1.1: {}
+
+  stripe@18.5.0(@types/node@22.19.20):
+    dependencies:
+      qs: 6.15.3
+    optionalDependencies:
+      '@types/node': 22.19.20
 
   strnum@2.3.0: {}
 

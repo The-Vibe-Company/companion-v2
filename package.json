@@ -17,7 +17,7 @@
     "db:seed": "pnpm --filter @companion/db seed",
     "dev": "bash scripts/dev-stack.sh",
     "dev:conductor": "bash scripts/dev-conductor.sh",
-    "dev:app": "pnpm exec concurrently -k -n api,web \"COMPANION_API_HOST=${COMPANION_API_HOST:-127.0.0.1} pnpm --filter @companion/api dev\" \"pnpm --filter @companion/web dev --hostname ${COMPANION_WEB_HOST:-127.0.0.1} --port ${COMPANION_WEB_PORT:-3000}\"",
+    "dev:app": "pnpm exec concurrently -k -n api,worker,web \"COMPANION_API_HOST=${COMPANION_API_HOST:-127.0.0.1} pnpm --filter @companion/api dev\" \"pnpm --filter @companion/worker dev\" \"pnpm --filter @companion/web dev --hostname ${COMPANION_WEB_HOST:-127.0.0.1} --port ${COMPANION_WEB_PORT:-3000}\"",
     "dev:check": "bash scripts/dev-stack-check.sh",
     "lint": "turbo run lint",
     "typecheck": "turbo run typecheck",

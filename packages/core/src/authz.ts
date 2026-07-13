@@ -1,4 +1,4 @@
-import { type OrgRole, type SkillScope } from "@companion/contracts";
+import { type OrgRole, type SecretAudience, type SkillScope } from "@companion/contracts";
 
 /**
  * The CAPABILITY gate (the "can the actor DO it?" half of authorization). The
@@ -100,4 +100,24 @@ export interface RunScopeRef {
  */
 export function canAccessRun(actorId: string, run: RunScopeRef): boolean {
   return run.creatorId === actorId;
+}
+
+export interface SecretAccessRef {
+  ownerId: string;
+  audience: SecretAudience;
+  recipientIds?: readonly string[];
+  disabledAt?: Date | string | null;
+  deletedAt?: Date | string | null;
+}
+
+/** Roles are deliberately absent: secret access is owner + audience, never an admin capability. */
+export function canAccessSecret(actorId: string, secret: SecretAccessRef): boolean {
+  if (secret.disabledAt || secret.deletedAt) return false;
+  if (secret.ownerId === actorId) return true;
+  if (secret.audience === "organization") return true;
+  return secret.audience === "restricted" && (secret.recipientIds ?? []).includes(actorId);
+}
+
+export function canManageSecret(actorId: string, secret: Pick<SecretAccessRef, "ownerId">): boolean {
+  return secret.ownerId === actorId;
 }
