@@ -1,254 +1,195 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
-import type { ModelRow, ModelsResponse } from "@companion/contracts";
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
+import type { RunModelOption } from "@companion/contracts";
 import { Icon } from "../Icon";
-import { setProviderConnection } from "@/lib/runQueries";
-import {
-  availableModelsFromGroups,
-  disconnectedGroups,
-  filterGroupsToActivated,
-  filterModels,
-  groupModelsByProvider,
-  toModelProviders,
-  type ModelGroupVM,
-} from "./derive";
-
-/** Compact model picker for the run launcher composer — button + upward popover menu. */
 
 function contextHint(context: number | null): string | null {
   if (!context) return null;
   return `${Math.round(context / 1000)}k context`;
 }
 
-function ConnectProviderRow({
-  group,
-  onConnected,
-}: {
-  group: ModelGroupVM;
-  onConnected: (providerId: string) => void;
-}) {
-  const { provider } = group;
-  const [connecting, setConnecting] = useState(false);
-  const [key, setKey] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const savingRef = useRef(false);
-  const canConnect = provider.envKeys.length > 0;
+type MenuPosition = { left: number; top: number; width: number };
 
-  const save = () => {
-    if (savingRef.current || !key.trim() || !canConnect) return;
-    savingRef.current = true;
-    setBusy(true);
-    setError(null);
-    setProviderConnection({ provider: provider.id, key_name: provider.envKeys[0]!, key: key.trim() })
-      .then(() => {
-        onConnected(provider.id);
-        setConnecting(false);
-        setKey("");
-      })
-      .catch((e) => {
-        setError(e instanceof Error ? e.message : "Could not save the key.");
-      })
-      .finally(() => {
-        savingRef.current = false;
-        setBusy(false);
-      });
-  };
-
-  return (
-    <div className="modelsel__connect">
-      <div className="modelsel__connect-head">
-        <span>{provider.name}</span>
-        {!connecting && (
-          <button
-            type="button"
-            className="ag-btn"
-            style={{ height: 24 }}
-            onClick={() => setConnecting(true)}
-            disabled={!canConnect}
-            title={canConnect ? undefined : "This provider can't be connected here."}
-          >
-            Connect
-          </button>
-        )}
-      </div>
-      {connecting && (
-        <div className="modelsel__connect-form">
-          <input
-            type="password"
-            value={key}
-            onChange={(e) => setKey(e.target.value)}
-            placeholder={`Your ${provider.name} API key`}
-            aria-label={`API key for ${provider.name}`}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") {
-                e.preventDefault();
-                save();
-              }
-            }}
-          />
-          <button type="button" className="ag-btn" onClick={save} disabled={busy || !key.trim()} style={{ height: 28 }}>
-            {busy ? "Saving…" : "Save"}
-          </button>
-          {error && (
-            <pre className="errblock" role="alert" style={{ margin: 0, gridColumn: "1 / -1" }}>
-              {error}
-            </pre>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
+/** Compact, top-layer model picker. Readiness comes from run-options and cannot be bypassed. */
 export function ModelSelect({
-  models,
+  options,
   model,
   onSelectModel,
-  connectedNow,
-  onConnected,
-  activated,
-  onAddModels,
+  onManageModels,
+  disabled = false,
 }: {
-  models: ModelsResponse;
+  options: RunModelOption[];
   model: string;
   onSelectModel: (id: string) => void;
-  connectedNow: ReadonlySet<string>;
-  onConnected: (providerId: string) => void;
-  activated: ReadonlySet<string>;
-  onAddModels: () => void;
+  onManageModels: () => void;
+  disabled?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
-  const ref = useRef<HTMLSpanElement>(null);
-  const providers = useMemo(() => toModelProviders(models), [models]);
-  const groups = useMemo(
-    () => filterGroupsToActivated(groupModelsByProvider(models.models, providers, connectedNow), activated),
-    [models.models, providers, connectedNow, activated],
-  );
-  const available = useMemo(() => availableModelsFromGroups(groups), [groups]);
-  const visible = useMemo(() => filterModels(available, query), [available, query]);
-  const needsConnect = useMemo(() => disconnectedGroups(groups), [groups]);
-  const selected = useMemo(() => available.find((m) => m.id === model) ?? null, [available, model]);
+  const [position, setPosition] = useState<MenuPosition | null>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const menuId = useId();
+  const selected = options.find((option) => option.model.id === model) ?? null;
+  const visible = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    return options.filter((option) =>
+      !needle || `${option.model.id} ${option.model.name} ${option.model.provider_name}`.toLowerCase().includes(needle),
+    );
+  }, [options, query]);
+
+  useLayoutEffect(() => {
+    if (!open) return;
+    const place = () => {
+      const trigger = triggerRef.current;
+      if (!trigger) return;
+      const rect = trigger.getBoundingClientRect();
+      const width = Math.min(340, window.innerWidth - 24);
+      const left = Math.max(12, Math.min(rect.left, window.innerWidth - width - 12));
+      const estimatedHeight = Math.min(430, 92 + options.length * 58);
+      const top = rect.top > estimatedHeight + 12
+        ? Math.max(12, rect.top - estimatedHeight - 6)
+        : Math.min(window.innerHeight - estimatedHeight - 12, rect.bottom + 6);
+      setPosition({ left, top: Math.max(12, top), width });
+    };
+    place();
+    window.addEventListener("resize", place);
+    window.addEventListener("scroll", place, true);
+    return () => {
+      window.removeEventListener("resize", place);
+      window.removeEventListener("scroll", place, true);
+    };
+  }, [open, options.length]);
 
   useEffect(() => {
     if (!open) return;
-    const onPointer = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
+    const onPointer = (event: MouseEvent) => {
+      const target = event.target as Node;
+      if (!triggerRef.current?.contains(target) && !menuRef.current?.contains(target)) setOpen(false);
     };
     document.addEventListener("mousedown", onPointer);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onPointer);
-      document.removeEventListener("keydown", onKey);
-    };
+    return () => document.removeEventListener("mousedown", onPointer);
   }, [open]);
 
-  if (groups.length === 0) {
-    return (
-      <button type="button" className="modelsel__btn" onClick={onAddModels}>
-        <Icon name="plus" size={12} />
-        Add models
-      </button>
-    );
-  }
+  useLayoutEffect(() => {
+    const menu = menuRef.current;
+    if (!open || !position || !menu || typeof menu.showPopover !== "function") return;
+    if (!menu.matches(":popover-open")) menu.showPopover();
+  }, [open, position]);
 
-  const label = selected?.name ?? (available.length > 0 ? "Select model" : "Connect provider");
+  const close = () => {
+    setOpen(false);
+    setQuery("");
+    requestAnimationFrame(() => triggerRef.current?.focus());
+  };
+
+  const menu = open && position ? (
+    <div
+      className="modelsel__menu modelsel__menu--portal"
+      role="dialog"
+      aria-label="Select model"
+      id={menuId}
+      popover="manual"
+      data-esc-guard
+      ref={menuRef}
+      style={{ left: position.left, top: position.top, width: position.width }}
+      onKeyDown={(event) => {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          event.stopPropagation();
+          close();
+          return;
+        }
+        if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+        const items = Array.from(menuRef.current?.querySelectorAll<HTMLButtonElement>('[role="option"]:not(:disabled)') ?? []);
+        if (!items.length) return;
+        event.preventDefault();
+        const current = items.indexOf(document.activeElement as HTMLButtonElement);
+        const next = event.key === "ArrowDown" ? current + 1 : current - 1;
+        items[(next + items.length) % items.length]?.focus();
+      }}
+    >
+      <div className="modelsel__search">
+        <Icon name="search" size={12} />
+        <input
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder="Search models"
+          aria-label="Search models"
+          autoFocus
+        />
+      </div>
+      <div className="modelsel__list" role="listbox" aria-label="Models">
+        {visible.map((option) => {
+          const ready = option.readiness === "ready";
+          const hint = option.message ?? option.model.description ?? contextHint(option.model.context);
+          return (
+            <button
+              type="button"
+              role="option"
+              aria-selected={model === option.model.id}
+              aria-disabled={!ready}
+              disabled={!ready}
+              className={`modelsel__item${model === option.model.id ? " is-sel" : ""}`}
+              key={option.model.id}
+              onClick={() => {
+                onSelectModel(option.model.id);
+                close();
+              }}
+            >
+              <span className="modelsel__item-txt">
+                <span className="modelsel__item-name">{option.model.name}</span>
+                <span className="modelsel__item-hint">
+                  <code>{option.model.id}</code>{hint ? ` · ${hint}` : ""}
+                </span>
+              </span>
+              <span className={`modelsel__readiness modelsel__readiness--${option.readiness}`}>
+                {ready ? "Ready" : option.readiness === "provider_disconnected" ? "Connect provider" : "Unavailable"}
+              </span>
+              {model === option.model.id && <Icon name="check" size={13} className="modelsel__item-check" />}
+            </button>
+          );
+        })}
+        {visible.length === 0 && <div className="modelsel__empty">No models match.</div>}
+      </div>
+      <div className="modelsel__foot">
+        <button type="button" className="modelsel__add" onClick={onManageModels}>
+          <Icon name="settings" size={12} />
+          Manage models and provider secrets
+        </button>
+      </div>
+    </div>
+  ) : null;
 
   return (
-    <span className="modelsel" ref={ref}>
+    <div
+      className="modelsel"
+      data-esc-guard={open || undefined}
+      onKeyDown={(event) => {
+        if (open && event.key === "Escape") {
+          event.preventDefault();
+          event.stopPropagation();
+          close();
+        }
+      }}
+    >
       <button
+        ref={triggerRef}
         type="button"
         className="modelsel__btn"
-        onClick={() => setOpen((o) => !o)}
-        aria-haspopup="menu"
+        disabled={disabled}
+        onClick={() => setOpen((current) => !current)}
+        aria-haspopup="dialog"
         aria-expanded={open}
+        aria-controls={open ? menuId : undefined}
         aria-label="Model"
       >
-        <span className="modelsel__lead">
-          <Icon name="bot" size={12} />
-        </span>
-        <b>{label}</b>
-        <span className="modelsel__caret">
-          <Icon name="chevron-down" size={12} />
-        </span>
+        <Icon name="bot" size={12} className="modelsel__lead" />
+        <b>{selected?.model.name ?? "Select model"}</b>
+        <Icon name="chevron-down" size={12} className="modelsel__caret" />
       </button>
-      {open && (
-        <div className="modelsel__menu" role="menu">
-          {available.length > 0 && (
-            <>
-              <div className="modelsel__search">
-                <Icon name="search" size={12} />
-                <input
-                  value={query}
-                  onChange={(e) => setQuery(e.target.value)}
-                  placeholder="Search models"
-                  aria-label="Search models"
-                />
-              </div>
-              <div className="modelsel__list" role="radiogroup" aria-label="Model">
-                {visible.map((row) => (
-                  <ModelMenuItem
-                    key={row.id}
-                    row={row}
-                    selected={model === row.id}
-                    onSelect={() => {
-                      onSelectModel(row.id);
-                      setOpen(false);
-                    }}
-                  />
-                ))}
-                {visible.length === 0 && <div className="modelsel__empty">No models match.</div>}
-              </div>
-            </>
-          )}
-          {needsConnect.length > 0 && (
-            <div className="modelsel__connect-block">
-              {available.length === 0 && (
-                <div className="modelsel__empty">Connect a provider to use your activated models.</div>
-              )}
-              {needsConnect.map((group) => (
-                <ConnectProviderRow key={group.provider.id} group={group} onConnected={onConnected} />
-              ))}
-            </div>
-          )}
-          <div className="modelsel__foot">
-            <button type="button" className="modelsel__add" onClick={onAddModels}>
-              <Icon name="plus" size={12} />
-              Add more models
-            </button>
-          </div>
-        </div>
-      )}
-    </span>
-  );
-}
-
-function ModelMenuItem({
-  row,
-  selected,
-  onSelect,
-}: {
-  row: ModelRow;
-  selected: boolean;
-  onSelect: () => void;
-}) {
-  const hint = row.description ?? contextHint(row.context);
-  return (
-    <button type="button" role="menuitemradio" aria-checked={selected} className={"modelsel__item" + (selected ? " is-sel" : "")} onClick={onSelect}>
-      <span className="modelsel__item-txt">
-        <span className="modelsel__item-name">{row.name}</span>
-        {hint && <span className="modelsel__item-hint">{hint}</span>}
-      </span>
-      {selected && (
-        <span className="modelsel__item-check">
-          <Icon name="check" size={13} />
-        </span>
-      )}
-    </button>
+      {menu}
+    </div>
   );
 }

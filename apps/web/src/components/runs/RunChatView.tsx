@@ -2,14 +2,15 @@
 
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import type { CSSProperties } from "react";
-import type { SkillRunDetail } from "@companion/contracts";
-import { fetchRun, runAttachmentHref, sendRunPrompt } from "@/lib/runQueries";
+import type { RunPhase, SkillRunDetail } from "@companion/contracts";
+import { cancelRun, fetchRun, runAttachmentHref, sendRunPrompt } from "@/lib/runQueries";
 import { formatDurationSeconds } from "@/lib/format";
 import { Icon } from "../Icon";
 import { ChatMarkdown } from "./chatMarkdown";
 import { chatReducer, initChatState, openRunStream, type ChatItem } from "./chatStream";
 import { toolIcon } from "./derive";
 import { ArtifactsStrip } from "./ArtifactsStrip";
+import { runInputsFromSnapshot, type RunLauncherDraft } from "./launcherState";
 
 /**
  * The run surface: one skill run's live chat (while the sandbox lives) or read-only transcript
@@ -50,7 +51,11 @@ const TOOL_PRE: CSSProperties = {
 const STARTING_POLL_MS = 1500;
 
 /** "Starting your run" banner: spinner + the live launch step + the indeterminate sweep track. */
-function StartingBanner({ detail }: { detail: string | null }) {
+function phaseLabel(phase: RunPhase | null | undefined): string {
+  return phase ?? "pending";
+}
+
+function StartingBanner({ status, phase }: { status: "queued" | "starting"; phase: RunPhase | null | undefined }) {
   return (
     <div
       style={{
@@ -62,8 +67,8 @@ function StartingBanner({ detail }: { detail: string | null }) {
     >
       <div style={{ display: "flex", alignItems: "center", gap: 9, fontSize: "var(--text-sm)", color: "var(--color-fg)", flexWrap: "wrap" }}>
         <Icon name="loader" size={14} className="ls-spin" style={{ color: "var(--color-muted)" }} />
-        <span style={{ fontWeight: 500 }}>Starting your run</span>
-        <span style={{ color: "var(--color-muted)" }}>{detail || "Preparing sandbox"}…</span>
+        <span style={{ fontWeight: 500 }}>{status === "queued" ? "Run queued" : "Starting your run"}</span>
+        <span className="mono" style={{ color: "var(--color-muted)" }}>{phaseLabel(phase)}</span>
       </div>
       <div className="chat-wake__track">
         <span className="chat-wake__bar" />
@@ -267,16 +272,22 @@ function WorkingLine({ label }: { label: string }) {
 
 export function RunChatView({
   runId,
+  expectedSkillSlug,
   onBack,
   onRunAgain,
 }: {
   runId: string;
+  /** The route's skill slug. A mismatched deep link must never contaminate another skill's draft. */
+  expectedSkillSlug: string;
   onBack: () => void;
-  /** Open the launcher prefilled with this run's prompt (Run again / Try again). */
-  onRunAgain: (prompt: string) => void;
+  /** Open the launcher with accessible input references from this immutable snapshot. */
+  onRunAgain: (draft: RunLauncherDraft) => void;
 }) {
   const [run, setRun] = useState<SkillRunDetail | null>(null);
+  const currentRunIdRef = useRef(runId);
+  currentRunIdRef.current = runId;
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [loadRetryNonce, setLoadRetryNonce] = useState(0);
   const [text, setText] = useState("");
   // Explicit per-row expand overrides. Absent → the row follows its default (a tool auto-expands
   // while running, a reasoning block while it streams).
@@ -289,6 +300,47 @@ export function RunChatView({
   // by the API and never displayed, and drives the "Reconnect" affordance below.
   const [streamDead, setStreamDead] = useState(false);
   const [reconnectNonce, setReconnectNonce] = useState(0);
+  const lastEventIdRef = useRef<string | null>(null);
+  const [promptPending, setPromptPending] = useState(false);
+  const [streamReady, setStreamReady] = useState(false);
+  const promptAttemptRef = useRef<{ text: string; idempotencyKey: string } | null>(null);
+  const [promptError, setPromptError] = useState<string | null>(null);
+  const [cancelBusy, setCancelBusy] = useState(false);
+  const [cancelRequestedLocal, setCancelRequestedLocal] = useState(false);
+  const requestGenerationRef = useRef(0);
+  const appliedGenerationRef = useRef(0);
+  const appliedTranscriptSequenceRef = useRef(-1);
+
+  const applyRunDetail = useCallback((detail: SkillRunDetail, generation: number): SkillRunDetail => {
+    if (detail.id !== currentRunIdRef.current) {
+      throw new Error("Ignored a stale response for a different run.");
+    }
+    if (detail.skill_slug !== expectedSkillSlug) {
+      throw new Error("This run does not belong to the skill in the current route.");
+    }
+    const current = runRef.current;
+    if (generation < appliedGenerationRef.current) return current ?? detail;
+    if (current?.id === detail.id) {
+      if (detail.transcript_event_sequence < current.transcript_event_sequence) return current;
+      const currentTerminal = ["frozen", "error", "canceled"].includes(current.status);
+      const nextTerminal = ["frozen", "error", "canceled"].includes(detail.status);
+      if (currentTerminal && !nextTerminal && detail.transcript_event_sequence <= current.transcript_event_sequence) {
+        return current;
+      }
+    }
+    appliedGenerationRef.current = generation;
+    runRef.current = detail;
+    setRun(detail);
+    setLoadError(null);
+    return detail;
+  }, [expectedSkillSlug]);
+
+  const refreshRun = useCallback(async (): Promise<SkillRunDetail> => {
+    const generation = requestGenerationRef.current + 1;
+    requestGenerationRef.current = generation;
+    const detail = await fetchRun(runId);
+    return applyRunDetail(detail, generation);
+  }, [applyRunDetail, runId]);
 
   /** `slug@version` when the tool run maps to the mounted skill; otherwise the raw tool name. */
   const resolveToolLabel = useCallback(
@@ -309,12 +361,19 @@ export function RunChatView({
     let timer: ReturnType<typeof setTimeout> | null = null;
     const load = async () => {
       try {
-        const detail = await fetchRun(runId);
+        const detail = await refreshRun();
         if (!live) return;
         setRun(detail);
-        if (detail.status === "starting") timer = setTimeout(() => void load(), STARTING_POLL_MS);
+        if (detail.status === "queued" || detail.status === "starting") timer = setTimeout(() => void load(), STARTING_POLL_MS);
       } catch (error) {
-        if (live) setLoadError(error instanceof Error ? error.message : "Could not load the run.");
+        if (!live) return;
+        setLoadError(error instanceof Error ? error.message : "Could not load the run.");
+        // A failed status poll must not discard a previously loaded run or strand a queued job.
+        // Keep polling the last known non-terminal snapshot while exposing an explicit retry.
+        const lastKnown = runRef.current;
+        if (lastKnown && (lastKnown.status === "queued" || lastKnown.status === "starting")) {
+          timer = setTimeout(() => void load(), STARTING_POLL_MS);
+        }
       }
     };
     void load();
@@ -322,22 +381,61 @@ export function RunChatView({
       live = false;
       if (timer) clearTimeout(timer);
     };
-  }, [runId]);
+  }, [refreshRun, loadRetryNonce]);
 
   // --- Seed the transcript once the run is past `starting`. Frozen/error runs seed from the DB
   // snapshot; running runs seed from the same fetch, then the live stream appends (see below).
   // When the snapshot carries no user message yet (fresh run, first idle not reached), the original
   // prompt renders as a synthetic first bubble — the live stream never re-emits it.
-  const seededRef = useRef<string | null>(null);
   const [showPromptBubble, setShowPromptBubble] = useState(false);
   useEffect(() => {
-    if (!run || run.status === "starting") return;
-    if (seededRef.current === run.id) return;
-    seededRef.current = run.id;
+    requestGenerationRef.current = 0;
+    appliedGenerationRef.current = 0;
+    appliedTranscriptSequenceRef.current = -1;
+    lastEventIdRef.current = null;
+    dispatch({ kind: "reset" });
+    setRun(null);
+    setLoadError(null);
+    setText("");
+    setPromptPending(false);
+    setPromptError(null);
+    setStreamReady(false);
+    promptAttemptRef.current = null;
+    setCancelRequestedLocal(false);
+    setCancelBusy(false);
+    setStreamDead(false);
+    setRowOverride(new Map());
+  }, [runId]);
+  useEffect(() => {
+    if (!run || run.status === "queued" || run.status === "starting") return;
+    const liveCursor = Number(lastEventIdRef.current ?? 0);
+    // Metadata may refresh while the durable transcript still trails already-rendered SSE events.
+    // Never replace the chat with such an intermediate snapshot; a later idle snapshot will fold it.
+    if (run.transcript_event_sequence < liveCursor) return;
+    if (run.transcript_event_sequence <= appliedTranscriptSequenceRef.current) return;
+    appliedTranscriptSequenceRef.current = run.transcript_event_sequence;
+    if (run.transcript_event_sequence > liveCursor) {
+      lastEventIdRef.current = String(run.transcript_event_sequence);
+    }
     setShowPromptBubble(!run.transcript.some((item) => item.kind === "user"));
     dispatch({ kind: "history", items: run.transcript, resolveToolLabel });
     setStreamDead(false);
   }, [run, resolveToolLabel]);
+
+  useEffect(() => {
+    if (!run) return;
+    for (const warning of run.warnings) {
+      dispatch({
+        kind: "event",
+        event: { type: "run.warning", code: warning.code, message: warning.message, phase: warning.phase },
+        resolveToolLabel,
+      });
+    }
+  }, [run, resolveToolLabel]);
+
+  useEffect(() => {
+    if (run && ["frozen", "error", "canceled"].includes(run.status)) setCancelRequestedLocal(false);
+  }, [run]);
 
   // --- Stream lifecycle: open the live stream only while `running`; aborted on cleanup
   // (StrictMode-safe). A terminal stream error re-fetches the run — it usually means freeze.
@@ -345,31 +443,71 @@ export function RunChatView({
   useEffect(() => {
     if (status !== "running" || streamDead) return;
     const controller = new AbortController();
+    setStreamReady(false);
     void openRunStream(
       runId,
       (event) => {
+        setStreamReady(true);
         if (event.type === "error" && event.message === "This session has ended.") {
-          void fetchRun(runId).then((detail) => setRun(detail)).catch(() => {});
+          // Gate the composer before reconciling terminal state. If that fetch fails, the
+          // transport is already closed and must never continue looking writable.
+          setStreamReady(false);
+          setStreamDead(true);
+          void refreshRun()
+            .then((detail) => {
+              if (detail.status === "running") {
+                dispatch({
+                  kind: "event",
+                  event: { type: "error", message: "The live connection ended before terminal state could be confirmed." },
+                  resolveToolLabel,
+                });
+              }
+            })
+            .catch((cause) => {
+              setLoadError(cause instanceof Error ? cause.message : "Could not refresh the completed run.");
+            });
           return;
         }
         dispatch({ kind: "event", event, resolveToolLabel });
+        setStreamDead(false);
+        if (event.type === "status" && event.state !== "idle") setPromptPending(false);
         if (event.type === "session.idle") {
           // Artifacts publish on idle server-side — refresh the strip (and the persisted status).
-          void fetchRun(runId)
-            .then((detail) => setRun(detail))
-            .catch(() => {});
+          void refreshRun().catch(() => {});
+        } else if (event.type === "run.error") {
+          void refreshRun().catch(() => {});
         } else if (event.type === "error") {
           // The reconnect budget is exhausted — the stream is dead even though the run may
           // still be healthy server-side. Refresh in case it actually froze, and stop the
           // composer from accepting input the user would never see a reply to.
           setStreamDead(true);
-          void fetchRun(runId).then((detail) => setRun(detail)).catch(() => {});
+          setStreamReady(false);
+          void refreshRun().catch(() => {});
         }
       },
       controller.signal,
+      {
+        lastEventId: lastEventIdRef.current,
+        onEventId: (id) => {
+          lastEventIdRef.current = id;
+        },
+        onConnected: () => {
+          setStreamReady(true);
+          setStreamDead(false);
+          dispatch({ kind: "connected" });
+        },
+        onStreamEnd: async () => {
+          try {
+            const detail = await refreshRun();
+            return ["frozen", "error", "canceled"].includes(detail.status);
+          } catch {
+            return false;
+          }
+        },
+      },
     );
     return () => controller.abort();
-  }, [status, runId, resolveToolLabel, streamDead, reconnectNonce]);
+  }, [status, runId, resolveToolLabel, streamDead, reconnectNonce, refreshRun]);
 
   // --- Auto-scroll the message area to the bottom on new items / streamed deltas.
   const listRef = useRef<HTMLDivElement | null>(null);
@@ -378,22 +516,73 @@ export function RunChatView({
     if (el) el.scrollTop = el.scrollHeight;
   }, [chat.items]);
 
-  const sendDisabled = status !== "running" || streamDead || chat.busy || !text.trim();
+  const cancelRequested = cancelRequestedLocal || run?.phase === "cancel";
+  const sendDisabled = status !== "running" || cancelRequested || !streamReady || streamDead || chat.busy || promptPending || !text.trim();
   const streamingAssistant = chat.items.some((item) => item.kind === "asst" && item.streaming);
   const showWorking = chat.working.active && !streamingAssistant && status === "running";
 
   const send = () => {
     const trimmed = text.trim();
     if (sendDisabled || !trimmed) return;
-    dispatch({ kind: "user", text: trimmed });
-    dispatch({ kind: "send" });
-    setText("");
-    sendRunPrompt(runId, trimmed).catch((error) => {
-      const message = error instanceof Error ? error.message : "Could not send the message.";
-      dispatch({ kind: "event", event: { type: "error", message }, resolveToolLabel });
-      // A 409 means the run froze under us — swap to the read-only transcript.
-      void fetchRun(runId).then((detail) => setRun(detail)).catch(() => {});
+    const previous = promptAttemptRef.current;
+    const retrying = previous?.text === trimmed;
+    const attempt = retrying
+      ? previous
+      : { text: trimmed, idempotencyKey: crypto.randomUUID() };
+    if (!attempt) return;
+    promptAttemptRef.current = attempt;
+    setPromptPending(true);
+    setPromptError(null);
+    sendRunPrompt(runId, trimmed, attempt.idempotencyKey)
+      .then(() => {
+        const lastVisibleUser = [...chat.items].reverse().find((item) => item.kind === "user");
+        if (!retrying || lastVisibleUser?.kind !== "user" || lastVisibleUser.text !== trimmed) {
+          dispatch({ kind: "user", text: trimmed });
+        }
+        dispatch({ kind: "send" });
+        setText("");
+        promptAttemptRef.current = null;
+        setPromptError(null);
+        if (retrying) void refreshRun().catch(() => {});
+      })
+      .catch((error) => {
+        const message = error instanceof Error ? error.message : "Could not send the message.";
+        setPromptError(`Delivery status is unknown. Retry safely: ${message}`);
+        void refreshRun().catch(() => {});
+      })
+      .finally(() => setPromptPending(false));
+  };
+
+  const rerun = () => {
+    if (!run) return;
+    onRunAgain({
+      prompt: run.prompt,
+      files: [],
+      model: run.model,
+      inputs: runInputsFromSnapshot(run.input_snapshot),
+      configurationId: run.run_config_id ?? null,
     });
+  };
+
+  const requestCancel = () => {
+    if (!run || cancelBusy || !["queued", "starting", "running"].includes(run.status)) return;
+    setCancelRequestedLocal(true);
+    setCancelBusy(true);
+    cancelRun(run.id)
+      .then((detail) => {
+        const generation = requestGenerationRef.current + 1;
+        requestGenerationRef.current = generation;
+        applyRunDetail(detail, generation);
+      })
+      .catch((cause) => {
+        setCancelRequestedLocal(false);
+        dispatch({
+          kind: "event",
+          event: { type: "run.warning", code: "cancel_failed", message: cause instanceof Error ? cause.message : "Could not cancel the run.", phase: run.phase ?? null },
+          resolveToolLabel,
+        });
+      })
+      .finally(() => setCancelBusy(false));
   };
 
   /** Effective expansion: the user's pin if set, else the row's default (running/streaming). */
@@ -406,28 +595,40 @@ export function RunChatView({
     });
   };
 
-  const statusWord =
-    status === "starting" ? "starting" : status === "running" ? "running" : status === "frozen" ? "ended" : "error";
+  const statusWord = cancelRequested ? "canceling" : status === "frozen" ? "ended" : status;
   const dotCls =
     status === "running"
       ? "vdot vdot--ok"
-      : status === "starting"
+      : status === "queued" || status === "starting"
         ? "vdot vdot--warn"
         : status === "error"
           ? "vdot vdot--down"
           : "vdot vdot--unknown";
 
-  if (loadError) {
+  const retryLoad = () => {
+    setLoadError(null);
+    setStreamDead(false);
+    setReconnectNonce((value) => value + 1);
+    setLoadRetryNonce((value) => value + 1);
+  };
+
+  if (loadError && !run) {
     return (
       <div data-screen-label="Run" style={{ height: "100%", display: "grid", placeItems: "center", padding: 24 }}>
         <div style={{ textAlign: "center" }}>
           <p style={{ color: "var(--color-danger)", fontSize: "var(--text-sm)" }} role="alert">
             {loadError}
           </p>
-          <button type="button" className="btn-sec" onClick={onBack}>
-            <Icon name="arrow-left" size={13} />
-            Back
-          </button>
+          <div style={{ display: "flex", justifyContent: "center", gap: 8 }}>
+            <button type="button" className="btn-primary" onClick={retryLoad}>
+              <Icon name="refresh-cw" size={13} />
+              Retry
+            </button>
+            <button type="button" className="btn-sec" onClick={onBack}>
+              <Icon name="arrow-left" size={13} />
+              Back
+            </button>
+          </div>
         </div>
       </div>
     );
@@ -448,6 +649,13 @@ export function RunChatView({
 
       <div style={{ flex: 1, minHeight: 0, display: "flex", alignItems: "stretch", justifyContent: "center", padding: "0 16px 16px" }}>
         <div style={FRAME_DESKTOP}>
+          {loadError && (
+            <div className="run-chat__load-warning" role="alert">
+              <Icon name="alert-triangle" size={13} />
+              <span>Could not refresh this run. Showing the latest available snapshot.</span>
+              <button type="button" className="btn-sec" onClick={retryLoad}>Retry</button>
+            </div>
+          )}
           <header
             style={{
               flex: "none",
@@ -475,28 +683,40 @@ export function RunChatView({
                 {run ? `${run.skill_slug}${run.skill_version ? `@${run.skill_version}` : ""}` : "…"}
               </span>
               <span className={dotCls} />
-              <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--color-muted)" }}>{statusWord}</span>
+              <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--color-muted)" }}>
+                {statusWord}{run?.phase ? ` · ${phaseLabel(run.phase)}` : ""}
+              </span>
               {chat.working.active && status === "running" && (
                 <Icon name="loader" size={12} className="ls-spin" style={{ color: "var(--color-muted)", flex: "none" }} aria-label="working" />
               )}
             </div>
             <span style={{ flex: 1 }} />
             {run && (
-              <span className="mono" style={{ fontSize: 11, color: "var(--color-faint)", flex: "none" }}>
-                {run.model}
-              </span>
+              <div className="run-chat__meta">
+                {run.run_config_name_snapshot && <span className="run-chat__config">{run.run_config_name_snapshot}</span>}
+                <span className="mono">{run.model}</span>
+                {["queued", "starting", "running"].includes(run.status) && (
+                  <button type="button" className="btn-sec" disabled={cancelBusy || cancelRequested} onClick={requestCancel}>
+                    {cancelBusy || cancelRequested ? "Canceling…" : "Cancel"}
+                  </button>
+                )}
+              </div>
             )}
           </header>
 
-          {status === "starting" && <StartingBanner detail={run?.status_detail ?? null} />}
+          {(status === "queued" || status === "starting") && <StartingBanner status={status} phase={run?.phase} />}
           {status === "frozen" && run && (
             <FrozenBanner
-              note={run.status_detail}
-              onRunAgain={() => onRunAgain(run.prompt)}
+              note={run.error_message ?? run.status_detail}
+              onRunAgain={rerun}
             />
+          )}
+          {status === "canceled" && run && (
+            <FrozenBanner note="Canceled before completion. The transcript below contains the last durable snapshot." onRunAgain={rerun} />
           )}
           {status === "error" && run && (
             <div
+              className="run-chat__error-banner"
               style={{
                 flex: "none",
                 display: "flex",
@@ -512,9 +732,9 @@ export function RunChatView({
             >
               <Icon name="alert-triangle" size={13} style={{ color: "var(--color-danger)", flex: "none" }} />
               <span style={{ fontWeight: 500, color: "var(--color-fg)" }}>This run failed</span>
-              <span style={{ color: "var(--color-muted)", whiteSpace: "pre-wrap" }}>{run.status_detail}</span>
+              <span style={{ color: "var(--color-muted)", whiteSpace: "pre-wrap" }}>{run.error_message ?? run.status_detail ?? "The runtime stopped unexpectedly."}</span>
               <span style={{ flex: 1 }} />
-              <button type="button" className="btn-sec" onClick={() => onRunAgain(run.prompt)}>
+              <button type="button" className="btn-sec" onClick={rerun}>
                 Try again
               </button>
             </div>
@@ -533,7 +753,7 @@ export function RunChatView({
               background: "var(--color-surface)",
             }}
           >
-            {run && showPromptBubble && status !== "starting" && (
+            {run && showPromptBubble && status !== "queued" && status !== "starting" && (
               <div
                 style={{
                   alignSelf: "flex-end",
@@ -623,6 +843,12 @@ export function RunChatView({
               );
             })}
             {showWorking && <WorkingLine label={chat.working.label} />}
+            {chat.warnings.map((warning) => (
+              <div className="run-chat__warning" role="status" key={`${warning.code}:${warning.message}`}>
+                <Icon name="alert-triangle" size={13} />
+                <span><b>Warning</b> {warning.message}</span>
+              </div>
+            ))}
             {chat.error && chat.error !== "This session has ended." && (
               <div
                 style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--color-danger)" }}
@@ -650,6 +876,7 @@ export function RunChatView({
 
           <div style={{ flex: "none", padding: "12px 16px 14px", borderTop: "1px solid var(--color-line)", background: "var(--color-surface)" }}>
             <div
+              className="run-chat__composer-box"
               style={{
                 display: "flex",
                 alignItems: "center",
@@ -661,20 +888,30 @@ export function RunChatView({
                 opacity: status === "running" ? 1 : 0.6,
               }}
             >
+              <label className="sr-only" htmlFor="run-follow-up">Send a follow-up message</label>
               <input
+                id="run-follow-up"
                 value={text}
-                onChange={(e) => setText(e.target.value)}
+                onChange={(e) => {
+                  if (promptAttemptRef.current?.text !== e.target.value.trim()) promptAttemptRef.current = null;
+                  setPromptError(null);
+                  setText(e.target.value);
+                }}
                 onKeyDown={(e) => {
                   if (e.key === "Enter") send();
                 }}
-                disabled={status !== "running"}
+                disabled={status !== "running" || cancelRequested || !streamReady || chat.busy || promptPending || streamDead}
                 placeholder={
                   status === "running"
-                    ? "Send a follow-up"
-                    : status === "starting"
-                      ? "Starting…"
+                    ? cancelRequested ? "Canceling…" : "Send a follow-up"
+                    : status === "queued"
+                      ? "Queued…"
+                      : status === "starting"
+                        ? "Starting…"
                       : status === "frozen"
-                        ? "This session has ended — start a new run."
+                        ? "This session has ended. Start a new run."
+                        : status === "canceled"
+                          ? "This run was canceled."
                         : "This run failed"
                 }
                 style={{
@@ -694,12 +931,13 @@ export function RunChatView({
                 onClick={send}
                 disabled={sendDisabled}
                 className="btn-primary"
-                style={{ width: 32, height: 32, padding: 0, justifyContent: "center" }}
+                style={{ width: 36, height: 36, padding: 0, justifyContent: "center" }}
                 aria-label="Send"
               >
                 <Icon name="arrow-up" size={15} />
               </button>
             </div>
+            {promptError && <p className="run-chat__prompt-error" role="alert">{promptError}</p>}
             <div style={{ marginTop: 7, fontSize: 11, color: "var(--color-faint)", textAlign: "center" }}>
               This run executes in an isolated sandbox and freezes after a few minutes of inactivity.
             </div>

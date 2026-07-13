@@ -307,9 +307,9 @@ describe("Run skill (sandboxed sessions)", () => {
         initialTab: "sessions",
       }),
     );
-    // SSR renders only the active tabpanel — the sessions empty state proves the tab is active
-    // and makes the privacy model visible.
-    expect(html).toContain("You haven");
+    // SSR renders only the active tabpanel. Data is intentionally unresolved during SSR, so the
+    // recoverable private-session loading state proves that Sessions is the active tab.
+    expect(html).toContain("Loading your private sessions");
     expect(html).toContain("private to you");
   });
 });

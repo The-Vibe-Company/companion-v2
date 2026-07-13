@@ -24,6 +24,7 @@ export interface SseParser {
 export function createSseParser(): SseParser {
   let buffer = "";
   let lastId: string | null = null;
+  let pendingCr = false;
 
   function parseFrame(raw: string): SseFrame | null {
     let event: string | null = null;
@@ -46,7 +47,15 @@ export function createSseParser(): SseParser {
 
   return {
     push(chunk: string): SseFrame[] {
-      buffer += chunk.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+      let source = pendingCr ? `\r${chunk}` : chunk;
+      pendingCr = false;
+      if (source.endsWith("\r")) {
+        pendingCr = true;
+        source = source.slice(0, -1);
+      }
+      // Preserve a CRLF boundary split between decoded chunks. Normalizing each chunk in
+      // isolation turns `\r` + `\n` into two line breaks and can terminate a frame early.
+      buffer += source.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
       const frames: SseFrame[] = [];
       let boundary = buffer.indexOf("\n\n");
       while (boundary !== -1) {
@@ -69,7 +78,11 @@ export function decodeChatEvent(frame: SseFrame): RunChatEvent | null {
     // Validate against the contract union rather than trusting the wire shape: a malformed frame
     // (partial/renamed fields from an OpenCode churn) is dropped, not fed to the reducer. Defaults
     // (`title`/`attempt`/`message` → null) are applied here, so downstream reads are total.
-    const result = runChatEventSchema.safeParse(JSON.parse(frame.data));
+    const parsed = JSON.parse(frame.data) as unknown;
+    const payload = parsed && typeof parsed === "object" && "event" in parsed
+      ? (parsed as { event: unknown }).event
+      : parsed;
+    const result = runChatEventSchema.safeParse(payload);
     return result.success ? result.data : null;
   } catch {
     return null;
@@ -92,19 +105,30 @@ export async function openRunStream(
   runId: string,
   onEvent: (event: RunChatEvent) => void,
   signal: AbortSignal,
+  cursor?: {
+    lastEventId?: string | null;
+    onEventId?: (id: string) => void;
+    /** The HTTP stream is open. This is deliberately independent from replay payloads. */
+    onConnected?: () => void;
+    /** Reconcile durable run state when the server intentionally closes a terminal stream. */
+    onStreamEnd?: () => Promise<boolean>;
+  },
 ): Promise<void> {
-  const parser = createSseParser();
   let attempts = 0;
+  let lastDeliveredId: string | null = cursor?.lastEventId ?? null;
   for (;;) {
     if (signal.aborted) return;
     try {
       const params = new URLSearchParams();
-      const lastId = parser.lastId();
+      const lastId = lastDeliveredId;
       if (lastId) params.set("last_event_id", lastId);
       const query = params.toString();
       const res = await fetch(`/v1/runs/${encodeURIComponent(runId)}/events${query ? `?${query}` : ""}`, {
         signal,
-        headers: { accept: "text/event-stream" },
+        headers: {
+          accept: "text/event-stream",
+          ...(lastId ? { "Last-Event-ID": lastId } : {}),
+        },
       });
       if (res.status === 409) {
         // The run froze between the fetch and the stream open — terminal, not retryable.
@@ -116,20 +140,38 @@ export async function openRunStream(
         return;
       }
       if (!res.ok || !res.body) throw new Error(`stream failed: ${res.status}`);
+      cursor?.onConnected?.();
+      // A transport cut may leave an incomplete frame buffered. Never carry that buffer into a
+      // replay response: the server will resend the whole event after `lastDeliveredId`.
+      const parser = createSseParser();
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
-      // A connection was established — the reconnect budget only limits consecutive
-      // failures, not the run's lifetime reconnect count.
-      attempts = 0;
+      const connectedAt = Date.now();
+      let deliveredValidEvent = false;
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
         for (const frame of parser.push(decoder.decode(value, { stream: true }))) {
           const event = decodeChatEvent(frame);
-          if (event) onEvent(event);
+          if (!event) continue;
+          if (frame.id && frame.id === lastDeliveredId) continue;
+          if (frame.id) {
+            lastDeliveredId = frame.id;
+            cursor?.onEventId?.(frame.id);
+          }
+          deliveredValidEvent = true;
+          attempts = 0;
+          onEvent(event);
         }
       }
-      // The server closed the stream — reconnect (the parser keeps its lastId).
+      // A terminal run closes its SSE response after draining the durable backlog. Reconcile the
+      // run before treating EOF as a transport failure so freeze/cancel does not burn the reconnect
+      // budget or leave the UI looking live forever.
+      if (cursor?.onStreamEnd && (await cursor.onStreamEnd())) return;
+      // A quiet connection only earns a fresh budget when it stayed up long enough to be a
+      // durable connection. An immediately-closing 200 must not create an infinite retry loop.
+      if (!deliveredValidEvent && Date.now() - connectedAt >= 10_000) attempts = 0;
+      // The server closed the stream — reconnect from the last fully decoded event id.
       throw new Error("stream ended");
     } catch (error) {
       if (signal.aborted) return;
@@ -184,10 +226,11 @@ export interface ChatState {
   working: WorkingState;
   sessionId: string | null;
   error: string | null;
+  warnings: { code: string; message: string }[];
 }
 
 export function initChatState(): ChatState {
-  return { items: [], busy: false, working: { active: false, label: "" }, sessionId: null, error: null };
+  return { items: [], busy: false, working: { active: false, label: "" }, sessionId: null, error: null, warnings: [] };
 }
 
 export type ResolveToolLabel = (tool: string, skill: string | null) => { label: string; action: string };
@@ -203,6 +246,7 @@ export type ChatAction =
       resolveToolLabel: ResolveToolLabel;
     }
   | { kind: "send" }
+  | { kind: "connected" }
   | { kind: "reset-busy" }
   /** Clear the transcript back to an empty session (New session). */
   | { kind: "reset" };
@@ -250,10 +294,17 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       // reloaded transcript, so history shows above new live events appended afterwards.
       const sysLines = state.items.filter((item) => item.kind === "sys");
       const history = action.items.map((item) => mapHistoryItem(item, action.resolveToolLabel));
-      return { ...state, items: [...sysLines, ...history] };
+      return {
+        ...state,
+        items: [...sysLines, ...history],
+        busy: false,
+        working: { active: false, label: "" },
+      };
     }
     case "send":
       return { ...state, busy: true, error: null };
+    case "connected":
+      return { ...state, error: null };
     case "reset-busy":
       return { ...state, busy: false };
     case "reset":
@@ -286,6 +337,16 @@ function applyEvent(state: ChatState, event: RunChatEvent, resolveToolLabel: Res
     case "tool.start": {
       const { label, action } = resolveToolLabel(event.tool, event.skill);
       const runningLabel = event.title?.trim() ? event.title.trim() : label;
+      const existing = state.items.find((item) => item.kind === "tool" && item.callId === event.call_id);
+      if (existing) {
+        return {
+          ...state,
+          working: { active: true, label: `Running ${runningLabel}…` },
+          items: state.items.map((item) => item.kind === "tool" && item.callId === event.call_id
+            ? { ...item, running: true, action: event.title ?? action, input: event.input }
+            : item),
+        };
+      }
       return {
         ...state,
         working: { active: true, label: `Running ${runningLabel}…` },
@@ -389,6 +450,12 @@ function applyEvent(state: ChatState, event: RunChatEvent, resolveToolLabel: Res
     }
     case "session.idle":
       return { ...state, busy: false, working: { active: false, label: "" } };
+    case "run.warning":
+      return state.warnings.some((warning) => warning.code === event.code && warning.message === event.message)
+        ? state
+        : { ...state, warnings: [...state.warnings, { code: event.code, message: event.message }] };
+    case "run.error":
+      return { ...state, busy: false, working: { active: false, label: "" }, error: event.message };
     case "error":
       return { ...state, busy: false, working: { active: false, label: "" }, error: event.message };
   }

@@ -30,6 +30,7 @@ import {
 import { DependenciesTab } from "./DependenciesTab";
 import { RunSessionsTab } from "../runs/RunSessionsTab";
 import { RunLauncherDialog } from "../runs/RunLauncherDialog";
+import type { RunLauncherDraft } from "../runs/launcherState";
 import { fetchRuns } from "@/lib/runQueries";
 import { FileExplorer } from "./fileview";
 import { MarkdownView } from "./markdown";
@@ -256,8 +257,11 @@ export function DetailView({
   onOpenRun,
   onOpenModelSettings,
   initialTab,
-  runAgainPrompt,
+  runDraft,
+  onRunDraftChange,
+  runAgainRequested,
   onRunAgainConsumed,
+  orgId = "",
   historyEnabled = true,
   onUpgrade = () => {},
 }: {
@@ -266,6 +270,7 @@ export function DetailView({
   total: number;
   me: MeVM;
   orgName: string;
+  orgId?: string;
   /** Every folder path in this skill's library (for the "Add to folder" picker). */
   allLabels: string[];
   onBack: () => void;
@@ -284,22 +289,24 @@ export function DetailView({
   onOpenModelSettings?: () => void;
   /** Land on this tab when opening the skill (Back from a run returns to Sessions). */
   initialTab?: "overview" | "sessions";
-  /** Prefill for the launcher (the "Run again" path from a frozen transcript). */
-  runAgainPrompt?: string | null;
+  /** Full per-skill draft, including the one-shot Run again snapshot. */
+  runDraft?: RunLauncherDraft | null;
+  onRunDraftChange?: (draft: RunLauncherDraft | null) => void;
+  runAgainRequested?: boolean;
   /** Consume the one-shot launcher-open request (run-again). */
   onRunAgainConsumed?: () => void;
   historyEnabled?: boolean;
   onUpgrade?: () => void;
 }) {
   const invalid = skill.validation === "invalid";
-  // Composed-but-unlaunched run draft, preserved across the launcher's "Add more models" detour
-  // (the dialog unmounts on close; without this the prompt and attachments would be lost).
-  const runDraftRef = useRef<{ prompt: string; files: File[] } | null>(null);
   const [versions, setVersions] = useState<SkillVersionRow[]>([]);
   const [comments, setComments] = useState<SkillCommentRow[]>([]);
   const [files, setFiles] = useState<SkillFile[]>([]);
   const [deps, setDeps] = useState<SkillDependenciesResponse | null>(null);
   const [runs, setRuns] = useState<SkillRunRow[]>([]);
+  const [runsLoading, setRunsLoading] = useState(true);
+  const [runsError, setRunsError] = useState<string | null>(null);
+  const [runsReload, setRunsReload] = useState(0);
   const [launcherOpen, setLauncherOpen] = useState(false);
   const [tab, setTab] = useState<DetailTab>(initialTab ?? "overview");
 
@@ -311,9 +318,9 @@ export function DetailView({
 
   // The "Run again" path (from a frozen/errored transcript) opens the launcher prefilled.
   useEffect(() => {
-    if (runAgainPrompt == null) return;
+    if (!runAgainRequested) return;
     setLauncherOpen(true);
-  }, [runAgainPrompt]);
+  }, [runAgainRequested]);
 
   useEffect(() => {
     let active = true;
@@ -365,20 +372,33 @@ export function DetailView({
     };
   }, [skill.id, skill.version]);
 
-  // The caller's runs of this skill (Sessions tab + tab count). Fail-soft to an empty list —
-  // an unconfigured runs backend must never break the detail page.
+  useEffect(() => {
+    setRuns([]);
+    setRunsError(null);
+  }, [skill.id]);
+
+  // The caller's runs of this skill (Sessions tab + tab count). A failed first load is distinct
+  // from a legitimate empty history; retries preserve any last valid snapshot.
   useEffect(() => {
     let active = true;
-    setRuns([]);
+    setRunsLoading(true);
+    setRunsError(null);
     fetchRuns(skill.id)
       .then((r) => {
-        if (active) setRuns(r.runs);
+        if (!active) return;
+        setRuns(r.runs);
+        setRunsError(null);
       })
-      .catch(() => {});
+      .catch((cause) => {
+        if (active) setRunsError(cause instanceof Error ? cause.message : "Could not load your run history.");
+      })
+      .finally(() => {
+        if (active) setRunsLoading(false);
+      });
     return () => {
       active = false;
     };
-  }, [skill.id]);
+  }, [skill.id, runsReload]);
 
   // Flat model: skills carry no owner/visibility axis — every member can do anything to any skill.
   const canModifySkill = true;
@@ -689,21 +709,28 @@ export function DetailView({
           </div>
         )}
 
-        {activeTab === "sessions" && <RunSessionsTab runs={runs} onOpen={onOpenRun} />}
+        {activeTab === "sessions" && (
+          <RunSessionsTab
+            runs={runs}
+            loading={runsLoading}
+            error={runsError}
+            onRetry={() => setRunsReload((value) => value + 1)}
+            onOpen={onOpenRun}
+          />
+        )}
       </div>
 
       {launcherOpen && (
         <RunLauncherDialog
+          key={skill.id}
           slug={skill.id}
-          initialPrompt={runAgainPrompt ?? runDraftRef.current?.prompt}
-          initialFiles={runDraftRef.current?.files}
+          orgId={orgId}
+          initialDraft={runDraft}
           onOpenModelSettings={onOpenModelSettings}
-          onStashDraft={(draft) => {
-            runDraftRef.current = draft;
-          }}
+          onStashDraft={(draft) => onRunDraftChange?.(draft)}
           onLaunched={(run) => {
             setLauncherOpen(false);
-            runDraftRef.current = null;
+            onRunDraftChange?.(null);
             onRunAgainConsumed?.();
             setRuns((prev) => [
               {
@@ -714,6 +741,11 @@ export function DetailView({
                 prompt_excerpt: run.prompt_excerpt,
                 status: run.status,
                 status_detail: run.status_detail,
+                phase: run.phase,
+                error_code: run.error_code,
+                error_message: run.error_message,
+                run_config_id: run.run_config_id,
+                run_config_name_snapshot: run.run_config_name_snapshot,
                 artifacts_count: 0,
                 created_at: run.created_at,
                 last_active_at: run.last_active_at,

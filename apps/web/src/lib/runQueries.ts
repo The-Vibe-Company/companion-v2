@@ -2,11 +2,16 @@
 
 import type {
   ActivatedModels,
+  CreateRunConfigurationInput,
   ModelsResponse,
   ProviderConnectionRow,
   ProviderConnectionsResponse,
+  RunConfiguration,
+  RunInputSelection,
+  RunOptions,
   SkillRunDetail,
   SkillRunsResponse,
+  UpdateRunConfigurationInput,
 } from "@companion/contracts";
 import { apiFetch } from "./apiClient";
 
@@ -41,11 +46,11 @@ export async function fetchProviderConnections(): Promise<ProviderConnectionsRes
   return apiFetch<ProviderConnectionsResponse>("/v1/provider-connections");
 }
 
-/** Save/replace the current user's API key for a provider (write-only). */
+/** Bind a provider to an accessible vault secret. The secret value never crosses this route. */
 export async function setProviderConnection(input: {
   provider: string;
   key_name: string;
-  key: string;
+  secret_id: string;
 }): Promise<{ connection: ProviderConnectionRow }> {
   return apiFetch<{ connection: ProviderConnectionRow }>("/v1/provider-connections", {
     method: "PUT",
@@ -68,7 +73,7 @@ export async function fetchOrgProviderConnections(): Promise<ProviderConnections
 export async function setOrgProviderConnection(input: {
   provider: string;
   key_name: string;
-  key: string;
+  secret_id: string;
 }): Promise<{ connection: ProviderConnectionRow }> {
   return apiFetch<{ connection: ProviderConnectionRow }>("/v1/org-provider-connections", {
     method: "PUT",
@@ -84,18 +89,67 @@ export async function deleteOrgProviderConnection(provider: string): Promise<{ o
 
 /* ---- Skill runs ---- */
 
-/** Launch a run: multipart (prompt + model + up to 5 files). Returns the `starting` run detail. */
+export async function fetchRunOptions(slug: string): Promise<RunOptions> {
+  return apiFetch<RunOptions>(`/v1/skills/${encodeURIComponent(slug)}/run-options`);
+}
+
+function unwrapConfiguration(value: RunConfiguration | { configuration: RunConfiguration }): RunConfiguration {
+  return "configuration" in value ? value.configuration : value;
+}
+
+export async function createRunConfiguration(
+  slug: string,
+  input: CreateRunConfigurationInput,
+): Promise<RunConfiguration> {
+  const response = await apiFetch<RunConfiguration | { configuration: RunConfiguration }>(
+    `/v1/skills/${encodeURIComponent(slug)}/run-configurations`,
+    { method: "POST", body: JSON.stringify(input) },
+  );
+  return unwrapConfiguration(response);
+}
+
+export async function updateRunConfiguration(
+  id: string,
+  input: UpdateRunConfigurationInput,
+): Promise<RunConfiguration> {
+  const response = await apiFetch<RunConfiguration | { configuration: RunConfiguration }>(
+    `/v1/run-configurations/${encodeURIComponent(id)}`,
+    { method: "PATCH", body: JSON.stringify(input) },
+  );
+  return unwrapConfiguration(response);
+}
+
+export async function deleteRunConfiguration(id: string, revision: number): Promise<{ ok: true }> {
+  return apiFetch<{ ok: true }>(`/v1/run-configurations/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+    body: JSON.stringify({ revision }),
+  });
+}
+
+/** Launch a run: multipart with a complete explicit input selection and idempotency key. */
 export async function launchRun(
   slug: string,
-  input: { prompt: string; model: string; files: File[] },
+  input: {
+    prompt: string;
+    model: string;
+    skillVersionId: string;
+    inputs: RunInputSelection;
+    runConfigId: string | null;
+    files: File[];
+    idempotencyKey: string;
+  },
 ): Promise<SkillRunDetail> {
   const form = new FormData();
   form.set("prompt", input.prompt);
   form.set("model", input.model);
+  form.set("skill_version_id", input.skillVersionId);
+  form.set("inputs", JSON.stringify(input.inputs));
+  if (input.runConfigId) form.set("run_config_id", input.runConfigId);
   for (const file of input.files) form.append("file", file, file.name);
   return apiFetch<SkillRunDetail>(`/v1/skills/${encodeURIComponent(slug)}/runs`, {
     method: "POST",
     body: form,
+    headers: { "Idempotency-Key": input.idempotencyKey },
   });
 }
 
@@ -110,11 +164,28 @@ export async function fetchRun(runId: string): Promise<SkillRunDetail> {
 }
 
 /** Fire-and-forget follow-up prompt (202); the reply arrives over the `/events` SSE stream. */
-export async function sendRunPrompt(runId: string, text: string): Promise<{ ok: true }> {
-  return apiFetch<{ ok: true }>(`/v1/runs/${encodeURIComponent(runId)}/prompt`, {
+export async function sendRunPrompt(
+  runId: string,
+  text: string,
+  idempotencyKey: string,
+): Promise<{ accepted: true; prompt_id: string }> {
+  return apiFetch<{ accepted: true; prompt_id: string }>(`/v1/runs/${encodeURIComponent(runId)}/prompt`, {
     method: "POST",
     body: JSON.stringify({ text }),
+    headers: { "Idempotency-Key": idempotencyKey },
   });
+}
+
+export async function cancelRun(runId: string): Promise<SkillRunDetail> {
+  const response = await apiFetch<
+    SkillRunDetail | { run: SkillRunDetail } | { ok: true } | { status: string; requested: boolean }
+  >(
+    `/v1/runs/${encodeURIComponent(runId)}/cancel`,
+    { method: "POST" },
+  );
+  if ("run" in response) return response.run;
+  if ("id" in response) return response;
+  return fetchRun(runId);
 }
 
 /** Download href for a run attachment (streamed by the API, creator-only). */

@@ -170,6 +170,12 @@ export function SettingsSidebar({
               onClick={() => goTo({ view: "org-models" })}
             />
             <NavItem
+              active={is("org-artifacts")}
+              icon="link-2"
+              label="Shared artifacts"
+              onClick={() => goTo({ view: "org-artifacts" })}
+            />
+            <NavItem
               active={is("members")}
               icon="users"
               label="Members"

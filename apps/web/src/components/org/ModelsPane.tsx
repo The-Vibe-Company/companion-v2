@@ -1,30 +1,32 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import type { ActivatedModels, ModelRow, ModelsResponse } from "@companion/contracts";
+import type { ActivatedModels, ModelRow, ModelsResponse, ProviderConnectionRow, SecretRow } from "@companion/contracts";
 import { Icon } from "../Icon";
 import { PaneHead } from "./paneKit";
 import { fetchModels } from "@/lib/runQueries";
+import { fetchSecrets } from "@/lib/secrets";
+import { VaultSecretField, secretReferenceFromRow } from "@/components/secrets/VaultSecretField";
 import { filterModelGroups, groupModelsByProvider, toModelProviders, type ModelGroupVM } from "@/components/runs/derive";
 
-/* ============================ Models (activation + provider keys, merged) ============================
+/* ============================ Models (activation + provider vault bindings) ============================
    One pane per scope (Account → Models, Workspace → Shared models; same keyed-usage rule as the old
    provider panes). The organizing concept is READINESS, not configuration: the deck at the top
    mirrors exactly what the run launcher will offer, each row telling the one truth that matters —
-   `Ready` (activated + a reachable key) or `Needs key` (key captured inline, right on the row).
+   `Ready` (activated + a reachable vault reference) or `Needs secret` (bound inline on the row).
    Below it, a search-first add bar over the full models.dev catalog, then a per-provider browse
    accordion for exploration. Activation is a hard gate: createRun rejects non-activated models. */
 
 export interface ModelScope {
+  orgId: string;
   title: string;
   desc: string;
   lockText: string;
   /** Read-only: show the deck but no add/remove/connect (non-admins on the workspace scope). */
   locked: boolean;
   /**
-   * What "Ready" means here: `"any"` (personal pane — a key from anywhere serves the viewer) or
-   * `"scope"` (workspace pane — only a SHARED key makes a model ready for every member; the
-   * viewer's personal key must not overstate what the workspace provides).
+   * What "Ready" means here: `"any"` (personal pane — a binding from either scope serves the viewer)
+   * or `"scope"` (workspace pane — only a workspace binding makes a model ready for every member).
    */
   readiness: "any" | "scope";
   /** The list this scope manages, from the one models response. */
@@ -33,9 +35,10 @@ export interface ModelScope {
   ghost?: { label: string; select: (activated: ActivatedModels) => string[] };
   /** Persist the full replacement list; returns both lists back. */
   save: (models: string[]) => Promise<ActivatedModels>;
-  /** Provider ids with a key in THIS scope (disconnect is offered only for these). */
-  loadConnected: () => Promise<Set<string>>;
-  connect: (provider: string, keyName: string, key: string) => Promise<void>;
+  /** Provider bindings in THIS scope (disconnect is offered only for these). */
+  loadConnected: () => Promise<ProviderConnectionRow[]>;
+  connect: (provider: string, keyName: string, secretId: string) => Promise<ProviderConnectionRow>;
+  connectionAudience: "personal" | "organization";
   disconnect: (provider: string) => Promise<void>;
 }
 
@@ -52,14 +55,15 @@ export function ModelsPane({ scope }: { scope: ModelScope }) {
   const [catalog, setCatalog] = useState<ModelsResponse | null>(null);
   const [activated, setActivated] = useState<string[]>([]);
   const [ghostIds, setGhostIds] = useState<string[]>([]);
-  /** Providers with a key in THIS scope (drives disconnect affordances). */
-  const [scopeKeys, setScopeKeys] = useState<Set<string>>(() => new Set());
+  /** Providers with a vault binding in THIS scope (drives disconnect affordances). */
+  const [scopeConnections, setScopeConnections] = useState<Map<string, ProviderConnectionRow>>(() => new Map());
+  const [secrets, setSecrets] = useState<SecretRow[]>([]);
   /** Providers connected during this visit — flips rows to Ready without a refetch. */
   const [connectedNow, setConnectedNow] = useState<Set<string>>(() => new Set());
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [savingId, setSavingId] = useState<string | null>(null);
-  /** The ONE spot whose inline key input is open: a specific deck/ghost row or a browse header. */
+  /** The ONE spot whose inline secret binding editor is open. */
   const [keyEntry, setKeyEntry] = useState<{ anchor: string; providerId: string } | null>(null);
   const [open, setOpen] = useState<Set<string>>(() => new Set());
   const [tick, setTick] = useState(0);
@@ -68,13 +72,15 @@ export function ModelsPane({ scope }: { scope: ModelScope }) {
 
   useEffect(() => {
     let live = true;
-    Promise.all([fetchModels(), scope.loadConnected()])
-      .then(([response, keys]) => {
+    setError(null);
+    Promise.all([fetchModels(), scope.loadConnected(), fetchSecrets(scope.orgId)])
+      .then(([response, connections, secretRows]) => {
         if (!live) return;
         setCatalog(response);
         setActivated(scope.select(response.activated));
         setGhostIds(scope.ghost ? scope.ghost.select(response.activated) : []);
-        setScopeKeys(keys);
+        setScopeConnections(new Map(connections.map((connection) => [connection.provider, connection])));
+        setSecrets(secretRows.filter((secret) => secret.can_use && !secret.disabled_at && !secret.deleted_at));
         setConnectedNow(new Set());
       })
       .catch((e) => live && setError(e instanceof Error ? e.message : "Could not load the model catalog."));
@@ -90,9 +96,9 @@ export function ModelsPane({ scope }: { scope: ModelScope }) {
   const providersById = useMemo(() => new Map(providers.map((p) => [p.id, p])), [providers]);
   const activatedSet = useMemo(() => new Set(activated), [activated]);
 
-  /** Per-scope readiness: any key (personal pane) vs shared keys only (workspace pane). */
+  /** Per-scope readiness: any binding (personal pane) vs workspace binding only. */
   const usable = (providerId: string): boolean =>
-    scopeKeys.has(providerId) ||
+    scopeConnections.has(providerId) ||
     connectedNow.has(providerId) ||
     (scope.readiness === "any" && (providersById.get(providerId)?.connected ?? false));
 
@@ -100,7 +106,7 @@ export function ModelsPane({ scope }: { scope: ModelScope }) {
   const ghost = ghostIds.filter((id) => !activatedSet.has(id)).map((id) => byId.get(id)).filter((m): m is ModelRow => !!m);
   const launcher = [...deck, ...ghost];
   const readyCount = launcher.filter((m) => usable(m.provider)).length;
-  const needsKeyCount = launcher.length - readyCount;
+  const needsSecretCount = launcher.length - readyCount;
 
   const groups = useMemo(() => {
     if (!catalog) return [];
@@ -140,29 +146,31 @@ export function ModelsPane({ scope }: { scope: ModelScope }) {
     setError(null);
     try {
       await scope.disconnect(providerId);
-      // Refetch instead of pruning local sets: `provider.connected` from the server included the
-      // just-deleted key, so only a reload can say whether the provider is still usable elsewhere.
+      // Refetch instead of pruning local sets: another scope may still make this provider usable.
       reload();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not disconnect.");
     }
   };
 
-  const onKeySaved = (providerId: string) => {
+  const onKeySaved = (providerId: string, connection: ProviderConnectionRow) => {
     setKeyEntry(null);
     setConnectedNow((prev) => new Set(prev).add(providerId));
-    setScopeKeys((prev) => new Set(prev).add(providerId));
+    setScopeConnections((previous) => new Map(previous).set(providerId, connection));
   };
 
-  /** Render the key input at exactly ONE anchor (the row/header that asked for it). */
+  /** Render the binding editor at exactly ONE anchor. */
   const keyRowAt = (anchor: string) =>
     keyEntry?.anchor === anchor ? (
-      <KeyRow
+      <SecretBindingRow
+        orgId={scope.orgId}
         providerId={keyEntry.providerId}
         providerName={providersById.get(keyEntry.providerId)?.name ?? keyEntry.providerId}
         envKey={providersById.get(keyEntry.providerId)?.envKeys[0] ?? null}
+        candidates={secrets}
+        audience={scope.connectionAudience}
         onConnect={scope.connect}
-        onSaved={() => onKeySaved(keyEntry.providerId)}
+        onSaved={(connection) => onKeySaved(keyEntry.providerId, connection)}
         onCancel={() => setKeyEntry(null)}
         onError={setError}
       />
@@ -178,8 +186,9 @@ export function ModelsPane({ scope }: { scope: ModelScope }) {
       </div>
 
       {error && (
-        <div className="sx-empty" role="alert" style={{ color: "var(--color-danger)" }}>
-          {error}
+        <div className="sx-empty settings-load-error" role="alert">
+          <span>{error}</span>
+          <button type="button" className="btn-sec" onClick={reload}>Retry</button>
         </div>
       )}
 
@@ -192,7 +201,7 @@ export function ModelsPane({ scope }: { scope: ModelScope }) {
             <span>
               {launcher.length === 0
                 ? "In your launcher"
-                : `${launcher.length} ${launcher.length === 1 ? "model" : "models"} in ${scope.ghost ? "your" : "the"} launcher · ${readyCount} ready${needsKeyCount ? ` · ${needsKeyCount} ${needsKeyCount === 1 ? "needs" : "need"} a key` : ""}`}
+                : `${launcher.length} ${launcher.length === 1 ? "model" : "models"} in ${scope.ghost ? "your" : "the"} launcher · ${readyCount} ready${needsSecretCount ? ` · ${needsSecretCount} ${needsSecretCount === 1 ? "needs" : "need"} a secret` : ""}`}
             </span>
           </div>
           {launcher.length === 0 ? (
@@ -228,7 +237,7 @@ export function ModelsPane({ scope }: { scope: ModelScope }) {
                       borderBottom: "1px solid var(--color-line)",
                     }}
                   >
-                    {scope.ghost!.label} — {ghost.length}
+                    {scope.ghost!.label} · {ghost.length}
                   </div>
                   {ghost.map((m) => (
                     <DeckRow
@@ -300,13 +309,13 @@ export function ModelsPane({ scope }: { scope: ModelScope }) {
                     </div>
                     {searchMatches.length > SEARCH_RESULT_CAP && (
                       <p style={{ margin: "8px 2px 0", fontSize: 11, color: "var(--color-faint)" }}>
-                        Showing the first {SEARCH_RESULT_CAP} of {searchMatches.length} matches — keep typing to narrow down.
+                        Showing the first {SEARCH_RESULT_CAP} of {searchMatches.length} matches. Keep typing to narrow down.
                       </p>
                     )}
                   </>
                 )
               ) : (
-                /* ---- Browse: per-provider accordion, keys managed on the headers ---- */
+                /* ---- Browse: per-provider accordion, vault bindings on the headers ---- */
                 <div
                   style={{
                     border: "1px solid var(--color-line)",
@@ -321,7 +330,7 @@ export function ModelsPane({ scope }: { scope: ModelScope }) {
                       group={group}
                       activated={activatedSet}
                       usable={usable(group.provider.id)}
-                      scopeKey={scopeKeys.has(group.provider.id)}
+                      connection={scopeConnections.get(group.provider.id) ?? null}
                       expanded={open.has(group.provider.id)}
                       onToggleExpanded={() =>
                         setOpen((prev) => {
@@ -370,7 +379,7 @@ function ReadyBadge({ ready }: { ready: boolean }) {
         aria-hidden
         style={{ width: 7, height: 7, borderRadius: "50%", background: "currentColor", flex: "none" }}
       />
-      {ready ? "Ready" : "Needs key"}
+      {ready ? "Ready" : "Needs secret"}
     </span>
   );
 }
@@ -393,7 +402,7 @@ function DeckRow({
   pending: boolean;
   shared?: boolean;
   keyRow: React.ReactNode;
-  /** True when the provider's key input is already open somewhere — hide this row's Add-key button. */
+  /** True when this provider's binding editor is already open elsewhere. */
   keyEntryOpenForProvider?: boolean;
   onAskKey: () => void;
   onRemove?: () => void;
@@ -414,7 +423,7 @@ function DeckRow({
           {shared && <span className="badge scopebadge">shared</span>}
           {!ready && !locked && !keyEntryOpenForProvider && (
             <button className="btn-sec" onClick={onAskKey}>
-              Add {model.provider_name} key
+              Choose {model.provider_name} secret
             </button>
           )}
           {!locked && onRemove && (
@@ -429,12 +438,12 @@ function DeckRow({
   );
 }
 
-/** One provider header (chevron, counts, key state) + its checkbox model rows. */
+/** One provider header (chevron, counts, binding state) + its checkbox model rows. */
 function ProviderModelsGroup({
   group,
   activated,
   usable,
-  scopeKey,
+  connection,
   expanded,
   onToggleExpanded,
   savingId,
@@ -447,8 +456,8 @@ function ProviderModelsGroup({
   activated: ReadonlySet<string>;
   /** A key reaches this provider from any scope. */
   usable: boolean;
-  /** THIS scope holds the key (disconnect is offered). */
-  scopeKey: boolean;
+  /** THIS scope holds this vault binding (disconnect is offered). */
+  connection: ProviderConnectionRow | null;
   expanded: boolean;
   onToggleExpanded: () => void;
   savingId: string | null;
@@ -526,10 +535,15 @@ function ProviderModelsGroup({
             Connect
           </button>
         )}
-        {scopeKey && (
-          <button className="mrow__x" title={`Disconnect ${provider.name}`} onClick={onDisconnect}>
-            <Icon name="trash-2" size={15} />
-          </button>
+        {connection && (
+          <>
+            <span className="provider-secret-meta" title={`${connection.secret_name} · ${connection.secret_audience} · ${connection.secret_owner_name}`}>
+              {connection.secret_name}
+            </span>
+            <button className="mrow__x" title={`Disconnect ${provider.name}; the vault secret is kept`} onClick={onDisconnect}>
+              <Icon name="trash-2" size={15} />
+            </button>
+          </>
         )}
       </div>
       {expanded && keyRow}
@@ -572,70 +586,89 @@ function ProviderModelsGroup({
   );
 }
 
-/** Inline key entry — password field + Connect/Cancel; the key is write-only and never re-shown. */
-function KeyRow({
+/** Bind a provider to a vault reference. Only the generic vault create form accepts plaintext. */
+function SecretBindingRow({
+  orgId,
   providerId,
   providerName,
   envKey,
+  candidates,
+  audience,
   onConnect,
   onSaved,
   onCancel,
   onError,
 }: {
+  orgId: string;
   providerId: string;
   providerName: string;
   envKey: string | null;
-  onConnect: (provider: string, keyName: string, key: string) => Promise<void>;
-  onSaved: () => void;
+  candidates: SecretRow[];
+  audience: "personal" | "organization";
+  onConnect: (provider: string, keyName: string, secretId: string) => Promise<ProviderConnectionRow>;
+  onSaved: (connection: ProviderConnectionRow) => void;
   onCancel: () => void;
   onError: (message: string | null) => void;
 }) {
-  const [key, setKey] = useState("");
+  const [selected, setSelected] = useState<string | null>(null);
+  const [localCandidates, setLocalCandidates] = useState(candidates.map(secretReferenceFromRow));
   const [busy, setBusy] = useState(false);
   const save = async () => {
-    if (!key.trim() || busy || !envKey) return;
+    if (!selected || busy || !envKey) return;
     setBusy(true);
     onError(null);
     try {
-      await onConnect(providerId, envKey, key.trim());
-      onSaved();
+      const connection = await onConnect(providerId, envKey, selected);
+      onSaved(connection);
     } catch (e) {
-      onError(e instanceof Error ? e.message : "Could not save the key.");
+      onError(e instanceof Error ? e.message : "Could not bind the provider secret.");
       setBusy(false);
     }
   };
   return (
     // data-esc-guard: the settings drawer's capture-phase Escape handler yields to this widget,
     // so Escape cancels the key entry instead of closing the whole drawer mid-typing.
-    <div className="mrow" data-esc-guard style={{ flexWrap: "wrap", gap: 8 }}>
+    <div
+      className="mrow"
+      data-esc-guard
+      style={{ flexWrap: "wrap", gap: 8 }}
+      onKeyDown={(event) => {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          event.stopPropagation();
+          onCancel();
+        }
+      }}
+    >
       <span className="keyic">
         <Icon name="key" size={15} />
       </span>
       <div className="mrow__id">
-        <div className="og-mname">{providerName} API key</div>
-        <div className="og-memail">Stored encrypted, used only for runs you launch, never shown again.</div>
+        <div className="og-mname">{providerName} provider secret</div>
+        <div className="og-memail">Choose an accessible vault secret. Disconnecting later keeps the secret in the vault.</div>
       </div>
-      <div className="mrow__end" style={{ gap: 8, flexWrap: "wrap" }}>
-        <input
-          className="sx-input"
-          type="password"
-          autoFocus
-          placeholder={`Your ${providerName} API key`}
-          aria-label={`API key for ${providerName}`}
-          value={key}
-          onChange={(e) => setKey(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") void save();
-            if (e.key === "Escape") onCancel();
-          }}
-          style={{ minWidth: 220 }}
+      <div className="provider-secret-editor">
+        <VaultSecretField
+          orgId={orgId}
+          envKey={envKey ?? "PROVIDER_API_KEY"}
+          candidates={localCandidates.filter((candidate) => audience !== "organization" || candidate.audience === "organization")}
+          value={selected}
+          onChange={setSelected}
+          audience={audience}
+          label={`${providerName} credential`}
+          required
+          disabled={!envKey || busy}
+          helper={audience === "organization"
+            ? "Workspace bindings require an active Organization secret."
+            : "The selected secret is revalidated before every run."}
+          onCreated={(secret) => setLocalCandidates((rows) => [...rows, secret])}
         />
-        <button className="btn-primary" disabled={!key.trim() || busy || !envKey} onClick={() => void save()}>
-          {busy ? "Connecting…" : "Connect"}
-        </button>
-        <button className="btn-sec" onClick={onCancel}>
-          Cancel
-        </button>
+        <div className="provider-secret-editor__actions">
+          <button className="btn-primary" disabled={!selected || busy || !envKey} onClick={() => void save()}>
+            {busy ? "Connecting…" : "Connect"}
+          </button>
+          <button className="btn-sec" onClick={onCancel}>Cancel</button>
+        </div>
       </div>
     </div>
   );

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, type ReactNode } from "react";
+import { useEffect, useId, useRef, type ReactNode } from "react";
 import { Icon } from "../Icon";
 import { UserAvatar } from "../UserAvatar";
 import type { SeedUser } from "./model";
@@ -25,6 +25,7 @@ export function Dialog({
   children,
   foot,
   onClose,
+  closeDisabled = false,
   className = "og-dialog",
 }: {
   icon: string;
@@ -34,9 +35,17 @@ export function Dialog({
   children?: ReactNode;
   foot?: ReactNode;
   onClose: () => void;
+  /** Prevent dismissal while an operation has an ambiguous external outcome. */
+  closeDisabled?: boolean;
   className?: string;
 }) {
   const dialogRef = useRef<HTMLDivElement>(null);
+  const titleId = useId();
+  const descriptionId = useId();
+  const onCloseRef = useRef(onClose);
+  const closeDisabledRef = useRef(closeDisabled);
+  onCloseRef.current = onClose;
+  closeDisabledRef.current = closeDisabled;
   useEffect(() => {
     const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const dialog = dialogRef.current;
@@ -44,9 +53,11 @@ export function Dialog({
 
     const k = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
+        if (e.target instanceof Element && e.target.closest("[data-esc-guard]")) return;
         e.preventDefault();
         e.stopPropagation();
-        onClose();
+        if (closeDisabledRef.current) return;
+        onCloseRef.current();
         return;
       }
       if (e.key !== "Tab" || !dialog) return;
@@ -69,20 +80,20 @@ export function Dialog({
       document.removeEventListener("keydown", k, true);
       opener?.focus?.();
     };
-  }, [onClose]);
+  }, []);
 
   return (
-    <div className="og-scrim" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <div className={className} role="dialog" aria-modal="true" ref={dialogRef} tabIndex={-1}>
+    <div className="og-scrim" onMouseDown={(e) => { if (!closeDisabled && e.target === e.currentTarget) onClose(); }}>
+      <div className={className} role="dialog" aria-modal="true" aria-labelledby={titleId} aria-describedby={descriptionId} ref={dialogRef} tabIndex={-1}>
         <div className="og-dialog__head">
           <span className={"og-dialog__ic" + (iconDanger ? " og-dialog__ic--danger" : "")}>
             <Icon name={icon} size={17} />
           </span>
           <div style={{ flex: 1 }}>
-            <h3 className="og-dialog__t">{title}</h3>
-            <p className="og-dialog__d">{desc}</p>
+            <h3 className="og-dialog__t" id={titleId}>{title}</h3>
+            <p className="og-dialog__d" id={descriptionId}>{desc}</p>
           </div>
-          <button className="iconbtn og-dialog__x" onClick={onClose} aria-label="Close">
+          <button className="iconbtn og-dialog__x" onClick={onClose} aria-label="Close" disabled={closeDisabled}>
             <Icon name="x" size={15} />
           </button>
         </div>

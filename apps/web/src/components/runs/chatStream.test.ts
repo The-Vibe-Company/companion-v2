@@ -39,6 +39,15 @@ describe("createSseParser", () => {
     expect(frames[0]?.data).toBe("line1\nline2");
   });
 
+  it("keeps CRLF intact when the carriage return and line feed arrive in separate chunks", () => {
+    const parser = createSseParser();
+    expect(parser.push('id: 9\r')).toEqual([]);
+    expect(parser.push('\ndata: {"type":"session.idle","session_id":"s"}\r')).toEqual([]);
+    const frames = parser.push("\n\r\n");
+    expect(frames).toHaveLength(1);
+    expect(frames[0]).toMatchObject({ id: "9", data: '{"type":"session.idle","session_id":"s"}' });
+  });
+
   it("ignores comment/heartbeat lines", () => {
     const parser = createSseParser();
     expect(parser.push(": ping\n\n")).toEqual([]);
@@ -64,7 +73,17 @@ describe("openRunStream", () => {
     return new Response(body, { status: 200 });
   }
 
-  it("resets the reconnect budget on every successful connection, so a long-lived run survives more reconnects than STREAM_MAX_RECONNECTS", async () => {
+  function streamResponse(chunks: string[]): Response {
+    const encoder = new TextEncoder();
+    return new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const chunk of chunks) controller.enqueue(encoder.encode(chunk));
+        controller.close();
+      },
+    }), { status: 200 });
+  }
+
+  it("does not reset the reconnect budget for immediately-closing empty 200 responses", async () => {
     let calls = 0;
     vi.stubGlobal(
       "fetch",
@@ -78,18 +97,76 @@ describe("openRunStream", () => {
     const controller = new AbortController();
     const done = openRunStream("run-1", (event) => events.push(event), controller.signal);
 
-    // Each cycle is a clean "server closed the stream" reconnect (200 + immediately-closed
-    // body). Drive far more cycles than the reconnect cap (3) — with the reset in place this
-    // never trips the terminal "Lost connection" error.
-    for (let i = 0; i < 6; i++) {
-      await vi.advanceTimersByTimeAsync(2000);
-    }
-    controller.abort();
-    await vi.advanceTimersByTimeAsync(2000);
+    await vi.advanceTimersByTimeAsync(10_000);
     await done;
 
-    expect(calls).toBeGreaterThan(6);
-    expect(events.find((e) => e.type === "error")).toBeUndefined();
+    expect(calls).toBe(4);
+    expect(events.at(-1)).toEqual({ type: "error", message: "Lost connection to the agent stream." });
+  });
+
+  it("reconciles an intentional terminal EOF without reconnecting or showing a transport error", async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => closedStreamResponse());
+    vi.stubGlobal("fetch", fetchMock);
+    const events: RunChatEvent[] = [];
+    const onStreamEnd = vi.fn(async () => true);
+
+    await openRunStream("run-terminal", (event) => events.push(event), new AbortController().signal, { onStreamEnd });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(onStreamEnd).toHaveBeenCalledTimes(1);
+    expect(events).toEqual([]);
+  });
+
+  it("opens after the transcript snapshot cursor on both replay channels", async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => closedStreamResponse());
+    vi.stubGlobal("fetch", fetchMock);
+
+    await openRunStream("run-snapshot", () => undefined, new AbortController().signal, {
+      lastEventId: "12",
+      onStreamEnd: async () => true,
+    });
+
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain("last_event_id=12");
+    expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({ headers: { "Last-Event-ID": "12" } });
+  });
+
+  it("reports a healthy connection even when there is no replay event after the snapshot cursor", async () => {
+    const fetchMock = vi.fn(async () => closedStreamResponse());
+    vi.stubGlobal("fetch", fetchMock);
+    const onConnected = vi.fn();
+
+    await openRunStream("run-idle", () => undefined, new AbortController().signal, {
+      lastEventId: "12",
+      onConnected,
+      onStreamEnd: async () => true,
+    });
+
+    expect(onConnected).toHaveBeenCalledTimes(1);
+  });
+
+  it("drops a partial frame on disconnect and replays it from the last validated cursor", async () => {
+    const controller = new AbortController();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(streamResponse(['id: 7\ndata: {"type":"run.warning","code":"cut']))
+      .mockResolvedValueOnce(streamResponse([
+        'id: 7\ndata: {"type":"run.warning","code":"replayed","message":"Recovered","phase":null}\n\n',
+      ]));
+    vi.stubGlobal("fetch", fetchMock);
+    const events: RunChatEvent[] = [];
+    const done = openRunStream("run-cut", (event) => {
+      events.push(event);
+      controller.abort();
+    }, controller.signal);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    await done;
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(String(fetchMock.mock.calls[1]?.[0])).not.toContain("last_event_id");
+    expect(events).toEqual([
+      { type: "run.warning", code: "replayed", message: "Recovered", phase: null },
+    ]);
   });
 });
 
@@ -102,6 +179,13 @@ describe("decodeChatEvent", () => {
     expect(decodeChatEvent({ event: null, id: null, data: "not json" })).toBeNull();
     expect(decodeChatEvent({ event: null, id: null, data: '{"noType":1}' })).toBeNull();
     expect(decodeChatEvent({ event: null, id: null, data: "" })).toBeNull();
+  });
+
+  it("accepts a persisted replay envelope without exposing its sequence to the reducer", () => {
+    expect(decodeChatEvent({ event: "run", id: "12", data: '{"sequence":12,"created_at":"now","event":{"type":"run.warning","code":"artifact_publish_failed","message":"Vanish unavailable","phase":"collect_artifacts"}}' })).toMatchObject({
+      type: "run.warning",
+      code: "artifact_publish_failed",
+    });
   });
 
   it("schema-validates events: applies defaults and drops malformed frames", () => {
@@ -131,6 +215,15 @@ describe("decodeChatEvent", () => {
 });
 
 describe("chatReducer", () => {
+  it("marks a durable history snapshot idle and clears stale transport errors on connection", () => {
+    let state = apply(initChatState(), { type: "error", message: "network lost" });
+    state = chatReducer(state, { kind: "send" });
+    state = chatReducer(state, { kind: "history", items: [{ kind: "assistant", text: "done" }], resolveToolLabel });
+    expect(state.busy).toBe(false);
+    state = chatReducer(state, { kind: "connected" });
+    expect(state.error).toBeNull();
+  });
+
   it("appends user/sys items and tracks busy through a full turn", () => {
     let state = initChatState();
     state = chatReducer(state, { kind: "user", text: "hello" });
@@ -180,6 +273,18 @@ describe("chatReducer", () => {
     state = apply(state, { type: "error", message: "sandbox unreachable" });
     expect(state.busy).toBe(false);
     expect(state.error).toBe("sandbox unreachable");
+  });
+
+  it("keeps warnings non-terminal and records run.error separately", () => {
+    let state = initChatState();
+    state = apply(state, { type: "status", state: "busy", attempt: null, message: null });
+    state = apply(state, { type: "run.warning", code: "artifact_publish_failed", message: "Vanish unavailable", phase: "collect_artifacts" });
+    expect(state.busy).toBe(true);
+    expect(state.error).toBeNull();
+    expect(state.warnings).toEqual([{ code: "artifact_publish_failed", message: "Vanish unavailable" }]);
+    state = apply(state, { type: "run.error", code: "sandbox_failed", message: "Sandbox stopped", phase: "cleanup" });
+    expect(state.busy).toBe(false);
+    expect(state.error).toBe("Sandbox stopped");
   });
 
   // Regression: reconnecting after a dead stream (the server re-sends "ready" at the start of
