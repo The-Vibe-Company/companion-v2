@@ -2,7 +2,6 @@
 
 import { useEffect, useRef, useState } from "react";
 import type {
-  OrgRole,
   SkillCommentRow,
   SkillDependenciesResponse,
   SkillFile,
@@ -13,7 +12,6 @@ import {
   addComment as addCommentRpc,
   fetchSkillDependencies,
   fetchSkillDetail,
-  fetchSkillDownloadUrl,
   fetchSkillVersionFiles,
   skillFileContentUrl,
   setCommentDeprecated as setCommentDeprecatedRpc,
@@ -32,84 +30,40 @@ import { DependenciesTab } from "./DependenciesTab";
 import { FileExplorer } from "./fileview";
 import { MarkdownView } from "./markdown";
 import { Discussion } from "./discussion";
+import {
+  resolveSkillActions,
+  skillActionPermissions,
+  type SkillAction,
+} from "./skillActions";
 
 export function DetailMoreMenuContent({
-  canModifySkill,
-  canDownload,
-  canArchive,
-  installed,
-  onToggleInstalled,
-  onUpdate,
-  onDownload,
-  onArchive,
+  actions,
+  onAction,
 }: {
-  canModifySkill: boolean;
-  canDownload: boolean;
-  canArchive: boolean;
-  installed: boolean;
-  onToggleInstalled: () => void;
-  onUpdate: () => void;
-  onDownload: () => void;
-  onArchive: () => void;
+  actions: SkillAction[];
+  onAction: (action: SkillAction) => void;
 }) {
   return (
     <div className="menu dmore__menu" role="menu">
       <div className="menu__head">Actions</div>
-      <button className="menu__item" role="menuitem" onClick={onToggleInstalled}>
-        <span className="ico">
-          <Icon name={installed ? "circle-x" : "circle-check"} size={14} />
-        </span>
-        <span className="menu__label">{installed ? "Mark as not installed" : "Mark as installed"}</span>
-      </button>
-      {canModifySkill && (
-        <button className="menu__item" role="menuitem" onClick={onUpdate}>
+      {actions.map((action) => (
+        <button key={action.id} className="menu__item" role="menuitem" onClick={() => onAction(action)}>
           <span className="ico">
-            <Icon name="git-commit" size={14} />
+            <Icon name={action.icon} size={14} />
           </span>
-          <span className="menu__label">Publish new version</span>
+          <span className="menu__label">{action.label}</span>
         </button>
-      )}
-      <button
-        className="menu__item"
-        role="menuitem"
-        onClick={onDownload}
-        disabled={!canDownload}
-      >
-        <span className="ico">
-          <Icon name="package-2" size={14} />
-        </span>
-        <span className="menu__label">Download package</span>
-      </button>
-      {canArchive && (
-        <button className="menu__item" role="menuitem" onClick={onArchive}>
-          <span className="ico">
-            <Icon name="archive" size={14} />
-          </span>
-          <span className="menu__label">Archive skill</span>
-        </button>
-      )}
+      ))}
     </div>
   );
 }
 
 function DetailMoreMenu({
-  canModifySkill,
-  canDownload,
-  canArchive,
-  installed,
-  onToggleInstalled,
-  onUpdate,
-  onDownload,
-  onArchive,
+  actions,
+  onAction,
 }: {
-  canModifySkill: boolean;
-  canDownload: boolean;
-  canArchive: boolean;
-  installed: boolean;
-  onToggleInstalled: () => void;
-  onUpdate: () => void;
-  onDownload: () => void;
-  onArchive: () => void;
+  actions: SkillAction[];
+  onAction: (action: SkillAction) => void;
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLSpanElement>(null);
@@ -164,14 +118,8 @@ function DetailMoreMenu({
       </button>
       {open && (
         <DetailMoreMenuContent
-          canModifySkill={canModifySkill}
-          canDownload={canDownload}
-          canArchive={canArchive}
-          installed={installed}
-          onToggleInstalled={() => choose(onToggleInstalled)}
-          onUpdate={() => choose(onUpdate)}
-          onDownload={() => choose(onDownload)}
-          onArchive={() => choose(onArchive)}
+          actions={actions}
+          onAction={(action) => choose(() => onAction(action))}
         />
       )}
     </span>
@@ -283,22 +231,16 @@ export function DetailView({
   index,
   total,
   me,
-  myRole,
   orgName,
   allLabels,
   onBack,
   onPrev,
   onNext,
   onToggleStar,
-  onToggleInstalled,
   onToggleLabel,
   onSelectLabel,
-  onShare,
-  onInstall,
-  onUpdate,
+  onAction,
   onOpenSkill,
-  onRestore,
-  onArchive,
   historyEnabled = true,
   onUpgrade = () => {},
 }: {
@@ -306,7 +248,6 @@ export function DetailView({
   index: number;
   total: number;
   me: MeVM;
-  myRole: OrgRole;
   orgName: string;
   /** Every folder path in this skill's library (for the "Add to folder" picker). */
   allLabels: string[];
@@ -314,19 +255,12 @@ export function DetailView({
   onPrev: () => void;
   onNext: () => void;
   onToggleStar: () => void;
-  onToggleInstalled: () => void;
   /** Assign / unassign a folder path on this skill (toggle). */
   onToggleLabel: (path: string) => void;
   /** Navigate to a folder's scope (chip click). */
   onSelectLabel: (path: string) => void;
-  /** Share this personal skill into the org library (owner + authored only). */
-  onShare: () => void;
-  /** Open the install flow (hands the Companion agent the prompt; the agent reports back on install). */
-  onInstall: () => void;
-  onUpdate: () => void;
+  onAction: (action: SkillAction) => void;
   onOpenSkill: (slug: string) => void;
-  onRestore: () => void;
-  onArchive: () => void;
   historyEnabled?: boolean;
   onUpgrade?: () => void;
 }) {
@@ -391,11 +325,6 @@ export function DetailView({
       active = false;
     };
   }, [skill.id, skill.version]);
-
-  const download = async () => {
-    const url = await fetchSkillDownloadUrl(skill.id, skill.version);
-    window.location.href = url;
-  };
 
   // Flat model: skills carry no owner/visibility axis — every member can do anything to any skill.
   const canModifySkill = true;
@@ -499,7 +428,7 @@ export function DetailView({
   const inMyLibrary = skill.scope === "personal" || skill.source === "installed";
   const libLabel = inMyLibrary ? "My Skills" : orgName;
   const isInstalledCopy = skill.source === "installed";
-  const canShare = skill.scope === "personal" && !skill.archived;
+  const actionModel = resolveSkillActions(skill, skillActionPermissions(skill, me.id));
   const eyebrow = skill.scope === "personal" ? "Personal skill" : isInstalledCopy ? "Installed skill" : "Organization skill";
   const eyebrowIcon = skill.scope === "personal" ? "user" : isInstalledCopy ? "download" : "building-2";
   const currentVersion = skill.version;
@@ -527,43 +456,19 @@ export function DetailView({
           {index + 1} / {total}
         </span>
         <StarButton starred={skill.starred} count={skill.stars} onToggle={onToggleStar} />
-        {skill.archived ? (
-          <button className="btn-ghost" onClick={onRestore} title="Restore this skill">
-            <Icon name="rotate-ccw" size={14} />
-            Restore
-          </button>
-        ) : canShare ? (
-          <button className="btn-primary" onClick={onShare} title="Share this skill to the organization">
-            <Icon name="send" size={14} />
-            Share to organization
-          </button>
-        ) : (
+        {actionModel.primary && (
           <button
             className="btn-primary"
-            disabled={invalid || !skill.version}
-            onClick={onInstall}
-            title={
-              invalid
-                ? "Resolve validation errors first"
-                : !skill.version
-                  ? "No published version yet"
-                  : "Install skill"
-            }
+            onClick={() => onAction(actionModel.primary!)}
+            title={actionModel.primary.label}
           >
-            <Icon name="download" size={14} />
-            Install skill
+            <Icon name={actionModel.primary.icon} size={14} />
+            {actionModel.primary.label}
           </button>
         )}
-        <DetailMoreMenu
-          canModifySkill={canModifySkill}
-          canDownload={!!skill.version && (!skill.archived || (skill.referenced ?? skill.usedByCount > 0))}
-          canArchive={canModifySkill && !skill.archived}
-          installed={skill.installStatus !== "none"}
-          onToggleInstalled={onToggleInstalled}
-          onUpdate={onUpdate}
-          onDownload={download}
-          onArchive={onArchive}
-        />
+        {actionModel.secondary.length > 0 && (
+          <DetailMoreMenu actions={actionModel.secondary} onAction={onAction} />
+        )}
       </div>
 
       <DetailTabs tabs={tabs} active={activeTab} onSelect={setTab} />

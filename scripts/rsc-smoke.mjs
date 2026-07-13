@@ -152,7 +152,7 @@ async function checkPage(path, expected) {
 await checkUnauthenticatedRedirect();
 await login();
 await markCompanionSkillInstalled();
-await checkPage("/skills", ["Skills", "Upload skill"]);
+await checkPage("/skills", ["Skills", "Add skill"]);
 await checkPage("/settings", ["Settings", "Members"]);
 
 console.log("[rsc-smoke] OK");

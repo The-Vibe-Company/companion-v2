@@ -53,22 +53,16 @@ function renderDetailFor(nextSkill: SkillVM) {
       index: 0,
       total: 1,
       me,
-      myRole: "owner",
       orgName: "The Vibe Company",
       allLabels: ["marketing", "marketing/seo", "growth"],
       onBack: vi.fn(),
       onPrev: vi.fn(),
       onNext: vi.fn(),
       onToggleStar: vi.fn(),
-      onToggleInstalled: vi.fn(),
       onToggleLabel: vi.fn(),
       onSelectLabel: vi.fn(),
-      onShare: vi.fn(),
-      onInstall: vi.fn(),
-      onUpdate: vi.fn(),
+      onAction: vi.fn(),
       onOpenSkill: vi.fn(),
-      onRestore: vi.fn(),
-      onArchive: vi.fn(),
     }),
   );
 }
@@ -87,6 +81,7 @@ describe("DetailView tabbed detail layout", () => {
     expect(html).toContain("statuscard");
     expect(html).toContain("Status");
     expect(html).toContain("Valid");
+    expect(html).toContain("Installed");
     expect(html).toContain("1.2.3");
     expect(html).toContain("just now");
     // Author provenance byline.
@@ -143,6 +138,19 @@ describe("DetailView tabbed detail layout", () => {
 
     expect(html).not.toContain("Copy public link");
     expect(html).toContain("Share to organization");
+  });
+
+  it("hides installation CTAs for current, invalid, validating, and unpublished skills", () => {
+    expect(renderDetailFor(skill)).not.toContain("Install skill");
+    expect(renderDetailFor({ ...skill, installStatus: "none", installedVersion: null, validation: "invalid" })).not.toContain("Install skill");
+    expect(renderDetailFor({ ...skill, installStatus: "none", installedVersion: null, validation: "validating" })).not.toContain("Install skill");
+    expect(renderDetailFor({ ...skill, installStatus: "none", installedVersion: null, version: null })).not.toContain("Install skill");
+  });
+
+  it("shows Update skill only for an outdated installation", () => {
+    const html = renderDetailFor({ ...skill, installStatus: "update", installedVersion: "1.1.0" });
+    expect(html).toContain("Update skill");
+    expect(html).not.toContain("Install skill");
   });
 
   it("prefers Companion title and summary for the detail title and lead", () => {

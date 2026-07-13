@@ -110,7 +110,7 @@ export async function validateSkillPackage(
   return { result: data.result, dependencyPlan: data.dependency_plan ?? null };
 }
 
-/** Author a SKILL.md inline ("Create in the browser") and publish it. */
+/** Author a SKILL.md inline ("Create in browser") and publish it. */
 export async function createSkillInline(input: {
   id: string;
   description: string;
@@ -147,6 +147,11 @@ export async function fetchSkillDetail(
   ]);
   const cur = versions.find((v) => v.version === currentVersion) ?? versions[0];
   return { versions, comments, frontmatter: cur?.frontmatter ?? null };
+}
+
+/** Read one skill's current server state, including this caller's install report. */
+export async function fetchSkillBySlug(slug: string): Promise<SkillListRow> {
+  return apiFetch<SkillListRow>(`/v1/skills/${encodeURIComponent(slug)}`);
 }
 
 export async function toggleStar(slug: string): Promise<boolean> {
