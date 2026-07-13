@@ -187,6 +187,15 @@ importers:
       '@companion/db':
         specifier: workspace:*
         version: link:../../packages/db
+      drizzle-orm:
+        specifier: ^0.38.4
+        version: 0.38.4(@types/react@19.2.17)(kysely@0.29.2)(postgres@3.4.9)(react@19.0.0)
+      postgres:
+        specifier: ^3.4.5
+        version: 3.4.9
+      stripe:
+        specifier: ^18.5.0
+        version: 18.5.0(@types/node@22.19.20)
     devDependencies:
       '@types/node':
         specifier: ^22.10.2

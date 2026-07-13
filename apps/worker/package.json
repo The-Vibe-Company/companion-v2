@@ -13,7 +13,10 @@
   "dependencies": {
     "@companion/billing": "workspace:*",
     "@companion/core": "workspace:*",
-    "@companion/db": "workspace:*"
+    "@companion/db": "workspace:*",
+    "drizzle-orm": "^0.38.4",
+    "postgres": "^3.4.5",
+    "stripe": "^18.5.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

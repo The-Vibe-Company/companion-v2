@@ -82,8 +82,9 @@ Docker Compose bundle plus the API, web, worker, and provider services (see the 
 For a manual split loop, `pnpm compose:up`, `pnpm db:migrate`, `pnpm db:seed`, and `pnpm dev:app`
 remain available.
 
-In production, the API start script applies pending Drizzle migrations before the server listens.
-If migrations fail, startup fails rather than serving newer code against an older database schema.
+In production, the standard API start script applies pending Drizzle migrations before the server listens.
+Railway runs the same migration as an API pre-deploy command so a failed migration never replaces the live
+deployment; see the [Railway deployment guide](deploy/railway/README.md) for the three-service and Stripe setup.
 
 ### Conductor workspaces
 

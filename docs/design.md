@@ -39,6 +39,14 @@ falls back to `EMAIL_PROVIDER=log`). A cleanup trap stops every native service o
 workspace runs `scripts/dev-conductor.sh archive`, which stops the services and removes
 `.conductor-pg/`.
 
+Production Railway deployments use three services from the same repository plus Railway Postgres. The public
+`web` service proxies browser, CLI, auth, and Stripe webhook traffic to the private `api` service over Railway
+private DNS; the `worker` is private and has no HTTP surface. Per-service configuration lives in
+`deploy/railway/*.railway.json`. Only the API runs Drizzle migrations, as a Railway pre-deploy command guarded by
+the existing Postgres advisory lock. The web and API bind Railway's injected/fixed `PORT` on `0.0.0.0`, while the
+worker is restarted as a long-running process. `deploy/railway/README.md` is the operational source of truth for
+service references, public domains, Stripe webhook registration, initial deployment order, and rollback.
+
 ## Repository Layout
 
 ```
