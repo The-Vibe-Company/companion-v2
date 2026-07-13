@@ -1,0 +1,134 @@
+import { describe, expect, it } from "vitest";
+import {
+  createRunRedactor,
+  createRunStreamingRedactor,
+  RUN_REDACTION_MIN_LITERAL_LENGTH,
+  RUN_REDACTION_PLACEHOLDER,
+} from "../src/runRedaction";
+
+describe("RunRedactor", () => {
+  it("uses every non-empty injected literal, including unusually short credentials", () => {
+    const redactor = createRunRedactor([undefined, null, "", "x", "abc", "safe", "second-secret"]);
+
+    expect(RUN_REDACTION_MIN_LITERAL_LENGTH).toBe(1);
+    expect(redactor.redactText("x abc safe second-secret")).toBe(
+      `${RUN_REDACTION_PLACEHOLDER} ${RUN_REDACTION_PLACEHOLDER} ${RUN_REDACTION_PLACEHOLDER} ${RUN_REDACTION_PLACEHOLDER}`,
+    );
+  });
+
+  it("prefers the longest overlapping literal and handles regex metacharacters literally", () => {
+    const redactor = createRunRedactor(["token", "token-long", "a+b*c?.[x]"]);
+
+    expect(redactor.redactText("token-long token a+b*c?.[x]")).toBe(
+      `${RUN_REDACTION_PLACEHOLDER} ${RUN_REDACTION_PLACEHOLDER} ${RUN_REDACTION_PLACEHOLDER}`,
+    );
+  });
+
+  it("redacts nested event, tool, and Error strings without mutating the input", () => {
+    const secret = "sk-live-super-secret";
+    const error = Object.assign(new Error(`provider rejected ${secret}`), {
+      details: { response: `tool output: ${secret}` },
+    });
+    const input = {
+      type: "tool.done",
+      output: `top-level ${secret}`,
+      nested: [{ input: `curl -H 'Authorization: ${secret}'` }],
+      error,
+    };
+    const redactor = createRunRedactor([secret]);
+
+    const result = redactor.redactPayload(input);
+
+    expect(result).not.toBe(input);
+    expect(result.nested).not.toBe(input.nested);
+    expect(result.nested[0]).not.toBe(input.nested[0]);
+    expect(result.output).toBe(`top-level ${RUN_REDACTION_PLACEHOLDER}`);
+    expect(result.nested[0]?.input).toBe(`curl -H 'Authorization: ${RUN_REDACTION_PLACEHOLDER}'`);
+    expect(result.error).toBeInstanceOf(Error);
+    expect(result.error).not.toBe(error);
+    expect(result.error.message).toBe(`provider rejected ${RUN_REDACTION_PLACEHOLDER}`);
+    expect(result.error.stack).not.toContain(secret);
+    expect(result.error.details.response).toBe(`tool output: ${RUN_REDACTION_PLACEHOLDER}`);
+
+    expect(input.output).toContain(secret);
+    expect(input.nested[0]?.input).toContain(secret);
+    expect(error.message).toContain(secret);
+    expect(error.details.response).toContain(secret);
+  });
+
+  it("preserves cycles while returning a distinct redacted payload", () => {
+    const secret = "cycle-secret";
+    const input: { message: string; self?: unknown } = { message: secret };
+    input.self = input;
+
+    const result = createRunRedactor([secret]).redactPayload(input);
+
+    expect(result).not.toBe(input);
+    expect(result.message).toBe(RUN_REDACTION_PLACEHOLDER);
+    expect(result.self).toBe(result);
+  });
+
+  it("clear drops the literals and turns future redaction into a pass-through", () => {
+    const secret = "clear-this-secret";
+    const redactor = createRunRedactor([secret]);
+    expect(redactor.redactText(secret)).toBe(RUN_REDACTION_PLACEHOLDER);
+
+    redactor.clear();
+
+    expect(redactor.redactText(secret)).toBe(secret);
+  });
+});
+
+describe("RunStreamingRedactor", () => {
+  it("does not emit a literal split across adjacent chunks", () => {
+    const secret = "split-across-chunks";
+    const stream = createRunStreamingRedactor([secret]);
+    const output = [
+      stream.push("before "),
+      stream.push(secret.slice(0, 5)),
+      stream.push(secret.slice(5, 12)),
+      stream.push(`${secret.slice(12)} after`),
+      stream.flush(),
+    ];
+
+    expect(output.join("")).toBe(`before ${RUN_REDACTION_PLACEHOLDER} after`);
+    expect(output.every((chunk) => !chunk.includes(secret))).toBe(true);
+  });
+
+  it("retains only a bounded tail and flushes ordinary text", () => {
+    const stream = createRunStreamingRedactor(["secret"]);
+
+    expect(stream.push("0123456789")).toBe("01234");
+    expect(stream.flush()).toBe("56789");
+    expect(stream.push("next")).toBe("");
+    expect(stream.flush()).toBe("next");
+  });
+
+  it("redacts the longest complete literal while draining a safe prefix", () => {
+    const stream = createRunStreamingRedactor(["token", "token-long"]);
+    const output = stream.push("token-long and token") + stream.flush();
+
+    expect(output).toBe(`${RUN_REDACTION_PLACEHOLDER} and ${RUN_REDACTION_PLACEHOLDER}`);
+  });
+
+  it("clear drops both literal references and the pending raw tail", () => {
+    const secret = "pending-stream-secret";
+    const stream = createRunStreamingRedactor([secret]);
+    expect(stream.push(secret.slice(0, 8))).toBe("");
+
+    stream.clear();
+
+    expect(stream.flush()).toBe("");
+    expect(stream.push(secret)).toBe(secret);
+  });
+
+  it("a stream created from a RunRedactor owns an independent literal set", () => {
+    const secret = "independent-secret";
+    const redactor = createRunRedactor([secret]);
+    const stream = redactor.createStream();
+    redactor.clear();
+
+    expect(stream.push(secret) + stream.flush()).toBe(RUN_REDACTION_PLACEHOLDER);
+    expect(redactor.redactText(secret)).toBe(secret);
+  });
+});
