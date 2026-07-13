@@ -9,16 +9,14 @@ import { SKILL_REQUIREMENT_KEY_RE } from "./frontmatter";
  * time and never copied onto a run.
  */
 
-export const SECRET_VALUE_MAX = 8_192;
-
-/** Env var names the runtime owns — a stored key must never shadow these (would break the server). */
-export const RESERVED_SECRET_KEYS: readonly string[] = ["OPENCODE_SERVER_PASSWORD", "OPENCODE_SERVER_USERNAME"];
+/** The runtime owns this whole namespace; provider bindings must never shadow it. */
+export const RESERVED_SECRET_KEY_PREFIX = "OPENCODE_SERVER_";
 
 export const secretKeyNameSchema = z
   .string()
   .regex(SKILL_REQUIREMENT_KEY_RE, "secret keys must look like environment variables (letters, digits, underscores)")
   .max(120)
-  .refine((key) => !RESERVED_SECRET_KEYS.includes(key), "this key name is reserved by the runtime");
+  .refine((key) => !key.startsWith(RESERVED_SECRET_KEY_PREFIX), "this key name is reserved by the runtime");
 
 /* ---- Model catalog ---------------------------------------------------------------- */
 
@@ -73,10 +71,14 @@ export type SetActivatedModelsInput = z.infer<typeof setActivatedModelsInputSche
 
 /* ---- Provider connections (saved model-provider API keys) ------------------------- */
 
-/** One saved provider connection (`GET /v1/provider-connections`) — key NAME + state only. */
+/** One saved provider connection. It references vault metadata and never contains a value. */
 export const providerConnectionRowSchema = z.object({
   provider: z.string(),
   key_name: z.string(),
+  secret_id: z.string().uuid(),
+  secret_name: z.string(),
+  secret_audience: z.enum(["personal", "restricted", "organization"]),
+  secret_owner_name: z.string(),
   set: z.literal(true),
   created_at: z.string(),
 });
@@ -87,11 +89,11 @@ export const providerConnectionsResponseSchema = z.object({
 });
 export type ProviderConnectionsResponse = z.infer<typeof providerConnectionsResponseSchema>;
 
-/** Body of `PUT /v1/provider-connections` — save/replace a provider API key (write-only). */
+/** Body of `PUT /v1/provider-connections` — bind a provider to an accessible vault secret. */
 export const setProviderConnectionInputSchema = z.object({
   provider: z.string().min(1).max(120),
-  /** The env var name to store the key under (from the model catalog's `env_keys`). */
+  /** Env name expected by the provider (from the model catalog's `env_keys`). */
   key_name: secretKeyNameSchema,
-  key: z.string().min(1).max(SECRET_VALUE_MAX),
-});
+  secret_id: z.string().uuid(),
+}).strict();
 export type SetProviderConnectionInput = z.infer<typeof setProviderConnectionInputSchema>;
