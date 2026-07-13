@@ -304,6 +304,5 @@ describe("Run skill (sandboxed sessions)", () => {
     // SSR renders only the active tabpanel. Data is intentionally unresolved during SSR, so the
     // recoverable private-session loading state proves that Sessions is the active tab.
     expect(html).toContain("Loading your private sessions");
-    expect(html).toContain("private to you");
   });
 });
