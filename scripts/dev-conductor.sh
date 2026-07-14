@@ -244,6 +244,7 @@ is_repo_pid() {
 
 free_port() {
   local port="$1" label="$2" pids pid repo_pids="" foreign_pids="" waited=0
+  local -a repo_pid_array
   is_port_open "$port" || return 0
   pids="$(lsof -ti :"$port" 2>/dev/null || true)"
   if [ -z "$pids" ]; then
@@ -263,10 +264,11 @@ free_port() {
   fi
 
   warn "$label port $port busy (our PID ${repo_pids}) — terminating stale process"
-  kill ${repo_pids} 2>/dev/null || true
+  read -r -a repo_pid_array <<< "$repo_pids"
+  kill "${repo_pid_array[@]}" 2>/dev/null || true
   while [ "$waited" -lt 3 ] && is_port_open "$port"; do sleep 1; waited=$((waited + 1)); done
   if is_port_open "$port"; then
-    kill -9 ${repo_pids} 2>/dev/null || true
+    kill -9 "${repo_pid_array[@]}" 2>/dev/null || true
     sleep 1
   fi
   is_port_open "$port" && die "Port $port still busy after stopping our process. Manual kill: lsof -ti :$port | xargs kill -9"
@@ -332,7 +334,9 @@ start_postgres() {
   step "Starting Postgres (native workspace cluster)"
 
   if [ "$RESET_DB" = true ] && [ -d "$STATE_DIR/postgres" ]; then
-    postgres_running && "$PG_BIN/pg_ctl" -D "$PG_DATA" -m fast stop >/dev/null 2>&1 || true
+    if postgres_running; then
+      "$PG_BIN/pg_ctl" -D "$PG_DATA" -m fast stop >/dev/null 2>&1 || true
+    fi
     info "Purging $STATE_DIR/postgres"
     rm -rf "$STATE_DIR/postgres"
   fi
@@ -502,7 +506,8 @@ cleanup() {
 # ---------------------------------------------------------------------------
 migrate_and_seed() {
   step "Applying migrations + seeding test user"
-  DATABASE_URL="$DATABASE_MIGRATION_URL" DATABASE_MIGRATION_URL="$DATABASE_MIGRATION_URL" pnpm db:migrate || die "Migrations failed"
+  env DATABASE_URL="$DATABASE_MIGRATION_URL" DATABASE_MIGRATION_URL="$DATABASE_MIGRATION_URL" \
+    pnpm db:migrate || die "Migrations failed"
   local OWNER_PSQL=("$PG_BIN/psql" "$DATABASE_MIGRATION_URL" -v ON_ERROR_STOP=1)
   "${OWNER_PSQL[@]}" -v runtime_role="$PG_USER" \
     -f "$REPO_ROOT/packages/db/runtime-role-grants.sql" >/dev/null || die "Runtime database grants failed"

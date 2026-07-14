@@ -17,7 +17,7 @@
     "@companion/db": "workspace:*",
     "@companion/sandbox": "workspace:*",
     "@companion/storage": "workspace:*",
-    "drizzle-orm": "^0.38.4",
+    "drizzle-orm": "^0.45.2",
     "postgres": "^3.4.5",
     "stripe": "^18.5.0"
   },
@@ -26,6 +26,6 @@
     "tsup": "^8.3.5",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
-    "vitest": "^2.1.8"
+    "vitest": "3.2.7"
   }
 }
