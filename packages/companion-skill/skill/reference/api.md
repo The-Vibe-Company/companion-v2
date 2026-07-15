@@ -40,6 +40,7 @@ These are the Companion skill-management endpoints a personal access token can c
 | List org library skills | `GET /skills?lib=org` | `skills:read` |
 | List My Skills | `GET /skills?lib=mine` | `skills:read` |
 | List reported installed skills | `GET /skills?installed=true` | `skills:read` |
+| Get skill metadata | `GET /skills/{slug}` | `skills:read` |
 | Read org skill naming policy | `GET /v1/orgs/current/skill-naming-policy` (or `GET /orgs/current/skill-naming-policy` from `COMPANION_API_URL`) | `skills:read` |
 | Current published version + checksum | `GET /skills/{slug}/download` | `skills:read` |
 | Download a version package | `GET /skills/{slug}/versions/{version}/package` | `skills:read` |
@@ -236,7 +237,6 @@ Companion PAT. Use them only when the caller is operating with a valid session c
 | Action | Method & path | Auth |
 | --- | --- | --- |
 | Resolve a share link target | `GET /skills/share-target/{share_token}` | Session |
-| Get skill metadata | `GET /skills/{slug}` | Session |
 | Enumerate versions | `GET /skills/{slug}/versions` | Session |
 | Read comments | `GET /skills/{slug}/comments` | Session |
 | Add a comment | `POST /skills/{slug}/comments` | Session |
