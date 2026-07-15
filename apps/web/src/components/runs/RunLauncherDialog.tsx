@@ -124,6 +124,7 @@ export function RunLauncherDialog({
   const prewarmStartRef = useRef<Promise<unknown> | null>(null);
   const prewarmAdoptedRef = useRef(false);
   const prewarmEnabledRef = useRef<boolean | null>(null);
+  const promptRef = useRef<HTMLTextAreaElement>(null);
 
   const abandonPrewarm = () => {
     const id = prewarmIdRef.current;
@@ -466,6 +467,10 @@ export function RunLauncherDialog({
     onFiles: addFiles,
   });
 
+  useEffect(() => {
+    if (!composerUnavailable) promptRef.current?.focus();
+  }, [composerUnavailable]);
+
   const togglePrewarm = async (enabled: boolean) => {
     if (preferenceBusy) return;
     const previous = prewarmEnabled;
@@ -672,10 +677,10 @@ export function RunLauncherDialog({
       >
         <label className="run-launcher__prompt-label" htmlFor="run-prompt">Prompt</label>
         <textarea
+          ref={promptRef}
           id="run-prompt"
           className="composer__input composer__input--launch"
           value={prompt}
-          autoFocus
           rows={4}
           maxLength={8000}
           disabled={composerUnavailable || busy}

@@ -154,6 +154,12 @@ afterEach(() => {
 });
 
 describe("RunLauncherDialog", () => {
+  it("focuses the prompt after run options become available", async () => {
+    const container = await mount(runOptions());
+
+    expect(document.activeElement).toBe(container.querySelector("#run-prompt"));
+  });
+
   it("keeps Add files visible and disabled when the runtime or options are unavailable", async () => {
     const unavailable = runOptions();
     unavailable.runtime = { available: false, message: "RunSkill is unavailable." };
