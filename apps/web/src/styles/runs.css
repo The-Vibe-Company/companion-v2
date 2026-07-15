@@ -146,8 +146,10 @@
 .ca-tool--running > button { border-color: var(--color-line-strong); }
 
 /* Run launcher: dense configuration + manifest inputs, with the action rail kept visible. */
+.og-scrim:has(.run-launcher) { align-items: center; padding: 16px; }
 .og-dialog.run-launcher { width: min(720px, calc(100vw - 32px)); max-height: min(860px, calc(100dvh - 32px)); }
 .run-launcher .og-dialog__body { gap: 16px; }
+.run-launcher .og-dialog__body > * { flex: none; }
 .run-launcher .og-dialog__foot { min-height: 58px; background: var(--color-surface); }
 .run-launcher .og-dialog__foot .btn-primary { display: inline-flex; align-items: center; gap: 6px; }
 .run-launcher__prompt-label { display: block; padding: 10px 16px 0; color: var(--color-muted); font-size: var(--text-xs); font-weight: 500; }
