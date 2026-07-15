@@ -2,7 +2,14 @@
 
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import type { CSSProperties } from "react";
-import type { RunPhase, SkillRunDetail } from "@companion/contracts";
+import {
+  RUN_ATTACHMENT_MAX_BYTES,
+  RUN_ATTACHMENT_MAX_FILES,
+  RUN_ATTACHMENT_MAX_TOTAL_BYTES,
+  type RunPhase,
+  type SkillRunAttachmentRow,
+  type SkillRunDetail,
+} from "@companion/contracts";
 import { cancelRun, fetchRun, runAttachmentHref, sendRunPrompt } from "@/lib/runQueries";
 import { formatDurationSeconds } from "@/lib/format";
 import { Icon } from "../Icon";
@@ -47,6 +54,31 @@ const TOOL_PRE: CSSProperties = {
   whiteSpace: "pre-wrap",
   overflowWrap: "anywhere",
 };
+
+function formatBytes(bytes: number): string {
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${bytes} B`;
+}
+
+function AttachmentChips({ runId, attachments }: { runId: string; attachments: SkillRunAttachmentRow[] }) {
+  if (attachments.length === 0) return null;
+  return (
+    <div className="run-chat__attachment-list">
+      {attachments.map((attachment) => (
+        <a
+          key={attachment.id}
+          href={runAttachmentHref(runId, attachment.id)}
+          className="chip"
+          title={`Download ${attachment.file_name}`}
+        >
+          <Icon name="file" size={11} />
+          {attachment.file_name}
+        </a>
+      ))}
+    </div>
+  );
+}
 
 const STARTING_POLL_MS = 1500;
 
@@ -305,7 +337,14 @@ export function RunChatView({
   const lastEventIdRef = useRef<string | null>(null);
   const [promptPending, setPromptPending] = useState(false);
   const [streamReady, setStreamReady] = useState(false);
-  const promptAttemptRef = useRef<{ text: string; idempotencyKey: string } | null>(null);
+  const [files, setFiles] = useState<File[]>([]);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const promptAttemptRef = useRef<{
+    text: string;
+    fileSignature: string;
+    files: File[];
+    idempotencyKey: string;
+  } | null>(null);
   const [promptError, setPromptError] = useState<string | null>(null);
   const [cancelBusy, setCancelBusy] = useState(false);
   const [cancelRequestedLocal, setCancelRequestedLocal] = useState(false);
@@ -399,6 +438,7 @@ export function RunChatView({
     setRun(null);
     setLoadError(null);
     setText("");
+    setFiles([]);
     setPromptPending(false);
     setPromptError(null);
     setStreamReady(false);
@@ -420,7 +460,7 @@ export function RunChatView({
       lastEventIdRef.current = String(run.transcript_event_sequence);
     }
     setShowPromptBubble(!run.transcript.some((item) => item.kind === "user"));
-    dispatch({ kind: "history", items: run.transcript, resolveToolLabel });
+    dispatch({ kind: "history", items: run.transcript, attachments: run.attachments, resolveToolLabel });
     setStreamDead(false);
   }, [run, resolveToolLabel]);
 
@@ -519,30 +559,52 @@ export function RunChatView({
   }, [chat.items]);
 
   const cancelRequested = cancelRequestedLocal || run?.phase === "cancel";
-  const sendDisabled = status !== "running" || cancelRequested || !streamReady || streamDead || chat.busy || promptPending || !text.trim();
+  const fileSignature = files.map((file) => [file.name, file.size, file.type, file.lastModified].join(":")).join("|");
+  const hasMessage = text.trim().length > 0 || files.length > 0;
+  const sendDisabled = status !== "running" || cancelRequested || !streamReady || streamDead || chat.busy || promptPending || !hasMessage;
   const streamingAssistant = chat.items.some((item) => item.kind === "asst" && item.streaming);
   const showWorking = chat.working.active && !streamingAssistant && status === "running";
 
   const send = () => {
     const trimmed = text.trim();
-    if (sendDisabled || !trimmed) return;
+    if (sendDisabled || (!trimmed && files.length === 0)) return;
     const previous = promptAttemptRef.current;
-    const retrying = previous?.text === trimmed;
+    const retrying = previous?.text === trimmed && previous.fileSignature === fileSignature;
     const attempt = retrying
       ? previous
-      : { text: trimmed, idempotencyKey: crypto.randomUUID() };
+      : { text: trimmed, fileSignature, files: [...files], idempotencyKey: crypto.randomUUID() };
     if (!attempt) return;
     promptAttemptRef.current = attempt;
     setPromptPending(true);
     setPromptError(null);
-    sendRunPrompt(runId, trimmed, attempt.idempotencyKey)
-      .then(() => {
+    sendRunPrompt(runId, trimmed, attempt.files, attempt.idempotencyKey)
+      .then((accepted) => {
+        const currentRun = runRef.current;
+        if (currentRun && accepted.attachments.length > 0) {
+          const known = new Set(currentRun.attachments.map((attachment) => attachment.id));
+          const merged = {
+            ...currentRun,
+            attachments: [
+              ...currentRun.attachments,
+              ...accepted.attachments.filter((attachment) => !known.has(attachment.id)),
+            ],
+          };
+          runRef.current = merged;
+          setRun(merged);
+        }
         const lastVisibleUser = [...chat.items].reverse().find((item) => item.kind === "user");
-        if (!retrying || lastVisibleUser?.kind !== "user" || lastVisibleUser.text !== trimmed) {
-          dispatch({ kind: "user", text: trimmed });
+        if (lastVisibleUser?.kind !== "user" || lastVisibleUser.messageId !== accepted.message_id) {
+          dispatch({
+            kind: "user",
+            text: trimmed,
+            messageId: accepted.message_id,
+            attachments: accepted.attachments,
+          });
         }
         dispatch({ kind: "send" });
         setText("");
+        setFiles([]);
+        if (fileInputRef.current) fileInputRef.current.value = "";
         promptAttemptRef.current = null;
         setPromptError(null);
         if (retrying) void refreshRun().catch(() => {});
@@ -553,6 +615,36 @@ export function RunChatView({
         void refreshRun().catch(() => {});
       })
       .finally(() => setPromptPending(false));
+  };
+
+  const addFiles = (incoming: FileList | null) => {
+    if (!incoming) return;
+    setPromptError(null);
+    promptAttemptRef.current = null;
+    const next = [...files];
+    const persistedBytes = run?.attachments.reduce((sum, attachment) => sum + attachment.byte_size, 0) ?? 0;
+    for (const file of Array.from(incoming)) {
+      if (next.length >= RUN_ATTACHMENT_MAX_FILES) {
+        setPromptError(`You can attach at most ${RUN_ATTACHMENT_MAX_FILES} files per message.`);
+        break;
+      }
+      if (file.size === 0) {
+        setPromptError(`${file.name} is empty.`);
+        continue;
+      }
+      if (file.size > RUN_ATTACHMENT_MAX_BYTES) {
+        setPromptError(`${file.name} is larger than 10 MB.`);
+        continue;
+      }
+      const draftBytes = next.reduce((sum, candidate) => sum + candidate.size, 0);
+      if (persistedBytes + draftBytes + file.size > RUN_ATTACHMENT_MAX_TOTAL_BYTES) {
+        setPromptError("This run can store at most 100 MB of attachments.");
+        continue;
+      }
+      next.push(file);
+    }
+    setFiles(next);
+    if (fileInputRef.current) fileInputRef.current.value = "";
   };
 
   const rerun = () => {
@@ -759,37 +851,12 @@ export function RunChatView({
             }}
           >
             {run && showPromptBubble && status !== "queued" && status !== "starting" && (
-              <div
-                style={{
-                  alignSelf: "flex-end",
-                  maxWidth: "78%",
-                  background: "var(--color-surface-raised)",
-                  border: "1px solid var(--color-line)",
-                  borderRadius: 10,
-                  padding: "8px 12px",
-                  fontSize: "var(--text-sm)",
-                  color: "var(--color-fg)",
-                  lineHeight: "var(--leading-normal)",
-                  whiteSpace: "pre-wrap",
-                }}
-              >
-                {run.prompt}
-              </div>
-            )}
-            {run && run.attachments.length > 0 && (
-              <div style={{ alignSelf: "flex-end", display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
-                {run.attachments.map((attachment) => (
-                  <a
-                    key={attachment.id}
-                    href={runAttachmentHref(run.id, attachment.id)}
-                    className="chip"
-                    title={`Download ${attachment.file_name}`}
-                    style={{ textDecoration: "none" }}
-                  >
-                    <Icon name="file" size={11} style={{ marginRight: 4 }} />
-                    {attachment.file_name}
-                  </a>
-                ))}
+              <div className="run-chat__user-message">
+                {run.prompt && <div className="run-chat__user-text">{run.prompt}</div>}
+                <AttachmentChips
+                  runId={run.id}
+                  attachments={run.attachments.filter((attachment) => attachment.prompt_ordinal === 0)}
+                />
               </div>
             )}
             {chat.items.map((item) => {
@@ -802,22 +869,9 @@ export function RunChatView({
               }
               if (item.kind === "user") {
                 return (
-                  <div
-                    key={item.id}
-                    style={{
-                      alignSelf: "flex-end",
-                      maxWidth: "78%",
-                      background: "var(--color-surface-raised)",
-                      border: "1px solid var(--color-line)",
-                      borderRadius: 10,
-                      padding: "8px 12px",
-                      fontSize: "var(--text-sm)",
-                      color: "var(--color-fg)",
-                      lineHeight: "var(--leading-normal)",
-                      whiteSpace: "pre-wrap",
-                    }}
-                  >
-                    {item.text}
+                  <div key={item.id} className="run-chat__user-message">
+                    {item.text && <div className="run-chat__user-text">{item.text}</div>}
+                    <AttachmentChips runId={runId} attachments={item.attachments} />
                   </div>
                 );
               }
@@ -878,6 +932,30 @@ export function RunChatView({
           </div>
 
           <div style={{ flex: "none", padding: "12px 16px 14px", borderTop: "1px solid var(--color-line)", background: "var(--color-surface)" }}>
+            {files.length > 0 && (
+              <div className="launch-files run-chat__draft-files">
+                {files.map((file, index) => (
+                  <span className="launch-file" key={`${file.name}-${file.size}-${index}`}>
+                    <Icon name="file" size={12} />
+                    <span className="launch-file__name">{file.name}</span>
+                    <span className="launch-file__size">{formatBytes(file.size)}</span>
+                    <button
+                      type="button"
+                      className="launch-file__x"
+                      disabled={promptPending}
+                      aria-label={`Remove ${file.name}`}
+                      onClick={() => {
+                        promptAttemptRef.current = null;
+                        setPromptError(null);
+                        setFiles(files.filter((_, itemIndex) => itemIndex !== index));
+                      }}
+                    >
+                      <Icon name="x" size={11} />
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
             <div
               className="run-chat__composer-box"
               style={{
@@ -891,6 +969,25 @@ export function RunChatView({
                 opacity: status === "running" ? 1 : 0.6,
               }}
             >
+              <button
+                type="button"
+                className="composer__attach"
+                title="Attach files"
+                aria-label="Attach files"
+                disabled={status !== "running" || cancelRequested || !streamReady || chat.busy || promptPending || streamDead || files.length >= RUN_ATTACHMENT_MAX_FILES}
+                onClick={() => fileInputRef.current?.click()}
+              >
+                <Icon name="paperclip" size={14} />
+              </button>
+              <input
+                ref={fileInputRef}
+                type="file"
+                multiple
+                hidden
+                aria-label="Attach files"
+                disabled={status !== "running" || cancelRequested || promptPending}
+                onChange={(event) => addFiles(event.target.files)}
+              />
               <label className="sr-only" htmlFor="run-follow-up">Send a follow-up message</label>
               <input
                 id="run-follow-up"
@@ -906,7 +1003,7 @@ export function RunChatView({
                 disabled={status !== "running" || cancelRequested || !streamReady || chat.busy || promptPending || streamDead}
                 placeholder={
                   status === "running"
-                    ? cancelRequested ? "Canceling…" : "Send a follow-up"
+                    ? cancelRequested ? "Canceling…" : "Send a follow-up or attach files"
                     : status === "queued"
                       ? "Queued…"
                       : status === "starting"
@@ -942,7 +1039,7 @@ export function RunChatView({
             </div>
             {promptError && <p className="run-chat__prompt-error" role="alert">{promptError}</p>}
             <div style={{ marginTop: 7, fontSize: 11, color: "var(--color-faint)", textAlign: "center" }}>
-              This run executes in an isolated sandbox and freezes after a few minutes of inactivity.
+              Up to 5 files per message, 10 MB each and 100 MB per run. This sandbox freezes after a few minutes of inactivity.
             </div>
           </div>
         </div>

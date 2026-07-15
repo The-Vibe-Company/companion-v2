@@ -269,7 +269,13 @@ describe("session-only RunSkill routes", () => {
 
   it("enqueues follow-ups and cancellation without contacting a sandbox", async () => {
     signIn();
-    serviceMocks.enqueueRunPrompt.mockResolvedValue({ id: "prompt-1", status: "queued" });
+    const promptId = "00000000-0000-4000-8000-000000000099";
+    serviceMocks.enqueueRunPrompt.mockResolvedValue({
+      id: promptId,
+      messageId: "msg_123456789012abcdefghijklmn",
+      status: "queued",
+      attachments: [],
+    });
     serviceMocks.requestRunCancellation.mockResolvedValue({ status: "running", requested: true });
     const prompt = await app.request("/v1/runs/run-1/prompt", {
       method: "POST",
@@ -277,11 +283,62 @@ describe("session-only RunSkill routes", () => {
       body: JSON.stringify({ text: "Continue" }),
     });
     expect(prompt.status).toBe(202);
-    await expect(prompt.json()).resolves.toEqual({ accepted: true, prompt_id: "prompt-1" });
+    await expect(prompt.json()).resolves.toEqual({
+      accepted: true,
+      prompt_id: promptId,
+      message_id: "msg_123456789012abcdefghijklmn",
+      attachments: [],
+    });
+    expect(serviceMocks.enqueueRunPrompt).toHaveBeenCalledWith(
+      expect.objectContaining({ text: "Continue", attachments: [] }),
+    );
 
     const canceled = await app.request("/v1/runs/run-1/cancel", { method: "POST" });
     expect(canceled.status).toBe(202);
     await expect(canceled.json()).resolves.toEqual({ status: "running", requested: true });
+  });
+
+  it("accepts an attachment-only multipart follow-up and forwards stored metadata", async () => {
+    signIn();
+    const promptId = "00000000-0000-4000-8000-000000000098";
+    serviceMocks.enqueueRunPrompt.mockImplementation(async (input: { attachments: Array<{ id: string; fileName: string; byteSize: number }> }) => ({
+      id: promptId,
+      messageId: "msg_123456789012abcdefghijklm1",
+      status: "queued",
+      attachments: input.attachments.map((attachment) => ({
+        id: attachment.id,
+        prompt_id: promptId,
+        message_id: "msg_123456789012abcdefghijklm1",
+        prompt_ordinal: 1,
+        file_name: attachment.fileName,
+        content_type: "text/plain",
+        byte_size: attachment.byteSize,
+      })),
+    }));
+    const form = new FormData();
+    form.set("text", "");
+    form.set("file", new Blob(["follow-up bytes"], { type: "text/plain" }), "follow-up.txt");
+
+    const response = await app.request("/v1/runs/run-1/prompt", {
+      method: "POST",
+      headers: { "Idempotency-Key": "prompt-file-request-1" },
+      body: form,
+    });
+
+    expect(response.status).toBe(202);
+    expect(storageMocks.putSkillArchive).toHaveBeenCalledTimes(1);
+    expect(serviceMocks.enqueueRunPrompt).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runId: "run-1",
+        text: "",
+        attachments: [expect.objectContaining({ fileName: "follow-up.txt", byteSize: 15 })],
+      }),
+    );
+    await expect(response.json()).resolves.toMatchObject({
+      accepted: true,
+      prompt_id: promptId,
+      attachments: [{ file_name: "follow-up.txt" }],
+    });
   });
 });
 

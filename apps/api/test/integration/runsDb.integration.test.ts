@@ -48,6 +48,7 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
   const revokedRunId = randomUUID();
   const freezeRunId = randomUUID();
   const attachmentId = randomUUID();
+  const followupAttachmentId = randomUUID();
   const owner = { id: `run-owner-${suffix}`, email: `run-owner-${suffix}@example.test` };
   const admin = { id: `run-admin-${suffix}`, email: `run-admin-${suffix}@example.test` };
   const outsider = { id: `run-outsider-${suffix}`, email: `run-outsider-${suffix}@example.test` };
@@ -274,24 +275,27 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
         (${orgA}::uuid, ${freezeRunId}::uuid, ${owner.id}, 'leased', 'record', 1,
          'freeze-worker', now() + interval '5 minutes')
     `;
-    await sql`
+    const initialPromptRows = await sql<{ id: string }[]>`
       insert into skill_run_prompts
-        (org_id, run_id, ordinal, kind, idempotency_key, payload_hash, message_id, prompt)
+        (org_id, run_id, ordinal, kind, idempotency_key, payload_hash, message_id, user_text, prompt)
       values
         (${orgA}::uuid, ${runId}::uuid, 0, 'initial', 'integration-prompt', ${"c".repeat(64)},
-         ${deterministicRunMessageId(runId, 0, Date.now())}, 'prompt')
+         ${deterministicRunMessageId(runId, 0, Date.now())}, 'prompt', 'prompt')
+      returning id
     `;
     await sql`
       insert into skill_run_prompts
-        (org_id, run_id, ordinal, kind, idempotency_key, payload_hash, message_id, prompt)
+        (org_id, run_id, ordinal, kind, idempotency_key, payload_hash, message_id, user_text, prompt)
       values
         (${orgA}::uuid, ${revokedRunId}::uuid, 1, 'follow_up', 'revoked-prompt',
-         ${"f".repeat(64)}, ${deterministicRunMessageId(revokedRunId, 1, Date.now())}, 'pending after departure')
+         ${"f".repeat(64)}, ${deterministicRunMessageId(revokedRunId, 1, Date.now())},
+         'pending after departure', 'pending after departure')
     `;
     await sql`
-      insert into skill_run_attachments (id, org_id, run_id, file_name, content_type, byte_size, storage_key)
+      insert into skill_run_attachments (id, org_id, run_id, prompt_id, file_name, content_type, byte_size, storage_key)
       values
-        (${attachmentId}::uuid, ${orgA}::uuid, ${runId}::uuid, 'input.txt', 'text/plain', 1, ${`${orgA}/run-attachments/${attachmentId}`})
+        (${attachmentId}::uuid, ${orgA}::uuid, ${runId}::uuid, ${initialPromptRows[0]!.id}::uuid,
+         'input.txt', 'text/plain', 1, ${`${orgA}/run-attachments/${attachmentId}`})
     `;
     await sql.unsafe(`create role ${rlsRole} nologin nosuperuser nobypassrls`);
     await sql.unsafe(`grant ${rlsRole} to current_user with inherit true, set true`);
@@ -537,6 +541,54 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
     `;
   });
 
+  it("atomically links an attachment-only follow-up to its visible and runtime prompt", async () => {
+    const runActor = { id: owner.id, email: owner.email, name: "Run Owner" };
+    const request = {
+      actor: runActor,
+      orgId: orgA,
+      runId: freezeRunId,
+      text: "",
+      idempotencyKey: "attachment-follow-up-request",
+      attachments: [{
+        id: followupAttachmentId,
+        fileName: "brief.pdf",
+        contentType: "application/pdf",
+        byteSize: 42,
+        storageKey: `${orgA}/run-attachments/${followupAttachmentId}`,
+      }],
+    };
+    const first = await withTenantContext({ orgId: orgA, userId: owner.id }, (database) =>
+      enqueueRunPrompt({ ...request, database }),
+    );
+    const replay = await withTenantContext({ orgId: orgA, userId: owner.id }, (database) =>
+      enqueueRunPrompt({ ...request, database }),
+    );
+    expect(replay).toEqual(first);
+    expect(first.attachments).toMatchObject([{
+      id: followupAttachmentId,
+      prompt_id: first.id,
+      message_id: first.messageId,
+      file_name: "brief.pdf",
+    }]);
+    const rows = await sql<{ userText: string; prompt: string; promptId: string }[]>`
+      select p.user_text as "userText", p.prompt, a.prompt_id as "promptId"
+      from skill_run_prompts p
+      join skill_run_attachments a
+        on a.org_id = p.org_id and a.run_id = p.run_id and a.prompt_id = p.id
+      where p.org_id = ${orgA}::uuid and p.run_id = ${freezeRunId}::uuid and p.id = ${first.id}::uuid
+    `;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.userText).toBe("");
+    expect(rows[0]?.prompt).toContain(`./attachments/${followupAttachmentId}-brief.pdf`);
+    expect(rows[0]?.promptId).toBe(first.id);
+
+    // Keep the subsequent freeze-race scenario isolated; deleting the prompt cascades its file row.
+    await sql`
+      delete from skill_run_prompts
+      where org_id = ${orgA}::uuid and run_id = ${freezeRunId}::uuid and id = ${first.id}::uuid
+    `;
+  });
+
   it("closes prompt admission atomically before inactivity teardown", async () => {
     const runActor = { id: owner.id, email: owner.email, name: "Run Owner" };
     await expect(
@@ -569,10 +621,11 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
     `;
     await sql`
       insert into skill_run_prompts
-        (org_id, run_id, ordinal, kind, idempotency_key, payload_hash, message_id, prompt)
+        (org_id, run_id, ordinal, kind, idempotency_key, payload_hash, message_id, user_text, prompt)
       values
         (${orgA}::uuid, ${freezeRunId}::uuid, 1, 'follow_up', 'freeze-pending-prompt',
-         ${"2".repeat(64)}, ${deterministicRunMessageId(freezeRunId, 1, Date.now())}, 'won the run lock first')
+         ${"2".repeat(64)}, ${deterministicRunMessageId(freezeRunId, 1, Date.now())},
+         'won the run lock first', 'won the run lock first')
     `;
     await expect(
       withTenantContext({ orgId: orgA, userId: owner.id }, (database) =>

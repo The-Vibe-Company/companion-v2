@@ -1,4 +1,9 @@
-import { runChatEventSchema, type RunChatEvent, type RunChatHistoryItem } from "@companion/contracts";
+import {
+  runChatEventSchema,
+  type RunChatEvent,
+  type RunChatHistoryItem,
+  type SkillRunAttachmentRow,
+} from "@companion/contracts";
 
 /**
  * Pure pieces of the chat surface: an incremental SSE frame parser (the stream is consumed via
@@ -192,7 +197,13 @@ export async function openRunStream(
 
 export type ChatItem =
   | { kind: "sys"; id: string; text: string }
-  | { kind: "user"; id: string; text: string }
+  | {
+      kind: "user";
+      id: string;
+      text: string;
+      messageId: string | null;
+      attachments: SkillRunAttachmentRow[];
+    }
   | {
       kind: "tool";
       id: string;
@@ -237,12 +248,13 @@ export type ResolveToolLabel = (tool: string, skill: string | null) => { label: 
 
 export type ChatAction =
   | { kind: "sys"; text: string }
-  | { kind: "user"; text: string }
+  | { kind: "user"; text: string; messageId?: string | null; attachments?: SkillRunAttachmentRow[] }
   | { kind: "event"; event: RunChatEvent; resolveToolLabel: ResolveToolLabel }
   | {
       /** Seed prior-session messages ABOVE any sys lines, before the live stream opens. */
       kind: "history";
       items: RunChatHistoryItem[];
+      attachments?: SkillRunAttachmentRow[];
       resolveToolLabel: ResolveToolLabel;
     }
   | { kind: "send" }
@@ -258,10 +270,22 @@ function nextId(prefix: string): string {
 }
 
 /** Map one persisted history item to a completed `ChatItem` (tool rows resolve their label + finish). */
-function mapHistoryItem(item: RunChatHistoryItem, resolveToolLabel: ResolveToolLabel): ChatItem {
+function mapHistoryItem(
+  item: RunChatHistoryItem,
+  resolveToolLabel: ResolveToolLabel,
+  attachments: SkillRunAttachmentRow[] = [],
+): ChatItem {
   switch (item.kind) {
     case "user":
-      return { kind: "user", id: nextId("user"), text: item.text };
+      return {
+        kind: "user",
+        id: nextId("user"),
+        text: item.text,
+        messageId: item.message_id ?? null,
+        attachments: item.message_id
+          ? attachments.filter((attachment) => attachment.message_id === item.message_id)
+          : [],
+      };
     case "assistant":
       return { kind: "asst", id: nextId("asst"), messageId: null, text: item.text, streaming: false };
     case "tool": {
@@ -288,12 +312,21 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
     case "sys":
       return { ...state, items: [...state.items, { kind: "sys", id: nextId("sys"), text: action.text }] };
     case "user":
-      return { ...state, items: [...state.items, { kind: "user", id: nextId("user"), text: action.text }] };
+      return {
+        ...state,
+        items: [...state.items, {
+          kind: "user",
+          id: nextId("user"),
+          text: action.text,
+          messageId: action.messageId ?? null,
+          attachments: action.attachments ?? [],
+        }],
+      };
     case "history": {
       // Preserve any existing sys lines (boot annotations like "resumed from snapshot") ABOVE the
       // reloaded transcript, so history shows above new live events appended afterwards.
       const sysLines = state.items.filter((item) => item.kind === "sys");
-      const history = action.items.map((item) => mapHistoryItem(item, action.resolveToolLabel));
+      const history = action.items.map((item) => mapHistoryItem(item, action.resolveToolLabel, action.attachments));
       return {
         ...state,
         items: [...sysLines, ...history],

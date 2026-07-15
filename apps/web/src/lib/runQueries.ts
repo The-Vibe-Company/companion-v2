@@ -10,6 +10,7 @@ import type {
   RunDependencyPin,
   RunInputSelection,
   RunOptions,
+  RunPromptAccepted,
   SkillRunDetail,
   SkillRunsResponse,
   UpdateRunConfigurationInput,
@@ -174,11 +175,15 @@ export async function fetchRun(runId: string): Promise<SkillRunDetail> {
 export async function sendRunPrompt(
   runId: string,
   text: string,
+  files: File[],
   idempotencyKey: string,
-): Promise<{ accepted: true; prompt_id: string }> {
-  return apiFetch<{ accepted: true; prompt_id: string }>(`/v1/runs/${encodeURIComponent(runId)}/prompt`, {
+): Promise<RunPromptAccepted> {
+  const form = new FormData();
+  form.set("text", text);
+  for (const file of files) form.append("file", file, file.name);
+  return apiFetch<RunPromptAccepted>(`/v1/runs/${encodeURIComponent(runId)}/prompt`, {
     method: "POST",
-    body: JSON.stringify({ text }),
+    body: form,
     headers: { "Idempotency-Key": idempotencyKey },
   });
 }

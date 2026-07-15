@@ -8,15 +8,20 @@ import {
   type RunChatHistoryItem,
   type RunEventEnvelope,
   type RunPhase,
+  type SkillRunAttachmentRow,
   type SkillRunStatus,
 } from "@companion/contracts";
 import { redactAndBoundRunEvents, type RunRedactor } from "./runRedaction";
 import {
   RunBusyError,
   RunValidationError,
+  attachmentWorkspacePath,
   capTranscript,
+  composeRunPrompt,
   deterministicRunMessageId,
   hashRunPayload,
+  validateRunMessageAttachments,
+  type CreateRunAttachment,
 } from "./skillRuns";
 import { assertMember, type ActorContext } from "./services";
 
@@ -565,15 +570,28 @@ export async function enqueueRunPrompt(input: {
   runId: string;
   text: string;
   idempotencyKey: string;
+  attachments?: CreateRunAttachment[];
   database?: Db;
-}): Promise<{ id: string; messageId: string; status: RunPromptRow["status"] }> {
+}): Promise<{
+  id: string;
+  messageId: string;
+  status: RunPromptRow["status"];
+  attachments: SkillRunAttachmentRow[];
+}> {
   const database = input.database ?? db;
   await assertMember(database, input.actor, input.orgId);
   const text = input.text.trim();
-  if (!text || text.length > RUN_PROMPT_MAX) {
+  const attachments = input.attachments ?? [];
+  if (text.length > RUN_PROMPT_MAX) {
     throw new RunValidationError("the prompt is invalid", "invalid_prompt");
   }
-  const payloadHash = hashRunPayload({ text });
+  validateRunMessageAttachments({ text, attachments });
+  const payloadHash = hashRunPayload({
+    text,
+    attachments: attachments
+      .map(({ id, fileName, contentType, byteSize }) => ({ id, fileName, contentType, byteSize }))
+      .sort((left, right) => left.id.localeCompare(right.id)),
+  });
   const execute = async (transaction: Db) => {
     // Serialize prompt creation with cancellation. Otherwise Cancel could clear pending prompts,
     // then a racing API transaction could insert a new prompt onto an already-canceling run.
@@ -592,10 +610,29 @@ export async function enqueueRunPrompt(input: {
       if (existing[0].payloadHash !== payloadHash) {
         throw new RunBusyError("this idempotency key was already used with another prompt", "idempotency_conflict");
       }
+      const existingAttachments = await transaction
+        .select()
+        .from(schema.skillRunAttachments)
+        .where(
+          and(
+            eq(schema.skillRunAttachments.orgId, input.orgId),
+            eq(schema.skillRunAttachments.runId, input.runId),
+            eq(schema.skillRunAttachments.promptId, existing[0].id),
+          ),
+        );
       return {
         id: existing[0].id,
         messageId: existing[0].messageId,
         status: existing[0].status,
+        attachments: existingAttachments.map((attachment) => ({
+          id: attachment.id,
+          prompt_id: existing[0]!.id,
+          message_id: existing[0]!.messageId,
+          prompt_ordinal: existing[0]!.ordinal,
+          file_name: attachment.fileName,
+          content_type: attachment.contentType,
+          byte_size: attachment.byteSize,
+        })),
       };
     }
     if (
@@ -616,6 +653,26 @@ export async function enqueueRunPrompt(input: {
         ),
       );
     if (active[0]) throw new RunBusyError("another prompt is already pending", "prompt_already_pending");
+    const existingAttachmentBytes = await transaction
+      .select({ bytes: sql<number>`coalesce(sum(${schema.skillRunAttachments.byteSize}), 0)` })
+      .from(schema.skillRunAttachments)
+      .where(
+        and(
+          eq(schema.skillRunAttachments.orgId, input.orgId),
+          eq(schema.skillRunAttachments.runId, input.runId),
+        ),
+      );
+    validateRunMessageAttachments({
+      text,
+      attachments,
+      existingBytes: Number(existingAttachmentBytes[0]?.bytes ?? 0),
+    });
+    const skills = await transaction
+      .select({ slug: schema.skills.slug })
+      .from(schema.skills)
+      .where(and(eq(schema.skills.orgId, input.orgId), eq(schema.skills.id, run.skillId)));
+    const skillSlug = skills[0]?.slug;
+    if (!skillSlug) throw new RunValidationError("skill not found", "skill_not_found");
     const ordinalRows = await transaction
       .select({ value: max(schema.skillRunPrompts.ordinal) })
       .from(schema.skillRunPrompts)
@@ -624,6 +681,14 @@ export async function enqueueRunPrompt(input: {
       );
     const ordinal = Number(ordinalRows[0]?.value ?? 0) + 1;
     const promptCreatedAt = new Date();
+    const runtimePrompt = composeRunPrompt({
+      prompt: text,
+      skillSlug,
+      attachments: attachments.map((attachment) => ({
+        fileName: attachment.fileName,
+        workspacePath: attachmentWorkspacePath(attachment),
+      })),
+    });
     const inserted = await transaction
       .insert(schema.skillRunPrompts)
       .values({
@@ -634,7 +699,8 @@ export async function enqueueRunPrompt(input: {
         idempotencyKey: input.idempotencyKey,
         payloadHash,
         messageId: deterministicRunMessageId(input.runId, ordinal, promptCreatedAt.getTime()),
-        prompt: text,
+        userText: text,
+        prompt: runtimePrompt,
         status: "queued",
         createdAt: promptCreatedAt,
         updatedAt: promptCreatedAt,
@@ -642,6 +708,20 @@ export async function enqueueRunPrompt(input: {
       .returning();
     const row = inserted[0];
     if (!row) throw new Error("prompt insert returned no row");
+    if (attachments.length > 0) {
+      await transaction.insert(schema.skillRunAttachments).values(
+        attachments.map((attachment) => ({
+          id: attachment.id,
+          orgId: input.orgId,
+          runId: input.runId,
+          promptId: row.id,
+          fileName: attachment.fileName,
+          contentType: attachment.contentType,
+          byteSize: attachment.byteSize,
+          storageKey: attachment.storageKey,
+        })),
+      );
+    }
     await transaction
       .update(schema.skillRuns)
       .set({ lastActiveAt: promptCreatedAt, updatedAt: promptCreatedAt })
@@ -652,13 +732,26 @@ export async function enqueueRunPrompt(input: {
           eq(schema.skillRuns.creatorId, input.actor.id),
         ),
       );
-    return { id: row.id, messageId: row.messageId, status: "queued" as const };
+    return {
+      id: row.id,
+      messageId: row.messageId,
+      status: "queued" as const,
+      attachments: attachments.map((attachment) => ({
+        id: attachment.id,
+        prompt_id: row.id,
+        message_id: row.messageId,
+        prompt_ordinal: row.ordinal,
+        file_name: attachment.fileName,
+        content_type: attachment.contentType,
+        byte_size: attachment.byteSize,
+      })),
+    };
   };
   try {
     return await database.transaction(async (transaction) => execute(transaction as unknown as Db));
   } catch (error) {
     if (isUniqueViolation(error)) {
-      throw new RunBusyError("another prompt is already pending", "prompt_already_pending");
+      return database.transaction(async (transaction) => execute(transaction as unknown as Db));
     }
     throw error;
   }
@@ -1163,7 +1256,6 @@ export async function persistRunTranscript(input: {
   database?: Db;
 }): Promise<boolean> {
   const database = input.database ?? db;
-  const transcript = capTranscript(input.redactor.redactPayload(input.items));
   return database.transaction(async (transaction) => {
     const tx = transaction as unknown as Db;
     const runs = await tx
@@ -1179,6 +1271,29 @@ export async function persistRunTranscript(input: {
       .for("update");
     if (!runs[0]) return false;
     await assertLiveRunJobLease({ ...input, database: tx });
+    const promptRows = await tx
+      .select({ messageId: schema.skillRunPrompts.messageId, userText: schema.skillRunPrompts.userText })
+      .from(schema.skillRunPrompts)
+      .where(
+        and(
+          eq(schema.skillRunPrompts.orgId, input.orgId),
+          eq(schema.skillRunPrompts.runId, input.runId),
+        ),
+      )
+      .orderBy(asc(schema.skillRunPrompts.ordinal));
+    const promptByMessageId = new Map(promptRows.map((prompt) => [prompt.messageId, prompt]));
+    let legacyUserIndex = 0;
+    const visibleItems = input.items.map((item): RunChatHistoryItem => {
+      if (item.kind !== "user") return item;
+      const prompt = item.message_id
+        ? promptByMessageId.get(item.message_id)
+        : promptRows[legacyUserIndex];
+      legacyUserIndex += 1;
+      return prompt
+        ? { kind: "user", text: prompt.userText, message_id: prompt.messageId }
+        : item;
+    });
+    const transcript = capTranscript(input.redactor.redactPayload(visibleItems));
     const sequenceRows = await tx
       .select({ value: max(schema.skillRunEvents.sequence) })
       .from(schema.skillRunEvents)

@@ -15,6 +15,7 @@ import { secretCandidateSchema } from "./secrets";
 export const RUN_PROMPT_MAX = 8_000;
 export const RUN_ATTACHMENT_MAX_FILES = 5;
 export const RUN_ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024;
+export const RUN_ATTACHMENT_MAX_TOTAL_BYTES = 100 * 1024 * 1024;
 export const RUN_MAX_DEPENDENCIES = 64;
 export const RUN_MAX_SECRET_INPUTS = 128;
 export const RUN_MAX_VARIABLE_INPUTS = 128;
@@ -442,7 +443,12 @@ export const RUN_CHAT_TRANSCRIPT_TEXT_MAX = 256 * 1024;
 
 /** A prior message when reloading a run's transcript. */
 export const runChatHistoryItemSchema = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("user"), text: z.string().max(RUN_CHAT_TRANSCRIPT_TEXT_MAX) }),
+  z.object({
+    kind: z.literal("user"),
+    text: z.string().max(RUN_CHAT_TRANSCRIPT_TEXT_MAX),
+    /** Deterministic OpenCode id; absent only on transcripts persisted before attachment-aware chat. */
+    message_id: z.string().max(RUN_CHAT_ID_MAX).optional(),
+  }),
   z.object({ kind: z.literal("assistant"), text: z.string().max(RUN_CHAT_TRANSCRIPT_TEXT_MAX) }),
   z.object({
     kind: z.literal("tool"),
@@ -544,6 +550,9 @@ export type SkillRunRow = z.infer<typeof skillRunRowSchema>;
 
 export const skillRunAttachmentRowSchema = z.object({
   id: z.string(),
+  prompt_id: runUuidSchema,
+  message_id: z.string().max(RUN_CHAT_ID_MAX),
+  prompt_ordinal: z.number().int().nonnegative(),
   file_name: z.string(),
   content_type: z.string(),
   byte_size: z.number().int().nonnegative(),
@@ -575,6 +584,24 @@ export const runPromptInputSchema = z
   .strict();
 export type RunPromptInput = z.infer<typeof runPromptInputSchema>;
 
+/** Text fields of multipart `POST /v1/runs/:id/prompt`; files arrive as repeated `file` parts. */
+export const runPromptFieldsSchema = z
+  .object({
+    text: z.string().trim().max(RUN_PROMPT_MAX).default(""),
+  })
+  .strict();
+export type RunPromptFields = z.infer<typeof runPromptFieldsSchema>;
+
+export const runPromptAcceptedSchema = z
+  .object({
+    accepted: z.literal(true),
+    prompt_id: runUuidSchema,
+    message_id: z.string().max(RUN_CHAT_ID_MAX),
+    attachments: z.array(skillRunAttachmentRowSchema).max(RUN_ATTACHMENT_MAX_FILES),
+  })
+  .strict();
+export type RunPromptAccepted = z.infer<typeof runPromptAcceptedSchema>;
+
 /**
  * Text fields of multipart `POST /v1/skills/:slug/runs`. Files arrive as repeated `file` parts.
  * `skill_version_id` makes stale launchers fail closed. Skill inputs and the exact dedicated
@@ -582,7 +609,7 @@ export type RunPromptInput = z.infer<typeof runPromptInputSchema>;
  */
 export const launchRunFieldsSchema = z
   .object({
-    prompt: z.string().trim().min(1).max(RUN_PROMPT_MAX),
+    prompt: z.string().trim().max(RUN_PROMPT_MAX),
     model: runModelIdSchema,
     skill_version_id: runUuidSchema,
     /** Exact non-root closure displayed by run-options; stale pins reject the launch. */

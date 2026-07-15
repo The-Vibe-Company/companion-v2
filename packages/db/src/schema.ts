@@ -1396,6 +1396,9 @@ export const skillRunPrompts = pgTable(
     idempotencyKey: text("idempotency_key").notNull(),
     payloadHash: text("payload_hash").notNull(),
     messageId: text("message_id").notNull(),
+    /** Exact user-authored text. May be empty when the message contains attachments only. */
+    userText: text("user_text").notNull(),
+    /** Runtime prompt enriched with mounted attachment paths and private control instructions. */
     prompt: text("prompt").notNull(),
     status: skillRunPromptStatusEnum("status").notNull().default("queued"),
     /** Prompt dispatch failures consume this budget; lease-only recovery keeps the same attempt. */
@@ -1414,6 +1417,7 @@ export const skillRunPrompts = pgTable(
   (t) => ({
     uniqueOrdinal: unique("skill_run_prompts_ordinal_uq").on(t.orgId, t.runId, t.ordinal),
     uniqueMessage: unique("skill_run_prompts_message_uq").on(t.orgId, t.runId, t.messageId),
+    uniqueIdentity: unique("skill_run_prompts_identity_uq").on(t.orgId, t.runId, t.id),
     uniqueIdempotency: unique("skill_run_prompts_idempotency_uq").on(t.orgId, t.runId, t.idempotencyKey),
     onePending: uniqueIndex("skill_run_prompts_pending_uq")
       .on(t.orgId, t.runId)
@@ -1468,13 +1472,14 @@ export const skillRunEvents = pgTable(
   }),
 );
 
-/** A file the launcher attached to a run (bytes in S3 under run-attachments/, metadata here). */
+/** A file attached to one durable run prompt (bytes in S3 under run-attachments/, metadata here). */
 export const skillRunAttachments = pgTable(
   "skill_run_attachments",
   {
     id: uuid("id").primaryKey().defaultRandom(),
     orgId: uuid("org_id").notNull(),
     runId: uuid("run_id").notNull(),
+    promptId: uuid("prompt_id").notNull(),
     fileName: text("file_name").notNull(),
     contentType: text("content_type").notNull(),
     byteSize: integer("byte_size").notNull(),
@@ -1486,6 +1491,11 @@ export const skillRunAttachments = pgTable(
       columns: [t.orgId, t.runId],
       foreignColumns: [skillRuns.orgId, skillRuns.id],
       name: "skill_run_attachments_run_fk",
+    }).onDelete("cascade"),
+    promptFk: foreignKey({
+      columns: [t.orgId, t.runId, t.promptId],
+      foreignColumns: [skillRunPrompts.orgId, skillRunPrompts.runId, skillRunPrompts.id],
+      name: "skill_run_attachments_prompt_fk",
     }).onDelete("cascade"),
     byRun: index("skill_run_attachments_run_idx").on(t.orgId, t.runId),
     sizeCheck: check(

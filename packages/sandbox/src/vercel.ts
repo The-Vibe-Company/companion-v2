@@ -169,6 +169,19 @@ export function createVercelRuntime(config: VercelRuntimeConfig): RunSandboxRunt
       }
     },
 
+    async pushAttachments({ ref, attachments, signal }) {
+      if (attachments.length === 0) return;
+      const sandbox = await getSandbox(ref, signal);
+      const payloads = attachments.map((attachment) => ({
+        path: `${WORKDIR}/attachments/${attachment.path}`,
+        content: attachment.data as Uint8Array,
+      }));
+      const CHUNK = 32;
+      for (let i = 0; i < payloads.length; i += CHUNK) {
+        await sandbox.writeFiles(payloads.slice(i, i + CHUNK), { signal });
+      }
+    },
+
     async startServer({ ref, env, signal }) {
       const sandbox = await getSandbox(ref, signal);
       await launchServe(sandbox, env, signal);

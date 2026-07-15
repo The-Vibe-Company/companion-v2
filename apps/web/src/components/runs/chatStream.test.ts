@@ -304,8 +304,17 @@ describe("chatReducer", () => {
     state = chatReducer(state, {
       kind: "history",
       resolveToolLabel,
+      attachments: [{
+        id: "attachment-1",
+        prompt_id: "00000000-0000-4000-8000-000000000001",
+        message_id: "msg-user-1",
+        prompt_ordinal: 0,
+        file_name: "brief.pdf",
+        content_type: "application/pdf",
+        byte_size: 42,
+      }],
       items: [
-        { kind: "user", text: "hey" },
+        { kind: "user", text: "hey", message_id: "msg-user-1" },
         {
           kind: "tool",
           call_id: "c1",
@@ -322,6 +331,8 @@ describe("chatReducer", () => {
 
     // Existing sys line stays first, then the reloaded transcript in order.
     expect(state.items.map((item) => item.kind)).toEqual(["sys", "user", "tool", "asst"]);
+    const user = state.items.find((item) => item.kind === "user");
+    expect(user && user.kind === "user" ? user.attachments : []).toMatchObject([{ file_name: "brief.pdf" }]);
     const tool = state.items.find((item) => item.kind === "tool");
     expect(tool && tool.kind === "tool" ? tool : null).toMatchObject({
       label: "meeting-digest@1.0.0",

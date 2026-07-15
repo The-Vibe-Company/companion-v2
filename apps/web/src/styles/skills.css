@@ -613,6 +613,7 @@ body { background: var(--color-canvas); color: var(--color-fg); font-family: var
   border: none; background: none; border-radius: var(--radius-sm); color: var(--color-faint); cursor: pointer;
   transition: color var(--duration-fast) var(--ease-out-quint), background var(--duration-fast) var(--ease-out-quint); }
 .composer__attach:hover { color: var(--color-fg); background: var(--color-surface-raised); }
+.composer__attach:disabled { opacity: 0.45; cursor: not-allowed; }
 
 /* --- Run launcher (ChatGPT-style composer dialog) ------------------------ */
 .run-launcher { width: min(560px, 92vw); }

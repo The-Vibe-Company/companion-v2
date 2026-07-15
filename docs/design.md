@@ -550,7 +550,8 @@ admin credentials.
 Skill runs are private, durable sandbox sessions launched from a published skill. Any member may run
 a skill they can access. Creation atomically pins the exact root version, its complete accessible
 dependency closure, every selected vault-secret version, and every declared non-sensitive value.
-Prompt and attachments belong to one run; named personal configurations save only model, live secret
+Prompts and attachments belong to one run; each attachment is linked to the exact initial/follow-up
+prompt that introduced it. Named personal configurations save only model, live secret
 references, and declared variables.
 
 The API validates and persists commands but never contacts the sandbox. `apps/worker` composes the
@@ -577,11 +578,12 @@ content; only the sandbox does.
   instead pins a dedicated connection id and credential version; it never appears in the generic
   secret collection. Ordinary responses never contain plaintext.
 - `skill_run_jobs` is the retryable orchestration queue. `skill_run_prompts` is the initial/follow-up
-  outbox with deterministic OpenCode `messageID`s. `skill_run_events` holds redacted, monotonically
-  sequenced events for replayable SSE.
-- `skill_run_attachments` — files the launcher attached (≤5 × 10 MB): bytes in S3 under
-  `{org}/run-attachments/{id}`, metadata here, mounted as `<attachmentId>-<filename>`, and streamed
-  back creator-only with `nosniff` +
+  outbox with deterministic OpenCode `messageID`s; it stores user-visible text separately from the
+  runtime prompt enriched with private attachment-path instructions. `skill_run_events` holds
+  redacted, monotonically sequenced events for replayable SSE.
+- `skill_run_attachments` — files attached to any prompt (≤5 × 10 MB per message, ≤100 MB per run):
+  bytes in S3 under `{org}/run-attachments/{id}`, prompt-linked metadata here, mounted as
+  `<attachmentId>-<filename>`, and streamed back creator-only with `nosniff` +
   `Content-Disposition: attachment`.
 - Migration `0034_skill_runs.sql` creates these tables and forces creator-only RLS on runs,
   configurations, snapshots, prompts, events, and attachments. Child policies derive the
@@ -590,6 +592,8 @@ content; only the sandbox does.
   and exact unexpired lease identities; claimed work then runs under the recorded tenant and creator
   context. Caller-controlled GUCs are not authority: policies additionally require the table-owner
   execution identity used only inside those functions.
+- Migration `0037_skill_run_prompt_attachments.sql` separates visible prompt text from runtime text,
+  links every attachment to its prompt, and backfills existing launch attachments to ordinal `0`.
 - `user_model_preferences` / `org_model_preferences` (mig 0036) — the ACTIVATED-model lists (see
   "Activated models" below): a jsonb array of `provider/model-id` refs per member (PK
   `org_id+user_id`, user-scoped RLS) and per workspace (PK `org_id`, tenant RLS, nullable
@@ -599,7 +603,7 @@ Live events are retained for 24 hours after a terminal state and then removed; t
 the durable history. Runs do not wake after freeze. A retry resumes durable orchestration for the same
 run and deterministic external identities; it does not create another run, sandbox, session, or
 prompt. Files created by sandbox code are discarded with the sandbox; Companion persists only the
-transcript and the metadata/bytes of files the user attached at launch.
+transcript and the metadata/bytes of files the user attached in any message.
 
 ### Launch pipeline + recorder
 
@@ -626,8 +630,12 @@ external step has persisted before/after progress:
 
 1. revalidate snapshot access and decrypt exact secret versions;
 2. get or fork the deterministic sandbox;
-3. push root, dependencies, uniquely named attachments, and `opencode.json`;
+3. push root, dependencies, uniquely named initial attachments, and `opencode.json`;
 4. start and health-check OpenCode with the exact environment;
+
+For each follow-up, the worker fetches only that prompt's attachment objects and idempotently writes
+them into the live sandbox before checking/sending its deterministic OpenCode message. A retry may
+rewrite the same paths, but it never sends a prompt before every referenced file is mounted.
 5. establish the recorder, then find or create the deterministic session;
 6. send the persisted initial/follow-up prompt with its deterministic `messageID`;
 7. batch redacted events and snapshot the transcript;
@@ -755,10 +763,12 @@ authoritative.
 `GET/PUT /v1/org-provider-connections` + `DELETE /v1/org-provider-connections/:provider`,
 `GET /v1/skills/:slug/run-options`, `GET/POST /v1/skills/:slug/run-configurations`,
 `PATCH/DELETE /v1/run-configurations/:id`,
-`POST /v1/skills/:slug/runs` (multipart: prompt, model, exact version, authoritative JSON inputs,
-repeatable file; mandatory `Idempotency-Key`; `201` for a new run and the same result on replay),
+`POST /v1/skills/:slug/runs` (multipart: optional prompt when at least one file is present, model,
+exact version, authoritative JSON inputs, repeatable file; mandatory `Idempotency-Key`; `201` for a
+new run and the same result on replay),
 `GET /v1/skills/:slug/runs` (caller's runs only), `GET /v1/runs/:id`,
-`POST /v1/runs/:id/prompt` (mandatory idempotency, `202`), `POST /v1/runs/:id/cancel`,
+`POST /v1/runs/:id/prompt` (legacy JSON text or multipart optional text + repeatable file; text or a
+file is required; mandatory idempotency, `202`), `POST /v1/runs/:id/cancel`,
 `GET /v1/runs/:id/events` (replayable SSE), and
 `GET /v1/runs/:id/attachments/:attachmentId`. Because every route rejects personal access
 tokens, the bundled Companion skill's API surface is unchanged.

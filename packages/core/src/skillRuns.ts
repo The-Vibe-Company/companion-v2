@@ -2,6 +2,9 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { and, asc, desc, eq, inArray } from "drizzle-orm";
 import { db, schema, type Db } from "@companion/db";
 import {
+  RUN_ATTACHMENT_MAX_BYTES,
+  RUN_ATTACHMENT_MAX_FILES,
+  RUN_ATTACHMENT_MAX_TOTAL_BYTES,
   RUN_CHAT_ID_MAX,
   RUN_CHAT_NAME_MAX,
   RUN_CHAT_TITLE_MAX,
@@ -129,6 +132,7 @@ export async function resolveRunRuntimeContext(
 
 export type RunRow = typeof schema.skillRuns.$inferSelect;
 type AttachmentRow = typeof schema.skillRunAttachments.$inferSelect;
+type AttachmentWithMessageRow = AttachmentRow & { messageId: string; promptOrdinal: number };
 
 export interface ResolvedRunSkill extends RunDependency {
   scope: "personal" | "org";
@@ -205,6 +209,11 @@ export function composeRunPrompt(input: {
   skillSlug: string;
   attachments: Array<{ fileName: string; workspacePath: string }>;
 }): string {
+  const userText = input.prompt.trim();
+  if (!userText && input.attachments.length === 0) {
+    throw new RunValidationError("a prompt or at least one attachment is required", "empty_prompt");
+  }
+  const request = userText || "Inspect the attached files. If the user's intent cannot be inferred from their contents, ask for clarification.";
   const notes = [`Use your installed "${input.skillSlug}" skill to handle this request.`];
   if (input.attachments.length > 0) {
     const mountedFiles = input.attachments
@@ -217,7 +226,36 @@ export function composeRunPrompt(input: {
       `The user attached ${input.attachments.length === 1 ? "a file" : "files"}. Use the exact mounted ${input.attachments.length === 1 ? "path" : "paths"}: ${mountedFiles}.`,
     );
   }
-  return `${input.prompt.trim()}\n\n---\n${notes.join("\n")}\n`;
+  return `${request}\n\n---\n${notes.join("\n")}\n`;
+}
+
+/** Canonical attachment validation shared by launch and follow-up service paths. */
+export function validateRunMessageAttachments(input: {
+  text: string;
+  attachments: CreateRunAttachment[];
+  existingBytes?: number;
+}): void {
+  if (!input.text.trim() && input.attachments.length === 0) {
+    throw new RunValidationError("a prompt or at least one attachment is required", "empty_prompt");
+  }
+  if (input.attachments.length > RUN_ATTACHMENT_MAX_FILES) {
+    throw new RunValidationError(
+      `a message can have at most ${RUN_ATTACHMENT_MAX_FILES} attachments`,
+      "too_many_attachments",
+    );
+  }
+  for (const attachment of input.attachments) {
+    if (!Number.isSafeInteger(attachment.byteSize) || attachment.byteSize <= 0) {
+      throw new RunValidationError("an attached file is empty", "empty_attachment");
+    }
+    if (attachment.byteSize > RUN_ATTACHMENT_MAX_BYTES) {
+      throw new RunValidationError("each attachment must be 10 MB or smaller", "attachment_too_large");
+    }
+  }
+  const total = (input.existingBytes ?? 0) + input.attachments.reduce((sum, attachment) => sum + attachment.byteSize, 0);
+  if (total > RUN_ATTACHMENT_MAX_TOTAL_BYTES) {
+    throw new RunValidationError("a run can store at most 100 MB of attachments", "attachment_total_too_large");
+  }
 }
 
 const PROMPT_EXCERPT_MAX = 140;
@@ -905,10 +943,30 @@ async function loadRunRow(database: Db, orgId: string, runId: string): Promise<R
   return rows[0] ?? null;
 }
 
-async function loadAttachments(database: Db, orgId: string, runId: string): Promise<AttachmentRow[]> {
+async function loadAttachments(database: Db, orgId: string, runId: string): Promise<AttachmentWithMessageRow[]> {
   return database
-    .select()
+    .select({
+      id: schema.skillRunAttachments.id,
+      orgId: schema.skillRunAttachments.orgId,
+      runId: schema.skillRunAttachments.runId,
+      promptId: schema.skillRunAttachments.promptId,
+      fileName: schema.skillRunAttachments.fileName,
+      contentType: schema.skillRunAttachments.contentType,
+      byteSize: schema.skillRunAttachments.byteSize,
+      storageKey: schema.skillRunAttachments.storageKey,
+      createdAt: schema.skillRunAttachments.createdAt,
+      messageId: schema.skillRunPrompts.messageId,
+      promptOrdinal: schema.skillRunPrompts.ordinal,
+    })
     .from(schema.skillRunAttachments)
+    .innerJoin(
+      schema.skillRunPrompts,
+      and(
+        eq(schema.skillRunPrompts.orgId, schema.skillRunAttachments.orgId),
+        eq(schema.skillRunPrompts.runId, schema.skillRunAttachments.runId),
+        eq(schema.skillRunPrompts.id, schema.skillRunAttachments.promptId),
+      ),
+    )
     .where(and(eq(schema.skillRunAttachments.orgId, orgId), eq(schema.skillRunAttachments.runId, runId)));
 }
 
@@ -920,8 +978,16 @@ async function loadSkillSlug(database: Db, orgId: string, skillId: string): Prom
   return rows.find((row) => row.id === skillId)?.slug ?? "?";
 }
 
-function toAttachmentRow(row: AttachmentRow): SkillRunAttachmentRow {
-  return { id: row.id, file_name: row.fileName, content_type: row.contentType, byte_size: row.byteSize };
+function toAttachmentRow(row: AttachmentWithMessageRow): SkillRunAttachmentRow {
+  return {
+    id: row.id,
+    prompt_id: row.promptId,
+    message_id: row.messageId,
+    prompt_ordinal: row.promptOrdinal,
+    file_name: row.fileName,
+    content_type: row.contentType,
+    byte_size: row.byteSize,
+  };
 }
 
 function toRunRow(row: RunRow, skillSlug: string): SkillRunRow {
@@ -1084,7 +1150,7 @@ async function toDetail(
   database: Db,
   row: RunRow,
   skillSlug: string,
-  attachments: AttachmentRow[],
+  attachments: AttachmentWithMessageRow[],
 ): Promise<SkillRunDetail> {
   return {
     ...toRunRow(row, skillSlug),
@@ -1377,20 +1443,6 @@ async function createRunInTransaction(input: {
       })),
     );
   }
-  if (input.attachments.length > 0) {
-    await input.database.insert(schema.skillRunAttachments).values(
-      input.attachments.map((attachment) => ({
-        id: attachment.id,
-        orgId: input.orgId,
-        runId,
-        fileName: attachment.fileName,
-        contentType: attachment.contentType,
-        byteSize: attachment.byteSize,
-        storageKey: attachment.storageKey,
-      })),
-    );
-  }
-
   const composedPrompt = composeRunPrompt({
     prompt: input.prompt,
     skillSlug: root.slug,
@@ -1400,19 +1452,39 @@ async function createRunInTransaction(input: {
     })),
   });
   const promptCreatedAt = new Date();
-  await input.database.insert(schema.skillRunPrompts).values({
-    orgId: input.orgId,
-    runId,
-    ordinal: 0,
-    kind: "initial",
-    idempotencyKey: `initial:${input.idempotencyKey}`,
-    payloadHash: hashRunPayload({ prompt: composedPrompt }),
-    messageId: deterministicRunMessageId(runId, 0, promptCreatedAt.getTime()),
-    prompt: composedPrompt,
-    status: "queued",
-    createdAt: promptCreatedAt,
-    updatedAt: promptCreatedAt,
-  });
+  const initialPrompts = await input.database
+    .insert(schema.skillRunPrompts)
+    .values({
+      orgId: input.orgId,
+      runId,
+      ordinal: 0,
+      kind: "initial",
+      idempotencyKey: `initial:${input.idempotencyKey}`,
+      payloadHash: hashRunPayload({ prompt: composedPrompt }),
+      messageId: deterministicRunMessageId(runId, 0, promptCreatedAt.getTime()),
+      userText: input.prompt.trim(),
+      prompt: composedPrompt,
+      status: "queued",
+      createdAt: promptCreatedAt,
+      updatedAt: promptCreatedAt,
+    })
+    .returning({ id: schema.skillRunPrompts.id });
+  const initialPrompt = initialPrompts[0];
+  if (!initialPrompt) throw new Error("initial prompt insert returned no row");
+  if (input.attachments.length > 0) {
+    await input.database.insert(schema.skillRunAttachments).values(
+      input.attachments.map((attachment) => ({
+        id: attachment.id,
+        orgId: input.orgId,
+        runId,
+        promptId: initialPrompt.id,
+        fileName: attachment.fileName,
+        contentType: attachment.contentType,
+        byteSize: attachment.byteSize,
+        storageKey: attachment.storageKey,
+      })),
+    );
+  }
   await input.database.insert(schema.skillRunJobs).values({
     orgId: input.orgId,
     runId,
@@ -1476,6 +1548,7 @@ export async function createRun(input: {
 }): Promise<SkillRunDetail> {
   const database = input.database ?? db;
   await assertMember(database, input.actor, input.orgId);
+  validateRunMessageAttachments({ text: input.prompt, attachments: input.attachments });
   const payloadHash = hashRunCreationPayload(input);
   const exactReplay = await loadCommittedIdempotentRunByPayload({
     database,
@@ -1619,6 +1692,32 @@ export async function getRunAttachment(input: {
   const attachment = attachments.find((candidate) => candidate.id === input.attachmentId);
   if (!attachment) throw new RunValidationError("attachment not found", "attachment_not_found");
   return { fileName: attachment.fileName, contentType: attachment.contentType, storageKey: attachment.storageKey };
+}
+
+/** Creator-scoped metadata for files belonging to one durable prompt; consumed by the worker. */
+export async function getRunPromptAttachments(input: {
+  actor: ActorContext;
+  orgId: string;
+  runId: string;
+  promptId: string;
+  database?: Db;
+}): Promise<CreateRunAttachment[]> {
+  const database = input.database ?? db;
+  await assertMember(database, input.actor, input.orgId);
+  const row = await loadRunRow(database, input.orgId, input.runId);
+  if (!row || !canAccessRun(input.actor.id, row)) {
+    throw new RunValidationError("run not found", "run_not_found");
+  }
+  const attachments = await loadAttachments(database, input.orgId, input.runId);
+  return attachments
+    .filter((attachment) => attachment.promptId === input.promptId)
+    .map((attachment) => ({
+      id: attachment.id,
+      fileName: attachment.fileName,
+      contentType: attachment.contentType,
+      byteSize: attachment.byteSize,
+      storageKey: attachment.storageKey,
+    }));
 }
 
 function safeAttachmentName(fileName: string): string {
@@ -1899,6 +1998,22 @@ export async function materializeRunWorkspace(input: {
     });
   }
   return { opencodeJson: buildOpencodeJson({ model: input.plan.row.model }), skills, attachments };
+}
+
+/** Fetch one prompt's attachment bytes outside a transaction for idempotent live-sandbox writes. */
+export async function materializeRunAttachmentFiles(input: {
+  attachments: CreateRunAttachment[];
+  fetchObject: (storageKey: string, signal?: AbortSignal) => Promise<Buffer>;
+  signal?: AbortSignal;
+}): Promise<RunWorkspaceFiles["attachments"]> {
+  const files: RunWorkspaceFiles["attachments"] = [];
+  for (const attachment of input.attachments) {
+    files.push({
+      path: attachmentWorkspacePath(attachment),
+      data: await input.fetchObject(attachment.storageKey, input.signal),
+    });
+  }
+  return files;
 }
 
 /** Best-effort, idempotent teardown shared by the worker and terminal sweeper. */

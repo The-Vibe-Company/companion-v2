@@ -71,6 +71,12 @@ describe("skill run contracts", () => {
     ]);
     expect(parsed.inputs.secrets[0]?.secret_id).toBe(secretId);
     expect(parsed.model_provider_credential_version).toBe(4);
+    expect(launchRunFieldsSchema.parse({
+      ...parsed,
+      prompt: "",
+      dependency_pins: JSON.stringify(parsed.dependency_pins),
+      inputs: JSON.stringify(parsed.inputs),
+    }).prompt).toBe("");
     expect(() => launchRunFieldsSchema.parse({ prompt: "x", model: "provider/model", inputs: "{}" })).toThrow();
     expect(() =>
       launchRunFieldsSchema.parse({ prompt: "x", model: "provider/model", skill_version_id: versionId, dependency_pins: "[]", model_provider_connection_id: providerConnectionId, model_provider_credential_version: "4", inputs: "not-json" }),

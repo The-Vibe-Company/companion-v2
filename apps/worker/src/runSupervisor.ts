@@ -23,7 +23,9 @@ import {
   heartbeatRunWorker,
   heartbeatRunJob,
   heartbeatRunPrompt,
+  getRunPromptAttachments,
   loadRunExecutionPlan,
+  materializeRunAttachmentFiles,
   materializeRunWorkspace,
   persistRunTranscript,
   removeRunWorkerHeartbeat,
@@ -1121,6 +1123,39 @@ async function processClaimedJob(input: {
           const beforeSend = await readRunControl(job);
           if (beforeSend.cancelRequestedAt || beforeSend.status === "canceled") {
             throw new CancellationRequested();
+          }
+          if (prompt.kind === "follow_up") {
+            const attachmentMetadata = await tenant(job, (database) =>
+              getRunPromptAttachments({
+                actor,
+                orgId: job.orgId,
+                runId: job.runId,
+                promptId: prompt.id,
+                database,
+              }),
+            );
+            if (attachmentMetadata.length > 0) {
+              const attachmentFiles = await withBoundedSignal({
+                parent: jobAbort.signal,
+                timeoutMs: SANDBOX_CONTROL_TIMEOUT_MS,
+                timeoutMessage: "the prompt attachment download timed out",
+                operation: (signal) => materializeRunAttachmentFiles({
+                  attachments: attachmentMetadata,
+                  fetchObject: ctx.fetchObject!,
+                  signal,
+                }),
+              });
+              await withBoundedSignal({
+                parent: jobAbort.signal,
+                timeoutMs: SANDBOX_CONTROL_TIMEOUT_MS,
+                timeoutMessage: "the prompt attachment upload timed out",
+                operation: (signal) => ctx.runtime!.pushAttachments({
+                  ref: activeRef,
+                  attachments: attachmentFiles,
+                  signal,
+                }),
+              });
+            }
           }
           // A prior worker may have dispatched this exact deterministic id and crashed. Only send
           // when the user message is absent; completion is tied to its assistant child rather than
