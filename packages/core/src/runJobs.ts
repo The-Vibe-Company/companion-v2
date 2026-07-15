@@ -462,7 +462,11 @@ export async function failOrRetryRunJob(input: {
     const tx = transaction as unknown as Db;
     // Global lock order is run → job (Cancel and prompt operations use the same order).
     const runs = await tx
-      .select({ id: schema.skillRuns.id, cancelRequestedAt: schema.skillRuns.cancelRequestedAt })
+      .select({
+        id: schema.skillRuns.id,
+        cancelRequestedAt: schema.skillRuns.cancelRequestedAt,
+        transcriptEventSequence: schema.skillRuns.transcriptEventSequence,
+      })
       .from(schema.skillRuns)
       .where(
         and(
@@ -538,7 +542,10 @@ export async function failOrRetryRunJob(input: {
       await tx.insert(schema.skillRunEvents).values({
         orgId: input.orgId,
         runId: input.runId,
-        sequence: Number(sequenceRows[0]?.value ?? 0) + 1,
+        sequence: Math.max(
+          Number(sequenceRows[0]?.value ?? 0),
+          run.transcriptEventSequence,
+        ) + 1,
         ...eventParts(terminalEvent),
       });
       await tx

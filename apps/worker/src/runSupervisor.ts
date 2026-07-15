@@ -93,6 +93,13 @@ export async function abortConversationForRetention(input: {
   }
 }
 
+export function shouldHeartbeatRunLease(input: {
+  signalAborted: boolean;
+  finalizingCancellation: boolean;
+}): boolean {
+  return !input.signalAborted || input.finalizingCancellation;
+}
+
 function abortFailure(signal: AbortSignal): Error {
   return signal.reason instanceof Error ? signal.reason : new WorkerShutdown();
 }
@@ -849,15 +856,15 @@ async function processClaimedJob(input: {
   const onShutdown = () => abortJob(new WorkerShutdown());
   input.shutdownSignal.addEventListener("abort", onShutdown, { once: true });
   let leaseLost = false;
-  let heartbeating = false;
+  let finalizingCancellation = false;
+  let heartbeatPromise: Promise<boolean> | null = null;
   let activePromptId: string | null = null;
   // Keep all claim-data validation inside the durable error handler below. A malformed decoder must
   // release/retry the lease instead of rejecting before `try` and leaving an eternal reclaim loop.
   let leaseDeadline = Date.now() + config.leaseSeconds * 1_000;
-  const heartbeat = setInterval(() => {
-    if (heartbeating || jobAbort.signal.aborted) return;
-    heartbeating = true;
-    void tenant(job, async (database) => {
+  const refreshLease = (): Promise<boolean> => {
+    if (heartbeatPromise) return heartbeatPromise;
+    heartbeatPromise = tenant(job, async (database) => {
       const jobOwned = await heartbeatRunJob({
         actor,
         orgId: job.orgId,
@@ -888,6 +895,7 @@ async function processClaimedJob(input: {
         } else {
           leaseDeadline = Date.now() + config.leaseSeconds * 1_000;
         }
+        return owned;
       })
       .catch(() => {
         // A transient DB outage is allowed only until the last confirmed lease deadline.
@@ -895,11 +903,23 @@ async function processClaimedJob(input: {
           leaseLost = true;
           abortJob(new LostLease());
         }
+        return !leaseLost;
       })
-      .finally(() => { heartbeating = false; });
+      .finally(() => { heartbeatPromise = null; });
+    return heartbeatPromise;
+  };
+  const heartbeat = setInterval(() => {
+    if (heartbeatPromise || !shouldHeartbeatRunLease({
+      signalAborted: jobAbort.signal.aborted,
+      finalizingCancellation,
+    })) return;
+    void refreshLease();
   }, config.heartbeatMs);
   const leaseWatchdog = setInterval(() => {
-    if (Date.now() < leaseDeadline || jobAbort.signal.aborted) return;
+    if (Date.now() < leaseDeadline || !shouldHeartbeatRunLease({
+      signalAborted: jobAbort.signal.aborted,
+      finalizingCancellation,
+    })) return;
     leaseLost = true;
     abortJob(new LostLease());
   }, Math.min(config.heartbeatMs, 1_000));
@@ -1296,6 +1316,8 @@ async function processClaimedJob(input: {
       cancellationRequested = Boolean(latest?.cancelRequestedAt || latest?.status === "canceled");
     }
     if (cancellationRequested) {
+      finalizingCancellation = true;
+      if (!(await refreshLease()) || leaseLost) return;
       const contextStable = await abortConversationForRetention({
         chat: ctx.chat!,
         target,
@@ -1370,6 +1392,8 @@ async function processClaimedJob(input: {
       await appendEvents(job, actor, [failureEvent], redactor, false).catch(() => undefined);
     }
     if (outcome === "cancel_requested") {
+      finalizingCancellation = true;
+      if (!(await refreshLease()) || leaseLost) return;
       const contextStable = await abortConversationForRetention({
         chat: ctx.chat!,
         target,

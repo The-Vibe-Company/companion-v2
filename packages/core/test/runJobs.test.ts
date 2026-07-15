@@ -305,6 +305,7 @@ function failureDb(cancelRequestedAt: Date | null = null) {
     status: "running",
     phase: "record",
     cancelRequestedAt,
+    transcriptEventSequence: 0,
   } as Record<string, unknown>;
   const job = {
     id: "50000000-0000-4000-8000-000000000001",
@@ -388,6 +389,26 @@ describe("atomic run failure transition", () => {
         type: "run.error",
         payload: { code: "runtime_failed", message: "[REDACTED] failed", phase: "record" },
       }),
+    ]);
+  });
+
+  it("allocates a terminal error above the folded transcript cursor after event purge", async () => {
+    const state = failureDb();
+    state.run.transcriptEventSequence = 42;
+    await expect(
+      failOrRetryRunJob({
+        actor,
+        orgId: ORG,
+        runId: RUN,
+        workerId: "worker-a",
+        errorCode: "run_context_unavailable",
+        userMessage: "Retained context unavailable",
+        transient: false,
+        database: state.database,
+      }),
+    ).resolves.toBe("failed");
+    expect(state.events).toEqual([
+      expect.objectContaining({ sequence: 43, type: "run.error" }),
     ]);
   });
 

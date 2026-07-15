@@ -9,6 +9,7 @@ import {
   isTransientRunFailure,
   runFailureEvent,
   sandboxTimeoutExtensionSchedule,
+  shouldHeartbeatRunLease,
 } from "./runSupervisor";
 
 afterEach(() => {
@@ -91,6 +92,14 @@ describe("claimed run lease decoding boundary", () => {
       .toThrow("invalid lease metadata");
     expect(() => claimedRunLeaseDeadline({ leaseExpiresAt: null }))
       .toThrow("invalid lease metadata");
+  });
+});
+
+describe("cancellation lease finalization", () => {
+  it("keeps heartbeating after user work is aborted while the retained sandbox is finalized", () => {
+    expect(shouldHeartbeatRunLease({ signalAborted: false, finalizingCancellation: false })).toBe(true);
+    expect(shouldHeartbeatRunLease({ signalAborted: true, finalizingCancellation: false })).toBe(false);
+    expect(shouldHeartbeatRunLease({ signalAborted: true, finalizingCancellation: true })).toBe(true);
   });
 });
 

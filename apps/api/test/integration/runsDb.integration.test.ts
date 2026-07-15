@@ -523,6 +523,14 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
   });
 
   it("terminalizes and leaves cleanup owed when a leased run owner loses membership", async () => {
+    await sql`
+      delete from skill_run_events
+      where org_id = ${orgA}::uuid and run_id = ${revokedRunId}::uuid
+    `;
+    await sql`
+      update skill_runs set transcript_event_sequence = 42
+      where org_id = ${orgA}::uuid and id = ${revokedRunId}::uuid
+    `;
     await sql`delete from memberships where org_id = ${orgA}::uuid and user_id = ${departed.id}`;
     const result = await sql.begin(async (tx) => {
       await tx.unsafe(`set local role ${rlsRole}`);
@@ -581,10 +589,11 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
       jobStatus: string;
       promptStatus: string;
       eventType: string;
+      eventSequence: number;
     }[]>`
       select r.status::text, r.phase::text, r.error_code as "errorCode",
              r.sandbox_cleaned_at is not null as cleaned, j.status::text as "jobStatus",
-             p.status::text as "promptStatus", e.type as "eventType"
+             p.status::text as "promptStatus", e.type as "eventType", e.sequence as "eventSequence"
       from skill_runs r
       join skill_run_jobs j on j.org_id = r.org_id and j.run_id = r.id
       join skill_run_prompts p on p.org_id = r.org_id and p.run_id = r.id
@@ -599,6 +608,7 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
       jobStatus: "failed",
       promptStatus: "canceled",
       eventType: "run.error",
+      eventSequence: 43,
     }]);
     // Keep the following cleanup-lease test isolated after proving the failed destroy remains owed.
     await sql`
