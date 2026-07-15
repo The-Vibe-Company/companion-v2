@@ -18,7 +18,6 @@ import { filterModelGroups, groupModelsByProvider, toModelProviders, type ModelG
 export interface ModelScope {
   title: string;
   desc: string;
-  lockText: string;
   /** Read-only: show the deck but no add/remove/connect (non-admins on the workspace scope). */
   locked: boolean;
   /**
@@ -199,11 +198,6 @@ export function ModelsPane({ scope }: { scope: ModelScope }) {
   return (
     <div className="sx-pane">
       <PaneHead title={scope.title} desc={scope.desc} />
-
-      <div className="og-lockbar og-lockbar--wide" style={{ marginBottom: 18 }}>
-        <Icon name="shield-check" size={13} />
-        <span>{scope.lockText}</span>
-      </div>
 
       {error && (
         <div className="sx-empty settings-load-error" role="alert">

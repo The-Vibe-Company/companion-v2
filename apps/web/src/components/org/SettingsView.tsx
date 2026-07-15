@@ -81,7 +81,6 @@ export function SettingsView({
   const personalModels: ModelScope = {
     title: "Models",
     desc: "Compose your run launcher: activate models and connect each provider with its own write-only API key.",
-    lockText: "Provider keys are stored separately from Secrets. Your personal key takes precedence over a workspace key.",
     locked: false,
     readiness: "any",
     select: (activated) => activated.personal,
@@ -95,7 +94,6 @@ export function SettingsView({
   const workspaceModels: ModelScope = {
     title: "Shared models",
     desc: "Curate the models every member can run and connect shared providers with dedicated write-only API keys.",
-    lockText: "Shared with every member. Only owners and admins can change these.",
     locked: !ctx.canManage,
     readiness: "scope",
     select: (activated) => activated.org,

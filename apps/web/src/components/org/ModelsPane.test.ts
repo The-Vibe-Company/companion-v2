@@ -83,7 +83,6 @@ async function mountModelsPane(
       scope: {
         title: "Models",
         desc: "Dedicated provider keys",
-        lockText: "Separate from Secrets",
         locked: false,
         readiness: "any",
         select: (activated: { personal: string[] }) => activated.personal,
@@ -178,7 +177,6 @@ describe("ModelsPane", () => {
         scope: {
           title: "Models",
           desc: "Dedicated provider keys",
-          lockText: "Separate from Secrets",
           locked: false,
           readiness: "any",
           select: (activated: { personal: string[] }) => activated.personal,
@@ -194,6 +192,7 @@ describe("ModelsPane", () => {
 
     expect(queryMocks.fetchModels).toHaveBeenCalledOnce();
     expect(loadConnected).toHaveBeenCalledOnce();
+    expect(container.querySelector(".og-lockbar")).toBeNull();
     expect(container.textContent).toContain("The run launcher only shows models you activate");
   });
 
