@@ -12,6 +12,11 @@ import {
   type RunControlContext,
 } from "./skillRuns";
 import type { SkillArchiveFetcher, SkillBundle } from "./runRuntime";
+import {
+  getRunPreferences,
+  reserveSandboxUsage,
+  SANDBOX_PREWARM_RESERVATION_MS,
+} from "./billing";
 
 export const RUN_PREWARM_CLIENT_LEASE_MS = 30_000;
 export const RUN_PREWARM_MAX_AGE_MS = 5 * 60_000;
@@ -54,6 +59,12 @@ export async function createRunPrewarm(input: {
 }): Promise<RunPrewarmTicket | null> {
   const database = input.database ?? db;
   await assertMember(database, input.actor, input.orgId);
+  const preferences = await getRunPreferences({
+    actorId: input.actor.id,
+    orgId: input.orgId,
+    database,
+  });
+  if (!preferences.prewarm_enabled) return null;
   const ctx = await resolveRunRuntimeContext(input.ctx, database);
   if (ctx.runtimeAvailable === false || !ctx.goldenSnapshotId) return null;
   const skills = await database
@@ -92,6 +103,18 @@ export async function createRunPrewarm(input: {
       ));
     if (active.length >= RUN_PREWARM_MAX_PER_CREATOR) return null;
     const id = randomUUID();
+    const sandboxName = sandboxNameForPrewarm(id);
+    await reserveSandboxUsage({
+      orgId: input.orgId,
+      creatorId: input.actor.id,
+      kind: "prewarm",
+      sourceId: id,
+      sandboxName,
+      activationRevision: 0,
+      reservationMs: SANDBOX_PREWARM_RESERVATION_MS,
+      database: transaction,
+      now,
+    });
     const inserted = await transaction
       .insert(schema.skillRunPrewarms)
       .values({
@@ -100,7 +123,7 @@ export async function createRunPrewarm(input: {
         skillId: closure[0]!.skill_id,
         creatorId: input.actor.id,
         skillVersionId: closure[0]!.skill_version_id,
-        sandboxName: sandboxNameForPrewarm(id),
+        sandboxName,
         goldenSnapshotId: ctx.goldenSnapshotId!,
         timeoutMs: ctx.timeoutMs,
         clientLeaseExpiresAt: new Date(now.getTime() + RUN_PREWARM_CLIENT_LEASE_MS),

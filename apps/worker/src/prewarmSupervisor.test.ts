@@ -14,8 +14,18 @@ const mocks = vi.hoisted(() => ({
   teardownSandbox: vi.fn(async () => true),
   updateClaimedRunPrewarm: vi.fn(async () => true),
 }));
+const billingMocks = vi.hoisted(() => ({
+  refreshSandboxUsageReservation: vi.fn(async () => ({ limitMs: 5 * 60_000 })),
+  reserveSandboxUsage: vi.fn(async () => undefined),
+  settleSandboxUsage: vi.fn(async () => undefined),
+  startSandboxUsage: vi.fn(async () => undefined),
+}));
 
 vi.mock("@companion/core/services", () => mocks);
+vi.mock("@companion/core", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@companion/core")>(),
+  ...billingMocks,
+}));
 vi.mock("@companion/db", () => ({
   db: {},
   withTenantContext: vi.fn(async (_scope: unknown, fn: (database: unknown) => unknown) => fn({})),
@@ -66,6 +76,14 @@ describe("secretless run prewarming", () => {
     await scheduler.stop();
 
     expect(runtime.forkFromGolden).toHaveBeenCalled();
+    expect(billingMocks.reserveSandboxUsage).toHaveBeenCalledWith(expect.objectContaining({
+      kind: "prewarm",
+      sourceId: row.id,
+      reservationMs: 5 * 60_000,
+    }));
+    expect(billingMocks.refreshSandboxUsageReservation.mock.invocationCallOrder[0])
+      .toBeLessThan((runtime.forkFromGolden as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0]!);
+    expect(billingMocks.startSandboxUsage).toHaveBeenCalledWith(expect.objectContaining({ sandboxName: row.sandboxName }));
     expect(runtime.pushSkillBundles).toHaveBeenCalledWith(expect.objectContaining({
       skills: [{ slug: "demo", version: "1.0.0", files: [] }],
     }));
@@ -99,6 +117,33 @@ describe("secretless run prewarming", () => {
     await scheduler.stop();
 
     expect(runtime.forkFromGolden).not.toHaveBeenCalled();
+    expect(billingMocks.reserveSandboxUsage).not.toHaveBeenCalled();
     expect(mocks.releaseClaimedRunPrewarm).toHaveBeenCalled();
+  });
+
+  it("settles usage before marking a cleaned prewarm complete", async () => {
+    const cleanup = {
+      ...row,
+      sandboxId: row.sandboxName,
+      cleanupAttempt: 1,
+    };
+    mocks.claimRunPrewarms.mockResolvedValue([]);
+    mocks.claimRunPrewarmCleanups.mockResolvedValue([cleanup] as never);
+    const runtime = {
+      stop: vi.fn(async () => true),
+      destroy: vi.fn(async () => undefined),
+    } as unknown as RunSandboxRuntime;
+    const scheduler = createRunPrewarmScheduler({
+      workerId: "worker-1",
+      concurrency: 1,
+      leaseSeconds: 30,
+      ctx: { runtime, region: "iad1" } as unknown as RunControlContext,
+      shutdownSignal: new AbortController().signal,
+    });
+
+    await scheduler.cleanup();
+
+    expect(billingMocks.settleSandboxUsage.mock.invocationCallOrder[0])
+      .toBeLessThan(mocks.completeRunPrewarmCleanup.mock.invocationCallOrder[0]!);
   });
 });

@@ -1020,6 +1020,68 @@ export const skillRunPrewarmPhaseEnum = pgEnum("skill_run_prewarm_phase", [
   "cleanup",
   "complete",
 ]);
+export const sandboxUsageKindEnum = pgEnum("sandbox_usage_kind", ["prewarm", "run"]);
+
+/** Creator-private launcher behavior. Prewarming is opt-out so existing launch latency is preserved. */
+export const userRunPreferences = pgTable(
+  "user_run_preferences",
+  {
+    orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+    userId: text("user_id").notNull().references(() => user.id, { onDelete: "cascade" }),
+    prewarmEnabled: boolean("prewarm_enabled").notNull().default(true),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({ pk: primaryKey({ columns: [t.orgId, t.userId] }) }),
+);
+
+/**
+ * One billable provider session. Active rows hold a conservative reservation; settlement replaces
+ * it with rounded-up wall-clock minutes once the sandbox is stopped or destroyed.
+ */
+export const sandboxUsageSessions = pgTable(
+  "sandbox_usage_sessions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+    creatorId: text("creator_id").notNull().references(() => user.id, { onDelete: "cascade" }),
+    kind: sandboxUsageKindEnum("kind").notNull(),
+    sourceId: uuid("source_id").notNull(),
+    sandboxName: text("sandbox_name").notNull(),
+    activationRevision: integer("activation_revision").notNull().default(0),
+    periodStart: timestamp("period_start", { withTimezone: true }).notNull(),
+    reservedMs: integer("reserved_ms").notNull(),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    endedAt: timestamp("ended_at", { withTimezone: true }),
+    settledMs: integer("settled_ms"),
+    reservationExpiresAt: timestamp("reservation_expires_at", { withTimezone: true }).notNull(),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    sourceActivation: unique("sandbox_usage_sessions_source_activation_uq").on(
+      t.orgId,
+      t.kind,
+      t.sourceId,
+      t.activationRevision,
+    ),
+    sandboxActivation: unique("sandbox_usage_sessions_sandbox_activation_uq").on(
+      t.orgId,
+      t.sandboxName,
+      t.activationRevision,
+    ),
+    byPeriod: index("sandbox_usage_sessions_period_idx").on(t.orgId, t.periodStart),
+    durationCheck: check(
+      "sandbox_usage_sessions_duration_check",
+      sql`${t.reservedMs} >= 60000 AND (${t.settledMs} IS NULL OR ${t.settledMs} >= 0)`,
+    ),
+    revisionCheck: check("sandbox_usage_sessions_revision_check", sql`${t.activationRevision} >= 0`),
+    lifecycleCheck: check(
+      "sandbox_usage_sessions_lifecycle_check",
+      sql`(${t.endedAt} IS NULL AND ${t.settledMs} IS NULL) OR (${t.endedAt} IS NOT NULL AND ${t.settledMs} IS NOT NULL)`,
+    ),
+  }),
+);
 
 /**
  * Secretless, creator-private sandbox prepared while the Run Skill launcher is open. It owns only

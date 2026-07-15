@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
+import { settleLatestSandboxUsage } from "@companion/core";
 import { teardownSandbox } from "@companion/core/services";
-import { db, type Db } from "@companion/db";
+import { db, withTenantContext, type Db } from "@companion/db";
 import type { RunSandboxRuntime } from "@companion/core";
 
 export interface ClaimedRunCleanup {
@@ -73,6 +74,7 @@ export async function processClaimedRunCleanup(input: {
   region: string;
   timeoutMs: number;
   complete?: typeof completeRunCleanup;
+  settle?: (claim: ClaimedRunCleanup) => Promise<void>;
 }): Promise<"completed" | "retry" | "lost_lease"> {
   const hasSandboxReference = Boolean(input.claim.sandboxName || input.claim.sandboxId);
   // Provider I/O must not hold a PostgreSQL tenant transaction open. The signed cleanup claim is
@@ -88,6 +90,23 @@ export async function processClaimedRunCleanup(input: {
       })
     : true;
   if (!cleaned) return "retry";
+  if (input.claim.sandboxName) {
+    const settle = input.settle ?? ((claim: ClaimedRunCleanup) => withTenantContext(
+      { orgId: claim.orgId, userId: claim.creatorId },
+      (database) => settleLatestSandboxUsage({
+        orgId: claim.orgId,
+        sandboxName: claim.sandboxName!,
+        database,
+      }),
+    ));
+    try {
+      await settle(input.claim);
+    } catch {
+      // Provider teardown is idempotent. Keep the cleanup lease incomplete until accounting is
+      // durably settled, then retry both operations on the next claim.
+      return "retry";
+    }
+  }
   const completed = await (input.complete ?? completeRunCleanup)({
     orgId: input.claim.orgId,
     runId: input.claim.runId,

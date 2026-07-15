@@ -23,6 +23,7 @@ export interface VercelRuntimeConfig {
   token: string;
   teamId: string;
   projectId: string;
+  vcpus: number;
 }
 
 export function vercelConfigFromEnv(env: NodeJS.ProcessEnv = process.env): VercelRuntimeConfig | null {
@@ -30,7 +31,21 @@ export function vercelConfigFromEnv(env: NodeJS.ProcessEnv = process.env): Verce
   const teamId = env.VERCEL_TEAM_ID?.trim();
   const projectId = env.VERCEL_PROJECT_ID?.trim();
   if (!token || !teamId || !projectId) return null;
-  return { token, teamId, projectId };
+  const requestedVcpus = Number(env.COMPANION_SANDBOX_VCPUS);
+  const vcpus = [1, 2, 4, 8].includes(requestedVcpus) ? requestedVcpus : 2;
+  return { token, teamId, projectId, vcpus };
+}
+
+export function shouldReplaceRunningSandboxForBudget(input: {
+  status: string;
+  expiresAt: Date | undefined;
+  nowMs: number;
+  requestedTimeoutMs: number;
+}): boolean {
+  if (input.status !== "running" || !input.expiresAt) return false;
+  // One second avoids replacement from provider/client clock and transport jitter while still
+  // failing closed on a materially longer lease created by an older worker.
+  return input.expiresAt.getTime() - input.nowMs > input.requestedTimeoutMs + 1_000;
 }
 
 function skillFilePayloads(skill: SkillBundle): { path: string; content: Uint8Array; mode?: number }[] {
@@ -143,11 +158,31 @@ export function createVercelRuntime(config: VercelRuntimeConfig): RunSandboxRunt
 
     async forkFromGolden({ ref, goldenSnapshotId, signal }) {
       try {
+        try {
+          const existing = await Sandbox.get({ ...credentials, name: ref.sandboxName, resume: false, signal });
+          if (shouldReplaceRunningSandboxForBudget({
+            status: existing.status,
+            expiresAt: existing.expiresAt,
+            nowMs: Date.now(),
+            requestedTimeoutMs: ref.timeoutMs,
+          })) {
+            // getOrCreate can lengthen but cannot shorten a running Vercel session. A reclaimed
+            // activation must replace an over-budget live session before it can inherit a fresh
+            // Companion reservation; stopped persistent sessions remain resumable.
+            await existing.stop({ signal });
+            await existing.delete({ signal });
+          }
+        } catch (error) {
+          if (!(error instanceof APIError && (error.response.status === 404 || error.response.status === 410))) {
+            throw error;
+          }
+        }
         const sandbox = await Sandbox.getOrCreate({
           ...credentials,
           name: ref.sandboxName,
           source: { type: "snapshot", snapshotId: goldenSnapshotId },
           ports: [OPENCODE_PORT],
+          resources: { vcpus: config.vcpus },
           timeout: ref.timeoutMs,
           signal,
         });

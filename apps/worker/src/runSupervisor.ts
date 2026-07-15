@@ -3,9 +3,16 @@ import { and, eq, inArray } from "drizzle-orm";
 import { RUN_REACTIVATION_RETENTION_MS, type RunChatEvent, type RunPhase } from "@companion/contracts";
 import {
   createRunRedactor,
+  getSandboxRuntimeBudget,
   loadSecretsMasterKey,
+  refreshSandboxUsageReservation,
+  reserveSandboxUsage,
   RunRuntimeError,
+  SANDBOX_RUN_ACTIVATION_RESERVATION_MS,
   SecretConfigurationError,
+  settleLatestSandboxUsage,
+  settleSandboxUsage,
+  startSandboxUsage,
   type RunChatRuntime,
   type RunChatTarget,
   type RunRedactor,
@@ -169,7 +176,10 @@ export function sandboxTimeoutExtensionSchedule(timeoutMs: number): {
   };
 }
 
-export function createSandboxTimeoutExtender(runtime: NonNullable<RunControlContext["runtime"]>): {
+export function createSandboxTimeoutExtender(
+  runtime: NonNullable<RunControlContext["runtime"]>,
+  readBudgetMs?: () => Promise<number | null>,
+): {
   activate(ref: SandboxRef): void;
   stop(): Promise<void>;
 } {
@@ -177,11 +187,23 @@ export function createSandboxTimeoutExtender(runtime: NonNullable<RunControlCont
   let activeRef: SandboxRef | null = null;
   let inFlight: Promise<void> | null = null;
   let stopped = false;
+  let provisionedMs = 0;
 
   const refresh = () => {
     if (stopped || !activeRef || !runtime.extendTimeout || inFlight) return;
-    const { extensionMs } = sandboxTimeoutExtensionSchedule(activeRef.timeoutMs);
-    inFlight = runtime.extendTimeout(activeRef, extensionMs, AbortSignal.timeout(10_000)).catch(() => undefined).finally(() => {
+    const extend = async () => {
+      if (readBudgetMs) {
+        const budgetMs = await readBudgetMs();
+        if (budgetMs === null || budgetMs <= provisionedMs) return;
+        const additionalMs = budgetMs - provisionedMs;
+        await runtime.extendTimeout!(activeRef!, additionalMs, AbortSignal.timeout(10_000));
+        provisionedMs = budgetMs;
+        return;
+      }
+      const { extensionMs } = sandboxTimeoutExtensionSchedule(activeRef!.timeoutMs);
+      await runtime.extendTimeout!(activeRef!, extensionMs, AbortSignal.timeout(10_000));
+    };
+    inFlight = extend().catch(() => undefined).finally(() => {
       inFlight = null;
     });
   };
@@ -190,8 +212,10 @@ export function createSandboxTimeoutExtender(runtime: NonNullable<RunControlCont
     activate(ref) {
       if (stopped || timer || !runtime.extendTimeout) return;
       activeRef = ref;
-      const { intervalMs } = sandboxTimeoutExtensionSchedule(ref.timeoutMs);
-      // Extending immediately gives a deployment at any point in the first interval a full lease.
+      provisionedMs = ref.timeoutMs;
+      const intervalMs = readBudgetMs ? 5_000 : sandboxTimeoutExtensionSchedule(ref.timeoutMs).intervalMs;
+      // Managed sandboxes extend only by newly admitted minutes; self-hosted sandboxes preserve
+      // the existing rolling provider lease behavior.
       refresh();
       timer = setInterval(refresh, intervalMs);
     },
@@ -309,6 +333,57 @@ function sandboxRef(plan: RunExecutionPlan, ctx: RunControlContext): SandboxRef 
 
 async function tenant<T>(job: ClaimedRunJob, fn: (database: Db) => Promise<T>): Promise<T> {
   return withTenantContext({ orgId: job.orgId, userId: job.creatorId }, fn);
+}
+
+async function startRunSandboxUsage(job: ClaimedRunJob, ref: SandboxRef, activationRevision: number): Promise<void> {
+  await tenant(job, (database) => startSandboxUsage({
+    orgId: job.orgId,
+    sandboxName: ref.sandboxName,
+    activationRevision,
+    database,
+  }));
+}
+
+async function settleRunSandboxUsage(job: ClaimedRunJob, ref: SandboxRef, activationRevision: number): Promise<void> {
+  await tenant(job, (database) => settleSandboxUsage({
+    orgId: job.orgId,
+    sandboxName: ref.sandboxName,
+    activationRevision,
+    database,
+  }));
+}
+
+async function ensureRunSandboxUsage(
+  job: ClaimedRunJob,
+  ref: SandboxRef,
+  activationRevision: number,
+): Promise<{ limitMs: number } | null> {
+  return tenant(job, async (database) => {
+    await reserveSandboxUsage({
+      orgId: job.orgId,
+      creatorId: job.creatorId,
+      kind: "run",
+      sourceId: job.runId,
+      sandboxName: ref.sandboxName,
+      activationRevision,
+      reservationMs: SANDBOX_RUN_ACTIVATION_RESERVATION_MS,
+      database,
+    });
+    return refreshSandboxUsageReservation({
+      orgId: job.orgId,
+      sandboxName: ref.sandboxName,
+      activationRevision,
+      database,
+    });
+  });
+}
+
+function applySandboxRuntimeBudget(ref: SandboxRef, budget: { limitMs: number } | null): void {
+  if (!budget) return;
+  if (budget.limitMs < SANDBOX_TIMEOUT_MIN_MS) {
+    throw new RunValidationError("the sandbox runtime budget is exhausted", "sandbox_quota_exhausted");
+  }
+  ref.timeoutMs = Math.min(ref.timeoutMs, budget.limitMs);
 }
 
 async function readRunControl(job: ClaimedRunJob): Promise<RunControlState> {
@@ -852,10 +927,24 @@ async function terminalizeRevokedMembership(input: {
     database: db,
   });
   if (!control || control.membershipActive) return false;
-  const cleaned = await teardownSandbox(
-    input.ctx.runtime!,
-    sandboxRefFromPersisted(input.job, input.ctx, control),
-  );
+  const revokedRef = sandboxRefFromPersisted(input.job, input.ctx, control);
+  const cleaned = await teardownSandbox(input.ctx.runtime!, revokedRef);
+  if (cleaned) {
+    try {
+      await withTenantContext(
+        { orgId: input.job.orgId, userId: input.job.creatorId },
+        (database) => settleLatestSandboxUsage({
+          orgId: input.job.orgId,
+          sandboxName: revokedRef.sandboxName,
+          database,
+        }),
+      );
+    } catch {
+      // Keep the durable worker lease non-terminal so accounting can be retried. Provider teardown
+      // is idempotent and must not leave a live usage row after the sandbox is gone.
+      return false;
+    }
+  }
   return terminalizeRevokedRunLease({
     orgId: input.job.orgId,
     runId: input.job.runId,
@@ -986,7 +1075,17 @@ async function processClaimedJob(input: {
   let redactor = createRunRedactor([]);
   let target: { domain: string; password: string } | null = null;
   let sessionId: string | null = null;
-  const timeoutExtender = createSandboxTimeoutExtender(ctx.runtime!);
+  let activationRevision = 0;
+  const timeoutExtender = createSandboxTimeoutExtender(ctx.runtime!, async () => {
+    if (!ref) return null;
+    const budget = await tenant(job, (database) => getSandboxRuntimeBudget({
+      orgId: job.orgId,
+      sandboxName: ref!.sandboxName,
+      activationRevision,
+      database,
+    }));
+    return budget?.limitMs ?? null;
+  });
   try {
     leaseDeadline = claimedRunLeaseDeadline(job);
     const leaseControl = await getRunWorkerLeaseControl({
@@ -1002,6 +1101,7 @@ async function processClaimedJob(input: {
       return;
     }
     const initialControl = await readRunControl(job);
+    activationRevision = initialControl.activationRevision;
     ref = sandboxRefFromPersisted(job, ctx, initialControl);
     if (initialControl.status === "canceled" || initialControl.cancelRequestedAt) {
       // Recover enough persisted state for a best-effort final snapshot, but sandbox teardown never
@@ -1018,6 +1118,7 @@ async function processClaimedJob(input: {
       }
       throw new CancellationRequested();
     }
+    applySandboxRuntimeBudget(ref, await ensureRunSandboxUsage(job, ref, activationRevision));
     if (initialControl.phase === "freeze") {
       // The previous replica persisted freeze before suspending the named sandbox. Reconcile the
       // final transcript, then repeat the idempotent stop while retaining OpenCode state.
@@ -1040,6 +1141,7 @@ async function processClaimedJob(input: {
         timeoutMessage: "the sandbox suspension timed out",
         operation: (signal) => ctx.runtime!.stop(ref!, signal),
       });
+      await settleRunSandboxUsage(job, ref, activationRevision);
       const frozenAt = new Date();
       await setPhase(job, actor, workerId, "complete", {
         status: "frozen",
@@ -1059,6 +1161,8 @@ async function processClaimedJob(input: {
       region: ctx.region,
       timeoutMs: materialPlan.row.timeoutMs,
     };
+    activationRevision = materialPlan.row.activationRevision;
+    applySandboxRuntimeBudget(activeRef, await ensureRunSandboxUsage(job, activeRef, activationRevision));
     ref = activeRef;
     let sandbox: { sandboxId: string; domain: string } | null = null;
     let skillsAlreadyWarm = false;
@@ -1113,6 +1217,7 @@ async function processClaimedJob(input: {
     } else {
       await setPhase(job, actor, workerId, "push_workspace", { sandboxId: sandbox!.sandboxId, sandboxDomain: sandbox!.domain });
     }
+    await startRunSandboxUsage(job, activeRef, activationRevision);
     timeoutExtender.activate(activeRef);
 
     const dynamicFiles = await withBoundedSignal({
@@ -1390,6 +1495,7 @@ async function processClaimedJob(input: {
       timeoutMessage: "the sandbox suspension timed out",
       operation: (signal) => ctx.runtime!.stop(activeRef, signal),
     });
+    await settleRunSandboxUsage(job, activeRef, activationRevision);
     const frozenAt = new Date();
     await setPhase(job, actor, workerId, "complete", {
       status: "frozen",
@@ -1448,6 +1554,9 @@ async function processClaimedJob(input: {
             cleaned = await teardownSandbox(ctx.runtime!, ref);
           }
         }
+      }
+      if (ref && (retained || cleaned)) {
+        await settleRunSandboxUsage(job, ref, activationRevision).catch(() => undefined);
       }
       try {
         await markCanceled({ job, actor, workerId, cleaned, retained });
@@ -1514,6 +1623,9 @@ async function processClaimedJob(input: {
           }
         }
       }
+      if (ref && (retained || cleaned)) {
+        await settleRunSandboxUsage(job, ref, activationRevision).catch(() => undefined);
+      }
       try {
         await markCanceled({ job, actor, workerId, cleaned, retained });
       } catch {
@@ -1527,6 +1639,7 @@ async function processClaimedJob(input: {
     if (outcome === "failed" && ref) {
       const cleaned = await teardownSandbox(ctx.runtime!, ref);
       if (cleaned) {
+        await settleRunSandboxUsage(job, ref, activationRevision).catch(() => undefined);
         await tenant(job, (database) =>
           updateRunWorkerState({
             actor,

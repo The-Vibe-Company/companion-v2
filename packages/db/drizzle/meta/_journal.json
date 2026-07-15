@@ -281,6 +281,13 @@
       "when": 1784131400000,
       "tag": "0039_run_prewarms",
       "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "7",
+      "when": 1784131500000,
+      "tag": "0040_sandbox_usage",
+      "breakpoints": true
     }
   ]
 }

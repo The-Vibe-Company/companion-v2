@@ -35,6 +35,15 @@ import {
   updateClaimedRunPrewarm,
 } from "@companion/core/services";
 import { db, withTenantContext } from "@companion/db";
+import {
+  getSandboxUsageOverview,
+  getSandboxRuntimeBudget,
+  refreshSandboxUsageReservation,
+  reserveSandboxUsage,
+  settleSandboxUsage,
+  startSandboxUsage,
+  type BillingRuntimeConfig,
+} from "@companion/core";
 
 const databaseUrl = process.env.DATABASE_URL?.trim();
 if (!databaseUrl) throw new Error("RunSkill integration tests require an explicit disposable DATABASE_URL");
@@ -1479,5 +1488,140 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
     `;
     expect(events.map((event) => event.runId)).toEqual(expect.arrayContaining([runId, revokedRunId]));
     expect(events).toHaveLength(2);
+  });
+
+  it("atomically blocks concurrent sandbox reservations at the shared monthly limit", async () => {
+    const sourceA = randomUUID();
+    const sourceB = randomUUID();
+    const now = new Date();
+    const config: BillingRuntimeConfig = {
+      billingMode: "stripe",
+      entitlementMode: "enforce",
+      pilotOrgIds: new Set(),
+      proOrgAllowlist: new Set([orgA]),
+      checkoutEnabled: false,
+      webhooksEnabled: false,
+      sandboxMinutesPerSeat: 1,
+    };
+    const reserve = (sourceId: string) => withTenantContext(
+      { orgId: orgA, userId: owner.id },
+      (database) => reserveSandboxUsage({
+        orgId: orgA,
+        creatorId: owner.id,
+        kind: "run",
+        sourceId,
+        sandboxName: `quota-${sourceId}`,
+        activationRevision: 0,
+        reservationMs: 2 * 60_000,
+        database,
+        now,
+        config,
+      }),
+    );
+
+    const attempts = await Promise.allSettled([reserve(sourceA), reserve(sourceB)]);
+    expect(attempts.filter((attempt) => attempt.status === "fulfilled")).toHaveLength(1);
+    expect(attempts.filter((attempt) => attempt.status === "rejected")).toHaveLength(1);
+    expect(attempts.find((attempt) => attempt.status === "rejected")).toMatchObject({
+      reason: { body: { code: "sandbox_quota_exhausted", feature: "sandbox_runs" } },
+    });
+
+    const acceptedSource = attempts[0]?.status === "fulfilled" ? sourceA : sourceB;
+    await withTenantContext({ orgId: orgA, userId: owner.id }, async (database) => {
+      await startSandboxUsage({
+        orgId: orgA,
+        sandboxName: `quota-${acceptedSource}`,
+        activationRevision: 0,
+        database,
+        now,
+        config,
+      });
+      await settleSandboxUsage({
+        orgId: orgA,
+        sandboxName: `quota-${acceptedSource}`,
+        activationRevision: 0,
+        database,
+        now: new Date(now.getTime() + 61_000),
+        config,
+      });
+      const usage = await getSandboxUsageOverview({
+        orgId: orgA,
+        database,
+        now: new Date(now.getTime() + 61_000),
+        config,
+      });
+      expect(usage).toMatchObject({ used_minutes: 2, reserved_minutes: 0, remaining_minutes: 0 });
+    });
+  });
+
+  it("rejects Free sandbox work before a usage row can be created", async () => {
+    const config: BillingRuntimeConfig = {
+      billingMode: "stripe",
+      entitlementMode: "enforce",
+      pilotOrgIds: new Set(),
+      proOrgAllowlist: new Set(),
+      checkoutEnabled: false,
+      webhooksEnabled: false,
+      sandboxMinutesPerSeat: 250,
+    };
+    await expect(withTenantContext({ orgId: orgB, userId: outsider.id }, (database) =>
+      reserveSandboxUsage({
+        orgId: orgB,
+        creatorId: outsider.id,
+        kind: "prewarm",
+        sourceId: randomUUID(),
+        sandboxName: `free-${randomUUID()}`,
+        activationRevision: 0,
+        reservationMs: 60_000,
+        database,
+        config,
+      }),
+    )).rejects.toMatchObject({ body: { code: "sandbox_plan_required", limit: 0 } });
+  });
+
+  it("caps a managed provider session at the UTC month boundary", async () => {
+    const sourceId = randomUUID();
+    const sandboxName = `rollover-${sourceId}`;
+    const startsAt = new Date("2026-07-31T23:58:00.000Z");
+    const config: BillingRuntimeConfig = {
+      billingMode: "stripe",
+      entitlementMode: "enforce",
+      pilotOrgIds: new Set(),
+      proOrgAllowlist: new Set([orgA]),
+      checkoutEnabled: false,
+      webhooksEnabled: false,
+      sandboxMinutesPerSeat: 250,
+    };
+    await withTenantContext({ orgId: orgA, userId: owner.id }, async (database) => {
+      await reserveSandboxUsage({
+        orgId: orgA,
+        creatorId: owner.id,
+        kind: "run",
+        sourceId,
+        sandboxName,
+        activationRevision: 0,
+        reservationMs: 10 * 60_000,
+        database,
+        now: startsAt,
+        config,
+      });
+      await expect(refreshSandboxUsageReservation({
+        orgId: orgA,
+        sandboxName,
+        activationRevision: 0,
+        database,
+        now: startsAt,
+        config,
+      })).resolves.toEqual({ limitMs: 2 * 60_000 });
+      await startSandboxUsage({ orgId: orgA, sandboxName, activationRevision: 0, database, now: startsAt, config });
+      await expect(getSandboxRuntimeBudget({
+        orgId: orgA,
+        sandboxName,
+        activationRevision: 0,
+        database,
+        now: new Date("2026-08-01T00:00:00.000Z"),
+        config,
+      })).rejects.toMatchObject({ body: { code: "sandbox_quota_exhausted" } });
+    });
   });
 });
