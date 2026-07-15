@@ -500,12 +500,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      # pnpm 9 still calls npm's retired quick/full audit endpoints. Keep the project's package
-      # manager pinned at 9.12.0, but use pnpm 11's bulk-advisory client for this isolated read.
-      - name: Set up audit pnpm
+      - name: Set up pnpm
         uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
-        with:
-          version: 11.13.0
 
       - name: Set up Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -513,7 +509,9 @@ jobs:
           node-version: 22
 
       - name: Audit production dependencies
-        run: pnpm --pm-on-fail=ignore audit --prod --audit-level=high
+        # pnpm 9 still calls npm's retired quick/full audit endpoints. Execute pnpm 11 only for
+        # this isolated read while keeping the project's package manager pinned at 9.12.0.
+        run: pnpm dlx pnpm@11.13.0 --pm-on-fail=ignore audit --prod --audit-level=high
 
   compatibility-node20:
     name: Compatibility Node 20
