@@ -589,7 +589,7 @@ content; only the sandbox does.
   bytes are retained for at least 24 hours. `skill_run_attachment_uploads` reserves each deterministic
   key before S3 I/O; prompt commits consume the reservation under row lock, while the age-gated worker
   sweep holds that same lock through S3 deletion. A concurrent retry therefore waits and recreates
-  bytes after cleanup instead of losing a committed file. The sweep persists its S3 page cursor so
+  bytes after cleanup instead of losing a committed file. The running sweeper carries its S3 page cursor so
   referenced early pages cannot starve later orphans. Multipart follow-ups also run an
   ownership/status/quota/protocol preflight before uploading bytes.
 - Migration `0034_skill_runs.sql` creates these tables and forces creator-only RLS on runs,
