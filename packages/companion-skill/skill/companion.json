@@ -1,7 +1,7 @@
 {
   "$schema": "https://thecompanion.sh/schemas/companion-manifest.v2.schema.json",
   "name": "companion",
-  "version": "1.21.0",
+  "version": "1.21.1",
   "title": "Companion",
   "description": "Manage local SKILL.md packages with Companion: bootstrap context, self-update first, validate, publish, update, resolve dependencies, track installs, and repair manifests.",
   "notes": "## What it does\n\nThe Companion skill gives your assistant one reliable workflow for local SKILL.md packages: validate, publish, update, organize, install, audit, and self-update.\n\n## Safety model\n\n- Reads only skill folders you point it at and Companion's own local state under ~/.companion.\n- Stores credentials in ~/.companion/credentials.json by workspace id and never prints tokens.\n- Confirms publishing or archival changes before mutating workspace skills.\n- Uses companion.json as the source of truth for package identity, version, env/secrets, dependencies, notes, commands, and changelog.\n\n## Local tracking\n\nCompanion records installed skills in ~/.companion/skills.lock.json under workspace-id keys so audits can compare local versions, checksums, and dependency snapshots against the workspace registry without storing tokens. Installs fan out into every tool the user works with (Claude Code, Codex, OpenCode, …); each record's targets[] array tracks the per-tool and per-project install locations, with project-scope installs kept in a per-project <repo>/.companion/skills.lock.json.",
@@ -24,6 +24,15 @@
       "evals/evals.json"
     ],
     "changelog": [
+      {
+        "version": "1.21.1",
+        "date": "2026-07-15",
+        "changes": [
+          "Documents token-readable GET /skills/{slug} metadata for the official installer.",
+          "Requires skills:read for canonical skill detail while preserving personal-skill privacy and workspace isolation.",
+          "Restores automatic installs for already-distributed Companion 1.21.0 clients without changing install_skill.py."
+        ]
+      },
       {
         "version": "1.21.0",
         "date": "2026-07-13",

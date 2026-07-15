@@ -44,7 +44,7 @@ describe("companion skill package + row", () => {
     const pkg = await getCompanionSkillPackage();
     expect(pkg.key).toBe("companion");
     expect(pkg.checksum).toMatch(/^sha256:[0-9a-f]{64}$/);
-    expect(pkg.version).toBe("1.21.0");
+    expect(pkg.version).toBe("1.21.1");
     expect(pkg.sizeBytes).toBeGreaterThan(0);
     expect(pkg.integrity.packageChecksum).toBe(pkg.checksum);
     expect(pkg.integrity.files["SKILL.md"]).toMatch(/^sha256:[0-9a-f]{64}$/);
@@ -115,9 +115,9 @@ describe("companion skill package + row", () => {
       desc: "Create or repair manifest v2 with identity, env/secrets, dependency ids, notes, commands, and changelog.",
     });
     const changelog = row.changes.join("\n");
-    expect(changelog).toContain("parity with signed-in users");
-    expect(changelog).toContain("create_secret.py --skill");
-    expect(changelog).toContain("Keeps plaintext out of arguments and output");
+    expect(changelog).toContain("token-readable GET /skills/{slug}");
+    expect(changelog).toContain("skills:read for canonical skill detail");
+    expect(changelog).toContain("already-distributed Companion 1.21.0 clients");
     const manifest = JSON.parse(await readFile(join(companionSkillDir(), "companion.json"), "utf8")) as {
       metadata?: { changelog?: Array<{ version?: string; changes?: string[] }> };
     };
@@ -193,6 +193,7 @@ describe("companion skill package + row", () => {
     expect(skillMd).toContain("After any successful publish or re-publish, include a skill link");
     expect(skillMd).toContain("Skill link: ${webBase}/s/{share_token}");
     expect(skillMd).toContain("GET /skills?lib=org");
+    expect(skillMd).toContain("`GET /skills/{slug}` is also token-readable with");
     expect(skillMd).toContain("GET /orgs/current/skill-naming-policy");
     expect(skillMd).toContain("returns `{ \"policy\": string | null }`. If");
     expect(skillMd).toContain("`policy` is a string, apply that convention");
@@ -217,6 +218,7 @@ describe("companion skill package + row", () => {
     expect(apiRef).toContain("POST /skills?scope=personal");
     expect(apiRef).toContain("GET /v1/schemas/companion-manifest.v2.schema.json");
     expect(apiRef).toContain("GET /skills?lib=mine");
+    expect(apiRef).toContain("| Get skill metadata | `GET /skills/{slug}` | `skills:read` |");
     expect(apiRef).toContain("GET /skills?installed=true");
     expect(apiRef).toContain("Read org skill naming policy");
     expect(apiRef).toContain("GET /v1/orgs/current/skill-naming-policy");
