@@ -265,6 +265,8 @@ export function RunLauncherDialog({
   const selectConfiguration = (id: string) => {
     setError(null);
     setConfirmDelete(false);
+    setNameMode(null);
+    setConfigName("");
     if (!id) {
       setSelectedConfigId(null);
       if (effectiveOptions) {
@@ -436,7 +438,6 @@ export function RunLauncherDialog({
       });
   };
 
-  const selectedModelOption = effectiveOptions?.models.find((option) => option.model.id === model) ?? null;
   const selectedSkillSecrets = effectiveOptions?.declared_secrets.flatMap((declaration) => {
     const selection = inputs.secrets.find((item) =>
       secretSelectionKey(item.skill_id, item.slot_id) === secretSelectionKey(declaration.skill_id, declaration.slot_id),
@@ -451,13 +452,6 @@ export function RunLauncherDialog({
         : "Secret unavailable",
     }];
   }) ?? [];
-  const providerCredentialExposure = selectedModelOption?.provider_credential_pin
-    ? {
-      envKey: selectedModelOption.provider_credential_pin.env_key,
-      skill: `${selectedModelOption.model.provider_name} model provider`,
-      name: `${selectedModelOption.provider_credential_pin.scope} provider key · v${selectedModelOption.provider_credential_pin.credential_version}`,
-    }
-    : null;
   const selectedVariables = effectiveOptions?.declared_variables.flatMap((declaration) => {
     const selection = inputs.variables.find((item) =>
       variableSelectionKey(item.skill_id, item.env_key) === variableSelectionKey(declaration.skill_id, declaration.env_key),
@@ -515,13 +509,21 @@ export function RunLauncherDialog({
                   </option>
                 ))}
               </select>
-              <button type="button" className="btn-sec" disabled={operationBusy} onClick={() => { setNameMode("save"); setConfigName(""); }}>Save as</button>
+              <div className="run-config__select-actions">
+                {selectedConfiguration && (
+                  <button type="button" className="btn-sec" disabled={operationBusy} onClick={() => { setNameMode("rename"); setConfigName(selectedConfiguration.name); }}>
+                    Rename
+                  </button>
+                )}
+                <button type="button" className="btn-sec" disabled={operationBusy} onClick={() => { setNameMode("save"); setConfigName(""); }}>
+                  {selectedConfiguration ? "Save as" : "Save configuration"}
+                </button>
+              </div>
             </div>
             {selectedConfiguration && (
               <div className="run-config__actions">
                 <button type="button" onClick={() => void updateConfiguration("contents")} disabled={operationBusy || !modified}>Update</button>
                 {!selectedConfiguration.is_default && <button type="button" onClick={() => void updateConfiguration("default")} disabled={operationBusy}>Set as default</button>}
-                <button type="button" disabled={operationBusy} onClick={() => { setNameMode("rename"); setConfigName(selectedConfiguration.name); }}>Rename</button>
                 <button type="button" className={confirmDelete ? "is-danger" : ""} onClick={() => void removeConfiguration()} disabled={operationBusy}>
                   {confirmDelete ? "Confirm delete" : "Delete"}
                 </button>
@@ -613,7 +615,7 @@ export function RunLauncherDialog({
                   <p>Only manifest-declared inputs can be injected. Non-secret variables remain visible in your private configuration and run history.</p>
                 </div>
                 <span>
-                  {selectedSkillSecrets.length + selectedVariables.length + Number(!!providerCredentialExposure)} exposed
+                  {selectedSkillSecrets.length + selectedVariables.length} exposed
                 </span>
               </div>
               {groups.map((group) => (
@@ -683,28 +685,19 @@ export function RunLauncherDialog({
             </section>
           )}
 
-          <section className="run-exposure" aria-labelledby="run-exposure-title">
-            <div className="run-exposure__head">
-              <Icon name="shield" size={14} />
-              <h4 id="run-exposure-title">Credentials exposed to sandbox code</h4>
-            </div>
-            {selectedSkillSecrets.length + selectedVariables.length + Number(!!providerCredentialExposure) === 0 ? (
-              <p>No credentials or variables selected.</p>
-            ) : (
+          {selectedSkillSecrets.length + selectedVariables.length > 0 && (
+            <section className="run-exposure" aria-labelledby="run-exposure-title">
+              <div className="run-exposure__head">
+                <Icon name="shield" size={14} />
+                <h4 id="run-exposure-title">Credentials exposed to sandbox code</h4>
+              </div>
               <ul>
-                {providerCredentialExposure && (
-                  <li key={`provider:${providerCredentialExposure.envKey}`}>
-                    <code>{providerCredentialExposure.envKey}</code>
-                    <span>{providerCredentialExposure.name}</span>
-                    <small>{providerCredentialExposure.skill} · separate store</small>
-                  </li>
-                )}
                 {selectedSkillSecrets.map((item) => <li key={`${item.skill}:${item.envKey}`}><code>{item.envKey}</code><span>{item.name}</span><small>{item.skill}</small></li>)}
                 {selectedVariables.map((item) => <li key={`${item.skill}:${item.envKey}`}><code>{item.envKey}</code><span>Visible value</span><small>{item.skill}</small></li>)}
               </ul>
-            )}
-            <p>Sandboxed skill code can read every selected credential. Companion redacts literal values from its own logs, events, errors and transcript, but cannot prevent a malicious skill from encoding or exfiltrating them.</p>
-          </section>
+              <p>Sandboxed skill code can read every selected credential. Companion redacts literal values from its own logs, events, errors and transcript, but cannot prevent a malicious skill from encoding or exfiltrating them.</p>
+            </section>
+          )}
 
           {blockers.length > 0 && (
             <ul className="run-launcher__blockers" id="run-launch-blockers" role="alert">

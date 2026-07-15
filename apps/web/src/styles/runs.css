@@ -165,6 +165,7 @@
 .run-config__modified { padding: 2px 6px; border: 1px solid var(--color-warn-line); border-radius: var(--radius-sm); background: var(--color-warn-tint); color: var(--color-warn); font-size: 10px; }
 .run-config__version { margin-inline-start: auto; color: var(--color-faint); font: 10px/1.4 var(--font-mono); }
 .run-config__select-row select { flex: 1; min-width: 0; }
+.run-config__select-actions { flex: none; display: flex; align-items: center; gap: 8px; }
 .run-config__actions { flex-wrap: wrap; }
 .run-config__actions button { min-height: 28px; padding: 0 8px; border: 0; border-radius: var(--radius-sm); background: none; color: var(--color-muted); font: 11px/1 var(--font-ui); cursor: pointer; }
 .run-config__actions button:hover { background: var(--color-surface-raised); color: var(--color-fg); }
@@ -302,6 +303,8 @@
   .run-launcher .og-dialog__foot .og-spacer { display: none; }
   .run-launcher .og-dialog__foot .btn-primary { margin-inline-start: auto; }
   .run-config__select-row, .vault-field__controls, .artifact-secret-bind { align-items: stretch; flex-direction: column; }
+  .run-config__select-row select, .run-config__select-actions > button, .run-config__actions > button { min-height: 44px; }
+  .run-config__select-actions > button { flex: 1; }
   .vault-field__create-button { align-self: flex-start; }
   .vault-create { grid-template-columns: 1fr; }
   .vault-create__meta { grid-column: 1; }
