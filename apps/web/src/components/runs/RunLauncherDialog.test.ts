@@ -112,8 +112,7 @@ function button(container: HTMLElement, text: string): HTMLButtonElement {
   return match;
 }
 
-async function mount(options: RunOptions): Promise<HTMLElement> {
-  queryMocks.fetchRunOptions.mockResolvedValue(options);
+async function renderLauncher(): Promise<HTMLElement> {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
@@ -131,6 +130,11 @@ async function mount(options: RunOptions): Promise<HTMLElement> {
   return container;
 }
 
+async function mount(options: RunOptions): Promise<HTMLElement> {
+  queryMocks.fetchRunOptions.mockResolvedValue(options);
+  return renderLauncher();
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   queryMocks.startRunPrewarm.mockResolvedValue(null);
@@ -142,6 +146,21 @@ afterEach(() => {
 });
 
 describe("RunLauncherDialog", () => {
+  it("keeps Add files visible and disabled when the runtime or options are unavailable", async () => {
+    const unavailable = runOptions();
+    unavailable.runtime = { available: false, message: "RunSkill is unavailable." };
+    const unavailableContainer = await mount(unavailable);
+
+    expect(button(unavailableContainer, "Add files").disabled).toBe(true);
+
+    act(() => roots.pop()?.unmount());
+    unavailableContainer.remove();
+    queryMocks.fetchRunOptions.mockRejectedValue(new Error("Could not load run options."));
+    const failedContainer = await renderLauncher();
+
+    expect(button(failedContainer, "Add files").disabled).toBe(true);
+  });
+
   it("abandons a secretless prewarm when the launcher unmounts", async () => {
     queryMocks.startRunPrewarm.mockResolvedValue({
       id: "88888888-8888-4888-8888-888888888888",
@@ -314,5 +333,26 @@ describe("RunLauncherDialog", () => {
       "incident-summary",
       expect.objectContaining({ prompt: "", files: [file] }),
     );
+  });
+
+  it("presents a labeled attachment action and accepts dropped files", async () => {
+    const container = await mount(runOptions());
+    const addFiles = button(container, "Add files");
+    const dropzone = container.querySelector(".composer__box--launch")!;
+    const file = new File(["brief"], "brief.pdf", { type: "application/pdf" });
+    const dataTransfer = { files: [file], types: ["Files"], dropEffect: "none" };
+    const dragEnter = new Event("dragenter", { bubbles: true, cancelable: true });
+    Object.defineProperty(dragEnter, "dataTransfer", { configurable: true, value: dataTransfer });
+    const drop = new Event("drop", { bubbles: true, cancelable: true });
+    Object.defineProperty(drop, "dataTransfer", { configurable: true, value: dataTransfer });
+
+    expect(addFiles.disabled).toBe(false);
+    await act(async () => dropzone.dispatchEvent(dragEnter));
+    expect(container.textContent).toContain("Drop files here");
+    await act(async () => dropzone.dispatchEvent(drop));
+
+    expect(drop.defaultPrevented).toBe(true);
+    expect(container.textContent).toContain("brief.pdf");
+    expect(button(container, "Run").disabled).toBe(false);
   });
 });

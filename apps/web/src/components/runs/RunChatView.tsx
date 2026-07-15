@@ -3,9 +3,7 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import {
-  RUN_ATTACHMENT_MAX_BYTES,
   RUN_ATTACHMENT_MAX_FILES,
-  RUN_ATTACHMENT_MAX_TOTAL_BYTES,
   type RunPhase,
   type SkillRunAttachmentRow,
   type SkillRunDetail,
@@ -17,12 +15,15 @@ import { ChatMarkdown } from "./chatMarkdown";
 import { chatReducer, initChatState, openRunStream, type ChatItem } from "./chatStream";
 import { toolIcon } from "./derive";
 import { runInputsFromSnapshot, type RunLauncherDraft } from "./launcherState";
+import { RunAttachmentButton } from "./RunAttachmentButton";
+import { appendRunAttachmentFiles } from "./runAttachmentDraft";
 import {
   canReactivateRun,
   canUseRunComposer,
   isStaleRunDetail,
   shouldRestartPollingAfterPromptFailure,
 } from "./reactivation";
+import { useRunFileDrop } from "./useRunFileDrop";
 
 /**
  * The run surface: one skill run's live chat (while the sandbox lives) or read-only transcript
@@ -355,7 +356,6 @@ export function RunChatView({
   const [promptPending, setPromptPending] = useState(false);
   const [streamReady, setStreamReady] = useState(false);
   const [files, setFiles] = useState<File[]>([]);
-  const fileInputRef = useRef<HTMLInputElement>(null);
   const promptSendingRef = useRef(false);
   const promptAttemptRef = useRef<{
     text: string;
@@ -638,7 +638,6 @@ export function RunChatView({
         dispatch({ kind: "send" });
         setText("");
         setFiles([]);
-        if (fileInputRef.current) fileInputRef.current.value = "";
         promptAttemptRef.current = null;
         setPromptError(null);
         if (response.reactivated) {
@@ -687,33 +686,18 @@ export function RunChatView({
 
   const addFiles = (incoming: FileList | null) => {
     if (!incoming) return;
-    setPromptError(null);
     promptAttemptRef.current = null;
-    const next = [...files];
     const persistedBytes = run?.attachments.reduce((sum, attachment) => sum + attachment.byte_size, 0) ?? 0;
-    for (const file of Array.from(incoming)) {
-      if (next.length >= RUN_ATTACHMENT_MAX_FILES) {
-        setPromptError(`You can attach at most ${RUN_ATTACHMENT_MAX_FILES} files per message.`);
-        break;
-      }
-      if (file.size === 0) {
-        setPromptError(`${file.name} is empty.`);
-        continue;
-      }
-      if (file.size > RUN_ATTACHMENT_MAX_BYTES) {
-        setPromptError(`${file.name} is larger than 10 MB.`);
-        continue;
-      }
-      const draftBytes = next.reduce((sum, candidate) => sum + candidate.size, 0);
-      if (persistedBytes + draftBytes + file.size > RUN_ATTACHMENT_MAX_TOTAL_BYTES) {
-        setPromptError("This run can store at most 100 MB of attachments.");
-        continue;
-      }
-      next.push(file);
-    }
-    setFiles(next);
-    if (fileInputRef.current) fileInputRef.current.value = "";
+    const next = appendRunAttachmentFiles({ files, incoming, persistedBytes });
+    setPromptError(next.error);
+    setFiles(next.files);
   };
+
+  const attachmentDisabled = composerDisabled || files.length >= RUN_ATTACHMENT_MAX_FILES;
+  const { dragOver, dropProps } = useRunFileDrop<HTMLDivElement>({
+    disabled: attachmentDisabled,
+    onFiles: addFiles,
+  });
 
   const rerun = () => {
     if (!run) return;
@@ -1004,7 +988,11 @@ export function RunChatView({
             )}
           </div>
 
-          <div style={{ flex: "none", padding: "12px 16px 14px", borderTop: "1px solid var(--color-line)", background: "var(--color-surface)" }}>
+          <div
+            className="run-chat__composer"
+            style={{ flex: "none", padding: "12px 16px 14px", borderTop: "1px solid var(--color-line)", background: "var(--color-surface)" }}
+            {...dropProps}
+          >
             {files.length > 0 && (
               <div className="launch-files run-chat__draft-files">
                 {files.map((file, index) => (
@@ -1029,8 +1017,14 @@ export function RunChatView({
                 ))}
               </div>
             )}
+            <div className="run-attachment-toolbar run-attachment-toolbar--chat">
+              <RunAttachmentButton disabled={attachmentDisabled} onFiles={addFiles} />
+              <span className={`run-attachment-hint${dragOver ? " is-active" : ""}`} aria-live="polite">
+                {dragOver ? "Drop files here" : "Up to 5 files · 10 MB each · 100 MB per run"}
+              </span>
+            </div>
             <div
-              className="run-chat__composer-box"
+              className={`run-chat__composer-box${dragOver ? " is-dragover" : ""}`}
               style={{
                 display: "flex",
                 alignItems: "center",
@@ -1042,25 +1036,6 @@ export function RunChatView({
                 opacity: status === "running" || terminalCanReactivate ? 1 : 0.6,
               }}
             >
-              <button
-                type="button"
-                className="composer__attach"
-                title="Attach files"
-                aria-label="Attach files"
-                disabled={composerDisabled || files.length >= RUN_ATTACHMENT_MAX_FILES}
-                onClick={() => fileInputRef.current?.click()}
-              >
-                <Icon name="paperclip" size={14} />
-              </button>
-              <input
-                ref={fileInputRef}
-                type="file"
-                multiple
-                hidden
-                aria-label="Attach files"
-                disabled={composerDisabled}
-                onChange={(event) => addFiles(event.target.files)}
-              />
               <label className="sr-only" htmlFor="run-follow-up">Send a follow-up message</label>
               <input
                 id="run-follow-up"
@@ -1115,8 +1090,8 @@ export function RunChatView({
             {promptError && <p className="run-chat__prompt-error" id="run-follow-up-error" role="alert">{promptError}</p>}
             <div style={{ marginTop: 7, fontSize: 11, color: "var(--color-faint)", textAlign: "center" }}>
               {terminalCanReactivate
-                ? "Attach up to 5 files (10 MB each) and send a message to resume this session."
-                : "Up to 5 files per message, 10 MB each and 100 MB per run. This sandbox freezes after a few minutes of inactivity."}
+                ? "Sending a message resumes this session."
+                : "This sandbox freezes after a few minutes of inactivity."}
             </div>
           </div>
         </div>

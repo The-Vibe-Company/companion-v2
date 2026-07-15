@@ -2,13 +2,14 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import type {
-  RunConfiguration,
-  RunDeclaredSecret,
-  RunDeclaredVariable,
-  RunInputSelection,
-  RunOptions,
-  SkillRunDetail,
+import {
+  RUN_ATTACHMENT_MAX_FILES,
+  type RunConfiguration,
+  type RunDeclaredSecret,
+  type RunDeclaredVariable,
+  type RunInputSelection,
+  type RunOptions,
+  type SkillRunDetail,
 } from "@companion/contracts";
 import { Icon } from "../Icon";
 import { Dialog } from "../org/primitives";
@@ -38,9 +39,9 @@ import {
   variableSelectionKey,
 } from "./launcherState";
 import { ModelSelect } from "./ModelSelect";
-
-const MAX_FILES = 5;
-const MAX_FILE_BYTES = 10 * 1024 * 1024;
+import { RunAttachmentButton } from "./RunAttachmentButton";
+import { appendRunAttachmentFiles } from "./runAttachmentDraft";
+import { useRunFileDrop } from "./useRunFileDrop";
 
 function formatBytes(bytes: number): string {
   if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
@@ -115,7 +116,6 @@ export function RunLauncherDialog({
   const prewarmIdRef = useRef<string | null>(null);
   const prewarmStartRef = useRef<Promise<unknown> | null>(null);
   const prewarmAdoptedRef = useRef(false);
-  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const abandonPrewarm = () => {
     const id = prewarmIdRef.current;
@@ -422,26 +422,17 @@ export function RunLauncherDialog({
 
   const addFiles = (incoming: FileList | File[] | null) => {
     if (!incoming) return;
-    setError(null);
-    const next = [...files];
-    for (const file of Array.from(incoming)) {
-      if (next.length >= MAX_FILES) {
-        setError(`You can attach at most ${MAX_FILES} files.`);
-        break;
-      }
-      if (file.size === 0) {
-        setError(`${file.name} is empty.`);
-        continue;
-      }
-      if (file.size > MAX_FILE_BYTES) {
-        setError(`${file.name} is larger than 10 MB.`);
-        continue;
-      }
-      next.push(file);
-    }
-    setFiles(next);
-    if (fileInputRef.current) fileInputRef.current.value = "";
+    const next = appendRunAttachmentFiles({ files, incoming });
+    setError(next.error);
+    setFiles(next.files);
   };
+
+  const composerUnavailable = !effectiveOptions || !effectiveOptions.runtime.available;
+  const attachmentDisabled = composerUnavailable || operationBusy || files.length >= RUN_ATTACHMENT_MAX_FILES;
+  const { dragOver, dropProps } = useRunFileDrop<HTMLDivElement>({
+    disabled: attachmentDisabled,
+    onFiles: addFiles,
+  });
 
   const launch = () => {
     if (!canLaunch || !effectiveOptions || submittingRef.current) return;
@@ -491,14 +482,6 @@ export function RunLauncherDialog({
         <ModelSelect options={effectiveOptions.models} model={model} onSelectModel={setModel} onManageModels={goManageModels} disabled={operationBusy} />
       ) : <span className="composer__hint">{loadError ? "Run options unavailable" : "Loading models…"}</span>}
       <span className="og-spacer" />
-      {files.length < MAX_FILES && (
-        <>
-          <button type="button" className="composer__attach" title="Attach files" aria-label="Attach files" disabled={operationBusy} onClick={() => fileInputRef.current?.click()}>
-            <Icon name="file" size={14} />
-          </button>
-          <input ref={fileInputRef} type="file" multiple hidden disabled={operationBusy} aria-label="Attach files" onChange={(event) => addFiles(event.target.files)} />
-        </>
-      )}
       <span className="composer__hint">⌘↵</span>
       <button type="button" className="btn-primary" onClick={launch} disabled={!canLaunch} aria-describedby={blockers.length ? "run-launch-blockers" : undefined}>
         {busy ? "Queueing…" : "Run"}
@@ -518,9 +501,8 @@ export function RunLauncherDialog({
         <div className="run-launcher__skeleton" aria-label="Loading run options">
           <span /><span /><span />
         </div>
-      ) : (
-        <>
-          <section className="run-config" aria-labelledby="run-config-label">
+      ) : effectiveOptions ? (
+        <section className="run-config" aria-labelledby="run-config-label">
             <div className="run-config__head">
               <label id="run-config-label" htmlFor="run-configuration">Configuration</label>
               {modified && <span className="run-config__modified">Modified</span>}
@@ -596,43 +578,55 @@ export function RunLauncherDialog({
                 {selectedConfiguration.issues.map((issue, index) => <li key={`${issue.code}-${index}`}>{issue.message}</li>)}
               </ul>
             ) : null}
-          </section>
+        </section>
+      ) : null}
 
-          <div className="composer__box composer__box--launch">
-            <label className="run-launcher__prompt-label" htmlFor="run-prompt">Prompt</label>
-            <textarea
-              id="run-prompt"
-              className="composer__input composer__input--launch"
-              value={prompt}
-              autoFocus
-              rows={4}
-              maxLength={8000}
-              disabled={busy}
-              placeholder={`What should ${slug} do? You can also attach files without a prompt.`}
-              onChange={(event) => setPrompt(event.target.value)}
-              onKeyDown={(event) => {
-                if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
-                  event.preventDefault();
-                  launch();
-                }
-              }}
-            />
-            {files.length > 0 && (
-              <div className="launch-files">
-                {files.map((file, index) => (
-                  <span className="launch-file" key={`${file.name}-${file.size}-${index}`}>
-                    <Icon name="file" size={12} />
-                    <span className="launch-file__name">{file.name}</span>
-                    <span className="launch-file__size">{formatBytes(file.size)}</span>
-                    <button type="button" className="launch-file__x" disabled={busy} aria-label={`Remove ${file.name}`} onClick={() => setFiles(files.filter((_, itemIndex) => itemIndex !== index))}>
-                      <Icon name="x" size={11} />
-                    </button>
-                  </span>
-                ))}
-              </div>
-            )}
+      <div
+        className={`composer__box composer__box--launch${dragOver ? " is-dragover" : ""}`}
+        {...dropProps}
+      >
+        <label className="run-launcher__prompt-label" htmlFor="run-prompt">Prompt</label>
+        <textarea
+          id="run-prompt"
+          className="composer__input composer__input--launch"
+          value={prompt}
+          autoFocus
+          rows={4}
+          maxLength={8000}
+          disabled={composerUnavailable || busy}
+          placeholder={`What should ${slug} do? You can also attach files without a prompt.`}
+          onChange={(event) => setPrompt(event.target.value)}
+          onKeyDown={(event) => {
+            if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+              event.preventDefault();
+              launch();
+            }
+          }}
+        />
+        {files.length > 0 && (
+          <div className="launch-files">
+            {files.map((file, index) => (
+              <span className="launch-file" key={`${file.name}-${file.size}-${index}`}>
+                <Icon name="file" size={12} />
+                <span className="launch-file__name">{file.name}</span>
+                <span className="launch-file__size">{formatBytes(file.size)}</span>
+                <button type="button" className="launch-file__x" disabled={busy} aria-label={`Remove ${file.name}`} onClick={() => setFiles(files.filter((_, itemIndex) => itemIndex !== index))}>
+                  <Icon name="x" size={11} />
+                </button>
+              </span>
+            ))}
           </div>
+        )}
+        <div className="run-attachment-toolbar">
+          <RunAttachmentButton disabled={attachmentDisabled} onFiles={addFiles} />
+          <span className={`run-attachment-hint${dragOver ? " is-active" : ""}`} aria-live="polite">
+            {dragOver ? "Drop files here" : "Up to 5 files · 10 MB each"}
+          </span>
+        </div>
+      </div>
 
+      {effectiveOptions && (
+        <>
           {groups.length > 0 && (
             <section className="run-inputs" aria-labelledby="run-inputs-title">
               <div className="run-inputs__intro">
