@@ -347,6 +347,42 @@ describe("chatReducer", () => {
     });
   });
 
+  it("maps migrated attachments onto legacy transcript users by prompt ordinal", () => {
+    const state = chatReducer(initChatState(), {
+      kind: "history",
+      resolveToolLabel,
+      attachments: [
+        {
+          id: "attachment-initial",
+          prompt_id: "00000000-0000-4000-8000-000000000001",
+          message_id: "msg-initial",
+          prompt_ordinal: 0,
+          file_name: "initial.pdf",
+          content_type: "application/pdf",
+          byte_size: 12,
+        },
+        {
+          id: "attachment-follow-up",
+          prompt_id: "00000000-0000-4000-8000-000000000002",
+          message_id: "msg-follow-up",
+          prompt_ordinal: 1,
+          file_name: "follow-up.txt",
+          content_type: "text/plain",
+          byte_size: 8,
+        },
+      ],
+      items: [
+        { kind: "user", text: "Initial legacy prompt" },
+        { kind: "assistant", text: "Initial answer" },
+        { kind: "user", text: "Legacy follow-up" },
+      ],
+    });
+
+    const users = state.items.filter((item) => item.kind === "user");
+    expect(users[0]).toMatchObject({ attachments: [expect.objectContaining({ file_name: "initial.pdf" })] });
+    expect(users[1]).toMatchObject({ attachments: [expect.objectContaining({ file_name: "follow-up.txt" })] });
+  });
+
   it("drives the working indicator from session.status events", () => {
     let state = initChatState();
     state = apply(state, { type: "status", state: "busy", attempt: null, message: null });

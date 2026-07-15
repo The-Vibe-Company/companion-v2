@@ -100,8 +100,9 @@ import {
   updateRunConfiguration,
   deleteRunConfiguration,
   createRun,
-  listReferencedRunAttachmentKeys,
   enqueueRunPrompt,
+  preflightRunPromptUpload,
+  reserveRunAttachmentUploads,
   requestRunCancellation,
   listRunEvents,
   listRuns,
@@ -240,7 +241,6 @@ import {
   runReadyFrame,
 } from "./runEvents";
 import {
-  cleanupUnreferencedRunAttachments,
   deterministicRunAttachmentId,
   putRunAttachmentOnce,
 } from "./runAttachments";
@@ -3068,7 +3068,6 @@ app.post(
 
       // Upload the bytes to object storage OUTSIDE any DB transaction (slow uploads must not hold a
       // pooled connection idle-in-transaction); createRun below persists metadata only.
-      const uploadedKeys: string[] = [];
       const attachments: Array<{ id: string; fileName: string; contentType: string; byteSize: number; storageKey: string }> = [];
       try {
         for (const file of files) {
@@ -3084,8 +3083,10 @@ app.post(
           });
           const key = runAttachmentKey({ orgId, attachmentId });
           const contentType = file.type || "application/octet-stream";
-          const stored = await putRunAttachmentOnce({ key, body: buf, contentType });
-          if (stored === "created") uploadedKeys.push(key);
+          await withTenantContext({ orgId, userId: actor.id }, (database) =>
+            reserveRunAttachmentUploads({ actor, orgId, storageKeys: [key], database }),
+          );
+          await putRunAttachmentOnce({ key, body: buf, contentType });
           attachments.push({
             id: attachmentId,
             fileName: sanitizeAttachmentName(file.name || `attachment-${attachments.length + 1}`),
@@ -3117,17 +3118,9 @@ app.post(
         );
         return c.json(detail, 201);
       } catch (e) {
-        // A createRun rejection can be ambiguous (for example, the transaction committed but its
-        // acknowledgement was lost). Query durable attachment rows in a fresh tenant transaction and
-        // delete only keys proven unreferenced. If that verification itself fails, retain the bytes.
-        await cleanupUnreferencedRunAttachments({
-          storageKeys: uploadedKeys,
-          findReferencedKeys: (storageKeys) =>
-            withTenantContext({ orgId, userId: actor.id }, (database) =>
-              listReferencedRunAttachmentKeys({ actor, orgId, storageKeys, database }),
-            ),
-          deleteObject: (key) => deleteSkillArchive({ key }),
-        });
+        // Never delete synchronously after an ambiguous or failed transaction: a concurrent retry
+        // can be committing the same deterministic object key but remain invisible to this request.
+        // Unreferenced objects are intentionally retained for a delayed orphan sweep.
         throw e;
       }
     } catch (error) {
@@ -3202,9 +3195,9 @@ app.post(
         }
       }
 
-      const uploadedKeys: string[] = [];
       const attachments: Array<{ id: string; fileName: string; contentType: string; byteSize: number; storageKey: string }> = [];
       try {
+        const attachmentBodies: Array<{ key: string; body: Buffer; contentType: string }> = [];
         for (const file of files) {
           if (!isRunUploadFile(file)) continue;
           const buf = Buffer.from(await file.arrayBuffer());
@@ -3219,8 +3212,7 @@ app.post(
             bytes: buf,
           });
           const key = runAttachmentKey({ orgId, attachmentId });
-          const stored = await putRunAttachmentOnce({ key, body: buf, contentType });
-          if (stored === "created") uploadedKeys.push(key);
+          attachmentBodies.push({ key, body: buf, contentType });
           attachments.push({
             id: attachmentId,
             fileName: sanitizeAttachmentName(file.name || `attachment-${attachments.length + 1}`),
@@ -3229,6 +3221,28 @@ app.post(
             storageKey: key,
           });
         }
+        if (attachments.length > 0) {
+          await withTenantContext({ orgId, userId: actor.id }, (database) =>
+            preflightRunPromptUpload({
+              actor,
+              orgId,
+              runId,
+              text,
+              attachments,
+              idempotencyKey: requestKey,
+              database,
+            }),
+          );
+          await withTenantContext({ orgId, userId: actor.id }, (database) =>
+            reserveRunAttachmentUploads({
+              actor,
+              orgId,
+              storageKeys: attachments.map((attachment) => attachment.storageKey),
+              database,
+            }),
+          );
+        }
+        for (const attachment of attachmentBodies) await putRunAttachmentOnce(attachment);
         const prompt = await withTenantContext({ orgId, userId: actor.id }, (database) =>
           enqueueRunPrompt({
             actor,
@@ -3247,14 +3261,8 @@ app.post(
           attachments: prompt.attachments,
         }, 202);
       } catch (error) {
-        await cleanupUnreferencedRunAttachments({
-          storageKeys: uploadedKeys,
-          findReferencedKeys: (storageKeys) =>
-            withTenantContext({ orgId, userId: actor.id }, (database) =>
-              listReferencedRunAttachmentKeys({ actor, orgId, storageKeys, database }),
-            ),
-          deleteObject: (key) => deleteSkillArchive({ key }),
-        });
+        // See the launch path above: deterministic keys make immediate cleanup race with a
+        // concurrent retry. Retain unreferenced bytes until a delayed orphan sweep can prove age.
         throw error;
       }
     } catch (error) {

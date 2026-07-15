@@ -1,5 +1,5 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { and, asc, desc, eq, inArray } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 import { db, schema, type Db } from "@companion/db";
 import {
   RUN_ATTACHMENT_MAX_BYTES,
@@ -132,7 +132,11 @@ export async function resolveRunRuntimeContext(
 
 export type RunRow = typeof schema.skillRuns.$inferSelect;
 type AttachmentRow = typeof schema.skillRunAttachments.$inferSelect;
-type AttachmentWithMessageRow = AttachmentRow & { messageId: string; promptOrdinal: number };
+type AttachmentWithMessageRow = Omit<AttachmentRow, "promptId"> & {
+  promptId: string;
+  messageId: string;
+  promptOrdinal: number;
+};
 
 export interface ResolvedRunSkill extends RunDependency {
   scope: "personal" | "org";
@@ -258,11 +262,111 @@ export function validateRunMessageAttachments(input: {
   }
 }
 
+/** Reserve deterministic S3 keys before upload so asynchronous cleanup can coordinate with retries. */
+export async function reserveRunAttachmentUploads(input: {
+  actor: ActorContext;
+  orgId: string;
+  storageKeys: string[];
+  database?: Db;
+}): Promise<void> {
+  if (input.storageKeys.length === 0) return;
+  const database = input.database ?? db;
+  await assertMember(database, input.actor, input.orgId);
+  const touchedAt = new Date();
+  for (const storageKey of [...new Set(input.storageKeys)]) {
+    await database.insert(schema.skillRunAttachmentUploads).values({
+      storageKey,
+      orgId: input.orgId,
+      creatorId: input.actor.id,
+      touchedAt,
+    }).onConflictDoUpdate({
+      target: schema.skillRunAttachmentUploads.storageKey,
+      set: { touchedAt },
+    });
+  }
+}
+
+export async function consumeRunAttachmentUploadReservations(input: {
+  database: Db;
+  actor: ActorContext;
+  orgId: string;
+  attachments: CreateRunAttachment[];
+}): Promise<void> {
+  if (input.attachments.length === 0) return;
+  const keys = input.attachments.map((attachment) => attachment.storageKey);
+  const reserved = await input.database
+    .update(schema.skillRunAttachmentUploads)
+    .set({ touchedAt: new Date() })
+    .where(and(
+      eq(schema.skillRunAttachmentUploads.orgId, input.orgId),
+      eq(schema.skillRunAttachmentUploads.creatorId, input.actor.id),
+      inArray(schema.skillRunAttachmentUploads.storageKey, keys),
+    ))
+    .returning({ storageKey: schema.skillRunAttachmentUploads.storageKey });
+  if (reserved.length !== new Set(keys).size) {
+    throw new RunValidationError("an attachment upload reservation is missing", "invalid_attachment");
+  }
+}
+
+export async function releaseRunAttachmentUploadReservations(input: {
+  database: Db;
+  actor: ActorContext;
+  orgId: string;
+  attachments: CreateRunAttachment[];
+}): Promise<void> {
+  if (input.attachments.length === 0) return;
+  await input.database.delete(schema.skillRunAttachmentUploads).where(and(
+    eq(schema.skillRunAttachmentUploads.orgId, input.orgId),
+    eq(schema.skillRunAttachmentUploads.creatorId, input.actor.id),
+    inArray(
+      schema.skillRunAttachmentUploads.storageKey,
+      input.attachments.map((attachment) => attachment.storageKey),
+    ),
+  ));
+}
+
 const PROMPT_EXCERPT_MAX = 140;
 
 function promptExcerpt(prompt: string): string {
   const flat = prompt.replace(/\s+/g, " ").trim();
   return flat.length > PROMPT_EXCERPT_MAX ? `${flat.slice(0, PROMPT_EXCERPT_MAX)}…` : flat;
+}
+
+/** Replace runtime-enriched user messages with durable raw text, including legacy snapshots. */
+export function normalizeRunTranscript(
+  items: RunChatHistoryItem[],
+  prompts: Array<{ messageId: string; userText: string; runtimePrompt?: string }>,
+): RunChatHistoryItem[] {
+  const promptByMessageId = new Map(prompts.map((prompt) => [prompt.messageId, prompt]));
+  const explicitlyMapped = new Set(
+    items.flatMap((item) => item.kind === "user" && item.message_id ? [item.message_id] : []),
+  );
+  const legacyPrompts = prompts.filter((prompt) => !explicitlyMapped.has(prompt.messageId));
+  const legacyUserCount = items.filter((item) => item.kind === "user" && !item.message_id).length;
+  // Transcript capping removes complete items from the front. If exact text matching is not
+  // possible (for example because an individual item was truncated), align the surviving legacy
+  // users with the tail of the durable prompt list rather than incorrectly starting at ordinal 0.
+  let legacyCursor = Math.max(0, legacyPrompts.length - legacyUserCount);
+  return items.map((item): RunChatHistoryItem => {
+    if (item.kind !== "user") return item;
+    let prompt = item.message_id ? promptByMessageId.get(item.message_id) : undefined;
+    if (!item.message_id) {
+      const exactIndex = legacyPrompts.findIndex((candidate, index) =>
+        index >= legacyCursor && (candidate.runtimePrompt === item.text || candidate.userText === item.text)
+      );
+      if (exactIndex >= 0) {
+        prompt = legacyPrompts[exactIndex];
+        legacyCursor = exactIndex + 1;
+      }
+      while (!prompt && legacyCursor < legacyPrompts.length) {
+        const candidate = legacyPrompts[legacyCursor++];
+        if (candidate) prompt = candidate;
+      }
+    }
+    return prompt
+      ? { kind: "user", text: prompt.userText, message_id: prompt.messageId }
+      : item;
+  });
 }
 
 export function capTranscript(items: RunChatHistoryItem[], maxBytes = 512 * 1024): RunChatHistoryItem[] {
@@ -949,7 +1053,8 @@ async function loadAttachments(database: Db, orgId: string, runId: string): Prom
       id: schema.skillRunAttachments.id,
       orgId: schema.skillRunAttachments.orgId,
       runId: schema.skillRunAttachments.runId,
-      promptId: schema.skillRunAttachments.promptId,
+      // The deferred compatibility trigger guarantees this is non-null for every committed row.
+      promptId: sql<string>`${schema.skillRunAttachments.promptId}`,
       fileName: schema.skillRunAttachments.fileName,
       contentType: schema.skillRunAttachments.contentType,
       byteSize: schema.skillRunAttachments.byteSize,
@@ -1152,14 +1257,26 @@ async function toDetail(
   skillSlug: string,
   attachments: AttachmentWithMessageRow[],
 ): Promise<SkillRunDetail> {
+  const [inputSnapshot, promptRows] = await Promise.all([
+    loadInputSnapshot(database, row),
+    database
+      .select({
+        messageId: schema.skillRunPrompts.messageId,
+        userText: schema.skillRunPrompts.userText,
+        runtimePrompt: schema.skillRunPrompts.prompt,
+      })
+      .from(schema.skillRunPrompts)
+      .where(and(eq(schema.skillRunPrompts.orgId, row.orgId), eq(schema.skillRunPrompts.runId, row.id)))
+      .orderBy(asc(schema.skillRunPrompts.ordinal)),
+  ]);
   return {
     ...toRunRow(row, skillSlug),
     prompt: row.prompt,
-    transcript: (row.transcript ?? []) as RunChatHistoryItem[],
+    transcript: normalizeRunTranscript((row.transcript ?? []) as RunChatHistoryItem[], promptRows),
     warnings: row.warnings ?? [],
     transcript_event_sequence: row.transcriptEventSequence,
     attachments: attachments.map(toAttachmentRow),
-    input_snapshot: await loadInputSnapshot(database, row),
+    input_snapshot: inputSnapshot,
   };
 }
 
@@ -1267,7 +1384,10 @@ async function createRunInTransaction(input: {
     idempotencyKey: input.idempotencyKey,
     payloadHash: input.payloadHash,
   });
-  if (existing) return existing;
+  if (existing) {
+    await releaseRunAttachmentUploadReservations(input);
+    return existing;
+  }
 
   const closure = await resolveRunDependencyClosure({
     actor: input.actor,
@@ -1472,6 +1592,12 @@ async function createRunInTransaction(input: {
   const initialPrompt = initialPrompts[0];
   if (!initialPrompt) throw new Error("initial prompt insert returned no row");
   if (input.attachments.length > 0) {
+    await consumeRunAttachmentUploadReservations({
+      database: input.database,
+      actor: input.actor,
+      orgId: input.orgId,
+      attachments: input.attachments,
+    });
     await input.database.insert(schema.skillRunAttachments).values(
       input.attachments.map((attachment) => ({
         id: attachment.id,
@@ -1483,6 +1609,9 @@ async function createRunInTransaction(input: {
         byteSize: attachment.byteSize,
         storageKey: attachment.storageKey,
       })),
+    );
+    await input.database.delete(schema.skillRunAttachmentUploads).where(
+      inArray(schema.skillRunAttachmentUploads.storageKey, input.attachments.map((attachment) => attachment.storageKey)),
     );
   }
   await input.database.insert(schema.skillRunJobs).values({
@@ -1557,7 +1686,10 @@ export async function createRun(input: {
     idempotencyKey: input.idempotencyKey,
     payloadHash,
   });
-  if (exactReplay) return exactReplay;
+  if (exactReplay) {
+    await releaseRunAttachmentUploadReservations({ ...input, database });
+    return exactReplay;
+  }
   const rootSkillId = await findRunRootSkillId({ database, orgId: input.orgId, slug: input.slug });
   if (rootSkillId) {
     const existing = await loadCommittedIdempotentRun({
@@ -1568,7 +1700,10 @@ export async function createRun(input: {
       idempotencyKey: input.idempotencyKey,
       payloadHash,
     });
-    if (existing) return existing;
+    if (existing) {
+      await releaseRunAttachmentUploadReservations({ ...input, database });
+      return existing;
+    }
   }
   const ctx = await resolveRunRuntimeContext(input.ctx, database);
   if (ctx.runtimeAvailable === false || !ctx.goldenSnapshotId) {
@@ -1638,41 +1773,6 @@ export async function getRun(input: {
     loadAttachments(database, input.orgId, row.id),
   ]);
   return toDetail(database, row, slug, attachments);
-}
-
-/**
- * Durable cleanup guard for API-uploaded objects. Attachment keys are derived from org + actor +
- * request payload, and this query additionally proves the reference belongs to one of that actor's
- * creator-only runs before the API is allowed to consider an object orphaned.
- */
-export async function listReferencedRunAttachmentKeys(input: {
-  actor: ActorContext;
-  orgId: string;
-  storageKeys: string[];
-  database?: Db;
-}): Promise<string[]> {
-  if (input.storageKeys.length === 0) return [];
-  const database = input.database ?? db;
-  await assertMember(database, input.actor, input.orgId);
-  const storageKeys = [...new Set(input.storageKeys)];
-  const rows = await database
-    .select({ storageKey: schema.skillRunAttachments.storageKey })
-    .from(schema.skillRunAttachments)
-    .innerJoin(
-      schema.skillRuns,
-      and(
-        eq(schema.skillRuns.orgId, schema.skillRunAttachments.orgId),
-        eq(schema.skillRuns.id, schema.skillRunAttachments.runId),
-      ),
-    )
-    .where(
-      and(
-        eq(schema.skillRunAttachments.orgId, input.orgId),
-        eq(schema.skillRuns.creatorId, input.actor.id),
-        inArray(schema.skillRunAttachments.storageKey, storageKeys),
-      ),
-    );
-  return rows.map((row) => row.storageKey);
 }
 
 export async function getRunAttachment(input: {

@@ -4,6 +4,7 @@ import { RunBusyError, RunValidationError } from "@companion/core/services";
 import {
   claimedRunLeaseDeadline,
   createSandboxTimeoutExtender,
+  dispatchPromptAfterAttachmentMount,
   isTransientRunFailure,
   runFailureEvent,
   sandboxTimeoutExtensionSchedule,
@@ -49,6 +50,40 @@ describe("run worker failure events", () => {
       .toBeNull();
     expect(runFailureEvent("lost_lease", { attempt: 1, code: "runtime_error", message: "Unavailable" }))
       .toBeNull();
+  });
+});
+
+describe("follow-up attachment dispatch ordering", () => {
+  it("mounts files before inspecting and sending the deterministic message", async () => {
+    const calls: string[] = [];
+    await dispatchPromptAfterAttachmentMount({
+      mountAttachments: async () => { calls.push("mount"); },
+      getMessageState: async () => { calls.push("inspect"); return "missing"; },
+      sendPrompt: async () => { calls.push("send"); },
+    });
+    expect(calls).toEqual(["mount", "inspect", "send"]);
+  });
+
+  it("never inspects or sends a prompt when attachment mounting fails", async () => {
+    const getMessageState = vi.fn(async () => "missing" as const);
+    const sendPrompt = vi.fn(async () => undefined);
+    await expect(dispatchPromptAfterAttachmentMount({
+      mountAttachments: async () => { throw new Error("storage unavailable"); },
+      getMessageState,
+      sendPrompt,
+    })).rejects.toThrow("storage unavailable");
+    expect(getMessageState).not.toHaveBeenCalled();
+    expect(sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it("rewrites safely after a retry without resending an existing message", async () => {
+    const calls: string[] = [];
+    await dispatchPromptAfterAttachmentMount({
+      mountAttachments: async () => { calls.push("mount"); },
+      getMessageState: async () => { calls.push("inspect"); return "completed"; },
+      sendPrompt: async () => { calls.push("send"); },
+    });
+    expect(calls).toEqual(["mount", "inspect"]);
   });
 });
 

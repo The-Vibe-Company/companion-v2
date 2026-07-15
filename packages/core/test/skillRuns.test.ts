@@ -19,6 +19,7 @@ import {
   loadRunDeclarations,
   materializeRunWorkspace,
   materializeRunAttachmentFiles,
+  normalizeRunTranscript,
   resolveRunDependencyClosure,
   sandboxNameForRun,
   validateRunInputSelection,
@@ -481,6 +482,48 @@ describe("workspace and durable helper invariants", () => {
     expect(() => composeRunPrompt({ prompt: "", skillSlug: "root-skill", attachments: [] })).toThrowError(
       expect.objectContaining({ code: "empty_prompt" }),
     );
+  });
+
+  it("restores raw user text and message ids in frozen legacy transcripts", () => {
+    expect(normalizeRunTranscript(
+      [
+        { kind: "user", text: "runtime instructions with ./attachments/private-path" },
+        { kind: "assistant", text: "done" },
+      ],
+      [{ messageId: "msg-initial", userText: "Summarize the document" }],
+    )).toEqual([
+      { kind: "user", text: "Summarize the document", message_id: "msg-initial" },
+      { kind: "assistant", text: "done" },
+    ]);
+  });
+
+  it("aligns front-capped legacy transcript users with the surviving prompt tail", () => {
+    expect(normalizeRunTranscript(
+      [
+        { kind: "user", text: "runtime follow-up two" },
+        { kind: "assistant", text: "second answer" },
+        { kind: "user", text: "runtime follow-up three" },
+      ],
+      [
+        { messageId: "msg-initial", userText: "Initial", runtimePrompt: "runtime initial" },
+        { messageId: "msg-two", userText: "Follow-up two", runtimePrompt: "runtime follow-up two" },
+        { messageId: "msg-three", userText: "Follow-up three", runtimePrompt: "runtime follow-up three" },
+      ],
+    )).toEqual([
+      { kind: "user", text: "Follow-up two", message_id: "msg-two" },
+      { kind: "assistant", text: "second answer" },
+      { kind: "user", text: "Follow-up three", message_id: "msg-three" },
+    ]);
+  });
+
+  it("does not match repeated surviving text to a dropped prompt", () => {
+    expect(normalizeRunTranscript(
+      [{ kind: "user", text: "continue" }],
+      [
+        { messageId: "msg-dropped", userText: "continue", runtimePrompt: "continue" },
+        { messageId: "msg-surviving", userText: "continue", runtimePrompt: "continue" },
+      ],
+    )).toEqual([{ kind: "user", text: "continue", message_id: "msg-surviving" }]);
   });
 
   it("enforces per-message and cumulative attachment limits in the service layer", () => {

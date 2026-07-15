@@ -18,8 +18,11 @@ import {
   attachmentWorkspacePath,
   capTranscript,
   composeRunPrompt,
+  consumeRunAttachmentUploadReservations,
   deterministicRunMessageId,
   hashRunPayload,
+  normalizeRunTranscript,
+  releaseRunAttachmentUploadReservations,
   validateRunMessageAttachments,
   type CreateRunAttachment,
 } from "./skillRuns";
@@ -89,7 +92,7 @@ export async function heartbeatRunWorker(input: {
   const ttlSeconds = input.ttlSeconds ?? 15;
   if (ttlSeconds < 5 || ttlSeconds > 300) throw new Error("invalid run worker heartbeat ttl");
   await database.execute(sql`
-    select companion_heartbeat_skill_run_worker(${input.workerId}, ${ttlSeconds})
+    select companion_heartbeat_skill_run_worker(${input.workerId}, ${ttlSeconds}, 1)
   `);
 }
 
@@ -105,6 +108,24 @@ export async function removeRunWorkerHeartbeat(input: {
 export async function isRunWorkerReady(input: { database?: Db } = {}): Promise<boolean> {
   const database = input.database ?? db;
   const result = await database.execute(sql`select companion_skill_run_worker_ready() as ready`);
+  const row = Array.from(result as unknown as Iterable<{ ready: boolean }>)[0];
+  return row?.ready ?? false;
+}
+
+/** Follow-up uploads are admitted only when this run is leased by a protocol-capable worker. */
+async function isRunAttachmentWorkerReady(input: {
+  orgId: string;
+  runId: string;
+  creatorId: string;
+  database: Db;
+}): Promise<boolean> {
+  const result = await input.database.execute(sql`
+    select companion_skill_run_attachment_worker_ready(
+      ${input.orgId}::uuid,
+      ${input.runId}::uuid,
+      ${input.creatorId}
+    ) as ready
+  `);
   const row = Array.from(result as unknown as Iterable<{ ready: boolean }>)[0];
   return row?.ready ?? false;
 }
@@ -205,6 +226,28 @@ export async function claimRunJobs(input: {
     ) as claimed
   `);
   return Array.from(result as unknown as Iterable<RawClaimedRunJob>, parseClaimedRunJob);
+}
+
+/** Hold the reservation row lock across S3 deletion so a retry must wait and then recreate bytes. */
+export async function deleteRunAttachmentOrphanIfReserved(input: {
+  storageKey: string;
+  before: Date;
+  deleteObject: () => Promise<void>;
+  database?: Db;
+}): Promise<boolean> {
+  const database = input.database ?? db;
+  return database.transaction(async (transaction) => {
+    const locked = await (transaction as unknown as Db).execute(sql`
+      select companion_lock_skill_run_attachment_orphan(${input.storageKey}, ${input.before}) as locked
+    `);
+    const row = Array.from(locked as unknown as Iterable<{ locked: boolean }>)[0];
+    if (row?.locked !== true) return false;
+    await input.deleteObject();
+    await (transaction as unknown as Db).execute(sql`
+      select companion_complete_skill_run_attachment_orphan(${input.storageKey})
+    `);
+    return true;
+  });
 }
 
 /**
@@ -620,6 +663,12 @@ export async function enqueueRunPrompt(input: {
             eq(schema.skillRunAttachments.promptId, existing[0].id),
           ),
         );
+      await releaseRunAttachmentUploadReservations({
+        database: transaction,
+        actor: input.actor,
+        orgId: input.orgId,
+        attachments,
+      });
       return {
         id: existing[0].id,
         messageId: existing[0].messageId,
@@ -653,6 +702,17 @@ export async function enqueueRunPrompt(input: {
         ),
       );
     if (active[0]) throw new RunBusyError("another prompt is already pending", "prompt_already_pending");
+    if (attachments.length > 0 && !(await isRunAttachmentWorkerReady({
+      orgId: input.orgId,
+      runId: input.runId,
+      creatorId: input.actor.id,
+      database: transaction,
+    }))) {
+      throw new RunBusyError(
+        "this run's worker cannot accept attachments yet",
+        "attachment_worker_unavailable",
+      );
+    }
     const existingAttachmentBytes = await transaction
       .select({ bytes: sql<number>`coalesce(sum(${schema.skillRunAttachments.byteSize}), 0)` })
       .from(schema.skillRunAttachments)
@@ -709,6 +769,12 @@ export async function enqueueRunPrompt(input: {
     const row = inserted[0];
     if (!row) throw new Error("prompt insert returned no row");
     if (attachments.length > 0) {
+      await consumeRunAttachmentUploadReservations({
+        database: transaction,
+        actor: input.actor,
+        orgId: input.orgId,
+        attachments,
+      });
       await transaction.insert(schema.skillRunAttachments).values(
         attachments.map((attachment) => ({
           id: attachment.id,
@@ -720,6 +786,9 @@ export async function enqueueRunPrompt(input: {
           byteSize: attachment.byteSize,
           storageKey: attachment.storageKey,
         })),
+      );
+      await transaction.delete(schema.skillRunAttachmentUploads).where(
+        inArray(schema.skillRunAttachmentUploads.storageKey, attachments.map((attachment) => attachment.storageKey)),
       );
     }
     await transaction
@@ -755,6 +824,60 @@ export async function enqueueRunPrompt(input: {
     }
     throw error;
   }
+}
+
+/** Cheap, side-effect-free rejection pass before the API writes multipart bytes to object storage. */
+export async function preflightRunPromptUpload(input: {
+  actor: ActorContext;
+  orgId: string;
+  runId: string;
+  text: string;
+  idempotencyKey: string;
+  attachments: CreateRunAttachment[];
+  database?: Db;
+}): Promise<void> {
+  const database = input.database ?? db;
+  await assertMember(database, input.actor, input.orgId);
+  validateRunMessageAttachments({ text: input.text.trim(), attachments: input.attachments });
+  const run = await ownedRun({ ...input, database });
+  const replay = await database
+    .select({ id: schema.skillRunPrompts.id })
+    .from(schema.skillRunPrompts)
+    .where(and(
+      eq(schema.skillRunPrompts.orgId, input.orgId),
+      eq(schema.skillRunPrompts.runId, input.runId),
+      eq(schema.skillRunPrompts.idempotencyKey, input.idempotencyKey),
+    ));
+  if (replay[0]) return;
+  if (run.status !== "running" || run.cancelRequestedAt !== null || ["freeze", "cancel", "cleanup", "complete"].includes(run.phase)) {
+    throw new RunBusyError("this run is not ready for another prompt", "run_not_running");
+  }
+  const active = await database
+    .select({ id: schema.skillRunPrompts.id })
+    .from(schema.skillRunPrompts)
+    .where(and(
+      eq(schema.skillRunPrompts.orgId, input.orgId),
+      eq(schema.skillRunPrompts.runId, input.runId),
+      inArray(schema.skillRunPrompts.status, ["queued", "processing"]),
+    ));
+  if (active[0]) throw new RunBusyError("another prompt is already pending", "prompt_already_pending");
+  if (!(await isRunAttachmentWorkerReady({
+    orgId: input.orgId,
+    runId: input.runId,
+    creatorId: input.actor.id,
+    database,
+  }))) {
+    throw new RunBusyError("this run's worker cannot accept attachments yet", "attachment_worker_unavailable");
+  }
+  const bytes = await database
+    .select({ value: sql<number>`coalesce(sum(${schema.skillRunAttachments.byteSize}), 0)` })
+    .from(schema.skillRunAttachments)
+    .where(and(eq(schema.skillRunAttachments.orgId, input.orgId), eq(schema.skillRunAttachments.runId, input.runId)));
+  validateRunMessageAttachments({
+    text: input.text.trim(),
+    attachments: input.attachments,
+    existingBytes: Number(bytes[0]?.value ?? 0),
+  });
 }
 
 /**
@@ -1281,18 +1404,7 @@ export async function persistRunTranscript(input: {
         ),
       )
       .orderBy(asc(schema.skillRunPrompts.ordinal));
-    const promptByMessageId = new Map(promptRows.map((prompt) => [prompt.messageId, prompt]));
-    let legacyUserIndex = 0;
-    const visibleItems = input.items.map((item): RunChatHistoryItem => {
-      if (item.kind !== "user") return item;
-      const prompt = item.message_id
-        ? promptByMessageId.get(item.message_id)
-        : promptRows[legacyUserIndex];
-      legacyUserIndex += 1;
-      return prompt
-        ? { kind: "user", text: prompt.userText, message_id: prompt.messageId }
-        : item;
-    });
+    const visibleItems = normalizeRunTranscript(input.items, promptRows);
     const transcript = capTranscript(input.redactor.redactPayload(visibleItems));
     const sequenceRows = await tx
       .select({ value: max(schema.skillRunEvents.sequence) })

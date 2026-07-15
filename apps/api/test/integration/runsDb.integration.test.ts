@@ -25,6 +25,7 @@ import {
   heartbeatRunWorker,
   isRunWorkerReady,
   removeRunWorkerHeartbeat,
+  reserveRunAttachmentUploads,
 } from "@companion/core/services";
 import { withTenantContext } from "@companion/db";
 
@@ -49,6 +50,9 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
   const freezeRunId = randomUUID();
   const attachmentId = randomUUID();
   const followupAttachmentId = randomUUID();
+  const incompatibleWorkerAttachmentId = randomUUID();
+  const legacyReplicaRunId = randomUUID();
+  const legacyReplicaAttachmentId = randomUUID();
   const owner = { id: `run-owner-${suffix}`, email: `run-owner-${suffix}@example.test` };
   const admin = { id: `run-admin-${suffix}`, email: `run-admin-${suffix}@example.test` };
   const outsider = { id: `run-outsider-${suffix}`, email: `run-outsider-${suffix}@example.test` };
@@ -72,6 +76,7 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
         "skill_run_prompts",
         "skill_run_events",
         "skill_run_attachments",
+        "skill_run_attachment_uploads",
       ] as const;
       const result: Record<string, number> = {};
       for (const table of tables) {
@@ -275,6 +280,14 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
         (${orgA}::uuid, ${freezeRunId}::uuid, ${owner.id}, 'leased', 'record', 1,
          'freeze-worker', now() + interval '5 minutes')
     `;
+    await sql`
+      insert into skill_run_worker_heartbeats
+        (worker_id, expires_at, attachment_prompt_protocol)
+      values ('freeze-worker', now() - interval '1 minute', 1)
+      on conflict (worker_id) do update
+      set expires_at = excluded.expires_at,
+          attachment_prompt_protocol = excluded.attachment_prompt_protocol
+    `;
     const initialPromptRows = await sql<{ id: string }[]>`
       insert into skill_run_prompts
         (org_id, run_id, ordinal, kind, idempotency_key, payload_hash, message_id, user_text, prompt)
@@ -297,6 +310,10 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
         (${attachmentId}::uuid, ${orgA}::uuid, ${runId}::uuid, ${initialPromptRows[0]!.id}::uuid,
          'input.txt', 'text/plain', 1, ${`${orgA}/run-attachments/${attachmentId}`})
     `;
+    await sql`
+      insert into skill_run_attachment_uploads (storage_key, org_id, creator_id)
+      values (${`${orgA}/run-attachments/reserved-${suffix}`} , ${orgA}::uuid, ${owner.id})
+    `;
     await sql.unsafe(`create role ${rlsRole} nologin nosuperuser nobypassrls`);
     await sql.unsafe(`grant ${rlsRole} to current_user with inherit true, set true`);
     await sql.unsafe(`grant usage on schema public to ${rlsRole}`);
@@ -308,9 +325,10 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
     await sql.unsafe(`grant execute on function companion_claim_skill_run_cleanups(text, integer, integer) to ${rlsRole}`);
     await sql.unsafe(`grant execute on function companion_complete_skill_run_cleanup(uuid, uuid, text) to ${rlsRole}`);
     await sql.unsafe(`grant execute on function companion_cleanup_skill_run_events(integer) to ${rlsRole}`);
-    await sql.unsafe(`grant execute on function companion_heartbeat_skill_run_worker(text, integer) to ${rlsRole}`);
+    await sql.unsafe(`grant execute on function companion_heartbeat_skill_run_worker(text, integer, integer) to ${rlsRole}`);
     await sql.unsafe(`grant execute on function companion_remove_skill_run_worker(text) to ${rlsRole}`);
     await sql.unsafe(`grant execute on function companion_skill_run_worker_ready() to ${rlsRole}`);
+    await sql.unsafe(`grant execute on function companion_skill_run_attachment_worker_ready(uuid, uuid, text) to ${rlsRole}`);
     await sql.unsafe(`grant execute on function companion_secret_usage_count(uuid, uuid) to ${rlsRole}`);
   });
 
@@ -416,6 +434,7 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
   });
 
   it("rejects stale lease heartbeats and exposes only live worker readiness", async () => {
+    await sql`update skill_run_worker_heartbeats set expires_at = now() - interval '1 second'`;
     await sql`
       update skill_run_jobs
       set lease_expires_at = now() - interval '1 second'
@@ -542,6 +561,11 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
   });
 
   it("atomically links an attachment-only follow-up to its visible and runtime prompt", async () => {
+    await sql`
+      update skill_run_worker_heartbeats
+      set expires_at = now() + interval '5 minutes', attachment_prompt_protocol = 1
+      where worker_id = 'freeze-worker'
+    `;
     const runActor = { id: owner.id, email: owner.email, name: "Run Owner" };
     const request = {
       actor: runActor,
@@ -557,6 +581,14 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
         storageKey: `${orgA}/run-attachments/${followupAttachmentId}`,
       }],
     };
+    await withTenantContext({ orgId: orgA, userId: owner.id }, (database) =>
+      reserveRunAttachmentUploads({
+        actor: runActor,
+        orgId: orgA,
+        storageKeys: request.attachments.map((attachment) => attachment.storageKey),
+        database,
+      }),
+    );
     const first = await withTenantContext({ orgId: orgA, userId: owner.id }, (database) =>
       enqueueRunPrompt({ ...request, database }),
     );
@@ -586,6 +618,125 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
     await sql`
       delete from skill_run_prompts
       where org_id = ${orgA}::uuid and run_id = ${freezeRunId}::uuid and id = ${first.id}::uuid
+    `;
+  });
+
+  it("keeps pre-0037 API inserts compatible during a rolling deployment", async () => {
+    await sql.begin(async (tx) => {
+      await tx`
+        insert into skill_runs
+          (id, org_id, skill_id, creator_id, skill_version_id, skill_version, idempotency_key,
+           payload_hash, model, prompt, status, phase, sandbox_name)
+        values
+          (${legacyReplicaRunId}::uuid, ${orgA}::uuid, ${skillId}::uuid, ${owner.id}, ${versionId}::uuid,
+           '1.0.0', 'legacy-replica-run', ${"9".repeat(64)}, 'openai/gpt-5', 'legacy visible prompt',
+           'queued', 'queued', ${`run-${legacyReplicaRunId.slice(0, 8)}`})
+      `;
+      // The old API inserted launch attachment metadata before its initial prompt and omitted both
+      // columns introduced by 0037.
+      await tx`
+        insert into skill_run_attachments
+          (id, org_id, run_id, file_name, content_type, byte_size, storage_key)
+        values
+          (${legacyReplicaAttachmentId}::uuid, ${orgA}::uuid, ${legacyReplicaRunId}::uuid,
+           'legacy.txt', 'text/plain', 1, ${`${orgA}/run-attachments/${legacyReplicaAttachmentId}`})
+      `;
+      await tx`
+        insert into skill_run_prompts
+          (org_id, run_id, ordinal, kind, idempotency_key, payload_hash, message_id, prompt)
+        values
+          (${orgA}::uuid, ${legacyReplicaRunId}::uuid, 0, 'initial', 'legacy-initial',
+           ${"8".repeat(64)}, ${deterministicRunMessageId(legacyReplicaRunId, 0, Date.now())},
+           'legacy composed runtime prompt with internal instructions')
+      `;
+    });
+    const rows = await sql<{ promptId: string; userText: string }[]>`
+      select a.prompt_id as "promptId", p.user_text as "userText"
+      from skill_run_attachments a
+      join skill_run_prompts p
+        on p.org_id = a.org_id and p.run_id = a.run_id and p.id = a.prompt_id
+      where a.id = ${legacyReplicaAttachmentId}::uuid
+    `;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.promptId).toBeTruthy();
+    expect(rows[0]?.userText).toBe("legacy visible prompt");
+    await sql`delete from skill_runs where org_id = ${orgA}::uuid and id = ${legacyReplicaRunId}::uuid`;
+  });
+
+  it("rejects follow-up files while the active worker lacks the mounting protocol", async () => {
+    await sql`
+      update skill_run_worker_heartbeats
+      set attachment_prompt_protocol = 0
+      where worker_id = 'freeze-worker'
+    `;
+    await expect(
+      withTenantContext({ orgId: orgA, userId: owner.id }, (database) =>
+        enqueueRunPrompt({
+          actor: { id: owner.id, email: owner.email, name: "Run Owner" },
+          orgId: orgA,
+          runId: freezeRunId,
+          text: "",
+          idempotencyKey: "unsupported-worker-attachment",
+          attachments: [{
+            id: incompatibleWorkerAttachmentId,
+            fileName: "unsupported.txt",
+            contentType: "text/plain",
+            byteSize: 1,
+            storageKey: `${orgA}/run-attachments/${incompatibleWorkerAttachmentId}`,
+          }],
+          database,
+        }),
+      ),
+    ).rejects.toMatchObject({ code: "attachment_worker_unavailable" });
+    await sql`
+      update skill_run_worker_heartbeats
+      set attachment_prompt_protocol = 1
+      where worker_id = 'freeze-worker'
+    `;
+  });
+
+  it("prevents a protocol-0 worker from reclaiming a lease with pending attachments", async () => {
+    const pendingPromptId = randomUUID();
+    const pendingAttachmentId = randomUUID();
+    await sql`
+      insert into skill_run_prompts
+        (id, org_id, run_id, ordinal, kind, idempotency_key, payload_hash, message_id, user_text, prompt, status)
+      values
+        (${pendingPromptId}::uuid, ${orgA}::uuid, ${freezeRunId}::uuid, 1, 'follow_up', 'reclaim-guard',
+         ${"7".repeat(64)}, ${deterministicRunMessageId(freezeRunId, 1, Date.now())}, '', 'runtime', 'queued')
+    `;
+    await sql`
+      insert into skill_run_attachments
+        (id, org_id, run_id, prompt_id, file_name, content_type, byte_size, storage_key)
+      values
+        (${pendingAttachmentId}::uuid, ${orgA}::uuid, ${freezeRunId}::uuid, ${pendingPromptId}::uuid,
+         'reclaim.txt', 'text/plain', 1, ${`${orgA}/run-attachments/${pendingAttachmentId}`})
+    `;
+    await sql`
+      update skill_run_jobs
+      set status = 'leased', lease_owner = 'expired-protocol-1', lease_expires_at = now() - interval '1 second'
+      where org_id = ${orgA}::uuid and run_id = ${freezeRunId}::uuid
+    `;
+    await sql`
+      update skill_run_jobs
+      set available_at = now() + interval '1 hour'
+      where run_id <> ${freezeRunId}::uuid
+        and (status = 'queued' or (status = 'leased' and lease_expires_at <= now()))
+    `;
+    await sql`
+      insert into skill_run_worker_heartbeats (worker_id, expires_at, attachment_prompt_protocol)
+      values ('legacy-reclaimer', now() + interval '5 minutes', 0),
+             ('modern-reclaimer', now() + interval '5 minutes', 1)
+      on conflict (worker_id) do update set expires_at = excluded.expires_at,
+        attachment_prompt_protocol = excluded.attachment_prompt_protocol
+    `;
+    expect(await claim("legacy-reclaimer")).toEqual([]);
+    expect(await claim("modern-reclaimer")).toHaveLength(1);
+    await sql`delete from skill_run_prompts where id = ${pendingPromptId}::uuid`;
+    await sql`
+      update skill_run_jobs
+      set status = 'leased', lease_owner = 'freeze-worker', lease_expires_at = now() + interval '5 minutes'
+      where org_id = ${orgA}::uuid and run_id = ${freezeRunId}::uuid
     `;
   });
 

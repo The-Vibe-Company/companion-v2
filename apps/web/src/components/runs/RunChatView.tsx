@@ -339,6 +339,7 @@ export function RunChatView({
   const [streamReady, setStreamReady] = useState(false);
   const [files, setFiles] = useState<File[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const promptSendingRef = useRef(false);
   const promptAttemptRef = useRef<{
     text: string;
     fileSignature: string;
@@ -567,13 +568,14 @@ export function RunChatView({
 
   const send = () => {
     const trimmed = text.trim();
-    if (sendDisabled || (!trimmed && files.length === 0)) return;
+    if (promptSendingRef.current || sendDisabled || (!trimmed && files.length === 0)) return;
     const previous = promptAttemptRef.current;
     const retrying = previous?.text === trimmed && previous.fileSignature === fileSignature;
     const attempt = retrying
       ? previous
       : { text: trimmed, fileSignature, files: [...files], idempotencyKey: crypto.randomUUID() };
     if (!attempt) return;
+    promptSendingRef.current = true;
     promptAttemptRef.current = attempt;
     setPromptPending(true);
     setPromptError(null);
@@ -614,7 +616,10 @@ export function RunChatView({
         setPromptError(`Delivery status is unknown. Retry safely: ${message}`);
         void refreshRun().catch(() => {});
       })
-      .finally(() => setPromptPending(false));
+      .finally(() => {
+        promptSendingRef.current = false;
+        setPromptPending(false);
+      });
   };
 
   const addFiles = (incoming: FileList | null) => {

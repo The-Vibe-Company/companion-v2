@@ -1371,6 +1371,8 @@ export const skillRunWorkerHeartbeats = pgTable(
   {
     workerId: text("worker_id").primaryKey(),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    /** Protocol 1 guarantees follow-up attachments are mounted before OpenCode dispatch. */
+    attachmentPromptProtocol: integer("attachment_prompt_protocol").notNull().default(0),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => ({
@@ -1378,6 +1380,10 @@ export const skillRunWorkerHeartbeats = pgTable(
     workerIdCheck: check(
       "skill_run_worker_heartbeats_worker_id_check",
       sql`length(btrim(${t.workerId})) BETWEEN 1 AND 512`,
+    ),
+    attachmentProtocolCheck: check(
+      "skill_run_worker_heartbeats_attachment_protocol_check",
+      sql`${t.attachmentPromptProtocol} BETWEEN 0 AND 1`,
     ),
   }),
 );
@@ -1479,7 +1485,8 @@ export const skillRunAttachments = pgTable(
     id: uuid("id").primaryKey().defaultRandom(),
     orgId: uuid("org_id").notNull(),
     runId: uuid("run_id").notNull(),
-    promptId: uuid("prompt_id").notNull(),
+    /** Nullable only for rolling compatibility; a deferred DB trigger links legacy inserts at commit. */
+    promptId: uuid("prompt_id"),
     fileName: text("file_name").notNull(),
     contentType: text("content_type").notNull(),
     byteSize: integer("byte_size").notNull(),
@@ -1503,6 +1510,18 @@ export const skillRunAttachments = pgTable(
       sql`${t.byteSize} > 0 AND ${t.byteSize} <= 10485760`,
     ),
   }),
+);
+
+/** Durable S3 upload reservation; consumed atomically when attachment metadata commits. */
+export const skillRunAttachmentUploads = pgTable(
+  "skill_run_attachment_uploads",
+  {
+    storageKey: text("storage_key").primaryKey(),
+    orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+    creatorId: text("creator_id").notNull().references(() => user.id, { onDelete: "cascade" }),
+    touchedAt: timestamp("touched_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({ byAge: index("skill_run_attachment_uploads_age_idx").on(t.touchedAt) }),
 );
 
 /** Metadata for one owner-controlled secret. Plaintext never lives in this row. */

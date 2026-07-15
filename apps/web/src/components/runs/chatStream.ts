@@ -274,6 +274,7 @@ function mapHistoryItem(
   item: RunChatHistoryItem,
   resolveToolLabel: ResolveToolLabel,
   attachments: SkillRunAttachmentRow[] = [],
+  promptOrdinal?: number,
 ): ChatItem {
   switch (item.kind) {
     case "user":
@@ -284,7 +285,7 @@ function mapHistoryItem(
         messageId: item.message_id ?? null,
         attachments: item.message_id
           ? attachments.filter((attachment) => attachment.message_id === item.message_id)
-          : [],
+          : attachments.filter((attachment) => attachment.prompt_ordinal === promptOrdinal),
       };
     case "assistant":
       return { kind: "asst", id: nextId("asst"), messageId: null, text: item.text, streaming: false };
@@ -326,7 +327,11 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       // Preserve any existing sys lines (boot annotations like "resumed from snapshot") ABOVE the
       // reloaded transcript, so history shows above new live events appended afterwards.
       const sysLines = state.items.filter((item) => item.kind === "sys");
-      const history = action.items.map((item) => mapHistoryItem(item, action.resolveToolLabel, action.attachments));
+      let promptOrdinal = 0;
+      const history = action.items.map((item) => {
+        const itemPromptOrdinal = item.kind === "user" ? promptOrdinal++ : undefined;
+        return mapHistoryItem(item, action.resolveToolLabel, action.attachments, itemPromptOrdinal);
+      });
       return {
         ...state,
         items: [...sysLines, ...history],

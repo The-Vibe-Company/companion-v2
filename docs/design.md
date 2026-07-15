@@ -584,7 +584,14 @@ content; only the sandbox does.
 - `skill_run_attachments` — files attached to any prompt (≤5 × 10 MB per message, ≤100 MB per run):
   bytes in S3 under `{org}/run-attachments/{id}`, prompt-linked metadata here, mounted as
   `<attachmentId>-<filename>`, and streamed back creator-only with `nosniff` +
-  `Content-Disposition: attachment`.
+  `Content-Disposition: attachment`. Failed request paths never delete these deterministic objects
+  synchronously: a concurrent idempotent retry may still be committing the same key. Unreferenced
+  bytes are retained for at least 24 hours. `skill_run_attachment_uploads` reserves each deterministic
+  key before S3 I/O; prompt commits consume the reservation under row lock, while the age-gated worker
+  sweep holds that same lock through S3 deletion. A concurrent retry therefore waits and recreates
+  bytes after cleanup instead of losing a committed file. The sweep persists its S3 page cursor so
+  referenced early pages cannot starve later orphans. Multipart follow-ups also run an
+  ownership/status/quota/protocol preflight before uploading bytes.
 - Migration `0034_skill_runs.sql` creates these tables and forces creator-only RLS on runs,
   configurations, snapshots, prompts, events, and attachments. Child policies derive the
   creator through their parent run/configuration; admins receive no override. The only cross-tenant
@@ -594,6 +601,11 @@ content; only the sandbox does.
   execution identity used only inside those functions.
 - Migration `0037_skill_run_prompt_attachments.sql` separates visible prompt text from runtime text,
   links every attachment to its prompt, and backfills existing launch attachments to ordinal `0`.
+  Legacy-write triggers keep old API replicas compatible during rollout: omitted initial
+  `user_text` is recovered from the parent run's raw prompt (follow-ups use their prompt), while the
+  old attachment-before-prompt insert order is linked by a deferred constraint trigger at commit.
+  Job claiming is protocol-aware: once a follow-up with files is pending, only a live protocol-1
+  worker can claim or reclaim that run during a rolling deployment.
 - `user_model_preferences` / `org_model_preferences` (mig 0036) — the ACTIVATED-model lists (see
   "Activated models" below): a jsonb array of `provider/model-id` refs per member (PK
   `org_id+user_id`, user-scoped RLS) and per workspace (PK `org_id`, tenant RLS, nullable
@@ -635,7 +647,10 @@ external step has persisted before/after progress:
 
 For each follow-up, the worker fetches only that prompt's attachment objects and idempotently writes
 them into the live sandbox before checking/sending its deterministic OpenCode message. A retry may
-rewrite the same paths, but it never sends a prompt before every referenced file is mounted.
+rewrite the same paths, but it never sends a prompt before every referenced file is mounted. Worker
+heartbeats advertise attachment-prompt protocol `1`; the API admits follow-up files only when the
+exact worker currently leasing that run advertises the protocol, so an old worker may finish text
+turns during a rolling deployment but cannot dispatch attachment-path prompts.
 5. establish the recorder, then find or create the deterministic session;
 6. send the persisted initial/follow-up prompt with its deterministic `messageID`;
 7. batch redacted events and snapshot the transcript;
@@ -654,8 +669,8 @@ it does not destroy active sandboxes.
 A terminal run's transcript is persisted before teardown. Stop and destroy are
 idempotent; provider failures keep cleanup owed for a later worker attempt. Cancellation is also a
 durable command: a queued run becomes `canceled` without a sandbox, while an active run takes a final
-snapshot and then tears down. The event-retention sweeper and sandbox-cleanup work live in the runs
-supervisor, not the API.
+snapshot and then tears down. The event-retention sweeper, age-gated run-attachment orphan sweep,
+and sandbox-cleanup work live in the runs supervisor, not the API.
 
 ### Privacy
 
