@@ -70,6 +70,7 @@ describe("write-only secret lifecycle", () => {
     fixture = await createIntegrationFixture();
     role = `companion_secret_${randomUUID().replaceAll("-", "").slice(0, 20)}`;
     await integrationSql.unsafe(`create role ${role} nologin`);
+    await integrationSql.unsafe(`grant ${role} to current_user with inherit true, set true`);
     await integrationSql.unsafe(`grant usage on schema public to ${role}`);
     await integrationSql.unsafe(`grant select, insert, update, delete on all tables in schema public to ${role}`);
     await integrationSql.unsafe(`grant usage, select on all sequences in schema public to ${role}`);
@@ -77,6 +78,7 @@ describe("write-only secret lifecycle", () => {
 
   afterEach(async () => {
     await integrationSql.unsafe(`drop owned by ${role}`);
+    await integrationSql.unsafe(`revoke ${role} from current_user`);
     await integrationSql.unsafe(`drop role ${role}`);
     await fixture.cleanup();
   });

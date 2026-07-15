@@ -2,7 +2,9 @@ import { randomBytes } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
   SecretConfigurationError,
+  decryptOpaqueValue,
   decryptSecretValue,
+  encryptOpaqueValue,
   encryptSecretValue,
   loadSecretsMasterKey,
 } from "../src/secretsCrypto";
@@ -22,6 +24,26 @@ describe("secret envelope encryption", () => {
     expect(decryptSecretValue({ ...context, ...encrypted }, key)).toBe(value);
   });
 
+  it("binds opaque credentials to purpose and subject", () => {
+    const encrypted = encryptOpaqueValue(
+      { orgId: context.orgId, purpose: "opencode-server-password", subjectId: "run-1", value: "sentinel" },
+      key,
+    );
+    expect(JSON.stringify(encrypted)).not.toContain("sentinel");
+    expect(
+      decryptOpaqueValue(
+        { orgId: context.orgId, purpose: "opencode-server-password", subjectId: "run-1", ...encrypted },
+        key,
+      ),
+    ).toBe("sentinel");
+    expect(() =>
+      decryptOpaqueValue(
+        { orgId: context.orgId, purpose: "opencode-server-password", subjectId: "run-2", ...encrypted },
+        key,
+      ),
+    ).toThrow();
+  });
+
   it("binds ciphertext and wrapped keys to tenant, secret, and version", () => {
     const encrypted = encryptSecretValue({ ...context, value: "secret" }, key);
     expect(() => decryptSecretValue({ ...context, orgId: "other-org", ...encrypted }, key)).toThrow();
@@ -30,7 +52,9 @@ describe("secret envelope encryption", () => {
 
   it("rejects tampering and a different root key", () => {
     const encrypted = encryptSecretValue({ ...context, value: "secret" }, key);
-    expect(() => decryptSecretValue({ ...context, ...encrypted, ciphertext: Buffer.from("tampered").toString("base64") }, key)).toThrow();
+    expect(() => decryptSecretValue({ ...context, ...encrypted, ciphertext: Buffer.from("tampered").toString("base64") }, key)).toThrow(
+      "encrypted secret value could not be decrypted",
+    );
     expect(() => decryptSecretValue({ ...context, ...encrypted, authTag: Buffer.from("tampered-auth-tag").toString("base64") }, key)).toThrow();
     expect(() => decryptSecretValue({ ...context, ...encrypted, wrappedDek: Buffer.from("tampered-dek").toString("base64") }, key)).toThrow();
     expect(() => decryptSecretValue({ ...context, ...encrypted, wrapAuthTag: Buffer.from("tampered-wrap-tag").toString("base64") }, key)).toThrow();

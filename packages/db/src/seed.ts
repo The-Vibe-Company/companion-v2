@@ -31,6 +31,15 @@ async function main(): Promise<void> {
         { orgId: org.id, path: "marketing/seo" },
       ])
       .onConflictDoNothing();
+    // Default workspace-activated models (createdBy stays null — this seed creates no user) so
+    // the hard createRun activation gate never bricks a fresh workspace.
+    await db
+      .insert(schema.orgModelPreferences)
+      .values({
+        orgId: org.id,
+        activatedModels: ["anthropic/claude-haiku-4-5", "anthropic/claude-opus-4-5", "anthropic/claude-sonnet-4-5"],
+      })
+      .onConflictDoNothing();
   }
 
   console.log("Seeded Acme workspace placeholder. Create the first user through the UI or CLI.");

@@ -63,6 +63,15 @@ export function commentImageKey(input: { orgId: string; imageId: string }): stri
   return `${input.orgId}/comments/${input.imageId}`;
 }
 
+/**
+ * Stored skill-run attachment (a file the launcher attached to a run). `attachmentId` is globally
+ * unique (the `skill_run_attachments.id`), so the key needs no run/skill segment. Uploaded with the
+ * generic `putSkillArchive` / read with `getSkillArchive` / removed with `deleteSkillArchive`.
+ */
+export function runAttachmentKey(input: { orgId: string; attachmentId: string }): string {
+  return `${input.orgId}/run-attachments/${input.attachmentId}`;
+}
+
 export async function putOrgLogo(input: {
   orgId: string;
   body: Uint8Array;
@@ -208,6 +217,7 @@ export async function deleteSkillArchive(input: {
 
 export async function getSkillArchive(input: {
   key: string;
+  signal?: AbortSignal;
   client?: S3Client;
   config?: StorageConfig;
 }): Promise<Buffer> {
@@ -218,6 +228,7 @@ export async function getSkillArchive(input: {
       Bucket: config.bucket,
       Key: input.key,
     }),
+    { abortSignal: input.signal },
   );
   if (!res.Body) throw new Error(`object not found: ${input.key}`);
   const bytes = await res.Body.transformToByteArray();

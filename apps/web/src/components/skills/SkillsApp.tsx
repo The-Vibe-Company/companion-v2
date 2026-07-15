@@ -38,18 +38,22 @@ import { treeRowKey } from "./dragGeometry";
 import { useSkillDrag, type PointerLike } from "./useSkillDrag";
 import { ArchivedListView } from "./ArchivedListView";
 import { DetailView } from "./DetailView";
+import { RunChatView } from "../runs/RunChatView";
+import { withRunDraft, type RunLauncherDraft } from "../runs/launcherState";
 import { LocalSkillsView } from "./LocalSkillsView";
 import { CommandPalette } from "./CommandPalette";
 import { UploadDialog, InstallDialog } from "./UploadDialog";
 import {
   parseSkillShareTokenPath,
   parseSkillsRoute,
+  canonicalSkillsRouteHref,
   skillShareHref,
   skillsRouteHref,
   skillsRouteKey,
   skillsRouteSource,
   skillsRouteWithSkill,
   skillsRouteWithoutSkill,
+  skillsRouteWithRun,
   type SkillsLibrary,
   type SkillsRoute,
   type SkillsRouteSource,
@@ -69,6 +73,7 @@ import { Onboarding } from "../org/Onboarding";
 import { settingsHref } from "../org/SettingsApp";
 import { SettingsDrawer, SettingsDrawerError } from "../org/SettingsDrawer";
 import { useOrgActions } from "../org/useOrgActions";
+import { parseSettingsView } from "../org/model";
 import type { SettingsAppData, SettingsDialog, SettingsIntent, SettingsRoute, SettingsView } from "../org/model";
 import { matchFilters, type Filter } from "./filters";
 import { deriveTreeRows } from "./sidebarTree";
@@ -87,20 +92,6 @@ type LocalSettingsSurface =
   | ({ kind: "ready"; data: SettingsAppData } & SettingsState)
   | ({ kind: "error"; message: string; busy: boolean } & SettingsState);
 
-const SETTINGS_VIEWS: readonly SettingsView[] = [
-  "profile",
-  "preferences",
-  "apikeys",
-  "general",
-  "members",
-  "invitations",
-  "billing",
-];
-
-function isSettingsView(value: string | null): value is SettingsView {
-  return value !== null && (SETTINGS_VIEWS as readonly string[]).includes(value);
-}
-
 function settingsStateFromIntent(intent?: SettingsIntent): SettingsState {
   const view: SettingsView = intent?.view ?? "profile";
   return {
@@ -111,8 +102,8 @@ function settingsStateFromIntent(intent?: SettingsIntent): SettingsState {
 
 function settingsStateFromSearch(search: string): SettingsState {
   const params = new URLSearchParams(search);
-  const viewRaw = params.get("view");
-  const view: SettingsView = isSettingsView(viewRaw) ? viewRaw : "profile";
+  // Shared parser (org/model.ts): whitelist + legacy `providers → models` normalization.
+  const view: SettingsView = parseSettingsView(params.get("view"));
   const dialogRaw = params.get("dialog");
   return {
     initialRoute: { view },
@@ -380,6 +371,8 @@ export function SkillsApp({
   useEffect(() => {
     settingsWarmupRef.current = null;
     setLocalSettings(null);
+    setRunDrafts(new Map());
+    setRunAgainRequest(null);
   }, [currentOrg.id]);
 
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -391,6 +384,16 @@ export function SkillsApp({
   const [openId, setOpenId] = useState<string | null>(() =>
     initialRoute.kind === "local" ? null : initialRoute.skill ?? null,
   );
+  // The open run transcript/chat (`?skill=…&run=…`); rendered instead of the skill detail.
+  const [openRunId, setOpenRunId] = useState<string | null>(() =>
+    initialRoute.kind === "local" ? null : initialRoute.run ?? null,
+  );
+  // Back from a run lands the detail on its Sessions tab; opening a skill normally resets it.
+  const [detailInitialTab, setDetailInitialTab] = useState<"overview" | "sessions" | undefined>(undefined);
+  // Complete drafts are keyed by skill so prompt/files/model/inputs never bleed across details.
+  const [runDrafts, setRunDrafts] = useState<Map<string, RunLauncherDraft>>(() => new Map());
+  // "Run again" is a one-shot request; its full snapshot also becomes this skill's current draft.
+  const [runAgainRequest, setRunAgainRequest] = useState<{ skillId: string; draft: RunLauncherDraft } | null>(null);
   const [lastId, setLastId] = useState<string | null>(() =>
     initialRoute.kind === "local" ? null : initialRoute.skill ?? null,
   );
@@ -424,9 +427,9 @@ export function SkillsApp({
     (route: SkillsRoute): string => {
       if (route.kind !== "local" && route.kind !== "archived" && route.skill) {
         const shared = shareableSkillForSlug(route.skill);
-        if (shared) return skillShareHref(shared.shareToken);
+        return canonicalSkillsRouteHref(route, shared?.shareToken ?? null);
       }
-      return skillsRouteHref(route);
+      return canonicalSkillsRouteHref(route, null);
     },
     [shareableSkillForSlug],
   );
@@ -476,6 +479,7 @@ export function SkillsApp({
     didInitializePersistenceRef.current = false;
     setPreferenceStatus("idle");
     setOpenId(initialRoute.kind === "local" ? null : initialRoute.skill ?? null);
+    setOpenRunId(initialRoute.kind === "local" ? null : initialRoute.run ?? null);
     setLastId(initialRoute.kind === "local" ? null : initialRoute.skill ?? null);
     setCurrentView(skillsViewForRoute(initialRoute));
     if (typeof window !== "undefined" && isSkillsClientPath(window.location.pathname)) {
@@ -1304,6 +1308,7 @@ export function SkillsApp({
       const nextOpenId = route.kind === "local" ? null : route.skill ?? null;
       setOpenId(nextOpenId);
       setLastId(nextOpenId);
+      setOpenRunId(route.kind === "local" ? null : route.run ?? null);
       if (history === "none" || typeof window === "undefined") return;
       writeSkillsUrl(route, history);
     },
@@ -1402,6 +1407,9 @@ export function SkillsApp({
     const openingFromWorkspace = currentView === "workspace";
     if (!openingFromWorkspace) setCurrentView("workspace");
     setUploadOpen(false);
+    setOpenRunId(null);
+    setDetailInitialTab(undefined);
+    setRunAgainRequest(null);
     setOpenId(id);
     setLastId(id);
     pushSkillsUrl(openingFromWorkspace ? routeForCurrentSurface(id) : { lib: "mine", kind: "all", skill: id });
@@ -1441,6 +1449,9 @@ export function SkillsApp({
     [loadArchived, pushSkillsUrl],
   );
   const back = useCallback(() => {
+    setOpenRunId(null);
+    setDetailInitialTab(undefined);
+    setRunAgainRequest(null);
     if (
       typeof window !== "undefined" &&
       window.history.state &&
@@ -1455,18 +1466,53 @@ export function SkillsApp({
       parseSkillShareTokenPath(window.location.pathname) ? { lib: "org", kind: "all" } : routeForCurrentSurface(),
     );
   }, [replaceSkillsUrl, routeForCurrentSurface]);
+  /** Open one of the current skill's runs (`?skill=…&run=…`) — deep-linkable transcript/chat. */
+  const openRun = useCallback(
+    (runId: string) => {
+      const skillId = openIdRef.current;
+      if (!skillId) return;
+      setOpenRunId(runId);
+      pushSkillsUrl(skillsRouteWithRun(routeForCurrentSurface(skillId), skillId, runId));
+    },
+    [pushSkillsUrl, routeForCurrentSurface],
+  );
+
+  /** Back from a run: return to the skill detail on its Sessions tab. */
+  const closeRun = useCallback(() => {
+    setOpenRunId(null);
+    setDetailInitialTab("sessions");
+    const skillId = openIdRef.current;
+    replaceSkillsUrl(routeForCurrentSurface(skillId ?? undefined));
+  }, [replaceSkillsUrl, routeForCurrentSurface]);
+
+  /** "Run again" from a frozen/errored transcript: back to the detail with the launcher prefilled. */
+  const runAgain = useCallback(
+    (draft: RunLauncherDraft) => {
+      setOpenRunId(null);
+      setDetailInitialTab("sessions");
+      const skillId = openIdRef.current;
+      if (skillId) {
+        setRunAgainRequest({ skillId, draft });
+        setRunDrafts((current) => withRunDraft(current, skillId, draft));
+      }
+      replaceSkillsUrl(routeForCurrentSurface(skillId ?? undefined));
+    },
+    [replaceSkillsUrl, routeForCurrentSurface],
+  );
+
   const go = useCallback(
     (delta: number) => {
-      setOpenId((cur) => {
-        const i = detailPool.findIndex((s) => s.id === cur);
-        const n = detailPool[i + delta];
-        if (n) {
-          setLastId(n.id);
-          replaceSkillsUrl(routeForCurrentSurface(n.id));
-          return n.id;
-        }
-        return cur;
-      });
+      const i = detailPool.findIndex((row) => row.id === openIdRef.current);
+      const n = detailPool[i + delta];
+      if (!n) return;
+      // Moving to another skill must also leave the current run route. Otherwise keyboard
+      // navigation can render a creator-only run beneath the wrong skill slug.
+      setOpenRunId(null);
+      setDetailInitialTab(undefined);
+      setRunAgainRequest(null);
+      setOpenId(n.id);
+      setLastId(n.id);
+      replaceSkillsUrl(routeForCurrentSurface(n.id));
     },
     [detailPool, replaceSkillsUrl, routeForCurrentSurface],
   );
@@ -1514,6 +1560,9 @@ export function SkillsApp({
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (uploadOpen || updateSkill || installSkill || shareTarget) return;
+      // Modal surfaces own Escape, arrows and Cmd/Ctrl shortcuts. Letting the skill shell handle
+      // them would unmount the launcher and move its prompt/files into another skill's route.
+      if (document.querySelector('[role="dialog"][aria-modal="true"]')) return;
       if (mobileSidebarOpen && e.key === "Escape") {
         e.preventDefault();
         setMobileSidebarOpen(false);
@@ -1656,6 +1705,8 @@ export function SkillsApp({
       <div className="main" aria-hidden={mobileSidebarOpen || undefined} inert={mobileSidebarOpen ? true : undefined}>
         {currentView === "local" ? (
           <LocalSkillsView skills={localSkills} workspaceId={currentOrg.id} workspaceName={currentOrg.name} />
+        ) : skill && openRunId ? (
+          <RunChatView key={openRunId} runId={openRunId} expectedSkillSlug={skill.id} onBack={closeRun} onRunAgain={runAgain} />
         ) : skill ? (
           <DetailView
             skill={skill}
@@ -1663,6 +1714,7 @@ export function SkillsApp({
             total={detailPool.length}
             me={me}
             orgName={currentOrg.name}
+            orgId={currentOrg.id}
             allLabels={detailTreePaths}
             onBack={back}
             onPrev={() => go(-1)}
@@ -1672,6 +1724,13 @@ export function SkillsApp({
             onSelectLabel={(path) => selectLabel(detailLib, path)}
             onAction={(action) => runSkillAction(skill, action)}
             onOpenSkill={openSkillBySlug}
+            onOpenRun={openRun}
+            onOpenModelSettings={() => openSettings({ view: "models" })}
+            initialTab={detailInitialTab}
+            runDraft={runAgainRequest?.skillId === skill.id ? runAgainRequest.draft : runDrafts.get(skill.id) ?? null}
+            runAgainRequested={runAgainRequest?.skillId === skill.id}
+            onRunDraftChange={(draft) => setRunDrafts((current) => withRunDraft(current, skill.id, draft))}
+            onRunAgainConsumed={() => setRunAgainRequest(null)}
             historyEnabled={initialBilling.entitlements.skillHistory}
             onUpgrade={() => openSettings({ view: "billing" })}
           />

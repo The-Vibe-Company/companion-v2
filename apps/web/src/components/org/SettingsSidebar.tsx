@@ -127,6 +127,12 @@ export function SettingsSidebar({
               onClick={() => goTo({ view: "preferences" })}
             />
             <NavItem
+              active={is("models") || is("providers")}
+              icon="boxes"
+              label="Models"
+              onClick={() => goTo({ view: "models" })}
+            />
+            <NavItem
               active={is("apikeys")}
               icon="key"
               label="API keys"
@@ -150,6 +156,12 @@ export function SettingsSidebar({
               }
               label="General"
               onClick={() => goTo({ view: "general" })}
+            />
+            <NavItem
+              active={is("org-models") || is("org-providers")}
+              icon="boxes"
+              label="Shared models"
+              onClick={() => goTo({ view: "org-models" })}
             />
             <NavItem
               active={is("members")}

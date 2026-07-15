@@ -8,14 +8,14 @@
 export type SkillsLibrary = "mine" | "org";
 
 export type SkillsRoute =
-  | { lib: "mine"; kind: "all"; skill?: string }
-  | { lib: "mine"; kind: "starred"; skill?: string }
-  | { lib: "mine"; kind: "installed"; skill?: string }
-  | { lib: "mine"; kind: "label"; label: string; skill?: string }
-  | { lib: "org"; kind: "all"; skill?: string }
-  | { lib: "org"; kind: "label"; label: string; skill?: string }
+  | { lib: "mine"; kind: "all"; skill?: string; run?: string }
+  | { lib: "mine"; kind: "starred"; skill?: string; run?: string }
+  | { lib: "mine"; kind: "installed"; skill?: string; run?: string }
+  | { lib: "mine"; kind: "label"; label: string; skill?: string; run?: string }
+  | { lib: "org"; kind: "all"; skill?: string; run?: string }
+  | { lib: "org"; kind: "label"; label: string; skill?: string; run?: string }
   | { kind: "local" }
-  | { kind: "archived"; skill?: string };
+  | { kind: "archived"; skill?: string; run?: string };
 
 export type SkillsSearchParams =
   | URLSearchParams
@@ -81,28 +81,30 @@ export function parseSkillsRoute(input: SkillsSearchParams): SkillsRoute {
   const lib = firstParam(params, "lib");
   const view = firstParam(params, "view");
   const skill = firstParam(params, "skill")?.trim() || undefined;
+  // A run transcript is only addressable under its skill — `run` without `skill` is ignored.
+  const run = (skill && firstParam(params, "run")?.trim()) || undefined;
 
   // Library-independent bottom views. `local` keeps its legacy name (the UI label is "Companion skills").
   if (view === "local" || view === "companion") return { kind: "local" };
-  if (view === "archived") return { kind: "archived", skill };
+  if (view === "archived") return { kind: "archived", skill, run };
 
   if (lib === "org") {
     if (view === "label") {
       const label = firstParam(params, "label")?.trim();
-      return label ? { lib: "org", kind: "label", label, skill } : { lib: "org", kind: "all", skill };
+      return label ? { lib: "org", kind: "label", label, skill, run } : { lib: "org", kind: "all", skill, run };
     }
-    return { lib: "org", kind: "all", skill };
+    return { lib: "org", kind: "all", skill, run };
   }
 
   // Default library is `mine`.
-  if (view === "starred") return { lib: "mine", kind: "starred", skill };
-  if (view === "installed") return { lib: "mine", kind: "installed", skill };
+  if (view === "starred") return { lib: "mine", kind: "starred", skill, run };
+  if (view === "installed") return { lib: "mine", kind: "installed", skill, run };
   if (view === "label") {
     const label = firstParam(params, "label")?.trim();
-    return label ? { lib: "mine", kind: "label", label, skill } : { lib: "mine", kind: "all", skill };
+    return label ? { lib: "mine", kind: "label", label, skill, run } : { lib: "mine", kind: "all", skill, run };
   }
   // Legacy `view=nolabel` had no replacement under the two-library model — land on My Skills.
-  return { lib: "mine", kind: "all", skill };
+  return { lib: "mine", kind: "all", skill, run };
 }
 
 export function skillsRouteHref(route: SkillsRoute): string {
@@ -117,8 +119,22 @@ export function skillsRouteHref(route: SkillsRoute): string {
     else if (route.kind === "label") params.push("view=label", `label=${encodeURIComponent(route.label)}`);
     // kind === "all" emits no `view` (the default within a library).
   }
-  if (route.skill) params.push(`skill=${encodeURIComponent(route.skill)}`);
+  if (route.skill) {
+    params.push(`skill=${encodeURIComponent(route.skill)}`);
+    if (route.run) params.push(`run=${encodeURIComponent(route.run)}`);
+  }
   return params.length ? `/skills?${params.join("&")}` : "/skills";
+}
+
+/**
+ * Public org-skill details use their share URL, but a private run transcript must remain on the
+ * authenticated skills route so its creator-only `run` cursor survives reload and browser Back.
+ */
+export function canonicalSkillsRouteHref(route: SkillsRoute, shareToken: string | null): string {
+  if (shareToken && route.kind !== "local" && route.kind !== "archived" && route.skill && !route.run) {
+    return skillShareHref(shareToken);
+  }
+  return skillsRouteHref(route);
 }
 
 export function skillsRouteKey(route: SkillsRoute): string {
@@ -126,7 +142,9 @@ export function skillsRouteKey(route: SkillsRoute): string {
   if (route.kind === "local" || route.kind === "archived") base = route.kind;
   else if (route.kind === "label") base = `${route.lib}:label:${route.label}`;
   else base = `${route.lib}:${route.kind}`;
-  return route.kind !== "local" && route.skill ? `${base}:skill:${route.skill}` : base;
+  if (route.kind === "local" || !route.skill) return base;
+  const withSkill = `${base}:skill:${route.skill}`;
+  return route.run ? `${withSkill}:run:${route.run}` : withSkill;
 }
 
 export function skillsRouteWithoutSkill(route: SkillsRoute): SkillsRoute {
@@ -161,4 +179,17 @@ export function skillsRouteWithSkill(route: SkillsRoute, skill: string): SkillsR
     case "local":
       return { kind: "local" };
   }
+}
+
+/** The same route with the skill open on a specific run transcript (`?skill=…&run=…`). */
+export function skillsRouteWithRun(route: SkillsRoute, skill: string, run: string): SkillsRoute {
+  const withSkill = skillsRouteWithSkill(route, skill);
+  return withSkill.kind === "local" ? withSkill : { ...withSkill, run };
+}
+
+/** The same route with the run closed (back to the skill detail). */
+export function skillsRouteWithoutRun(route: SkillsRoute): SkillsRoute {
+  if (route.kind === "local" || !("run" in route)) return route;
+  const { run: _run, ...rest } = route;
+  return rest as SkillsRoute;
 }

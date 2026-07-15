@@ -86,12 +86,14 @@ export function classifyFiles(files, { forceFull = false } = {}) {
         (!isTestFile(file) &&
           matchesAny(file, [
             "apps/api/",
+            "apps/worker/",
             "packages/auth/",
             "packages/billing/",
             "packages/contracts/",
             "packages/core/",
             "packages/db/",
             "packages/email/",
+            "packages/sandbox/",
             "packages/skills/",
             "packages/storage/",
             "scripts/ci-rsc-smoke.sh",

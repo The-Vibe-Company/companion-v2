@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  canonicalSkillsRouteHref,
   parseSkillShareTokenPath,
   parseSkillsRoute,
   skillShareHref,
@@ -9,6 +10,8 @@ import {
   skillsRouteSource,
   skillsRouteWithSkill,
   skillsRouteWithoutSkill,
+  skillsRouteWithRun,
+  skillsRouteWithoutRun,
 } from "./route";
 
 describe("skills route helpers", () => {
@@ -160,5 +163,49 @@ describe("skills route helpers", () => {
       kind: "label",
       label: "marketing/seo",
     });
+  });
+});
+
+describe("run transcript routing (?skill=…&run=…)", () => {
+  it("parses run only alongside a skill", () => {
+    expect(parseSkillsRoute("?skill=digest&run=r-1")).toEqual({ lib: "mine", kind: "all", skill: "digest", run: "r-1" });
+    expect(parseSkillsRoute("?lib=org&skill=digest&run=r-1")).toEqual({ lib: "org", kind: "all", skill: "digest", run: "r-1" });
+    // `run` without `skill` is ignored — a transcript is only addressable under its skill.
+    expect(parseSkillsRoute("?run=r-1")).toEqual({ lib: "mine", kind: "all", skill: undefined, run: undefined });
+  });
+
+  it("emits and round-trips the run param in hrefs", () => {
+    const route = { lib: "org" as const, kind: "all" as const, skill: "digest", run: "r-1" };
+    expect(skillsRouteHref(route)).toBe("/skills?lib=org&skill=digest&run=r-1");
+    expect(parseSkillsRoute(skillsRouteHref(route))).toEqual(route);
+  });
+
+  it("keeps creator-only org runs on the authenticated route instead of the public share URL", () => {
+    const detail = { lib: "org" as const, kind: "all" as const, skill: "digest" };
+    expect(canonicalSkillsRouteHref(detail, "public-token")).toBe("/s/public-token");
+    expect(canonicalSkillsRouteHref({ ...detail, run: "r-1" }, "public-token")).toBe(
+      "/skills?lib=org&skill=digest&run=r-1",
+    );
+  });
+
+  it("keys run routes distinctly from the bare skill detail", () => {
+    expect(skillsRouteKey({ lib: "mine", kind: "all", skill: "x", run: "r-1" })).toBe("mine:all:skill:x:run:r-1");
+    expect(skillsRouteKey({ lib: "mine", kind: "all", skill: "x" })).toBe("mine:all:skill:x");
+  });
+
+  it("adds and removes the run, preserving library + label", () => {
+    expect(skillsRouteWithRun({ lib: "mine", kind: "label", label: "drafts" }, "digest", "r-9")).toEqual({
+      lib: "mine",
+      kind: "label",
+      label: "drafts",
+      skill: "digest",
+      run: "r-9",
+    });
+    expect(skillsRouteWithoutRun({ lib: "mine", kind: "all", skill: "digest", run: "r-9" })).toEqual({
+      lib: "mine",
+      kind: "all",
+      skill: "digest",
+    });
+    expect(skillsRouteWithRun({ kind: "local" }, "digest", "r-9")).toEqual({ kind: "local" });
   });
 });

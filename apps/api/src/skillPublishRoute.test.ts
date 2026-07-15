@@ -197,5 +197,41 @@ describe("POST /v1/skills identity guard", () => {
 
     const res = await publish("", "validate");
     expect(res.status).toBe(200);
+    expect(serviceMocks.getSkillBySlug).toHaveBeenCalledWith(expect.objectContaining({ database: expect.any(Object) }));
+    expect(serviceMocks.getSkillById).toHaveBeenCalledWith(expect.objectContaining({ database: expect.any(Object) }));
+    expect(serviceMocks.prepareSkillPublishDependencies).toHaveBeenCalledWith(
+      expect.objectContaining({ database: expect.any(Object) }),
+    );
+  });
+});
+
+describe("POST /v1/skills/create tenant context", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    serviceMocks.resolveApiToken.mockImplementation(async (token: string) =>
+      token === "write" ? { actor: actorA, orgId: "org-1", scopes: ["skills:write", "skills:read"] } : null,
+    );
+  });
+
+  it("preflights carried dependencies with the request-scoped database", async () => {
+    serviceMocks.getSkillBySlug.mockResolvedValue(null);
+    skillsMocks.validateSkillArchive.mockResolvedValue({ ok: false, error: "stop after dependency preflight" });
+
+    const res = await app.request("/v1/skills/create", {
+      method: "POST",
+      headers: { Authorization: "Bearer write", "content-type": "application/json" },
+      body: JSON.stringify({
+        id: "inline-skill",
+        description: "Inline skill.",
+        body: "# Inline skill",
+        scope: "personal",
+        labels: [],
+      }),
+    });
+
+    expect(res.status).toBe(422);
+    expect(serviceMocks.prepareSkillPublishDependencies).toHaveBeenCalledWith(
+      expect.objectContaining({ actor: actorA, orgId: "org-1", slugs: [], database: expect.any(Object) }),
+    );
   });
 });

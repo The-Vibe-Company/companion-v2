@@ -2,7 +2,13 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { databaseUrl, resolveMigrationsFolder } from "./migrate";
+import {
+  databaseRuntimeRole,
+  databaseUrl,
+  extractRuntimeRoleGrantBlock,
+  resolveMigrationsFolder,
+  resolveRuntimeRoleGrantsFile,
+} from "./migrate";
 
 const tempDirs: string[] = [];
 
@@ -24,13 +30,36 @@ afterEach(async () => {
 });
 
 describe("databaseUrl", () => {
-  it("requires DATABASE_URL", () => {
-    expect(() => databaseUrl({ NODE_ENV: "test" })).toThrow("DATABASE_URL is required");
+  it("requires a migration or runtime database URL", () => {
+    expect(() => databaseUrl({ NODE_ENV: "test" })).toThrow("DATABASE_MIGRATION_URL or DATABASE_URL is required");
   });
 
   it("returns DATABASE_URL when configured", () => {
     expect(databaseUrl({ DATABASE_URL: "postgres://example" })).toBe("postgres://example");
+    expect(
+      databaseUrl({ DATABASE_URL: "postgres://runtime", DATABASE_MIGRATION_URL: "postgres://owner" }),
+    ).toBe("postgres://owner");
   });
+});
+
+describe("databaseRuntimeRole", () => {
+  it("is opt-in", () => {
+    expect(databaseRuntimeRole({})).toBeNull();
+    expect(databaseRuntimeRole({ DATABASE_RUNTIME_ROLE: "" })).toBeNull();
+  });
+
+  it("accepts a strict lowercase PostgreSQL identifier", () => {
+    expect(databaseRuntimeRole({ DATABASE_RUNTIME_ROLE: "companion_runtime_2" })).toBe("companion_runtime_2");
+  });
+
+  it.each(["Companion", " companion_runtime", "companion-runtime", "9runtime", "a".repeat(64)])(
+    "fails closed for invalid configured role %s",
+    (role) => {
+      expect(() => databaseRuntimeRole({ DATABASE_RUNTIME_ROLE: role })).toThrow(
+        "DATABASE_RUNTIME_ROLE must be a lowercase PostgreSQL identifier",
+      );
+    },
+  );
 });
 
 describe("resolveMigrationsFolder", () => {
@@ -96,5 +125,47 @@ describe("resolveMigrationsFolder", () => {
         scriptDir: join(root, "missing-script-dir"),
       }),
     ).rejects.toThrow("could not find Drizzle migrations folder");
+  });
+});
+
+describe("runtime role grants", () => {
+  it("finds the grants file copied next to the built API entrypoint", async () => {
+    const root = await tempDir();
+    const scriptDir = join(root, "apps", "api", "dist");
+    await mkdir(scriptDir, { recursive: true });
+    const grantsFile = join(scriptDir, "runtime-role-grants.sql");
+    await writeFile(grantsFile, "-- companion-runtime-grants-begin\nselect 1;\n-- companion-runtime-grants-end\n");
+
+    await expect(
+      resolveRuntimeRoleGrantsFile({
+        cwd: join(root, "missing-cwd"),
+        env: {},
+        scriptDir,
+      }),
+    ).resolves.toBe(grantsFile);
+  });
+
+  it("rejects a missing explicit grants file", async () => {
+    const root = await tempDir();
+    const missing = join(root, "missing.sql");
+    await expect(
+      resolveRuntimeRoleGrantsFile({
+        cwd: root,
+        env: { COMPANION_RUNTIME_GRANTS_FILE: missing },
+        scriptDir: root,
+      }),
+    ).rejects.toThrow("COMPANION_RUNTIME_GRANTS_FILE is not readable");
+  });
+
+  it("extracts only the driver-safe marked SQL block", () => {
+    expect(
+      extractRuntimeRoleGrantBlock(
+        "\\if :{?runtime_role}\n-- companion-runtime-grants-begin\nDO $$ BEGIN NULL; END $$;\n-- companion-runtime-grants-end\n\\endif",
+      ),
+    ).toBe("DO $$ BEGIN NULL; END $$;");
+  });
+
+  it("rejects an unmarked grants file", () => {
+    expect(() => extractRuntimeRoleGrantBlock("select 1;")).toThrow("missing its marked SQL block");
   });
 });

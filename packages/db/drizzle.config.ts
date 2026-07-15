@@ -5,6 +5,9 @@ export default defineConfig({
   schema: "./src/schema.ts",
   out: "./drizzle",
   dbCredentials: {
-    url: process.env.DATABASE_URL ?? "postgres://companion:companion@127.0.0.1:5432/companion",
+    url:
+      process.env.DATABASE_MIGRATION_URL
+      ?? process.env.DATABASE_URL
+      ?? "postgres://companion:companion@127.0.0.1:5432/companion",
   },
 });

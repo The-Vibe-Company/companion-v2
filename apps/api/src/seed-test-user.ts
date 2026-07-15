@@ -9,7 +9,7 @@ import {
   publishSkillVersion,
   type ActorContext,
 } from "@companion/core/services";
-import { closeDb, db, schema } from "@companion/db";
+import { closeDb, db, schema, withTenantContext, type Db } from "@companion/db";
 import { buildNormalizedCompanionJson, packDir, parseFrontmatter, toStoredSkillVersionManifest } from "@companion/skills";
 import { putSkillArchive, skillArchiveKey } from "@companion/storage";
 import { and, eq, inArray } from "drizzle-orm";
@@ -101,7 +101,7 @@ function buildSkillMd(spec: Pick<SeedSkillSpec, "slug" | "version" | "descriptio
   return `${lines.join("\n")}\n\n${spec.body.trim()}\n`;
 }
 
-async function seedSkill(actor: ActorContext, orgId: string, spec: SeedSkillSpec): Promise<void> {
+async function seedSkill(actor: ActorContext, orgId: string, spec: SeedSkillSpec, database: Db): Promise<void> {
   const dir = await mkdtemp(join(tmpdir(), "companion-seed-skill-"));
   try {
     const md = buildSkillMd(spec);
@@ -143,7 +143,7 @@ async function seedSkill(actor: ActorContext, orgId: string, spec: SeedSkillSpec
         throw error;
       }
     }
-    await publishSkillVersion({ actor, orgId, payload, archiveKey: key });
+    await publishSkillVersion({ actor, orgId, payload, archiveKey: key, database });
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -154,21 +154,35 @@ async function seedDemoContent(actor: ActorContext): Promise<void> {
   if (orgs.length === 0) return;
   const orgId = orgs[0]!.org_id;
 
-  // Seed one empty label so the folder tree has a non-trivial, skill-less node out of the box.
-  await db.insert(schema.labels).values({ orgId, path: "growth", createdBy: actor.id }).onConflictDoNothing();
+  const existingSlugs = await withTenantContext({ orgId, userId: actor.id }, async (database) => {
+    // Seed one empty label so the folder tree has a non-trivial, skill-less node out of the box.
+    await database.insert(schema.labels).values({ orgId, path: "growth", createdBy: actor.id }).onConflictDoNothing();
+
+    // Default workspace-activated models (ids from the sandbox catalog's offline fallback registry)
+    // so the hard createRun activation gate never bricks a fresh dev workspace.
+    await database
+      .insert(schema.orgModelPreferences)
+      .values({
+        orgId,
+        activatedModels: ["anthropic/claude-haiku-4-5", "anthropic/claude-opus-4-5", "anthropic/claude-sonnet-4-5"],
+        createdBy: actor.id,
+      })
+      .onConflictDoNothing();
+
+    // Include archived skills so a re-run does not try to republish ones the showcase archived.
+    return new Set(
+      (await listSkills({ actor, orgId, includeArchived: true, database })).map((skill) => skill.slug),
+    );
+  });
 
   if (!storageConfigured()) {
     console.warn("Skipping demo skills: S3 storage is not configured (S3_ENDPOINT and related env vars)");
     return;
   }
 
-  // Include archived skills so a re-run does not try to republish ones the showcase archived.
-  const existingSlugs = new Set(
-    (await listSkills({ actor, orgId, includeArchived: true })).map((skill) => skill.slug),
-  );
   // Ordered so every declared dependency is published before its dependents (publish blocks
-  // missing/cycle). The showcase edges below (missing/cycle/archived) are inserted directly
-  // afterwards, since those states cannot pass the publish-time check.
+  // missing/cycle). Keep the primary incident-summary demo runnable: invalid dependency states
+  // belong in tests, not on the skill used by the browser smoke path.
   const specs: SeedSkillSpec[] = [
     {
       slug: "markdown-report",
@@ -281,7 +295,7 @@ async function seedDemoContent(actor: ActorContext): Promise<void> {
   for (const spec of specs) {
     if (existingSlugs.has(spec.slug)) continue;
     try {
-      await seedSkill(actor, orgId, spec);
+      await withTenantContext({ orgId, userId: actor.id }, (database) => seedSkill(actor, orgId, spec, database));
       console.log(`Seeded skill ${spec.slug}@${spec.version}`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -289,16 +303,14 @@ async function seedDemoContent(actor: ActorContext): Promise<void> {
     }
   }
 
-  await seedDependencyShowcase(actor, orgId);
+  await withTenantContext({ orgId, userId: actor.id }, (database) =>
+    seedDependencyShowcase(actor, orgId, database),
+  );
 }
 
-/**
- * Insert the showcase dependency states (missing / cycle / archived) directly, since
- * these deliberately cannot pass the publish-time check. Idempotent: edges use onConflictDoNothing
- * and archive flags are set unconditionally.
- */
-async function seedDependencyShowcase(actor: ActorContext, orgId: string): Promise<void> {
-  const rows = await db
+/** Insert the cycle showcase directly, since it deliberately cannot pass publish-time checks. */
+async function seedDependencyShowcase(actor: ActorContext, orgId: string, database: Db): Promise<void> {
+  const rows = await database
     .select({ id: schema.skills.id, slug: schema.skills.slug, currentVersionId: schema.skills.currentVersionId })
     .from(schema.skills)
     .where(eq(schema.skills.orgId, orgId));
@@ -321,25 +333,36 @@ async function seedDependencyShowcase(actor: ActorContext, orgId: string): Promi
     // Cycle: vault-index ↔ granite-recall.
     edge("vault-index", "granite-recall"),
     edge("granite-recall", "vault-index"),
-    // Missing: a declared dependency that was never published to the workspace.
-    edge("incident-summary", "html-sanitize"),
-    // Archived dependency, still referenced by a live version (keeps it downloadable).
-    edge("incident-summary", "screenshot-grab"),
   ].filter((e): e is NonNullable<typeof e> => e != null);
 
   if (edges.length) {
-    await db.insert(schema.skillVersionDependencies).values(edges).onConflictDoNothing();
+    await database.insert(schema.skillVersionDependencies).values(edges).onConflictDoNothing();
   }
 
-  // Archive screenshot-grab (referenced by incident-summary → downloadable) and html-export (unreferenced).
+  // Clean up legacy invalid showcase edges so an existing local workspace becomes runnable
+  // after the seed command is re-run. These edges were never declared by incident-summary.
+  const incidentSummary = bySlug.get("incident-summary");
+  if (incidentSummary?.currentVersionId) {
+    await database
+      .delete(schema.skillVersionDependencies)
+      .where(
+        and(
+          eq(schema.skillVersionDependencies.orgId, orgId),
+          eq(schema.skillVersionDependencies.skillVersionId, incidentSummary.currentVersionId),
+          inArray(schema.skillVersionDependencies.dependsOnSlug, ["html-sanitize", "screenshot-grab"]),
+        ),
+      );
+  }
+
+  // Keep two unrelated archived rows for archive-list and restore flows.
   const toArchive = ["screenshot-grab", "html-export"].map((slug) => bySlug.get(slug)?.id).filter((id): id is string => !!id);
   if (toArchive.length) {
-    await db
+    await database
       .update(schema.skills)
       .set({ archivedAt: new Date(), archivedBy: actor.id, archiveReason: "Superseded — seeded archive demo" })
       .where(and(eq(schema.skills.orgId, orgId), inArray(schema.skills.id, toArchive)));
   }
-  console.log("Seeded dependency showcase (cycle, missing, archived)");
+  console.log("Seeded dependency showcase (cycle and archived rows)");
 }
 
 async function createAuthUser(input: { email: string; password: string; name: string }): Promise<void> {

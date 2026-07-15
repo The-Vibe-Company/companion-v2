@@ -54,6 +54,16 @@ test("API changes run database, browser, and container checks", () => {
   assert.equal(result.containers, true);
 });
 
+test("RunSkill worker and sandbox changes run database and container checks", () => {
+  for (const file of ["apps/worker/src/runSupervisor.ts", "packages/sandbox/src/vercel.ts"]) {
+    const result = classifyFiles([file]);
+    assert.equal(result.quality, true);
+    assert.equal(result.build, true);
+    assert.equal(result.database, true);
+    assert.equal(result.containers, true);
+  }
+});
+
 test("database migrations run every integrated surface", () => {
   const result = classifyFiles(["packages/db/drizzle/0012_tenant_rls.sql"]);
   assert.equal(result.database, true);
@@ -90,6 +100,7 @@ test("deletion-only diffs retain the deleted runtime path", (context) => {
   execFileSync("git", ["init", "--quiet"], { cwd: directory });
   execFileSync("git", ["config", "user.email", "ci-scope@example.invalid"], { cwd: directory });
   execFileSync("git", ["config", "user.name", "CI scope test"], { cwd: directory });
+  execFileSync("git", ["config", "commit.gpgsign", "false"], { cwd: directory });
   const relativePath = "apps/api/src/deleted.ts";
   mkdirSync(join(directory, "apps/api/src"), { recursive: true });
   writeFileSync(join(directory, relativePath), "export const deleted = true;\n");

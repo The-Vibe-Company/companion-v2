@@ -13,8 +13,9 @@
 - **Email:** `packages/email` supports local log/Mailpit mode and Resend for production.
 - **Web:** Next.js App Router in `apps/web`; it calls the API, not Postgres or MinIO directly.
 - **CLI:** `cli` stores an API URL plus Better Auth session cookie and uses REST endpoints.
-- **Billing:** `packages/billing` is the framework-free Stripe adapter shared by the API and
-  `apps/worker`; `packages/core` owns plan computation, entitlements, quotas, and reconciliation.
+- **Worker:** `apps/worker` runs independent billing and skill-run supervisors. `packages/billing`
+  is the framework-free Stripe adapter; `packages/core` owns plan computation, entitlements,
+  quotas, run validation, and durable orchestration state.
 
 Redis/BullMQ are intentionally excluded. Temporal is the intended future workflow engine for
 deployments, reconcile loops, retries, compensation, and schedules.
@@ -23,14 +24,14 @@ deployments, reconcile loops, retries, compensation, and schedules.
 
 Manual local development uses `pnpm dev` as the idempotent full-stack entrypoint. The script starts
 Postgres, MinIO, and Mailpit with the defaults from `.env.example`, applies Drizzle migrations, seeds
-the local test user, and starts the long-running API, billing worker, and web processes. Local Docker ports bind
+the local test user, and starts the long-running API, worker, and web processes. Local Docker ports bind
 to `COMPOSE_BIND_HOST`, which defaults to `127.0.0.1`. `pnpm dev:app` is the app-only loop when infra
 is already prepared.
 
 Conductor workspaces use a separate, **native (Docker-free)** entrypoint, `scripts/dev-conductor.sh`
 (modeled on `~/Dev/monkapps`). It starts a per-workspace Postgres cluster — plus optional native MinIO
 and Mailpit — under `.conductor-pg/`, applies migrations, seeds the test user, and runs only the
-long-running API, billing worker, and web processes via `concurrently`. All services are allocated from
+long-running API, worker, and web processes via `concurrently`. All services are allocated from
 `CONDUCTOR_PORT`: web `+0`, API `+1`, Postgres `+2`, MinIO API `+3`, MinIO console `+4`, Mailpit SMTP
 `+5`, and Mailpit UI `+6`. It injects workspace-specific `DATABASE_URL`, API URLs, S3 endpoint,
 Mailpit ports, and a `companion-<workspace>` Better Auth cookie prefix inline — without mutating
@@ -56,7 +57,7 @@ service references, public domains, Stripe webhook registration, initial deploym
 ```
 apps/
   api/        # Hono backend, Better Auth, REST + tRPC
-  worker/     # Stripe seat sync + periodic billing reconciliation
+  worker/     # independent Stripe reconciliation + durable skill-run supervisors
   web/        # Next.js portal
 packages/
   billing/    # framework-free Stripe gateway
@@ -76,8 +77,8 @@ Better Auth owns the core `user`, `session`, `account`, and `verification` table
 adds `profiles`, `organizations`, `memberships`, `invitations`,
 `skills`, `skill_versions`, `skill_version_dependencies`, `skill_stars`, `labels`, `skill_labels`,
 `skill_filter_preferences`, `skill_comments`, `skill_comment_images`, `local_skill_installs`,
-`api_tokens`, `billing_subscriptions`, `stripe_webhook_events`, `audit_log`, and the secret-vault
-tables described below. There are **no teams**:
+`api_tokens`, `billing_subscriptions`, `stripe_webhook_events`, `audit_log`, the secret-vault
+tables, and the skill-run tables described below. There are **no teams**:
 the hierarchy is `Organization → User`. The former decorative `organizations.plan` column no longer
 exists: raw provider state lives in at most one `billing_subscriptions` row per organization, while
 the effective plan is derived centrally at request time.
@@ -543,6 +544,262 @@ Skill archives are stored under `{org_id}/{slug}/{version}.tar.gz` in the `skill
 using the slug at publish time; a later rename does not move historical archive objects. The
 per-version package endpoint repackages them as `.zip` on the fly. Clients never receive S3
 admin credentials.
+
+## Skill Runs (one-shot sandboxed sessions)
+
+Skill runs are private, durable sandbox sessions launched from a published skill. Any member may run
+a skill they can access. Creation atomically pins the exact root version, its complete accessible
+dependency closure, every selected vault-secret version, and every declared non-sensitive value.
+Prompt and attachments belong to one run; named personal configurations save only model, live secret
+references, and declared variables.
+
+The API validates and persists commands but never contacts the sandbox. `apps/worker` composes the
+`RunSandboxRuntime` port from `packages/core/src/runRuntime.ts` with the Vercel/OpenCode adapter in
+`packages/sandbox`. A fresh deterministic sandbox is forked from a golden snapshot, and every pinned
+package is mounted below `.claude/skills/<slug>/`. The control plane never executes untrusted skill
+content; only the sandbox does.
+
+### Data model
+
+- `skill_run_configs`, `skill_run_config_secrets`, and `skill_run_config_variables` store multiple
+  named creator-only configurations. Names are unique per creator and root skill, at most one is the
+  default, and optimistic `revision` updates reject stale writers. Secret children reference
+  `secrets.id`; deleting a configuration never deletes a vault row and atomically detaches the live
+  foreign key from historical runs, whose immutable configuration-name snapshot remains intact.
+- `skill_runs` stores the creator, root skill/version snapshot, model, prompt, optional configuration
+  name snapshot, idempotency key and payload hash, typed status/phase/error fields, deterministic
+  sandbox/session identity, opaque-encrypted internal server password, final transcript with its
+  folded event cursor, and a bounded redacted warning snapshot that survives event retention. Public
+  lifecycle is `queued → starting → running → frozen | error | canceled`.
+- `skill_run_skills`, `skill_run_secret_inputs`, `skill_run_model_provider_inputs`, and
+  `skill_run_variable_inputs` are immutable input snapshots. Generic secret inputs contain vault
+  references and exact versions only, with provenance `skill` or `runtime`. The model-provider row
+  instead pins a dedicated connection id and credential version; it never appears in the generic
+  secret collection. Ordinary responses never contain plaintext.
+- `skill_run_jobs` is the retryable orchestration queue. `skill_run_prompts` is the initial/follow-up
+  outbox with deterministic OpenCode `messageID`s. `skill_run_events` holds redacted, monotonically
+  sequenced events for replayable SSE.
+- `skill_run_attachments` — files the launcher attached (≤5 × 10 MB): bytes in S3 under
+  `{org}/run-attachments/{id}`, metadata here, mounted as `<attachmentId>-<filename>`, and streamed
+  back creator-only with `nosniff` +
+  `Content-Disposition: attachment`.
+- Migration `0034_skill_runs.sql` creates these tables and forces creator-only RLS on runs,
+  configurations, snapshots, prompts, events, and attachments. Child policies derive the
+  creator through their parent run/configuration; admins receive no override. The only cross-tenant
+  queue operations are narrow internal `SECURITY DEFINER` functions using `FOR UPDATE SKIP LOCKED`
+  and exact unexpired lease identities; claimed work then runs under the recorded tenant and creator
+  context. Caller-controlled GUCs are not authority: policies additionally require the table-owner
+  execution identity used only inside those functions.
+- `user_model_preferences` / `org_model_preferences` (mig 0036) — the ACTIVATED-model lists (see
+  "Activated models" below): a jsonb array of `provider/model-id` refs per member (PK
+  `org_id+user_id`, user-scoped RLS) and per workspace (PK `org_id`, tenant RLS, nullable
+  `created_by` so `db:seed` can seed it).
+
+Live events are retained for 24 hours after a terminal state and then removed; the transcript remains
+the durable history. Runs do not wake after freeze. A retry resumes durable orchestration for the same
+run and deterministic external identities; it does not create another run, sandbox, session, or
+prompt. Files created by sandbox code are discarded with the sandbox; Companion persists only the
+transcript and the metadata/bytes of files the user attached at launch.
+
+### Launch pipeline + recorder
+
+`getRunOptions` returns the complete ordered set of root/dependency version and edge pins. `createRun`
+requires the client to echo that exact set and compares it under the same transaction locks that
+create the immutable snapshots. It never silently upgrades a dependency between launcher render and
+submit. Both paths reject
+cycles, missing/archived/inaccessible dependencies, stale root versions, excessive closure size,
+undeclared inputs, required omissions, reserved runtime names, and ambiguous environment collisions.
+The selected payload is authoritative: installation bindings may prefill `Custom`, but the server
+never adds or mutates a binding implicitly. Secret ACL and model readiness are checked while loading
+options and again while atomically creating the run snapshots, initial prompt, and queue row.
+
+The runs supervisor advertises a short-lived PostgreSQL readiness heartbeat; run-options and new-run
+creation fail closed when no configured worker heartbeat is live, without disabling the rest of the
+API. It claims short leases with `FOR UPDATE SKIP LOCKED`, heartbeats them, limits local
+concurrency, and retries transient failures at most three times with backoff. Validation failures are
+terminal. Raw SQL claim timestamps are decoded and validated before execution; malformed claim
+metadata enters the same durable retry/error transition instead of leaving an expiring lease to be
+reclaimed forever. A separate exact-lease control watcher aborts in-flight work promptly on
+cancellation, membership loss, or lease loss. S3, sandbox control, OpenCode request, probe, and
+recorder-connect calls all carry cancellation signals and strict time budgets. Each
+external step has persisted before/after progress:
+
+1. revalidate snapshot access and decrypt exact secret versions;
+2. get or fork the deterministic sandbox;
+3. push root, dependencies, uniquely named attachments, and `opencode.json`;
+4. start and health-check OpenCode with the exact environment;
+5. establish the recorder, then find or create the deterministic session;
+6. send the persisted initial/follow-up prompt with its deterministic `messageID`;
+7. batch redacted events and snapshot the transcript;
+8. freeze after inactivity, then stop and destroy the sandbox idempotently.
+
+Runtime/network calls never occur inside a database transaction. On worker replacement, an expired
+lease resumes the same sandbox/session/message instead of duplicating them. A transient recorder
+closure reconnects with backoff while preserving recorder-local cumulative part cursors across new
+network signals. Each idle transcript snapshot and its `session.idle` barrier event are committed in
+one transaction with the same watermark, so SSE can never hydrate an older snapshot after observing
+that event. Normal process shutdown stops claiming work and lets leases expire;
+it does not destroy active sandboxes.
+
+### Sandbox cleanup
+
+A terminal run's transcript is persisted before teardown. Stop and destroy are
+idempotent; provider failures keep cleanup owed for a later worker attempt. Cancellation is also a
+durable command: a queued run becomes `canceled` without a sandbox, while an active run takes a final
+snapshot and then tears down. The event-retention sweeper and sandbox-cleanup work live in the runs
+supervisor, not the API.
+
+### Privacy
+
+Runs are **private to their creator** — `canAccessRun` in `packages/core/src/authz.ts`, the same
+owner-only shape as personal skills, deliberately with **no admin override**. `GET
+/v1/skills/:slug/runs` returns only the caller's runs; anyone else's `GET /v1/runs/:id` is a 404.
+Any member may RUN any skill they can see; running confers no visibility into others' runs.
+
+### Chat proxy
+
+The browser never sees the sandbox. A follow-up route inserts one durable outbox row and returns
+`202`; a concurrent pending prompt returns `409`. `GET /v1/runs/:id/events` first replays persisted
+rows strictly after `Last-Event-ID`, then switches to PostgreSQL `LISTEN/NOTIFY` without a race. The
+notification contains only run id and sequence, and every SSE frame has a real `id:`. Reconnect uses
+the last accepted sequence and transcript snapshots reconcile whenever `transcript_updated_at`
+advances.
+
+`packages/sandbox/src/opencodeChat.ts` absorbs pinned-SDK event churn. `run.warning` is non-terminal
+(for example a transient recorder reconnect); `run.error` represents a runtime failure. The worker
+redacts all injected literal values before database events, SSE, transcripts, errors, audits, and
+logs, including tool inputs/outputs and SDK errors. Plaintext maps are cleared after server start;
+recovery reconstructs only the in-memory matcher after revalidating and decrypting pinned versions.
+This protects Companion surfaces from literal leakage, not from a malicious skill encoding or
+exfiltrating a credential it can read inside the sandbox.
+
+### Model provider credentials (personal + workspace, separate from Secrets)
+
+Model-provider keys have a dedicated write-only domain; they are not Secrets rows, vault candidates,
+recipients, or bindings. Migration `0035_runtime_credentials.sql` creates
+`model_provider_connections` plus immutable `model_provider_credential_versions`. Personal
+connections are forced owner-only (admins included, with no override); workspace connections are
+readable by members and writable only by owners/admins. The API accepts a key only on PUT and returns
+redacted connection metadata. Encryption uses `COMPANION_SECRETS_MASTER_KEY`, but a provider-specific
+opaque AAD domain (`model-provider-credential` plus connection id and version) keeps ciphertext
+cryptographically distinct from vault secret versions and internal run credentials.
+
+Resolution keeps personal-over-workspace precedence. `createRun` requires the exact redacted
+connection/version pin shown by run-options and stores it in `skill_run_model_provider_inputs`, never
+in `skill_run_secret_inputs`. Each immutable encrypted version also owns its exact environment key,
+so rotating either the key value or its accepted env name leaves already-created runs deterministic;
+future runs pin the new version. Disconnect removes the dedicated
+connection and its ciphertext without touching any generic Secret, so queued/active pins fail their
+next revalidation and cannot be revived by a later reconnect. Provider connection, membership and
+version are checked when options load, when the run is created, immediately before injection, before
+every follow-up, and periodically during an active lease. Loss before injection fails without
+starting a sandbox; loss during a run takes a final snapshot and tears down best-effort. All
+`OPENCODE_SERVER_*` names are reserved.
+
+### Activated models (curated picker + hard gate)
+
+The run launcher's picker does NOT show the full models.dev catalog — it shows only the
+**activated** set: the member's personal list (`user_model_preferences`) ∪ the workspace list
+(`org_model_preferences`, owner/admin write via `canManageOrg` + `models.activate.org` audit).
+Both lists are curated in Settings — Account → **Models** and Workspace → **Shared models**
+(`ModelsPane`, one component keyed per scope; the old *Model providers*/*Shared providers* panes
+are MERGED into it, `?view=providers`/`org-providers` are normalized aliases). The pane is
+organized around READINESS: a top "deck" mirroring exactly what the launcher offers (each row
+`Ready` or `Needs key`, with a dedicated write-only provider-key form; the personal pane also shows
+the workspace's contributions read-only), then a search-first add bar over the full catalog
+(flat one-click Activate rows, capped at 50 visible matches), then a per-provider browse accordion
+whose headers carry connect/disconnect for THIS scope's bindings. The launcher's "Add more models"
+button opens the pane via the shell's `openSettings({view:"models"})` (the skills shell renders
+Settings as a LOCAL surface with `history.pushState`, so a plain `router.push` would be swallowed —
+the opener is threaded SkillsApp → DetailView → RunLauncherDialog) and an empty effective set
+renders an empty state instead of a picker. Enforcement is **hard**: `createRun` rejects a
+non-activated model (`RunValidationError`), so the raw API honors the same rule as the UI. Core
+(`packages/core/src/modelPreferences.ts`) is catalog-agnostic: ids are validated against the live
+catalog at the API layer on write (400 on unknown ids) and pruned against it at read time
+(`GET /v1/models` returns `activated: { personal, org }`), and run time stays safe regardless via
+`resolveModelKeys`. Seeds activate a default Anthropic trio so fresh workspaces are not bricked by
+the gate; real deployments must activate models before members can run skills.
+
+### Launcher inputs and saved configurations
+
+The launcher starts from `Custom`, a default configuration, or another named personal
+configuration. `Save as`, `Update`, default, rename, and delete operations affect model plus declared
+secret/variable selections only; prompt and files are always ephemeral. A `Modified` marker compares
+the full draft with its source revision. Drafts are keyed by skill id so navigation cannot leak a
+prompt, attachment, model, or credential choice between skills, while the Settings → Models detour
+can safely preserve the current skill's draft.
+
+Inputs are grouped root-first by pinned skill. Secrets display metadata only; inline creation writes
+to the vault and selects the returned id. Variables accept only keys declared in
+`companion.json.environment.env`, retain non-sensitive values in cleartext private history/configs,
+and label that visibility explicitly. Removed declarations are obsolete and never injected; a new
+required declaration or inaccessible secret makes a configuration `Needs attention`.
+
+There is no silent environment precedence. Secret/variable collisions fail. The same key across
+dependencies is allowed only for the same variable value or exact pinned secret id+version. A model
+provider key belongs to a separate credential domain, so any collision with a skill secret or
+variable fails. Any `OPENCODE_SERVER_*` collision fails. The launcher always summarizes credentials
+exposed to sandbox code and explains that literal redaction is not an exfiltration boundary.
+
+For each model, run-options also returns a redacted provider pin containing only environment key,
+connection id, scope, and exact credential version. This lets the launcher reject a provider/skill
+collision before submit without exposing a value or any vault metadata; the server remains
+authoritative.
+
+### Endpoints (session-only — PATs are rejected; not a skills API surface)
+
+`GET /v1/models` (full tool-capable models.dev catalog + `connected` flags + the caller's
+`activated` lists, pruned to the catalog), `PUT /v1/model-preferences` +
+`PUT /v1/org-model-preferences` (replace the activated lists; owner/admin for the org one),
+`GET/PUT /v1/provider-connections` + `DELETE /v1/provider-connections/:provider`,
+`GET/PUT /v1/org-provider-connections` + `DELETE /v1/org-provider-connections/:provider`,
+`GET /v1/skills/:slug/run-options`, `GET/POST /v1/skills/:slug/run-configurations`,
+`PATCH/DELETE /v1/run-configurations/:id`,
+`POST /v1/skills/:slug/runs` (multipart: prompt, model, exact version, authoritative JSON inputs,
+repeatable file; mandatory `Idempotency-Key`; `201` for a new run and the same result on replay),
+`GET /v1/skills/:slug/runs` (caller's runs only), `GET /v1/runs/:id`,
+`POST /v1/runs/:id/prompt` (mandatory idempotency, `202`), `POST /v1/runs/:id/cancel`,
+`GET /v1/runs/:id/events` (replayable SSE), and
+`GET /v1/runs/:id/attachments/:attachmentId`. Because every route rejects personal access
+tokens, the bundled Companion skill's API surface is unchanged.
+
+### Non-goals (v1)
+
+Wake/resume of frozen runs, arbitrary undeclared variables, organization-shared configurations,
+fan-out, and golden-snapshot management UI
+(`COMPANION_GOLDEN_SNAPSHOT_ID` is the single golden) remain out of scope.
+Real-sandbox verification lives in `pnpm --filter @companion/sandbox smoke:vercel` (cred-gated,
+not CI).
+
+### Ops runbook
+
+One-time golden snapshot (per OpenCode pin):
+`VERCEL_TOKEN=… VERCEL_TEAM_ID=… VERCEL_PROJECT_ID=… OPENCODE_VERSION=1.17.13
+pnpm --filter @companion/sandbox golden` → export the printed `COMPANION_GOLDEN_SNAPSHOT_ID`.
+
+Environment: `VERCEL_TOKEN`, `VERCEL_TEAM_ID`, `VERCEL_PROJECT_ID`,
+`COMPANION_GOLDEN_SNAPSHOT_ID`, `OPENCODE_VERSION` (pin, e.g. `1.17.13`),
+`COMPANION_SECRETS_MASTER_KEY` (the same base64 32-byte root used with distinct AAD domains for the
+vault, dedicated provider credentials, and opaque internal run credentials),
+`COMPANION_RUNS_ENABLED`, `COMPANION_SANDBOX_REGION`,
+`COMPANION_SANDBOX_TIMEOUT_MS` (default `300000`), `COMPANION_RUN_CONCURRENCY`,
+`COMPANION_RUN_CLAIM_INTERVAL_MS`, `COMPANION_RUN_LEASE_SECONDS`,
+`COMPANION_RUN_HEARTBEAT_MS`, `COMPANION_RUN_INACTIVITY_MS`, bounded recorder reconnect settings,
+`COMPANION_RUN_EVENT_RETENTION_INTERVAL_MS`, `COMPANION_RUN_SWEEP_INTERVAL_MS`, S3 settings for
+attachments/packages. Event retention itself is
+fixed at 24 hours after terminal state. The worker receives these settings. Keep the feature flag off
+when Vercel/golden configuration is absent; only RunSkill is disabled, while API, web, billing,
+provider settings, and vault still run.
+
+Production API and worker processes connect through `DATABASE_URL` using a dedicated login with
+`NOSUPERUSER`, `NOBYPASSRLS`, no table ownership, and no membership in the migration-owner role.
+`DATABASE_MIGRATION_URL` is available only to the API migration step. With
+`DATABASE_RUNTIME_ROLE` configured, that step applies `packages/db/runtime-role-grants.sql` under the
+same advisory lock after every migration; the file is also the manual recovery path. It grants
+ordinary table access plus only the narrow cross-tenant discovery functions needed before a tenant
+GUC exists. Organization creation and domain joining generate/select an org id first, then run under
+normal RLS with explicit tenant context. Running application processes as the table owner, superuser,
+or a `BYPASSRLS` role invalidates the forced-RLS security boundary.
 
 The bundled Companion skill performs write-only secret creation and binding plus secret-aware
 install/update/sync.

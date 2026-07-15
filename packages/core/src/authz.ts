@@ -87,6 +87,21 @@ export function canManagePersonalSkill(actorId: string, skill: SkillScopeRef): b
   return skill.scope === "personal" && skill.creatorId === actorId;
 }
 
+/* ---- Per-run privacy gate (skill runs) --------------------------------------- */
+
+/** The minimal run shape the privacy gate needs: who launched it. */
+export interface RunScopeRef {
+  creatorId: string;
+}
+
+/**
+ * Skill runs are PRIVATE to their creator — like personal skills, there is deliberately NO admin
+ * override. Any member may launch a run of any skill they can see; only the launcher ever reads it.
+ */
+export function canAccessRun(actorId: string, run: RunScopeRef): boolean {
+  return run.creatorId === actorId;
+}
+
 export interface SecretAccessRef {
   ownerId: string;
   audience: SecretAudience;

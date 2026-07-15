@@ -28,6 +28,27 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Load the repo-root .env (if present) so secrets like VERCEL_TOKEN / model provider keys reach the
+# API and worker without depending on the launcher's environment. dotenv semantics: never overrides variables
+# already in the environment, and skips empty assignments (a copied .env.example full of empty
+# values must not nuke exported shell vars).
+if [ -f "$REPO_ROOT/.env" ]; then
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in ''|\#*) continue ;; esac
+    key="${line%%=*}"
+    value="${line#*=}"
+    case "$key" in *[!A-Za-z0-9_]*|'') continue ;; esac
+    [ -n "$value" ] || continue
+    if [ -z "${!key:-}" ]; then
+      case "$value" in
+        \"*\") value="${value%\"}"; value="${value#\"}" ;;
+        \'*\') value="${value%\'}"; value="${value#\'}" ;;
+      esac
+      export "$key=$value"
+    fi
+  done < "$REPO_ROOT/.env"
+fi
 cd "$REPO_ROOT"
 
 # ---------------------------------------------------------------------------
@@ -158,10 +179,13 @@ MAILPIT_PID="$STATE_DIR/mailpit/mailpit.pid"
 # ---------------------------------------------------------------------------
 # Derived runtime config
 # ---------------------------------------------------------------------------
+PG_OWNER_USER="companion_owner"
+PG_OWNER_PASS="companion-owner"
 PG_USER="companion"
 PG_PASS="companion"
 PG_DB="companion"
 DATABASE_URL="postgres://${PG_USER}:${PG_PASS}@127.0.0.1:${PG_PORT}/${PG_DB}"
+DATABASE_MIGRATION_URL="postgres://${PG_OWNER_USER}:${PG_OWNER_PASS}@127.0.0.1:${PG_PORT}/${PG_DB}"
 
 WEB_URL="http://127.0.0.1:${WEB_PORT}"
 API_URL="http://127.0.0.1:${API_PORT}"
@@ -359,15 +383,23 @@ start_postgres() {
 }
 
 bootstrap_database() {
-  step "Ensuring role + database"
+  step "Ensuring migration-owner + NOBYPASSRLS runtime roles"
   local PSQL=("$PG_BIN/psql" -h 127.0.0.1 -p "$PG_PORT" -U postgres -d postgres -v ON_ERROR_STOP=1)
   "${PSQL[@]}" -c "DO \$\$ BEGIN
+    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '$PG_OWNER_USER') THEN
+      CREATE ROLE $PG_OWNER_USER LOGIN PASSWORD '$PG_OWNER_PASS' NOSUPERUSER BYPASSRLS;
+    END IF;
     IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '$PG_USER') THEN
-      CREATE ROLE $PG_USER LOGIN PASSWORD '$PG_PASS' SUPERUSER;
+      CREATE ROLE $PG_USER LOGIN PASSWORD '$PG_PASS' NOSUPERUSER NOBYPASSRLS;
     END IF;
   END \$\$;" >/dev/null
-  "${PSQL[@]}" -c "CREATE DATABASE $PG_DB OWNER $PG_USER;" 2>/dev/null || true
-  ok "Role '$PG_USER' + database '$PG_DB' ready"
+  "${PSQL[@]}" -c "ALTER ROLE $PG_OWNER_USER NOSUPERUSER BYPASSRLS;" >/dev/null
+  "${PSQL[@]}" -c "ALTER ROLE $PG_USER NOSUPERUSER NOBYPASSRLS NOINHERIT;" >/dev/null
+  "${PSQL[@]}" -c "CREATE DATABASE $PG_DB OWNER $PG_OWNER_USER;" 2>/dev/null || true
+  "${PSQL[@]}" -c "ALTER DATABASE $PG_DB OWNER TO $PG_OWNER_USER;" >/dev/null
+  # Upgrade old Conductor clusters whose application role used to own every migrated object.
+  "${PSQL[@]}" -d "$PG_DB" -c "REASSIGN OWNED BY $PG_USER TO $PG_OWNER_USER;" >/dev/null
+  ok "Owner '$PG_OWNER_USER' + runtime '$PG_USER' + database '$PG_DB' ready"
 }
 
 # ---------------------------------------------------------------------------
@@ -474,7 +506,11 @@ cleanup() {
 # ---------------------------------------------------------------------------
 migrate_and_seed() {
   step "Applying migrations + seeding test user"
-  DATABASE_URL="$DATABASE_URL" pnpm db:migrate || die "Migrations failed"
+  env DATABASE_URL="$DATABASE_MIGRATION_URL" DATABASE_MIGRATION_URL="$DATABASE_MIGRATION_URL" \
+    pnpm db:migrate || die "Migrations failed"
+  local OWNER_PSQL=("$PG_BIN/psql" "$DATABASE_MIGRATION_URL" -v ON_ERROR_STOP=1)
+  "${OWNER_PSQL[@]}" -v runtime_role="$PG_USER" \
+    -f "$REPO_ROOT/packages/db/runtime-role-grants.sql" >/dev/null || die "Runtime database grants failed"
   ok "Migrations applied"
 
   local seed_env=(
@@ -529,10 +565,10 @@ print_header() {
 launch_apps() {
   step "Launching API + worker + web via concurrently"
 
-  # Shared API env: storage + email vary with what's installed.
-  local api_storage_env="" api_email_env
+  # Storage is shared by API uploads and the runs worker; email remains API-only.
+  local shared_storage_env="" api_email_env
   if [ "$HAS_MINIO" = true ]; then
-    api_storage_env="S3_ENDPOINT=\"$S3_ENDPOINT\" S3_REGION=us-east-1 S3_ACCESS_KEY_ID=\"$S3_ACCESS_KEY_ID\" S3_SECRET_ACCESS_KEY=\"$S3_SECRET_ACCESS_KEY\" S3_BUCKET_SKILL_ARCHIVES=\"$S3_BUCKET\" S3_FORCE_PATH_STYLE=true"
+    shared_storage_env="S3_ENDPOINT=\"$S3_ENDPOINT\" S3_REGION=us-east-1 S3_ACCESS_KEY_ID=\"$S3_ACCESS_KEY_ID\" S3_SECRET_ACCESS_KEY=\"$S3_SECRET_ACCESS_KEY\" S3_BUCKET_SKILL_ARCHIVES=\"$S3_BUCKET\" S3_FORCE_PATH_STYLE=true"
   fi
   if [ "$HAS_MAILPIT" = true ]; then
     api_email_env="EMAIL_PROVIDER=mailpit EMAIL_FROM=\"Companion <noreply@companion.local>\" MAILPIT_SMTP_HOST=127.0.0.1 MAILPIT_SMTP_PORT=$MAILPIT_SMTP_PORT"
@@ -540,10 +576,10 @@ launch_apps() {
     api_email_env="EMAIL_PROVIDER=log"
   fi
 
-  # The master key is exported by ensure_secrets_master_key and inherited by the API process. Never
+  # The master key is exported by ensure_secrets_master_key and inherited by API + worker. Never
   # interpolate it into concurrently's command argument, where process listings could expose it.
-  local api_cmd="COMPANION_API_HOST=127.0.0.1 COMPANION_API_PORT=$API_PORT DATABASE_URL=\"$DATABASE_URL\" BETTER_AUTH_URL=\"$API_URL\" BETTER_AUTH_COOKIE_PREFIX=\"$PROJECT\" COMPANION_WEB_URL=\"$WEB_URL\" COMPANION_API_URL=\"$API_URL\" NEXT_PUBLIC_COMPANION_API_URL=\"$API_URL\" $api_storage_env $api_email_env pnpm --filter @companion/api dev"
-  local worker_cmd="DATABASE_URL=\"$DATABASE_URL\" COMPANION_WEB_URL=\"$WEB_URL\" pnpm --filter @companion/worker dev"
+  local api_cmd="COMPANION_API_HOST=127.0.0.1 COMPANION_API_PORT=$API_PORT DATABASE_URL=\"$DATABASE_URL\" BETTER_AUTH_URL=\"$API_URL\" BETTER_AUTH_COOKIE_PREFIX=\"$PROJECT\" COMPANION_WEB_URL=\"$WEB_URL\" COMPANION_API_URL=\"$API_URL\" NEXT_PUBLIC_COMPANION_API_URL=\"$API_URL\" $shared_storage_env $api_email_env pnpm --filter @companion/api dev"
+  local worker_cmd="DATABASE_URL=\"$DATABASE_URL\" COMPANION_WEB_URL=\"$WEB_URL\" $shared_storage_env pnpm --filter @companion/worker dev"
   local web_cmd="COMPANION_API_URL=\"$API_URL\" NEXT_PUBLIC_COMPANION_API_URL=\"$API_URL\" pnpm --filter @companion/web dev --hostname 127.0.0.1 --port $WEB_PORT"
 
   free_port "$API_PORT" "api"

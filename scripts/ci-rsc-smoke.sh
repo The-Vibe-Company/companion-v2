@@ -131,7 +131,11 @@ start_stack() {
   docker compose -p "$COMPOSE_PROJECT_NAME" up -d minio-init
 
   log "Applying migrations and seeding test user"
-  NODE_ENV=development pnpm db:migrate
+  if [ -n "${DATABASE_RUNTIME_ROLE:-}" ]; then
+    NODE_ENV=development pnpm --filter @companion/api migrate
+  else
+    NODE_ENV=development pnpm db:migrate
+  fi
   NODE_ENV=development pnpm --filter @companion/api seed:test-user
 
   log "Starting built API"

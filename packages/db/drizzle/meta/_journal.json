@@ -239,6 +239,27 @@
       "when": 1783937500000,
       "tag": "0033_personal_shared_secrets",
       "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1783937600000,
+      "tag": "0034_skill_runs",
+      "breakpoints": true
+    },
+    {
+      "idx": 35,
+      "version": "7",
+      "when": 1783937700000,
+      "tag": "0035_runtime_credentials",
+      "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1783937800000,
+      "tag": "0036_model_preferences",
+      "breakpoints": true
     }
   ]
 }

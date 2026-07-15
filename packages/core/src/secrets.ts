@@ -111,6 +111,79 @@ async function assertSecretAccess(
   return secret;
 }
 
+/** Metadata-only pin used by trusted control-plane workflows such as RunSkill and provider binds. */
+export interface AccessibleSecretPin {
+  secretId: string;
+  version: number;
+  key: string;
+  name: string;
+  ownerId: string;
+  ownerName: string;
+  audience: SecretAudience;
+}
+
+/**
+ * Revalidate the normal vault ACL and pin the current immutable value version without decrypting it.
+ * Callers persist this reference, never a plaintext or ciphertext copy.
+ */
+export async function pinAccessibleSecret(input: {
+  actor: SecretActorContext;
+  orgId: string;
+  secretId: string;
+  database?: Db;
+}): Promise<AccessibleSecretPin> {
+  const database = input.database ?? db;
+  const secret = await assertSecretAccess(database, input.actor, input.orgId, input.secretId);
+  return {
+    secretId: secret.id,
+    version: secret.currentVersion,
+    key: secret.key,
+    name: secret.name,
+    ownerId: secret.ownerId,
+    ownerName: secret.ownerName,
+    audience: secret.audience,
+  };
+}
+
+/**
+ * Last-moment trusted resolver for an already pinned version. Access is checked again before the
+ * immutable version is opened; disabled/deleted/revoked secrets therefore stop a queued run.
+ */
+export async function decryptPinnedSecret(input: {
+  actor: SecretActorContext;
+  orgId: string;
+  secretId: string;
+  version: number;
+  masterKey?: Buffer;
+  database?: Db;
+}): Promise<{ pin: AccessibleSecretPin; value: string }> {
+  const database = input.database ?? db;
+  const secret = await assertSecretAccess(database, input.actor, input.orgId, input.secretId);
+  const row = await database.query.secretVersions.findFirst({
+    where: and(
+      eq(schema.secretVersions.orgId, input.orgId),
+      eq(schema.secretVersions.secretId, input.secretId),
+      eq(schema.secretVersions.version, input.version),
+    ),
+  });
+  if (!row) throw new Error("secret not found");
+  return {
+    pin: {
+      secretId: secret.id,
+      version: input.version,
+      key: secret.key,
+      name: secret.name,
+      ownerId: secret.ownerId,
+      ownerName: secret.ownerName,
+      audience: secret.audience,
+    },
+    value: decryptSecretValue(
+      { orgId: input.orgId, secretId: input.secretId, version: input.version, ...ciphertextFromRow(row) },
+      input.masterKey,
+    ),
+  };
+}
+
 async function assertSecretOwner(
   database: Db,
   actor: SecretActorContext,
@@ -139,12 +212,14 @@ async function recipientRows(database: Db, secret: SecretRecord, actorId: string
 }
 
 async function toSecretRow(database: Db, actorId: string, secret: SecretRecord): Promise<SecretRow> {
-  const [usage] = secret.ownerId === actorId
-    ? await database
-        .select({ value: count() })
-        .from(schema.skillSecretBindings)
-        .where(and(eq(schema.skillSecretBindings.orgId, secret.orgId), eq(schema.skillSecretBindings.secretId, secret.id), isNull(schema.skillSecretBindings.revokedAt)))
-    : [{ value: 0 }];
+  let usageCount = 0;
+  if (secret.ownerId === actorId) {
+    const result = await database.execute(sql`
+      select companion_secret_usage_count(${secret.orgId}::uuid, ${secret.id}::uuid) as count
+    `);
+    const row = Array.from(result as unknown as Iterable<{ count: number | string }>)[0];
+    usageCount = Number(row?.count ?? 0);
+  }
   return {
     id: secret.id,
     org_id: secret.orgId,
@@ -172,7 +247,7 @@ async function toSecretRow(database: Db, actorId: string, secret: SecretRecord):
       deletedAt: secret.deletedAt,
     }),
     can_manage: canManageSecret(actorId, secret),
-    usage_count: Number(usage?.value ?? 0),
+    usage_count: usageCount,
   };
 }
 

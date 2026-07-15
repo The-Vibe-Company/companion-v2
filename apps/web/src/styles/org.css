@@ -145,17 +145,18 @@
 .og-btn i { display: inline-flex; }
 
 /* ---- Dialog (invite, create, join) ------------------------------------- */
-.og-scrim { position: fixed; inset: 0; background: var(--color-scrim); z-index: 70; display: flex; align-items: flex-start; justify-content: center; padding-top: 14vh; }
-.og-dialog { width: min(460px, 92vw); background: var(--color-surface); border: 1px solid var(--color-line); border-radius: var(--radius-lg); box-shadow: var(--shadow-lg); overflow: hidden; }
+.og-scrim { position: fixed; inset: 0; background: var(--color-scrim); z-index: 70; display: flex; align-items: flex-start; justify-content: center; padding: 14vh 16px; }
+.og-dialog { width: min(460px, 92vw); max-height: 100%; display: flex; flex-direction: column; background: var(--color-surface); border: 1px solid var(--color-line); border-radius: var(--radius-lg); box-shadow: var(--shadow-lg); overflow: hidden; }
 @media (prefers-reduced-motion: no-preference) { .og-dialog { animation: ogIn var(--duration-base) var(--ease-out-quint); } }
 @keyframes ogIn { from { transform: translateY(-8px); opacity: 0.6; } to { transform: none; opacity: 1; } }
-.og-dialog__head { display: flex; align-items: flex-start; gap: 12px; padding: 18px 20px 0; }
+.og-dialog__head { flex: none; display: flex; align-items: flex-start; gap: 12px; padding: 18px 20px 0; }
 .og-dialog__ic { width: 34px; height: 34px; border-radius: var(--radius-md); display: grid; place-items: center; flex: none; background: var(--color-accent-tint); color: var(--color-accent-fg); }
 .og-dialog__t { font-size: var(--text-md); font-weight: 600; margin: 0; letter-spacing: var(--tracking-tight); }
 .og-dialog__d { font-size: var(--text-sm); color: var(--color-muted); margin: 4px 0 0; line-height: var(--leading-relaxed); }
 .og-dialog__x { margin-left: auto; }
-.og-dialog__body { padding: 18px 20px; display: flex; flex-direction: column; gap: 14px; }
-.og-dialog__foot { display: flex; align-items: center; gap: 8px; padding: 14px 20px; border-top: 1px solid var(--color-line); }
+/* Content scrolls internally once it exceeds the scrim's vertical clearance; head/foot stay pinned. */
+.og-dialog__body { flex: 1; min-height: 0; overflow-y: auto; padding: 18px 20px; display: flex; flex-direction: column; gap: 14px; }
+.og-dialog__foot { flex: none; display: flex; align-items: center; gap: 8px; padding: 14px 20px; border-top: 1px solid var(--color-line); }
 .og-dialog__foot .og-spacer { flex: 1; }
 
 .og-field { display: flex; flex-direction: column; gap: 6px; }

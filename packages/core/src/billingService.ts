@@ -1,12 +1,27 @@
-import { and, count, eq, lte, or, sql } from "drizzle-orm";
+import { and, count, eq, sql } from "drizzle-orm";
 import type { BillingGateway, BillingSubscriptionSnapshot } from "@companion/billing";
 import { db, schema, type Db } from "@companion/db";
 import { PAYMENT_GRACE_MS, billingRuntimeConfig } from "./billing";
+import { listPreTenantBillingSyncCandidates, resolvePreTenantBillingOrganization } from "./preTenant";
 
 const OPEN_STATUSES = new Set(["active", "past_due", "unpaid", "incomplete", "paused", "trialing"]);
 
 function retryAt(attempts: number, now: Date): Date {
   return new Date(now.getTime() + Math.min(3_600, 30 * 2 ** Math.max(0, attempts - 1)) * 1_000);
+}
+
+async function withBillingTenantContext<T>(
+  database: Db,
+  orgId: string,
+  fn: (tenantDatabase: Db) => Promise<T>,
+): Promise<T> {
+  return database.transaction(async (rawTx) => {
+    const tx = rawTx as unknown as Db;
+    await tx.execute(
+      sql`select set_config('app.org_id', ${orgId}, true), set_config('app.user_id', '', true)`,
+    );
+    return fn(tx);
+  });
 }
 
 async function assertBillingManager(database: Db, actorId: string, orgId: string): Promise<void> {
@@ -184,60 +199,63 @@ export async function processStripeWebhook(input: {
   // A new Checkout subscription is not linked in our row yet: Stripe's first event already carries
   // the subscription id, while our durable correlation key is still the Customer id. Try both so
   // checkout.session.completed and customer.subscription.created can bootstrap the relationship.
-  const bySubscription = input.subscriptionId
-    ? await database.query.billingSubscriptions.findFirst({
-        where: eq(schema.billingSubscriptions.stripeSubscriptionId, input.subscriptionId),
-      })
-    : null;
-  const billing =
-    bySubscription ??
-    (input.customerId
-      ? await database.query.billingSubscriptions.findFirst({
-          where: eq(schema.billingSubscriptions.stripeCustomerId, input.customerId),
-        })
-      : null);
-  if (!billing) return "ignored";
-  const [inserted] = await database
-    .insert(schema.stripeWebhookEvents)
-    .values({ eventId: input.eventId, orgId: billing.orgId, eventType: input.eventType })
-    .onConflictDoNothing()
-    .returning({ eventId: schema.stripeWebhookEvents.eventId });
-  if (!inserted) {
-    const [reclaimed] = await database
-      .update(schema.stripeWebhookEvents)
-      .set({ status: "processing", error: null })
-      .where(and(eq(schema.stripeWebhookEvents.eventId, input.eventId), eq(schema.stripeWebhookEvents.status, "failed")))
-      .returning({ eventId: schema.stripeWebhookEvents.eventId });
-    if (!reclaimed) return "duplicate";
-  }
-  try {
-    const subscriptionId = input.subscriptionId ?? billing.stripeSubscriptionId;
-    const snapshot = subscriptionId
-      ? await input.gateway.retrieveSubscription(subscriptionId)
-      : billing.stripeCustomerId
-        ? await input.gateway.findCurrentSubscription(billing.stripeCustomerId)
-        : null;
-    if (snapshot) await persistSubscriptionSnapshot({ orgId: billing.orgId, snapshot, database, eventId: input.eventId });
-    await database.insert(schema.auditLog).values({
-      orgId: billing.orgId,
-      actorId: null,
-      action: "billing.webhook_reconciled",
-      targetType: "organization",
-      targetId: billing.orgId,
-      metadata: { eventType: input.eventType, status: snapshot?.status ?? null },
+  const orgId = await resolvePreTenantBillingOrganization(database, {
+    subscriptionId: input.subscriptionId,
+    customerId: input.customerId,
+  });
+  if (!orgId) return "ignored";
+
+  const outcome = await withBillingTenantContext(database, orgId, async (tenantDatabase) => {
+    const billing = await tenantDatabase.query.billingSubscriptions.findFirst({
+      where: eq(schema.billingSubscriptions.orgId, orgId),
     });
-    await database
-      .update(schema.stripeWebhookEvents)
-      .set({ status: "processed", processedAt: new Date(), error: null })
-      .where(eq(schema.stripeWebhookEvents.eventId, input.eventId));
-    return "processed";
-  } catch (error) {
-    await database
-      .update(schema.stripeWebhookEvents)
-      .set({ status: "failed", error: error instanceof Error ? error.message.slice(0, 500) : "Stripe reconciliation failed" })
-      .where(eq(schema.stripeWebhookEvents.eventId, input.eventId));
-    throw error;
-  }
+    if (!billing) return { result: "ignored" as const };
+    const [inserted] = await tenantDatabase
+      .insert(schema.stripeWebhookEvents)
+      .values({ eventId: input.eventId, orgId, eventType: input.eventType })
+      .onConflictDoNothing()
+      .returning({ eventId: schema.stripeWebhookEvents.eventId });
+    if (!inserted) {
+      const [reclaimed] = await tenantDatabase
+        .update(schema.stripeWebhookEvents)
+        .set({ status: "processing", error: null })
+        .where(and(eq(schema.stripeWebhookEvents.eventId, input.eventId), eq(schema.stripeWebhookEvents.status, "failed")))
+        .returning({ eventId: schema.stripeWebhookEvents.eventId });
+      if (!reclaimed) return { result: "duplicate" as const };
+    }
+    try {
+      const subscriptionId = input.subscriptionId ?? billing.stripeSubscriptionId;
+      const snapshot = subscriptionId
+        ? await input.gateway.retrieveSubscription(subscriptionId)
+        : billing.stripeCustomerId
+          ? await input.gateway.findCurrentSubscription(billing.stripeCustomerId)
+          : null;
+      if (snapshot) {
+        await persistSubscriptionSnapshot({ orgId, snapshot, database: tenantDatabase, eventId: input.eventId });
+      }
+      await tenantDatabase.insert(schema.auditLog).values({
+        orgId,
+        actorId: null,
+        action: "billing.webhook_reconciled",
+        targetType: "organization",
+        targetId: orgId,
+        metadata: { eventType: input.eventType, status: snapshot?.status ?? null },
+      });
+      await tenantDatabase
+        .update(schema.stripeWebhookEvents)
+        .set({ status: "processed", processedAt: new Date(), error: null })
+        .where(eq(schema.stripeWebhookEvents.eventId, input.eventId));
+      return { result: "processed" as const };
+    } catch (error) {
+      await tenantDatabase
+        .update(schema.stripeWebhookEvents)
+        .set({ status: "failed", error: error instanceof Error ? error.message.slice(0, 500) : "Stripe reconciliation failed" })
+        .where(eq(schema.stripeWebhookEvents.eventId, input.eventId));
+      return { error };
+    }
+  });
+  if ("error" in outcome) throw outcome.error;
+  return outcome.result;
 }
 
 export async function reconcileSeatQuantity(input: {
@@ -248,76 +266,69 @@ export async function reconcileSeatQuantity(input: {
 }): Promise<void> {
   const database = input.database ?? db;
   const now = input.now ?? new Date();
-  const billing = await database.query.billingSubscriptions.findFirst({
-    where: eq(schema.billingSubscriptions.orgId, input.orgId),
-  });
-  if (!billing?.stripeSubscriptionId || !billing.stripeSubscriptionItemId) return;
-  const [seatRow] = await database
-    .select({ value: count() })
-    .from(schema.memberships)
-    .where(eq(schema.memberships.orgId, input.orgId));
-  const quantity = Math.max(1, Number(seatRow?.value ?? 0));
-  try {
-    const quantityChanged = billing.syncedQuantity !== quantity;
-    const snapshot = !quantityChanged
-      ? await input.gateway.retrieveSubscription(billing.stripeSubscriptionId)
-      : await input.gateway.updateSeatQuantity({
-          subscriptionId: billing.stripeSubscriptionId,
-          itemId: billing.stripeSubscriptionItemId,
-          quantity,
-          idempotencyKey: `billing:seats:${input.orgId}:${quantity}:${billing.seatSyncRequestedAt?.getTime() ?? 0}`,
+  const outcome = await withBillingTenantContext(database, input.orgId, async (tenantDatabase) => {
+    const billing = await tenantDatabase.query.billingSubscriptions.findFirst({
+      where: eq(schema.billingSubscriptions.orgId, input.orgId),
+    });
+    if (!billing?.stripeSubscriptionId || !billing.stripeSubscriptionItemId) return {};
+    const [seatRow] = await tenantDatabase
+      .select({ value: count() })
+      .from(schema.memberships)
+      .where(eq(schema.memberships.orgId, input.orgId));
+    const quantity = Math.max(1, Number(seatRow?.value ?? 0));
+    try {
+      const quantityChanged = billing.syncedQuantity !== quantity;
+      const snapshot = !quantityChanged
+        ? await input.gateway.retrieveSubscription(billing.stripeSubscriptionId)
+        : await input.gateway.updateSeatQuantity({
+            subscriptionId: billing.stripeSubscriptionId,
+            itemId: billing.stripeSubscriptionItemId,
+            quantity,
+            idempotencyKey: `billing:seats:${input.orgId}:${quantity}:${billing.seatSyncRequestedAt?.getTime() ?? 0}`,
+          });
+      await persistSubscriptionSnapshot({ orgId: input.orgId, snapshot, database: tenantDatabase, now });
+      if (quantityChanged) {
+        await tenantDatabase.insert(schema.auditLog).values({
+          orgId: input.orgId,
+          actorId: null,
+          action: "billing.seats_synced",
+          targetType: "organization",
+          targetId: input.orgId,
+          metadata: { quantity },
         });
-    await persistSubscriptionSnapshot({ orgId: input.orgId, snapshot, database, now });
-    if (quantityChanged) {
-      await database.insert(schema.auditLog).values({
+      }
+      return {};
+    } catch (error) {
+      const attempts = billing.seatSyncAttempts + 1;
+      await tenantDatabase
+        .update(schema.billingSubscriptions)
+        .set({
+          seatSyncStatus: "error",
+          seatSyncAttempts: attempts,
+          nextRetryAt: retryAt(attempts, now),
+          lastError: error instanceof Error ? error.message.slice(0, 500) : "Stripe seat synchronization failed",
+          lastErrorAt: now,
+          updatedAt: now,
+        })
+        .where(eq(schema.billingSubscriptions.orgId, input.orgId));
+      await tenantDatabase.insert(schema.auditLog).values({
         orgId: input.orgId,
         actorId: null,
-        action: "billing.seats_synced",
+        action: "billing.seat_sync_failed",
         targetType: "organization",
         targetId: input.orgId,
-        metadata: { quantity },
+        metadata: { attempts, retryAt: retryAt(attempts, now).toISOString() },
       });
+      return { error };
     }
-  } catch (error) {
-    const attempts = billing.seatSyncAttempts + 1;
-    await database
-      .update(schema.billingSubscriptions)
-      .set({
-        seatSyncStatus: "error",
-        seatSyncAttempts: attempts,
-        nextRetryAt: retryAt(attempts, now),
-        lastError: error instanceof Error ? error.message.slice(0, 500) : "Stripe seat synchronization failed",
-        lastErrorAt: now,
-        updatedAt: now,
-      })
-      .where(eq(schema.billingSubscriptions.orgId, input.orgId));
-    await database.insert(schema.auditLog).values({
-      orgId: input.orgId,
-      actorId: null,
-      action: "billing.seat_sync_failed",
-      targetType: "organization",
-      targetId: input.orgId,
-      metadata: { attempts, retryAt: retryAt(attempts, now).toISOString() },
-    });
-    throw error;
-  }
+  });
+  if ("error" in outcome) throw outcome.error;
 }
 
 export async function listSeatSyncCandidates(input: { database?: Db; now?: Date; full?: boolean; limit?: number } = {}): Promise<string[]> {
   const database = input.database ?? db;
   const now = input.now ?? new Date();
-  const rows = await database
-    .select({ orgId: schema.billingSubscriptions.orgId })
-    .from(schema.billingSubscriptions)
-    .where(
-      input.full
-        ? or(lte(schema.billingSubscriptions.lastReconciledAt, new Date(now.getTime() - 15 * 60_000)), sql`${schema.billingSubscriptions.lastReconciledAt} is null`)
-        : and(
-            or(eq(schema.billingSubscriptions.seatSyncStatus, "pending"), eq(schema.billingSubscriptions.seatSyncStatus, "error")),
-            or(lte(schema.billingSubscriptions.nextRetryAt, now), sql`${schema.billingSubscriptions.nextRetryAt} is null`),
-          ),
-    )
-    .limit(input.limit ?? 50)
-    .for("update", { skipLocked: true });
-  return rows.map((row) => row.orgId);
+  const limit = input.limit ?? 50;
+  if (!Number.isInteger(limit) || limit < 1 || limit > 500) throw new Error("billing candidate limit must be between 1 and 500");
+  return listPreTenantBillingSyncCandidates(database, { now, full: input.full ?? false, limit });
 }

@@ -83,6 +83,34 @@ import {
   setPersonalLabelIcon,
   renamePersonalLabel,
   deletePersonalLabel,
+  connectedOrgProviderIds,
+  connectedProviderIds,
+  deleteOrgProviderConnection,
+  deleteProviderConnection,
+  listOrgProviderConnections,
+  listProviderConnections,
+  setOrgProviderConnection,
+  setProviderConnection,
+  getActivatedModels,
+  setUserActivatedModels,
+  setOrgActivatedModels,
+  getRunOptions,
+  listRunConfigurations,
+  createRunConfiguration,
+  updateRunConfiguration,
+  deleteRunConfiguration,
+  createRun,
+  listReferencedRunAttachmentKeys,
+  enqueueRunPrompt,
+  requestRunCancellation,
+  listRunEvents,
+  listRuns,
+  getRun,
+  getRunAttachment,
+  isRunWorkerReady,
+  RunBusyError,
+  RunValidationError,
+  type RunControlContext,
   listSecrets,
   getSecret,
   createSecret,
@@ -135,6 +163,15 @@ import {
   MAX_COMMENT_IMAGES,
   MAX_COMMENT_IMAGE_BYTES,
   updateUserProfileInputSchema,
+  setModelProviderConnectionInputSchema,
+  setActivatedModelsInputSchema,
+  launchRunFieldsSchema,
+  runPromptInputSchema,
+  createRunConfigurationInputSchema,
+  updateRunConfigurationInputSchema,
+  deleteRunConfigurationInputSchema,
+  RUN_ATTACHMENT_MAX_FILES,
+  RUN_ATTACHMENT_MAX_BYTES,
   type CompanionManifest,
   type SkillFrontmatter,
   type SkillScope,
@@ -146,8 +183,10 @@ import {
   secretRetrievalPreflightInputSchema,
   redeemSecretGrantInputSchema,
 } from "@companion/contracts";
+import { createModelCatalog } from "@companion/sandbox";
 import {
   commentImageKey,
+  runAttachmentKey,
   deleteSkillArchive,
   getSkillArchive,
   getOrgLogo,
@@ -175,7 +214,7 @@ import {
   unpackAnyTo,
   validateSkillArchive,
 } from "@companion/skills";
-import { withTenantContext, type Db } from "@companion/db";
+import { sql as postgresSql, withTenantContext, type Db } from "@companion/db";
 import { auth } from "@companion/auth";
 import { inviteEmail, sendTransactionalEmail } from "@companion/email";
 import {
@@ -192,6 +231,18 @@ import { assertNoCompanionRetarget, assertTargetedSkillUpdate, assertUpdateIsTar
 import { buildInlineCompanionManifest, uploadDependencyValues, withResolvedManifestDependencies } from "./skillCompanionManifest";
 import { buildCompanionSkillRow, getCompanionSkillPackage } from "./companionSkillPackage";
 import { parseSkillListQuery } from "./skillListQuery";
+import {
+  parseLastEventId,
+  parseRunEventNotification,
+  runDrainAction,
+  runEventFrame,
+  runReadyFrame,
+} from "./runEvents";
+import {
+  cleanupUnreferencedRunAttachments,
+  deterministicRunAttachmentId,
+  putRunAttachmentOnce,
+} from "./runAttachments";
 import { COMPANION_SKILL_KEY } from "@companion/companion-skill";
 import { StripeBillingGateway } from "@companion/billing";
 import {
@@ -467,7 +518,7 @@ app.use(
   "*",
   cors({
     origin: [process.env.COMPANION_WEB_URL ?? "http://127.0.0.1:3000"],
-    allowHeaders: ["Content-Type", "Authorization", "x-companion-org"],
+    allowHeaders: ["Content-Type", "Authorization", "Idempotency-Key", "Last-Event-ID", "x-companion-org"],
     allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     credentials: true,
   }),
@@ -921,7 +972,9 @@ app.get("/v1/orgs/:orgId/logo", async (c) => {
   try {
     const actor = actorFromContext(c, true);
     const orgId = c.req.param("orgId");
-    await getOrgLogoAsset({ actor, orgId });
+    await withTenantContext({ orgId, userId: actor.id }, (database) =>
+      getOrgLogoAsset({ actor, orgId, database }),
+    );
     const asset = await getOrgLogo({ orgId });
     if (!asset) return c.json({ error: "logo not found" }, 404);
     return new Response(asset.body, {
@@ -1033,7 +1086,9 @@ app.post("/v1/invitations", async (c) => {
     return c.json(invite);
   } catch (error) {
     if (createdInvite && createdOrgId && createdActor) {
-      await revokeInvitation({ actor: createdActor, orgId: createdOrgId, inviteId: createdInvite.id }).catch((cleanupError) => {
+      await withTenantContext({ orgId: createdOrgId, userId: createdActor.id }, (database) =>
+        revokeInvitation({ actor: createdActor!, orgId: createdOrgId!, inviteId: createdInvite!.id, database }),
+      ).catch((cleanupError) => {
         console.error(`failed to revoke invitation ${createdInvite?.id} after email failure`, cleanupError);
       });
     }
@@ -1888,10 +1943,15 @@ app.post("/v1/skills", bodyLimit({ maxSize: 32 * 1024 * 1024, onError: (c) => js
     // declared Companion id resolves to (org-scoped). The declared id (== skills.id) is authoritative.
     const declaredCompanionId =
       result.companion_manifest?.metadata.companionSkillId ?? fm.metadata.companion_skill_id ?? undefined;
-    const slugSkill = await getSkillBySlug({ actor, orgId, slug: fm.name });
-    const companionIdSkill = declaredCompanionId
-      ? await getSkillById({ actor, orgId, id: declaredCompanionId })
-      : null;
+    const { slugSkill, companionIdSkill } = await withTenantContext(
+      { orgId, userId: actor.id },
+      async (database) => ({
+        slugSkill: await getSkillBySlug({ actor, orgId, slug: fm.name, database }),
+        companionIdSkill: declaredCompanionId
+          ? await getSkillById({ actor, orgId, id: declaredCompanionId, database })
+          : null,
+      }),
+    );
     try {
       assertNoCompanionRetarget({
         frontmatter: fm,
@@ -1905,10 +1965,11 @@ app.post("/v1/skills", bodyLimit({ maxSize: 32 * 1024 * 1024, onError: (c) => js
       }
       // When the caller does send expect_*, also bind the upload to that exact slug + id.
       if (expectSlug || expectSkillId) {
-        const expectedSkill =
-          expectSlug && expectSlug !== fm.name
-            ? await getSkillBySlug({ actor, orgId, slug: expectSlug })
-            : slugSkill;
+        const expectedSkill = expectSlug && expectSlug !== fm.name
+          ? await withTenantContext({ orgId, userId: actor.id }, (database) =>
+              getSkillBySlug({ actor, orgId, slug: expectSlug, database }),
+            )
+          : slugSkill;
         assertTargetedSkillUpdate({
           frontmatter: fm,
           companionSkillId: declaredCompanionId,
@@ -1929,12 +1990,15 @@ app.post("/v1/skills", bodyLimit({ maxSize: 32 * 1024 * 1024, onError: (c) => js
     });
     let preparedDependencies;
     try {
-      preparedDependencies = await prepareSkillPublishDependencies({
-        actor,
-        orgId,
-        slugs: dependencyValues,
-        manifest: result.companion_manifest,
-      });
+      preparedDependencies = await withTenantContext({ orgId, userId: actor.id }, (database) =>
+        prepareSkillPublishDependencies({
+          actor,
+          orgId,
+          slugs: dependencyValues,
+          manifest: result.companion_manifest,
+          database,
+        }),
+      );
     } catch (error) {
       return c.json({ result, error: error instanceof Error ? error.message : String(error) }, 422);
     }
@@ -2036,7 +2100,10 @@ app.post("/v1/skills/create", bodyLimit({ maxSize: 2 * 1024 * 1024, onError: (c)
       },
       true,
     );
-    const preparedCarriedDependencies = await prepareSkillPublishDependencies({ actor, orgId, slugs: carriedDependencies });
+    const preparedCarriedDependencies = await withTenantContext(
+      { orgId, userId: actor.id },
+      (database) => prepareSkillPublishDependencies({ actor, orgId, slugs: carriedDependencies, database }),
+    );
     const companionManifest = buildInlineCompanionManifest({
       description: input.description,
       carriedDisplay,
@@ -2539,6 +2606,735 @@ app.delete("/v1/tokens/:id", async (c) => {
     return jsonError(c, error);
   }
 });
+
+/* ---- Model catalog + provider connections (session-only; PATs rejected) ------------------- */
+
+const modelCatalog = createModelCatalog();
+
+app.get("/v1/models", async (c) => {
+  try {
+    if (isTokenRequest(c)) return jsonError(c, "personal access tokens cannot use provider connections", 401);
+    const catalog = await modelCatalog.listModels();
+    // Mark which providers are usable: the user's own connection OR one shared by the workspace.
+    const { connected, activated } = await withTenant(c, async ({ actor, orgId, database }) => {
+      const [personal, shared, activatedLists] = await Promise.all([
+        connectedProviderIds({ actor, orgId, database }),
+        connectedOrgProviderIds({ actor, orgId, database }),
+        getActivatedModels({ actor, orgId, database }),
+      ]);
+      return { connected: new Set<string>([...personal, ...shared]), activated: activatedLists };
+    });
+    // Prune stored activations against the live catalog so models.dev drift never shows ghosts.
+    const known = new Set(catalog.models.map((m) => m.id));
+    return c.json({
+      models: catalog.models,
+      providers: catalog.providers.map((p) => {
+        const envKeys = catalog.models.find((m) => m.provider === p.id)?.env_keys ?? [];
+        return { ...p, env_keys: envKeys, connected: connected.has(p.id) };
+      }),
+      activated: {
+        personal: activated.personal.filter((id) => known.has(id)),
+        org: activated.org.filter((id) => known.has(id)),
+      },
+    });
+  } catch (error) {
+    return jsonError(c, error, 401);
+  }
+});
+
+/**
+ * Activated-model lists (personal + workspace) — the short lists the run launcher's picker shows.
+ * Ids are validated against the live catalog here (core is catalog-agnostic); createRun enforces
+ * the activation gate at run time.
+ */
+async function rejectUnknownModels(c: Context, models: string[]): Promise<Response | null> {
+  const catalog = await modelCatalog.listModels();
+  const known = new Set(catalog.models.map((m) => m.id));
+  const unknown = models.filter((m) => !known.has(m));
+  if (unknown.length > 0) return jsonError(c, `unknown model(s): ${unknown.slice(0, 3).join(", ")}`, 400);
+  return null;
+}
+
+app.put("/v1/model-preferences", async (c) => {
+  try {
+    if (isTokenRequest(c)) return jsonError(c, "personal access tokens cannot use model preferences", 401);
+    const input = setActivatedModelsInputSchema.parse(await c.req.json());
+    const rejected = await rejectUnknownModels(c, input.models);
+    if (rejected) return rejected;
+    const activated = await withTenant(c, ({ actor, orgId, database }) =>
+      setUserActivatedModels({ actor, orgId, models: input.models, database }),
+    );
+    return c.json({ activated });
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
+app.put("/v1/org-model-preferences", async (c) => {
+  try {
+    if (isTokenRequest(c)) return jsonError(c, "personal access tokens cannot use model preferences", 401);
+    const input = setActivatedModelsInputSchema.parse(await c.req.json());
+    const rejected = await rejectUnknownModels(c, input.models);
+    if (rejected) return rejected;
+    const activated = await withTenant(c, ({ actor, orgId, database }) =>
+      setOrgActivatedModels({ actor, orgId, models: input.models, database }),
+    );
+    return c.json({ activated });
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
+app.get("/v1/provider-connections", async (c) => {
+  try {
+    if (isTokenRequest(c)) return jsonError(c, "personal access tokens cannot use provider connections", 401);
+    const connections = await withTenant(c, ({ actor, orgId, database }) =>
+      listProviderConnections({ actor, orgId, database }),
+    );
+    return c.json({ connections });
+  } catch (error) {
+    return jsonError(c, error, 401);
+  }
+});
+
+app.put("/v1/provider-connections", async (c) => {
+  let masterKey: Buffer | null = null;
+  try {
+    if (isTokenRequest(c)) return jsonError(c, "personal access tokens cannot use provider connections", 401);
+    const input = setModelProviderConnectionInputSchema.parse(await c.req.json());
+    const catalog = await modelCatalog.listModels();
+    const provider = catalog.providers.find((candidate) => candidate.id === input.provider);
+    if (!provider || !provider.env_keys.includes(input.key_name)) {
+      return jsonError(c, "the model provider or key name is unavailable", 422);
+    }
+    masterKey = loadSecretsMasterKey();
+    const connection = await withTenant(c, ({ actor, orgId, database }) =>
+      setProviderConnection({
+        actor,
+        orgId,
+        provider: input.provider,
+        keyName: input.key_name,
+        apiKey: input.api_key,
+        masterKey: masterKey!,
+        database,
+      }),
+    );
+    return c.json({ connection });
+  } catch (error) {
+    return jsonError(c, error);
+  } finally {
+    masterKey?.fill(0);
+  }
+});
+
+app.delete("/v1/provider-connections/:provider", async (c) => {
+  try {
+    if (isTokenRequest(c)) return jsonError(c, "personal access tokens cannot use provider connections", 401);
+    await withTenant(c, ({ actor, orgId, database }) =>
+      deleteProviderConnection({ actor, orgId, provider: c.req.param("provider"), database }),
+    );
+    return c.json({ ok: true });
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
+/* ---- Workspace-shared provider connections (owner/admin write; any member reads) ---- */
+
+app.get("/v1/org-provider-connections", async (c) => {
+  try {
+    if (isTokenRequest(c)) return jsonError(c, "personal access tokens cannot use provider connections", 401);
+    const connections = await withTenant(c, ({ actor, orgId, database }) =>
+      listOrgProviderConnections({ actor, orgId, database }),
+    );
+    return c.json({ connections });
+  } catch (error) {
+    return jsonError(c, error, 401);
+  }
+});
+
+app.put("/v1/org-provider-connections", async (c) => {
+  let masterKey: Buffer | null = null;
+  try {
+    if (isTokenRequest(c)) return jsonError(c, "personal access tokens cannot use provider connections", 401);
+    const input = setModelProviderConnectionInputSchema.parse(await c.req.json());
+    const catalog = await modelCatalog.listModels();
+    const provider = catalog.providers.find((candidate) => candidate.id === input.provider);
+    if (!provider || !provider.env_keys.includes(input.key_name)) {
+      return jsonError(c, "the model provider or key name is unavailable", 422);
+    }
+    masterKey = loadSecretsMasterKey();
+    const connection = await withTenant(c, ({ actor, orgId, database }) =>
+      setOrgProviderConnection({
+        actor,
+        orgId,
+        provider: input.provider,
+        keyName: input.key_name,
+        apiKey: input.api_key,
+        masterKey: masterKey!,
+        database,
+      }),
+    );
+    return c.json({ connection });
+  } catch (error) {
+    return jsonError(c, error);
+  } finally {
+    masterKey?.fill(0);
+  }
+});
+
+app.delete("/v1/org-provider-connections/:provider", async (c) => {
+  try {
+    if (isTokenRequest(c)) return jsonError(c, "personal access tokens cannot use provider connections", 401);
+    await withTenant(c, ({ actor, orgId, database }) =>
+      deleteOrgProviderConnection({ actor, orgId, provider: c.req.param("provider"), database }),
+    );
+    return c.json({ ok: true });
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
+/* ---- Skill runs (one-shot sandboxed sessions; session-only, PATs rejected) ------------------ */
+
+function boundedInteger(raw: string | undefined, fallback: number, min: number, max: number): number {
+  if (!raw) return fallback;
+  const parsed = Number(raw);
+  return Number.isSafeInteger(parsed) && parsed >= min && parsed <= max ? parsed : fallback;
+}
+
+/** API-side run context contains catalog/readiness only. Runtime SDKs are composed by apps/worker. */
+async function apiRunContext(input: { includeModels?: boolean } = {}): Promise<RunControlContext> {
+  let masterKey: Buffer;
+  let secretsAvailable = true;
+  try {
+    masterKey = loadSecretsMasterKey();
+  } catch {
+    // Options and saved configurations remain readable when execution is disabled. createRun fails
+    // closed on runtimeAvailable before this placeholder can ever encrypt anything.
+    masterKey = Buffer.alloc(32);
+    secretsAvailable = false;
+  }
+  // Only run-options needs the complete catalog. Launches resolve their selected model lazily after
+  // createRun has had a chance to return an already-committed idempotent replay.
+  const catalog = input.includeModels ? await modelCatalog.listModels() : null;
+  const goldenSnapshotId = process.env.COMPANION_GOLDEN_SNAPSHOT_ID?.trim() || null;
+  const enabledSetting = process.env.COMPANION_RUNS_ENABLED?.trim().toLowerCase();
+  // The API intentionally does not receive Vercel credentials. Operators enable this only when the
+  // separately configured runs worker is ready; absent/invalid flags fail closed instead of queuing
+  // work that no worker can execute.
+  const enabled = enabledSetting === "true" || enabledSetting === "1";
+  const missing = [
+    !enabled ? "RunSkill" : null,
+    !goldenSnapshotId ? "golden snapshot" : null,
+    !secretsAvailable ? "secrets master key" : null,
+  ].filter((value): value is string => Boolean(value));
+  return {
+    masterKey,
+    goldenSnapshotId,
+    opencodeVersion: process.env.OPENCODE_VERSION?.trim() || null,
+    region: process.env.COMPANION_SANDBOX_REGION?.trim() || "iad1",
+    timeoutMs: boundedInteger(process.env.COMPANION_SANDBOX_TIMEOUT_MS, 300_000, 10_000, 3_600_000),
+    resolveModelKeys: (model) => modelCatalog.resolveModel(model),
+    models: catalog?.models,
+    runtimeAvailable: missing.length === 0,
+    runtimeMessage: missing.length === 0 ? null : `RunSkill is unavailable: configure ${missing.join(", ")}`,
+    resolveRuntimeReadiness:
+      missing.length === 0
+        ? async (database) => {
+            const available = await isRunWorkerReady({ database });
+            return {
+              available,
+              message: available
+                ? null
+                : "RunSkill is unavailable because no configured run worker is currently online.",
+            };
+          }
+        : undefined,
+  };
+}
+
+async function withApiRunContext<T>(
+  fn: (ctx: RunControlContext) => Promise<T>,
+  input: { includeModels?: boolean } = {},
+): Promise<T> {
+  const ctx = await apiRunContext(input);
+  try {
+    return await fn(ctx);
+  } finally {
+    ctx.masterKey.fill(0);
+  }
+}
+
+function assertRunSession(c: Context): void {
+  if (isTokenRequest(c)) throw new Error("personal access tokens cannot use skill runs");
+  actorFromContext(c);
+}
+
+function idempotencyKey(c: Context): string {
+  const value = c.req.header("Idempotency-Key")?.trim();
+  if (!value || value.length < 8 || value.length > 200 || !/^[\x21-\x7e]+$/.test(value)) {
+    throw new RunValidationError("a valid Idempotency-Key header is required", "invalid_idempotency_key");
+  }
+  return value;
+}
+
+/** Map run service failures onto the HTTP statuses the run UI expects. */
+function runError(c: Context, error: unknown): Response {
+  if (error instanceof RunBusyError) return jsonError(c, error, 409);
+  if (error instanceof RunValidationError) {
+    if (error.code.endsWith("not_found")) return jsonError(c, error, 404);
+    if (error.code === "runtime_unavailable") return jsonError(c, error, 503);
+    return jsonError(c, error, 422);
+  }
+  const message = error instanceof Error ? error.message : "";
+  if (message === "not authenticated" || message.startsWith("personal access tokens")) {
+    return jsonError(c, error, 401);
+  }
+  return jsonError(c, error);
+}
+
+// One process-wide LISTEN connection fans cursor-only notifications out to all active SSE streams.
+// A dedicated PostgreSQL connection per browser stream would eventually starve the API pool.
+const runEventSubscribers = new Map<string, Set<(sequence: number) => void>>();
+let runEventListenerPromise: Promise<void> | null = null;
+
+async function subscribeRunEventCursor(runId: string, callback: (sequence: number) => void): Promise<() => void> {
+  if (!runEventListenerPromise) {
+    runEventListenerPromise = postgresSql
+      .listen("skill_run_events", (payload) => {
+        const notification = parseRunEventNotification(payload);
+        if (!notification) return;
+        for (const subscriber of runEventSubscribers.get(notification.runId) ?? []) {
+          subscriber(notification.sequence);
+        }
+      })
+      .then(() => undefined)
+      .catch((error) => {
+        runEventListenerPromise = null;
+        throw error;
+      });
+  }
+  await runEventListenerPromise;
+  const subscribers = runEventSubscribers.get(runId) ?? new Set<(sequence: number) => void>();
+  subscribers.add(callback);
+  runEventSubscribers.set(runId, subscribers);
+  return () => {
+    subscribers.delete(callback);
+    if (subscribers.size === 0) runEventSubscribers.delete(runId);
+  };
+}
+
+app.get("/v1/skills/:slug/run-options", async (c) => {
+  try {
+    assertRunSession(c);
+    const options = await withApiRunContext(
+      (ctx) =>
+        withTenant(c, ({ actor, orgId, database }) =>
+          getRunOptions({ actor, orgId, slug: c.req.param("slug"), ctx, database }),
+        ),
+      { includeModels: true },
+    );
+    return c.json(options);
+  } catch (error) {
+    return runError(c, error);
+  }
+});
+
+app.get("/v1/skills/:slug/run-configurations", async (c) => {
+  try {
+    assertRunSession(c);
+    const configurations = await withApiRunContext((ctx) =>
+      withTenant(c, ({ actor, orgId, database }) =>
+        listRunConfigurations({ actor, orgId, slug: c.req.param("slug"), ctx, database }),
+      ),
+    );
+    return c.json({ configurations });
+  } catch (error) {
+    return runError(c, error);
+  }
+});
+
+app.post("/v1/skills/:slug/run-configurations", async (c) => {
+  try {
+    assertRunSession(c);
+    const value = createRunConfigurationInputSchema.parse(await c.req.json());
+    const configuration = await withApiRunContext((ctx) =>
+      withTenant(c, ({ actor, orgId, database }) =>
+        createRunConfiguration({ actor, orgId, slug: c.req.param("slug"), value, ctx, database }),
+      ),
+    );
+    return c.json(configuration, 201);
+  } catch (error) {
+    return runError(c, error);
+  }
+});
+
+app.patch("/v1/run-configurations/:id", async (c) => {
+  try {
+    assertRunSession(c);
+    const value = updateRunConfigurationInputSchema.parse(await c.req.json());
+    const configuration = await withApiRunContext((ctx) =>
+      withTenant(c, ({ actor, orgId, database }) =>
+        updateRunConfiguration({ actor, orgId, configId: c.req.param("id"), value, ctx, database }),
+      ),
+    );
+    return c.json(configuration);
+  } catch (error) {
+    return runError(c, error);
+  }
+});
+
+app.delete("/v1/run-configurations/:id", async (c) => {
+  try {
+    assertRunSession(c);
+    const value = deleteRunConfigurationInputSchema.parse(await c.req.json());
+    await withTenant(c, ({ actor, orgId, database }) =>
+      deleteRunConfiguration({ actor, orgId, configId: c.req.param("id"), value, database }),
+    );
+    return c.json({ ok: true });
+  } catch (error) {
+    return runError(c, error);
+  }
+});
+
+app.post(
+  "/v1/skills/:slug/runs",
+  // Authenticate before the body-reading bodyLimit middleware, so an unauthenticated caller can't
+  // make the server read or measure a large upload body.
+  async (c, next) => {
+    try {
+      if (isTokenRequest(c)) return jsonError(c, "personal access tokens cannot use skill runs", 401);
+      actorFromContext(c);
+    } catch (error) {
+      return jsonError(c, error, 401);
+    }
+    await next();
+  },
+  // 5 files x 10 MB + form overhead.
+  bodyLimit({ maxSize: 64 * 1024 * 1024, onError: (c) => jsonError(c, "run upload exceeds the 64 MB limit", 413) }),
+  async (c) => {
+    try {
+      const slug = c.req.param("slug");
+      const actor = actorFromContext(c);
+      const orgId = await orgIdFromContext(c);
+      const requestKey = idempotencyKey(c);
+
+      const form = await c.req.formData();
+      const fields = launchRunFieldsSchema.parse({
+        prompt: typeof form.get("prompt") === "string" ? form.get("prompt") : "",
+        model: typeof form.get("model") === "string" ? form.get("model") : "",
+        skill_version_id: typeof form.get("skill_version_id") === "string" ? form.get("skill_version_id") : "",
+        dependency_pins: typeof form.get("dependency_pins") === "string" ? form.get("dependency_pins") : "",
+        inputs: typeof form.get("inputs") === "string" ? form.get("inputs") : "",
+        model_provider_connection_id:
+          typeof form.get("model_provider_connection_id") === "string" ? form.get("model_provider_connection_id") : "",
+        model_provider_credential_version:
+          typeof form.get("model_provider_credential_version") === "string"
+            ? form.get("model_provider_credential_version")
+            : "",
+        run_config_id:
+          typeof form.get("run_config_id") === "string" && form.get("run_config_id") !== ""
+            ? form.get("run_config_id")
+            : undefined,
+      });
+      // File entries only (the other branch of FormDataEntryValue is `string`).
+      const files = form.getAll("file").filter((f): f is Exclude<typeof f, string> => typeof f !== "string");
+      if (files.length > RUN_ATTACHMENT_MAX_FILES) {
+        throw new Error(`a run can have at most ${RUN_ATTACHMENT_MAX_FILES} attachments`);
+      }
+      for (const file of files) {
+        if (file.size === 0) throw new Error("an attached file is empty");
+        if (file.size > RUN_ATTACHMENT_MAX_BYTES) throw new Error("each attachment must be 10 MB or smaller");
+      }
+
+      // Upload the bytes to object storage OUTSIDE any DB transaction (slow uploads must not hold a
+      // pooled connection idle-in-transaction); createRun below persists metadata only.
+      const uploadedKeys: string[] = [];
+      const attachments: Array<{ id: string; fileName: string; contentType: string; byteSize: number; storageKey: string }> = [];
+      try {
+        for (const file of files) {
+          const buf = Buffer.from(await file.arrayBuffer());
+          const attachmentId = deterministicRunAttachmentId({
+            orgId,
+            actorId: actor.id,
+            idempotencyKey: requestKey,
+            index: attachments.length,
+            fileName: file.name,
+            contentType: file.type || "application/octet-stream",
+            bytes: buf,
+          });
+          const key = runAttachmentKey({ orgId, attachmentId });
+          const contentType = file.type || "application/octet-stream";
+          const stored = await putRunAttachmentOnce({ key, body: buf, contentType });
+          if (stored === "created") uploadedKeys.push(key);
+          attachments.push({
+            id: attachmentId,
+            fileName: sanitizeAttachmentName(file.name || `attachment-${attachments.length + 1}`),
+            contentType,
+            byteSize: buf.length,
+            storageKey: key,
+          });
+        }
+        const detail = await withApiRunContext((ctx) =>
+          withTenantContext({ orgId, userId: actor.id }, (database) =>
+            createRun({
+              actor,
+              orgId,
+              slug,
+              skillVersionId: fields.skill_version_id,
+              dependencyPins: fields.dependency_pins,
+              prompt: fields.prompt,
+              model: fields.model,
+              inputs: fields.inputs,
+              modelProviderConnectionId: fields.model_provider_connection_id,
+              modelProviderCredentialVersion: fields.model_provider_credential_version,
+              runConfigId: fields.run_config_id,
+              idempotencyKey: requestKey,
+              attachments,
+              ctx,
+              database,
+            }),
+          ),
+        );
+        return c.json(detail, 201);
+      } catch (e) {
+        // A createRun rejection can be ambiguous (for example, the transaction committed but its
+        // acknowledgement was lost). Query durable attachment rows in a fresh tenant transaction and
+        // delete only keys proven unreferenced. If that verification itself fails, retain the bytes.
+        await cleanupUnreferencedRunAttachments({
+          storageKeys: uploadedKeys,
+          findReferencedKeys: (storageKeys) =>
+            withTenantContext({ orgId, userId: actor.id }, (database) =>
+              listReferencedRunAttachmentKeys({ actor, orgId, storageKeys, database }),
+            ),
+          deleteObject: (key) => deleteSkillArchive({ key }),
+        });
+        throw e;
+      }
+    } catch (error) {
+      return runError(c, error);
+    }
+  },
+);
+
+app.get("/v1/skills/:slug/runs", async (c) => {
+  try {
+    assertRunSession(c);
+    const runs = await withTenant(c, ({ actor, orgId, database }) =>
+      listRuns({ actor, orgId, slug: c.req.param("slug"), database }),
+    );
+    return c.json({ runs });
+  } catch (error) {
+    return runError(c, error);
+  }
+});
+
+app.get("/v1/runs/:id", async (c) => {
+  try {
+    assertRunSession(c);
+    const detail = await withTenant(c, ({ actor, orgId, database }) =>
+      getRun({ actor, orgId, runId: c.req.param("id"), database }),
+    );
+    return c.json(detail);
+  } catch (error) {
+    return runError(c, error);
+  }
+});
+
+app.post("/v1/runs/:id/prompt", async (c) => {
+  try {
+    assertRunSession(c);
+    const requestKey = idempotencyKey(c);
+    const input = runPromptInputSchema.parse(await c.req.json());
+    const prompt = await withTenant(c, ({ actor, orgId, database }) =>
+      enqueueRunPrompt({
+        actor,
+        orgId,
+        runId: c.req.param("id"),
+        text: input.text,
+        idempotencyKey: requestKey,
+        database,
+      }),
+    );
+    return c.json({ accepted: true, prompt_id: prompt.id }, 202);
+  } catch (error) {
+    return runError(c, error);
+  }
+});
+
+app.post("/v1/runs/:id/cancel", async (c) => {
+  try {
+    assertRunSession(c);
+    const run = await withTenant(c, ({ actor, orgId, database }) =>
+      requestRunCancellation({ actor, orgId, runId: c.req.param("id"), database }),
+    );
+    return c.json(run, 202);
+  } catch (error) {
+    return runError(c, error);
+  }
+});
+
+/** Replay durable redacted events, then follow PostgreSQL cursor notifications without a race. */
+app.get("/v1/runs/:id/events", async (c) => {
+  try {
+    assertRunSession(c);
+    const runId = c.req.param("id");
+    const actor = actorFromContext(c);
+    const orgId = await orgIdFromContext(c);
+    // Fail before opening a stream, with the same creator-only not-found behavior as GET /runs/:id.
+    await withTenantContext({ orgId, userId: actor.id }, (database) =>
+      getRun({ actor, orgId, runId, database }),
+    );
+    let cursor = parseLastEventId(c.req.header("Last-Event-ID") ?? c.req.query("last_event_id"));
+    const encoder = new TextEncoder();
+    let closed = false;
+    let unsubscribe: () => void = () => undefined;
+    let wake: (() => void) | null = null;
+    let notified = false;
+    let readySent = false;
+    let terminalObserved = false;
+    const stream = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        const send = (payload: string) => {
+          if (closed) return;
+          try {
+            controller.enqueue(encoder.encode(payload));
+          } catch {
+            closed = true;
+          }
+        };
+        const waitForWake = () =>
+          new Promise<void>((resolve) => {
+            let settled = false;
+            const finish = () => {
+              if (settled) return;
+              settled = true;
+              clearTimeout(timer);
+              resolve();
+            };
+            const timer = setTimeout(finish, 15_000);
+            timer.unref();
+            wake = finish;
+            // Close the tiny gap between deciding to wait and installing this resolver. LISTEN was
+            // established before replay, so the flag is the durable cursor wake-up barrier.
+            if (notified) finish();
+          });
+        unsubscribe = await subscribeRunEventCursor(runId, (sequence) => {
+          if (sequence <= cursor) return;
+          notified = true;
+          wake?.();
+        });
+        if (c.req.raw.signal.aborted) {
+          closed = true;
+          unsubscribe();
+          controller.close();
+          return;
+        }
+        c.req.raw.signal.addEventListener("abort", () => {
+          closed = true;
+          wake?.();
+        }, { once: true });
+
+        try {
+          while (!closed) {
+            notified = false;
+            const events = await withTenantContext({ orgId, userId: actor.id }, (database) =>
+              listRunEvents({ actor, orgId, runId, afterSequence: cursor, limit: 500, database }),
+            );
+            for (const envelope of events) {
+              if (envelope.sequence <= cursor) continue;
+              cursor = envelope.sequence;
+              send(runEventFrame(envelope));
+            }
+            if (events.length >= 500 || notified) continue;
+            const run = await withTenantContext({ orgId, userId: actor.id }, (database) =>
+              getRun({ actor, orgId, runId, database }),
+            );
+            const terminal = ["frozen", "error", "canceled"].includes(run.status);
+            const action = runDrainAction({
+              eventCount: events.length,
+              pageSize: 500,
+              notified,
+              terminal,
+              terminalObserved,
+              readySent,
+            });
+            terminalObserved = terminal;
+            if (action === "continue") continue;
+            // `runDrainAction` requires a second durable replay after observing terminal state, so
+            // a terminal event is not lost when its NOTIFY callback arrives behind the DB commit.
+            if (action === "close") break;
+            if (action === "ready") {
+              send(runReadyFrame());
+              readySent = true;
+            }
+            send(": keepalive\n\n");
+            await waitForWake();
+            wake = null;
+          }
+        } catch {
+          // Network/database failures close the response; EventSource reconnects with Last-Event-ID.
+        } finally {
+          closed = true;
+          unsubscribe();
+          try { controller.close(); } catch { /* already closed */ }
+        }
+      },
+      async cancel() {
+        closed = true;
+        wake?.();
+        unsubscribe();
+      },
+    });
+    return new Response(stream, {
+      headers: {
+        "content-type": "text/event-stream",
+        "cache-control": "no-cache, no-transform",
+        "x-accel-buffering": "no",
+        connection: "keep-alive",
+      },
+    });
+  } catch (error) {
+    return runError(c, error);
+  }
+});
+
+/** Stream a run attachment back to its creator. */
+app.get("/v1/runs/:id/attachments/:attachmentId", async (c) => {
+  try {
+    if (isTokenRequest(c)) return jsonError(c, "personal access tokens cannot use skill runs", 401);
+    const asset = await withTenant(c, ({ actor, orgId, database }) =>
+      getRunAttachment({
+        actor,
+        orgId,
+        runId: c.req.param("id"),
+        attachmentId: c.req.param("attachmentId"),
+        database,
+      }),
+    );
+    const body = await getSkillArchive({ key: asset.storageKey });
+    return new Response(body, {
+      headers: {
+        "Content-Type": asset.contentType,
+        "Cache-Control": "private, no-cache",
+        // User-uploaded bytes: never let the browser sniff them into an executable type.
+        "X-Content-Type-Options": "nosniff",
+        "Content-Disposition": `attachment; filename="${asset.fileName.replace(/[^\w. -]/g, "_")}"`,
+      },
+    });
+  } catch (error) {
+    // Not-visible run / unknown attachment / cross-tenant all surface as a 404.
+    return jsonError(c, error, 404);
+  }
+});
+
+/** Keep attachment names path-safe inside the sandbox (written under attachments/<name>). */
+function sanitizeAttachmentName(raw: string): string {
+  const base = raw.split(/[\\/]/).pop() || "attachment";
+  const clean = base.replace(/[^\w. ()\[\]-]/g, "_").slice(0, 120);
+  return clean.startsWith(".") ? `_${clean}` : clean || "attachment";
+}
 
 const port = Number(process.env.COMPANION_API_PORT ?? process.env.PORT ?? 3001);
 const hostname = process.env.COMPANION_API_HOST;

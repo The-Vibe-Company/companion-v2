@@ -59,7 +59,8 @@ docs/         # vision / product / design / PRD
 
 **Anchor files** (the contracts the system hinges on — see `docs/design.md`):
 - `packages/db/schema.ts` — all entities + the `org_id` tenant column, the `creator_id` provenance/owner column and the `scope` (personal/org) column on skills; the `labels`/`skill_labels` (org) and `personal_labels`/`personal_skill_labels` (per-user) folder tables.
-- `packages/core/src/authz.ts` — typed RBAC: tenant/membership gate + org-role capability gate, plus `canAccessSkill`/`canManagePersonalSkill` (personal-skill privacy: owner-only, no admin override). Org skills carry no per-resource gate; personal skills do.
+- `packages/core/src/authz.ts` — typed RBAC: tenant/membership gate + org-role capability gate, plus `canAccessSkill`/`canManagePersonalSkill` (personal-skill privacy: owner-only, no admin override) and `canAccessRun` (skill runs are creator-only, same no-admin-override shape). Org skills carry no per-resource gate; personal skills and runs do.
+- `packages/core/src/runRuntime.ts` — the `RunSandboxRuntime` port for one-shot sandboxed skill runs (fork golden → push workspace → serve → health → stop/destroy), implemented by `packages/sandbox` (`@vercel/sandbox` + `@opencode-ai/sdk`, pinned exactly). Core stays SDK-free; `apps/worker` composes and injects it while the API only persists commands and serves creator-scoped state.
 - `packages/providers/port.ts` — the `DeploymentProvider` interface + neutral `DeploySpec`.
 - `apps/worker/reconcile.ts` — observe → diff → apply → drift loop.
 - `packages/hermes/configBuilder.ts` — agent + skills + vault + model + secrets → `DeploySpec`.

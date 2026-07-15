@@ -57,20 +57,22 @@ export async function joinOrgByDomain(actor: ActorContext, orgId: string, databa
   const { domain, isPersonal } = classifyEmailDomain(actor.email);
   if (!domain || isPersonal) throw new Error("no organization to join for this email domain");
 
-  if (!(await orgAllowsEmailDomain({ orgId, emailDomain: domain, database }))) {
-    throw new Error("no organization to join for this email domain");
-  }
-  const org = await database.query.organizations.findFirst({
-    where: eq(schema.organizations.id, orgId),
-    columns: { kind: true },
-  });
-  if (!org || org.kind !== "team") throw new Error("no organization to join for this email domain");
-
   if (requireVerifiedForDomainJoin() && !(await isActorEmailVerified(actor.id, database))) {
     throw new Error("verify your email to join this organization");
   }
 
   await database.transaction(async (tx) => {
+    await tx.execute(
+      sql`select set_config('app.org_id', ${orgId}, true), set_config('app.user_id', ${actor.id}, true)`,
+    );
+    if (!(await orgAllowsEmailDomain({ orgId, emailDomain: domain, database: tx as unknown as Db }))) {
+      throw new Error("no organization to join for this email domain");
+    }
+    const org = await tx.query.organizations.findFirst({
+      where: eq(schema.organizations.id, orgId),
+      columns: { kind: true },
+    });
+    if (!org || org.kind !== "team") throw new Error("no organization to join for this email domain");
     await tx
       .insert(schema.memberships)
       .values({ orgId, userId: actor.id, orgRole: "developer" })
@@ -110,14 +112,20 @@ export async function completeOnboarding(
 
   const orgColor = normalizeBrandColor(input.org.color, "org");
   const inviteTokens: Array<{ email: string; token: string }> = [];
+  const orgId = crypto.randomUUID();
+  const orgSlug = uniqueSlug(input.org.name, crypto.randomUUID());
 
-  const orgId = await database
+  await database
     .transaction(async (tx) => {
+      await tx.execute(
+        sql`select set_config('app.org_id', ${orgId}, true), set_config('app.user_id', ${actor.id}, true)`,
+      );
       const [org] = await tx
         .insert(schema.organizations)
         .values({
+          id: orgId,
           name: input.org.name,
-          slug: uniqueSlug(input.org.name, crypto.randomUUID()),
+          slug: orgSlug,
           kind: "team",
           domain: orgDomain,
           domainAutoJoin: domainAccessEnabled,
@@ -163,7 +171,6 @@ export async function completeOnboarding(
         .set({ onboardedAt: new Date() })
         .where(and(eq(schema.profiles.id, actor.id), isNull(schema.profiles.onboardedAt)));
 
-      return org.id;
     })
     .catch((error: unknown) => {
       const message = error instanceof Error ? error.message : String(error);

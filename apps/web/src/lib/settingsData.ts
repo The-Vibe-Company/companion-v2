@@ -10,32 +10,19 @@ import {
   parseOrgSettingsResponse,
   parseBillingOverview,
 } from "@/lib/settingsViewModel";
+import { parseSettingsView } from "@/components/org/model";
 import type { SettingsAppData, SettingsDialog, SettingsRoute, SettingsView } from "@/components/org/model";
 import type { MeVM } from "@/lib/types";
 
 export type SettingsSearchParams = Promise<Record<string, string | string[] | undefined>>;
 export { parseOrgSettingsResponse } from "@/lib/settingsViewModel";
 
-const SETTINGS_VIEWS: readonly SettingsView[] = [
-  "profile",
-  "preferences",
-  "apikeys",
-  "general",
-  "members",
-  "invitations",
-  "billing",
-];
-
-function isSettingsView(value: string): value is SettingsView {
-  return (SETTINGS_VIEWS as readonly string[]).includes(value);
-}
-
 function parseSettingsState(sp: Record<string, string | string[] | undefined>): {
   initialRoute: SettingsRoute;
   initialDialog: SettingsDialog;
 } {
   const viewRaw = typeof sp.view === "string" ? sp.view : undefined;
-  const view: SettingsView = viewRaw && isSettingsView(viewRaw) ? viewRaw : "profile";
+  const view: SettingsView = parseSettingsView(viewRaw);
   const dialogRaw = typeof sp.dialog === "string" ? sp.dialog : undefined;
   const initialDialog: SettingsDialog = dialogRaw === "invite" ? dialogRaw : null;
   return { initialRoute: { view }, initialDialog };

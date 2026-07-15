@@ -75,6 +75,8 @@ export function SettingsDrawer({
       const activeDialog = panel?.querySelector<HTMLElement>(".og-scrim [role='dialog']");
       if (e.key === "Escape") {
         if (activeDialog) return;
+        // A pane widget with its own Escape semantics (e.g. inline key entry) wins over the drawer.
+        if (e.target instanceof Element && e.target.closest("[data-esc-guard]")) return;
         e.preventDefault();
         e.stopPropagation();
         close();

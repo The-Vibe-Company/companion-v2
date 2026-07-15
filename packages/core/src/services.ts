@@ -57,6 +57,14 @@ import {
   getEntitlements,
   markSeatSyncPending,
 } from "./billing";
+import {
+  getPreTenantSkillPreview,
+  getPreTenantSkillShareTarget,
+  listPreTenantOrganizations,
+  lockPreTenantInvitation,
+  preTenantUsersShareOrganization,
+  resolvePreTenantApiToken,
+} from "./preTenant";
 
 export * from "./secrets";
 
@@ -238,34 +246,11 @@ export async function updateUserProfile(input: {
 
 export async function listOrgs(actor: ActorContext, database: Db = db): Promise<OrgSummary[]> {
   await ensureUserBootstrap(actor, database);
-  const rows = await database
-    .select({
-      org_id: schema.organizations.id,
-      name: schema.organizations.name,
-      slug: schema.organizations.slug,
-      kind: schema.organizations.kind,
-      org_role: schema.memberships.orgRole,
-      color: schema.organizations.color,
-      logo_url: schema.organizations.logoUrl,
-    })
-    .from(schema.organizations)
-    .innerJoin(schema.memberships, eq(schema.memberships.orgId, schema.organizations.id))
-    .where(eq(schema.memberships.userId, actor.id))
-    .orderBy(asc(schema.memberships.createdAt));
-
-  const summaries: OrgSummary[] = [];
-  for (const r of rows) {
-    const [memberCount] = await database
-      .select({ value: count() })
-      .from(schema.memberships)
-      .where(eq(schema.memberships.orgId, r.org_id));
-    summaries.push({
-      ...r,
-      org_role: r.org_role as OrgRole,
-      member_count: Number(memberCount?.value ?? 0),
-    });
-  }
-  return summaries;
+  const rows = await listPreTenantOrganizations(database, actor.id);
+  return rows.map((row) => ({
+    ...row,
+    member_count: Number(row.member_count),
+  }));
 }
 
 export async function getOrgRole(orgId: string, userId: string, database: Db = db): Promise<OrgRole | null> {
@@ -283,14 +268,20 @@ export async function createOrg(input: {
 }): Promise<{ id: string; slug: string }> {
   const database = input.database ?? db;
   await ensureUserBootstrap(input.actor, database);
+  const id = crypto.randomUUID();
   const slug = uniqueSlug(input.name, crypto.randomUUID());
-  const [org] = await database
-    .insert(schema.organizations)
-    .values({ name: input.name, slug, kind: input.kind })
-    .returning();
-  if (!org) throw new Error("could not create organization");
-  await database.insert(schema.memberships).values({ orgId: org.id, userId: input.actor.id, orgRole: "owner" });
-  return { id: org.id, slug: org.slug };
+  return database.transaction(async (tx) => {
+    await tx.execute(
+      sql`select set_config('app.org_id', ${id}, true), set_config('app.user_id', ${input.actor.id}, true)`,
+    );
+    const [org] = await tx
+      .insert(schema.organizations)
+      .values({ id, name: input.name, slug, kind: input.kind })
+      .returning({ id: schema.organizations.id, slug: schema.organizations.slug });
+    if (!org) throw new Error("could not create organization");
+    await tx.insert(schema.memberships).values({ orgId: org.id, userId: input.actor.id, orgRole: "owner" });
+    return org;
+  });
 }
 
 /**
@@ -499,18 +490,7 @@ export async function getUserAvatarAsset(input: {
   });
   if (!profile?.avatarUrl) throw new Error("avatar not found");
   if (input.userId === input.actor.id) return;
-  const actorOrgs = await database
-    .select({ orgId: schema.memberships.orgId })
-    .from(schema.memberships)
-    .where(eq(schema.memberships.userId, input.actor.id));
-  const orgIds = (Array.isArray(actorOrgs) ? actorOrgs : []).map((r) => r.orgId);
-  if (orgIds.length === 0) throw new Error("not authorized to view this avatar");
-  const shared = await database
-    .select({ one: sql`1` })
-    .from(schema.memberships)
-    .where(and(eq(schema.memberships.userId, input.userId), inArray(schema.memberships.orgId, orgIds)))
-    .limit(1);
-  if (!Array.isArray(shared) || shared.length === 0) {
+  if (!(await preTenantUsersShareOrganization(database, input.actor.id, input.userId))) {
     throw new Error("not authorized to view this avatar");
   }
 }
@@ -1222,33 +1202,7 @@ export async function getSkillPublicPreviewByShareToken(input: {
   const token = input.token.trim();
   if (!token) return null;
   const database = input.database ?? db;
-  const rows = await database
-    .select({
-      slug: schema.skills.slug,
-      display_name: schema.skills.displayName,
-      description: schema.skills.description,
-      creator_name: schema.profiles.name,
-      creator_initials: schema.profiles.initials,
-      current_version: schema.skillVersions.version,
-      frontmatter: schema.skillVersions.frontmatter,
-      star_count: sql<number>`cast(count(${schema.skillStars.userId}) as int)`,
-      updated_at: schema.skills.updatedAt,
-    })
-    .from(schema.skills)
-    .innerJoin(schema.profiles, eq(schema.profiles.id, schema.skills.creatorId))
-    .innerJoin(schema.skillVersions, eq(schema.skillVersions.id, schema.skills.currentVersionId))
-    .leftJoin(schema.skillStars, eq(schema.skillStars.skillId, schema.skills.id))
-    .where(
-      and(
-        eq(schema.skills.shareToken, token),
-        eq(schema.skills.scope, "org"),
-        isNull(schema.skills.archivedAt),
-      ),
-    )
-    .groupBy(schema.skills.id, schema.profiles.id, schema.skillVersions.id)
-    .limit(1);
-
-  const row = rows[0];
+  const row = await getPreTenantSkillPreview(database, token);
   if (!row) return null;
   const manifest = parseStoredCompanionManifest(row.frontmatter ?? "", row.description);
   const display = skillDisplayWithOverride(manifest.display, row.display_name);
@@ -1259,7 +1213,7 @@ export async function getSkillPublicPreviewByShareToken(input: {
     current_version: row.current_version,
     creator_name: row.creator_name,
     creator_initials: row.creator_initials,
-    star_count: row.star_count,
+    star_count: Number(row.star_count),
     updated_at: row.updated_at.toISOString(),
   };
 }
@@ -1277,26 +1231,7 @@ export async function getSkillShareTargetByShareToken(input: {
   const token = input.token.trim();
   if (!token) return null;
   const database = input.database ?? db;
-  const rows = await database
-    .select({
-      org_id: schema.skills.orgId,
-      slug: schema.skills.slug,
-    })
-    .from(schema.skills)
-    .innerJoin(
-      schema.memberships,
-      and(eq(schema.memberships.orgId, schema.skills.orgId), eq(schema.memberships.userId, input.actor.id)),
-    )
-    .where(
-      and(
-        eq(schema.skills.shareToken, token),
-        eq(schema.skills.scope, "org"),
-        isNull(schema.skills.archivedAt),
-      ),
-    )
-    .limit(1);
-
-  const row = rows[0];
+  const row = await getPreTenantSkillShareTarget(database, token, input.actor.id);
   return row ? { org_id: row.org_id, slug: row.slug } : null;
 }
 
@@ -2280,31 +2215,30 @@ export async function acceptInvitation(input: {
   database?: Db;
 }): Promise<{ orgId: string }> {
   const database = input.database ?? db;
-  const invite = await database.query.invitations.findFirst({
-    where: and(
-      eq(schema.invitations.token, input.token),
-      eq(schema.invitations.status, "pending"),
-      gt(schema.invitations.expiresAt, new Date()),
-    ),
-  });
-  if (!invite) throw new Error("invite not found or expired");
-  if (invite.email.toLowerCase() !== input.actor.email.toLowerCase()) {
-    throw new Error("invite email does not match current user");
-  }
-  await database.transaction(async (tx) => {
+  const orgId = await database.transaction(async (tx) => {
+    const invite = await lockPreTenantInvitation({
+      database: tx as unknown as Db,
+      userId: input.actor.id,
+      token: input.token,
+    });
+    if (!invite) throw new Error("invite not found or expired");
+    await tx.execute(
+      sql`select set_config('app.org_id', ${invite.orgId}, true), set_config('app.user_id', ${input.actor.id}, true)`,
+    );
     await tx
       .insert(schema.memberships)
       .values({ orgId: invite.orgId, userId: input.actor.id, orgRole: invite.orgRole })
       .onConflictDoNothing();
-    await tx.update(schema.invitations).set({ status: "accepted" }).where(eq(schema.invitations.id, invite.id));
+    await tx.update(schema.invitations).set({ status: "accepted" }).where(eq(schema.invitations.id, invite.inviteId));
     // Accepting an invite means the user has joined an org — they skip the onboarding flow.
     await tx
       .update(schema.profiles)
       .set({ onboardedAt: new Date() })
       .where(and(eq(schema.profiles.id, input.actor.id), isNull(schema.profiles.onboardedAt)));
     await markSeatSyncPending(invite.orgId, tx as unknown as Db);
+    return invite.orgId;
   });
-  return { orgId: invite.orgId };
+  return { orgId };
 }
 
 export async function getDownloadVersion(input: {
@@ -3416,29 +3350,15 @@ export async function resolveApiToken(
   database: Db = db,
 ): Promise<{ actor: ActorContext; orgId: string; scopes: TokenScope[] } | null> {
   if (!rawToken.startsWith(API_TOKEN_PREFIX)) return null;
-  const row = await database.query.apiTokens.findFirst({
-    where: eq(schema.apiTokens.tokenHash, hashApiToken(rawToken)),
-  });
-  if (!row || row.revokedAt) return null;
-  if (row.expiresAt.getTime() <= Date.now()) return null;
-  // The owner must still belong to the token's org — a removed member's token stops working.
-  const role = await getOrgRole(row.orgId, row.userId, database);
-  if (!role) return null;
-  const profile = await database.query.profiles.findFirst({
-    where: eq(schema.profiles.id, row.userId),
-  });
-  await database
-    .update(schema.apiTokens)
-    .set({ lastUsedAt: new Date() })
-    .where(eq(schema.apiTokens.id, row.id))
-    .catch(() => {});
+  const row = await resolvePreTenantApiToken(database, hashApiToken(rawToken));
+  if (!row) return null;
   return {
     actor: {
-      id: row.userId,
-      email: profile?.email ?? "",
-      name: profile?.name || profile?.email || row.userId,
+      id: row.user_id,
+      email: row.email,
+      name: row.name,
     },
-    orgId: row.orgId,
+    orgId: row.org_id,
     scopes: (row.scopes ?? []) as TokenScope[],
   };
 }
@@ -3764,3 +3684,16 @@ export async function uninstallSkill(input: {
     metadata: { slug: skill.slug },
   });
 }
+
+// Saved model-provider connections (API keys). Same load-order reasoning as `./labels`.
+export * from "./providerConnections";
+
+// Activated-model lists (personal + workspace). Same load-order reasoning as `./labels`.
+export * from "./modelPreferences";
+
+// Skill runs (one-shot sandboxed sessions). Same load-order reasoning as `./labels`:
+// `skillRuns.ts` imports only hoisted functions and types from here.
+export * from "./skillRuns";
+export * from "./runConfigurations";
+export * from "./runJobs";
+export * from "./runSweeper";

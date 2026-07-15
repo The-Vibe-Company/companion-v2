@@ -3,27 +3,15 @@ import type { Db } from "@companion/db";
 import { getSkillPublicPreviewByShareToken, getSkillShareTargetByShareToken } from "../src/services";
 
 function fakeDb(rows: unknown[]) {
-  const captured = { whereCalled: false };
-  const chain = {
-    from: vi.fn(() => chain),
-    innerJoin: vi.fn(() => chain),
-    leftJoin: vi.fn(() => chain),
-    where: vi.fn(() => {
-      captured.whereCalled = true;
-      return chain;
-    }),
-    groupBy: vi.fn(() => chain),
-    limit: vi.fn(async () => rows),
-  };
   const database = {
-    select: vi.fn(() => chain),
+    execute: vi.fn(async () => rows),
   };
-  return { database: database as unknown as Db, chain, captured };
+  return { database: database as unknown as Db, execute: database.execute };
 }
 
 describe("getSkillPublicPreviewByShareToken", () => {
   it("returns a metadata-only preview for a live org skill token", async () => {
-    const { database, captured } = fakeDb([
+    const { database, execute } = fakeDb([
       {
         slug: "mega-code-review",
         description: "Review changes with repository context.",
@@ -45,7 +33,7 @@ describe("getSkillPublicPreviewByShareToken", () => {
 
     const preview = await getSkillPublicPreviewByShareToken({ token: " share-token-1 ", database });
 
-    expect(captured.whereCalled).toBe(true);
+    expect(execute).toHaveBeenCalledOnce();
     expect(preview).toEqual({
       display_name: "Mega Code Review",
       slug: "mega-code-review",
@@ -71,7 +59,7 @@ describe("getSkillPublicPreviewByShareToken", () => {
     const { database } = fakeDb([]);
 
     await expect(getSkillPublicPreviewByShareToken({ token: "  ", database })).resolves.toBeNull();
-    expect(database.select).not.toHaveBeenCalled();
+    expect(database.execute).not.toHaveBeenCalled();
   });
 });
 
@@ -79,11 +67,11 @@ describe("getSkillShareTargetByShareToken", () => {
   const actor = { id: "user-1", email: "ada@example.test", name: "Ada" };
 
   it("returns the org target only for a token the actor can access", async () => {
-    const { database, chain } = fakeDb([{ org_id: "org-1", slug: "mega-code-review" }]);
+    const { database, execute } = fakeDb([{ org_id: "org-1", slug: "mega-code-review" }]);
 
     const target = await getSkillShareTargetByShareToken({ actor, token: " share-token-1 ", database });
 
-    expect(chain.innerJoin).toHaveBeenCalled();
+    expect(execute).toHaveBeenCalledOnce();
     expect(target).toEqual({ org_id: "org-1", slug: "mega-code-review" });
   });
 
@@ -97,6 +85,6 @@ describe("getSkillShareTargetByShareToken", () => {
     const { database } = fakeDb([]);
 
     await expect(getSkillShareTargetByShareToken({ actor, token: "  ", database })).resolves.toBeNull();
-    expect(database.select).not.toHaveBeenCalled();
+    expect(database.execute).not.toHaveBeenCalled();
   });
 });

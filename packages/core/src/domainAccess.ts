@@ -1,10 +1,11 @@
-import { and, asc, count, eq, ne, sql } from "drizzle-orm";
+import { and, asc, eq, sql } from "drizzle-orm";
 import { db, schema, type Db } from "@companion/db";
 import type { OrgRole } from "@companion/contracts";
 import { canManageOrg } from "./authz";
 import { classifyEmailDomain } from "./email-domains";
 import { getEntitlements } from "./billing";
 import type { ActorContext } from "./services";
+import { listPreTenantJoinableOrganizations } from "./preTenant";
 
 export interface OrgAccessDomain {
   id: string;
@@ -75,41 +76,15 @@ export async function listOrgAccessDomains(orgId: string, database: Db = db): Pr
 
 export async function listJoinableOrgsByDomain(domain: string, actorId: string, database: Db = db): Promise<DomainJoinableOrg[]> {
   const normalized = normalizeAccessDomain(domain);
-  const rows = await database
-    .select({
-      orgId: schema.organizations.id,
-      name: schema.organizations.name,
-      domain: schema.organizationDomains.domain,
-    })
-    .from(schema.organizationDomains)
-    .innerJoin(schema.organizations, eq(schema.organizations.id, schema.organizationDomains.orgId))
-    .where(
-      and(
-        sql`lower(${schema.organizationDomains.domain}) = ${normalized}`,
-        ne(schema.organizations.kind, "personal"),
-        sql`not exists (
-          select 1 from ${schema.memberships}
-          where ${schema.memberships.orgId} = ${schema.organizations.id}
-            and ${schema.memberships.userId} = ${actorId}
-        )`,
-      ),
-    )
-    .orderBy(asc(schema.organizations.name));
-
-  const orgs: DomainJoinableOrg[] = [];
-  for (const row of rows) {
-    const [members] = await database
-      .select({ value: count() })
-      .from(schema.memberships)
-      .where(eq(schema.memberships.orgId, row.orgId));
-    orgs.push({
-      id: row.orgId,
+  const rows = await listPreTenantJoinableOrganizations(database, actorId);
+  return rows
+    .filter((row) => row.domain.toLowerCase() === normalized)
+    .map((row) => ({
+      id: row.org_id,
       name: row.name,
       domain: row.domain,
-      memberCount: Number(members?.value ?? 0),
-    });
-  }
-  return orgs;
+      memberCount: Number(row.member_count),
+    }));
 }
 
 export async function orgAllowsEmailDomain(input: {

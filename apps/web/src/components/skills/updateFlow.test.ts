@@ -100,6 +100,7 @@ describe("skill update flow", () => {
         onSelectLabel: vi.fn(),
         onAction: vi.fn(),
         onOpenSkill: vi.fn(),
+        onOpenRun: vi.fn(),
       }),
     );
 

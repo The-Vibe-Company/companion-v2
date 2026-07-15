@@ -4,7 +4,7 @@ Companion runs as three Railway services from this repository plus a Railway Pos
 
 - `web`: the only public application service; it proxies `/auth`, `/v1`, and `/trpc` to `api`.
 - `api`: private Hono service. Its pre-deploy command applies Drizzle migrations under an advisory lock.
-- `worker`: private, long-running Stripe seat reconciliation process.
+- `worker`: private process with independent Stripe reconciliation and durable skill-run supervisors.
 - `Postgres`: Railway's PostgreSQL template.
 
 Keeping application traffic on the web origin avoids cross-origin session cookies. Stripe and CLI clients use the
@@ -33,8 +33,25 @@ The Dockerfiles declare every build-time variable they consume; secrets remain r
 be added as Docker build arguments.
 
 Generate the `web` Railway domain before adding variables that reference `web.RAILWAY_PUBLIC_DOMAIN`. The API and
-worker communicate only over Railway private networking. Deploy `api` once before enabling the billing worker so
+worker communicate through Postgres and external providers. Deploy `api` once before enabling either worker
+supervisor so
 the first database migration has completed; later API deploys run migrations before replacing the live process.
+
+Run the API and worker with a dedicated `NOSUPERUSER NOBYPASSRLS` login that neither owns database
+objects nor belongs to the migration-owner role. Keep the Railway Postgres owner URL only in
+`DATABASE_MIGRATION_URL` on the API (for its pre-deploy migration). Set `DATABASE_RUNTIME_ROLE` to the
+runtime login name: the migration hook then applies the versioned least-privilege grants immediately
+after every migration while it still holds the advisory lock. The checked-in script remains a manual
+recovery/fallback path:
+
+```bash
+psql "$DATABASE_MIGRATION_URL" -v runtime_role=companion_runtime \
+  -f packages/db/runtime-role-grants.sql
+```
+
+Set `DATABASE_URL` on API and worker to that runtime login's URL. This separation is required for
+forced creator-only RLS; using the table owner, a superuser, or a `BYPASSRLS` role at runtime disables
+that security boundary.
 
 ## 2. Configure variables
 
@@ -47,12 +64,15 @@ below assume the services are named exactly `web`, `api`, and `Postgres`.
 NODE_ENV=production
 PORT=3001
 COMPANION_API_HOST=0.0.0.0
-DATABASE_URL=${{Postgres.DATABASE_URL}}
+DATABASE_URL=<companion_runtime NOSUPERUSER/NOBYPASSRLS URL>
+DATABASE_MIGRATION_URL=${{Postgres.DATABASE_URL}}
+DATABASE_RUNTIME_ROLE=companion_runtime
 COMPANION_WEB_URL=https://${{web.RAILWAY_PUBLIC_DOMAIN}}
 COMPANION_API_URL=https://${{web.RAILWAY_PUBLIC_DOMAIN}}
 BETTER_AUTH_URL=https://${{web.RAILWAY_PUBLIC_DOMAIN}}
 BETTER_AUTH_COOKIE_PREFIX=companion-production
 BETTER_AUTH_SECRET=<random secret of at least 32 bytes>
+COMPANION_SECRETS_MASTER_KEY=<shared base64 32-byte key; never rotate without a migration>
 
 EMAIL_PROVIDER=resend
 EMAIL_FROM=Companion <noreply@your-domain.example>
@@ -75,6 +95,13 @@ STRIPE_SECRET_KEY=<Stripe live secret key>
 STRIPE_WEBHOOK_SECRET=<endpoint signing secret>
 STRIPE_PRO_PRICE_ID=<live price id>
 STRIPE_PORTAL_CONFIGURATION_ID=<live portal configuration id>
+
+# The API exposes run readiness/options but never receives Vercel credentials.
+COMPANION_RUNS_ENABLED=true
+COMPANION_GOLDEN_SNAPSHOT_ID=<same pinned OpenCode snapshot as worker>
+OPENCODE_VERSION=1.17.13
+COMPANION_SANDBOX_REGION=iad1
+COMPANION_SANDBOX_TIMEOUT_MS=300000
 ```
 
 `COMPANION_ENTITLEMENTS_MODE=observe` is the safe first production rollout. Enable webhooks, then Checkout, then use
@@ -100,17 +127,44 @@ private DNS is not reachable from a browser; browser requests intentionally stay
 
 ```dotenv
 NODE_ENV=production
-DATABASE_URL=${{Postgres.DATABASE_URL}}
+DATABASE_URL=<same companion_runtime URL as api>
 COMPANION_BILLING_MODE=stripe
 COMPANION_ENTITLEMENTS_MODE=observe
 STRIPE_SECRET_KEY=<same live secret key as api>
 STRIPE_WEBHOOK_SECRET=<same endpoint signing secret as api>
 STRIPE_PRO_PRICE_ID=<same live price id as api>
 STRIPE_PORTAL_CONFIGURATION_ID=<same live portal configuration id as api>
+
+COMPANION_SECRETS_MASTER_KEY=<exactly the same key as api>
+S3_ENDPOINT=<same endpoint as api>
+S3_REGION=<same region as api>
+S3_ACCESS_KEY_ID=<same access key as api>
+S3_SECRET_ACCESS_KEY=<same secret key as api>
+S3_BUCKET_SKILL_ARCHIVES=<same bucket as api>
+S3_FORCE_PATH_STYLE=false
+
+VERCEL_TOKEN=<sandbox token>
+VERCEL_TEAM_ID=<sandbox team id>
+VERCEL_PROJECT_ID=<sandbox project id>
+COMPANION_RUNS_ENABLED=true
+COMPANION_GOLDEN_SNAPSHOT_ID=<current pinned OpenCode snapshot>
+OPENCODE_VERSION=1.17.13
+COMPANION_SANDBOX_REGION=iad1
+COMPANION_SANDBOX_TIMEOUT_MS=300000
+COMPANION_RUN_CONCURRENCY=2
+COMPANION_RUN_CLAIM_INTERVAL_MS=1000
+COMPANION_RUN_LEASE_SECONDS=30
+COMPANION_RUN_HEARTBEAT_MS=10000
+COMPANION_RUN_INACTIVITY_MS=120000
+COMPANION_RUN_RECORDER_RECONNECT_MIN_MS=250
+COMPANION_RUN_RECORDER_RECONNECT_MAX_MS=5000
+COMPANION_RUN_EVENT_RETENTION_INTERVAL_MS=900000
+COMPANION_RUN_SWEEP_INTERVAL_MS=60000
 ```
 
-The worker needs all four Stripe variables because it validates the complete billing configuration before starting.
-It does not need a domain or `PORT`.
+Billing and runs are independent supervisors: disabling billing must not stop run processing, and missing Vercel
+configuration disables only RunSkill. The worker needs all four Stripe variables when Stripe billing is enabled, plus
+the vault, S3, Vercel, and OpenCode settings for runs. It does not need a domain or `PORT`.
 
 ## 3. Configure Stripe
 

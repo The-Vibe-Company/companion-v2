@@ -87,11 +87,46 @@ export interface SettingsAppData {
 export type SettingsView =
   | "profile"
   | "preferences"
+  | "providers"
+  | "models"
   | "apikeys"
+  | "org-providers"
+  | "org-models"
   | "general"
   | "members"
   | "invitations"
   | "billing";
+
+/** Every `?view=` value both settings URL parsers accept (client pushState + server searchParams). */
+export const SETTINGS_VIEWS: readonly SettingsView[] = [
+  "profile",
+  "preferences",
+  "providers",
+  "models",
+  "apikeys",
+  "general",
+  "org-providers",
+  "org-models",
+  "members",
+  "invitations",
+  "billing",
+];
+
+export function isSettingsView(value: string | null | undefined): value is SettingsView {
+  return typeof value === "string" && (SETTINGS_VIEWS as readonly string[]).includes(value);
+}
+
+/** Legacy provider views merged into the Models panes — old deep-links keep working. */
+export function normalizeSettingsView(view: SettingsView): SettingsView {
+  if (view === "providers") return "models";
+  if (view === "org-providers") return "org-models";
+  return view;
+}
+
+/** One parse for both settings URL surfaces: raw `?view=` value → the pane to mount. */
+export function parseSettingsView(raw: string | null | undefined): SettingsView {
+  return normalizeSettingsView(isSettingsView(raw) ? raw : "profile");
+}
 
 /** A resolved settings destination — a pane. */
 export interface SettingsRoute {
