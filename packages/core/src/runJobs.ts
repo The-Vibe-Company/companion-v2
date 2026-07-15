@@ -238,7 +238,10 @@ export async function deleteRunAttachmentOrphanIfReserved(input: {
   const database = input.database ?? db;
   return database.transaction(async (transaction) => {
     const locked = await (transaction as unknown as Db).execute(sql`
-      select companion_lock_skill_run_attachment_orphan(${input.storageKey}, ${input.before}) as locked
+      select companion_lock_skill_run_attachment_orphan(
+        ${input.storageKey},
+        ${input.before.toISOString()}::timestamp with time zone
+      ) as locked
     `);
     const row = Array.from(locked as unknown as Iterable<{ locked: boolean }>)[0];
     if (row?.locked !== true) return false;

@@ -28,11 +28,9 @@ export async function sweepRunAttachmentOrphans(input: {
   const listObjects = input.listObjects ?? listStoredRunAttachmentObjects;
   const deleteIfReserved = input.deleteIfReserved ?? deleteRunAttachmentOrphanIfReserved;
   const deleteObject = input.deleteObject ?? ((key) => deleteSkillArchive({ key }));
-  const page = await listObjects({ limit: Math.max(limit * 4, limit), cursor: sweepCursor });
+  const page = await listObjects({ limit, cursor: sweepCursor });
   sweepCursor = page.nextCursor ?? undefined;
-  const candidates = page.objects
-    .filter((object) => object.lastModified.getTime() <= now.getTime() - graceMs)
-    .slice(0, limit);
+  const candidates = page.objects.filter((object) => object.lastModified.getTime() <= now.getTime() - graceMs);
   const result: RunAttachmentSweepResult = { deleted: 0, retained: 0, failed: 0 };
   for (const candidate of candidates) {
     try {

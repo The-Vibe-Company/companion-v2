@@ -18,6 +18,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   beginRunFreeze,
   claimNextRunPrompt,
+  deleteRunAttachmentOrphanIfReserved,
   deleteRunConfiguration,
   deterministicRunMessageId,
   enqueueRunPrompt,
@@ -27,7 +28,7 @@ import {
   removeRunWorkerHeartbeat,
   reserveRunAttachmentUploads,
 } from "@companion/core/services";
-import { withTenantContext } from "@companion/db";
+import { db, withTenantContext } from "@companion/db";
 
 const databaseUrl = process.env.DATABASE_URL?.trim();
 if (!databaseUrl) throw new Error("RunSkill integration tests require an explicit disposable DATABASE_URL");
@@ -51,6 +52,7 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
   const attachmentId = randomUUID();
   const followupAttachmentId = randomUUID();
   const incompatibleWorkerAttachmentId = randomUUID();
+  const reservationAttachmentId = randomUUID();
   const legacyReplicaRunId = randomUUID();
   const legacyReplicaAttachmentId = randomUUID();
   const owner = { id: `run-owner-${suffix}`, email: `run-owner-${suffix}@example.test` };
@@ -619,6 +621,76 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
       delete from skill_run_prompts
       where org_id = ${orgA}::uuid and run_id = ${freezeRunId}::uuid and id = ${first.id}::uuid
     `;
+  });
+
+  it("serializes orphan deletion with a retry reservation and prompt consumption", async () => {
+    const storageKey = `${orgA}/run-attachments/${reservationAttachmentId}`;
+    await withTenantContext({ orgId: orgA, userId: owner.id }, (database) =>
+      reserveRunAttachmentUploads({
+        actor: { id: owner.id, email: owner.email, name: "Run Owner" },
+        orgId: orgA,
+        storageKeys: [storageKey],
+        database,
+      }),
+    );
+    await sql`update skill_run_attachment_uploads set touched_at = now() - interval '2 days' where storage_key = ${storageKey}`;
+
+    let releaseDelete!: () => void;
+    const deleteGate = new Promise<void>((resolve) => { releaseDelete = resolve; });
+    let enteredDelete!: () => void;
+    const deleteEntered = new Promise<void>((resolve) => { enteredDelete = resolve; });
+    const cleanup = deleteRunAttachmentOrphanIfReserved({
+      storageKey,
+      before: new Date(Date.now() - 24 * 60 * 60 * 1_000),
+      database: db,
+      deleteObject: async () => {
+        enteredDelete();
+        await deleteGate;
+      },
+    });
+    await deleteEntered;
+    let retrySettled = false;
+    const retry = withTenantContext({ orgId: orgA, userId: owner.id }, (database) =>
+      reserveRunAttachmentUploads({
+        actor: { id: owner.id, email: owner.email, name: "Run Owner" },
+        orgId: orgA,
+        storageKeys: [storageKey],
+        database,
+      }),
+    ).then(() => { retrySettled = true; });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(retrySettled).toBe(false);
+    releaseDelete();
+    await expect(cleanup).resolves.toBe(true);
+    await retry;
+
+    await sql`
+      update skill_run_worker_heartbeats
+      set expires_at = now() + interval '5 minutes', attachment_prompt_protocol = 1
+      where worker_id = 'freeze-worker'
+    `;
+    const accepted = await withTenantContext({ orgId: orgA, userId: owner.id }, (database) =>
+      enqueueRunPrompt({
+        actor: { id: owner.id, email: owner.email, name: "Run Owner" },
+        orgId: orgA,
+        runId: freezeRunId,
+        text: "consume retry",
+        idempotencyKey: "reservation-race-consume",
+        attachments: [{
+          id: reservationAttachmentId,
+          fileName: "race.txt",
+          contentType: "text/plain",
+          byteSize: 1,
+          storageKey,
+        }],
+        database,
+      }),
+    );
+    const reservations = await sql<{ count: number }[]>`
+      select count(*)::int as count from skill_run_attachment_uploads where storage_key = ${storageKey}
+    `;
+    expect(reservations).toEqual([{ count: 0 }]);
+    await sql`delete from skill_run_prompts where id = ${accepted.id}::uuid`;
   });
 
   it("keeps pre-0037 API inserts compatible during a rolling deployment", async () => {

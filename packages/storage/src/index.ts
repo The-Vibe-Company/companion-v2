@@ -236,7 +236,9 @@ export async function listStoredRunAttachmentObjects(input: {
     const page = await client.send(new ListObjectsV2Command({
       Bucket: config.bucket,
       ContinuationToken: continuationToken,
-      MaxKeys: 1_000,
+      // Never fetch more keys than this call can still return: the continuation token then always
+      // begins strictly after every object we inspected, even when a page contains many matches.
+      MaxKeys: Math.min(1_000, limit - objects.length),
     }));
     for (const object of page.Contents ?? []) {
       if (!object.Key || !object.LastModified || !object.Key.includes("/run-attachments/")) continue;
