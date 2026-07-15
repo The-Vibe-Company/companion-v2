@@ -182,9 +182,9 @@ describe("decodeChatEvent", () => {
   });
 
   it("accepts a persisted replay envelope without exposing its sequence to the reducer", () => {
-    expect(decodeChatEvent({ event: "run", id: "12", data: '{"sequence":12,"created_at":"now","event":{"type":"run.warning","code":"artifact_publish_failed","message":"Vanish unavailable","phase":"collect_artifacts"}}' })).toMatchObject({
+    expect(decodeChatEvent({ event: "run", id: "12", data: '{"sequence":12,"created_at":"now","event":{"type":"run.warning","code":"retry_delayed","message":"The run is retrying","phase":"record"}}' })).toMatchObject({
       type: "run.warning",
-      code: "artifact_publish_failed",
+      code: "retry_delayed",
     });
   });
 
@@ -278,10 +278,10 @@ describe("chatReducer", () => {
   it("keeps warnings non-terminal and records run.error separately", () => {
     let state = initChatState();
     state = apply(state, { type: "status", state: "busy", attempt: null, message: null });
-    state = apply(state, { type: "run.warning", code: "artifact_publish_failed", message: "Vanish unavailable", phase: "collect_artifacts" });
+    state = apply(state, { type: "run.warning", code: "retry_delayed", message: "The run is retrying", phase: "record" });
     expect(state.busy).toBe(true);
     expect(state.error).toBeNull();
-    expect(state.warnings).toEqual([{ code: "artifact_publish_failed", message: "Vanish unavailable" }]);
+    expect(state.warnings).toEqual([{ code: "retry_delayed", message: "The run is retrying" }]);
     state = apply(state, { type: "run.error", code: "sandbox_failed", message: "Sandbox stopped", phase: "cleanup" });
     expect(state.busy).toBe(false);
     expect(state.error).toBe("Sandbox stopped");

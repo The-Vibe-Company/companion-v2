@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { launchRun, setModelProviderConnection, setVanishConnection } from "./runQueries";
+import { launchRun, setModelProviderConnection } from "./runQueries";
 
 const jsonResponse = (value: unknown) => new Response(JSON.stringify(value), {
   status: 200,
@@ -31,17 +31,6 @@ describe("run query credential boundaries", () => {
       api_key: "provider-sentinel",
     });
     expect(String(init.body)).not.toContain("secret_id");
-  });
-
-  it("keeps Vanish on its distinct vault-reference route", async () => {
-    await setVanishConnection("11111111-1111-4111-8111-111111111111");
-
-    const [path, init] = request.mock.calls[0] as [string, RequestInit];
-    expect(path).toBe("/v1/vanish-connection");
-    expect(JSON.parse(String(init.body))).toEqual({
-      secret_id: "11111111-1111-4111-8111-111111111111",
-    });
-    expect(String(init.body)).not.toContain("api_key");
   });
 
   it("launches with the exact provider connection version and no generic provider secret id", async () => {

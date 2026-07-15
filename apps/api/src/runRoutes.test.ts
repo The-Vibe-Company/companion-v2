@@ -40,12 +40,6 @@ const serviceMocks = vi.hoisted(() => ({
   isRunWorkerReady: vi.fn(async () => true),
   setProviderConnection: vi.fn(),
   setOrgProviderConnection: vi.fn(),
-  getVanishConnection: vi.fn(),
-  getOrgVanishConnection: vi.fn(),
-  setVanishConnection: vi.fn(),
-  setOrgVanishConnection: vi.fn(),
-  deleteVanishConnection: vi.fn(),
-  deleteOrgVanishConnection: vi.fn(),
 }));
 
 const authMocks = vi.hoisted(() => ({
@@ -322,25 +316,4 @@ describe("dedicated provider credentials", () => {
     expect(vaultReference.status).toBeGreaterThanOrEqual(400);
   });
 
-  it("keeps Vanish on a dedicated generic-secret route", async () => {
-    signIn();
-    serviceMocks.setVanishConnection.mockResolvedValue({
-      key_name: "VANISH_API_KEY",
-      secret_id: secretId,
-      secret_name: "Vanish",
-      secret_audience: "personal",
-      secret_owner_name: "Run User",
-      scope: "personal",
-      set: true,
-      created_at: "2026-07-13T00:00:00.000Z",
-      updated_at: "2026-07-13T00:00:00.000Z",
-    });
-    const response = await app.request("/v1/vanish-connection", {
-      method: "PUT",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ secret_id: secretId }),
-    });
-    expect(response.status).toBe(200);
-    expect(serviceMocks.setVanishConnection).toHaveBeenCalledWith(expect.objectContaining({ secretId }));
-  });
 });

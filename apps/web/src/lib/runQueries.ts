@@ -13,8 +13,6 @@ import type {
   SkillRunDetail,
   SkillRunsResponse,
   UpdateRunConfigurationInput,
-  VanishConnectionResponse,
-  VanishConnectionRow,
 } from "@companion/contracts";
 import { apiFetch } from "./apiClient";
 
@@ -88,38 +86,6 @@ export async function deleteOrgModelProviderConnection(provider: string): Promis
   return apiFetch<{ ok: true }>(`/v1/org-provider-connections/${encodeURIComponent(provider)}`, {
     method: "DELETE",
   });
-}
-
-/* ---- Vanish bindings (references to the generic Secrets vault) ---- */
-
-export async function fetchVanishConnection(): Promise<VanishConnectionResponse> {
-  return apiFetch<VanishConnectionResponse>("/v1/vanish-connection");
-}
-
-export async function setVanishConnection(secretId: string): Promise<{ connection: VanishConnectionRow }> {
-  return apiFetch<{ connection: VanishConnectionRow }>("/v1/vanish-connection", {
-    method: "PUT",
-    body: JSON.stringify({ secret_id: secretId }),
-  });
-}
-
-export async function deleteVanishConnection(): Promise<{ ok: true }> {
-  return apiFetch<{ ok: true }>("/v1/vanish-connection", { method: "DELETE" });
-}
-
-export async function fetchOrgVanishConnection(): Promise<VanishConnectionResponse> {
-  return apiFetch<VanishConnectionResponse>("/v1/org-vanish-connection");
-}
-
-export async function setOrgVanishConnection(secretId: string): Promise<{ connection: VanishConnectionRow }> {
-  return apiFetch<{ connection: VanishConnectionRow }>("/v1/org-vanish-connection", {
-    method: "PUT",
-    body: JSON.stringify({ secret_id: secretId }),
-  });
-}
-
-export async function deleteOrgVanishConnection(): Promise<{ ok: true }> {
-  return apiFetch<{ ok: true }>("/v1/org-vanish-connection", { method: "DELETE" });
 }
 
 /* ---- Skill runs ---- */
@@ -199,7 +165,7 @@ export async function fetchRuns(slug: string): Promise<SkillRunsResponse> {
   return apiFetch<SkillRunsResponse>(`/v1/skills/${encodeURIComponent(slug)}/runs`);
 }
 
-/** Full run detail (transcript + attachments + artifacts). Polled at 1.5s while `starting`. */
+/** Full run detail (transcript + attachments). Polled at 1.5s while `starting`. */
 export async function fetchRun(runId: string): Promise<SkillRunDetail> {
   return apiFetch<SkillRunDetail>(`/v1/runs/${encodeURIComponent(runId)}`);
 }

@@ -94,10 +94,7 @@ export type ModelProviderConnectionsResponse = z.infer<typeof modelProviderConne
 
 /** Body of `PUT /v1/provider-connections` — replace the provider's write-only credential. */
 export const setModelProviderConnectionInputSchema = z.object({
-  provider: z.string().min(1).max(120).refine(
-    (provider) => provider.toLowerCase() !== "vanish",
-    "Vanish uses its own connection API",
-  ),
+  provider: z.string().min(1).max(120),
   /** Env name expected by the provider (from the model catalog's `env_keys`). */
   key_name: secretKeyNameSchema,
   /** Plaintext exists only for this write request and is never returned, audited, or logged. */

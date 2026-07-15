@@ -20,7 +20,6 @@ describe("SettingsController", () => {
     expect(settingsHref({ view: "members" }, "invite")).toBe("/settings?view=members&dialog=invite");
     expect(settingsHref({ view: "profile" }, null)).toBe("/settings?view=profile");
     expect(settingsHref({ view: "billing" }, null)).toBe("/settings?view=billing");
-    expect(settingsHref({ view: "org-artifacts" }, null)).toBe("/settings?view=org-artifacts");
   });
 
   it("normalizes malformed member collections before rendering", async () => {

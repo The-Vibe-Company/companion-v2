@@ -5,9 +5,9 @@
  *   COMPANION_GOLDEN_SNAPSHOT_ID=… ANTHROPIC_API_KEY=… \
  *   pnpm --filter @companion/sandbox smoke:vercel
  *
- * Flow: fork golden → push a tiny probe skill workspace → serve → health → prompt once through the
- * chat bridge (skill triggers + script execution + artifact write) → collect artifacts → stop →
- * destroy. Prints an honest report; exits non-zero on any failure.
+ * Flow: fork golden → push a tiny probe skill workspace + attachment → serve → health → prompt
+ * once through the chat bridge (skill triggers + dependency script execution) → stop → destroy.
+ * Prints an honest report; exits non-zero on any failure.
  */
 import { randomBytes } from "node:crypto";
 import { createVercelRuntime, vercelConfigFromEnv } from "../src/vercel";
@@ -22,8 +22,8 @@ description: Answers smoke-test probes by delegating to its smoke-helper depende
 # smoke-probe
 
 When the user asks for a "smoke probe", use the installed \`smoke-helper\` skill. Run its
-\`scripts/probe.py\` with bash, report its non-sensitive output verbatim, and write that output into
-\`./artifacts/probe.txt\`. Never print environment variable values.
+\`scripts/probe.py\` with bash and report its non-sensitive output verbatim. Never print environment
+variable values.
 `;
 
 const HELPER_SKILL_MD = `---
@@ -38,8 +38,11 @@ Run \`scripts/probe.py\` for the smoke-probe skill. Never print environment vari
 
 const PROBE_PY = `#!/usr/bin/env python3
 import os
+from pathlib import Path
 print("PROBE-OK-4242")
 print("SECRET-AVAILABLE" if os.environ.get("SMOKE_SECRET_SENTINEL") else "SECRET-MISSING")
+attachment = Path("attachments/note.txt")
+print("ATTACHMENT-OK" if attachment.is_file() and attachment.read_text() == "smoke attachment\\n" else "ATTACHMENT-MISSING")
 `;
 
 function required(name: string): string {
@@ -123,6 +126,7 @@ async function main(): Promise<void> {
     let sawTool = false;
     let sawProbeOutput = false;
     let sawSecretAvailable = false;
+    let sawAttachment = false;
     let leakedSecret = false;
     let text = "";
     // Hard deadline: abort the underlying SSE fetch so a silent stream can NEVER hang the smoke.
@@ -144,6 +148,7 @@ async function main(): Promise<void> {
         if (event.type === "tool.start") sawTool = true;
         if (event.type === "tool.done" && event.output.includes("PROBE-OK-4242")) sawProbeOutput = true;
         if (event.type === "tool.done" && event.output.includes("SECRET-AVAILABLE")) sawSecretAvailable = true;
+        if (event.type === "tool.done" && event.output.includes("ATTACHMENT-OK")) sawAttachment = true;
         if (JSON.stringify(event).includes(secretSentinel)) leakedSecret = true;
         if (event.type === "text.delta") text += event.delta;
         if (event.type === "session.idle") break;
@@ -158,21 +163,9 @@ async function main(): Promise<void> {
     report["skill_triggered"] = String(sawTool);
     report["script_ran"] = String(sawProbeOutput || text.includes("PROBE-OK-4242"));
     report["dependency_ran"] = String(sawSecretAvailable || text.includes("SECRET-AVAILABLE"));
+    report["attachment_mounted"] = String(sawAttachment || text.includes("ATTACHMENT-OK"));
     report["secret_not_leaked"] = String(!leakedSecret && !text.includes(secretSentinel));
     console.log(`  skill triggered=${report["skill_triggered"]} script ran=${report["script_ran"]}`);
-
-    console.log("collect artifacts…");
-    t = Date.now();
-    const artifacts = await runtime.collectFiles({
-      ref,
-      dir: "/vercel/sandbox/artifacts",
-      maxFiles: 20,
-      maxFileBytes: 10 * 1024 * 1024,
-    });
-    report["collect_ms"] = String(Date.now() - t);
-    report["artifacts"] = artifacts.map((a) => `${a.path} (${a.byteSize}B)`).join(", ") || "(none)";
-    report["artifact_ok"] = String(artifacts.some((a) => a.data.toString("utf8").includes("PROBE-OK-4242")));
-    report["artifact_secret_safe"] = String(artifacts.every((a) => !a.data.toString("utf8").includes(secretSentinel)));
 
     console.log("stop (freeze)…");
     await runtime.stop(ref);
@@ -187,9 +180,8 @@ async function main(): Promise<void> {
     report["skill_triggered"] === "true" &&
     report["script_ran"] === "true" &&
     report["dependency_ran"] === "true" &&
-    report["secret_not_leaked"] === "true" &&
-    report["artifact_ok"] === "true" &&
-    report["artifact_secret_safe"] === "true";
+    report["attachment_mounted"] === "true" &&
+    report["secret_not_leaked"] === "true";
   console.log(pass ? "\nPASS" : "\nFAIL (see criteria above)");
   process.exit(pass ? 0 : 1);
 }

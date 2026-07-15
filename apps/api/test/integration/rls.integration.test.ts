@@ -34,7 +34,6 @@ describe("Postgres tenant isolation", () => {
   let skillB: SeededSkill;
   const personalProviderId = randomUUID();
   const orgProviderId = randomUUID();
-  const vanishSecretId = randomUUID();
   const role = `companion_rls_${randomUUID().replaceAll("-", "").slice(0, 20)}`;
 
   beforeAll(async () => {
@@ -65,10 +64,6 @@ describe("Postgres tenant isolation", () => {
       values
         (${fixture.orgA}::uuid, ${personalProviderId}::uuid, 1, 'ANTHROPIC_API_KEY', 'cipher-personal', 'iv', 'tag', 'dek', 'wrap-iv', 'wrap-tag', 'key-id'),
         (${fixture.orgA}::uuid, ${orgProviderId}::uuid, 1, 'OPENAI_API_KEY', 'cipher-org', 'iv', 'tag', 'dek', 'wrap-iv', 'wrap-tag', 'key-id')
-    `;
-    await integrationSql`
-      insert into secrets (id, org_id, owner_id, name, key, audience)
-      values (${vanishSecretId}::uuid, ${fixture.orgA}::uuid, ${fixture.owner.id}, 'Vanish RLS', 'VANISH_API_KEY', 'organization')
     `;
     await integrationSql.unsafe(`create role ${role} nologin`);
     await integrationSql.unsafe(`grant ${role} to current_user with inherit true, set true`);
@@ -182,28 +177,6 @@ describe("Postgres tenant isolation", () => {
         values (${fixture.orgA}::uuid, ${orgProviderId}::uuid, 2, 'OPENAI_API_KEY', 'cipher', 'iv', 'tag', 'dek', 'wrap-iv', 'wrap-tag', 'key-id')
       `;
     })).rejects.toThrow(/row-level security/);
-  });
-
-  it("lets members read shared Vanish while refusing direct developer mutations", async () => {
-    await expect(integrationSql.begin(async (tx) => {
-      await tx.unsafe(`set local role ${role}`);
-      await tx`select set_config('app.org_id', ${fixture.orgA}, true), set_config('app.user_id', ${fixture.developer.id}, true)`;
-      await tx`
-        insert into org_vanish_connections (org_id, secret_id, created_by)
-        values (${fixture.orgA}::uuid, ${vanishSecretId}::uuid, ${fixture.developer.id})
-      `;
-    })).rejects.toThrow(/row-level security/);
-
-    await integrationSql`
-      insert into org_vanish_connections (org_id, secret_id, created_by)
-      values (${fixture.orgA}::uuid, ${vanishSecretId}::uuid, ${fixture.owner.id})
-    `;
-    const visible = await integrationSql.begin(async (tx) => {
-      await tx.unsafe(`set local role ${role}`);
-      await tx`select set_config('app.org_id', ${fixture.orgA}, true), set_config('app.user_id', ${fixture.developer.id}, true)`;
-      return tx<Array<{ secret_id: string }>>`select secret_id from org_vanish_connections`;
-    });
-    expect(visible).toEqual([{ secret_id: vanishSecretId }]);
   });
 
   it("uses transaction-local tenant identifiers that are cleared after withTenantContext returns", async () => {

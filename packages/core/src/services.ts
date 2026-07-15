@@ -3687,15 +3687,13 @@ export async function uninstallSkill(input: {
 
 // Saved model-provider connections (API keys). Same load-order reasoning as `./labels`.
 export * from "./providerConnections";
-export * from "./vanishConnections";
 
 // Activated-model lists (personal + workspace). Same load-order reasoning as `./labels`.
 export * from "./modelPreferences";
 
-// Skill runs (one-shot sandboxed sessions) + the Vanish artifact client. Same load-order reasoning
-// as `./labels`: `skillRuns.ts` imports only hoisted functions and types from here.
+// Skill runs (one-shot sandboxed sessions). Same load-order reasoning as `./labels`:
+// `skillRuns.ts` imports only hoisted functions and types from here.
 export * from "./skillRuns";
 export * from "./runConfigurations";
 export * from "./runJobs";
 export * from "./runSweeper";
-export * from "./vanish";

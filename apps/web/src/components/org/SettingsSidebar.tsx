@@ -133,12 +133,6 @@ export function SettingsSidebar({
               onClick={() => goTo({ view: "models" })}
             />
             <NavItem
-              active={is("artifacts")}
-              icon="link-2"
-              label="Artifacts (Vanish)"
-              onClick={() => goTo({ view: "artifacts" })}
-            />
-            <NavItem
               active={is("apikeys")}
               icon="key"
               label="API keys"
@@ -168,12 +162,6 @@ export function SettingsSidebar({
               icon="boxes"
               label="Shared models"
               onClick={() => goTo({ view: "org-models" })}
-            />
-            <NavItem
-              active={is("org-artifacts")}
-              icon="link-2"
-              label="Shared artifacts"
-              onClick={() => goTo({ view: "org-artifacts" })}
             />
             <NavItem
               active={is("members")}

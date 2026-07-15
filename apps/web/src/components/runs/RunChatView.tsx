@@ -9,7 +9,6 @@ import { Icon } from "../Icon";
 import { ChatMarkdown } from "./chatMarkdown";
 import { chatReducer, initChatState, openRunStream, type ChatItem } from "./chatStream";
 import { toolIcon } from "./derive";
-import { ArtifactsStrip } from "./ArtifactsStrip";
 import { runInputsFromSnapshot, type RunLauncherDraft } from "./launcherState";
 
 /**
@@ -475,7 +474,7 @@ export function RunChatView({
         setStreamDead(false);
         if (event.type === "status" && event.state !== "idle") setPromptPending(false);
         if (event.type === "session.idle") {
-          // Artifacts publish on idle server-side — refresh the strip (and the persisted status).
+          // Reconcile the durable transcript snapshot and persisted run state after each turn.
           void refreshRun().catch(() => {});
         } else if (event.type === "run.error") {
           void refreshRun().catch(() => {});
@@ -877,8 +876,6 @@ export function RunChatView({
               </div>
             )}
           </div>
-
-          {run && <ArtifactsStrip artifacts={run.artifacts} />}
 
           <div style={{ flex: "none", padding: "12px 16px 14px", borderTop: "1px solid var(--color-line)", background: "var(--color-surface)" }}>
             <div

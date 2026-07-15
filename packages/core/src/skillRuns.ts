@@ -24,7 +24,6 @@ import {
   type RunModelProviderInputSnapshot,
   type RunSecretInputSnapshot,
   type RunVariableInputSnapshot,
-  type SkillRunArtifactRow,
   type SkillRunAttachmentRow,
   type SkillRunDetail,
   type SkillRunRow,
@@ -38,7 +37,6 @@ import {
   type ProviderCredentialPin,
 } from "./providerConnections";
 import { decryptPinnedSecret, pinAccessibleSecret, type AccessibleSecretPin } from "./secrets";
-import { resolveVanishSecretPin } from "./vanishConnections";
 import {
   decryptOpaqueValue,
   encryptOpaqueValue,
@@ -131,7 +129,6 @@ export async function resolveRunRuntimeContext(
 
 export type RunRow = typeof schema.skillRuns.$inferSelect;
 type AttachmentRow = typeof schema.skillRunAttachments.$inferSelect;
-type ArtifactRow = typeof schema.skillRunArtifacts.$inferSelect;
 
 export interface ResolvedRunSkill extends RunDependency {
   scope: "personal" | "org";
@@ -207,7 +204,6 @@ export function composeRunPrompt(input: {
   prompt: string;
   skillSlug: string;
   attachments: Array<{ fileName: string; workspacePath: string }>;
-  artifactsEnabled: boolean;
 }): string {
   const notes = [`Use your installed "${input.skillSlug}" skill to handle this request.`];
   if (input.attachments.length > 0) {
@@ -220,9 +216,6 @@ export function composeRunPrompt(input: {
     notes.push(
       `The user attached ${input.attachments.length === 1 ? "a file" : "files"}. Use the exact mounted ${input.attachments.length === 1 ? "path" : "paths"}: ${mountedFiles}.`,
     );
-  }
-  if (input.artifactsEnabled) {
-    notes.push("Save any deliverable files into ./artifacts/ — they will be shared with the user as links.");
   }
   return `${input.prompt.trim()}\n\n---\n${notes.join("\n")}\n`;
 }
@@ -919,14 +912,6 @@ async function loadAttachments(database: Db, orgId: string, runId: string): Prom
     .where(and(eq(schema.skillRunAttachments.orgId, orgId), eq(schema.skillRunAttachments.runId, runId)));
 }
 
-async function loadArtifacts(database: Db, orgId: string, runId: string): Promise<ArtifactRow[]> {
-  return database
-    .select()
-    .from(schema.skillRunArtifacts)
-    .where(and(eq(schema.skillRunArtifacts.orgId, orgId), eq(schema.skillRunArtifacts.runId, runId)))
-    .orderBy(asc(schema.skillRunArtifacts.path));
-}
-
 async function loadSkillSlug(database: Db, orgId: string, skillId: string): Promise<string> {
   const rows = await database
     .select({ id: schema.skills.id, slug: schema.skills.slug })
@@ -939,20 +924,7 @@ function toAttachmentRow(row: AttachmentRow): SkillRunAttachmentRow {
   return { id: row.id, file_name: row.fileName, content_type: row.contentType, byte_size: row.byteSize };
 }
 
-function toArtifactRow(row: ArtifactRow): SkillRunArtifactRow {
-  return {
-    id: row.id,
-    file_name: row.fileName,
-    path: row.path,
-    content_type: row.contentType,
-    byte_size: row.byteSize,
-    url: row.url,
-    expires_at: row.expiresAt?.toISOString() ?? null,
-    published_at: row.publishedAt.toISOString(),
-  };
-}
-
-function toRunRow(row: RunRow, skillSlug: string, artifactsCount: number): SkillRunRow {
+function toRunRow(row: RunRow, skillSlug: string): SkillRunRow {
   return {
     id: row.id,
     skill_slug: skillSlug,
@@ -966,7 +938,6 @@ function toRunRow(row: RunRow, skillSlug: string, artifactsCount: number): Skill
     error_message: row.userMessage,
     run_config_id: row.runConfigId,
     run_config_name_snapshot: row.runConfigNameSnapshot,
-    artifacts_count: artifactsCount,
     created_at: row.createdAt.toISOString(),
     last_active_at: row.lastActiveAt?.toISOString() ?? null,
   };
@@ -1114,16 +1085,14 @@ async function toDetail(
   row: RunRow,
   skillSlug: string,
   attachments: AttachmentRow[],
-  artifacts: ArtifactRow[],
 ): Promise<SkillRunDetail> {
   return {
-    ...toRunRow(row, skillSlug, artifacts.length),
+    ...toRunRow(row, skillSlug),
     prompt: row.prompt,
     transcript: (row.transcript ?? []) as RunChatHistoryItem[],
     warnings: row.warnings ?? [],
     transcript_event_sequence: row.transcriptEventSequence,
     attachments: attachments.map(toAttachmentRow),
-    artifacts: artifacts.map(toArtifactRow),
     input_snapshot: await loadInputSnapshot(database, row),
   };
 }
@@ -1141,12 +1110,11 @@ async function findRunRootSkillId(input: {
 }
 
 async function committedRunDetail(database: Db, row: RunRow): Promise<SkillRunDetail> {
-  const [attachments, artifacts, slug] = await Promise.all([
+  const [attachments, slug] = await Promise.all([
     loadAttachments(database, row.orgId, row.id),
-    loadArtifacts(database, row.orgId, row.id),
     loadSkillSlug(database, row.orgId, row.skillId),
   ]);
-  return toDetail(database, row, slug, attachments, artifacts);
+  return toDetail(database, row, slug, attachments);
 }
 
 /** Exact-payload lookup survives mutable catalog metadata such as a skill slug rename. */
@@ -1311,18 +1279,6 @@ async function createRunInTransaction(input: {
     configNameSnapshot = config.name;
   }
 
-  let artifactsEnabled = false;
-  try {
-    artifactsEnabled =
-      (await resolveVanishSecretPin({
-        actor: input.actor,
-        orgId: input.orgId,
-        database: input.database,
-      })) !== null;
-  } catch {
-    artifactsEnabled = false;
-  }
-
   const runId = randomUUID();
   const serverPassword = randomBytes(32).toString("base64url");
   const serverPasswordEnc = serializeOpaque(
@@ -1442,7 +1398,6 @@ async function createRunInTransaction(input: {
       fileName: attachment.fileName,
       workspacePath: attachmentWorkspacePath(attachment),
     })),
-    artifactsEnabled,
   });
   const promptCreatedAt = new Date();
   await input.database.insert(schema.skillRunPrompts).values({
@@ -1494,7 +1449,7 @@ async function createRunInTransaction(input: {
     },
   });
   const attachments = await loadAttachments(input.database, input.orgId, runId);
-  return toDetail(input.database, row, root.slug, attachments, []);
+  return toDetail(input.database, row, root.slug, attachments);
 }
 
 /**
@@ -1590,20 +1545,7 @@ export async function listRuns(input: {
       ),
     )
     .orderBy(desc(schema.skillRuns.createdAt));
-  const artifacts = rows.length
-    ? await database
-        .select({ runId: schema.skillRunArtifacts.runId })
-        .from(schema.skillRunArtifacts)
-        .where(
-          and(
-            eq(schema.skillRunArtifacts.orgId, input.orgId),
-            inArray(schema.skillRunArtifacts.runId, rows.map((row) => row.id)),
-          ),
-        )
-    : [];
-  const counts = new Map<string, number>();
-  for (const artifact of artifacts) counts.set(artifact.runId, (counts.get(artifact.runId) ?? 0) + 1);
-  return rows.map((row) => toRunRow(row, input.slug, counts.get(row.id) ?? 0));
+  return rows.map((row) => toRunRow(row, input.slug));
 }
 
 export async function getRun(input: {
@@ -1618,12 +1560,11 @@ export async function getRun(input: {
   if (!row || !canAccessRun(input.actor.id, row)) {
     throw new RunValidationError("run not found", "run_not_found");
   }
-  const [slug, attachments, artifacts] = await Promise.all([
+  const [slug, attachments] = await Promise.all([
     loadSkillSlug(database, input.orgId, row.skillId),
     loadAttachments(database, input.orgId, row.id),
-    loadArtifacts(database, input.orgId, row.id),
   ]);
-  return toDetail(database, row, slug, attachments, artifacts);
+  return toDetail(database, row, slug, attachments);
 }
 
 /**

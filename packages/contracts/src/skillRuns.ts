@@ -65,7 +65,6 @@ export const runPhaseSchema = z.enum([
   "create_session",
   "prompt",
   "record",
-  "collect_artifacts",
   "freeze",
   "cancel",
   "cleanup",
@@ -538,7 +537,6 @@ export const skillRunRowSchema = z.object({
   error_message: z.string().nullable().optional(),
   run_config_id: runUuidSchema.nullable().optional(),
   run_config_name_snapshot: z.string().max(RUN_CONFIGURATION_NAME_MAX).nullable().optional(),
-  artifacts_count: z.number().int().nonnegative(),
   created_at: z.string(),
   last_active_at: z.string().nullable(),
 });
@@ -552,28 +550,6 @@ export const skillRunAttachmentRowSchema = z.object({
 });
 export type SkillRunAttachmentRow = z.infer<typeof skillRunAttachmentRowSchema>;
 
-/** One published artifact (a file the agent saved into `artifacts/`, shared via Vanish). */
-export const skillRunArtifactRowSchema = z.object({
-  id: z.string(),
-  file_name: z.string(),
-  path: z.string(),
-  content_type: z.string().nullable(),
-  byte_size: z.number().int().nonnegative(),
-  url: z
-    .string()
-    .url()
-    .max(2_048)
-    .refine((value) => {
-      const authority = value.match(/^[a-z][a-z0-9+.-]*:\/\/([^/?#]*)/i)?.[1] ?? "";
-      if (!authority || authority.includes("@")) return false;
-      if (/^https:\/\//i.test(value)) return true;
-      return /^http:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?(?:[/?#]|$)/i.test(value);
-    }, "artifact url must use HTTPS"),
-  expires_at: z.string().nullable(),
-  published_at: z.string(),
-});
-export type SkillRunArtifactRow = z.infer<typeof skillRunArtifactRowSchema>;
-
 /** Full run for the chat/transcript view (`GET /v1/runs/:id`). */
 export const skillRunDetailSchema = skillRunRowSchema.extend({
   prompt: z.string(),
@@ -582,7 +558,6 @@ export const skillRunDetailSchema = skillRunRowSchema.extend({
   /** Highest replay sequence already folded into `transcript`. */
   transcript_event_sequence: z.number().int().nonnegative(),
   attachments: z.array(skillRunAttachmentRowSchema),
-  artifacts: z.array(skillRunArtifactRowSchema),
   input_snapshot: runInputSnapshotSchema.optional(),
 });
 export type SkillRunDetail = z.infer<typeof skillRunDetailSchema>;

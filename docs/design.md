@@ -583,10 +583,8 @@ content; only the sandbox does.
   `{org}/run-attachments/{id}`, metadata here, mounted as `<attachmentId>-<filename>`, and streamed
   back creator-only with `nosniff` +
   `Content-Disposition: attachment`.
-- `skill_run_artifacts` — files the agent saved into `artifacts/`, published to Vanish
-  (path-deduped per run via `UNIQUE(run_id, path)`); only metadata + the public URL live here.
 - Migration `0034_skill_runs.sql` creates these tables and forces creator-only RLS on runs,
-  configurations, snapshots, prompts, events, attachments, and artifacts. Child policies derive the
+  configurations, snapshots, prompts, events, and attachments. Child policies derive the
   creator through their parent run/configuration; admins receive no override. The only cross-tenant
   queue operations are narrow internal `SECURITY DEFINER` functions using `FOR UPDATE SKIP LOCKED`
   and exact unexpired lease identities; claimed work then runs under the recorded tenant and creator
@@ -600,7 +598,8 @@ content; only the sandbox does.
 Live events are retained for 24 hours after a terminal state and then removed; the transcript remains
 the durable history. Runs do not wake after freeze. A retry resumes durable orchestration for the same
 run and deterministic external identities; it does not create another run, sandbox, session, or
-prompt.
+prompt. Files created by sandbox code are discarded with the sandbox; Companion persists only the
+transcript and the metadata/bytes of files the user attached at launch.
 
 ### Launch pipeline + recorder
 
@@ -621,8 +620,8 @@ concurrency, and retries transient failures at most three times with backoff. Va
 terminal. Raw SQL claim timestamps are decoded and validated before execution; malformed claim
 metadata enters the same durable retry/error transition instead of leaving an expiring lease to be
 reclaimed forever. A separate exact-lease control watcher aborts in-flight work promptly on
-cancellation, membership loss, or lease loss. S3, sandbox control, OpenCode request, probe,
-recorder-connect, and artifact calls all carry cancellation signals and strict time budgets. Each
+cancellation, membership loss, or lease loss. S3, sandbox control, OpenCode request, probe, and
+recorder-connect calls all carry cancellation signals and strict time budgets. Each
 external step has persisted before/after progress:
 
 1. revalidate snapshot access and decrypt exact secret versions;
@@ -631,7 +630,7 @@ external step has persisted before/after progress:
 4. start and health-check OpenCode with the exact environment;
 5. establish the recorder, then find or create the deterministic session;
 6. send the persisted initial/follow-up prompt with its deterministic `messageID`;
-7. batch redacted events, snapshot the transcript, and collect artifacts;
+7. batch redacted events and snapshot the transcript;
 8. freeze after inactivity, then stop and destroy the sandbox idempotently.
 
 Runtime/network calls never occur inside a database transaction. On worker replacement, an expired
@@ -644,7 +643,7 @@ it does not destroy active sandboxes.
 
 ### Sandbox cleanup
 
-A terminal run's transcript and artifact metadata are persisted before teardown. Stop and destroy are
+A terminal run's transcript is persisted before teardown. Stop and destroy are
 idempotent; provider failures keep cleanup owed for a later worker attempt. Cancellation is also a
 durable command: a queued run becomes `canceled` without a sandbox, while an active run takes a final
 snapshot and then tears down. The event-retention sweeper and sandbox-cleanup work live in the runs
@@ -667,7 +666,7 @@ the last accepted sequence and transcript snapshots reconcile whenever `transcri
 advances.
 
 `packages/sandbox/src/opencodeChat.ts` absorbs pinned-SDK event churn. `run.warning` is non-terminal
-(for example a Vanish publication failure); `run.error` represents a runtime failure. The worker
+(for example a transient recorder reconnect); `run.error` represents a runtime failure. The worker
 redacts all injected literal values before database events, SSE, transcripts, errors, audits, and
 logs, including tool inputs/outputs and SDK errors. Plaintext maps are cleared after server start;
 recovery reconstructs only the in-memory matcher after revalidating and decrypting pinned versions.
@@ -696,9 +695,6 @@ version are checked when options load, when the run is created, immediately befo
 every follow-up, and periodically during an active lease. Loss before injection fails without
 starting a sandbox; loss during a run takes a final snapshot and tears down best-effort. All
 `OPENCODE_SERVER_*` names are reserved.
-
-Vanish is not a model provider. Its personal/workspace connection tables remain explicit bindings to
-an accessible generic Secret, and only those Vanish bindings contribute to vault `usage_count`.
 
 ### Activated models (curated picker + hard gate)
 
@@ -750,21 +746,6 @@ connection id, scope, and exact credential version. This lets the launcher rejec
 collision before submit without exposing a value or any vault metadata; the server remains
 authoritative.
 
-### Artifacts via Vanish
-
-A run can publish deliverables as shareable links. Settings → Account → *Artifacts (Vanish)* binds
-the Vanish integration to an accessible vault Secret through its own connection API; the model
-provider APIs and picker never handle it.
-Its presence ENABLES artifacts: the composed prompt tells the agent to save deliverables into
-`./artifacts/`, and on every `session.idle` (and at freeze) the recorder collects that directory
-**server-side** (`collectFiles`: BFS depth ≤ 3, skip dotfiles, ≤20 files × ≤10 MB), filters
-Vanish-blocked executable extensions, skips already-published paths, and uploads each new file to
-`POST {VANISH_API_URL:-https://vanish.sh}/upload` with an idempotency key
-(`runId:path:byteSize`). The decrypted key lives only in the worker process for the duration of the
-publish — **it never enters the sandbox env**. Successful publishes persist a `skill_run_artifacts`
-row (public URL + expiry); failures persist nothing and surface on the live stream. v1 publishes
-per-file uploads only; Vanish's multi-file `/sites` API is a noted follow-up.
-
 ### Endpoints (session-only — PATs are rejected; not a skills API surface)
 
 `GET /v1/models` (full tool-capable models.dev catalog + `connected` flags + the caller's
@@ -772,7 +753,6 @@ per-file uploads only; Vanish's multi-file `/sites` API is a noted follow-up.
 `PUT /v1/org-model-preferences` (replace the activated lists; owner/admin for the org one),
 `GET/PUT /v1/provider-connections` + `DELETE /v1/provider-connections/:provider`,
 `GET/PUT /v1/org-provider-connections` + `DELETE /v1/org-provider-connections/:provider`,
-`GET/PUT/DELETE /v1/vanish-connection` and `/v1/org-vanish-connection`,
 `GET /v1/skills/:slug/run-options`, `GET/POST /v1/skills/:slug/run-configurations`,
 `PATCH/DELETE /v1/run-configurations/:id`,
 `POST /v1/skills/:slug/runs` (multipart: prompt, model, exact version, authoritative JSON inputs,
@@ -786,7 +766,7 @@ tokens, the bundled Companion skill's API surface is unchanged.
 ### Non-goals (v1)
 
 Wake/resume of frozen runs, arbitrary undeclared variables, organization-shared configurations,
-fan-out, multi-file Vanish sites, and golden-snapshot management UI
+fan-out, and golden-snapshot management UI
 (`COMPANION_GOLDEN_SNAPSHOT_ID` is the single golden) remain out of scope.
 Real-sandbox verification lives in `pnpm --filter @companion/sandbox smoke:vercel` (cred-gated,
 not CI).
@@ -806,7 +786,7 @@ vault, dedicated provider credentials, and opaque internal run credentials),
 `COMPANION_RUN_CLAIM_INTERVAL_MS`, `COMPANION_RUN_LEASE_SECONDS`,
 `COMPANION_RUN_HEARTBEAT_MS`, `COMPANION_RUN_INACTIVITY_MS`, bounded recorder reconnect settings,
 `COMPANION_RUN_EVENT_RETENTION_INTERVAL_MS`, `COMPANION_RUN_SWEEP_INTERVAL_MS`, S3 settings for
-attachments/packages, and `VANISH_API_URL` (default `https://vanish.sh`). Event retention itself is
+attachments/packages. Event retention itself is
 fixed at 24 hours after terminal state. The worker receives these settings. Keep the feature flag off
 when Vercel/golden configuration is absent; only RunSkill is disabled, while API, web, billing,
 provider settings, and vault still run.

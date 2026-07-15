@@ -89,11 +89,9 @@ export type SettingsView =
   | "preferences"
   | "providers"
   | "models"
-  | "artifacts"
   | "apikeys"
   | "org-providers"
   | "org-models"
-  | "org-artifacts"
   | "general"
   | "members"
   | "invitations"
@@ -105,12 +103,10 @@ export const SETTINGS_VIEWS: readonly SettingsView[] = [
   "preferences",
   "providers",
   "models",
-  "artifacts",
   "apikeys",
   "general",
   "org-providers",
   "org-models",
-  "org-artifacts",
   "members",
   "invitations",
   "billing",

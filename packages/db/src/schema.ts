@@ -739,7 +739,7 @@ export const modelProviderConnections = pgTable(
     scope: modelProviderConnectionScopeEnum("scope").notNull(),
     /** Set only for personal connections; workspace connections have no owner override. */
     userId: text("user_id").references(() => user.id, { onDelete: "cascade" }),
-    /** models.dev provider id, e.g. "anthropic". Vanish is stored separately. */
+    /** models.dev provider id, e.g. "anthropic". */
     provider: text("provider").notNull(),
     /** Exact environment key expected by the provider. */
     keyName: text("key_name").notNull(),
@@ -756,10 +756,7 @@ export const modelProviderConnections = pgTable(
     orgProvider: uniqueIndex("model_provider_connections_org_provider_uq")
       .on(t.orgId, t.provider)
       .where(sql`${t.scope} = 'organization'`),
-    providerCheck: check(
-      "model_provider_connections_provider_check",
-      sql`char_length(${t.provider}) BETWEEN 1 AND 120 AND lower(${t.provider}) <> 'vanish'`,
-    ),
+    providerCheck: check("model_provider_connections_provider_check", sql`char_length(${t.provider}) BETWEEN 1 AND 120`),
     keyCheck: check("model_provider_connections_key_check", sql`${t.keyName} ~ '^[A-Za-z_][A-Za-z0-9_]*$' AND ${t.keyName} !~ '^OPENCODE_SERVER_'`),
     scopeOwnerCheck: check(
       "model_provider_connections_scope_owner_check",
@@ -806,57 +803,6 @@ export const modelProviderCredentialVersions = pgTable(
       "model_provider_credential_versions_key_check",
       sql`${t.keyName} ~ '^[A-Za-z_][A-Za-z0-9_]*$' AND ${t.keyName} !~ '^OPENCODE_SERVER_'`,
     ),
-  }),
-);
-
-/** Personal Vanish binding; unlike model providers, it intentionally references Secrets. */
-export const userVanishConnections = pgTable(
-  "user_vanish_connections",
-  {
-    orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
-    userId: text("user_id").notNull().references(() => user.id, { onDelete: "cascade" }),
-    keyName: text("key_name").notNull().default("VANISH_API_KEY"),
-    secretId: uuid("secret_id").notNull(),
-    createdAt: now(),
-    updatedAt: updatedAt(),
-  },
-  (t) => ({
-    pk: primaryKey({ columns: [t.orgId, t.userId] }),
-    bySecret: index("user_vanish_connections_secret_idx").on(t.orgId, t.secretId),
-    keyCheck: check("user_vanish_connections_key_check", sql`${t.keyName} = 'VANISH_API_KEY'`),
-    memberOrgFk: foreignKey({
-      columns: [t.orgId, t.userId],
-      foreignColumns: [memberships.orgId, memberships.userId],
-      name: "user_vanish_connections_member_org_fk",
-    }).onDelete("cascade"),
-    secretOrgFk: foreignKey({
-      columns: [t.orgId, t.secretId],
-      foreignColumns: [secrets.orgId, secrets.id],
-      name: "user_vanish_connections_secret_org_fk",
-    }).onDelete("restrict"),
-  }),
-);
-
-/** Workspace Vanish binding; its generic secret must have organization audience. */
-export const orgVanishConnections = pgTable(
-  "org_vanish_connections",
-  {
-    orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
-    keyName: text("key_name").notNull().default("VANISH_API_KEY"),
-    secretId: uuid("secret_id").notNull(),
-    createdBy: text("created_by").references(() => user.id, { onDelete: "set null" }),
-    createdAt: now(),
-    updatedAt: updatedAt(),
-  },
-  (t) => ({
-    pk: primaryKey({ columns: [t.orgId] }),
-    bySecret: index("org_vanish_connections_secret_idx").on(t.orgId, t.secretId),
-    keyCheck: check("org_vanish_connections_key_check", sql`${t.keyName} = 'VANISH_API_KEY'`),
-    secretOrgFk: foreignKey({
-      columns: [t.orgId, t.secretId],
-      foreignColumns: [secrets.orgId, secrets.id],
-      name: "org_vanish_connections_secret_org_fk",
-    }).onDelete("restrict"),
   }),
 );
 
@@ -1035,7 +981,6 @@ export const skillRunPhaseEnum = pgEnum("skill_run_phase", [
   "create_session",
   "prompt",
   "record",
-  "collect_artifacts",
   "freeze",
   "cancel",
   "cleanup",
@@ -1546,42 +1491,6 @@ export const skillRunAttachments = pgTable(
     sizeCheck: check(
       "skill_run_attachments_size_check",
       sql`${t.byteSize} > 0 AND ${t.byteSize} <= 10485760`,
-    ),
-  }),
-);
-
-/**
- * A published run artifact: a file the agent saved into `artifacts/`, collected server-side and
- * uploaded to Vanish with the launcher's key (the key never enters the sandbox). Only metadata +
- * the public URL live here — the bytes are on Vanish.
- */
-export const skillRunArtifacts = pgTable(
-  "skill_run_artifacts",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    orgId: uuid("org_id").notNull(),
-    runId: uuid("run_id").notNull(),
-    /** Path relative to the sandbox artifacts/ directory (dedup key per run). */
-    path: text("path").notNull(),
-    fileName: text("file_name").notNull(),
-    contentType: text("content_type"),
-    byteSize: integer("byte_size").notNull(),
-    vanishId: text("vanish_id"),
-    url: text("url").notNull(),
-    expiresAt: timestamp("expires_at", { withTimezone: true }),
-    publishedAt: timestamp("published_at", { withTimezone: true }).notNull().defaultNow(),
-  },
-  (t) => ({
-    uniqueRunPath: unique("skill_run_artifacts_run_path_uq").on(t.orgId, t.runId, t.path),
-    runFk: foreignKey({
-      columns: [t.orgId, t.runId],
-      foreignColumns: [skillRuns.orgId, skillRuns.id],
-      name: "skill_run_artifacts_run_fk",
-    }).onDelete("cascade"),
-    byRun: index("skill_run_artifacts_run_idx").on(t.orgId, t.runId),
-    sizeCheck: check(
-      "skill_run_artifacts_size_check",
-      sql`${t.byteSize} >= 0 AND ${t.byteSize} <= 10485760`,
     ),
   }),
 );

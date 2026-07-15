@@ -86,7 +86,7 @@ describe("durable run events", () => {
       runId: RUN,
       events: [
         { type: "status", state: "busy", attempt: 1, message: null },
-        { type: "run.warning", code: "artifact_publish_failed", message: "super-secret-value failed", phase: "collect_artifacts" },
+        { type: "run.warning", code: "recorder_reconnected", message: "super-secret-value recovered", phase: "record" },
       ],
       redactor,
       database,
@@ -177,18 +177,18 @@ describe("durable run events", () => {
     const redactor = createRunRedactor(["warning-secret"]);
     const warning = {
       type: "run.warning" as const,
-      code: "vanish_publish_failed",
-      message: "warning-secret could not be published",
-      phase: "collect_artifacts" as const,
+      code: "recorder_reconnected",
+      message: "warning-secret connection recovered",
+      phase: "record" as const,
     };
     await appendRunEvents({ actor, orgId: ORG, runId: RUN, events: [warning, warning], redactor, database });
     await appendRunEvents({ actor, orgId: ORG, runId: RUN, events: [warning], redactor, database });
 
     expect(run.warnings).toEqual([
       {
-        code: "vanish_publish_failed",
-        message: "[REDACTED] could not be published",
-        phase: "collect_artifacts",
+        code: "recorder_reconnected",
+        message: "[REDACTED] connection recovered",
+        phase: "record",
       },
     ]);
     expect(JSON.stringify(run.warnings)).not.toContain("warning-secret");

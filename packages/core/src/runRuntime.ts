@@ -90,19 +90,6 @@ export interface RunSandboxRuntime {
    * without this an active conversation dies mid-stream). Optional: best-effort feature.
    */
   extendTimeout?(ref: SandboxRef, ms: number, signal?: AbortSignal): Promise<void>;
-  /**
-   * List + read the files of one sandbox directory (artifact collection). Bounded: depth ≤ 3,
-   * files above `maxFileBytes` are skipped, traversal stops at `maxFiles`. Paths are relative
-   * to `dir`.
-   */
-  collectFiles(input: {
-    ref: SandboxRef;
-    dir: string;
-    maxFiles: number;
-    maxFileBytes: number;
-    /** Bound provider/filesystem calls during cancel, deploy shutdown, or ACL revocation. */
-    signal?: AbortSignal;
-  }): Promise<Array<{ path: string; data: Buffer; byteSize: number }>>;
 }
 
 /** Basic-auth target for the OpenCode instance running inside a sandbox. */

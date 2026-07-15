@@ -1,5 +1,5 @@
 CREATE TYPE "skill_run_status" AS ENUM ('queued', 'starting', 'running', 'frozen', 'error', 'canceled');--> statement-breakpoint
-CREATE TYPE "skill_run_phase" AS ENUM ('queued', 'resolve_inputs', 'fork', 'push_workspace', 'start_server', 'healthcheck', 'create_session', 'prompt', 'record', 'collect_artifacts', 'freeze', 'cancel', 'cleanup', 'complete');--> statement-breakpoint
+CREATE TYPE "skill_run_phase" AS ENUM ('queued', 'resolve_inputs', 'fork', 'push_workspace', 'start_server', 'healthcheck', 'create_session', 'prompt', 'record', 'freeze', 'cancel', 'cleanup', 'complete');--> statement-breakpoint
 CREATE TYPE "skill_run_secret_provenance" AS ENUM ('skill', 'runtime');--> statement-breakpoint
 CREATE TYPE "skill_run_job_status" AS ENUM ('queued', 'leased', 'completed', 'failed', 'canceled');--> statement-breakpoint
 CREATE TYPE "skill_run_prompt_kind" AS ENUM ('initial', 'follow_up');--> statement-breakpoint
@@ -237,22 +237,6 @@ CREATE TABLE "skill_run_attachments" (
   CONSTRAINT "skill_run_attachments_size_check" CHECK ("byte_size" > 0 AND "byte_size" <= 10485760)
 );--> statement-breakpoint
 
-CREATE TABLE "skill_run_artifacts" (
-  "id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
-  "org_id" uuid NOT NULL,
-  "run_id" uuid NOT NULL,
-  "path" text NOT NULL,
-  "file_name" text NOT NULL,
-  "content_type" text,
-  "byte_size" integer NOT NULL,
-  "vanish_id" text,
-  "url" text NOT NULL,
-  "expires_at" timestamp with time zone,
-  "published_at" timestamp with time zone DEFAULT now() NOT NULL,
-  CONSTRAINT "skill_run_artifacts_run_path_uq" UNIQUE("org_id", "run_id", "path"),
-  CONSTRAINT "skill_run_artifacts_size_check" CHECK ("byte_size" >= 0 AND "byte_size" <= 10485760)
-);--> statement-breakpoint
-
 ALTER TABLE "skill_run_configs" ADD CONSTRAINT "skill_run_configs_org_fk" FOREIGN KEY ("org_id") REFERENCES "organizations"("id") ON DELETE cascade;--> statement-breakpoint
 ALTER TABLE "skill_run_configs" ADD CONSTRAINT "skill_run_configs_creator_fk" FOREIGN KEY ("creator_id") REFERENCES "user"("id") ON DELETE cascade;--> statement-breakpoint
 ALTER TABLE "skill_run_configs" ADD CONSTRAINT "skill_run_configs_skill_org_fk" FOREIGN KEY ("org_id", "skill_id") REFERENCES "skills"("org_id", "id") ON DELETE cascade;--> statement-breakpoint
@@ -288,8 +272,6 @@ ALTER TABLE "skill_run_events" ADD CONSTRAINT "skill_run_events_org_fk" FOREIGN 
 ALTER TABLE "skill_run_events" ADD CONSTRAINT "skill_run_events_run_org_fk" FOREIGN KEY ("org_id", "run_id") REFERENCES "skill_runs"("org_id", "id") ON DELETE cascade;--> statement-breakpoint
 ALTER TABLE "skill_run_attachments" ADD CONSTRAINT "skill_run_attachments_org_fk" FOREIGN KEY ("org_id") REFERENCES "organizations"("id") ON DELETE cascade;--> statement-breakpoint
 ALTER TABLE "skill_run_attachments" ADD CONSTRAINT "skill_run_attachments_run_fk" FOREIGN KEY ("org_id", "run_id") REFERENCES "skill_runs"("org_id", "id") ON DELETE cascade;--> statement-breakpoint
-ALTER TABLE "skill_run_artifacts" ADD CONSTRAINT "skill_run_artifacts_org_fk" FOREIGN KEY ("org_id") REFERENCES "organizations"("id") ON DELETE cascade;--> statement-breakpoint
-ALTER TABLE "skill_run_artifacts" ADD CONSTRAINT "skill_run_artifacts_run_fk" FOREIGN KEY ("org_id", "run_id") REFERENCES "skill_runs"("org_id", "id") ON DELETE cascade;--> statement-breakpoint
 
 CREATE UNIQUE INDEX "skill_run_configs_default_uq" ON "skill_run_configs" ("org_id", "creator_id", "skill_id") WHERE "is_default" = true;--> statement-breakpoint
 CREATE INDEX "skill_run_configs_owner_skill_idx" ON "skill_run_configs" ("org_id", "creator_id", "skill_id", "updated_at" DESC);--> statement-breakpoint
@@ -305,7 +287,6 @@ CREATE UNIQUE INDEX "skill_run_prompts_pending_uq" ON "skill_run_prompts" ("org_
 CREATE INDEX "skill_run_prompts_available_idx" ON "skill_run_prompts" ("status", "available_at");--> statement-breakpoint
 CREATE INDEX "skill_run_events_retention_idx" ON "skill_run_events" ("created_at");--> statement-breakpoint
 CREATE INDEX "skill_run_attachments_run_idx" ON "skill_run_attachments" ("org_id", "run_id");--> statement-breakpoint
-CREATE INDEX "skill_run_artifacts_run_idx" ON "skill_run_artifacts" ("org_id", "run_id");--> statement-breakpoint
 
 CREATE FUNCTION companion_reject_run_snapshot_update() RETURNS trigger
 LANGUAGE plpgsql AS $$
@@ -344,7 +325,6 @@ ALTER TABLE "skill_run_jobs" ENABLE ROW LEVEL SECURITY;--> statement-breakpoint
 ALTER TABLE "skill_run_prompts" ENABLE ROW LEVEL SECURITY;--> statement-breakpoint
 ALTER TABLE "skill_run_events" ENABLE ROW LEVEL SECURITY;--> statement-breakpoint
 ALTER TABLE "skill_run_attachments" ENABLE ROW LEVEL SECURITY;--> statement-breakpoint
-ALTER TABLE "skill_run_artifacts" ENABLE ROW LEVEL SECURITY;--> statement-breakpoint
 ALTER TABLE "skill_run_configs" FORCE ROW LEVEL SECURITY;--> statement-breakpoint
 ALTER TABLE "skill_run_config_secrets" FORCE ROW LEVEL SECURITY;--> statement-breakpoint
 ALTER TABLE "skill_run_config_variables" FORCE ROW LEVEL SECURITY;--> statement-breakpoint
@@ -356,7 +336,6 @@ ALTER TABLE "skill_run_jobs" FORCE ROW LEVEL SECURITY;--> statement-breakpoint
 ALTER TABLE "skill_run_prompts" FORCE ROW LEVEL SECURITY;--> statement-breakpoint
 ALTER TABLE "skill_run_events" FORCE ROW LEVEL SECURITY;--> statement-breakpoint
 ALTER TABLE "skill_run_attachments" FORCE ROW LEVEL SECURITY;--> statement-breakpoint
-ALTER TABLE "skill_run_artifacts" FORCE ROW LEVEL SECURITY;--> statement-breakpoint
 
 -- Custom GUCs are caller-settable and are never an authority by themselves. Worker-only policies
 -- additionally require the current SQL identity to be the migration/table owner; ordinary API and
@@ -416,7 +395,6 @@ CREATE POLICY "skill_run_prompts_creator" ON "skill_run_prompts" USING ("org_id"
 CREATE POLICY "skill_run_events_creator" ON "skill_run_events" USING ("org_id" = NULLIF(current_setting('app.org_id', true), '')::uuid AND EXISTS (SELECT 1 FROM "skill_runs" r WHERE r."org_id" = "skill_run_events"."org_id" AND r."id" = "skill_run_events"."run_id" AND r."creator_id" = NULLIF(current_setting('app.user_id', true), ''))) WITH CHECK ("org_id" = NULLIF(current_setting('app.org_id', true), '')::uuid AND EXISTS (SELECT 1 FROM "skill_runs" r WHERE r."org_id" = "skill_run_events"."org_id" AND r."id" = "skill_run_events"."run_id" AND r."creator_id" = NULLIF(current_setting('app.user_id', true), '')));--> statement-breakpoint
 CREATE POLICY "skill_run_events_worker_cleanup" ON "skill_run_events" FOR DELETE USING (companion_run_policy_definer() AND current_setting('app.run_worker', true) = 'cleanup');--> statement-breakpoint
 CREATE POLICY "skill_run_attachments_creator" ON "skill_run_attachments" USING ("org_id" = NULLIF(current_setting('app.org_id', true), '')::uuid AND EXISTS (SELECT 1 FROM "skill_runs" r WHERE r."org_id" = "skill_run_attachments"."org_id" AND r."id" = "skill_run_attachments"."run_id" AND r."creator_id" = NULLIF(current_setting('app.user_id', true), ''))) WITH CHECK ("org_id" = NULLIF(current_setting('app.org_id', true), '')::uuid AND EXISTS (SELECT 1 FROM "skill_runs" r WHERE r."org_id" = "skill_run_attachments"."org_id" AND r."id" = "skill_run_attachments"."run_id" AND r."creator_id" = NULLIF(current_setting('app.user_id', true), '')));--> statement-breakpoint
-CREATE POLICY "skill_run_artifacts_creator" ON "skill_run_artifacts" USING ("org_id" = NULLIF(current_setting('app.org_id', true), '')::uuid AND EXISTS (SELECT 1 FROM "skill_runs" r WHERE r."org_id" = "skill_run_artifacts"."org_id" AND r."id" = "skill_run_artifacts"."run_id" AND r."creator_id" = NULLIF(current_setting('app.user_id', true), ''))) WITH CHECK ("org_id" = NULLIF(current_setting('app.org_id', true), '')::uuid AND EXISTS (SELECT 1 FROM "skill_runs" r WHERE r."org_id" = "skill_run_artifacts"."org_id" AND r."id" = "skill_run_artifacts"."run_id" AND r."creator_id" = NULLIF(current_setting('app.user_id', true), '')));--> statement-breakpoint
 
 -- A creator can lose organization membership while a worker owns the run lease. These policies do
 -- not create a general worker bypass: every row must match the exact org/run/creator/worker tuple,

@@ -40,6 +40,7 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
   const versionId = randomUUID();
   const configId = randomUUID();
   const sharedSecretId = randomUUID();
+  const configSecretSlotId = randomUUID();
   const providerConnectionId = randomUUID();
   const runId = randomUUID();
   const terminalRunId = randomUUID();
@@ -47,7 +48,6 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
   const revokedRunId = randomUUID();
   const freezeRunId = randomUUID();
   const attachmentId = randomUUID();
-  const artifactId = randomUUID();
   const owner = { id: `run-owner-${suffix}`, email: `run-owner-${suffix}@example.test` };
   const admin = { id: `run-admin-${suffix}`, email: `run-admin-${suffix}@example.test` };
   const outsider = { id: `run-outsider-${suffix}`, email: `run-outsider-${suffix}@example.test` };
@@ -60,6 +60,7 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
       await tx`select set_config('app.org_id', ${orgId}, true), set_config('app.user_id', ${userId}, true)`;
       const tables = [
         "skill_run_configs",
+        "skill_run_config_secrets",
         "skill_run_config_variables",
         "skill_runs",
         "skill_run_skills",
@@ -70,7 +71,6 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
         "skill_run_prompts",
         "skill_run_events",
         "skill_run_attachments",
-        "skill_run_artifacts",
       ] as const;
       const result: Record<string, number> = {};
       for (const table of tables) {
@@ -163,11 +163,15 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
     `;
     await sql`
       insert into secrets (id, org_id, owner_id, name, key, audience)
-      values (${sharedSecretId}::uuid, ${orgA}::uuid, ${owner.id}, 'Shared Vanish key', 'VANISH_API_KEY', 'organization')
+      values (${sharedSecretId}::uuid, ${orgA}::uuid, ${owner.id}, 'Saved config key', 'SUMMARY_API_KEY', 'organization')
     `;
     await sql`
-      insert into user_vanish_connections (org_id, user_id, secret_id)
-      values (${orgA}::uuid, ${admin.id}, ${sharedSecretId}::uuid)
+      insert into skill_secret_slots (org_id, skill_id, slot_id)
+      values (${orgA}::uuid, ${skillId}::uuid, ${configSecretSlotId}::uuid)
+    `;
+    await sql`
+      insert into skill_run_config_secrets (org_id, config_id, skill_id, slot_id, secret_id)
+      values (${orgA}::uuid, ${configId}::uuid, ${skillId}::uuid, ${configSecretSlotId}::uuid, ${sharedSecretId}::uuid)
     `;
     await sql`
       insert into model_provider_connections
@@ -289,12 +293,6 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
       values
         (${attachmentId}::uuid, ${orgA}::uuid, ${runId}::uuid, 'input.txt', 'text/plain', 1, ${`${orgA}/run-attachments/${attachmentId}`})
     `;
-    await sql`
-      insert into skill_run_artifacts (id, org_id, run_id, path, file_name, content_type, byte_size, url)
-      values
-        (${artifactId}::uuid, ${orgA}::uuid, ${runId}::uuid, 'result.txt', 'result.txt', 'text/plain', 1, 'https://example.test/result')
-    `;
-
     await sql.unsafe(`create role ${rlsRole} nologin nosuperuser nobypassrls`);
     await sql.unsafe(`grant ${rlsRole} to current_user with inherit true, set true`);
     await sql.unsafe(`grant usage on schema public to ${rlsRole}`);
@@ -343,20 +341,13 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
     expect(result).toEqual({ runs: 0, jobs: 0, deleted: 0 });
   });
 
-  it("keeps model-provider credentials outside Secrets while counting Vanish usage", async () => {
+  it("keeps model-provider credentials outside Secrets while counting saved-configuration usage", async () => {
     const genericProviderSecrets = await sql<{ count: number }[]>`
       select count(*)::int as count
       from secrets
       where org_id = ${orgA}::uuid and key = 'OPENAI_API_KEY'
     `;
     expect(genericProviderSecrets).toEqual([{ count: 0 }]);
-
-    await expect(sql`
-      insert into model_provider_connections
-        (org_id, scope, user_id, provider, key_name, current_version, created_by)
-      values
-        (${orgA}::uuid, 'personal', ${owner.id}, 'VaNiSh', 'VANISH_API_KEY', 1, ${owner.id})
-    `).rejects.toMatchObject({ constraint_name: "model_provider_connections_provider_check" });
 
     const usageFor = (userId: string) => sql.begin(async (tx) => {
       await tx.unsafe(`set local role ${rlsRole}`);

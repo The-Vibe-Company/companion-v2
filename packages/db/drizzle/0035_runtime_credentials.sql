@@ -12,7 +12,7 @@ CREATE TABLE "model_provider_connections" (
   "created_at" timestamp with time zone DEFAULT now() NOT NULL,
   "updated_at" timestamp with time zone DEFAULT now() NOT NULL,
   CONSTRAINT "model_provider_connections_org_id_id_uq" UNIQUE("org_id", "id"),
-  CONSTRAINT "model_provider_connections_provider_check" CHECK (char_length("provider") BETWEEN 1 AND 120 AND lower("provider") <> 'vanish'),
+  CONSTRAINT "model_provider_connections_provider_check" CHECK (char_length("provider") BETWEEN 1 AND 120),
   CONSTRAINT "model_provider_connections_key_check" CHECK ("key_name" ~ '^[A-Za-z_][A-Za-z0-9_]*$' AND "key_name" !~ '^OPENCODE_SERVER_'),
   CONSTRAINT "model_provider_connections_scope_owner_check" CHECK (("scope" = 'personal' AND "user_id" IS NOT NULL) OR ("scope" = 'organization' AND "user_id" IS NULL)),
   CONSTRAINT "model_provider_connections_version_check" CHECK ("current_version" >= 1)
@@ -38,27 +38,6 @@ CREATE TABLE "model_provider_credential_versions" (
   CONSTRAINT "model_provider_credential_versions_key_check" CHECK ("key_name" ~ '^[A-Za-z_][A-Za-z0-9_]*$' AND "key_name" !~ '^OPENCODE_SERVER_')
 );--> statement-breakpoint
 
-CREATE TABLE "user_vanish_connections" (
-  "org_id" uuid NOT NULL,
-  "user_id" text NOT NULL,
-  "key_name" text DEFAULT 'VANISH_API_KEY' NOT NULL,
-  "secret_id" uuid NOT NULL,
-  "created_at" timestamp with time zone DEFAULT now() NOT NULL,
-  "updated_at" timestamp with time zone DEFAULT now() NOT NULL,
-  CONSTRAINT "user_vanish_connections_pk" PRIMARY KEY("org_id", "user_id"),
-  CONSTRAINT "user_vanish_connections_key_check" CHECK ("key_name" = 'VANISH_API_KEY')
-);--> statement-breakpoint
-
-CREATE TABLE "org_vanish_connections" (
-  "org_id" uuid PRIMARY KEY NOT NULL,
-  "key_name" text DEFAULT 'VANISH_API_KEY' NOT NULL,
-  "secret_id" uuid NOT NULL,
-  "created_by" text,
-  "created_at" timestamp with time zone DEFAULT now() NOT NULL,
-  "updated_at" timestamp with time zone DEFAULT now() NOT NULL,
-  CONSTRAINT "org_vanish_connections_key_check" CHECK ("key_name" = 'VANISH_API_KEY')
-);--> statement-breakpoint
-
 -- Provider pins are run metadata, not generic secret inputs. There is intentionally no FK to the
 -- live connection/version: disconnect removes ciphertext immediately while this redacted snapshot
 -- remains for history and queued/active jobs fail closed when they revalidate the pin.
@@ -82,64 +61,8 @@ ALTER TABLE "model_provider_connections" ADD CONSTRAINT "model_provider_connecti
 ALTER TABLE "model_provider_connections" ADD CONSTRAINT "model_provider_connections_member_org_fk" FOREIGN KEY ("org_id", "user_id") REFERENCES "memberships"("org_id", "user_id") ON DELETE cascade;--> statement-breakpoint
 ALTER TABLE "model_provider_credential_versions" ADD CONSTRAINT "model_provider_credential_versions_org_fk" FOREIGN KEY ("org_id") REFERENCES "organizations"("id") ON DELETE cascade;--> statement-breakpoint
 ALTER TABLE "model_provider_credential_versions" ADD CONSTRAINT "model_provider_credential_versions_connection_org_fk" FOREIGN KEY ("org_id", "connection_id") REFERENCES "model_provider_connections"("org_id", "id") ON DELETE cascade;--> statement-breakpoint
-ALTER TABLE "user_vanish_connections" ADD CONSTRAINT "user_vanish_connections_org_fk" FOREIGN KEY ("org_id") REFERENCES "organizations"("id") ON DELETE cascade;--> statement-breakpoint
-ALTER TABLE "user_vanish_connections" ADD CONSTRAINT "user_vanish_connections_user_fk" FOREIGN KEY ("user_id") REFERENCES "user"("id") ON DELETE cascade;--> statement-breakpoint
-ALTER TABLE "user_vanish_connections" ADD CONSTRAINT "user_vanish_connections_member_org_fk" FOREIGN KEY ("org_id", "user_id") REFERENCES "memberships"("org_id", "user_id") ON DELETE cascade;--> statement-breakpoint
-ALTER TABLE "user_vanish_connections" ADD CONSTRAINT "user_vanish_connections_secret_org_fk" FOREIGN KEY ("org_id", "secret_id") REFERENCES "secrets"("org_id", "id") ON DELETE restrict;--> statement-breakpoint
-ALTER TABLE "org_vanish_connections" ADD CONSTRAINT "org_vanish_connections_org_fk" FOREIGN KEY ("org_id") REFERENCES "organizations"("id") ON DELETE cascade;--> statement-breakpoint
-ALTER TABLE "org_vanish_connections" ADD CONSTRAINT "org_vanish_connections_created_by_fk" FOREIGN KEY ("created_by") REFERENCES "user"("id") ON DELETE set null;--> statement-breakpoint
-ALTER TABLE "org_vanish_connections" ADD CONSTRAINT "org_vanish_connections_secret_org_fk" FOREIGN KEY ("org_id", "secret_id") REFERENCES "secrets"("org_id", "id") ON DELETE restrict;--> statement-breakpoint
 ALTER TABLE "skill_run_model_provider_inputs" ADD CONSTRAINT "skill_run_model_provider_inputs_org_fk" FOREIGN KEY ("org_id") REFERENCES "organizations"("id") ON DELETE cascade;--> statement-breakpoint
 ALTER TABLE "skill_run_model_provider_inputs" ADD CONSTRAINT "skill_run_model_provider_inputs_run_org_fk" FOREIGN KEY ("org_id", "run_id") REFERENCES "skill_runs"("org_id", "id") ON DELETE cascade;--> statement-breakpoint
-
-CREATE INDEX "user_vanish_connections_secret_idx" ON "user_vanish_connections" ("org_id", "secret_id");--> statement-breakpoint
-CREATE INDEX "org_vanish_connections_secret_idx" ON "org_vanish_connections" ("org_id", "secret_id");--> statement-breakpoint
-
-CREATE FUNCTION companion_validate_vanish_secret_binding() RETURNS trigger
-LANGUAGE plpgsql
-SET search_path = pg_catalog, public
-AS $$
-DECLARE
-  bound_key text;
-  bound_audience public."secret_audience";
-  bound_owner_id text;
-  bound_disabled_at timestamp with time zone;
-  bound_deleted_at timestamp with time zone;
-BEGIN
-  SELECT s."key", s."audience", s."owner_id", s."disabled_at", s."deleted_at"
-  INTO bound_key, bound_audience, bound_owner_id, bound_disabled_at, bound_deleted_at
-  FROM public."secrets" s
-  WHERE s."org_id" = NEW."org_id" AND s."id" = NEW."secret_id";
-
-  IF NOT FOUND OR bound_disabled_at IS NOT NULL OR bound_deleted_at IS NOT NULL THEN
-    RAISE EXCEPTION 'secret unavailable' USING ERRCODE = '23514';
-  END IF;
-  IF bound_key <> 'VANISH_API_KEY' OR NEW."key_name" <> 'VANISH_API_KEY' THEN
-    RAISE EXCEPTION 'Vanish requires a VANISH_API_KEY secret' USING ERRCODE = '23514';
-  END IF;
-
-  IF TG_TABLE_NAME = 'org_vanish_connections' THEN
-    IF bound_audience <> 'organization' THEN
-      RAISE EXCEPTION 'workspace Vanish bindings require an organization secret' USING ERRCODE = '23514';
-    END IF;
-  ELSIF NOT (
-    bound_owner_id = NEW."user_id"
-    OR bound_audience = 'organization'
-    OR (
-      bound_audience = 'restricted'
-      AND EXISTS (
-        SELECT 1 FROM public."secret_recipients" r
-        WHERE r."org_id" = NEW."org_id" AND r."secret_id" = NEW."secret_id" AND r."user_id" = NEW."user_id"
-      )
-    )
-  ) THEN
-    RAISE EXCEPTION 'secret unavailable' USING ERRCODE = '23514';
-  END IF;
-  RETURN NEW;
-END
-$$;--> statement-breakpoint
-CREATE TRIGGER user_vanish_connections_validate BEFORE INSERT OR UPDATE OF "secret_id", "key_name" ON "user_vanish_connections" FOR EACH ROW EXECUTE FUNCTION companion_validate_vanish_secret_binding();--> statement-breakpoint
-CREATE TRIGGER org_vanish_connections_validate BEFORE INSERT OR UPDATE OF "secret_id", "key_name" ON "org_vanish_connections" FOR EACH ROW EXECUTE FUNCTION companion_validate_vanish_secret_binding();--> statement-breakpoint
 
 CREATE FUNCTION companion_preserve_model_provider_connection_identity() RETURNS trigger
 LANGUAGE plpgsql
@@ -160,13 +83,9 @@ CREATE TRIGGER model_provider_connections_preserve_identity BEFORE UPDATE ON "mo
 
 ALTER TABLE "model_provider_connections" ENABLE ROW LEVEL SECURITY;--> statement-breakpoint
 ALTER TABLE "model_provider_credential_versions" ENABLE ROW LEVEL SECURITY;--> statement-breakpoint
-ALTER TABLE "user_vanish_connections" ENABLE ROW LEVEL SECURITY;--> statement-breakpoint
-ALTER TABLE "org_vanish_connections" ENABLE ROW LEVEL SECURITY;--> statement-breakpoint
 ALTER TABLE "skill_run_model_provider_inputs" ENABLE ROW LEVEL SECURITY;--> statement-breakpoint
 ALTER TABLE "model_provider_connections" FORCE ROW LEVEL SECURITY;--> statement-breakpoint
 ALTER TABLE "model_provider_credential_versions" FORCE ROW LEVEL SECURITY;--> statement-breakpoint
-ALTER TABLE "user_vanish_connections" FORCE ROW LEVEL SECURITY;--> statement-breakpoint
-ALTER TABLE "org_vanish_connections" FORCE ROW LEVEL SECURITY;--> statement-breakpoint
 ALTER TABLE "skill_run_model_provider_inputs" FORCE ROW LEVEL SECURITY;--> statement-breakpoint
 
 CREATE POLICY "model_provider_connections_select" ON "model_provider_connections" FOR SELECT USING (
@@ -225,34 +144,6 @@ CREATE POLICY "model_provider_credential_versions_insert" ON "model_provider_cre
       )
   )
 );--> statement-breakpoint
-CREATE POLICY "user_vanish_connections_owner" ON "user_vanish_connections" USING (
-  "org_id" = NULLIF(current_setting('app.org_id', true), '')::uuid
-  AND "user_id" = NULLIF(current_setting('app.user_id', true), '')
-  AND EXISTS (SELECT 1 FROM "memberships" m WHERE m."org_id" = "user_vanish_connections"."org_id" AND m."user_id" = "user_vanish_connections"."user_id")
-) WITH CHECK (
-  "org_id" = NULLIF(current_setting('app.org_id', true), '')::uuid
-  AND "user_id" = NULLIF(current_setting('app.user_id', true), '')
-  AND EXISTS (SELECT 1 FROM "memberships" m WHERE m."org_id" = "user_vanish_connections"."org_id" AND m."user_id" = "user_vanish_connections"."user_id")
-);--> statement-breakpoint
-CREATE POLICY "org_vanish_connections_select" ON "org_vanish_connections" FOR SELECT USING (
-  "org_id" = NULLIF(current_setting('app.org_id', true), '')::uuid
-  AND EXISTS (SELECT 1 FROM "memberships" m WHERE m."org_id" = "org_vanish_connections"."org_id" AND m."user_id" = NULLIF(current_setting('app.user_id', true), ''))
-);--> statement-breakpoint
-CREATE POLICY "org_vanish_connections_insert" ON "org_vanish_connections" FOR INSERT WITH CHECK (
-  "org_id" = NULLIF(current_setting('app.org_id', true), '')::uuid
-  AND EXISTS (SELECT 1 FROM "memberships" m WHERE m."org_id" = "org_vanish_connections"."org_id" AND m."user_id" = NULLIF(current_setting('app.user_id', true), '') AND m."org_role" IN ('owner', 'admin'))
-);--> statement-breakpoint
-CREATE POLICY "org_vanish_connections_update" ON "org_vanish_connections" FOR UPDATE USING (
-  "org_id" = NULLIF(current_setting('app.org_id', true), '')::uuid
-  AND EXISTS (SELECT 1 FROM "memberships" m WHERE m."org_id" = "org_vanish_connections"."org_id" AND m."user_id" = NULLIF(current_setting('app.user_id', true), '') AND m."org_role" IN ('owner', 'admin'))
-) WITH CHECK (
-  "org_id" = NULLIF(current_setting('app.org_id', true), '')::uuid
-  AND EXISTS (SELECT 1 FROM "memberships" m WHERE m."org_id" = "org_vanish_connections"."org_id" AND m."user_id" = NULLIF(current_setting('app.user_id', true), '') AND m."org_role" IN ('owner', 'admin'))
-);--> statement-breakpoint
-CREATE POLICY "org_vanish_connections_delete" ON "org_vanish_connections" FOR DELETE USING (
-  "org_id" = NULLIF(current_setting('app.org_id', true), '')::uuid
-  AND EXISTS (SELECT 1 FROM "memberships" m WHERE m."org_id" = "org_vanish_connections"."org_id" AND m."user_id" = NULLIF(current_setting('app.user_id', true), '') AND m."org_role" IN ('owner', 'admin'))
-);--> statement-breakpoint
 CREATE POLICY "skill_run_model_provider_inputs_creator" ON "skill_run_model_provider_inputs" USING (
   "org_id" = NULLIF(current_setting('app.org_id', true), '')::uuid
   AND EXISTS (SELECT 1 FROM "skill_runs" r WHERE r."org_id" = "skill_run_model_provider_inputs"."org_id" AND r."id" = "skill_run_model_provider_inputs"."run_id" AND r."creator_id" = NULLIF(current_setting('app.user_id', true), ''))
@@ -262,8 +153,7 @@ CREATE POLICY "skill_run_model_provider_inputs_creator" ON "skill_run_model_prov
 );--> statement-breakpoint
 CREATE TRIGGER skill_run_model_provider_inputs_immutable BEFORE UPDATE ON "skill_run_model_provider_inputs" FOR EACH ROW EXECUTE FUNCTION companion_reject_run_snapshot_update();--> statement-breakpoint
 
--- Generic secret usage deliberately counts Vanish bindings, but never dedicated model-provider
--- credentials because those have no relation to the vault.
+-- Dedicated model-provider credentials have no relation to the generic vault and are not counted.
 CREATE FUNCTION companion_secret_usage_count(p_org_id uuid, p_secret_id uuid)
 RETURNS bigint
 LANGUAGE plpgsql
@@ -285,8 +175,6 @@ BEGIN
   SELECT
     (SELECT count(*) FROM public."skill_secret_bindings" b WHERE b."org_id" = p_org_id AND b."secret_id" = p_secret_id AND b."revoked_at" IS NULL)
     + (SELECT count(*) FROM public."skill_run_config_secrets" c WHERE c."org_id" = p_org_id AND c."secret_id" = p_secret_id)
-    + (SELECT count(*) FROM public."user_vanish_connections" u WHERE u."org_id" = p_org_id AND u."secret_id" = p_secret_id)
-    + (SELECT count(*) FROM public."org_vanish_connections" o WHERE o."org_id" = p_org_id AND o."secret_id" = p_secret_id)
   INTO total;
   RETURN total;
 END

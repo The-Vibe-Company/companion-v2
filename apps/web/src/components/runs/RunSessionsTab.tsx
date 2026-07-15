@@ -81,12 +81,6 @@ export function RunSessionsTab({
               <button type="button" className="run-session" onClick={() => onOpen(run.id)} title="Open this session">
                 <Icon name="play" size={13} className="run-session__play" />
                 <span className="run-session__prompt">{run.prompt_excerpt || "(no prompt)"}</span>
-                {run.artifacts_count > 0 && (
-                  <span className="run-session__artifacts mono" title="Published artifacts">
-                    <Icon name="link-2" size={10} />
-                    {run.artifacts_count}
-                  </span>
-                )}
                 <span
                   className="run-session__model mono"
                   title={run.run_config_name_snapshot ? `${run.run_config_name_snapshot} · ${run.model}` : run.model}

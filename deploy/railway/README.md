@@ -160,12 +160,11 @@ COMPANION_RUN_RECORDER_RECONNECT_MIN_MS=250
 COMPANION_RUN_RECORDER_RECONNECT_MAX_MS=5000
 COMPANION_RUN_EVENT_RETENTION_INTERVAL_MS=900000
 COMPANION_RUN_SWEEP_INTERVAL_MS=60000
-VANISH_API_URL=https://vanish.sh
 ```
 
 Billing and runs are independent supervisors: disabling billing must not stop run processing, and missing Vercel
 configuration disables only RunSkill. The worker needs all four Stripe variables when Stripe billing is enabled, plus
-the vault, S3, Vercel, OpenCode, and optional Vanish settings for runs. It does not need a domain or `PORT`.
+the vault, S3, Vercel, and OpenCode settings for runs. It does not need a domain or `PORT`.
 
 ## 3. Configure Stripe
 

@@ -740,7 +740,6 @@ export function DetailView({
                 error_message: run.error_message,
                 run_config_id: run.run_config_id,
                 run_config_name_snapshot: run.run_config_name_snapshot,
-                artifacts_count: 0,
                 created_at: run.created_at,
                 last_active_at: run.last_active_at,
               },

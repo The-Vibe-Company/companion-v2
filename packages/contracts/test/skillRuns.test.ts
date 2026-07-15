@@ -207,7 +207,7 @@ describe("skill run contracts", () => {
 
   it("distinguishes non-terminal warnings from terminal run errors", () => {
     expect(
-      runChatEventSchema.parse({ type: "run.warning", code: "vanish_publish_failed", message: "Artifact sharing failed" }).type,
+      runChatEventSchema.parse({ type: "run.warning", code: "recorder_reconnected", message: "Recorder reconnected" }).type,
     ).toBe("run.warning");
     expect(runChatEventSchema.parse({ type: "run.error", code: "runtime_failed", message: "Run failed" }).type).toBe("run.error");
     expect(runChatEventSchema.parse({ type: "error", message: "legacy" }).type).toBe("error");
@@ -249,15 +249,13 @@ describe("skill run contracts", () => {
       prompt_excerpt: "Summarize",
       status: "running",
       status_detail: null,
-      artifacts_count: 0,
       created_at: "2026-07-13T10:00:00.000Z",
       last_active_at: null,
       prompt: "Summarize",
       transcript: [],
-      warnings: [{ code: "vanish_publish_failed", message: "Artifact sharing failed", phase: "collect_artifacts" }],
+      warnings: [{ code: "recorder_reconnected", message: "Recorder reconnected", phase: "record" }],
       transcript_event_sequence: 12,
       attachments: [],
-      artifacts: [],
     };
     expect(skillRunDetailSchema.parse(base).transcript_event_sequence).toBe(12);
     expect(skillRunDetailSchema.parse(base).warnings).toHaveLength(1);

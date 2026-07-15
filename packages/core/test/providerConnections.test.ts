@@ -238,17 +238,8 @@ describe("dedicated model-provider credentials", () => {
     })).toBeNull();
   });
 
-  it("rejects Vanish and protects workspace mutations with role checks", async () => {
+  it("validates credentials and protects workspace mutations with role checks", async () => {
     const developerStore = providerDatabase("developer");
-    await expect(setProviderConnection({
-      actor: me,
-      orgId: ORG,
-      provider: "VaNiSh",
-      keyName: "VANISH_API_KEY",
-      apiKey: "token",
-      masterKey: MASTER_KEY,
-      database: developerStore.database,
-    })).rejects.toThrow(/own connection API/);
     await expect(setProviderConnection({
       actor: me,
       orgId: ORG,

@@ -121,7 +121,6 @@ async function saveConnection(input: {
   scope: ModelProviderConnectionScope;
   masterKey?: Buffer;
 }): Promise<ModelProviderConnectionRow> {
-  if (input.provider.toLowerCase() === "vanish") throw new Error("Vanish uses its own connection API");
   if (
     !input.apiKey.trim() ||
     input.apiKey.includes("\0") ||

@@ -7,23 +7,16 @@ import { ProfilePane } from "./ProfilePane";
 import { PreferencesPane } from "./PreferencesPane";
 import { ApiKeysPane } from "./ApiKeysPane";
 import { ModelsPane, type ModelScope } from "./ModelsPane";
-import { ArtifactsPane, type ArtifactScope } from "./ArtifactsPane";
 import { WorkspaceGeneralPane } from "./WorkspaceGeneralPane";
 import {
   deleteModelProviderConnection,
   deleteOrgModelProviderConnection,
-  deleteOrgVanishConnection,
-  deleteVanishConnection,
   fetchModelProviderConnections,
   fetchOrgModelProviderConnections,
-  fetchOrgVanishConnection,
-  fetchVanishConnection,
   saveActivatedModels,
   saveOrgActivatedModels,
   setModelProviderConnection,
   setOrgModelProviderConnection,
-  setOrgVanishConnection,
-  setVanishConnection,
 } from "@/lib/runQueries";
 import { MembersPane } from "./MembersPane";
 import { InvitationsPane } from "./InvitationsPane";
@@ -43,15 +36,11 @@ function crumbFor(ctx: OrgCtx, route: SettingsRoute): string[] {
     case "providers":
     case "models":
       return ["Account", "Models"];
-    case "artifacts":
-      return ["Account", "Artifacts (Vanish)"];
     case "apikeys":
       return ["Account", "API keys"];
     case "org-providers":
     case "org-models":
       return [ws.name, "Shared models"];
-    case "org-artifacts":
-      return [ws.name, "Shared artifacts (Vanish)"];
     case "general":
       return [ws.name, "General"];
     case "members":
@@ -116,29 +105,6 @@ export function SettingsView({
     connectionScope: "organization",
     disconnect: (provider) => deleteOrgModelProviderConnection(provider).then(() => {}),
   };
-  const personalArtifacts: ArtifactScope = {
-    id: "personal",
-    orgId: ctx.currentOrg.id,
-    title: "Artifacts (Vanish)",
-    desc: "Bind Vanish to an accessible vault secret so your runs can publish files saved under artifacts/. Your personal binding takes precedence over the workspace binding.",
-    lockText: "Personal to you. The binding stores only a secret reference, and disconnecting never deletes the vault secret.",
-    locked: false,
-    loadConnected: () => fetchVanishConnection().then((r) => r.connection),
-    connect: (secretId) => setVanishConnection(secretId).then((r) => r.connection),
-    disconnect: () => deleteVanishConnection().then(() => {}),
-  };
-  const workspaceArtifacts: ArtifactScope = {
-    id: "organization",
-    orgId: ctx.currentOrg.id,
-    title: "Shared artifacts (Vanish)",
-    desc: "Bind Vanish for every member who has no personal Vanish binding. Shared bindings can reference Organization vault secrets only.",
-    lockText: "Shared with every member. Only owners and admins can change this binding; disconnecting never deletes the vault secret.",
-    locked: !ctx.canManage,
-    loadConnected: () => fetchOrgVanishConnection().then((r) => r.connection),
-    connect: (secretId) => setOrgVanishConnection(secretId).then((r) => r.connection),
-    disconnect: () => deleteOrgVanishConnection().then(() => {}),
-  };
-
   let pane: React.ReactNode;
   if (route.view === "profile") pane = <ProfilePane ctx={ctx} />;
   else if (route.view === "preferences") pane = <PreferencesPane ctx={ctx} />;
@@ -148,11 +114,8 @@ export function SettingsView({
   // `providers`/`org-providers` are legacy aliases of the merged Models panes (old deep-links).
   else if (route.view === "models" || route.view === "providers")
     pane = <ModelsPane key="models" scope={personalModels} />;
-  else if (route.view === "artifacts") pane = <ArtifactsPane key="artifacts" scope={personalArtifacts} />;
   else if (route.view === "org-models" || route.view === "org-providers")
     pane = <ModelsPane key="org-models" scope={workspaceModels} />;
-  else if (route.view === "org-artifacts")
-    pane = <ArtifactsPane key="org-artifacts" scope={workspaceArtifacts} />;
   else if (route.view === "apikeys") pane = <ApiKeysPane ctx={ctx} keys={apiKeys} />;
   else if (route.view === "general") pane = <WorkspaceGeneralPane ctx={ctx} />;
   else if (route.view === "members") pane = <MembersPane ctx={ctx} onInvite={() => onDialog("invite")} />;

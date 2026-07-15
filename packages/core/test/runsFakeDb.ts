@@ -13,7 +13,6 @@ export type FakeUserModelPreferencesRow = typeof schema.userModelPreferences.$in
 export type FakeOrgModelPreferencesRow = typeof schema.orgModelPreferences.$inferSelect;
 export type FakeRunRow = typeof schema.skillRuns.$inferSelect;
 export type FakeRunAttachmentRow = typeof schema.skillRunAttachments.$inferSelect;
-export type FakeRunArtifactRow = typeof schema.skillRunArtifacts.$inferSelect;
 
 export interface FakeSkillRow {
   id: string;
@@ -43,7 +42,6 @@ export interface FakeStore {
   orgModelPreferences: FakeOrgModelPreferencesRow[];
   runs: FakeRunRow[];
   runAttachments: FakeRunAttachmentRow[];
-  runArtifacts: FakeRunArtifactRow[];
   audit: Array<Record<string, unknown>>;
 }
 
@@ -56,7 +54,6 @@ export function emptyStore(overrides: Partial<FakeStore> = {}): FakeStore {
     orgModelPreferences: [],
     runs: [],
     runAttachments: [],
-    runArtifacts: [],
     audit: [],
     ...overrides,
   };
@@ -103,7 +100,6 @@ const USER_MODEL_PREF_KEYS = ["userId"];
 const ORG_MODEL_PREF_KEYS: string[] = [];
 const RUN_KEYS = ["id", "skillId", "creatorId"];
 const RUN_ATTACHMENT_KEYS = ["runId", "id"];
-const RUN_ARTIFACT_KEYS = ["runId", "id"];
 
 function runDefaults(values: Record<string, unknown>): FakeRunRow {
   return {
@@ -148,9 +144,6 @@ export function fakeRunsDb(store: FakeStore): Db {
       }
       if (table === schema.skillRunAttachments) {
         return filterRows(store.runAttachments as unknown as Record<string, unknown>[], RUN_ATTACHMENT_KEYS, cond);
-      }
-      if (table === schema.skillRunArtifacts) {
-        return filterRows(store.runArtifacts as unknown as Record<string, unknown>[], RUN_ARTIFACT_KEYS, cond);
       }
       return resolveOtherRows(cond);
     };
@@ -234,22 +227,6 @@ export function fakeRunsDb(store: FakeStore): Db {
                   createdAt: new Date(),
                   ...v,
                 }) as FakeRunAttachmentRow,
-            ),
-          );
-          return Promise.resolve();
-        }
-        if (table === schema.skillRunArtifacts) {
-          store.runArtifacts.push(
-            ...list.map(
-              (v) =>
-                ({
-                  id: crypto.randomUUID(),
-                  vanishId: null,
-                  contentType: null,
-                  expiresAt: null,
-                  publishedAt: new Date(),
-                  ...v,
-                }) as FakeRunArtifactRow,
             ),
           );
           return Promise.resolve();

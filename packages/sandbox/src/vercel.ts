@@ -18,33 +18,6 @@ import {
 const WORKDIR = "/vercel/sandbox";
 const OPENCODE_PORT = 4096;
 const OPENCODE_USERNAME = OPENCODE_SERVER_USERNAME;
-const COLLECT_MAX_DEPTH = 3;
-
-function abortReason(signal: AbortSignal): Error {
-  return signal.reason instanceof Error ? signal.reason : new Error("sandbox operation aborted");
-}
-
-function abortable<T>(operation: Promise<T>, signal?: AbortSignal): Promise<T> {
-  if (!signal) return operation;
-  if (signal.aborted) return Promise.reject(abortReason(signal));
-  return new Promise<T>((resolve, reject) => {
-    const onAbort = () => {
-      signal.removeEventListener("abort", onAbort);
-      reject(abortReason(signal));
-    };
-    signal.addEventListener("abort", onAbort, { once: true });
-    operation.then(
-      (value) => {
-        signal.removeEventListener("abort", onAbort);
-        resolve(value);
-      },
-      (error) => {
-        signal.removeEventListener("abort", onAbort);
-        reject(error);
-      },
-    );
-  });
-}
 
 export interface VercelRuntimeConfig {
   token: string;
@@ -188,8 +161,6 @@ export function createVercelRuntime(config: VercelRuntimeConfig): RunSandboxRunt
           path: `${WORKDIR}/attachments/${attachment.path}`,
           content: attachment.data as Uint8Array,
         })),
-        // Materialize artifacts/ so the composed prompt's "save into ./artifacts/" always resolves.
-        { path: `${WORKDIR}/artifacts/.keep`, content: Buffer.alloc(0) as Uint8Array },
       ];
       // Write in chunks: a big skill in one call risks oversized requests.
       const CHUNK = 32;
@@ -242,50 +213,6 @@ export function createVercelRuntime(config: VercelRuntimeConfig): RunSandboxRunt
       } catch {
         // Best-effort: a stopped/gone sandbox simply stays frozen.
       }
-    },
-
-    async collectFiles({ ref, dir, maxFiles, maxFileBytes, signal }) {
-      const sandbox = await getSandbox(ref, signal);
-      const collected: Array<{ path: string; data: Buffer; byteSize: number }> = [];
-      // BFS over (absolute dir, depth) pairs so nested deliverables (e.g. site/index.html) publish.
-      const queue: Array<{ abs: string; depth: number }> = [{ abs: dir, depth: 0 }];
-      while (queue.length > 0 && collected.length < maxFiles) {
-        const { abs, depth } = queue.shift()!;
-        let entries;
-        try {
-          entries = await abortable(sandbox.fs.readdir(abs, { withFileTypes: true, signal }), signal);
-        } catch (error) {
-          if (signal?.aborted) throw error;
-          // Directory vanished or was never created — nothing to collect.
-          continue;
-        }
-        for (const entry of entries) {
-          if (collected.length >= maxFiles) break;
-          const name = entry.name;
-          // Skip dotfiles (incl. the .keep placeholder) — deliverables only.
-          if (!name || name.startsWith(".")) continue;
-          const entryAbs = `${abs}/${name}`;
-          if (entry.isDirectory()) {
-            if (depth + 1 <= COLLECT_MAX_DEPTH) queue.push({ abs: entryAbs, depth: depth + 1 });
-            continue;
-          }
-          if (!entry.isFile()) continue;
-          try {
-            // stat first: never pull oversized bytes across the wire.
-            const stats = await abortable(sandbox.fs.stat(entryAbs, { signal }), signal);
-            if (stats.size > maxFileBytes) continue;
-            const data = await abortable(sandbox.fs.readFile(entryAbs, { signal }), signal);
-            if (data.length > maxFileBytes) continue;
-            const rel = entryAbs.slice(dir.length).replace(/^\/+/, "");
-            collected.push({ path: rel, data, byteSize: data.length });
-          } catch (error) {
-            if (signal?.aborted) throw error;
-            // File vanished between listing and read — skip it.
-            continue;
-          }
-        }
-      }
-      return collected;
     },
   };
 }

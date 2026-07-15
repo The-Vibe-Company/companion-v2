@@ -10,8 +10,6 @@
 # Audited RunSkill test fixtures from the feature branch. These are UUIDs, idempotency keys, and
 # literal redaction sentinels rather than live credentials.
 34b64f1d0facdf2efe764236795847000f3076bf:packages/contracts/test/modelProviders.test.ts:generic-api-key:18
-34b64f1d0facdf2efe764236795847000f3076bf:packages/contracts/test/vanishConnections.test.ts:generic-api-key:6
-34b64f1d0facdf2efe764236795847000f3076bf:packages/contracts/test/vanishConnections.test.ts:generic-api-key:16
 99a342e6b8e0bd76b2496fbd43549039424ff85d:apps/api/src/runRoutes.test.ts:generic-api-key:200
 99a342e6b8e0bd76b2496fbd43549039424ff85d:apps/api/src/runRoutes.test.ts:generic-api-key:230
 99a342e6b8e0bd76b2496fbd43549039424ff85d:apps/api/src/runRoutes.test.ts:generic-api-key:254

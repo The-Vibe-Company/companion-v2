@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { and, eq, inArray } from "drizzle-orm";
 import type { RunChatEvent, RunPhase } from "@companion/contracts";
 import {
@@ -20,14 +20,12 @@ import {
   failOrRetryRunJob,
   failRunPrompt,
   getRunWorkerLeaseControl,
-  getDecryptedVanishKey,
   heartbeatRunWorker,
   heartbeatRunJob,
   heartbeatRunPrompt,
   loadRunExecutionPlan,
   materializeRunWorkspace,
   persistRunTranscript,
-  publishRunArtifact,
   removeRunWorkerHeartbeat,
   RunBusyError,
   RunValidationError,
@@ -52,10 +50,6 @@ import { boundedInteger, runWorkerConfig, type RunWorkerConfig } from "./config"
 import type { Supervisor } from "./billingSupervisor";
 import { createRunCleanupScheduler } from "./runCleanup";
 
-const ARTIFACT_MAX_FILES = 20;
-const ARTIFACT_MAX_FILE_BYTES = 10 * 1024 * 1024;
-const ARTIFACT_PUBLISH_BUDGET_MS = 120_000;
-const ARTIFACT_PROVIDER_RECHECK_MS = 5_000;
 const PROMPT_POLL_MS = 250;
 const ACL_RECHECK_MS = 15_000;
 const OPENCODE_CALL_TIMEOUT_MS = 30_000;
@@ -64,7 +58,6 @@ const SANDBOX_CONTROL_TIMEOUT_MS = 60_000;
 class WorkerShutdown extends Error {}
 class LostLease extends Error {}
 class CancellationRequested extends Error {}
-class ArtifactProviderUnavailable extends Error {}
 
 function abortFailure(signal: AbortSignal): Error {
   return signal.reason instanceof Error ? signal.reason : new WorkerShutdown();
@@ -722,324 +715,6 @@ async function saveFinalTranscript(
   );
 }
 
-function artifactContentType(path: string): string {
-  const extension = path.toLowerCase().split(".").pop();
-  if (extension === "html") return "text/html; charset=utf-8";
-  if (extension === "json") return "application/json";
-  if (extension === "csv") return "text/csv; charset=utf-8";
-  if (extension === "txt" || extension === "md") return "text/plain; charset=utf-8";
-  if (extension === "png") return "image/png";
-  if (extension === "jpg" || extension === "jpeg") return "image/jpeg";
-  if (extension === "pdf") return "application/pdf";
-  return "application/octet-stream";
-}
-
-async function loadVanishKey(input: {
-  job: ClaimedRunJob;
-  actor: ActorContext;
-  ctx: RunControlContext;
-}): Promise<Awaited<ReturnType<typeof getDecryptedVanishKey>>> {
-  return tenant(input.job, (database) =>
-    getDecryptedVanishKey({
-      actor: input.actor,
-      orgId: input.job.orgId,
-      masterKey: input.ctx.masterKey,
-      database,
-    }),
-  );
-}
-
-async function guardedArtifactPublish(input: {
-  job: ClaimedRunJob;
-  actor: ActorContext;
-  ctx: RunControlContext;
-  key: NonNullable<Awaited<ReturnType<typeof getDecryptedVanishKey>>>;
-  filename: string;
-  bytes: Buffer;
-  idempotencyKey: string;
-  signal: AbortSignal;
-}): Promise<Awaited<ReturnType<typeof publishRunArtifact>>> {
-  const abort = new AbortController();
-  let failure: unknown = null;
-  let finished = false;
-  let nextProviderCheck = Date.now() + ARTIFACT_PROVIDER_RECHECK_MS;
-  const fail = (error: unknown) => {
-    if (failure) return;
-    failure = error;
-    abort.abort(error);
-  };
-  const onAbort = () => fail(
-    input.signal.reason instanceof Error
-      ? input.signal.reason
-      : new RunRuntimeError("artifact publishing exceeded its run budget"),
-  );
-  input.signal.addEventListener("abort", onAbort, { once: true });
-
-  const monitor = (async () => {
-    while (!finished && !abort.signal.aborted) {
-      try {
-        const control = await readRunControl(input.job);
-        if (control.cancelRequestedAt || control.status === "canceled") {
-          throw new CancellationRequested();
-        }
-        if (Date.now() >= nextProviderCheck) {
-          const current = await loadVanishKey(input);
-          try {
-            if (
-              !current ||
-              current.secretId !== input.key.secretId ||
-              current.secretVersion !== input.key.secretVersion
-            ) {
-              throw new ArtifactProviderUnavailable();
-            }
-          } finally {
-            if (current) current.value = "";
-          }
-          nextProviderCheck = Date.now() + ARTIFACT_PROVIDER_RECHECK_MS;
-        }
-      } catch (error) {
-        fail(error);
-        return;
-      }
-      await sleep(1_000, abort.signal).catch(() => undefined);
-    }
-  })();
-
-  try {
-    const published = await publishRunArtifact({
-      apiKey: input.key.value,
-      filename: input.filename,
-      bytes: input.bytes,
-      idempotencyKey: input.idempotencyKey,
-      signal: abort.signal,
-    });
-    if (failure) throw failure;
-    return published;
-  } catch (error) {
-    if (failure) throw failure;
-    throw error;
-  } finally {
-    finished = true;
-    abort.abort();
-    input.signal.removeEventListener("abort", onAbort);
-    await monitor;
-  }
-}
-
-async function guardedArtifactCollection(input: {
-  job: ClaimedRunJob;
-  actor: ActorContext;
-  ctx: RunControlContext;
-  ref: SandboxRef;
-  signal: AbortSignal;
-}): Promise<Awaited<ReturnType<NonNullable<RunControlContext["runtime"]>["collectFiles"]>>> {
-  const abort = new AbortController();
-  let failure: unknown = null;
-  let finished = false;
-  const fail = (error: unknown) => {
-    if (failure) return;
-    failure = error;
-    abort.abort(error);
-  };
-  const onAbort = () => fail(
-    input.signal.reason instanceof Error
-      ? input.signal.reason
-      : new RunRuntimeError("artifact collection exceeded its run budget"),
-  );
-  input.signal.addEventListener("abort", onAbort, { once: true });
-  const monitor = (async () => {
-    while (!finished && !abort.signal.aborted) {
-      try {
-        const control = await readRunControl(input.job);
-        if (control.cancelRequestedAt || control.status === "canceled") throw new CancellationRequested();
-        await revalidatePinnedSecrets(input.job, input.actor, input.ctx.masterKey);
-      } catch (error) {
-        fail(error);
-        return;
-      }
-      await sleep(ARTIFACT_PROVIDER_RECHECK_MS, abort.signal).catch(() => undefined);
-    }
-  })();
-  try {
-    const files = await input.ctx.runtime!.collectFiles({
-      ref: input.ref,
-      dir: "artifacts",
-      maxFiles: ARTIFACT_MAX_FILES,
-      maxFileBytes: ARTIFACT_MAX_FILE_BYTES,
-      signal: abort.signal,
-    });
-    if (failure) throw failure;
-    return files;
-  } catch (error) {
-    if (failure) throw failure;
-    throw error;
-  } finally {
-    finished = true;
-    abort.abort();
-    input.signal.removeEventListener("abort", onAbort);
-    await monitor;
-  }
-}
-
-async function collectAndPublishArtifacts(input: {
-  job: ClaimedRunJob;
-  actor: ActorContext;
-  ctx: RunControlContext;
-  ref: SandboxRef;
-  redactor: RunRedactor;
-  shutdownSignal: AbortSignal;
-}): Promise<void> {
-  let vanish: Awaited<ReturnType<typeof getDecryptedVanishKey>> = null;
-  try {
-    vanish = await loadVanishKey(input);
-  } catch {
-    await appendEvents(
-      input.job,
-      input.actor,
-      [{ type: "run.warning", code: "vanish_unavailable", message: "Artifact sharing is temporarily unavailable", phase: "collect_artifacts" }],
-      input.redactor,
-    ).catch(() => undefined);
-    return;
-  }
-  if (!vanish) return;
-
-  try {
-    const publishDeadline = Date.now() + ARTIFACT_PUBLISH_BUDGET_MS;
-    const budgetSignal = AbortSignal.timeout(ARTIFACT_PUBLISH_BUDGET_MS);
-    const artifactSignal = AbortSignal.any([input.shutdownSignal, budgetSignal]);
-    let files: Awaited<ReturnType<NonNullable<RunControlContext["runtime"]>["collectFiles"]>>;
-    try {
-      files = await guardedArtifactCollection({
-        job: input.job,
-        actor: input.actor,
-        ctx: input.ctx,
-        ref: input.ref,
-        signal: artifactSignal,
-      });
-    } catch (error) {
-      if (input.shutdownSignal.aborted) throw abortFailure(input.shutdownSignal);
-      if (error instanceof CancellationRequested || error instanceof SecretConfigurationError) throw error;
-      if (error instanceof RunValidationError && error.code === "run_not_found") throw error;
-      await appendEvents(
-        input.job,
-        input.actor,
-        [{ type: "run.warning", code: "artifact_collect_failed", message: "Artifacts could not be collected", phase: "collect_artifacts" }],
-        input.redactor,
-      );
-      return;
-    }
-
-    for (const [index, file] of files.entries()) {
-      if (input.shutdownSignal.aborted) throw abortFailure(input.shutdownSignal);
-      const control = await readRunControl(input.job);
-      if (control.cancelRequestedAt || control.status === "canceled") throw new CancellationRequested();
-      let current: Awaited<ReturnType<typeof getDecryptedVanishKey>> = null;
-      try {
-        current = await loadVanishKey(input);
-      } catch (error) {
-        if (error instanceof RunValidationError && error.code === "run_not_found") throw error;
-        current = null;
-      }
-      vanish.value = "";
-      vanish = current;
-      if (!vanish) {
-        await appendEvents(
-          input.job,
-          input.actor,
-          [{ type: "run.warning", code: "vanish_unavailable", message: "Artifact sharing is no longer available", phase: "collect_artifacts" }],
-          input.redactor,
-        );
-        return;
-      }
-      const remainingMs = publishDeadline - Date.now();
-      if (remainingMs <= 0) {
-        await appendEvents(
-          input.job,
-          input.actor,
-          [{ type: "run.warning", code: "vanish_publish_failed", message: "Artifact sharing exceeded its time budget", phase: "collect_artifacts" }],
-          input.redactor,
-        );
-        return;
-      }
-      const redactedPath = input.redactor.redactText(file.path);
-      const safePath = redactedPath === file.path ? file.path : `artifact-${index + 1}`;
-      try {
-        const contentDigest = createHash("sha256")
-          .update(file.path)
-          .update("\0")
-          .update(file.data)
-          .digest("base64url");
-        const fileBudgetSignal = AbortSignal.timeout(remainingMs);
-        const published = await guardedArtifactPublish({
-          job: input.job,
-          actor: input.actor,
-          ctx: input.ctx,
-          key: vanish,
-          filename: safePath,
-          bytes: file.data,
-          idempotencyKey: `run:${input.job.runId}:artifact:${file.byteSize}:${contentDigest}`,
-          signal: AbortSignal.any([input.shutdownSignal, fileBudgetSignal]),
-        });
-        await tenant(input.job, (database) =>
-          database
-            .insert(schema.skillRunArtifacts)
-            .values({
-              orgId: input.job.orgId,
-              runId: input.job.runId,
-              path: safePath,
-              fileName: safePath.split("/").pop() || safePath,
-              contentType: artifactContentType(safePath),
-              byteSize: file.byteSize,
-              vanishId: published.id,
-              url: published.url,
-              expiresAt: published.expiresAt ? new Date(published.expiresAt) : null,
-            })
-            .onConflictDoUpdate({
-              target: [schema.skillRunArtifacts.orgId, schema.skillRunArtifacts.runId, schema.skillRunArtifacts.path],
-              set: {
-                vanishId: published.id,
-                url: published.url,
-                expiresAt: published.expiresAt ? new Date(published.expiresAt) : null,
-                byteSize: file.byteSize,
-                publishedAt: new Date(),
-              },
-            }),
-        );
-      } catch (error) {
-        if (input.shutdownSignal.aborted) throw abortFailure(input.shutdownSignal);
-        if (error instanceof CancellationRequested) throw error;
-        if (error instanceof RunValidationError && error.code === "run_not_found") throw error;
-        if (error instanceof ArtifactProviderUnavailable) {
-          await appendEvents(
-            input.job,
-            input.actor,
-            [{ type: "run.warning", code: "vanish_unavailable", message: "Artifact sharing is no longer available", phase: "collect_artifacts" }],
-            input.redactor,
-          );
-          return;
-        }
-        if (Date.now() >= publishDeadline) {
-          await appendEvents(
-            input.job,
-            input.actor,
-            [{ type: "run.warning", code: "vanish_publish_failed", message: "Artifact sharing exceeded its time budget", phase: "collect_artifacts" }],
-            input.redactor,
-          );
-          return;
-        }
-        await appendEvents(
-          input.job,
-          input.actor,
-          [{ type: "run.warning", code: "vanish_publish_failed", message: `Artifact ${safePath} could not be shared`, phase: "collect_artifacts" }],
-          input.redactor,
-        );
-      }
-    }
-  } finally {
-    if (vanish) vanish.value = "";
-  }
-}
-
 async function markCanceled(input: {
   job: ClaimedRunJob;
   actor: ActorContext;
@@ -1260,7 +935,7 @@ async function processClaimedJob(input: {
     if (initialControl.phase === "freeze") {
       // The previous replica persisted freeze before provider teardown. Repeating destroy is safe;
       // forking here would recreate an empty sandbox and trust a dead OpenCode session. Reconcile a
-      // final snapshot/artifact pass from the existing session when its pinned inputs remain valid.
+      // final transcript snapshot from the existing session when its pinned inputs remain valid.
       plan = await tenant(job, (database) =>
         loadRunExecutionPlan({ actor, orgId: job.orgId, runId: job.runId, masterKey: ctx.masterKey, database }),
       ).catch(() => null);
@@ -1272,7 +947,6 @@ async function processClaimedJob(input: {
           sessionId = plan.row.opencodeSessionId;
           await saveFinalTranscript(job, actor, ctx, target, sessionId, redactor, jobAbort.signal).catch(() => undefined);
         }
-        await collectAndPublishArtifacts({ job, actor, ctx, ref, redactor, shutdownSignal: jobAbort.signal });
       }
       await timeoutExtender.stop();
       const cleaned = await teardownSandbox(ctx.runtime!, ref);
@@ -1490,8 +1164,6 @@ async function processClaimedJob(input: {
           );
           if (!promptCompleted) throw new LostLease();
           activePromptId = null;
-          await setPhase(job, actor, workerId, "collect_artifacts", { status: "running", lastActiveAt: new Date() });
-          await collectAndPublishArtifacts({ job, actor, ctx, ref: activeRef, redactor, shutdownSignal: jobAbort.signal });
           await setPhase(job, actor, workerId, "record", { status: "running", lastActiveAt: new Date() });
         } catch (error) {
           if (error instanceof WorkerShutdown || error instanceof LostLease || error instanceof CancellationRequested) throw error;
@@ -1533,9 +1205,8 @@ async function processClaimedJob(input: {
     }
 
     // `beginRunFreeze` already closed prompt admission under the run lock. Keep that phase through
-    // final transcript/artifact collection so a racing API request cannot enqueue abandoned work.
+    // final transcript collection so a racing API request cannot enqueue abandoned work.
     await saveFinalTranscript(job, actor, ctx, chatTarget, activeSessionId, redactor, jobAbort.signal);
-    await collectAndPublishArtifacts({ job, actor, ctx, ref: activeRef, redactor, shutdownSignal: jobAbort.signal });
     if (jobAbort.signal.aborted) throw leaseLost ? new LostLease() : abortFailure(jobAbort.signal);
     await setPhase(job, actor, workerId, "freeze");
     await timeoutExtender.stop();

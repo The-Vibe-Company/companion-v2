@@ -91,12 +91,6 @@ import {
   listProviderConnections,
   setOrgProviderConnection,
   setProviderConnection,
-  deleteOrgVanishConnection,
-  deleteVanishConnection,
-  getOrgVanishConnection,
-  getVanishConnection,
-  setOrgVanishConnection,
-  setVanishConnection,
   getActivatedModels,
   setUserActivatedModels,
   setOrgActivatedModels,
@@ -170,7 +164,6 @@ import {
   MAX_COMMENT_IMAGE_BYTES,
   updateUserProfileInputSchema,
   setModelProviderConnectionInputSchema,
-  setVanishConnectionInputSchema,
   setActivatedModelsInputSchema,
   launchRunFieldsSchema,
   runPromptInputSchema,
@@ -2796,78 +2789,6 @@ app.delete("/v1/org-provider-connections/:provider", async (c) => {
     await withTenant(c, ({ actor, orgId, database }) =>
       deleteOrgProviderConnection({ actor, orgId, provider: c.req.param("provider"), database }),
     );
-    return c.json({ ok: true });
-  } catch (error) {
-    return jsonError(c, error);
-  }
-});
-
-/* ---- Vanish bindings remain generic-vault references on a dedicated API surface. ---- */
-
-app.get("/v1/vanish-connection", async (c) => {
-  try {
-    if (isTokenRequest(c)) return jsonError(c, "personal access tokens cannot use Vanish connections", 401);
-    const connection = await withTenant(c, ({ actor, orgId, database }) =>
-      getVanishConnection({ actor, orgId, database }),
-    );
-    return c.json({ connection });
-  } catch (error) {
-    return jsonError(c, error, 401);
-  }
-});
-
-app.put("/v1/vanish-connection", async (c) => {
-  try {
-    if (isTokenRequest(c)) return jsonError(c, "personal access tokens cannot use Vanish connections", 401);
-    const input = setVanishConnectionInputSchema.parse(await c.req.json());
-    const connection = await withTenant(c, ({ actor, orgId, database }) =>
-      setVanishConnection({ actor, orgId, secretId: input.secret_id, database }),
-    );
-    return c.json({ connection });
-  } catch (error) {
-    return jsonError(c, error);
-  }
-});
-
-app.delete("/v1/vanish-connection", async (c) => {
-  try {
-    if (isTokenRequest(c)) return jsonError(c, "personal access tokens cannot use Vanish connections", 401);
-    await withTenant(c, ({ actor, orgId, database }) => deleteVanishConnection({ actor, orgId, database }));
-    return c.json({ ok: true });
-  } catch (error) {
-    return jsonError(c, error);
-  }
-});
-
-app.get("/v1/org-vanish-connection", async (c) => {
-  try {
-    if (isTokenRequest(c)) return jsonError(c, "personal access tokens cannot use Vanish connections", 401);
-    const connection = await withTenant(c, ({ actor, orgId, database }) =>
-      getOrgVanishConnection({ actor, orgId, database }),
-    );
-    return c.json({ connection });
-  } catch (error) {
-    return jsonError(c, error, 401);
-  }
-});
-
-app.put("/v1/org-vanish-connection", async (c) => {
-  try {
-    if (isTokenRequest(c)) return jsonError(c, "personal access tokens cannot use Vanish connections", 401);
-    const input = setVanishConnectionInputSchema.parse(await c.req.json());
-    const connection = await withTenant(c, ({ actor, orgId, database }) =>
-      setOrgVanishConnection({ actor, orgId, secretId: input.secret_id, database }),
-    );
-    return c.json({ connection });
-  } catch (error) {
-    return jsonError(c, error);
-  }
-});
-
-app.delete("/v1/org-vanish-connection", async (c) => {
-  try {
-    if (isTokenRequest(c)) return jsonError(c, "personal access tokens cannot use Vanish connections", 401);
-    await withTenant(c, ({ actor, orgId, database }) => deleteOrgVanishConnection({ actor, orgId, database }));
     return c.json({ ok: true });
   } catch (error) {
     return jsonError(c, error);

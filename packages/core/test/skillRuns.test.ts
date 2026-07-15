@@ -454,10 +454,8 @@ describe("workspace and durable helper invariants", () => {
       prompt: "Summarize",
       skillSlug: "root-skill",
       attachments: [{ fileName: "notes.txt", workspacePath: "file-id-notes.txt" }],
-      artifactsEnabled: true,
     });
     expect(composed).toContain('"notes.txt" → "./attachments/file-id-notes.txt"');
-    expect(composed).toContain("./artifacts/");
   });
 
   it("trims tool output before losing the final assistant response", () => {
