@@ -738,8 +738,8 @@ required declaration or inaccessible secret makes a configuration `Needs attenti
 There is no silent environment precedence. Secret/variable collisions fail. The same key across
 dependencies is allowed only for the same variable value or exact pinned secret id+version. A model
 provider key belongs to a separate credential domain, so any collision with a skill secret or
-variable fails. Any `OPENCODE_SERVER_*` collision fails. The launcher always summarizes credentials
-exposed to sandbox code and explains that literal redaction is not an exfiltration boundary.
+variable fails. Any `OPENCODE_SERVER_*` collision fails. The launcher presents declared inputs in
+their skill groups without a separate credential-exposure summary.
 
 For each model, run-options also returns a redacted provider pin containing only environment key,
 connection id, scope, and exact credential version. This lets the launcher reject a provider/skill
