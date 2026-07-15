@@ -438,27 +438,6 @@ export function RunLauncherDialog({
       });
   };
 
-  const selectedSkillSecrets = effectiveOptions?.declared_secrets.flatMap((declaration) => {
-    const selection = inputs.secrets.find((item) =>
-      secretSelectionKey(item.skill_id, item.slot_id) === secretSelectionKey(declaration.skill_id, declaration.slot_id),
-    );
-    if (!selection) return [];
-    const candidate = declaration.candidates.find((item) => item.id === selection.secret_id);
-    return [{
-      envKey: declaration.env_key,
-      skill: declaration.skill_slug,
-      name: candidate
-        ? `${candidate.name} · ${candidate.audience} · ${candidate.owner.name}`
-        : "Secret unavailable",
-    }];
-  }) ?? [];
-  const selectedVariables = effectiveOptions?.declared_variables.flatMap((declaration) => {
-    const selection = inputs.variables.find((item) =>
-      variableSelectionKey(item.skill_id, item.env_key) === variableSelectionKey(declaration.skill_id, declaration.env_key),
-    );
-    return selection ? [{ envKey: declaration.env_key, skill: declaration.skill_slug }] : [];
-  }) ?? [];
-
   const footer = (
     <>
       {effectiveOptions ? (
@@ -614,9 +593,6 @@ export function RunLauncherDialog({
                   <h4 id="run-inputs-title">Secrets &amp; variables</h4>
                   <p>Only manifest-declared inputs can be injected. Non-secret variables remain visible in your private configuration and run history.</p>
                 </div>
-                <span>
-                  {selectedSkillSecrets.length + selectedVariables.length} exposed
-                </span>
               </div>
               {groups.map((group) => (
                 <details className="run-input-group" key={group.skill.skill_version_id} open={group.skill.root || group.secrets.some((item) => item.required) || group.variables.some((item) => item.required)}>
@@ -682,20 +658,6 @@ export function RunLauncherDialog({
                   </div>
                 </details>
               ))}
-            </section>
-          )}
-
-          {selectedSkillSecrets.length + selectedVariables.length > 0 && (
-            <section className="run-exposure" aria-labelledby="run-exposure-title">
-              <div className="run-exposure__head">
-                <Icon name="shield" size={14} />
-                <h4 id="run-exposure-title">Credentials exposed to sandbox code</h4>
-              </div>
-              <ul>
-                {selectedSkillSecrets.map((item) => <li key={`${item.skill}:${item.envKey}`}><code>{item.envKey}</code><span>{item.name}</span><small>{item.skill}</small></li>)}
-                {selectedVariables.map((item) => <li key={`${item.skill}:${item.envKey}`}><code>{item.envKey}</code><span>Visible value</span><small>{item.skill}</small></li>)}
-              </ul>
-              <p>Sandboxed skill code can read every selected credential. Companion redacts literal values from its own logs, events, errors and transcript, but cannot prevent a malicious skill from encoding or exfiltrating them.</p>
             </section>
           )}
 

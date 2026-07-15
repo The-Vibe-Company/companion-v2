@@ -146,8 +146,10 @@
 .ca-tool--running > button { border-color: var(--color-line-strong); }
 
 /* Run launcher: dense configuration + manifest inputs, with the action rail kept visible. */
+.og-scrim:has(.run-launcher) { align-items: center; padding: 16px; }
 .og-dialog.run-launcher { width: min(720px, calc(100vw - 32px)); max-height: min(860px, calc(100dvh - 32px)); }
 .run-launcher .og-dialog__body { gap: 16px; }
+.run-launcher .og-dialog__body > * { flex: none; }
 .run-launcher .og-dialog__foot { min-height: 58px; background: var(--color-surface); }
 .run-launcher .og-dialog__foot .btn-primary { display: inline-flex; align-items: center; gap: 6px; }
 .run-launcher__prompt-label { display: block; padding: 10px 16px 0; color: var(--color-muted); font-size: var(--text-xs); font-weight: 500; }
@@ -179,9 +181,8 @@
 .run-inputs { display: grid; gap: 8px; }
 .run-inputs__intro { display: flex; align-items: flex-start; gap: 16px; }
 .run-inputs__intro > div { flex: 1; min-width: 0; }
-.run-inputs__intro h4, .run-exposure h4 { margin: 0; color: var(--color-fg); font-size: var(--text-sm); font-weight: 600; }
-.run-inputs__intro p, .run-exposure > p { margin: 3px 0 0; color: var(--color-muted); font-size: 11px; line-height: var(--leading-relaxed); }
-.run-inputs__intro > span { flex: none; color: var(--color-faint); font: 10px/1.5 var(--font-mono); }
+.run-inputs__intro h4 { margin: 0; color: var(--color-fg); font-size: var(--text-sm); font-weight: 600; }
+.run-inputs__intro p { margin: 3px 0 0; color: var(--color-muted); font-size: 11px; line-height: var(--leading-relaxed); }
 .run-input-group { border-block-start: 1px solid var(--color-line); }
 .run-input-group:last-child { border-block-end: 1px solid var(--color-line); }
 .run-input-group > summary { min-height: 40px; display: flex; align-items: center; gap: 8px; padding: 0 4px; color: var(--color-fg); cursor: pointer; list-style: none; }
@@ -222,14 +223,6 @@
 .run-variable__head small { margin-left: 5px; color: var(--color-faint); font-size: 10px; }
 .run-variable__include { display: inline-flex; align-items: center; gap: 5px; color: var(--color-muted); font-size: 10px; }
 .run-variable > input { width: 100%; }
-
-.run-exposure { padding: 11px 12px; border: 1px solid var(--color-warn-line); border-radius: var(--radius-md); background: var(--color-warn-tint); }
-.run-exposure__head { display: flex; align-items: center; gap: 7px; color: var(--color-warn); }
-.run-exposure ul { margin: 9px 0; padding: 0; list-style: none; }
-.run-exposure li { min-width: 0; display: grid; grid-template-columns: minmax(120px, .8fr) minmax(100px, 1fr) auto; gap: 8px; padding: 5px 0; border-block-start: 1px solid var(--color-warn-line); font-size: 10px; }
-.run-exposure li code { min-width: 0; color: var(--color-fg); font-family: var(--font-mono); overflow-wrap: anywhere; }
-.run-exposure li span { min-width: 0; color: var(--color-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.run-exposure li small { color: var(--color-faint); font-family: var(--font-mono); }
 
 /* The model menu stays in the dialog's logical/focus tree while the Popover top layer escapes
    every scroll container. The fixed fallback still works in browsers without Popover support. */
@@ -304,9 +297,6 @@
   .vault-field__create-button { align-self: flex-start; }
   .vault-create { grid-template-columns: 1fr; }
   .vault-create__meta { grid-column: 1; }
-  .run-exposure li { grid-template-columns: 1fr auto; }
-  .run-exposure li span { grid-column: 1; grid-row: 2; }
-  .run-exposure li small { grid-column: 2; grid-row: 1 / span 2; }
   .provider-key-editor { padding-inline-start: 0; }
   .provider-key-meta { display: none; }
   .provider-group__head { gap: 6px !important; padding-inline-end: 6px !important; }
