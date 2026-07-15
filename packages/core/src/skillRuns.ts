@@ -428,8 +428,8 @@ export function hashRunPayload(value: unknown): string {
 
 /**
  * Canonical launch identity shared by the early replay lookup and the transactional insert path.
- * Keep every caller-visible input here, including the exact dedicated model-provider credential;
- * object-storage keys are derived from the attachment ids and are intentionally not authoritative.
+ * Resolved secret/provider versions are deliberately excluded: the idempotent client intent is the
+ * selected model and secret references, while exact versions are pinned transactionally at commit.
  */
 export function hashRunCreationPayload(input: {
   slug: string;
@@ -437,8 +437,9 @@ export function hashRunCreationPayload(input: {
   dependencyPins: RunDependencyPin[];
   prompt: string;
   model: string;
-  modelProviderConnectionId: string;
-  modelProviderCredentialVersion: number;
+  modelProviderConnectionId?: string | null;
+  modelProviderCredentialVersion?: number | null;
+  prewarmId?: string | null;
   inputs: RunInputSelection;
   runConfigId?: string | null;
   attachments: CreateRunAttachment[];
@@ -451,8 +452,6 @@ export function hashRunCreationPayload(input: {
     ),
     prompt: input.prompt,
     model: input.model,
-    modelProviderConnectionId: input.modelProviderConnectionId,
-    modelProviderCredentialVersion: input.modelProviderCredentialVersion,
     inputs: {
       secrets: [...input.inputs.secrets].sort((a, b) =>
         `${a.skill_id}:${a.slot_id}`.localeCompare(`${b.skill_id}:${b.slot_id}`),
@@ -1376,8 +1375,9 @@ async function createRunInTransaction(input: {
   prompt: string;
   model: string;
   inputs: RunInputSelection;
-  modelProviderConnectionId: string;
-  modelProviderCredentialVersion: number;
+  modelProviderConnectionId?: string | null;
+  modelProviderCredentialVersion?: number | null;
+  prewarmId?: string | null;
   runConfigId?: string | null;
   idempotencyKey: string;
   attachments: CreateRunAttachment[];
@@ -1443,6 +1443,26 @@ async function createRunInTransaction(input: {
   if (!activated.personal.includes(input.model) && !activated.org.includes(input.model)) {
     throw new RunValidationError("the selected model is not activated", "model_not_activated");
   }
+  // Serialize the click-time snapshot against concurrent secret/provider rotations. Rotators update
+  // these parent rows before inserting the next immutable version, so FOR SHARE gives the run one
+  // coherent before-or-after view without ever opening plaintext in the transaction.
+  const selectedSecretIds = [...new Set(input.inputs.secrets.map((item) => item.secret_id))].sort();
+  if (selectedSecretIds.length > 0) {
+    await input.database
+      .select({ id: schema.secrets.id })
+      .from(schema.secrets)
+      .where(and(eq(schema.secrets.orgId, input.orgId), inArray(schema.secrets.id, selectedSecretIds)))
+      .orderBy(asc(schema.secrets.id))
+      .for("share");
+  }
+  const provider = input.model.split("/", 1)[0] ?? "";
+  await input.database.execute(sql`select pg_advisory_xact_lock(hashtext(${`companion:provider-credential:${input.orgId}:${provider}`}))`);
+  await input.database
+    .select({ id: schema.modelProviderConnections.id })
+    .from(schema.modelProviderConnections)
+    .where(and(eq(schema.modelProviderConnections.orgId, input.orgId), eq(schema.modelProviderConnections.provider, provider)))
+    .orderBy(asc(schema.modelProviderConnections.id))
+    .for("share");
   const resolvedInputs = await validateRunInputSelection({
     actor: input.actor,
     orgId: input.orgId,
@@ -1451,6 +1471,7 @@ async function createRunInTransaction(input: {
     selection: input.inputs,
     modelProviderConnectionId: input.modelProviderConnectionId,
     modelProviderCredentialVersion: input.modelProviderCredentialVersion,
+    requireExplicitProviderSelection: false,
     declarations,
     database: input.database,
   });
@@ -1478,6 +1499,16 @@ async function createRunInTransaction(input: {
   }
 
   const runId = randomUUID();
+  const adoptedPrewarm = await import("./runPrewarms").then(({ adoptRunPrewarm }) => adoptRunPrewarm({
+    database: input.database,
+    actor: input.actor,
+    orgId: input.orgId,
+    runId,
+    prewarmId: input.prewarmId,
+    closure,
+    goldenSnapshotId: input.ctx.goldenSnapshotId!,
+    timeoutMs: input.ctx.timeoutMs,
+  }));
   const serverPassword = randomBytes(32).toString("base64url");
   const serverPasswordEnc = serializeOpaque(
     encryptOpaqueValue(
@@ -1497,6 +1528,7 @@ async function createRunInTransaction(input: {
       orgId: input.orgId,
       skillId: root.skill_id,
       creatorId: input.actor.id,
+      prewarmId: adoptedPrewarm?.id ?? null,
       skillVersionId: root.skill_version_id,
       skillVersion: root.version,
       runConfigId: input.runConfigId ?? null,
@@ -1507,7 +1539,9 @@ async function createRunInTransaction(input: {
       prompt: input.prompt,
       status: "queued",
       phase: "queued",
-      sandboxName: sandboxNameForRun(input.orgId, runId),
+      sandboxName: adoptedPrewarm?.sandboxName ?? sandboxNameForRun(input.orgId, runId),
+      sandboxId: adoptedPrewarm?.sandboxId ?? null,
+      sandboxDomain: adoptedPrewarm?.sandboxDomain ?? null,
       goldenSnapshotId: input.ctx.goldenSnapshotId,
       opencodeVersion: input.ctx.opencodeVersion,
       serverPasswordEnc,
@@ -1679,8 +1713,9 @@ export async function createRun(input: {
   prompt: string;
   model: string;
   inputs: RunInputSelection;
-  modelProviderConnectionId: string;
-  modelProviderCredentialVersion: number;
+  modelProviderConnectionId?: string | null;
+  modelProviderCredentialVersion?: number | null;
+  prewarmId?: string | null;
   runConfigId?: string | null;
   idempotencyKey: string;
   attachments: CreateRunAttachment[];
@@ -1893,6 +1928,54 @@ export interface RunExecutionPlan {
   serverPassword: string;
 }
 
+export interface RunMaterializationPlan {
+  row: RunRow;
+  creator: ActorContext;
+  skills: Array<{ slug: string; version: string; storagePath: string }>;
+  attachments: CreateRunAttachment[];
+}
+
+/** Load only non-secret run state so fork/upload can happen before plaintext enters memory. */
+export async function loadRunMaterializationPlan(input: {
+  actor: ActorContext;
+  orgId: string;
+  runId: string;
+  database?: Db;
+}): Promise<RunMaterializationPlan> {
+  const database = input.database ?? db;
+  await assertMember(database, input.actor, input.orgId);
+  const row = await loadRunRow(database, input.orgId, input.runId);
+  if (!row || row.creatorId !== input.actor.id) throw new RunValidationError("run not found", "run_not_found");
+  if (["frozen", "error", "canceled"].includes(row.status)) throw new RunBusyError("this run is terminal", "run_terminal");
+  const [skills, attachments] = await Promise.all([
+    database
+      .select({
+        slug: schema.skills.slug,
+        version: schema.skillVersions.version,
+        storagePath: schema.skillVersions.storagePath,
+        mountOrder: schema.skillRunSkills.mountOrder,
+      })
+      .from(schema.skillRunSkills)
+      .innerJoin(schema.skills, and(eq(schema.skills.orgId, schema.skillRunSkills.orgId), eq(schema.skills.id, schema.skillRunSkills.skillId)))
+      .innerJoin(schema.skillVersions, and(eq(schema.skillVersions.orgId, schema.skillRunSkills.orgId), eq(schema.skillVersions.id, schema.skillRunSkills.skillVersionId)))
+      .where(and(eq(schema.skillRunSkills.orgId, input.orgId), eq(schema.skillRunSkills.runId, input.runId)))
+      .orderBy(asc(schema.skillRunSkills.mountOrder)),
+    loadAttachments(database, input.orgId, input.runId),
+  ]);
+  return {
+    row,
+    creator: input.actor,
+    skills,
+    attachments: attachments.map((attachment) => ({
+      id: attachment.id,
+      fileName: attachment.fileName,
+      contentType: attachment.contentType,
+      byteSize: attachment.byteSize,
+      storageKey: attachment.storageKey,
+    })),
+  };
+}
+
 /**
  * Revalidate every pinned skill secret and the dedicated model-provider credential immediately
  * before sandbox injection, then decrypt into an ephemeral map. The caller must clear `env` and
@@ -2093,23 +2176,41 @@ export async function loadRunExecutionPlan(input: {
 
 /** Fetch archive and attachment bytes outside any DB transaction. */
 export async function materializeRunWorkspace(input: {
-  plan: RunExecutionPlan;
+  plan: RunMaterializationPlan | RunExecutionPlan;
   fetchArchive: SkillArchiveFetcher;
   fetchObject: (storageKey: string, signal?: AbortSignal) => Promise<Buffer>;
   signal?: AbortSignal;
 }): Promise<RunWorkspaceFiles> {
+  const [skills, dynamic] = await Promise.all([
+    materializeRunSkillBundles({ plan: input.plan, fetchArchive: input.fetchArchive, signal: input.signal }),
+    materializeRunDynamicFiles({ plan: input.plan, fetchObject: input.fetchObject, signal: input.signal }),
+  ]);
+  const attachments = dynamic.attachments;
+  return { opencodeJson: buildOpencodeJson({ model: input.plan.row.model }), skills, attachments };
+}
+
+export async function materializeRunSkillBundles(input: {
+  plan: RunMaterializationPlan | RunExecutionPlan;
+  fetchArchive: SkillArchiveFetcher;
+  signal?: AbortSignal;
+}): Promise<SkillBundle[]> {
   const skills: SkillBundle[] = [];
   for (const skill of input.plan.skills) {
     skills.push(await buildSkillBundle(skill.slug, skill.version, skill.storagePath, input.fetchArchive, input.signal));
   }
+  return skills;
+}
+
+export async function materializeRunDynamicFiles(input: {
+  plan: RunMaterializationPlan | RunExecutionPlan;
+  fetchObject: (storageKey: string, signal?: AbortSignal) => Promise<Buffer>;
+  signal?: AbortSignal;
+}): Promise<{ opencodeJson: string; attachments: RunWorkspaceFiles["attachments"] }> {
   const attachments: RunWorkspaceFiles["attachments"] = [];
   for (const attachment of input.plan.attachments) {
-    attachments.push({
-      path: attachmentWorkspacePath(attachment),
-      data: await input.fetchObject(attachment.storageKey, input.signal),
-    });
+    attachments.push({ path: attachmentWorkspacePath(attachment), data: await input.fetchObject(attachment.storageKey, input.signal) });
   }
-  return { opencodeJson: buildOpencodeJson({ model: input.plan.row.model }), skills, attachments };
+  return { opencodeJson: buildOpencodeJson({ model: input.plan.row.model }), attachments };
 }
 
 /** Fetch one prompt's attachment bytes outside a transaction for idempotent live-sandbox writes. */

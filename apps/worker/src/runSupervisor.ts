@@ -26,9 +26,12 @@ import {
   heartbeatRunJob,
   heartbeatRunPrompt,
   getRunPromptAttachments,
-  loadRunExecutionPlan,
   materializeRunAttachmentFiles,
-  materializeRunWorkspace,
+  getAdoptedRunPrewarm,
+  loadRunExecutionPlan,
+  loadRunMaterializationPlan,
+  materializeRunDynamicFiles,
+  materializeRunSkillBundles,
   persistRunTranscript,
   removeRunWorkerHeartbeat,
   RunBusyError,
@@ -54,6 +57,7 @@ import { boundedInteger, runWorkerConfig, type RunWorkerConfig } from "./config"
 import type { Supervisor } from "./billingSupervisor";
 import { createRunCleanupScheduler } from "./runCleanup";
 import { sweepRunAttachmentOrphans } from "./runAttachmentCleanup";
+import { createRunPrewarmScheduler } from "./prewarmSupervisor";
 
 const PROMPT_POLL_MS = 250;
 const ACL_RECHECK_MS = 15_000;
@@ -101,6 +105,12 @@ export function shouldHeartbeatRunLease(input: {
   finalizingCancellation: boolean;
 }): boolean {
   return !input.signalAborted || input.finalizingCancellation;
+}
+
+export function cancellationStateAfterStop(stopped: boolean): { retained: boolean; cleaned: boolean } {
+  // A missing deterministic name may still be an adopted fork that is not visible yet. Recording
+  // cleanup lets the prewarm reconciler destroy it as soon as the warming lease is released.
+  return stopped ? { retained: true, cleaned: false } : { retained: false, cleaned: true };
 }
 
 function abortFailure(signal: AbortSignal): Error {
@@ -1040,47 +1050,86 @@ async function processClaimedJob(input: {
       return;
     }
     await setPhase(job, actor, workerId, "resolve_inputs", { status: "starting", errorCode: null, userMessage: null });
-    const activePlan = await tenant(job, (database) =>
-      loadRunExecutionPlan({ actor, orgId: job.orgId, runId: job.runId, masterKey: ctx.masterKey, database }),
+    const materialPlan = await tenant(job, (database) =>
+      loadRunMaterializationPlan({ actor, orgId: job.orgId, runId: job.runId, database }),
     );
-    plan = activePlan;
-    redactor = createRunRedactor(activePlan.injectedLiterals);
-    const workspace = await withBoundedSignal({
+    const activeRef: SandboxRef = {
+      sandboxName: materialPlan.row.sandboxName!,
+      sandboxId: materialPlan.row.sandboxId,
+      region: ctx.region,
+      timeoutMs: materialPlan.row.timeoutMs,
+    };
+    ref = activeRef;
+    let sandbox: { sandboxId: string; domain: string } | null = null;
+    let skillsAlreadyWarm = false;
+    if (materialPlan.row.prewarmId) {
+      const waitDeadline = Date.now() + SANDBOX_CONTROL_TIMEOUT_MS;
+      while (Date.now() < waitDeadline && !jobAbort.signal.aborted) {
+        const warm = await tenant(job, (database) => getAdoptedRunPrewarm({
+          database,
+          orgId: job.orgId,
+          runId: job.runId,
+          prewarmId: materialPlan.row.prewarmId!,
+        }));
+        if (!warm) break;
+        if (warm.phase === "ready" && warm.status === "ready" && warm.sandboxId && warm.sandboxDomain) {
+          sandbox = { sandboxId: warm.sandboxId, domain: warm.sandboxDomain };
+          activeRef.sandboxId = warm.sandboxId;
+          skillsAlreadyWarm = true;
+          break;
+        }
+        if (warm.status === "failed" || warm.status === "canceled") break;
+        if (!warm.leaseExpiresAt || warm.leaseExpiresAt.getTime() <= Date.now()) break;
+        await sleep(PROMPT_POLL_MS, jobAbort.signal);
+      }
+    }
+
+    if (!skillsAlreadyWarm) {
+      const skills = await withBoundedSignal({
+        parent: jobAbort.signal,
+        timeoutMs: SANDBOX_CONTROL_TIMEOUT_MS,
+        timeoutMessage: "the run skill bundle download timed out",
+        operation: (signal) => materializeRunSkillBundles({ plan: materialPlan, fetchArchive: ctx.fetchArchive!, signal }),
+      });
+      await setPhase(job, actor, workerId, "fork");
+      sandbox = await withBoundedSignal({
+        parent: jobAbort.signal,
+        timeoutMs: SANDBOX_CONTROL_TIMEOUT_MS,
+        timeoutMessage: "the sandbox fork timed out",
+        operation: (signal) => ctx.runtime!.forkFromGolden({
+          ref: activeRef,
+          goldenSnapshotId: materialPlan.row.goldenSnapshotId!,
+          signal,
+        }),
+      });
+      activeRef.sandboxId = sandbox.sandboxId;
+      await setPhase(job, actor, workerId, "push_workspace", { sandboxId: sandbox.sandboxId, sandboxDomain: sandbox.domain });
+      await withBoundedSignal({
+        parent: jobAbort.signal,
+        timeoutMs: SANDBOX_CONTROL_TIMEOUT_MS,
+        timeoutMessage: "the sandbox skill upload timed out",
+        operation: (signal) => ctx.runtime!.pushSkillBundles({ ref: activeRef, skills, signal }),
+      });
+    } else {
+      await setPhase(job, actor, workerId, "push_workspace", { sandboxId: sandbox!.sandboxId, sandboxDomain: sandbox!.domain });
+    }
+    timeoutExtender.activate(activeRef);
+
+    const dynamicFiles = await withBoundedSignal({
       parent: jobAbort.signal,
       timeoutMs: SANDBOX_CONTROL_TIMEOUT_MS,
-      timeoutMessage: "the run workspace download timed out",
-      operation: (signal) => materializeRunWorkspace({
-        plan: activePlan,
-        fetchArchive: ctx.fetchArchive!,
+      timeoutMessage: "the run attachment download timed out",
+      operation: (signal) => materializeRunDynamicFiles({
+        plan: materialPlan,
         fetchObject: ctx.fetchObject!,
         signal,
       }),
     });
-    const activeRef = sandboxRef(activePlan, ctx);
-    ref = activeRef;
-
-    await setPhase(job, actor, workerId, "fork");
-    const sandbox = await withBoundedSignal({
-      parent: jobAbort.signal,
-      timeoutMs: SANDBOX_CONTROL_TIMEOUT_MS,
-      timeoutMessage: "the sandbox fork timed out",
-      operation: (signal) => ctx.runtime!.forkFromGolden({
-        ref: activeRef,
-        goldenSnapshotId: activePlan.row.goldenSnapshotId!,
-        signal,
-      }),
-    });
-    activeRef.sandboxId = sandbox.sandboxId;
-    timeoutExtender.activate(activeRef);
-    await setPhase(job, actor, workerId, "push_workspace", {
-      sandboxId: sandbox.sandboxId,
-      sandboxDomain: sandbox.domain,
-    });
     await withBoundedSignal({
       parent: jobAbort.signal,
       timeoutMs: SANDBOX_CONTROL_TIMEOUT_MS,
-      timeoutMessage: "the sandbox workspace upload timed out",
-      operation: (signal) => ctx.runtime!.pushWorkspace({ ref: activeRef, files: workspace, signal }),
+      timeoutMessage: "the sandbox run-file upload timed out",
+      operation: (signal) => ctx.runtime!.pushRunFiles({ ref: activeRef, files: dynamicFiles, signal }),
     });
 
     await setPhase(job, actor, workerId, "start_server");
@@ -1090,7 +1139,11 @@ async function processClaimedJob(input: {
     if (beforeSecretInjection.cancelRequestedAt || beforeSecretInjection.status === "canceled") {
       throw new CancellationRequested();
     }
-    await revalidatePinnedSecrets(job, actor, ctx.masterKey);
+    const activePlan = await tenant(job, (database) =>
+      loadRunExecutionPlan({ actor, orgId: job.orgId, runId: job.runId, masterKey: ctx.masterKey, database }),
+    );
+    plan = activePlan;
+    redactor = createRunRedactor(activePlan.injectedLiterals);
     const beforeServerStart = await readRunControl(job);
     if (beforeServerStart.cancelRequestedAt || beforeServerStart.status === "canceled") {
       throw new CancellationRequested();
@@ -1106,11 +1159,11 @@ async function processClaimedJob(input: {
       actor,
       ctx,
       ref: activeRef,
-      domain: sandbox.domain,
+      domain: sandbox!.domain,
       password: activePlan.serverPassword,
       shutdownSignal: jobAbort.signal,
     });
-    const chatTarget = { domain: sandbox.domain, password: activePlan.serverPassword };
+    const chatTarget = { domain: sandbox!.domain, password: activePlan.serverPassword };
     target = chatTarget;
 
     await setPhase(job, actor, workerId, "create_session");
@@ -1389,8 +1442,8 @@ async function processClaimedJob(input: {
           cleaned = await teardownSandbox(ctx.runtime!, ref);
         } else {
           try {
-            await ctx.runtime!.stop(ref, AbortSignal.timeout(SANDBOX_CONTROL_TIMEOUT_MS));
-            retained = true;
+            const stopped = await ctx.runtime!.stop(ref, AbortSignal.timeout(SANDBOX_CONTROL_TIMEOUT_MS));
+            ({ retained, cleaned } = cancellationStateAfterStop(stopped));
           } catch {
             cleaned = await teardownSandbox(ctx.runtime!, ref);
           }
@@ -1454,8 +1507,8 @@ async function processClaimedJob(input: {
           cleaned = await teardownSandbox(ctx.runtime!, ref);
         } else {
           try {
-            await ctx.runtime!.stop(ref, AbortSignal.timeout(SANDBOX_CONTROL_TIMEOUT_MS));
-            retained = true;
+            const stopped = await ctx.runtime!.stop(ref, AbortSignal.timeout(SANDBOX_CONTROL_TIMEOUT_MS));
+            ({ retained, cleaned } = cancellationStateAfterStop(stopped));
           } catch {
             cleaned = await teardownSandbox(ctx.runtime!, ref);
           }
@@ -1602,6 +1655,22 @@ export async function startRunSupervisor(): Promise<Supervisor | null> {
 
   await claim();
   const timer = setInterval(() => void claim(), config.claimIntervalMs);
+  const prewarmScheduler = createRunPrewarmScheduler({
+    workerId,
+    concurrency: config.prewarmConcurrency,
+    leaseSeconds: config.leaseSeconds,
+    ctx,
+    shutdownSignal: shutdown.signal,
+  });
+  const prewarmEnabled = !["false", "0"].includes(process.env.COMPANION_RUN_PREWARM_ENABLED?.trim().toLowerCase() ?? "");
+  const prewarmTick = async () => {
+    // Real run claims always get first look at the queue and use an independent concurrency budget.
+    await claim();
+    if (prewarmEnabled) await prewarmScheduler.run();
+    await prewarmScheduler.cleanup();
+  };
+  const prewarmTimer = setInterval(() => void prewarmTick().catch(() => undefined), config.claimIntervalMs);
+  void prewarmTick().catch(() => undefined);
   const cleanupScheduler = createRunCleanupScheduler({
     workerId,
     concurrency: config.concurrency,
@@ -1635,12 +1704,14 @@ export async function startRunSupervisor(): Promise<Supervisor | null> {
   return {
     async stop() {
       clearInterval(timer);
+      clearInterval(prewarmTimer);
       clearInterval(cleanupTimer);
       clearInterval(retentionTimer);
       clearInterval(readinessTimer);
       shutdown.abort();
       await removeRunWorkerHeartbeat({ workerId, database: db }).catch(() => undefined);
       await cleanupScheduler.stop();
+      await prewarmScheduler.stop();
       await Promise.allSettled(active.values());
       masterKey.fill(0);
     },

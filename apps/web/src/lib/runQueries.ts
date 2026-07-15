@@ -11,6 +11,8 @@ import type {
   RunInputSelection,
   RunOptions,
   RunPromptAccepted,
+  RunPrewarmResponse,
+  RunPrewarmTicket,
   SkillRunDetail,
   SkillRunsResponse,
   UpdateRunConfigurationInput,
@@ -95,6 +97,33 @@ export async function fetchRunOptions(slug: string): Promise<RunOptions> {
   return apiFetch<RunOptions>(`/v1/skills/${encodeURIComponent(slug)}/run-options`);
 }
 
+export async function startRunPrewarm(slug: string): Promise<RunPrewarmTicket | null> {
+  const response = await apiFetch<RunPrewarmResponse>(`/v1/skills/${encodeURIComponent(slug)}/run-prewarms`, {
+    method: "POST",
+  });
+  return response.prewarm;
+}
+
+export async function heartbeatRunPrewarm(id: string): Promise<void> {
+  try {
+    await apiFetch<RunPrewarmResponse>(`/v1/run-prewarms/${encodeURIComponent(id)}/heartbeat`, {
+      method: "POST",
+    });
+  } catch {
+    // A stale ticket is a harmless cold miss at launch. Keep it so a transient heartbeat failure
+    // does not prevent a later heartbeat or best-effort cancellation from reaching the server.
+  }
+}
+
+/** Best-effort abandonment signal; missed requests are covered by the 30-second client lease. */
+export function abandonRunPrewarm(id: string): void {
+  void fetch(`/v1/run-prewarms/${encodeURIComponent(id)}/cancel`, {
+    method: "POST",
+    credentials: "same-origin",
+    keepalive: true,
+  }).catch(() => undefined);
+}
+
 function unwrapConfiguration(value: RunConfiguration | { configuration: RunConfiguration }): RunConfiguration {
   return "configuration" in value ? value.configuration : value;
 }
@@ -137,8 +166,9 @@ export async function launchRun(
     skillVersionId: string;
     dependencyPins: RunDependencyPin[];
     inputs: RunInputSelection;
-    modelProviderConnectionId: string;
-    modelProviderCredentialVersion: number;
+    modelProviderConnectionId?: string;
+    modelProviderCredentialVersion?: number;
+    prewarmId?: string | null;
     runConfigId: string | null;
     files: File[];
     idempotencyKey: string;
@@ -150,8 +180,9 @@ export async function launchRun(
   form.set("skill_version_id", input.skillVersionId);
   form.set("dependency_pins", JSON.stringify(input.dependencyPins));
   form.set("inputs", JSON.stringify(input.inputs));
-  form.set("model_provider_connection_id", input.modelProviderConnectionId);
-  form.set("model_provider_credential_version", String(input.modelProviderCredentialVersion));
+  if (input.modelProviderConnectionId) form.set("model_provider_connection_id", input.modelProviderConnectionId);
+  if (input.modelProviderCredentialVersion) form.set("model_provider_credential_version", String(input.modelProviderCredentialVersion));
+  if (input.prewarmId) form.set("prewarm_id", input.prewarmId);
   if (input.runConfigId) form.set("run_config_id", input.runConfigId);
   for (const file of input.files) form.append("file", file, file.name);
   return apiFetch<SkillRunDetail>(`/v1/skills/${encodeURIComponent(slug)}/runs`, {

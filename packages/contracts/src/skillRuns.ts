@@ -56,6 +56,24 @@ const runErrorCodeSchema = z
 export const skillRunStatusSchema = z.enum(["queued", "starting", "running", "frozen", "error", "canceled"]);
 export type SkillRunStatus = z.infer<typeof skillRunStatusSchema>;
 
+export const runPrewarmStatusSchema = z.enum(["queued", "warming", "ready", "failed", "canceled"]);
+export type RunPrewarmStatus = z.infer<typeof runPrewarmStatusSchema>;
+
+/** Browser-visible handle only. Provider identities and domains never leave the control plane. */
+export const runPrewarmTicketSchema = z
+  .object({
+    id: runUuidSchema,
+    status: runPrewarmStatusSchema,
+    expires_at: z.string().datetime(),
+  })
+  .strict();
+export type RunPrewarmTicket = z.infer<typeof runPrewarmTicketSchema>;
+
+export const runPrewarmResponseSchema = z
+  .object({ prewarm: runPrewarmTicketSchema.nullable() })
+  .strict();
+export type RunPrewarmResponse = z.infer<typeof runPrewarmResponseSchema>;
+
 /** Fine-grained durable worker phase; status remains the stable user-facing lifecycle. */
 export const runPhaseSchema = z.enum([
   "queued",
@@ -612,8 +630,9 @@ export type RunPromptResponse = z.infer<typeof runPromptResponseSchema>;
 
 /**
  * Text fields of multipart `POST /v1/skills/:slug/runs`. Files arrive as repeated `file` parts.
- * `skill_version_id` makes stale launchers fail closed. Skill inputs and the exact dedicated
- * model-provider credential pin are authoritative; the server must not add a connection implicitly.
+ * `skill_version_id` makes stale launchers fail closed. Secret ids are authoritative references;
+ * their latest accessible versions and the current personal-then-workspace provider credential are
+ * resolved transactionally when the run is committed. Legacy provider observations remain optional.
  */
 export const launchRunFieldsSchema = z
   .object({
@@ -623,8 +642,9 @@ export const launchRunFieldsSchema = z
     /** Exact non-root closure displayed by run-options; stale pins reject the launch. */
     dependency_pins: runDependencyPinsJsonSchema,
     inputs: runInputSelectionJsonSchema,
-    model_provider_connection_id: runUuidSchema,
-    model_provider_credential_version: z.coerce.number().int().positive(),
+    model_provider_connection_id: runUuidSchema.optional(),
+    model_provider_credential_version: z.coerce.number().int().positive().optional(),
+    prewarm_id: runUuidSchema.optional(),
     /** Optional provenance only; the selected payload remains authoritative. */
     run_config_id: runUuidSchema.nullable().optional(),
   })

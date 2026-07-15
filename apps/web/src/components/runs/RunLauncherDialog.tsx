@@ -17,10 +17,13 @@ import {
   type VaultSecretReference,
 } from "../secrets/VaultSecretField";
 import {
+  abandonRunPrewarm,
   createRunConfiguration,
   deleteRunConfiguration,
   fetchRunOptions,
+  heartbeatRunPrewarm,
   launchRun,
+  startRunPrewarm,
   updateRunConfiguration,
 } from "@/lib/runQueries";
 import {
@@ -109,7 +112,17 @@ export function RunLauncherDialog({
   const skipUnmountStashRef = useRef(false);
   const explicitStashRef = useRef(false);
   const pendingUnmountRef = useRef<symbol | null>(null);
+  const prewarmIdRef = useRef<string | null>(null);
+  const prewarmStartRef = useRef<Promise<unknown> | null>(null);
+  const prewarmAdoptedRef = useRef(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const abandonPrewarm = () => {
+    const id = prewarmIdRef.current;
+    if (!id || prewarmAdoptedRef.current) return;
+    prewarmIdRef.current = null;
+    abandonRunPrewarm(id);
+  };
 
   // An ambiguous transport failure may be retried with the same key. Any draft change represents a
   // new authoritative payload and must get a fresh key instead of conflicting with that attempt.
@@ -117,7 +130,6 @@ export function RunLauncherDialog({
     prompt,
     model,
     inputs,
-    modelProviderCredential: options?.models.find((option) => option.model.id === model)?.provider_credential_pin ?? null,
     selectedConfigId,
     files: files.map((file) => [file.name, file.size, file.type, file.lastModified]),
     skillVersionId: options?.root.skill_version_id ?? null,
@@ -159,6 +171,33 @@ export function RunLauncherDialog({
       live = false;
     };
   }, [slug]);
+
+  useEffect(() => {
+    if (!prewarmStartRef.current) {
+      prewarmStartRef.current = startRunPrewarm(slug).then((prewarm) => {
+        if (!prewarm) return;
+        if (!mountedRef.current || prewarmAdoptedRef.current) {
+          abandonRunPrewarm(prewarm.id);
+          return;
+        }
+        prewarmIdRef.current = prewarm.id;
+      }).catch(() => undefined);
+    }
+  }, [slug]);
+
+  useEffect(() => {
+    const heartbeat = window.setInterval(() => {
+      const id = prewarmIdRef.current;
+      if (!id || prewarmAdoptedRef.current) return;
+      void heartbeatRunPrewarm(id);
+    }, 10_000);
+    const onPageHide = () => abandonPrewarm();
+    window.addEventListener("pagehide", onPageHide);
+    return () => {
+      window.clearInterval(heartbeat);
+      window.removeEventListener("pagehide", onPageHide);
+    };
+  }, []);
 
   const effectiveOptions = useMemo<RunOptions | null>(() => {
     if (!options || createdSecrets.length === 0) return options;
@@ -243,6 +282,7 @@ export function RunLauncherDialog({
         if (!skipUnmountStashRef.current && !explicitStashRef.current) {
           stashCallbackRef.current?.(stashGetterRef.current());
         }
+        abandonPrewarm();
       });
     };
   }, []);
@@ -251,12 +291,14 @@ export function RunLauncherDialog({
     if (operationBusy) return;
     explicitStashRef.current = true;
     onStashDraft?.(stashGetterRef.current());
+    abandonPrewarm();
     onClose();
   };
 
   const goManageModels = () => {
     explicitStashRef.current = true;
     onStashDraft?.(stashGetterRef.current());
+    abandonPrewarm();
     onClose();
     if (onOpenModelSettings) onOpenModelSettings();
     else router.push("/settings?view=models");
@@ -422,12 +464,17 @@ export function RunLauncherDialog({
       inputs: authoritativeInputs(effectiveOptions, inputs),
       modelProviderConnectionId: providerCredential.connection_id,
       modelProviderCredentialVersion: providerCredential.credential_version,
+      prewarmId: prewarmIdRef.current,
       runConfigId: selectedConfigId,
       files,
       idempotencyKey: requestKey,
     })
       .then((run) => {
         if (!mountedRef.current) return;
+        // An adopted ticket ignores cancellation server-side; a late or incompatible ticket is
+        // canceled immediately instead of waiting for its browser lease to expire.
+        abandonPrewarm();
+        prewarmAdoptedRef.current = true;
         skipUnmountStashRef.current = true;
         onLaunched(run);
       })

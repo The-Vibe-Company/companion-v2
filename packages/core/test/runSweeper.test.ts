@@ -14,6 +14,7 @@ function run(id: string, status: RunRow["status"], updatedAt = OLD): RunRow {
     orgId: ORG,
     skillId: "10000000-0000-0000-0000-000000000001",
     creatorId: "user-me",
+    prewarmId: null,
     skillVersionId: "20000000-0000-0000-0000-000000000001",
     skillVersion: "1.0.0",
     runConfigId: null,
@@ -78,7 +79,7 @@ function harness(rows: RunRow[], failed = new Set<string>()) {
   const destroyed: string[] = [];
   const runtime = {
     provider: "vercel",
-    stop: async () => undefined,
+    stop: async () => true,
     destroy: async (ref) => {
       destroyed.push(ref.sandboxName);
       if (failed.has(ref.sandboxName)) throw new Error("provider unavailable");

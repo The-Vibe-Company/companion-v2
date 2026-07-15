@@ -30,6 +30,9 @@ const serviceMocks = vi.hoisted(() => ({
   updateRunConfiguration: vi.fn(),
   deleteRunConfiguration: vi.fn(async () => undefined),
   createRun: vi.fn(),
+  createRunPrewarm: vi.fn(),
+  heartbeatRunPrewarm: vi.fn(),
+  cancelRunPrewarm: vi.fn(async () => undefined),
   listRuns: vi.fn(),
   getRun: vi.fn(),
   enqueueRunPrompt: vi.fn(),
@@ -98,9 +101,39 @@ function signIn(): void {
 beforeEach(() => {
   vi.clearAllMocks();
   authMocks.getSession.mockResolvedValue(null);
+  delete process.env.COMPANION_RUN_PREWARM_ENABLED;
 });
 
 describe("session-only RunSkill routes", () => {
+  it("creates, heartbeats and cancels creator-private prewarms without exposing provider state", async () => {
+    signIn();
+    const prewarm = {
+      id: "88888888-8888-4888-8888-888888888888",
+      status: "queued",
+      expires_at: "2026-07-15T10:05:00.000Z",
+    };
+    serviceMocks.createRunPrewarm.mockResolvedValue(prewarm);
+    serviceMocks.heartbeatRunPrewarm.mockResolvedValue({ ...prewarm, status: "warming" });
+
+    const created = await app.request("/v1/skills/demo/run-prewarms", { method: "POST" });
+    expect(created.status).toBe(202);
+    expect(await created.json()).toEqual({ prewarm });
+    const heartbeat = await app.request(`/v1/run-prewarms/${prewarm.id}/heartbeat`, { method: "POST" });
+    expect(JSON.stringify(await heartbeat.json())).not.toContain("sandbox");
+    expect((await app.request(`/v1/run-prewarms/${prewarm.id}/cancel`, { method: "POST" })).status).toBe(202);
+    expect(serviceMocks.cancelRunPrewarm).toHaveBeenCalledWith(expect.objectContaining({ prewarmId: prewarm.id }));
+  });
+
+  it("rejects PAT access before creating a prewarm", async () => {
+    serviceMocks.resolveApiToken.mockResolvedValue({ actor, orgId: "00000000-0000-4000-8000-000000000010", scopes: ["skills:read"] });
+    const response = await app.request("/v1/skills/demo/run-prewarms", {
+      method: "POST",
+      headers: { Authorization: "Bearer cmp_pat_test" },
+    });
+    expect(response.status).toBe(401);
+    expect(serviceMocks.createRunPrewarm).not.toHaveBeenCalled();
+  });
+
   it("returns caught-up run options without requiring Vercel credentials in the API", async () => {
     signIn();
     serviceMocks.getRunOptions.mockResolvedValue({ runtime: { available: true, message: null }, configurations: [] });
@@ -156,6 +189,7 @@ describe("session-only RunSkill routes", () => {
     form.set("inputs", JSON.stringify({ secrets: [], variables: [] }));
     form.set("model_provider_connection_id", providerConnectionId);
     form.set("model_provider_credential_version", "1");
+    form.set("prewarm_id", "88888888-8888-4888-8888-888888888888");
     form.set("run_config_id", configId);
 
     const missingKey = await app.request("/v1/skills/demo/runs", { method: "POST", body: form });
@@ -178,9 +212,34 @@ describe("session-only RunSkill routes", () => {
         inputs: { secrets: [], variables: [] },
         modelProviderConnectionId: providerConnectionId,
         modelProviderCredentialVersion: 1,
+        prewarmId: "88888888-8888-4888-8888-888888888888",
       }),
     );
     expect(catalogMocks.listModels).not.toHaveBeenCalled();
+  });
+
+  it("forces a cold launch when prewarming is disabled after a ticket was issued", async () => {
+    signIn();
+    process.env.COMPANION_RUN_PREWARM_ENABLED = "false";
+    serviceMocks.createRun.mockResolvedValue({ id: "run-cold", status: "queued" });
+    const form = new FormData();
+    form.set("prompt", "Run this skill");
+    form.set("model", "openai/gpt-5");
+    form.set("skill_version_id", skillVersionId);
+    form.set("dependency_pins", "[]");
+    form.set("inputs", JSON.stringify({ secrets: [], variables: [] }));
+    form.set("prewarm_id", "88888888-8888-4888-8888-888888888888");
+
+    const response = await app.request("/v1/skills/demo/runs", {
+      method: "POST",
+      headers: { "Idempotency-Key": "cold-launch-after-rollback" },
+      body: form,
+    });
+
+    expect(response.status).toBe(201);
+    expect(serviceMocks.createRun).toHaveBeenCalledWith(
+      expect.objectContaining({ prewarmId: undefined }),
+    );
   });
 
   it("retains a newly uploaded object after an ambiguous createRun failure", async () => {

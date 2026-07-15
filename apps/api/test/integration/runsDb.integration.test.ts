@@ -17,6 +17,9 @@ import postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   beginRunFreeze,
+  adoptRunPrewarm,
+  cancelRunPrewarm,
+  createRunPrewarm,
   claimNextRunPrompt,
   deferRunAttachmentOrphanReservation,
   deleteRunAttachmentOrphanIfReserved,
@@ -28,6 +31,8 @@ import {
   isRunWorkerReady,
   removeRunWorkerHeartbeat,
   reserveRunAttachmentUploads,
+  resolveRunDependencyClosure,
+  updateClaimedRunPrewarm,
 } from "@companion/core/services";
 import { db, withTenantContext } from "@companion/db";
 
@@ -45,6 +50,9 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
   const sharedSecretId = randomUUID();
   const configSecretSlotId = randomUUID();
   const providerConnectionId = randomUUID();
+  const prewarmId = randomUUID();
+  const adoptedCleanupPrewarmId = randomUUID();
+  const adoptedCleanupRunId = randomUUID();
   const runId = randomUUID();
   const terminalRunId = randomUUID();
   const cleanupRunId = randomUUID();
@@ -78,6 +86,8 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
         "skill_run_config_secrets",
         "skill_run_config_variables",
         "skill_runs",
+        "skill_run_prewarms",
+        "skill_run_prewarm_skills",
         "skill_run_skills",
         "skill_run_secret_inputs",
         "skill_run_model_provider_inputs",
@@ -173,6 +183,19 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
          ${`sha256:${"a".repeat(64)}`}, ${`${orgA}/run-test/1.0.0.tar.gz`}, ${owner.id})
     `;
     await sql`update skills set current_version_id = ${versionId}::uuid where id = ${skillId}::uuid`;
+    await sql`
+      insert into skill_run_prewarms
+        (id, org_id, skill_id, creator_id, skill_version_id, sandbox_name, golden_snapshot_id,
+         client_lease_expires_at, absolute_expires_at)
+      values
+        (${prewarmId}::uuid, ${orgA}::uuid, ${skillId}::uuid, ${owner.id}, ${versionId}::uuid,
+         ${`prewarm-${prewarmId}`}, 'golden-integration', now() + interval '30 seconds', now() + interval '5 minutes')
+    `;
+    await sql`
+      insert into skill_run_prewarm_skills
+        (org_id, prewarm_id, skill_id, skill_version_id, is_root, mount_order)
+      values (${orgA}::uuid, ${prewarmId}::uuid, ${skillId}::uuid, ${versionId}::uuid, true, 0)
+    `;
     await sql`
       insert into skill_run_configs (id, org_id, skill_id, creator_id, name, model)
       values (${configId}::uuid, ${orgA}::uuid, ${skillId}::uuid, ${owner.id}, 'Private config', 'openai/gpt-5')
@@ -406,6 +429,10 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
     await sql.unsafe(`grant execute on function companion_skill_run_attachment_worker_ready() to ${rlsRole}`);
     await sql.unsafe(`grant execute on function companion_skill_run_attachment_worker_ready(uuid, uuid, text) to ${rlsRole}`);
     await sql.unsafe(`grant execute on function companion_secret_usage_count(uuid, uuid) to ${rlsRole}`);
+    await sql.unsafe(`grant execute on function companion_claim_skill_run_prewarms(text, integer, integer) to ${rlsRole}`);
+    await sql.unsafe(`grant execute on function companion_claim_skill_run_prewarm_cleanups(text, integer, integer) to ${rlsRole}`);
+    await sql.unsafe(`grant execute on function companion_complete_skill_run_prewarm_cleanup(uuid, uuid, text) to ${rlsRole}`);
+    await sql.unsafe(`grant execute on function companion_purge_skill_run_prewarms(integer) to ${rlsRole}`);
   });
 
   afterAll(async () => {
@@ -424,6 +451,215 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
     expect(Object.values(await countsFor(orgB, outsider.id)).every((count) => count === 0)).toBe(true);
   });
 
+  it("claims a secretless prewarm once while preserving creator-only visibility", async () => {
+    const first = await sql.begin(async (tx) => {
+      await tx.unsafe(`set local role ${rlsRole}`);
+      return tx<{ id: string; status: string }[]>`
+        select id::text, status::text
+        from companion_claim_skill_run_prewarms('prewarm-worker', 1, 30)
+      `;
+    });
+    expect(first).toEqual([{ id: prewarmId, status: "warming" }]);
+
+    const second = await sql.begin(async (tx) => {
+      await tx.unsafe(`set local role ${rlsRole}`);
+      return tx<{ id: string }[]>`
+        select id::text from companion_claim_skill_run_prewarms('other-worker', 1, 30)
+      `;
+    });
+    expect(second).toEqual([]);
+    expect((await countsFor(orgA, admin.id)).skill_run_prewarms).toBe(0);
+
+    await withTenantContext({ orgId: orgA, userId: owner.id }, (database) => cancelRunPrewarm({
+      actor: { ...owner, name: "Run Owner" },
+      orgId: orgA,
+      prewarmId,
+      database,
+    }));
+    const cleanupDuringFork = await sql.begin(async (tx) => {
+      await tx.unsafe(`set local role ${rlsRole}`);
+      return tx<{ id: string }[]>`
+        select id::text from companion_claim_skill_run_prewarm_cleanups('cleanup-worker', 1, 30)
+      `;
+    });
+    expect(cleanupDuringFork).toEqual([]);
+    const promotedAfterCancel = await withTenantContext({ orgId: orgA, userId: owner.id }, (database) =>
+      updateClaimedRunPrewarm({
+        actor: { ...owner, name: "Run Owner" },
+        orgId: orgA,
+        prewarmId,
+        workerId: "prewarm-worker",
+        status: "ready",
+        phase: "ready",
+        complete: true,
+        database,
+      }),
+    );
+    expect(promotedAfterCancel).toBe(false);
+    expect((await sql<{ status: string }[]>`select status::text from skill_run_prewarms where id = ${prewarmId}::uuid`)[0]?.status).toBe("canceled");
+  });
+
+  it("reconciles an adopted sandbox that appears after early run cleanup", async () => {
+    await sql`
+      insert into skill_run_prewarms
+        (id, org_id, skill_id, creator_id, skill_version_id, status, phase, sandbox_name,
+         golden_snapshot_id, client_lease_expires_at, absolute_expires_at, adopted_run_id,
+         lease_owner, lease_expires_at)
+      values
+        (${adoptedCleanupPrewarmId}::uuid, ${orgA}::uuid, ${skillId}::uuid, ${owner.id},
+         ${versionId}::uuid, 'warming', 'fork', ${`prewarm-${adoptedCleanupPrewarmId}`},
+         'golden-integration', now() + interval '30 seconds', now() + interval '5 minutes',
+         ${adoptedCleanupRunId}::uuid, 'prewarm-race-worker', now() + interval '5 minutes')
+    `;
+    await sql`
+      insert into skill_runs
+        (id, org_id, skill_id, creator_id, prewarm_id, skill_version_id, skill_version,
+         idempotency_key, payload_hash, model, prompt, status, phase, sandbox_name, sandbox_cleaned_at)
+      values
+        (${adoptedCleanupRunId}::uuid, ${orgA}::uuid, ${skillId}::uuid, ${owner.id},
+         ${adoptedCleanupPrewarmId}::uuid, ${versionId}::uuid, '1.0.0',
+         'integration-adopted-cleanup', ${"7".repeat(64)}, 'openai/gpt-5', 'canceled during fork',
+         'canceled', 'complete', ${`prewarm-${adoptedCleanupPrewarmId}`}, now())
+    `;
+
+    const whileForking = await sql.begin(async (tx) => {
+      await tx.unsafe(`set local role ${rlsRole}`);
+      return tx<{ id: string }[]>`
+        select id::text from companion_claim_skill_run_prewarm_cleanups('race-cleanup-worker', 32, 30)
+      `;
+    });
+    expect(whileForking.map((row) => row.id)).not.toContain(adoptedCleanupPrewarmId);
+
+    await sql`
+      update skill_run_prewarms
+      set lease_owner = null, lease_expires_at = null
+      where id = ${adoptedCleanupPrewarmId}::uuid
+    `;
+    const afterFork = await sql.begin(async (tx) => {
+      await tx.unsafe(`set local role ${rlsRole}`);
+      return tx<{ id: string }[]>`
+        select id::text from companion_claim_skill_run_prewarm_cleanups('race-cleanup-worker', 32, 30)
+      `;
+    });
+    expect(afterFork.map((row) => row.id)).toContain(adoptedCleanupPrewarmId);
+
+    const completed = await sql.begin(async (tx) => {
+      await tx.unsafe(`set local role ${rlsRole}`);
+      return tx<{ completed: boolean }[]>`
+        select companion_complete_skill_run_prewarm_cleanup(
+          ${orgA}::uuid,
+          ${adoptedCleanupPrewarmId}::uuid,
+          'race-cleanup-worker'
+        ) as completed
+      `;
+    });
+    expect(completed[0]?.completed).toBe(true);
+    expect((await sql<{ cleaned: boolean }[]>`
+      select sandbox_cleaned_at is not null as cleaned
+      from skill_run_prewarms where id = ${adoptedCleanupPrewarmId}::uuid
+    `)[0]?.cleaned).toBe(true);
+  });
+
+  it("limits each creator to two live five-minute warm-ups", async () => {
+    const ctx = {
+      masterKey: Buffer.alloc(32),
+      goldenSnapshotId: "golden-integration",
+      opencodeVersion: null,
+      region: "iad1",
+      timeoutMs: 300_000,
+      resolveModelKeys: async () => null,
+      runtimeAvailable: true,
+      runtimeMessage: null,
+    };
+    const create = () => withTenantContext({ orgId: orgA, userId: owner.id }, (database) => createRunPrewarm({
+      actor: { ...owner, name: "Run Owner" },
+      orgId: orgA,
+      slug: `run-test-${suffix}`,
+      ctx,
+      database,
+    }));
+    const first = await create();
+    const second = await create();
+    expect(first).not.toBeNull();
+    expect(second).not.toBeNull();
+    expect(await create()).toBeNull();
+    expect(new Date(first!.expires_at).getTime() - Date.now()).toBeGreaterThan(299_000);
+    for (const id of [first!.id, second!.id]) {
+      await withTenantContext({ orgId: orgA, userId: owner.id }, (database) => cancelRunPrewarm({
+        actor: { ...owner, name: "Run Owner" }, orgId: orgA, prewarmId: id, database,
+      }));
+    }
+  });
+
+  it("lets adoption win cleanup exactly once", async () => {
+    const actor = { ...owner, name: "Run Owner" };
+    const ctx = {
+      masterKey: Buffer.alloc(32),
+      goldenSnapshotId: "golden-integration",
+      opencodeVersion: null,
+      region: "iad1",
+      timeoutMs: 300_000,
+      resolveModelKeys: async () => null,
+      runtimeAvailable: true,
+      runtimeMessage: null,
+    };
+    const warmup = await withTenantContext({ orgId: orgA, userId: owner.id }, (database) =>
+      createRunPrewarm({ actor, orgId: orgA, slug: `run-test-${suffix}`, ctx, database }),
+    );
+    expect(warmup).not.toBeNull();
+    const adoptedRunId = randomUUID();
+    const adopted = await withTenantContext({ orgId: orgA, userId: owner.id }, async (database) => {
+      const closure = await resolveRunDependencyClosure({
+        actor, orgId: orgA, slug: `run-test-${suffix}`, skillVersionId: versionId, database,
+      });
+      const incompatible = await adoptRunPrewarm({
+        database,
+        actor,
+        orgId: orgA,
+        runId: randomUUID(),
+        prewarmId: warmup!.id,
+        closure,
+        goldenSnapshotId: "replacement-golden",
+        timeoutMs: 300_000,
+      });
+      expect(incompatible).toBeNull();
+      return adoptRunPrewarm({
+        database,
+        actor,
+        orgId: orgA,
+        runId: adoptedRunId,
+        prewarmId: warmup!.id,
+        closure,
+        goldenSnapshotId: "golden-integration",
+        timeoutMs: 300_000,
+      });
+    });
+    expect(adopted?.id).toBe(warmup!.id);
+
+    await withTenantContext({ orgId: orgA, userId: owner.id }, (database) =>
+      cancelRunPrewarm({ actor, orgId: orgA, prewarmId: warmup!.id, database }),
+    );
+    const secondAdoption = await withTenantContext({ orgId: orgA, userId: owner.id }, async (database) => {
+      const closure = await resolveRunDependencyClosure({
+        actor, orgId: orgA, slug: `run-test-${suffix}`, skillVersionId: versionId, database,
+      });
+      return adoptRunPrewarm({
+        database,
+        actor,
+        orgId: orgA,
+        runId: randomUUID(),
+        prewarmId: warmup!.id,
+        closure,
+        goldenSnapshotId: "golden-integration",
+        timeoutMs: 300_000,
+      });
+    });
+    expect(secondAdoption).toBeNull();
+    expect((await sql<{ adoptedRunId: string; status: string }[]>`
+      select adopted_run_id::text as "adoptedRunId", status::text from skill_run_prewarms where id = ${warmup!.id}::uuid
+    `)[0]).toEqual({ adoptedRunId, status: "queued" });
+  });
+
   it("does not treat caller-controlled worker GUCs as an RLS authority", async () => {
     const result = await sql.begin(async (tx) => {
       await tx.unsafe(`set local role ${rlsRole}`);
@@ -434,9 +670,16 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
       `;
       await tx`select set_config('app.run_worker', 'claim', true)`;
       const jobs = await tx<{ count: number }[]>`select count(*)::int as count from skill_run_jobs`;
-      return { runs: runs[0]?.count ?? -1, jobs: jobs[0]?.count ?? -1, deleted: deleted.length };
+      await tx`select set_config('app.run_prewarm_worker', 'internal', true)`;
+      const prewarms = await tx<{ count: number }[]>`select count(*)::int as count from skill_run_prewarms`;
+      return {
+        runs: runs[0]?.count ?? -1,
+        jobs: jobs[0]?.count ?? -1,
+        prewarms: prewarms[0]?.count ?? -1,
+        deleted: deleted.length,
+      };
     });
-    expect(result).toEqual({ runs: 0, jobs: 0, deleted: 0 });
+    expect(result).toEqual({ runs: 0, jobs: 0, prewarms: 0, deleted: 0 });
   });
 
   it("keeps model-provider credentials outside Secrets while counting saved-configuration usage", async () => {

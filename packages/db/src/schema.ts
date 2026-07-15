@@ -1005,6 +1005,81 @@ export const skillRunPromptStatusEnum = pgEnum("skill_run_prompt_status", [
   "error",
   "canceled",
 ]);
+export const skillRunPrewarmStatusEnum = pgEnum("skill_run_prewarm_status", [
+  "queued",
+  "warming",
+  "ready",
+  "failed",
+  "canceled",
+]);
+export const skillRunPrewarmPhaseEnum = pgEnum("skill_run_prewarm_phase", [
+  "queued",
+  "fork",
+  "push_skills",
+  "ready",
+  "cleanup",
+  "complete",
+]);
+
+/**
+ * Secretless, creator-private sandbox prepared while the Run Skill launcher is open. It owns only
+ * skill-version pins and provider lifecycle state; a committed run atomically adopts it.
+ */
+export const skillRunPrewarms = pgTable(
+  "skill_run_prewarms",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+    skillId: uuid("skill_id").notNull(),
+    creatorId: text("creator_id").notNull().references(() => user.id, { onDelete: "cascade" }),
+    skillVersionId: uuid("skill_version_id").notNull(),
+    status: skillRunPrewarmStatusEnum("status").notNull().default("queued"),
+    phase: skillRunPrewarmPhaseEnum("phase").notNull().default("queued"),
+    sandboxName: text("sandbox_name").notNull(),
+    sandboxId: text("sandbox_id"),
+    sandboxDomain: text("sandbox_domain"),
+    goldenSnapshotId: text("golden_snapshot_id").notNull(),
+    timeoutMs: integer("timeout_ms").notNull().default(300000),
+    clientLeaseExpiresAt: timestamp("client_lease_expires_at", { withTimezone: true }).notNull(),
+    absoluteExpiresAt: timestamp("absolute_expires_at", { withTimezone: true }).notNull(),
+    adoptedRunId: uuid("adopted_run_id"),
+    availableAt: timestamp("available_at", { withTimezone: true }).notNull().defaultNow(),
+    attempt: integer("attempt").notNull().default(0),
+    maxAttempts: integer("max_attempts").notNull().default(3),
+    leaseOwner: text("lease_owner"),
+    leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
+    heartbeatAt: timestamp("heartbeat_at", { withTimezone: true }),
+    errorCode: text("error_code"),
+    sandboxCleanedAt: timestamp("sandbox_cleaned_at", { withTimezone: true }),
+    cleanupLeaseOwner: text("cleanup_lease_owner"),
+    cleanupLeaseExpiresAt: timestamp("cleanup_lease_expires_at", { withTimezone: true }),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    uniqueOrgId: unique("skill_run_prewarms_org_id_id_uq").on(t.orgId, t.id),
+    skillFk: foreignKey({
+      columns: [t.orgId, t.skillId],
+      foreignColumns: [skills.orgId, skills.id],
+      name: "skill_run_prewarms_skill_org_fk",
+    }).onDelete("cascade"),
+    skillVersionFk: foreignKey({
+      columns: [t.orgId, t.skillId, t.skillVersionId],
+      foreignColumns: [skillVersions.orgId, skillVersions.skillId, skillVersions.id],
+      name: "skill_run_prewarms_version_org_fk",
+    }).onDelete("cascade"),
+    byClaim: index("skill_run_prewarms_claim_idx").on(t.status, t.availableAt, t.leaseExpiresAt),
+    byCleanup: index("skill_run_prewarms_cleanup_idx").on(t.status, t.clientLeaseExpiresAt, t.absoluteExpiresAt),
+    quota: index("skill_run_prewarms_quota_idx").on(t.orgId, t.creatorId, t.createdAt),
+    uniqueAdoptedRun: uniqueIndex("skill_run_prewarms_adopted_run_uq")
+      .on(t.adoptedRunId)
+      .where(sql`${t.adoptedRunId} IS NOT NULL`),
+    timeoutCheck: check("skill_run_prewarms_timeout_check", sql`${t.timeoutMs} BETWEEN 10000 AND 3600000`),
+    attemptCheck: check("skill_run_prewarms_attempt_check", sql`${t.attempt} >= 0 AND ${t.maxAttempts} BETWEEN 1 AND 10`),
+    leaseCheck: check("skill_run_prewarms_lease_check", sql`(${t.leaseOwner} IS NULL) = (${t.leaseExpiresAt} IS NULL)`),
+    cleanupLeaseCheck: check("skill_run_prewarms_cleanup_lease_check", sql`(${t.cleanupLeaseOwner} IS NULL) = (${t.cleanupLeaseExpiresAt} IS NULL)`),
+  }),
+);
 
 /**
  * Structural mirror of the contracts `RunChatHistoryItem` (db stays contracts-free). The transcript
@@ -1049,6 +1124,7 @@ export const skillRuns = pgTable(
     creatorId: text("creator_id")
       .notNull()
       .references(() => user.id, { onDelete: "cascade" }),
+    prewarmId: uuid("prewarm_id").references(() => skillRunPrewarms.id, { onDelete: "set null" }),
     /** Exact root version and its display snapshot at launch. */
     skillVersionId: uuid("skill_version_id").notNull(),
     skillVersion: text("skill_version").notNull(),
@@ -1107,6 +1183,9 @@ export const skillRuns = pgTable(
       t.skillId,
       t.idempotencyKey,
     ),
+    uniquePrewarm: uniqueIndex("skill_runs_prewarm_uq")
+      .on(t.prewarmId)
+      .where(sql`${t.prewarmId} IS NOT NULL`),
     skillFk: foreignKey({
       columns: [t.orgId, t.skillId],
       foreignColumns: [skills.orgId, skills.id],
@@ -1151,6 +1230,35 @@ export const skillRuns = pgTable(
       sql`char_length(${t.idempotencyKey}) BETWEEN 8 AND 200`,
     ),
     payloadHashCheck: check("skill_runs_payload_hash_check", sql`char_length(${t.payloadHash}) BETWEEN 32 AND 128`),
+  }),
+);
+
+/** Immutable root + dependency versions loaded into a secretless prewarm sandbox. */
+export const skillRunPrewarmSkills = pgTable(
+  "skill_run_prewarm_skills",
+  {
+    orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+    prewarmId: uuid("prewarm_id").notNull(),
+    skillId: uuid("skill_id").notNull(),
+    skillVersionId: uuid("skill_version_id").notNull(),
+    isRoot: boolean("is_root").notNull().default(false),
+    mountOrder: integer("mount_order").notNull(),
+    createdAt: now(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.orgId, t.prewarmId, t.skillId] }),
+    uniqueMountOrder: unique("skill_run_prewarm_skills_mount_order_uq").on(t.orgId, t.prewarmId, t.mountOrder),
+    prewarmFk: foreignKey({
+      columns: [t.orgId, t.prewarmId],
+      foreignColumns: [skillRunPrewarms.orgId, skillRunPrewarms.id],
+      name: "skill_run_prewarm_skills_prewarm_org_fk",
+    }).onDelete("cascade"),
+    versionFk: foreignKey({
+      columns: [t.orgId, t.skillId, t.skillVersionId],
+      foreignColumns: [skillVersions.orgId, skillVersions.skillId, skillVersions.id],
+      name: "skill_run_prewarm_skills_version_org_fk",
+    }).onDelete("cascade"),
+    mountOrderCheck: check("skill_run_prewarm_skills_mount_order_check", sql`${t.mountOrder} >= 0`),
   }),
 );
 

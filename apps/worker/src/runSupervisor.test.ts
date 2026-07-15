@@ -3,6 +3,7 @@ import { RunRuntimeError, type RunSandboxRuntime, type SandboxRef } from "@compa
 import { RunBusyError, RunValidationError } from "@companion/core/services";
 import {
   abortConversationForRetention,
+  cancellationStateAfterStop,
   claimedRunLeaseDeadline,
   assertRetainedConversationAvailable,
   createSandboxTimeoutExtender,
@@ -101,6 +102,13 @@ describe("cancellation lease finalization", () => {
     expect(shouldHeartbeatRunLease({ signalAborted: false, finalizingCancellation: false })).toBe(true);
     expect(shouldHeartbeatRunLease({ signalAborted: true, finalizingCancellation: false })).toBe(false);
     expect(shouldHeartbeatRunLease({ signalAborted: true, finalizingCancellation: true })).toBe(true);
+  });
+});
+
+describe("cancellation sandbox settlement", () => {
+  it("retains an existing stop but leaves cleanup owed when the sandbox name is still missing", () => {
+    expect(cancellationStateAfterStop(true)).toEqual({ retained: true, cleaned: false });
+    expect(cancellationStateAfterStop(false)).toEqual({ retained: false, cleaned: true });
   });
 });
 

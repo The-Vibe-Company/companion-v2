@@ -23,6 +23,7 @@ const dependencyVersionId = "2bc55a52-3320-47cd-aa66-9859cda981ed";
 const slotId = "df80d275-30c9-5f0d-9a46-d77e6fca8448";
 const secretId = "a57b0803-6afb-47d0-a307-e8fb80c56511";
 const providerConnectionId = "f7a3b3fa-2d55-4c59-bf70-6cf2048df48f";
+const prewarmId = "3d1bd9d5-fc67-4b5d-93da-b1ece6ca90be";
 
 describe("skill run contracts", () => {
   it("exposes the complete public lifecycle", () => {
@@ -96,6 +97,20 @@ describe("skill run contracts", () => {
         inputs: "{}",
       }),
     ).toThrow(/duplicate dependency pin/);
+  });
+
+  it("accepts a prewarm ticket without treating legacy provider pins as required authority", () => {
+    const parsed = launchRunFieldsSchema.parse({
+      prompt: "Summarize this",
+      model: "anthropic/claude-sonnet-4",
+      skill_version_id: versionId,
+      dependency_pins: "[]",
+      inputs: "{}",
+      prewarm_id: prewarmId,
+    });
+    expect(parsed.prewarm_id).toBe(prewarmId);
+    expect(parsed.model_provider_connection_id).toBeUndefined();
+    expect(parsed.model_provider_credential_version).toBeUndefined();
   });
 
   it("validates create/update configuration payloads and optimistic revisions", () => {

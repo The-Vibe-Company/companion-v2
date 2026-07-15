@@ -596,8 +596,12 @@ content; only the sandbox does.
   bytes after cleanup instead of losing a committed file. The sweep starts from aged reservation
   rows, so even a failed S3 creation remains reachable for cleanup. Multipart follow-ups also run an
   ownership/status/quota/protocol preflight before uploading bytes.
-- Migration `0034_skill_runs.sql` creates these tables and forces creator-only RLS on runs,
-  configurations, snapshots, prompts, events, and attachments. Child policies derive the
+- `skill_run_prewarms` and `skill_run_prewarm_skills` hold creator-private, secretless launcher
+  warm-ups. They pin only the root/dependency versions and sandbox lifecycle state; they never join
+  the Sessions query. A run may atomically adopt one through nullable `skill_runs.prewarm_id`.
+- Migration `0034_skill_runs.sql` creates the durable run tables; `0039_run_prewarms.sql` adds the
+  private warm-up lifecycle. Both force creator-only RLS on runs, warm-ups, configurations,
+  snapshots, prompts, events, and attachments. Child policies derive the
   creator through their parent run/configuration; admins receive no override. The only cross-tenant
   queue operations are narrow internal `SECURITY DEFINER` functions using `FOR UPDATE SKIP LOCKED`
   and exact unexpired lease identities; claimed work then runs under the recorded tenant and creator
@@ -628,6 +632,29 @@ after expiry, Companion persists the transcript and the metadata/bytes of files 
 
 ### Launch pipeline + recorder
 
+Opening the launcher creates a best-effort warm-up in parallel with run-options. The worker forks
+the golden snapshot and uploads only immutable skill bundles: it does not create an OpenCode server,
+password, provider credential, generic secret input, variable, prompt, attachment, event, audit row,
+or public run. The browser heartbeats every 10 seconds; the client lease expires after 30 seconds,
+the absolute lifetime is five minutes, and at most two active warm-ups exist per creator. Explicit
+launcher close/navigation requests durable cleanup, while the lease covers crashes and lost beacons.
+
+At launch, the transaction locks selected secret parents in stable id order and serializes provider
+connection changes per org/provider. It resolves every selected secret id and the effective
+personal-then-workspace model credential to their latest accessible immutable versions. Those exact
+versions become the run snapshot; launcher-observed provider versions are backward-compatible hints,
+not authority. Idempotent replay hashes the selected references, not mutable resolved versions.
+
+A compatible live warm-up is adopted under the same transaction lock. A ready adoption skips fork
+and skill upload; an in-flight adoption waits for its lease or resumes idempotently with the same
+sandbox name. If an early run teardown observes no sandbox while an adopted fork is still in flight,
+the prewarm cleanup waits for that lease to end and reconciles the deterministic sandbox name after
+the terminal run records its cleanup. Only after static preparation does the worker decrypt the
+committed pins, upload the dynamic OpenCode config/attachments, and pass plaintext through
+`startServer` environment variables.
+The environment is cleared after redactor creation/server start. Rotations before commit are used;
+rotations after commit do not change the run, while ACL loss before injection fails closed.
+
 `getRunOptions` returns the complete ordered set of root/dependency version and edge pins. `createRun`
 requires the client to echo that exact set and compares it under the same transaction locks that
 create the immutable snapshots. It never silently upgrades a dependency between launcher render and
@@ -649,10 +676,10 @@ cancellation, membership loss, or lease loss. S3, sandbox control, OpenCode requ
 recorder-connect calls all carry cancellation signals and strict time budgets. Each
 external step has persisted before/after progress:
 
-1. revalidate snapshot access and decrypt exact secret versions;
-2. get or fork the deterministic sandbox;
-3. push root, dependencies, uniquely named initial attachments, and `opencode.json`;
-4. start and health-check OpenCode with the exact environment;
+1. revalidate run ownership and load only non-sensitive materialization snapshots;
+2. adopt a compatible warm-up or get/fork the deterministic sandbox;
+3. push any missing skill bundles, then uniquely named initial attachments and `opencode.json`;
+4. decrypt the click-time pins, then start and health-check OpenCode with the exact environment;
 
 For each follow-up, the worker fetches only that prompt's attachment objects and idempotently writes
 them into the live sandbox before checking/sending its deterministic OpenCode message. A retry may
@@ -819,15 +846,17 @@ Environment: `VERCEL_TOKEN`, `VERCEL_TEAM_ID`, `VERCEL_PROJECT_ID`,
 `COMPANION_GOLDEN_SNAPSHOT_ID`, `OPENCODE_VERSION` (pin, e.g. `1.17.13`),
 `COMPANION_SECRETS_MASTER_KEY` (the same base64 32-byte root used with distinct AAD domains for the
 vault, dedicated provider credentials, and opaque internal run credentials),
-`COMPANION_RUNS_ENABLED`, `COMPANION_SANDBOX_REGION`,
-`COMPANION_SANDBOX_TIMEOUT_MS` (default `300000`), `COMPANION_RUN_CONCURRENCY`,
+`COMPANION_RUNS_ENABLED`, `COMPANION_RUN_PREWARM_ENABLED` (defaults on with RunSkill),
+`COMPANION_SANDBOX_REGION`, `COMPANION_SANDBOX_TIMEOUT_MS` (default `300000`),
+`COMPANION_RUN_CONCURRENCY`, `COMPANION_RUN_PREWARM_CONCURRENCY`,
 `COMPANION_RUN_CLAIM_INTERVAL_MS`, `COMPANION_RUN_LEASE_SECONDS`,
 `COMPANION_RUN_HEARTBEAT_MS`, `COMPANION_RUN_INACTIVITY_MS`, bounded recorder reconnect settings,
 `COMPANION_RUN_EVENT_RETENTION_INTERVAL_MS`, `COMPANION_RUN_SWEEP_INTERVAL_MS`, S3 settings for
 attachments/packages. Event retention itself is
 fixed at 24 hours after terminal state. The worker receives these settings. Keep the feature flag off
 when Vercel/golden configuration is absent; only RunSkill is disabled, while API, web, billing,
-provider settings, and vault still run.
+provider settings, and vault still run. Disabling prewarming also prevents adoption of tickets issued
+before the flag changed, so every run not yet committed immediately returns to the cold path.
 
 Production API and worker processes connect through `DATABASE_URL` using a dedicated login with
 `NOSUPERUSER`, `NOBYPASSRLS`, no table ownership, and no membership in the migration-owner role.
