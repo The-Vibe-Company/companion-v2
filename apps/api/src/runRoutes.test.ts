@@ -238,6 +238,7 @@ describe("session-only RunSkill routes", () => {
       messageId: "msg_123456789012abcdefghijklmn",
       status: "queued",
       attachments: [],
+      reactivated: true,
     });
     serviceMocks.requestRunCancellation.mockResolvedValue({ status: "running", requested: true });
     const prompt = await app.request("/v1/runs/run-1/prompt", {
@@ -251,9 +252,10 @@ describe("session-only RunSkill routes", () => {
       prompt_id: promptId,
       message_id: "msg_123456789012abcdefghijklmn",
       attachments: [],
+      reactivated: true,
     });
     expect(serviceMocks.enqueueRunPrompt).toHaveBeenCalledWith(
-      expect.objectContaining({ text: "Continue", attachments: [] }),
+      expect.objectContaining({ text: "Continue", attachments: [], reactivationAvailable: true }),
     );
 
     const canceled = await app.request("/v1/runs/run-1/cancel", { method: "POST" });

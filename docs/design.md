@@ -570,8 +570,10 @@ content; only the sandbox does.
 - `skill_runs` stores the creator, root skill/version snapshot, model, prompt, optional configuration
   name snapshot, idempotency key and payload hash, typed status/phase/error fields, deterministic
   sandbox/session identity, opaque-encrypted internal server password, final transcript with its
-  folded event cursor, and a bounded redacted warning snapshot that survives event retention. Public
-  lifecycle is `queued → starting → running → frozen | error | canceled`.
+  folded event cursor, a monotonic activation revision, a bounded reactivation deadline, and a
+  redacted warning snapshot that survives event retention. Public lifecycle is
+  `queued → starting → running → frozen | error | canceled`, with creator-triggered
+  `frozen | canceled → queued` while the retained sandbox is still eligible.
 - `skill_run_skills`, `skill_run_secret_inputs`, `skill_run_model_provider_inputs`, and
   `skill_run_variable_inputs` are immutable input snapshots. Generic secret inputs contain vault
   references and exact versions only, with provenance `skill` or `runtime`. The model-provider row
@@ -589,8 +591,8 @@ content; only the sandbox does.
   bytes are retained for at least 24 hours. `skill_run_attachment_uploads` reserves each deterministic
   key before S3 I/O; prompt commits consume the reservation under row lock, while the age-gated worker
   sweep holds that same lock through S3 deletion. A concurrent retry therefore waits and recreates
-  bytes after cleanup instead of losing a committed file. The running sweeper carries its S3 page cursor so
-  referenced early pages cannot starve later orphans. Multipart follow-ups also run an
+  bytes after cleanup instead of losing a committed file. The sweep starts from aged reservation
+  rows, so even a failed S3 creation remains reachable for cleanup. Multipart follow-ups also run an
   ownership/status/quota/protocol preflight before uploading bytes.
 - Migration `0034_skill_runs.sql` creates these tables and forces creator-only RLS on runs,
   configurations, snapshots, prompts, events, and attachments. Child policies derive the
@@ -599,23 +601,28 @@ content; only the sandbox does.
   and exact unexpired lease identities; claimed work then runs under the recorded tenant and creator
   context. Caller-controlled GUCs are not authority: policies additionally require the table-owner
   execution identity used only inside those functions.
-- Migration `0037_skill_run_prompt_attachments.sql` separates visible prompt text from runtime text,
+- Migration `0038_skill_run_prompt_attachments.sql` separates visible prompt text from runtime text,
   links every attachment to its prompt, and backfills existing launch attachments to ordinal `0`.
   Legacy-write triggers keep old API replicas compatible during rollout: omitted initial
   `user_text` is recovered from the parent run's raw prompt (follow-ups use their prompt), while the
   old attachment-before-prompt insert order is linked by a deferred constraint trigger at commit.
   Job claiming is protocol-aware: once a follow-up with files is pending, only a live protocol-1
   worker can claim or reclaim that run during a rolling deployment.
+- Migration `0037_reactivate_runs.sql` adds the seven-day reactivation window and activation
+  revision, permits multiple queued prompts while retaining one processing prompt, and delays
+  terminal cleanup claims until a retained frozen/canceled sandbox expires.
 - `user_model_preferences` / `org_model_preferences` (mig 0036) — the ACTIVATED-model lists (see
   "Activated models" below): a jsonb array of `provider/model-id` refs per member (PK
   `org_id+user_id`, user-scoped RLS) and per workspace (PK `org_id`, tenant RLS, nullable
   `created_by` so `db:seed` can seed it).
 
 Live events are retained for 24 hours after a terminal state and then removed; the transcript remains
-the durable history. Runs do not wake after freeze. A retry resumes durable orchestration for the same
-run and deterministic external identities; it does not create another run, sandbox, session, or
-prompt. Files created by sandbox code are discarded with the sandbox; Companion persists only the
-transcript and the metadata/bytes of files the user attached in any message.
+the durable history and its folded cursor remains the lower bound for future event sequences. Frozen
+and canceled runs retain their stopped named sandbox for seven days. Sending a new prompt during that
+window atomically requeues the same run and resumes the same OpenCode session; a missing retained
+session fails closed rather than silently losing context. Each later freeze/cancel starts a fresh
+seven-day window. Files created by sandbox code survive within the retained sandbox until cleanup;
+after expiry, Companion persists the transcript and the metadata/bytes of files the user attached in any message.
 
 ### Launch pipeline + recorder
 
@@ -654,7 +661,8 @@ turns during a rolling deployment but cannot dispatch attachment-path prompts.
 5. establish the recorder, then find or create the deterministic session;
 6. send the persisted initial/follow-up prompt with its deterministic `messageID`;
 7. batch redacted events and snapshot the transcript;
-8. freeze after inactivity, then stop and destroy the sandbox idempotently.
+8. freeze after inactivity, stop the named sandbox for bounded reactivation, then destroy it
+   idempotently after the seven-day deadline.
 
 Runtime/network calls never occur inside a database transaction. On worker replacement, an expired
 lease resumes the same sandbox/session/message instead of duplicating them. A transient recorder
@@ -666,11 +674,13 @@ it does not destroy active sandboxes.
 
 ### Sandbox cleanup
 
-A terminal run's transcript is persisted before teardown. Stop and destroy are
-idempotent; provider failures keep cleanup owed for a later worker attempt. Cancellation is also a
-durable command: a queued run becomes `canceled` without a sandbox, while an active run takes a final
-snapshot and then tears down. The event-retention sweeper, age-gated run-attachment orphan sweep,
-and sandbox-cleanup work live in the runs supervisor, not the API.
+A terminal run's transcript is persisted before suspension or teardown. Frozen/canceled runs stop
+without destroying their named sandbox, remain creator-reactivatable for seven days, and are excluded
+from cleanup claims until that deadline. Cancellation aborts the active OpenCode turn before the
+final snapshot so a later resume starts from a stable context. Error runs and revoked memberships
+still destroy immediately; provider failures keep cleanup owed for a later worker attempt. The
+event-retention sweeper, age-gated run-attachment orphan sweep, and sandbox-cleanup work live in the
+runs supervisor, not the API.
 
 ### Privacy
 
@@ -682,7 +692,9 @@ Any member may RUN any skill they can see; running confers no visibility into ot
 ### Chat proxy
 
 The browser never sees the sandbox. A follow-up route inserts one durable outbox row and returns
-`202`; a concurrent pending prompt returns `409`. `GET /v1/runs/:id/events` first replays persisted
+`202`; for an eligible frozen/canceled run the same transaction also increments the activation
+revision and requeues its orchestration job. A concurrent pending prompt returns `409`.
+`GET /v1/runs/:id/events` first replays persisted
 rows strictly after `Last-Event-ID`, then switches to PostgreSQL `LISTEN/NOTIFY` without a race. The
 notification contains only run id and sequence, and every SSE frame has a real `id:`. Reconnect uses
 the last accepted sequence and transcript snapshots reconcile whenever `transcript_updated_at`
@@ -790,8 +802,7 @@ tokens, the bundled Companion skill's API surface is unchanged.
 
 ### Non-goals (v1)
 
-Wake/resume of frozen runs, arbitrary undeclared variables, organization-shared configurations,
-fan-out, and golden-snapshot management UI
+Arbitrary undeclared variables, organization-shared configurations, fan-out, and golden-snapshot management UI
 (`COMPANION_GOLDEN_SNAPSHOT_ID` is the single golden) remain out of scope.
 Real-sandbox verification lives in `pnpm --filter @companion/sandbox smoke:vercel` (cred-gated,
 not CI).

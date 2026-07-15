@@ -12,7 +12,7 @@ import {
 /**
  * The Vercel Sandbox implementation of the {@link RunSandboxRuntime} port. One skill run = one
  * named sandbox booted fresh from the golden snapshot (OpenCode + python3 pre-installed). Runs
- * never wake: when the sandbox stops (freeze or timeout), the run becomes a read-only transcript.
+ * Named sandboxes may be stopped and resumed for the bounded run-reactivation window.
  */
 
 const WORKDIR = "/vercel/sandbox";
@@ -202,8 +202,11 @@ export function createVercelRuntime(config: VercelRuntimeConfig): RunSandboxRunt
       try {
         const sandbox = await Sandbox.get({ ...credentials, name: ref.sandboxName, resume: false, signal });
         await sandbox.stop({ signal });
-      } catch {
-        // Already stopped or gone — freeze is idempotent.
+      } catch (error) {
+        // Already stopped or gone is idempotent. Provider outages must remain visible so the
+        // worker does not claim a resumable terminal state while code may still be running.
+        if (error instanceof APIError && (error.response.status === 404 || error.response.status === 410)) return;
+        throw error;
       }
     },
 

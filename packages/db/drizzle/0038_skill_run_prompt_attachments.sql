@@ -133,6 +133,20 @@ AS $$
   )
 $$;--> statement-breakpoint
 REVOKE ALL ON FUNCTION companion_skill_run_attachment_worker_ready(uuid, uuid, text) FROM PUBLIC;--> statement-breakpoint
+CREATE FUNCTION companion_skill_run_attachment_worker_ready()
+RETURNS boolean
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+  SELECT EXISTS (
+    SELECT 1
+    FROM public."skill_run_worker_heartbeats" h
+    WHERE h."expires_at" > clock_timestamp()
+      AND h."attachment_prompt_protocol" >= 1
+  )
+$$;--> statement-breakpoint
+REVOKE ALL ON FUNCTION companion_skill_run_attachment_worker_ready() FROM PUBLIC;--> statement-breakpoint
 
 -- A rolling protocol-0 worker must not reclaim a job after a protocol-1 worker accepted files.
 CREATE OR REPLACE FUNCTION companion_claim_skill_run_jobs(p_worker_id text, p_limit integer DEFAULT 1, p_lease_seconds integer DEFAULT 30)
@@ -244,3 +258,17 @@ AS $$
   DELETE FROM public."skill_run_attachment_uploads" WHERE "storage_key" = p_storage_key
 $$;--> statement-breakpoint
 REVOKE ALL ON FUNCTION companion_complete_skill_run_attachment_orphan(text) FROM PUBLIC;
+--> statement-breakpoint
+CREATE FUNCTION companion_list_skill_run_attachment_orphans(p_before timestamp with time zone, p_limit integer)
+RETURNS TABLE (storage_key text)
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+  SELECT u."storage_key"
+  FROM public."skill_run_attachment_uploads" u
+  WHERE u."touched_at" < p_before
+  ORDER BY u."touched_at", u."storage_key"
+  LIMIT LEAST(GREATEST(p_limit, 1), 1000)
+$$;--> statement-breakpoint
+REVOKE ALL ON FUNCTION companion_list_skill_run_attachment_orphans(timestamp with time zone, integer) FROM PUBLIC;

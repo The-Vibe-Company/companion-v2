@@ -121,6 +121,8 @@ function runDefaults(values: Record<string, unknown>): FakeRunRow {
     transcriptUpdatedAt: null,
     lastActiveAt: null,
     frozenAt: null,
+    reactivatableUntil: null,
+    activationRevision: 0,
     sandboxCleanedAt: null,
     cleanupLeaseOwner: null,
     cleanupLeaseExpiresAt: null,

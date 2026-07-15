@@ -1,8 +1,7 @@
-import { deleteRunAttachmentOrphanIfReserved } from "@companion/core/services";
-import { deleteSkillArchive, listStoredRunAttachmentObjects } from "@companion/storage";
+import { deleteRunAttachmentOrphanIfReserved, listRunAttachmentOrphanReservations } from "@companion/core/services";
+import { deleteSkillArchive } from "@companion/storage";
 
 const DEFAULT_ORPHAN_GRACE_MS = 24 * 60 * 60 * 1_000;
-let sweepCursor: string | undefined;
 
 export interface RunAttachmentSweepResult {
   deleted: number;
@@ -18,26 +17,25 @@ export async function sweepRunAttachmentOrphans(input: {
   now?: Date;
   graceMs?: number;
   limit?: number;
-  listObjects?: typeof listStoredRunAttachmentObjects;
+  listReservations?: typeof listRunAttachmentOrphanReservations;
   deleteIfReserved?: typeof deleteRunAttachmentOrphanIfReserved;
   deleteObject?: (key: string) => Promise<void>;
 } = {}): Promise<RunAttachmentSweepResult> {
   const now = input.now ?? new Date();
   const graceMs = input.graceMs ?? DEFAULT_ORPHAN_GRACE_MS;
   const limit = input.limit ?? 250;
-  const listObjects = input.listObjects ?? listStoredRunAttachmentObjects;
+  const listReservations = input.listReservations ?? listRunAttachmentOrphanReservations;
   const deleteIfReserved = input.deleteIfReserved ?? deleteRunAttachmentOrphanIfReserved;
   const deleteObject = input.deleteObject ?? ((key) => deleteSkillArchive({ key }));
-  const page = await listObjects({ limit, cursor: sweepCursor });
-  sweepCursor = page.nextCursor ?? undefined;
-  const candidates = page.objects.filter((object) => object.lastModified.getTime() <= now.getTime() - graceMs);
+  const before = new Date(now.getTime() - graceMs);
+  const candidates = await listReservations({ before, limit });
   const result: RunAttachmentSweepResult = { deleted: 0, retained: 0, failed: 0 };
-  for (const candidate of candidates) {
+  for (const storageKey of candidates) {
     try {
       const deleted = await deleteIfReserved({
-        storageKey: candidate.key,
-        before: new Date(now.getTime() - graceMs),
-        deleteObject: () => deleteObject(candidate.key),
+        storageKey,
+        before,
+        deleteObject: () => deleteObject(storageKey),
       });
       if (deleted) result.deleted += 1;
       else result.retained += 1;

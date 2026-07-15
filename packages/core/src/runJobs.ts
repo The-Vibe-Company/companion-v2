@@ -2,6 +2,7 @@ import { and, asc, eq, gt, inArray, isNull, lt, max, notInArray, or, sql } from 
 import { db, schema, type Db } from "@companion/db";
 import {
   RUN_PROMPT_MAX,
+  RUN_REACTIVATION_RETENTION_MS,
   RUN_WARNING_SNAPSHOT_MAX,
   runChatEventSchema,
   type RunChatEvent,
@@ -130,6 +131,15 @@ async function isRunAttachmentWorkerReady(input: {
   return row?.ready ?? false;
 }
 
+/** Reactivation has no active lease yet, so require any live protocol-capable worker. */
+async function isAnyRunAttachmentWorkerReady(database: Db): Promise<boolean> {
+  const result = await database.execute(sql`
+    select companion_skill_run_attachment_worker_ready() as ready
+  `);
+  const row = Array.from(result as unknown as Iterable<{ ready: boolean }>)[0];
+  return row?.ready ?? false;
+}
+
 function isUniqueViolation(error: unknown): boolean {
   return Boolean(
     error &&
@@ -253,6 +263,22 @@ export async function deleteRunAttachmentOrphanIfReserved(input: {
   });
 }
 
+export async function listRunAttachmentOrphanReservations(input: {
+  before: Date;
+  limit?: number;
+  database?: Db;
+}): Promise<string[]> {
+  const database = input.database ?? db;
+  const result = await database.execute(sql`
+    select storage_key as "storageKey"
+    from companion_list_skill_run_attachment_orphans(
+      ${input.before.toISOString()}::timestamp with time zone,
+      ${input.limit ?? 250}
+    )
+  `);
+  return Array.from(result as unknown as Iterable<{ storageKey: string }>).map((row) => row.storageKey);
+}
+
 /**
  * Read only the sandbox identity/control fields bound to an unexpired worker lease. This RPC is the
  * recovery seam used after creator RLS correctly hides a run whose owner left the organization.
@@ -357,6 +383,7 @@ export async function updateRunWorkerState(input: {
   opencodeSessionId?: string | null;
   lastActiveAt?: Date | null;
   frozenAt?: Date | null;
+  reactivatableUntil?: Date | null;
   sandboxCleanedAt?: Date | null;
   database?: Db;
 }): Promise<boolean> {
@@ -389,6 +416,7 @@ export async function updateRunWorkerState(input: {
           ...(input.opencodeSessionId !== undefined ? { opencodeSessionId: input.opencodeSessionId } : {}),
           ...(input.lastActiveAt !== undefined ? { lastActiveAt: input.lastActiveAt } : {}),
           ...(input.frozenAt !== undefined ? { frozenAt: input.frozenAt } : {}),
+          ...(input.reactivatableUntil !== undefined ? { reactivatableUntil: input.reactivatableUntil } : {}),
           ...(input.sandboxCleanedAt !== undefined ? { sandboxCleanedAt: input.sandboxCleanedAt } : {}),
           updatedAt: now,
         })
@@ -510,7 +538,11 @@ export async function failOrRetryRunJob(input: {
     const tx = transaction as unknown as Db;
     // Global lock order is run → job (Cancel and prompt operations use the same order).
     const runs = await tx
-      .select({ id: schema.skillRuns.id, cancelRequestedAt: schema.skillRuns.cancelRequestedAt })
+      .select({
+        id: schema.skillRuns.id,
+        cancelRequestedAt: schema.skillRuns.cancelRequestedAt,
+        transcriptEventSequence: schema.skillRuns.transcriptEventSequence,
+      })
       .from(schema.skillRuns)
       .where(
         and(
@@ -586,7 +618,10 @@ export async function failOrRetryRunJob(input: {
       await tx.insert(schema.skillRunEvents).values({
         orgId: input.orgId,
         runId: input.runId,
-        sequence: Number(sequenceRows[0]?.value ?? 0) + 1,
+        sequence: Math.max(
+          Number(sequenceRows[0]?.value ?? 0),
+          run.transcriptEventSequence,
+        ) + 1,
         ...eventParts(terminalEvent),
       });
       await tx
@@ -617,12 +652,15 @@ export async function enqueueRunPrompt(input: {
   text: string;
   idempotencyKey: string;
   attachments?: CreateRunAttachment[];
+  /** Set only after the API has verified runtime configuration and a live worker heartbeat. */
+  reactivationAvailable?: boolean;
   database?: Db;
 }): Promise<{
   id: string;
   messageId: string;
   status: RunPromptRow["status"];
   attachments: SkillRunAttachmentRow[];
+  reactivated: boolean;
 }> {
   const database = input.database ?? db;
   await assertMember(database, input.actor, input.orgId);
@@ -685,9 +723,24 @@ export async function enqueueRunPrompt(input: {
           content_type: attachment.contentType,
           byte_size: attachment.byteSize,
         })),
+        reactivated: false,
       };
     }
-    if (
+    const terminalReactivation = run.status === "frozen" || run.status === "canceled";
+    if (terminalReactivation) {
+      if (!input.reactivationAvailable) {
+        throw new RunValidationError("RunSkill is unavailable because no configured run worker is currently online.", "runtime_unavailable");
+      }
+      const now = new Date();
+      if (
+        run.sandboxCleanedAt !== null
+        || run.reactivatableUntil === null
+        || run.reactivatableUntil.getTime() <= now.getTime()
+        || run.cleanupLeaseOwner !== null
+      ) {
+        throw new RunBusyError("this run can no longer be reactivated", "run_reactivation_expired");
+      }
+    } else if (
       run.status !== "running"
       || run.cancelRequestedAt !== null
       || ["freeze", "cancel", "cleanup", "complete"].includes(run.phase)
@@ -705,16 +758,21 @@ export async function enqueueRunPrompt(input: {
         ),
       );
     if (active[0]) throw new RunBusyError("another prompt is already pending", "prompt_already_pending");
-    if (attachments.length > 0 && !(await isRunAttachmentWorkerReady({
-      orgId: input.orgId,
-      runId: input.runId,
-      creatorId: input.actor.id,
-      database: transaction,
-    }))) {
-      throw new RunBusyError(
-        "this run's worker cannot accept attachments yet",
-        "attachment_worker_unavailable",
-      );
+    if (attachments.length > 0) {
+      const attachmentWorkerReady = terminalReactivation
+        ? await isAnyRunAttachmentWorkerReady(transaction)
+        : await isRunAttachmentWorkerReady({
+            orgId: input.orgId,
+            runId: input.runId,
+            creatorId: input.actor.id,
+            database: transaction,
+          });
+      if (!attachmentWorkerReady) {
+        throw new RunBusyError(
+          "this run's worker cannot accept attachments yet",
+          "attachment_worker_unavailable",
+        );
+      }
     }
     const existingAttachmentBytes = await transaction
       .select({ bytes: sql<number>`coalesce(sum(${schema.skillRunAttachments.byteSize}), 0)` })
@@ -744,6 +802,82 @@ export async function enqueueRunPrompt(input: {
       );
     const ordinal = Number(ordinalRows[0]?.value ?? 0) + 1;
     const promptCreatedAt = new Date();
+    if (terminalReactivation) {
+      // A queued run can be canceled before OpenCode exists. Replay its immutable initial prompt
+      // first so the newly entered follow-up continues the same logical conversation.
+      if (!run.opencodeSessionId) {
+        await transaction
+          .update(schema.skillRunPrompts)
+          .set({
+            status: "queued",
+            attempt: 0,
+            availableAt: promptCreatedAt,
+            leaseOwner: null,
+            leaseExpiresAt: null,
+            heartbeatAt: null,
+            errorCode: null,
+            userMessage: null,
+            completedAt: null,
+            updatedAt: promptCreatedAt,
+          })
+          .where(
+            and(
+              eq(schema.skillRunPrompts.orgId, input.orgId),
+              eq(schema.skillRunPrompts.runId, input.runId),
+              eq(schema.skillRunPrompts.kind, "initial"),
+              eq(schema.skillRunPrompts.status, "canceled"),
+            ),
+          );
+      }
+      const resetJobs = await transaction
+        .update(schema.skillRunJobs)
+        .set({
+          status: "queued",
+          phase: "queued",
+          attempt: 0,
+          leaseReclaimCount: 0,
+          availableAt: promptCreatedAt,
+          leaseOwner: null,
+          leaseExpiresAt: null,
+          heartbeatAt: null,
+          lastErrorCode: null,
+          updatedAt: promptCreatedAt,
+        })
+        .where(
+          and(
+            eq(schema.skillRunJobs.orgId, input.orgId),
+            eq(schema.skillRunJobs.runId, input.runId),
+            eq(schema.skillRunJobs.creatorId, input.actor.id),
+          ),
+        )
+        .returning({ id: schema.skillRunJobs.id });
+      if (!resetJobs[0]) throw new Error("run reactivation found no matching job");
+      const resetRuns = await transaction
+        .update(schema.skillRuns)
+        .set({
+          status: "queued",
+          phase: "queued",
+          errorCode: null,
+          userMessage: null,
+          cancelRequestedAt: null,
+          frozenAt: null,
+          reactivatableUntil: null,
+          activationRevision: sql`${schema.skillRuns.activationRevision} + 1`,
+          cleanupLeaseOwner: null,
+          cleanupLeaseExpiresAt: null,
+          lastActiveAt: promptCreatedAt,
+          updatedAt: promptCreatedAt,
+        })
+        .where(
+          and(
+            eq(schema.skillRuns.orgId, input.orgId),
+            eq(schema.skillRuns.id, input.runId),
+            eq(schema.skillRuns.creatorId, input.actor.id),
+          ),
+        )
+        .returning({ id: schema.skillRuns.id });
+      if (!resetRuns[0]) throw new Error("run reactivation lost ownership before reset");
+    }
     const runtimePrompt = composeRunPrompt({
       prompt: text,
       skillSlug,
@@ -804,10 +938,21 @@ export async function enqueueRunPrompt(input: {
           eq(schema.skillRuns.creatorId, input.actor.id),
         ),
       );
+    if (terminalReactivation) {
+      await transaction.insert(schema.auditLog).values({
+        orgId: input.orgId,
+        actorId: input.actor.id,
+        action: "skill.run.reactivated",
+        targetType: "skill_run",
+        targetId: input.runId,
+        metadata: { previous_status: run.status },
+      });
+    }
     return {
       id: row.id,
       messageId: row.messageId,
       status: "queued" as const,
+      reactivated: terminalReactivation,
       attachments: attachments.map((attachment) => ({
         id: attachment.id,
         prompt_id: row.id,
@@ -837,6 +982,7 @@ export async function preflightRunPromptUpload(input: {
   text: string;
   idempotencyKey: string;
   attachments: CreateRunAttachment[];
+  reactivationAvailable?: boolean;
   database?: Db;
 }): Promise<void> {
   const database = input.database ?? db;
@@ -852,7 +998,20 @@ export async function preflightRunPromptUpload(input: {
       eq(schema.skillRunPrompts.idempotencyKey, input.idempotencyKey),
     ));
   if (replay[0]) return;
-  if (run.status !== "running" || run.cancelRequestedAt !== null || ["freeze", "cancel", "cleanup", "complete"].includes(run.phase)) {
+  const terminalReactivation = run.status === "frozen" || run.status === "canceled";
+  if (terminalReactivation) {
+    if (!input.reactivationAvailable) {
+      throw new RunValidationError("RunSkill is unavailable because no configured run worker is currently online.", "runtime_unavailable");
+    }
+    if (
+      run.sandboxCleanedAt !== null
+      || run.reactivatableUntil === null
+      || run.reactivatableUntil.getTime() <= Date.now()
+      || run.cleanupLeaseOwner !== null
+    ) {
+      throw new RunBusyError("this run can no longer be reactivated", "run_reactivation_expired");
+    }
+  } else if (run.status !== "running" || run.cancelRequestedAt !== null || ["freeze", "cancel", "cleanup", "complete"].includes(run.phase)) {
     throw new RunBusyError("this run is not ready for another prompt", "run_not_running");
   }
   const active = await database
@@ -864,12 +1023,15 @@ export async function preflightRunPromptUpload(input: {
       inArray(schema.skillRunPrompts.status, ["queued", "processing"]),
     ));
   if (active[0]) throw new RunBusyError("another prompt is already pending", "prompt_already_pending");
-  if (!(await isRunAttachmentWorkerReady({
-    orgId: input.orgId,
-    runId: input.runId,
-    creatorId: input.actor.id,
-    database,
-  }))) {
+  const attachmentWorkerReady = terminalReactivation
+    ? await isAnyRunAttachmentWorkerReady(database)
+    : await isRunAttachmentWorkerReady({
+        orgId: input.orgId,
+        runId: input.runId,
+        creatorId: input.actor.id,
+        database,
+      });
+  if (!attachmentWorkerReady) {
     throw new RunBusyError("this run's worker cannot accept attachments yet", "attachment_worker_unavailable");
   }
   const bytes = await database
@@ -1171,6 +1333,7 @@ export async function requestRunCancellation(input: {
     if (run.cancelRequestedAt !== null) return { status: run.status, requested: false };
     const now = new Date();
     if (run.status === "queued") {
+      const reactivatableUntil = new Date(now.getTime() + RUN_REACTIVATION_RETENTION_MS);
       await tx
         .update(schema.skillRuns)
         .set({
@@ -1178,7 +1341,8 @@ export async function requestRunCancellation(input: {
           phase: "complete",
           cancelRequestedAt: now,
           frozenAt: now,
-          sandboxCleanedAt: now,
+          reactivatableUntil,
+          sandboxCleanedAt: null,
           updatedAt: now,
         })
         .where(
@@ -1266,7 +1430,11 @@ export async function appendRunEvents(input: {
   return database.transaction(async (transaction) => {
     const tx = transaction as unknown as Db;
     const runs = await tx
-      .select({ id: schema.skillRuns.id, warnings: schema.skillRuns.warnings })
+      .select({
+        id: schema.skillRuns.id,
+        warnings: schema.skillRuns.warnings,
+        transcriptEventSequence: schema.skillRuns.transcriptEventSequence,
+      })
       .from(schema.skillRuns)
       .where(
         and(
@@ -1283,7 +1451,7 @@ export async function appendRunEvents(input: {
       .select({ value: max(schema.skillRunEvents.sequence) })
       .from(schema.skillRunEvents)
       .where(and(eq(schema.skillRunEvents.orgId, input.orgId), eq(schema.skillRunEvents.runId, input.runId)));
-    const first = Number(sequenceRows[0]?.value ?? 0) + 1;
+    const first = Math.max(Number(sequenceRows[0]?.value ?? 0), run.transcriptEventSequence) + 1;
     const normalized = redactAndBoundRunEvents(input.events, input.redactor).map((event) =>
       runChatEventSchema.parse(event),
     );
@@ -1385,7 +1553,7 @@ export async function persistRunTranscript(input: {
   return database.transaction(async (transaction) => {
     const tx = transaction as unknown as Db;
     const runs = await tx
-      .select({ id: schema.skillRuns.id })
+      .select({ id: schema.skillRuns.id, transcriptEventSequence: schema.skillRuns.transcriptEventSequence })
       .from(schema.skillRuns)
       .where(
         and(
@@ -1413,7 +1581,10 @@ export async function persistRunTranscript(input: {
       .select({ value: max(schema.skillRunEvents.sequence) })
       .from(schema.skillRunEvents)
       .where(and(eq(schema.skillRunEvents.orgId, input.orgId), eq(schema.skillRunEvents.runId, input.runId)));
-    let transcriptSequence = Number(sequenceRows[0]?.value ?? 0);
+    let transcriptSequence = Math.max(
+      Number(sequenceRows[0]?.value ?? 0),
+      runs[0]?.transcriptEventSequence ?? 0,
+    );
     if (input.barrierEvent) {
       const barrier = runChatEventSchema.parse(
         input.redactor.redactPayload(input.barrierEvent),

@@ -12,12 +12,7 @@ describe("run attachment orphan maintenance", () => {
     const result = await sweepRunAttachmentOrphans({
       now: new Date("2026-07-15T12:00:00Z"),
       graceMs: 60_000,
-      listObjects: async () => ({ objects: [
-        { key: "fresh", lastModified: new Date("2026-07-15T11:59:30Z") },
-        { key: "referenced", lastModified: new Date("2026-07-15T10:00:00Z") },
-        { key: "orphan", lastModified: new Date("2026-07-15T10:00:00Z") },
-        { key: "raced", lastModified: new Date("2026-07-15T10:00:00Z") },
-      ], nextCursor: null }),
+      listReservations: async () => ["referenced", "orphan", "raced"],
       deleteIfReserved: deleteIfReserved as never,
       deleteObject: remove,
     });

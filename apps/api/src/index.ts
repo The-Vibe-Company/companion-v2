@@ -3197,6 +3197,14 @@ app.post(
 
       const attachments: Array<{ id: string; fileName: string; contentType: string; byteSize: number; storageKey: string }> = [];
       try {
+        const reactivationAvailable = await withApiRunContext((ctx) =>
+          withTenantContext({ orgId, userId: actor.id }, async (database) => {
+            const readiness = ctx.runtimeAvailable
+              ? await ctx.resolveRuntimeReadiness?.(database)
+              : { available: false, message: ctx.runtimeMessage };
+            return readiness?.available ?? ctx.runtimeAvailable;
+          }),
+        );
         const attachmentBodies: Array<{ key: string; body: Buffer; contentType: string }> = [];
         for (const file of files) {
           if (!isRunUploadFile(file)) continue;
@@ -3230,6 +3238,7 @@ app.post(
               text,
               attachments,
               idempotencyKey: requestKey,
+              reactivationAvailable,
               database,
             }),
           );
@@ -3251,6 +3260,7 @@ app.post(
             text,
             attachments,
             idempotencyKey: requestKey,
+            reactivationAvailable,
             database,
           }),
         );
@@ -3259,6 +3269,7 @@ app.post(
           prompt_id: prompt.id,
           message_id: prompt.messageId,
           attachments: prompt.attachments,
+          reactivated: prompt.reactivated,
         }, 202);
       } catch (error) {
         // See the launch path above: deterministic keys make immediate cleanup race with a

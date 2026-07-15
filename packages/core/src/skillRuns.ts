@@ -1114,6 +1114,15 @@ function toRunRow(row: RunRow, skillSlug: string): SkillRunRow {
   };
 }
 
+function canReactivateRun(row: RunRow, now = new Date()): boolean {
+  return (
+    (row.status === "frozen" || row.status === "canceled") &&
+    row.sandboxCleanedAt === null &&
+    row.reactivatableUntil !== null &&
+    row.reactivatableUntil.getTime() > now.getTime()
+  );
+}
+
 async function loadInputSnapshot(database: Db, row: RunRow): Promise<RunInputSnapshot> {
   const [skillRows, secretRows, variableRows, modelProviderRows] = await Promise.all([
     database
@@ -1275,6 +1284,9 @@ async function toDetail(
     transcript: normalizeRunTranscript((row.transcript ?? []) as RunChatHistoryItem[], promptRows),
     warnings: row.warnings ?? [],
     transcript_event_sequence: row.transcriptEventSequence,
+    activation_revision: row.activationRevision,
+    reactivatable_until: row.reactivatableUntil?.toISOString() ?? null,
+    can_reactivate: canReactivateRun(row),
     attachments: attachments.map(toAttachmentRow),
     input_snapshot: inputSnapshot,
   };

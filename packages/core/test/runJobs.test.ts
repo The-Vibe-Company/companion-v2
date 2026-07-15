@@ -107,6 +107,20 @@ describe("durable run events", () => {
     expect(JSON.stringify(events)).toContain("[REDACTED]");
   });
 
+  it("continues after the folded transcript cursor when retained live events were purged", async () => {
+    const { database, events, run } = eventDb();
+    run.transcriptEventSequence = 42;
+    const rows = await appendRunEvents({
+      actor,
+      orgId: ORG,
+      runId: RUN,
+      events: [{ type: "status", state: "busy", attempt: null, message: null }],
+      database,
+    });
+    expect(rows.map((row) => row.sequence)).toEqual([43]);
+    expect(events[0]?.sequence).toBe(43);
+  });
+
   it("redacts before bounding tool payloads and splits oversized deltas losslessly", async () => {
     const { database, events } = eventDb();
     const secret = "SENTINEL-SECRET-123456789";
@@ -227,6 +241,8 @@ function cancellationDb(status: "queued" | "running" | "canceled") {
     status,
     phase: status === "queued" ? "queued" : status === "running" ? "record" : "complete",
     cancelRequestedAt: status === "canceled" ? new Date() : null,
+    reactivatableUntil: status === "canceled" ? new Date(Date.now() + 60_000) : null,
+    activationRevision: 0,
   } as Record<string, unknown>;
   const job = { orgId: ORG, runId: RUN, creatorId: actor.id, status: "queued", phase: "queued" } as Record<string, unknown>;
   const prompt = { orgId: ORG, runId: RUN, status: "queued" } as Record<string, unknown>;
@@ -271,6 +287,8 @@ describe("run cancellation", () => {
       requestRunCancellation({ actor, orgId: ORG, runId: RUN, database: state.database }),
     ).resolves.toEqual({ status: "canceled", requested: true });
     expect(state.run).toMatchObject({ status: "canceled", phase: "complete" });
+    expect(state.run.reactivatableUntil).toBeInstanceOf(Date);
+    expect(state.run.sandboxCleanedAt).toBeNull();
     expect(state.job).toMatchObject({ status: "canceled", phase: "complete", leaseOwner: null });
     expect(state.prompt).toMatchObject({ status: "canceled", leaseOwner: null });
     expect(state.audit).toHaveLength(1);
@@ -311,6 +329,7 @@ function failureDb(cancelRequestedAt: Date | null = null) {
     status: "running",
     phase: "record",
     cancelRequestedAt,
+    transcriptEventSequence: 0,
   } as Record<string, unknown>;
   const job = {
     id: "50000000-0000-4000-8000-000000000001",
@@ -394,6 +413,26 @@ describe("atomic run failure transition", () => {
         type: "run.error",
         payload: { code: "runtime_failed", message: "[REDACTED] failed", phase: "record" },
       }),
+    ]);
+  });
+
+  it("allocates a terminal error above the folded transcript cursor after event purge", async () => {
+    const state = failureDb();
+    state.run.transcriptEventSequence = 42;
+    await expect(
+      failOrRetryRunJob({
+        actor,
+        orgId: ORG,
+        runId: RUN,
+        workerId: "worker-a",
+        errorCode: "run_context_unavailable",
+        userMessage: "Retained context unavailable",
+        transient: false,
+        database: state.database,
+      }),
+    ).resolves.toBe("failed");
+    expect(state.events).toEqual([
+      expect.objectContaining({ sequence: 43, type: "run.error" }),
     ]);
   });
 

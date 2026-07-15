@@ -17,12 +17,18 @@ import { ChatMarkdown } from "./chatMarkdown";
 import { chatReducer, initChatState, openRunStream, type ChatItem } from "./chatStream";
 import { toolIcon } from "./derive";
 import { runInputsFromSnapshot, type RunLauncherDraft } from "./launcherState";
+import {
+  canReactivateRun,
+  isStaleRunDetail,
+  shouldRestartPollingAfterPromptFailure,
+} from "./reactivation";
 
 /**
  * The run surface: one skill run's live chat (while the sandbox lives) or read-only transcript
  * (frozen). Boot flow: fetch the run → poll every 1.5s while `starting` (status_detail banner) →
  * seed the transcript → consume the normalized SSE event stream via `openRunStream`
- * (AbortController teardown, StrictMode-safe). Frozen runs never open a stream.
+ * (AbortController teardown, StrictMode-safe). Terminal runs open no stream until a message
+ * atomically reactivates them and the worker returns them to `running`.
  */
 
 const MONO_FAINT_11: CSSProperties = { fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--color-faint)" };
@@ -109,8 +115,16 @@ function StartingBanner({ status, phase }: { status: "queued" | "starting"; phas
   );
 }
 
-/** "This session has ended" banner for frozen transcripts, with the Run again affordance. */
-function FrozenBanner({ note, onRunAgain }: { note: string | null; onRunAgain: () => void }) {
+/** Terminal transcript banner with both continuation guidance and the fresh-run escape hatch. */
+function FrozenBanner({
+  note,
+  onRunAgain,
+  canReactivate,
+}: {
+  note: string | null;
+  onRunAgain: () => void;
+  canReactivate: boolean;
+}) {
   return (
     <div
       style={{
@@ -125,9 +139,11 @@ function FrozenBanner({ note, onRunAgain }: { note: string | null; onRunAgain: (
         fontSize: "var(--text-sm)",
       }}
     >
-      <Icon name="lock" size={13} style={{ color: "var(--color-muted)", flex: "none" }} />
+      <Icon name={canReactivate ? "refresh-cw" : "lock"} size={13} style={{ color: "var(--color-muted)", flex: "none" }} />
       <span style={{ fontWeight: 500, color: "var(--color-fg)" }}>This session has ended</span>
-      <span style={{ color: "var(--color-muted)" }}>{note ?? "The transcript below is read-only."}</span>
+      <span style={{ color: "var(--color-muted)" }}>
+        {note ?? (canReactivate ? "Send a message below to reactivate it." : "The transcript below is read-only.")}
+      </span>
       <span style={{ flex: 1 }} />
       <button type="button" className="btn-sec" onClick={onRunAgain}>
         <Icon name="play" size={13} />
@@ -347,8 +363,10 @@ export function RunChatView({
     idempotencyKey: string;
   } | null>(null);
   const [promptError, setPromptError] = useState<string | null>(null);
+  const composerRef = useRef<HTMLInputElement | null>(null);
   const [cancelBusy, setCancelBusy] = useState(false);
   const [cancelRequestedLocal, setCancelRequestedLocal] = useState(false);
+  const [reactivationClock, setReactivationClock] = useState(() => Date.now());
   const requestGenerationRef = useRef(0);
   const appliedGenerationRef = useRef(0);
   const appliedTranscriptSequenceRef = useRef(-1);
@@ -363,12 +381,7 @@ export function RunChatView({
     const current = runRef.current;
     if (generation < appliedGenerationRef.current) return current ?? detail;
     if (current?.id === detail.id) {
-      if (detail.transcript_event_sequence < current.transcript_event_sequence) return current;
-      const currentTerminal = ["frozen", "error", "canceled"].includes(current.status);
-      const nextTerminal = ["frozen", "error", "canceled"].includes(detail.status);
-      if (currentTerminal && !nextTerminal && detail.transcript_event_sequence <= current.transcript_event_sequence) {
-        return current;
-      }
+      if (isStaleRunDetail(current, detail)) return current;
     }
     appliedGenerationRef.current = generation;
     runRef.current = detail;
@@ -480,6 +493,16 @@ export function RunChatView({
     if (run && ["frozen", "error", "canceled"].includes(run.status)) setCancelRequestedLocal(false);
   }, [run]);
 
+  useEffect(() => {
+    const until = run?.reactivatable_until ? Date.parse(run.reactivatable_until) : Number.NaN;
+    if (!Number.isFinite(until)) return;
+    setReactivationClock(Date.now());
+    const remaining = until - Date.now();
+    if (remaining <= 0) return;
+    const timer = setTimeout(() => setReactivationClock(Date.now()), Math.min(remaining + 25, 2_147_483_647));
+    return () => clearTimeout(timer);
+  }, [run?.reactivatable_until]);
+
   // --- Stream lifecycle: open the live stream only while `running`; aborted on cleanup
   // (StrictMode-safe). A terminal stream error re-fetches the run — it usually means freeze.
   const status = run?.status ?? "starting";
@@ -559,16 +582,25 @@ export function RunChatView({
     if (el) el.scrollTop = el.scrollHeight;
   }, [chat.items]);
 
+  useEffect(() => {
+    if (promptError) composerRef.current?.focus();
+  }, [promptError]);
+
   const cancelRequested = cancelRequestedLocal || run?.phase === "cancel";
   const fileSignature = files.map((file) => [file.name, file.size, file.type, file.lastModified].join(":")).join("|");
   const hasMessage = text.trim().length > 0 || files.length > 0;
-  const sendDisabled = status !== "running" || cancelRequested || !streamReady || streamDead || chat.busy || promptPending || !hasMessage;
+  const terminalCanReactivate = canReactivateRun(run, reactivationClock);
+  const liveSendReady = status === "running" && !cancelRequested && streamReady && !streamDead && !chat.busy;
+  const terminalSendReady = (status === "frozen" || status === "canceled") && terminalCanReactivate;
+  const composerDisabled = (!liveSendReady && !terminalSendReady) || promptPending;
+  const sendDisabled = composerDisabled || !hasMessage;
   const streamingAssistant = chat.items.some((item) => item.kind === "asst" && item.streaming);
   const showWorking = chat.working.active && !streamingAssistant && status === "running";
 
   const send = () => {
     const trimmed = text.trim();
     if (promptSendingRef.current || sendDisabled || (!trimmed && files.length === 0)) return;
+    const terminalDelivery = status === "frozen" || status === "canceled";
     const previous = promptAttemptRef.current;
     const retrying = previous?.text === trimmed && previous.fileSignature === fileSignature;
     const attempt = retrying
@@ -580,27 +612,27 @@ export function RunChatView({
     setPromptPending(true);
     setPromptError(null);
     sendRunPrompt(runId, trimmed, attempt.files, attempt.idempotencyKey)
-      .then((accepted) => {
+      .then((response) => {
         const currentRun = runRef.current;
-        if (currentRun && accepted.attachments.length > 0) {
+        if (currentRun && response.attachments.length > 0) {
           const known = new Set(currentRun.attachments.map((attachment) => attachment.id));
           const merged = {
             ...currentRun,
             attachments: [
               ...currentRun.attachments,
-              ...accepted.attachments.filter((attachment) => !known.has(attachment.id)),
+              ...response.attachments.filter((attachment) => !known.has(attachment.id)),
             ],
           };
           runRef.current = merged;
           setRun(merged);
         }
         const lastVisibleUser = [...chat.items].reverse().find((item) => item.kind === "user");
-        if (lastVisibleUser?.kind !== "user" || lastVisibleUser.messageId !== accepted.message_id) {
+        if (lastVisibleUser?.kind !== "user" || lastVisibleUser.messageId !== response.message_id) {
           dispatch({
             kind: "user",
             text: trimmed,
-            messageId: accepted.message_id,
-            attachments: accepted.attachments,
+            messageId: response.message_id,
+            attachments: response.attachments,
           });
         }
         dispatch({ kind: "send" });
@@ -609,11 +641,42 @@ export function RunChatView({
         if (fileInputRef.current) fileInputRef.current.value = "";
         promptAttemptRef.current = null;
         setPromptError(null);
-        if (retrying) void refreshRun().catch(() => {});
+        if (response.reactivated) {
+          setStreamReady(false);
+          setStreamDead(false);
+          const current = runRef.current;
+          if (current) {
+            const next = {
+              ...current,
+              status: "queued" as const,
+              phase: "queued" as const,
+              error_code: null,
+              error_message: null,
+              status_detail: null,
+              activation_revision: current.activation_revision + 1,
+              reactivatable_until: null,
+              can_reactivate: false,
+            };
+            runRef.current = next;
+            setRun(next);
+          }
+        }
+        // An idempotent retry may observe the already-created prompt and therefore return
+        // `reactivated: false`. The run is still restarting, so always resume polling when the
+        // message was submitted from a terminal composer.
+        if (terminalDelivery) {
+          setLoadRetryNonce((value) => value + 1);
+          if (!response.reactivated) void refreshRun().catch(() => {});
+        } else if (retrying) {
+          void refreshRun().catch(() => {});
+        }
       })
       .catch((error) => {
         const message = error instanceof Error ? error.message : "Could not send the message.";
         setPromptError(`Delivery status is unknown. Retry safely: ${message}`);
+        if (shouldRestartPollingAfterPromptFailure(status)) {
+          setLoadRetryNonce((value) => value + 1);
+        }
         void refreshRun().catch(() => {});
       })
       .finally(() => {
@@ -806,12 +869,17 @@ export function RunChatView({
           {(status === "queued" || status === "starting") && <StartingBanner status={status} phase={run?.phase} />}
           {status === "frozen" && run && (
             <FrozenBanner
-              note={run.error_message ?? run.status_detail}
+              note={terminalCanReactivate ? "Send a message below to reactivate this session." : "The reactivation window has expired."}
               onRunAgain={rerun}
+              canReactivate={terminalCanReactivate}
             />
           )}
           {status === "canceled" && run && (
-            <FrozenBanner note="Canceled before completion. The transcript below contains the last durable snapshot." onRunAgain={rerun} />
+            <FrozenBanner
+              note={terminalCanReactivate ? "Send a message below to reactivate from the last durable snapshot." : "The reactivation window has expired."}
+              onRunAgain={rerun}
+              canReactivate={terminalCanReactivate}
+            />
           )}
           {status === "error" && run && (
             <div
@@ -971,7 +1039,7 @@ export function RunChatView({
                 borderRadius: "var(--radius-md)",
                 background: "var(--color-surface)",
                 padding: "4px 4px 4px 12px",
-                opacity: status === "running" ? 1 : 0.6,
+                opacity: status === "running" || terminalCanReactivate ? 1 : 0.6,
               }}
             >
               <button
@@ -996,6 +1064,7 @@ export function RunChatView({
               <label className="sr-only" htmlFor="run-follow-up">Send a follow-up message</label>
               <input
                 id="run-follow-up"
+                ref={composerRef}
                 value={text}
                 onChange={(e) => {
                   if (promptAttemptRef.current?.text !== e.target.value.trim()) promptAttemptRef.current = null;
@@ -1005,7 +1074,8 @@ export function RunChatView({
                 onKeyDown={(e) => {
                   if (e.key === "Enter") send();
                 }}
-                disabled={status !== "running" || cancelRequested || !streamReady || chat.busy || promptPending || streamDead}
+                disabled={composerDisabled}
+                aria-describedby={promptError ? "run-follow-up-error" : undefined}
                 placeholder={
                   status === "running"
                     ? cancelRequested ? "Canceling…" : "Send a follow-up or attach files"
@@ -1014,9 +1084,9 @@ export function RunChatView({
                       : status === "starting"
                         ? "Starting…"
                       : status === "frozen"
-                        ? "This session has ended. Start a new run."
+                        ? terminalCanReactivate ? "Send a message to reactivate" : "This session has ended. Start a new run."
                         : status === "canceled"
-                          ? "This run was canceled."
+                          ? terminalCanReactivate ? "Send a message to reactivate" : "This run was canceled."
                         : "This run failed"
                 }
                 style={{
@@ -1042,9 +1112,11 @@ export function RunChatView({
                 <Icon name="arrow-up" size={15} />
               </button>
             </div>
-            {promptError && <p className="run-chat__prompt-error" role="alert">{promptError}</p>}
+            {promptError && <p className="run-chat__prompt-error" id="run-follow-up-error" role="alert">{promptError}</p>}
             <div style={{ marginTop: 7, fontSize: 11, color: "var(--color-faint)", textAlign: "center" }}>
-              Up to 5 files per message, 10 MB each and 100 MB per run. This sandbox freezes after a few minutes of inactivity.
+              {terminalCanReactivate
+                ? "Attach up to 5 files (10 MB each) and send a message to resume this session."
+                : "Up to 5 files per message, 10 MB each and 100 MB per run. This sandbox freezes after a few minutes of inactivity."}
             </div>
           </div>
         </div>

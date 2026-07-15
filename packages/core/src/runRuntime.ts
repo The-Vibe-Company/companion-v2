@@ -82,7 +82,7 @@ export interface RunSandboxRuntime {
     /** Abort promptly when cancellation, membership, or secret ACL changes while probing. */
     signal?: AbortSignal;
   }): Promise<{ ok: true; ms: number }>;
-  /** Stop now (freeze). Idempotent. */
+  /** Stop now while retaining the named sandbox filesystem for a later resume. Idempotent. */
   stop(ref: SandboxRef, signal?: AbortSignal): Promise<void>;
   /**
    * Delete the sandbox entirely. Idempotent (a missing/already-deleted sandbox is success), but
@@ -114,6 +114,8 @@ export interface RunChatRuntime {
   /** Find a session created by an earlier worker attempt using its deterministic title. */
   findSessionByTitle(target: RunChatTarget, title: string, signal?: AbortSignal): Promise<{ id: string; title: string } | null>;
   createSession(target: RunChatTarget, title: string, signal?: AbortSignal): Promise<{ id: string; title: string }>;
+  /** Abort an in-flight model turn so a canceled session resumes from a stable idle boundary. */
+  abortSession(target: RunChatTarget, sessionId: string, signal?: AbortSignal): Promise<void>;
   /** Reconcile one persisted session after worker crash or recorder reconnect. */
   getSessionState(target: RunChatTarget, sessionId: string, signal?: AbortSignal): Promise<RunChatSessionState>;
   /** Exact deterministic user-message + assistant-parent state used for crash-safe completion. */

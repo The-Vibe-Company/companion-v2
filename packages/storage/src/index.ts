@@ -1,4 +1,4 @@
-import { DeleteObjectCommand, GetObjectCommand, ListObjectsV2Command, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { DeleteObjectCommand, GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
 export interface StorageConfig {
@@ -213,41 +213,6 @@ export async function deleteSkillArchive(input: {
       Key: input.key,
     }),
   );
-}
-
-export interface StoredRunAttachmentObject {
-  key: string;
-  lastModified: Date;
-}
-
-/** List run-attachment objects across tenant prefixes for age-gated worker maintenance. */
-export async function listStoredRunAttachmentObjects(input: {
-  limit?: number;
-  cursor?: string;
-  client?: S3Client;
-  config?: StorageConfig;
-} = {}): Promise<{ objects: StoredRunAttachmentObject[]; nextCursor: string | null }> {
-  const config = input.config ?? getStorageConfig();
-  const client = input.client ?? createStorageClient(config);
-  const limit = Math.max(1, Math.min(input.limit ?? 1_000, 10_000));
-  const objects: StoredRunAttachmentObject[] = [];
-  let continuationToken: string | undefined = input.cursor;
-  do {
-    const page = await client.send(new ListObjectsV2Command({
-      Bucket: config.bucket,
-      ContinuationToken: continuationToken,
-      // Never fetch more keys than this call can still return: the continuation token then always
-      // begins strictly after every object we inspected, even when a page contains many matches.
-      MaxKeys: Math.min(1_000, limit - objects.length),
-    }));
-    for (const object of page.Contents ?? []) {
-      if (!object.Key || !object.LastModified || !object.Key.includes("/run-attachments/")) continue;
-      objects.push({ key: object.Key, lastModified: object.LastModified });
-      if (objects.length >= limit) return { objects, nextCursor: page.NextContinuationToken ?? null };
-    }
-    continuationToken = page.IsTruncated ? page.NextContinuationToken : undefined;
-  } while (continuationToken);
-  return { objects, nextCursor: null };
 }
 
 export async function getSkillArchive(input: {
