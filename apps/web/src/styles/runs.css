@@ -318,6 +318,7 @@
   .provider-key-meta { display: none; }
   .provider-group__head { gap: 6px !important; padding-inline-end: 6px !important; }
   .run-chat__config, .run-chat__meta > .mono { display: none; }
+  .run-attachment-button { min-height: 44px; }
   .run-session { grid-template-columns: auto minmax(0, 1fr) auto auto; gap: 7px; }
   .run-session__model { grid-column: 2 / -1; grid-row: 2; max-width: 100%; }
   .run-session__time { min-width: 0; }
@@ -329,6 +330,7 @@
   .run-launcher .run-variable__include, .run-launcher .run-input-group > summary { min-height: 44px; }
   .run-launcher .launch-file__x { width: 44px; min-height: 44px; margin: -8px; }
   .run-chat__draft-files .launch-file { height: 44px; }
+  .run-attachment-button { min-height: 44px; }
   .modelsel__item, .modelsel__add { min-height: 44px; }
   .run-chat__composer-box .btn-primary, .run-chat__meta .btn-sec, .run-session { min-width: 44px; min-height: 44px; }
   [data-screen-label="Run"] button, [data-screen-label="Run"] a { min-width: 44px; min-height: 44px; }

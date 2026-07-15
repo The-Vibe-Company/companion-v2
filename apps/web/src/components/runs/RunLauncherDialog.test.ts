@@ -119,8 +119,7 @@ function button(container: HTMLElement, text: string): HTMLButtonElement {
   return match;
 }
 
-async function mount(options: RunOptions): Promise<HTMLElement> {
-  queryMocks.fetchRunOptions.mockResolvedValue(options);
+async function renderLauncher(): Promise<HTMLElement> {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
@@ -138,6 +137,11 @@ async function mount(options: RunOptions): Promise<HTMLElement> {
   return container;
 }
 
+async function mount(options: RunOptions): Promise<HTMLElement> {
+  queryMocks.fetchRunOptions.mockResolvedValue(options);
+  return renderLauncher();
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   queryMocks.startRunPrewarm.mockResolvedValue(null);
@@ -150,6 +154,27 @@ afterEach(() => {
 });
 
 describe("RunLauncherDialog", () => {
+  it("focuses the prompt after run options become available", async () => {
+    const container = await mount(runOptions());
+
+    expect(document.activeElement).toBe(container.querySelector("#run-prompt"));
+  });
+
+  it("keeps Add files visible and disabled when the runtime or options are unavailable", async () => {
+    const unavailable = runOptions();
+    unavailable.runtime = { available: false, message: "RunSkill is unavailable." };
+    const unavailableContainer = await mount(unavailable);
+
+    expect(button(unavailableContainer, "Add files").disabled).toBe(true);
+
+    act(() => roots.pop()?.unmount());
+    unavailableContainer.remove();
+    queryMocks.fetchRunOptions.mockRejectedValue(new Error("Could not load run options."));
+    const failedContainer = await renderLauncher();
+
+    expect(button(failedContainer, "Add files").disabled).toBe(true);
+  });
+
   it("shows shared pool usage and persists the personal prewarm toggle", async () => {
     const container = await mount(runOptions());
     expect(container.textContent).toContain("230 min left of 250");
@@ -387,5 +412,26 @@ describe("RunLauncherDialog", () => {
       "incident-summary",
       expect.objectContaining({ prompt: "", files: [file] }),
     );
+  });
+
+  it("presents a labeled attachment action and accepts dropped files", async () => {
+    const container = await mount(runOptions());
+    const addFiles = button(container, "Add files");
+    const dropzone = container.querySelector(".composer__box--launch")!;
+    const file = new File(["brief"], "brief.pdf", { type: "application/pdf" });
+    const dataTransfer = { files: [file], types: ["Files"], dropEffect: "none" };
+    const dragEnter = new Event("dragenter", { bubbles: true, cancelable: true });
+    Object.defineProperty(dragEnter, "dataTransfer", { configurable: true, value: dataTransfer });
+    const drop = new Event("drop", { bubbles: true, cancelable: true });
+    Object.defineProperty(drop, "dataTransfer", { configurable: true, value: dataTransfer });
+
+    expect(addFiles.disabled).toBe(false);
+    await act(async () => dropzone.dispatchEvent(dragEnter));
+    expect(container.textContent).toContain("Drop files here");
+    await act(async () => dropzone.dispatchEvent(drop));
+
+    expect(drop.defaultPrevented).toBe(true);
+    expect(container.textContent).toContain("brief.pdf");
+    expect(button(container, "Run").disabled).toBe(false);
   });
 });
