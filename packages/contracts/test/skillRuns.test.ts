@@ -170,6 +170,18 @@ describe("skill run contracts", () => {
       declared_variables: [],
       configurations: [],
       models: [],
+      sandbox_usage: {
+        enabled: true,
+        enforced: true,
+        limit_minutes: 250,
+        used_minutes: 20,
+        reserved_minutes: 10,
+        remaining_minutes: 220,
+        minutes_per_seat: 250,
+        period_start: "2026-07-01T00:00:00.000Z",
+        period_end: "2026-08-01T00:00:00.000Z",
+      },
+      preferences: { prewarm_enabled: true },
       runtime: { available: true },
     });
     expect(parsed.dependencies[0]?.skill_version_id).toBe(dependency.skill_version_id);
@@ -211,6 +223,18 @@ describe("skill run contracts", () => {
       declared_variables: [],
       configurations: [],
       models: [option],
+      sandbox_usage: {
+        enabled: false,
+        enforced: false,
+        limit_minutes: null,
+        used_minutes: 0,
+        reserved_minutes: 0,
+        remaining_minutes: null,
+        minutes_per_seat: 250,
+        period_start: "2026-07-01T00:00:00.000Z",
+        period_end: "2026-08-01T00:00:00.000Z",
+      },
+      preferences: { prewarm_enabled: false },
       runtime: { available: true },
     });
     expect(parsed.models[0]?.provider_credential_pin).toEqual(option.provider_credential_pin);

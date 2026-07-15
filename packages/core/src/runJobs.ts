@@ -28,6 +28,12 @@ import {
   type CreateRunAttachment,
 } from "./skillRuns";
 import { assertMember, type ActorContext } from "./services";
+import {
+  extendSandboxUsageReservation,
+  reserveSandboxUsage,
+  SANDBOX_FOLLOWUP_RESERVATION_MS,
+  SANDBOX_RUN_ACTIVATION_RESERVATION_MS,
+} from "./billing";
 
 export type ClaimedRunJob = typeof schema.skillRunJobs.$inferSelect;
 export type RunPromptRow = typeof schema.skillRunPrompts.$inferSelect;
@@ -819,6 +825,28 @@ export async function enqueueRunPrompt(input: {
       );
     const ordinal = Number(ordinalRows[0]?.value ?? 0) + 1;
     const promptCreatedAt = new Date();
+    if (terminalReactivation) {
+      await reserveSandboxUsage({
+        orgId: input.orgId,
+        creatorId: input.actor.id,
+        kind: "run",
+        sourceId: input.runId,
+        sandboxName: run.sandboxName ?? `run-${input.runId}`,
+        activationRevision: run.activationRevision + 1,
+        reservationMs: SANDBOX_RUN_ACTIVATION_RESERVATION_MS,
+        database: transaction,
+        now: promptCreatedAt,
+      });
+    } else {
+      await extendSandboxUsageReservation({
+        orgId: input.orgId,
+        sourceId: input.runId,
+        activationRevision: run.activationRevision,
+        additionalMs: SANDBOX_FOLLOWUP_RESERVATION_MS,
+        database: transaction,
+        now: promptCreatedAt,
+      });
+    }
     if (terminalReactivation) {
       // A queued run can be canceled before OpenCode exists. Replay its immutable initial prompt
       // first so the newly entered follow-up continues the same logical conversation.

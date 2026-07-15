@@ -429,9 +429,36 @@ Free keeps all data but narrows reads and mutations:
   archive remain available.
 - Only the current version is readable; historical version requests return the structured 403
   Upgrade response.
+- Run Skill has zero sandbox minutes. Pro receives a shared UTC-calendar-month pool equal to active
+  membership count × `COMPANION_SANDBOX_MINUTES_PER_SEAT` (default 250). An organization-period
+  advisory lock serializes reservations, so concurrent launch, reactivation, follow-up, and prewarm
+  requests cannot oversubscribe the enforced pool. Reservations are 5 minutes for prewarm, 10 for a
+  launch/reactivation, and 7 for each further prompt. There are no paid overage packs in v1.
+
+Self-hosted billing mode bypasses sandbox accounting and remains unlimited. In managed mode,
+`sandbox_usage_sessions` stores one reservation per sandbox activation; unstarted reservations expire,
+started reservations grow with elapsed wall time, and the worker settles them to whole minutes when
+the provider session stops or is destroyed. A prewarm reservation transfers atomically to its run
+instead of double-counting. `user_run_preferences` stores the creator-only prewarm toggle, default on.
+Prewarming consumes the same pool and is visible in the launcher before it starts. `GET /v1/billing`
+returns used, reserved, remaining, pool size, and reset boundary. The quota bounds ordinary compute;
+provider-level spend management remains the emergency guardrail for atypical network transfer. The
+pool is recomputed from the current active-seat count: adding a seat increases capacity immediately;
+removing one never erases recorded usage and blocks further work if consumption now meets or exceeds
+the lower limit.
+
+The worker re-admits every claimed activation immediately before provider I/O, including commands
+created by a replica from before the usage migration. In enforced mode it clamps the provider's
+initial timeout to the admitted reservation and extends that timeout only by minutes subsequently
+reserved for follow-up prompts. During a rolling deployment, an already-running named sandbox whose
+provider lease exceeds the fresh reservation is stopped, deleted, and recreated; stopped persistent
+sessions remain eligible for normal conversation reactivation. The admitted provider lifetime also ends at the next UTC month
+boundary, so a sandbox cannot carry unused prior-month capacity into a fresh pool. Deferred and
+membership-revocation cleanup settle the newest open activation before marking cleanup complete;
+provider teardown remains idempotent and is retried if accounting persistence fails.
 
 The structured entitlement rejection is `{ code, feature, message, effectivePlan, limit?, current?,
-upgradeUrl? }`, using `upgrade_required`, `org_skill_limit_reached`, or `catalog_frozen`.
+upgradeUrl? }`, including `sandbox_plan_required` and `sandbox_quota_exhausted` for Run Skill.
 
 Membership acceptance, domain join, and removal mark the tenant billing row `pending` in the same
 database transaction. `apps/worker` claims rows with `FOR UPDATE SKIP LOCKED` every 15 seconds, updates
@@ -453,6 +480,8 @@ persisting so delivery order cannot corrupt local state.
   `POST /v1/billing/checkout` and `/portal` for Owners/Admins; public
   `POST /v1/billing/webhooks/stripe` authenticated only by the Stripe signature. Billing endpoints
   never accept PATs. Pro invitations and domain-access additions require `acknowledgeSeatBilling`.
+- Run preferences: session-only `GET/PATCH /v1/run-preferences`; the PATCH accepts the complete
+  `{ prewarm_enabled }` preference. Run routes and preferences reject PATs.
 - Tokens: `GET /v1/tokens` (list the caller's own active keys, no plaintext — it backs the personal
   Account pane, so it is caller-scoped even for admins), `POST /v1/tokens` (issue a scoped `cmp_pat_…`,
   plaintext returned once), `DELETE /v1/tokens/:id` (an org admin may revoke any token by id).
@@ -599,6 +628,10 @@ content; only the sandbox does.
 - `skill_run_prewarms` and `skill_run_prewarm_skills` hold creator-private, secretless launcher
   warm-ups. They pin only the root/dependency versions and sandbox lifecycle state; they never join
   the Sessions query. A run may atomically adopt one through nullable `skill_runs.prewarm_id`.
+- `sandbox_usage_sessions` records the org pool period, source activation, temporary reservation,
+  actual start/stop, and settled whole-minute duration. `user_run_preferences` records the per-user
+  prewarm default. Migration `0040_sandbox_usage.sql` adds tenant/owner forced RLS and unique source
+  plus sandbox-activation keys so retries cannot reserve or settle twice.
 - Migration `0034_skill_runs.sql` creates the durable run tables; `0039_run_prewarms.sql` adds the
   private warm-up lifecycle. Both force creator-only RLS on runs, warm-ups, configurations,
   snapshots, prompts, events, and attachments. Child policies derive the
@@ -632,7 +665,8 @@ after expiry, Companion persists the transcript and the metadata/bytes of files 
 
 ### Launch pipeline + recorder
 
-Opening the launcher creates a best-effort warm-up in parallel with run-options. The worker forks
+Opening the launcher creates a best-effort warm-up after loading the caller's default-on preference
+and the current pool. The worker forks
 the golden snapshot and uploads only immutable skill bundles: it does not create an OpenCode server,
 password, provider credential, generic secret input, variable, prompt, attachment, event, audit row,
 or public run. The browser heartbeats every 10 seconds; the client lease expires after 30 seconds,
@@ -817,7 +851,8 @@ authoritative.
 `PUT /v1/org-model-preferences` (replace the activated lists; owner/admin for the org one),
 `GET/PUT /v1/provider-connections` + `DELETE /v1/provider-connections/:provider`,
 `GET/PUT /v1/org-provider-connections` + `DELETE /v1/org-provider-connections/:provider`,
-`GET /v1/skills/:slug/run-options`, `GET/POST /v1/skills/:slug/run-configurations`,
+`GET /v1/skills/:slug/run-options`, `GET/PATCH /v1/run-preferences`,
+`GET/POST /v1/skills/:slug/run-configurations`,
 `PATCH/DELETE /v1/run-configurations/:id`,
 `POST /v1/skills/:slug/runs` (multipart: optional prompt when at least one file is present, model,
 exact version, authoritative JSON inputs, repeatable file; mandatory `Idempotency-Key`; `201` for a
@@ -848,6 +883,8 @@ Environment: `VERCEL_TOKEN`, `VERCEL_TEAM_ID`, `VERCEL_PROJECT_ID`,
 vault, dedicated provider credentials, and opaque internal run credentials),
 `COMPANION_RUNS_ENABLED`, `COMPANION_RUN_PREWARM_ENABLED` (defaults on with RunSkill),
 `COMPANION_SANDBOX_REGION`, `COMPANION_SANDBOX_TIMEOUT_MS` (default `300000`),
+`COMPANION_SANDBOX_VCPUS` (default `2`; supported `1`, `2`, `4`, `8`),
+`COMPANION_SANDBOX_MINUTES_PER_SEAT` (managed SaaS default `250`),
 `COMPANION_RUN_CONCURRENCY`, `COMPANION_RUN_PREWARM_CONCURRENCY`,
 `COMPANION_RUN_CLAIM_INTERVAL_MS`, `COMPANION_RUN_LEASE_SECONDS`,
 `COMPANION_RUN_HEARTBEAT_MS`, `COMPANION_RUN_INACTIVITY_MS`, bounded recorder reconnect settings,

@@ -67,6 +67,12 @@ function options(): RunOptions {
         scope: "personal",
       },
     }],
+    sandbox_usage: {
+      enabled: false, enforced: false, limit_minutes: null, used_minutes: 0,
+      reserved_minutes: 0, remaining_minutes: null, minutes_per_seat: 250,
+      period_start: "2026-07-01T00:00:00.000Z", period_end: "2026-08-01T00:00:00.000Z",
+    },
+    preferences: { prewarm_enabled: true },
     runtime: { available: true, message: null },
   };
 }

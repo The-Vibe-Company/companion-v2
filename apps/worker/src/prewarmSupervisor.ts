@@ -14,6 +14,13 @@ import {
   type ClaimedRunPrewarm,
 } from "@companion/core/services";
 import { db, withTenantContext } from "@companion/db";
+import {
+  refreshSandboxUsageReservation,
+  reserveSandboxUsage,
+  SANDBOX_PREWARM_RESERVATION_MS,
+  settleSandboxUsage,
+  startSandboxUsage,
+} from "@companion/core";
 
 const CONTROL_TIMEOUT_MS = 60_000;
 
@@ -62,12 +69,42 @@ async function processPrewarm(input: {
       region: ctx.region,
       timeoutMs: plan.row.timeoutMs,
     };
+    const budget = await tenant(async (database) => {
+      // Rolling deployments may claim prewarms created before the usage table existed. Re-admit
+      // them here so no provider call can bypass the managed quota boundary.
+      await reserveSandboxUsage({
+        orgId: prewarm.orgId,
+        creatorId: prewarm.creatorId,
+        kind: "prewarm",
+        sourceId: prewarm.id,
+        sandboxName: plan.row.sandboxName,
+        activationRevision: 0,
+        reservationMs: SANDBOX_PREWARM_RESERVATION_MS,
+        database,
+      });
+      return refreshSandboxUsageReservation({
+        orgId: prewarm.orgId,
+        sandboxName: plan.row.sandboxName,
+        activationRevision: 0,
+        database,
+      });
+    });
+    if (budget) {
+      if (budget.limitMs < 10_000) throw new Error("sandbox runtime budget exhausted");
+      ref.timeoutMs = Math.min(ref.timeoutMs, budget.limitMs);
+    }
     const sandbox = await ctx.runtime!.forkFromGolden({
       ref,
       goldenSnapshotId: plan.row.goldenSnapshotId,
       signal,
     });
     sandboxIdentity = sandbox;
+    await tenant((database) => startSandboxUsage({
+      orgId: prewarm.orgId,
+      sandboxName: plan.row.sandboxName,
+      activationRevision: 0,
+      database,
+    }));
     ref.sandboxId = sandbox.sandboxId;
     const owns = await tenant((database) => updateClaimedRunPrewarm({
       actor,
@@ -182,12 +219,25 @@ export function createRunPrewarmScheduler(input: {
           region: input.ctx.region,
           timeoutMs: claim.timeoutMs,
         });
-        if (cleaned) await completeRunPrewarmCleanup({
-          orgId: claim.orgId,
-          prewarmId: claim.id,
-          workerId: input.workerId,
-          database: db,
-        });
+        if (cleaned) {
+          await withTenantContext(
+            { orgId: claim.orgId, userId: claim.creatorId },
+            (database) => settleSandboxUsage({
+              orgId: claim.orgId,
+              sandboxName: claim.sandboxName,
+              activationRevision: 0,
+              database,
+            }),
+          );
+          // Completion removes the row from future cleanup claims. Persist usage first so a
+          // transient accounting failure leaves the idempotent provider cleanup retryable.
+          await completeRunPrewarmCleanup({
+            orgId: claim.orgId,
+            prewarmId: claim.id,
+            workerId: input.workerId,
+            database: db,
+          });
+        }
       }));
       await purgeRunPrewarms({ database: db }).catch(() => undefined);
     })().finally(() => { cleaning = null; });
