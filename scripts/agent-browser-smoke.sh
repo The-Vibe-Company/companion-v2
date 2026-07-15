@@ -460,6 +460,48 @@ agent-browser find role button click --name "Open skill $SMOKE_SKILL"
 agent-browser wait 1000
 assert_body_contains "$SMOKE_SKILL"
 wait_for_contextual_action "Install skill" "Install"
+
+log "Checking run launcher scrolling at a short desktop viewport"
+agent-browser set viewport 1024 420
+click_button_text "Run skill"
+wait_for_body_contains "Configuration"
+assert_eval_true "(() => {
+  const dialog = document.querySelector('.run-launcher');
+  const head = dialog?.querySelector('.og-dialog__head');
+  const body = dialog?.querySelector('.og-dialog__body');
+  const foot = dialog?.querySelector('.og-dialog__foot');
+  if (!dialog || !head || !body || !foot) return false;
+  const dialogRect = dialog.getBoundingClientRect();
+  const headRect = head.getBoundingClientRect();
+  const footRect = foot.getBoundingClientRect();
+  const contained = dialogRect.top >= 0 && dialogRect.bottom <= window.innerHeight;
+  const pinned = headRect.top >= dialogRect.top && headRect.bottom <= dialogRect.bottom &&
+    footRect.top >= dialogRect.top && footRect.bottom <= dialogRect.bottom;
+  const sectionsUnclipped = Array.from(body.children).every((section) =>
+    section.scrollHeight <= section.clientHeight + 1
+  );
+  window.__runLauncherPinnedPositions = { headTop: headRect.top, footTop: footRect.top };
+  return contained && pinned && sectionsUnclipped && body.scrollHeight > body.clientHeight;
+})()" "run launcher is not contained, scrollable, and pinned at a short viewport"
+agent-browser eval "(() => { const body = document.querySelector('.run-launcher .og-dialog__body'); if (body) body.scrollTop = body.scrollHeight; })()" >/dev/null
+assert_eval_true "document.querySelector('.run-launcher .og-dialog__body')?.scrollTop > 0" \
+  "run launcher body did not scroll"
+assert_eval_true "(() => {
+  const dialog = document.querySelector('.run-launcher');
+  const head = dialog?.querySelector('.og-dialog__head');
+  const foot = dialog?.querySelector('.og-dialog__foot');
+  const before = window.__runLauncherPinnedPositions;
+  if (!dialog || !head || !foot || !before) return false;
+  const dialogRect = dialog.getBoundingClientRect();
+  const headRect = head.getBoundingClientRect();
+  const footRect = foot.getBoundingClientRect();
+  return headRect.top >= dialogRect.top && headRect.bottom <= dialogRect.bottom &&
+    footRect.top >= dialogRect.top && footRect.bottom <= dialogRect.bottom &&
+    Math.abs(headRect.top - before.headTop) < 0.5 && Math.abs(footRect.top - before.footTop) < 0.5;
+})()" "run launcher header or footer moved outside the dialog after scrolling"
+agent-browser press Escape
+agent-browser set viewport 1440 1000
+
 agent-browser open "$APP_URL/skills?lib=org"
 wait_for_skills
 
@@ -486,6 +528,48 @@ agent-browser open "$APP_URL/skills?lib=org"
 wait_for_skills
 assert_body_contains "Add skill"
 assert_body_contains "$SMOKE_SKILL"
+
+log "Checking mobile run launcher"
+agent-browser set viewport 390 420
+agent-browser open "$APP_URL/skills?lib=org&skill=$SMOKE_SKILL"
+wait_for_contextual_action "Install skill" "Install"
+click_button_text "Run skill"
+wait_for_body_contains "Configuration"
+assert_eval_true "(() => {
+  const dialog = document.querySelector('.run-launcher');
+  const head = dialog?.querySelector('.og-dialog__head');
+  const body = dialog?.querySelector('.og-dialog__body');
+  const foot = dialog?.querySelector('.og-dialog__foot');
+  if (!dialog || !head || !body || !foot) return false;
+  const dialogRect = dialog.getBoundingClientRect();
+  const headRect = head.getBoundingClientRect();
+  const footRect = foot.getBoundingClientRect();
+  const style = getComputedStyle(dialog);
+  const sectionsUnclipped = Array.from(body.children).every((section) =>
+    section.scrollHeight <= section.clientHeight + 1
+  );
+  window.__runLauncherMobilePinnedPositions = { headTop: headRect.top, footTop: footRect.top };
+  return Math.abs(dialogRect.top) < 0.5 && Math.abs(dialogRect.left) < 0.5 &&
+    Math.abs(dialogRect.width - window.innerWidth) < 0.5 &&
+    Math.abs(dialogRect.height - window.innerHeight) < 0.5 &&
+    style.borderWidth === '0px' && style.borderRadius === '0px' &&
+    getComputedStyle(body).overflowY === 'auto' && sectionsUnclipped &&
+    body.scrollHeight > body.clientHeight &&
+    headRect.top >= dialogRect.top && footRect.bottom <= dialogRect.bottom;
+})()" "mobile run launcher is not fullscreen with a pinned, scrollable body"
+agent-browser eval "(() => { const body = document.querySelector('.run-launcher .og-dialog__body'); if (body) body.scrollTop = body.scrollHeight; })()" >/dev/null
+assert_eval_true "(() => {
+  const dialog = document.querySelector('.run-launcher');
+  const head = dialog?.querySelector('.og-dialog__head');
+  const body = dialog?.querySelector('.og-dialog__body');
+  const foot = dialog?.querySelector('.og-dialog__foot');
+  const before = window.__runLauncherMobilePinnedPositions;
+  if (!dialog || !head || !body || !foot || !before || body.scrollTop <= 0) return false;
+  return Math.abs(head.getBoundingClientRect().top - before.headTop) < 0.5 &&
+    Math.abs(foot.getBoundingClientRect().top - before.footTop) < 0.5;
+})()" "mobile run launcher did not scroll with pinned header and footer"
+agent-browser press Escape
+agent-browser set device "iPhone 14"
 
 log "Checking mobile install targets"
 agent-browser open "$APP_URL/skills?lib=org&skill=$SMOKE_SKILL"
