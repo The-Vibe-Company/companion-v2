@@ -17,3 +17,5 @@
 834b27a52e30b35457a6b41b8c22779e63d58239:packages/contracts/test/modelProviders.test.ts:generic-api-key:9
 834b27a52e30b35457a6b41b8c22779e63d58239:packages/contracts/test/modelProviders.test.ts:generic-api-key:22
 834b27a52e30b35457a6b41b8c22779e63d58239:packages/contracts/test/skillRuns.test.ts:generic-api-key:18
+34b64f1d0facdf2efe764236795847000f3076bf:packages/contracts/test/vanishConnections.test.ts:generic-api-key:6
+34b64f1d0facdf2efe764236795847000f3076bf:packages/contracts/test/vanishConnections.test.ts:generic-api-key:16
