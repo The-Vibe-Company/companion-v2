@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { computeSubscriptionPlan, getEntitlements, PAYMENT_GRACE_MS, type RawBillingState } from "../src/billing";
+import {
+  billingRuntimeConfig,
+  computeSubscriptionPlan,
+  getEntitlements,
+  getSandboxUsageOverview,
+  PAYMENT_GRACE_MS,
+  type RawBillingState,
+} from "../src/billing";
 
 const NOW = new Date("2026-07-13T12:00:00.000Z");
 
@@ -22,6 +29,32 @@ describe("billing entitlements", () => {
       },
     });
     expect(entitlements).toMatchObject({ effectivePlan: "pro", personalSkills: true, skillHistory: true, enforced: false });
+  });
+
+  it("keeps self-hosted sandbox usage unlimited without reading the database", async () => {
+    const usage = await getSandboxUsageOverview({
+      orgId: "self-hosted",
+      database: new Proxy({}, { get: () => { throw new Error("database must not be read"); } }) as never,
+      now: NOW,
+      config: {
+        billingMode: "disabled",
+        entitlementMode: "off",
+        pilotOrgIds: new Set(),
+        proOrgAllowlist: new Set(),
+        checkoutEnabled: false,
+        webhooksEnabled: false,
+        sandboxMinutesPerSeat: 250,
+      },
+    });
+    expect(usage).toMatchObject({ enabled: false, limit_minutes: null, remaining_minutes: null });
+    expect(usage.period_start).toBe("2026-07-01T00:00:00.000Z");
+    expect(usage.period_end).toBe("2026-08-01T00:00:00.000Z");
+  });
+
+  it("defaults sandbox capacity safely and accepts the documented overrides", () => {
+    expect(billingRuntimeConfig({}).sandboxMinutesPerSeat).toBe(250);
+    expect(billingRuntimeConfig({ COMPANION_SANDBOX_MINUTES_PER_SEAT: "400" }).sandboxMinutesPerSeat).toBe(400);
+    expect(billingRuntimeConfig({ COMPANION_SANDBOX_MINUTES_PER_SEAT: "0" }).sandboxMinutesPerSeat).toBe(250);
   });
 
   it("grants Pro to an active subscription", () => {

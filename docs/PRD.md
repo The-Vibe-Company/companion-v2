@@ -145,8 +145,18 @@ Each requirement has user stories with acceptance criteria. Priorities: **P0** =
 - As a Free member, I retain org catalog access with up to 20 active-or-archived org skills, installed
   org skills in My Skills, and current-version downloads. *AC:* personal skills remain preserved but
   hidden, history is Pro-only, and over-limit catalogs freeze non-destructive mutations.
+- As a Pro member, I can run skills against a shared UTC-calendar-month sandbox pool, initially
+  configured at 250 minutes per active seat. *AC:* Free has zero minutes; launches, reactivations,
+  follow-ups, and prewarming reserve capacity atomically and are rejected before provider work when
+  the enforced pool is exhausted. The provider lifetime cannot exceed admitted minutes or cross the
+  UTC reset boundary; actual wall time replaces temporary reservations after stop.
+- As a member, I can disable personal launcher prewarming, which defaults on and consumes the same
+  pool. *AC:* the preference persists per user and the launcher exposes used, reserved, and remaining
+  minutes before launch. Additional paid minute packs and exact Vercel invoice pass-through are not
+  part of the first release.
 - As a self-hosted operator, I receive all Pro capabilities without Stripe. *AC:* Billing remains
-  visible as an informational “Pro included” page, while Checkout, Portal, and Upgrade CTAs are absent.
+  visible as an informational “Pro included” page, sandbox usage is unlimited, and Checkout, Portal,
+  and Upgrade CTAs are absent.
 
 ---
 

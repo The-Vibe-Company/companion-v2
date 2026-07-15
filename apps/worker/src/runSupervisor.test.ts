@@ -190,4 +190,29 @@ describe("active sandbox hard-timeout extension", () => {
     await vi.advanceTimersByTimeAsync(60_000);
     expect(extendTimeout).toHaveBeenCalledTimes(3);
   });
+
+  it("extends a managed sandbox only by newly reserved runtime", async () => {
+    vi.useFakeTimers();
+    const extendTimeout = vi.fn(async () => undefined);
+    const runtime = { extendTimeout } as unknown as RunSandboxRuntime;
+    const ref: SandboxRef = {
+      sandboxName: "run-managed",
+      sandboxId: "sandbox-managed",
+      region: "iad1",
+      timeoutMs: 20_000,
+    };
+    const readBudgetMs = vi.fn(async () => 20_000);
+    const extender = createSandboxTimeoutExtender(runtime, readBudgetMs);
+    extender.activate(ref);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(extendTimeout).not.toHaveBeenCalled();
+
+    readBudgetMs.mockResolvedValue(27_000);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(extendTimeout).toHaveBeenCalledWith(ref, 7_000, expect.any(AbortSignal));
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(extendTimeout).toHaveBeenCalledTimes(1);
+    await extender.stop();
+  });
 });

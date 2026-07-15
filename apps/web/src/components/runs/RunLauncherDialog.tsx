@@ -26,6 +26,7 @@ import {
   launchRun,
   startRunPrewarm,
   updateRunConfiguration,
+  updateRunPreferences,
 } from "@/lib/runQueries";
 import {
   authoritativeInputs,
@@ -42,6 +43,9 @@ import { ModelSelect } from "./ModelSelect";
 import { RunAttachmentButton } from "./RunAttachmentButton";
 import { appendRunAttachmentFiles } from "./runAttachmentDraft";
 import { useRunFileDrop } from "./useRunFileDrop";
+
+const COLD_RUN_RESERVATION_MINUTES = 10;
+const PREWARM_RESERVATION_MINUTES = 5;
 
 function formatBytes(bytes: number): string {
   if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
@@ -103,6 +107,9 @@ export function RunLauncherDialog({
   const [busy, setBusy] = useState(false);
   const [configBusy, setConfigBusy] = useState(false);
   const [vaultBusy, setVaultBusy] = useState(false);
+  const [prewarmEnabled, setPrewarmEnabled] = useState<boolean | null>(null);
+  const [prewarmUsageLoaded, setPrewarmUsageLoaded] = useState(false);
+  const [preferenceBusy, setPreferenceBusy] = useState(false);
   const [nameMode, setNameMode] = useState<"save" | "rename" | null>(null);
   const [configName, setConfigName] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -116,11 +123,13 @@ export function RunLauncherDialog({
   const prewarmIdRef = useRef<string | null>(null);
   const prewarmStartRef = useRef<Promise<unknown> | null>(null);
   const prewarmAdoptedRef = useRef(false);
+  const prewarmEnabledRef = useRef<boolean | null>(null);
 
   const abandonPrewarm = () => {
     const id = prewarmIdRef.current;
     if (!id || prewarmAdoptedRef.current) return;
     prewarmIdRef.current = null;
+    if (mountedRef.current) setPrewarmUsageLoaded(false);
     abandonRunPrewarm(id);
   };
 
@@ -152,6 +161,8 @@ export function RunLauncherDialog({
       .then((response) => {
         setOptions(response);
         setConfigurations(response.configurations);
+        setPrewarmEnabled(response.preferences.prewarm_enabled);
+        prewarmEnabledRef.current = response.preferences.prewarm_enabled;
       })
       .catch((cause) => setLoadError(cause instanceof Error ? cause.message : "Could not load run options."));
   };
@@ -165,6 +176,8 @@ export function RunLauncherDialog({
         if (!live) return;
         setOptions(response);
         setConfigurations(response.configurations);
+        setPrewarmEnabled(response.preferences.prewarm_enabled);
+        prewarmEnabledRef.current = response.preferences.prewarm_enabled;
       })
       .catch((cause) => live && setLoadError(cause instanceof Error ? cause.message : "Could not load run options."));
     return () => {
@@ -173,17 +186,26 @@ export function RunLauncherDialog({
   }, [slug]);
 
   useEffect(() => {
-    if (!prewarmStartRef.current) {
+    if (prewarmEnabled && !prewarmStartRef.current) {
       prewarmStartRef.current = startRunPrewarm(slug).then((prewarm) => {
         if (!prewarm) return;
-        if (!mountedRef.current || prewarmAdoptedRef.current) {
+        if (!mountedRef.current || prewarmAdoptedRef.current || prewarmEnabledRef.current !== true) {
           abandonRunPrewarm(prewarm.id);
           return;
         }
         prewarmIdRef.current = prewarm.id;
+        void fetchRunOptions(slug).then((latest) => {
+          if (!mountedRef.current) return;
+          setOptions((current) => current ? {
+            ...current,
+            sandbox_usage: latest.sandbox_usage,
+            preferences: latest.preferences,
+          } : current);
+          setPrewarmUsageLoaded(true);
+        }).catch(() => undefined);
       }).catch(() => undefined);
     }
-  }, [slug]);
+  }, [prewarmEnabled, slug]);
 
   useEffect(() => {
     const heartbeat = window.setInterval(() => {
@@ -246,11 +268,21 @@ export function RunLauncherDialog({
       if (selectedConfiguration?.status === "needs_attention" && !modified) {
         current.push(...selectedConfiguration.issues.map((issue) => issue.message));
       }
+      if (effectiveOptions.sandbox_usage.enforced && effectiveOptions.sandbox_usage.limit_minutes === 0) {
+        current.push("Sandbox runs are available on Pro.");
+      } else if (effectiveOptions.sandbox_usage.enforced) {
+        const requiredMinutes = prewarmUsageLoaded
+          ? COLD_RUN_RESERVATION_MINUTES - PREWARM_RESERVATION_MINUTES
+          : COLD_RUN_RESERVATION_MINUTES;
+        if ((effectiveOptions.sandbox_usage.remaining_minutes ?? 0) < requiredMinutes) {
+          current.push(`This run needs ${requiredMinutes} sandbox minutes, but the workspace has ${effectiveOptions.sandbox_usage.remaining_minutes ?? 0} left this month.`);
+        }
+      }
       return [...new Set(current)];
     },
-    [effectiveOptions, inputs, model, modified, selectedConfiguration],
+    [effectiveOptions, inputs, model, modified, prewarmUsageLoaded, selectedConfiguration],
   );
-  const operationBusy = busy || configBusy || vaultBusy;
+  const operationBusy = busy || configBusy || vaultBusy || preferenceBusy;
   const canLaunch = !!effectiveOptions && (prompt.trim().length > 0 || files.length > 0) && blockers.length === 0 && !operationBusy;
 
   const stash = (): RunLauncherDraft => ({
@@ -434,6 +466,31 @@ export function RunLauncherDialog({
     onFiles: addFiles,
   });
 
+  const togglePrewarm = async (enabled: boolean) => {
+    if (preferenceBusy) return;
+    const previous = prewarmEnabled;
+    setPreferenceBusy(true);
+    setError(null);
+    if (!enabled) {
+      setPrewarmEnabled(false);
+      prewarmEnabledRef.current = false;
+      abandonPrewarm();
+      prewarmStartRef.current = null;
+    }
+    try {
+      const saved = await updateRunPreferences({ prewarm_enabled: enabled });
+      if (saved.prewarm_enabled) prewarmStartRef.current = null;
+      setPrewarmEnabled(saved.prewarm_enabled);
+      prewarmEnabledRef.current = saved.prewarm_enabled;
+    } catch (cause) {
+      setPrewarmEnabled(previous);
+      prewarmEnabledRef.current = previous;
+      setError(cause instanceof Error ? cause.message : "Could not update the prewarm preference.");
+    } finally {
+      setPreferenceBusy(false);
+    }
+  };
+
   const launch = () => {
     if (!canLaunch || !effectiveOptions || submittingRef.current) return;
     const providerCredential = effectiveOptions.models.find((option) => option.model.id === model)?.provider_credential_pin;
@@ -471,6 +528,10 @@ export function RunLauncherDialog({
       })
       .catch((cause) => {
         setError(cause instanceof Error ? cause.message : "Could not start the run.");
+        void fetchRunOptions(slug).then((latest) => {
+          if (!mountedRef.current) return;
+          setOptions((current) => current ? { ...current, sandbox_usage: latest.sandbox_usage } : current);
+        }).catch(() => undefined);
         submittingRef.current = false;
         setBusy(false);
       });
@@ -502,7 +563,30 @@ export function RunLauncherDialog({
           <span /><span /><span />
         </div>
       ) : effectiveOptions ? (
-        <section className="run-config" aria-labelledby="run-config-label">
+        <>
+          <section className="run-sandbox" aria-label="Sandbox usage">
+            <div className="run-sandbox__usage">
+              <span>Sandbox pool</span>
+              <b>
+                {effectiveOptions.sandbox_usage.limit_minutes === null
+                  ? "Unlimited"
+                  : `${effectiveOptions.sandbox_usage.remaining_minutes} min left of ${effectiveOptions.sandbox_usage.limit_minutes}`}
+              </b>
+              {effectiveOptions.sandbox_usage.reserved_minutes > 0 && (
+                <small>{effectiveOptions.sandbox_usage.reserved_minutes} min reserved</small>
+              )}
+            </div>
+            <label className="run-sandbox__prewarm">
+              <input
+                type="checkbox"
+                checked={prewarmEnabled ?? effectiveOptions.preferences.prewarm_enabled}
+                disabled={operationBusy || (effectiveOptions.sandbox_usage.enforced && effectiveOptions.sandbox_usage.limit_minutes === 0)}
+                onChange={(event) => void togglePrewarm(event.target.checked)}
+              />
+              <span><b>Prewarm sandbox</b><small>Starts while this launcher is open and uses sandbox minutes.</small></span>
+            </label>
+          </section>
+          <section className="run-config" aria-labelledby="run-config-label">
             <div className="run-config__head">
               <label id="run-config-label" htmlFor="run-configuration">Configuration</label>
               {modified && <span className="run-config__modified">Modified</span>}
@@ -578,7 +662,8 @@ export function RunLauncherDialog({
                 {selectedConfiguration.issues.map((issue, index) => <li key={`${issue.code}-${index}`}>{issue.message}</li>)}
               </ul>
             ) : null}
-        </section>
+          </section>
+        </>
       ) : null}
 
       <div

@@ -10,6 +10,7 @@ import type {
   RunDependencyPin,
   RunInputSelection,
   RunOptions,
+  RunPreferences,
   RunPromptAccepted,
   RunPrewarmResponse,
   RunPrewarmTicket,
@@ -95,6 +96,13 @@ export async function deleteOrgModelProviderConnection(provider: string): Promis
 
 export async function fetchRunOptions(slug: string): Promise<RunOptions> {
   return apiFetch<RunOptions>(`/v1/skills/${encodeURIComponent(slug)}/run-options`);
+}
+
+export async function updateRunPreferences(preferences: RunPreferences): Promise<RunPreferences> {
+  return apiFetch<RunPreferences>("/v1/run-preferences", {
+    method: "PATCH",
+    body: JSON.stringify(preferences),
+  });
 }
 
 export async function startRunPrewarm(slug: string): Promise<RunPrewarmTicket | null> {

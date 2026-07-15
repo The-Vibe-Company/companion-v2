@@ -33,6 +33,7 @@ describe("terminal run cleanup", () => {
   it("tears down the claimed sandbox and completes only its worker lease", async () => {
     const sandbox = runtime(async () => undefined);
     const complete = vi.fn(async () => true);
+    const settle = vi.fn(async () => undefined);
 
     const result = await processClaimedRunCleanup({
       claim,
@@ -41,6 +42,7 @@ describe("terminal run cleanup", () => {
       region: "iad1",
       timeoutMs: 30_000,
       complete,
+      settle,
     });
 
     expect(result).toBe("completed");
@@ -54,6 +56,7 @@ describe("terminal run cleanup", () => {
       runId: claim.runId,
       workerId: "worker-a",
     }));
+    expect(settle).toHaveBeenCalledWith(claim);
   });
 
   it("leaves the lease to expire after provider failure so another worker can retry", async () => {
@@ -73,6 +76,24 @@ describe("terminal run cleanup", () => {
     expect(complete).not.toHaveBeenCalled();
   });
 
+  it("retries cleanup when provider teardown succeeds but usage settlement fails", async () => {
+    const sandbox = runtime(async () => undefined);
+    const complete = vi.fn(async () => true);
+
+    const result = await processClaimedRunCleanup({
+      claim,
+      workerId: "worker-b",
+      runtime: sandbox,
+      region: "iad1",
+      timeoutMs: 30_000,
+      complete,
+      settle: vi.fn(async () => { throw new Error("database unavailable"); }),
+    });
+
+    expect(result).toBe("retry");
+    expect(complete).not.toHaveBeenCalled();
+  });
+
   it("completes a terminal run that never created a sandbox", async () => {
     const sandbox = runtime(async () => undefined);
     const complete = vi.fn(async () => true);
@@ -84,6 +105,7 @@ describe("terminal run cleanup", () => {
       region: "iad1",
       timeoutMs: 30_000,
       complete,
+      settle: vi.fn(async () => undefined),
     });
 
     expect(result).toBe("completed");

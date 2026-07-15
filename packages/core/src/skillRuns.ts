@@ -55,6 +55,11 @@ import {
   type SkillBundle,
 } from "./runRuntime";
 import { assertMember, type ActorContext } from "./services";
+import {
+  adoptSandboxUsageReservation,
+  reserveSandboxUsage,
+  SANDBOX_RUN_ACTIVATION_RESERVATION_MS,
+} from "./billing";
 
 /** Opens a short tenant transaction. Kept in the context so the worker can use forced RLS. */
 export type TenantRunner = <T>(
@@ -1509,6 +1514,29 @@ async function createRunInTransaction(input: {
     goldenSnapshotId: input.ctx.goldenSnapshotId!,
     timeoutMs: input.ctx.timeoutMs,
   }));
+  const sandboxName = adoptedPrewarm?.sandboxName ?? sandboxNameForRun(input.orgId, runId);
+  if (adoptedPrewarm) {
+    await adoptSandboxUsageReservation({
+      orgId: input.orgId,
+      creatorId: input.actor.id,
+      prewarmId: adoptedPrewarm.id,
+      runId,
+      sandboxName,
+      reservationMs: SANDBOX_RUN_ACTIVATION_RESERVATION_MS,
+      database: input.database,
+    });
+  } else {
+    await reserveSandboxUsage({
+      orgId: input.orgId,
+      creatorId: input.actor.id,
+      kind: "run",
+      sourceId: runId,
+      sandboxName,
+      activationRevision: 0,
+      reservationMs: SANDBOX_RUN_ACTIVATION_RESERVATION_MS,
+      database: input.database,
+    });
+  }
   const serverPassword = randomBytes(32).toString("base64url");
   const serverPasswordEnc = serializeOpaque(
     encryptOpaqueValue(
@@ -1539,7 +1567,7 @@ async function createRunInTransaction(input: {
       prompt: input.prompt,
       status: "queued",
       phase: "queued",
-      sandboxName: adoptedPrewarm?.sandboxName ?? sandboxNameForRun(input.orgId, runId),
+      sandboxName,
       sandboxId: adoptedPrewarm?.sandboxId ?? null,
       sandboxDomain: adoptedPrewarm?.sandboxDomain ?? null,
       goldenSnapshotId: input.ctx.goldenSnapshotId,

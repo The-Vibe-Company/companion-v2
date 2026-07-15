@@ -2,6 +2,7 @@ import { z } from "zod";
 import { SEMVER_RE, SKILL_NAME_RE, SKILL_REQUIREMENT_KEY_RE } from "./frontmatter";
 import { modelRowSchema } from "./modelProviders";
 import { secretCandidateSchema } from "./secrets";
+import { sandboxUsageOverviewSchema } from "./billing";
 
 /**
  * Skill runs are private, durable sandbox sessions launched from a published skill version.
@@ -73,6 +74,9 @@ export const runPrewarmResponseSchema = z
   .object({ prewarm: runPrewarmTicketSchema.nullable() })
   .strict();
 export type RunPrewarmResponse = z.infer<typeof runPrewarmResponseSchema>;
+
+export const runPreferencesSchema = z.object({ prewarm_enabled: z.boolean() }).strict();
+export type RunPreferences = z.infer<typeof runPreferencesSchema>;
 
 /** Fine-grained durable worker phase; status remains the stable user-facing lifecycle. */
 export const runPhaseSchema = z.enum([
@@ -366,6 +370,8 @@ export const runOptionsSchema = z
     declared_variables: z.array(runDeclaredVariableSchema).max(RUN_MAX_VARIABLE_INPUTS),
     configurations: z.array(runConfigurationSchema),
     models: z.array(runModelOptionSchema),
+    sandbox_usage: sandboxUsageOverviewSchema,
+    preferences: runPreferencesSchema,
     runtime: z
       .object({
         available: z.boolean(),

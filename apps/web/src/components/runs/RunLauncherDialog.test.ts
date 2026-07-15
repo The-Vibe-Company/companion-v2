@@ -24,6 +24,7 @@ const queryMocks = vi.hoisted(() => ({
   launchRun: vi.fn(),
   startRunPrewarm: vi.fn(),
   updateRunConfiguration: vi.fn(),
+  updateRunPreferences: vi.fn(),
 }));
 
 vi.mock("next/navigation", () => ({ useRouter: () => ({ push: vi.fn() }) }));
@@ -67,6 +68,12 @@ function runOptions(): RunOptions {
         scope: "personal",
       },
     }],
+    sandbox_usage: {
+      enabled: true, enforced: true, limit_minutes: 250, used_minutes: 20,
+      reserved_minutes: 0, remaining_minutes: 230, minutes_per_seat: 250,
+      period_start: "2026-07-01T00:00:00.000Z", period_end: "2026-08-01T00:00:00.000Z",
+    },
+    preferences: { prewarm_enabled: true },
     runtime: { available: true, message: null },
   };
 }
@@ -138,6 +145,7 @@ async function mount(options: RunOptions): Promise<HTMLElement> {
 beforeEach(() => {
   vi.clearAllMocks();
   queryMocks.startRunPrewarm.mockResolvedValue(null);
+  queryMocks.updateRunPreferences.mockImplementation(async (preferences: { prewarm_enabled: boolean }) => preferences);
 });
 
 afterEach(() => {
@@ -159,6 +167,71 @@ describe("RunLauncherDialog", () => {
     const failedContainer = await renderLauncher();
 
     expect(button(failedContainer, "Add files").disabled).toBe(true);
+  });
+
+  it("shows shared pool usage and persists the personal prewarm toggle", async () => {
+    const container = await mount(runOptions());
+    expect(container.textContent).toContain("230 min left of 250");
+    const toggle = container.querySelector<HTMLInputElement>('.run-sandbox input[type="checkbox"]');
+    expect(toggle?.checked).toBe(true);
+    await act(async () => {
+      toggle?.click();
+      await Promise.resolve();
+    });
+    expect(queryMocks.updateRunPreferences).toHaveBeenCalledWith({ prewarm_enabled: false });
+  });
+
+  it("abandons a prewarm that resolves after the user opts out", async () => {
+    let resolvePrewarm!: (value: { id: string; status: "queued"; expires_at: string }) => void;
+    queryMocks.startRunPrewarm.mockReturnValue(new Promise((resolve) => { resolvePrewarm = resolve; }));
+    const container = await mount(runOptions());
+    const toggle = container.querySelector<HTMLInputElement>('.run-sandbox input[type="checkbox"]');
+
+    await act(async () => {
+      toggle?.click();
+      await Promise.resolve();
+      resolvePrewarm({
+        id: "99999999-9999-4999-8999-999999999999",
+        status: "queued",
+        expires_at: "2026-07-15T10:05:00.000Z",
+      });
+      await Promise.resolve();
+    });
+
+    expect(queryMocks.abandonRunPrewarm).toHaveBeenCalledWith("99999999-9999-4999-8999-999999999999");
+  });
+
+  it("waits for an enabled preference to persist before starting prewarm", async () => {
+    const options = runOptions();
+    options.preferences.prewarm_enabled = false;
+    let savePreference!: (value: { prewarm_enabled: boolean }) => void;
+    queryMocks.updateRunPreferences.mockReturnValue(new Promise((resolve) => { savePreference = resolve; }));
+    const container = await mount(options);
+    const toggle = container.querySelector<HTMLInputElement>('.run-sandbox input[type="checkbox"]');
+
+    await act(async () => {
+      toggle?.click();
+      await Promise.resolve();
+    });
+    expect(queryMocks.startRunPrewarm).not.toHaveBeenCalled();
+
+    await act(async () => {
+      savePreference({ prewarm_enabled: true });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(queryMocks.startRunPrewarm).toHaveBeenCalledWith("incident-summary");
+  });
+
+  it("blocks a cold launch when the remaining pool cannot cover its reservation", async () => {
+    const options = runOptions();
+    options.preferences.prewarm_enabled = false;
+    options.sandbox_usage.remaining_minutes = 9;
+    const container = await mount(options);
+    setReactTextareaValue(container.querySelector("textarea")!, "Summarize this incident");
+
+    expect(container.textContent).toContain("This run needs 10 sandbox minutes");
+    expect(button(container, "Run").disabled).toBe(true);
   });
 
   it("abandons a secretless prewarm when the launcher unmounts", async () => {

@@ -187,6 +187,7 @@ import {
   setSecretSuggestionInputSchema,
   secretRetrievalPreflightInputSchema,
   redeemSecretGrantInputSchema,
+  runPreferencesSchema,
 } from "@companion/contracts";
 import { createModelCatalog } from "@companion/sandbox";
 import {
@@ -255,7 +256,9 @@ import {
   createBillingCheckout,
   createBillingPortal,
   getBillingOverview,
+  getRunPreferences,
   processStripeWebhook,
+  updateRunPreferences,
 } from "@companion/core";
 
 const app = new Hono<{ Variables: ApiVariables }>();
@@ -2967,6 +2970,36 @@ app.get("/v1/skills/:slug/run-options", async (c) => {
       { includeModels: true },
     );
     return c.json(options);
+  } catch (error) {
+    return runError(c, error);
+  }
+});
+
+app.get("/v1/run-preferences", async (c) => {
+  try {
+    assertRunSession(c);
+    const preferences = await withTenant(c, ({ actor, orgId, database }) =>
+      getRunPreferences({ actorId: actor.id, orgId, database }),
+    );
+    return c.json(preferences);
+  } catch (error) {
+    return runError(c, error);
+  }
+});
+
+app.patch("/v1/run-preferences", async (c) => {
+  try {
+    assertRunSession(c);
+    const value = runPreferencesSchema.parse(await c.req.json());
+    const preferences = await withTenant(c, ({ actor, orgId, database }) =>
+      updateRunPreferences({
+        actorId: actor.id,
+        orgId,
+        prewarmEnabled: value.prewarm_enabled,
+        database,
+      }),
+    );
+    return c.json(preferences);
   } catch (error) {
     return runError(c, error);
   }

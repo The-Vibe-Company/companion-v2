@@ -8,9 +8,9 @@ function money(cents: number): string {
   return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(cents / 100);
 }
 
-function date(value: string | null): string {
+function date(value: string | null, timeZone?: string): string {
   if (!value) return "—";
-  return new Intl.DateTimeFormat(undefined, { dateStyle: "medium" }).format(new Date(value));
+  return new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeZone }).format(new Date(value));
 }
 
 function statusLabel(value: string | null): string {
@@ -96,6 +96,20 @@ export function BillingPane({ ctx }: { ctx: OrgCtx }) {
           <div className="sx-def"><span className="sx-def__k">Confirmed by Stripe</span><span className="sx-def__v">{billing.syncedSeats ?? "—"} seats</span></div>
         </div>
         {billing.lastError && <p className="sx-field__hint sx-field__hint--error" role="status">Seat sync is retrying automatically.</p>}
+      </div>
+
+      <div className="sx-sec">
+        <h2 className="sx-sec__h">Sandbox usage</h2>
+        <p className="sx-sec__d">
+          Pro includes a shared monthly pool of {billing.sandboxUsage.minutes_per_seat} minutes per active seat. New sandbox work is blocked when the pool is exhausted.
+        </p>
+        <div className="sx-defs">
+          <div className="sx-def"><span className="sx-def__k">Used</span><span className="sx-def__v"><b>{billing.sandboxUsage.used_minutes} min</b></span></div>
+          <div className="sx-def"><span className="sx-def__k">Reserved by active runs</span><span className="sx-def__v">{billing.sandboxUsage.reserved_minutes} min</span></div>
+          <div className="sx-def"><span className="sx-def__k">Remaining</span><span className="sx-def__v"><b>{billing.sandboxUsage.remaining_minutes ?? "Unlimited"}{billing.sandboxUsage.remaining_minutes === null ? "" : " min"}</b></span></div>
+          <div className="sx-def"><span className="sx-def__k">Monthly pool</span><span className="sx-def__v">{billing.sandboxUsage.limit_minutes ?? "Unlimited"}{billing.sandboxUsage.limit_minutes === null ? "" : " min"}</span></div>
+          <div className="sx-def"><span className="sx-def__k">Resets</span><span className="sx-def__v">{date(billing.sandboxUsage.period_end, "UTC")}</span></div>
+        </div>
       </div>
 
       {plan === "free" && (

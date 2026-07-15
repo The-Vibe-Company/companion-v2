@@ -23,6 +23,7 @@ import {
   type RunControlContext,
 } from "./skillRuns";
 import { assertMember, type ActorContext } from "./services";
+import { getRunPreferences, getSandboxUsageOverview } from "./billing";
 
 type ConfigRow = typeof schema.skillRunConfigs.$inferSelect;
 
@@ -739,6 +740,10 @@ export async function getRunOptions(input: {
     depth: skill.depth,
     via: skill.via,
   });
+  const [sandboxUsage, preferences] = await Promise.all([
+    getSandboxUsageOverview({ orgId: input.orgId, database }),
+    getRunPreferences({ actorId: input.actor.id, orgId: input.orgId, database }),
+  ]);
   return {
     root: dependency(root),
     dependencies: closure.slice(1).map(dependency),
@@ -746,6 +751,8 @@ export async function getRunOptions(input: {
     declared_variables: declarations.variables,
     configurations,
     models,
+    sandbox_usage: sandboxUsage,
+    preferences,
     runtime: {
       available: ctx.runtimeAvailable !== false && Boolean(ctx.goldenSnapshotId),
       message:

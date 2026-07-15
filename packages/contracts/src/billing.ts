@@ -37,6 +37,20 @@ export const entitlementsSchema = z.object({
 });
 export type Entitlements = z.infer<typeof entitlementsSchema>;
 
+/** Organization-wide sandbox minute pool for the current UTC calendar month. */
+export const sandboxUsageOverviewSchema = z.object({
+  enabled: z.boolean(),
+  enforced: z.boolean(),
+  limit_minutes: z.number().int().nonnegative().nullable(),
+  used_minutes: z.number().int().nonnegative(),
+  reserved_minutes: z.number().int().nonnegative(),
+  remaining_minutes: z.number().int().nonnegative().nullable(),
+  minutes_per_seat: z.number().int().positive(),
+  period_start: z.string().datetime(),
+  period_end: z.string().datetime(),
+});
+export type SandboxUsageOverview = z.infer<typeof sandboxUsageOverviewSchema>;
+
 export const billingOverviewSchema = z.object({
   billingEnabled: z.boolean(),
   canManage: z.boolean(),
@@ -56,6 +70,7 @@ export const billingOverviewSchema = z.object({
   lastError: z.string().nullable(),
   orgSkillCount: z.number().int().nonnegative(),
   hiddenPersonalSkillCount: z.number().int().nonnegative(),
+  sandboxUsage: sandboxUsageOverviewSchema,
   checkoutEnabled: z.boolean(),
   portalEnabled: z.boolean(),
 });
@@ -65,6 +80,8 @@ export const entitlementErrorCodeSchema = z.enum([
   "upgrade_required",
   "org_skill_limit_reached",
   "catalog_frozen",
+  "sandbox_plan_required",
+  "sandbox_quota_exhausted",
 ]);
 export type EntitlementErrorCode = z.infer<typeof entitlementErrorCodeSchema>;
 
@@ -76,6 +93,7 @@ export const entitlementFeatureSchema = z.enum([
   "org_skill_restore",
   "org_skill_rename",
   "skill_share",
+  "sandbox_runs",
 ]);
 export type EntitlementFeature = z.infer<typeof entitlementFeatureSchema>;
 
@@ -84,7 +102,7 @@ export const entitlementErrorSchema = z.object({
   feature: entitlementFeatureSchema,
   message: z.string(),
   effectivePlan: effectivePlanSchema,
-  limit: z.number().int().positive().optional(),
+  limit: z.number().int().nonnegative().optional(),
   current: z.number().int().nonnegative().optional(),
   upgradeUrl: z.string().optional(),
 });
