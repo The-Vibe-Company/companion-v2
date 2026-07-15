@@ -299,6 +299,16 @@ describe("declarations and explicit inputs", () => {
     ).rejects.toMatchObject({ code: "provider_credential_unavailable" });
   });
 
+  it("uses the latest provider pin at commit instead of a stale launcher observation", async () => {
+    const latest = { ...providerPin, credentialVersion: 4 };
+    const resolved = await validate({
+      modelProviderCredentialVersion: 3,
+      providerPin: latest,
+      requireExplicitProviderSelection: false,
+    });
+    expect(resolved.modelProvider).toEqual({ ...latest, envKey: "ANTHROPIC_API_KEY" });
+  });
+
   it("rejects missing required, unknown, duplicate and invalid variable inputs", async () => {
     await expect(validate({ selection: { secrets: [], variables: [] } })).rejects.toMatchObject({
       code: "required_secret_missing",
@@ -703,21 +713,21 @@ describe("createRun committed idempotent replay", () => {
     expect(database.transaction).not.toHaveBeenCalled();
   });
 
-  it("still rejects an exact-key replay when the explicit provider credential changes", async () => {
+  it("returns the committed snapshot when a provider credential rotates after the click", async () => {
     const payloadHash = hashRunCreationPayload(request);
     const database = committedReplayDb(existingRow(payloadHash));
     const ctx = unavailableContext();
 
-    await expect(
-      createRun({
-        ...request,
-        modelProviderConnectionId: SECRET,
-        actor,
-        orgId: ORG,
-        ctx,
-        database,
-      }),
-    ).rejects.toMatchObject({ code: "idempotency_conflict" });
+    const detail = await createRun({
+      ...request,
+      modelProviderConnectionId: SECRET,
+      modelProviderCredentialVersion: request.modelProviderCredentialVersion + 1,
+      actor,
+      orgId: ORG,
+      ctx,
+      database,
+    });
+    expect(detail.id).toBe("50000000-0000-4000-8000-000000000001");
     expect(ctx.resolveModelKeys).not.toHaveBeenCalled();
     expect(database.transaction).not.toHaveBeenCalled();
   });

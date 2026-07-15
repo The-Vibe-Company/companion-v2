@@ -130,6 +130,7 @@ async function saveConnection(input: {
   }
   const now = new Date();
   return input.database.transaction(async (tx) => {
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`companion:provider-credential:${input.orgId}:${input.provider}`}))`);
     const connectionId = randomUUID();
     const target = input.scope === "personal"
       ? [schema.modelProviderConnections.orgId, schema.modelProviderConnections.userId, schema.modelProviderConnections.provider]
@@ -239,14 +240,17 @@ async function removeConnection(input: {
     eq(schema.modelProviderConnections.provider, input.provider),
   ];
   if (input.scope === "personal") conditions.push(eq(schema.modelProviderConnections.userId, input.actor.id));
-  await input.database.delete(schema.modelProviderConnections).where(and(...conditions));
-  await input.database.insert(schema.auditLog).values({
-    orgId: input.orgId,
-    actorId: input.actor.id,
-    action: input.scope === "personal" ? "provider.disconnect" : "provider.disconnect.org",
-    targetType: "provider",
-    targetId: input.provider,
-    metadata: { provider: input.provider, scope: input.scope },
+  await input.database.transaction(async (tx) => {
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`companion:provider-credential:${input.orgId}:${input.provider}`}))`);
+    await tx.delete(schema.modelProviderConnections).where(and(...conditions));
+    await tx.insert(schema.auditLog).values({
+      orgId: input.orgId,
+      actorId: input.actor.id,
+      action: input.scope === "personal" ? "provider.disconnect" : "provider.disconnect.org",
+      targetType: "provider",
+      targetId: input.provider,
+      metadata: { provider: input.provider, scope: input.scope },
+    });
   });
 }
 

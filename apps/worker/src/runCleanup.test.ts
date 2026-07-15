@@ -18,7 +18,7 @@ const claim: ClaimedRunCleanup = {
 function runtime(destroy: () => Promise<void>): RunSandboxRuntime {
   return {
     provider: "vercel",
-    stop: vi.fn(async () => undefined),
+    stop: vi.fn(async () => true),
     destroy: vi.fn(destroy),
   } as unknown as RunSandboxRuntime;
 }

@@ -100,6 +100,9 @@ import {
   updateRunConfiguration,
   deleteRunConfiguration,
   createRun,
+  createRunPrewarm,
+  heartbeatRunPrewarm,
+  cancelRunPrewarm,
   enqueueRunPrompt,
   preflightRunPromptUpload,
   reserveRunAttachmentUploads,
@@ -2809,6 +2812,11 @@ function boundedInteger(raw: string | undefined, fallback: number, min: number, 
   return Number.isSafeInteger(parsed) && parsed >= min && parsed <= max ? parsed : fallback;
 }
 
+function runPrewarmEnabled(): boolean {
+  const setting = process.env.COMPANION_RUN_PREWARM_ENABLED?.trim().toLowerCase();
+  return setting !== "false" && setting !== "0";
+}
+
 /** API-side run context contains catalog/readiness only. Runtime SDKs are composed by apps/worker. */
 async function apiRunContext(input: { includeModels?: boolean } = {}): Promise<RunControlContext> {
   let masterKey: Buffer;
@@ -2964,6 +2972,47 @@ app.get("/v1/skills/:slug/run-options", async (c) => {
   }
 });
 
+app.post("/v1/skills/:slug/run-prewarms", async (c) => {
+  try {
+    assertRunSession(c);
+    if (!runPrewarmEnabled()) {
+      return c.json({ prewarm: null }, 200);
+    }
+    const prewarm = await withApiRunContext((ctx) =>
+      withTenant(c, ({ actor, orgId, database }) =>
+        createRunPrewarm({ actor, orgId, slug: c.req.param("slug"), ctx, database }),
+      ),
+    );
+    return c.json({ prewarm }, prewarm ? 202 : 200);
+  } catch (error) {
+    return runError(c, error);
+  }
+});
+
+app.post("/v1/run-prewarms/:id/heartbeat", async (c) => {
+  try {
+    assertRunSession(c);
+    const prewarm = await withTenant(c, ({ actor, orgId, database }) =>
+      heartbeatRunPrewarm({ actor, orgId, prewarmId: c.req.param("id"), database }),
+    );
+    return prewarm ? c.json({ prewarm }) : jsonError(c, "prewarm not found", 404);
+  } catch (error) {
+    return runError(c, error);
+  }
+});
+
+app.post("/v1/run-prewarms/:id/cancel", async (c) => {
+  try {
+    assertRunSession(c);
+    await withTenant(c, ({ actor, orgId, database }) =>
+      cancelRunPrewarm({ actor, orgId, prewarmId: c.req.param("id"), database }),
+    );
+    return c.json({ ok: true }, 202);
+  } catch (error) {
+    return runError(c, error);
+  }
+});
+
 app.get("/v1/skills/:slug/run-configurations", async (c) => {
   try {
     assertRunSession(c);
@@ -3051,11 +3100,17 @@ app.post(
         dependency_pins: typeof form.get("dependency_pins") === "string" ? form.get("dependency_pins") : "",
         inputs: typeof form.get("inputs") === "string" ? form.get("inputs") : "",
         model_provider_connection_id:
-          typeof form.get("model_provider_connection_id") === "string" ? form.get("model_provider_connection_id") : "",
+          typeof form.get("model_provider_connection_id") === "string" && form.get("model_provider_connection_id") !== ""
+            ? form.get("model_provider_connection_id")
+            : undefined,
         model_provider_credential_version:
-          typeof form.get("model_provider_credential_version") === "string"
+          typeof form.get("model_provider_credential_version") === "string" && form.get("model_provider_credential_version") !== ""
             ? form.get("model_provider_credential_version")
-            : "",
+            : undefined,
+        prewarm_id:
+          typeof form.get("prewarm_id") === "string" && form.get("prewarm_id") !== ""
+            ? form.get("prewarm_id")
+            : undefined,
         run_config_id:
           typeof form.get("run_config_id") === "string" && form.get("run_config_id") !== ""
             ? form.get("run_config_id")
@@ -3113,6 +3168,9 @@ app.post(
               inputs: fields.inputs,
               modelProviderConnectionId: fields.model_provider_connection_id,
               modelProviderCredentialVersion: fields.model_provider_credential_version,
+              // Disabling prewarming is an immediate rollback boundary for every uncommitted run.
+              // Existing tickets may still be canceled/cleaned, but cannot be newly adopted.
+              prewarmId: runPrewarmEnabled() ? fields.prewarm_id : undefined,
               runConfigId: fields.run_config_id,
               idempotencyKey: requestKey,
               attachments,

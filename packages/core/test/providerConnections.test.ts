@@ -46,6 +46,7 @@ function providerDatabase(role: "owner" | "admin" | "developer" | null = "develo
   const database = {
     query: { memberships: { findFirst: async () => (role ? { orgRole: role } : undefined) } },
     transaction: async (fn: (tx: Db) => Promise<unknown>) => fn(database as unknown as Db),
+    execute: async () => [],
     select: () => ({
       from: (table: unknown) => ({
         where: (condition: unknown) => {

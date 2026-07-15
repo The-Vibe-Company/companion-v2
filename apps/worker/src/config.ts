@@ -10,6 +10,7 @@ export function boundedInteger(
 
 export interface RunWorkerConfig {
   concurrency: number;
+  prewarmConcurrency: number;
   claimIntervalMs: number;
   leaseSeconds: number;
   heartbeatMs: number;
@@ -24,6 +25,7 @@ export function runWorkerConfig(env: NodeJS.ProcessEnv = process.env): RunWorker
   const leaseSeconds = boundedInteger(env.COMPANION_RUN_LEASE_SECONDS, 30, { min: 10, max: 300 });
   return {
     concurrency: boundedInteger(env.COMPANION_RUN_CONCURRENCY, 2, { min: 1, max: 32 }),
+    prewarmConcurrency: boundedInteger(env.COMPANION_RUN_PREWARM_CONCURRENCY, 2, { min: 1, max: 32 }),
     claimIntervalMs: boundedInteger(env.COMPANION_RUN_CLAIM_INTERVAL_MS, 1_000, { min: 100, max: 60_000 }),
     leaseSeconds,
     heartbeatMs: boundedInteger(env.COMPANION_RUN_HEARTBEAT_MS, Math.max(1_000, Math.floor(leaseSeconds * 1_000 / 3)), {

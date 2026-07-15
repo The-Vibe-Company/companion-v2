@@ -55,6 +55,11 @@ export interface RunWorkspaceFiles {
 
 export type RunAttachmentFiles = RunWorkspaceFiles["attachments"];
 
+export interface RunDynamicFiles {
+  opencodeJson: string;
+  attachments: Array<{ path: string; data: Buffer }>;
+}
+
 export interface RunSandboxRuntime {
   readonly provider: "vercel";
   /** Step 1 — fork/boot the named sandbox from the golden snapshot; returns id + public domain. */
@@ -67,6 +72,10 @@ export interface RunSandboxRuntime {
   pushWorkspace(input: { ref: SandboxRef; files: RunWorkspaceFiles; signal?: AbortSignal }): Promise<void>;
   /** Idempotently add files to an already-running sandbox before dispatching a follow-up prompt. */
   pushAttachments(input: { ref: SandboxRef; attachments: RunAttachmentFiles; signal?: AbortSignal }): Promise<void>;
+  /** Secretless prewarm step: write only immutable published skill bundles. */
+  pushSkillBundles(input: { ref: SandboxRef; skills: SkillBundle[]; signal?: AbortSignal }): Promise<void>;
+  /** Per-run step after adoption: write model config and user attachments, but no skill bundles. */
+  pushRunFiles(input: { ref: SandboxRef; files: RunDynamicFiles; signal?: AbortSignal }): Promise<void>;
   /** Step 3 — launch `opencode serve` detached with the injected env. */
   startServer(input: {
     ref: SandboxRef;
@@ -82,8 +91,8 @@ export interface RunSandboxRuntime {
     /** Abort promptly when cancellation, membership, or secret ACL changes while probing. */
     signal?: AbortSignal;
   }): Promise<{ ok: true; ms: number }>;
-  /** Stop now while retaining the named sandbox filesystem for a later resume. Idempotent. */
-  stop(ref: SandboxRef, signal?: AbortSignal): Promise<void>;
+  /** Stop now while retaining the filesystem. False means the deterministic name did not exist. */
+  stop(ref: SandboxRef, signal?: AbortSignal): Promise<boolean>;
   /**
    * Delete the sandbox entirely. Idempotent (a missing/already-deleted sandbox is success), but
    * MUST throw on transient provider failures so callers keep the cleanup owed and retry later.

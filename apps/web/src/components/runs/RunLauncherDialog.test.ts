@@ -16,10 +16,13 @@ const PROVIDER_CONNECTION_ID = "55555555-5555-4555-8555-555555555555";
 const CONFIG_ID = "66666666-6666-4666-8666-666666666666";
 
 const queryMocks = vi.hoisted(() => ({
+  abandonRunPrewarm: vi.fn(),
   createRunConfiguration: vi.fn(),
   deleteRunConfiguration: vi.fn(),
   fetchRunOptions: vi.fn(),
+  heartbeatRunPrewarm: vi.fn(),
   launchRun: vi.fn(),
+  startRunPrewarm: vi.fn(),
   updateRunConfiguration: vi.fn(),
 }));
 
@@ -95,6 +98,14 @@ function setReactInputValue(input: HTMLInputElement, value: string): void {
   });
 }
 
+function setReactTextareaValue(input: HTMLTextAreaElement, value: string): void {
+  const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value")?.set;
+  act(() => {
+    setter?.call(input, value);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+}
+
 function button(container: HTMLElement, text: string): HTMLButtonElement {
   const match = Array.from(container.querySelectorAll("button")).find((candidate) => candidate.textContent?.trim() === text);
   if (!(match instanceof HTMLButtonElement)) throw new Error(`Button not found: ${text}`);
@@ -122,6 +133,7 @@ async function mount(options: RunOptions): Promise<HTMLElement> {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  queryMocks.startRunPrewarm.mockResolvedValue(null);
 });
 
 afterEach(() => {
@@ -130,6 +142,70 @@ afterEach(() => {
 });
 
 describe("RunLauncherDialog", () => {
+  it("abandons a secretless prewarm when the launcher unmounts", async () => {
+    queryMocks.startRunPrewarm.mockResolvedValue({
+      id: "88888888-8888-4888-8888-888888888888",
+      status: "queued",
+      expires_at: "2026-07-15T10:05:00.000Z",
+    });
+    await mount(runOptions());
+    await act(async () => { await Promise.resolve(); });
+    const root = roots.pop()!;
+    await act(async () => {
+      root.unmount();
+      await Promise.resolve();
+    });
+    expect(queryMocks.abandonRunPrewarm).toHaveBeenCalledWith("88888888-8888-4888-8888-888888888888");
+  });
+
+  it("passes the prewarm to Run and safely cancels any cold-missed ticket after commit", async () => {
+    queryMocks.startRunPrewarm.mockResolvedValue({
+      id: "88888888-8888-4888-8888-888888888888",
+      status: "queued",
+      expires_at: "2026-07-15T10:05:00.000Z",
+    });
+    queryMocks.launchRun.mockResolvedValue({ id: "run-1" });
+    const container = await mount(runOptions());
+    await act(async () => { await Promise.resolve(); });
+    setReactTextareaValue(container.querySelector("textarea")!, "Summarize this incident");
+    await act(async () => {
+      button(container, "Run").click();
+      await Promise.resolve();
+    });
+    expect(queryMocks.launchRun).toHaveBeenCalledWith(
+      "incident-summary",
+      expect.objectContaining({ prewarmId: "88888888-8888-4888-8888-888888888888" }),
+    );
+    const root = roots.pop()!;
+    await act(async () => {
+      root.unmount();
+      await Promise.resolve();
+    });
+    expect(queryMocks.abandonRunPrewarm).toHaveBeenCalledWith("88888888-8888-4888-8888-888888888888");
+  });
+
+  it("cancels a prewarm ticket that arrives after a cold launch commits", async () => {
+    let resolvePrewarm!: (value: { id: string; status: "queued"; expires_at: string }) => void;
+    queryMocks.startRunPrewarm.mockReturnValue(new Promise((resolve) => { resolvePrewarm = resolve; }));
+    queryMocks.launchRun.mockResolvedValue({ id: "run-1" });
+    const container = await mount(runOptions());
+    setReactTextareaValue(container.querySelector("textarea")!, "Summarize this incident");
+    await act(async () => {
+      button(container, "Run").click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      resolvePrewarm({
+        id: "99999999-9999-4999-8999-999999999999",
+        status: "queued",
+        expires_at: "2026-07-15T10:05:00.000Z",
+      });
+      await Promise.resolve();
+    });
+
+    expect(queryMocks.abandonRunPrewarm).toHaveBeenCalledWith("99999999-9999-4999-8999-999999999999");
+  });
+
   it("does not present the dedicated model-provider key as a manifest-declared skill input", async () => {
     const container = await mount(runOptions());
 

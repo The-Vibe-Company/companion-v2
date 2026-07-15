@@ -41,6 +41,17 @@ function skillFilePayloads(skill: SkillBundle): { path: string; content: Uint8Ar
   }));
 }
 
+async function writePayloads(
+  sandbox: Sandbox,
+  payloads: { path: string; content: Uint8Array; mode?: number }[],
+  signal?: AbortSignal,
+): Promise<void> {
+  const CHUNK = 32;
+  for (let i = 0; i < payloads.length; i += CHUNK) {
+    await sandbox.writeFiles(payloads.slice(i, i + CHUNK), { signal });
+  }
+}
+
 async function firstOkResponse(
   url: string,
   headers: Record<string, string>,
@@ -162,11 +173,23 @@ export function createVercelRuntime(config: VercelRuntimeConfig): RunSandboxRunt
           content: attachment.data as Uint8Array,
         })),
       ];
-      // Write in chunks: a big skill in one call risks oversized requests.
-      const CHUNK = 32;
-      for (let i = 0; i < payloads.length; i += CHUNK) {
-        await sandbox.writeFiles(payloads.slice(i, i + CHUNK), { signal });
-      }
+      await writePayloads(sandbox, payloads, signal);
+    },
+
+    async pushSkillBundles({ ref, skills, signal }) {
+      const sandbox = await getSandbox(ref, signal);
+      await writePayloads(sandbox, skills.flatMap(skillFilePayloads), signal);
+    },
+
+    async pushRunFiles({ ref, files, signal }) {
+      const sandbox = await getSandbox(ref, signal);
+      await writePayloads(sandbox, [
+        { path: `${WORKDIR}/opencode.json`, content: Buffer.from(files.opencodeJson, "utf8") as Uint8Array },
+        ...files.attachments.map((attachment) => ({
+          path: `${WORKDIR}/attachments/${attachment.path}`,
+          content: attachment.data as Uint8Array,
+        })),
+      ], signal);
     },
 
     async pushAttachments({ ref, attachments, signal }) {
@@ -202,10 +225,11 @@ export function createVercelRuntime(config: VercelRuntimeConfig): RunSandboxRunt
       try {
         const sandbox = await Sandbox.get({ ...credentials, name: ref.sandboxName, resume: false, signal });
         await sandbox.stop({ signal });
+        return true;
       } catch (error) {
         // Already stopped or gone is idempotent. Provider outages must remain visible so the
         // worker does not claim a resumable terminal state while code may still be running.
-        if (error instanceof APIError && (error.response.status === 404 || error.response.status === 410)) return;
+        if (error instanceof APIError && (error.response.status === 404 || error.response.status === 410)) return false;
         throw error;
       }
     },
