@@ -93,7 +93,8 @@ Every tenant-owned table carries `org_id`. A skill lives in one of two libraries
   delete it. Organized by that user's **personal folders** (`personal_labels`).
 
 `creator_id` (always recorded, for Activity/audit) doubles as the **owner** of a personal skill, and is
-distinct from the **last updater**: the authenticated `GET /v1/skills` and `GET /v1/skills/:slug` read
+distinct from the **last updater**: the session- or `skills:read` PAT-authenticated `GET /v1/skills`
+and `GET /v1/skills/:slug` read
 models carry both the `creator_*` ("Created by") and `updater_*` ("Last updated by") display fields, the
 latter derived from the uploader of the current version (`skill_versions.created_by` of
 `skills.current_version_id`) — no `updated_by` column. There
@@ -519,7 +520,8 @@ persisting so delivery order cannot corrupt local state.
   `PUT /v1/users/me` (update display name), and `/v1/invitations`. There are no `/v1/teams` endpoints.
 
 Requests authenticate by Better Auth cookie session. An `Authorization: Bearer cmp_pat_…` token is
-accepted **only** on the PAT-enabled skills endpoints (`GET /v1/skills`, `POST /v1/skills`,
+accepted **only** on the PAT-enabled skills endpoints (`GET /v1/skills`, `GET /v1/skills/:slug`,
+`POST /v1/skills`,
 `POST /v1/skills/create`, `POST /v1/skills/:slug/rename`,
 `GET /v1/skills/:slug/download`,
 `GET /v1/skills/:slug/versions/:version/package`,

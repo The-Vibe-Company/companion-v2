@@ -1490,10 +1490,15 @@ app.post("/v1/skills/:slug/rename", async (c) => {
 
 app.get("/v1/skills/:slug", async (c) => {
   try {
+    actorFromContext(c, true);
+    requireScope(c, "skills:read");
     // Resolve archived skills too — they stay viewable, so the canonical detail endpoint must
     // return them (getSkillBySlug includes archived).
-    const row = await withTenant(c, ({ actor, orgId, database }) =>
-      getSkillBySlug({ actor, orgId, slug: c.req.param("slug"), database }),
+    const row = await withTenant(
+      c,
+      ({ actor, orgId, database }) =>
+        getSkillBySlug({ actor, orgId, slug: c.req.param("slug"), database }),
+      true,
     );
     if (!row) return jsonError(c, "skill not found", 404);
     return c.json(row);

@@ -23,7 +23,7 @@ const serviceMocks = vi.hoisted(() => {
     getLocalSkillInstall: noop,
     getOnboardingContext: noop,
     getOnboardingState: noop,
-    getSkillBySlug: noop,
+    getSkillBySlug: vi.fn(),
     getSkillDependencies: noop,
     restoreSkill: noop,
     getSkillFilterPreferences: noop,
@@ -38,7 +38,7 @@ const serviceMocks = vi.hoisted(() => {
     joinOrgByDomain: noop,
     listApiTokens: noop,
     listLabels: noop,
-    listOrgs: noop,
+    listOrgs: vi.fn(),
     listSkillComments: noop,
     listSkills: vi.fn(),
     listSkillVersions: noop,
@@ -564,6 +564,73 @@ describe("GET /v1/orgs/current/skill-naming-policy", () => {
 
     expect(res.status).toBe(401);
     await expect(res.json()).resolves.toMatchObject({ ok: false, error: "not a member of this organization" });
+  });
+});
+
+/**
+ * Product promise:
+ * The official Companion installer can resolve skill metadata with its scoped PAT before downloading
+ * the dependency closure.
+ *
+ * Regression caught:
+ * Making the canonical detail route session-only returns 401 to install_skill.py and blocks every
+ * automated skill installation before package download.
+ *
+ * Why this test is HTTP-level:
+ * The failure lives in route authentication and scope wiring; the service visibility rules are
+ * protected separately by the skill lifecycle integration suite.
+ *
+ * Failure proof:
+ * Removing PAT opt-in or the skills:read gate from GET /v1/skills/:slug makes these cases fail.
+ */
+describe("GET /v1/skills/:slug", () => {
+  const row = { id: "skill-1", slug: "workspace-skill", current_version: "1.2.3" };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    authMocks.getSession.mockResolvedValue(null);
+    serviceMocks.resolveApiToken.mockImplementation(async (token: string) => tokenFor(token));
+    serviceMocks.getSkillBySlug.mockResolvedValue(row);
+  });
+
+  it("lets the official installer resolve metadata with a skills:read PAT", async () => {
+    const res = await app.request("/v1/skills/workspace-skill", {
+      headers: { Authorization: "Bearer read-a" },
+    });
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual(row);
+    expect(serviceMocks.getSkillBySlug).toHaveBeenCalledWith(
+      expect.objectContaining({ actor: actorA, orgId: "org-1", slug: "workspace-skill" }),
+    );
+  });
+
+  it("rejects a PAT without skills:read before resolving the skill", async () => {
+    const res = await app.request("/v1/skills/workspace-skill", {
+      headers: { Authorization: "Bearer write-only" },
+    });
+
+    expect(res.status).toBe(401);
+    await expect(res.json()).resolves.toMatchObject({ ok: false, error: expect.stringContaining("skills:read") });
+    expect(serviceMocks.getSkillBySlug).not.toHaveBeenCalled();
+  });
+
+  it("keeps signed-in session access unchanged", async () => {
+    authMocks.getSession.mockResolvedValue({
+      user: { id: "user-a", email: "a@example.test", name: "User A" },
+      session: { id: "session-1" },
+    });
+    serviceMocks.listOrgs.mockResolvedValue([{ org_id: "org-1" }]);
+
+    const res = await app.request("/v1/skills/workspace-skill", {
+      headers: { cookie: "session=value" },
+    });
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual(row);
+    expect(serviceMocks.getSkillBySlug).toHaveBeenCalledWith(
+      expect.objectContaining({ actor: actorA, orgId: "org-1", slug: "workspace-skill" }),
+    );
   });
 });
 

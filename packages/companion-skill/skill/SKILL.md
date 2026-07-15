@@ -312,8 +312,10 @@ curl -s "$COMPANION_API_URL/skills?installed=true" -H "Authorization: Bearer $CO
 `lib=org` lists the org library. `lib=mine` lists the caller's My Skills: authored personal skills
 plus org skills reported as installed. `installed=true` narrows any list to skills with a
 `skill_installs` record for the current user, which means "reported installed to Companion"; it does
-not prove the files still exist on disk. Skill rows include `share_token`; for live org skills only,
-use it to build a clean public preview URL such as `/s/$share_token`.
+not prove the files still exist on disk. `GET /skills/{slug}` is also token-readable with
+`skills:read`; the installer uses it to resolve the canonical skill metadata before dependency and
+package downloads. Skill rows include `share_token`; for live org skills only, use it to build a
+clean public preview URL such as `/s/$share_token`.
 
 ### Free and Pro workspace gates
 
@@ -854,6 +856,8 @@ Allowed skills API tasks:
 - List workspace skills with `GET /skills?lib=org`, `GET /skills?lib=mine`, and
   `GET /skills?installed=true` using a `skills:read` token. Use `installed=true` for Companion's
   reported install state; use the local lockfile for disk inventory.
+- Resolve one accessible skill's canonical metadata with `GET /skills/$SLUG` using a `skills:read`
+  token. The official installer relies on this before resolving its dependency closure.
 - Read the workspace skill naming policy with `GET /orgs/current/skill-naming-policy` before naming
   or filing a brand-new skill.
 - Read a public org-skill preview with `GET /public/skills/{share_token}` without a token when the
@@ -989,7 +993,7 @@ skills view shows the correct status and version. Report the version from this s
 curl -s "$COMPANION_API_URL/local-skills/companion/installed" \
   -H "Authorization: Bearer $COMPANION_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"version":"1.21.0","agent":"<your assistant name>"}'
+  -d '{"version":"1.21.1","agent":"<your assistant name>"}'
 ```
 
 A `{ "ok": true, "status": "installed" }` response confirms the workspace now knows this machine has
