@@ -57,28 +57,3 @@ export async function putRunAttachmentOnce(input: {
     throw error;
   }
 }
-
-/**
- * Delete only objects that a successful, durable database read proves are not referenced. A failed
- * verification is deliberately fail-safe: leaked temporary bytes can be swept later, while deleting
- * a committed run's attachment would make an idempotent replay return a permanently broken run.
- */
-export async function cleanupUnreferencedRunAttachments(input: {
-  storageKeys: readonly string[];
-  findReferencedKeys: (storageKeys: string[]) => Promise<readonly string[]>;
-  deleteObject: (storageKey: string) => Promise<void>;
-}): Promise<void> {
-  const storageKeys = [...new Set(input.storageKeys)];
-  if (storageKeys.length === 0) return;
-
-  let referenced: Set<string>;
-  try {
-    referenced = new Set(await input.findReferencedKeys(storageKeys));
-  } catch {
-    return;
-  }
-
-  await Promise.allSettled(
-    storageKeys.filter((storageKey) => !referenced.has(storageKey)).map((storageKey) => input.deleteObject(storageKey)),
-  );
-}

@@ -30,10 +30,11 @@ const serviceMocks = vi.hoisted(() => ({
   updateRunConfiguration: vi.fn(),
   deleteRunConfiguration: vi.fn(async () => undefined),
   createRun: vi.fn(),
-  listReferencedRunAttachmentKeys: vi.fn(async (_input: unknown): Promise<string[]> => []),
   listRuns: vi.fn(),
   getRun: vi.fn(),
   enqueueRunPrompt: vi.fn(),
+  preflightRunPromptUpload: vi.fn(async () => undefined),
+  reserveRunAttachmentUploads: vi.fn(async () => undefined),
   requestRunCancellation: vi.fn(),
   listRunEvents: vi.fn(),
   getRunAttachment: vi.fn(),
@@ -182,13 +183,9 @@ describe("session-only RunSkill routes", () => {
     expect(catalogMocks.listModels).not.toHaveBeenCalled();
   });
 
-  it("keeps a newly uploaded object when an ambiguous createRun failure has a durable attachment row", async () => {
+  it("retains a newly uploaded object after an ambiguous createRun failure", async () => {
     signIn();
     serviceMocks.createRun.mockRejectedValueOnce(new Error("commit acknowledgement lost"));
-    serviceMocks.listReferencedRunAttachmentKeys.mockImplementationOnce(async () => {
-      const upload = storageMocks.putSkillArchive.mock.calls[0]?.[0] as { key?: string } | undefined;
-      return upload?.key ? [upload.key] : [];
-    });
     const form = new FormData();
     form.set("prompt", "Run this skill");
     form.set("model", "openai/gpt-5");
@@ -207,19 +204,12 @@ describe("session-only RunSkill routes", () => {
 
     expect(response.status).toBe(400);
     expect(storageMocks.putSkillArchive).toHaveBeenCalledTimes(1);
-    expect(serviceMocks.listReferencedRunAttachmentKeys).toHaveBeenCalledWith(
-      expect.objectContaining({
-        actor,
-        storageKeys: [expect.stringContaining("/")],
-      }),
-    );
     expect(storageMocks.deleteSkillArchive).not.toHaveBeenCalled();
   });
 
-  it("fails safe and retains uploaded objects when durable attachment verification fails", async () => {
+  it("retains uploaded objects even when a failed transaction appears uncommitted", async () => {
     signIn();
-    serviceMocks.createRun.mockRejectedValueOnce(new Error("commit acknowledgement lost"));
-    serviceMocks.listReferencedRunAttachmentKeys.mockRejectedValueOnce(new Error("database unavailable"));
+    serviceMocks.createRun.mockRejectedValueOnce(new Error("launch rejected before commit"));
     const form = new FormData();
     form.set("prompt", "Run this skill");
     form.set("model", "openai/gpt-5");
@@ -232,44 +222,24 @@ describe("session-only RunSkill routes", () => {
 
     const response = await app.request("/v1/skills/demo/runs", {
       method: "POST",
-      headers: { "Idempotency-Key": "ambiguous-launch-2" },
-      body: form,
-    });
-
-    expect(response.status).toBe(400);
-    expect(serviceMocks.listReferencedRunAttachmentKeys).toHaveBeenCalledTimes(1);
-    expect(storageMocks.deleteSkillArchive).not.toHaveBeenCalled();
-  });
-
-  it("deletes a newly uploaded object only after durable verification proves it unreferenced", async () => {
-    signIn();
-    serviceMocks.createRun.mockRejectedValueOnce(new Error("launch rejected before commit"));
-    serviceMocks.listReferencedRunAttachmentKeys.mockResolvedValueOnce([]);
-    const form = new FormData();
-    form.set("prompt", "Run this skill");
-    form.set("model", "openai/gpt-5");
-    form.set("skill_version_id", skillVersionId);
-    form.set("dependency_pins", "[]");
-    form.set("inputs", JSON.stringify({ secrets: [], variables: [] }));
-    form.set("model_provider_connection_id", providerConnectionId);
-    form.set("model_provider_credential_version", "1");
-    form.set("file", new Blob(["orphan bytes"], { type: "text/plain" }), "notes.txt");
-
-    const response = await app.request("/v1/skills/demo/runs", {
-      method: "POST",
       headers: { "Idempotency-Key": "rejected-launch-1" },
       body: form,
     });
 
     expect(response.status).toBe(400);
-    const uploadedKey = (storageMocks.putSkillArchive.mock.calls[0]?.[0] as { key: string }).key;
-    expect(serviceMocks.listReferencedRunAttachmentKeys).toHaveBeenCalledTimes(1);
-    expect(storageMocks.deleteSkillArchive).toHaveBeenCalledWith({ key: uploadedKey });
+    expect(storageMocks.deleteSkillArchive).not.toHaveBeenCalled();
   });
 
   it("enqueues follow-ups and cancellation without contacting a sandbox", async () => {
     signIn();
-    serviceMocks.enqueueRunPrompt.mockResolvedValue({ id: "prompt-1", status: "queued", reactivated: true });
+    const promptId = "00000000-0000-4000-8000-000000000099";
+    serviceMocks.enqueueRunPrompt.mockResolvedValue({
+      id: promptId,
+      messageId: "msg_123456789012abcdefghijklmn",
+      status: "queued",
+      attachments: [],
+      reactivated: true,
+    });
     serviceMocks.requestRunCancellation.mockResolvedValue({ status: "running", requested: true });
     const prompt = await app.request("/v1/runs/run-1/prompt", {
       method: "POST",
@@ -277,14 +247,69 @@ describe("session-only RunSkill routes", () => {
       body: JSON.stringify({ text: "Continue" }),
     });
     expect(prompt.status).toBe(202);
-    await expect(prompt.json()).resolves.toEqual({ accepted: true, prompt_id: "prompt-1", reactivated: true });
+    await expect(prompt.json()).resolves.toEqual({
+      accepted: true,
+      prompt_id: promptId,
+      message_id: "msg_123456789012abcdefghijklmn",
+      attachments: [],
+      reactivated: true,
+    });
     expect(serviceMocks.enqueueRunPrompt).toHaveBeenCalledWith(
-      expect.objectContaining({ reactivationAvailable: true }),
+      expect.objectContaining({ text: "Continue", attachments: [], reactivationAvailable: true }),
     );
 
     const canceled = await app.request("/v1/runs/run-1/cancel", { method: "POST" });
     expect(canceled.status).toBe(202);
     await expect(canceled.json()).resolves.toEqual({ status: "running", requested: true });
+  });
+
+  it("accepts an attachment-only multipart follow-up and forwards stored metadata", async () => {
+    signIn();
+    const promptId = "00000000-0000-4000-8000-000000000098";
+    serviceMocks.enqueueRunPrompt.mockImplementation(async (input: { attachments: Array<{ id: string; fileName: string; byteSize: number }> }) => ({
+      id: promptId,
+      messageId: "msg_123456789012abcdefghijklm1",
+      status: "queued",
+      attachments: input.attachments.map((attachment) => ({
+        id: attachment.id,
+        prompt_id: promptId,
+        message_id: "msg_123456789012abcdefghijklm1",
+        prompt_ordinal: 1,
+        file_name: attachment.fileName,
+        content_type: "text/plain",
+        byte_size: attachment.byteSize,
+      })),
+    }));
+    const form = new FormData();
+    form.set("text", "");
+    form.set("file", new Blob(["follow-up bytes"], { type: "text/plain" }), "follow-up.txt");
+
+    const response = await app.request("/v1/runs/run-1/prompt", {
+      method: "POST",
+      headers: { "Idempotency-Key": "prompt-file-request-1" },
+      body: form,
+    });
+
+    expect(response.status).toBe(202);
+    expect(storageMocks.putSkillArchive).toHaveBeenCalledTimes(1);
+    expect(serviceMocks.preflightRunPromptUpload).toHaveBeenCalledWith(
+      expect.objectContaining({ actor, runId: "run-1", text: "", attachments: [expect.objectContaining({ fileName: "follow-up.txt" })] }),
+    );
+    expect(serviceMocks.preflightRunPromptUpload.mock.invocationCallOrder[0]).toBeLessThan(
+      storageMocks.putSkillArchive.mock.invocationCallOrder[0]!,
+    );
+    expect(serviceMocks.enqueueRunPrompt).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runId: "run-1",
+        text: "",
+        attachments: [expect.objectContaining({ fileName: "follow-up.txt", byteSize: 15 })],
+      }),
+    );
+    await expect(response.json()).resolves.toMatchObject({
+      accepted: true,
+      prompt_id: promptId,
+      attachments: [{ file_name: "follow-up.txt" }],
+    });
   });
 });
 

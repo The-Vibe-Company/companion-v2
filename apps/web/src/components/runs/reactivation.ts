@@ -6,6 +6,15 @@ export function canReactivateRun(run: SkillRunDetail | null, now = Date.now()): 
   return Date.parse(run.reactivatable_until) > now;
 }
 
+/** Terminal retained sessions share the same text-and-file composer as a live session. */
+export function canUseRunComposer(
+  status: SkillRunDetail["status"] | null,
+  liveSendReady: boolean,
+  terminalCanReactivate: boolean,
+): boolean {
+  return liveSendReady || ((status === "frozen" || status === "canceled") && terminalCanReactivate);
+}
+
 /** A terminal prompt can commit even when its HTTP acknowledgement is lost, so polling must resume. */
 export function shouldRestartPollingAfterPromptFailure(status: SkillRunDetail["status"] | null): boolean {
   return status === "frozen" || status === "canceled";

@@ -552,7 +552,8 @@ admin credentials.
 Skill runs are private, durable sandbox sessions launched from a published skill. Any member may run
 a skill they can access. Creation atomically pins the exact root version, its complete accessible
 dependency closure, every selected vault-secret version, and every declared non-sensitive value.
-Prompt and attachments belong to one run; named personal configurations save only model, live secret
+Prompts and attachments belong to one run; each attachment is linked to the exact initial/follow-up
+prompt that introduced it. Named personal configurations save only model, live secret
 references, and declared variables.
 
 The API validates and persists commands but never contacts the sandbox. `apps/worker` composes the
@@ -581,12 +582,20 @@ content; only the sandbox does.
   instead pins a dedicated connection id and credential version; it never appears in the generic
   secret collection. Ordinary responses never contain plaintext.
 - `skill_run_jobs` is the retryable orchestration queue. `skill_run_prompts` is the initial/follow-up
-  outbox with deterministic OpenCode `messageID`s. `skill_run_events` holds redacted, monotonically
-  sequenced events for replayable SSE.
-- `skill_run_attachments` — files the launcher attached (≤5 × 10 MB): bytes in S3 under
-  `{org}/run-attachments/{id}`, metadata here, mounted as `<attachmentId>-<filename>`, and streamed
-  back creator-only with `nosniff` +
-  `Content-Disposition: attachment`.
+  outbox with deterministic OpenCode `messageID`s; it stores user-visible text separately from the
+  runtime prompt enriched with private attachment-path instructions. `skill_run_events` holds
+  redacted, monotonically sequenced events for replayable SSE.
+- `skill_run_attachments` — files attached to any prompt (≤5 × 10 MB per message, ≤100 MB per run):
+  bytes in S3 under `{org}/run-attachments/{id}`, prompt-linked metadata here, mounted as
+  `<attachmentId>-<filename>`, and streamed back creator-only with `nosniff` +
+  `Content-Disposition: attachment`. Failed request paths never delete these deterministic objects
+  synchronously: a concurrent idempotent retry may still be committing the same key. Unreferenced
+  bytes are retained for at least 24 hours. `skill_run_attachment_uploads` reserves each deterministic
+  key before S3 I/O; prompt commits consume the reservation under row lock, while the age-gated worker
+  sweep holds that same lock through S3 deletion. A concurrent retry therefore waits and recreates
+  bytes after cleanup instead of losing a committed file. The sweep starts from aged reservation
+  rows, so even a failed S3 creation remains reachable for cleanup. Multipart follow-ups also run an
+  ownership/status/quota/protocol preflight before uploading bytes.
 - Migration `0034_skill_runs.sql` creates these tables and forces creator-only RLS on runs,
   configurations, snapshots, prompts, events, and attachments. Child policies derive the
   creator through their parent run/configuration; admins receive no override. The only cross-tenant
@@ -594,6 +603,13 @@ content; only the sandbox does.
   and exact unexpired lease identities; claimed work then runs under the recorded tenant and creator
   context. Caller-controlled GUCs are not authority: policies additionally require the table-owner
   execution identity used only inside those functions.
+- Migration `0038_skill_run_prompt_attachments.sql` separates visible prompt text from runtime text,
+  links every attachment to its prompt, and backfills existing launch attachments to ordinal `0`.
+  Legacy-write triggers keep old API replicas compatible during rollout: omitted initial
+  `user_text` is recovered from the parent run's raw prompt (follow-ups use their prompt), while the
+  old attachment-before-prompt insert order is linked by a deferred constraint trigger at commit.
+  Job claiming is protocol-aware: once a follow-up with files is pending, only a live protocol-1
+  worker can claim or reclaim that run during a rolling deployment.
 - Migration `0037_reactivate_runs.sql` adds the seven-day reactivation window and activation
   revision, permits multiple queued prompts while retaining one processing prompt, and delays
   terminal cleanup claims until a retained frozen/canceled sandbox expires.
@@ -608,7 +624,7 @@ and canceled runs retain their stopped named sandbox for seven days. Sending a n
 window atomically requeues the same run and resumes the same OpenCode session; a missing retained
 session fails closed rather than silently losing context. Each later freeze/cancel starts a fresh
 seven-day window. Files created by sandbox code survive within the retained sandbox until cleanup;
-after expiry, Companion persists only the transcript and launch attachments.
+after expiry, Companion persists the transcript and the metadata/bytes of files the user attached in any message.
 
 ### Launch pipeline + recorder
 
@@ -635,8 +651,15 @@ external step has persisted before/after progress:
 
 1. revalidate snapshot access and decrypt exact secret versions;
 2. get or fork the deterministic sandbox;
-3. push root, dependencies, uniquely named attachments, and `opencode.json`;
+3. push root, dependencies, uniquely named initial attachments, and `opencode.json`;
 4. start and health-check OpenCode with the exact environment;
+
+For each follow-up, the worker fetches only that prompt's attachment objects and idempotently writes
+them into the live sandbox before checking/sending its deterministic OpenCode message. A retry may
+rewrite the same paths, but it never sends a prompt before every referenced file is mounted. Worker
+heartbeats advertise attachment-prompt protocol `1`; the API admits follow-up files only when the
+exact worker currently leasing that run advertises the protocol, so an old worker may finish text
+turns during a rolling deployment but cannot dispatch attachment-path prompts.
 5. establish the recorder, then find or create the deterministic session;
 6. send the persisted initial/follow-up prompt with its deterministic `messageID`;
 7. batch redacted events and snapshot the transcript;
@@ -658,7 +681,8 @@ without destroying their named sandbox, remain creator-reactivatable for seven d
 from cleanup claims until that deadline. Cancellation aborts the active OpenCode turn before the
 final snapshot so a later resume starts from a stable context. Error runs and revoked memberships
 still destroy immediately; provider failures keep cleanup owed for a later worker attempt. The
-event-retention sweeper and sandbox-cleanup work live in the runs supervisor, not the API.
+event-retention sweeper, age-gated run-attachment orphan sweep, and sandbox-cleanup work live in the
+runs supervisor, not the API.
 
 ### Privacy
 
@@ -768,10 +792,12 @@ authoritative.
 `GET/PUT /v1/org-provider-connections` + `DELETE /v1/org-provider-connections/:provider`,
 `GET /v1/skills/:slug/run-options`, `GET/POST /v1/skills/:slug/run-configurations`,
 `PATCH/DELETE /v1/run-configurations/:id`,
-`POST /v1/skills/:slug/runs` (multipart: prompt, model, exact version, authoritative JSON inputs,
-repeatable file; mandatory `Idempotency-Key`; `201` for a new run and the same result on replay),
+`POST /v1/skills/:slug/runs` (multipart: optional prompt when at least one file is present, model,
+exact version, authoritative JSON inputs, repeatable file; mandatory `Idempotency-Key`; `201` for a
+new run and the same result on replay),
 `GET /v1/skills/:slug/runs` (caller's runs only), `GET /v1/runs/:id`,
-`POST /v1/runs/:id/prompt` (mandatory idempotency, `202`), `POST /v1/runs/:id/cancel`,
+`POST /v1/runs/:id/prompt` (legacy JSON text or multipart optional text + repeatable file; text or a
+file is required; mandatory idempotency, `202`), `POST /v1/runs/:id/cancel`,
 `GET /v1/runs/:id/events` (replayable SSE), and
 `GET /v1/runs/:id/attachments/:attachmentId`. Because every route rejects personal access
 tokens, the bundled Companion skill's API surface is unchanged.

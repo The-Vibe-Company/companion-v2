@@ -53,6 +53,8 @@ export interface RunWorkspaceFiles {
   attachments: Array<{ path: string; data: Buffer }>;
 }
 
+export type RunAttachmentFiles = RunWorkspaceFiles["attachments"];
+
 export interface RunSandboxRuntime {
   readonly provider: "vercel";
   /** Step 1 — fork/boot the named sandbox from the golden snapshot; returns id + public domain. */
@@ -63,6 +65,8 @@ export interface RunSandboxRuntime {
   }): Promise<{ sandboxId: string; domain: string }>;
   /** Step 2 — write opencode.json, the skill folder and the attachments into the sandbox FS. */
   pushWorkspace(input: { ref: SandboxRef; files: RunWorkspaceFiles; signal?: AbortSignal }): Promise<void>;
+  /** Idempotently add files to an already-running sandbox before dispatching a follow-up prompt. */
+  pushAttachments(input: { ref: SandboxRef; attachments: RunAttachmentFiles; signal?: AbortSignal }): Promise<void>;
   /** Step 3 — launch `opencode serve` detached with the injected env. */
   startServer(input: {
     ref: SandboxRef;

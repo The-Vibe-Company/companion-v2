@@ -9,15 +9,23 @@ import {
   type RunChatHistoryItem,
   type RunEventEnvelope,
   type RunPhase,
+  type SkillRunAttachmentRow,
   type SkillRunStatus,
 } from "@companion/contracts";
 import { redactAndBoundRunEvents, type RunRedactor } from "./runRedaction";
 import {
   RunBusyError,
   RunValidationError,
+  attachmentWorkspacePath,
   capTranscript,
+  composeRunPrompt,
+  consumeRunAttachmentUploadReservations,
   deterministicRunMessageId,
   hashRunPayload,
+  normalizeRunTranscript,
+  releaseRunAttachmentUploadReservations,
+  validateRunMessageAttachments,
+  type CreateRunAttachment,
 } from "./skillRuns";
 import { assertMember, type ActorContext } from "./services";
 
@@ -85,7 +93,7 @@ export async function heartbeatRunWorker(input: {
   const ttlSeconds = input.ttlSeconds ?? 15;
   if (ttlSeconds < 5 || ttlSeconds > 300) throw new Error("invalid run worker heartbeat ttl");
   await database.execute(sql`
-    select companion_heartbeat_skill_run_worker(${input.workerId}, ${ttlSeconds})
+    select companion_heartbeat_skill_run_worker(${input.workerId}, ${ttlSeconds}, 1)
   `);
 }
 
@@ -101,6 +109,33 @@ export async function removeRunWorkerHeartbeat(input: {
 export async function isRunWorkerReady(input: { database?: Db } = {}): Promise<boolean> {
   const database = input.database ?? db;
   const result = await database.execute(sql`select companion_skill_run_worker_ready() as ready`);
+  const row = Array.from(result as unknown as Iterable<{ ready: boolean }>)[0];
+  return row?.ready ?? false;
+}
+
+/** Follow-up uploads are admitted only when this run is leased by a protocol-capable worker. */
+async function isRunAttachmentWorkerReady(input: {
+  orgId: string;
+  runId: string;
+  creatorId: string;
+  database: Db;
+}): Promise<boolean> {
+  const result = await input.database.execute(sql`
+    select companion_skill_run_attachment_worker_ready(
+      ${input.orgId}::uuid,
+      ${input.runId}::uuid,
+      ${input.creatorId}
+    ) as ready
+  `);
+  const row = Array.from(result as unknown as Iterable<{ ready: boolean }>)[0];
+  return row?.ready ?? false;
+}
+
+/** Reactivation has no active lease yet, so require any live protocol-capable worker. */
+async function isAnyRunAttachmentWorkerReady(database: Db): Promise<boolean> {
+  const result = await database.execute(sql`
+    select companion_skill_run_attachment_worker_ready() as ready
+  `);
   const row = Array.from(result as unknown as Iterable<{ ready: boolean }>)[0];
   return row?.ready ?? false;
 }
@@ -201,6 +236,64 @@ export async function claimRunJobs(input: {
     ) as claimed
   `);
   return Array.from(result as unknown as Iterable<RawClaimedRunJob>, parseClaimedRunJob);
+}
+
+/** Hold the reservation row lock across S3 deletion so a retry must wait and then recreate bytes. */
+export async function deleteRunAttachmentOrphanIfReserved(input: {
+  storageKey: string;
+  before: Date;
+  deleteObject: () => Promise<void>;
+  database?: Db;
+}): Promise<boolean> {
+  const database = input.database ?? db;
+  return database.transaction(async (transaction) => {
+    const locked = await (transaction as unknown as Db).execute(sql`
+      select companion_lock_skill_run_attachment_orphan(
+        ${input.storageKey},
+        ${input.before.toISOString()}::timestamp with time zone
+      ) as locked
+    `);
+    const row = Array.from(locked as unknown as Iterable<{ locked: boolean }>)[0];
+    if (row?.locked !== true) return false;
+    await input.deleteObject();
+    await (transaction as unknown as Db).execute(sql`
+      select companion_complete_skill_run_attachment_orphan(${input.storageKey})
+    `);
+    return true;
+  });
+}
+
+export async function listRunAttachmentOrphanReservations(input: {
+  before: Date;
+  limit?: number;
+  database?: Db;
+}): Promise<string[]> {
+  const database = input.database ?? db;
+  const result = await database.execute(sql`
+    select storage_key as "storageKey"
+    from companion_list_skill_run_attachment_orphans(
+      ${input.before.toISOString()}::timestamp with time zone,
+      ${input.limit ?? 250}
+    )
+  `);
+  return Array.from(result as unknown as Iterable<{ storageKey: string }>).map((row) => row.storageKey);
+}
+
+/** Back off a failed delete only if no retry or durable attachment superseded the old candidate. */
+export async function deferRunAttachmentOrphanReservation(input: {
+  storageKey: string;
+  before: Date;
+  database?: Db;
+}): Promise<boolean> {
+  const database = input.database ?? db;
+  const result = await database.execute(sql`
+    select companion_defer_skill_run_attachment_orphan(
+      ${input.storageKey},
+      ${input.before.toISOString()}::timestamp with time zone
+    ) as deferred
+  `);
+  const row = Array.from(result as unknown as Iterable<{ deferred: boolean }>)[0];
+  return row?.deferred ?? false;
 }
 
 /**
@@ -575,17 +668,31 @@ export async function enqueueRunPrompt(input: {
   runId: string;
   text: string;
   idempotencyKey: string;
+  attachments?: CreateRunAttachment[];
   /** Set only after the API has verified runtime configuration and a live worker heartbeat. */
   reactivationAvailable?: boolean;
   database?: Db;
-}): Promise<{ id: string; messageId: string; status: RunPromptRow["status"]; reactivated: boolean }> {
+}): Promise<{
+  id: string;
+  messageId: string;
+  status: RunPromptRow["status"];
+  attachments: SkillRunAttachmentRow[];
+  reactivated: boolean;
+}> {
   const database = input.database ?? db;
   await assertMember(database, input.actor, input.orgId);
   const text = input.text.trim();
-  if (!text || text.length > RUN_PROMPT_MAX) {
+  const attachments = input.attachments ?? [];
+  if (text.length > RUN_PROMPT_MAX) {
     throw new RunValidationError("the prompt is invalid", "invalid_prompt");
   }
-  const payloadHash = hashRunPayload({ text });
+  validateRunMessageAttachments({ text, attachments });
+  const payloadHash = hashRunPayload({
+    text,
+    attachments: attachments
+      .map(({ id, fileName, contentType, byteSize }) => ({ id, fileName, contentType, byteSize }))
+      .sort((left, right) => left.id.localeCompare(right.id)),
+  });
   const execute = async (transaction: Db) => {
     // Serialize prompt creation with cancellation. Otherwise Cancel could clear pending prompts,
     // then a racing API transaction could insert a new prompt onto an already-canceling run.
@@ -604,10 +711,35 @@ export async function enqueueRunPrompt(input: {
       if (existing[0].payloadHash !== payloadHash) {
         throw new RunBusyError("this idempotency key was already used with another prompt", "idempotency_conflict");
       }
+      const existingAttachments = await transaction
+        .select()
+        .from(schema.skillRunAttachments)
+        .where(
+          and(
+            eq(schema.skillRunAttachments.orgId, input.orgId),
+            eq(schema.skillRunAttachments.runId, input.runId),
+            eq(schema.skillRunAttachments.promptId, existing[0].id),
+          ),
+        );
+      await releaseRunAttachmentUploadReservations({
+        database: transaction,
+        actor: input.actor,
+        orgId: input.orgId,
+        attachments,
+      });
       return {
         id: existing[0].id,
         messageId: existing[0].messageId,
         status: existing[0].status,
+        attachments: existingAttachments.map((attachment) => ({
+          id: attachment.id,
+          prompt_id: existing[0]!.id,
+          message_id: existing[0]!.messageId,
+          prompt_ordinal: existing[0]!.ordinal,
+          file_name: attachment.fileName,
+          content_type: attachment.contentType,
+          byte_size: attachment.byteSize,
+        })),
         reactivated: false,
       };
     }
@@ -643,6 +775,42 @@ export async function enqueueRunPrompt(input: {
         ),
       );
     if (active[0]) throw new RunBusyError("another prompt is already pending", "prompt_already_pending");
+    if (attachments.length > 0) {
+      const attachmentWorkerReady = terminalReactivation
+        ? await isAnyRunAttachmentWorkerReady(transaction)
+        : await isRunAttachmentWorkerReady({
+            orgId: input.orgId,
+            runId: input.runId,
+            creatorId: input.actor.id,
+            database: transaction,
+          });
+      if (!attachmentWorkerReady) {
+        throw new RunBusyError(
+          "this run's worker cannot accept attachments yet",
+          "attachment_worker_unavailable",
+        );
+      }
+    }
+    const existingAttachmentBytes = await transaction
+      .select({ bytes: sql<number>`coalesce(sum(${schema.skillRunAttachments.byteSize}), 0)` })
+      .from(schema.skillRunAttachments)
+      .where(
+        and(
+          eq(schema.skillRunAttachments.orgId, input.orgId),
+          eq(schema.skillRunAttachments.runId, input.runId),
+        ),
+      );
+    validateRunMessageAttachments({
+      text,
+      attachments,
+      existingBytes: Number(existingAttachmentBytes[0]?.bytes ?? 0),
+    });
+    const skills = await transaction
+      .select({ slug: schema.skills.slug })
+      .from(schema.skills)
+      .where(and(eq(schema.skills.orgId, input.orgId), eq(schema.skills.id, run.skillId)));
+    const skillSlug = skills[0]?.slug;
+    if (!skillSlug) throw new RunValidationError("skill not found", "skill_not_found");
     const ordinalRows = await transaction
       .select({ value: max(schema.skillRunPrompts.ordinal) })
       .from(schema.skillRunPrompts)
@@ -727,6 +895,14 @@ export async function enqueueRunPrompt(input: {
         .returning({ id: schema.skillRuns.id });
       if (!resetRuns[0]) throw new Error("run reactivation lost ownership before reset");
     }
+    const runtimePrompt = composeRunPrompt({
+      prompt: text,
+      skillSlug,
+      attachments: attachments.map((attachment) => ({
+        fileName: attachment.fileName,
+        workspacePath: attachmentWorkspacePath(attachment),
+      })),
+    });
     const inserted = await transaction
       .insert(schema.skillRunPrompts)
       .values({
@@ -737,7 +913,8 @@ export async function enqueueRunPrompt(input: {
         idempotencyKey: input.idempotencyKey,
         payloadHash,
         messageId: deterministicRunMessageId(input.runId, ordinal, promptCreatedAt.getTime()),
-        prompt: text,
+        userText: text,
+        prompt: runtimePrompt,
         status: "queued",
         createdAt: promptCreatedAt,
         updatedAt: promptCreatedAt,
@@ -745,6 +922,29 @@ export async function enqueueRunPrompt(input: {
       .returning();
     const row = inserted[0];
     if (!row) throw new Error("prompt insert returned no row");
+    if (attachments.length > 0) {
+      await consumeRunAttachmentUploadReservations({
+        database: transaction,
+        actor: input.actor,
+        orgId: input.orgId,
+        attachments,
+      });
+      await transaction.insert(schema.skillRunAttachments).values(
+        attachments.map((attachment) => ({
+          id: attachment.id,
+          orgId: input.orgId,
+          runId: input.runId,
+          promptId: row.id,
+          fileName: attachment.fileName,
+          contentType: attachment.contentType,
+          byteSize: attachment.byteSize,
+          storageKey: attachment.storageKey,
+        })),
+      );
+      await transaction.delete(schema.skillRunAttachmentUploads).where(
+        inArray(schema.skillRunAttachmentUploads.storageKey, attachments.map((attachment) => attachment.storageKey)),
+      );
+    }
     await transaction
       .update(schema.skillRuns)
       .set({ lastActiveAt: promptCreatedAt, updatedAt: promptCreatedAt })
@@ -765,16 +965,101 @@ export async function enqueueRunPrompt(input: {
         metadata: { previous_status: run.status },
       });
     }
-    return { id: row.id, messageId: row.messageId, status: "queued" as const, reactivated: terminalReactivation };
+    return {
+      id: row.id,
+      messageId: row.messageId,
+      status: "queued" as const,
+      reactivated: terminalReactivation,
+      attachments: attachments.map((attachment) => ({
+        id: attachment.id,
+        prompt_id: row.id,
+        message_id: row.messageId,
+        prompt_ordinal: row.ordinal,
+        file_name: attachment.fileName,
+        content_type: attachment.contentType,
+        byte_size: attachment.byteSize,
+      })),
+    };
   };
   try {
     return await database.transaction(async (transaction) => execute(transaction as unknown as Db));
   } catch (error) {
     if (isUniqueViolation(error)) {
-      throw new RunBusyError("another prompt is already pending", "prompt_already_pending");
+      return database.transaction(async (transaction) => execute(transaction as unknown as Db));
     }
     throw error;
   }
+}
+
+/** Cheap, side-effect-free rejection pass before the API writes multipart bytes to object storage. */
+export async function preflightRunPromptUpload(input: {
+  actor: ActorContext;
+  orgId: string;
+  runId: string;
+  text: string;
+  idempotencyKey: string;
+  attachments: CreateRunAttachment[];
+  reactivationAvailable?: boolean;
+  database?: Db;
+}): Promise<void> {
+  const database = input.database ?? db;
+  await assertMember(database, input.actor, input.orgId);
+  validateRunMessageAttachments({ text: input.text.trim(), attachments: input.attachments });
+  const run = await ownedRun({ ...input, database });
+  const replay = await database
+    .select({ id: schema.skillRunPrompts.id })
+    .from(schema.skillRunPrompts)
+    .where(and(
+      eq(schema.skillRunPrompts.orgId, input.orgId),
+      eq(schema.skillRunPrompts.runId, input.runId),
+      eq(schema.skillRunPrompts.idempotencyKey, input.idempotencyKey),
+    ));
+  if (replay[0]) return;
+  const terminalReactivation = run.status === "frozen" || run.status === "canceled";
+  if (terminalReactivation) {
+    if (!input.reactivationAvailable) {
+      throw new RunValidationError("RunSkill is unavailable because no configured run worker is currently online.", "runtime_unavailable");
+    }
+    if (
+      run.sandboxCleanedAt !== null
+      || run.reactivatableUntil === null
+      || run.reactivatableUntil.getTime() <= Date.now()
+      || run.cleanupLeaseOwner !== null
+    ) {
+      throw new RunBusyError("this run can no longer be reactivated", "run_reactivation_expired");
+    }
+  } else if (run.status !== "running" || run.cancelRequestedAt !== null || ["freeze", "cancel", "cleanup", "complete"].includes(run.phase)) {
+    throw new RunBusyError("this run is not ready for another prompt", "run_not_running");
+  }
+  const active = await database
+    .select({ id: schema.skillRunPrompts.id })
+    .from(schema.skillRunPrompts)
+    .where(and(
+      eq(schema.skillRunPrompts.orgId, input.orgId),
+      eq(schema.skillRunPrompts.runId, input.runId),
+      inArray(schema.skillRunPrompts.status, ["queued", "processing"]),
+    ));
+  if (active[0]) throw new RunBusyError("another prompt is already pending", "prompt_already_pending");
+  const attachmentWorkerReady = terminalReactivation
+    ? await isAnyRunAttachmentWorkerReady(database)
+    : await isRunAttachmentWorkerReady({
+        orgId: input.orgId,
+        runId: input.runId,
+        creatorId: input.actor.id,
+        database,
+      });
+  if (!attachmentWorkerReady) {
+    throw new RunBusyError("this run's worker cannot accept attachments yet", "attachment_worker_unavailable");
+  }
+  const bytes = await database
+    .select({ value: sql<number>`coalesce(sum(${schema.skillRunAttachments.byteSize}), 0)` })
+    .from(schema.skillRunAttachments)
+    .where(and(eq(schema.skillRunAttachments.orgId, input.orgId), eq(schema.skillRunAttachments.runId, input.runId)));
+  validateRunMessageAttachments({
+    text: input.text.trim(),
+    attachments: input.attachments,
+    existingBytes: Number(bytes[0]?.value ?? 0),
+  });
 }
 
 /**
@@ -1282,7 +1567,6 @@ export async function persistRunTranscript(input: {
   database?: Db;
 }): Promise<boolean> {
   const database = input.database ?? db;
-  const transcript = capTranscript(input.redactor.redactPayload(input.items));
   return database.transaction(async (transaction) => {
     const tx = transaction as unknown as Db;
     const runs = await tx
@@ -1298,6 +1582,18 @@ export async function persistRunTranscript(input: {
       .for("update");
     if (!runs[0]) return false;
     await assertLiveRunJobLease({ ...input, database: tx });
+    const promptRows = await tx
+      .select({ messageId: schema.skillRunPrompts.messageId, userText: schema.skillRunPrompts.userText })
+      .from(schema.skillRunPrompts)
+      .where(
+        and(
+          eq(schema.skillRunPrompts.orgId, input.orgId),
+          eq(schema.skillRunPrompts.runId, input.runId),
+        ),
+      )
+      .orderBy(asc(schema.skillRunPrompts.ordinal));
+    const visibleItems = normalizeRunTranscript(input.items, promptRows);
+    const transcript = capTranscript(input.redactor.redactPayload(visibleItems));
     const sequenceRows = await tx
       .select({ value: max(schema.skillRunEvents.sequence) })
       .from(schema.skillRunEvents)

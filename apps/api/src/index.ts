@@ -100,8 +100,9 @@ import {
   updateRunConfiguration,
   deleteRunConfiguration,
   createRun,
-  listReferencedRunAttachmentKeys,
   enqueueRunPrompt,
+  preflightRunPromptUpload,
+  reserveRunAttachmentUploads,
   requestRunCancellation,
   listRunEvents,
   listRuns,
@@ -166,6 +167,7 @@ import {
   setModelProviderConnectionInputSchema,
   setActivatedModelsInputSchema,
   launchRunFieldsSchema,
+  runPromptFieldsSchema,
   runPromptInputSchema,
   createRunConfigurationInputSchema,
   updateRunConfigurationInputSchema,
@@ -239,7 +241,6 @@ import {
   runReadyFrame,
 } from "./runEvents";
 import {
-  cleanupUnreferencedRunAttachments,
   deterministicRunAttachmentId,
   putRunAttachmentOnce,
 } from "./runAttachments";
@@ -2884,6 +2885,23 @@ function idempotencyKey(c: Context): string {
   return value;
 }
 
+function isRunUploadFile(value: unknown): value is {
+  name: string;
+  size: number;
+  type: string;
+  arrayBuffer(): Promise<ArrayBuffer>;
+} {
+  return Boolean(
+    value
+      && typeof value === "object"
+      && "name" in value
+      && "size" in value
+      && "type" in value
+      && "arrayBuffer" in value
+      && typeof (value as { arrayBuffer?: unknown }).arrayBuffer === "function",
+  );
+}
+
 /** Map run service failures onto the HTTP statuses the run UI expects. */
 function runError(c: Context, error: unknown): Response {
   if (error instanceof RunBusyError) return jsonError(c, error, 409);
@@ -3055,7 +3073,6 @@ app.post(
 
       // Upload the bytes to object storage OUTSIDE any DB transaction (slow uploads must not hold a
       // pooled connection idle-in-transaction); createRun below persists metadata only.
-      const uploadedKeys: string[] = [];
       const attachments: Array<{ id: string; fileName: string; contentType: string; byteSize: number; storageKey: string }> = [];
       try {
         for (const file of files) {
@@ -3071,8 +3088,10 @@ app.post(
           });
           const key = runAttachmentKey({ orgId, attachmentId });
           const contentType = file.type || "application/octet-stream";
-          const stored = await putRunAttachmentOnce({ key, body: buf, contentType });
-          if (stored === "created") uploadedKeys.push(key);
+          await withTenantContext({ orgId, userId: actor.id }, (database) =>
+            reserveRunAttachmentUploads({ actor, orgId, storageKeys: [key], database }),
+          );
+          await putRunAttachmentOnce({ key, body: buf, contentType });
           attachments.push({
             id: attachmentId,
             fileName: sanitizeAttachmentName(file.name || `attachment-${attachments.length + 1}`),
@@ -3104,17 +3123,9 @@ app.post(
         );
         return c.json(detail, 201);
       } catch (e) {
-        // A createRun rejection can be ambiguous (for example, the transaction committed but its
-        // acknowledgement was lost). Query durable attachment rows in a fresh tenant transaction and
-        // delete only keys proven unreferenced. If that verification itself fails, retain the bytes.
-        await cleanupUnreferencedRunAttachments({
-          storageKeys: uploadedKeys,
-          findReferencedKeys: (storageKeys) =>
-            withTenantContext({ orgId, userId: actor.id }, (database) =>
-              listReferencedRunAttachmentKeys({ actor, orgId, storageKeys, database }),
-            ),
-          deleteObject: (key) => deleteSkillArchive({ key }),
-        });
+        // Never delete synchronously after an ambiguous or failed transaction: a concurrent retry
+        // can be committing the same deterministic object key but remain invisible to this request.
+        // Unreferenced objects are intentionally retained for a delayed orphan sweep.
         throw e;
       }
     } catch (error) {
@@ -3147,32 +3158,134 @@ app.get("/v1/runs/:id", async (c) => {
   }
 });
 
-app.post("/v1/runs/:id/prompt", async (c) => {
-  try {
-    assertRunSession(c);
-    const requestKey = idempotencyKey(c);
-    const input = runPromptInputSchema.parse(await c.req.json());
-    const prompt = await withApiRunContext((ctx) =>
-      withTenant(c, async ({ actor, orgId, database }) => {
-        const readiness = ctx.runtimeAvailable
-          ? await ctx.resolveRuntimeReadiness?.(database)
-          : { available: false, message: ctx.runtimeMessage };
-        return enqueueRunPrompt({
-          actor,
-          orgId,
-          runId: c.req.param("id"),
-          text: input.text,
-          idempotencyKey: requestKey,
-          reactivationAvailable: readiness?.available ?? ctx.runtimeAvailable,
-          database,
+app.post(
+  "/v1/runs/:id/prompt",
+  async (c, next) => {
+    try {
+      assertRunSession(c);
+    } catch (error) {
+      return jsonError(c, error, 401);
+    }
+    await next();
+  },
+  bodyLimit({ maxSize: 64 * 1024 * 1024, onError: (c) => jsonError(c, "run upload exceeds the 64 MB limit", 413) }),
+  async (c) => {
+    try {
+      const actor = actorFromContext(c);
+      const orgId = await orgIdFromContext(c);
+      const runId = c.req.param("id");
+      const requestKey = idempotencyKey(c);
+      const multipart = c.req.header("content-type")?.toLowerCase().startsWith("multipart/form-data") ?? false;
+      let text = "";
+      let files: unknown[] = [];
+      if (multipart) {
+        const form = await c.req.formData();
+        const fields = runPromptFieldsSchema.parse({
+          text: typeof form.get("text") === "string" ? form.get("text") : "",
         });
-      }),
-    );
-    return c.json({ accepted: true, prompt_id: prompt.id, reactivated: prompt.reactivated }, 202);
-  } catch (error) {
-    return runError(c, error);
-  }
-});
+        text = fields.text;
+        files = form.getAll("file");
+      } else {
+        text = runPromptInputSchema.parse(await c.req.json()).text;
+      }
+      const fileCount = files.filter(isRunUploadFile).length;
+      if (fileCount > RUN_ATTACHMENT_MAX_FILES) {
+        throw new RunValidationError(`a message can have at most ${RUN_ATTACHMENT_MAX_FILES} attachments`, "too_many_attachments");
+      }
+      for (const file of files) {
+        if (!isRunUploadFile(file)) continue;
+        if (file.size === 0) throw new RunValidationError("an attached file is empty", "empty_attachment");
+        if (file.size > RUN_ATTACHMENT_MAX_BYTES) {
+          throw new RunValidationError("each attachment must be 10 MB or smaller", "attachment_too_large");
+        }
+      }
+
+      const attachments: Array<{ id: string; fileName: string; contentType: string; byteSize: number; storageKey: string }> = [];
+      try {
+        const reactivationAvailable = await withApiRunContext((ctx) =>
+          withTenantContext({ orgId, userId: actor.id }, async (database) => {
+            const readiness = ctx.runtimeAvailable
+              ? await ctx.resolveRuntimeReadiness?.(database)
+              : { available: false, message: ctx.runtimeMessage };
+            return readiness?.available ?? ctx.runtimeAvailable;
+          }),
+        );
+        const attachmentBodies: Array<{ key: string; body: Buffer; contentType: string }> = [];
+        for (const file of files) {
+          if (!isRunUploadFile(file)) continue;
+          const buf = Buffer.from(await file.arrayBuffer());
+          const contentType = file.type || "application/octet-stream";
+          const attachmentId = deterministicRunAttachmentId({
+            orgId,
+            actorId: actor.id,
+            idempotencyKey: `${runId}:${requestKey}`,
+            index: attachments.length,
+            fileName: file.name,
+            contentType,
+            bytes: buf,
+          });
+          const key = runAttachmentKey({ orgId, attachmentId });
+          attachmentBodies.push({ key, body: buf, contentType });
+          attachments.push({
+            id: attachmentId,
+            fileName: sanitizeAttachmentName(file.name || `attachment-${attachments.length + 1}`),
+            contentType,
+            byteSize: buf.length,
+            storageKey: key,
+          });
+        }
+        if (attachments.length > 0) {
+          await withTenantContext({ orgId, userId: actor.id }, (database) =>
+            preflightRunPromptUpload({
+              actor,
+              orgId,
+              runId,
+              text,
+              attachments,
+              idempotencyKey: requestKey,
+              reactivationAvailable,
+              database,
+            }),
+          );
+          await withTenantContext({ orgId, userId: actor.id }, (database) =>
+            reserveRunAttachmentUploads({
+              actor,
+              orgId,
+              storageKeys: attachments.map((attachment) => attachment.storageKey),
+              database,
+            }),
+          );
+        }
+        for (const attachment of attachmentBodies) await putRunAttachmentOnce(attachment);
+        const prompt = await withTenantContext({ orgId, userId: actor.id }, (database) =>
+          enqueueRunPrompt({
+            actor,
+            orgId,
+            runId,
+            text,
+            attachments,
+            idempotencyKey: requestKey,
+            reactivationAvailable,
+            database,
+          }),
+        );
+        return c.json({
+          accepted: true as const,
+          prompt_id: prompt.id,
+          message_id: prompt.messageId,
+          attachments: prompt.attachments,
+          reactivated: prompt.reactivated,
+        }, 202);
+      } catch (error) {
+        // See the launch path above: deterministic keys make immediate cleanup race with a
+        // concurrent retry. Retain unreferenced bytes until a delayed orphan sweep can prove age.
+        throw error;
+      }
+    } catch (error) {
+      return runError(c, error);
+    }
+  },
+);
 
 app.post("/v1/runs/:id/cancel", async (c) => {
   try {

@@ -30,6 +30,7 @@ function eventDb() {
     createdAt: Date;
   }> = [];
   const run = { id: RUN, transcript: [] as unknown[], warnings: [] as unknown[], transcriptEventSequence: 0 };
+  const prompts: Array<{ messageId: string; userText: string }> = [];
   const handle = {
     transaction: async (fn: (transaction: Db) => Promise<unknown>) => fn(handle as unknown as Db),
     select: (projection?: Record<string, unknown>) => ({
@@ -42,6 +43,9 @@ function eventDb() {
             return Promise.resolve([
               { value: events.length ? Math.max(...events.map((event) => event.sequence)) : null },
             ]);
+          }
+          if (table === schema.skillRunPrompts) {
+            return { orderBy: async () => prompts };
           }
           throw new Error("unexpected select");
         },
@@ -73,7 +77,7 @@ function eventDb() {
       }),
     }),
   };
-  return { database: handle as unknown as Db, events, run };
+  return { database: handle as unknown as Db, events, run, prompts };
 }
 
 describe("durable run events", () => {
@@ -184,6 +188,26 @@ describe("durable run events", () => {
     expect(events.at(-1)).toMatchObject({ sequence: 3, type: "session.idle" });
     expect(JSON.stringify(run.transcript)).toContain("[REDACTED]");
     expect(JSON.stringify(run.transcript)).not.toContain("snapshot-secret");
+  });
+
+  it("persists user-authored text instead of private runtime attachment instructions", async () => {
+    const { database, run, prompts } = eventDb();
+    prompts.push({ messageId: "msg-user-attachment", userText: "" });
+    await expect(
+      persistRunTranscript({
+        actor,
+        orgId: ORG,
+        runId: RUN,
+        items: [{
+          kind: "user",
+          message_id: "msg-user-attachment",
+          text: "Inspect files\n\n---\nprivate mounted path: ./attachments/secret.pdf",
+        }],
+        redactor: createRunRedactor([]),
+        database,
+      }),
+    ).resolves.toBe(true);
+    expect(run.transcript).toEqual([{ kind: "user", message_id: "msg-user-attachment", text: "" }]);
   });
 
   it("keeps a deduplicated redacted warning snapshot after live events expire", async () => {

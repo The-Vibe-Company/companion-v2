@@ -212,7 +212,7 @@ export function RunLauncherDialog({
     [effectiveOptions, inputs, model, modified, selectedConfiguration],
   );
   const operationBusy = busy || configBusy || vaultBusy;
-  const canLaunch = !!effectiveOptions && prompt.trim().length > 0 && blockers.length === 0 && !operationBusy;
+  const canLaunch = !!effectiveOptions && (prompt.trim().length > 0 || files.length > 0) && blockers.length === 0 && !operationBusy;
 
   const stash = (): RunLauncherDraft => ({
     prompt,
@@ -461,7 +461,7 @@ export function RunLauncherDialog({
   );
 
   return (
-    <Dialog icon="play" title={`Run ${slug}`} desc="Prompt and files belong to this run only." onClose={close} closeDisabled={operationBusy} foot={footer} className="og-dialog run-launcher">
+    <Dialog icon="play" title={`Run ${slug}`} desc="Add a prompt, files, or both. They belong to this run only." onClose={close} closeDisabled={operationBusy} foot={footer} className="og-dialog run-launcher">
       {loadError ? (
         <div className="run-launcher__load-error" role="alert">
           <p>{loadError}</p>
@@ -561,7 +561,7 @@ export function RunLauncherDialog({
               rows={4}
               maxLength={8000}
               disabled={busy}
-              placeholder={`What should ${slug} do?`}
+              placeholder={`What should ${slug} do? You can also attach files without a prompt.`}
               onChange={(event) => setPrompt(event.target.value)}
               onKeyDown={(event) => {
                 if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {

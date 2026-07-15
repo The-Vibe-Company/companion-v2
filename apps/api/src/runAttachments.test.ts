@@ -1,6 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
 import {
-  cleanupUnreferencedRunAttachments,
   deterministicRunAttachmentId,
   putRunAttachmentOnce,
 } from "./runAttachments";
@@ -56,36 +55,5 @@ describe("idempotent run attachments", () => {
     for (const key of createdKeys) objects.delete(key);
     expect(objects.has("shared")).toBe(true);
     expect(objects.has("conflicting-new-file")).toBe(false);
-  });
-
-  it("deletes only newly-created keys durably proven unreferenced", async () => {
-    const deleteObject = vi.fn(async () => undefined);
-    const findReferencedKeys = vi.fn(async () => ["committed"]);
-
-    await cleanupUnreferencedRunAttachments({
-      storageKeys: ["committed", "orphan", "orphan"],
-      findReferencedKeys,
-      deleteObject,
-    });
-
-    expect(findReferencedKeys).toHaveBeenCalledWith(["committed", "orphan"]);
-    expect(deleteObject).toHaveBeenCalledTimes(1);
-    expect(deleteObject).toHaveBeenCalledWith("orphan");
-  });
-
-  it("retains every object when durable reference verification fails", async () => {
-    const deleteObject = vi.fn(async () => undefined);
-
-    await expect(
-      cleanupUnreferencedRunAttachments({
-        storageKeys: ["possibly-committed"],
-        findReferencedKeys: async () => {
-          throw new Error("database outcome unknown");
-        },
-        deleteObject,
-      }),
-    ).resolves.toBeUndefined();
-
-    expect(deleteObject).not.toHaveBeenCalled();
   });
 });

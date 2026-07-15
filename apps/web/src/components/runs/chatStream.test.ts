@@ -304,8 +304,17 @@ describe("chatReducer", () => {
     state = chatReducer(state, {
       kind: "history",
       resolveToolLabel,
+      attachments: [{
+        id: "attachment-1",
+        prompt_id: "00000000-0000-4000-8000-000000000001",
+        message_id: "msg-user-1",
+        prompt_ordinal: 0,
+        file_name: "brief.pdf",
+        content_type: "application/pdf",
+        byte_size: 42,
+      }],
       items: [
-        { kind: "user", text: "hey" },
+        { kind: "user", text: "hey", message_id: "msg-user-1" },
         {
           kind: "tool",
           call_id: "c1",
@@ -322,6 +331,8 @@ describe("chatReducer", () => {
 
     // Existing sys line stays first, then the reloaded transcript in order.
     expect(state.items.map((item) => item.kind)).toEqual(["sys", "user", "tool", "asst"]);
+    const user = state.items.find((item) => item.kind === "user");
+    expect(user && user.kind === "user" ? user.attachments : []).toMatchObject([{ file_name: "brief.pdf" }]);
     const tool = state.items.find((item) => item.kind === "tool");
     expect(tool && tool.kind === "tool" ? tool : null).toMatchObject({
       label: "meeting-digest@1.0.0",
@@ -334,6 +345,42 @@ describe("chatReducer", () => {
       streaming: false,
       text: "on it",
     });
+  });
+
+  it("maps migrated attachments onto legacy transcript users by prompt ordinal", () => {
+    const state = chatReducer(initChatState(), {
+      kind: "history",
+      resolveToolLabel,
+      attachments: [
+        {
+          id: "attachment-initial",
+          prompt_id: "00000000-0000-4000-8000-000000000001",
+          message_id: "msg-initial",
+          prompt_ordinal: 0,
+          file_name: "initial.pdf",
+          content_type: "application/pdf",
+          byte_size: 12,
+        },
+        {
+          id: "attachment-follow-up",
+          prompt_id: "00000000-0000-4000-8000-000000000002",
+          message_id: "msg-follow-up",
+          prompt_ordinal: 1,
+          file_name: "follow-up.txt",
+          content_type: "text/plain",
+          byte_size: 8,
+        },
+      ],
+      items: [
+        { kind: "user", text: "Initial legacy prompt" },
+        { kind: "assistant", text: "Initial answer" },
+        { kind: "user", text: "Legacy follow-up" },
+      ],
+    });
+
+    const users = state.items.filter((item) => item.kind === "user");
+    expect(users[0]).toMatchObject({ attachments: [expect.objectContaining({ file_name: "initial.pdf" })] });
+    expect(users[1]).toMatchObject({ attachments: [expect.objectContaining({ file_name: "follow-up.txt" })] });
   });
 
   it("drives the working indicator from session.status events", () => {

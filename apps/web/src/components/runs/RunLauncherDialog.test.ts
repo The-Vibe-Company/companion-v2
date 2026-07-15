@@ -216,4 +216,27 @@ describe("RunLauncherDialog", () => {
     expect(container.querySelector("#run-config-name")).toBeNull();
     expect(button(container, "Save configuration")).toBeTruthy();
   });
+
+  it("launches with an attachment and no text prompt", async () => {
+    queryMocks.launchRun.mockResolvedValue({ id: "run-file-only" });
+    const container = await mount(runOptions());
+    const fileInput = container.querySelector<HTMLInputElement>('input[type="file"]');
+    expect(fileInput).toBeTruthy();
+    const file = new File(["brief"], "brief.pdf", { type: "application/pdf" });
+    Object.defineProperty(fileInput, "files", { configurable: true, value: [file] });
+    await act(async () => {
+      fileInput!.dispatchEvent(new Event("change", { bubbles: true }));
+      await Promise.resolve();
+    });
+
+    expect(button(container, "Run").disabled).toBe(false);
+    await act(async () => {
+      button(container, "Run").click();
+      await Promise.resolve();
+    });
+    expect(queryMocks.launchRun).toHaveBeenCalledWith(
+      "incident-summary",
+      expect.objectContaining({ prompt: "", files: [file] }),
+    );
+  });
 });

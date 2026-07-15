@@ -98,7 +98,13 @@ export async function loadSessionItems(
       .join("");
     // Use trim only as the empty-message predicate. The worker must see the exact bytes so a
     // credential containing leading/trailing whitespace is redacted before any normalization.
-    if (text.trim()) items.push({ kind: role === "user" ? "user" : "assistant", text });
+    if (text.trim()) {
+      items.push(
+        role === "user"
+          ? { kind: "user", text, message_id: entry.info.id }
+          : { kind: "assistant", text },
+      );
+    }
   }
   return items;
 }

@@ -267,6 +267,13 @@
       "when": 1784131200000,
       "tag": "0037_reactivate_runs",
       "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "7",
+      "when": 1784131300000,
+      "tag": "0038_skill_run_prompt_attachments",
+      "breakpoints": true
     }
   ]
 }

@@ -25,7 +25,9 @@ import {
   heartbeatRunWorker,
   heartbeatRunJob,
   heartbeatRunPrompt,
+  getRunPromptAttachments,
   loadRunExecutionPlan,
+  materializeRunAttachmentFiles,
   materializeRunWorkspace,
   persistRunTranscript,
   removeRunWorkerHeartbeat,
@@ -51,6 +53,7 @@ import { getSkillArchive } from "@companion/storage";
 import { boundedInteger, runWorkerConfig, type RunWorkerConfig } from "./config";
 import type { Supervisor } from "./billingSupervisor";
 import { createRunCleanupScheduler } from "./runCleanup";
+import { sweepRunAttachmentOrphans } from "./runAttachmentCleanup";
 
 const PROMPT_POLL_MS = 250;
 const ACL_RECHECK_MS = 15_000;
@@ -102,6 +105,19 @@ export function shouldHeartbeatRunLease(input: {
 
 function abortFailure(signal: AbortSignal): Error {
   return signal.reason instanceof Error ? signal.reason : new WorkerShutdown();
+}
+
+/** Crash-safe dispatch seam: mounting must finish before OpenCode is inspected or contacted. */
+export async function dispatchPromptAfterAttachmentMount(input: {
+  mountAttachments: () => Promise<void>;
+  getMessageState: () => Promise<"missing" | "pending" | "completed" | "error">;
+  sendPrompt: () => Promise<void>;
+}): Promise<"missing" | "pending" | "completed"> {
+  await input.mountAttachments();
+  const messageState = await input.getMessageState();
+  if (messageState === "missing") await input.sendPrompt();
+  else if (messageState === "error") throw new RunRuntimeError("OpenCode could not complete the prompt");
+  return messageState;
 }
 
 interface RunControlState {
@@ -1196,14 +1212,47 @@ async function processClaimedJob(input: {
           // A prior worker may have dispatched this exact deterministic id and crashed. Only send
           // when the user message is absent; completion is tied to its assistant child rather than
           // to a global idle generation, which can advance during an unrelated reconnect.
-          const messageState = await withBoundedSignal({
-            parent: jobAbort.signal,
-            timeoutMs: OPENCODE_CALL_TIMEOUT_MS,
-            timeoutMessage: "the OpenCode prompt lookup timed out",
-            operation: (signal) => ctx.chat!.getMessageState(chatTarget, activeSessionId, prompt.messageId, signal),
-          });
-          if (messageState === "missing") {
-            await withBoundedSignal({
+          await dispatchPromptAfterAttachmentMount({
+            mountAttachments: async () => {
+              if (prompt.kind !== "follow_up") return;
+              const attachmentMetadata = await tenant(job, (database) =>
+                getRunPromptAttachments({
+                  actor,
+                  orgId: job.orgId,
+                  runId: job.runId,
+                  promptId: prompt.id,
+                  database,
+                }),
+              );
+              if (attachmentMetadata.length === 0) return;
+              const attachmentFiles = await withBoundedSignal({
+                parent: jobAbort.signal,
+                timeoutMs: SANDBOX_CONTROL_TIMEOUT_MS,
+                timeoutMessage: "the prompt attachment download timed out",
+                operation: (signal) => materializeRunAttachmentFiles({
+                  attachments: attachmentMetadata,
+                  fetchObject: ctx.fetchObject!,
+                  signal,
+                }),
+              });
+              await withBoundedSignal({
+                parent: jobAbort.signal,
+                timeoutMs: SANDBOX_CONTROL_TIMEOUT_MS,
+                timeoutMessage: "the prompt attachment upload timed out",
+                operation: (signal) => ctx.runtime!.pushAttachments({
+                  ref: activeRef,
+                  attachments: attachmentFiles,
+                  signal,
+                }),
+              });
+            },
+            getMessageState: () => withBoundedSignal({
+              parent: jobAbort.signal,
+              timeoutMs: OPENCODE_CALL_TIMEOUT_MS,
+              timeoutMessage: "the OpenCode prompt lookup timed out",
+              operation: (signal) => ctx.chat!.getMessageState(chatTarget, activeSessionId, prompt.messageId, signal),
+            }),
+            sendPrompt: () => withBoundedSignal({
               parent: jobAbort.signal,
               timeoutMs: OPENCODE_CALL_TIMEOUT_MS,
               timeoutMessage: "the OpenCode prompt dispatch timed out",
@@ -1214,10 +1263,8 @@ async function processClaimedJob(input: {
                 prompt.messageId,
                 signal,
               ),
-            });
-          } else if (messageState === "error") {
-            throw new RunRuntimeError("OpenCode could not complete the prompt");
-          }
+            }),
+          });
           await waitForPromptCompletion({
             job,
             actor,
@@ -1575,6 +1622,7 @@ export async function startRunSupervisor(): Promise<Supervisor | null> {
       while ((await cleanupExpiredRunEvents({ limit: 1_000, database: db })) === 1_000) {
         if (shutdown.signal.aborted) break;
       }
+      if (!shutdown.signal.aborted) await sweepRunAttachmentOrphans();
     } catch {
       // Best-effort maintenance; the next interval retries without affecting active runs.
     } finally {

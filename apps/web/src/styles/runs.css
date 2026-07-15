@@ -253,6 +253,11 @@
 .run-chat__config { padding: 2px 6px; border: 1px solid var(--color-line); border-radius: var(--radius-sm); color: var(--color-muted); font-size: 10px; }
 .run-chat__warning { align-self: stretch; display: flex; align-items: flex-start; gap: 7px; padding: 8px 10px; border: 1px solid var(--color-warn-line); border-radius: var(--radius-md); background: var(--color-warn-tint); color: var(--color-warn); font-size: var(--text-xs); }
 .run-chat__warning b { font-weight: 600; }
+.run-chat__user-message { align-self: flex-end; display: flex; flex-direction: column; align-items: flex-end; gap: 6px; max-width: 78%; }
+.run-chat__user-text { max-width: 100%; padding: 8px 12px; border: 1px solid var(--color-line); border-radius: 10px; background: var(--color-surface-raised); color: var(--color-fg); font-size: var(--text-sm); line-height: var(--leading-normal); white-space: pre-wrap; overflow-wrap: anywhere; }
+.run-chat__attachment-list { display: flex; justify-content: flex-end; gap: 6px; flex-wrap: wrap; }
+.run-chat__attachment-list .chip { display: inline-flex; align-items: center; gap: 4px; max-width: 260px; text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.run-chat__draft-files { padding: 0 0 8px; }
 .run-chat__composer-box:focus-within { border-color: var(--color-accent) !important; box-shadow: 0 0 0 3px var(--color-accent-ring); }
 .run-chat__load-warning {
   display: flex;
@@ -311,6 +316,7 @@
   .provider-group__head .mrow__x { min-width: 44px; min-height: 44px; opacity: 1; }
   .run-launcher .run-variable__include, .run-launcher .run-input-group > summary { min-height: 44px; }
   .run-launcher .launch-file__x { width: 44px; min-height: 44px; margin: -8px; }
+  .run-chat__draft-files .launch-file { height: 44px; }
   .modelsel__item, .modelsel__add { min-height: 44px; }
   .run-chat__composer-box .btn-primary, .run-chat__meta .btn-sec, .run-session { min-width: 44px; min-height: 44px; }
   [data-screen-label="Run"] button, [data-screen-label="Run"] a { min-width: 44px; min-height: 44px; }

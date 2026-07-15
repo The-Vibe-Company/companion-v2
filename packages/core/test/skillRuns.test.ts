@@ -18,9 +18,12 @@ import {
   hashRunPayload,
   loadRunDeclarations,
   materializeRunWorkspace,
+  materializeRunAttachmentFiles,
+  normalizeRunTranscript,
   resolveRunDependencyClosure,
   sandboxNameForRun,
   validateRunInputSelection,
+  validateRunMessageAttachments,
   type ResolvedRunSkill,
   type RunControlContext,
 } from "../src/skillRuns";
@@ -413,6 +416,20 @@ describe("workspace and durable helper invariants", () => {
     expect(files.attachments.map((item) => item.path)).toEqual(["a-id-notes.txt", "b-id-notes.txt"]);
   });
 
+  it("materializes follow-up attachment bytes under stable id-prefixed paths", async () => {
+    const files = await materializeRunAttachmentFiles({
+      attachments: [{
+        id: "follow-up-id",
+        fileName: "../brief.pdf",
+        contentType: "application/pdf",
+        byteSize: 4,
+        storageKey: "stored/follow-up",
+      }],
+      fetchObject: async (key) => Buffer.from(key === "stored/follow-up" ? "data" : ""),
+    });
+    expect(files).toEqual([{ path: "follow-up-id-brief.pdf", data: Buffer.from("data") }]);
+  });
+
   it("rejects unsafe archives", async () => {
     const unsafe = await archive({ "../escape.txt": "oops", "SKILL.md": "# Skill" });
     await expect(buildSkillBundle("root", "1.0.0", "path", async () => unsafe)).rejects.toThrow(
@@ -456,6 +473,80 @@ describe("workspace and durable helper invariants", () => {
       attachments: [{ fileName: "notes.txt", workspacePath: "file-id-notes.txt" }],
     });
     expect(composed).toContain('"notes.txt" → "./attachments/file-id-notes.txt"');
+    const fileOnly = composeRunPrompt({
+      prompt: "",
+      skillSlug: "root-skill",
+      attachments: [{ fileName: "notes.txt", workspacePath: "file-id-notes.txt" }],
+    });
+    expect(fileOnly).toContain("Inspect the attached files");
+    expect(() => composeRunPrompt({ prompt: "", skillSlug: "root-skill", attachments: [] })).toThrowError(
+      expect.objectContaining({ code: "empty_prompt" }),
+    );
+  });
+
+  it("restores raw user text and message ids in frozen legacy transcripts", () => {
+    expect(normalizeRunTranscript(
+      [
+        { kind: "user", text: "runtime instructions with ./attachments/private-path" },
+        { kind: "assistant", text: "done" },
+      ],
+      [{ messageId: "msg-initial", userText: "Summarize the document" }],
+    )).toEqual([
+      { kind: "user", text: "Summarize the document", message_id: "msg-initial" },
+      { kind: "assistant", text: "done" },
+    ]);
+  });
+
+  it("aligns front-capped legacy transcript users with the surviving prompt tail", () => {
+    expect(normalizeRunTranscript(
+      [
+        { kind: "user", text: "runtime follow-up two" },
+        { kind: "assistant", text: "second answer" },
+        { kind: "user", text: "runtime follow-up three" },
+      ],
+      [
+        { messageId: "msg-initial", userText: "Initial", runtimePrompt: "runtime initial" },
+        { messageId: "msg-two", userText: "Follow-up two", runtimePrompt: "runtime follow-up two" },
+        { messageId: "msg-three", userText: "Follow-up three", runtimePrompt: "runtime follow-up three" },
+      ],
+    )).toEqual([
+      { kind: "user", text: "Follow-up two", message_id: "msg-two" },
+      { kind: "assistant", text: "second answer" },
+      { kind: "user", text: "Follow-up three", message_id: "msg-three" },
+    ]);
+  });
+
+  it("does not match repeated surviving text to a dropped prompt", () => {
+    expect(normalizeRunTranscript(
+      [{ kind: "user", text: "continue" }],
+      [
+        { messageId: "msg-dropped", userText: "continue", runtimePrompt: "continue" },
+        { messageId: "msg-surviving", userText: "continue", runtimePrompt: "continue" },
+      ],
+    )).toEqual([{ kind: "user", text: "continue", message_id: "msg-surviving" }]);
+  });
+
+  it("enforces per-message and cumulative attachment limits in the service layer", () => {
+    const attachment = (id: string, byteSize: number) => ({
+      id,
+      fileName: `${id}.bin`,
+      contentType: "application/octet-stream",
+      byteSize,
+      storageKey: `attachments/${id}`,
+    });
+    expect(() => validateRunMessageAttachments({ text: "", attachments: [attachment("one", 1)] })).not.toThrow();
+    expect(() => validateRunMessageAttachments({ text: "", attachments: [] })).toThrowError(
+      expect.objectContaining({ code: "empty_prompt" }),
+    );
+    expect(() => validateRunMessageAttachments({
+      text: "files",
+      attachments: Array.from({ length: 6 }, (_, index) => attachment(String(index), 1)),
+    })).toThrowError(expect.objectContaining({ code: "too_many_attachments" }));
+    expect(() => validateRunMessageAttachments({
+      text: "more",
+      attachments: [attachment("overflow", 1)],
+      existingBytes: 100 * 1024 * 1024,
+    })).toThrowError(expect.objectContaining({ code: "attachment_total_too_large" }));
   });
 
   it("trims tool output before losing the final assistant response", () => {
