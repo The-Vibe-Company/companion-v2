@@ -1,4 +1,8 @@
-import { deleteRunAttachmentOrphanIfReserved, listRunAttachmentOrphanReservations } from "@companion/core/services";
+import {
+  deferRunAttachmentOrphanReservation,
+  deleteRunAttachmentOrphanIfReserved,
+  listRunAttachmentOrphanReservations,
+} from "@companion/core/services";
 import { deleteSkillArchive } from "@companion/storage";
 
 const DEFAULT_ORPHAN_GRACE_MS = 24 * 60 * 60 * 1_000;
@@ -19,6 +23,7 @@ export async function sweepRunAttachmentOrphans(input: {
   limit?: number;
   listReservations?: typeof listRunAttachmentOrphanReservations;
   deleteIfReserved?: typeof deleteRunAttachmentOrphanIfReserved;
+  deferReservation?: typeof deferRunAttachmentOrphanReservation;
   deleteObject?: (key: string) => Promise<void>;
 } = {}): Promise<RunAttachmentSweepResult> {
   const now = input.now ?? new Date();
@@ -26,6 +31,7 @@ export async function sweepRunAttachmentOrphans(input: {
   const limit = input.limit ?? 250;
   const listReservations = input.listReservations ?? listRunAttachmentOrphanReservations;
   const deleteIfReserved = input.deleteIfReserved ?? deleteRunAttachmentOrphanIfReserved;
+  const deferReservation = input.deferReservation ?? deferRunAttachmentOrphanReservation;
   const deleteObject = input.deleteObject ?? ((key) => deleteSkillArchive({ key }));
   const before = new Date(now.getTime() - graceMs);
   const candidates = await listReservations({ before, limit });
@@ -41,6 +47,11 @@ export async function sweepRunAttachmentOrphans(input: {
       else result.retained += 1;
     } catch {
       result.failed += 1;
+      try {
+        await deferReservation({ storageKey, before });
+      } catch {
+        // Keep the original failed-delete accounting; a later sweep can retry either operation.
+      }
     }
   }
   return result;

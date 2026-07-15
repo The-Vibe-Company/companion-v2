@@ -19,6 +19,7 @@ import { toolIcon } from "./derive";
 import { runInputsFromSnapshot, type RunLauncherDraft } from "./launcherState";
 import {
   canReactivateRun,
+  canUseRunComposer,
   isStaleRunDetail,
   shouldRestartPollingAfterPromptFailure,
 } from "./reactivation";
@@ -591,8 +592,7 @@ export function RunChatView({
   const hasMessage = text.trim().length > 0 || files.length > 0;
   const terminalCanReactivate = canReactivateRun(run, reactivationClock);
   const liveSendReady = status === "running" && !cancelRequested && streamReady && !streamDead && !chat.busy;
-  const terminalSendReady = (status === "frozen" || status === "canceled") && terminalCanReactivate;
-  const composerDisabled = (!liveSendReady && !terminalSendReady) || promptPending;
+  const composerDisabled = !canUseRunComposer(status, liveSendReady, terminalCanReactivate) || promptPending;
   const sendDisabled = composerDisabled || !hasMessage;
   const streamingAssistant = chat.items.some((item) => item.kind === "asst" && item.streaming);
   const showWorking = chat.working.active && !streamingAssistant && status === "running";
@@ -1047,7 +1047,7 @@ export function RunChatView({
                 className="composer__attach"
                 title="Attach files"
                 aria-label="Attach files"
-                disabled={status !== "running" || cancelRequested || !streamReady || chat.busy || promptPending || streamDead || files.length >= RUN_ATTACHMENT_MAX_FILES}
+                disabled={composerDisabled || files.length >= RUN_ATTACHMENT_MAX_FILES}
                 onClick={() => fileInputRef.current?.click()}
               >
                 <Icon name="paperclip" size={14} />
@@ -1058,7 +1058,7 @@ export function RunChatView({
                 multiple
                 hidden
                 aria-label="Attach files"
-                disabled={status !== "running" || cancelRequested || promptPending}
+                disabled={composerDisabled}
                 onChange={(event) => addFiles(event.target.files)}
               />
               <label className="sr-only" htmlFor="run-follow-up">Send a follow-up message</label>

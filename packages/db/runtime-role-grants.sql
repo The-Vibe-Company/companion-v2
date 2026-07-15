@@ -62,6 +62,7 @@ BEGIN
       public.companion_skill_run_attachment_worker_ready(uuid, uuid, text),
       public.companion_lock_skill_run_attachment_orphan(text, timestamp with time zone),
       public.companion_complete_skill_run_attachment_orphan(text),
+      public.companion_defer_skill_run_attachment_orphan(text, timestamp with time zone),
       public.companion_list_skill_run_attachment_orphans(timestamp with time zone, integer),
       public.companion_claim_skill_run_jobs(text, integer, integer),
       public.companion_get_skill_run_worker_control(uuid, uuid, text, text),

@@ -279,6 +279,23 @@ export async function listRunAttachmentOrphanReservations(input: {
   return Array.from(result as unknown as Iterable<{ storageKey: string }>).map((row) => row.storageKey);
 }
 
+/** Back off a failed delete only if no retry or durable attachment superseded the old candidate. */
+export async function deferRunAttachmentOrphanReservation(input: {
+  storageKey: string;
+  before: Date;
+  database?: Db;
+}): Promise<boolean> {
+  const database = input.database ?? db;
+  const result = await database.execute(sql`
+    select companion_defer_skill_run_attachment_orphan(
+      ${input.storageKey},
+      ${input.before.toISOString()}::timestamp with time zone
+    ) as deferred
+  `);
+  const row = Array.from(result as unknown as Iterable<{ deferred: boolean }>)[0];
+  return row?.deferred ?? false;
+}
+
 /**
  * Read only the sandbox identity/control fields bound to an unexpired worker lease. This RPC is the
  * recovery seam used after creator RLS correctly hides a run whose owner left the organization.

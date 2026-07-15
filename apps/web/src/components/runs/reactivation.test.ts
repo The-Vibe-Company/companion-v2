@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { SkillRunDetail } from "@companion/contracts";
 import {
   canReactivateRun,
+  canUseRunComposer,
   isStaleRunDetail,
   shouldRestartPollingAfterPromptFailure,
 } from "./reactivation";
@@ -53,5 +54,13 @@ describe("run reactivation UI state", () => {
     expect(shouldRestartPollingAfterPromptFailure("canceled")).toBe(true);
     expect(shouldRestartPollingAfterPromptFailure("frozen")).toBe(true);
     expect(shouldRestartPollingAfterPromptFailure("running")).toBe(false);
+  });
+
+  it("keeps the text and attachment composer available for retained terminal sessions", () => {
+    expect(canUseRunComposer("running", true, false)).toBe(true);
+    expect(canUseRunComposer("frozen", false, true)).toBe(true);
+    expect(canUseRunComposer("canceled", false, true)).toBe(true);
+    expect(canUseRunComposer("frozen", false, false)).toBe(false);
+    expect(canUseRunComposer("error", false, true)).toBe(false);
   });
 });

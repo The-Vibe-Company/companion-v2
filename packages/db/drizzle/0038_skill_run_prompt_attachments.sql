@@ -243,9 +243,16 @@ BEGIN
   WHERE u."storage_key" = p_storage_key AND u."touched_at" < p_before
   FOR UPDATE;
   IF candidate IS NULL THEN RETURN false; END IF;
-  RETURN NOT EXISTS (
+  IF EXISTS (
     SELECT 1 FROM public."skill_run_attachments" a WHERE a."storage_key" = p_storage_key
-  );
+  ) THEN
+    -- A retry may recreate a reservation after the original request committed, then fail before
+    -- replaying it. The durable attachment proves the object must stay; only the stale reservation
+    -- is redundant. Removing it here also prevents old referenced rows from starving the sweep.
+    DELETE FROM public."skill_run_attachment_uploads" WHERE "storage_key" = p_storage_key;
+    RETURN false;
+  END IF;
+  RETURN true;
 END
 $$;--> statement-breakpoint
 REVOKE ALL ON FUNCTION companion_lock_skill_run_attachment_orphan(text, timestamp with time zone) FROM PUBLIC;--> statement-breakpoint
@@ -258,6 +265,26 @@ AS $$
   DELETE FROM public."skill_run_attachment_uploads" WHERE "storage_key" = p_storage_key
 $$;--> statement-breakpoint
 REVOKE ALL ON FUNCTION companion_complete_skill_run_attachment_orphan(text) FROM PUBLIC;
+--> statement-breakpoint
+CREATE FUNCTION companion_defer_skill_run_attachment_orphan(p_storage_key text, p_before timestamp with time zone)
+RETURNS boolean
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+  WITH deferred AS (
+    UPDATE public."skill_run_attachment_uploads" u
+    SET "touched_at" = clock_timestamp()
+    WHERE u."storage_key" = p_storage_key
+      AND u."touched_at" < p_before
+      AND NOT EXISTS (
+        SELECT 1 FROM public."skill_run_attachments" a WHERE a."storage_key" = p_storage_key
+      )
+    RETURNING 1
+  )
+  SELECT EXISTS (SELECT 1 FROM deferred)
+$$;--> statement-breakpoint
+REVOKE ALL ON FUNCTION companion_defer_skill_run_attachment_orphan(text, timestamp with time zone) FROM PUBLIC;
 --> statement-breakpoint
 CREATE FUNCTION companion_list_skill_run_attachment_orphans(p_before timestamp with time zone, p_limit integer)
 RETURNS TABLE (storage_key text)

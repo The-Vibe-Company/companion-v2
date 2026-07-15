@@ -18,6 +18,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   beginRunFreeze,
   claimNextRunPrompt,
+  deferRunAttachmentOrphanReservation,
   deleteRunAttachmentOrphanIfReserved,
   deleteRunConfiguration,
   deterministicRunMessageId,
@@ -59,6 +60,7 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
   const incompatibleWorkerAttachmentId = randomUUID();
   const reactivationAttachmentId = randomUUID();
   const reservationAttachmentId = randomUUID();
+  const deferredAttachmentId = randomUUID();
   const legacyReplicaRunId = randomUUID();
   const legacyReplicaAttachmentId = randomUUID();
   const owner = { id: `run-owner-${suffix}`, email: `run-owner-${suffix}@example.test` };
@@ -772,6 +774,52 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
       select count(*)::int as count from skill_run_attachment_uploads where storage_key = ${storageKey}
     `;
     expect(reservations).toEqual([{ count: 0 }]);
+
+    // A retry can reserve an already durable attachment and die before enqueue replay. The sweep
+    // must retain its referenced object while removing the stale reservation so later rows are not
+    // permanently starved behind it.
+    await withTenantContext({ orgId: orgA, userId: owner.id }, (database) =>
+      reserveRunAttachmentUploads({
+        actor: { id: owner.id, email: owner.email, name: "Run Owner" },
+        orgId: orgA,
+        storageKeys: [storageKey],
+        database,
+      }),
+    );
+    await sql`update skill_run_attachment_uploads set touched_at = now() - interval '2 days' where storage_key = ${storageKey}`;
+    let referencedObjectDeleted = false;
+    await expect(deleteRunAttachmentOrphanIfReserved({
+      storageKey,
+      before: new Date(Date.now() - 24 * 60 * 60 * 1_000),
+      database: db,
+      deleteObject: async () => { referencedObjectDeleted = true; },
+    })).resolves.toBe(false);
+    expect(referencedObjectDeleted).toBe(false);
+    const staleReservations = await sql<{ count: number }[]>`
+      select count(*)::int as count from skill_run_attachment_uploads where storage_key = ${storageKey}
+    `;
+    expect(staleReservations).toEqual([{ count: 0 }]);
+
+    const deferredStorageKey = `${orgA}/run-attachments/${deferredAttachmentId}`;
+    await withTenantContext({ orgId: orgA, userId: owner.id }, (database) =>
+      reserveRunAttachmentUploads({
+        actor: { id: owner.id, email: owner.email, name: "Run Owner" },
+        orgId: orgA,
+        storageKeys: [deferredStorageKey],
+        database,
+      }),
+    );
+    await sql`update skill_run_attachment_uploads set touched_at = now() - interval '2 days' where storage_key = ${deferredStorageKey}`;
+    await expect(deferRunAttachmentOrphanReservation({
+      storageKey: deferredStorageKey,
+      before: new Date(Date.now() - 24 * 60 * 60 * 1_000),
+      database: db,
+    })).resolves.toBe(true);
+    const deferredRows = await sql<{ fresh: boolean }[]>`
+      select touched_at > now() - interval '1 minute' as fresh
+      from skill_run_attachment_uploads where storage_key = ${deferredStorageKey}
+    `;
+    expect(deferredRows).toEqual([{ fresh: true }]);
     await sql`delete from skill_run_prompts where id = ${accepted.id}::uuid`;
   });
 
