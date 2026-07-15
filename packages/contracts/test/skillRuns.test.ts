@@ -10,6 +10,7 @@ import {
   runInputSelectionSchema,
   runInputSnapshotSchema,
   runOptionsSchema,
+  runPromptResponseSchema,
   skillRunDetailSchema,
   skillRunStatusSchema,
   updateRunConfigurationInputSchema,
@@ -255,11 +256,20 @@ describe("skill run contracts", () => {
       transcript: [],
       warnings: [{ code: "recorder_reconnected", message: "Recorder reconnected", phase: "record" }],
       transcript_event_sequence: 12,
+      activation_revision: 1,
+      reactivatable_until: null,
+      can_reactivate: false,
       attachments: [],
     };
     expect(skillRunDetailSchema.parse(base).transcript_event_sequence).toBe(12);
     expect(skillRunDetailSchema.parse(base).warnings).toHaveLength(1);
     expect(() => skillRunDetailSchema.parse({ ...base, transcript_event_sequence: -1 })).toThrow();
+    expect(() => skillRunDetailSchema.parse({ ...base, activation_revision: -1 })).toThrow();
+    expect(runPromptResponseSchema.parse({
+      accepted: true,
+      prompt_id: secretId,
+      reactivated: true,
+    }).reactivated).toBe(true);
   });
 
   it("pins redacted secret versions without accepting a value field", () => {

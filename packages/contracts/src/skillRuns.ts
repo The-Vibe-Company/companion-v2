@@ -23,6 +23,7 @@ export const RUN_CONFIGURATION_NAME_MAX = 120;
 export const RUN_MODEL_ID_MAX = 240;
 export const RUN_ERROR_CODE_MAX = 80;
 export const RUN_WARNING_SNAPSHOT_MAX = 100;
+export const RUN_REACTIVATION_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;
 
 /** Runtime-owned names may never be supplied by a skill or saved configuration. */
 export const RUN_RESERVED_ENV_PREFIX = "OPENCODE_SERVER_";
@@ -557,6 +558,10 @@ export const skillRunDetailSchema = skillRunRowSchema.extend({
   warnings: z.array(runWarningSnapshotSchema).max(RUN_WARNING_SNAPSHOT_MAX),
   /** Highest replay sequence already folded into `transcript`. */
   transcript_event_sequence: z.number().int().nonnegative(),
+  /** Monotonic generation used to distinguish a legitimate terminal -> queued transition. */
+  activation_revision: z.number().int().nonnegative(),
+  reactivatable_until: z.string().nullable(),
+  can_reactivate: z.boolean(),
   attachments: z.array(skillRunAttachmentRowSchema),
   input_snapshot: runInputSnapshotSchema.optional(),
 });
@@ -574,6 +579,15 @@ export const runPromptInputSchema = z
   })
   .strict();
 export type RunPromptInput = z.infer<typeof runPromptInputSchema>;
+
+export const runPromptResponseSchema = z
+  .object({
+    accepted: z.literal(true),
+    prompt_id: runUuidSchema,
+    reactivated: z.boolean(),
+  })
+  .strict();
+export type RunPromptResponse = z.infer<typeof runPromptResponseSchema>;
 
 /**
  * Text fields of multipart `POST /v1/skills/:slug/runs`. Files arrive as repeated `file` parts.

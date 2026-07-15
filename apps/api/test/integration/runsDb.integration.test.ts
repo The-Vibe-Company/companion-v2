@@ -47,6 +47,11 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
   const cleanupRunId = randomUUID();
   const revokedRunId = randomUUID();
   const freezeRunId = randomUUID();
+  const reactivationRunId = randomUUID();
+  const canceledReactivationRunId = randomUUID();
+  const expiredReactivationRunId = randomUUID();
+  const errorReactivationRunId = randomUUID();
+  const cleanupRetentionRunId = randomUUID();
   const attachmentId = randomUUID();
   const owner = { id: `run-owner-${suffix}`, email: `run-owner-${suffix}@example.test` };
   const admin = { id: `run-admin-${suffix}`, email: `run-admin-${suffix}@example.test` };
@@ -218,6 +223,71 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
         (${cleanupRunId}::uuid, ${orgA}::uuid, ${skillId}::uuid, ${owner.id}, ${versionId}::uuid,
          '1.0.0', 'integration-cleanup', ${"d".repeat(64)}, 'openai/gpt-5', 'cleanup prompt',
          'error', 'complete', ${`run-${cleanupRunId.slice(0, 8)}`})
+    `;
+    await sql`
+      insert into skill_runs
+        (id, org_id, skill_id, creator_id, skill_version_id, skill_version, idempotency_key,
+         payload_hash, model, prompt, status, phase, sandbox_name, sandbox_id, sandbox_domain,
+         opencode_session_id, reactivatable_until, frozen_at)
+      values
+        (${reactivationRunId}::uuid, ${orgA}::uuid, ${skillId}::uuid, ${owner.id}, ${versionId}::uuid,
+         '1.0.0', 'integration-reactivate', ${"e".repeat(64)}, 'openai/gpt-5', 'resume prompt',
+         'frozen', 'complete', ${`run-${reactivationRunId.slice(0, 8)}`},
+         ${`run-${reactivationRunId.slice(0, 8)}`}, 'https://reactivate.example.test',
+         'session-reactivate', now() + interval '7 days', now())
+    `;
+    await sql`
+      insert into skill_run_jobs (org_id, run_id, creator_id, status, phase, attempt)
+      values (${orgA}::uuid, ${reactivationRunId}::uuid, ${owner.id}, 'completed', 'complete', 1)
+    `;
+    await sql`
+      insert into skill_run_prompts
+        (org_id, run_id, ordinal, kind, idempotency_key, payload_hash, message_id, prompt, status, completed_at)
+      values
+        (${orgA}::uuid, ${reactivationRunId}::uuid, 0, 'initial', 'initial:integration-reactivate',
+         ${"f".repeat(64)}, ${deterministicRunMessageId(reactivationRunId, 0, Date.now())},
+         'resume prompt', 'completed', now())
+    `;
+    await sql`
+      insert into skill_runs
+        (id, org_id, skill_id, creator_id, skill_version_id, skill_version, idempotency_key,
+         payload_hash, model, prompt, status, phase, sandbox_name, reactivatable_until, frozen_at,
+         sandbox_cleaned_at)
+      values
+        (${canceledReactivationRunId}::uuid, ${orgA}::uuid, ${skillId}::uuid, ${owner.id}, ${versionId}::uuid,
+         '1.0.0', 'integration-reactivate-canceled', ${"2".repeat(64)}, 'openai/gpt-5',
+         'initial prompt before session creation', 'canceled', 'complete',
+         ${`run-${canceledReactivationRunId.slice(0, 8)}`}, now() + interval '7 days', now(), null),
+        (${expiredReactivationRunId}::uuid, ${orgA}::uuid, ${skillId}::uuid, ${owner.id}, ${versionId}::uuid,
+         '1.0.0', 'integration-reactivate-expired', ${"3".repeat(64)}, 'openai/gpt-5',
+         'expired prompt', 'canceled', 'complete', ${`run-${expiredReactivationRunId.slice(0, 8)}`},
+         now() - interval '1 second', now() - interval '7 days', now()),
+        (${errorReactivationRunId}::uuid, ${orgA}::uuid, ${skillId}::uuid, ${owner.id}, ${versionId}::uuid,
+         '1.0.0', 'integration-reactivate-error', ${"4".repeat(64)}, 'openai/gpt-5',
+         'failed prompt', 'error', 'complete', ${`run-${errorReactivationRunId.slice(0, 8)}`},
+         null, null, now()),
+        (${cleanupRetentionRunId}::uuid, ${orgA}::uuid, ${skillId}::uuid, ${owner.id}, ${versionId}::uuid,
+         '1.0.0', 'integration-retention-cleanup', ${"5".repeat(64)}, 'openai/gpt-5',
+         'retained cleanup prompt', 'frozen', 'complete', ${`run-${cleanupRetentionRunId.slice(0, 8)}`},
+         now() + interval '7 days', now(), null)
+    `;
+    await sql`
+      insert into skill_run_jobs (org_id, run_id, creator_id, status, phase)
+      values
+        (${orgA}::uuid, ${canceledReactivationRunId}::uuid, ${owner.id}, 'canceled', 'complete'),
+        (${orgA}::uuid, ${expiredReactivationRunId}::uuid, ${owner.id}, 'canceled', 'complete'),
+        (${orgA}::uuid, ${errorReactivationRunId}::uuid, ${owner.id}, 'failed', 'complete'),
+        (${orgA}::uuid, ${cleanupRetentionRunId}::uuid, ${owner.id}, 'completed', 'complete')
+    `;
+    await sql`
+      insert into skill_run_prompts
+        (org_id, run_id, ordinal, kind, idempotency_key, payload_hash, message_id, prompt, status,
+         completed_at)
+      values
+        (${orgA}::uuid, ${canceledReactivationRunId}::uuid, 0, 'initial',
+         'initial:integration-reactivate-canceled', ${"6".repeat(64)},
+         ${deterministicRunMessageId(canceledReactivationRunId, 0, Date.now())},
+         'initial prompt before session creation', 'canceled', null)
     `;
     await sql`
       insert into skill_runs
@@ -453,6 +523,14 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
   });
 
   it("terminalizes and leaves cleanup owed when a leased run owner loses membership", async () => {
+    await sql`
+      delete from skill_run_events
+      where org_id = ${orgA}::uuid and run_id = ${revokedRunId}::uuid
+    `;
+    await sql`
+      update skill_runs set transcript_event_sequence = 42
+      where org_id = ${orgA}::uuid and id = ${revokedRunId}::uuid
+    `;
     await sql`delete from memberships where org_id = ${orgA}::uuid and user_id = ${departed.id}`;
     const result = await sql.begin(async (tx) => {
       await tx.unsafe(`set local role ${rlsRole}`);
@@ -511,10 +589,11 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
       jobStatus: string;
       promptStatus: string;
       eventType: string;
+      eventSequence: number;
     }[]>`
       select r.status::text, r.phase::text, r.error_code as "errorCode",
              r.sandbox_cleaned_at is not null as cleaned, j.status::text as "jobStatus",
-             p.status::text as "promptStatus", e.type as "eventType"
+             p.status::text as "promptStatus", e.type as "eventType", e.sequence as "eventSequence"
       from skill_runs r
       join skill_run_jobs j on j.org_id = r.org_id and j.run_id = r.id
       join skill_run_prompts p on p.org_id = r.org_id and p.run_id = r.id
@@ -529,6 +608,7 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
       jobStatus: "failed",
       promptStatus: "canceled",
       eventType: "run.error",
+      eventSequence: 43,
     }]);
     // Keep the following cleanup-lease test isolated after proving the failed destroy remains owed.
     await sql`
@@ -591,6 +671,141 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
     expect(phases).toEqual([{ phase: "record" }]);
   });
 
+  it("reactivates a retained creator-only conversation and requeues its durable job", async () => {
+    const runActor = { id: owner.id, email: owner.email, name: "Run Owner" };
+    const result = await withTenantContext({ orgId: orgA, userId: owner.id }, (database) =>
+      enqueueRunPrompt({
+        actor: runActor,
+        orgId: orgA,
+        runId: reactivationRunId,
+        text: "Continue from the retained context",
+        idempotencyKey: "reactivation-follow-up",
+        reactivationAvailable: true,
+        database,
+      }),
+    );
+    expect(result).toMatchObject({ status: "queued", reactivated: true });
+
+    const replay = await withTenantContext({ orgId: orgA, userId: owner.id }, (database) =>
+      enqueueRunPrompt({
+        actor: runActor,
+        orgId: orgA,
+        runId: reactivationRunId,
+        text: "Continue from the retained context",
+        idempotencyKey: "reactivation-follow-up",
+        reactivationAvailable: false,
+        database,
+      }),
+    );
+    expect(replay).toMatchObject({ id: result.id, status: "queued", reactivated: false });
+
+    const rows = await sql<{
+      status: string;
+      phase: string;
+      activationRevision: number;
+      reactivatableUntil: Date | null;
+      jobStatus: string;
+      prompts: number;
+    }[]>`
+      select r.status::text, r.phase::text,
+             r.activation_revision as "activationRevision",
+             r.reactivatable_until as "reactivatableUntil",
+             j.status::text as "jobStatus",
+             count(p.id)::int as prompts
+      from skill_runs r
+      join skill_run_jobs j on j.org_id = r.org_id and j.run_id = r.id
+      join skill_run_prompts p on p.org_id = r.org_id and p.run_id = r.id
+      where r.org_id = ${orgA}::uuid and r.id = ${reactivationRunId}::uuid
+      group by r.id, j.status
+    `;
+    expect(rows).toEqual([{
+      status: "queued",
+      phase: "queued",
+      activationRevision: 1,
+      reactivatableUntil: null,
+      jobStatus: "queued",
+      prompts: 2,
+    }]);
+
+    await expect(
+      withTenantContext({ orgId: orgA, userId: admin.id }, (database) =>
+        enqueueRunPrompt({
+          actor: { id: admin.id, email: admin.email, name: "Run Admin" },
+          orgId: orgA,
+          runId: reactivationRunId,
+          text: "Admin override",
+          idempotencyKey: "reactivation-admin-denied",
+          reactivationAvailable: true,
+          database,
+        }),
+      ),
+    ).rejects.toMatchObject({ code: "run_not_found" });
+  });
+
+  it("replays a canceled pre-session initial prompt before the new follow-up", async () => {
+    const runActor = { id: owner.id, email: owner.email, name: "Run Owner" };
+    await expect(
+      withTenantContext({ orgId: orgA, userId: owner.id }, (database) =>
+        enqueueRunPrompt({
+          actor: runActor,
+          orgId: orgA,
+          runId: canceledReactivationRunId,
+          text: "New message after cancellation",
+          idempotencyKey: "reactivation-after-pre-session-cancel",
+          reactivationAvailable: true,
+          database,
+        }),
+      ),
+    ).resolves.toMatchObject({ status: "queued", reactivated: true });
+
+    const prompts = await sql<{ ordinal: number; kind: string; status: string; prompt: string }[]>`
+      select ordinal, kind::text, status::text, prompt
+      from skill_run_prompts
+      where org_id = ${orgA}::uuid and run_id = ${canceledReactivationRunId}::uuid
+      order by ordinal
+    `;
+    expect(prompts).toEqual([
+      { ordinal: 0, kind: "initial", status: "queued", prompt: "initial prompt before session creation" },
+      { ordinal: 1, kind: "follow_up", status: "queued", prompt: "New message after cancellation" },
+    ]);
+  });
+
+  it("rejects unavailable, expired, failed, and cross-tenant reactivation attempts", async () => {
+    const runActor = { id: owner.id, email: owner.email, name: "Run Owner" };
+    const enqueue = (runId: string, key: string, reactivationAvailable: boolean) =>
+      withTenantContext({ orgId: orgA, userId: owner.id }, (database) =>
+        enqueueRunPrompt({
+          actor: runActor,
+          orgId: orgA,
+          runId,
+          text: "Attempt reactivation",
+          idempotencyKey: key,
+          reactivationAvailable,
+          database,
+        }),
+      );
+
+    await expect(enqueue(expiredReactivationRunId, "reactivation-runtime-unavailable", false))
+      .rejects.toMatchObject({ code: "runtime_unavailable" });
+    await expect(enqueue(expiredReactivationRunId, "reactivation-expired", true))
+      .rejects.toMatchObject({ code: "run_reactivation_expired" });
+    await expect(enqueue(errorReactivationRunId, "reactivation-error-run", true))
+      .rejects.toMatchObject({ code: "run_not_running" });
+    await expect(
+      withTenantContext({ orgId: orgB, userId: outsider.id }, (database) =>
+        enqueueRunPrompt({
+          actor: { id: outsider.id, email: outsider.email, name: "Run Outsider" },
+          orgId: orgB,
+          runId: canceledReactivationRunId,
+          text: "Cross-tenant attempt",
+          idempotencyKey: "reactivation-cross-tenant",
+          reactivationAvailable: true,
+          database,
+        }),
+      ),
+    ).rejects.toMatchObject({ code: "run_not_found" });
+  });
+
   it("leases terminal cleanup once and retries after a failed provider attempt", async () => {
     const firstClaims = await Promise.all([claimCleanup("cleanup-a"), claimCleanup("cleanup-b")]);
     expect(firstClaims.flat()).toEqual([{ runId: cleanupRunId, cleanupAttempt: 1 }]);
@@ -612,6 +827,34 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
       where org_id = ${orgA}::uuid and id = ${cleanupRunId}::uuid
     `;
     expect(rows).toEqual([{ cleaned: true, owner: null, attempt: 2 }]);
+  });
+
+  it("makes retained cleanup and reactivation mutually exclusive at the deadline", async () => {
+    expect(await claimCleanup("retention-before-deadline")).toEqual([]);
+    await sql`
+      update skill_runs
+      set reactivatable_until = now() - interval '1 millisecond'
+      where org_id = ${orgA}::uuid and id = ${cleanupRetentionRunId}::uuid
+    `;
+    const claims = await Promise.all([
+      claimCleanup("retention-cleanup-a"),
+      claimCleanup("retention-cleanup-b"),
+    ]);
+    expect(claims.flat()).toEqual([{ runId: cleanupRetentionRunId, cleanupAttempt: 1 }]);
+
+    await expect(
+      withTenantContext({ orgId: orgA, userId: owner.id }, (database) =>
+        enqueueRunPrompt({
+          actor: { id: owner.id, email: owner.email, name: "Run Owner" },
+          orgId: orgA,
+          runId: cleanupRetentionRunId,
+          text: "Too late after cleanup won the row lock",
+          idempotencyKey: "reactivation-after-cleanup-claim",
+          reactivationAvailable: true,
+          database,
+        }),
+      ),
+    ).rejects.toMatchObject({ code: "run_reactivation_expired" });
   });
 
   it("globally removes only terminal events older than 24 hours", async () => {

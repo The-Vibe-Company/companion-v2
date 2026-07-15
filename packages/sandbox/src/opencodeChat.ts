@@ -343,6 +343,10 @@ export function createOpencodeRunChatRuntime(
     createSession(target, title, signal) {
       return createChatSession(clientFor(target), title, signal);
     },
+    async abortSession(target, sessionId, signal) {
+      const response = await clientFor(target).session.abort({ path: { id: sessionId }, signal });
+      if (response.error) throw new RunRuntimeError("OpenCode could not abort the active prompt");
+    },
     getSessionState(target, sessionId, signal) {
       return getSessionState(clientFor(target), sessionId, signal);
     },

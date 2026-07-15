@@ -3147,17 +3147,23 @@ app.post("/v1/runs/:id/prompt", async (c) => {
     assertRunSession(c);
     const requestKey = idempotencyKey(c);
     const input = runPromptInputSchema.parse(await c.req.json());
-    const prompt = await withTenant(c, ({ actor, orgId, database }) =>
-      enqueueRunPrompt({
-        actor,
-        orgId,
-        runId: c.req.param("id"),
-        text: input.text,
-        idempotencyKey: requestKey,
-        database,
+    const prompt = await withApiRunContext((ctx) =>
+      withTenant(c, async ({ actor, orgId, database }) => {
+        const readiness = ctx.runtimeAvailable
+          ? await ctx.resolveRuntimeReadiness?.(database)
+          : { available: false, message: ctx.runtimeMessage };
+        return enqueueRunPrompt({
+          actor,
+          orgId,
+          runId: c.req.param("id"),
+          text: input.text,
+          idempotencyKey: requestKey,
+          reactivationAvailable: readiness?.available ?? ctx.runtimeAvailable,
+          database,
+        });
       }),
     );
-    return c.json({ accepted: true, prompt_id: prompt.id }, 202);
+    return c.json({ accepted: true, prompt_id: prompt.id, reactivated: prompt.reactivated }, 202);
   } catch (error) {
     return runError(c, error);
   }

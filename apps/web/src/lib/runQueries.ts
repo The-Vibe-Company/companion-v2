@@ -10,6 +10,7 @@ import type {
   RunDependencyPin,
   RunInputSelection,
   RunOptions,
+  RunPromptResponse,
   SkillRunDetail,
   SkillRunsResponse,
   UpdateRunConfigurationInput,
@@ -175,8 +176,8 @@ export async function sendRunPrompt(
   runId: string,
   text: string,
   idempotencyKey: string,
-): Promise<{ accepted: true; prompt_id: string }> {
-  return apiFetch<{ accepted: true; prompt_id: string }>(`/v1/runs/${encodeURIComponent(runId)}/prompt`, {
+): Promise<RunPromptResponse> {
+  return apiFetch<RunPromptResponse>(`/v1/runs/${encodeURIComponent(runId)}/prompt`, {
     method: "POST",
     body: JSON.stringify({ text }),
     headers: { "Idempotency-Key": idempotencyKey },
