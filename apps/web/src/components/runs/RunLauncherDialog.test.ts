@@ -130,16 +130,14 @@ afterEach(() => {
 });
 
 describe("RunLauncherDialog", () => {
-  it("does not present the dedicated model-provider key as a skill input exposure", async () => {
+  it("does not present the dedicated model-provider key as a manifest-declared skill input", async () => {
     const container = await mount(runOptions());
 
-    expect(container.textContent).not.toContain("Credentials exposed to sandbox code");
     expect(container.textContent).not.toContain("OPENAI_API_KEY");
     expect(container.textContent).not.toContain("provider key");
-    expect(container.textContent).not.toContain("malicious skill");
   });
 
-  it("keeps the disclosure for a manifest-declared secret selected by the user", async () => {
+  it("keeps a manifest-declared secret selectable without an exposure summary", async () => {
     const options = runOptions();
     options.declared_secrets = [{
       skill_id: ROOT_ID,
@@ -161,10 +159,13 @@ describe("RunLauncherDialog", () => {
     }];
 
     const container = await mount(options);
+    const secretSelect = container.querySelector<HTMLSelectElement>(".vault-field__select");
 
-    expect(container.textContent).toContain("Credentials exposed to sandbox code");
-    expect(container.textContent).toContain("Production service · personal · Ada");
-    expect(container.textContent).toContain("malicious skill");
+    expect(secretSelect?.value).toBe(SECRET_ID);
+    expect(secretSelect?.textContent).toContain("Production service · Personal · Ada");
+    expect(container.textContent).not.toMatch(/\b\d+ exposed\b/);
+    expect(container.textContent).not.toContain("Credentials exposed to sandbox code");
+    expect(container.textContent).not.toContain("malicious skill");
   });
 
   it("creates and renames a configuration from the primary configuration controls", async () => {
