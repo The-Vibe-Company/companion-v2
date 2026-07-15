@@ -2,7 +2,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { RunRuntimeError, type RunSandboxRuntime, type SandboxRef } from "@companion/core";
 import { RunBusyError, RunValidationError } from "@companion/core/services";
 import {
+  abortConversationForRetention,
   claimedRunLeaseDeadline,
+  assertRetainedConversationAvailable,
   createSandboxTimeoutExtender,
   isTransientRunFailure,
   runFailureEvent,
@@ -25,6 +27,59 @@ describe("run worker retry classification", () => {
     expect(isTransientRunFailure(new RunValidationError("secret unavailable", "secret_unavailable"))).toBe(false);
     expect(isTransientRunFailure(new RunBusyError("run is terminal", "run_terminal"))).toBe(false);
     expect(isTransientRunFailure(new Error("database connection reset"))).toBe(true);
+  });
+});
+
+describe("reactivated OpenCode context", () => {
+  it("fails closed when a reactivated run lost its retained session", () => {
+    expect(() => assertRetainedConversationAvailable({
+      activationRevision: 1,
+      opencodeSessionId: "session-1",
+      sessionState: "missing",
+    })).toThrow(expect.objectContaining({ code: "run_context_unavailable" }));
+    expect(() => assertRetainedConversationAvailable({
+      activationRevision: 1,
+      opencodeSessionId: "session-1",
+      sessionState: "idle",
+    })).not.toThrow();
+    expect(() => assertRetainedConversationAvailable({
+      activationRevision: 1,
+      opencodeSessionId: null,
+      sessionState: "missing",
+    })).not.toThrow();
+  });
+
+  it("retains only after OpenCode confirms that the canceled turn was aborted", async () => {
+    const target = { domain: "sandbox.example", password: "secret" };
+    const signal = new AbortController().signal;
+    const abortSession = vi.fn(async () => undefined);
+
+    await expect(abortConversationForRetention({
+      chat: { abortSession },
+      target,
+      sessionId: "session-1",
+      signal,
+    })).resolves.toBe(true);
+    expect(abortSession).toHaveBeenCalledWith(target, "session-1", signal);
+
+    abortSession.mockRejectedValueOnce(new Error("OpenCode unavailable"));
+    await expect(abortConversationForRetention({
+      chat: { abortSession },
+      target,
+      sessionId: "session-1",
+      signal,
+    })).resolves.toBe(false);
+  });
+
+  it("allows pre-session cancellations to retain their sandbox", async () => {
+    const abortSession = vi.fn(async () => undefined);
+    await expect(abortConversationForRetention({
+      chat: { abortSession },
+      target: null,
+      sessionId: null,
+      signal: new AbortController().signal,
+    })).resolves.toBe(true);
+    expect(abortSession).not.toHaveBeenCalled();
   });
 });
 

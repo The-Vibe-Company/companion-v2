@@ -161,6 +161,23 @@ describe("loadSessionItems", () => {
 });
 
 describe("session reconciliation", () => {
+  it("aborts the active OpenCode turn before a canceled sandbox is retained", async () => {
+    const calls: string[] = [];
+    const runtime = createOpencodeRunChatRuntime(() => ({
+      session: {
+        abort: async ({ path }: { path: { id: string } }) => {
+          calls.push(path.id);
+          return { data: true };
+        },
+      },
+    }) as unknown as OpencodeClient);
+    await expect(runtime.abortSession(
+      { domain: "https://sandbox.invalid", password: "unused" },
+      "session-1",
+    )).resolves.toBeUndefined();
+    expect(calls).toEqual(["session-1"]);
+  });
+
   it("distinguishes missing, idle and active sessions", async () => {
     const client = {
       session: {

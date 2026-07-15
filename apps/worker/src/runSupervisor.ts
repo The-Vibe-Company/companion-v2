@@ -1,11 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { and, eq, inArray } from "drizzle-orm";
-import type { RunChatEvent, RunPhase } from "@companion/contracts";
+import { RUN_REACTIVATION_RETENTION_MS, type RunChatEvent, type RunPhase } from "@companion/contracts";
 import {
   createRunRedactor,
   loadSecretsMasterKey,
   RunRuntimeError,
   SecretConfigurationError,
+  type RunChatRuntime,
+  type RunChatTarget,
   type RunRedactor,
   type RunStreamingRedactor,
   type SandboxRef,
@@ -59,6 +61,38 @@ class WorkerShutdown extends Error {}
 class LostLease extends Error {}
 class CancellationRequested extends Error {}
 
+export function assertRetainedConversationAvailable(input: {
+  activationRevision: number;
+  opencodeSessionId: string | null;
+  sessionState: "idle" | "busy" | "retry" | "missing";
+}): void {
+  if (input.activationRevision > 0 && input.opencodeSessionId && input.sessionState === "missing") {
+    throw new RunValidationError(
+      "the retained conversation context is no longer available",
+      "run_context_unavailable",
+    );
+  }
+}
+
+/**
+ * A retained sandbox is safe to resume only after OpenCode confirms that its active turn stopped.
+ * If aborting fails, callers must destroy the sandbox instead of advertising a resumable context.
+ */
+export async function abortConversationForRetention(input: {
+  chat: Pick<RunChatRuntime, "abortSession">;
+  target: RunChatTarget | null;
+  sessionId: string | null;
+  signal: AbortSignal;
+}): Promise<boolean> {
+  if (!input.target || !input.sessionId) return true;
+  try {
+    await input.chat.abortSession(input.target, input.sessionId, input.signal);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function abortFailure(signal: AbortSignal): Error {
   return signal.reason instanceof Error ? signal.reason : new WorkerShutdown();
 }
@@ -71,6 +105,7 @@ interface RunControlState {
   sandboxId: string | null;
   sandboxDomain: string | null;
   opencodeSessionId: string | null;
+  activationRevision: number;
   timeoutMs: number;
 }
 
@@ -254,6 +289,7 @@ async function readRunControl(job: ClaimedRunJob): Promise<RunControlState> {
         sandboxId: schema.skillRuns.sandboxId,
         sandboxDomain: schema.skillRuns.sandboxDomain,
         opencodeSessionId: schema.skillRuns.opencodeSessionId,
+        activationRevision: schema.skillRuns.activationRevision,
         timeoutMs: schema.skillRuns.timeoutMs,
       })
       .from(schema.skillRuns)
@@ -720,6 +756,7 @@ async function markCanceled(input: {
   actor: ActorContext;
   workerId: string;
   cleaned: boolean;
+  retained: boolean;
 }): Promise<void> {
   const now = new Date();
   await tenant(input.job, async (database) => {
@@ -731,6 +768,9 @@ async function markCanceled(input: {
       status: "canceled",
       phase: "complete",
       frozenAt: now,
+      reactivatableUntil: input.retained
+        ? new Date(now.getTime() + RUN_REACTIVATION_RETENTION_MS)
+        : null,
       ...(input.cleaned ? { sandboxCleanedAt: now } : {}),
       database,
     });
@@ -933,9 +973,8 @@ async function processClaimedJob(input: {
       throw new CancellationRequested();
     }
     if (initialControl.phase === "freeze") {
-      // The previous replica persisted freeze before provider teardown. Repeating destroy is safe;
-      // forking here would recreate an empty sandbox and trust a dead OpenCode session. Reconcile a
-      // final transcript snapshot from the existing session when its pinned inputs remain valid.
+      // The previous replica persisted freeze before suspending the named sandbox. Reconcile the
+      // final transcript, then repeat the idempotent stop while retaining OpenCode state.
       plan = await tenant(job, (database) =>
         loadRunExecutionPlan({ actor, orgId: job.orgId, runId: job.runId, masterKey: ctx.masterKey, database }),
       ).catch(() => null);
@@ -949,11 +988,18 @@ async function processClaimedJob(input: {
         }
       }
       await timeoutExtender.stop();
-      const cleaned = await teardownSandbox(ctx.runtime!, ref);
+      await withBoundedSignal({
+        parent: jobAbort.signal,
+        timeoutMs: SANDBOX_CONTROL_TIMEOUT_MS,
+        timeoutMessage: "the sandbox suspension timed out",
+        operation: (signal) => ctx.runtime!.stop(ref!, signal),
+      });
+      const frozenAt = new Date();
       await setPhase(job, actor, workerId, "complete", {
         status: "frozen",
-        frozenAt: new Date(),
-        ...(cleaned ? { sandboxCleanedAt: new Date() } : {}),
+        frozenAt,
+        reactivatableUntil: new Date(frozenAt.getTime() + RUN_REACTIVATION_RETENTION_MS),
+        sandboxCleanedAt: null,
       });
       return;
     }
@@ -1041,6 +1087,11 @@ async function processClaimedJob(input: {
           operation: (signal) => ctx.chat!.getSessionState(chatTarget, activePlan.row.opencodeSessionId!, signal),
         })
       : "missing";
+    assertRetainedConversationAvailable({
+      activationRevision: activePlan.row.activationRevision,
+      opencodeSessionId: activePlan.row.opencodeSessionId,
+      sessionState: persistedSessionState,
+    });
     let activeSessionId: string;
     if (activePlan.row.opencodeSessionId && persistedSessionState !== "missing") {
       activeSessionId = activePlan.row.opencodeSessionId;
@@ -1213,11 +1264,18 @@ async function processClaimedJob(input: {
     await recorder.stop();
     recorder = null;
     if (jobAbort.signal.aborted) throw leaseLost ? new LostLease() : abortFailure(jobAbort.signal);
-    const cleaned = await teardownSandbox(ctx.runtime!, activeRef);
+    await withBoundedSignal({
+      parent: jobAbort.signal,
+      timeoutMs: SANDBOX_CONTROL_TIMEOUT_MS,
+      timeoutMessage: "the sandbox suspension timed out",
+      operation: (signal) => ctx.runtime!.stop(activeRef, signal),
+    });
+    const frozenAt = new Date();
     await setPhase(job, actor, workerId, "complete", {
       status: "frozen",
-      frozenAt: new Date(),
-      ...(cleaned ? { sandboxCleanedAt: new Date() } : {}),
+      frozenAt,
+      reactivatableUntil: new Date(frozenAt.getTime() + RUN_REACTIVATION_RETENTION_MS),
+      sandboxCleanedAt: null,
     });
   } catch (error) {
     await timeoutExtender.stop();
@@ -1238,6 +1296,12 @@ async function processClaimedJob(input: {
       cancellationRequested = Boolean(latest?.cancelRequestedAt || latest?.status === "canceled");
     }
     if (cancellationRequested) {
+      const contextStable = await abortConversationForRetention({
+        chat: ctx.chat!,
+        target,
+        sessionId,
+        signal: AbortSignal.timeout(10_000),
+      });
       if (target && sessionId) {
         await saveFinalTranscript(
           job,
@@ -1249,9 +1313,22 @@ async function processClaimedJob(input: {
           AbortSignal.timeout(10_000),
         ).catch(() => undefined);
       }
-      const cleaned = ref ? await teardownSandbox(ctx.runtime!, ref) : false;
+      let retained = false;
+      let cleaned = false;
+      if (ref) {
+        if (!contextStable) {
+          cleaned = await teardownSandbox(ctx.runtime!, ref);
+        } else {
+          try {
+            await ctx.runtime!.stop(ref, AbortSignal.timeout(SANDBOX_CONTROL_TIMEOUT_MS));
+            retained = true;
+          } catch {
+            cleaned = await teardownSandbox(ctx.runtime!, ref);
+          }
+        }
+      }
       try {
-        await markCanceled({ job, actor, workerId, cleaned });
+        await markCanceled({ job, actor, workerId, cleaned, retained });
       } catch {
         await terminalizeRevokedMembership({ job, workerId, ctx }).catch(() => false);
       }
@@ -1293,9 +1370,28 @@ async function processClaimedJob(input: {
       await appendEvents(job, actor, [failureEvent], redactor, false).catch(() => undefined);
     }
     if (outcome === "cancel_requested") {
-      const cleaned = ref ? await teardownSandbox(ctx.runtime!, ref) : false;
+      const contextStable = await abortConversationForRetention({
+        chat: ctx.chat!,
+        target,
+        sessionId,
+        signal: AbortSignal.timeout(10_000),
+      });
+      let retained = false;
+      let cleaned = false;
+      if (ref) {
+        if (!contextStable) {
+          cleaned = await teardownSandbox(ctx.runtime!, ref);
+        } else {
+          try {
+            await ctx.runtime!.stop(ref, AbortSignal.timeout(SANDBOX_CONTROL_TIMEOUT_MS));
+            retained = true;
+          } catch {
+            cleaned = await teardownSandbox(ctx.runtime!, ref);
+          }
+        }
+      }
       try {
-        await markCanceled({ job, actor, workerId, cleaned });
+        await markCanceled({ job, actor, workerId, cleaned, retained });
       } catch {
         await terminalizeRevokedMembership({ job, workerId, ctx }).catch(() => false);
       }

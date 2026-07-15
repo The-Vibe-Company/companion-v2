@@ -1032,10 +1032,10 @@ export type SkillRunWarning = {
 };
 
 /**
- * One skill run: a one-shot sandboxed session launched from a skill's page. A FRESH sandbox is
- * forked from the golden snapshot per run (no wake — the run freezes into a read-only transcript
- * when the sandbox stops). Runs are PRIVATE to their creator: like personal skills, there is no
- * admin override (`canAccessRun`).
+ * One skill run: a sandboxed session launched from a skill's page. A fresh named sandbox is forked
+ * from the golden snapshot, then retained in a stopped state for seven days after freeze/cancel so
+ * the same OpenCode conversation can resume. Runs are PRIVATE to their creator: like personal
+ * skills, there is no admin override (`canAccessRun`).
  */
 export const skillRuns = pgTable(
   "skill_runs",
@@ -1085,6 +1085,10 @@ export const skillRuns = pgTable(
     transcriptUpdatedAt: timestamp("transcript_updated_at", { withTimezone: true }),
     lastActiveAt: timestamp("last_active_at", { withTimezone: true }),
     frozenAt: timestamp("frozen_at", { withTimezone: true }),
+    /** Terminal runs remain resumable while their stopped named sandbox is retained. */
+    reactivatableUntil: timestamp("reactivatable_until", { withTimezone: true }),
+    /** Monotonic generation for stale-response protection across terminal -> queued transitions. */
+    activationRevision: integer("activation_revision").notNull().default(0),
     /** Set once the provider sandbox is confirmed destroyed; NULL = the sweeper still owes a destroy. */
     sandboxCleanedAt: timestamp("sandbox_cleaned_at", { withTimezone: true }),
     /** Short system lease used only to retry terminal sandbox teardown across worker replicas. */
@@ -1132,6 +1136,10 @@ export const skillRuns = pgTable(
     transcriptEventSequenceCheck: check(
       "skill_runs_transcript_event_sequence_check",
       sql`${t.transcriptEventSequence} >= 0`,
+    ),
+    activationRevisionCheck: check(
+      "skill_runs_activation_revision_check",
+      sql`${t.activationRevision} >= 0`,
     ),
     cleanupAttemptCheck: check("skill_runs_cleanup_attempt_check", sql`${t.cleanupAttempt} >= 0`),
     cleanupLeaseCheck: check(
@@ -1417,7 +1425,7 @@ export const skillRunPrompts = pgTable(
     uniqueIdempotency: unique("skill_run_prompts_idempotency_uq").on(t.orgId, t.runId, t.idempotencyKey),
     onePending: uniqueIndex("skill_run_prompts_pending_uq")
       .on(t.orgId, t.runId)
-      .where(sql`${t.status} IN ('queued', 'processing')`),
+      .where(sql`${t.status} = 'processing'`),
     byAvailability: index("skill_run_prompts_available_idx").on(t.status, t.availableAt),
     runFk: foreignKey({
       columns: [t.orgId, t.runId],

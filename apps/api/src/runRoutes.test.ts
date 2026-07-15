@@ -269,7 +269,7 @@ describe("session-only RunSkill routes", () => {
 
   it("enqueues follow-ups and cancellation without contacting a sandbox", async () => {
     signIn();
-    serviceMocks.enqueueRunPrompt.mockResolvedValue({ id: "prompt-1", status: "queued" });
+    serviceMocks.enqueueRunPrompt.mockResolvedValue({ id: "prompt-1", status: "queued", reactivated: true });
     serviceMocks.requestRunCancellation.mockResolvedValue({ status: "running", requested: true });
     const prompt = await app.request("/v1/runs/run-1/prompt", {
       method: "POST",
@@ -277,7 +277,10 @@ describe("session-only RunSkill routes", () => {
       body: JSON.stringify({ text: "Continue" }),
     });
     expect(prompt.status).toBe(202);
-    await expect(prompt.json()).resolves.toEqual({ accepted: true, prompt_id: "prompt-1" });
+    await expect(prompt.json()).resolves.toEqual({ accepted: true, prompt_id: "prompt-1", reactivated: true });
+    expect(serviceMocks.enqueueRunPrompt).toHaveBeenCalledWith(
+      expect.objectContaining({ reactivationAvailable: true }),
+    );
 
     const canceled = await app.request("/v1/runs/run-1/cancel", { method: "POST" });
     expect(canceled.status).toBe(202);

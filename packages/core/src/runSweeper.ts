@@ -1,4 +1,4 @@
-import { and, asc, eq, inArray, isNull, lt } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, lt, lte, or } from "drizzle-orm";
 import { db, schema, type Db } from "@companion/db";
 import type { SandboxRef } from "./runRuntime";
 import { sandboxNameForRun, teardownSandbox, type RunControlContext, type RunRow } from "./skillRuns";
@@ -33,6 +33,13 @@ export async function sweepRunSandboxes(input: {
       and(
         isNull(schema.skillRuns.sandboxCleanedAt),
         inArray(schema.skillRuns.status, ["frozen", "error", "canceled"]),
+        or(
+          eq(schema.skillRuns.status, "error"),
+          and(
+            inArray(schema.skillRuns.status, ["frozen", "canceled"]),
+            lte(schema.skillRuns.reactivatableUntil, at),
+          ),
+        ),
         lt(schema.skillRuns.updatedAt, new Date(at.getTime() - graceMs)),
       ),
     )
@@ -43,6 +50,7 @@ export async function sweepRunSandboxes(input: {
       (row) =>
         row.sandboxCleanedAt === null &&
         (row.status === "frozen" || row.status === "error" || row.status === "canceled") &&
+        (row.status === "error" || (row.reactivatableUntil !== null && row.reactivatableUntil <= at)) &&
         row.updatedAt.getTime() < at.getTime() - graceMs,
     )
     .slice(0, batchSize);

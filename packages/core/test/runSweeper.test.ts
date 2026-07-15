@@ -41,6 +41,8 @@ function run(id: string, status: RunRow["status"], updatedAt = OLD): RunRow {
     transcriptUpdatedAt: null,
     lastActiveAt: null,
     frozenAt: status === "frozen" || status === "canceled" ? updatedAt : null,
+    reactivatableUntil: status === "frozen" || status === "canceled" ? OLD : null,
+    activationRevision: 0,
     sandboxCleanedAt: null,
     cleanupLeaseOwner: null,
     cleanupLeaseExpiresAt: null,
@@ -116,6 +118,16 @@ describe("terminal run sandbox sweeper", () => {
   it("respects the grace window", async () => {
     const fresh = run("run-fresh", "frozen", new Date(NOW.getTime() - 30_000));
     const { sweep, destroyed } = harness([fresh]);
+    await expect(sweep()).resolves.toEqual({ destroyed: 0, failed: 0 });
+    expect(destroyed).toEqual([]);
+  });
+
+  it("retains frozen and canceled sandboxes until their reactivation deadline", async () => {
+    const frozen = run("run-retained-frozen", "frozen");
+    const canceled = run("run-retained-canceled", "canceled");
+    frozen.reactivatableUntil = new Date(NOW.getTime() + 60_000);
+    canceled.reactivatableUntil = new Date(NOW.getTime() + 60_000);
+    const { sweep, destroyed } = harness([frozen, canceled]);
     await expect(sweep()).resolves.toEqual({ destroyed: 0, failed: 0 });
     expect(destroyed).toEqual([]);
   });
