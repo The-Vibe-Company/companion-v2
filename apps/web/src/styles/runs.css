@@ -318,6 +318,7 @@
   .provider-key-meta { display: none; }
   .provider-group__head { gap: 6px !important; padding-inline-end: 6px !important; }
   .run-chat__config, .run-chat__meta > .mono { display: none; }
+  .run-attachment-button { min-height: 44px; }
   .run-session { grid-template-columns: auto minmax(0, 1fr) auto auto; gap: 7px; }
   .run-session__model { grid-column: 2 / -1; grid-row: 2; max-width: 100%; }
   .run-session__time { min-width: 0; }
