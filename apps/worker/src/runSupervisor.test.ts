@@ -1,12 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { RunRuntimeError, type RunSandboxRuntime, type SandboxRef } from "@companion/core";
-import { RunBusyError, RunValidationError } from "@companion/core/services";
+import { createRunRedactor, RunRuntimeError, type RunSandboxRuntime, type SandboxRef } from "@companion/core";
+import { putRunArtifactMetadata, RunBusyError, RunValidationError } from "@companion/core/services";
 import {
   abortConversationForRetention,
   cancellationStateAfterStop,
   claimedRunLeaseDeadline,
   assertRetainedConversationAvailable,
   createSandboxTimeoutExtender,
+  collectAndCacheRunArtifacts,
   dispatchPromptAfterAttachmentMount,
   isTransientRunFailure,
   runFailureEvent,
@@ -156,6 +157,230 @@ describe("follow-up attachment dispatch ordering", () => {
       sendPrompt: async () => { calls.push("send"); },
     });
     expect(calls).toEqual(["mount", "inspect"]);
+  });
+});
+
+describe("run artifact publication", () => {
+  const job = {
+    orgId: "11111111-1111-4111-8111-111111111111",
+    runId: "22222222-2222-4222-8222-222222222222",
+    creatorId: "user-1",
+    leaseOwner: "worker-1",
+  };
+  const actor = { id: "user-1", email: "user@example.test", name: "User" };
+  const ref: SandboxRef = { sandboxName: "run-test", sandboxId: "run-test", region: "iad1", timeoutMs: 60_000 };
+
+  it("uses one deterministic object key and renews the same path through reservation and ready", async () => {
+    const putMetadata = vi.fn(async (_input: Parameters<typeof putRunArtifactMetadata>[0]) => true);
+    const putObject = vi.fn(async (_input: { body: Uint8Array }) => undefined);
+    const headObject = vi.fn(async () => null);
+    const append = vi.fn(async () => undefined);
+    const collectOutputFiles = vi.fn(async () => [{ path: "artifacts/cat.png", data: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), byteSize: 8 }]);
+    const ready = await collectAndCacheRunArtifacts({
+      job: job as never,
+      actor,
+      workerId: "worker-1",
+      ctx: { runtime: { collectOutputFiles } as unknown as RunSandboxRuntime } as never,
+      ref,
+      imagePaths: [],
+      redactor: createRunRedactor([]),
+      signal: new AbortController().signal,
+      dependencies: { putMetadata, headObject, putObject, append, now: () => Date.parse("2026-07-16T12:00:00Z") },
+    });
+    expect(ready).toBe(1);
+    expect(putMetadata).toHaveBeenCalledTimes(3);
+    expect(putMetadata.mock.calls[0]![0]).toMatchObject({ ready: false, path: "artifacts/cat.png" });
+    expect(putMetadata.mock.calls[1]![0]).toMatchObject({ ready: false, path: "artifacts/cat.png" });
+    expect(putMetadata.mock.calls[2]![0]).toMatchObject({
+      ready: true,
+      storageKey: putMetadata.mock.calls[0]![0].storageKey,
+      expiresAt: new Date("2026-07-17T12:00:00Z"),
+    });
+    expect(append).toHaveBeenCalledWith([{ type: "artifacts.updated", count: 1 }]);
+    expect(putObject).toHaveBeenCalledWith(expect.objectContaining({
+      preventOverwrite: true,
+      ifMatch: undefined,
+      signal: expect.any(AbortSignal),
+    }));
+  });
+
+  it("leaves a non-ready reservation and emits a non-terminal warning after an upload crash", async () => {
+    const putMetadata = vi.fn(async (_input: Parameters<typeof putRunArtifactMetadata>[0]) => true);
+    const append = vi.fn(async () => undefined);
+    const ready = await collectAndCacheRunArtifacts({
+      job: job as never,
+      actor,
+      workerId: "worker-1",
+      ctx: {
+        runtime: {
+          collectOutputFiles: async () => [{ path: "artifacts/report.txt", data: Buffer.from("report"), byteSize: 6 }],
+        } as unknown as RunSandboxRuntime,
+      } as never,
+      ref,
+      imagePaths: [],
+      redactor: createRunRedactor([]),
+      signal: new AbortController().signal,
+      dependencies: {
+        putMetadata,
+        headObject: async () => null,
+        putObject: async () => { throw new Error("crash after reservation"); },
+        append,
+      },
+    });
+    expect(ready).toBe(0);
+    expect(putMetadata).toHaveBeenCalledTimes(2);
+    expect(putMetadata.mock.calls[0]![0]).toMatchObject({ ready: false });
+    expect(append).toHaveBeenCalledWith([
+      expect.objectContaining({ type: "run.warning", code: "artifact_collection_failed" }),
+    ]);
+  });
+
+  it("redacts exact injected secret bytes before an artifact reaches object storage", async () => {
+    const secret = "provider-secret-value";
+    const putMetadata = vi.fn(async (_input: Parameters<typeof putRunArtifactMetadata>[0]) => true);
+    const putObject = vi.fn(async (_input: { body: Uint8Array }) => undefined);
+    const append = vi.fn(async () => undefined);
+    const ready = await collectAndCacheRunArtifacts({
+      job: job as never,
+      actor,
+      workerId: "worker-1",
+      ctx: {
+        runtime: {
+          collectOutputFiles: async () => [{
+            path: "artifacts/report.txt",
+            data: Buffer.from(`before ${secret} after`),
+            byteSize: 35,
+          }],
+        } as unknown as RunSandboxRuntime,
+      } as never,
+      ref,
+      imagePaths: [],
+      redactor: createRunRedactor([secret]),
+      signal: new AbortController().signal,
+      dependencies: {
+        putMetadata,
+        headObject: async () => null,
+        putObject,
+        append,
+      },
+    });
+
+    expect(ready).toBe(1);
+    const uploaded = Buffer.from(putObject.mock.calls[0]![0].body);
+    expect(uploaded.toString("utf8")).toBe("before [REDACTED] after");
+    expect(uploaded.includes(Buffer.from(secret))).toBe(false);
+    expect(putMetadata.mock.calls.at(-1)?.[0]).toMatchObject({ ready: true, byteSize: uploaded.length });
+  });
+
+  it("revalidates the exact lease and retries with the latest ETag after a CAS collision", async () => {
+    const putMetadata = vi.fn(async (_input: Parameters<typeof putRunArtifactMetadata>[0]) => true);
+    const append = vi.fn(async () => undefined);
+    const headObject = vi.fn()
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ etag: '"winner"' });
+    const collision = Object.assign(new Error("precondition failed"), { name: "PreconditionFailed" });
+    const putObject = vi.fn()
+      .mockRejectedValueOnce(collision)
+      .mockResolvedValueOnce(undefined);
+
+    const ready = await collectAndCacheRunArtifacts({
+      job: job as never,
+      actor,
+      workerId: "worker-1",
+      ctx: {
+        runtime: {
+          collectOutputFiles: async () => [{ path: "artifacts/report.txt", data: Buffer.from("report"), byteSize: 6 }],
+        } as unknown as RunSandboxRuntime,
+      } as never,
+      ref,
+      imagePaths: [],
+      redactor: createRunRedactor([]),
+      signal: new AbortController().signal,
+      dependencies: {
+        putMetadata,
+        headObject,
+        putObject,
+        isPreconditionFailure: (error) => error === collision,
+        append,
+      },
+    });
+
+    expect(ready).toBe(1);
+    expect(putMetadata).toHaveBeenCalledTimes(4);
+    expect(putObject).toHaveBeenNthCalledWith(1, expect.objectContaining({ preventOverwrite: true }));
+    expect(putObject).toHaveBeenNthCalledWith(2, expect.objectContaining({ ifMatch: '"winner"' }));
+  });
+
+  it("does not upload after the worker loses its lease between reservation and PUT", async () => {
+    const putMetadata = vi.fn()
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false);
+    const append = vi.fn(async () => undefined);
+    const putObject = vi.fn(async () => undefined);
+
+    const ready = await collectAndCacheRunArtifacts({
+      job: job as never,
+      actor,
+      workerId: "stale-worker",
+      ctx: {
+        runtime: {
+          collectOutputFiles: async () => [{ path: "artifacts/report.txt", data: Buffer.from("report"), byteSize: 6 }],
+        } as unknown as RunSandboxRuntime,
+      } as never,
+      ref,
+      imagePaths: [],
+      redactor: createRunRedactor([]),
+      signal: new AbortController().signal,
+      dependencies: {
+        putMetadata,
+        headObject: async () => null,
+        putObject,
+        append,
+      },
+    });
+
+    expect(ready).toBe(0);
+    expect(putObject).not.toHaveBeenCalled();
+    expect(append).toHaveBeenCalledWith([
+      expect.objectContaining({ type: "run.warning", code: "artifact_collection_failed" }),
+    ]);
+  });
+
+  it("aborts a stalled object upload at the storage deadline", async () => {
+    vi.useFakeTimers();
+    const putMetadata = vi.fn(async (_input: Parameters<typeof putRunArtifactMetadata>[0]) => true);
+    const append = vi.fn(async () => undefined);
+    let uploadSignal: AbortSignal | undefined;
+    const result = collectAndCacheRunArtifacts({
+      job: job as never,
+      actor,
+      workerId: "worker-1",
+      ctx: {
+        runtime: {
+          collectOutputFiles: async () => [{ path: "artifacts/report.txt", data: Buffer.from("report"), byteSize: 6 }],
+        } as unknown as RunSandboxRuntime,
+      } as never,
+      ref,
+      imagePaths: [],
+      redactor: createRunRedactor([]),
+      signal: new AbortController().signal,
+      dependencies: {
+        putMetadata,
+        headObject: async () => null,
+        putObject: ({ signal }) => new Promise((_resolve, reject) => {
+          uploadSignal = signal;
+          signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+        }),
+        append,
+      },
+    });
+
+    await vi.advanceTimersByTimeAsync(30_001);
+    await expect(result).resolves.toBe(0);
+    expect(uploadSignal?.aborted).toBe(true);
+    expect(append).toHaveBeenCalledWith([
+      expect.objectContaining({ type: "run.warning", code: "artifact_collection_failed" }),
+    ]);
   });
 });
 

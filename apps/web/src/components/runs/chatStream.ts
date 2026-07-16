@@ -488,6 +488,8 @@ function applyEvent(state: ChatState, event: RunChatEvent, resolveToolLabel: Res
     }
     case "session.idle":
       return { ...state, busy: false, working: { active: false, label: "" } };
+    case "artifacts.updated":
+      return state;
     case "run.warning":
       return state.warnings.some((warning) => warning.code === event.code && warning.message === event.message)
         ? state

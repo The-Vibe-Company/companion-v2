@@ -111,6 +111,7 @@ import {
   listRuns,
   getRun,
   getRunAttachment,
+  getRunArtifact,
   isRunWorkerReady,
   RunBusyError,
   RunValidationError,
@@ -3540,6 +3541,37 @@ app.get("/v1/runs/:id/attachments/:attachmentId", async (c) => {
     });
   } catch (error) {
     // Not-visible run / unknown attachment / cross-tenant all surface as a 404.
+    return jsonError(c, error, 404);
+  }
+});
+
+/** Serve creator-private cached outputs without exposing S3 or the retained sandbox. */
+app.get("/v1/runs/:id/artifacts/:artifactId", async (c) => {
+  try {
+    if (isTokenRequest(c)) return jsonError(c, "personal access tokens cannot use skill runs", 401);
+    const asset = await withTenant(c, ({ actor, orgId, database }) =>
+      getRunArtifact({
+        actor,
+        orgId,
+        runId: c.req.param("id"),
+        artifactId: c.req.param("artifactId"),
+        database,
+      }),
+    );
+    const body = await getSkillArchive({ key: asset.storageKey });
+    const fileName = asset.fileName.replace(/[^\w. -]/g, "_");
+    const download = c.req.query("download") === "1";
+    const disposition = !download && asset.previewable ? "inline" : "attachment";
+    return new Response(body, {
+      headers: {
+        "Content-Type": asset.contentType,
+        "Cache-Control": "private, no-store",
+        "X-Content-Type-Options": "nosniff",
+        "Content-Disposition": `${disposition}; filename="${fileName}"`,
+      },
+    });
+  } catch (error) {
+    // Expired, missing and unauthorized artifacts are intentionally indistinguishable.
     return jsonError(c, error, 404);
   }
 });

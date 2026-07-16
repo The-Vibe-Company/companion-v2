@@ -41,6 +41,7 @@ const serviceMocks = vi.hoisted(() => ({
   requestRunCancellation: vi.fn(),
   listRunEvents: vi.fn(),
   getRunAttachment: vi.fn(),
+  getRunArtifact: vi.fn(),
   isRunWorkerReady: vi.fn(async () => true),
   setProviderConnection: vi.fn(),
   setOrgProviderConnection: vi.fn(),
@@ -54,6 +55,7 @@ const authMocks = vi.hoisted(() => ({
 const storageMocks = vi.hoisted(() => ({
   putSkillArchive: vi.fn(async (_input: { key: string }) => undefined),
   deleteSkillArchive: vi.fn(async (_input: { key: string }) => undefined),
+  getSkillArchive: vi.fn(async (_input: { key: string }) => Buffer.from("artifact")),
 }));
 
 const catalogMocks = vi.hoisted(() => ({
@@ -81,6 +83,7 @@ vi.mock("@companion/storage", () => ({
   runAttachmentKey: ({ orgId, attachmentId }: { orgId: string; attachmentId: string }) => `${orgId}/${attachmentId}`,
   putSkillArchive: storageMocks.putSkillArchive,
   deleteSkillArchive: storageMocks.deleteSkillArchive,
+  getSkillArchive: storageMocks.getSkillArchive,
 }));
 
 import { app } from "./index";
@@ -320,6 +323,37 @@ describe("session-only RunSkill routes", () => {
     const canceled = await app.request("/v1/runs/run-1/cancel", { method: "POST" });
     expect(canceled.status).toBe(202);
     await expect(canceled.json()).resolves.toEqual({ status: "running", requested: true });
+  });
+
+  it("serves safe raster artifacts inline and forces all downloads when requested", async () => {
+    signIn();
+    serviceMocks.getRunArtifact.mockResolvedValue({
+      fileName: "cat.png",
+      contentType: "image/png",
+      storageKey: "org/run-artifacts/run/cat",
+      previewable: true,
+    });
+    const inline = await app.request("/v1/runs/run-1/artifacts/artifact-1");
+    expect(inline.status).toBe(200);
+    expect(inline.headers.get("content-disposition")).toBe('inline; filename="cat.png"');
+    expect(inline.headers.get("x-content-type-options")).toBe("nosniff");
+
+    const download = await app.request("/v1/runs/run-1/artifacts/artifact-1?download=1");
+    expect(download.headers.get("content-disposition")).toBe('attachment; filename="cat.png"');
+  });
+
+  it("keeps non-raster artifacts download-only and maps unavailable artifacts to 404", async () => {
+    signIn();
+    serviceMocks.getRunArtifact.mockResolvedValueOnce({
+      fileName: "report.html",
+      contentType: "text/html; charset=utf-8",
+      storageKey: "org/run-artifacts/run/report",
+      previewable: false,
+    });
+    const attachment = await app.request("/v1/runs/run-1/artifacts/artifact-2");
+    expect(attachment.headers.get("content-disposition")).toBe('attachment; filename="report.html"');
+    serviceMocks.getRunArtifact.mockRejectedValueOnce(new Error("artifact not found"));
+    expect((await app.request("/v1/runs/run-1/artifacts/expired")).status).toBe(404);
   });
 
   it("accepts an attachment-only multipart follow-up and forwards stored metadata", async () => {

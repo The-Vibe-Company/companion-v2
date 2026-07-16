@@ -77,6 +77,20 @@ describe("RunRedactor", () => {
 
     expect(redactor.redactText(secret)).toBe(secret);
   });
+
+  it("redacts exact secret bytes without decoding surrounding binary data", () => {
+    const secret = "binary-secret";
+    const prefix = Buffer.from([0x00, 0xff, 0x89, 0x50]);
+    const suffix = Buffer.from([0xfe, 0x01]);
+    const input = Buffer.concat([prefix, Buffer.from(secret), suffix]);
+
+    const output = createRunRedactor([secret]).redactBytes(input);
+
+    expect(output.subarray(0, prefix.length)).toEqual(prefix);
+    expect(output.subarray(-suffix.length)).toEqual(suffix);
+    expect(output.includes(Buffer.from(secret))).toBe(false);
+    expect(output.includes(Buffer.from(RUN_REDACTION_PLACEHOLDER))).toBe(true);
+  });
 });
 
 describe("RunStreamingRedactor", () => {

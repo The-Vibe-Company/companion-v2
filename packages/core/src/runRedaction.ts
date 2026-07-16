@@ -134,6 +134,27 @@ export class RunRedactor {
     return redactTextWith(input, this.literals);
   }
 
+  /** Redact exact UTF-8 literal bytes without decoding or otherwise corrupting binary files. */
+  redactBytes(input: Uint8Array): Buffer {
+    let output = Buffer.from(input);
+    const replacement = Buffer.from(RUN_REDACTION_PLACEHOLDER, "utf8");
+    for (const literal of this.literals) {
+      const needle = Buffer.from(literal, "utf8");
+      if (needle.length === 0 || output.indexOf(needle) < 0) continue;
+      const chunks: Buffer[] = [];
+      let cursor = 0;
+      let match = output.indexOf(needle, cursor);
+      while (match >= 0) {
+        chunks.push(output.subarray(cursor, match), replacement);
+        cursor = match + needle.length;
+        match = output.indexOf(needle, cursor);
+      }
+      chunks.push(output.subarray(cursor));
+      output = Buffer.concat(chunks);
+    }
+    return output;
+  }
+
   /** Return a recursively redacted copy. The supplied payload is never mutated. */
   redactPayload<T>(input: T): T {
     return redactNested(input, this.literals, new WeakMap()) as T;
@@ -301,6 +322,8 @@ export function redactAndBoundRunEvents(
         }];
       case "session.idle":
         return [{ ...event, session_id: truncateUtf8(event.session_id, RUN_CHAT_ID_MAX) }];
+      case "artifacts.updated":
+        return [event];
       case "run.warning":
       case "run.error":
       case "error":

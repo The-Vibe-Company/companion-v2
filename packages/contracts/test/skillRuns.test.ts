@@ -305,6 +305,7 @@ describe("skill run contracts", () => {
       reactivatable_until: null,
       can_reactivate: false,
       attachments: [],
+      artifacts: [],
     };
     expect(skillRunDetailSchema.parse(base).transcript_event_sequence).toBe(12);
     expect(skillRunDetailSchema.parse(base).warnings).toHaveLength(1);

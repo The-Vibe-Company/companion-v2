@@ -55,6 +55,13 @@ export interface RunWorkspaceFiles {
 
 export type RunAttachmentFiles = RunWorkspaceFiles["attachments"];
 
+export interface RunOutputFile {
+  /** Normalized path relative to the run workspace. */
+  path: string;
+  data: Buffer;
+  byteSize: number;
+}
+
 export interface RunDynamicFiles {
   opencodeJson: string;
   attachments: Array<{ path: string; data: Buffer }>;
@@ -76,6 +83,16 @@ export interface RunSandboxRuntime {
   pushSkillBundles(input: { ref: SandboxRef; skills: SkillBundle[]; signal?: AbortSignal }): Promise<void>;
   /** Per-run step after adoption: write model config and user attachments, but no skill bundles. */
   pushRunFiles(input: { ref: SandboxRef; files: RunDynamicFiles; signal?: AbortSignal }): Promise<void>;
+  /** Bounded output collection; implementations must never scan the whole workspace. */
+  collectOutputFiles(input: {
+    ref: SandboxRef;
+    /** Raster paths explicitly opened by OpenCode's `read` tool. */
+    imagePaths: string[];
+    maxFiles: number;
+    maxFileBytes: number;
+    maxTotalBytes: number;
+    signal?: AbortSignal;
+  }): Promise<RunOutputFile[]>;
   /** Step 3 — launch `opencode serve` detached with the injected env. */
   startServer(input: {
     ref: SandboxRef;

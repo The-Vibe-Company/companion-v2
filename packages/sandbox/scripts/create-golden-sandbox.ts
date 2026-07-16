@@ -6,9 +6,8 @@
  *   VERCEL_TOKEN=… VERCEL_TEAM_ID=… VERCEL_PROJECT_ID=… \
  *   OPENCODE_VERSION=1.17.13 pnpm tsx scripts/agents/create-golden-sandbox.ts
  *
- * What it bakes in: the pinned OpenCode CLI (npm global install, exact version) and python3 (skills
- * bundle Python scripts). Per-agent state (agent markdown, opencode.json, skills, env) is pushed at
- * provision time, never here. Prints the snapshot id to export as COMPANION_GOLDEN_SNAPSHOT_ID.
+ * What it bakes in: Python 3.13, the pinned Python toolbox, Node 24, the exact OpenCode CLI, and
+ * common shell utilities. Per-run state is still pushed at provision time, never here.
  */
 import { Sandbox } from "@vercel/sandbox";
 
@@ -43,10 +42,10 @@ async function main(): Promise<void> {
   };
   const opencodeVersion = required("OPENCODE_VERSION");
 
-  console.log(`Creating golden sandbox (opencode-ai@${opencodeVersion}, node24 + python3)…`);
+  console.log(`Creating golden sandbox (opencode-ai@${opencodeVersion}, Python 3.13 + Node 24)…`);
   const sandbox = await Sandbox.create({
     ...credentials,
-    runtime: "node24",
+    runtime: "python3.13",
     ports: [OPENCODE_PORT],
     timeout: 15 * 60 * 1000,
     resources: { vcpus: 2 },
@@ -54,7 +53,27 @@ async function main(): Promise<void> {
   try {
     console.log(`Sandbox ${sandbox.name} booted.`);
 
-    await run(sandbox, "install python3 (dnf)", "dnf", ["install", "-y", "python3"], true);
+    await run(sandbox, "install Node 24 and shell toolbox", "dnf", [
+      "install", "-y", "nodejs24", "nodejs24-npm", "git", "curl", "jq", "ripgrep", "file", "zip", "unzip",
+    ], true);
+    await run(sandbox, "select Node 24", "alternatives", ["--set", "node", "/usr/bin/node-24"], true);
+    await run(sandbox, "configure Python command aliases", "sh", ["-lc", [
+      "set -eu",
+      "python_bin=$(command -v python3.13)",
+      'ln -sf "$python_bin" /usr/local/bin/python3',
+      'ln -sf "$python_bin" /usr/local/bin/python',
+      '"$python_bin" -m ensurepip --upgrade',
+    ].join("\n")], true);
+    await run(sandbox, "install pinned Python toolbox", "python3", [
+      "-m", "pip", "install", "--no-cache-dir", "--break-system-packages",
+      "openai==2.45.0", "requests==2.34.2", "PyYAML==6.0.3", "uv==0.11.29",
+    ], true);
+    await run(sandbox, "configure pip command aliases", "sh", ["-lc", [
+      "set -eu",
+      "pip_bin=$(command -v pip3.13 || command -v pip3)",
+      'ln -sf "$pip_bin" /usr/local/bin/pip3',
+      'ln -sf "$pip_bin" /usr/local/bin/pip',
+    ].join("\n")], true);
     await run(sandbox, `install opencode-ai@${opencodeVersion} (npm -g)`, "npm", [
       "install",
       "--global",
@@ -64,7 +83,19 @@ async function main(): Promise<void> {
     if (!reported.includes(opencodeVersion)) {
       throw new Error(`opencode reports "${reported}" but the pin is ${opencodeVersion} — aborting.`);
     }
-    await run(sandbox, "verify python3", "python3", ["--version"]);
+    const python = await run(sandbox, "verify Python toolbox", "python", [
+      "-c",
+      "value: str | None = None; import openai, requests, yaml; print(openai.__version__, requests.__version__, yaml.__version__)",
+    ]);
+    if (python.trim() !== "2.45.0 2.34.2 6.0.3") throw new Error(`unexpected Python package versions: ${python}`);
+    const pythonVersion = await run(sandbox, "verify Python 3.13", "python3", ["--version"]);
+    if (!pythonVersion.startsWith("Python 3.13.")) throw new Error(`unexpected Python version: ${pythonVersion}`);
+    await run(sandbox, "verify pip", "pip", ["--version"]);
+    const uvVersion = await run(sandbox, "verify uv", "uv", ["--version"]);
+    if (!uvVersion.includes("0.11.29")) throw new Error(`unexpected uv version: ${uvVersion}`);
+    const nodeVersion = await run(sandbox, "verify Node 24", "node", ["--version"]);
+    if (!nodeVersion.startsWith("v24.")) throw new Error(`unexpected Node version: ${nodeVersion}`);
+    await run(sandbox, "verify npm", "npm", ["--version"]);
 
     console.log("Snapshotting (the sandbox shuts down when the snapshot completes)…");
     const snapshot = await sandbox.snapshot();

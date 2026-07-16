@@ -288,6 +288,13 @@
       "when": 1784131500000,
       "tag": "0040_sandbox_usage",
       "breakpoints": true
+    },
+    {
+      "idx": 41,
+      "version": "7",
+      "when": 1784217600000,
+      "tag": "0041_run_artifacts",
+      "breakpoints": true
     }
   ]
 }
