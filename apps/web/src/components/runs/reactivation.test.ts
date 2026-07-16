@@ -26,6 +26,7 @@ function detail(overrides: Partial<SkillRunDetail> = {}): SkillRunDetail {
     reactivatable_until: "2026-07-22T00:00:00.000Z",
     can_reactivate: true,
     attachments: [],
+    pending_prompts: [],
     artifacts: [],
     ...overrides,
   };

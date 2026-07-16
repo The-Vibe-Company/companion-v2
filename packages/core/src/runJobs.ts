@@ -2,6 +2,7 @@ import { and, asc, eq, gt, inArray, isNull, lt, max, notInArray, or, sql } from 
 import { db, schema, type Db } from "@companion/db";
 import {
   RUN_PROMPT_MAX,
+  RUN_PROMPT_MAX_QUEUED,
   RUN_REACTIVATION_RETENTION_MS,
   RUN_WARNING_SNAPSHOT_MAX,
   runChatEventSchema,
@@ -9,6 +10,8 @@ import {
   type RunChatHistoryItem,
   type RunEventEnvelope,
   type RunPhase,
+  type RunPromptCancellationResponse,
+  type RunPromptStatus,
   type SkillRunAttachmentRow,
   type SkillRunStatus,
 } from "@companion/contracts";
@@ -99,7 +102,7 @@ export async function heartbeatRunWorker(input: {
   const ttlSeconds = input.ttlSeconds ?? 15;
   if (ttlSeconds < 5 || ttlSeconds > 300) throw new Error("invalid run worker heartbeat ttl");
   await database.execute(sql`
-    select companion_heartbeat_skill_run_worker(${input.workerId}, ${ttlSeconds}, 1)
+    select companion_heartbeat_skill_run_worker(${input.workerId}, ${ttlSeconds}, 1, 1)
   `);
 }
 
@@ -141,6 +144,32 @@ async function isRunAttachmentWorkerReady(input: {
 async function isAnyRunAttachmentWorkerReady(database: Db): Promise<boolean> {
   const result = await database.execute(sql`
     select companion_skill_run_attachment_worker_ready() as ready
+  `);
+  const row = Array.from(result as unknown as Iterable<{ ready: boolean }>)[0];
+  return row?.ready ?? false;
+}
+
+/** Follow-up queuing is admitted only to a lease owner that implements prompt-scoped stop. */
+async function isRunTurnStopWorkerReady(input: {
+  orgId: string;
+  runId: string;
+  creatorId: string;
+  database: Db;
+}): Promise<boolean> {
+  const result = await input.database.execute(sql`
+    select companion_skill_run_turn_stop_worker_ready(
+      ${input.orgId}::uuid,
+      ${input.runId}::uuid,
+      ${input.creatorId}
+    ) as ready
+  `);
+  const row = Array.from(result as unknown as Iterable<{ ready: boolean }>)[0];
+  return row?.ready ?? false;
+}
+
+async function isAnyRunTurnStopWorkerReady(database: Db): Promise<boolean> {
+  const result = await database.execute(sql`
+    select companion_skill_run_turn_stop_worker_ready() as ready
   `);
   const row = Array.from(result as unknown as Iterable<{ ready: boolean }>)[0];
   return row?.ready ?? false;
@@ -619,6 +648,15 @@ export async function failOrRetryRunJob(input: {
       .returning({ id: schema.skillRunJobs.id });
     if (!released[0]) return "lost_lease";
     if (!retry) {
+      await terminalizeOutstandingRunPrompts(tx, {
+        orgId: input.orgId,
+        runId: input.runId,
+        transcriptEventSequence: run.transcriptEventSequence,
+        status: "error",
+        now: new Date(),
+        errorCode: input.errorCode,
+        userMessage: input.userMessage,
+      });
       const terminalEvent = runChatEventSchema.parse(
         input.redactor
           ? input.redactor.redactPayload({
@@ -668,6 +706,117 @@ export async function failOrRetryRunJob(input: {
   });
 }
 
+function publicPromptStatus(
+  prompt: Pick<RunPromptRow, "status" | "cancelRequestedAt">,
+): RunPromptStatus {
+  return prompt.status === "processing" && prompt.cancelRequestedAt
+    ? "cancel_requested"
+    : prompt.status;
+}
+
+/** Caller must hold the run row lock; this keeps prompt transitions and replay cursors atomic. */
+async function appendPromptStatusEvent(
+  database: Db,
+  input: {
+    orgId: string;
+    runId: string;
+    transcriptEventSequence: number;
+    prompt: Pick<RunPromptRow, "id" | "messageId" | "ordinal" | "status" | "cancelRequestedAt">;
+    status?: RunPromptStatus;
+  },
+): Promise<void> {
+  const sequenceRows = await database
+    .select({ value: max(schema.skillRunEvents.sequence) })
+    .from(schema.skillRunEvents)
+    .where(
+      and(
+        eq(schema.skillRunEvents.orgId, input.orgId),
+        eq(schema.skillRunEvents.runId, input.runId),
+      ),
+    );
+  const event: RunChatEvent = {
+    type: "prompt.status",
+    prompt_id: input.prompt.id,
+    message_id: input.prompt.messageId,
+    ordinal: input.prompt.ordinal,
+    status: input.status ?? publicPromptStatus(input.prompt),
+  };
+  await database.insert(schema.skillRunEvents).values({
+    orgId: input.orgId,
+    runId: input.runId,
+    sequence: Math.max(
+      Number(sequenceRows[0]?.value ?? 0),
+      input.transcriptEventSequence,
+    ) + 1,
+    ...eventParts(event),
+  });
+}
+
+/**
+ * Terminalize every prompt that can still run while the caller holds the run row lock. Returning
+ * rows are sorted because a bulk UPDATE does not guarantee order, while replay should mirror FIFO.
+ */
+async function terminalizeOutstandingRunPrompts(
+  database: Db,
+  input: {
+    orgId: string;
+    runId: string;
+    transcriptEventSequence: number;
+    status: "canceled" | "error";
+    now: Date;
+    errorCode?: string;
+    userMessage?: string;
+  },
+): Promise<RunPromptRow[]> {
+  const active = await database
+    .select({ id: schema.skillRunPrompts.id })
+    .from(schema.skillRunPrompts)
+    .where(
+      and(
+        eq(schema.skillRunPrompts.orgId, input.orgId),
+        eq(schema.skillRunPrompts.runId, input.runId),
+        inArray(schema.skillRunPrompts.status, ["queued", "processing"]),
+      ),
+    )
+    .for("update");
+  if (active.length === 0) return [];
+  const rows = await database
+    .update(schema.skillRunPrompts)
+    .set({
+      status: input.status,
+      ...(input.status === "canceled"
+        ? { cancelRequestedAt: sql`coalesce(${schema.skillRunPrompts.cancelRequestedAt}, ${input.now})` }
+        : {
+            errorCode: input.errorCode ?? "run_failed",
+            userMessage: input.userMessage ?? "the run ended before this prompt could complete",
+          }),
+      leaseOwner: null,
+      leaseExpiresAt: null,
+      heartbeatAt: input.now,
+      completedAt: input.now,
+      updatedAt: input.now,
+    })
+    .where(
+      and(
+        eq(schema.skillRunPrompts.orgId, input.orgId),
+        eq(schema.skillRunPrompts.runId, input.runId),
+        inArray(schema.skillRunPrompts.id, active.map((prompt) => prompt.id)),
+        inArray(schema.skillRunPrompts.status, ["queued", "processing"]),
+      ),
+    )
+    .returning();
+  rows.sort((left, right) => left.ordinal - right.ordinal);
+  for (const prompt of rows) {
+    await appendPromptStatusEvent(database, {
+      orgId: input.orgId,
+      runId: input.runId,
+      transcriptEventSequence: input.transcriptEventSequence,
+      prompt,
+    });
+  }
+  return rows;
+}
+
 export async function enqueueRunPrompt(input: {
   actor: ActorContext;
   orgId: string;
@@ -681,7 +830,8 @@ export async function enqueueRunPrompt(input: {
 }): Promise<{
   id: string;
   messageId: string;
-  status: RunPromptRow["status"];
+  ordinal: number;
+  status: RunPromptStatus;
   attachments: SkillRunAttachmentRow[];
   reactivated: boolean;
 }> {
@@ -727,16 +877,19 @@ export async function enqueueRunPrompt(input: {
             eq(schema.skillRunAttachments.promptId, existing[0].id),
           ),
         );
-      await releaseRunAttachmentUploadReservations({
-        database: transaction,
-        actor: input.actor,
-        orgId: input.orgId,
-        attachments,
-      });
+      if (existing[0].status !== "canceled") {
+        await releaseRunAttachmentUploadReservations({
+          database: transaction,
+          actor: input.actor,
+          orgId: input.orgId,
+          attachments,
+        });
+      }
       return {
         id: existing[0].id,
         messageId: existing[0].messageId,
-        status: existing[0].status,
+        ordinal: existing[0].ordinal,
+        status: publicPromptStatus(existing[0]),
         attachments: existingAttachments.map((attachment) => ({
           id: attachment.id,
           prompt_id: existing[0]!.id,
@@ -744,6 +897,7 @@ export async function enqueueRunPrompt(input: {
           prompt_ordinal: existing[0]!.ordinal,
           file_name: attachment.fileName,
           content_type: attachment.contentType,
+          preview_content_type: attachment.previewContentType,
           byte_size: attachment.byteSize,
         })),
         reactivated: false,
@@ -770,17 +924,37 @@ export async function enqueueRunPrompt(input: {
     ) {
       throw new RunBusyError("this run is not ready for another prompt", "run_not_running");
     }
-    const active = await transaction
+    const queued = await transaction
       .select({ id: schema.skillRunPrompts.id })
       .from(schema.skillRunPrompts)
       .where(
         and(
           eq(schema.skillRunPrompts.orgId, input.orgId),
           eq(schema.skillRunPrompts.runId, input.runId),
-          inArray(schema.skillRunPrompts.status, ["queued", "processing"]),
+          eq(schema.skillRunPrompts.kind, "follow_up"),
+          eq(schema.skillRunPrompts.status, "queued"),
         ),
       );
-    if (active[0]) throw new RunBusyError("another prompt is already pending", "prompt_already_pending");
+    if (terminalReactivation && queued[0]) {
+      throw new RunBusyError("this run is already being reactivated", "prompt_already_pending");
+    }
+    if (queued.length >= RUN_PROMPT_MAX_QUEUED) {
+      throw new RunBusyError("the follow-up queue is full", "prompt_queue_full");
+    }
+    const turnStopReady = terminalReactivation
+      ? await isAnyRunTurnStopWorkerReady(transaction)
+      : await isRunTurnStopWorkerReady({
+          orgId: input.orgId,
+          runId: input.runId,
+          creatorId: input.actor.id,
+          database: transaction,
+        });
+    if (!turnStopReady) {
+      throw new RunBusyError(
+        "this run's worker cannot accept queued follow-ups yet",
+        "prompt_queue_worker_unavailable",
+      );
+    }
     if (attachments.length > 0) {
       const attachmentWorkerReady = terminalReactivation
         ? await isAnyRunAttachmentWorkerReady(transaction)
@@ -851,12 +1025,13 @@ export async function enqueueRunPrompt(input: {
       // A queued run can be canceled before OpenCode exists. Replay its immutable initial prompt
       // first so the newly entered follow-up continues the same logical conversation.
       if (!run.opencodeSessionId) {
-        await transaction
+        const replayedInitialPrompts = await transaction
           .update(schema.skillRunPrompts)
           .set({
             status: "queued",
             attempt: 0,
             availableAt: promptCreatedAt,
+            cancelRequestedAt: null,
             leaseOwner: null,
             leaseExpiresAt: null,
             heartbeatAt: null,
@@ -872,7 +1047,16 @@ export async function enqueueRunPrompt(input: {
               eq(schema.skillRunPrompts.kind, "initial"),
               eq(schema.skillRunPrompts.status, "canceled"),
             ),
-          );
+          )
+          .returning();
+        for (const replayed of replayedInitialPrompts) {
+          await appendPromptStatusEvent(transaction, {
+            orgId: input.orgId,
+            runId: input.runId,
+            transcriptEventSequence: run.transcriptEventSequence,
+            prompt: replayed,
+          });
+        }
       }
       const resetJobs = await transaction
         .update(schema.skillRunJobs)
@@ -965,6 +1149,7 @@ export async function enqueueRunPrompt(input: {
           promptId: row.id,
           fileName: attachment.fileName,
           contentType: attachment.contentType,
+          previewContentType: attachment.previewContentType ?? null,
           byteSize: attachment.byteSize,
           storageKey: attachment.storageKey,
         })),
@@ -983,6 +1168,12 @@ export async function enqueueRunPrompt(input: {
           eq(schema.skillRuns.creatorId, input.actor.id),
         ),
       );
+    await appendPromptStatusEvent(transaction, {
+      orgId: input.orgId,
+      runId: input.runId,
+      transcriptEventSequence: run.transcriptEventSequence,
+      prompt: row,
+    });
     if (terminalReactivation) {
       await transaction.insert(schema.auditLog).values({
         orgId: input.orgId,
@@ -996,6 +1187,7 @@ export async function enqueueRunPrompt(input: {
     return {
       id: row.id,
       messageId: row.messageId,
+      ordinal: row.ordinal,
       status: "queued" as const,
       reactivated: terminalReactivation,
       attachments: attachments.map((attachment) => ({
@@ -1005,6 +1197,7 @@ export async function enqueueRunPrompt(input: {
         prompt_ordinal: row.ordinal,
         file_name: attachment.fileName,
         content_type: attachment.contentType,
+        preview_content_type: attachment.previewContentType ?? null,
         byte_size: attachment.byteSize,
       })),
     };
@@ -1059,15 +1252,35 @@ export async function preflightRunPromptUpload(input: {
   } else if (run.status !== "running" || run.cancelRequestedAt !== null || ["freeze", "cancel", "cleanup", "complete"].includes(run.phase)) {
     throw new RunBusyError("this run is not ready for another prompt", "run_not_running");
   }
-  const active = await database
+  const queued = await database
     .select({ id: schema.skillRunPrompts.id })
     .from(schema.skillRunPrompts)
     .where(and(
       eq(schema.skillRunPrompts.orgId, input.orgId),
       eq(schema.skillRunPrompts.runId, input.runId),
-      inArray(schema.skillRunPrompts.status, ["queued", "processing"]),
+      eq(schema.skillRunPrompts.kind, "follow_up"),
+      eq(schema.skillRunPrompts.status, "queued"),
     ));
-  if (active[0]) throw new RunBusyError("another prompt is already pending", "prompt_already_pending");
+  if (terminalReactivation && queued[0]) {
+    throw new RunBusyError("this run is already being reactivated", "prompt_already_pending");
+  }
+  if (queued.length >= RUN_PROMPT_MAX_QUEUED) {
+    throw new RunBusyError("the follow-up queue is full", "prompt_queue_full");
+  }
+  const turnStopReady = terminalReactivation
+    ? await isAnyRunTurnStopWorkerReady(database)
+    : await isRunTurnStopWorkerReady({
+        orgId: input.orgId,
+        runId: input.runId,
+        creatorId: input.actor.id,
+        database,
+      });
+  if (!turnStopReady) {
+    throw new RunBusyError(
+      "this run's worker cannot accept queued follow-ups yet",
+      "prompt_queue_worker_unavailable",
+    );
+  }
   const attachmentWorkerReady = terminalReactivation
     ? await isAnyRunAttachmentWorkerReady(database)
     : await isRunAttachmentWorkerReady({
@@ -1212,10 +1425,12 @@ export async function claimNextRunPrompt(input: {
       .for("update", { skipLocked: true });
     const prompt = rows[0];
     if (!prompt) return null;
+    const wasQueued = prompt.status === "queued";
     const updated = await tx
       .update(schema.skillRunPrompts)
       .set({
         status: "processing",
+        cancelRequestedAt: prompt.status === "queued" ? null : prompt.cancelRequestedAt,
         // Lease recovery resumes the already-persisted deterministic message id. Only a prompt
         // explicitly returned to `queued` by failRunPrompt consumes another execution attempt.
         attempt: prompt.status === "queued" ? prompt.attempt + 1 : prompt.attempt,
@@ -1233,6 +1448,76 @@ export async function claimNextRunPrompt(input: {
         ),
       )
       .returning();
+    const claimed = updated[0] ?? null;
+    if (claimed && wasQueued) {
+      await appendPromptStatusEvent(tx, {
+        orgId: input.orgId,
+        runId: input.runId,
+        transcriptEventSequence: run.transcriptEventSequence,
+        prompt: claimed,
+      });
+    }
+    return claimed;
+  });
+}
+
+/**
+ * Reclaim only a committed prompt stop after its previous worker died. This path intentionally
+ * runs before the recorder busy gate: the OpenCode session may still be busy precisely because
+ * the crashed owner never reached abortSession.
+ */
+export async function claimRunPromptStopRecovery(input: {
+  actor: ActorContext;
+  orgId: string;
+  runId: string;
+  workerId: string;
+  leaseSeconds?: number;
+  database?: Db;
+}): Promise<RunPromptRow | null> {
+  const database = input.database ?? db;
+  const leaseSeconds = input.leaseSeconds ?? 30;
+  if (leaseSeconds < 5 || leaseSeconds > 300) throw new Error("invalid prompt lease duration");
+  return database.transaction(async (transaction) => {
+    const tx = transaction as unknown as Db;
+    const run = await ownedRun({ ...input, database: tx, lock: true });
+    await assertLiveRunJobLease({ ...input, database: tx });
+    if (run.status !== "running" || run.cancelRequestedAt !== null) return null;
+    const rows = await tx
+      .select()
+      .from(schema.skillRunPrompts)
+      .where(
+        and(
+          eq(schema.skillRunPrompts.orgId, input.orgId),
+          eq(schema.skillRunPrompts.runId, input.runId),
+          eq(schema.skillRunPrompts.status, "processing"),
+          sql`${schema.skillRunPrompts.cancelRequestedAt} IS NOT NULL`,
+          sql`${schema.skillRunPrompts.leaseExpiresAt} <= clock_timestamp()`,
+        ),
+      )
+      .limit(1)
+      .for("update", { skipLocked: true });
+    const prompt = rows[0];
+    if (!prompt) return null;
+    const updated = await tx
+      .update(schema.skillRunPrompts)
+      .set({
+        leaseOwner: input.workerId,
+        leaseExpiresAt: sql`clock_timestamp() + make_interval(secs => ${leaseSeconds})`,
+        heartbeatAt: sql`clock_timestamp()`,
+        leaseReclaimCount: prompt.leaseReclaimCount + 1,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(schema.skillRunPrompts.orgId, input.orgId),
+          eq(schema.skillRunPrompts.runId, input.runId),
+          eq(schema.skillRunPrompts.id, prompt.id),
+          eq(schema.skillRunPrompts.status, "processing"),
+          sql`${schema.skillRunPrompts.cancelRequestedAt} IS NOT NULL`,
+          sql`${schema.skillRunPrompts.leaseExpiresAt} <= clock_timestamp()`,
+        ),
+      )
+      .returning();
     return updated[0] ?? null;
   });
 }
@@ -1244,12 +1529,29 @@ export async function completeRunPrompt(input: {
   promptId: string;
   workerId: string;
   database?: Db;
-}): Promise<boolean> {
+}): Promise<"completed" | "cancel_requested" | "lost_lease"> {
   const database = input.database ?? db;
   return database.transaction(async (transaction) => {
     const tx = transaction as unknown as Db;
-    await ownedRun({ ...input, database: tx, lock: true });
+    const run = await ownedRun({ ...input, database: tx, lock: true });
     await assertLiveRunJobLease({ ...input, database: tx });
+    const promptRows = await tx
+      .select()
+      .from(schema.skillRunPrompts)
+      .where(
+        and(
+          eq(schema.skillRunPrompts.orgId, input.orgId),
+          eq(schema.skillRunPrompts.runId, input.runId),
+          eq(schema.skillRunPrompts.id, input.promptId),
+          eq(schema.skillRunPrompts.status, "processing"),
+          eq(schema.skillRunPrompts.leaseOwner, input.workerId),
+          sql`${schema.skillRunPrompts.leaseExpiresAt} > clock_timestamp()`,
+        ),
+      )
+      .for("update");
+    const prompt = promptRows[0];
+    if (!prompt) return "lost_lease";
+    if (prompt.cancelRequestedAt) return "cancel_requested";
     const now = new Date();
     const rows = await tx
       .update(schema.skillRunPrompts)
@@ -1271,8 +1573,16 @@ export async function completeRunPrompt(input: {
           sql`${schema.skillRunPrompts.leaseExpiresAt} > clock_timestamp()`,
         ),
       )
-      .returning({ id: schema.skillRunPrompts.id });
-    return Boolean(rows[0]);
+      .returning();
+    const completed = rows[0];
+    if (!completed) return "lost_lease";
+    await appendPromptStatusEvent(tx, {
+      orgId: input.orgId,
+      runId: input.runId,
+      transcriptEventSequence: run.transcriptEventSequence,
+      prompt: completed,
+    });
+    return "completed";
   });
 }
 
@@ -1324,20 +1634,40 @@ export async function failRunPrompt(input: {
   errorCode: string;
   userMessage: string;
   retry?: boolean;
+  /** Only the worker's proven stop-barrier failure may override a committed stop request. */
+  overrideCancellation?: boolean;
   backoffMs?: number;
   database?: Db;
-}): Promise<boolean> {
+}): Promise<"updated" | "cancel_requested" | "lost_lease"> {
   const database = input.database ?? db;
   const retry = input.retry ?? false;
   return database.transaction(async (transaction) => {
     const tx = transaction as unknown as Db;
-    await ownedRun({ ...input, database: tx, lock: true });
+    const run = await ownedRun({ ...input, database: tx, lock: true });
     await assertLiveRunJobLease({ ...input, database: tx });
+    const promptRows = await tx
+      .select()
+      .from(schema.skillRunPrompts)
+      .where(
+        and(
+          eq(schema.skillRunPrompts.orgId, input.orgId),
+          eq(schema.skillRunPrompts.runId, input.runId),
+          eq(schema.skillRunPrompts.id, input.promptId),
+          eq(schema.skillRunPrompts.status, "processing"),
+          eq(schema.skillRunPrompts.leaseOwner, input.workerId),
+          sql`${schema.skillRunPrompts.leaseExpiresAt} > clock_timestamp()`,
+        ),
+      )
+      .for("update");
+    const prompt = promptRows[0];
+    if (!prompt) return "lost_lease";
+    if (prompt.cancelRequestedAt && !input.overrideCancellation) return "cancel_requested";
     const now = new Date();
     const rows = await tx
       .update(schema.skillRunPrompts)
       .set({
         status: retry ? "queued" : "error",
+        cancelRequestedAt: retry ? null : prompt.cancelRequestedAt,
         availableAt: retry ? new Date(now.getTime() + (input.backoffMs ?? 1_000)) : now,
         leaseOwner: null,
         leaseExpiresAt: null,
@@ -1356,9 +1686,278 @@ export async function failRunPrompt(input: {
           sql`${schema.skillRunPrompts.leaseExpiresAt} > clock_timestamp()`,
         ),
       )
-      .returning({ id: schema.skillRunPrompts.id });
-    return Boolean(rows[0]);
+      .returning();
+    const failed = rows[0];
+    if (!failed) return "lost_lease";
+    await appendPromptStatusEvent(tx, {
+      orgId: input.orgId,
+      runId: input.runId,
+      transcriptEventSequence: run.transcriptEventSequence,
+      prompt: failed,
+    });
+    return "updated";
   });
+}
+
+/** Creator-owned idempotent prompt cancellation. Queued work is removed; active work is signaled. */
+export async function requestRunPromptCancellation(input: {
+  actor: ActorContext;
+  orgId: string;
+  runId: string;
+  promptId: string;
+  database?: Db;
+}): Promise<RunPromptCancellationResponse> {
+  const database = input.database ?? db;
+  await assertMember(database, input.actor, input.orgId);
+  return database.transaction(async (transaction) => {
+    const tx = transaction as unknown as Db;
+    const run = await ownedRun({ ...input, database: tx, lock: true });
+    const promptRows = await tx
+      .select()
+      .from(schema.skillRunPrompts)
+      .where(
+        and(
+          eq(schema.skillRunPrompts.orgId, input.orgId),
+          eq(schema.skillRunPrompts.runId, input.runId),
+          eq(schema.skillRunPrompts.id, input.promptId),
+        ),
+      )
+      .for("update");
+    const prompt = promptRows[0];
+    if (!prompt) throw new RunValidationError("prompt not found", "prompt_not_found");
+    const currentStatus = publicPromptStatus(prompt);
+    if (!["queued", "processing", "cancel_requested"].includes(currentStatus)) {
+      return { prompt_id: prompt.id, status: currentStatus, requested: false };
+    }
+    if (currentStatus === "cancel_requested") {
+      return { prompt_id: prompt.id, status: currentStatus, requested: false };
+    }
+    if (prompt.kind === "initial" && prompt.status === "queued") {
+      throw new RunBusyError(
+        "end the session to cancel its initial prompt before dispatch",
+        "initial_prompt_requires_run_cancel",
+      );
+    }
+    const now = new Date();
+    if (prompt.status === "queued") {
+      const attachmentRows = await tx
+        .select({ storageKey: schema.skillRunAttachments.storageKey })
+        .from(schema.skillRunAttachments)
+        .where(
+          and(
+            eq(schema.skillRunAttachments.orgId, input.orgId),
+            eq(schema.skillRunAttachments.runId, input.runId),
+            eq(schema.skillRunAttachments.promptId, prompt.id),
+          ),
+        );
+      for (const attachment of attachmentRows) {
+        await tx
+          .insert(schema.skillRunAttachmentUploads)
+          .values({
+            storageKey: attachment.storageKey,
+            orgId: input.orgId,
+            creatorId: input.actor.id,
+            touchedAt: now,
+          })
+          .onConflictDoUpdate({
+            target: schema.skillRunAttachmentUploads.storageKey,
+            set: { touchedAt: now },
+          });
+      }
+      // Keep metadata until the age-gated S3 sweep succeeds. Besides making object deletion
+      // recoverable, byte_size must continue counting toward the immutable 100 MB/run budget.
+      const canceledRows = await tx
+        .update(schema.skillRunPrompts)
+        .set({
+          status: "canceled",
+          cancelRequestedAt: now,
+          leaseOwner: null,
+          leaseExpiresAt: null,
+          heartbeatAt: now,
+          completedAt: now,
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(schema.skillRunPrompts.orgId, input.orgId),
+            eq(schema.skillRunPrompts.runId, input.runId),
+            eq(schema.skillRunPrompts.id, prompt.id),
+            eq(schema.skillRunPrompts.status, "queued"),
+          ),
+        )
+        .returning();
+      const canceled = canceledRows[0];
+      if (!canceled) throw new RunBusyError("the prompt started while it was being canceled", "prompt_started");
+      await appendPromptStatusEvent(tx, {
+        orgId: input.orgId,
+        runId: input.runId,
+        transcriptEventSequence: run.transcriptEventSequence,
+        prompt: canceled,
+      });
+      await tx.insert(schema.auditLog).values({
+        orgId: input.orgId,
+        actorId: input.actor.id,
+        action: "skill.run.prompt.cancel",
+        targetType: "skill_run_prompt",
+        targetId: prompt.id,
+        metadata: { run_id: input.runId, queued: true },
+      });
+      return { prompt_id: prompt.id, status: "canceled", requested: true };
+    }
+    const turnStopReady = await isRunTurnStopWorkerReady({
+      orgId: input.orgId,
+      runId: input.runId,
+      creatorId: input.actor.id,
+      database: tx,
+    });
+    if (!turnStopReady) {
+      throw new RunBusyError(
+        "this run's worker cannot stop the active turn safely",
+        "prompt_stop_worker_unavailable",
+      );
+    }
+    const requestedRows = await tx
+      .update(schema.skillRunPrompts)
+      .set({ cancelRequestedAt: now, updatedAt: now })
+      .where(
+        and(
+          eq(schema.skillRunPrompts.orgId, input.orgId),
+          eq(schema.skillRunPrompts.runId, input.runId),
+          eq(schema.skillRunPrompts.id, prompt.id),
+          eq(schema.skillRunPrompts.status, "processing"),
+          isNull(schema.skillRunPrompts.cancelRequestedAt),
+        ),
+      )
+      .returning();
+    const requested = requestedRows[0];
+    if (!requested) {
+      return { prompt_id: prompt.id, status: publicPromptStatus(prompt), requested: false };
+    }
+    await appendPromptStatusEvent(tx, {
+      orgId: input.orgId,
+      runId: input.runId,
+      transcriptEventSequence: run.transcriptEventSequence,
+      prompt: requested,
+    });
+    await tx.insert(schema.auditLog).values({
+      orgId: input.orgId,
+      actorId: input.actor.id,
+      action: "skill.run.prompt.cancel_requested",
+      targetType: "skill_run_prompt",
+      targetId: prompt.id,
+      metadata: { run_id: input.runId },
+    });
+    return { prompt_id: prompt.id, status: "cancel_requested", requested: true };
+  });
+}
+
+/** Lightweight exact-lease poll used while OpenCode is processing one deterministic prompt. */
+export async function getRunPromptStopControl(input: {
+  actor: ActorContext;
+  orgId: string;
+  runId: string;
+  promptId: string;
+  workerId: string;
+  database?: Db;
+}): Promise<"continue" | "cancel_requested" | "lost_lease"> {
+  const database = input.database ?? db;
+  const rows = await database
+    .select({ cancelRequestedAt: schema.skillRunPrompts.cancelRequestedAt })
+    .from(schema.skillRunPrompts)
+    .where(
+      and(
+        eq(schema.skillRunPrompts.orgId, input.orgId),
+        eq(schema.skillRunPrompts.runId, input.runId),
+        eq(schema.skillRunPrompts.id, input.promptId),
+        eq(schema.skillRunPrompts.status, "processing"),
+        eq(schema.skillRunPrompts.leaseOwner, input.workerId),
+        sql`${schema.skillRunPrompts.leaseExpiresAt} > clock_timestamp()`,
+      ),
+    );
+  if (!rows[0]) return "lost_lease";
+  return rows[0].cancelRequestedAt ? "cancel_requested" : "continue";
+}
+
+/** Finalize a successful OpenCode abort only while the exact prompt and job leases are live. */
+export async function cancelRunPromptByWorker(input: {
+  actor: ActorContext;
+  orgId: string;
+  runId: string;
+  promptId: string;
+  workerId: string;
+  database?: Db;
+}): Promise<boolean> {
+  const database = input.database ?? db;
+  return database.transaction(async (transaction) => {
+    const tx = transaction as unknown as Db;
+    const run = await ownedRun({ ...input, database: tx, lock: true });
+    await assertLiveRunJobLease({ ...input, database: tx });
+    const now = new Date();
+    const canceledRows = await tx
+      .update(schema.skillRunPrompts)
+      .set({
+        status: "canceled",
+        leaseOwner: null,
+        leaseExpiresAt: null,
+        heartbeatAt: now,
+        completedAt: now,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(schema.skillRunPrompts.orgId, input.orgId),
+          eq(schema.skillRunPrompts.runId, input.runId),
+          eq(schema.skillRunPrompts.id, input.promptId),
+          eq(schema.skillRunPrompts.status, "processing"),
+          eq(schema.skillRunPrompts.leaseOwner, input.workerId),
+          sql`${schema.skillRunPrompts.leaseExpiresAt} > clock_timestamp()`,
+          sql`${schema.skillRunPrompts.cancelRequestedAt} IS NOT NULL`,
+        ),
+      )
+      .returning();
+    const canceled = canceledRows[0];
+    if (!canceled) return false;
+    await appendPromptStatusEvent(tx, {
+      orgId: input.orgId,
+      runId: input.runId,
+      transcriptEventSequence: run.transcriptEventSequence,
+      prompt: canceled,
+    });
+    return true;
+  });
+}
+
+/**
+ * Finish every still-runnable prompt before the destructive run cancellation releases its lease.
+ * A replacement worker can safely repeat this: terminal rows are excluded, so events never repeat.
+ */
+export async function cancelOutstandingRunPromptsByWorker(input: {
+  actor: ActorContext;
+  orgId: string;
+  runId: string;
+  workerId: string;
+  database?: Db;
+}): Promise<boolean> {
+  const database = input.database ?? db;
+  try {
+    return await database.transaction(async (transaction) => {
+      const tx = transaction as unknown as Db;
+      const run = await ownedRun({ ...input, database: tx, lock: true });
+      await assertLiveRunJobLease({ ...input, database: tx });
+      if (run.cancelRequestedAt === null && run.status !== "canceled") return false;
+      await terminalizeOutstandingRunPrompts(tx, {
+        orgId: input.orgId,
+        runId: input.runId,
+        transcriptEventSequence: run.transcriptEventSequence,
+        status: "canceled",
+        now: new Date(),
+      });
+      return true;
+    });
+  } catch (error) {
+    if (error instanceof LostRunLeaseError) return false;
+    throw error;
+  }
 }
 
 export async function requestRunCancellation(input: {
@@ -1413,16 +2012,13 @@ export async function requestRunCancellation(input: {
             eq(schema.skillRunJobs.creatorId, input.actor.id),
           ),
         );
-      await tx
-        .update(schema.skillRunPrompts)
-        .set({ status: "canceled", leaseOwner: null, leaseExpiresAt: null, updatedAt: now })
-        .where(
-          and(
-            eq(schema.skillRunPrompts.orgId, input.orgId),
-            eq(schema.skillRunPrompts.runId, input.runId),
-            inArray(schema.skillRunPrompts.status, ["queued", "processing"]),
-          ),
-        );
+      await terminalizeOutstandingRunPrompts(tx, {
+        orgId: input.orgId,
+        runId: input.runId,
+        transcriptEventSequence: run.transcriptEventSequence,
+        status: "canceled",
+        now,
+      });
       await tx.insert(schema.auditLog).values({
         orgId: input.orgId,
         actorId: input.actor.id,

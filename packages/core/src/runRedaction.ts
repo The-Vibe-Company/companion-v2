@@ -323,6 +323,7 @@ export function redactAndBoundRunEvents(
       case "session.idle":
         return [{ ...event, session_id: truncateUtf8(event.session_id, RUN_CHAT_ID_MAX) }];
       case "artifacts.updated":
+      case "prompt.status":
         return [event];
       case "run.warning":
       case "run.error":

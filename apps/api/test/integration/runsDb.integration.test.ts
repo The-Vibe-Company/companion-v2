@@ -17,10 +17,13 @@ import postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   beginRunFreeze,
+  cancelRunPromptByWorker,
   adoptRunPrewarm,
   cancelRunPrewarm,
   createRunPrewarm,
   claimNextRunPrompt,
+  claimRunPromptStopRecovery,
+  completeRunPrompt,
   deferRunAttachmentOrphanReservation,
   deleteRunAttachmentOrphanIfReserved,
   deleteRunConfiguration,
@@ -28,8 +31,11 @@ import {
   enqueueRunPrompt,
   heartbeatRunJob,
   heartbeatRunWorker,
+  getRun,
+  getRunAttachment,
   isRunWorkerReady,
   removeRunWorkerHeartbeat,
+  requestRunPromptCancellation,
   reserveRunAttachmentUploads,
   resolveRunDependencyClosure,
   updateClaimedRunPrewarm,
@@ -443,10 +449,13 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
     await sql.unsafe(`grant execute on function companion_complete_skill_run_cleanup(uuid, uuid, text) to ${rlsRole}`);
     await sql.unsafe(`grant execute on function companion_cleanup_skill_run_events(integer) to ${rlsRole}`);
     await sql.unsafe(`grant execute on function companion_heartbeat_skill_run_worker(text, integer, integer) to ${rlsRole}`);
+    await sql.unsafe(`grant execute on function companion_heartbeat_skill_run_worker(text, integer, integer, integer) to ${rlsRole}`);
     await sql.unsafe(`grant execute on function companion_remove_skill_run_worker(text) to ${rlsRole}`);
     await sql.unsafe(`grant execute on function companion_skill_run_worker_ready() to ${rlsRole}`);
     await sql.unsafe(`grant execute on function companion_skill_run_attachment_worker_ready() to ${rlsRole}`);
     await sql.unsafe(`grant execute on function companion_skill_run_attachment_worker_ready(uuid, uuid, text) to ${rlsRole}`);
+    await sql.unsafe(`grant execute on function companion_skill_run_turn_stop_worker_ready() to ${rlsRole}`);
+    await sql.unsafe(`grant execute on function companion_skill_run_turn_stop_worker_ready(uuid, uuid, text) to ${rlsRole}`);
     await sql.unsafe(`grant execute on function companion_secret_usage_count(uuid, uuid) to ${rlsRole}`);
     await sql.unsafe(`grant execute on function companion_claim_skill_run_prewarms(text, integer, integer) to ${rlsRole}`);
     await sql.unsafe(`grant execute on function companion_claim_skill_run_prewarm_cleanups(text, integer, integer) to ${rlsRole}`);
@@ -912,17 +921,30 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
       join skill_run_prompts p on p.org_id = r.org_id and p.run_id = r.id
       join skill_run_events e on e.org_id = r.org_id and e.run_id = r.id
       where r.org_id = ${orgA}::uuid and r.id = ${revokedRunId}::uuid
+      order by e.sequence
     `;
-    expect(rows).toEqual([{
-      status: "error",
-      phase: "record",
-      errorCode: "membership_revoked",
-      cleaned: false,
-      jobStatus: "failed",
-      promptStatus: "canceled",
-      eventType: "run.error",
-      eventSequence: 43,
-    }]);
+    expect(rows).toEqual([
+      {
+        status: "error",
+        phase: "record",
+        errorCode: "membership_revoked",
+        cleaned: false,
+        jobStatus: "failed",
+        promptStatus: "error",
+        eventType: "run.error",
+        eventSequence: 43,
+      },
+      {
+        status: "error",
+        phase: "record",
+        errorCode: "membership_revoked",
+        cleaned: false,
+        jobStatus: "failed",
+        promptStatus: "error",
+        eventType: "prompt.status",
+        eventSequence: 44,
+      },
+    ]);
     // Keep the following cleanup-lease test isolated after proving the failed destroy remains owed.
     await sql`
       update skill_runs set sandbox_cleaned_at = now()
@@ -933,7 +955,8 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
   it("atomically links an attachment-only follow-up to its visible and runtime prompt", async () => {
     await sql`
       update skill_run_worker_heartbeats
-      set expires_at = now() + interval '5 minutes', attachment_prompt_protocol = 1
+      set expires_at = now() + interval '5 minutes', attachment_prompt_protocol = 1,
+          turn_stop_protocol = 1
       where worker_id = 'freeze-worker'
     `;
     const runActor = { id: owner.id, email: owner.email, name: "Run Owner" };
@@ -991,6 +1014,124 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
     `;
   });
 
+  it("keeps canceled queued files in the 100 MB run budget until their S3 sweep succeeds", async () => {
+    const canceledPromptId = randomUUID();
+    const completedPromptId = randomUUID();
+    const canceledKeys = Array.from({ length: 5 }, (_, index) =>
+      `${orgA}/run-attachments/canceled-budget-${index}-${suffix}`);
+    const retainedKeys = Array.from({ length: 5 }, (_, index) =>
+      `${orgA}/run-attachments/retained-budget-${index}-${suffix}`);
+    const attachmentIds = Array.from({ length: 10 }, () => randomUUID());
+    const canceledAttachmentIds = new Set<string>(attachmentIds.slice(0, 5));
+    await sql`
+      update skill_run_jobs
+      set status = 'leased', lease_owner = 'freeze-worker', lease_expires_at = now() + interval '5 minutes'
+      where org_id = ${orgA}::uuid and run_id = ${freezeRunId}::uuid
+    `;
+    await sql`
+      update skill_run_worker_heartbeats
+      set expires_at = now() + interval '5 minutes', attachment_prompt_protocol = 1, turn_stop_protocol = 1
+      where worker_id = 'freeze-worker'
+    `;
+    await sql`
+      insert into skill_run_prompts
+        (id, org_id, run_id, ordinal, kind, idempotency_key, payload_hash, message_id,
+         user_text, prompt, status, completed_at)
+      values
+        (${canceledPromptId}::uuid, ${orgA}::uuid, ${freezeRunId}::uuid, 900, 'follow_up',
+         'canceled-budget-prompt', ${"7".repeat(64)},
+         ${deterministicRunMessageId(freezeRunId, 900, Date.now())}, 'cancel files', 'cancel files', 'queued', null),
+        (${completedPromptId}::uuid, ${orgA}::uuid, ${freezeRunId}::uuid, 901, 'follow_up',
+         'retained-budget-prompt', ${"8".repeat(64)},
+         ${deterministicRunMessageId(freezeRunId, 901, Date.now() + 1)}, 'kept files', 'kept files', 'completed', now())
+    `;
+    for (const [index, storageKey] of [...canceledKeys, ...retainedKeys].entries()) {
+      await sql`
+        insert into skill_run_attachments
+          (id, org_id, run_id, prompt_id, file_name, content_type, byte_size, storage_key)
+        values
+          (${attachmentIds[index]!}::uuid, ${orgA}::uuid, ${freezeRunId}::uuid,
+           ${index < canceledKeys.length ? canceledPromptId : completedPromptId}::uuid,
+           ${`budget-${index}.bin`}, 'application/octet-stream', 10485760, ${storageKey})
+      `;
+    }
+
+    await expect(withTenantContext({ orgId: orgA, userId: owner.id }, (database) =>
+      requestRunPromptCancellation({
+        actor: { id: owner.id, email: owner.email, name: "Run Owner" },
+        orgId: orgA,
+        runId: freezeRunId,
+        promptId: canceledPromptId,
+        database,
+      }),
+    )).resolves.toMatchObject({ status: "canceled", requested: true });
+    const visible = await withTenantContext({ orgId: orgA, userId: owner.id }, (database) =>
+      getRun({
+        actor: { id: owner.id, email: owner.email, name: "Run Owner" },
+        orgId: orgA,
+        runId: freezeRunId,
+        database,
+      }));
+    expect(visible.pending_prompts.some((prompt) => prompt.id === canceledPromptId)).toBe(false);
+    expect(visible.attachments.filter((attachment) => canceledAttachmentIds.has(attachment.id)))
+      .toEqual([]);
+    await expect(withTenantContext({ orgId: orgA, userId: owner.id }, (database) =>
+      getRunAttachment({
+        actor: { id: owner.id, email: owner.email, name: "Run Owner" },
+        orgId: orgA,
+        runId: freezeRunId,
+        attachmentId: attachmentIds[0]!,
+        database,
+      })),
+    ).rejects.toMatchObject({ code: "attachment_not_found" });
+    const retained = await sql<{ bytes: number; files: number; reservations: number }[]>`
+      select coalesce(sum(a.byte_size), 0)::int as bytes,
+             count(a.id)::int as files,
+             (select count(*)::int from skill_run_attachment_uploads u
+              where u.storage_key = any(${canceledKeys}::text[])) as reservations
+      from skill_run_attachments a
+      where a.org_id = ${orgA}::uuid and a.run_id = ${freezeRunId}::uuid
+        and a.prompt_id in (${canceledPromptId}::uuid, ${completedPromptId}::uuid)
+    `;
+    expect(retained).toEqual([{ bytes: 104857600, files: 10, reservations: 5 }]);
+    await expect(withTenantContext({ orgId: orgA, userId: owner.id }, (database) =>
+      enqueueRunPrompt({
+        actor: { id: owner.id, email: owner.email, name: "Run Owner" },
+        orgId: orgA,
+        runId: freezeRunId,
+        text: "Do not reuse canceled bytes",
+        idempotencyKey: "canceled-budget-reuse",
+        attachments: [{
+          id: randomUUID(),
+          fileName: "one-more-byte.bin",
+          contentType: "application/octet-stream",
+          byteSize: 1,
+          storageKey: `${orgA}/run-attachments/one-more-byte-${suffix}`,
+        }],
+        database,
+      }),
+    )).rejects.toMatchObject({ code: "attachment_total_too_large" });
+
+    await sql`
+      update skill_run_attachment_uploads
+      set touched_at = now() - interval '2 days'
+      where storage_key = ${canceledKeys[0]!}
+    `;
+    await expect(deleteRunAttachmentOrphanIfReserved({
+      storageKey: canceledKeys[0]!,
+      before: new Date(Date.now() - 24 * 60 * 60 * 1_000),
+      deleteObject: async () => undefined,
+      database: db,
+    })).resolves.toBe(true);
+    const swept = await sql<{ files: number; reservations: number }[]>`
+      select (select count(*)::int from skill_run_attachments where storage_key = ${canceledKeys[0]!}) as files,
+             (select count(*)::int from skill_run_attachment_uploads where storage_key = ${canceledKeys[0]!}) as reservations
+    `;
+    expect(swept).toEqual([{ files: 0, reservations: 0 }]);
+    await sql`delete from skill_run_attachment_uploads where storage_key = any(${canceledKeys}::text[])`;
+    await sql`delete from skill_run_prompts where id in (${canceledPromptId}::uuid, ${completedPromptId}::uuid)`;
+  });
+
   it("serializes orphan deletion with a retry reservation and prompt consumption", async () => {
     const storageKey = `${orgA}/run-attachments/${reservationAttachmentId}`;
     await withTenantContext({ orgId: orgA, userId: owner.id }, (database) =>
@@ -1034,7 +1175,8 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
 
     await sql`
       update skill_run_worker_heartbeats
-      set expires_at = now() + interval '5 minutes', attachment_prompt_protocol = 1
+      set expires_at = now() + interval '5 minutes', attachment_prompt_protocol = 1,
+          turn_stop_protocol = 1
       where worker_id = 'freeze-worker'
     `;
     const accepted = await withTenantContext({ orgId: orgA, userId: owner.id }, (database) =>
@@ -1105,6 +1247,234 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
     `;
     expect(deferredRows).toEqual([{ fresh: true }]);
     await sql`delete from skill_run_prompts where id = ${accepted.id}::uuid`;
+  });
+
+  it("persists five FIFO follow-ups behind one processing prompt and rejects the sixth", async () => {
+    await sql`
+      update skill_run_worker_heartbeats
+      set expires_at = now() + interval '5 minutes', turn_stop_protocol = 1
+      where worker_id = 'freeze-worker'
+    `;
+    const runActor = { id: owner.id, email: owner.email, name: "Run Owner" };
+    const enqueue = (index: number) =>
+      withTenantContext({ orgId: orgA, userId: owner.id }, (database) =>
+        enqueueRunPrompt({
+          actor: runActor,
+          orgId: orgA,
+          runId: freezeRunId,
+          text: `FIFO follow-up ${index}`,
+          idempotencyKey: `fifo-follow-up-${index}`,
+          database,
+        }),
+      );
+    const active = await enqueue(0);
+    await sql`
+      update skill_run_prompts
+      set status = 'processing', lease_owner = 'freeze-worker',
+          lease_expires_at = now() + interval '5 minutes'
+      where id = ${active.id}::uuid
+    `;
+    const queued = [];
+    for (let index = 1; index <= 5; index += 1) queued.push(await enqueue(index));
+    await expect(enqueue(6)).rejects.toMatchObject({ code: "prompt_queue_full" });
+    const promptIds = [active.id, ...queued.map((prompt) => prompt.id)];
+
+    const rows = await sql<{ id: string; ordinal: number; status: string }[]>`
+      select id::text, ordinal, status::text
+      from skill_run_prompts
+      where org_id = ${orgA}::uuid and run_id = ${freezeRunId}::uuid
+        and id = any(${promptIds}::uuid[])
+      order by ordinal
+    `;
+    expect(rows.map((row) => row.id)).toEqual([active.id, ...queued.map((prompt) => prompt.id)]);
+    expect(rows.map((row) => row.status)).toEqual(["processing", "queued", "queued", "queued", "queued", "queued"]);
+    await sql`
+      delete from skill_run_prompts
+      where id = any(${promptIds}::uuid[])
+    `;
+  });
+
+  it("recovers a stop committed before worker crash, then advances to the next FIFO prompt", async () => {
+    const stoppedPromptId = randomUUID();
+    const nextPromptId = randomUUID();
+    const stoppedAttachmentId = randomUUID();
+    const stoppedStorageKey = `${orgA}/run-attachments/stopped-${stoppedAttachmentId}`;
+    const stoppedMessageId = deterministicRunMessageId(freezeRunId, 1000, Date.now());
+    await sql`
+      update skill_run_jobs
+      set status = 'leased', lease_owner = 'freeze-worker',
+          lease_expires_at = now() + interval '5 minutes'
+      where org_id = ${orgA}::uuid and run_id = ${freezeRunId}::uuid
+    `;
+    await sql`
+      update skill_run_worker_heartbeats
+      set expires_at = now() + interval '5 minutes', turn_stop_protocol = 1
+      where worker_id = 'freeze-worker'
+    `;
+    await sql`
+      insert into skill_run_prompts
+        (id, org_id, run_id, ordinal, kind, idempotency_key, payload_hash, message_id,
+         user_text, prompt, status, attempt, lease_owner, lease_expires_at, cancel_requested_at)
+      values
+        (${stoppedPromptId}::uuid, ${orgA}::uuid, ${freezeRunId}::uuid, 1000, 'follow_up',
+         'crashed-stop-prompt', ${"3".repeat(64)},
+         ${stoppedMessageId}, 'stop me', 'stop me',
+         'processing', 1, 'crashed-worker', now() - interval '1 second', now()),
+        (${nextPromptId}::uuid, ${orgA}::uuid, ${freezeRunId}::uuid, 1001, 'follow_up',
+         'after-crashed-stop', ${"4".repeat(64)},
+         ${deterministicRunMessageId(freezeRunId, 1001, Date.now() + 1)}, 'continue', 'continue',
+         'queued', 0, null, null, null)
+    `;
+    await sql`
+      insert into skill_run_attachments
+        (id, org_id, run_id, prompt_id, file_name, content_type, byte_size, storage_key)
+      values
+        (${stoppedAttachmentId}::uuid, ${orgA}::uuid, ${freezeRunId}::uuid, ${stoppedPromptId}::uuid,
+         'stopped-input.txt', 'text/plain', 12, ${stoppedStorageKey})
+    `;
+    await sql`
+      insert into skill_run_attachment_uploads (storage_key, org_id, creator_id, touched_at)
+      values (${stoppedStorageKey}, ${orgA}::uuid, ${owner.id}, now() - interval '2 days')
+    `;
+    await sql`
+      update skill_runs
+      set transcript = jsonb_build_array(
+        jsonb_build_object('kind', 'user', 'message_id', ${stoppedMessageId}::text, 'text', 'stop me'),
+        jsonb_build_object('kind', 'assistant', 'text', 'partial answer')
+      )
+      where org_id = ${orgA}::uuid and id = ${freezeRunId}::uuid
+    `;
+    const runActor = { id: owner.id, email: owner.email, name: "Run Owner" };
+    const recovered = await withTenantContext({ orgId: orgA, userId: owner.id }, (database) =>
+      claimRunPromptStopRecovery({
+        actor: runActor,
+        orgId: orgA,
+        runId: freezeRunId,
+        workerId: "freeze-worker",
+        database,
+      }),
+    );
+    expect(recovered).toMatchObject({ id: stoppedPromptId, cancelRequestedAt: expect.any(Date) });
+    await expect(withTenantContext({ orgId: orgA, userId: owner.id }, (database) =>
+      cancelRunPromptByWorker({
+        actor: runActor,
+        orgId: orgA,
+        runId: freezeRunId,
+        promptId: stoppedPromptId,
+        workerId: "freeze-worker",
+        database,
+      }),
+    )).resolves.toBe(true);
+    const stoppedRun = await withTenantContext({ orgId: orgA, userId: owner.id }, (database) =>
+      getRun({
+        actor: runActor,
+        orgId: orgA,
+        runId: freezeRunId,
+        database,
+      }),
+    );
+    expect(stoppedRun.transcript).toEqual([
+      { kind: "user", message_id: stoppedMessageId, text: "stop me" },
+      { kind: "assistant", text: "partial answer" },
+    ]);
+    expect(stoppedRun.attachments).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: stoppedAttachmentId, message_id: stoppedMessageId }),
+    ]));
+    await expect(withTenantContext({ orgId: orgA, userId: owner.id }, (database) =>
+      getRunAttachment({
+        actor: runActor,
+        orgId: orgA,
+        runId: freezeRunId,
+        attachmentId: stoppedAttachmentId,
+        database,
+      }),
+    )).resolves.toMatchObject({ storageKey: stoppedStorageKey });
+    let stoppedObjectDeleted = false;
+    await expect(deleteRunAttachmentOrphanIfReserved({
+      storageKey: stoppedStorageKey,
+      before: new Date(Date.now() - 24 * 60 * 60 * 1_000),
+      deleteObject: async () => { stoppedObjectDeleted = true; },
+      database: db,
+    })).resolves.toBe(false);
+    expect(stoppedObjectDeleted).toBe(false);
+    const next = await withTenantContext({ orgId: orgA, userId: owner.id }, (database) =>
+      claimNextRunPrompt({
+        actor: runActor,
+        orgId: orgA,
+        runId: freezeRunId,
+        workerId: "freeze-worker",
+        database,
+      }),
+    );
+    expect(next).toMatchObject({ id: nextPromptId, status: "processing" });
+    await sql`update skill_runs set transcript = '[]'::jsonb where org_id = ${orgA}::uuid and id = ${freezeRunId}::uuid`;
+    await sql`delete from skill_run_prompts where id = any(${[stoppedPromptId, nextPromptId]}::uuid[])`;
+  });
+
+  it("serializes stop against natural completion without overwriting the winner", async () => {
+    const racingPromptId = randomUUID();
+    await sql`
+      update skill_run_jobs
+      set status = 'leased', lease_owner = 'freeze-worker', lease_expires_at = now() + interval '5 minutes'
+      where org_id = ${orgA}::uuid and run_id = ${freezeRunId}::uuid
+    `;
+    await sql`
+      update skill_run_worker_heartbeats
+      set expires_at = now() + interval '5 minutes', turn_stop_protocol = 1
+      where worker_id = 'freeze-worker'
+    `;
+    await sql`
+      insert into skill_run_prompts
+        (id, org_id, run_id, ordinal, kind, idempotency_key, payload_hash, message_id,
+         user_text, prompt, status, lease_owner, lease_expires_at)
+      values
+        (${racingPromptId}::uuid, ${orgA}::uuid, ${freezeRunId}::uuid, 1100, 'follow_up',
+         'stop-completion-race', ${"9".repeat(64)},
+         ${deterministicRunMessageId(freezeRunId, 1100, Date.now())}, 'race', 'race',
+         'processing', 'freeze-worker', now() + interval '5 minutes')
+    `;
+    const runActor = { id: owner.id, email: owner.email, name: "Run Owner" };
+    const [stop, completion] = await Promise.all([
+      withTenantContext({ orgId: orgA, userId: owner.id }, (database) =>
+        requestRunPromptCancellation({
+          actor: runActor,
+          orgId: orgA,
+          runId: freezeRunId,
+          promptId: racingPromptId,
+          database,
+        })),
+      withTenantContext({ orgId: orgA, userId: owner.id }, (database) =>
+        completeRunPrompt({
+          actor: runActor,
+          orgId: orgA,
+          runId: freezeRunId,
+          promptId: racingPromptId,
+          workerId: "freeze-worker",
+          database,
+        })),
+    ]);
+    const winner = await sql<{ status: string; canceled: boolean }[]>`
+      select status::text, cancel_requested_at is not null as canceled
+      from skill_run_prompts where id = ${racingPromptId}::uuid
+    `;
+    if (completion === "completed") {
+      expect(stop).toMatchObject({ status: "completed", requested: false });
+      expect(winner).toEqual([{ status: "completed", canceled: false }]);
+    } else {
+      expect(completion).toBe("cancel_requested");
+      expect(stop).toMatchObject({ status: "cancel_requested" });
+      expect(winner).toEqual([{ status: "processing", canceled: true }]);
+      await withTenantContext({ orgId: orgA, userId: owner.id }, (database) =>
+        cancelRunPromptByWorker({
+          actor: runActor,
+          orgId: orgA,
+          runId: freezeRunId,
+          promptId: racingPromptId,
+          workerId: "freeze-worker",
+          database,
+        }));
+    }
+    await sql`delete from skill_run_prompts where id = ${racingPromptId}::uuid`;
   });
 
   it("keeps pre-0037 API inserts compatible during a rolling deployment", async () => {
@@ -1210,11 +1580,51 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
         and (status = 'queued' or (status = 'leased' and lease_expires_at <= now()))
     `;
     await sql`
-      insert into skill_run_worker_heartbeats (worker_id, expires_at, attachment_prompt_protocol)
-      values ('legacy-reclaimer', now() + interval '5 minutes', 0),
-             ('modern-reclaimer', now() + interval '5 minutes', 1)
+      insert into skill_run_worker_heartbeats
+        (worker_id, expires_at, attachment_prompt_protocol, turn_stop_protocol)
+      values ('legacy-reclaimer', now() + interval '5 minutes', 0, 0),
+             ('modern-reclaimer', now() + interval '5 minutes', 1, 1)
       on conflict (worker_id) do update set expires_at = excluded.expires_at,
-        attachment_prompt_protocol = excluded.attachment_prompt_protocol
+        attachment_prompt_protocol = excluded.attachment_prompt_protocol,
+        turn_stop_protocol = excluded.turn_stop_protocol
+    `;
+    expect(await claim("legacy-reclaimer")).toEqual([]);
+    expect(await claim("modern-reclaimer")).toHaveLength(1);
+    await sql`delete from skill_run_prompts where id = ${pendingPromptId}::uuid`;
+    await sql`
+      update skill_run_jobs
+      set status = 'leased', lease_owner = 'freeze-worker', lease_expires_at = now() + interval '5 minutes'
+      where org_id = ${orgA}::uuid and run_id = ${freezeRunId}::uuid
+    `;
+  });
+
+  it("prevents a protocol-0 worker from reclaiming an initial prompt with a committed stop", async () => {
+    const pendingPromptId = randomUUID();
+    await sql`
+      insert into skill_run_prompts
+        (id, org_id, run_id, ordinal, kind, idempotency_key, payload_hash, message_id,
+         user_text, prompt, status, lease_owner, lease_expires_at, cancel_requested_at)
+      values
+        (${pendingPromptId}::uuid, ${orgA}::uuid, ${freezeRunId}::uuid, 2000, 'initial',
+         'initial-stop-reclaim', ${"5".repeat(64)},
+         ${deterministicRunMessageId(freezeRunId, 2000, Date.now())}, 'initial', 'initial',
+         'processing', 'expired-stop-worker', now() - interval '1 second', now())
+    `;
+    await sql`
+      update skill_run_jobs
+      set status = 'leased', lease_owner = 'expired-stop-worker',
+          lease_expires_at = now() - interval '1 second'
+      where org_id = ${orgA}::uuid and run_id = ${freezeRunId}::uuid
+    `;
+    await sql`
+      update skill_run_worker_heartbeats
+      set expires_at = now() + interval '5 minutes', turn_stop_protocol = 0
+      where worker_id = 'legacy-reclaimer'
+    `;
+    await sql`
+      update skill_run_worker_heartbeats
+      set expires_at = now() + interval '5 minutes', turn_stop_protocol = 1
+      where worker_id = 'modern-reclaimer'
     `;
     expect(await claim("legacy-reclaimer")).toEqual([]);
     expect(await claim("modern-reclaimer")).toHaveLength(1);
@@ -1516,10 +1926,12 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
     expect(result).toEqual({ count: 1, context: "" });
     const events = await sql<{ runId: string }[]>`
       select run_id::text as "runId" from skill_run_events
-      where org_id = ${orgA}::uuid order by run_id
+      where org_id = ${orgA}::uuid
+        and run_id in (${runId}::uuid, ${terminalRunId}::uuid, ${revokedRunId}::uuid)
+      order by run_id
     `;
     expect(events.map((event) => event.runId)).toEqual(expect.arrayContaining([runId, revokedRunId]));
-    expect(events).toHaveLength(2);
+    expect(events).toHaveLength(3);
   });
 
   it("atomically blocks concurrent sandbox reservations at the shared monthly limit", async () => {

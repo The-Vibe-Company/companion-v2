@@ -31,7 +31,10 @@ import {
 import {
   appendRunEvents,
   beginRunFreeze,
+  cancelOutstandingRunPromptsByWorker,
+  cancelRunPromptByWorker,
   claimNextRunPrompt,
+  claimRunPromptStopRecovery,
   claimRunJobs,
   cleanupExpiredRunEvents,
   completeRunPrompt,
@@ -42,6 +45,7 @@ import {
   heartbeatRunJob,
   heartbeatRunPrompt,
   getRunPromptAttachments,
+  getRunPromptStopControl,
   materializeRunAttachmentFiles,
   getAdoptedRunPrewarm,
   loadRunExecutionPlan,
@@ -63,6 +67,7 @@ import {
   type ClaimedRunJob,
   type RunControlContext,
   type RunExecutionPlan,
+  type RunPromptRow,
 } from "@companion/core/services";
 import { db, schema, withTenantContext, type Db } from "@companion/db";
 import {
@@ -96,6 +101,7 @@ const ARTIFACT_STORAGE_CAS_ATTEMPTS = 3;
 class WorkerShutdown extends Error {}
 class LostLease extends Error {}
 class CancellationRequested extends Error {}
+class PromptCancellationRequested extends Error {}
 
 export function assertRetainedConversationAvailable(input: {
   activationRevision: number;
@@ -159,6 +165,19 @@ export async function dispatchPromptAfterAttachmentMount(input: {
   return messageState;
 }
 
+/**
+ * Claiming a prompt is not evidence that OpenCode is busy. Arm the recorder gate only after the
+ * exact prompt lease proves that dispatch may proceed, otherwise a pre-dispatch stop would leave an
+ * idle session permanently blocked from claiming the next FIFO entry.
+ */
+export function armRecorderForPromptDispatch(
+  state: { busy: boolean },
+  control: "continue" | "cancel_requested" | "lost_lease",
+): "continue" | "cancel_requested" | "lost_lease" {
+  if (control === "continue") state.busy = true;
+  return control;
+}
+
 interface RunControlState {
   status: "queued" | "starting" | "running" | "frozen" | "error" | "canceled";
   phase: RunPhase;
@@ -181,7 +200,80 @@ interface RecorderState {
 interface RecorderHandle {
   state: RecorderState;
   started: Promise<void>;
+  idleBarrierRevision(): number;
+  waitForIdleBarrierAfter(revision: number, timeoutMs: number, signal: AbortSignal): Promise<void>;
   stop(): Promise<void>;
+}
+
+/**
+ * A snapshot is not a continuation barrier until a new event subscription is connected after it.
+ * Keep the persisted and ready revisions separate so an unrelated reconnect cannot satisfy a stop.
+ */
+export function createRecorderIdleBarrierTracker() {
+  let persistedRevision = 0;
+  let readyRevision = 0;
+  let closedError: Error | null = null;
+  const waiters = new Set<{
+    after: number;
+    resolve: () => void;
+    reject: (error: Error) => void;
+  }>();
+
+  const notify = () => {
+    for (const waiter of [...waiters]) {
+      if (readyRevision > waiter.after) waiter.resolve();
+    }
+  };
+
+  return {
+    revision: () => readyRevision,
+    markSnapshotPersisted: () => {
+      persistedRevision += 1;
+      return persistedRevision;
+    },
+    markFreshIdleConnection: () => {
+      if (persistedRevision > readyRevision) {
+        readyRevision = persistedRevision;
+        notify();
+      }
+      return readyRevision;
+    },
+    waitForAfter(after: number, timeoutMs: number, signal: AbortSignal): Promise<void> {
+      if (readyRevision > after) return Promise.resolve();
+      if (closedError) return Promise.reject(closedError);
+      if (signal.aborted) return Promise.reject(abortFailure(signal));
+      return new Promise<void>((resolve, reject) => {
+        let settled = false;
+        const finish = (error?: Error) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          signal.removeEventListener("abort", onAbort);
+          waiters.delete(waiter);
+          if (error) reject(error);
+          else resolve();
+        };
+        const waiter = {
+          after,
+          resolve: () => finish(),
+          reject: (error: Error) => finish(error),
+        };
+        const onAbort = () => finish(abortFailure(signal));
+        const timer = setTimeout(
+          () => finish(new RunRuntimeError("the run recorder did not establish a durable idle barrier after stop")),
+          Math.max(1, timeoutMs),
+        );
+        waiters.add(waiter);
+        signal.addEventListener("abort", onAbort, { once: true });
+        if (signal.aborted) finish(abortFailure(signal));
+        else if (readyRevision > after) finish();
+      });
+    },
+    close(error = new WorkerShutdown()) {
+      closedError = error;
+      for (const waiter of [...waiters]) waiter.reject(error);
+    },
+  };
 }
 
 const SANDBOX_TIMEOUT_MIN_MS = 10_000;
@@ -527,6 +619,7 @@ function startRecorder(input: {
   const abort = new AbortController();
   const recorderSignal = AbortSignal.any([abort.signal, input.shutdownSignal]);
   const streams = new Map<string, RunStreamingRedactor>();
+  const idleBarriers = createRecorderIdleBarrierTracker();
   let stopped = false;
   let resolveStarted!: () => void;
   const started = new Promise<void>((resolve) => { resolveStarted = resolve; });
@@ -539,7 +632,7 @@ function startRecorder(input: {
       timeoutMessage: "the OpenCode transcript read timed out",
       operation: (signal) => chat.loadItems(input.target, input.sessionId, signal),
     });
-    await tenant(input.job, (database) =>
+    const persisted = await tenant(input.job, (database) =>
       persistRunTranscript({
         actor: input.actor,
         orgId: input.job.orgId,
@@ -553,6 +646,8 @@ function startRecorder(input: {
         database,
       }),
     );
+    if (!persisted) throw new LostLease();
+    if (emitIdleBarrier) idleBarriers.markSnapshotPersisted();
   };
 
   const loop = (async () => {
@@ -606,6 +701,9 @@ function startRecorder(input: {
           continue;
         }
         state.busy = sessionState !== "idle";
+        if (sessionState === "idle" && idleSnapshotFresh) {
+          idleBarriers.markFreshIdleConnection();
+        }
         if (state.busy) {
           state.idleAt = null;
           idleSnapshotFresh = false;
@@ -666,8 +764,11 @@ function startRecorder(input: {
   return {
     state,
     started,
+    idleBarrierRevision: idleBarriers.revision,
+    waitForIdleBarrierAfter: idleBarriers.waitForAfter,
     async stop() {
       stopped = true;
+      idleBarriers.close();
       abort.abort();
       await loop.catch(() => undefined);
       for (const stream of streams.values()) stream.clear();
@@ -962,6 +1063,8 @@ async function waitForPromptCompletion(input: {
   ctx: RunControlContext;
   target: { domain: string; password: string };
   sessionId: string;
+  promptId: string;
+  workerId: string;
   messageId: string;
   masterKey: Buffer;
   timeoutMs: number;
@@ -976,6 +1079,18 @@ async function waitForPromptCompletion(input: {
     }
     const remainingMs = deadline - Date.now();
     if (remainingMs <= 0) throw new RunRuntimeError("the prompt did not become idle before its timeout");
+    const promptControl = await tenant(input.job, (database) =>
+      getRunPromptStopControl({
+        actor: input.actor,
+        orgId: input.job.orgId,
+        runId: input.job.runId,
+        promptId: input.promptId,
+        workerId: input.workerId,
+        database,
+      }),
+    );
+    if (promptControl === "cancel_requested") throw new PromptCancellationRequested();
+    if (promptControl === "lost_lease") throw new LostLease();
     const messageState = await withBoundedSignal({
       parent: input.shutdownSignal,
       timeoutMs: Math.min(OPENCODE_CALL_TIMEOUT_MS, remainingMs),
@@ -999,6 +1114,56 @@ async function waitForPromptCompletion(input: {
     }
     if (Date.now() >= deadline) throw new RunRuntimeError("the prompt did not become idle before its timeout");
     await sleep(PROMPT_POLL_MS, input.shutdownSignal);
+  }
+}
+
+export function promptStopBarrierPlan(input: {
+  messageState: "missing" | "pending" | "completed" | "error";
+  turnBarrierRevision: number | null;
+  currentBarrierRevision: number;
+}): { abort: boolean; waitAfterRevision: number | null } {
+  if (input.messageState === "pending" || input.messageState === "error") {
+    return {
+      abort: true,
+      waitAfterRevision: input.turnBarrierRevision ?? input.currentBarrierRevision,
+    };
+  }
+  if (input.messageState === "completed") {
+    return { abort: false, waitAfterRevision: input.turnBarrierRevision };
+  }
+  return { abort: false, waitAfterRevision: null };
+}
+
+/** Abort one OpenCode turn and prove the shared session is idle before it may accept another. */
+export async function abortPromptForContinuation(input: {
+  chat: Pick<RunChatRuntime, "abortSession" | "getSessionState">;
+  target: RunChatTarget;
+  sessionId: string;
+  messageExists: boolean;
+  signal: AbortSignal;
+  timeoutMs?: number;
+}): Promise<void> {
+  if (!input.messageExists) return;
+  const timeoutMs = input.timeoutMs ?? 10_000;
+  const deadline = Date.now() + timeoutMs;
+  await withBoundedSignal({
+    parent: input.signal,
+    timeoutMs,
+    timeoutMessage: "the active turn could not be stopped safely",
+    operation: (signal) => input.chat.abortSession(input.target, input.sessionId, signal),
+  });
+  while (true) {
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) throw new RunRuntimeError("the active turn did not become idle after stop");
+    const state = await withBoundedSignal({
+      parent: input.signal,
+      timeoutMs: Math.min(OPENCODE_CALL_TIMEOUT_MS, remainingMs),
+      timeoutMessage: "the stopped turn status check timed out",
+      operation: (signal) => input.chat.getSessionState(input.target, input.sessionId, signal),
+    });
+    if (state === "idle") return;
+    if (state === "missing") throw new RunRuntimeError("the stopped conversation context disappeared");
+    await sleep(Math.min(PROMPT_POLL_MS, Math.max(1, remainingMs)), input.signal);
   }
 }
 
@@ -1039,6 +1204,14 @@ async function markCanceled(input: {
 }): Promise<void> {
   const now = new Date();
   await tenant(input.job, async (database) => {
+    const promptsCanceled = await cancelOutstandingRunPromptsByWorker({
+      actor: input.actor,
+      orgId: input.job.orgId,
+      runId: input.job.runId,
+      workerId: input.workerId,
+      database,
+    });
+    if (!promptsCanceled) throw new LostLease();
     const updated = await updateRunWorkerState({
       actor: input.actor,
       orgId: input.job.orgId,
@@ -1054,16 +1227,6 @@ async function markCanceled(input: {
       database,
     });
     if (!updated) throw new LostLease();
-    await database
-      .update(schema.skillRunPrompts)
-      .set({ status: "canceled", leaseOwner: null, leaseExpiresAt: null, updatedAt: now })
-      .where(
-        and(
-          eq(schema.skillRunPrompts.orgId, input.job.orgId),
-          eq(schema.skillRunPrompts.runId, input.job.runId),
-          inArray(schema.skillRunPrompts.status, ["queued", "processing"]),
-        ),
-      );
   });
 }
 
@@ -1510,6 +1673,111 @@ async function processClaimedJob(input: {
       }),
     ]);
 
+    const activeRecorder = recorder;
+    const finishPromptCancellation = async (
+      prompt: RunPromptRow,
+      turnBarrierRevision: number | null,
+    ): Promise<void> => {
+      try {
+        const messageState = await withBoundedSignal({
+          parent: jobAbort.signal,
+          timeoutMs: OPENCODE_CALL_TIMEOUT_MS,
+          timeoutMessage: "the stopped OpenCode prompt lookup timed out",
+          operation: (signal) => ctx.chat!.getMessageState(
+            chatTarget,
+            activeSessionId,
+            prompt.messageId,
+            signal,
+          ),
+        });
+        // For a naturally completed turn, the recorder may already have crossed the exact barrier
+        // captured before dispatch. Waiting on that revision is immediate and must not demand a
+        // second artificial reconnect. Recovery starts after recorder.started, so completed/missing
+        // messages with no captured turn revision already have a safe baseline.
+        const stopPlan = promptStopBarrierPlan({
+          messageState,
+          turnBarrierRevision,
+          currentBarrierRevision: activeRecorder.idleBarrierRevision(),
+        });
+        await abortPromptForContinuation({
+          chat: ctx.chat!,
+          target: chatTarget,
+          sessionId: activeSessionId,
+          messageExists: stopPlan.abort,
+          signal: jobAbort.signal,
+        });
+        if (stopPlan.waitAfterRevision !== null) {
+          await activeRecorder.waitForIdleBarrierAfter(
+            stopPlan.waitAfterRevision,
+            OPENCODE_CALL_TIMEOUT_MS,
+            jobAbort.signal,
+          );
+        }
+        await saveFinalTranscript(
+          job,
+          actor,
+          ctx,
+          chatTarget,
+          activeSessionId,
+          redactor,
+          jobAbort.signal,
+        );
+        const imagePaths = [...activeRecorder.state.readImagePaths];
+        activeRecorder.state.readImagePaths.clear();
+        await collectAndCacheRunArtifacts({
+          job,
+          actor,
+          workerId,
+          ctx,
+          ref: activeRef,
+          imagePaths,
+          redactor,
+          signal: jobAbort.signal,
+        });
+        const promptCanceled = await tenant(job, (database) =>
+          cancelRunPromptByWorker({
+            actor,
+            orgId: job.orgId,
+            runId: job.runId,
+            promptId: prompt.id,
+            workerId,
+            database,
+          }),
+        );
+        if (!promptCanceled) throw new LostLease();
+        activePromptId = null;
+        await setPhase(job, actor, workerId, "record", {
+          status: "running",
+          lastActiveAt: new Date(),
+        });
+      } catch (stopError) {
+        if (stopError instanceof WorkerShutdown || stopError instanceof LostLease || stopError instanceof CancellationRequested) {
+          throw stopError;
+        }
+        const unsafeStop = new RunValidationError(
+          "the active turn could not be stopped safely",
+          "prompt_stop_failed",
+        );
+        const failure = await tenant(job, (database) =>
+          failRunPrompt({
+            actor,
+            orgId: job.orgId,
+            runId: job.runId,
+            promptId: prompt.id,
+            workerId,
+            errorCode: unsafeStop.code,
+            userMessage: unsafeStop.message,
+            retry: false,
+            overrideCancellation: true,
+            database,
+          }),
+        );
+        if (failure !== "updated") throw new LostLease();
+        activePromptId = null;
+        throw unsafeStop;
+      }
+    };
+
     let nextAclCheck = Date.now() + ACL_RECHECK_MS;
     while (!jobAbort.signal.aborted) {
       const control = await readRunControl(job);
@@ -1518,6 +1786,26 @@ async function processClaimedJob(input: {
       if (Date.now() >= nextAclCheck) {
         await revalidatePinnedSecrets(job, actor, ctx.masterKey);
         nextAclCheck = Date.now() + ACL_RECHECK_MS;
+      }
+
+      // Stop recovery must outrank the recorder's busy gate. A previous worker may have persisted
+      // cancel_requested and crashed before aborting OpenCode, leaving the session legitimately busy.
+      const stopRecovery: RunPromptRow | null = activePromptId
+        ? null
+        : await tenant(job, (database) =>
+            claimRunPromptStopRecovery({
+              actor,
+              orgId: job.orgId,
+              runId: job.runId,
+              workerId,
+              leaseSeconds: config.leaseSeconds,
+              database,
+            }),
+          );
+      if (stopRecovery) {
+        activePromptId = stopRecovery.id;
+        await finishPromptCancellation(stopRecovery, null);
+        continue;
       }
 
       // A new prompt is safe only after the recorder has committed the previous idle snapshot and
@@ -1541,17 +1829,33 @@ async function processClaimedJob(input: {
       if (prompt) {
         activePromptId = prompt.id;
         await revalidatePinnedSecrets(job, actor, ctx.masterKey);
-        recorder.state.busy = true;
         await setPhase(job, actor, workerId, "prompt", { status: "running", lastActiveAt: new Date() });
+        let promptTurnBarrierRevision: number | null = null;
         try {
           const beforeSend = await readRunControl(job);
           if (beforeSend.cancelRequestedAt || beforeSend.status === "canceled") {
             throw new CancellationRequested();
           }
+          const promptControl = await tenant(job, (database) =>
+            getRunPromptStopControl({
+              actor,
+              orgId: job.orgId,
+              runId: job.runId,
+              promptId: prompt.id,
+              workerId,
+              database,
+            }),
+          );
+          const dispatchControl = armRecorderForPromptDispatch(activeRecorder.state, promptControl);
+          if (dispatchControl === "cancel_requested") throw new PromptCancellationRequested();
+          if (dispatchControl === "lost_lease") throw new LostLease();
           // A prior worker may have dispatched this exact deterministic id and crashed. Only send
           // when the user message is absent; completion is tied to its assistant child rather than
           // to a global idle generation, which can advance during an unrelated reconnect.
-          await dispatchPromptAfterAttachmentMount({
+          const dispatchBarrierRevision = activeRecorder.idleBarrierRevision();
+          // Set before the call: a timed-out send may still have reached OpenCode.
+          promptTurnBarrierRevision = dispatchBarrierRevision;
+          const dispatchState = await dispatchPromptAfterAttachmentMount({
             mountAttachments: async () => {
               if (prompt.kind !== "follow_up") return;
               const attachmentMetadata = await tenant(job, (database) =>
@@ -1604,6 +1908,9 @@ async function processClaimedJob(input: {
               ),
             }),
           });
+          // `missing` is sent before the helper returns. A completed deterministic retry created no
+          // new turn in this lease, so recorder.started already established its safe baseline.
+          if (dispatchState === "completed") promptTurnBarrierRevision = null;
           await waitForPromptCompletion({
             job,
             actor,
@@ -1611,6 +1918,8 @@ async function processClaimedJob(input: {
             ctx,
             target: chatTarget,
             sessionId: activeSessionId,
+            promptId: prompt.id,
+            workerId,
             messageId: prompt.messageId,
             masterKey: ctx.masterKey,
             timeoutMs: activePlan.row.timeoutMs,
@@ -1628,31 +1937,40 @@ async function processClaimedJob(input: {
             redactor,
             signal: jobAbort.signal,
           });
-          const promptCompleted = await tenant(job, (database) =>
+          const completion = await tenant(job, (database) =>
             completeRunPrompt({ actor, orgId: job.orgId, runId: job.runId, promptId: prompt.id, workerId, database }),
           );
-          if (!promptCompleted) throw new LostLease();
+          if (completion === "cancel_requested") throw new PromptCancellationRequested();
+          if (completion === "lost_lease") throw new LostLease();
           activePromptId = null;
           await setPhase(job, actor, workerId, "record", { status: "running", lastActiveAt: new Date() });
         } catch (error) {
           if (error instanceof WorkerShutdown || error instanceof LostLease || error instanceof CancellationRequested) throw error;
-          const promptFailed = await tenant(job, (database) =>
-            failRunPrompt({
-              actor,
-              orgId: job.orgId,
-              runId: job.runId,
-              promptId: prompt.id,
-              workerId,
-              errorCode: errorCode(error),
-              userMessage: userFacingError(error, redactor),
-              retry: isTransientRunFailure(error) && prompt.attempt < 3,
-              backoffMs: 2 ** Math.max(0, prompt.attempt - 1) * 1_000,
-              database,
-            }),
-          );
-          if (!promptFailed) throw new LostLease();
-          activePromptId = null;
-          throw error;
+          if (error instanceof PromptCancellationRequested) {
+            await finishPromptCancellation(prompt, promptTurnBarrierRevision);
+          } else {
+            const failure = await tenant(job, (database) =>
+              failRunPrompt({
+                actor,
+                orgId: job.orgId,
+                runId: job.runId,
+                promptId: prompt.id,
+                workerId,
+                errorCode: errorCode(error),
+                userMessage: userFacingError(error, redactor),
+                retry: isTransientRunFailure(error) && prompt.attempt < 3,
+                backoffMs: 2 ** Math.max(0, prompt.attempt - 1) * 1_000,
+                database,
+              }),
+            );
+            if (failure === "cancel_requested") {
+              await finishPromptCancellation(prompt, promptTurnBarrierRevision);
+            } else {
+              if (failure === "lost_lease") throw new LostLease();
+              activePromptId = null;
+              throw error;
+            }
+          }
         }
         continue;
       }

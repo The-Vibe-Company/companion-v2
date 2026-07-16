@@ -238,10 +238,20 @@ export interface ChatState {
   sessionId: string | null;
   error: string | null;
   warnings: { code: string; message: string }[];
+  /** Prompt currently owning live OpenCode output; queued siblings must not settle its visuals. */
+  activePromptId?: string | null;
 }
 
 export function initChatState(): ChatState {
-  return { items: [], busy: false, working: { active: false, label: "" }, sessionId: null, error: null, warnings: [] };
+  return {
+    items: [],
+    busy: false,
+    working: { active: false, label: "" },
+    sessionId: null,
+    error: null,
+    warnings: [],
+    activePromptId: null,
+  };
 }
 
 export type ResolveToolLabel = (tool: string, skill: string | null) => { label: string; action: string };
@@ -275,25 +285,34 @@ function mapHistoryItem(
   resolveToolLabel: ResolveToolLabel,
   attachments: SkillRunAttachmentRow[] = [],
   promptOrdinal?: number,
+  historyIndex = 0,
 ): ChatItem {
   switch (item.kind) {
     case "user":
       return {
         kind: "user",
-        id: nextId("user"),
+        id: item.message_id ? `user:${item.message_id}` : `history:user:${promptOrdinal ?? historyIndex}`,
         text: item.text,
         messageId: item.message_id ?? null,
         attachments: item.message_id
           ? attachments.filter((attachment) => attachment.message_id === item.message_id)
           : attachments.filter((attachment) => attachment.prompt_ordinal === promptOrdinal),
       };
-    case "assistant":
-      return { kind: "asst", id: nextId("asst"), messageId: null, text: item.text, streaming: false };
+    case "assistant": {
+      const messageId = "message_id" in item && typeof item.message_id === "string" ? item.message_id : null;
+      return {
+        kind: "asst",
+        id: messageId ? `assistant:${messageId}` : `history:assistant:${historyIndex}`,
+        messageId,
+        text: item.text,
+        streaming: false,
+      };
+    }
     case "tool": {
       const { label, action } = resolveToolLabel(item.tool, item.skill);
       return {
         kind: "tool",
-        id: nextId("tool"),
+        id: `tool:${item.call_id}`,
         callId: item.call_id,
         label,
         action: item.title ?? action,
@@ -312,25 +331,41 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
   switch (action.kind) {
     case "sys":
       return { ...state, items: [...state.items, { kind: "sys", id: nextId("sys"), text: action.text }] };
-    case "user":
+    case "user": {
+      if (action.messageId) {
+        const existing = state.items.find((item) => item.kind === "user" && item.messageId === action.messageId);
+        if (existing) {
+          return {
+            ...state,
+            items: state.items.map((item) => item.kind === "user" && item.messageId === action.messageId
+              ? {
+                  ...item,
+                  text: item.text || action.text,
+                  attachments: item.attachments.length > 0 ? item.attachments : action.attachments ?? [],
+                }
+              : item),
+          };
+        }
+      }
       return {
         ...state,
         items: [...state.items, {
           kind: "user",
-          id: nextId("user"),
+          id: action.messageId ? `user:${action.messageId}` : nextId("user"),
           text: action.text,
           messageId: action.messageId ?? null,
           attachments: action.attachments ?? [],
         }],
       };
+    }
     case "history": {
       // Preserve any existing sys lines (boot annotations like "resumed from snapshot") ABOVE the
       // reloaded transcript, so history shows above new live events appended afterwards.
       const sysLines = state.items.filter((item) => item.kind === "sys");
       let promptOrdinal = 0;
-      const history = action.items.map((item) => {
+      const history = action.items.map((item, historyIndex) => {
         const itemPromptOrdinal = item.kind === "user" ? promptOrdinal++ : undefined;
-        return mapHistoryItem(item, action.resolveToolLabel, action.attachments, itemPromptOrdinal);
+        return mapHistoryItem(item, action.resolveToolLabel, action.attachments, itemPromptOrdinal, historyIndex);
       });
       return {
         ...state,
@@ -392,7 +427,7 @@ function applyEvent(state: ChatState, event: RunChatEvent, resolveToolLabel: Res
           ...state.items,
           {
             kind: "tool",
-            id: nextId("tool"),
+            id: `tool:${event.call_id}`,
             callId: event.call_id,
             label,
             action: event.title ?? action,
@@ -429,7 +464,7 @@ function applyEvent(state: ChatState, event: RunChatEvent, resolveToolLabel: Res
           working,
           items: state.items.map((item) =>
             item.kind === "reasoning" && item.partId === event.part_id
-              ? { ...item, text: item.text + event.delta }
+              ? { ...item, text: item.text + event.delta, streaming: true }
               : item,
           ),
         };
@@ -439,7 +474,7 @@ function applyEvent(state: ChatState, event: RunChatEvent, resolveToolLabel: Res
         working,
         items: [
           ...state.items,
-          { kind: "reasoning", id: nextId("reasoning"), partId: event.part_id, text: event.delta, streaming: true },
+          { kind: "reasoning", id: `reasoning:${event.part_id}`, partId: event.part_id, text: event.delta, streaming: true },
         ],
       };
     }
@@ -464,7 +499,7 @@ function applyEvent(state: ChatState, event: RunChatEvent, resolveToolLabel: Res
           ...state,
           items: items.map((item) =>
             item.kind === "asst" && item.messageId === event.message_id
-              ? { ...item, text: item.text + event.delta }
+              ? { ...item, text: item.text + event.delta, streaming: true }
               : item,
           ),
         };
@@ -473,7 +508,7 @@ function applyEvent(state: ChatState, event: RunChatEvent, resolveToolLabel: Res
         ...state,
         items: [
           ...items,
-          { kind: "asst", id: nextId("asst"), messageId: event.message_id, text: event.delta, streaming: true },
+          { kind: "asst", id: `assistant:${event.message_id}`, messageId: event.message_id, text: event.delta, streaming: true },
         ],
       };
     }
@@ -487,8 +522,45 @@ function applyEvent(state: ChatState, event: RunChatEvent, resolveToolLabel: Res
       };
     }
     case "session.idle":
-      return { ...state, busy: false, working: { active: false, label: "" } };
+      return {
+        ...state,
+        busy: false,
+        activePromptId: null,
+        working: { active: false, label: "" },
+        items: state.items.map((item) => {
+          if (item.kind === "tool" && item.running) return { ...item, running: false };
+          if ((item.kind === "asst" || item.kind === "reasoning") && item.streaming) {
+            return { ...item, streaming: false };
+          }
+          return item;
+        }),
+      };
     case "artifacts.updated":
+      return state;
+    case "prompt.status":
+      if (event.status === "processing") {
+        return { ...state, busy: true, error: null, activePromptId: event.prompt_id };
+      }
+      if (event.status === "queued" || event.status === "completed" || event.status === "canceled" || event.status === "error") {
+        // Queue and cancellation events can belong to a follow-up waiting behind the live turn.
+        // Only the prompt that entered processing is allowed to settle global OpenCode visuals.
+        if (state.activePromptId !== event.prompt_id) return state;
+        return {
+          ...state,
+          busy: false,
+          activePromptId: null,
+          working: { active: false, label: "" },
+          // A stopped turn can legitimately have no text.done/reasoning.done. Preserve its partial
+          // bytes but close every visual streaming state so the transcript is explicitly settled.
+          items: state.items.map((item) => {
+            if (item.kind === "tool" && item.running) return { ...item, running: false };
+            if ((item.kind === "asst" || item.kind === "reasoning") && item.streaming) {
+              return { ...item, streaming: false };
+            }
+            return item;
+          }),
+        };
+      }
       return state;
     case "run.warning":
       return state.warnings.some((warning) => warning.code === event.code && warning.message === event.message)

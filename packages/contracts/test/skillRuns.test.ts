@@ -315,6 +315,8 @@ describe("skill run contracts", () => {
       accepted: true,
       prompt_id: secretId,
       message_id: "msg-contract",
+      ordinal: 2,
+      status: "queued",
       attachments: [],
       reactivated: true,
     }).reactivated).toBe(true);

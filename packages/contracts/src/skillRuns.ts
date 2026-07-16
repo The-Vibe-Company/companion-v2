@@ -30,6 +30,8 @@ export const RUN_MODEL_ID_MAX = 240;
 export const RUN_ERROR_CODE_MAX = 80;
 export const RUN_WARNING_SNAPSHOT_MAX = 100;
 export const RUN_REACTIVATION_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;
+/** Follow-ups waiting behind the active turn. The processing prompt is not included in this cap. */
+export const RUN_PROMPT_MAX_QUEUED = 5;
 
 /** Runtime-owned names may never be supplied by a skill or saved configuration. */
 export const RUN_RESERVED_ENV_PREFIX = "OPENCODE_SERVER_";
@@ -478,7 +480,12 @@ export const runChatHistoryItemSchema = z.discriminatedUnion("kind", [
     /** Deterministic OpenCode id; absent only on transcripts persisted before attachment-aware chat. */
     message_id: z.string().max(RUN_CHAT_ID_MAX).optional(),
   }),
-  z.object({ kind: z.literal("assistant"), text: z.string().max(RUN_CHAT_TRANSCRIPT_TEXT_MAX) }),
+  z.object({
+    kind: z.literal("assistant"),
+    text: z.string().max(RUN_CHAT_TRANSCRIPT_TEXT_MAX),
+    /** Stable OpenCode assistant message id; absent only on legacy persisted snapshots. */
+    message_id: z.string().max(RUN_CHAT_ID_MAX).optional(),
+  }),
   z.object({
     kind: z.literal("tool"),
     call_id: z.string().max(RUN_CHAT_ID_MAX),
@@ -528,6 +535,13 @@ export const runChatEventSchema = z.discriminatedUnion("type", [
   }),
   z.object({ type: z.literal("session.idle"), session_id: z.string().max(RUN_CHAT_ID_MAX) }),
   z.object({ type: z.literal("artifacts.updated"), count: z.number().int().nonnegative().max(RUN_ARTIFACT_MAX_FILES) }),
+  z.object({
+    type: z.literal("prompt.status"),
+    prompt_id: runUuidSchema,
+    message_id: z.string().max(RUN_CHAT_ID_MAX),
+    ordinal: z.number().int().nonnegative(),
+    status: z.enum(["queued", "processing", "cancel_requested", "completed", "error", "canceled"]),
+  }),
   z.object({
     type: z.literal("run.warning"),
     code: runErrorCodeSchema,
@@ -585,9 +599,34 @@ export const skillRunAttachmentRowSchema = z.object({
   prompt_ordinal: z.number().int().nonnegative(),
   file_name: z.string(),
   content_type: z.string(),
+  preview_content_type: z.string().nullable().default(null),
   byte_size: z.number().int().nonnegative(),
 });
 export type SkillRunAttachmentRow = z.infer<typeof skillRunAttachmentRowSchema>;
+
+export const runPromptStatusSchema = z.enum([
+  "queued",
+  "processing",
+  "cancel_requested",
+  "completed",
+  "error",
+  "canceled",
+]);
+export type RunPromptStatus = z.infer<typeof runPromptStatusSchema>;
+
+export const pendingRunPromptSchema = z
+  .object({
+    id: runUuidSchema,
+    message_id: z.string().max(RUN_CHAT_ID_MAX),
+    ordinal: z.number().int().nonnegative(),
+    kind: z.enum(["initial", "follow_up"]),
+    text: z.string().max(RUN_PROMPT_MAX),
+    status: z.enum(["queued", "processing", "cancel_requested"]),
+    created_at: z.string().datetime(),
+    attachments: z.array(skillRunAttachmentRowSchema).max(RUN_ATTACHMENT_MAX_FILES),
+  })
+  .strict();
+export type PendingRunPrompt = z.infer<typeof pendingRunPromptSchema>;
 
 /** Creator-private cached output produced by a run. Bytes expire independently from the sandbox. */
 export const skillRunArtifactRowSchema = z.object({
@@ -613,6 +652,7 @@ export const skillRunDetailSchema = skillRunRowSchema.extend({
   reactivatable_until: z.string().nullable(),
   can_reactivate: z.boolean(),
   attachments: z.array(skillRunAttachmentRowSchema),
+  pending_prompts: z.array(pendingRunPromptSchema).max(RUN_PROMPT_MAX_QUEUED + 1).default([]),
   artifacts: z.array(skillRunArtifactRowSchema).max(RUN_ARTIFACT_MAX_FILES),
   input_snapshot: runInputSnapshotSchema.optional(),
 });
@@ -644,6 +684,8 @@ export const runPromptAcceptedSchema = z
     accepted: z.literal(true),
     prompt_id: runUuidSchema,
     message_id: z.string().max(RUN_CHAT_ID_MAX),
+    ordinal: z.number().int().nonnegative(),
+    status: runPromptStatusSchema,
     attachments: z.array(skillRunAttachmentRowSchema).max(RUN_ATTACHMENT_MAX_FILES),
     reactivated: z.boolean(),
   })
@@ -651,6 +693,15 @@ export const runPromptAcceptedSchema = z
 export type RunPromptAccepted = z.infer<typeof runPromptAcceptedSchema>;
 export const runPromptResponseSchema = runPromptAcceptedSchema;
 export type RunPromptResponse = z.infer<typeof runPromptResponseSchema>;
+
+export const runPromptCancellationResponseSchema = z
+  .object({
+    prompt_id: runUuidSchema,
+    status: runPromptStatusSchema,
+    requested: z.boolean(),
+  })
+  .strict();
+export type RunPromptCancellationResponse = z.infer<typeof runPromptCancellationResponseSchema>;
 
 /**
  * Text fields of multipart `POST /v1/skills/:slug/runs`. Files arrive as repeated `file` parts.

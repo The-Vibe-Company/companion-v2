@@ -1551,6 +1551,8 @@ export const skillRunWorkerHeartbeats = pgTable(
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
     /** Protocol 1 guarantees follow-up attachments are mounted before OpenCode dispatch. */
     attachmentPromptProtocol: integer("attachment_prompt_protocol").notNull().default(0),
+    /** Protocol 1 guarantees a processing prompt can stop without ending its run sandbox. */
+    turnStopProtocol: integer("turn_stop_protocol").notNull().default(0),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => ({
@@ -1562,6 +1564,10 @@ export const skillRunWorkerHeartbeats = pgTable(
     attachmentProtocolCheck: check(
       "skill_run_worker_heartbeats_attachment_protocol_check",
       sql`${t.attachmentPromptProtocol} BETWEEN 0 AND 1`,
+    ),
+    turnStopProtocolCheck: check(
+      "skill_run_worker_heartbeats_turn_stop_protocol_check",
+      sql`${t.turnStopProtocol} BETWEEN 0 AND 1`,
     ),
   }),
 );
@@ -1592,6 +1598,8 @@ export const skillRunPrompts = pgTable(
     leaseOwner: text("lease_owner"),
     leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
     heartbeatAt: timestamp("heartbeat_at", { withTimezone: true }),
+    /** Status remains processing until the owning worker reaches a durable stop barrier. */
+    cancelRequestedAt: timestamp("cancel_requested_at", { withTimezone: true }),
     errorCode: text("error_code"),
     userMessage: text("user_message"),
     completedAt: timestamp("completed_at", { withTimezone: true }),
@@ -1607,6 +1615,12 @@ export const skillRunPrompts = pgTable(
       .on(t.orgId, t.runId)
       .where(sql`${t.status} = 'processing'`),
     byAvailability: index("skill_run_prompts_available_idx").on(t.status, t.availableAt),
+    byRunStatusOrdinal: index("skill_run_prompts_run_status_ordinal_idx").on(
+      t.orgId,
+      t.runId,
+      t.status,
+      t.ordinal,
+    ),
     runFk: foreignKey({
       columns: [t.orgId, t.runId],
       foreignColumns: [skillRuns.orgId, skillRuns.id],
@@ -1667,6 +1681,8 @@ export const skillRunAttachments = pgTable(
     promptId: uuid("prompt_id"),
     fileName: text("file_name").notNull(),
     contentType: text("content_type").notNull(),
+    /** Server-verified safe inline MIME; null means download-only. */
+    previewContentType: text("preview_content_type"),
     byteSize: integer("byte_size").notNull(),
     storageKey: text("storage_key").notNull().unique(),
     createdAt: now(),

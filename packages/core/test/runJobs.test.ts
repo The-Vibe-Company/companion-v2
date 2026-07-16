@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  RUN_ATTACHMENT_MAX_BYTES,
+  RUN_ATTACHMENT_MAX_TOTAL_BYTES,
   RUN_CHAT_DELTA_MAX,
   RUN_CHAT_TOOL_INPUT_MAX,
   RUN_CHAT_TOOL_OUTPUT_MAX,
@@ -8,12 +10,18 @@ import { schema, type Db } from "@companion/db";
 import { createRunRedactor } from "../src/runRedaction";
 import {
   appendRunEvents,
+  cancelOutstandingRunPromptsByWorker,
   claimNextRunPrompt,
+  claimRunPromptStopRecovery,
   claimRunJobs,
+  completeRunPrompt,
+  failRunPrompt,
   failOrRetryRunJob,
   persistRunTranscript,
   requestRunCancellation,
+  requestRunPromptCancellation,
 } from "../src/runJobs";
+import { validateRunMessageAttachments } from "../src/skillRuns";
 import type { ActorContext } from "../src/services";
 
 const ORG = "00000000-0000-0000-0000-000000000001";
@@ -243,10 +251,20 @@ function cancellationDb(status: "queued" | "running" | "canceled") {
     cancelRequestedAt: status === "canceled" ? new Date() : null,
     reactivatableUntil: status === "canceled" ? new Date(Date.now() + 60_000) : null,
     activationRevision: 0,
+    transcriptEventSequence: 0,
   } as Record<string, unknown>;
   const job = { orgId: ORG, runId: RUN, creatorId: actor.id, status: "queued", phase: "queued" } as Record<string, unknown>;
-  const prompt = { orgId: ORG, runId: RUN, status: "queued" } as Record<string, unknown>;
+  const prompt = {
+    id: "60000000-0000-4000-8000-000000000010",
+    orgId: ORG,
+    runId: RUN,
+    messageId: "msg_cancel_initial",
+    ordinal: 0,
+    status: "queued",
+    cancelRequestedAt: null,
+  } as Record<string, unknown>;
   const audit: Record<string, unknown>[] = [];
+  const events: Record<string, unknown>[] = [];
   const handle = {
     query: { memberships: { findFirst: async () => ({ orgRole: "developer" }) } },
     transaction: async (fn: (transaction: Db) => Promise<unknown>) => fn(handle as unknown as Db),
@@ -256,28 +274,45 @@ function cancellationDb(status: "queued" | "running" | "canceled") {
           if (table === schema.skillRuns) {
             return Object.assign(Promise.resolve([run]), { for: async () => [run] });
           }
+          if (table === schema.skillRunPrompts) return { for: async () => [prompt] };
+          if (table === schema.skillRunEvents) {
+            return Promise.resolve([{ value: events.length ? events.length : null }]);
+          }
           throw new Error("unexpected select");
         },
       }),
     }),
     update: (table: unknown) => ({
       set: (patch: Record<string, unknown>) => ({
-        where: async () => {
-          if (table === schema.skillRuns) Object.assign(run, patch);
-          else if (table === schema.skillRunJobs) Object.assign(job, patch);
-          else if (table === schema.skillRunPrompts) Object.assign(prompt, patch);
-          else throw new Error("unexpected update");
+        where: () => {
+          const apply = () => {
+            if (table === schema.skillRuns) Object.assign(run, patch);
+            else if (table === schema.skillRunJobs) Object.assign(job, patch);
+            else if (table === schema.skillRunPrompts) Object.assign(prompt, patch);
+            else throw new Error("unexpected update");
+          };
+          return {
+            returning: async () => {
+              apply();
+              return table === schema.skillRunPrompts ? [prompt] : [{ id: String(run.id) }];
+            },
+            then: (resolve: (value: undefined) => unknown) => {
+              apply();
+              return Promise.resolve(undefined).then(resolve);
+            },
+          };
         },
       }),
     }),
     insert: (table: unknown) => ({
       values: async (value: Record<string, unknown>) => {
-        if (table !== schema.auditLog) throw new Error("unexpected insert");
-        audit.push(value);
+        if (table === schema.auditLog) audit.push(value);
+        else if (table === schema.skillRunEvents) events.push(value);
+        else throw new Error("unexpected insert");
       },
     }),
   };
-  return { database: handle as unknown as Db, run, job, prompt, audit };
+  return { database: handle as unknown as Db, run, job, prompt, audit, events };
 }
 
 describe("run cancellation", () => {
@@ -291,6 +326,13 @@ describe("run cancellation", () => {
     expect(state.run.sandboxCleanedAt).toBeNull();
     expect(state.job).toMatchObject({ status: "canceled", phase: "complete", leaseOwner: null });
     expect(state.prompt).toMatchObject({ status: "canceled", leaseOwner: null });
+    expect(state.events).toEqual([
+      expect.objectContaining({
+        sequence: 1,
+        type: "prompt.status",
+        payload: expect.objectContaining({ status: "canceled" }),
+      }),
+    ]);
     expect(state.audit).toHaveLength(1);
   });
 
@@ -321,7 +363,312 @@ describe("run cancellation", () => {
   });
 });
 
-function failureDb(cancelRequestedAt: Date | null = null) {
+function promptCancellationDb(input: {
+  status: "queued" | "processing";
+  kind?: "initial" | "follow_up";
+  stopReady?: boolean;
+  withAttachment?: boolean;
+  attachmentCount?: number;
+}) {
+  const run = {
+    id: RUN,
+    orgId: ORG,
+    creatorId: actor.id,
+    status: "running",
+    phase: "record",
+    cancelRequestedAt: null,
+    transcriptEventSequence: 0,
+  } as Record<string, unknown>;
+  const prompt = {
+    id: "60000000-0000-4000-8000-000000000099",
+    orgId: ORG,
+    runId: RUN,
+    ordinal: 2,
+    messageId: "msg_01J00000000000000000000099",
+    kind: input.kind ?? "follow_up",
+    status: input.status,
+    cancelRequestedAt: null,
+    leaseOwner: input.status === "processing" ? "worker-a" : null,
+    leaseExpiresAt: input.status === "processing" ? new Date(Date.now() + 60_000) : null,
+  } as Record<string, unknown>;
+  const job = {
+    id: "50000000-0000-4000-8000-000000000099",
+    orgId: ORG,
+    runId: RUN,
+    creatorId: actor.id,
+    status: "leased",
+    leaseOwner: "worker-a",
+  } as Record<string, unknown>;
+  const attachments = input.withAttachment
+    ? Array.from({ length: input.attachmentCount ?? 1 }, (_, index) => ({
+        storageKey: `run-attachments/file-${index + 1}`,
+        promptId: prompt.id,
+        byteSize: RUN_ATTACHMENT_MAX_BYTES,
+      }))
+    : [];
+  const reservations: Record<string, unknown>[] = [];
+  const events: Record<string, unknown>[] = [];
+  const audit: Record<string, unknown>[] = [];
+  const handle = {
+    query: { memberships: { findFirst: async () => ({ orgRole: "developer" }) } },
+    transaction: async (fn: (transaction: Db) => Promise<unknown>) => fn(handle as unknown as Db),
+    execute: async () => [{ ready: input.stopReady ?? true }],
+    select: (projection?: Record<string, unknown>) => ({
+      from: (table: unknown) => ({
+        where: () => {
+          if (table === schema.skillRuns) {
+            return Object.assign(Promise.resolve([run]), { for: async () => [run] });
+          }
+          if (table === schema.skillRunPrompts) {
+            if (projection && "id" in projection) {
+              const active = prompt.status === "queued" || prompt.status === "processing";
+              return { for: async () => active ? [prompt] : [] };
+            }
+            return Object.assign(Promise.resolve([prompt]), { for: async () => [prompt] });
+          }
+          if (table === schema.skillRunJobs) {
+            return Object.assign(Promise.resolve([job]), { for: async () => [job] });
+          }
+          if (table === schema.skillRunAttachments) return Promise.resolve(attachments);
+          if (table === schema.skillRunEvents && projection && "value" in projection) {
+            return Promise.resolve([{ value: events.length }]);
+          }
+          throw new Error("unexpected select");
+        },
+      }),
+    }),
+    update: (table: unknown) => ({
+      set: (patch: Record<string, unknown>) => ({
+        where: () => ({
+          returning: async () => {
+            if (table !== schema.skillRunPrompts) throw new Error("unexpected update");
+            Object.assign(prompt, patch);
+            return [prompt];
+          },
+        }),
+      }),
+    }),
+    insert: (table: unknown) => ({
+      values: (value: Record<string, unknown>) => {
+        if (table === schema.skillRunAttachmentUploads) {
+          reservations.push(value);
+          return { onConflictDoUpdate: async () => undefined };
+        }
+        if (table === schema.skillRunEvents) {
+          events.push(value);
+          return Promise.resolve();
+        }
+        if (table === schema.auditLog) {
+          audit.push(value);
+          return Promise.resolve();
+        }
+        throw new Error("unexpected insert");
+      },
+    }),
+  };
+  return {
+    database: handle as unknown as Db,
+    run,
+    job,
+    prompt,
+    attachments,
+    reservations,
+    events,
+    audit,
+  };
+}
+
+describe("prompt-scoped cancellation", () => {
+  it("publishes canceled exactly once when the destructive worker owns finalization", async () => {
+    const state = promptCancellationDb({ status: "processing" });
+    state.run.cancelRequestedAt = new Date();
+    await expect(cancelOutstandingRunPromptsByWorker({
+      actor,
+      orgId: ORG,
+      runId: RUN,
+      workerId: "worker-a",
+      database: state.database,
+    })).resolves.toBe(true);
+    await expect(cancelOutstandingRunPromptsByWorker({
+      actor,
+      orgId: ORG,
+      runId: RUN,
+      workerId: "worker-a",
+      database: state.database,
+    })).resolves.toBe(true);
+    expect(state.prompt.status).toBe("canceled");
+    expect(state.events).toEqual([
+      expect.objectContaining({
+        type: "prompt.status",
+        payload: expect.objectContaining({ status: "canceled" }),
+      }),
+    ]);
+  });
+
+  it("removes queued work and hands attachment objects to the age-gated orphan sweeper", async () => {
+    const state = promptCancellationDb({ status: "queued", withAttachment: true });
+    await expect(requestRunPromptCancellation({
+      actor,
+      orgId: ORG,
+      runId: RUN,
+      promptId: String(state.prompt.id),
+      database: state.database,
+    })).resolves.toEqual({ prompt_id: state.prompt.id, status: "canceled", requested: true });
+    expect(state.prompt).toMatchObject({ status: "canceled", leaseOwner: null });
+    expect(state.attachments).toEqual([
+      expect.objectContaining({ storageKey: "run-attachments/file-1", byteSize: RUN_ATTACHMENT_MAX_BYTES }),
+    ]);
+    expect(state.reservations).toEqual([
+      expect.objectContaining({ storageKey: "run-attachments/file-1", creatorId: actor.id }),
+    ]);
+    expect(state.events.at(-1)).toMatchObject({ type: "prompt.status", payload: expect.objectContaining({ status: "canceled" }) });
+  });
+
+  it("keeps canceled queued bytes charged until the deferred object sweep succeeds", async () => {
+    const state = promptCancellationDb({ status: "queued", withAttachment: true, attachmentCount: 5 });
+    await requestRunPromptCancellation({
+      actor,
+      orgId: ORG,
+      runId: RUN,
+      promptId: String(state.prompt.id),
+      database: state.database,
+    });
+    const canceledBytes = state.attachments.reduce((total, attachment) => total + attachment.byteSize, 0);
+    expect(canceledBytes).toBe(5 * RUN_ATTACHMENT_MAX_BYTES);
+    const otherPromptBytes = RUN_ATTACHMENT_MAX_TOTAL_BYTES - canceledBytes;
+    expect(() => validateRunMessageAttachments({
+      text: "try to reuse the canceled upload budget",
+      existingBytes: canceledBytes + otherPromptBytes,
+      attachments: [{
+        id: "70000000-0000-4000-8000-000000000001",
+        fileName: "extra.txt",
+        contentType: "text/plain",
+        byteSize: 1,
+        storageKey: "run-attachments/extra",
+      }],
+    })).toThrow(expect.objectContaining({ code: "attachment_total_too_large" }));
+  });
+
+  it("records one idempotent stop request for a processing prompt", async () => {
+    const state = promptCancellationDb({ status: "processing", stopReady: true });
+    const request = {
+      actor,
+      orgId: ORG,
+      runId: RUN,
+      promptId: String(state.prompt.id),
+      database: state.database,
+    };
+    await expect(requestRunPromptCancellation(request)).resolves.toEqual({
+      prompt_id: state.prompt.id,
+      status: "cancel_requested",
+      requested: true,
+    });
+    await expect(requestRunPromptCancellation(request)).resolves.toEqual({
+      prompt_id: state.prompt.id,
+      status: "cancel_requested",
+      requested: false,
+    });
+    expect(state.events).toHaveLength(1);
+    expect(state.audit).toHaveLength(1);
+  });
+
+  it("refuses to stop an active turn owned by a rolling protocol-0 worker", async () => {
+    const state = promptCancellationDb({ status: "processing", stopReady: false });
+    await expect(requestRunPromptCancellation({
+      actor,
+      orgId: ORG,
+      runId: RUN,
+      promptId: String(state.prompt.id),
+      database: state.database,
+    })).rejects.toMatchObject({ code: "prompt_stop_worker_unavailable" });
+    expect(state.prompt.cancelRequestedAt).toBeNull();
+    expect(state.events).toEqual([]);
+  });
+
+  it("requires full End session cancellation for an initial prompt that has not dispatched", async () => {
+    const state = promptCancellationDb({ status: "queued", kind: "initial" });
+    await expect(requestRunPromptCancellation({
+      actor,
+      orgId: ORG,
+      runId: RUN,
+      promptId: String(state.prompt.id),
+      database: state.database,
+    })).rejects.toMatchObject({ code: "initial_prompt_requires_run_cancel" });
+    expect(state.prompt.status).toBe("queued");
+  });
+
+  it("lets a committed stop request win atomically over a retryable prompt failure", async () => {
+    const state = promptCancellationDb({ status: "processing", stopReady: true });
+    const request = {
+      actor,
+      orgId: ORG,
+      runId: RUN,
+      promptId: String(state.prompt.id),
+      workerId: "worker-a",
+      database: state.database,
+    };
+    await requestRunPromptCancellation(request);
+    await expect(failRunPrompt({
+      ...request,
+      errorCode: "runtime_error",
+      userMessage: "temporary failure",
+      retry: true,
+    })).resolves.toBe("cancel_requested");
+    expect(state.prompt).toMatchObject({ status: "processing" });
+    expect(state.prompt.cancelRequestedAt).toBeInstanceOf(Date);
+
+    await expect(failRunPrompt({
+      ...request,
+      errorCode: "prompt_stop_failed",
+      userMessage: "unsafe context",
+      retry: false,
+      overrideCancellation: true,
+    })).resolves.toBe("updated");
+    expect(state.prompt).toMatchObject({ status: "error", errorCode: "prompt_stop_failed" });
+  });
+
+  it("arbitrates natural completion and stop under the same prompt row lock", async () => {
+    const naturallyCompleted = promptCancellationDb({ status: "processing" });
+    await expect(completeRunPrompt({
+      actor,
+      orgId: ORG,
+      runId: RUN,
+      promptId: String(naturallyCompleted.prompt.id),
+      workerId: "worker-a",
+      database: naturallyCompleted.database,
+    })).resolves.toBe("completed");
+    expect(naturallyCompleted.events).toEqual([
+      expect.objectContaining({
+        type: "prompt.status",
+        payload: expect.objectContaining({ status: "completed" }),
+      }),
+    ]);
+
+    const stopped = promptCancellationDb({ status: "processing" });
+    await requestRunPromptCancellation({
+      actor,
+      orgId: ORG,
+      runId: RUN,
+      promptId: String(stopped.prompt.id),
+      database: stopped.database,
+    });
+    await expect(completeRunPrompt({
+      actor,
+      orgId: ORG,
+      runId: RUN,
+      promptId: String(stopped.prompt.id),
+      workerId: "worker-a",
+      database: stopped.database,
+    })).resolves.toBe("cancel_requested");
+    expect(stopped.events).toHaveLength(1);
+    expect(stopped.events[0]).toMatchObject({
+      type: "prompt.status",
+      payload: expect.objectContaining({ status: "cancel_requested" }),
+    });
+  });
+});
+
+function failureDb(cancelRequestedAt: Date | null = null, withPrompt = false) {
   const run = {
     id: RUN,
     orgId: ORG,
@@ -331,6 +678,17 @@ function failureDb(cancelRequestedAt: Date | null = null) {
     cancelRequestedAt,
     transcriptEventSequence: 0,
   } as Record<string, unknown>;
+  const prompt = withPrompt
+    ? {
+        id: "60000000-0000-4000-8000-000000000011",
+        orgId: ORG,
+        runId: RUN,
+        messageId: "msg_failure_initial",
+        ordinal: 0,
+        status: "queued",
+        cancelRequestedAt: null,
+      } as Record<string, unknown>
+    : null;
   const job = {
     id: "50000000-0000-4000-8000-000000000001",
     orgId: ORG,
@@ -350,6 +708,7 @@ function failureDb(cancelRequestedAt: Date | null = null) {
         where: () => {
           if (table === schema.skillRuns) return { for: async () => [run] };
           if (table === schema.skillRunJobs) return { for: async () => [job] };
+          if (table === schema.skillRunPrompts) return { for: async () => prompt ? [prompt] : [] };
           if (table === schema.skillRunEvents) {
             return Promise.resolve([{ value: events.length ? events.length : null }]);
           }
@@ -363,11 +722,13 @@ function failureDb(cancelRequestedAt: Date | null = null) {
           const apply = () => {
             if (table === schema.skillRuns) Object.assign(run, patch);
             else if (table === schema.skillRunJobs) Object.assign(job, patch);
+            else if (table === schema.skillRunPrompts && prompt) Object.assign(prompt, patch);
             else throw new Error("unexpected update");
           };
           return {
             returning: async () => {
               apply();
+              if (table === schema.skillRunPrompts) return prompt ? [prompt] : [];
               return [{ id: String(table === schema.skillRuns ? run.id : job.id) }];
             },
             then: (resolve: (value: undefined) => unknown) => {
@@ -385,7 +746,7 @@ function failureDb(cancelRequestedAt: Date | null = null) {
       },
     }),
   };
-  return { database: handle as unknown as Db, run, job, events };
+  return { database: handle as unknown as Db, run, job, prompt, events };
 }
 
 describe("atomic run failure transition", () => {
@@ -433,6 +794,36 @@ describe("atomic run failure transition", () => {
     ).resolves.toBe("failed");
     expect(state.events).toEqual([
       expect.objectContaining({ sequence: 43, type: "run.error" }),
+    ]);
+  });
+
+  it("terminalizes queued prompts with replayable error status when setup exhausts retries", async () => {
+    const state = failureDb(null, true);
+    await expect(
+      failOrRetryRunJob({
+        actor,
+        orgId: ORG,
+        runId: RUN,
+        workerId: "worker-a",
+        errorCode: "sandbox_setup_failed",
+        userMessage: "Sandbox setup failed",
+        transient: false,
+        database: state.database,
+      }),
+    ).resolves.toBe("failed");
+    expect(state.prompt).toMatchObject({
+      status: "error",
+      errorCode: "sandbox_setup_failed",
+      userMessage: "Sandbox setup failed",
+      leaseOwner: null,
+    });
+    expect(state.events).toEqual([
+      expect.objectContaining({
+        sequence: 1,
+        type: "prompt.status",
+        payload: expect.objectContaining({ status: "error" }),
+      }),
+      expect.objectContaining({ sequence: 2, type: "run.error" }),
     ]);
   });
 
@@ -495,6 +886,7 @@ describe("cross-tenant job claim seam", () => {
 });
 
 function promptClaimDb(prompt: Record<string, unknown>) {
+  const events: Record<string, unknown>[] = [];
   const run = {
     id: RUN,
     orgId: ORG,
@@ -502,6 +894,7 @@ function promptClaimDb(prompt: Record<string, unknown>) {
     status: "running",
     phase: "record",
     cancelRequestedAt: null,
+    transcriptEventSequence: 0,
   };
   const job = {
     id: "50000000-0000-4000-8000-000000000002",
@@ -513,25 +906,36 @@ function promptClaimDb(prompt: Record<string, unknown>) {
   };
   const handle = {
     transaction: async (fn: (transaction: Db) => Promise<unknown>) => fn(handle as unknown as Db),
-    select: () => ({
+    select: (projection?: Record<string, unknown>) => ({
       from: (table: unknown) => ({
         where: () => {
           if (table === schema.skillRuns) {
             return Object.assign(Promise.resolve([run]), { for: async () => [run] });
           }
           if (table === schema.skillRunPrompts) {
+            const lockOne = { for: async () => [prompt] };
             return {
               orderBy: () => ({
-                limit: () => ({ for: async () => [prompt] }),
+                limit: () => lockOne,
               }),
+              limit: () => lockOne,
             };
           }
           if (table === schema.skillRunJobs) {
             return { for: async () => [job] };
           }
+          if (table === schema.skillRunEvents && projection && "value" in projection) {
+            return Promise.resolve([{ value: events.length }]);
+          }
           throw new Error("unexpected select");
         },
       }),
+    }),
+    insert: (table: unknown) => ({
+      values: async (value: Record<string, unknown>) => {
+        if (table !== schema.skillRunEvents) throw new Error("unexpected insert");
+        events.push(value);
+      },
     }),
     update: (table: unknown) => ({
       set: (patch: Record<string, unknown>) => ({
@@ -558,6 +962,8 @@ describe("prompt lease recovery budget", () => {
       attempt: 0,
       leaseReclaimCount: 0,
       ordinal: 1,
+      messageId: "msg_01J00000000000000000000000",
+      cancelRequestedAt: null,
     } as Record<string, unknown>;
     const database = promptClaimDb(prompt);
     await claimNextRunPrompt({ actor, orgId: ORG, runId: RUN, workerId: "worker-a", database });
@@ -568,5 +974,33 @@ describe("prompt lease recovery budget", () => {
     // Simulate the expired prompt lease being resumed by the still-current job owner.
     await claimNextRunPrompt({ actor, orgId: ORG, runId: RUN, workerId: "worker-b", database });
     expect(prompt).toMatchObject({ status: "processing", attempt: 10, leaseReclaimCount: 5, leaseOwner: "worker-b" });
+  });
+
+  it("reclaims a committed stop without clearing its cancellation intent", async () => {
+    const prompt = {
+      id: "60000000-0000-4000-8000-000000000002",
+      orgId: ORG,
+      runId: RUN,
+      status: "processing",
+      attempt: 1,
+      leaseReclaimCount: 2,
+      ordinal: 2,
+      messageId: "msg_01J00000000000000000000002",
+      cancelRequestedAt: new Date(),
+      leaseOwner: "crashed-worker",
+    } as Record<string, unknown>;
+    const database = promptClaimDb(prompt);
+    await expect(claimRunPromptStopRecovery({
+      actor,
+      orgId: ORG,
+      runId: RUN,
+      workerId: "replacement-worker",
+      database,
+    })).resolves.toMatchObject({
+      status: "processing",
+      leaseOwner: "replacement-worker",
+      leaseReclaimCount: 3,
+      cancelRequestedAt: expect.any(Date),
+    });
   });
 });

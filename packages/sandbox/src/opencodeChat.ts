@@ -102,7 +102,7 @@ export async function loadSessionItems(
       items.push(
         role === "user"
           ? { kind: "user", text, message_id: entry.info.id }
-          : { kind: "assistant", text },
+          : { kind: "assistant", text, message_id: entry.info.id },
       );
     }
   }

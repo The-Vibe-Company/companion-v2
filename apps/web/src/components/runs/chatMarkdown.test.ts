@@ -1,49 +1,75 @@
-import { describe, expect, it } from "vitest";
-import { parseChatBlocks, parseChatInline } from "./chatMarkdown";
+// @vitest-environment happy-dom
 
-describe("parseChatInline", () => {
-  it("splits bold and code spans", () => {
-    expect(parseChatInline("a **b** and `c` end")).toEqual([
-      { kind: "text", text: "a " },
-      { kind: "bold", text: "b" },
-      { kind: "text", text: " and " },
-      { kind: "code", text: "c" },
-      { kind: "text", text: " end" },
-    ]);
-  });
+import React, { act } from "react";
+import { createRoot } from "react-dom/client";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { ChatMarkdown } from "./chatMarkdown";
 
-  it("passes plain text through", () => {
-    expect(parseChatInline("plain")).toEqual([{ kind: "text", text: "plain" }]);
-  });
+(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
+afterEach(() => {
+  document.body.innerHTML = "";
+  vi.useRealTimers();
 });
 
-describe("parseChatBlocks", () => {
-  it("splits paragraphs on blank lines", () => {
-    const blocks = parseChatBlocks("first\n\nsecond");
-    expect(blocks).toHaveLength(2);
-    expect(blocks[0]?.kind).toBe("paragraph");
+async function renderMarkdown(text: string): Promise<HTMLElement> {
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  await act(async () => root.render(React.createElement(ChatMarkdown, { text })));
+  return container;
+}
+
+describe("ChatMarkdown", () => {
+  it("renders GFM tables, task lists, and fenced code", async () => {
+    const container = await renderMarkdown([
+      "| Name | State |",
+      "| --- | --- |",
+      "| api | healthy |",
+      "",
+      "- [x] checked",
+      "",
+      "```ts",
+      "const healthy = true;",
+      "```",
+    ].join("\n"));
+
+    expect(container.querySelector("table")?.textContent).toContain("healthy");
+    expect(container.querySelector('input[type="checkbox"]')).not.toBeNull();
+    expect(container.querySelector(".run-md__code")?.textContent).toContain("const healthy");
+    expect(container.querySelector('button[aria-label="Copy code"]')).not.toBeNull();
   });
 
-  it("recognizes bullet lists", () => {
-    const blocks = parseChatBlocks("**Highlights**\n\n- one `x`\n- two");
-    expect(blocks[1]?.kind).toBe("list");
-    const list = blocks[1];
-    if (list?.kind === "list") {
-      expect(list.items).toHaveLength(2);
-      expect(list.items[0]).toEqual([
-        { kind: "text", text: "one " },
-        { kind: "code", text: "x" },
-      ]);
-    }
+  it("keeps raw HTML inert and protects external links", async () => {
+    const container = await renderMarkdown('<script>bad()</script>\n\n[Docs](https://example.com)');
+    expect(container.querySelector("script")).toBeNull();
+    expect(container.textContent).toContain("<script>bad()</script>");
+    expect(container.querySelector("a")?.getAttribute("rel")).toBe("noreferrer noopener");
   });
 
-  it("a paragraph containing a dash line is not a list", () => {
-    const blocks = parseChatBlocks("intro\n- not all lines are bullets");
-    expect(blocks[0]?.kind).toBe("paragraph");
+  it("never fetches images embedded in untrusted assistant Markdown", async () => {
+    const container = await renderMarkdown("![tracking pixel](https://attacker.example/pixel.png)");
+
+    expect(container.querySelector("img")).toBeNull();
+    expect(container.textContent).toContain("Image not loaded · tracking pixel");
   });
 
-  it("drops empty blocks (streaming edge)", () => {
-    expect(parseChatBlocks("")).toEqual([]);
-    expect(parseChatBlocks("a\n\n\n\nb")).toHaveLength(2);
+  it("throttles expensive Markdown commits while preserving the final delta", async () => {
+    vi.useFakeTimers();
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => root.render(React.createElement(ChatMarkdown, { text: "First", streaming: true })));
+    await act(async () => root.render(React.createElement(ChatMarkdown, { text: "Second", streaming: true })));
+    expect(container.textContent).toContain("First");
+    expect(container.textContent).not.toContain("Second");
+
+    await act(async () => vi.advanceTimersByTime(80));
+    expect(container.textContent).toContain("Second");
+
+    await act(async () => root.render(React.createElement(ChatMarkdown, { text: "Final", streaming: false })));
+    expect(container.textContent).toContain("Final");
+    await act(async () => root.unmount());
   });
 });

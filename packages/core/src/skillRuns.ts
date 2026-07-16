@@ -189,6 +189,8 @@ export interface CreateRunAttachment {
   id: string;
   fileName: string;
   contentType: string;
+  /** Server-verified inline MIME. Omitted/null keeps the attachment download-only. */
+  previewContentType?: string | null;
   byteSize: number;
   storageKey: string;
 }
@@ -1065,6 +1067,7 @@ async function loadAttachments(database: Db, orgId: string, runId: string): Prom
       promptId: sql<string>`${schema.skillRunAttachments.promptId}`,
       fileName: schema.skillRunAttachments.fileName,
       contentType: schema.skillRunAttachments.contentType,
+      previewContentType: schema.skillRunAttachments.previewContentType,
       byteSize: schema.skillRunAttachments.byteSize,
       storageKey: schema.skillRunAttachments.storageKey,
       createdAt: schema.skillRunAttachments.createdAt,
@@ -1080,7 +1083,14 @@ async function loadAttachments(database: Db, orgId: string, runId: string): Prom
         eq(schema.skillRunPrompts.id, schema.skillRunAttachments.promptId),
       ),
     )
-    .where(and(eq(schema.skillRunAttachments.orgId, orgId), eq(schema.skillRunAttachments.runId, runId)));
+    .where(and(
+      eq(schema.skillRunAttachments.orgId, orgId),
+      eq(schema.skillRunAttachments.runId, runId),
+      // A prompt stopped after entering processing still owns durable user input that appears in
+      // the partial transcript. Only a canceled prompt that never entered processing is hidden and
+      // eligible for deferred object cleanup. `attempt` is incremented by the atomic prompt claim.
+      sql`(${schema.skillRunPrompts.status} <> 'canceled' OR ${schema.skillRunPrompts.attempt} > 0)`,
+    ));
 }
 
 async function loadArtifacts(database: Db, orgId: string, runId: string) {
@@ -1114,6 +1124,7 @@ function toAttachmentRow(row: AttachmentWithMessageRow): SkillRunAttachmentRow {
     prompt_ordinal: row.promptOrdinal,
     file_name: row.fileName,
     content_type: row.contentType,
+    preview_content_type: row.previewContentType,
     byte_size: row.byteSize,
   };
 }
@@ -1305,9 +1316,15 @@ async function toDetail(
     loadInputSnapshot(database, row),
     database
       .select({
+        id: schema.skillRunPrompts.id,
         messageId: schema.skillRunPrompts.messageId,
+        ordinal: schema.skillRunPrompts.ordinal,
+        kind: schema.skillRunPrompts.kind,
         userText: schema.skillRunPrompts.userText,
         runtimePrompt: schema.skillRunPrompts.prompt,
+        status: schema.skillRunPrompts.status,
+        cancelRequestedAt: schema.skillRunPrompts.cancelRequestedAt,
+        createdAt: schema.skillRunPrompts.createdAt,
       })
       .from(schema.skillRunPrompts)
       .where(and(eq(schema.skillRunPrompts.orgId, row.orgId), eq(schema.skillRunPrompts.runId, row.id)))
@@ -1324,6 +1341,23 @@ async function toDetail(
     reactivatable_until: row.reactivatableUntil?.toISOString() ?? null,
     can_reactivate: canReactivateRun(row),
     attachments: attachments.map(toAttachmentRow),
+    pending_prompts: promptRows.flatMap((prompt) => {
+      if (prompt.status !== "queued" && prompt.status !== "processing") return [];
+      return [{
+          id: prompt.id,
+          message_id: prompt.messageId,
+          ordinal: prompt.ordinal,
+          kind: prompt.kind,
+          text: prompt.userText,
+          status: prompt.status === "processing" && prompt.cancelRequestedAt
+            ? "cancel_requested" as const
+            : prompt.status,
+          created_at: prompt.createdAt.toISOString(),
+          attachments: attachments
+            .filter((attachment) => attachment.promptId === prompt.id)
+            .map(toAttachmentRow),
+        }];
+    }),
     artifacts: artifactRows.map(toArtifactRow),
     input_snapshot: inputSnapshot,
   };
@@ -1695,9 +1729,25 @@ async function createRunInTransaction(input: {
       createdAt: promptCreatedAt,
       updatedAt: promptCreatedAt,
     })
-    .returning({ id: schema.skillRunPrompts.id });
+    .returning({
+      id: schema.skillRunPrompts.id,
+      messageId: schema.skillRunPrompts.messageId,
+      ordinal: schema.skillRunPrompts.ordinal,
+    });
   const initialPrompt = initialPrompts[0];
   if (!initialPrompt) throw new Error("initial prompt insert returned no row");
+  await input.database.insert(schema.skillRunEvents).values({
+    orgId: input.orgId,
+    runId,
+    sequence: 1,
+    type: "prompt.status",
+    payload: {
+      prompt_id: initialPrompt.id,
+      message_id: initialPrompt.messageId,
+      ordinal: initialPrompt.ordinal,
+      status: "queued",
+    },
+  });
   if (input.attachments.length > 0) {
     await consumeRunAttachmentUploadReservations({
       database: input.database,
@@ -1713,6 +1763,7 @@ async function createRunInTransaction(input: {
         promptId: initialPrompt.id,
         fileName: attachment.fileName,
         contentType: attachment.contentType,
+        previewContentType: attachment.previewContentType ?? null,
         byteSize: attachment.byteSize,
         storageKey: attachment.storageKey,
       })),
@@ -1889,7 +1940,12 @@ export async function getRunAttachment(input: {
   runId: string;
   attachmentId: string;
   database?: Db;
-}): Promise<{ fileName: string; contentType: string; storageKey: string }> {
+}): Promise<{
+  fileName: string;
+  contentType: string;
+  previewContentType: string | null;
+  storageKey: string;
+}> {
   const database = input.database ?? db;
   await assertMember(database, input.actor, input.orgId);
   const row = await loadRunRow(database, input.orgId, input.runId);
@@ -1899,7 +1955,12 @@ export async function getRunAttachment(input: {
   const attachments = await loadAttachments(database, input.orgId, row.id);
   const attachment = attachments.find((candidate) => candidate.id === input.attachmentId);
   if (!attachment) throw new RunValidationError("attachment not found", "attachment_not_found");
-  return { fileName: attachment.fileName, contentType: attachment.contentType, storageKey: attachment.storageKey };
+  return {
+    fileName: attachment.fileName,
+    contentType: attachment.contentType,
+    previewContentType: attachment.previewContentType,
+    storageKey: attachment.storageKey,
+  };
 }
 
 export async function getRunArtifact(input: {
@@ -1908,7 +1969,15 @@ export async function getRunArtifact(input: {
   runId: string;
   artifactId: string;
   database?: Db;
-}): Promise<{ fileName: string; contentType: string; storageKey: string; previewable: boolean }> {
+}): Promise<{
+  fileName: string;
+  contentType: string;
+  byteSize: number;
+  storageKey: string;
+  previewable: boolean;
+  /** Opaque row generation used to fence metadata from a concurrently replaced S3 object. */
+  generation: string;
+}> {
   const database = input.database ?? db;
   await assertMember(database, input.actor, input.orgId);
   const row = await loadRunRow(database, input.orgId, input.runId);
@@ -1921,8 +1990,20 @@ export async function getRunArtifact(input: {
   return {
     fileName: artifact.fileName,
     contentType: artifact.contentType,
+    byteSize: artifact.byteSize,
     storageKey: artifact.storageKey,
     previewable: artifact.previewable,
+    generation: [
+      artifact.id,
+      artifact.path,
+      artifact.fileName,
+      artifact.contentType,
+      artifact.byteSize,
+      artifact.previewable,
+      artifact.storageKey,
+      artifact.expiresAt.toISOString(),
+      artifact.updatedAt.toISOString(),
+    ].join("\0"),
   };
 }
 
@@ -1947,6 +2028,7 @@ export async function getRunPromptAttachments(input: {
       id: attachment.id,
       fileName: attachment.fileName,
       contentType: attachment.contentType,
+      previewContentType: attachment.previewContentType,
       byteSize: attachment.byteSize,
       storageKey: attachment.storageKey,
     }));
@@ -2055,6 +2137,7 @@ export async function loadRunMaterializationPlan(input: {
       id: attachment.id,
       fileName: attachment.fileName,
       contentType: attachment.contentType,
+      previewContentType: attachment.previewContentType,
       byteSize: attachment.byteSize,
       storageKey: attachment.storageKey,
     })),
@@ -2250,6 +2333,7 @@ export async function loadRunExecutionPlan(input: {
       id: attachment.id,
       fileName: attachment.fileName,
       contentType: attachment.contentType,
+      previewContentType: attachment.previewContentType,
       byteSize: attachment.byteSize,
       storageKey: attachment.storageKey,
     })),

@@ -1,101 +1,123 @@
-import type { ReactNode } from "react";
+"use client";
 
-/**
- * Markdown-lite for streamed chat replies (paragraphs, `- ` bullet lists, **bold**, `code`) — a
- * direct port of the design prototype's renderer. The full react-markdown pipeline used for SKILL.md
- * files is the wrong shape here: chat needs cheap re-renders on every streamed delta and only this
- * tiny grammar. Parsing is pure (node-testable); rendering maps blocks to elements.
- */
+import { memo, useEffect, useRef, useState, type ReactNode } from "react";
+import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
+import remarkGfm from "remark-gfm";
+import { Icon } from "../Icon";
+import { copyRunText } from "./clipboard";
 
-export type ChatInlinePart =
-  | { kind: "text"; text: string }
-  | { kind: "bold"; text: string }
-  | { kind: "code"; text: string };
-
-export type ChatBlock =
-  | { kind: "paragraph"; parts: ChatInlinePart[] }
-  | { kind: "list"; items: ChatInlinePart[][] };
-
-export function parseChatInline(text: string): ChatInlinePart[] {
-  const parts = text.split(/(\*\*[^*]+\*\*|`[^`]+`)/g);
-  const out: ChatInlinePart[] = [];
-  for (const part of parts) {
-    if (part === "") continue;
-    if (/^\*\*[^*]+\*\*$/.test(part)) out.push({ kind: "bold", text: part.slice(2, -2) });
-    else if (/^`[^`]+`$/.test(part)) out.push({ kind: "code", text: part.slice(1, -1) });
-    else out.push({ kind: "text", text: part });
+function plainText(value: ReactNode): string {
+  if (typeof value === "string" || typeof value === "number") return String(value);
+  if (Array.isArray(value)) return value.map(plainText).join("");
+  if (value && typeof value === "object" && "props" in value) {
+    return plainText((value as { props?: { children?: ReactNode } }).props?.children);
   }
-  return out;
+  return "";
 }
 
-export function parseChatBlocks(text: string): ChatBlock[] {
-  const blocks = String(text)
-    .split(/\n\n+/)
-    .filter((block) => block.trim() !== "");
-  return blocks.map((block) => {
-    const lines = block.split("\n");
-    const isList = lines.length > 0 && lines.every((line) => line.trim() === "" || line.startsWith("- "));
-    if (isList) {
-      return {
-        kind: "list",
-        items: lines.filter((line) => line.trim() !== "").map((line) => parseChatInline(line.slice(2))),
-      };
-    }
-    return { kind: "paragraph", parts: parseChatInline(block) };
-  });
-}
+function CodeBlock({ children }: { children?: ReactNode }) {
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "error">("idle");
+  useEffect(() => {
+    if (copyState === "idle") return;
+    const timer = window.setTimeout(() => setCopyState("idle"), 1_600);
+    return () => window.clearTimeout(timer);
+  }, [copyState]);
 
-function renderInline(parts: ChatInlinePart[], keyBase: string): ReactNode[] {
-  return parts.map((part, i) => {
-    const key = `${keyBase}-${i}`;
-    if (part.kind === "bold") {
-      return (
-        <strong key={key} style={{ fontWeight: 600 }}>
-          {part.text}
-        </strong>
-      );
-    }
-    if (part.kind === "code") {
-      return (
-        <code
-          key={key}
-          style={{
-            fontFamily: "var(--font-mono)",
-            fontSize: "0.92em",
-            background: "var(--color-surface-sunken)",
-            border: "1px solid var(--color-line)",
-            borderRadius: 4,
-            padding: "0 4px",
-          }}
-        >
-          {part.text}
-        </code>
-      );
-    }
-    return part.text;
-  });
-}
+  const child = Array.isArray(children) ? children[0] : children;
+  const className = child && typeof child === "object" && "props" in child
+    ? String((child as { props?: { className?: string } }).props?.className ?? "")
+    : "";
+  const language = className.match(/language-([^\s]+)/)?.[1] ?? "text";
+  const source = plainText(children).replace(/\n$/, "");
 
-export function ChatMarkdown({ text, streaming = false }: { text: string; streaming?: boolean }) {
-  const blocks = parseChatBlocks(text);
   return (
-    <>
-      {blocks.map((block, bi) =>
-        block.kind === "list" ? (
-          <ul key={`b${bi}`} style={{ margin: "6px 0", paddingLeft: 18, display: "flex", flexDirection: "column", gap: 4 }}>
-            {block.items.map((item, li) => (
-              <li key={li} style={{ color: "var(--color-muted)" }}>
-                {renderInline(item, `${bi}-${li}`)}
-              </li>
-            ))}
-          </ul>
-        ) : (
-          <p key={`b${bi}`} style={{ margin: bi === 0 ? 0 : "10px 0 0" }}>
-            {renderInline(block.parts, `p${bi}`)}
-          </p>
-        ),
-      )}
-      {streaming ? <span className="chat-caret" aria-hidden="true" /> : null}
-    </>
+    <div className="run-md__code">
+      <div className="run-md__code-head">
+        <span>{language}</span>
+        <button
+          type="button"
+          onClick={() => {
+            void copyRunText(source).then((copied) => setCopyState(copied ? "copied" : "error"));
+          }}
+          aria-label={copyState === "copied" ? "Code copied" : copyState === "error" ? "Code copy failed" : "Copy code"}
+        >
+          <Icon name={copyState === "copied" ? "check" : copyState === "error" ? "alert-triangle" : "copy"} size={12} />
+          {copyState === "copied" ? "Copied" : copyState === "error" ? "Copy failed" : "Copy"}
+        </button>
+      </div>
+      <pre>{children}</pre>
+    </div>
   );
 }
+
+const STREAM_MARKDOWN_INTERVAL_MS = 80;
+
+function useStreamingMarkdownText(text: string, streaming: boolean): string {
+  const [renderedText, setRenderedText] = useState(text);
+  const latestText = useRef(text);
+  const lastCommitAt = useRef(Date.now());
+  latestText.current = text;
+
+  useEffect(() => {
+    if (!streaming || text === renderedText) return;
+    const delay = Math.max(0, STREAM_MARKDOWN_INTERVAL_MS - (Date.now() - lastCommitAt.current));
+    const timer = window.setTimeout(() => {
+      lastCommitAt.current = Date.now();
+      setRenderedText(latestText.current);
+    }, delay);
+    return () => window.clearTimeout(timer);
+  }, [renderedText, streaming, text]);
+
+  // The final delta is never delayed once the server closes the message.
+  return streaming ? renderedText : text;
+}
+
+/** Parsing is isolated so parent/delta renders with the same throttled text are effectively free. */
+const ParsedMarkdown = memo(function ParsedMarkdown({ text }: { text: string }) {
+  return (
+    <ReactMarkdown
+      remarkPlugins={[remarkGfm]}
+      urlTransform={(url) => defaultUrlTransform(url)}
+      components={{
+        pre: CodeBlock,
+        a: ({ href, children, ...props }) => {
+          const external = Boolean(href && /^https?:\/\//i.test(href));
+          return (
+            <a
+              {...props}
+              href={href}
+              target={external ? "_blank" : undefined}
+              rel={external ? "noreferrer noopener" : undefined}
+            >
+              {children}
+            </a>
+          );
+        },
+        // Agent output is untrusted. Never let Markdown silently beacon to a remote image host;
+        // verified run images and videos are rendered through the authenticated media pipeline.
+        img: ({ alt }) => (
+          <span className="run-md__image-placeholder" role="note">
+            <Icon name="image" size={13} />
+            Image not loaded{alt ? ` · ${alt}` : ""}
+          </span>
+        ),
+        code: ({ className, children, ...props }) => (
+          <code className={className} {...props}>{children}</code>
+        ),
+      }}
+    >
+      {text}
+    </ReactMarkdown>
+  );
+});
+
+/** Full GFM rendering for assistant output. Raw HTML stays escaped by react-markdown. */
+export const ChatMarkdown = memo(function ChatMarkdown({ text, streaming = false }: { text: string; streaming?: boolean }) {
+  const renderedText = useStreamingMarkdownText(text, streaming);
+  return (
+    <div className="run-md">
+      <ParsedMarkdown text={renderedText} />
+      {streaming ? <span className="chat-caret" aria-hidden="true" /> : null}
+    </div>
+  );
+});

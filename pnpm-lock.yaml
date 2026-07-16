@@ -135,6 +135,9 @@ importers:
       '@posthog/react':
         specifier: ^1.10.3
         version: 1.10.3(@types/react@19.2.17)(posthog-js@1.396.4)(react@19.0.0)
+      '@shadcn/react':
+        specifier: 0.2.1
+        version: 0.2.1(@types/react@19.2.17)(react@19.0.0)
       '@trpc/client':
         specifier: ^10.45.2
         version: 10.45.4(@trpc/server@10.45.4)
@@ -1794,6 +1797,17 @@ packages:
 
   '@rushstack/eslint-patch@1.16.1':
     resolution: {integrity: sha512-TvZbIpeKqGQQ7X0zSCvPH9riMSFQFSggnfBjFZ1mEoILW+UuXCKwOoPcgjMwiUtRqFZ8jWhPJc4um14vC6I4ag==}
+
+  '@shadcn/react@0.2.1':
+    resolution: {integrity: sha512-5krgi3dRMKb5jH6a+qPzVJUy/54s0kKE4Rw4LjDfLqOdVQTWKUgxWf1kW8r912I0jX/Lzxqc+pgjkjWxUIK5BQ==}
+    peerDependencies:
+      '@types/react': '>=19'
+      react: '>=19'
+    peerDependenciesMeta:
+      '@types/react':
+        optional: true
+      react:
+        optional: true
 
   '@smithy/core@3.24.6':
     resolution: {integrity: sha512-wBXDRup6UU97VKyaiRo8AssnfStPtG0oAAfpq/bC0a1YYau8pM86YB4kM6ccoVi1mS8l/UHbn9oDM+7uozr/ug==}
@@ -5460,6 +5474,11 @@ snapshots:
   '@rtsao/scc@1.1.0': {}
 
   '@rushstack/eslint-patch@1.16.1': {}
+
+  '@shadcn/react@0.2.1(@types/react@19.2.17)(react@19.0.0)':
+    optionalDependencies:
+      '@types/react': 19.2.17
+      react: 19.0.0
 
   '@smithy/core@3.24.6':
     dependencies:
