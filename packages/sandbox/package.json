@@ -16,8 +16,8 @@
   "dependencies": {
     "@companion/contracts": "workspace:*",
     "@companion/core": "workspace:*",
-    "@opencode-ai/sdk": "1.17.13",
-    "@vercel/sandbox": "2.4.0"
+    "@opencode-ai/sdk": "1.18.2",
+    "@vercel/sandbox": "2.7.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
