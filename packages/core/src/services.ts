@@ -1214,7 +1214,7 @@ export async function getSkillPublicPreviewByShareToken(input: {
     creator_name: row.creator_name,
     creator_initials: row.creator_initials,
     star_count: Number(row.star_count),
-    updated_at: row.updated_at.toISOString(),
+    updated_at: new Date(row.updated_at).toISOString(),
   };
 }
 

@@ -107,7 +107,7 @@ export interface PreTenantSkillPreviewRow {
   current_version: string;
   frontmatter: string;
   star_count: number | string;
-  updated_at: Date;
+  updated_at: string;
 }
 
 export async function getPreTenantSkillPreview(
