@@ -109,9 +109,8 @@ describe("zip support", () => {
 
   it("rejects a zip whose entries exceed the total-size cap", async () => {
     const chunk = new Uint8Array(9 * 1024 * 1024); // 3 x 9 MB = 27 MB > MAX_ARCHIVE_BYTES (25 MB)
-    const zip = Buffer.from(zipSync({ "a.bin": chunk, "b.bin": chunk, "c.bin": chunk }));
-    const result = await validateSkillArchive(zip);
-    expect(result.ok).toBe(false);
+    const zip = Buffer.from(zipSync({ "a.bin": chunk, "b.bin": chunk, "c.bin": chunk }, { level: 0 }));
+    await expect(zipToTar(zip)).rejects.toThrow("archive exceeds size limit");
   });
 
   it("rejects a zip entry whose name normalizes to an empty path", async () => {
