@@ -252,7 +252,7 @@
   color: var(--color-accent-fg);
   border-radius: var(--radius-sm);
   padding: var(--space-4);
-  transform: rotate(-5deg);
+  transform: rotate(-2deg);
   box-shadow: var(--shadow-sm);
 }
 .v5-lost--note .v5-lost__where { color: var(--color-accent-fg); opacity: 0.65; }
@@ -263,7 +263,7 @@
 .v5-lost--dm {
   top: 14%; right: 2%;
   width: 240px;
-  transform: rotate(2deg);
+  transform: rotate(1deg);
   opacity: 0.92;
 }
 .v5-lost--dm .v5-dm__bubble {
@@ -285,7 +285,7 @@
   border: var(--border-width) solid var(--color-line);
   border-radius: var(--radius-sm);
   padding: var(--space-4);
-  transform: rotate(2deg);
+  transform: rotate(1deg);
   opacity: 0.8;
   box-shadow: var(--shadow-xs);
 }
@@ -299,7 +299,7 @@
   border: var(--border-width) dashed var(--color-line-strong);
   border-radius: var(--radius-sm);
   padding: var(--space-4);
-  transform: rotate(-2deg);
+  transform: rotate(-1deg);
   opacity: 0.62;
 }
 
@@ -307,7 +307,7 @@
 @media (max-width: 640px) {
   .v5-scatter { min-height: 0; display: flex; flex-direction: column; gap: var(--space-3); }
   .v5-lost { position: static; width: auto; }
-  .v5-lost--note { transform: rotate(-2deg); }
+  .v5-lost--note { transform: rotate(-1deg); }
   .v5-lost--dm { transform: rotate(1deg); opacity: 1; }
   .v5-lost--doc { transform: rotate(-1deg); opacity: 0.9; }
   .v5-lost--ghost { transform: rotate(1deg); }
@@ -605,3 +605,157 @@
 .v6-pdrawer__kv dt { font-size: var(--text-xs); color: var(--color-faint); margin: 0; }
 .v6-pdrawer__kv dd { margin: 0; font-family: var(--font-mono); font-size: var(--text-xs); color: var(--color-fg); text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .v6-pdrawer__actions { display: flex; align-items: center; gap: var(--space-2); margin-top: auto; }
+
+/* ============================================================================
+   v7 additions — hero spec strip, governance, open-source band
+   ============================================================================ */
+
+/* --- hero spec strip (quiet hairline row of standards signals) --------------
+   Operator-grade: machine values, hairlines, tabular. Sits between the CTAs
+   and the "free / open source" note. Signals the abstract value (standards,
+   versioning, permissioned sharing) without shouting. */
+.v5-hero__specs {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-top: var(--space-5);
+  padding: 7px 14px;
+  border: var(--border-width) solid var(--color-line);
+  border-radius: var(--radius-full);
+  background: var(--color-surface);
+  font-size: var(--text-xs);
+  color: var(--color-muted);
+  letter-spacing: var(--tracking-tight);
+}
+.v5-hero__spec {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.v5-hero__spec svg { width: 12px; height: 12px; color: var(--color-faint); flex: none; }
+.v5-hero__spec-sep {
+  width: 1px; height: 12px; background: var(--color-line-strong); opacity: 0.6; margin-right: 0;
+  display: inline-block;
+}
+@media (max-width: 640px) {
+  .v5-hero__specs { flex-direction: column; align-items: flex-start; gap: 6px; padding: 8px 12px; }
+  .v5-hero__spec-sep { display: none; }
+}
+
+/* --- governance (sharing, with permission) ----------------------------------
+   Three visibility levels as hairline cards. Mirrors the scope iconography
+   used in the portal capture so the page reads as one system. */
+.v5-gov { background: var(--color-canvas); border-top: var(--border-width) solid var(--color-line); border-bottom: var(--border-width) solid var(--color-line); }
+.v5-gov__inner { text-align: center; }
+.v5-gov__inner .v5-act__num { justify-content: center; }
+.v5-gov__inner .v5-act__num::before { content: ""; width: 56px; height: 1px; background: currentColor; opacity: 0.35; }
+.v5-gov h2 { margin-left: auto; margin-right: auto; max-width: 20ch; }
+.v5-gov__lead { margin-left: auto; margin-right: auto; max-width: 60ch; line-height: 1.55; }
+.v5-gov__levels {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  margin-top: var(--space-8);
+  text-align: left;
+  border-top: var(--border-width) solid var(--color-line);
+}
+.v5-gov__level {
+  padding: var(--space-6) var(--space-6) var(--space-1);
+  border-left: var(--border-width) solid var(--color-line);
+  background: var(--color-surface);
+}
+.v5-gov__level:first-child { border-left: none; }
+@media (max-width: 860px) {
+  .v5-gov__levels { grid-template-columns: 1fr; border-top: none; }
+  .v5-gov__level { border-left: none; padding: var(--space-5) 0 0; border-top: var(--border-width) solid var(--color-line); }
+  .v5-gov__level:first-child { border-top: none; padding-top: 0; }
+}
+.v5-gov__level-head { display: flex; align-items: center; gap: var(--space-2); margin-bottom: var(--space-3); }
+.v5-gov__level-icon {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 24px; height: 24px;
+  border-radius: var(--radius-sm);
+  background: var(--color-accent-tint);
+  color: var(--color-accent-ink);
+  flex: none;
+}
+.v5-gov__level-icon svg { width: 14px; height: 14px; }
+.v5-gov__level h3 { margin: 0; font-size: var(--text-md); font-weight: var(--weight-semibold); letter-spacing: -0.01em; }
+.v5-gov__level-scope {
+  margin-left: auto;
+  font-family: var(--font-mono); font-size: var(--text-xs); color: var(--color-faint);
+  border: var(--border-width) solid var(--color-line); border-radius: var(--radius-sm);
+  padding: 1px 6px; background: var(--color-canvas);
+}
+.v5-gov__level p { margin: 0; font-size: var(--text-sm); color: var(--color-muted); text-wrap: pretty; max-width: 34ch; }
+
+/* --- open-source band -------------------------------------------------------
+   Two columns: left = the sovereignty statement + the CLI strip; right = three
+   quiet signals. Light surface so the ink finale keeps its single dark moment. */
+.v5-oss {
+  padding-block: clamp(64px, 8vw, 112px);
+  background: var(--color-surface);
+  border-bottom: var(--border-width) solid var(--color-line);
+}
+.v5-oss__grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
+  gap: var(--space-8);
+  align-items: start;
+}
+@media (max-width: 900px) { .v5-oss__grid { grid-template-columns: 1fr; gap: var(--space-7); } }
+.v5-oss__intro .v5-act__num { margin-bottom: var(--space-4); }
+.v5-oss__intro h2 {
+  margin: 0;
+  font-size: var(--text-h2);
+  font-weight: var(--weight-semibold);
+  letter-spacing: -0.024em;
+  line-height: 1.08;
+  max-width: 14ch;
+  text-wrap: balance;
+}
+.v5-oss__intro .v5-act__sub { margin-top: var(--space-4); max-width: 46ch; }
+.v5-oss__devs {
+  display: flex; align-items: center; gap: var(--space-4);
+  margin-top: var(--space-6);
+  padding-top: var(--space-5);
+  border-top: var(--border-width) solid var(--color-line);
+  flex-wrap: wrap;
+}
+.v5-oss__devs-text { font-size: var(--text-sm); color: var(--color-muted); max-width: 38ch; }
+.v5-oss__devs-text strong { color: var(--color-fg); font-weight: var(--weight-semibold); }
+.v5-oss__code {
+  font-family: var(--font-mono); font-size: var(--text-sm); color: var(--color-fg);
+  background: var(--color-surface-sunken);
+  border: var(--border-width) solid var(--color-line);
+  border-radius: var(--radius-md);
+  padding: var(--space-2) var(--space-3);
+  white-space: nowrap;
+}
+
+.v5-oss__signals { display: flex; flex-direction: column; gap: var(--space-3); }
+.v5-oss__signal {
+  display: flex; align-items: flex-start; gap: var(--space-4);
+  padding: var(--space-5);
+  background: var(--color-canvas);
+  border: var(--border-width) solid var(--color-line);
+  border-radius: var(--radius-lg);
+}
+.v5-oss__signal-icon {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 32px; height: 32px;
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  border: var(--border-width) solid var(--color-line);
+  color: var(--color-accent-ink);
+  flex: none;
+}
+.v5-oss__signal-icon svg { width: 16px; height: 16px; }
+.v5-oss__signal-body h3 { margin: 0; font-size: var(--text-md); font-weight: var(--weight-semibold); letter-spacing: -0.01em; }
+.v5-oss__signal-body p { margin: 4px 0 0; font-size: var(--text-sm); color: var(--color-muted); text-wrap: pretty; }
+
+/* reveal staggering for the new grids */
+@media (prefers-reduced-motion: no-preference) {
+  .v5-gov__level:nth-child(2), .v5-oss__signal:nth-child(2) { transition-delay: 70ms; }
+  .v5-gov__level:nth-child(3), .v5-oss__signal:nth-child(3) { transition-delay: 140ms; }
+}

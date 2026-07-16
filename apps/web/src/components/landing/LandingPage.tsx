@@ -1,10 +1,12 @@
 "use client";
 
-/* Companion marketing landing (v6A "Keystroke").
-   Ported from the claude.ai/design handoff (landing-v6a-app.jsx). English-only,
-   yellow accent. Reuses the app's Button/Badge (cds) and Icon (lucide) so the
-   page stays in sync with the real design system. The portal demo is
-   presentational — it mirrors the real Skills list but is not API-wired. */
+/* Companion marketing landing (v7 "The Library").
+   English-only, signal-yellow accent. Operator-grade-warm: precise and calm
+   like Linear/Stripe/Raycast, with a human undercurrent (real colleagues,
+   real know-how). Reuses the app's Button/Badge (cds) and Icon (lucide) so
+   the page stays in sync with the real design system. The portal demo is
+   presentational and mirrors the real Skills list; it is not API-wired.
+   Copy follows DESIGN.md: sentence case, no em dashes in UI copy, terse. */
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
@@ -20,23 +22,31 @@ const COPY = {
   nav: { story: "How it works", moat: "Why it matters", library: "The library" },
   github: "GitHub",
   navCta: "Get started",
+
   heroBadge: "The team skill library",
-  heroTitlePre: "You can't be good at everything. ",
-  heroTitleMark: "Your team already is.",
+  heroTitlePre: "Your team's best work, ",
+  heroTitleMark: "packaged and shared.",
   heroSub:
-    "Skills are your colleagues' best prompts, packaged. Browse the team library, pick the ones you need, and use them in your AI for anything.",
+    "Skills are your colleagues' best prompts, workflows, and playbooks, captured once and reused everywhere. One permissioned library that turns individual expertise into team capability.",
   ctaPrimary: "Start your team's library",
   ctaSecondary: "See how it works",
-  heroNote: "Free and open source",
+  heroNote: "Free, open source, and self-hostable.",
+  heroSpecs: [
+    { icon: "file-code", label: "SKILL.md standard" },
+    { icon: "git-branch", label: "Semantic versioning" },
+    { icon: "lock", label: "Permissioned sharing" },
+  ],
+
   libInstall: "Use this skill",
   libInstalled: "Added",
-  tickerLabel: "A few skills your colleagues have already shared",
+  tickerLabel: "Live in your team's library",
+
   lossNum: "01 · Without Companion",
   lossTitle: "The same prompt, written four times.",
   lossSub:
-    "You're brilliant at your job, so your prompts for it are brilliant too. Same for everyone else, in their own corner. But nothing circulates: each team quietly rebuilds what another already perfected.",
+    "You're brilliant at your job, so your prompts are too. Same for everyone else, in their own corner. Nothing circulates. Each team quietly rebuilds what another already perfected.",
   lossPunch: "Hours lost, every week, in every team.",
-  lostNote: { where: "Marie · product", text: "Meeting-summary prompt v7. The good one." },
+  lostNote: { where: "Marie · product", text: "Meeting summary prompt v7. The good one." },
   lostDm: {
     who: "Jonas",
     a: "blue",
@@ -45,29 +55,31 @@ const COPY = {
   },
   lostDoc: { where: "Tom · engineering", text: "meeting-notes-prompt-FINAL-v2" },
   lostGhost: { where: "you, next week", text: "About to write it a fourth time" },
+
   turnNum: "02 · With Companion",
   turnTitle: "Borrow the expert, every time.",
   turnSub:
-    "A skill is an expert's know-how, packaged: the best prompt for the job, written by the person who does that job best, ready for anyone to use.",
+    "A skill is an expert's know-how, packaged. The best prompt for the job, written by the person who does it best, ready for anyone to use.",
   turnSteps: [
     {
       title: "Experts share",
-      desc: "Léa shares her LinkedIn skill, Sam his troubleshooting helper. Each one comes from the person who knows that job best.",
+      desc: "Lea shares her LinkedIn skill, Sam his troubleshooting helper. Each one comes from the person who knows that job best.",
     },
     {
       title: "Everyone borrows",
-      desc: "Find it in the library, pick it, use it. You write like marketing, plan like product, research like sales.",
+      desc: "Find it in the library, pick it, use it. Write like marketing, plan like product, research like sales.",
     },
     {
-      title: "Simply and safely",
-      desc: "Each skill is shared exactly as widely as its owner decides: just you, your team, or the whole company.",
+      title: "Shared on your terms",
+      desc: "Each skill is visible exactly as widely as its owner decides: just you, your team, or the whole workspace.",
     },
   ],
+
   moatNum: "Why it matters",
   moatTitlePre: "The advantage ",
   moatTitleMark: "no AI can copy.",
   moatSub:
-    "You're building a company. Everyone has access to the same AI. What's yours is how your people use it: the prompts your experts refined on your problems, your customers, your real work. Skills capture that know-how and keep it in the building.",
+    "Everyone has access to the same AI. What's yours is how your people use it. The prompts your experts refined on your customers, your product, your real work. Skills capture that know-how and keep it in the building.",
   moatCols: [
     {
       title: "Built on your reality",
@@ -79,16 +91,28 @@ const COPY = {
     },
     {
       title: "Competitors don't have it",
-      desc: "This is your own know-how, getting better every week. The longer you run, the wider the gap.",
+      desc: "This is your own know-how, getting better every week. The longer you run it, the wider the gap.",
     },
   ],
+
+  govNum: "Sharing, with permission",
+  govTitlePre: "Visible to ",
+  govTitleMark: "exactly who you choose.",
+  govSub:
+    "Every skill is shared on purpose. Private by default, shared with a team, or open to the whole workspace. Nothing leaks, nothing is over-shared. You always know who can use what.",
+  govLevels: [
+    { icon: "lock", title: "Private", scope: "private", desc: "Just you. Drafts, experiments, works in progress." },
+    { icon: "users", title: "Team", scope: "team", desc: "Your team's shared playbook. Editors and admins manage it." },
+    { icon: "globe", title: "Everyone", scope: "everyone", desc: "The whole workspace. Company-wide know-how, one search away." },
+  ],
+
   payoffNum: "03 · The result",
   payoffTitle: "Every expert's best work, one search away.",
   payoffSub:
     "The library grows every week. New hires start with the whole company's playbook on day one.",
   portalCaption: "This is the real thing. Click around: star, filter, pick a skill.",
   portalDescs: {
-    "linkedin-posts": "Léa's prompt for posts that hook in line one and never sound like a robot.",
+    "linkedin-posts": "Lea's prompt for posts that hook in line one and never sound like a robot.",
     "meeting-summaries": "Paste a transcript, get decisions, owners and deadlines.",
     "debug-my-setup": "Sam's checklist for fixing a broken setup, step by step.",
     "sales-research": "A 10-minute company brief before any sales call.",
@@ -102,21 +126,30 @@ const COPY = {
     },
     {
       title: "The best version wins",
-      desc: "Each skill comes from the person who does that job best, and every improvement they make reaches everyone instantly.",
+      desc: "Each skill comes from the person who does the job best. Every improvement they make reaches everyone instantly.",
     },
     {
-      title: "Simple and secure",
+      title: "Permissioned by design",
       desc: "Sharing is explicit. Every skill is visible exactly as widely as its owner decides, and you always know who can use what.",
     },
   ],
-  buildersStrong: "For developers:",
-  buildersText:
-    " a real toolchain underneath. Versioned skills, a command line, and the open SKILL.md standard. Never a black box.",
+
+  ossKicker: "Open source",
+  ossTitle: "Yours. All of it.",
+  ossSub:
+    "Companion is MIT licensed and runs on your own infrastructure. The library, the skills, the permissions, the audit trail. No lock-in, no black box, no one else holding your know-how.",
+  ossSignals: [
+    { icon: "shield-check", title: "MIT licensed", desc: "Free forever, built in the open." },
+    { icon: "building-2", title: "Self-hostable", desc: "Your skills, your servers, your rules." },
+    { icon: "file-code", title: "SKILL.md standard", desc: "Open format, portable, no lock-in." },
+  ],
+  ossDevsStrong: "For developers:",
+  ossDevsText: " a real toolchain underneath. Versioned skills, a command line, and the open SKILL.md standard.",
+
   finaleTitle: "Your company is full of experts. Borrow them.",
   finaleSub: "Up and running in minutes. The first skills can be live this afternoon.",
   finaleNote: "Your next prompt is already written.",
-  finaleSmall:
-    "Open source, MIT licensed. And if you ever need it, it can run entirely on your own infrastructure.",
+  finaleSmall: "Open source, MIT licensed. Runs entirely on your own infrastructure when you need it to.",
   finaleCta: "Get started",
   footerBy: "an open source tool by The Vibe Company",
   footerDocs: "Documentation",
@@ -124,7 +157,7 @@ const COPY = {
 
 type Copy = typeof COPY;
 
-/* Portal rows — machine values stay literal, like a real screenshot. */
+/* Portal rows. Machine values stay literal, like a real screenshot. */
 type PortalRow = {
   id: string;
   team: string;
@@ -140,23 +173,23 @@ type PortalRow = {
 };
 
 const PORTAL_ROWS: PortalRow[] = [
-  { id: "linkedin-posts", team: "marketing", who: "Léa", a: "terracotta", scope: "public", scopeLabel: "everyone", ver: "1.4.0", stars: 13, when: "2h ago", recent: true },
+  { id: "linkedin-posts", team: "marketing", who: "Lea", a: "terracotta", scope: "public", scopeLabel: "everyone", ver: "1.4.0", stars: 13, when: "2h ago", recent: true },
   { id: "meeting-summaries", team: "product", who: "Marie", a: "violet", scope: "public", scopeLabel: "everyone", ver: "2.2.0", stars: 11, when: "yesterday", recent: true },
   { id: "debug-my-setup", team: "platform", who: "Sam", a: "amber", scope: "team", scopeLabel: "platform", ver: "3.0.1", stars: 8, when: "3d ago", recent: true },
   { id: "sales-research", team: "sales", who: "Jonas", a: "blue", scope: "team", scopeLabel: "sales", ver: "1.0.2", stars: 6, when: "1w ago" },
-  { id: "brand-voice", team: "marketing", who: "Léa", a: "terracotta", scope: "public", scopeLabel: "everyone", ver: "1.1.0", stars: 9, when: "2w ago" },
+  { id: "brand-voice", team: "marketing", who: "Lea", a: "terracotta", scope: "public", scopeLabel: "everyone", ver: "1.1.0", stars: 9, when: "2w ago" },
   { id: "weekly-report", team: "you", who: "You", a: "slate", scope: "private", scopeLabel: "just you", ver: "0.9.1", stars: 0, when: "4w ago", draft: true },
 ];
 const SCOPE_ICON: Record<PortalRow["scope"], string> = { private: "lock", team: "users", public: "globe" };
 
-/* Ticker chips — a slice of the library in motion. */
+/* Ticker chips. A slice of the library in motion. */
 type TickerSkill = { id: string; who: string; a: string; stars: number };
 const TICKER_SKILLS: TickerSkill[] = [
-  { id: "linkedin-posts", who: "Léa", a: "terracotta", stars: 13 },
+  { id: "linkedin-posts", who: "Lea", a: "terracotta", stars: 13 },
   { id: "meeting-summaries", who: "Marie", a: "violet", stars: 11 },
   { id: "debug-my-setup", who: "Sam", a: "amber", stars: 8 },
   { id: "sales-research", who: "Jonas", a: "blue", stars: 6 },
-  { id: "brand-voice", who: "Léa", a: "terracotta", stars: 9 },
+  { id: "brand-voice", who: "Lea", a: "terracotta", stars: 9 },
   { id: "cold-emails", who: "Jonas", a: "blue", stars: 11 },
   { id: "incident-postmortem", who: "Sam", a: "amber", stars: 7 },
 ];
@@ -257,6 +290,15 @@ function Hero({ c }: { c: Copy }) {
         <Button variant="secondary" onClick={() => { location.hash = "#loss"; }}>
           {c.ctaSecondary}
         </Button>
+      </div>
+      <div className="v5-hero__specs" aria-hidden="true">
+        {c.heroSpecs.map((s, i) => (
+          <span className="v5-hero__spec" key={s.label}>
+            {i > 0 ? <span className="v5-hero__spec-sep" /> : null}
+            <Icon name={s.icon} size={12} />
+            {s.label}
+          </span>
+        ))}
       </div>
       <p className="v5-hero__note">{c.heroNote}</p>
     </section>
@@ -364,6 +406,35 @@ function Moat({ c }: { c: Copy }) {
             <div className="v5-moat__col v5-reveal" key={col.title}>
               <h3>{col.title}</h3>
               <p>{col.desc}</p>
+            </div>
+          ))}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function Governance({ c }: { c: Copy }) {
+  return (
+    <section className="v5-act v5-gov" id="sharing" data-screen-label="governance">
+      <div className="v5-wrap v5-gov__inner">
+        <p className="v5-act__num">{c.govNum}</p>
+        <h2 className="v5-reveal">
+          {c.govTitlePre}
+          <span className="v5-mark v5-mark--lit">{c.govTitleMark}</span>
+        </h2>
+        <p className="v5-act__sub v5-gov__lead v5-reveal">{c.govSub}</p>
+        <div className="v5-gov__levels">
+          {c.govLevels.map((lvl) => (
+            <div className="v5-gov__level v5-reveal" key={lvl.title}>
+              <div className="v5-gov__level-head">
+                <span className="v5-gov__level-icon">
+                  <Icon name={lvl.icon} size={14} />
+                </span>
+                <h3>{lvl.title}</h3>
+                <code className="v5-gov__level-scope">scope: {lvl.scope}</code>
+              </div>
+              <p>{lvl.desc}</p>
             </div>
           ))}
         </div>
@@ -577,21 +648,40 @@ function Payoff({ c }: { c: Copy }) {
   );
 }
 
-function Builders({ c }: { c: Copy }) {
+function OpenSource({ c }: { c: Copy }) {
   return (
-    <div className="v5-builders" id="devs" data-screen-label="for-developers">
-      <div className="v5-wrap v5-builders__inner">
-        <span className="v5-builders__text">
-          <strong>{c.buildersStrong}</strong>
-          {c.buildersText}
-        </span>
-        <span className="v5-builders__code">companion skills push · pull · sync</span>
-        <span className="v5-builders__spacer"></span>
-        <Button variant="secondary" size="sm" onClick={() => window.open(GITHUB_URL, "_blank", "noopener,noreferrer")}>
-          GitHub ↗
-        </Button>
+    <section className="v5-oss" id="open-source" data-screen-label="open-source">
+      <div className="v5-wrap v5-oss__grid">
+        <div className="v5-oss__intro">
+          <p className="v5-act__num">{c.ossKicker}</p>
+          <h2 className="v5-reveal">{c.ossTitle}</h2>
+          <p className="v5-act__sub v5-reveal">{c.ossSub}</p>
+          <div className="v5-oss__devs v5-reveal">
+            <span className="v5-oss__devs-text">
+              <strong>{c.ossDevsStrong}</strong>
+              {c.ossDevsText}
+            </span>
+            <code className="v5-oss__code">companion skills push · pull · sync</code>
+            <Button variant="secondary" size="sm" onClick={() => window.open(GITHUB_URL, "_blank", "noopener,noreferrer")}>
+              {c.github} ↗
+            </Button>
+          </div>
+        </div>
+        <div className="v5-oss__signals">
+          {c.ossSignals.map((s) => (
+            <div className="v5-oss__signal v5-reveal" key={s.title}>
+              <span className="v5-oss__signal-icon" aria-hidden="true">
+                <Icon name={s.icon} size={16} />
+              </span>
+              <div className="v5-oss__signal-body">
+                <h3>{s.title}</h3>
+                <p>{s.desc}</p>
+              </div>
+            </div>
+          ))}
+        </div>
       </div>
-    </div>
+    </section>
   );
 }
 
@@ -658,8 +748,9 @@ export function LandingPage() {
         <Loss c={c} />
         <Turn c={c} />
         <Moat c={c} />
+        <Governance c={c} />
         <Payoff c={c} />
-        <Builders c={c} />
+        <OpenSource c={c} />
         <Finale c={c} />
       </main>
       <Footer c={c} />
