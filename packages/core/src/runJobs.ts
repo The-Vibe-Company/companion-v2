@@ -102,7 +102,7 @@ export async function heartbeatRunWorker(input: {
   const ttlSeconds = input.ttlSeconds ?? 15;
   if (ttlSeconds < 5 || ttlSeconds > 300) throw new Error("invalid run worker heartbeat ttl");
   await database.execute(sql`
-    select companion_heartbeat_skill_run_worker(${input.workerId}, ${ttlSeconds}, 1, 1)
+    select companion_heartbeat_skill_run_worker(${input.workerId}, ${ttlSeconds}, 1, 2)
   `);
 }
 
@@ -714,6 +714,61 @@ function publicPromptStatus(
     : prompt.status;
 }
 
+/**
+ * Protocol-2 claims distinguish a pre-send retry from an ambiguous legacy claim. A protocol-0/1
+ * row with a consumed attempt remains conservative during rolling deploys, even without a marker.
+ */
+function promptMayHaveReachedRuntime(
+  prompt: Pick<RunPromptRow, "attempt" | "dispatchProtocol" | "sendAttemptedAt">,
+): boolean {
+  return prompt.sendAttemptedAt !== null || (prompt.attempt > 0 && prompt.dispatchProtocol < 2);
+}
+
+function queuedPromptCanReleaseAttachments(
+  prompt: Pick<RunPromptRow, "status" | "kind" | "attempt" | "dispatchProtocol" | "sendAttemptedAt">,
+): boolean {
+  return prompt.status === "queued"
+    && prompt.kind === "follow_up"
+    && !promptMayHaveReachedRuntime(prompt);
+}
+
+async function reservePromptAttachmentsForCleanup(
+  database: Db,
+  input: {
+    orgId: string;
+    runId: string;
+    promptIds: string[];
+    creatorId: string;
+    now: Date;
+  },
+): Promise<void> {
+  if (input.promptIds.length === 0) return;
+  const attachments = await database
+    .select({ storageKey: schema.skillRunAttachments.storageKey })
+    .from(schema.skillRunAttachments)
+    .where(
+      and(
+        eq(schema.skillRunAttachments.orgId, input.orgId),
+        eq(schema.skillRunAttachments.runId, input.runId),
+        inArray(schema.skillRunAttachments.promptId, input.promptIds),
+      ),
+    );
+  for (const attachment of attachments) {
+    await database
+      .insert(schema.skillRunAttachmentUploads)
+      .values({
+        storageKey: attachment.storageKey,
+        orgId: input.orgId,
+        creatorId: input.creatorId,
+        touchedAt: input.now,
+      })
+      .onConflictDoUpdate({
+        target: schema.skillRunAttachmentUploads.storageKey,
+        set: { touchedAt: input.now },
+      });
+  }
+}
+
 /** Caller must hold the run row lock; this keeps prompt transitions and replay cursors atomic. */
 async function appendPromptStatusEvent(
   database: Db,
@@ -764,12 +819,20 @@ async function terminalizeOutstandingRunPrompts(
     transcriptEventSequence: number;
     status: "canceled" | "error";
     now: Date;
+    creatorId?: string;
     errorCode?: string;
     userMessage?: string;
   },
 ): Promise<RunPromptRow[]> {
   const active = await database
-    .select({ id: schema.skillRunPrompts.id })
+    .select({
+      id: schema.skillRunPrompts.id,
+      status: schema.skillRunPrompts.status,
+      kind: schema.skillRunPrompts.kind,
+      attempt: schema.skillRunPrompts.attempt,
+      dispatchProtocol: schema.skillRunPrompts.dispatchProtocol,
+      sendAttemptedAt: schema.skillRunPrompts.sendAttemptedAt,
+    })
     .from(schema.skillRunPrompts)
     .where(
       and(
@@ -780,12 +843,36 @@ async function terminalizeOutstandingRunPrompts(
     )
     .for("update");
   if (active.length === 0) return [];
+  const releasablePromptIds = input.status === "canceled"
+    ? active.filter(queuedPromptCanReleaseAttachments).map((prompt) => prompt.id)
+    : [];
+  if (releasablePromptIds.length > 0) {
+    if (!input.creatorId) throw new Error("canceled prompt cleanup requires a creator id");
+    await reservePromptAttachmentsForCleanup(database, {
+      orgId: input.orgId,
+      runId: input.runId,
+      promptIds: releasablePromptIds,
+      creatorId: input.creatorId,
+      now: input.now,
+    });
+  }
   const rows = await database
     .update(schema.skillRunPrompts)
     .set({
       status: input.status,
       ...(input.status === "canceled"
-        ? { cancelRequestedAt: sql`coalesce(${schema.skillRunPrompts.cancelRequestedAt}, ${input.now})` }
+        ? {
+            cancelRequestedAt: sql`coalesce(
+              ${schema.skillRunPrompts.cancelRequestedAt},
+              ${input.now.toISOString()}::timestamp with time zone
+            )`,
+            attachmentsRetained: releasablePromptIds.length === 0
+              ? true
+              : sql`CASE WHEN ${schema.skillRunPrompts.id} IN (${sql.join(
+                  releasablePromptIds.map((id) => sql`${id}::uuid`),
+                  sql`, `,
+                )}) THEN false ELSE true END`,
+          }
         : {
             errorCode: input.errorCode ?? "run_failed",
             userMessage: input.userMessage ?? "the run ended before this prompt could complete",
@@ -1030,6 +1117,9 @@ export async function enqueueRunPrompt(input: {
           .set({
             status: "queued",
             attempt: 0,
+            dispatchProtocol: 0,
+            sendAttemptedAt: null,
+            attachmentsRetained: true,
             availableAt: promptCreatedAt,
             cancelRequestedAt: null,
             leaseOwner: null,
@@ -1434,6 +1524,11 @@ export async function claimNextRunPrompt(input: {
         // Lease recovery resumes the already-persisted deterministic message id. Only a prompt
         // explicitly returned to `queued` by failRunPrompt consumes another execution attempt.
         attempt: prompt.status === "queued" ? prompt.attempt + 1 : prompt.attempt,
+        // Never relabel an old ambiguous retry as protocol 2. Fresh claims and retries already
+        // guarded by protocol 2 can prove that a null send marker means no external side effect.
+        dispatchProtocol: prompt.status === "queued" && prompt.attempt === 0
+          ? 2
+          : prompt.dispatchProtocol,
         leaseReclaimCount:
           prompt.status === "processing" ? prompt.leaseReclaimCount + 1 : prompt.leaseReclaimCount,
         leaseOwner: input.workerId,
@@ -1625,6 +1720,71 @@ export async function heartbeatRunPrompt(input: {
   });
 }
 
+/**
+ * Commit the external-side-effect barrier under both exact leases immediately before sendPrompt.
+ * Once set, the marker is never cleared: a timeout after the call starts is permanently ambiguous
+ * until a worker inspects the deterministic message id and reaches the continuation barrier.
+ */
+export async function markRunPromptSendAttempted(input: {
+  actor: ActorContext;
+  orgId: string;
+  runId: string;
+  promptId: string;
+  workerId: string;
+  database?: Db;
+}): Promise<"marked" | "prompt_cancel_requested" | "run_cancel_requested" | "lost_lease"> {
+  const database = input.database ?? db;
+  try {
+    return await database.transaction(async (transaction) => {
+      const tx = transaction as unknown as Db;
+      const run = await ownedRun({ ...input, database: tx, lock: true });
+      await assertLiveRunJobLease({ ...input, database: tx });
+      if (run.cancelRequestedAt || run.status === "canceled") return "run_cancel_requested";
+      const promptRows = await tx
+        .select()
+        .from(schema.skillRunPrompts)
+        .where(
+          and(
+            eq(schema.skillRunPrompts.orgId, input.orgId),
+            eq(schema.skillRunPrompts.runId, input.runId),
+            eq(schema.skillRunPrompts.id, input.promptId),
+            eq(schema.skillRunPrompts.status, "processing"),
+            eq(schema.skillRunPrompts.leaseOwner, input.workerId),
+            sql`${schema.skillRunPrompts.leaseExpiresAt} > clock_timestamp()`,
+          ),
+        )
+        .for("update");
+      const prompt = promptRows[0];
+      if (!prompt) return "lost_lease";
+      if (prompt.cancelRequestedAt) return "prompt_cancel_requested";
+      if (prompt.sendAttemptedAt) return "marked";
+      const marked = await tx
+        .update(schema.skillRunPrompts)
+        .set({
+          dispatchProtocol: 2,
+          sendAttemptedAt: sql`clock_timestamp()`,
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(schema.skillRunPrompts.orgId, input.orgId),
+            eq(schema.skillRunPrompts.runId, input.runId),
+            eq(schema.skillRunPrompts.id, input.promptId),
+            eq(schema.skillRunPrompts.status, "processing"),
+            eq(schema.skillRunPrompts.leaseOwner, input.workerId),
+            isNull(schema.skillRunPrompts.cancelRequestedAt),
+            sql`${schema.skillRunPrompts.leaseExpiresAt} > clock_timestamp()`,
+          ),
+        )
+        .returning({ id: schema.skillRunPrompts.id });
+      return marked[0] ? "marked" : "lost_lease";
+    });
+  } catch (error) {
+    if (error instanceof LostRunLeaseError) return "lost_lease";
+    throw error;
+  }
+}
+
 export async function failRunPrompt(input: {
   actor: ActorContext;
   orgId: string;
@@ -1732,48 +1892,29 @@ export async function requestRunPromptCancellation(input: {
     if (currentStatus === "cancel_requested") {
       return { prompt_id: prompt.id, status: currentStatus, requested: false };
     }
-    if (prompt.kind === "initial" && prompt.status === "queued") {
+    const queuedDispatchAmbiguous = prompt.status === "queued" && promptMayHaveReachedRuntime(prompt);
+    if (prompt.kind === "initial" && prompt.status === "queued" && !queuedDispatchAmbiguous) {
       throw new RunBusyError(
         "end the session to cancel its initial prompt before dispatch",
         "initial_prompt_requires_run_cancel",
       );
     }
     const now = new Date();
-    if (prompt.status === "queued") {
-      const attachmentRows = await tx
-        .select({ storageKey: schema.skillRunAttachments.storageKey })
-        .from(schema.skillRunAttachments)
-        .where(
-          and(
-            eq(schema.skillRunAttachments.orgId, input.orgId),
-            eq(schema.skillRunAttachments.runId, input.runId),
-            eq(schema.skillRunAttachments.promptId, prompt.id),
-          ),
-        );
-      for (const attachment of attachmentRows) {
-        await tx
-          .insert(schema.skillRunAttachmentUploads)
-          .values({
-            storageKey: attachment.storageKey,
-            orgId: input.orgId,
-            creatorId: input.actor.id,
-            touchedAt: now,
-          })
-          .onConflictDoUpdate({
-            target: schema.skillRunAttachmentUploads.storageKey,
-            set: { touchedAt: now },
-          });
-      }
+    if (prompt.status === "queued" && !queuedDispatchAmbiguous) {
+      await reservePromptAttachmentsForCleanup(tx, {
+        orgId: input.orgId,
+        runId: input.runId,
+        promptIds: [prompt.id],
+        creatorId: input.actor.id,
+        now,
+      });
       // Keep metadata until the age-gated S3 sweep succeeds. Besides making object deletion
       // recoverable, byte_size must continue counting toward the immutable 100 MB/run budget.
       const canceledRows = await tx
         .update(schema.skillRunPrompts)
         .set({
           status: "canceled",
-          // Terminal queued cancellation is the cleanup path even when this row is a retry whose
-          // earlier claim incremented `attempt`. Canceled rows with attempt > 0 are reserved for
-          // worker-finalized processing stops whose files remain part of the partial transcript.
-          attempt: 0,
+          attachmentsRetained: false,
           cancelRequestedAt: now,
           leaseOwner: null,
           leaseExpiresAt: null,
@@ -1822,19 +1963,47 @@ export async function requestRunPromptCancellation(input: {
     }
     const requestedRows = await tx
       .update(schema.skillRunPrompts)
-      .set({ cancelRequestedAt: now, updatedAt: now })
+      .set(queuedDispatchAmbiguous
+        ? {
+            status: "processing",
+            cancelRequestedAt: now,
+            leaseOwner: null,
+            leaseExpiresAt: now,
+            heartbeatAt: now,
+            attachmentsRetained: true,
+            updatedAt: now,
+          }
+        : { cancelRequestedAt: now, updatedAt: now })
       .where(
-        and(
-          eq(schema.skillRunPrompts.orgId, input.orgId),
-          eq(schema.skillRunPrompts.runId, input.runId),
-          eq(schema.skillRunPrompts.id, prompt.id),
-          eq(schema.skillRunPrompts.status, "processing"),
-          isNull(schema.skillRunPrompts.cancelRequestedAt),
-        ),
+        queuedDispatchAmbiguous
+          ? and(
+              eq(schema.skillRunPrompts.orgId, input.orgId),
+              eq(schema.skillRunPrompts.runId, input.runId),
+              eq(schema.skillRunPrompts.id, prompt.id),
+              eq(schema.skillRunPrompts.status, "queued"),
+              // The run lock serializes normal claims. Keep a database-side guard as defense in
+              // depth so the partial unique index cannot turn a corrupt FIFO into a 500 response.
+              sql`NOT EXISTS (
+                SELECT 1 FROM ${schema.skillRunPrompts} active
+                WHERE active.org_id = ${input.orgId}::uuid
+                  AND active.run_id = ${input.runId}::uuid
+                  AND active.status = 'processing'
+              )`,
+            )
+          : and(
+              eq(schema.skillRunPrompts.orgId, input.orgId),
+              eq(schema.skillRunPrompts.runId, input.runId),
+              eq(schema.skillRunPrompts.id, prompt.id),
+              eq(schema.skillRunPrompts.status, "processing"),
+              isNull(schema.skillRunPrompts.cancelRequestedAt),
+            ),
       )
       .returning();
     const requested = requestedRows[0];
     if (!requested) {
+      if (queuedDispatchAmbiguous) {
+        throw new RunBusyError("another prompt is already processing", "prompt_started");
+      }
       return { prompt_id: prompt.id, status: publicPromptStatus(prompt), requested: false };
     }
     await appendPromptStatusEvent(tx, {
@@ -1849,7 +2018,7 @@ export async function requestRunPromptCancellation(input: {
       action: "skill.run.prompt.cancel_requested",
       targetType: "skill_run_prompt",
       targetId: prompt.id,
-      metadata: { run_id: input.runId },
+      metadata: { run_id: input.runId, recovered_ambiguous_dispatch: queuedDispatchAmbiguous },
     });
     return { prompt_id: prompt.id, status: "cancel_requested", requested: true };
   });
@@ -1955,6 +2124,7 @@ export async function cancelOutstandingRunPromptsByWorker(input: {
         transcriptEventSequence: run.transcriptEventSequence,
         status: "canceled",
         now: new Date(),
+        creatorId: run.creatorId,
       });
       return true;
     });
@@ -2022,6 +2192,7 @@ export async function requestRunCancellation(input: {
         transcriptEventSequence: run.transcriptEventSequence,
         status: "canceled",
         now,
+        creatorId: input.actor.id,
       });
       await tx.insert(schema.auditLog).values({
         orgId: input.orgId,

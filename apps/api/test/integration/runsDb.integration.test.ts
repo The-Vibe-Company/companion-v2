@@ -17,6 +17,7 @@ import postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   beginRunFreeze,
+  cancelOutstandingRunPromptsByWorker,
   cancelRunPromptByWorker,
   adoptRunPrewarm,
   cancelRunPrewarm,
@@ -34,6 +35,7 @@ import {
   getRun,
   getRunAttachment,
   isRunWorkerReady,
+  markRunPromptSendAttempted,
   removeRunWorkerHeartbeat,
   requestRunPromptCancellation,
   reserveRunAttachmentUploads,
@@ -777,6 +779,9 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
   });
 
   it("claims a job once across workers and reclaims it only after lease expiry", async () => {
+    for (const workerId of ["worker-a", "worker-b", "worker-c", "worker-d"]) {
+      await sql`select companion_heartbeat_skill_run_worker(${workerId}, 30, 1, 2)`;
+    }
     const firstClaims = await Promise.all([claim("worker-a"), claim("worker-b")]);
     expect(firstClaims.flat()).toHaveLength(1);
     expect(firstClaims.flat()[0]).toMatchObject({ attempt: 1, leaseReclaimCount: 0 });
@@ -837,6 +842,9 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
 
     await withTenantContext({ orgId: orgA, userId: owner.id }, async (database) => {
       expect(await isRunWorkerReady({ database })).toBe(false);
+      await sql`select companion_heartbeat_skill_run_worker('readiness-v1-worker', 15, 1, 1)`;
+      expect(await isRunWorkerReady({ database })).toBe(false);
+      await sql`select companion_remove_skill_run_worker('readiness-v1-worker')`;
       await heartbeatRunWorker({ workerId: "readiness-worker", ttlSeconds: 15, database });
       expect(await isRunWorkerReady({ database })).toBe(true);
       await removeRunWorkerHeartbeat({ workerId: "readiness-worker", database });
@@ -844,7 +852,136 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
     });
   });
 
+  it("rejects prompt rows whose send marker lacks protocol-2 provenance", async () => {
+    await expect(sql`
+      insert into skill_run_prompts
+        (org_id, run_id, ordinal, kind, idempotency_key, payload_hash, message_id,
+         user_text, prompt, status, dispatch_protocol, send_attempted_at)
+      values
+        (${orgA}::uuid, ${runId}::uuid, 99991, 'follow_up', ${`bad-marker-${suffix}`},
+         ${"a".repeat(64)}, ${deterministicRunMessageId(runId, 99991, Date.now())},
+         'bad marker', 'bad marker', 'completed', 0, now())
+    `).rejects.toMatchObject({ code: "23514" });
+    await expect(sql`
+      insert into skill_run_prompts
+        (org_id, run_id, ordinal, kind, idempotency_key, payload_hash, message_id,
+         user_text, prompt, status, dispatch_protocol, attachments_retained)
+      values
+        (${orgA}::uuid, ${runId}::uuid, 99994, 'follow_up', ${`bad-disposition-${suffix}`},
+         ${"d".repeat(64)}, ${deterministicRunMessageId(runId, 99994, Date.now() + 1)},
+         'bad disposition', 'bad disposition', 'canceled', 2, false)
+    `).rejects.toMatchObject({ code: "55000" });
+  });
+
+  it("fails closed when a rolling API directly terminalizes an ambiguous queued prompt", async () => {
+    const promptId = randomUUID();
+    await sql`
+      insert into skill_run_prompts
+        (id, org_id, run_id, ordinal, kind, idempotency_key, payload_hash, message_id,
+         user_text, prompt, status, attempt, dispatch_protocol)
+      values
+        (${promptId}::uuid, ${orgA}::uuid, ${freezeRunId}::uuid, 99992, 'follow_up',
+         ${`legacy-direct-cancel-${suffix}`}, ${"b".repeat(64)},
+         ${deterministicRunMessageId(freezeRunId, 99992, Date.now())},
+         'ambiguous', 'ambiguous', 'queued', 1, 0)
+    `;
+    await expect(sql`
+      update skill_run_prompts set status = 'canceled', cancel_requested_at = now()
+      where id = ${promptId}::uuid
+    `).rejects.toMatchObject({ code: "55000" });
+    const rows = await sql<{ status: string; retained: boolean }[]>`
+      select status::text, attachments_retained as retained
+      from skill_run_prompts where id = ${promptId}::uuid
+    `;
+    expect(rows).toEqual([{ status: "queued", retained: true }]);
+    await sql`delete from skill_run_prompts where id = ${promptId}::uuid`;
+  });
+
+  it("commits the send marker once under exact leases and lets whole-run cancellation win the lock", async () => {
+    const promptId = randomUUID();
+    await sql`
+      update skill_runs set status = 'running', phase = 'record', cancel_requested_at = null
+      where org_id = ${orgA}::uuid and id = ${freezeRunId}::uuid
+    `;
+    await sql`
+      update skill_run_jobs
+      set status = 'leased', lease_owner = 'freeze-worker', lease_expires_at = now() + interval '5 minutes'
+      where org_id = ${orgA}::uuid and run_id = ${freezeRunId}::uuid
+    `;
+    await sql`select companion_heartbeat_skill_run_worker('freeze-worker', 30, 1, 2)`;
+    await sql`
+      insert into skill_run_prompts
+        (id, org_id, run_id, ordinal, kind, idempotency_key, payload_hash, message_id,
+         user_text, prompt, status)
+      values
+        (${promptId}::uuid, ${orgA}::uuid, ${freezeRunId}::uuid, 99993, 'follow_up',
+         ${`send-marker-${suffix}`}, ${"c".repeat(64)},
+         ${deterministicRunMessageId(freezeRunId, 99993, Date.now())},
+         'mark me', 'mark me', 'queued')
+    `;
+    const runActor = { id: owner.id, email: owner.email, name: "Run Owner" };
+    const claimed = await withTenantContext({ orgId: orgA, userId: owner.id }, (database) =>
+      claimNextRunPrompt({
+        actor: runActor,
+        orgId: orgA,
+        runId: freezeRunId,
+        workerId: "freeze-worker",
+        database,
+      }),
+    );
+    expect(claimed).toMatchObject({ id: promptId, dispatchProtocol: 2, sendAttemptedAt: null });
+    const markerInput = {
+      actor: runActor,
+      orgId: orgA,
+      runId: freezeRunId,
+      promptId,
+      workerId: "freeze-worker",
+    };
+    await expect(withTenantContext({ orgId: orgA, userId: owner.id }, (database) =>
+      markRunPromptSendAttempted({ ...markerInput, database }),
+    )).resolves.toBe("marked");
+    const firstMarker = await sql<{ attemptedAt: Date }[]>`
+      select send_attempted_at as "attemptedAt" from skill_run_prompts where id = ${promptId}::uuid
+    `;
+    await expect(withTenantContext({ orgId: orgA, userId: owner.id }, (database) =>
+      markRunPromptSendAttempted({ ...markerInput, database }),
+    )).resolves.toBe("marked");
+    const replayedMarker = await sql<{ attemptedAt: Date }[]>`
+      select send_attempted_at as "attemptedAt" from skill_run_prompts where id = ${promptId}::uuid
+    `;
+    expect(replayedMarker).toEqual(firstMarker);
+
+    await sql`update skill_run_prompts set cancel_requested_at = now() where id = ${promptId}::uuid`;
+    await expect(withTenantContext({ orgId: orgA, userId: owner.id }, (database) =>
+      markRunPromptSendAttempted({ ...markerInput, database }),
+    )).resolves.toBe("prompt_cancel_requested");
+    await sql`update skill_run_prompts set cancel_requested_at = null where id = ${promptId}::uuid`;
+
+    await sql`
+      update skill_runs set cancel_requested_at = now(), phase = 'cancel'
+      where org_id = ${orgA}::uuid and id = ${freezeRunId}::uuid
+    `;
+    await expect(withTenantContext({ orgId: orgA, userId: owner.id }, (database) =>
+      markRunPromptSendAttempted({ ...markerInput, database }),
+    )).resolves.toBe("run_cancel_requested");
+    await sql`delete from skill_run_prompts where id = ${promptId}::uuid`;
+    await sql`
+      update skill_runs set cancel_requested_at = null, phase = 'record'
+      where org_id = ${orgA}::uuid and id = ${freezeRunId}::uuid
+    `;
+  });
+
   it("terminalizes and leaves cleanup owed when a leased run owner loses membership", async () => {
+    const revokedAttachmentKey = `${orgA}/run-attachments/revoked-${suffix}`;
+    await sql`
+      insert into skill_run_attachments
+        (id, org_id, run_id, prompt_id, file_name, content_type, byte_size, storage_key)
+      select ${randomUUID()}::uuid, p.org_id, p.run_id, p.id,
+             'revoked-input.txt', 'text/plain', 1, ${revokedAttachmentKey}
+      from skill_run_prompts p
+      where p.org_id = ${orgA}::uuid and p.run_id = ${revokedRunId}::uuid
+      limit 1
+    `;
     await sql`
       delete from skill_run_events
       where org_id = ${orgA}::uuid and run_id = ${revokedRunId}::uuid
@@ -945,6 +1082,15 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
         eventSequence: 44,
       },
     ]);
+    const disposition = await sql<{ retained: boolean; reservations: number }[]>`
+      select p.attachments_retained as retained,
+             (select count(*)::int from skill_run_attachment_uploads
+              where storage_key = ${revokedAttachmentKey}) as reservations
+      from skill_run_prompts p
+      where p.org_id = ${orgA}::uuid and p.run_id = ${revokedRunId}::uuid
+    `;
+    // Failure terminalization is diagnostic, not a user cancellation: retain its submitted input.
+    expect(disposition).toEqual([{ retained: true, reservations: 0 }]);
     // Keep the following cleanup-lease test isolated after proving the failed destroy remains owed.
     await sql`
       update skill_runs set sandbox_cleaned_at = now()
@@ -956,7 +1102,7 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
     await sql`
       update skill_run_worker_heartbeats
       set expires_at = now() + interval '5 minutes', attachment_prompt_protocol = 1,
-          turn_stop_protocol = 1
+          turn_stop_protocol = 2
       where worker_id = 'freeze-worker'
     `;
     const runActor = { id: owner.id, email: owner.email, name: "Run Owner" };
@@ -1030,20 +1176,20 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
     `;
     await sql`
       update skill_run_worker_heartbeats
-      set expires_at = now() + interval '5 minutes', attachment_prompt_protocol = 1, turn_stop_protocol = 1
+      set expires_at = now() + interval '5 minutes', attachment_prompt_protocol = 1, turn_stop_protocol = 2
       where worker_id = 'freeze-worker'
     `;
     await sql`
       insert into skill_run_prompts
         (id, org_id, run_id, ordinal, kind, idempotency_key, payload_hash, message_id,
-         user_text, prompt, status, attempt, completed_at)
+         user_text, prompt, status, attempt, dispatch_protocol, completed_at)
       values
         (${canceledPromptId}::uuid, ${orgA}::uuid, ${freezeRunId}::uuid, 900, 'follow_up',
          'canceled-budget-prompt', ${"7".repeat(64)},
-         ${deterministicRunMessageId(freezeRunId, 900, Date.now())}, 'cancel files', 'cancel files', 'queued', 2, null),
+         ${deterministicRunMessageId(freezeRunId, 900, Date.now())}, 'cancel files', 'cancel files', 'queued', 2, 2, null),
         (${completedPromptId}::uuid, ${orgA}::uuid, ${freezeRunId}::uuid, 901, 'follow_up',
          'retained-budget-prompt', ${"8".repeat(64)},
-         ${deterministicRunMessageId(freezeRunId, 901, Date.now() + 1)}, 'kept files', 'kept files', 'completed', 0, now())
+         ${deterministicRunMessageId(freezeRunId, 901, Date.now() + 1)}, 'kept files', 'kept files', 'completed', 0, 0, now())
     `;
     for (const [index, storageKey] of [...canceledKeys, ...retainedKeys].entries()) {
       await sql`
@@ -1075,10 +1221,11 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
     expect(visible.pending_prompts.some((prompt) => prompt.id === canceledPromptId)).toBe(false);
     expect(visible.attachments.filter((attachment) => canceledAttachmentIds.has(attachment.id)))
       .toEqual([]);
-    const canceledAttempt = await sql<{ attempt: number }[]>`
-      select attempt from skill_run_prompts where id = ${canceledPromptId}::uuid
+    const canceledAttempt = await sql<{ attempt: number; retained: boolean }[]>`
+      select attempt, attachments_retained as retained
+      from skill_run_prompts where id = ${canceledPromptId}::uuid
     `;
-    expect(canceledAttempt).toEqual([{ attempt: 0 }]);
+    expect(canceledAttempt).toEqual([{ attempt: 2, retained: false }]);
     await expect(withTenantContext({ orgId: orgA, userId: owner.id }, (database) =>
       getRunAttachment({
         actor: { id: owner.id, email: owner.email, name: "Run Owner" },
@@ -1136,6 +1283,90 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
     await sql`delete from skill_run_prompts where id in (${canceledPromptId}::uuid, ${completedPromptId}::uuid)`;
   });
 
+  it("whole-run cancellation reserves only proven-unsent queued follow-up objects", async () => {
+    const promptIds = Array.from({ length: 4 }, () => randomUUID());
+    const storageKeys = promptIds.map((id) => `${orgA}/run-attachments/whole-cancel-${id}`);
+    await sql`
+      update skill_runs
+      set status = 'running', phase = 'cancel', cancel_requested_at = now()
+      where org_id = ${orgA}::uuid and id = ${freezeRunId}::uuid
+    `;
+    await sql`
+      update skill_run_jobs
+      set status = 'leased', lease_owner = 'freeze-worker', lease_expires_at = now() + interval '5 minutes'
+      where org_id = ${orgA}::uuid and run_id = ${freezeRunId}::uuid
+    `;
+    await sql`
+      update skill_run_worker_heartbeats
+      set expires_at = now() + interval '5 minutes', turn_stop_protocol = 2
+      where worker_id = 'freeze-worker'
+    `;
+    await sql`
+      insert into skill_run_prompts
+        (id, org_id, run_id, ordinal, kind, idempotency_key, payload_hash, message_id,
+         user_text, prompt, status, attempt, dispatch_protocol, send_attempted_at,
+         lease_owner, lease_expires_at)
+      values
+        (${promptIds[0]!}::uuid, ${orgA}::uuid, ${freezeRunId}::uuid, 902, 'follow_up',
+         ${`whole-safe-${suffix}`}, ${"1".repeat(64)},
+         ${deterministicRunMessageId(freezeRunId, 902, Date.now())}, 'safe', 'safe',
+         'queued', 2, 2, null, null, null),
+        (${promptIds[1]!}::uuid, ${orgA}::uuid, ${freezeRunId}::uuid, 903, 'follow_up',
+         ${`whole-ambiguous-${suffix}`}, ${"2".repeat(64)},
+         ${deterministicRunMessageId(freezeRunId, 903, Date.now() + 1)}, 'ambiguous', 'ambiguous',
+         'queued', 2, 2, now(), null, null),
+        (${promptIds[2]!}::uuid, ${orgA}::uuid, ${freezeRunId}::uuid, 904, 'initial',
+         ${`whole-initial-${suffix}`}, ${"3".repeat(64)},
+         ${deterministicRunMessageId(freezeRunId, 904, Date.now() + 2)}, 'initial', 'initial',
+         'queued', 0, 0, null, null, null),
+        (${promptIds[3]!}::uuid, ${orgA}::uuid, ${freezeRunId}::uuid, 905, 'follow_up',
+         ${`whole-processing-${suffix}`}, ${"4".repeat(64)},
+         ${deterministicRunMessageId(freezeRunId, 905, Date.now() + 3)}, 'processing', 'processing',
+         'processing', 1, 2, now(), 'freeze-worker', now() + interval '5 minutes')
+    `;
+    for (const [index, promptId] of promptIds.entries()) {
+      await sql`
+        insert into skill_run_attachments
+          (id, org_id, run_id, prompt_id, file_name, content_type, byte_size, storage_key)
+        values
+          (${randomUUID()}::uuid, ${orgA}::uuid, ${freezeRunId}::uuid, ${promptId}::uuid,
+           ${`whole-${index}.txt`}, 'text/plain', 1, ${storageKeys[index]!})
+      `;
+    }
+
+    await expect(withTenantContext({ orgId: orgA, userId: owner.id }, (database) =>
+      cancelOutstandingRunPromptsByWorker({
+        actor: { id: owner.id, email: owner.email, name: "Run Owner" },
+        orgId: orgA,
+        runId: freezeRunId,
+        workerId: "freeze-worker",
+        database,
+      }),
+    )).resolves.toBe(true);
+    const dispositions = await sql<{ id: string; status: string; retained: boolean }[]>`
+      select id::text, status::text, attachments_retained as retained
+      from skill_run_prompts where id = any(${promptIds}::uuid[]) order by ordinal
+    `;
+    expect(dispositions).toEqual([
+      { id: promptIds[0]!, status: "canceled", retained: false },
+      { id: promptIds[1]!, status: "canceled", retained: true },
+      { id: promptIds[2]!, status: "canceled", retained: true },
+      { id: promptIds[3]!, status: "canceled", retained: true },
+    ]);
+    const reservations = await sql<{ storageKey: string }[]>`
+      select storage_key as "storageKey" from skill_run_attachment_uploads
+      where storage_key = any(${storageKeys}::text[]) order by storage_key
+    `;
+    expect(reservations.map((row) => row.storageKey)).toEqual([storageKeys[0]!]);
+
+    await sql`delete from skill_run_prompts where id = any(${promptIds}::uuid[])`;
+    await sql`delete from skill_run_attachment_uploads where storage_key = any(${storageKeys}::text[])`;
+    await sql`
+      update skill_runs set status = 'running', phase = 'record', cancel_requested_at = null
+      where org_id = ${orgA}::uuid and id = ${freezeRunId}::uuid
+    `;
+  });
+
   it("serializes orphan deletion with a retry reservation and prompt consumption", async () => {
     const storageKey = `${orgA}/run-attachments/${reservationAttachmentId}`;
     await withTenantContext({ orgId: orgA, userId: owner.id }, (database) =>
@@ -1180,7 +1411,7 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
     await sql`
       update skill_run_worker_heartbeats
       set expires_at = now() + interval '5 minutes', attachment_prompt_protocol = 1,
-          turn_stop_protocol = 1
+          turn_stop_protocol = 2
       where worker_id = 'freeze-worker'
     `;
     const accepted = await withTenantContext({ orgId: orgA, userId: owner.id }, (database) =>
@@ -1256,7 +1487,7 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
   it("persists five FIFO follow-ups behind one processing prompt and rejects the sixth", async () => {
     await sql`
       update skill_run_worker_heartbeats
-      set expires_at = now() + interval '5 minutes', turn_stop_protocol = 1
+      set expires_at = now() + interval '5 minutes', turn_stop_protocol = 2
       where worker_id = 'freeze-worker'
     `;
     const runActor = { id: owner.id, email: owner.email, name: "Run Owner" };
@@ -1312,7 +1543,7 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
     `;
     await sql`
       update skill_run_worker_heartbeats
-      set expires_at = now() + interval '5 minutes', turn_stop_protocol = 1
+      set expires_at = now() + interval '5 minutes', turn_stop_protocol = 2
       where worker_id = 'freeze-worker'
     `;
     await sql`
@@ -1424,7 +1655,7 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
     `;
     await sql`
       update skill_run_worker_heartbeats
-      set expires_at = now() + interval '5 minutes', turn_stop_protocol = 1
+      set expires_at = now() + interval '5 minutes', turn_stop_protocol = 2
       where worker_id = 'freeze-worker'
     `;
     await sql`
@@ -1587,7 +1818,7 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
       insert into skill_run_worker_heartbeats
         (worker_id, expires_at, attachment_prompt_protocol, turn_stop_protocol)
       values ('legacy-reclaimer', now() + interval '5 minutes', 0, 0),
-             ('modern-reclaimer', now() + interval '5 minutes', 1, 1)
+             ('modern-reclaimer', now() + interval '5 minutes', 1, 2)
       on conflict (worker_id) do update set expires_at = excluded.expires_at,
         attachment_prompt_protocol = excluded.attachment_prompt_protocol,
         turn_stop_protocol = excluded.turn_stop_protocol
@@ -1627,7 +1858,7 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
     `;
     await sql`
       update skill_run_worker_heartbeats
-      set expires_at = now() + interval '5 minutes', turn_stop_protocol = 1
+      set expires_at = now() + interval '5 minutes', turn_stop_protocol = 2
       where worker_id = 'modern-reclaimer'
     `;
     expect(await claim("legacy-reclaimer")).toEqual([]);

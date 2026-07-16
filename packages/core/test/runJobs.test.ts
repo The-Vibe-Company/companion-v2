@@ -260,7 +260,12 @@ function cancellationDb(status: "queued" | "running" | "canceled") {
     runId: RUN,
     messageId: "msg_cancel_initial",
     ordinal: 0,
+    kind: "initial",
     status: "queued",
+    attempt: 0,
+    dispatchProtocol: 0,
+    sendAttemptedAt: null,
+    attachmentsRetained: true,
     cancelRequestedAt: null,
   } as Record<string, unknown>;
   const audit: Record<string, unknown>[] = [];
@@ -369,6 +374,9 @@ function promptCancellationDb(input: {
   stopReady?: boolean;
   withAttachment?: boolean;
   attachmentCount?: number;
+  attempt?: number;
+  dispatchProtocol?: number;
+  sendAttemptedAt?: Date | null;
 }) {
   const run = {
     id: RUN,
@@ -387,6 +395,10 @@ function promptCancellationDb(input: {
     messageId: "msg_01J00000000000000000000099",
     kind: input.kind ?? "follow_up",
     status: input.status,
+    attempt: input.attempt ?? (input.status === "processing" ? 1 : 0),
+    dispatchProtocol: input.dispatchProtocol ?? (input.status === "processing" ? 2 : 0),
+    sendAttemptedAt: input.sendAttemptedAt ?? null,
+    attachmentsRetained: true,
     cancelRequestedAt: null,
     leaseOwner: input.status === "processing" ? "worker-a" : null,
     leaseExpiresAt: input.status === "processing" ? new Date(Date.now() + 60_000) : null,
@@ -515,6 +527,7 @@ describe("prompt-scoped cancellation", () => {
       database: state.database,
     })).resolves.toEqual({ prompt_id: state.prompt.id, status: "canceled", requested: true });
     expect(state.prompt).toMatchObject({ status: "canceled", leaseOwner: null });
+    expect(state.prompt.attachmentsRetained).toBe(false);
     expect(state.attachments).toEqual([
       expect.objectContaining({ storageKey: "run-attachments/file-1", byteSize: RUN_ATTACHMENT_MAX_BYTES }),
     ]);
@@ -522,6 +535,124 @@ describe("prompt-scoped cancellation", () => {
       expect.objectContaining({ storageKey: "run-attachments/file-1", creatorId: actor.id }),
     ]);
     expect(state.events.at(-1)).toMatchObject({ type: "prompt.status", payload: expect.objectContaining({ status: "canceled" }) });
+  });
+
+  it("direct-cancels a protocol-2 retry that failed before its send barrier", async () => {
+    const state = promptCancellationDb({
+      status: "queued",
+      withAttachment: true,
+      attempt: 2,
+      dispatchProtocol: 2,
+      sendAttemptedAt: null,
+    });
+    await expect(requestRunPromptCancellation({
+      actor,
+      orgId: ORG,
+      runId: RUN,
+      promptId: String(state.prompt.id),
+      database: state.database,
+    })).resolves.toMatchObject({ status: "canceled", requested: true });
+    expect(state.prompt).toMatchObject({
+      status: "canceled",
+      attempt: 2,
+      attachmentsRetained: false,
+    });
+    expect(state.reservations).toHaveLength(1);
+  });
+
+  it("routes an ambiguous queued retry through stop recovery without reserving its files", async () => {
+    const state = promptCancellationDb({
+      status: "queued",
+      withAttachment: true,
+      attempt: 2,
+      dispatchProtocol: 2,
+      sendAttemptedAt: new Date(),
+      stopReady: true,
+    });
+    await expect(requestRunPromptCancellation({
+      actor,
+      orgId: ORG,
+      runId: RUN,
+      promptId: String(state.prompt.id),
+      database: state.database,
+    })).resolves.toMatchObject({ status: "cancel_requested", requested: true });
+    expect(state.prompt).toMatchObject({
+      status: "processing",
+      attachmentsRetained: true,
+      cancelRequestedAt: expect.any(Date),
+    });
+    expect(state.reservations).toEqual([]);
+  });
+
+  it("treats a rolling protocol-1 retry without a marker as ambiguous", async () => {
+    const state = promptCancellationDb({
+      status: "queued",
+      withAttachment: true,
+      attempt: 1,
+      dispatchProtocol: 0,
+      sendAttemptedAt: null,
+      stopReady: true,
+    });
+    await expect(requestRunPromptCancellation({
+      actor,
+      orgId: ORG,
+      runId: RUN,
+      promptId: String(state.prompt.id),
+      database: state.database,
+    })).resolves.toMatchObject({ status: "cancel_requested" });
+    expect(state.prompt.status).toBe("processing");
+    expect(state.reservations).toEqual([]);
+  });
+
+  it("reserves only never-dispatched queued follow-ups during whole-run cancellation", async () => {
+    const queued = promptCancellationDb({
+      status: "queued",
+      withAttachment: true,
+      attempt: 2,
+      dispatchProtocol: 2,
+      sendAttemptedAt: null,
+    });
+    queued.run.cancelRequestedAt = new Date();
+    await expect(cancelOutstandingRunPromptsByWorker({
+      actor,
+      orgId: ORG,
+      runId: RUN,
+      workerId: "worker-a",
+      database: queued.database,
+    })).resolves.toBe(true);
+    expect(queued.reservations).toHaveLength(1);
+
+    const ambiguous = promptCancellationDb({
+      status: "queued",
+      withAttachment: true,
+      attempt: 2,
+      dispatchProtocol: 2,
+      sendAttemptedAt: new Date(),
+    });
+    ambiguous.run.cancelRequestedAt = new Date();
+    await cancelOutstandingRunPromptsByWorker({
+      actor,
+      orgId: ORG,
+      runId: RUN,
+      workerId: "worker-a",
+      database: ambiguous.database,
+    });
+    expect(ambiguous.reservations).toEqual([]);
+
+    const reactivatableInitial = promptCancellationDb({
+      status: "queued",
+      kind: "initial",
+      withAttachment: true,
+    });
+    reactivatableInitial.run.cancelRequestedAt = new Date();
+    await cancelOutstandingRunPromptsByWorker({
+      actor,
+      orgId: ORG,
+      runId: RUN,
+      workerId: "worker-a",
+      database: reactivatableInitial.database,
+    });
+    expect(reactivatableInitial.reservations).toEqual([]);
   });
 
   it("keeps canceled queued bytes charged until the deferred object sweep succeeds", async () => {

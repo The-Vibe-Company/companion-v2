@@ -302,6 +302,13 @@
       "when": 1784246400000,
       "tag": "0042_run_prompt_queue_stop",
       "breakpoints": true
+    },
+    {
+      "idx": 43,
+      "version": "7",
+      "when": 1784247300000,
+      "tag": "0043_run_prompt_dispatch_barrier",
+      "breakpoints": true
     }
   ]
 }

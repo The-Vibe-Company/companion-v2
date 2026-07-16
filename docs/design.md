@@ -615,10 +615,14 @@ content; only the sandbox does.
   secret collection. Ordinary responses never contain plaintext.
 - `skill_run_jobs` is the retryable orchestration queue. `skill_run_prompts` is the initial/follow-up
   FIFO outbox with deterministic OpenCode `messageID`s; it stores user-visible text separately from
-  the runtime prompt enriched with private attachment-path instructions. At most five follow-ups may
-  remain queued behind the single processing prompt. A prompt-level cancellation request stops or
-  removes exactly that row without terminalizing the run. `skill_run_events` holds redacted,
-  monotonically sequenced events for replayable SSE, including every durable prompt-status change.
+  the runtime prompt enriched with private attachment-path instructions. Dispatch protocol 2 records
+  a write-once `send_attempted_at` under the exact job and prompt leases immediately before
+  `sendPrompt`, distinguishing a proven pre-send retry from an ambiguous external side effect.
+  `attachments_retained` explicitly controls canceled-prompt file visibility and sweeper eligibility.
+  At most five follow-ups may remain queued behind the single processing prompt. A prompt-level
+  cancellation request stops or removes exactly that row without terminalizing the run.
+  `skill_run_events` holds redacted, monotonically sequenced events for replayable SSE, including
+  every durable prompt-status change.
 - `skill_run_attachments` — files attached to any prompt (≤5 × 10 MB per message, ≤100 MB per run):
   bytes in S3 under `{org}/run-attachments/{id}`, prompt-linked metadata here, mounted as
   `<attachmentId>-<filename>`, and streamed back creator-only. A server-derived
@@ -626,6 +630,10 @@ content; only the sandbox does.
   signature validation; browser MIME and filename extensions never grant inline rendering. Other
   files and `?download=1` use `Content-Disposition: attachment`. Every response uses `nosniff`,
   private/no-store caching and same-origin isolation. Videos support strict single HTTP byte ranges.
+  A partial response honors `If-Range` only when its strong ETag matches the selected object; weak,
+  stale, date, or malformed validators ignore Range and return the complete `200` representation.
+  The S3 GET remains pinned to the HEAD generation with `If-Match`, including when an overwrite
+  forces a retry.
   Failed request paths never delete these deterministic objects
   synchronously: a concurrent idempotent retry may still be committing the same key. Unreferenced
   bytes are retained for at least 24 hours. `skill_run_attachment_uploads` reserves each deterministic
@@ -680,6 +688,12 @@ content; only the sandbox does.
   metadata, so replacement and sweeping cannot orphan or publish bytes.
 - Migration `0042_run_prompt_queue_stop.sql` adds prompt-level cancellation, worker stop-protocol negotiation and
   the signature-derived attachment preview type. Existing attachments remain download-only.
+- Migration `0043_run_prompt_dispatch_barrier.sql` adds dispatch protocol 2, the immutable pre-send
+  marker and explicit attachment disposition. It conservatively marks legacy attempted rows,
+  expires pending protocol-1 leases without consuming another attempt, and gates launch, claim and
+  queued-to-processing dispatch on a live turn-stop-v2 worker during rolling deployment. Ambiguous
+  cancellation is routed through worker stop recovery; only a queued follow-up proven never sent
+  becomes hidden and eligible for deferred attachment sweeping.
 - `user_model_preferences` / `org_model_preferences` (mig 0036) — the ACTIVATED-model lists (see
   "Activated models" below): a jsonb array of `provider/model-id` refs per member (PK
   `org_id+user_id`, user-scoped RLS) and per workspace (PK `org_id`, tenant RLS, nullable
@@ -749,9 +763,12 @@ external step has persisted before/after progress:
 For each follow-up, the worker fetches only that prompt's attachment objects and idempotently writes
 them into the live sandbox before checking/sending its deterministic OpenCode message. A retry may
 rewrite the same paths, but it never sends a prompt before every referenced file is mounted. Worker
-heartbeats advertise attachment-prompt protocol `1` and turn-stop protocol `1`; the API admits each
-capability only when the exact worker currently leasing that run advertises it, so an old worker may
-finish compatible work during a rolling deployment but cannot accept commands it would ignore.
+heartbeats advertise attachment-prompt protocol `1` and turn-stop protocol `2`. Turn-stop v2 also
+identifies dispatch-v2 workers: the queued-to-processing transition requires their exact live job
+lease, and they persist the write-once send marker before any possible `sendPrompt` side effect.
+Migration 0043 expires old protocol-1 leases that could dispatch pending work; a v2 worker reclaims
+the same job attempt and reconciles the deterministic message id instead of allowing the old lease
+to advance.
 5. establish the recorder, then find or create the deterministic session;
 6. send the persisted initial/follow-up prompt with its deterministic `messageID`;
 7. batch redacted events and snapshot the transcript;
@@ -769,12 +786,14 @@ one transaction with the same watermark, so SSE can never hydrate an older snaps
 that event. Normal process shutdown stops claiming work and lets leases expire;
 it does not destroy active sandboxes.
 
-The exact-lease watcher also observes cancellation of the processing prompt. Before dispatch it
-finalizes the prompt without sending it. During a live turn it aborts OpenCode, waits for the durable
-idle/transcript barrier, preserves the partial answer, collects any outputs already produced and then
-claims the next FIFO prompt. Completion and cancellation are compare-and-set transitions, so a late
-request can never stop the successor. If abort or snapshot stabilization fails after retries, the run
-fails closed and its sandbox is destroyed before another prompt can start.
+The exact-lease watcher also observes cancellation of the processing prompt. A prompt proven unsent
+is finalized without contacting OpenCode. A marked or legacy-ambiguous queued retry instead becomes
+`cancel_requested` processing work and is reclaimed by the stop path ahead of the recorder busy gate.
+The worker reconciles its deterministic message id, proves the shared session idle or aborts it, then
+waits for the recorder's durable atomic idle/transcript barrier before preserving the partial answer,
+collecting outputs and claiming the next FIFO prompt. Completion and cancellation are compare-and-set
+transitions, so a late request can never stop the successor. If abort or snapshot stabilization fails
+after retries, the run fails closed and its sandbox is destroyed before another prompt can start.
 
 ### Sandbox cleanup
 
@@ -921,7 +940,9 @@ file is required; mandatory idempotency, `202`),
 `GET /v1/runs/:id/artifacts/:artifactId`. Attachment and artifact routes send only
 signature-validated PNG, JPEG, GIF, WebP, AVIF, MP4, and WebM as `inline`; SVG, HTML, PDF, unknown
 types, and `?download=1` always use `attachment`. MP4/WebM support a single conditional byte range
-without buffering the whole object. Because every route rejects personal access
+without buffering the whole object. RFC `If-Range` semantics require a matching strong ETag for
+`206`; a mismatch returns the full current object with `200`, while S3 `If-Match` fences every stream
+to one object generation. Because every route rejects personal access
 tokens, the bundled Companion skill's API surface is unchanged.
 
 ### Non-goals (v1)

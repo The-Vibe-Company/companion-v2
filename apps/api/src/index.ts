@@ -3623,6 +3623,21 @@ function runDownloadHeaders(input: {
   return headers;
 }
 
+/**
+ * If-Range only permits a partial response when its strong entity-tag matches the selected
+ * representation. Run assets do not expose a Last-Modified validator, so dates, weak tags and
+ * malformed validators deliberately fall back to a complete 200 response.
+ */
+function ifRangeMatchesStrongETag(ifRange: string, currentETag: string): boolean {
+  const validator = ifRange.trim();
+  const etag = currentETag.trim();
+  return validator === etag
+    && validator.startsWith('"')
+    && validator.endsWith('"')
+    && !validator.startsWith("W/")
+    && !etag.startsWith("W/");
+}
+
 async function streamRunDownload(
   c: Context,
   initialAsset: RunDownloadAsset,
@@ -3630,6 +3645,7 @@ async function streamRunDownload(
 ): Promise<Response> {
   const download = c.req.query("download") === "1";
   const rangeHeader = c.req.header("range");
+  const ifRangeHeader = c.req.header("if-range");
   let asset = initialAsset;
 
   // A ranged video read needs the total length. Pin the subsequent GET to this HEAD's ETag so a
@@ -3656,7 +3672,10 @@ async function streamRunDownload(
       }
     }
     let range: ReturnType<typeof resolveSkillArchiveByteRange> | null = null;
-    if (rangeHeader) {
+    // RFC 9110 evaluates If-Range before applying Range. A stale/weak/unsupported validator makes
+    // the request an unconditional full representation, even when the Range field itself is
+    // malformed. Only parse and potentially reject Range when its validator permits a partial.
+    if (rangeHeader && (ifRangeHeader === undefined || ifRangeMatchesStrongETag(ifRangeHeader, head.etag))) {
       try {
         range = resolveSkillArchiveByteRange(rangeHeader, head.contentLength);
       } catch (error) {

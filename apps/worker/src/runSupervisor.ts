@@ -50,6 +50,7 @@ import {
   getAdoptedRunPrewarm,
   loadRunExecutionPlan,
   loadRunMaterializationPlan,
+  markRunPromptSendAttempted,
   materializeRunDynamicFiles,
   materializeRunSkillBundles,
   persistRunTranscript,
@@ -156,12 +157,19 @@ function abortFailure(signal: AbortSignal): Error {
 export async function dispatchPromptAfterAttachmentMount(input: {
   mountAttachments: () => Promise<void>;
   getMessageState: () => Promise<"missing" | "pending" | "completed" | "error">;
+  beforeSend?: () => Promise<void>;
+  onMessageObserved?: (state: "pending" | "completed" | "error") => Promise<void>;
   sendPrompt: () => Promise<void>;
 }): Promise<"missing" | "pending" | "completed"> {
   await input.mountAttachments();
   const messageState = await input.getMessageState();
-  if (messageState === "missing") await input.sendPrompt();
-  else if (messageState === "error") throw new RunRuntimeError("OpenCode could not complete the prompt");
+  if (messageState === "missing") {
+    await input.beforeSend?.();
+    await input.sendPrompt();
+  } else {
+    await input.onMessageObserved?.(messageState);
+    if (messageState === "error") throw new RunRuntimeError("OpenCode could not complete the prompt");
+  }
   return messageState;
 }
 
@@ -176,6 +184,16 @@ export function armRecorderForPromptDispatch(
 ): "continue" | "cancel_requested" | "lost_lease" {
   if (control === "continue") state.busy = true;
   return control;
+}
+
+/** Undo only the in-memory gate that this lease created before any external send was possible. */
+export function releaseSyntheticRecorderBusy(
+  state: { busy: boolean },
+  dispatchMayHaveReachedRuntime: boolean,
+): boolean {
+  if (dispatchMayHaveReachedRuntime) return false;
+  state.busy = false;
+  return true;
 }
 
 interface RunControlState {
@@ -1167,6 +1185,39 @@ export async function abortPromptForContinuation(input: {
   }
 }
 
+/**
+ * A timed-out send can be followed by a deterministic-message lookup that returns missing. That
+ * resolves the message id, but not the shared session's busy state. Prove idle (or abort a busy
+ * session and wait for idle) before releasing the recorder gate for the next FIFO prompt.
+ */
+export async function proveSessionIdleAfterMissingAttempt(input: {
+  chat: Pick<RunChatRuntime, "abortSession" | "getSessionState">;
+  target: RunChatTarget;
+  sessionId: string;
+  signal: AbortSignal;
+  timeoutMs?: number;
+}): Promise<"already_idle" | "aborted"> {
+  const state = await withBoundedSignal({
+    parent: input.signal,
+    timeoutMs: input.timeoutMs ?? OPENCODE_CALL_TIMEOUT_MS,
+    timeoutMessage: "the ambiguous prompt session status check timed out",
+    operation: (signal) => input.chat.getSessionState(input.target, input.sessionId, signal),
+  });
+  if (state === "idle") return "already_idle";
+  if (state === "missing") {
+    throw new RunRuntimeError("the conversation context disappeared during prompt recovery");
+  }
+  await abortPromptForContinuation({
+    chat: input.chat,
+    target: input.target,
+    sessionId: input.sessionId,
+    messageExists: true,
+    signal: input.signal,
+    timeoutMs: input.timeoutMs,
+  });
+  return "aborted";
+}
+
 async function saveFinalTranscript(
   job: ClaimedRunJob,
   actor: ActorContext,
@@ -1677,6 +1728,8 @@ async function processClaimedJob(input: {
     const finishPromptCancellation = async (
       prompt: RunPromptRow,
       turnBarrierRevision: number | null,
+      dispatchMayHaveReachedRuntime = prompt.sendAttemptedAt !== null
+        || (prompt.attempt > 0 && prompt.dispatchProtocol < 2),
     ): Promise<void> => {
       try {
         const messageState = await withBoundedSignal({
@@ -1690,6 +1743,22 @@ async function processClaimedJob(input: {
             signal,
           ),
         });
+        if (messageState === "missing" && dispatchMayHaveReachedRuntime) {
+          const beforeRecoveryBarrier = activeRecorder.idleBarrierRevision();
+          const recovery = await proveSessionIdleAfterMissingAttempt({
+            chat: ctx.chat!,
+            target: chatTarget,
+            sessionId: activeSessionId,
+            signal: jobAbort.signal,
+          });
+          if (recovery === "aborted") {
+            await activeRecorder.waitForIdleBarrierAfter(
+              beforeRecoveryBarrier,
+              OPENCODE_CALL_TIMEOUT_MS,
+              jobAbort.signal,
+            );
+          }
+        }
         // For a naturally completed turn, the recorder may already have crossed the exact barrier
         // captured before dispatch. Waiting on that revision is immediate and must not demand a
         // second artificial reconnect. Recovery starts after recorder.started, so completed/missing
@@ -1745,6 +1814,11 @@ async function processClaimedJob(input: {
           }),
         );
         if (!promptCanceled) throw new LostLease();
+        if (messageState === "missing") {
+          // No recorder event can clear a synthetic busy gate for a message that never existed.
+          // The ambiguous case reached the session-idle proof above before taking this path.
+          activeRecorder.state.busy = false;
+        }
         activePromptId = null;
         await setPhase(job, actor, workerId, "record", {
           status: "running",
@@ -1831,6 +1905,8 @@ async function processClaimedJob(input: {
         await revalidatePinnedSecrets(job, actor, ctx.masterKey);
         await setPhase(job, actor, workerId, "prompt", { status: "running", lastActiveAt: new Date() });
         let promptTurnBarrierRevision: number | null = null;
+        let dispatchMayHaveReachedRuntime = prompt.sendAttemptedAt !== null
+          || (prompt.attempt > 0 && prompt.dispatchProtocol < 2);
         try {
           const beforeSend = await readRunControl(job);
           if (beforeSend.cancelRequestedAt || beforeSend.status === "canceled") {
@@ -1895,6 +1971,45 @@ async function processClaimedJob(input: {
               timeoutMessage: "the OpenCode prompt lookup timed out",
               operation: (signal) => ctx.chat!.getMessageState(chatTarget, activeSessionId, prompt.messageId, signal),
             }),
+            beforeSend: async () => {
+              const marker = await tenant(job, (database) =>
+                markRunPromptSendAttempted({
+                  actor,
+                  orgId: job.orgId,
+                  runId: job.runId,
+                  promptId: prompt.id,
+                  workerId,
+                  database,
+                }),
+              );
+              if (marker === "run_cancel_requested") throw new CancellationRequested();
+              if (marker === "prompt_cancel_requested") throw new PromptCancellationRequested();
+              if (marker === "lost_lease") throw new LostLease();
+              dispatchMayHaveReachedRuntime = true;
+            },
+            onMessageObserved: async (messageState) => {
+              // Observing the deterministic id is already proof of an external side effect. Set
+              // the conservative local guard before the database call so a racing stop cannot
+              // downgrade this turn to the pre-dispatch path.
+              dispatchMayHaveReachedRuntime = true;
+              // A completed retry created no turn in this lease. Clear the synthetic revision
+              // before the cancellation-capable marker call so a racing stop cannot wait for a
+              // second idle barrier that will never arrive.
+              if (messageState === "completed") promptTurnBarrierRevision = null;
+              const marker = await tenant(job, (database) =>
+                markRunPromptSendAttempted({
+                  actor,
+                  orgId: job.orgId,
+                  runId: job.runId,
+                  promptId: prompt.id,
+                  workerId,
+                  database,
+                }),
+              );
+              if (marker === "run_cancel_requested") throw new CancellationRequested();
+              if (marker === "prompt_cancel_requested") throw new PromptCancellationRequested();
+              if (marker === "lost_lease") throw new LostLease();
+            },
             sendPrompt: () => withBoundedSignal({
               parent: jobAbort.signal,
               timeoutMs: OPENCODE_CALL_TIMEOUT_MS,
@@ -1947,7 +2062,11 @@ async function processClaimedJob(input: {
         } catch (error) {
           if (error instanceof WorkerShutdown || error instanceof LostLease || error instanceof CancellationRequested) throw error;
           if (error instanceof PromptCancellationRequested) {
-            await finishPromptCancellation(prompt, promptTurnBarrierRevision);
+            await finishPromptCancellation(
+              prompt,
+              promptTurnBarrierRevision,
+              dispatchMayHaveReachedRuntime,
+            );
           } else {
             const failure = await tenant(job, (database) =>
               failRunPrompt({
@@ -1964,9 +2083,14 @@ async function processClaimedJob(input: {
               }),
             );
             if (failure === "cancel_requested") {
-              await finishPromptCancellation(prompt, promptTurnBarrierRevision);
+              await finishPromptCancellation(
+                prompt,
+                promptTurnBarrierRevision,
+                dispatchMayHaveReachedRuntime,
+              );
             } else {
               if (failure === "lost_lease") throw new LostLease();
+              releaseSyntheticRecorderBusy(activeRecorder.state, dispatchMayHaveReachedRuntime);
               activePromptId = null;
               throw error;
             }

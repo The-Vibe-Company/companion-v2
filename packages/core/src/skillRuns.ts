@@ -1086,10 +1086,9 @@ async function loadAttachments(database: Db, orgId: string, runId: string): Prom
     .where(and(
       eq(schema.skillRunAttachments.orgId, orgId),
       eq(schema.skillRunAttachments.runId, runId),
-      // A prompt stopped after entering processing still owns durable user input that appears in
-      // the partial transcript. Only a canceled prompt that never entered processing is hidden and
-      // eligible for deferred object cleanup. `attempt` is incremented by the atomic prompt claim.
-      sql`(${schema.skillRunPrompts.status} <> 'canceled' OR ${schema.skillRunPrompts.attempt} > 0)`,
+      // Attachment disposition is committed with terminal cancellation. Never infer it from an
+      // execution counter: a queued retry may already have reached the external runtime.
+      sql`(${schema.skillRunPrompts.status} <> 'canceled' OR ${schema.skillRunPrompts.attachmentsRetained})`,
     ));
 }
 

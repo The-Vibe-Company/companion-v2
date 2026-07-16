@@ -454,7 +454,7 @@ describe("session-only RunSkill routes", () => {
     });
 
     const partial = await app.request("/v1/runs/run-1/artifacts/video-1", {
-      headers: { Range: "bytes=2-5" },
+      headers: { Range: "bytes=2-5", "If-Range": '"asset-etag"' },
     });
     expect(partial.status).toBe(206);
     expect(partial.headers.get("accept-ranges")).toBe("bytes");
@@ -467,11 +467,59 @@ describe("session-only RunSkill routes", () => {
 
     storageMocks.streamSkillArchive.mockClear();
     const invalid = await app.request("/v1/runs/run-1/artifacts/video-1", {
-      headers: { Range: "bytes=0-1,4-5" },
+      headers: { Range: "bytes=0-1,4-5", "If-Range": '"asset-etag"' },
     });
     expect(invalid.status).toBe(416);
     expect(invalid.headers.get("content-range")).toBe("bytes */8");
     expect(storageMocks.streamSkillArchive).not.toHaveBeenCalled();
+  });
+
+  it("ignores an invalid Range when If-Range does not select the current representation", async () => {
+    signIn();
+    serviceMocks.getRunArtifact.mockResolvedValue({
+      fileName: "clip.mp4",
+      contentType: "video/mp4",
+      storageKey: "org/run-artifacts/run/clip",
+      previewable: true,
+    });
+
+    const response = await app.request("/v1/runs/run-1/artifacts/video-1", {
+      headers: { Range: "bytes=0-1,4-5", "If-Range": '"stale-etag"' },
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-range")).toBeNull();
+    await expect(response.text()).resolves.toBe("artifact");
+    expect(storageMocks.streamSkillArchive).toHaveBeenCalledWith(expect.objectContaining({
+      range: undefined,
+      ifMatch: '"asset-etag"',
+    }));
+  });
+
+  it("ignores Range when If-Range is stale or weak while preserving the S3 generation fence", async () => {
+    signIn();
+    serviceMocks.getRunArtifact.mockResolvedValue({
+      fileName: "clip.mp4",
+      contentType: "video/mp4",
+      storageKey: "org/run-artifacts/run/clip",
+      previewable: true,
+    });
+
+    for (const ifRange of ['"stale-etag"', 'W/"asset-etag"']) {
+      storageMocks.streamSkillArchive.mockClear();
+      const response = await app.request("/v1/runs/run-1/artifacts/video-1", {
+        headers: { Range: "bytes=2-5", "If-Range": ifRange },
+      });
+
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-range")).toBeNull();
+      expect(response.headers.get("content-length")).toBe("8");
+      await expect(response.text()).resolves.toBe("artifact");
+      expect(storageMocks.streamSkillArchive).toHaveBeenCalledWith(expect.objectContaining({
+        range: undefined,
+        ifMatch: '"asset-etag"',
+      }));
+    }
   });
 
   it("reopens an asset when its ETag changes between HEAD and GET", async () => {
@@ -502,6 +550,47 @@ describe("session-only RunSkill routes", () => {
     expect(response.status).toBe(200);
     expect(storageMocks.headSkillArchive).toHaveBeenCalledTimes(2);
     expect(storageMocks.streamSkillArchive).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      ifMatch: '"new-etag"',
+    }));
+  });
+
+  it("returns the complete replacement when an If-Range ETag becomes stale during a stable-key overwrite", async () => {
+    signIn();
+    const oldAsset = {
+      fileName: "clip.mp4",
+      contentType: "video/mp4",
+      byteSize: 8,
+      storageKey: "org/run-artifacts/run/clip",
+      previewable: true,
+      generation: "generation-1",
+    };
+    const newAsset = { ...oldAsset, generation: "generation-2" };
+    serviceMocks.getRunArtifact
+      .mockResolvedValueOnce(oldAsset)
+      .mockResolvedValueOnce(oldAsset)
+      .mockResolvedValueOnce(newAsset)
+      .mockResolvedValueOnce(newAsset);
+    storageMocks.headSkillArchive
+      .mockResolvedValueOnce({ etag: '"old-etag"', contentLength: 8 })
+      .mockResolvedValueOnce({ etag: '"new-etag"', contentLength: 8 });
+    storageMocks.streamSkillArchive.mockRejectedValueOnce(
+      Object.assign(new Error("changed"), { name: "PreconditionFailed" }),
+    );
+
+    const response = await app.request("/v1/runs/run-1/artifacts/video-1", {
+      headers: { Range: "bytes=2-5", "If-Range": '"old-etag"' },
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("etag")).toBe('"new-etag"');
+    expect(response.headers.get("content-range")).toBeNull();
+    await expect(response.text()).resolves.toBe("artifact");
+    expect(storageMocks.streamSkillArchive).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      range: "bytes=2-5",
+      ifMatch: '"old-etag"',
+    }));
+    expect(storageMocks.streamSkillArchive).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      range: undefined,
       ifMatch: '"new-etag"',
     }));
   });
