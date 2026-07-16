@@ -12,6 +12,10 @@
 import { Sandbox } from "@vercel/sandbox";
 
 const OPENCODE_PORT = 4096;
+const PIP_VERSION = "25.3";
+const GET_PIP_SHA256 = "a341e1a43e38001c551a1508a73ff23636a11970b61d901d9a1cad2a18f57055";
+const RIPGREP_VERSION = "14.1.1";
+const RIPGREP_SHA256 = "4cf9f2741e6c465ffdb7c26f38056a59e2a2544b51f7cc128ef28337eeae4d8e";
 
 function required(name: string): string {
   const value = process.env[name]?.trim();
@@ -54,15 +58,29 @@ async function main(): Promise<void> {
     console.log(`Sandbox ${sandbox.name} booted.`);
 
     await run(sandbox, "install Node 24 and shell toolbox", "dnf", [
-      "install", "-y", "nodejs24", "nodejs24-npm", "git", "curl", "jq", "ripgrep", "file", "zip", "unzip",
+      "install", "-y", "nodejs24", "nodejs24-npm", "git", "jq", "file", "zip", "unzip",
     ], true);
+    await run(sandbox, `install ripgrep ${RIPGREP_VERSION}`, "sh", ["-lc", [
+      "set -eu",
+      `archive=ripgrep-${RIPGREP_VERSION}-x86_64-unknown-linux-musl.tar.gz`,
+      "tmp=$(mktemp -d)",
+      "trap 'rm -rf \"$tmp\"' EXIT",
+      `curl --fail --location --silent --show-error "https://github.com/BurntSushi/ripgrep/releases/download/${RIPGREP_VERSION}/$archive" -o "$tmp/$archive"`,
+      `printf '${RIPGREP_SHA256}  %s\\n' "$tmp/$archive" | sha256sum -c -`,
+      "tar -xzf \"$tmp/$archive\" -C \"$tmp\"",
+      `install -m 0755 "$tmp/ripgrep-${RIPGREP_VERSION}-x86_64-unknown-linux-musl/rg" /usr/local/bin/rg`,
+    ].join("\n")], true);
     await run(sandbox, "select Node 24", "alternatives", ["--set", "node", "/usr/bin/node-24"], true);
     await run(sandbox, "configure Python command aliases", "sh", ["-lc", [
       "set -eu",
       "python_bin=$(command -v python3.13)",
       'ln -sf "$python_bin" /usr/local/bin/python3',
       'ln -sf "$python_bin" /usr/local/bin/python',
-      '"$python_bin" -m ensurepip --upgrade',
+      "get_pip=$(mktemp)",
+      "trap 'rm -f \"$get_pip\"' EXIT",
+      'curl --fail --location --silent --show-error "https://bootstrap.pypa.io/get-pip.py" -o "$get_pip"',
+      `printf '${GET_PIP_SHA256}  %s\\n' "$get_pip" | sha256sum -c -`,
+      `"$python_bin" "$get_pip" "pip==${PIP_VERSION}"`,
     ].join("\n")], true);
     await run(sandbox, "install pinned Python toolbox", "python3", [
       "-m", "pip", "install", "--no-cache-dir", "--break-system-packages",
