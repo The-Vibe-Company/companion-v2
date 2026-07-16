@@ -1770,6 +1770,10 @@ export async function requestRunPromptCancellation(input: {
         .update(schema.skillRunPrompts)
         .set({
           status: "canceled",
+          // Terminal queued cancellation is the cleanup path even when this row is a retry whose
+          // earlier claim incremented `attempt`. Canceled rows with attempt > 0 are reserved for
+          // worker-finalized processing stops whose files remain part of the partial transcript.
+          attempt: 0,
           cancelRequestedAt: now,
           leaseOwner: null,
           leaseExpiresAt: null,

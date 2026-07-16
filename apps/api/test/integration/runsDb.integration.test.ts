@@ -1014,7 +1014,7 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
     `;
   });
 
-  it("keeps canceled queued files in the 100 MB run budget until their S3 sweep succeeds", async () => {
+  it("sweeps canceled queued retry files while charging them until deletion succeeds", async () => {
     const canceledPromptId = randomUUID();
     const completedPromptId = randomUUID();
     const canceledKeys = Array.from({ length: 5 }, (_, index) =>
@@ -1036,14 +1036,14 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
     await sql`
       insert into skill_run_prompts
         (id, org_id, run_id, ordinal, kind, idempotency_key, payload_hash, message_id,
-         user_text, prompt, status, completed_at)
+         user_text, prompt, status, attempt, completed_at)
       values
         (${canceledPromptId}::uuid, ${orgA}::uuid, ${freezeRunId}::uuid, 900, 'follow_up',
          'canceled-budget-prompt', ${"7".repeat(64)},
-         ${deterministicRunMessageId(freezeRunId, 900, Date.now())}, 'cancel files', 'cancel files', 'queued', null),
+         ${deterministicRunMessageId(freezeRunId, 900, Date.now())}, 'cancel files', 'cancel files', 'queued', 2, null),
         (${completedPromptId}::uuid, ${orgA}::uuid, ${freezeRunId}::uuid, 901, 'follow_up',
          'retained-budget-prompt', ${"8".repeat(64)},
-         ${deterministicRunMessageId(freezeRunId, 901, Date.now() + 1)}, 'kept files', 'kept files', 'completed', now())
+         ${deterministicRunMessageId(freezeRunId, 901, Date.now() + 1)}, 'kept files', 'kept files', 'completed', 0, now())
     `;
     for (const [index, storageKey] of [...canceledKeys, ...retainedKeys].entries()) {
       await sql`
@@ -1075,6 +1075,10 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
     expect(visible.pending_prompts.some((prompt) => prompt.id === canceledPromptId)).toBe(false);
     expect(visible.attachments.filter((attachment) => canceledAttachmentIds.has(attachment.id)))
       .toEqual([]);
+    const canceledAttempt = await sql<{ attempt: number }[]>`
+      select attempt from skill_run_prompts where id = ${canceledPromptId}::uuid
+    `;
+    expect(canceledAttempt).toEqual([{ attempt: 0 }]);
     await expect(withTenantContext({ orgId: orgA, userId: owner.id }, (database) =>
       getRunAttachment({
         actor: { id: owner.id, email: owner.email, name: "Run Owner" },
