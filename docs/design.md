@@ -625,6 +625,16 @@ content; only the sandbox does.
   bytes after cleanup instead of losing a committed file. The sweep starts from aged reservation
   rows, so even a failed S3 creation remains reachable for cleanup. Multipart follow-ups also run an
   ownership/status/quota/protocol preflight before uploading bytes.
+- `skill_run_artifacts` — creator-private outputs cached independently from a live sandbox for 24
+  hours. The worker collects at most 20 files, 10 MB each and 100 MB total from `./artifacts/` (three
+  directory levels) plus raster paths explicitly opened by OpenCode's `read` tool. It never scans the
+  workspace. Traversal, hidden paths, `.claude/`, `attachments/`, escaping symlinks, sockets, and
+  special files are rejected. Exact injected secret bytes are redacted before upload. A deterministic
+  run/path id and storage key make later versions replace the prior object and renew its TTL; an ETag
+  compare-and-swap plus an exact lease check immediately before every PUT fences stale workers.
+  Metadata follows `ready=false reservation → conditional S3 overwrite → ready=true`; only ready,
+  unexpired rows are visible. Cleanup bounds and aborts S3 deletion while holding its final row lock,
+  and conditions that deletion on the observed ETag so a late request cannot remove a replacement.
 - `skill_run_prewarms` and `skill_run_prewarm_skills` hold creator-private, secretless launcher
   warm-ups. They pin only the root/dependency versions and sandbox lifecycle state; they never join
   the Sessions query. A run may atomically adopt one through nullable `skill_runs.prewarm_id`.
@@ -650,6 +660,10 @@ content; only the sandbox does.
 - Migration `0037_reactivate_runs.sql` adds the seven-day reactivation window and activation
   revision, permits multiple queued prompts while retaining one processing prompt, and delays
   terminal cleanup claims until a retained frozen/canceled sandbox expires.
+- Migration `0041_run_artifacts.sql` adds artifact metadata, creator-through-run forced RLS and the
+  exact worker-lease write policy. Narrow reservation/finalization and cleanup functions are the only
+  cross-tenant seams. Cleanup locks and rechecks the expired row across S3 deletion before removing
+  metadata, so replacement and sweeping cannot orphan or publish bytes.
 - `user_model_preferences` / `org_model_preferences` (mig 0036) — the ACTIVATED-model lists (see
   "Activated models" below): a jsonb array of `provider/model-id` refs per member (PK
   `org_id+user_id`, user-scoped RLS) and per workspace (PK `org_id`, tenant RLS, nullable
@@ -660,8 +674,9 @@ the durable history and its folded cursor remains the lower bound for future eve
 and canceled runs retain their stopped named sandbox for seven days. Sending a new prompt during that
 window atomically requeues the same run and resumes the same OpenCode session; a missing retained
 session fails closed rather than silently losing context. Each later freeze/cancel starts a fresh
-seven-day window. Files created by sandbox code survive within the retained sandbox until cleanup;
-after expiry, Companion persists the transcript and the metadata/bytes of files the user attached in any message.
+seven-day window. Files created by sandbox code survive within the retained sandbox until cleanup.
+Generated outputs also remain available from the private S3 cache for 24 hours without resuming that
+sandbox; attached input files retain their separate attachment lifecycle.
 
 ### Launch pipeline + recorder
 
@@ -724,7 +739,10 @@ turns during a rolling deployment but cannot dispatch attachment-path prompts.
 5. establish the recorder, then find or create the deterministic session;
 6. send the persisted initial/follow-up prompt with its deterministic `messageID`;
 7. batch redacted events and snapshot the transcript;
-8. freeze after inactivity, stop the named sandbox for bounded reactivation, then destroy it
+8. after every completed turn and once immediately before freeze, collect bounded outputs and publish
+   an `artifacts.updated` event after ready metadata commits; collection failures emit a durable
+   non-terminal `run.warning`;
+9. freeze after inactivity, stop the named sandbox for bounded reactivation, then destroy it
    idempotently after the seven-day deadline.
 
 Runtime/network calls never occur inside a database transaction. On worker replacement, an expired
@@ -742,8 +760,9 @@ without destroying their named sandbox, remain creator-reactivatable for seven d
 from cleanup claims until that deadline. Cancellation aborts the active OpenCode turn before the
 final snapshot so a later resume starts from a stable context. Error runs and revoked memberships
 still destroy immediately; provider failures keep cleanup owed for a later worker attempt. The
-event-retention sweeper, age-gated run-attachment orphan sweep, and sandbox-cleanup work live in the
-runs supervisor, not the API.
+event-retention sweeper, age-gated run-attachment orphan sweep, artifact expiry sweep, and
+sandbox-cleanup work live in the runs supervisor, not the API. Artifact routes reject expiry
+immediately; physical S3/row deletion is an idempotent asynchronous follow-up.
 
 ### Privacy
 
@@ -861,7 +880,10 @@ new run and the same result on replay),
 `POST /v1/runs/:id/prompt` (legacy JSON text or multipart optional text + repeatable file; text or a
 file is required; mandatory idempotency, `202`), `POST /v1/runs/:id/cancel`,
 `GET /v1/runs/:id/events` (replayable SSE), and
-`GET /v1/runs/:id/attachments/:attachmentId`. Because every route rejects personal access
+`GET /v1/runs/:id/attachments/:attachmentId`, plus creator-only
+`GET /v1/runs/:id/artifacts/:artifactId`. The artifact route sends only signature-validated PNG,
+JPEG, GIF, WebP, and AVIF as `inline`; SVG, HTML, PDF, unknown types, and `?download=1` always use
+`attachment`, with `nosniff` for every response. Because every route rejects personal access
 tokens, the bundled Companion skill's API surface is unchanged.
 
 ### Non-goals (v1)
@@ -873,9 +895,14 @@ not CI).
 
 ### Ops runbook
 
-One-time golden snapshot (per OpenCode pin):
+One-time golden snapshot (per OpenCode pin), deployed after migration/application compatibility:
 `VERCEL_TOKEN=… VERCEL_TEAM_ID=… VERCEL_PROJECT_ID=… OPENCODE_VERSION=1.17.13
 pnpm --filter @companion/sandbox golden` → export the printed `COMPANION_GOLDEN_SNAPSHOT_ID`.
+The snapshot starts from Vercel `python3.13`, selects Amazon Linux `nodejs24`/`nodejs24-npm`, and
+verifies Python 3.13 union syntax, pip, `openai==2.45.0`, `requests==2.34.2`, `PyYAML==6.0.3`,
+`uv==0.11.29`, Node 24, npm, and the exact OpenCode pin. It also includes git, curl, jq, ripgrep,
+file, zip, and unzip. Existing retained sandboxes keep their old runtime until expiry; re-running a
+session creates a new run from the configured golden.
 
 Environment: `VERCEL_TOKEN`, `VERCEL_TEAM_ID`, `VERCEL_PROJECT_ID`,
 `COMPANION_GOLDEN_SNAPSHOT_ID`, `OPENCODE_VERSION` (pin, e.g. `1.17.13`),
@@ -889,7 +916,7 @@ vault, dedicated provider credentials, and opaque internal run credentials),
 `COMPANION_RUN_CLAIM_INTERVAL_MS`, `COMPANION_RUN_LEASE_SECONDS`,
 `COMPANION_RUN_HEARTBEAT_MS`, `COMPANION_RUN_INACTIVITY_MS`, bounded recorder reconnect settings,
 `COMPANION_RUN_EVENT_RETENTION_INTERVAL_MS`, `COMPANION_RUN_SWEEP_INTERVAL_MS`, S3 settings for
-attachments/packages. Event retention itself is
+attachments/artifacts/packages. Event retention itself is
 fixed at 24 hours after terminal state. The worker receives these settings. Keep the feature flag off
 when Vercel/golden configuration is absent; only RunSkill is disabled, while API, web, billing,
 provider settings, and vault still run. Disabling prewarming also prevents adoption of tickets issued

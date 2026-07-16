@@ -243,3 +243,9 @@ export async function cancelRun(runId: string): Promise<SkillRunDetail> {
 export function runAttachmentHref(runId: string, attachmentId: string): string {
   return `/v1/runs/${encodeURIComponent(runId)}/attachments/${encodeURIComponent(attachmentId)}`;
 }
+
+/** Creator-only artifact href. Raster images render inline unless download is forced. */
+export function runArtifactHref(runId: string, artifactId: string, download = false): string {
+  const base = `/v1/runs/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(artifactId)}`;
+  return download ? `${base}?download=1` : base;
+}

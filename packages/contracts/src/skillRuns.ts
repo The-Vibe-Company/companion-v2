@@ -17,6 +17,10 @@ export const RUN_PROMPT_MAX = 8_000;
 export const RUN_ATTACHMENT_MAX_FILES = 5;
 export const RUN_ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024;
 export const RUN_ATTACHMENT_MAX_TOTAL_BYTES = 100 * 1024 * 1024;
+export const RUN_ARTIFACT_MAX_FILES = 20;
+export const RUN_ARTIFACT_MAX_BYTES = 10 * 1024 * 1024;
+export const RUN_ARTIFACT_MAX_TOTAL_BYTES = 100 * 1024 * 1024;
+export const RUN_ARTIFACT_RETENTION_MS = 24 * 60 * 60 * 1_000;
 export const RUN_MAX_DEPENDENCIES = 64;
 export const RUN_MAX_SECRET_INPUTS = 128;
 export const RUN_MAX_VARIABLE_INPUTS = 128;
@@ -523,6 +527,7 @@ export const runChatEventSchema = z.discriminatedUnion("type", [
     message: z.string().max(RUN_CHAT_MESSAGE_MAX).nullable().default(null),
   }),
   z.object({ type: z.literal("session.idle"), session_id: z.string().max(RUN_CHAT_ID_MAX) }),
+  z.object({ type: z.literal("artifacts.updated"), count: z.number().int().nonnegative().max(RUN_ARTIFACT_MAX_FILES) }),
   z.object({
     type: z.literal("run.warning"),
     code: runErrorCodeSchema,
@@ -584,6 +589,18 @@ export const skillRunAttachmentRowSchema = z.object({
 });
 export type SkillRunAttachmentRow = z.infer<typeof skillRunAttachmentRowSchema>;
 
+/** Creator-private cached output produced by a run. Bytes expire independently from the sandbox. */
+export const skillRunArtifactRowSchema = z.object({
+  id: runUuidSchema,
+  file_name: z.string().min(1).max(255),
+  path: z.string().min(1).max(1_024),
+  content_type: z.string().min(1).max(255),
+  byte_size: z.number().int().positive().max(RUN_ARTIFACT_MAX_BYTES),
+  previewable: z.boolean(),
+  expires_at: z.string().datetime(),
+});
+export type SkillRunArtifactRow = z.infer<typeof skillRunArtifactRowSchema>;
+
 /** Full run for the chat/transcript view (`GET /v1/runs/:id`). */
 export const skillRunDetailSchema = skillRunRowSchema.extend({
   prompt: z.string(),
@@ -596,6 +613,7 @@ export const skillRunDetailSchema = skillRunRowSchema.extend({
   reactivatable_until: z.string().nullable(),
   can_reactivate: z.boolean(),
   attachments: z.array(skillRunAttachmentRowSchema),
+  artifacts: z.array(skillRunArtifactRowSchema).max(RUN_ARTIFACT_MAX_FILES),
   input_snapshot: runInputSnapshotSchema.optional(),
 });
 export type SkillRunDetail = z.infer<typeof skillRunDetailSchema>;

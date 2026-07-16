@@ -73,6 +73,7 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
   const errorReactivationRunId = randomUUID();
   const cleanupRetentionRunId = randomUUID();
   const attachmentId = randomUUID();
+  const artifactId = randomUUID();
   const followupAttachmentId = randomUUID();
   const incompatibleWorkerAttachmentId = randomUUID();
   const reactivationAttachmentId = randomUUID();
@@ -106,6 +107,7 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
         "skill_run_events",
         "skill_run_attachments",
         "skill_run_attachment_uploads",
+        "skill_run_artifacts",
       ] as const;
       const result: Record<string, number> = {};
       for (const table of tables) {
@@ -421,6 +423,14 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
       insert into skill_run_attachment_uploads (storage_key, org_id, creator_id)
       values (${`${orgA}/run-attachments/reserved-${suffix}`} , ${orgA}::uuid, ${owner.id})
     `;
+    await sql`
+      insert into skill_run_artifacts
+        (id, org_id, run_id, path, file_name, content_type, byte_size, previewable, storage_key, ready, expires_at)
+      values
+        (${artifactId}::uuid, ${orgA}::uuid, ${runId}::uuid, 'artifacts/result.txt', 'result.txt',
+         'text/plain; charset=utf-8', 6, false, ${`${orgA}/run-artifacts/${runId}/${artifactId}`}, true,
+         now() + interval '24 hours')
+    `;
     await sql.unsafe(`create role ${rlsRole} nologin nosuperuser nobypassrls`);
     await sql.unsafe(`grant ${rlsRole} to current_user with inherit true, set true`);
     await sql.unsafe(`grant usage on schema public to ${rlsRole}`);
@@ -442,6 +452,7 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
     await sql.unsafe(`grant execute on function companion_claim_skill_run_prewarm_cleanups(text, integer, integer) to ${rlsRole}`);
     await sql.unsafe(`grant execute on function companion_complete_skill_run_prewarm_cleanup(uuid, uuid, text) to ${rlsRole}`);
     await sql.unsafe(`grant execute on function companion_purge_skill_run_prewarms(integer) to ${rlsRole}`);
+    await sql.unsafe(`grant execute on function companion_put_skill_run_artifact_metadata(uuid, uuid, text, text, uuid, text, text, text, integer, boolean, text, boolean, timestamp with time zone) to ${rlsRole}`);
   });
 
   afterAll(async () => {
@@ -458,6 +469,27 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
     expect(Object.values(creator).every((count) => count >= 1)).toBe(true);
     expect(Object.values(await countsFor(orgA, admin.id)).every((count) => count === 0)).toBe(true);
     expect(Object.values(await countsFor(orgB, outsider.id)).every((count) => count === 0)).toBe(true);
+  });
+
+  it("allows artifact writes only for the exact unexpired worker lease", async () => {
+    const write = (workerId: string, id: string, artifactPath: string) => sql.begin(async (tx) => {
+      await tx.unsafe(`set local role ${rlsRole}`);
+      return tx<{ stored: boolean }[]>`
+        select companion_put_skill_run_artifact_metadata(
+          ${orgA}::uuid, ${freezeRunId}::uuid, ${owner.id}, ${workerId}, ${id}::uuid,
+          ${artifactPath}, 'lease.txt', 'text/plain; charset=utf-8', 5, false,
+          ${`${orgA}/run-artifacts/${freezeRunId}/${id}`}, false, now() + interval '24 hours'
+        ) as stored
+      `;
+    });
+    await expect(write("wrong-worker", randomUUID(), "artifacts/wrong.txt")).resolves.toEqual([{ stored: false }]);
+    await expect(write("freeze-worker", randomUUID(), "artifacts/lease.txt")).resolves.toEqual([{ stored: true }]);
+    for (let index = 0; index < 19; index += 1) {
+      await expect(write("freeze-worker", randomUUID(), `artifacts/quota-${index}.txt`))
+        .resolves.toEqual([{ stored: true }]);
+    }
+    await expect(write("freeze-worker", randomUUID(), "artifacts/quota-overflow.txt"))
+      .resolves.toEqual([{ stored: false }]);
   });
 
   it("claims a secretless prewarm once while preserving creator-only visibility", async () => {

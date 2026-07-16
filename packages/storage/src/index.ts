@@ -1,4 +1,10 @@
-import { DeleteObjectCommand, GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import {
+  DeleteObjectCommand,
+  GetObjectCommand,
+  HeadObjectCommand,
+  PutObjectCommand,
+  S3Client,
+} from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
 export interface StorageConfig {
@@ -70,6 +76,10 @@ export function commentImageKey(input: { orgId: string; imageId: string }): stri
  */
 export function runAttachmentKey(input: { orgId: string; attachmentId: string }): string {
   return `${input.orgId}/run-attachments/${input.attachmentId}`;
+}
+
+export function runArtifactKey(input: { orgId: string; runId: string; artifactId: string }): string {
+  return `${input.orgId}/run-artifacts/${input.runId}/${input.artifactId}`;
 }
 
 export async function putOrgLogo(input: {
@@ -184,24 +194,63 @@ export async function putSkillArchive(input: {
   body: Uint8Array;
   contentType?: string;
   preventOverwrite?: boolean;
+  ifMatch?: string;
+  signal?: AbortSignal;
   client?: S3Client;
   config?: StorageConfig;
-}): Promise<void> {
+}): Promise<string | null> {
   const config = input.config ?? getStorageConfig();
   const client = input.client ?? createStorageClient(config);
-  await client.send(
+  const response = await client.send(
     new PutObjectCommand({
       Bucket: config.bucket,
       Key: input.key,
       Body: input.body,
       ContentType: input.contentType ?? "application/gzip",
       IfNoneMatch: input.preventOverwrite ? "*" : undefined,
+      IfMatch: input.ifMatch,
     }),
+    { abortSignal: input.signal },
   );
+  return response.ETag ?? null;
+}
+
+export async function headSkillArchive(input: {
+  key: string;
+  signal?: AbortSignal;
+  client?: S3Client;
+  config?: StorageConfig;
+}): Promise<{ etag: string } | null> {
+  const config = input.config ?? getStorageConfig();
+  const client = input.client ?? createStorageClient(config);
+  try {
+    const response = await client.send(
+      new HeadObjectCommand({ Bucket: config.bucket, Key: input.key }),
+      { abortSignal: input.signal },
+    );
+    return response.ETag ? { etag: response.ETag } : null;
+  } catch (error) {
+    const status = typeof error === "object" && error !== null && "$metadata" in error
+      ? (error as { $metadata?: { httpStatusCode?: number } }).$metadata?.httpStatusCode
+      : undefined;
+    const name = error instanceof Error ? error.name : "";
+    if (status === 404 || name === "NotFound" || name === "NoSuchKey") return null;
+    throw error;
+  }
+}
+
+export function isStoragePreconditionFailure(error: unknown): boolean {
+  const status = typeof error === "object" && error !== null && "$metadata" in error
+    ? (error as { $metadata?: { httpStatusCode?: number } }).$metadata?.httpStatusCode
+    : undefined;
+  const name = error instanceof Error ? error.name : "";
+  return status === 412 || name === "PreconditionFailed";
 }
 
 export async function deleteSkillArchive(input: {
   key: string;
+  ifMatch?: string;
+  signal?: AbortSignal;
   client?: S3Client;
   config?: StorageConfig;
 }): Promise<void> {
@@ -211,7 +260,9 @@ export async function deleteSkillArchive(input: {
     new DeleteObjectCommand({
       Bucket: config.bucket,
       Key: input.key,
+      IfMatch: input.ifMatch,
     }),
+    { abortSignal: input.signal },
   );
 }
 

@@ -3696,5 +3696,6 @@ export * from "./modelPreferences";
 export * from "./skillRuns";
 export * from "./runConfigurations";
 export * from "./runJobs";
+export * from "./runArtifacts";
 export * from "./runSweeper";
 export * from "./runPrewarms";

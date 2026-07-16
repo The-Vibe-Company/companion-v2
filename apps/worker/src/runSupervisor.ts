@@ -1,6 +1,15 @@
 import { randomUUID } from "node:crypto";
+import path from "node:path";
 import { and, eq, inArray } from "drizzle-orm";
-import { RUN_REACTIVATION_RETENTION_MS, type RunChatEvent, type RunPhase } from "@companion/contracts";
+import {
+  RUN_ARTIFACT_MAX_BYTES,
+  RUN_ARTIFACT_MAX_FILES,
+  RUN_ARTIFACT_MAX_TOTAL_BYTES,
+  RUN_ARTIFACT_RETENTION_MS,
+  RUN_REACTIVATION_RETENTION_MS,
+  type RunChatEvent,
+  type RunPhase,
+} from "@companion/contracts";
 import {
   createRunRedactor,
   getSandboxRuntimeBudget,
@@ -40,7 +49,10 @@ import {
   materializeRunDynamicFiles,
   materializeRunSkillBundles,
   persistRunTranscript,
+  detectRunArtifactType,
+  putRunArtifactMetadata,
   removeRunWorkerHeartbeat,
+  runArtifactId,
   RunBusyError,
   RunValidationError,
   sandboxNameForRun,
@@ -57,19 +69,29 @@ import {
   createModelCatalog,
   createOpencodeRunChatRuntime,
   createVercelRuntime,
+  imagePathFromReadInput,
   vercelConfigFromEnv,
 } from "@companion/sandbox";
-import { getSkillArchive } from "@companion/storage";
+import {
+  getSkillArchive,
+  headSkillArchive,
+  isStoragePreconditionFailure,
+  putSkillArchive,
+  runArtifactKey,
+} from "@companion/storage";
 import { boundedInteger, runWorkerConfig, type RunWorkerConfig } from "./config";
 import type { Supervisor } from "./billingSupervisor";
 import { createRunCleanupScheduler } from "./runCleanup";
 import { sweepRunAttachmentOrphans } from "./runAttachmentCleanup";
+import { sweepRunArtifacts } from "./runArtifactCleanup";
 import { createRunPrewarmScheduler } from "./prewarmSupervisor";
 
 const PROMPT_POLL_MS = 250;
 const ACL_RECHECK_MS = 15_000;
 const OPENCODE_CALL_TIMEOUT_MS = 30_000;
 const SANDBOX_CONTROL_TIMEOUT_MS = 60_000;
+const ARTIFACT_STORAGE_TIMEOUT_MS = 30_000;
+const ARTIFACT_STORAGE_CAS_ATTEMPTS = 3;
 
 class WorkerShutdown extends Error {}
 class LostLease extends Error {}
@@ -153,6 +175,7 @@ interface RecorderState {
   busy: boolean;
   idleAt: number | null;
   fatal: { code: string; message: string } | null;
+  readImagePaths: Set<string>;
 }
 
 interface RecorderHandle {
@@ -500,7 +523,7 @@ function startRecorder(input: {
   shutdownSignal: AbortSignal;
 }): RecorderHandle {
   const chat = input.ctx.chat!;
-  const state: RecorderState = { busy: false, idleAt: null, fatal: null };
+  const state: RecorderState = { busy: false, idleAt: null, fatal: null, readImagePaths: new Set() };
   const abort = new AbortController();
   const recorderSignal = AbortSignal.any([abort.signal, input.shutdownSignal]);
   const streams = new Map<string, RunStreamingRedactor>();
@@ -596,6 +619,12 @@ function startRecorder(input: {
           if (result.done) break;
           const event = result.value;
           next = iterator.next();
+          if (event.type === "tool.start" && event.tool.toLowerCase() === "read") {
+            const imagePath = imagePathFromReadInput(event.input);
+            if (imagePath && state.readImagePaths.size < RUN_ARTIFACT_MAX_FILES) {
+              state.readImagePaths.add(imagePath);
+            }
+          }
           // Only the atomic transcript + session.idle barrier is allowed to mark the recorder
           // dispatch-ready. A generic status:idle can arrive before that snapshot is durable.
           if (event.type === "status" && event.state !== "idle") state.busy = true;
@@ -645,6 +674,148 @@ function startRecorder(input: {
       streams.clear();
     },
   };
+}
+
+export async function collectAndCacheRunArtifacts(input: {
+  job: ClaimedRunJob;
+  actor: ActorContext;
+  workerId: string;
+  ctx: RunControlContext;
+  ref: SandboxRef;
+  imagePaths: string[];
+  redactor: RunRedactor;
+  signal: AbortSignal;
+  dependencies?: {
+    putMetadata?: typeof putRunArtifactMetadata;
+    headObject?: (input: { key: string; signal: AbortSignal }) => Promise<{ etag: string } | null>;
+    putObject?: (input: {
+      key: string;
+      body: Uint8Array;
+      contentType: string;
+      ifMatch?: string;
+      preventOverwrite?: boolean;
+      signal: AbortSignal;
+    }) => Promise<unknown>;
+    isPreconditionFailure?: (error: unknown) => boolean;
+    append?: (events: RunChatEvent[]) => Promise<void>;
+    now?: () => number;
+  };
+}): Promise<number> {
+  const putMetadata = input.dependencies?.putMetadata ?? putRunArtifactMetadata;
+  const headObject = input.dependencies?.headObject ?? ((object) => headSkillArchive(object));
+  const putObject = input.dependencies?.putObject ?? ((object) => putSkillArchive(object));
+  const isPreconditionFailure = input.dependencies?.isPreconditionFailure ?? isStoragePreconditionFailure;
+  const append = input.dependencies?.append
+    ?? ((events: RunChatEvent[]) => appendEvents(input.job, input.actor, events, input.redactor));
+  const now = input.dependencies?.now ?? Date.now;
+  try {
+    const files = await withBoundedSignal({
+      parent: input.signal,
+      timeoutMs: SANDBOX_CONTROL_TIMEOUT_MS,
+      timeoutMessage: "the sandbox artifact collection timed out",
+      operation: (signal) => input.ctx.runtime!.collectOutputFiles({
+        ref: input.ref,
+        imagePaths: input.imagePaths,
+        maxFiles: RUN_ARTIFACT_MAX_FILES,
+        maxFileBytes: RUN_ARTIFACT_MAX_BYTES,
+        maxTotalBytes: RUN_ARTIFACT_MAX_TOTAL_BYTES,
+        signal,
+      }),
+    });
+    let ready = 0;
+    let failed = 0;
+    let cachedBytes = 0;
+    for (const file of files) {
+      const data = input.redactor.redactBytes(file.data);
+      if (data.length <= 0 || data.length > RUN_ARTIFACT_MAX_BYTES || cachedBytes + data.length > RUN_ARTIFACT_MAX_TOTAL_BYTES) {
+        failed += 1;
+        continue;
+      }
+      const id = runArtifactId(input.job.runId, file.path);
+      const storageKey = runArtifactKey({ orgId: input.job.orgId, runId: input.job.runId, artifactId: id });
+      const detected = detectRunArtifactType(file.path, data);
+      const expiresAt = new Date(now() + RUN_ARTIFACT_RETENTION_MS);
+      const metadata = {
+        orgId: input.job.orgId,
+        runId: input.job.runId,
+        creatorId: input.job.creatorId,
+        workerId: input.workerId,
+        id,
+        path: file.path,
+        fileName: path.posix.basename(file.path),
+        contentType: detected.contentType,
+        byteSize: data.length,
+        previewable: detected.previewable,
+        storageKey,
+        expiresAt,
+      };
+      try {
+        const reserved = await putMetadata({ ...metadata, ready: false, database: db });
+        if (!reserved) throw new LostLease();
+        let uploaded = false;
+        for (let attempt = 0; attempt < ARTIFACT_STORAGE_CAS_ATTEMPTS; attempt += 1) {
+          const existing = await withBoundedSignal({
+            parent: input.signal,
+            timeoutMs: ARTIFACT_STORAGE_TIMEOUT_MS,
+            timeoutMessage: "the artifact storage lookup timed out",
+            operation: (signal) => headObject({ key: storageKey, signal }),
+          });
+          // Fence immediately before the external write. If an old worker observes an object
+          // written by its successor, this check stops it before it can use that fresh ETag.
+          const stillLeased = await putMetadata({ ...metadata, ready: false, database: db });
+          if (!stillLeased) throw new LostLease();
+          try {
+            await withBoundedSignal({
+              parent: input.signal,
+              timeoutMs: ARTIFACT_STORAGE_TIMEOUT_MS,
+              timeoutMessage: "the artifact upload timed out",
+              operation: (signal) => putObject({
+                key: storageKey,
+                body: data,
+                contentType: detected.contentType,
+                ifMatch: existing?.etag,
+                preventOverwrite: existing === null,
+                signal,
+              }),
+            });
+            uploaded = true;
+            break;
+          } catch (error) {
+            if (!isPreconditionFailure(error)) throw error;
+            // A competing lease changed the object after our HEAD. The next iteration re-reads
+            // its ETag and revalidates the exact database lease before attempting another PUT.
+          }
+        }
+        if (!uploaded) throw new RunRuntimeError("the artifact changed too many times during upload");
+        const finalized = await putMetadata({ ...metadata, ready: true, database: db });
+        if (!finalized) throw new LostLease();
+        ready += 1;
+        cachedBytes += data.length;
+      } catch {
+        failed += 1;
+      }
+    }
+    const events: RunChatEvent[] = [];
+    if (ready > 0) events.push({ type: "artifacts.updated", count: ready });
+    if (failed > 0) {
+      events.push({
+        type: "run.warning",
+        code: "artifact_collection_failed",
+        message: "Some generated files could not be saved. The run itself completed normally.",
+        phase: "record",
+      });
+    }
+    await append(events);
+    return ready;
+  } catch {
+    await append([{
+      type: "run.warning",
+      code: "artifact_collection_failed",
+      message: "Generated files could not be collected. The run itself completed normally.",
+      phase: "record",
+    }]).catch(() => undefined);
+    return 0;
+  }
 }
 
 async function revalidatePinnedSecrets(
@@ -1134,6 +1305,16 @@ async function processClaimedJob(input: {
           await saveFinalTranscript(job, actor, ctx, target, sessionId, redactor, jobAbort.signal).catch(() => undefined);
         }
       }
+      await collectAndCacheRunArtifacts({
+        job,
+        actor,
+        workerId,
+        ctx,
+        ref,
+        imagePaths: [],
+        redactor,
+        signal: jobAbort.signal,
+      });
       await timeoutExtender.stop();
       await withBoundedSignal({
         parent: jobAbort.signal,
@@ -1435,6 +1616,18 @@ async function processClaimedJob(input: {
             timeoutMs: activePlan.row.timeoutMs,
             shutdownSignal: jobAbort.signal,
           });
+          const imagePaths = [...recorder.state.readImagePaths];
+          recorder.state.readImagePaths.clear();
+          await collectAndCacheRunArtifacts({
+            job,
+            actor,
+            workerId,
+            ctx,
+            ref: activeRef,
+            imagePaths,
+            redactor,
+            signal: jobAbort.signal,
+          });
           const promptCompleted = await tenant(job, (database) =>
             completeRunPrompt({ actor, orgId: job.orgId, runId: job.runId, promptId: prompt.id, workerId, database }),
           );
@@ -1484,6 +1677,18 @@ async function processClaimedJob(input: {
     // final transcript collection so a racing API request cannot enqueue abandoned work.
     await saveFinalTranscript(job, actor, ctx, chatTarget, activeSessionId, redactor, jobAbort.signal);
     if (jobAbort.signal.aborted) throw leaseLost ? new LostLease() : abortFailure(jobAbort.signal);
+    const finalImagePaths = recorder ? [...recorder.state.readImagePaths] : [];
+    recorder?.state.readImagePaths.clear();
+    await collectAndCacheRunArtifacts({
+      job,
+      actor,
+      workerId,
+      ctx,
+      ref: activeRef,
+      imagePaths: finalImagePaths,
+      redactor,
+      signal: jobAbort.signal,
+    });
     await setPhase(job, actor, workerId, "freeze");
     await timeoutExtender.stop();
     await recorder.stop();
@@ -1805,6 +2010,7 @@ export async function startRunSupervisor(): Promise<Supervisor | null> {
         if (shutdown.signal.aborted) break;
       }
       if (!shutdown.signal.aborted) await sweepRunAttachmentOrphans();
+      if (!shutdown.signal.aborted) await sweepRunArtifacts();
     } catch {
       // Best-effort maintenance; the next interval retries without affecting active runs.
     } finally {

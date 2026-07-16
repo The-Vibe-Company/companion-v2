@@ -1690,6 +1690,49 @@ export const skillRunAttachments = pgTable(
   }),
 );
 
+/** Private, short-lived cached outputs collected from a sandbox before it is frozen. */
+export const skillRunArtifacts = pgTable(
+  "skill_run_artifacts",
+  {
+    id: uuid("id").primaryKey(),
+    orgId: uuid("org_id").notNull(),
+    runId: uuid("run_id").notNull(),
+    path: text("path").notNull(),
+    fileName: text("file_name").notNull(),
+    contentType: text("content_type").notNull(),
+    byteSize: integer("byte_size").notNull(),
+    previewable: boolean("previewable").notNull().default(false),
+    storageKey: text("storage_key").notNull().unique(),
+    /** False between reservation and the successful object upload/finalization. */
+    ready: boolean("ready").notNull().default(false),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    runFk: foreignKey({
+      columns: [t.orgId, t.runId],
+      foreignColumns: [skillRuns.orgId, skillRuns.id],
+      name: "skill_run_artifacts_run_fk",
+    }).onDelete("cascade"),
+    uniquePath: unique("skill_run_artifacts_run_path_uq").on(t.orgId, t.runId, t.path),
+    byRun: index("skill_run_artifacts_run_idx").on(t.orgId, t.runId, t.ready, t.expiresAt),
+    byExpiry: index("skill_run_artifacts_expiry_idx").on(t.expiresAt, t.updatedAt),
+    pathCheck: check(
+      "skill_run_artifacts_path_check",
+      sql`char_length(${t.path}) BETWEEN 1 AND 1024 AND ${t.path} !~ '(^|/)\\.\\.?(/|$)'`,
+    ),
+    fileNameCheck: check(
+      "skill_run_artifacts_file_name_check",
+      sql`char_length(${t.fileName}) BETWEEN 1 AND 255`,
+    ),
+    sizeCheck: check(
+      "skill_run_artifacts_size_check",
+      sql`${t.byteSize} > 0 AND ${t.byteSize} <= 10485760`,
+    ),
+  }),
+);
+
 /** Durable S3 upload reservation; consumed atomically when attachment metadata commits. */
 export const skillRunAttachmentUploads = pgTable(
   "skill_run_attachment_uploads",

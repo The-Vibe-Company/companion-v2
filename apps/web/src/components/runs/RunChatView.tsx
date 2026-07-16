@@ -6,9 +6,10 @@ import {
   RUN_ATTACHMENT_MAX_FILES,
   type RunPhase,
   type SkillRunAttachmentRow,
+  type SkillRunArtifactRow,
   type SkillRunDetail,
 } from "@companion/contracts";
-import { cancelRun, fetchRun, runAttachmentHref, sendRunPrompt } from "@/lib/runQueries";
+import { cancelRun, fetchRun, runArtifactHref, runAttachmentHref, sendRunPrompt } from "@/lib/runQueries";
 import { formatDurationSeconds } from "@/lib/format";
 import { Icon } from "../Icon";
 import { ChatMarkdown } from "./chatMarkdown";
@@ -85,6 +86,74 @@ function AttachmentChips({ runId, attachments }: { runId: string; attachments: S
         </a>
       ))}
     </div>
+  );
+}
+
+function RunArtifacts({ runId, artifacts }: { runId: string; artifacts: SkillRunArtifactRow[] }) {
+  const [clock, setClock] = useState(() => Date.now());
+  useEffect(() => {
+    const now = Date.now();
+    const nextExpiry = Math.min(
+      ...artifacts.map((artifact) => Date.parse(artifact.expires_at)).filter((expiry) => Number.isFinite(expiry) && expiry > now),
+    );
+    if (!Number.isFinite(nextExpiry)) return;
+    const timer = setTimeout(() => setClock(Date.now()), Math.min(nextExpiry - now + 25, 2_147_483_647));
+    return () => clearTimeout(timer);
+  }, [artifacts, clock]);
+  if (artifacts.length === 0) return null;
+  return (
+    <section className="run-artifacts" aria-label="Generated files">
+      <div className="run-artifacts__heading">Generated files</div>
+      <div className="run-artifacts__grid">
+        {artifacts.map((artifact) => {
+          const expired = Date.parse(artifact.expires_at) <= clock;
+          if (expired) {
+            return (
+              <div key={artifact.id} className="run-artifact run-artifact--expired" role="status">
+                <Icon name="file" size={15} />
+                <span>{artifact.file_name}</span>
+                <small>Expired</small>
+              </div>
+            );
+          }
+          if (artifact.previewable) {
+            return (
+              <figure key={artifact.id} className="run-artifact-image">
+                <a href={runArtifactHref(runId, artifact.id)} target="_blank" rel="noreferrer">
+                  {/* The API validates the raster signature and enforces nosniff before allowing inline. */}
+                  <img src={runArtifactHref(runId, artifact.id)} alt={artifact.file_name} loading="lazy" />
+                </a>
+                <figcaption>
+                  <span title={artifact.path}>{artifact.file_name}</span>
+                  <small>{formatBytes(artifact.byte_size)}</small>
+                  <a
+                    className="btn-sec run-artifact__download"
+                    href={runArtifactHref(runId, artifact.id, true)}
+                    download={artifact.file_name}
+                    aria-label={`Download ${artifact.file_name}`}
+                  >
+                    <Icon name="download" size={13} />
+                  </a>
+                </figcaption>
+              </figure>
+            );
+          }
+          return (
+            <a
+              key={artifact.id}
+              className="run-artifact"
+              href={runArtifactHref(runId, artifact.id, true)}
+              download={artifact.file_name}
+            >
+              <Icon name="file" size={15} />
+              <span title={artifact.path}>{artifact.file_name}</span>
+              <small>{formatBytes(artifact.byte_size)}</small>
+              <Icon name="download" size={13} />
+            </a>
+          );
+        })}
+      </div>
+    </section>
   );
 }
 
@@ -538,7 +607,7 @@ export function RunChatView({
         dispatch({ kind: "event", event, resolveToolLabel });
         setStreamDead(false);
         if (event.type === "status" && event.state !== "idle") setPromptPending(false);
-        if (event.type === "session.idle") {
+        if (event.type === "session.idle" || event.type === "artifacts.updated") {
           // Reconcile the durable transcript snapshot and persisted run state after each turn.
           void refreshRun().catch(() => {});
         } else if (event.type === "run.error") {
@@ -578,10 +647,11 @@ export function RunChatView({
 
   // --- Auto-scroll the message area to the bottom on new items / streamed deltas.
   const listRef = useRef<HTMLDivElement | null>(null);
+  const artifactSignature = run?.artifacts.map((artifact) => `${artifact.id}:${artifact.expires_at}`).join("|") ?? "";
   useEffect(() => {
     const el = listRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [chat.items]);
+  }, [chat.items, artifactSignature]);
 
   useEffect(() => {
     if (promptError) composerRef.current?.focus();
@@ -958,6 +1028,7 @@ export function RunChatView({
                 </div>
               );
             })}
+            {run && <RunArtifacts runId={run.id} artifacts={run.artifacts} />}
             {showWorking && <WorkingLine label={chat.working.label} />}
             {chat.warnings.map((warning) => (
               <div className="run-chat__warning" role="status" key={`${warning.code}:${warning.message}`}>

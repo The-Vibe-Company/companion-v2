@@ -28,6 +28,7 @@ import {
   type RunSecretInputSnapshot,
   type RunVariableInputSnapshot,
   type SkillRunAttachmentRow,
+  type SkillRunArtifactRow,
   type SkillRunDetail,
   type SkillRunRow,
   type SkillRunStatus,
@@ -224,6 +225,9 @@ export function composeRunPrompt(input: {
   }
   const request = userText || "Inspect the attached files. If the user's intent cannot be inferred from their contents, ask for clarification.";
   const notes = [`Use your installed "${input.skillSlug}" skill to handle this request.`];
+  notes.push(
+    "Place every file you want to deliver to the user in ./artifacts/. This instruction takes priority over a skill's default output directory.",
+  );
   if (input.attachments.length > 0) {
     const mountedFiles = input.attachments
       .map(
@@ -1079,6 +1083,21 @@ async function loadAttachments(database: Db, orgId: string, runId: string): Prom
     .where(and(eq(schema.skillRunAttachments.orgId, orgId), eq(schema.skillRunAttachments.runId, runId)));
 }
 
+async function loadArtifacts(database: Db, orgId: string, runId: string) {
+  return database
+    .select()
+    .from(schema.skillRunArtifacts)
+    .where(
+      and(
+        eq(schema.skillRunArtifacts.orgId, orgId),
+        eq(schema.skillRunArtifacts.runId, runId),
+        eq(schema.skillRunArtifacts.ready, true),
+        sql`${schema.skillRunArtifacts.expiresAt} > clock_timestamp()`,
+      ),
+    )
+    .orderBy(asc(schema.skillRunArtifacts.path));
+}
+
 async function loadSkillSlug(database: Db, orgId: string, skillId: string): Promise<string> {
   const rows = await database
     .select({ id: schema.skills.id, slug: schema.skills.slug })
@@ -1096,6 +1115,18 @@ function toAttachmentRow(row: AttachmentWithMessageRow): SkillRunAttachmentRow {
     file_name: row.fileName,
     content_type: row.contentType,
     byte_size: row.byteSize,
+  };
+}
+
+function toArtifactRow(row: typeof schema.skillRunArtifacts.$inferSelect): SkillRunArtifactRow {
+  return {
+    id: row.id,
+    file_name: row.fileName,
+    path: row.path,
+    content_type: row.contentType,
+    byte_size: row.byteSize,
+    previewable: row.previewable,
+    expires_at: row.expiresAt.toISOString(),
   };
 }
 
@@ -1270,7 +1301,7 @@ async function toDetail(
   skillSlug: string,
   attachments: AttachmentWithMessageRow[],
 ): Promise<SkillRunDetail> {
-  const [inputSnapshot, promptRows] = await Promise.all([
+  const [inputSnapshot, promptRows, artifactRows] = await Promise.all([
     loadInputSnapshot(database, row),
     database
       .select({
@@ -1281,6 +1312,7 @@ async function toDetail(
       .from(schema.skillRunPrompts)
       .where(and(eq(schema.skillRunPrompts.orgId, row.orgId), eq(schema.skillRunPrompts.runId, row.id)))
       .orderBy(asc(schema.skillRunPrompts.ordinal)),
+    loadArtifacts(database, row.orgId, row.id),
   ]);
   return {
     ...toRunRow(row, skillSlug),
@@ -1292,6 +1324,7 @@ async function toDetail(
     reactivatable_until: row.reactivatableUntil?.toISOString() ?? null,
     can_reactivate: canReactivateRun(row),
     attachments: attachments.map(toAttachmentRow),
+    artifacts: artifactRows.map(toArtifactRow),
     input_snapshot: inputSnapshot,
   };
 }
@@ -1867,6 +1900,30 @@ export async function getRunAttachment(input: {
   const attachment = attachments.find((candidate) => candidate.id === input.attachmentId);
   if (!attachment) throw new RunValidationError("attachment not found", "attachment_not_found");
   return { fileName: attachment.fileName, contentType: attachment.contentType, storageKey: attachment.storageKey };
+}
+
+export async function getRunArtifact(input: {
+  actor: ActorContext;
+  orgId: string;
+  runId: string;
+  artifactId: string;
+  database?: Db;
+}): Promise<{ fileName: string; contentType: string; storageKey: string; previewable: boolean }> {
+  const database = input.database ?? db;
+  await assertMember(database, input.actor, input.orgId);
+  const row = await loadRunRow(database, input.orgId, input.runId);
+  if (!row || !canAccessRun(input.actor.id, row)) {
+    throw new RunValidationError("run not found", "run_not_found");
+  }
+  const artifacts = await loadArtifacts(database, input.orgId, input.runId);
+  const artifact = artifacts.find((candidate) => candidate.id === input.artifactId);
+  if (!artifact) throw new RunValidationError("artifact not found", "artifact_not_found");
+  return {
+    fileName: artifact.fileName,
+    contentType: artifact.contentType,
+    storageKey: artifact.storageKey,
+    previewable: artifact.previewable,
+  };
 }
 
 /** Creator-scoped metadata for files belonging to one durable prompt; consumed by the worker. */

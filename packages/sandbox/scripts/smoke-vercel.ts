@@ -37,12 +37,21 @@ Run \`scripts/probe.py\` for the smoke-probe skill. Never print environment vari
 `;
 
 const PROBE_PY = `#!/usr/bin/env python3
+import base64
 import os
+import sys
 from pathlib import Path
+import openai
 print("PROBE-OK-4242")
+print(f"PYTHON-{sys.version_info.major}.{sys.version_info.minor}")
+print(f"OPENAI-{openai.__version__}")
 print("SECRET-AVAILABLE" if os.environ.get("SMOKE_SECRET_SENTINEL") else "SECRET-MISSING")
 attachment = Path("attachments/note.txt")
 print("ATTACHMENT-OK" if attachment.is_file() and attachment.read_text() == "smoke attachment\\n" else "ATTACHMENT-MISSING")
+artifacts = Path("artifacts")
+artifacts.mkdir(exist_ok=True)
+(artifacts / "probe.txt").write_text("artifact text\\n")
+(artifacts / "probe.png").write_bytes(base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="))
 `;
 
 function required(name: string): string {
@@ -127,6 +136,8 @@ async function main(): Promise<void> {
     let sawProbeOutput = false;
     let sawSecretAvailable = false;
     let sawAttachment = false;
+    let sawPython = false;
+    let sawOpenai = false;
     let leakedSecret = false;
     let text = "";
     // Hard deadline: abort the underlying SSE fetch so a silent stream can NEVER hang the smoke.
@@ -149,6 +160,8 @@ async function main(): Promise<void> {
         if (event.type === "tool.done" && event.output.includes("PROBE-OK-4242")) sawProbeOutput = true;
         if (event.type === "tool.done" && event.output.includes("SECRET-AVAILABLE")) sawSecretAvailable = true;
         if (event.type === "tool.done" && event.output.includes("ATTACHMENT-OK")) sawAttachment = true;
+        if (event.type === "tool.done" && event.output.includes("PYTHON-3.13")) sawPython = true;
+        if (event.type === "tool.done" && event.output.includes("OPENAI-2.45.0")) sawOpenai = true;
         if (JSON.stringify(event).includes(secretSentinel)) leakedSecret = true;
         if (event.type === "text.delta") text += event.delta;
         if (event.type === "session.idle") break;
@@ -164,7 +177,20 @@ async function main(): Promise<void> {
     report["script_ran"] = String(sawProbeOutput || text.includes("PROBE-OK-4242"));
     report["dependency_ran"] = String(sawSecretAvailable || text.includes("SECRET-AVAILABLE"));
     report["attachment_mounted"] = String(sawAttachment || text.includes("ATTACHMENT-OK"));
+    report["python_3_13"] = String(sawPython || text.includes("PYTHON-3.13"));
+    report["openai_pinned"] = String(sawOpenai || text.includes("OPENAI-2.45.0"));
     report["secret_not_leaked"] = String(!leakedSecret && !text.includes(secretSentinel));
+    const artifacts = await runtime.collectOutputFiles({
+      ref,
+      imagePaths: [],
+      maxFiles: 20,
+      maxFileBytes: 10 * 1024 * 1024,
+      maxTotalBytes: 100 * 1024 * 1024,
+    });
+    report["artifacts_collected"] = String(
+      artifacts.some((artifact) => artifact.path === "artifacts/probe.png")
+      && artifacts.some((artifact) => artifact.path === "artifacts/probe.txt"),
+    );
     console.log(`  skill triggered=${report["skill_triggered"]} script ran=${report["script_ran"]}`);
 
     console.log("stop (freeze)…");
@@ -181,6 +207,9 @@ async function main(): Promise<void> {
     report["script_ran"] === "true" &&
     report["dependency_ran"] === "true" &&
     report["attachment_mounted"] === "true" &&
+    report["python_3_13"] === "true" &&
+    report["openai_pinned"] === "true" &&
+    report["artifacts_collected"] === "true" &&
     report["secret_not_leaked"] === "true";
   console.log(pass ? "\nPASS" : "\nFAIL (see criteria above)");
   process.exit(pass ? 0 : 1);

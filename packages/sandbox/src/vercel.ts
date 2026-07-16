@@ -8,6 +8,7 @@ import {
   type ServeEnv,
   type SkillBundle,
 } from "@companion/core";
+import { collectSandboxOutputFiles } from "./outputFiles";
 
 /**
  * The Vercel Sandbox implementation of the {@link RunSandboxRuntime} port. One skill run = one
@@ -198,6 +199,7 @@ export function createVercelRuntime(config: VercelRuntimeConfig): RunSandboxRunt
     async pushWorkspace({ ref, files, signal }) {
       const sandbox = await getSandbox(ref, signal);
       const payloads: { path: string; content: Uint8Array; mode?: number }[] = [
+        { path: `${WORKDIR}/artifacts/.keep`, content: Buffer.alloc(0) as Uint8Array },
         {
           path: `${WORKDIR}/opencode.json`,
           content: Buffer.from(files.opencodeJson, "utf8") as Uint8Array,
@@ -219,12 +221,25 @@ export function createVercelRuntime(config: VercelRuntimeConfig): RunSandboxRunt
     async pushRunFiles({ ref, files, signal }) {
       const sandbox = await getSandbox(ref, signal);
       await writePayloads(sandbox, [
+        { path: `${WORKDIR}/artifacts/.keep`, content: Buffer.alloc(0) as Uint8Array },
         { path: `${WORKDIR}/opencode.json`, content: Buffer.from(files.opencodeJson, "utf8") as Uint8Array },
         ...files.attachments.map((attachment) => ({
           path: `${WORKDIR}/attachments/${attachment.path}`,
           content: attachment.data as Uint8Array,
         })),
       ], signal);
+    },
+
+    async collectOutputFiles({ ref, imagePaths, maxFiles, maxFileBytes, maxTotalBytes, signal }) {
+      const sandbox = await getSandbox(ref, signal);
+      return collectSandboxOutputFiles({
+        fs: sandbox.fs,
+        imagePaths,
+        maxFiles,
+        maxFileBytes,
+        maxTotalBytes,
+        signal,
+      });
     },
 
     async pushAttachments({ ref, attachments, signal }) {
