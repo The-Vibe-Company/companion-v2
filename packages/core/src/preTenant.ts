@@ -152,7 +152,7 @@ export async function listPreTenantBillingSyncCandidates(
   const result = await database.execute(sql`
     select candidate."org_id"::text as "orgId"
     from companion_list_billing_sync_candidates(
-      ${input.now},
+      ${input.now.toISOString()}::timestamptz,
       ${input.full},
       ${input.limit}
     ) as candidate
