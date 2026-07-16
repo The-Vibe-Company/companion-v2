@@ -1,9 +1,10 @@
-import { StripeBillingGateway } from "@companion/billing";
+import { StripeBillingGateway, type BillingGateway } from "@companion/billing";
 import { billingRuntimeConfig, listSeatSyncCandidates, reconcileSeatQuantity } from "@companion/core";
 import { db, type Db } from "@companion/db";
 
 const PENDING_INTERVAL_MS = 15_000;
 const RECONCILE_INTERVAL_MS = 15 * 60_000;
+const STARTUP_RETRY_MS = 15_000;
 
 export interface Supervisor {
   stop(): Promise<void>;
@@ -17,7 +18,7 @@ function gatewayFromEnvironment(): StripeBillingGateway {
   return new StripeBillingGateway(secret, price, portal, webhook);
 }
 
-async function runBatch(gateway: StripeBillingGateway, full: boolean): Promise<void> {
+async function runBatch(gateway: BillingGateway, full: boolean): Promise<void> {
   await db.transaction(async (rawTx) => {
     const database = rawTx as unknown as Db;
     const orgIds = await listSeatSyncCandidates({ database, full, limit: 50 });
@@ -31,36 +32,113 @@ async function runBatch(gateway: StripeBillingGateway, full: boolean): Promise<v
   });
 }
 
+function safeErrorLabel(error: unknown): string {
+  if (!error || typeof error !== "object") return "unknown";
+  const value = error as { name?: unknown; code?: unknown; statusCode?: unknown };
+  const parts = [typeof value.name === "string" && value.name ? value.name : "Error"];
+  if (typeof value.code === "string" && value.code) parts.push(`code=${value.code}`);
+  if (typeof value.statusCode === "number") parts.push(`status=${value.statusCode}`);
+  return parts.join(" ");
+}
+
+interface BillingSupervisorOptions {
+  config?: ReturnType<typeof billingRuntimeConfig>;
+  gateway?: BillingGateway;
+  runBatch?: (gateway: BillingGateway, full: boolean) => Promise<void>;
+  startupRetryMs?: number;
+  pendingIntervalMs?: number;
+  reconcileIntervalMs?: number;
+}
+
 /** Billing is an independent supervisor: disabled billing never idles the run worker. */
-export async function startBillingSupervisor(): Promise<Supervisor | null> {
-  const config = billingRuntimeConfig();
+export async function startBillingSupervisor(input: BillingSupervisorOptions = {}): Promise<Supervisor | null> {
+  const config = input.config ?? billingRuntimeConfig();
   if (config.billingMode !== "stripe") {
     console.info("billing supervisor disabled");
     return null;
   }
-  const gateway = gatewayFromEnvironment();
-  await gateway.validateConfiguration();
+  const executeBatch = input.runBatch ?? runBatch;
+  const startupRetryMs = input.startupRetryMs ?? STARTUP_RETRY_MS;
+  const pendingIntervalMs = input.pendingIntervalMs ?? PENDING_INTERVAL_MS;
+  const reconcileIntervalMs = input.reconcileIntervalMs ?? RECONCILE_INTERVAL_MS;
+  let gateway = input.gateway;
   let stopped = false;
-  let pendingRunning = false;
-  let fullRunning = false;
-  const pending = async () => {
-    if (stopped || pendingRunning) return;
-    pendingRunning = true;
-    try { await runBatch(gateway, false); } finally { pendingRunning = false; }
+  let retryTimer: ReturnType<typeof setTimeout> | null = null;
+  let pendingTimer: ReturnType<typeof setInterval> | null = null;
+  let fullTimer: ReturnType<typeof setInterval> | null = null;
+  let activationPromise: Promise<void> | null = null;
+  let pendingPromise: Promise<void> | null = null;
+  let fullPromise: Promise<void> | null = null;
+  const pending = (activeGateway: BillingGateway): Promise<void> => {
+    if (stopped) return Promise.resolve();
+    if (pendingPromise) return pendingPromise;
+    const operation = (async () => {
+      try {
+        await executeBatch(activeGateway, false);
+      } catch (error) {
+        if (!stopped) console.warn(`billing pending synchronization will retry (${safeErrorLabel(error)})`);
+      }
+    })();
+    pendingPromise = operation;
+    void operation.finally(() => {
+      if (pendingPromise === operation) pendingPromise = null;
+    });
+    return operation;
   };
-  const full = async () => {
-    if (stopped || fullRunning) return;
-    fullRunning = true;
-    try { await runBatch(gateway, true); } finally { fullRunning = false; }
+  const full = (activeGateway: BillingGateway): Promise<void> => {
+    if (stopped) return Promise.resolve();
+    if (fullPromise) return fullPromise;
+    const operation = (async () => {
+      try {
+        await executeBatch(activeGateway, true);
+      } catch (error) {
+        if (!stopped) console.warn(`billing full synchronization will retry (${safeErrorLabel(error)})`);
+      }
+    })();
+    fullPromise = operation;
+    void operation.finally(() => {
+      if (fullPromise === operation) fullPromise = null;
+    });
+    return operation;
   };
-  await pending();
-  const pendingTimer = setInterval(() => void pending(), PENDING_INTERVAL_MS);
-  const fullTimer = setInterval(() => void full(), RECONCILE_INTERVAL_MS);
+  const activate = async () => {
+    try {
+      gateway ??= gatewayFromEnvironment();
+      await gateway.validateConfiguration();
+      if (stopped) return;
+      await pending(gateway);
+      if (stopped) return;
+      pendingTimer = setInterval(() => void pending(gateway!), pendingIntervalMs);
+      fullTimer = setInterval(() => void full(gateway!), reconcileIntervalMs);
+      console.info("billing supervisor started");
+    } catch (error) {
+      if (stopped) return;
+      console.warn(`billing supervisor startup will retry (${safeErrorLabel(error)})`);
+      retryTimer = setTimeout(() => {
+        retryTimer = null;
+        void startActivation();
+      }, startupRetryMs);
+    }
+  };
+  const startActivation = (): Promise<void> => {
+    if (activationPromise) return activationPromise;
+    const operation = activate();
+    activationPromise = operation;
+    void operation.finally(() => {
+      if (activationPromise === operation) activationPromise = null;
+    });
+    return operation;
+  };
+  await startActivation();
   return {
     async stop() {
       stopped = true;
-      clearInterval(pendingTimer);
-      clearInterval(fullTimer);
+      if (retryTimer) clearTimeout(retryTimer);
+      if (pendingTimer) clearInterval(pendingTimer);
+      if (fullTimer) clearInterval(fullTimer);
+      await Promise.allSettled(
+        [activationPromise, pendingPromise, fullPromise].filter((operation): operation is Promise<void> => Boolean(operation)),
+      );
     },
   };
 }

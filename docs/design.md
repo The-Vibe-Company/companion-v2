@@ -463,7 +463,10 @@ upgradeUrl? }`, including `sandbox_plan_required` and `sandbox_quota_exhausted` 
 Membership acceptance, domain join, and removal mark the tenant billing row `pending` in the same
 database transaction. `apps/worker` claims rows with `FOR UPDATE SKIP LOCKED` every 15 seconds, updates
 Stripe quantities with `proration_behavior=create_prorations`, retries from 30 seconds up to one hour,
-and refreshes all subscriptions every 15 minutes. Stripe webhook signatures are verified against the
+and refreshes all subscriptions every 15 minutes. The billing supervisor also retries its own startup
+every 15 seconds after transient Stripe or database failures; scheduled batch failures remain isolated
+and retry on the next interval instead of disabling billing or producing an unhandled rejection.
+Stripe webhook signatures are verified against the
 raw body; event ids are deduplicated, then the current Stripe subscription is always re-read before
 persisting so delivery order cannot corrupt local state.
 
