@@ -10,7 +10,7 @@ function fakeDb(rows: unknown[]) {
 }
 
 describe("getSkillPublicPreviewByShareToken", () => {
-  it("returns a metadata-only preview for a live org skill token", async () => {
+  it("returns a metadata-only preview when the raw SQL timestamp is a string", async () => {
     const { database, execute } = fakeDb([
       {
         slug: "mega-code-review",
@@ -27,7 +27,7 @@ describe("getSkillPublicPreviewByShareToken", () => {
           },
         }),
         star_count: 4,
-        updated_at: new Date("2026-06-25T10:00:00.000Z"),
+        updated_at: "2026-06-25 10:00:00+00",
       },
     ]);
 
