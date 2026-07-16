@@ -2,7 +2,11 @@ import { createHash } from "node:crypto";
 import { sql } from "drizzle-orm";
 import { db, type Db } from "@companion/db";
 
-export type RunArtifactType = { contentType: string; previewable: boolean };
+export type RunArtifactType = {
+  contentType: string;
+  previewable: boolean;
+  previewContentType: string | null;
+};
 
 const EXTENSION_TYPES: Record<string, string> = {
   ".csv": "text/csv; charset=utf-8",
@@ -21,31 +25,85 @@ function hasPrefix(data: Buffer, bytes: number[]): boolean {
   return data.length >= bytes.length && bytes.every((byte, index) => data[index] === byte);
 }
 
-/** Raster previews are trusted only after a binary signature check, never from a filename/MIME hint. */
-export function detectRunArtifactType(path: string, data: Buffer): RunArtifactType {
-  if (hasPrefix(data, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) {
-    return { contentType: "image/png", previewable: true };
+function detectedPreview(contentType: string): RunArtifactType {
+  return { contentType, previewable: true, previewContentType: contentType };
+}
+
+function downloadOnly(contentType: string): RunArtifactType {
+  return { contentType, previewable: false, previewContentType: null };
+}
+
+function isoBmffBrands(data: Buffer): string[] {
+  if (data.length < 16 || data.subarray(4, 8).toString("ascii") !== "ftyp") return [];
+  const boxSize = data.readUInt32BE(0);
+  if (boxSize < 16) return [];
+  const end = Math.min(data.length, boxSize, 256);
+  const brands: string[] = [];
+  for (let offset = 8; offset + 4 <= end; offset += 4) {
+    // Bytes 12..15 are the minor version, not a compatible brand.
+    if (offset === 12) continue;
+    brands.push(data.subarray(offset, offset + 4).toString("ascii"));
   }
-  if (hasPrefix(data, [0xff, 0xd8, 0xff])) return { contentType: "image/jpeg", previewable: true };
+  return brands;
+}
+
+function readEbmlVint(data: Buffer, offset: number): { length: number; value: number } | null {
+  const first = data[offset];
+  if (first === undefined || first === 0) return null;
+  let length = 1;
+  let marker = 0x80;
+  while ((first & marker) === 0 && length < 8) {
+    marker >>= 1;
+    length += 1;
+  }
+  if (offset + length > data.length) return null;
+  let value = first & (marker - 1);
+  for (let index = 1; index < length; index += 1) value = (value * 256) + data[offset + index]!;
+  return Number.isSafeInteger(value) ? { length, value } : null;
+}
+
+function hasWebmDocType(data: Buffer): boolean {
+  if (!hasPrefix(data, [0x1a, 0x45, 0xdf, 0xa3])) return false;
+  // DocType (0x4282) lives in the small EBML header. Parse its VINT length instead of accepting
+  // any Matroska-family payload that happens to carry a .webm extension.
+  const limit = Math.min(data.length, 4096);
+  for (let offset = 4; offset + 3 <= limit; offset += 1) {
+    if (data[offset] !== 0x42 || data[offset + 1] !== 0x82) continue;
+    const size = readEbmlVint(data, offset + 2);
+    if (!size || size.value < 1 || size.value > 16) return false;
+    const start = offset + 2 + size.length;
+    if (start + size.value > limit) return false;
+    return data.subarray(start, start + size.value).toString("ascii").toLowerCase() === "webm";
+  }
+  return false;
+}
+
+/** Browser previews are trusted only after a binary signature check, never from a filename/MIME hint. */
+export function detectRunFileType(path: string, data: Buffer): RunArtifactType {
+  if (hasPrefix(data, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) {
+    return detectedPreview("image/png");
+  }
+  if (hasPrefix(data, [0xff, 0xd8, 0xff])) return detectedPreview("image/jpeg");
   const ascii = data.subarray(0, 16).toString("ascii");
   if (ascii.startsWith("GIF87a") || ascii.startsWith("GIF89a")) {
-    return { contentType: "image/gif", previewable: true };
+    return detectedPreview("image/gif");
   }
   if (ascii.startsWith("RIFF") && ascii.slice(8, 12) === "WEBP") {
-    return { contentType: "image/webp", previewable: true };
+    return detectedPreview("image/webp");
   }
-  if (data.length >= 16 && ascii.slice(4, 8) === "ftyp") {
-    const boxSize = data.readUInt32BE(0);
-    const end = Math.min(data.length, boxSize, 256);
-    for (let offset = 8; boxSize >= 16 && offset + 4 <= end; offset += 4) {
-      const brand = data.subarray(offset, offset + 4).toString("ascii");
-      if (brand === "avif" || brand === "avis") return { contentType: "image/avif", previewable: true };
-    }
+  const brands = isoBmffBrands(data);
+  if (brands.some((brand) => brand === "avif" || brand === "avis")) return detectedPreview("image/avif");
+  if (brands.some((brand) => ["isom", "iso2", "iso3", "iso4", "iso5", "iso6", "avc1", "mp41", "mp42", "M4V ", "MSNV", "dash"].includes(brand))) {
+    return detectedPreview("video/mp4");
   }
+  if (hasWebmDocType(data)) return detectedPreview("video/webm");
   const dot = path.lastIndexOf(".");
   const extension = dot >= 0 ? path.slice(dot).toLowerCase() : "";
-  return { contentType: EXTENSION_TYPES[extension] ?? "application/octet-stream", previewable: false };
+  return downloadOnly(EXTENSION_TYPES[extension] ?? "application/octet-stream");
 }
+
+/** Artifact-facing name retained for the worker and existing callers. */
+export const detectRunArtifactType = detectRunFileType;
 
 /** Stable UUID-shaped id makes replacing one run/path an idempotent overwrite. */
 export function runArtifactId(runId: string, path: string): string {

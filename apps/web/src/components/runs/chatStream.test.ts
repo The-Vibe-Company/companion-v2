@@ -265,6 +265,62 @@ describe("chatReducer", () => {
     expect(asst).toHaveLength(2);
   });
 
+  it("settles partial assistant and reasoning output when a turn stops without done events", () => {
+    let state = initChatState();
+    state = apply(state, { type: "prompt.status", prompt_id: "11111111-1111-4111-8111-111111111111", message_id: "m1", ordinal: 1, status: "processing" });
+    state = apply(state, { type: "tool.start", call_id: "c1", skill: null, tool: "bash", title: null, input: "sleep 10" });
+    state = apply(state, { type: "reasoning.delta", part_id: "r1", delta: "Partial thought" });
+    state = apply(state, { type: "text.delta", message_id: "m1", delta: "Partial answer" });
+    state = apply(state, { type: "prompt.status", prompt_id: "11111111-1111-4111-8111-111111111111", message_id: "m1", ordinal: 1, status: "canceled" });
+
+    expect(state.busy).toBe(false);
+    expect(state.working).toEqual({ active: false, label: "" });
+    expect(state.items.filter((item) => item.kind === "asst" || item.kind === "reasoning"))
+      .toEqual(expect.arrayContaining([
+        expect.objectContaining({ kind: "asst", text: "Partial answer", streaming: false }),
+        expect.objectContaining({ kind: "reasoning", text: "Partial thought", streaming: false }),
+      ]));
+    expect(state.items.find((item) => item.kind === "tool"))
+      .toMatchObject({ kind: "tool", callId: "c1", running: false });
+
+    // A retry may legitimately resume the same stable assistant id.
+    state = apply(state, { type: "text.delta", message_id: "m1", delta: " resumed" });
+    expect(state.items.find((item) => item.kind === "asst"))
+      .toMatchObject({ text: "Partial answer resumed", streaming: true });
+  });
+
+  it("keeps the active turn streaming when another follow-up is queued or removed", () => {
+    let state = initChatState();
+    state = apply(state, { type: "prompt.status", prompt_id: "11111111-1111-4111-8111-111111111111", message_id: "m1", ordinal: 1, status: "processing" });
+    state = apply(state, { type: "tool.start", call_id: "c1", skill: null, tool: "bash", title: null, input: "sleep 10" });
+    state = apply(state, { type: "text.delta", message_id: "m1", delta: "Still working" });
+
+    state = apply(state, { type: "prompt.status", prompt_id: "22222222-2222-4222-8222-222222222222", message_id: "m2", ordinal: 2, status: "queued" });
+    state = apply(state, { type: "prompt.status", prompt_id: "22222222-2222-4222-8222-222222222222", message_id: "m2", ordinal: 2, status: "canceled" });
+
+    expect(state.busy).toBe(true);
+    expect(state.activePromptId).toBe("11111111-1111-4111-8111-111111111111");
+    expect(state.items.find((item) => item.kind === "tool"))
+      .toMatchObject({ kind: "tool", callId: "c1", running: true });
+    expect(state.items.find((item) => item.kind === "asst"))
+      .toMatchObject({ kind: "asst", messageId: "m1", streaming: true });
+  });
+
+  it("settles live visual states when the session becomes idle without done events", () => {
+    let state = initChatState();
+    state = apply(state, { type: "tool.start", call_id: "c1", skill: null, tool: "bash", title: null, input: "sleep 10" });
+    state = apply(state, { type: "reasoning.delta", part_id: "r1", delta: "Partial thought" });
+    state = apply(state, { type: "text.delta", message_id: "m1", delta: "Partial answer" });
+    state = apply(state, { type: "session.idle", session_id: "s1" });
+
+    expect(state.busy).toBe(false);
+    expect(state.items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "tool", callId: "c1", running: false }),
+      expect.objectContaining({ kind: "reasoning", partId: "r1", streaming: false }),
+      expect.objectContaining({ kind: "asst", messageId: "m1", streaming: false }),
+    ]));
+  });
+
   it("captures session id and errors", () => {
     let state = initChatState();
     state = apply(state, { type: "ready", session_id: "s-9" });
@@ -311,6 +367,7 @@ describe("chatReducer", () => {
         prompt_ordinal: 0,
         file_name: "brief.pdf",
         content_type: "application/pdf",
+        preview_content_type: null,
         byte_size: 42,
       }],
       items: [
@@ -359,6 +416,7 @@ describe("chatReducer", () => {
           prompt_ordinal: 0,
           file_name: "initial.pdf",
           content_type: "application/pdf",
+          preview_content_type: null,
           byte_size: 12,
         },
         {
@@ -368,6 +426,7 @@ describe("chatReducer", () => {
           prompt_ordinal: 1,
           file_name: "follow-up.txt",
           content_type: "text/plain",
+          preview_content_type: null,
           byte_size: 8,
         },
       ],
@@ -381,6 +440,22 @@ describe("chatReducer", () => {
     const users = state.items.filter((item) => item.kind === "user");
     expect(users[0]).toMatchObject({ attachments: [expect.objectContaining({ file_name: "initial.pdf" })] });
     expect(users[1]).toMatchObject({ attachments: [expect.objectContaining({ file_name: "follow-up.txt" })] });
+  });
+
+  it("deduplicates an acknowledged user message replayed by prompt processing", () => {
+    let state = chatReducer(initChatState(), {
+      kind: "user",
+      text: "Queued follow-up",
+      messageId: "message-queued",
+      attachments: [],
+    });
+    state = chatReducer(state, {
+      kind: "user",
+      text: "Queued follow-up",
+      messageId: "message-queued",
+      attachments: [],
+    });
+    expect(state.items.filter((item) => item.kind === "user" && item.messageId === "message-queued")).toHaveLength(1);
   });
 
   it("drives the working indicator from session.status events", () => {

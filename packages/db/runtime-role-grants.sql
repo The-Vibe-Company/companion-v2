@@ -56,10 +56,13 @@ BEGIN
     'GRANT EXECUTE ON FUNCTION
       public.companion_heartbeat_skill_run_worker(text, integer),
       public.companion_heartbeat_skill_run_worker(text, integer, integer),
+      public.companion_heartbeat_skill_run_worker(text, integer, integer, integer),
       public.companion_remove_skill_run_worker(text),
       public.companion_skill_run_worker_ready(),
       public.companion_skill_run_attachment_worker_ready(),
       public.companion_skill_run_attachment_worker_ready(uuid, uuid, text),
+      public.companion_skill_run_turn_stop_worker_ready(),
+      public.companion_skill_run_turn_stop_worker_ready(uuid, uuid, text),
       public.companion_lock_skill_run_attachment_orphan(text, timestamp with time zone),
       public.companion_complete_skill_run_attachment_orphan(text),
       public.companion_defer_skill_run_attachment_orphan(text, timestamp with time zone),

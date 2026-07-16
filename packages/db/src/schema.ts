@@ -1551,6 +1551,8 @@ export const skillRunWorkerHeartbeats = pgTable(
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
     /** Protocol 1 guarantees follow-up attachments are mounted before OpenCode dispatch. */
     attachmentPromptProtocol: integer("attachment_prompt_protocol").notNull().default(0),
+    /** Protocol 2 also persists the send-attempt barrier before contacting OpenCode. */
+    turnStopProtocol: integer("turn_stop_protocol").notNull().default(0),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => ({
@@ -1562,6 +1564,10 @@ export const skillRunWorkerHeartbeats = pgTable(
     attachmentProtocolCheck: check(
       "skill_run_worker_heartbeats_attachment_protocol_check",
       sql`${t.attachmentPromptProtocol} BETWEEN 0 AND 1`,
+    ),
+    turnStopProtocolCheck: check(
+      "skill_run_worker_heartbeats_turn_stop_protocol_check",
+      sql`${t.turnStopProtocol} BETWEEN 0 AND 2`,
     ),
   }),
 );
@@ -1587,11 +1593,19 @@ export const skillRunPrompts = pgTable(
     status: skillRunPromptStatusEnum("status").notNull().default("queued"),
     /** Prompt dispatch failures consume this budget; lease-only recovery keeps the same attempt. */
     attempt: integer("attempt").notNull().default(0),
+    /** Version 2 claims persist sendAttemptedAt before the runtime can observe this message id. */
+    dispatchProtocol: integer("dispatch_protocol").notNull().default(0),
+    /** Durable external-side-effect barrier, committed immediately before sendPrompt. */
+    sendAttemptedAt: timestamp("send_attempted_at", { withTimezone: true }),
+    /** False only after a never-dispatched queued prompt has handed its objects to the sweeper. */
+    attachmentsRetained: boolean("attachments_retained").notNull().default(true),
     leaseReclaimCount: integer("lease_reclaim_count").notNull().default(0),
     availableAt: timestamp("available_at", { withTimezone: true }).notNull().defaultNow(),
     leaseOwner: text("lease_owner"),
     leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
     heartbeatAt: timestamp("heartbeat_at", { withTimezone: true }),
+    /** Status remains processing until the owning worker reaches a durable stop barrier. */
+    cancelRequestedAt: timestamp("cancel_requested_at", { withTimezone: true }),
     errorCode: text("error_code"),
     userMessage: text("user_message"),
     completedAt: timestamp("completed_at", { withTimezone: true }),
@@ -1607,6 +1621,12 @@ export const skillRunPrompts = pgTable(
       .on(t.orgId, t.runId)
       .where(sql`${t.status} = 'processing'`),
     byAvailability: index("skill_run_prompts_available_idx").on(t.status, t.availableAt),
+    byRunStatusOrdinal: index("skill_run_prompts_run_status_ordinal_idx").on(
+      t.orgId,
+      t.runId,
+      t.status,
+      t.ordinal,
+    ),
     runFk: foreignKey({
       columns: [t.orgId, t.runId],
       foreignColumns: [skillRuns.orgId, skillRuns.id],
@@ -1614,6 +1634,23 @@ export const skillRunPrompts = pgTable(
     }).onDelete("cascade"),
     ordinalCheck: check("skill_run_prompts_ordinal_check", sql`${t.ordinal} >= 0`),
     attemptCheck: check("skill_run_prompts_attempt_check", sql`${t.attempt} BETWEEN 0 AND 10`),
+    dispatchProtocolCheck: check(
+      "skill_run_prompts_dispatch_protocol_check",
+      sql`${t.dispatchProtocol} BETWEEN 0 AND 2`,
+    ),
+    sendMarkerProtocolCheck: check(
+      "skill_run_prompts_send_marker_protocol_check",
+      sql`${t.sendAttemptedAt} IS NULL OR ${t.dispatchProtocol} >= 2`,
+    ),
+    attachmentDispositionCheck: check(
+      "skill_run_prompts_attachment_disposition_check",
+      sql`${t.attachmentsRetained} OR (
+        ${t.status} = 'canceled'
+        AND ${t.kind} = 'follow_up'
+        AND ${t.sendAttemptedAt} IS NULL
+        AND (${t.attempt} = 0 OR ${t.dispatchProtocol} >= 2)
+      )`,
+    ),
     leaseReclaimCheck: check("skill_run_prompts_lease_reclaim_check", sql`${t.leaseReclaimCount} >= 0`),
     idempotencyKeyCheck: check(
       "skill_run_prompts_idempotency_key_check",
@@ -1667,6 +1704,8 @@ export const skillRunAttachments = pgTable(
     promptId: uuid("prompt_id"),
     fileName: text("file_name").notNull(),
     contentType: text("content_type").notNull(),
+    /** Server-verified safe inline MIME; null means download-only. */
+    previewContentType: text("preview_content_type"),
     byteSize: integer("byte_size").notNull(),
     storageKey: text("storage_key").notNull().unique(),
     createdAt: now(),

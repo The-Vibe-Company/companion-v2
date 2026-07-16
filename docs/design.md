@@ -614,13 +614,27 @@ content; only the sandbox does.
   instead pins a dedicated connection id and credential version; it never appears in the generic
   secret collection. Ordinary responses never contain plaintext.
 - `skill_run_jobs` is the retryable orchestration queue. `skill_run_prompts` is the initial/follow-up
-  outbox with deterministic OpenCode `messageID`s; it stores user-visible text separately from the
-  runtime prompt enriched with private attachment-path instructions. `skill_run_events` holds
-  redacted, monotonically sequenced events for replayable SSE.
+  FIFO outbox with deterministic OpenCode `messageID`s; it stores user-visible text separately from
+  the runtime prompt enriched with private attachment-path instructions. Dispatch protocol 2 records
+  a write-once `send_attempted_at` under the exact job and prompt leases immediately before
+  `sendPrompt`, distinguishing a proven pre-send retry from an ambiguous external side effect.
+  `attachments_retained` explicitly controls canceled-prompt file visibility and sweeper eligibility.
+  At most five follow-ups may remain queued behind the single processing prompt. A prompt-level
+  cancellation request stops or removes exactly that row without terminalizing the run.
+  `skill_run_events` holds redacted, monotonically sequenced events for replayable SSE, including
+  every durable prompt-status change.
 - `skill_run_attachments` — files attached to any prompt (≤5 × 10 MB per message, ≤100 MB per run):
   bytes in S3 under `{org}/run-attachments/{id}`, prompt-linked metadata here, mounted as
-  `<attachmentId>-<filename>`, and streamed back creator-only with `nosniff` +
-  `Content-Disposition: attachment`. Failed request paths never delete these deterministic objects
+  `<attachmentId>-<filename>`, and streamed back creator-only. A server-derived
+  `preview_content_type` permits inline PNG, JPEG, GIF, WebP, AVIF, MP4, or WebM only after binary
+  signature validation; browser MIME and filename extensions never grant inline rendering. Other
+  files and `?download=1` use `Content-Disposition: attachment`. Every response uses `nosniff`,
+  private/no-store caching and same-origin isolation. Videos support strict single HTTP byte ranges.
+  A partial response honors `If-Range` only when its strong ETag matches the selected object; weak,
+  stale, date, or malformed validators ignore Range and return the complete `200` representation.
+  The S3 GET remains pinned to the HEAD generation with `If-Match`, including when an overwrite
+  forces a retry.
+  Failed request paths never delete these deterministic objects
   synchronously: a concurrent idempotent retry may still be committing the same key. Unreferenced
   bytes are retained for at least 24 hours. `skill_run_attachment_uploads` reserves each deterministic
   key before S3 I/O; prompt commits consume the reservation under row lock, while the age-gated worker
@@ -636,7 +650,12 @@ content; only the sandbox does.
   run/path id and storage key make later versions replace the prior object and renew its TTL; an ETag
   compare-and-swap plus an exact lease check immediately before every PUT fences stale workers.
   Metadata follows `ready=false reservation → conditional S3 overwrite → ready=true`; only ready,
-  unexpired rows are visible. Cleanup bounds and aborts S3 deletion while holding its final row lock,
+  unexpired rows are visible. Raster images plus signature-validated MP4/WebM may render inline;
+  video delivery uses the same conditional, range-streamed object path as input attachments. The API
+  reads replaceable artifact metadata on both sides of S3 `HEAD`, pins the streamed `GET` with that
+  object's ETag, and retries when either generation changes; a response can therefore expose bytes
+  from only one metadata/object generation. Cleanup bounds and aborts S3 deletion while holding its
+  final row lock,
   and conditions that deletion on the observed ETag so a late request cannot remove a replacement.
 - `skill_run_prewarms` and `skill_run_prewarm_skills` hold creator-private, secretless launcher
   warm-ups. They pin only the root/dependency versions and sandbox lifecycle state; they never join
@@ -667,6 +686,14 @@ content; only the sandbox does.
   exact worker-lease write policy. Narrow reservation/finalization and cleanup functions are the only
   cross-tenant seams. Cleanup locks and rechecks the expired row across S3 deletion before removing
   metadata, so replacement and sweeping cannot orphan or publish bytes.
+- Migration `0042_run_prompt_queue_stop.sql` adds prompt-level cancellation, worker stop-protocol negotiation and
+  the signature-derived attachment preview type. Existing attachments remain download-only.
+- Migration `0043_run_prompt_dispatch_barrier.sql` adds dispatch protocol 2, the immutable pre-send
+  marker and explicit attachment disposition. It conservatively marks legacy attempted rows,
+  expires pending protocol-1 leases without consuming another attempt, and gates launch, claim and
+  queued-to-processing dispatch on a live turn-stop-v2 worker during rolling deployment. Ambiguous
+  cancellation is routed through worker stop recovery; only a queued follow-up proven never sent
+  becomes hidden and eligible for deferred attachment sweeping.
 - `user_model_preferences` / `org_model_preferences` (mig 0036) — the ACTIVATED-model lists (see
   "Activated models" below): a jsonb array of `provider/model-id` refs per member (PK
   `org_id+user_id`, user-scoped RLS) and per workspace (PK `org_id`, tenant RLS, nullable
@@ -736,9 +763,12 @@ external step has persisted before/after progress:
 For each follow-up, the worker fetches only that prompt's attachment objects and idempotently writes
 them into the live sandbox before checking/sending its deterministic OpenCode message. A retry may
 rewrite the same paths, but it never sends a prompt before every referenced file is mounted. Worker
-heartbeats advertise attachment-prompt protocol `1`; the API admits follow-up files only when the
-exact worker currently leasing that run advertises the protocol, so an old worker may finish text
-turns during a rolling deployment but cannot dispatch attachment-path prompts.
+heartbeats advertise attachment-prompt protocol `1` and turn-stop protocol `2`. Turn-stop v2 also
+identifies dispatch-v2 workers: the queued-to-processing transition requires their exact live job
+lease, and they persist the write-once send marker before any possible `sendPrompt` side effect.
+Migration 0043 expires old protocol-1 leases that could dispatch pending work; a v2 worker reclaims
+the same job attempt and reconciles the deterministic message id instead of allowing the old lease
+to advance.
 5. establish the recorder, then find or create the deterministic session;
 6. send the persisted initial/follow-up prompt with its deterministic `messageID`;
 7. batch redacted events and snapshot the transcript;
@@ -755,6 +785,15 @@ network signals. Each idle transcript snapshot and its `session.idle` barrier ev
 one transaction with the same watermark, so SSE can never hydrate an older snapshot after observing
 that event. Normal process shutdown stops claiming work and lets leases expire;
 it does not destroy active sandboxes.
+
+The exact-lease watcher also observes cancellation of the processing prompt. A prompt proven unsent
+is finalized without contacting OpenCode. A marked or legacy-ambiguous queued retry instead becomes
+`cancel_requested` processing work and is reclaimed by the stop path ahead of the recorder busy gate.
+The worker reconciles its deterministic message id, proves the shared session idle or aborts it, then
+waits for the recorder's durable atomic idle/transcript barrier before preserving the partial answer,
+collecting outputs and claiming the next FIFO prompt. Completion and cancellation are compare-and-set
+transitions, so a late request can never stop the successor. If abort or snapshot stabilization fails
+after retries, the run fails closed and its sandbox is destroyed before another prompt can start.
 
 ### Sandbox cleanup
 
@@ -776,14 +815,26 @@ Any member may RUN any skill they can see; running confers no visibility into ot
 
 ### Chat proxy
 
-The browser never sees the sandbox. A follow-up route inserts one durable outbox row and returns
-`202`; for an eligible frozen/canceled run the same transaction also increments the activation
-revision and requeues its orchestration job. A concurrent pending prompt returns `409`.
+The browser never sees the sandbox. A follow-up route inserts one durable FIFO outbox row and returns
+`202`; while a run is live, up to five rows may wait behind its single processing prompt. For an
+eligible frozen/canceled run, only the first prompt is admitted while the same transaction increments
+the activation revision and requeues its orchestration job. Each transition emits a replayable
+`prompt.status` event. Canceling a queued prompt removes it from future dispatch; canceling the exact
+processing prompt requests a turn-level stop while leaving the run and sandbox active.
 `GET /v1/runs/:id/events` first replays persisted
 rows strictly after `Last-Event-ID`, then switches to PostgreSQL `LISTEN/NOTIFY` without a race. The
 notification contains only run id and sequence, and every SSE frame has a real `id:`. Reconnect uses
 the last accepted sequence and transcript snapshots reconcile whenever `transcript_updated_at`
 advances.
+
+The web chat composes the headless shadcn Message Scroller with Companion-owned message, marker,
+attachment and composer components. User turns anchor the viewport; streaming follows only while the
+reader remains at the live edge, otherwise a labeled jump control exposes new content. The assistant
+is unframed, user turns use compact neutral bubbles, and tools/reasoning remain dense operational
+markers. The multiline composer stays available during a turn and displays the durable FIFO above
+it. Input files render beside their prompt; generated artifacts remain a run-level collection opened
+from the 460px Files drawer because the artifact contract does not attribute a path version to one
+turn. Local object-URL previews are revoked on removal, successful send and unmount.
 
 `packages/sandbox/src/opencodeChat.ts` absorbs pinned-SDK event churn. `run.warning` is non-terminal
 (for example a transient recorder reconnect); `run.error` represents a runtime failure. The worker
@@ -881,12 +932,17 @@ exact version, authoritative JSON inputs, repeatable file; mandatory `Idempotenc
 new run and the same result on replay),
 `GET /v1/skills/:slug/runs` (caller's runs only), `GET /v1/runs/:id`,
 `POST /v1/runs/:id/prompt` (legacy JSON text or multipart optional text + repeatable file; text or a
-file is required; mandatory idempotency, `202`), `POST /v1/runs/:id/cancel`,
+file is required; mandatory idempotency, `202`),
+`POST /v1/runs/:id/prompts/:promptId/cancel` (idempotent removal/turn stop),
+`POST /v1/runs/:id/cancel` (terminal run cancellation),
 `GET /v1/runs/:id/events` (replayable SSE), and
 `GET /v1/runs/:id/attachments/:attachmentId`, plus creator-only
-`GET /v1/runs/:id/artifacts/:artifactId`. The artifact route sends only signature-validated PNG,
-JPEG, GIF, WebP, and AVIF as `inline`; SVG, HTML, PDF, unknown types, and `?download=1` always use
-`attachment`, with `nosniff` for every response. Because every route rejects personal access
+`GET /v1/runs/:id/artifacts/:artifactId`. Attachment and artifact routes send only
+signature-validated PNG, JPEG, GIF, WebP, AVIF, MP4, and WebM as `inline`; SVG, HTML, PDF, unknown
+types, and `?download=1` always use `attachment`. MP4/WebM support a single conditional byte range
+without buffering the whole object. RFC `If-Range` semantics require a matching strong ETag for
+`206`; a mismatch returns the full current object with `200`, while S3 `If-Match` fences every stream
+to one object generation. Because every route rejects personal access
 tokens, the bundled Companion skill's API surface is unchanged.
 
 ### Non-goals (v1)

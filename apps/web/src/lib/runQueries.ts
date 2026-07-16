@@ -12,11 +12,16 @@ import type {
   RunOptions,
   RunPreferences,
   RunPromptAccepted,
+  RunPromptStatus,
   RunPrewarmResponse,
   RunPrewarmTicket,
   SkillRunDetail,
   SkillRunsResponse,
   UpdateRunConfigurationInput,
+} from "@companion/contracts";
+import {
+  runPromptAcceptedSchema,
+  skillRunDetailSchema,
 } from "@companion/contracts";
 import { apiFetch } from "./apiClient";
 
@@ -207,7 +212,43 @@ export async function fetchRuns(slug: string): Promise<SkillRunsResponse> {
 
 /** Full run detail (transcript + attachments). Polled at 1.5s while `starting`. */
 export async function fetchRun(runId: string): Promise<SkillRunDetail> {
-  return apiFetch<SkillRunDetail>(`/v1/runs/${encodeURIComponent(runId)}`);
+  const response = await apiFetch<unknown>(`/v1/runs/${encodeURIComponent(runId)}`);
+  return skillRunDetailSchema.parse(response);
+}
+
+/**
+ * A rolling deploy can briefly pair this client with the previous prompt API. Keep that response
+ * usable, but mark it so the chat refreshes instead of inventing a durable queue row the old API
+ * cannot report or complete through `prompt.status` events.
+ */
+export type RunPromptAcceptedResult = RunPromptAccepted & { legacy: boolean };
+
+export function normalizeRunPromptAccepted(response: unknown): RunPromptAcceptedResult {
+  const current = runPromptAcceptedSchema.safeParse(response);
+  if (current.success) return { ...current.data, legacy: false };
+
+  if (!response || typeof response !== "object") throw current.error;
+  const candidate = response as Record<string, unknown>;
+  const attachments = Array.isArray(candidate.attachments)
+    ? candidate.attachments.map((attachment) => (
+        attachment && typeof attachment === "object"
+          ? { preview_content_type: null, ...(attachment as Record<string, unknown>) }
+          : attachment
+      ))
+    : candidate.attachments;
+  const firstAttachment = Array.isArray(attachments) && attachments[0] && typeof attachments[0] === "object"
+    ? attachments[0] as Record<string, unknown>
+    : null;
+  const legacy = runPromptAcceptedSchema.parse({
+    ...candidate,
+    // The previous API accepted exactly one prompt at a time and returned it as queued. Its
+    // attachment rows still carry the exact ordinal; text-only prompts do not need one locally
+    // because legacy acknowledgements bypass the new queue reconciliation below.
+    ordinal: firstAttachment?.prompt_ordinal ?? 0,
+    status: "queued",
+    attachments,
+  });
+  return { ...legacy, legacy: true };
 }
 
 /** Fire-and-forget follow-up prompt (202); the reply arrives over the `/events` SSE stream. */
@@ -216,14 +257,56 @@ export async function sendRunPrompt(
   text: string,
   files: File[],
   idempotencyKey: string,
-): Promise<RunPromptAccepted> {
+  onUploadProgress?: (percent: number) => void,
+): Promise<RunPromptAcceptedResult> {
   const form = new FormData();
   form.set("text", text);
   for (const file of files) form.append("file", file, file.name);
-  return apiFetch<RunPromptAccepted>(`/v1/runs/${encodeURIComponent(runId)}/prompt`, {
+  if (onUploadProgress && files.length > 0 && typeof XMLHttpRequest !== "undefined") {
+    return new Promise<RunPromptAcceptedResult>((resolve, reject) => {
+      const request = new XMLHttpRequest();
+      request.open("POST", `/v1/runs/${encodeURIComponent(runId)}/prompt`);
+      request.setRequestHeader("Idempotency-Key", idempotencyKey);
+      request.responseType = "json";
+      request.upload.addEventListener("progress", (event) => {
+        if (event.lengthComputable && event.total > 0) {
+          onUploadProgress(Math.min(100, Math.round((event.loaded / event.total) * 100)));
+        }
+      });
+      request.addEventListener("load", () => {
+        const response = request.response as RunPromptAccepted | { error?: string; message?: string } | null;
+        if (request.status >= 200 && request.status < 300 && response) {
+          onUploadProgress(100);
+          try {
+            resolve(normalizeRunPromptAccepted(response));
+          } catch (error) {
+            reject(error);
+          }
+          return;
+        }
+        const error = response && "message" in response ? response.message : response && "error" in response ? response.error : null;
+        reject(new Error(error ?? `Request failed: ${request.status}`));
+      });
+      request.addEventListener("error", () => reject(new Error("The upload connection failed.")));
+      request.addEventListener("abort", () => reject(new Error("The upload was interrupted.")));
+      onUploadProgress(0);
+      request.send(form);
+    });
+  }
+  const response = await apiFetch<unknown>(`/v1/runs/${encodeURIComponent(runId)}/prompt`, {
     method: "POST",
     body: form,
     headers: { "Idempotency-Key": idempotencyKey },
+  });
+  return normalizeRunPromptAccepted(response);
+}
+
+export async function cancelRunPrompt(
+  runId: string,
+  promptId: string,
+): Promise<{ prompt_id: string; status: RunPromptStatus; requested: boolean }> {
+  return apiFetch(`/v1/runs/${encodeURIComponent(runId)}/prompts/${encodeURIComponent(promptId)}/cancel`, {
+    method: "POST",
   });
 }
 
@@ -240,8 +323,9 @@ export async function cancelRun(runId: string): Promise<SkillRunDetail> {
 }
 
 /** Download href for a run attachment (streamed by the API, creator-only). */
-export function runAttachmentHref(runId: string, attachmentId: string): string {
-  return `/v1/runs/${encodeURIComponent(runId)}/attachments/${encodeURIComponent(attachmentId)}`;
+export function runAttachmentHref(runId: string, attachmentId: string, download = false): string {
+  const base = `/v1/runs/${encodeURIComponent(runId)}/attachments/${encodeURIComponent(attachmentId)}`;
+  return download ? `${base}?download=1` : base;
 }
 
 /** Creator-only artifact href. Raster images render inline unless download is forced. */

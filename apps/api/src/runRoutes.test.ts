@@ -38,10 +38,20 @@ const serviceMocks = vi.hoisted(() => ({
   enqueueRunPrompt: vi.fn(),
   preflightRunPromptUpload: vi.fn(async () => undefined),
   reserveRunAttachmentUploads: vi.fn(async () => undefined),
+  requestRunPromptCancellation: vi.fn(),
   requestRunCancellation: vi.fn(),
   listRunEvents: vi.fn(),
   getRunAttachment: vi.fn(),
   getRunArtifact: vi.fn(),
+  detectRunFileType: vi.fn((_path: string, data: Buffer) => ({
+    contentType: data.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+      ? "image/png"
+      : "application/octet-stream",
+    previewable: data.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])),
+    previewContentType: data.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+      ? "image/png"
+      : null,
+  })),
   isRunWorkerReady: vi.fn(async () => true),
   setProviderConnection: vi.fn(),
   setOrgProviderConnection: vi.fn(),
@@ -52,11 +62,42 @@ const authMocks = vi.hoisted(() => ({
   handler: vi.fn(),
 }));
 
-const storageMocks = vi.hoisted(() => ({
-  putSkillArchive: vi.fn(async (_input: { key: string }) => undefined),
-  deleteSkillArchive: vi.fn(async (_input: { key: string }) => undefined),
-  getSkillArchive: vi.fn(async (_input: { key: string }) => Buffer.from("artifact")),
-}));
+const storageMocks = vi.hoisted(() => {
+  class InvalidSkillArchiveRangeError extends Error {}
+  return {
+    InvalidSkillArchiveRangeError,
+    putSkillArchive: vi.fn(async (_input: { key: string }) => undefined),
+    deleteSkillArchive: vi.fn(async (_input: { key: string }) => undefined),
+    getSkillArchive: vi.fn(async (_input: { key: string }) => Buffer.from("artifact")),
+    headSkillArchive: vi.fn(async (_input: { key: string }) => ({ etag: '"asset-etag"', contentLength: 8 })),
+    streamSkillArchive: vi.fn(async (input: { key: string; range?: string; ifMatch?: string }) => {
+      const match = input.range ? /^bytes=(\d+)-(\d+)$/.exec(input.range) : null;
+      const start = match ? Number(match[1]) : 0;
+      const end = match ? Number(match[2]) : 7;
+      const body = "artifact".slice(start, end + 1);
+      return {
+        body: new Response(body).body!,
+        contentLength: body.length,
+        contentRange: match ? `bytes ${start}-${end}/8` : null,
+        contentType: "application/octet-stream",
+        etag: input.ifMatch ?? '"asset-etag"',
+      };
+    }),
+    resolveSkillArchiveByteRange: (value: string, size: number) => {
+      const match = /^bytes=(\d*)-(\d*)$/.exec(value);
+      if (!match || (match[1] === "" && match[2] === "") || value.includes(",")) {
+        throw new InvalidSkillArchiveRangeError();
+      }
+      const start = match[1] === "" ? Math.max(0, size - Number(match[2])) : Number(match[1]);
+      const end = match[2] === "" ? size - 1 : Math.min(Number(match[2]), size - 1);
+      if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start >= size || end < start) {
+        throw new InvalidSkillArchiveRangeError();
+      }
+      return { start, end, length: end - start + 1, header: `bytes=${start}-${end}` };
+    },
+    isStoragePreconditionFailure: (error: unknown) => error instanceof Error && error.name === "PreconditionFailed",
+  };
+});
 
 const catalogMocks = vi.hoisted(() => ({
   listModels: vi.fn(async () => ({
@@ -84,6 +125,11 @@ vi.mock("@companion/storage", () => ({
   putSkillArchive: storageMocks.putSkillArchive,
   deleteSkillArchive: storageMocks.deleteSkillArchive,
   getSkillArchive: storageMocks.getSkillArchive,
+  headSkillArchive: storageMocks.headSkillArchive,
+  streamSkillArchive: storageMocks.streamSkillArchive,
+  resolveSkillArchiveByteRange: storageMocks.resolveSkillArchiveByteRange,
+  InvalidSkillArchiveRangeError: storageMocks.InvalidSkillArchiveRangeError,
+  isStoragePreconditionFailure: storageMocks.isStoragePreconditionFailure,
 }));
 
 import { app } from "./index";
@@ -267,6 +313,9 @@ describe("session-only RunSkill routes", () => {
     expect(response.status).toBe(400);
     expect(storageMocks.putSkillArchive).toHaveBeenCalledTimes(1);
     expect(storageMocks.deleteSkillArchive).not.toHaveBeenCalled();
+    expect(serviceMocks.createRun).toHaveBeenCalledWith(expect.objectContaining({
+      attachments: [expect.objectContaining({ previewContentType: null })],
+    }));
   });
 
   it("retains uploaded objects even when a failed transaction appears uncommitted", async () => {
@@ -298,6 +347,7 @@ describe("session-only RunSkill routes", () => {
     serviceMocks.enqueueRunPrompt.mockResolvedValue({
       id: promptId,
       messageId: "msg_123456789012abcdefghijklmn",
+      ordinal: 1,
       status: "queued",
       attachments: [],
       reactivated: true,
@@ -313,6 +363,8 @@ describe("session-only RunSkill routes", () => {
       accepted: true,
       prompt_id: promptId,
       message_id: "msg_123456789012abcdefghijklmn",
+      ordinal: 1,
+      status: "queued",
       attachments: [],
       reactivated: true,
     });
@@ -323,6 +375,53 @@ describe("session-only RunSkill routes", () => {
     const canceled = await app.request("/v1/runs/run-1/cancel", { method: "POST" });
     expect(canceled.status).toBe(202);
     await expect(canceled.json()).resolves.toEqual({ status: "running", requested: true });
+  });
+
+  it("cancels the exact queued or processing prompt without ending the run", async () => {
+    signIn();
+    const promptId = "00000000-0000-4000-8000-000000000099";
+    serviceMocks.requestRunPromptCancellation.mockResolvedValue({
+      prompt_id: promptId,
+      status: "cancel_requested",
+      requested: true,
+    });
+
+    const response = await app.request(`/v1/runs/run-1/prompts/${promptId}/cancel`, { method: "POST" });
+
+    expect(response.status).toBe(202);
+    await expect(response.json()).resolves.toEqual({
+      prompt_id: promptId,
+      status: "cancel_requested",
+      requested: true,
+    });
+    expect(serviceMocks.requestRunPromptCancellation).toHaveBeenCalledWith(expect.objectContaining({
+      actor,
+      runId: "run-1",
+      promptId,
+    }));
+    expect(serviceMocks.requestRunCancellation).not.toHaveBeenCalled();
+  });
+
+  it("keeps prompt cancellation session-only and hides unknown prompt ownership", async () => {
+    const promptId = "00000000-0000-4000-8000-000000000099";
+    serviceMocks.resolveApiToken.mockResolvedValue({
+      actor,
+      orgId: "00000000-0000-4000-8000-000000000010",
+      scopes: ["skills:read"],
+    });
+    const tokenResponse = await app.request(`/v1/runs/run-1/prompts/${promptId}/cancel`, {
+      method: "POST",
+      headers: { Authorization: "Bearer cmp_pat_test" },
+    });
+    expect(tokenResponse.status).toBe(401);
+    expect(serviceMocks.requestRunPromptCancellation).not.toHaveBeenCalled();
+
+    signIn();
+    serviceMocks.requestRunPromptCancellation.mockRejectedValueOnce(
+      new serviceMocks.RunValidationError("prompt not found", "prompt_not_found"),
+    );
+    const missing = await app.request(`/v1/runs/run-1/prompts/${promptId}/cancel`, { method: "POST" });
+    expect(missing.status).toBe(404);
   });
 
   it("serves safe raster artifacts inline and forces all downloads when requested", async () => {
@@ -337,14 +436,210 @@ describe("session-only RunSkill routes", () => {
     expect(inline.status).toBe(200);
     expect(inline.headers.get("content-disposition")).toBe('inline; filename="cat.png"');
     expect(inline.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(inline.headers.get("cross-origin-resource-policy")).toBe("same-origin");
+    expect(inline.headers.get("cache-control")).toBe("private, no-store");
+    expect(inline.headers.get("etag")).toBe('"asset-etag"');
 
     const download = await app.request("/v1/runs/run-1/artifacts/artifact-1?download=1");
     expect(download.headers.get("content-disposition")).toBe('attachment; filename="cat.png"');
   });
 
+  it("streams verified video ranges and rejects multiple ranges", async () => {
+    signIn();
+    serviceMocks.getRunArtifact.mockResolvedValue({
+      fileName: "clip.mp4",
+      contentType: "video/mp4",
+      storageKey: "org/run-artifacts/run/clip",
+      previewable: true,
+    });
+
+    const partial = await app.request("/v1/runs/run-1/artifacts/video-1", {
+      headers: { Range: "bytes=2-5", "If-Range": '"asset-etag"' },
+    });
+    expect(partial.status).toBe(206);
+    expect(partial.headers.get("accept-ranges")).toBe("bytes");
+    expect(partial.headers.get("content-range")).toBe("bytes 2-5/8");
+    expect(partial.headers.get("content-length")).toBe("4");
+    expect(storageMocks.streamSkillArchive).toHaveBeenCalledWith(expect.objectContaining({
+      range: "bytes=2-5",
+      ifMatch: '"asset-etag"',
+    }));
+
+    storageMocks.streamSkillArchive.mockClear();
+    const invalid = await app.request("/v1/runs/run-1/artifacts/video-1", {
+      headers: { Range: "bytes=0-1,4-5", "If-Range": '"asset-etag"' },
+    });
+    expect(invalid.status).toBe(416);
+    expect(invalid.headers.get("content-range")).toBe("bytes */8");
+    expect(storageMocks.streamSkillArchive).not.toHaveBeenCalled();
+  });
+
+  it("ignores an invalid Range when If-Range does not select the current representation", async () => {
+    signIn();
+    serviceMocks.getRunArtifact.mockResolvedValue({
+      fileName: "clip.mp4",
+      contentType: "video/mp4",
+      storageKey: "org/run-artifacts/run/clip",
+      previewable: true,
+    });
+
+    const response = await app.request("/v1/runs/run-1/artifacts/video-1", {
+      headers: { Range: "bytes=0-1,4-5", "If-Range": '"stale-etag"' },
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-range")).toBeNull();
+    await expect(response.text()).resolves.toBe("artifact");
+    expect(storageMocks.streamSkillArchive).toHaveBeenCalledWith(expect.objectContaining({
+      range: undefined,
+      ifMatch: '"asset-etag"',
+    }));
+  });
+
+  it("ignores Range when If-Range is stale or weak while preserving the S3 generation fence", async () => {
+    signIn();
+    serviceMocks.getRunArtifact.mockResolvedValue({
+      fileName: "clip.mp4",
+      contentType: "video/mp4",
+      storageKey: "org/run-artifacts/run/clip",
+      previewable: true,
+    });
+
+    for (const ifRange of ['"stale-etag"', 'W/"asset-etag"']) {
+      storageMocks.streamSkillArchive.mockClear();
+      const response = await app.request("/v1/runs/run-1/artifacts/video-1", {
+        headers: { Range: "bytes=2-5", "If-Range": ifRange },
+      });
+
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-range")).toBeNull();
+      expect(response.headers.get("content-length")).toBe("8");
+      await expect(response.text()).resolves.toBe("artifact");
+      expect(storageMocks.streamSkillArchive).toHaveBeenCalledWith(expect.objectContaining({
+        range: undefined,
+        ifMatch: '"asset-etag"',
+      }));
+    }
+  });
+
+  it("reopens an asset when its ETag changes between HEAD and GET", async () => {
+    signIn();
+    const oldAsset = {
+      fileName: "clip.mp4",
+      contentType: "video/mp4",
+      byteSize: 8,
+      storageKey: "org/run-artifacts/run/clip",
+      previewable: true,
+      generation: "generation-1",
+    };
+    const newAsset = { ...oldAsset, generation: "generation-2" };
+    serviceMocks.getRunArtifact
+      .mockResolvedValueOnce(oldAsset)
+      .mockResolvedValueOnce(oldAsset)
+      .mockResolvedValueOnce(newAsset)
+      .mockResolvedValueOnce(newAsset);
+    storageMocks.headSkillArchive
+      .mockResolvedValueOnce({ etag: '"old-etag"', contentLength: 8 })
+      .mockResolvedValueOnce({ etag: '"new-etag"', contentLength: 8 });
+    storageMocks.streamSkillArchive.mockRejectedValueOnce(
+      Object.assign(new Error("changed"), { name: "PreconditionFailed" }),
+    );
+
+    const response = await app.request("/v1/runs/run-1/artifacts/video-1");
+
+    expect(response.status).toBe(200);
+    expect(storageMocks.headSkillArchive).toHaveBeenCalledTimes(2);
+    expect(storageMocks.streamSkillArchive).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      ifMatch: '"new-etag"',
+    }));
+  });
+
+  it("returns the complete replacement when an If-Range ETag becomes stale during a stable-key overwrite", async () => {
+    signIn();
+    const oldAsset = {
+      fileName: "clip.mp4",
+      contentType: "video/mp4",
+      byteSize: 8,
+      storageKey: "org/run-artifacts/run/clip",
+      previewable: true,
+      generation: "generation-1",
+    };
+    const newAsset = { ...oldAsset, generation: "generation-2" };
+    serviceMocks.getRunArtifact
+      .mockResolvedValueOnce(oldAsset)
+      .mockResolvedValueOnce(oldAsset)
+      .mockResolvedValueOnce(newAsset)
+      .mockResolvedValueOnce(newAsset);
+    storageMocks.headSkillArchive
+      .mockResolvedValueOnce({ etag: '"old-etag"', contentLength: 8 })
+      .mockResolvedValueOnce({ etag: '"new-etag"', contentLength: 8 });
+    storageMocks.streamSkillArchive.mockRejectedValueOnce(
+      Object.assign(new Error("changed"), { name: "PreconditionFailed" }),
+    );
+
+    const response = await app.request("/v1/runs/run-1/artifacts/video-1", {
+      headers: { Range: "bytes=2-5", "If-Range": '"old-etag"' },
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("etag")).toBe('"new-etag"');
+    expect(response.headers.get("content-range")).toBeNull();
+    await expect(response.text()).resolves.toBe("artifact");
+    expect(storageMocks.streamSkillArchive).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      range: "bytes=2-5",
+      ifMatch: '"old-etag"',
+    }));
+    expect(storageMocks.streamSkillArchive).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      range: undefined,
+      ifMatch: '"new-etag"',
+    }));
+  });
+
+  it("never serves replacement bytes while artifact metadata is not ready", async () => {
+    signIn();
+    serviceMocks.getRunArtifact
+      .mockResolvedValueOnce({
+        fileName: "old.png",
+        contentType: "image/png",
+        byteSize: 8,
+        storageKey: "org/run-artifacts/run/stable",
+        previewable: true,
+        generation: "generation-old",
+      })
+      .mockRejectedValueOnce(new Error("artifact replacement is not ready"));
+    storageMocks.headSkillArchive.mockResolvedValueOnce({ etag: '"replacement-etag"', contentLength: 8 });
+
+    const response = await app.request("/v1/runs/run-1/artifacts/replacing");
+
+    expect(response.status).toBe(404);
+    expect(storageMocks.streamSkillArchive).not.toHaveBeenCalled();
+  });
+
+  it("renders only server-verified attachments inline", async () => {
+    signIn();
+    serviceMocks.getRunAttachment.mockResolvedValueOnce({
+      fileName: "photo.png",
+      contentType: "text/html",
+      previewContentType: "image/png",
+      storageKey: "org/run-attachments/photo",
+    });
+    const image = await app.request("/v1/runs/run-1/attachments/attachment-1");
+    expect(image.headers.get("content-type")).toBe("image/png");
+    expect(image.headers.get("content-disposition")).toBe('inline; filename="photo.png"');
+
+    serviceMocks.getRunAttachment.mockResolvedValueOnce({
+      fileName: "fake.png",
+      contentType: "image/png",
+      previewContentType: null,
+      storageKey: "org/run-attachments/fake",
+    });
+    const download = await app.request("/v1/runs/run-1/attachments/attachment-2");
+    expect(download.headers.get("content-disposition")).toBe('attachment; filename="fake.png"');
+  });
+
   it("keeps non-raster artifacts download-only and maps unavailable artifacts to 404", async () => {
     signIn();
-    serviceMocks.getRunArtifact.mockResolvedValueOnce({
+    serviceMocks.getRunArtifact.mockResolvedValue({
       fileName: "report.html",
       contentType: "text/html; charset=utf-8",
       storageKey: "org/run-artifacts/run/report",
@@ -362,6 +657,7 @@ describe("session-only RunSkill routes", () => {
     serviceMocks.enqueueRunPrompt.mockImplementation(async (input: { attachments: Array<{ id: string; fileName: string; byteSize: number }> }) => ({
       id: promptId,
       messageId: "msg_123456789012abcdefghijklm1",
+      ordinal: 1,
       status: "queued",
       attachments: input.attachments.map((attachment) => ({
         id: attachment.id,
@@ -395,7 +691,7 @@ describe("session-only RunSkill routes", () => {
       expect.objectContaining({
         runId: "run-1",
         text: "",
-        attachments: [expect.objectContaining({ fileName: "follow-up.txt", byteSize: 15 })],
+        attachments: [expect.objectContaining({ fileName: "follow-up.txt", byteSize: 15, previewContentType: null })],
       }),
     );
     await expect(response.json()).resolves.toMatchObject({
@@ -403,6 +699,36 @@ describe("session-only RunSkill routes", () => {
       prompt_id: promptId,
       attachments: [{ file_name: "follow-up.txt" }],
     });
+  });
+
+  it("derives inline attachment media from bytes rather than the browser MIME", async () => {
+    signIn();
+    serviceMocks.enqueueRunPrompt.mockImplementation(async (input: { attachments: Array<{ previewContentType: string | null }> }) => ({
+      id: "00000000-0000-4000-8000-000000000097",
+      messageId: "msg_123456789012abcdefghijklm2",
+      ordinal: 2,
+      status: "queued",
+      attachments: input.attachments,
+    }));
+    const form = new FormData();
+    form.set("text", "Inspect this image");
+    form.set("file", new Blob([
+      new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    ], { type: "text/html" }), "photo.png");
+
+    const response = await app.request("/v1/runs/run-1/prompt", {
+      method: "POST",
+      headers: { "Idempotency-Key": "prompt-image-request-1" },
+      body: form,
+    });
+
+    expect(response.status).toBe(202);
+    expect(serviceMocks.enqueueRunPrompt).toHaveBeenCalledWith(expect.objectContaining({
+      attachments: [expect.objectContaining({
+        contentType: "text/html",
+        previewContentType: "image/png",
+      })],
+    }));
   });
 });
 

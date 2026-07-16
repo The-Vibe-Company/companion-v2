@@ -106,12 +106,14 @@ import {
   enqueueRunPrompt,
   preflightRunPromptUpload,
   reserveRunAttachmentUploads,
+  requestRunPromptCancellation,
   requestRunCancellation,
   listRunEvents,
   listRuns,
   getRun,
   getRunAttachment,
   getRunArtifact,
+  detectRunFileType,
   isRunWorkerReady,
   RunBusyError,
   RunValidationError,
@@ -196,6 +198,9 @@ import {
   runAttachmentKey,
   deleteSkillArchive,
   getSkillArchive,
+  headSkillArchive,
+  InvalidSkillArchiveRangeError,
+  isStoragePreconditionFailure,
   getOrgLogo,
   putOrgLogo,
   putUserAvatar,
@@ -203,7 +208,9 @@ import {
   deleteUserAvatar,
   skillArchiveKey,
   putSkillArchive,
+  resolveSkillArchiveByteRange,
   signedSkillArchiveUrl,
+  streamSkillArchive,
 } from "@companion/storage";
 import {
   bumpSemver,
@@ -3162,7 +3169,14 @@ app.post(
 
       // Upload the bytes to object storage OUTSIDE any DB transaction (slow uploads must not hold a
       // pooled connection idle-in-transaction); createRun below persists metadata only.
-      const attachments: Array<{ id: string; fileName: string; contentType: string; byteSize: number; storageKey: string }> = [];
+      const attachments: Array<{
+        id: string;
+        fileName: string;
+        contentType: string;
+        previewContentType: string | null;
+        byteSize: number;
+        storageKey: string;
+      }> = [];
       try {
         for (const file of files) {
           const buf = Buffer.from(await file.arrayBuffer());
@@ -3185,6 +3199,7 @@ app.post(
             id: attachmentId,
             fileName: sanitizeAttachmentName(file.name || `attachment-${attachments.length + 1}`),
             contentType,
+            previewContentType: detectRunFileType(file.name, buf).previewContentType,
             byteSize: buf.length,
             storageKey: key,
           });
@@ -3292,7 +3307,14 @@ app.post(
         }
       }
 
-      const attachments: Array<{ id: string; fileName: string; contentType: string; byteSize: number; storageKey: string }> = [];
+      const attachments: Array<{
+        id: string;
+        fileName: string;
+        contentType: string;
+        previewContentType: string | null;
+        byteSize: number;
+        storageKey: string;
+      }> = [];
       try {
         const reactivationAvailable = await withApiRunContext((ctx) =>
           withTenantContext({ orgId, userId: actor.id }, async (database) => {
@@ -3322,6 +3344,7 @@ app.post(
             id: attachmentId,
             fileName: sanitizeAttachmentName(file.name || `attachment-${attachments.length + 1}`),
             contentType,
+            previewContentType: detectRunFileType(file.name, buf).previewContentType,
             byteSize: buf.length,
             storageKey: key,
           });
@@ -3365,6 +3388,8 @@ app.post(
           accepted: true as const,
           prompt_id: prompt.id,
           message_id: prompt.messageId,
+          ordinal: prompt.ordinal,
+          status: prompt.status,
           attachments: prompt.attachments,
           reactivated: prompt.reactivated,
         }, 202);
@@ -3386,6 +3411,25 @@ app.post("/v1/runs/:id/cancel", async (c) => {
       requestRunCancellation({ actor, orgId, runId: c.req.param("id"), database }),
     );
     return c.json(run, 202);
+  } catch (error) {
+    return runError(c, error);
+  }
+});
+
+/** Cancel a queued follow-up or request a turn-level stop without ending the run session. */
+app.post("/v1/runs/:id/prompts/:promptId/cancel", async (c) => {
+  try {
+    assertRunSession(c);
+    const prompt = await withTenant(c, ({ actor, orgId, database }) =>
+      requestRunPromptCancellation({
+        actor,
+        orgId,
+        runId: c.req.param("id"),
+        promptId: c.req.param("promptId"),
+        database,
+      }),
+    );
+    return c.json(prompt, 202);
   } catch (error) {
     return runError(c, error);
   }
@@ -3516,6 +3560,175 @@ app.get("/v1/runs/:id/events", async (c) => {
   }
 });
 
+const RUN_INLINE_MEDIA_TYPES = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/gif",
+  "image/webp",
+  "image/avif",
+  "video/mp4",
+  "video/webm",
+]);
+
+interface RunDownloadAsset {
+  fileName: string;
+  contentType: string;
+  storageKey: string;
+  previewContentType: string | null;
+  byteSize?: number;
+  /** Present for replaceable artifacts; attachments are immutable after their row commits. */
+  generation?: string;
+}
+
+function sameRunDownloadGeneration(left: RunDownloadAsset, right: RunDownloadAsset): boolean {
+  return left.fileName === right.fileName
+    && left.contentType === right.contentType
+    && left.storageKey === right.storageKey
+    && left.previewContentType === right.previewContentType
+    && left.byteSize === right.byteSize
+    && left.generation === right.generation;
+}
+
+function safeRunAssetContentType(asset: RunDownloadAsset): string {
+  if (asset.previewContentType && RUN_INLINE_MEDIA_TYPES.has(asset.previewContentType)) {
+    return asset.previewContentType;
+  }
+  // Non-preview files are always attachments. Preserve a conventional stored MIME for download
+  // clients, but reject control characters and exotic parameters from legacy/user-provided rows.
+  return /^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*(?:;\s*charset=[a-z0-9._-]+)?$/i.test(asset.contentType)
+    ? asset.contentType
+    : "application/octet-stream";
+}
+
+function runDownloadHeaders(input: {
+  asset: RunDownloadAsset;
+  disposition: "inline" | "attachment";
+  etag?: string;
+  length?: number;
+  contentRange?: string;
+}): Headers {
+  const fileName = input.asset.fileName.replace(/[^\w. -]/g, "_");
+  const headers = new Headers({
+    "Content-Type": safeRunAssetContentType(input.asset),
+    "Content-Disposition": `${input.disposition}; filename="${fileName}"`,
+    "Cache-Control": "private, no-store",
+    "X-Content-Type-Options": "nosniff",
+    "Cross-Origin-Resource-Policy": "same-origin",
+    "Content-Security-Policy": "default-src 'none'; sandbox",
+    "Accept-Ranges": "bytes",
+  });
+  if (input.etag) headers.set("ETag", input.etag);
+  if (input.length !== undefined) headers.set("Content-Length", String(input.length));
+  if (input.contentRange) headers.set("Content-Range", input.contentRange);
+  return headers;
+}
+
+/**
+ * If-Range only permits a partial response when its strong entity-tag matches the selected
+ * representation. Run assets do not expose a Last-Modified validator, so dates, weak tags and
+ * malformed validators deliberately fall back to a complete 200 response.
+ */
+function ifRangeMatchesStrongETag(ifRange: string, currentETag: string): boolean {
+  const validator = ifRange.trim();
+  const etag = currentETag.trim();
+  return validator === etag
+    && validator.startsWith('"')
+    && validator.endsWith('"')
+    && !validator.startsWith("W/")
+    && !etag.startsWith("W/");
+}
+
+async function streamRunDownload(
+  c: Context,
+  initialAsset: RunDownloadAsset,
+  reloadAsset?: () => Promise<RunDownloadAsset>,
+): Promise<Response> {
+  const download = c.req.query("download") === "1";
+  const rangeHeader = c.req.header("range");
+  const ifRangeHeader = c.req.header("if-range");
+  let asset = initialAsset;
+
+  // A ranged video read needs the total length. Pin the subsequent GET to this HEAD's ETag so a
+  // worker replacing an artifact at the same stable key cannot splice two object generations.
+  // Replaceable artifacts also re-read their creator-scoped metadata after HEAD: ready=false or a
+  // changed generation restarts the fence before any bytes are exposed.
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    if (attempt > 0 && reloadAsset) asset = await reloadAsset();
+    const inline = !download
+      && asset.previewContentType !== null
+      && RUN_INLINE_MEDIA_TYPES.has(asset.previewContentType);
+    const head = await headSkillArchive({ key: asset.storageKey, signal: c.req.raw.signal });
+    if (!head || head.contentLength === undefined) throw new Error("run asset not found");
+    if (asset.byteSize !== undefined && head.contentLength !== asset.byteSize) {
+      if (reloadAsset && attempt < 2) continue;
+      throw new Error("run asset generation does not match its metadata");
+    }
+    if (reloadAsset) {
+      const confirmed = await reloadAsset();
+      if (!sameRunDownloadGeneration(asset, confirmed)) {
+        asset = confirmed;
+        if (attempt < 2) continue;
+        throw new Error("run asset metadata changed while opening it");
+      }
+    }
+    let range: ReturnType<typeof resolveSkillArchiveByteRange> | null = null;
+    // RFC 9110 evaluates If-Range before applying Range. A stale/weak/unsupported validator makes
+    // the request an unconditional full representation, even when the Range field itself is
+    // malformed. Only parse and potentially reject Range when its validator permits a partial.
+    if (rangeHeader && (ifRangeHeader === undefined || ifRangeMatchesStrongETag(ifRangeHeader, head.etag))) {
+      try {
+        range = resolveSkillArchiveByteRange(rangeHeader, head.contentLength);
+      } catch (error) {
+        if (!(error instanceof InvalidSkillArchiveRangeError)) throw error;
+        return new Response(null, {
+          status: 416,
+          headers: runDownloadHeaders({
+            asset,
+            disposition: inline ? "inline" : "attachment",
+            etag: head.etag,
+            contentRange: `bytes */${head.contentLength}`,
+          }),
+        });
+      }
+    }
+
+    try {
+      const object = await streamSkillArchive({
+        key: asset.storageKey,
+        range: range?.header,
+        ifMatch: head.etag,
+        signal: c.req.raw.signal,
+      });
+      const expectedContentRange = range
+        ? `bytes ${range.start}-${range.end}/${head.contentLength}`
+        : null;
+      const invalidObjectGeneration = (object.etag !== null && object.etag !== head.etag)
+        || (range !== null && object.contentLength !== range.length)
+        || (range !== null && object.contentRange !== expectedContentRange)
+        || (range === null && object.contentLength !== null && object.contentLength !== head.contentLength);
+      if (invalidObjectGeneration) {
+        await object.body.cancel().catch(() => undefined);
+        throw new Error("object storage returned an inconsistent run asset generation");
+      }
+      const length = range?.length ?? object.contentLength ?? head.contentLength;
+      return new Response(object.body, {
+        status: range ? 206 : 200,
+        headers: runDownloadHeaders({
+          asset,
+          disposition: inline ? "inline" : "attachment",
+          etag: object.etag ?? head.etag,
+          length,
+          contentRange: expectedContentRange ?? undefined,
+        }),
+      });
+    } catch (error) {
+      if (attempt < 2 && isStoragePreconditionFailure(error)) continue;
+      throw error;
+    }
+  }
+  throw new Error("run asset changed while opening it");
+}
+
 /** Stream a run attachment back to its creator. */
 app.get("/v1/runs/:id/attachments/:attachmentId", async (c) => {
   try {
@@ -3529,15 +3742,9 @@ app.get("/v1/runs/:id/attachments/:attachmentId", async (c) => {
         database,
       }),
     );
-    const body = await getSkillArchive({ key: asset.storageKey });
-    return new Response(body, {
-      headers: {
-        "Content-Type": asset.contentType,
-        "Cache-Control": "private, no-cache",
-        // User-uploaded bytes: never let the browser sniff them into an executable type.
-        "X-Content-Type-Options": "nosniff",
-        "Content-Disposition": `attachment; filename="${asset.fileName.replace(/[^\w. -]/g, "_")}"`,
-      },
+    return await streamRunDownload(c, {
+      ...asset,
+      previewContentType: asset.previewContentType,
     });
   } catch (error) {
     // Not-visible run / unknown attachment / cross-tenant all surface as a 404.
@@ -3549,27 +3756,23 @@ app.get("/v1/runs/:id/attachments/:attachmentId", async (c) => {
 app.get("/v1/runs/:id/artifacts/:artifactId", async (c) => {
   try {
     if (isTokenRequest(c)) return jsonError(c, "personal access tokens cannot use skill runs", 401);
-    const asset = await withTenant(c, ({ actor, orgId, database }) =>
-      getRunArtifact({
-        actor,
-        orgId,
-        runId: c.req.param("id"),
-        artifactId: c.req.param("artifactId"),
-        database,
-      }),
-    );
-    const body = await getSkillArchive({ key: asset.storageKey });
-    const fileName = asset.fileName.replace(/[^\w. -]/g, "_");
-    const download = c.req.query("download") === "1";
-    const disposition = !download && asset.previewable ? "inline" : "attachment";
-    return new Response(body, {
-      headers: {
-        "Content-Type": asset.contentType,
-        "Cache-Control": "private, no-store",
-        "X-Content-Type-Options": "nosniff",
-        "Content-Disposition": `${disposition}; filename="${fileName}"`,
-      },
-    });
+    const loadAsset = async (): Promise<RunDownloadAsset> => {
+      const asset = await withTenant(c, ({ actor, orgId, database }) =>
+        getRunArtifact({
+          actor,
+          orgId,
+          runId: c.req.param("id"),
+          artifactId: c.req.param("artifactId"),
+          database,
+        }),
+      );
+      return {
+        ...asset,
+        previewContentType: asset.previewable ? asset.contentType : null,
+      };
+    };
+    const asset = await loadAsset();
+    return await streamRunDownload(c, asset, loadAsset);
   } catch (error) {
     // Expired, missing and unauthorized artifacts are intentionally indistinguishable.
     return jsonError(c, error, 404);

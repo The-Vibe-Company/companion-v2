@@ -220,7 +220,7 @@ export async function headSkillArchive(input: {
   signal?: AbortSignal;
   client?: S3Client;
   config?: StorageConfig;
-}): Promise<{ etag: string } | null> {
+}): Promise<{ etag: string; contentLength?: number } | null> {
   const config = input.config ?? getStorageConfig();
   const client = input.client ?? createStorageClient(config);
   try {
@@ -228,7 +228,10 @@ export async function headSkillArchive(input: {
       new HeadObjectCommand({ Bucket: config.bucket, Key: input.key }),
       { abortSignal: input.signal },
     );
-    return response.ETag ? { etag: response.ETag } : null;
+    if (!response.ETag) return null;
+    return typeof response.ContentLength === "number"
+      ? { etag: response.ETag, contentLength: response.ContentLength }
+      : { etag: response.ETag };
   } catch (error) {
     const status = typeof error === "object" && error !== null && "$metadata" in error
       ? (error as { $metadata?: { httpStatusCode?: number } }).$metadata?.httpStatusCode
@@ -284,6 +287,85 @@ export async function getSkillArchive(input: {
   if (!res.Body) throw new Error(`object not found: ${input.key}`);
   const bytes = await res.Body.transformToByteArray();
   return Buffer.from(bytes);
+}
+
+export interface SkillArchiveByteRange {
+  start: number;
+  end: number;
+  length: number;
+  header: string;
+}
+
+export class InvalidSkillArchiveRangeError extends Error {
+  constructor() {
+    super("requested byte range is not satisfiable");
+    this.name = "InvalidSkillArchiveRangeError";
+  }
+}
+
+/** Resolve one RFC 9110 byte range. Multiple ranges are deliberately unsupported. */
+export function resolveSkillArchiveByteRange(value: string, size: number): SkillArchiveByteRange {
+  if (!Number.isSafeInteger(size) || size < 0) throw new InvalidSkillArchiveRangeError();
+  const match = /^bytes=(\d*)-(\d*)$/i.exec(value.trim());
+  if (!match || (match[1] === "" && match[2] === "") || size === 0) {
+    throw new InvalidSkillArchiveRangeError();
+  }
+
+  let start: number;
+  let end: number;
+  if (match[1] === "") {
+    const suffixLength = Number(match[2]);
+    if (!Number.isSafeInteger(suffixLength) || suffixLength <= 0) throw new InvalidSkillArchiveRangeError();
+    start = Math.max(size - suffixLength, 0);
+    end = size - 1;
+  } else {
+    start = Number(match[1]);
+    const requestedEnd = match[2] === "" ? size - 1 : Number(match[2]);
+    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(requestedEnd) || start >= size || requestedEnd < start) {
+      throw new InvalidSkillArchiveRangeError();
+    }
+    end = Math.min(requestedEnd, size - 1);
+  }
+
+  return { start, end, length: end - start + 1, header: `bytes=${start}-${end}` };
+}
+
+export interface SkillArchiveStream {
+  body: ReadableStream<Uint8Array>;
+  contentLength: number | null;
+  contentRange: string | null;
+  contentType: string | null;
+  etag: string | null;
+}
+
+/** Open an object as a web stream, optionally pinned to the ETag observed by a preceding HEAD. */
+export async function streamSkillArchive(input: {
+  key: string;
+  range?: string;
+  ifMatch?: string;
+  signal?: AbortSignal;
+  client?: S3Client;
+  config?: StorageConfig;
+}): Promise<SkillArchiveStream> {
+  const config = input.config ?? getStorageConfig();
+  const client = input.client ?? createStorageClient(config);
+  const response = await client.send(
+    new GetObjectCommand({
+      Bucket: config.bucket,
+      Key: input.key,
+      Range: input.range,
+      IfMatch: input.ifMatch,
+    }),
+    { abortSignal: input.signal },
+  );
+  if (!response.Body) throw new Error(`object not found: ${input.key}`);
+  return {
+    body: response.Body.transformToWebStream(),
+    contentLength: response.ContentLength ?? null,
+    contentRange: response.ContentRange ?? null,
+    contentType: response.ContentType ?? null,
+    etag: response.ETag ?? null,
+  };
 }
 
 export async function signedSkillArchiveUrl(input: {

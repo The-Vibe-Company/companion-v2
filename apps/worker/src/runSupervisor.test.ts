@@ -3,13 +3,19 @@ import { createRunRedactor, RunRuntimeError, type RunSandboxRuntime, type Sandbo
 import { putRunArtifactMetadata, RunBusyError, RunValidationError } from "@companion/core/services";
 import {
   abortConversationForRetention,
+  abortPromptForContinuation,
+  armRecorderForPromptDispatch,
   cancellationStateAfterStop,
   claimedRunLeaseDeadline,
   assertRetainedConversationAvailable,
   createSandboxTimeoutExtender,
   collectAndCacheRunArtifacts,
+  createRecorderIdleBarrierTracker,
   dispatchPromptAfterAttachmentMount,
   isTransientRunFailure,
+  promptStopBarrierPlan,
+  proveSessionIdleAfterMissingAttempt,
+  releaseSyntheticRecorderBusy,
   runFailureEvent,
   sandboxTimeoutExtensionSchedule,
   shouldHeartbeatRunLease,
@@ -132,9 +138,10 @@ describe("follow-up attachment dispatch ordering", () => {
     await dispatchPromptAfterAttachmentMount({
       mountAttachments: async () => { calls.push("mount"); },
       getMessageState: async () => { calls.push("inspect"); return "missing"; },
+      beforeSend: async () => { calls.push("mark"); },
       sendPrompt: async () => { calls.push("send"); },
     });
-    expect(calls).toEqual(["mount", "inspect", "send"]);
+    expect(calls).toEqual(["mount", "inspect", "mark", "send"]);
   });
 
   it("never inspects or sends a prompt when attachment mounting fails", async () => {
@@ -154,9 +161,179 @@ describe("follow-up attachment dispatch ordering", () => {
     await dispatchPromptAfterAttachmentMount({
       mountAttachments: async () => { calls.push("mount"); },
       getMessageState: async () => { calls.push("inspect"); return "completed"; },
+      onMessageObserved: async () => { calls.push("observe"); },
       sendPrompt: async () => { calls.push("send"); },
     });
-    expect(calls).toEqual(["mount", "inspect"]);
+    expect(calls).toEqual(["mount", "inspect", "observe"]);
+  });
+
+  it("clears a completed retry revision before a racing cancellation can interrupt marking", async () => {
+    let turnBarrierRevision: number | null = 7;
+    await expect(dispatchPromptAfterAttachmentMount({
+      mountAttachments: async () => undefined,
+      getMessageState: async () => "completed",
+      onMessageObserved: async (state) => {
+        if (state === "completed") turnBarrierRevision = null;
+        throw new Error("cancel_requested");
+      },
+      sendPrompt: async () => undefined,
+    })).rejects.toThrow("cancel_requested");
+    expect(turnBarrierRevision).toBeNull();
+  });
+});
+
+describe("prompt FIFO dispatch gate", () => {
+  it("starts the next prompt when cancellation wins after claim but before dispatch", () => {
+    const recorder = { busy: false };
+    const prompts = [
+      { id: "prompt-canceled", control: "cancel_requested" as const },
+      { id: "prompt-next", control: "continue" as const },
+    ];
+    const dispatched: string[] = [];
+
+    for (const prompt of prompts) {
+      if (recorder.busy) break;
+      const control = armRecorderForPromptDispatch(recorder, prompt.control);
+      if (control === "cancel_requested") continue;
+      dispatched.push(prompt.id);
+    }
+
+    expect(dispatched).toEqual(["prompt-next"]);
+    expect(recorder.busy).toBe(true);
+  });
+
+  it("releases only a synthetic pre-send busy gate", () => {
+    const unsent = { busy: true };
+    expect(releaseSyntheticRecorderBusy(unsent, false)).toBe(true);
+    expect(unsent.busy).toBe(false);
+
+    const ambiguous = { busy: true };
+    expect(releaseSyntheticRecorderBusy(ambiguous, true)).toBe(false);
+    expect(ambiguous.busy).toBe(true);
+  });
+});
+
+describe("prompt-scoped stop barrier", () => {
+  it("proves an attempted-but-missing message session idle before continuation", async () => {
+    const target = { domain: "sandbox.example", password: "secret" };
+    const abortSession = vi.fn(async () => undefined);
+    const getSessionState = vi.fn()
+      .mockResolvedValueOnce("busy")
+      .mockResolvedValueOnce("busy")
+      .mockResolvedValueOnce("idle");
+
+    await expect(proveSessionIdleAfterMissingAttempt({
+      chat: { abortSession, getSessionState },
+      target,
+      sessionId: "session-1",
+      signal: new AbortController().signal,
+      timeoutMs: 1_000,
+    })).resolves.toBe("aborted");
+    expect(abortSession).toHaveBeenCalledOnce();
+    expect(getSessionState).toHaveBeenCalledTimes(3);
+  });
+
+  it("keeps continuation closed when an ambiguous prompt lost its session", async () => {
+    const abortSession = vi.fn(async () => undefined);
+    await expect(proveSessionIdleAfterMissingAttempt({
+      chat: { abortSession, getSessionState: vi.fn(async () => "missing" as const) },
+      target: { domain: "sandbox.example", password: "secret" },
+      sessionId: "session-1",
+      signal: new AbortController().signal,
+    })).rejects.toThrow("conversation context disappeared");
+    expect(abortSession).not.toHaveBeenCalled();
+  });
+
+  it("publishes a new continuation revision only after snapshot and fresh idle reconnect", async () => {
+    const barriers = createRecorderIdleBarrierTracker();
+    const signal = new AbortController().signal;
+    const before = barriers.revision();
+    let resolved = false;
+    const waiting = barriers.waitForAfter(before, 1_000, signal).then(() => { resolved = true; });
+
+    barriers.markFreshIdleConnection();
+    barriers.markSnapshotPersisted();
+    await Promise.resolve();
+    expect(resolved).toBe(false);
+    expect(barriers.revision()).toBe(before);
+
+    barriers.markFreshIdleConnection();
+    await waiting;
+    expect(resolved).toBe(true);
+    expect(barriers.revision()).toBe(before + 1);
+  });
+
+  it("fails closed when the recorder never reconnects after its durable snapshot", async () => {
+    const barriers = createRecorderIdleBarrierTracker();
+    const before = barriers.revision();
+    barriers.markSnapshotPersisted();
+    await expect(barriers.waitForAfter(before, 5, new AbortController().signal))
+      .rejects.toThrow("durable idle barrier");
+    expect(barriers.revision()).toBe(before);
+
+    const closed = createRecorderIdleBarrierTracker();
+    const waiting = closed.waitForAfter(0, 1_000, new AbortController().signal);
+    closed.close(new Error("recorder closed"));
+    await expect(waiting).rejects.toThrow("recorder closed");
+  });
+
+  it("accepts a natural-completion barrier already acquired during the stop race", async () => {
+    const barriers = createRecorderIdleBarrierTracker();
+    const turnRevision = barriers.revision();
+    barriers.markSnapshotPersisted();
+    barriers.markFreshIdleConnection();
+
+    expect(promptStopBarrierPlan({
+      messageState: "completed",
+      turnBarrierRevision: turnRevision,
+      currentBarrierRevision: barriers.revision(),
+    })).toEqual({ abort: false, waitAfterRevision: turnRevision });
+
+    await expect(barriers.waitForAfter(turnRevision, 1_000, new AbortController().signal))
+      .resolves.toBeUndefined();
+    expect(barriers.revision()).toBe(turnRevision + 1);
+  });
+
+  it("does not abort an idle shared session when cancellation won before dispatch", async () => {
+    const abortSession = vi.fn(async () => undefined);
+    const getSessionState = vi.fn(async () => "idle" as const);
+    await expect(abortPromptForContinuation({
+      chat: { abortSession, getSessionState },
+      target: { domain: "sandbox.example", password: "secret" },
+      sessionId: "session-1",
+      messageExists: false,
+      signal: new AbortController().signal,
+    })).resolves.toBeUndefined();
+    expect(abortSession).not.toHaveBeenCalled();
+    expect(getSessionState).not.toHaveBeenCalled();
+  });
+
+  it("does not abort when the attempted-but-missing message session is already idle", async () => {
+    const abortSession = vi.fn(async () => undefined);
+    await expect(proveSessionIdleAfterMissingAttempt({
+      chat: { abortSession, getSessionState: vi.fn(async () => "idle" as const) },
+      target: { domain: "sandbox.example", password: "secret" },
+      sessionId: "session-1",
+      signal: new AbortController().signal,
+    })).resolves.toBe("already_idle");
+    expect(abortSession).not.toHaveBeenCalled();
+  });
+
+  it("aborts a dispatched turn and waits until OpenCode confirms idle", async () => {
+    const abortSession = vi.fn(async () => undefined);
+    const getSessionState = vi.fn()
+      .mockResolvedValueOnce("busy")
+      .mockResolvedValueOnce("idle");
+    await expect(abortPromptForContinuation({
+      chat: { abortSession, getSessionState },
+      target: { domain: "sandbox.example", password: "secret" },
+      sessionId: "session-1",
+      messageExists: true,
+      signal: new AbortController().signal,
+      timeoutMs: 2_000,
+    })).resolves.toBeUndefined();
+    expect(abortSession).toHaveBeenCalledTimes(1);
+    expect(getSessionState).toHaveBeenCalledTimes(2);
   });
 });
 
