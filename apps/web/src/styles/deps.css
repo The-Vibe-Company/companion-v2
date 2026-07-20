@@ -123,54 +123,6 @@
 .depmeter__flag--warn { color: var(--color-warn); background: var(--color-warn-tint); border: 1px solid var(--color-warn-line); }
 .depmeter__flag--down { color: var(--color-danger); background: var(--color-danger-tint); border: 1px solid var(--color-danger-line); }
 
-/* --- List: Deps indicator ------------------------------------------------ */
-.depspill { display: inline-flex; align-items: center; gap: 5px; font-family: var(--font-mono); font-size: 11px; color: var(--color-muted);
-  border: 1px solid var(--color-line); border-radius: var(--radius-full); padding: 0 7px; height: 19px; }
-.depspill svg { color: var(--color-faint); }
-.depspill--warn { color: var(--color-warn); border-color: var(--color-warn-line); background: var(--color-warn-tint); }
-.depspill--warn svg { color: var(--color-warn); }
-.depspill--used { color: var(--color-faint); }
-
-/* Skills list with dependency signals: Skill · People · Version · Deps · Updated · Action. */
-.clist--deps .chead,
-.clist--deps .crow { grid-template-columns: minmax(0,1fr) 104px 76px 58px 72px 132px; }
-
-/* Responsive: the skill name is the priority. Shed columns by importance as width shrinks so the
-   name keeps room. These override the base skills.css breakpoints (higher specificity), so the deps
-   row degrades on its own terms. */
-@media (max-width: 1100px) {
-  .clist--deps .chead,
-  .clist--deps .crow { grid-template-columns: minmax(0,1fr) 88px 58px 68px 132px; }
-  .clist--deps .chead span:nth-child(3),
-  .clist--deps .crow > .ver {
-    display: none;
-  }
-}
-@media (max-width: 820px) {
-  .clist--deps .chead,
-  .clist--deps .crow { grid-template-columns: minmax(0,1fr) 82px 132px; }
-  .clist--deps .chead span:nth-child(4),
-  .clist--deps .chead span:nth-child(5),
-  .clist--deps .crow > .crow__deps,
-  .clist--deps .crow > .when {
-    display: none;
-  }
-}
-@media (max-width: 560px) {
-  .clist--deps .chead {
-    display: none;
-  }
-  .clist--deps .chead,
-  .clist--deps .crow {
-    grid-template-columns: minmax(0,1fr) auto;
-  }
-  .clist--deps .crow > .ver,
-  .clist--deps .crow > .crow__deps,
-  .clist--deps .crow > .when {
-    display: none;
-  }
-}
-
 /* --- Archived view ------------------------------------------------------- */
 .crow--archived .crow__name { color: var(--color-muted); }
 .arch-pill { display: inline-flex; align-items: center; gap: 4px; flex: none; font-size: 10px; color: var(--color-muted);

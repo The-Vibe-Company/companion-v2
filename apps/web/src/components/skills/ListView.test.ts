@@ -1,8 +1,15 @@
-import React from "react";
+// @vitest-environment happy-dom
+
+import React, { act } from "react";
+import { createRoot, type Root } from "react-dom/client";
 import { renderToString } from "react-dom/server";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SkillVM } from "@/lib/types";
 import { ListView } from "./ListView";
+
+(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
+const roots: Root[] = [];
 
 function skill(overrides: Partial<SkillVM> = {}): SkillVM {
   return {
@@ -46,29 +53,157 @@ function skill(overrides: Partial<SkillVM> = {}): SkillVM {
   };
 }
 
-function render(skills: SkillVM[]) {
-  return renderToString(
-    React.createElement(ListView, {
-      skills,
-      library: "org",
-      scopeKind: "all",
-      breadcrumb: ["All skills"],
-      onOpen: vi.fn(),
-      onUpload: vi.fn(),
-      actorId: "user-1",
-      onPrimaryAction: vi.fn(),
-      lastId: null,
-      filters: [],
-      onToggleFilter: vi.fn(),
-      onRemoveFilter: vi.fn(),
-      onClearFilters: vi.fn(),
-      preferenceStatus: "idle",
-      onRetryPreferences: vi.fn(),
-      dragSkillId: null,
-      onSkillStartDrag: vi.fn(),
-    }),
-  );
+function props(skills: SkillVM[], overrides: { onOpen?: (id: string) => void } = {}) {
+  return {
+    skills,
+    library: "org" as const,
+    scopeKind: "all" as const,
+    breadcrumb: ["All skills"],
+    onOpen: overrides.onOpen ?? vi.fn(),
+    onUpload: vi.fn(),
+    actorId: "user-1",
+    onPrimaryAction: vi.fn(),
+    lastId: null,
+    filters: [],
+    onToggleFilter: vi.fn(),
+    onRemoveFilter: vi.fn(),
+    onClearFilters: vi.fn(),
+    preferenceStatus: "idle" as const,
+    onRetryPreferences: vi.fn(),
+    dragSkillId: null,
+    onSkillStartDrag: vi.fn(),
+  };
 }
+
+function render(skills: SkillVM[]) {
+  return renderToString(React.createElement(ListView, props(skills)));
+}
+
+async function mount(skills: SkillVM[], overrides: { onOpen?: (id: string) => void } = {}) {
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  roots.push(root);
+  await act(async () => root.render(React.createElement(ListView, props(skills, overrides))));
+  return container;
+}
+
+function setInputValue(input: HTMLInputElement, value: string) {
+  const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
+  act(() => {
+    setter?.call(input, value);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+}
+
+afterEach(() => {
+  act(() => roots.splice(0).forEach((root) => root.unmount()));
+  document.body.innerHTML = "";
+});
+
+describe("ListView names and discovery", () => {
+  it("renders the display title and removes description, version, and dependency metadata", () => {
+    const html = render([
+      skill({
+        id: "incident-summary",
+        display: { name: "Incident Summary" },
+        description: "Unique description preview",
+        version: "9.8.7",
+        requiresCount: 37,
+      }),
+    ]);
+
+    expect(html).toContain('<span class="crow__title">Incident Summary</span>');
+    expect(html).toContain('data-skill-slug="incident-summary"');
+    expect(html).toContain('aria-label="Open skill Incident Summary"');
+    expect(html).toContain('aria-label="Install skill Incident Summary"');
+    expect(html).not.toContain('<span class="crow__slug"');
+    expect(html).not.toContain("Unique description preview");
+    expect(html).not.toContain("9.8.7");
+    expect(html).not.toContain(">Version<");
+    expect(html).not.toContain(">Deps<");
+    expect(html).not.toContain("depspill");
+  });
+
+  it("falls back to the slug when a skill has no display title", () => {
+    const html = render([
+      skill({ id: "seo-helper", display: {} }),
+      skill({ id: "blank-title", display: { name: "   " } }),
+    ]);
+
+    expect(html).toContain('<span class="crow__title">seo-helper</span>');
+    expect(html).toContain('aria-label="Open skill seo-helper"');
+    expect(html).toContain('<span class="crow__title">blank-title</span>');
+    expect(html).toContain('aria-label="Open skill blank-title"');
+  });
+
+  it("disambiguates duplicate display titles with their unique slugs", () => {
+    const html = render([
+      skill({ id: "incident-summary", display: { name: "Incident Summary" } }),
+      skill({ id: "incident-summary-legacy", display: { name: "incident summary" } }),
+    ]);
+
+    expect(html).toContain('<span class="crow__slug" title="incident-summary">incident-summary</span>');
+    expect(html).toContain(
+      '<span class="crow__slug" title="incident-summary-legacy">…nt-summary-legacy</span>',
+    );
+    expect(html).toContain('aria-label="Open skill Incident Summary (incident-summary)"');
+    expect(html).toContain('aria-label="Install skill incident summary (incident-summary-legacy)"');
+  });
+
+  it("keeps the distinguishing tail visible for long duplicate slugs", () => {
+    const html = render([
+      skill({ id: "shared-very-long-prefix-production", display: { name: "Shared title" } }),
+      skill({ id: "shared-very-long-prefix-staging", display: { name: "Shared title" } }),
+    ]);
+
+    expect(html).toContain(
+      '<span class="crow__slug" title="shared-very-long-prefix-production">…prefix-production</span>',
+    );
+    expect(html).toContain(
+      '<span class="crow__slug" title="shared-very-long-prefix-staging">…ng-prefix-staging</span>',
+    );
+  });
+
+  it("searches hidden slugs and descriptions as well as display titles", async () => {
+    const container = await mount([
+      skill({ id: "slug-needle", display: { name: "Zebra" }, description: "First description" }),
+      skill({ id: "second", display: { name: "Alpha Needle" }, description: "Second description" }),
+      skill({ id: "third", display: { name: "Gamma" }, description: "Hidden description needle" }),
+    ]);
+    const input = container.querySelector('input[type="search"]') as HTMLInputElement;
+
+    setInputValue(input, "slug-needle");
+    expect(Array.from(container.querySelectorAll(".crow__title"), (node) => node.textContent)).toEqual(["Zebra"]);
+
+    setInputValue(input, "alpha needle");
+    expect(Array.from(container.querySelectorAll(".crow__title"), (node) => node.textContent)).toEqual(["Alpha Needle"]);
+
+    setInputValue(input, "hidden description");
+    expect(Array.from(container.querySelectorAll(".crow__title"), (node) => node.textContent)).toEqual(["Gamma"]);
+  });
+
+  it("sorts A–Z by display title and still opens the skill by slug", async () => {
+    const onOpen = vi.fn();
+    const container = await mount(
+      [
+        skill({ id: "first-slug", display: { name: "Zulu" } }),
+        skill({ id: "second-slug", display: { name: "Alpha" } }),
+      ],
+      { onOpen },
+    );
+    const select = container.querySelector('select[aria-label="Sort skills"]') as HTMLSelectElement;
+
+    act(() => {
+      select.value = "name";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(Array.from(container.querySelectorAll(".crow__title"), (node) => node.textContent)).toEqual(["Alpha", "Zulu"]);
+
+    act(() => (container.querySelector('button[aria-label="Open skill Alpha"]') as HTMLButtonElement).click());
+    expect(onOpen).toHaveBeenCalledWith("second-slug");
+  });
+});
 
 describe("ListView contributors", () => {
   it("renders the creator-first people stack, overflow count, and mobile metadata", () => {
