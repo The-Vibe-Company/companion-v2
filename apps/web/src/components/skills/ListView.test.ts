@@ -205,6 +205,64 @@ describe("ListView names and discovery", () => {
   });
 });
 
+describe("ListView folders", () => {
+  it("renders no folder metadata when the skill has no labels", () => {
+    const html = render([skill({ labels: [] })]);
+
+    expect(html).not.toContain("crow__labels");
+    expect(html).not.toContain("crow__label");
+  });
+
+  it("renders one full folder path", () => {
+    const html = render([skill({ labels: ["marketing/seo"] })]);
+
+    expect(html).toContain('role="list" aria-label="Folders"');
+    expect(html).toContain('role="listitem" aria-label="Folder: marketing/seo"');
+    expect(html).toContain('<span class="crow__labeltext">marketing/seo</span>');
+    expect(html).not.toContain("crow__label--more");
+  });
+
+  it("renders two folder paths in their source order", async () => {
+    const container = await mount([skill({ labels: ["engineering/platform", "marketing/seo"] })]);
+
+    expect(Array.from(container.querySelectorAll(".crow__labeltext"), (node) => node.textContent)).toEqual([
+      "engineering/platform",
+      "marketing/seo",
+    ]);
+    expect(container.querySelector(".crow__label--more")).toBeNull();
+  });
+
+  it("caps visible folders at two and exposes the remaining paths through the overflow badge", async () => {
+    const onOpen = vi.fn();
+    const container = await mount(
+      [skill({ labels: ["engineering/platform", "marketing/seo", "operations", "sales/enterprise"] })],
+      { onOpen },
+    );
+
+    expect(Array.from(container.querySelectorAll(".crow__labeltext"), (node) => node.textContent)).toEqual([
+      "engineering/platform",
+      "marketing/seo",
+    ]);
+    const overflow = container.querySelector(".crow__label--more");
+    expect(overflow?.textContent).toBe("+2");
+    expect(overflow?.getAttribute("title")).toBeNull();
+    expect(overflow?.getAttribute("data-folders")).toBe("operations, sales/enterprise");
+    expect(overflow?.getAttribute("aria-label")).toBe("2 more folders: operations, sales/enterprise");
+    expect(overflow?.getAttribute("tabindex")).toBe("0");
+    act(() => (overflow as HTMLElement).click());
+    expect(onOpen).not.toHaveBeenCalled();
+    act(() => {
+      (overflow as HTMLElement).focus();
+    });
+    expect(document.body.querySelector('[role="tooltip"]')?.textContent).toBe("operations, sales/enterprise");
+    act(() => {
+      overflow?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    });
+    expect(document.activeElement).toBe(overflow);
+    expect(document.body.querySelector('[role="tooltip"]')).toBeNull();
+  });
+});
+
 describe("ListView contributors", () => {
   it("renders the creator-first people stack, overflow count, and mobile metadata", () => {
     const html = render([
