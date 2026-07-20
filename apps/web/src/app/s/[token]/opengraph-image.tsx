@@ -83,7 +83,6 @@ export default async function SkillOpenGraphImage({ params }: { params: Promise<
         </div>
 
         <div style={{ display: "flex", gap: 18, color: "#787182", fontSize: 24 }}>
-          {preview ? <div>{`${preview.star_count} stars`}</div> : null}
           {preview ? <div>{`By ${preview.creator_name}`}</div> : null}
         </div>
       </div>

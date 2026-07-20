@@ -13,13 +13,12 @@ import {
   type SkillAction,
 } from "./skillActions";
 
-type SortKey = "default" | "name" | "stars";
+type SortKey = "default" | "name";
 
 const SORT_OPTIONS: { key: SortKey; label: string }[] = [
   // "default" preserves the server order (most recently updated first).
   { key: "default", label: "Recently updated" },
   { key: "name", label: "Name (A–Z)" },
-  { key: "stars", label: "Most starred" },
 ];
 
 type Person = SkillContributorVM & { role: "creator" | "modifier" };
@@ -106,7 +105,6 @@ export function ListView({
   scopeKind,
   breadcrumb,
   onOpen,
-  onToggleStar,
   onUpload,
   actorId,
   onPrimaryAction,
@@ -125,11 +123,10 @@ export function ListView({
   skills: SkillVM[];
   /** Which library this list shows (drives scope-aware empty + upload copy). */
   library: "mine" | "org";
-  scopeKind: "all" | "starred" | "installed" | "label";
+  scopeKind: "all" | "installed" | "label";
   /** Folder breadcrumb for the active sidebar selection (e.g. ["marketing", "seo"]). */
   breadcrumb: string[];
   onOpen: (id: string) => void;
-  onToggleStar: (id: string) => void;
   onUpload: () => void;
   actorId: string;
   onPrimaryAction: (skill: SkillVM, action: SkillAction) => void;
@@ -163,7 +160,6 @@ export function ListView({
     if (sort === "default") return matched;
     const out = [...matched];
     if (sort === "name") out.sort((a, b) => a.id.localeCompare(b.id));
-    else if (sort === "stars") out.sort((a, b) => b.stars - a.stars || a.id.localeCompare(b.id));
     return out;
   }, [skills, q, sort]);
 
@@ -271,7 +267,6 @@ export function ListView({
           <span>People</span>
           <span>Version</span>
           <span>Deps</span>
-          <span className="r">Stars</span>
           <span className="r">Updated</span>
           <span className="r">Action</span>
         </div>
@@ -325,19 +320,6 @@ export function ListView({
                   <span style={{ color: "var(--color-faint)" }}>—</span>
                 )}
               </span>
-              <span className="crow__stars r">
-                <button
-                  type="button"
-                  className={"stars" + (s.starred ? " is-on" : "")}
-                  title={s.starred ? "Unstar this skill" : "Star this skill"}
-                  aria-pressed={s.starred}
-                  aria-label={(s.starred ? "Unstar" : "Star") + " " + s.id}
-                  onClick={() => onToggleStar(s.id)}
-                >
-                  <Icon name="star" size={13} />
-                  <span className="tnum">{s.stars}</span>
-                </button>
-              </span>
               <span className="r when when--by" title={`Updated by ${s.updaterName} · ${s.updated}`}>
                 <UserAvatar
                   className="avatar"
@@ -383,9 +365,7 @@ export function ListView({
                 ? "No skills match your search. Clear the search or filters to see this view in full."
                 : scopeKind === "installed"
                   ? "You have not installed any organization skills yet. Open one in Organization to install it."
-                  : scopeKind === "starred"
-                    ? "No starred skills yet. Star a skill to keep it here."
-                    : library === "mine"
+                  : library === "mine"
                       ? "No skills in My Skills yet. Add a skill, or install one from the organization library."
                       : "No organization skills match this view. Clear the filters to see them all."}
             </div>

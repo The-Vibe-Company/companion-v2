@@ -216,8 +216,6 @@ export const skillListRowSchema = z.object({
   tools: z.array(z.string()),
   /** Declared required secrets / env vars + install notes (parsed from the version frontmatter). */
   requirements: z.array(skillRequirementSchema).default([]),
-  star_count: z.number().int().nonnegative(),
-  starred: z.boolean(),
   /** Whether the caller has this skill recorded as installed (any version). */
   installed: z.boolean().default(false),
   /** Version the caller recorded installing, or null (never installed, or marked without a version). */
@@ -247,7 +245,6 @@ export const skillPublicPreviewSchema = z.object({
   current_version: z.string(),
   creator_name: z.string(),
   creator_initials: z.string(),
-  star_count: z.number().int().nonnegative(),
   updated_at: z.string(),
 });
 export type SkillPublicPreview = z.infer<typeof skillPublicPreviewSchema>;

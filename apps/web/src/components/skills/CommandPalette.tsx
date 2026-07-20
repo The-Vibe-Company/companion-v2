@@ -175,10 +175,6 @@ export function CommandPalette({
                 </span>
                 <span className="cpal__name">{s.id}</span>
                 <span className="cpal__desc">{s.description}</span>
-                <span className={"cpal__star" + (s.starred ? " is-on" : "")}>
-                  <Icon name="star" size={11} />
-                  <span className="tnum">{s.stars}</span>
-                </span>
                 {label && (
                   <span className="cpal__scope">
                     <Icon name="folder" size={11} />

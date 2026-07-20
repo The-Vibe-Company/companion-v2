@@ -78,10 +78,6 @@ export default async function SkillSharePage({ params, searchParams }: SharePara
             v{preview.current_version}
           </span>
           <span className="spreview__fact">
-            <Icon name="star" size={14} />
-            {preview.star_count}
-          </span>
-          <span className="spreview__fact">
             <span className="avatar" style={{ width: 22, height: 22, fontSize: 11 }}>
               {preview.creator_initials}
             </span>

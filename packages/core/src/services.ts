@@ -927,19 +927,6 @@ export async function listSkills(input: {
       checksum: schema.skillVersions.checksum,
       size_bytes: schema.skillVersions.sizeBytes,
       tools: schema.skillVersions.tools,
-      star_count: sql<number>`cast(count(${schema.skillStars.userId}) as int)`,
-      starred: exists(
-        database
-          .select({ one: sql`1` })
-          .from(schema.skillStars)
-          .where(
-            and(
-              eq(schema.skillStars.orgId, input.orgId),
-              eq(schema.skillStars.skillId, schema.skills.id),
-              eq(schema.skillStars.userId, input.actor.id),
-            ),
-          ),
-      ),
       installed: exists(
         database
           .select({ one: sql`1` })
@@ -960,9 +947,7 @@ export async function listSkills(input: {
     .innerJoin(schema.profiles, eq(schema.profiles.id, schema.skills.creatorId))
     .leftJoin(schema.skillVersions, eq(schema.skillVersions.id, schema.skills.currentVersionId))
     .leftJoin(updaterProfile, eq(updaterProfile.id, schema.skillVersions.createdBy))
-    .leftJoin(schema.skillStars, eq(schema.skillStars.skillId, schema.skills.id))
-    .where(and(...predicates))
-    .groupBy(schema.skills.id, schema.profiles.id, schema.skillVersions.id, updaterProfile.id);
+    .where(and(...predicates));
 
   // Search path orders by relevance then recency and caps the result count; the default list path keeps
   // its recency-only ordering and never calls `.limit()` (so the fakeDb query mocks stay untouched).
@@ -1093,8 +1078,6 @@ export async function listSkills(input: {
       requirements: companion.requirements,
       checksum: r.checksum,
       size_bytes: r.size_bytes,
-      star_count: r.star_count,
-      starred: r.starred,
       installed: Boolean(r.installed),
       installed_version: installBySkill.get(r.id) ?? null,
       install_status: (() => {
@@ -1213,7 +1196,6 @@ export async function getSkillPublicPreviewByShareToken(input: {
     current_version: row.current_version,
     creator_name: row.creator_name,
     creator_initials: row.creator_initials,
-    star_count: Number(row.star_count),
     updated_at: new Date(row.updated_at).toISOString(),
   };
 }
@@ -1240,14 +1222,19 @@ const EMPTY_SKILL_FILTER_PREFERENCES: SkillFilterPreferences = {
 };
 
 /**
- * Drop persisted filters that no longer exist in the flat model: legacy "scope" / "visibility" /
- * "owner" / "team" filters all referenced the removed owner axis and have no replacement (skills are
- * flat). Surviving filter types are passed through; the zod schema validates the result.
+ * Drop persisted filters that no longer exist. Surviving filter types are passed through; the zod
+ * schema validates the result.
  */
 function normalizePersistedSkillFilter(value: unknown): unknown | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return value;
   const filter = value as Record<string, unknown>;
-  if (filter.type === "scope" || filter.type === "visibility" || filter.type === "owner" || filter.type === "team") {
+  if (
+    filter.type === "scope" ||
+    filter.type === "visibility" ||
+    filter.type === "owner" ||
+    filter.type === "team" ||
+    filter.type === "starred"
+  ) {
     return null;
   }
   return value;
@@ -1322,7 +1309,7 @@ export async function getSkillBySlug(input: {
   }
   // Resolve by slug across both live and archived skills — archived ones stay viewable. Uses the
   // `accessible` library so an org skill resolves for anyone and a personal skill only for its owner
-  // (every single-skill mutate — install/archive/share/star/deps — funnels through here).
+  // (every single-skill mutation — install/archive/share/dependencies — funnels through here).
   const rows = await listSkills({
     ...input,
     library: "accessible",
@@ -1653,38 +1640,6 @@ export async function listSkillComments(input: {
       images: imagesByComment.get(r.id) ?? [],
     };
   });
-}
-
-export async function toggleStar(input: {
-  actor: ActorContext;
-  orgId: string;
-  slug: string;
-  database?: Db;
-}): Promise<boolean> {
-  const database = input.database ?? db;
-  const skill = await getSkillBySlug(input);
-  if (!skill) throw new Error("skill not found");
-  const existing = await database.query.skillStars.findFirst({
-    where: and(
-      eq(schema.skillStars.orgId, input.orgId),
-      eq(schema.skillStars.skillId, skill.id),
-      eq(schema.skillStars.userId, input.actor.id),
-    ),
-  });
-  if (existing) {
-    await database
-      .delete(schema.skillStars)
-      .where(
-        and(
-          eq(schema.skillStars.orgId, input.orgId),
-          eq(schema.skillStars.skillId, skill.id),
-          eq(schema.skillStars.userId, input.actor.id),
-        ),
-      );
-    return false;
-  }
-  await database.insert(schema.skillStars).values({ orgId: input.orgId, skillId: skill.id, userId: input.actor.id });
-  return true;
 }
 
 /**

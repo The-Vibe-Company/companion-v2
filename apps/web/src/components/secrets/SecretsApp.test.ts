@@ -93,7 +93,6 @@ async function mount(initialSecrets = rows) {
         orgTreeRows: [],
         mineCount: 3,
         orgCount: 2,
-        starredCount: 1,
         installedCount: 1,
         installedUpdateCount: 1,
         localUpdateCount: 0,
@@ -132,7 +131,6 @@ describe("SecretsApp", () => {
     const primary = container.querySelector('nav[aria-label="Primary"]') as HTMLElement;
     expect(primary.textContent).toContain("My Skills");
     expect(primary.textContent).toContain("Organization");
-    expect(primary.textContent).toContain("Starred");
     expect(primary.textContent).toContain("Installed");
     expect(primary.textContent).toContain("Companion skills");
     expect(primary.textContent).toContain("Archived");

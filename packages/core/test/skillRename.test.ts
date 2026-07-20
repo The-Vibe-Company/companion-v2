@@ -40,7 +40,6 @@ function fakeDb(opts: {
   const related = {
     labels: row ? [{ orgId: row.orgId, skillId: row.id, path: "dev/tools" }] : [],
     installs: row ? [{ orgId: row.orgId, userId: owner.id, skillId: row.id, installedVersion: "1.0.0" }] : [],
-    stars: row ? [{ orgId: row.orgId, userId: other.id, skillId: row.id }] : [],
     comments: row ? [{ orgId: row.orgId, skillId: row.id, id: "comment-1" }] : [],
   };
   const captured = {

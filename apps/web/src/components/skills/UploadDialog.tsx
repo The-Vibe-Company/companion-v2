@@ -1407,7 +1407,7 @@ export function UploadDialog({
                 </>
               ) : scope === "org" ? (
                 <>
-                  Publishing to the <b>Organization</b> library. Every member can find, star, and install it.
+                  Publishing to the <b>Organization</b> library. Every member can find and install it.
                 </>
               ) : (
                 <>

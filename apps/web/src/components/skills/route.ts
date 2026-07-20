@@ -1,7 +1,7 @@
 /**
  * The skills route encodes which library + slice is shown plus the open skill detail. There are two
  * libraries: `mine` (the private "My Skills" — authored personal skills + installed org skills) and
- * `org` (the flat org-wide library). Within a library, selection is by the starred/installed shortcuts
+ * `org` (the flat org-wide library). Within a library, selection is by the installed shortcut
  * (mine only) or the folder tree (a `label` path). The `local` (Companion skills) and `archived` views
  * are library-independent and sit at the sidebar bottom. The default surface is `mine` / `all`.
  */
@@ -9,7 +9,6 @@ export type SkillsLibrary = "mine" | "org";
 
 export type SkillsRoute =
   | { lib: "mine"; kind: "all"; skill?: string; run?: string }
-  | { lib: "mine"; kind: "starred"; skill?: string; run?: string }
   | { lib: "mine"; kind: "installed"; skill?: string; run?: string }
   | { lib: "mine"; kind: "label"; label: string; skill?: string; run?: string }
   | { lib: "org"; kind: "all"; skill?: string; run?: string }
@@ -97,7 +96,8 @@ export function parseSkillsRoute(input: SkillsSearchParams): SkillsRoute {
   }
 
   // Default library is `mine`.
-  if (view === "starred") return { lib: "mine", kind: "starred", skill, run };
+  // Retired `view=starred` links intentionally fall through to the default My Skills view while
+  // preserving an addressed skill or run.
   if (view === "installed") return { lib: "mine", kind: "installed", skill, run };
   if (view === "label") {
     const label = firstParam(params, "label")?.trim();
@@ -114,8 +114,7 @@ export function skillsRouteHref(route: SkillsRoute): string {
     params.push("view=archived");
   } else {
     if (route.lib === "org") params.push("lib=org");
-    if (route.kind === "starred") params.push("view=starred");
-    else if (route.kind === "installed") params.push("view=installed");
+    if (route.kind === "installed") params.push("view=installed");
     else if (route.kind === "label") params.push("view=label", `label=${encodeURIComponent(route.label)}`);
     // kind === "all" emits no `view` (the default within a library).
   }
@@ -151,8 +150,6 @@ export function skillsRouteWithoutSkill(route: SkillsRoute): SkillsRoute {
   switch (route.kind) {
     case "all":
       return { lib: route.lib, kind: "all" };
-    case "starred":
-      return { lib: "mine", kind: "starred" };
     case "installed":
       return { lib: "mine", kind: "installed" };
     case "label":
@@ -168,8 +165,6 @@ export function skillsRouteWithSkill(route: SkillsRoute, skill: string): SkillsR
   switch (route.kind) {
     case "all":
       return { lib: route.lib, kind: "all", skill };
-    case "starred":
-      return { lib: "mine", kind: "starred", skill };
     case "installed":
       return { lib: "mine", kind: "installed", skill };
     case "label":

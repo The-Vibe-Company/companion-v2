@@ -85,8 +85,6 @@ function fakeDb(opts: FakeOptions = {}) {
             checksum: null,
             size_bytes: null,
             tools: [],
-            star_count: 0,
-            starred: false,
             created_at: new Date(),
             updated_at: new Date(),
           },

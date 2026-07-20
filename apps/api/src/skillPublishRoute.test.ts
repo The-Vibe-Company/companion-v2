@@ -71,7 +71,6 @@ const serviceMocks = vi.hoisted(() => {
     setOrgLogoFromUpload: noop,
     orgLogoPublicPath: vi.fn(() => "/org-logo.png"),
     shareSkill: noop,
-    toggleStar: noop,
     installSkill: noop,
     unassignLabel: noop,
     uninstallSkill: noop,

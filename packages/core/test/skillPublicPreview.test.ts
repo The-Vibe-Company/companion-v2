@@ -26,7 +26,6 @@ describe("getSkillPublicPreviewByShareToken", () => {
             },
           },
         }),
-        star_count: 4,
         updated_at: "2026-06-25 10:00:00+00",
       },
     ]);
@@ -41,7 +40,6 @@ describe("getSkillPublicPreviewByShareToken", () => {
       current_version: "1.2.3",
       creator_name: "Ada Lovelace",
       creator_initials: "AL",
-      star_count: 4,
       updated_at: "2026-06-25T10:00:00.000Z",
     });
     expect(preview).not.toHaveProperty("id");

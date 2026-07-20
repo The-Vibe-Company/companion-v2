@@ -131,9 +131,9 @@
 .depspill--warn svg { color: var(--color-warn); }
 .depspill--used { color: var(--color-faint); }
 
-/* Skills list with dependency signals: Skill · People · Version · Deps · Stars · Updated · Action. */
+/* Skills list with dependency signals: Skill · People · Version · Deps · Updated · Action. */
 .clist--deps .chead,
-.clist--deps .crow { grid-template-columns: minmax(0,1fr) 104px 76px 58px 52px 72px 132px; }
+.clist--deps .crow { grid-template-columns: minmax(0,1fr) 104px 76px 58px 72px 132px; }
 
 /* Responsive: the skill name is the priority. Shed columns by importance as width shrinks so the
    name keeps room. These override the base skills.css breakpoints (higher specificity), so the deps
@@ -142,9 +142,7 @@
   .clist--deps .chead,
   .clist--deps .crow { grid-template-columns: minmax(0,1fr) 88px 58px 68px 132px; }
   .clist--deps .chead span:nth-child(3),
-  .clist--deps .chead span:nth-child(5),
-  .clist--deps .crow > .ver,
-  .clist--deps .crow > .crow__stars {
+  .clist--deps .crow > .ver {
     display: none;
   }
 }
@@ -152,7 +150,7 @@
   .clist--deps .chead,
   .clist--deps .crow { grid-template-columns: minmax(0,1fr) 82px 132px; }
   .clist--deps .chead span:nth-child(4),
-  .clist--deps .chead span:nth-child(6),
+  .clist--deps .chead span:nth-child(5),
   .clist--deps .crow > .crow__deps,
   .clist--deps .crow > .when {
     display: none;
@@ -168,7 +166,6 @@
   }
   .clist--deps .crow > .ver,
   .clist--deps .crow > .crow__deps,
-  .clist--deps .crow > .crow__stars,
   .clist--deps .crow > .when {
     display: none;
   }

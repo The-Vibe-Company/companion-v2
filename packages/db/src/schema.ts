@@ -390,26 +390,6 @@ export const skillVersionDependencies = pgTable(
   }),
 );
 
-export const skillStars = pgTable(
-  "skill_stars",
-  {
-    orgId: uuid("org_id")
-      .notNull()
-      .references(() => organizations.id, { onDelete: "cascade" }),
-    skillId: uuid("skill_id")
-      .notNull()
-      .references(() => skills.id, { onDelete: "cascade" }),
-    userId: text("user_id")
-      .notNull()
-      .references(() => user.id, { onDelete: "cascade" }),
-    createdAt: now(),
-  },
-  (t) => ({
-    pk: primaryKey({ columns: [t.skillId, t.userId] }),
-    byOrg: index("skill_stars_org_idx").on(t.orgId),
-  }),
-);
-
 /**
  * The org-wide shared label ("folder") tree. The canonical set of paths plus their per-path
  * appearance (color + icon). A row here is what lets an **empty** folder exist (a path with no

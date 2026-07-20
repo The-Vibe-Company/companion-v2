@@ -4,10 +4,10 @@ import { labelPathSchema } from "./labels";
 
 /**
  * The active skill filters a member has applied. Skills are flat and org-wide, so the only axes are
- * validation status, starred, dependency relationships, and the org-wide label folders (a specific
+ * validation status, dependency relationships, and the library label folders (a specific
  * label path, or the "no label" pseudo-filter).
  */
-export const skillFilterTypeSchema = z.enum(["status", "starred", "deps", "label", "nolabel"]);
+export const skillFilterTypeSchema = z.enum(["status", "deps", "label", "nolabel"]);
 export type SkillFilterType = z.infer<typeof skillFilterTypeSchema>;
 
 export const depsFilterSchema = z.enum(["has", "used"]);
@@ -15,7 +15,6 @@ export type DepsFilter = z.infer<typeof depsFilterSchema>;
 
 export const skillFilterSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("status"), value: validationStateSchema }),
-  z.object({ type: z.literal("starred"), value: z.literal("true") }),
   // "has" = declares dependencies; "used" = depended on by another skill.
   z.object({ type: z.literal("deps"), value: depsFilterSchema }),
   // Filed under a specific label path (or any descendant of it).

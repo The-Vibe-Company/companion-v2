@@ -117,13 +117,12 @@ export async function list(
     return;
   }
   printTable(
-    ["skill", "version", "by", "labels", "stars", "state"],
+    ["skill", "version", "by", "labels", "state"],
     rows.map((r) => [
       r.slug,
       r.current_version ?? "-",
       r.creator_name,
       r.labels.length ? r.labels.join(", ") : "-",
-      String(r.star_count ?? 0),
       r.validation,
     ]),
   );
@@ -143,7 +142,6 @@ export async function info(name: string, g: GlobalOpts): Promise<void> {
   out(`license    ${r.license ?? "-"}`);
   out(`checksum   ${r.checksum ?? "-"}`);
   out(`validation ${r.validation}`);
-  out(`stars      ${r.star_count ?? 0}`);
 }
 
 export async function versions(name: string, g: GlobalOpts): Promise<void> {

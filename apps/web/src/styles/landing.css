@@ -178,7 +178,6 @@
   padding: 7px 13px;
 }
 .v5-ticker__name { font-family: var(--font-mono); font-size: var(--text-sm); font-weight: var(--weight-medium); }
-.v5-ticker__stars { font-size: var(--text-xs); color: var(--color-faint); font-variant-numeric: tabular-nums; }
 @media (prefers-reduced-motion: reduce) {
   .v5-ticker__track { animation: none; flex-wrap: wrap; width: auto; }
   .v5-ticker__mask { -webkit-mask-image: none; mask-image: none; }
@@ -434,7 +433,7 @@
 
 .v5-portal__chead, .v5-portal__crow {
   display: grid;
-  grid-template-columns: 14px minmax(0, 1.7fr) minmax(0, 1fr) 64px 64px 76px;
+  grid-template-columns: 14px minmax(0, 1.7fr) minmax(0, 1fr) 64px 76px;
   gap: var(--space-3);
   align-items: center;
   padding: var(--space-2) var(--space-5);
@@ -456,14 +455,10 @@
 .v5-portal__scope { display: inline-flex; align-items: center; gap: 6px; color: var(--color-muted); font-size: var(--text-xs); overflow: hidden; }
 .v5-portal__scope svg { width: 11px; height: 11px; color: var(--color-faint); flex: none; }
 .v5-portal__ver { font-family: var(--font-mono); font-size: var(--text-xs); color: var(--color-muted); }
-.v5-portal__stars { display: inline-flex; align-items: center; gap: 4px; justify-self: end; font-size: var(--text-xs); color: var(--color-faint); }
-.v5-portal__stars svg { width: 12px; height: 12px; }
-.v5-portal__stars--on { color: var(--color-accent-ink); }
-.v5-portal__stars--on svg { fill: var(--color-accent); color: var(--color-accent-ink); }
 .v5-portal__when { justify-self: end; font-size: var(--text-xs); color: var(--color-faint); }
 @media (max-width: 760px) {
   .v5-portal__chead, .v5-portal__crow { grid-template-columns: 14px minmax(0, 1.6fr) minmax(0, 1fr) 64px; }
-  .v5-portal__stars, .v5-portal__when, .v5-portal__chead span:nth-child(5), .v5-portal__chead span:nth-child(6) { display: none; }
+  .v5-portal__when, .v5-portal__chead span:nth-child(5) { display: none; }
 }
 .v5-libframe__caption {
   display: flex; align-items: center; justify-content: center; gap: var(--space-2);
@@ -554,7 +549,6 @@
 .v6-pframe .v5-portal__navitem:hover { background: var(--color-surface-raised); color: var(--color-fg); }
 .v6-pframe .v5-portal__view { cursor: pointer; }
 .v6-pframe .v5-portal__view:hover { color: var(--color-fg); }
-.v6-pstar { display: inline-flex; justify-self: end; }
 .v6-fchip-x { display: inline-flex; margin-left: 2px; color: var(--color-faint); }
 .v6-fchip-x:hover { color: var(--color-fg); }
 .v6-pdrawer {
@@ -595,8 +589,6 @@
   .v6-pframe .v5-portal__crow .v5-portal__name { grid-area: name; }
   .v6-pframe .v5-portal__crow .v5-portal__ver { grid-area: ver; }
   .v6-pframe .v5-portal__crow .v5-portal__scope { grid-area: scope; }
-  /* .v6-pstar re-shows the star button past the 760px hide, so re-hide it here */
-  .v6-pframe .v5-portal__crow .v5-portal__stars { display: none; }
 }
 .v6-pdrawer__head { display: flex; align-items: center; gap: var(--space-2); }
 .v6-pdrawer__title { font-family: var(--font-mono); font-size: var(--text-md); font-weight: var(--weight-semibold); margin: 0; overflow: hidden; text-overflow: ellipsis; }

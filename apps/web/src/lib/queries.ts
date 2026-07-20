@@ -154,11 +154,6 @@ export async function fetchSkillBySlug(slug: string): Promise<SkillListRow> {
   return apiFetch<SkillListRow>(`/v1/skills/${encodeURIComponent(slug)}`);
 }
 
-export async function toggleStar(slug: string): Promise<boolean> {
-  const data = await apiFetch<{ starred: boolean }>(`/v1/skills/${slug}/star`, { method: "POST" });
-  return data.starred;
-}
-
 /** Mark a published skill as installed for the current user (manual mark or agent report). */
 export async function markSkillInstalled(
   slug: string,

@@ -59,7 +59,6 @@ const serviceMocks = vi.hoisted(() => {
     setOrgLogoFromUpload: noop,
     orgLogoPublicPath: vi.fn(() => "/org-logo.png"),
     shareSkill: vi.fn(),
-    toggleStar: noop,
     installSkill: noop,
     unassignLabel: noop,
     uninstallSkill: noop,
@@ -328,7 +327,6 @@ describe("GET /v1/public/skills/:token", () => {
       current_version: "1.2.3",
       creator_name: "Ada Lovelace",
       creator_initials: "AL",
-      star_count: 7,
       updated_at: "2026-06-25T10:00:00.000Z",
     });
 
@@ -343,7 +341,6 @@ describe("GET /v1/public/skills/:token", () => {
       current_version: "1.2.3",
       creator_name: "Ada Lovelace",
       creator_initials: "AL",
-      star_count: 7,
       updated_at: "2026-06-25T10:00:00.000Z",
     });
     expect(serviceMocks.getSkillPublicPreviewByShareToken).toHaveBeenCalledWith({ token: "share-token-1" });
@@ -357,6 +354,13 @@ describe("GET /v1/public/skills/:token", () => {
 
     expect(res.status).toBe(404);
     await expect(res.json()).resolves.toMatchObject({ ok: false, error: "skill not found" });
+  });
+});
+
+describe("removed skill star endpoint", () => {
+  it("returns the normal 404", async () => {
+    const res = await app.request("/v1/skills/mega-code-review/star", { method: "POST" });
+    expect(res.status).toBe(404);
   });
 });
 

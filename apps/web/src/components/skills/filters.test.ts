@@ -32,8 +32,6 @@ function mk(p: Partial<SkillVM> & { id: string }): SkillVM {
     checksum: null,
     created: "",
     updated: "",
-    stars: 0,
-    starred: false,
     installStatus: "none",
     installedVersion: null,
     requiresCount: 0,
@@ -48,7 +46,7 @@ const registry: SkillVM[] = [
   mk({ id: "jira-triage", requiresCount: 2 }),
   mk({ id: "k8s-logs", usedByCount: 3 }),
   mk({ id: "sql-query", validation: "validating" }),
-  mk({ id: "pdf-extract", starred: true }),
+  mk({ id: "pdf-extract" }),
   mk({ id: "web-fetch" }),
   mk({ id: "image-ocr", validation: "invalid" }),
 ];
@@ -63,10 +61,6 @@ describe("matchFilters", () => {
   it("status narrows by validation state", () => {
     expect(run([{ type: "status", value: "invalid" }])).toEqual(["image-ocr"]);
     expect(run([{ type: "status", value: "validating" }])).toEqual(["sql-query"]);
-  });
-
-  it("starred selects starred skills", () => {
-    expect(run([{ type: "starred", value: "true" }])).toEqual(["pdf-extract"]);
   });
 
   it("deps 'has' matches skills that declare dependencies", () => {
@@ -107,11 +101,11 @@ describe("filtersKey", () => {
     expect(
       filtersKey([
         { type: "status", value: "valid" },
-        { type: "starred", value: "true" },
+        { type: "deps", value: "has" },
       ]),
     ).toBe(
       filtersKey([
-        { type: "starred", value: "true" },
+        { type: "deps", value: "has" },
         { type: "status", value: "valid" },
       ]),
     );
@@ -119,13 +113,12 @@ describe("filtersKey", () => {
 });
 
 describe("chipParts", () => {
-  it("renders status / starred / deps chips", () => {
+  it("renders status and dependency chips", () => {
     expect(chipParts({ type: "status", value: "invalid" })).toEqual({
       icon: "alert-triangle",
       key: "status",
       val: "invalid",
     });
-    expect(chipParts({ type: "starred", value: "true" })).toEqual({ icon: "star", key: "", val: "starred" });
     expect(chipParts({ type: "deps", value: "used" })).toEqual({
       icon: "corner-down-right",
       key: "deps",
@@ -137,13 +130,11 @@ describe("chipParts", () => {
 describe("makeFilter", () => {
   it("returns typed filters for valid pairs", () => {
     expect(makeFilter("status", "valid")).toEqual({ type: "status", value: "valid" });
-    expect(makeFilter("starred", "true")).toEqual({ type: "starred", value: "true" });
     expect(makeFilter("deps", "has")).toEqual({ type: "deps", value: "has" });
   });
 
   it("rejects invalid type/value pairs", () => {
     expect(makeFilter("status", "everyone")).toBeNull();
-    expect(makeFilter("starred", "false")).toBeNull();
     expect(makeFilter("deps", "nope")).toBeNull();
   });
 });

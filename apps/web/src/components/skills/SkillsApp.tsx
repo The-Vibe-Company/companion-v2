@@ -27,7 +27,6 @@ import {
   saveSkillFilterPreferences,
   setLabelColor as setLabelColorRpc,
   setLabelIcon as setLabelIconRpc,
-  toggleStar as toggleStarRpc,
   unassignSkillLabel,
 } from "@/lib/queries";
 import { fetchSettingsAppData } from "@/lib/settingsClient";
@@ -122,7 +121,7 @@ function settingsErrorMessage(error: unknown): string {
  * in the client from skills + explicit `labels` rows so optimistic assigns / renames re-derive
  * without a refetch.
  */
-type ScopeKind = "all" | "starred" | "installed" | "label";
+type ScopeKind = "all" | "installed" | "label";
 /** The active workspace slice: a library (`mine`/`org`) + a kind within it. */
 type Selection = { lib: SkillsLibrary; kind: ScopeKind; label?: string };
 
@@ -143,12 +142,11 @@ function skillUnderLabel(skill: SkillVM, path: string): boolean {
 
 /**
  * Does a skill belong to the active slice? The skill set is already library-filtered, so this only
- * narrows within the library: starred / installed (installed = a `source: installed` row) / filed
+ * narrows within the library: installed (a `source: installed` row) / filed
  * under the selected folder. Installed skills carry no personal folders, so a `label` slice naturally
  * shows only authored personal skills.
  */
 function skillInSelection(skill: SkillVM, selection: Selection): boolean {
-  if (selection.kind === "starred") return skill.starred;
   if (selection.kind === "installed") return skill.source === "installed";
   if (selection.kind === "label") return selection.label ? skillUnderLabel(skill, selection.label) : true;
   return true;
@@ -157,7 +155,6 @@ function skillInSelection(skill: SkillVM, selection: Selection): boolean {
 type SkillsView = "workspace" | "local" | "archived";
 
 function selectionFromRoute(route: SkillsRoute): Selection {
-  if (route.kind === "starred") return { lib: "mine", kind: "starred" };
   if (route.kind === "installed") return { lib: "mine", kind: "installed" };
   if (route.kind === "label") return { lib: route.lib, kind: "label", label: route.label };
   if (route.kind === "all") return { lib: route.lib, kind: "all" };
@@ -173,8 +170,7 @@ function skillsViewForRoute(route: SkillsRoute): SkillsView {
 
 function routeFromSelection(selection: Selection, skill?: string): SkillsRoute {
   let route: SkillsRoute;
-  if (selection.kind === "starred") route = { lib: "mine", kind: "starred" };
-  else if (selection.kind === "installed") route = { lib: "mine", kind: "installed" };
+  if (selection.kind === "installed") route = { lib: "mine", kind: "installed" };
   else if (selection.kind === "label" && selection.label) route = { lib: selection.lib, kind: "label", label: selection.label };
   else route = { lib: selection.lib, kind: "all" };
   return skill ? skillsRouteWithSkill(route, skill) : route;
@@ -266,12 +262,6 @@ export function SkillsApp({
   personalLabelsRef.current = personalLabels;
   orgLabelsRef.current = orgLabels;
   activeLibRef.current = activeLib;
-
-  // Star toggles apply to every copy of a skill (an installed org skill lives in both libraries).
-  const setSkillEverywhere = useCallback((id: string, fn: (s: SkillVM) => SkillVM) => {
-    setMineSkills((arr) => arr.map((s) => (s.id === id ? fn(s) : s)));
-    setOrgSkills((arr) => arr.map((s) => (s.id === id ? fn(s) : s)));
-  }, []);
 
   const refreshSkillLibraries = useCallback(async () => {
     const generation = refreshGenerationRef.current + 1;
@@ -545,16 +535,6 @@ export function SkillsApp({
     setUploadOpen(false);
     queueMicrotask(() => uploadReturnRef.current?.focus());
   }, []);
-
-  // --- Optimistic mutations: stars / install ---------------------------------
-  const toggleStar = useCallback(
-    (id: string) => {
-      const flip = (s: SkillVM): SkillVM => ({ ...s, starred: !s.starred, stars: s.stars + (s.starred ? -1 : 1) });
-      setSkillEverywhere(id, flip);
-      toggleStarRpc(id).catch(() => setSkillEverywhere(id, flip));
-    },
-    [setSkillEverywhere],
-  );
 
   /**
    * Install an org skill into My Skills, or remove it. Updates the org row's status AND mirrors a
@@ -1002,7 +982,7 @@ export function SkillsApp({
       const id = vm.id;
       setShareTarget(null);
       // Share is one-way (there is no un-share endpoint). Refetch both libraries after success so
-      // derived rows, labels, installs, stars, and dependency counters stay server-authoritative.
+      // derived rows, labels, installs, and dependency counters stay server-authoritative.
       shareSkillToOrg(id)
         .then(async (result) => {
           await refreshSkillLibraries();
@@ -1252,7 +1232,6 @@ export function SkillsApp({
 
   const mineCount = mineSkills.length;
   const orgCount = orgSkills.length;
-  const starredCount = useMemo(() => mineSkills.filter((s) => s.starred).length, [mineSkills]);
   const installedCount = useMemo(() => mineSkills.filter((s) => s.source === "installed").length, [mineSkills]);
   const installedUpdateCount = useMemo(
     () => mineSkills.filter((s) => s.source === "installed" && s.installStatus === "update").length,
@@ -1267,7 +1246,6 @@ export function SkillsApp({
 
   const activeLabel = selection.kind === "label" ? selection.label ?? null : null;
   const breadcrumb = useMemo(() => {
-    if (selection.kind === "starred") return ["Starred"];
     if (selection.kind === "installed") return ["Installed"];
     if (selection.kind === "label" && selection.label) return selection.label.split("/");
     return selection.lib === "org" ? ["All skills"] : ["My Skills"];
@@ -1283,7 +1261,7 @@ export function SkillsApp({
     [currentView, selection],
   );
 
-  // --- Filter actions (in-list bar: status / deps / starred) -----------------
+  // --- Filter actions (in-list bar: status / dependencies) -------------------
   const toggleFilter = useCallback((type: Filter["type"], value: string) => {
     setFilters((fs) =>
       fs.some((f) => f.type === type && f.value === value)
@@ -1316,7 +1294,6 @@ export function SkillsApp({
   );
   const selectMineAll = useCallback(() => applySkillsRoute({ lib: "mine", kind: "all" }, "push"), [applySkillsRoute]);
   const selectOrgAll = useCallback(() => applySkillsRoute({ lib: "org", kind: "all" }, "push"), [applySkillsRoute]);
-  const selectStarred = useCallback(() => applySkillsRoute({ lib: "mine", kind: "starred" }, "push"), [applySkillsRoute]);
   const selectInstalled = useCallback(
     () => applySkillsRoute({ lib: "mine", kind: "installed" }, "push"),
     [applySkillsRoute],
@@ -1661,13 +1638,11 @@ export function SkillsApp({
         selection={currentView === "workspace" ? selection : null}
         mineCount={mineCount}
         orgCount={orgCount}
-        starredCount={starredCount}
         installedCount={installedCount}
         installedUpdateCount={installedUpdateCount}
         onOpenPalette={() => setPaletteOpen(true)}
         onSelectMineAll={selectMineAll}
         onSelectOrgAll={selectOrgAll}
-        onSelectStarred={selectStarred}
         onSelectInstalled={selectInstalled}
         onSelectLabel={selectLabel}
         onCreateLabel={createLabelPath}
@@ -1719,7 +1694,6 @@ export function SkillsApp({
             onBack={back}
             onPrev={() => go(-1)}
             onNext={() => go(1)}
-            onToggleStar={() => toggleStar(skill.id)}
             onToggleLabel={(path) => toggleSkillLabel(detailLib, skill.id, path)}
             onSelectLabel={(path) => selectLabel(detailLib, path)}
             onAction={(action) => runSkillAction(skill, action)}
@@ -1749,7 +1723,6 @@ export function SkillsApp({
             scopeKind={selection.kind}
             breadcrumb={breadcrumb}
             onOpen={open}
-            onToggleStar={toggleStar}
             onUpload={openUpload}
             actorId={me.id}
             onPrimaryAction={runSkillAction}

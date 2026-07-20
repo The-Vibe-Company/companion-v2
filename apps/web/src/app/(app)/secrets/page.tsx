@@ -67,7 +67,6 @@ export default async function SecretsPage({ searchParams }: { searchParams: Prom
         orgTreeRows: deriveTreeRows(orgSkills, orgLabels.flat),
         mineCount: mineSkills.length,
         orgCount: orgSkills.length,
-        starredCount: mineSkills.filter((skill) => skill.starred).length,
         installedCount: mineSkills.filter((skill) => skill.source === "installed").length,
         installedUpdateCount: mineSkills.filter((skill) => skill.source === "installed" && skill.installStatus === "update").length,
         localUpdateCount: localSkills.filter((skill) => skill.status === "update").length,
