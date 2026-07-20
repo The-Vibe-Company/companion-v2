@@ -95,6 +95,7 @@ export type SettingsView =
   | "general"
   | "members"
   | "invitations"
+  | "github"
   | "billing";
 
 /** Every `?view=` value both settings URL parsers accept (client pushState + server searchParams). */
@@ -109,6 +110,7 @@ export const SETTINGS_VIEWS: readonly SettingsView[] = [
   "org-models",
   "members",
   "invitations",
+  "github",
   "billing",
 ];
 
@@ -131,6 +133,11 @@ export function parseSettingsView(raw: string | null | undefined): SettingsView 
 /** A resolved settings destination — a pane. */
 export interface SettingsRoute {
   view: SettingsView;
+}
+
+/** Keep privileged settings deep-links aligned with the pane an actor can actually access. */
+export function canonicalizeSettingsRoute(route: SettingsRoute, canManage: boolean): SettingsRoute {
+  return route.view === "github" && !canManage ? { view: "general" } : route;
 }
 
 /** Top-level dialogs the shell owns. Key create/reveal dialogs are local to ApiKeysPane. */

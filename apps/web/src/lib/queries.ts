@@ -348,8 +348,8 @@ export async function shareSkillToOrg(slug: string): Promise<ShareSkillResult> {
   return apiFetch<ShareSkillResult>(`/v1/skills/${slug}/share`, { method: "POST" });
 }
 
-export async function fetchSkillLibrary(lib: "mine" | "org"): Promise<SkillListRow[]> {
-  return apiFetch<SkillListRow[]>(`/v1/skills?lib=${lib}`);
+export async function fetchSkillLibrary(lib: "mine" | "org", archived = false): Promise<SkillListRow[]> {
+  return apiFetch<SkillListRow[]>(`/v1/skills?lib=${lib}${archived ? "&archived=true" : ""}`);
 }
 
 export async function saveSkillFilterPreferences(

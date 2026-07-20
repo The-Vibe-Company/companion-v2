@@ -42,8 +42,9 @@ Canonical terms — **do not invent synonyms**:
 apps/
   web/        # Next.js App Router — UI, tRPC/API client
   api/        # tRPC routers + REST/OpenAPI gateway (service layer entrypoints)
-  worker/     # reconcile loop + job runner (no HTTP surface)
+  worker/     # supervisors + job runner (no HTTP surface)
 packages/
+  github/     # GitHub App OAuth, installation tokens, deterministic repository writer
   db/         # Drizzle schema, migrations, query helpers  ← data source of truth
   core/       # domain services (authz, scoping, deploy orchestration) — NO Next.js deps
   providers/  # provider port + adapters: docker/, fly/, k8s/, modal/
@@ -58,7 +59,7 @@ docs/         # vision / product / design / PRD
 ```
 
 **Anchor files** (the contracts the system hinges on — see `docs/design.md`):
-- `packages/db/schema.ts` — all entities + the `org_id` tenant column, the `creator_id` provenance/owner column and the `scope` (personal/org) column on skills; the `labels`/`skill_labels` (org) and `personal_labels`/`personal_skill_labels` (per-user) folder tables.
+- `packages/db/src/schema.ts` — all entities + the `org_id` tenant column, the `creator_id` provenance/owner column and the `scope` (personal/org) column on skills; the `labels`/`skill_labels` (org) and `personal_labels`/`personal_skill_labels` (per-user) folder tables.
 - `packages/core/src/authz.ts` — typed RBAC: tenant/membership gate + org-role capability gate, plus `canAccessSkill`/`canManagePersonalSkill` (personal-skill privacy: owner-only, no admin override) and `canAccessRun` (skill runs are creator-only, same no-admin-override shape). Org skills carry no per-resource gate; personal skills and runs do.
 - `packages/core/src/runRuntime.ts` — the `RunSandboxRuntime` port for one-shot sandboxed skill runs (fork golden → push workspace → serve → health → stop/destroy), implemented by `packages/sandbox` (`@vercel/sandbox` + `@opencode-ai/sdk`, pinned exactly). Core stays SDK-free; `apps/worker` composes and injects it while the API only persists commands and serves creator-scoped state.
 - `packages/providers/port.ts` — the `DeploymentProvider` interface + neutral `DeploySpec`.

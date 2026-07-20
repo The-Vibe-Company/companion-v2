@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import type { BillingOverview } from "@companion/contracts";
 import { BillingPane } from "./BillingPane";
 import { SettingsSidebar } from "./SettingsSidebar";
+import { canonicalizeSettingsRoute } from "./model";
 import type { OrgCtx } from "./model";
 
 const selfHostedBilling: BillingOverview = {
@@ -85,6 +86,26 @@ describe("Billing navigation", () => {
     );
     expect(html).toContain("Billing");
     expect(html).toContain("Included");
+  });
+
+  it("keeps General current and hides GitHub for a Developer deep-link", () => {
+    const ctx = selfHostedContext();
+    ctx.canManage = false;
+    ctx.myRole = "developer";
+    ctx.currentOrg.myRole = "developer";
+    const html = renderToString(
+      React.createElement(SettingsSidebar, {
+        ctx,
+        route: canonicalizeSettingsRoute({ view: "github" }, ctx.canManage),
+        go: () => undefined,
+        onClose: () => undefined,
+        apiKeyCount: 0,
+        inviteCount: 0,
+      }),
+    );
+
+    expect(html).toContain('aria-current="page" title="General"');
+    expect(html).not.toContain('title="GitHub"');
   });
 
   it("explains that Pro is included without rendering payment actions", () => {

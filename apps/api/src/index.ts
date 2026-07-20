@@ -1,5 +1,5 @@
 import { serve } from "@hono/node-server";
-import { randomUUID } from "node:crypto";
+import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,7 +7,7 @@ import { fetchRequestHandler } from "@trpc/server/adapters/fetch";
 import { Hono, type Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { cors } from "hono/cors";
-import { setCookie } from "hono/cookie";
+import { getCookie, setCookie } from "hono/cookie";
 import {
   acceptInvitation,
   addComment,
@@ -132,6 +132,15 @@ import {
   preflightSecretRetrieval,
   createSecretRetrievalGrant,
   redeemSecretRetrievalGrant,
+  createGitHubDestination,
+  deleteGitHubConnection,
+  deleteGitHubDestination,
+  getGitHubIntegration,
+  getGitHubUserCredential,
+  refreshGitHubConnectionCredential,
+  requestGitHubDestinationSync,
+  saveGitHubConnection,
+  updateGitHubDestination,
 } from "@companion/core/services";
 import { SecretConfigurationError, loadSecretsMasterKey } from "@companion/core";
 import {
@@ -190,7 +199,12 @@ import {
   secretRetrievalPreflightInputSchema,
   redeemSecretGrantInputSchema,
   runPreferencesSchema,
+  createGitHubDestinationInputSchema,
+  createGitHubRepositoryInputSchema,
+  requestGitHubDestinationSyncInputSchema,
+  updateGitHubDestinationInputSchema,
 } from "@companion/contracts";
+import { GitHubOAuthClient, githubOAuthConfig, githubSyncEnabled } from "@companion/github";
 import { createModelCatalog } from "@companion/sandbox";
 import {
   commentImageKey,
@@ -759,6 +773,257 @@ app.get("/v1/auth/whoami", async (c) => {
     });
   } catch (error) {
     return jsonError(c, error, 401);
+  }
+});
+
+type GitHubOAuthState = { orgId: string; userId: string; nonce: string; expiresAt: number };
+
+function githubRedirectUri(): string {
+  const base = process.env.COMPANION_WEB_URL ?? "http://127.0.0.1:3000";
+  return new URL("/v1/integrations/github/callback", base).toString();
+}
+
+function signGitHubState(payload: GitHubOAuthState, secret: string): string {
+  const encoded = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
+  const signature = createHmac("sha256", secret).update(encoded).digest("base64url");
+  return `${encoded}.${signature}`;
+}
+
+function verifyGitHubState(value: string, secret: string): GitHubOAuthState {
+  const [encoded, signature] = value.split(".");
+  if (!encoded || !signature) throw new Error("invalid GitHub authorization state");
+  const expected = createHmac("sha256", secret).update(encoded).digest();
+  const actual = Buffer.from(signature, "base64url");
+  if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) throw new Error("invalid GitHub authorization state");
+  const payload = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as GitHubOAuthState;
+  if (!payload.orgId || !payload.userId || !payload.nonce || payload.expiresAt < Date.now()) {
+    throw new Error("GitHub authorization state expired");
+  }
+  return payload;
+}
+
+function githubClient(): GitHubOAuthClient {
+  const config = githubOAuthConfig();
+  if (!config || !githubSyncEnabled()) throw new Error("GitHub App integration is not configured");
+  return new GitHubOAuthClient(config);
+}
+
+async function activeGitHubUserToken(input: {
+  actor: ReturnType<typeof actorFromContext>; orgId: string; client: GitHubOAuthClient;
+}): Promise<string> {
+  const credential = await withTenantContext({ orgId: input.orgId, userId: input.actor.id }, (database) =>
+    getGitHubUserCredential({ actor: input.actor, orgId: input.orgId, database }),
+  );
+  if (!credential.accessExpiresAt || credential.accessExpiresAt.getTime() > Date.now() + 5 * 60_000) return credential.accessToken;
+  if (!credential.refreshToken || (credential.refreshExpiresAt && credential.refreshExpiresAt.getTime() <= Date.now())) {
+    throw new Error("GitHub authorization expired; reconnect Companion");
+  }
+  const refreshed = await input.client.refreshUserToken(credential.refreshToken);
+  const persisted = await withTenantContext({ orgId: input.orgId, userId: input.actor.id }, (database) =>
+    refreshGitHubConnectionCredential({
+      actor: input.actor,
+      orgId: input.orgId,
+      expectedCredentialGeneration: credential.credentialGeneration,
+      expectedCredentialVersion: credential.credentialVersion,
+      accessToken: refreshed.accessToken,
+      refreshToken: refreshed.refreshToken,
+      accessExpiresAt: refreshed.accessExpiresAt,
+      refreshExpiresAt: refreshed.refreshExpiresAt,
+      database,
+    }),
+  );
+  if (!persisted) {
+    await input.client.revokeUserToken(refreshed.accessToken);
+    throw new Error("GitHub authorization changed while refreshing; retry the request");
+  }
+  return refreshed.accessToken;
+}
+
+app.get("/v1/integrations/github", async (c) => {
+  try {
+    const config = githubOAuthConfig();
+    const configured = Boolean(config) && githubSyncEnabled();
+    const result = await withTenant(c, ({ actor, orgId, database }) => getGitHubIntegration({
+      actor, orgId, configured, appSlug: config?.slug ?? null,
+      appName: config?.name ?? "GitHub App", managed: config?.managed ?? false, database,
+    }));
+    return c.json(result);
+  } catch (error) {
+    return jsonError(c, error, 403);
+  }
+});
+
+app.post("/v1/integrations/github/connect", async (c) => {
+  try {
+    const client = githubClient();
+    const actor = actorFromContext(c);
+    const orgId = await orgIdFromContext(c);
+    await withTenantContext({ orgId, userId: actor.id }, (database) => getGitHubIntegration({
+      actor, orgId, configured: true, appSlug: client.config.slug, appName: client.config.name,
+      managed: client.config.managed, database,
+    }));
+    const nonce = randomUUID();
+    const state = signGitHubState({ orgId, userId: actor.id, nonce, expiresAt: Date.now() + 10 * 60_000 }, client.config.clientSecret);
+    setCookie(c, "companion_github_oauth", nonce, {
+      path: "/v1/integrations/github/callback", httpOnly: true, sameSite: "Lax",
+      secure: process.env.NODE_ENV === "production", maxAge: 600,
+    });
+    return c.json({
+      url: client.authorizationUrl({ state, redirectUri: githubRedirectUri() }),
+      install_url: client.installationUrl(state),
+    });
+  } catch (error) {
+    return jsonError(c, error, 403);
+  }
+});
+
+app.get("/v1/integrations/github/callback", async (c) => {
+  const web = process.env.COMPANION_WEB_URL ?? "http://127.0.0.1:3000";
+  try {
+    const client = githubClient();
+    const actor = actorFromContext(c);
+    const state = verifyGitHubState(c.req.query("state") ?? "", client.config.clientSecret);
+    if (actor.id !== state.userId || getCookie(c, "companion_github_oauth") !== state.nonce) {
+      throw new Error("GitHub authorization session does not match");
+    }
+    const code = c.req.query("code");
+    if (!code) throw new Error("GitHub did not return an authorization code");
+    const tokens = await client.exchangeCode(code, githubRedirectUri());
+    const user = await client.user(tokens.accessToken);
+    await withTenantContext({ orgId: state.orgId, userId: actor.id }, (database) => saveGitHubConnection({
+      actor, orgId: state.orgId, githubUserId: String(user.id), githubLogin: user.login,
+      githubAvatarUrl: user.avatar_url, accessToken: tokens.accessToken, refreshToken: tokens.refreshToken,
+      accessExpiresAt: tokens.accessExpiresAt, refreshExpiresAt: tokens.refreshExpiresAt, database,
+    }));
+    setCookie(c, "companion_org", state.orgId, { path: "/", sameSite: "Lax", secure: process.env.NODE_ENV === "production" });
+    setCookie(c, "companion_github_oauth", "", { path: "/v1/integrations/github/callback", maxAge: 0, httpOnly: true });
+    return c.redirect(new URL("/settings?view=github&github=connected", web).toString(), 303);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "GitHub authorization failed";
+    setCookie(c, "companion_github_oauth", "", {
+      path: "/v1/integrations/github/callback",
+      maxAge: 0,
+      httpOnly: true,
+      sameSite: "Lax",
+      secure: process.env.NODE_ENV === "production",
+    });
+    const target = new URL("/settings", web);
+    target.searchParams.set("view", "github");
+    target.searchParams.set("github_error", message.slice(0, 200));
+    return c.redirect(target.toString(), 303);
+  }
+});
+
+app.delete("/v1/integrations/github/account", async (c) => {
+  try {
+    const client = githubClient();
+    await withTenant(c, ({ actor, orgId, database }) => deleteGitHubConnection({
+      actor,
+      orgId,
+      revokeAccessToken: (accessToken) => client.revokeUserToken(accessToken),
+      database,
+    }));
+    return c.json({ ok: true });
+  } catch (error) {
+    return jsonError(c, error, 403);
+  }
+});
+
+app.get("/v1/integrations/github/repositories", async (c) => {
+  try {
+    const client = githubClient();
+    const actor = actorFromContext(c);
+    const orgId = await orgIdFromContext(c);
+    const accessToken = await activeGitHubUserToken({ actor, orgId, client });
+    const [repositories, installations] = await Promise.all([
+      client.repositories(accessToken),
+      client.installations(accessToken),
+    ]);
+    const result = { repositories, installations, install_url: client.installationUrl() };
+    return c.json(result);
+  } catch (error) {
+    return jsonError(c, error, 403);
+  }
+});
+
+app.post("/v1/integrations/github/repositories", async (c) => {
+  try {
+    const body = createGitHubRepositoryInputSchema.parse(await c.req.json());
+    const client = githubClient();
+    const actor = actorFromContext(c);
+    const orgId = await orgIdFromContext(c);
+    const accessToken = await activeGitHubUserToken({ actor, orgId, client });
+    const user = await client.user(accessToken);
+    const installation = (await client.installations(accessToken)).find((candidate) =>
+      candidate.installation_id === body.installation_id && candidate.owner === body.owner,
+    );
+    if (!installation) throw new Error("GitHub App installation is not accessible");
+    const repository = await client.createRepository({
+      accessToken, installationId: installation.installation_id, owner: installation.owner,
+      userLogin: user.login, name: body.name, private: body.private,
+    });
+    return c.json({ repository }, 201);
+  } catch (error) {
+    return jsonError(c, error, 400);
+  }
+});
+
+app.post("/v1/integrations/github/destinations", async (c) => {
+  try {
+    const raw = await c.req.json() as Record<string, unknown>;
+    const client = githubClient();
+    const actor = actorFromContext(c);
+    const orgId = await orgIdFromContext(c);
+    const accessToken = await activeGitHubUserToken({ actor, orgId, client });
+    const candidates = await client.repositories(accessToken);
+    const candidate = candidates.find((repo) => repo.repository_id === raw.repository_id && repo.installation_id === raw.installation_id);
+    if (!candidate) throw new Error("repository is not accessible to the Companion GitHub App");
+    const destination = createGitHubDestinationInputSchema.parse({
+      ...raw, owner: candidate.owner, name: candidate.name, html_url: candidate.html_url,
+      default_branch: candidate.default_branch || "main", private: candidate.private,
+      repository_empty: candidate.empty,
+    });
+    const id = await withTenantContext({ orgId, userId: actor.id }, (database) =>
+      createGitHubDestination({ actor, orgId, destination, database }),
+    );
+    return c.json({ ok: true, id }, 201);
+  } catch (error) {
+    return jsonError(c, error, 400);
+  }
+});
+
+app.patch("/v1/integrations/github/destinations/:id", async (c) => {
+  try {
+    const patch = updateGitHubDestinationInputSchema.parse(await c.req.json());
+    await withTenant(c, ({ actor, orgId, database }) => updateGitHubDestination({
+      actor, orgId, destinationId: c.req.param("id"), patch, database,
+    }));
+    return c.json({ ok: true });
+  } catch (error) {
+    return jsonError(c, error, 400);
+  }
+});
+
+app.post("/v1/integrations/github/destinations/:id/sync", async (c) => {
+  try {
+    const input = requestGitHubDestinationSyncInputSchema.parse(await c.req.json().catch(() => ({})));
+    await withTenant(c, ({ actor, orgId, database }) => requestGitHubDestinationSync({
+      actor, orgId, destinationId: c.req.param("id"), resumeDisconnected: input.resume_disconnected, database,
+    }));
+    return c.json({ ok: true });
+  } catch (error) {
+    return jsonError(c, error, 403);
+  }
+});
+
+app.delete("/v1/integrations/github/destinations/:id", async (c) => {
+  try {
+    await withTenant(c, ({ actor, orgId, database }) => deleteGitHubDestination({
+      actor, orgId, destinationId: c.req.param("id"), database,
+    }));
+    return c.json({ ok: true });
+  } catch (error) {
+    return jsonError(c, error, 403);
   }
 });
 

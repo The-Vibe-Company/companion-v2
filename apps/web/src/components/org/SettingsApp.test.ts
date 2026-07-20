@@ -15,11 +15,13 @@ vi.mock("next/navigation", () => ({
 describe("SettingsController", () => {
   it("builds stable settings URLs for route and dialog state", async () => {
     const { settingsHref } = await import("./SettingsApp");
+    const { canonicalizeSettingsRoute } = await import("./model");
 
     expect(settingsHref({ view: "general" }, null)).toBe("/settings?view=general");
     expect(settingsHref({ view: "members" }, "invite")).toBe("/settings?view=members&dialog=invite");
     expect(settingsHref({ view: "profile" }, null)).toBe("/settings?view=profile");
     expect(settingsHref({ view: "billing" }, null)).toBe("/settings?view=billing");
+    expect(settingsHref(canonicalizeSettingsRoute({ view: "github" }, false), null)).toBe("/settings?view=general");
   });
 
   it("normalizes malformed member collections before rendering", async () => {

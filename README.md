@@ -87,11 +87,23 @@ In production, the standard API start script applies pending Drizzle migrations 
 Railway runs the same migration as an API pre-deploy command so a failed migration never replaces the live
 deployment; see the [Railway deployment guide](deploy/railway/README.md) for the three-service and Stripe setup.
 
+### Optional GitHub skill mirrors
+
+Owners and admins can mirror organization skills from **Settings → GitHub**. Self-hosted operators register
+their own GitHub App and split its credentials by trust boundary: the API receives the slug, client ID, and
+client secret; the worker receives only the App ID and private key. Set `COMPANION_GITHUB_SYNC_ENABLED=true`
+on the API only after the worker is configured. Enable user-to-server OAuth and grant **Metadata: read**, **Contents: read/write**, and
+**Administration: read/write**; register
+`${COMPANION_WEB_URL}/v1/integrations/github/callback` as the callback. Missing API credentials disable the
+GitHub panel, while missing worker credentials independently disable the mirror supervisor. Companion never
+accepts PATs for this integration and never imports from GitHub:
+each configured default branch is a one-way, fully managed mirror.
+
 ### Conductor workspaces
 
 Conductor's Run button calls `bash scripts/dev-conductor.sh` — a **native, Docker-free** launcher
 (modeled on `~/Dev/monkapps`). It starts a per-workspace Postgres cluster, plus optional native MinIO
-and Mailpit, under `.conductor-pg/`, applies migrations, seeds the test user, then runs the API + billing worker + web
+and Mailpit, under `.conductor-pg/`, applies migrations, seeds the test user, then runs the API + worker + web
 with `concurrently`. All ports derive from `CONDUCTOR_PORT` (fallback `3000` outside Conductor):
 
 | Service | Port |

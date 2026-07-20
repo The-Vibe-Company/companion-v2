@@ -316,6 +316,13 @@
       "when": 1784568000000,
       "tag": "0044_remove_skill_stars",
       "breakpoints": true
+    },
+    {
+      "idx": 45,
+      "version": "7",
+      "when": 1784568900000,
+      "tag": "0045_github_skill_sync",
+      "breakpoints": true
     }
   ]
 }

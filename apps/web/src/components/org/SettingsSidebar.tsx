@@ -177,6 +177,14 @@ export function SettingsSidebar({
               meta={inviteCount ? String(inviteCount) : undefined}
               onClick={() => goTo({ view: "invitations" })}
             />
+            {ctx.canManage && (
+              <NavItem
+                active={is("github")}
+                icon="github"
+                label="GitHub"
+                onClick={() => goTo({ view: "github" })}
+              />
+            )}
             <NavItem
               active={is("billing")}
               icon="credit-card"

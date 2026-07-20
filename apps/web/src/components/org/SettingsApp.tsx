@@ -37,6 +37,7 @@ import { initialsOf, mapApiKey } from "@/lib/settingsViewModel";
 import { Onboarding } from "./Onboarding";
 import { SettingsView } from "./SettingsView";
 import { useOrgActions } from "./useOrgActions";
+import { canonicalizeSettingsRoute } from "./model";
 import type {
   ApiKeyVM,
   Invite,
@@ -100,10 +101,17 @@ export function SettingsController({
     document.cookie = `companion_org=${encodeURIComponent(data.current.id)}; path=/; SameSite=Lax`;
   }, [data]);
   const [busy, setBusy] = useState(false);
+  const canManage = current.myRole === "owner" || current.myRole === "admin";
 
-  const [route, setRoute] = useState<SettingsRoute>(initialRoute);
+  const [route, setRoute] = useState<SettingsRoute>(() => canonicalizeSettingsRoute(initialRoute, canManage));
   const [dialog, setDialog] = useState<SettingsDialog>(initialDialog);
-  useEffect(() => setRoute(initialRoute), [initialRoute]);
+  useEffect(() => {
+    const nextRoute = canonicalizeSettingsRoute(initialRoute, canManage);
+    setRoute(nextRoute);
+    if (nextRoute.view !== initialRoute.view) {
+      window.history.replaceState(window.history.state, "", settingsHref(nextRoute, initialDialog));
+    }
+  }, [canManage, initialDialog, initialRoute]);
   useEffect(() => setDialog(initialDialog), [initialDialog]);
 
   // Keep the URL the source of truth for the active pane. Every pane change — clicks AND
@@ -112,10 +120,11 @@ export function SettingsController({
   const replaceUrl = (r: SettingsRoute, d: SettingsDialog) => {
     window.history.replaceState(window.history.state, "", settingsHref(r, d));
   };
-  const navigate = (r: SettingsRoute) => {
-    setRoute(r);
+  const navigate = (requestedRoute: SettingsRoute) => {
+    const nextRoute = canonicalizeSettingsRoute(requestedRoute, canManage);
+    setRoute(nextRoute);
     setDialog(null);
-    replaceUrl(r, null);
+    replaceUrl(nextRoute, null);
   };
 
   // Per-device theme + accent prefs (localStorage), applied to <html> live.
@@ -199,7 +208,7 @@ export function SettingsController({
     currentOrg: current,
     myId: me.id,
     myRole: current.myRole,
-    canManage: current.myRole === "owner" || current.myRole === "admin",
+    canManage,
     isOwner: current.myRole === "owner",
     ownerCount: (org) => org.members.filter((m) => m.role === "owner" && !m.pending).length,
     domainJoin,

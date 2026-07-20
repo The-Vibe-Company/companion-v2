@@ -1,0 +1,21 @@
+{
+  "name": "@companion/github",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@companion/contracts": "workspace:*",
+    "@companion/skills": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "skills": "1.5.9",
+    "typescript": "^5.7.2",
+    "vitest": "3.2.7"
+  }
+}
