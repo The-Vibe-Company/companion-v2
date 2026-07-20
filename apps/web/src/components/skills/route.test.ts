@@ -20,20 +20,26 @@ describe("skills route helpers", () => {
     expect(parseSkillsRoute(new URLSearchParams())).toEqual({ lib: "mine", kind: "all" });
   });
 
-  it("parses the My-Skills shortcuts", () => {
-    expect(parseSkillsRoute("view=starred")).toEqual({ lib: "mine", kind: "starred" });
+  it("parses the My-Skills shortcut and falls back from retired Starred URLs", () => {
     expect(parseSkillsRoute("view=installed")).toEqual({ lib: "mine", kind: "installed" });
+    expect(parseSkillsRoute("view=starred")).toEqual({ lib: "mine", kind: "all" });
     expect(parseSkillsRoute("view=starred&skill=incident-summary")).toEqual({
       lib: "mine",
-      kind: "starred",
+      kind: "all",
       skill: "incident-summary",
+    });
+    expect(parseSkillsRoute("view=starred&skill=incident-summary&run=run-1")).toEqual({
+      lib: "mine",
+      kind: "all",
+      skill: "incident-summary",
+      run: "run-1",
     });
   });
 
   it("parses the Organization library", () => {
     expect(parseSkillsRoute("lib=org")).toEqual({ lib: "org", kind: "all" });
     expect(parseSkillsRoute("lib=org&skill=brand-linter")).toEqual({ lib: "org", kind: "all", skill: "brand-linter" });
-    // starred/installed are mine-only — under org they fall back to org/all.
+    // Installed is mine-only — under org it falls back to org/all.
     expect(parseSkillsRoute("lib=org&view=starred")).toEqual({ lib: "org", kind: "all" });
   });
 
@@ -92,7 +98,6 @@ describe("skills route helpers", () => {
 
   it("builds canonical route URLs", () => {
     expect(skillsRouteHref({ lib: "mine", kind: "all" })).toBe("/skills");
-    expect(skillsRouteHref({ lib: "mine", kind: "starred" })).toBe("/skills?view=starred");
     expect(skillsRouteHref({ lib: "mine", kind: "installed" })).toBe("/skills?view=installed");
     expect(skillsRouteHref({ lib: "org", kind: "all" })).toBe("/skills?lib=org");
     expect(skillsRouteHref({ kind: "local" })).toBe("/skills?view=local");

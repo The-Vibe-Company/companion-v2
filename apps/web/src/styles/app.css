@@ -377,8 +377,7 @@
   .dtop .crumb b,
   .dtop .navpair { display: none; }
   .dtop__spacer { display: none; }
-  .dtop .count,
-  .dtop .starbtn__count { display: none; }
+  .dtop .count { display: none; }
   .dtop .btn-primary { padding: 0 10px; }
   .ddoc { padding: 26px 18px 40px; }
   .dtitle--linear { font-size: 21px; }

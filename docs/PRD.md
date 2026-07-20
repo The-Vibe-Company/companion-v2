@@ -58,7 +58,7 @@ one person. There is no open, self-hostable answer for a **team**.
 | **Pillar 2 — Containers** | Org-admin **approval** of images into the catalog; **1-click deploy** of ≥1 container; surface connection details/secrets. |
 | **Pillar 3 — Skills** | Upload + **validate** + **version** ≥1 `SKILL.md` package; organize with shared labels; **attach** to an agent; sync into the runtime. |
 | **Memory** | **Granite** vault provisioned and mounted for the agent (concrete V0 integration). |
-| **Dashboard** | Basic list/detail views of agents, containers, and skills (skills filterable by label, status, dependencies, and stars); deployment status & logs. |
+| **Dashboard** | Basic list/detail views of agents, containers, and skills (skills filterable by label, status, and dependencies); deployment status & logs. |
 | **Secrets** | Encrypted, write-only secret storage; OpenRouter and provider credentials referenced, never inlined. |
 | **Audit** | Append-only audit log of mutating, deploy, and exec actions (in-app view minimal). |
 | **Managed SaaS billing** | Free and Pro plans; Pro is $10 USD/month per active member with Stripe Tax, automatic prorations, a seven-day delinquency grace period, and transactional skill quotas. Self-hosted remains fully unlocked without Stripe. |

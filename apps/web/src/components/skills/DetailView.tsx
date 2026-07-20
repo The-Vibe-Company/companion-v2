@@ -18,7 +18,7 @@ import {
   setCommentDeprecated as setCommentDeprecatedRpc,
 } from "@/lib/queries";
 import type { MeVM, SkillVM } from "@/lib/types";
-import { Avatar, StarButton } from "./blocks";
+import { Avatar } from "./blocks";
 import {
   Activity,
   FiledIn,
@@ -248,7 +248,6 @@ export function DetailView({
   onBack,
   onPrev,
   onNext,
-  onToggleStar,
   onToggleLabel,
   onSelectLabel,
   onAction,
@@ -275,7 +274,6 @@ export function DetailView({
   onBack: () => void;
   onPrev: () => void;
   onNext: () => void;
-  onToggleStar: () => void;
   /** Assign / unassign a folder path on this skill (toggle). */
   onToggleLabel: (path: string) => void;
   /** Navigate to a folder's scope (chip click). */
@@ -529,7 +527,6 @@ export function DetailView({
         <span className="count tnum">
           {index + 1} / {total}
         </span>
-        <StarButton starred={skill.starred} count={skill.stars} onToggle={onToggleStar} />
         {!skill.archived && (
           <button
             className="btn-ghost"

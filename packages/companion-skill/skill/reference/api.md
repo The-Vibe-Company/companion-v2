@@ -204,7 +204,7 @@ GET /public/skills/{share_token}
 ```
 
 This endpoint is unauthenticated. It returns only `display_name`, `slug`, `description`,
-`current_version`, `creator_name`, `creator_initials`, `star_count`, and `updated_at` for a live org
+`current_version`, `creator_name`, `creator_initials`, and `updated_at` for a live org
 skill. Personal, archived, and unknown tokens return 404. It never exposes package content, files,
 downloads, requirements, secrets, labels, `id`, `org_id`, or `creator_id`.
 
@@ -242,7 +242,6 @@ Companion PAT. Use them only when the caller is operating with a valid session c
 | Add a comment | `POST /skills/{slug}/comments` | Session |
 | Deprecate/restore a comment | `PATCH /skills/{slug}/comments/{id}` | Session |
 | Read a comment image | `GET /skills/{slug}/comments/{commentId}/images/{imageId}` | Session |
-| Toggle star | `POST /skills/{slug}/star` | Session |
 
 Version rows returned by `GET /skills/{slug}/versions` include a nullable `changelog` object. When
 present, it is the `companion.json.metadata.changelog` entry for that exact version and carries
@@ -442,7 +441,7 @@ Content-Type: application/json
 
 The response is `{ "ok": true, "id": "...", "old_slug": "skill-creator", "slug":
 "skill-creator-and-eval", "title": "Skill Creator and Eval" }`. The `id`, versions, labels,
-installs, stars, comments, share token, dependency links, checksums, and package history stay attached
+installs, comments, share token, dependency links, checksums, and package history stay attached
 to the same skill. Existing public `/s/{share_token}` links remain valid and resolve to the new slug.
 Historical package archives are not rewritten.
 

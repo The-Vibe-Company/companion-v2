@@ -76,30 +76,6 @@ export function InstallMark({ state }: { state: InstallState }) {
   return null;
 }
 
-/** GitHub-style star toggle (detail topbar). */
-export function StarButton({
-  starred,
-  count,
-  onToggle,
-}: {
-  starred: boolean;
-  count: number;
-  onToggle: () => void;
-}) {
-  return (
-    <button
-      className={"starbtn" + (starred ? " is-on" : "")}
-      onClick={onToggle}
-      title={starred ? "Unstar this skill" : "Star this skill"}
-      aria-pressed={starred}
-    >
-      <Icon name="star" size={14} />
-      <span>{starred ? "Starred" : "Star"}</span>
-      <span className="starbtn__count tnum">{count}</span>
-    </button>
-  );
-}
-
 /** key: value highlighter for the SKILL.md frontmatter preview. */
 export function Frontmatter({ text }: { text: string }) {
   return (

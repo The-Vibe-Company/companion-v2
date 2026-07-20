@@ -65,9 +65,6 @@ function FilterMenuPopover({
       <div className="fmenu__grouphead">Dependencies</div>
       <Item type="deps" value="has" icon="package" label="Has dependencies" />
       <Item type="deps" value="used" icon="corner-down-right" label="Used as dependency" />
-      <div className="fmenu__divider" />
-      <div className="fmenu__grouphead">Stars</div>
-      <Item type="starred" value="true" icon="star" label="starred" />
     </div>
   );
 }

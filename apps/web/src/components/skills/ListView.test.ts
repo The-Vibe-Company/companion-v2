@@ -36,8 +36,6 @@ function skill(overrides: Partial<SkillVM> = {}): SkillVM {
     checksum: null,
     created: "Jun 1, 2026",
     updated: "just now",
-    stars: 0,
-    starred: false,
     installStatus: "none",
     installedVersion: null,
     requiresCount: 0,
@@ -56,7 +54,6 @@ function render(skills: SkillVM[]) {
       scopeKind: "all",
       breadcrumb: ["All skills"],
       onOpen: vi.fn(),
-      onToggleStar: vi.fn(),
       onUpload: vi.fn(),
       actorId: "user-1",
       onPrimaryAction: vi.fn(),
@@ -97,6 +94,8 @@ describe("ListView contributors", () => {
     );
     expect(html).toContain("crow__mobilemeta");
     expect(html).not.toContain("vdot--ok");
+    expect(html).not.toContain("Most starred");
+    expect(html).not.toContain(">Stars<");
   });
 
   it("keeps non-valid states explicit", () => {

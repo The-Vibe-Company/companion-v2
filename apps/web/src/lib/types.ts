@@ -61,8 +61,6 @@ export interface SkillVM {
   checksum: string | null;
   created: string; // formatted date (server-computed)
   updated: string; // relative label (server-computed)
-  stars: number;
-  starred: boolean;
   installStatus: "none" | "installed" | "update"; // caller's install state for this skill
   installedVersion: string | null; // version the caller recorded installing, if any
   requiresCount: number; // dependencies the current version declares
@@ -117,8 +115,6 @@ export function mapSkill(row: SkillListRow): SkillVM {
     checksum: row.checksum,
     created: formatDate(row.created_at),
     updated: relativeTime(row.updated_at),
-    stars: row.star_count,
-    starred: row.starred,
     installStatus: row.install_status ?? "none",
     installedVersion: row.installed_version ?? null,
     requiresCount: row.requires_count ?? 0,

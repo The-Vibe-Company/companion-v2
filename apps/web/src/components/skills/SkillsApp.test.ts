@@ -29,7 +29,6 @@ const queryMocks = vi.hoisted(() => ({
   restoreSkill: vi.fn(),
   saveSkillFilterPreferences: vi.fn(),
   setCommentDeprecated: vi.fn(),
-  toggleStar: vi.fn(),
   validateSkillPackage: vi.fn(),
   // Label RPCs (org-wide shared folders).
   fetchSkillLabels: vi.fn(),
@@ -109,8 +108,6 @@ function skill(overrides: Partial<SkillVM> & { id: string }): SkillVM {
     checksum: null,
     created: "Jun 1, 2026",
     updated: "just now",
-    stars: 0,
-    starred: false,
     installStatus: "none",
     installedVersion: null,
     requiresCount: 0,
@@ -159,8 +156,6 @@ function skillRowFromVM(vm: SkillVM): SkillListRow {
     checksum: vm.checksum,
     created_at: "2026-06-01T00:00:00.000Z",
     updated_at: "2026-06-21T00:00:00.000Z",
-    star_count: vm.stars,
-    starred: vm.starred,
     installed: vm.installStatus !== "none",
     install_status: vm.installStatus,
     installed_version: vm.installedVersion,
@@ -472,7 +467,6 @@ beforeEach(() => {
   queryMocks.restoreSkill.mockResolvedValue(undefined);
   queryMocks.saveSkillFilterPreferences.mockResolvedValue(undefined);
   queryMocks.setCommentDeprecated.mockResolvedValue(null);
-  queryMocks.toggleStar.mockResolvedValue(true);
   queryMocks.validateSkillPackage.mockResolvedValue({ result: { ok: true }, dependencyPlan: null });
   queryMocks.fetchSkillLabels.mockResolvedValue(emptyLabels());
   queryMocks.assignSkillLabel.mockResolvedValue(undefined);
@@ -511,19 +505,6 @@ describe("SkillsApp initial route", () => {
     expect(html).toContain("seo-helper");
     expect(html).toContain("brand-kit");
     expect(html).toContain("loose-skill");
-  });
-
-  it("renders the Starred view (My Skills) from the initial route", () => {
-    // Starred is a My-Skills view, so seed the personal library (one starred).
-    const html = render({ lib: "mine", kind: "starred", skill: undefined }, {
-      initialMineSkills: [
-        skill({ id: "seo-helper", scope: "personal", source: "authored", starred: true }),
-        skill({ id: "brand-kit", scope: "personal", source: "authored" }),
-      ],
-    });
-    expect(html).toContain("Starred");
-    expect(html).toContain("seo-helper");
-    expect(html).not.toContain("brand-kit");
   });
 
   it("renders the Installed view (My Skills) from the initial route", () => {
@@ -747,11 +728,11 @@ describe("SkillsApp sidebar label tree derivation", () => {
     expect(growth.querySelector(".lblrow__chev--leaf")).not.toBeNull();
   });
 
-  it("reflects My Skills / Starred counts in the sidebar", async () => {
+  it("reflects the My Skills count in the sidebar", async () => {
     const { container } = await mountSkillsApp({ lib: "mine", kind: "all" }, {
       props: {
         initialMineSkills: [
-          skill({ id: "seo-helper", scope: "personal", source: "authored", starred: true }),
+          skill({ id: "seo-helper", scope: "personal", source: "authored" }),
           skill({ id: "brand-kit", scope: "personal", source: "authored" }),
           skill({ id: "loose-skill", scope: "personal", source: "authored" }),
         ],
@@ -762,8 +743,6 @@ describe("SkillsApp sidebar label tree derivation", () => {
     // The first `.ml-libhead__count` belongs to the My Skills section.
     const mineCount = container.querySelector(".ml-libhead__count");
     expect(mineCount?.textContent?.trim()).toBe("3");
-    const starred = findButton(container, "Starred skills");
-    expect(starred.querySelector(".navitem__count")?.textContent?.trim()).toBe("1");
   });
 });
 
@@ -1457,7 +1436,7 @@ describe("SkillsApp navigation", () => {
   it("preserves unsaved filters when browser Back closes a pushed detail", async () => {
     const { container } = await mountSkillsApp({ lib: "org", kind: "all" });
     await flushEffects();
-    // The default route ignores the saved starred filter, so every skill shows.
+    // The default route keeps the complete selected library visible.
     expect(container.textContent).toContain("loose-skill");
 
     clickButton(container, "Open skill loose-skill");

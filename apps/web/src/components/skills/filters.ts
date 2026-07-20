@@ -7,11 +7,10 @@ export function filtersKey(fs: Filter[]): string {
   return fs.map((f) => f.type + ":" + f.value).sort().join("|");
 }
 
-// Skills are flat and org-wide. The in-list filter bar only narrows by validation status, dependency
-// relationships, and the starred flag — label folders are selected from the sidebar, not here.
+// The in-list filter bar narrows by validation status and dependency relationships; label folders
+// are selected from the sidebar, not here.
 function matchOne(s: SkillVM, type: string, v: string): boolean {
   if (type === "status") return s.validation === v;
-  if (type === "starred") return s.starred === true;
   if (type === "deps") {
     if (v === "has") return s.requiresCount > 0;
     if (v === "used") return s.usedByCount > 0;
@@ -36,7 +35,6 @@ export function chipParts(f: Filter): { icon: string; key: string; val: string }
       key: "status",
       val: f.value,
     };
-  if (f.type === "starred") return { icon: "star", key: "", val: "starred" };
   if (f.type === "deps")
     return {
       icon: f.value === "has" ? "package" : "corner-down-right",

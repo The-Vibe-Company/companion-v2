@@ -35,12 +35,11 @@ function fakeDb(options: {
   return { database: database as unknown as Db, state, values, onConflictDoUpdate };
 }
 
-describe("skill filter preferences (flat model: status / starred / deps / label / nolabel)", () => {
+describe("skill filter preferences (status / deps / label / nolabel)", () => {
   it("validates the shared preference contract (active_filters only — no saved views)", () => {
     const parsed = skillFilterPreferencesSchema.parse({
       active_filters: [
         { type: "status", value: "valid" },
-        { type: "starred", value: "true" },
         { type: "deps", value: "has" },
         { type: "label", value: "marketing/seo" },
         { type: "nolabel", value: "true" },
@@ -56,7 +55,7 @@ describe("skill filter preferences (flat model: status / starred / deps / label 
     expect(() => skillFilterPreferencesSchema.parse({ active_filters: [{ type: "owner", value: "user-42" }] })).toThrow();
     expect(() => skillFilterPreferencesSchema.parse({ active_filters: [{ type: "team", value: "platform" }] })).toThrow();
     expect(() => skillFilterPreferencesSchema.parse({ active_filters: [{ type: "unknown", value: "x" }] })).toThrow();
-    expect(() => skillFilterPreferencesSchema.parse({ active_filters: [{ type: "starred", value: "false" }] })).toThrow();
+    expect(() => skillFilterPreferencesSchema.parse({ active_filters: [{ type: "starred", value: "true" }] })).toThrow();
     expect(() => skillFilterPreferencesSchema.parse({ active_filters: [{ type: "label", value: "Bad Path" }] })).toThrow();
   });
 
@@ -76,7 +75,7 @@ describe("skill filter preferences (flat model: status / starred / deps / label 
     });
   });
 
-  it("drops legacy persisted scope / visibility / owner / team filters (no replacement)", async () => {
+  it("drops retired persisted filters while preserving every remaining preference", async () => {
     const { database } = fakeDb({
       existing: {
         activeFilters: [
@@ -85,12 +84,16 @@ describe("skill filter preferences (flat model: status / starred / deps / label 
           { type: "owner", value: "user-42" },
           { type: "team", value: "platform" },
           { type: "status", value: "valid" },
+          { type: "starred", value: "true" },
+          { type: "deps", value: "has" },
         ],
       },
     });
     await expect(getSkillFilterPreferences({ actor, orgId: ORG, database })).resolves.toEqual({
-      // Only the still-valid status filter survives; every owner-era filter is dropped.
-      active_filters: [{ type: "status", value: "valid" }],
+      active_filters: [
+        { type: "status", value: "valid" },
+        { type: "deps", value: "has" },
+      ],
     });
   });
 

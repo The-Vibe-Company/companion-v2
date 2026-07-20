@@ -156,11 +156,6 @@ describe("pre-tenant PostgreSQL RLS boundary", () => {
       set current_version_id = ${versionId}::uuid
       where org_id = ${orgA}::uuid and id = ${skillId}::uuid
     `;
-    await sql`
-      insert into skill_stars (org_id, skill_id, user_id)
-      values (${orgA}::uuid, ${skillId}::uuid, ${colleague.id})
-    `;
-
     await sql.unsafe(`create role ${rlsRole} login nosuperuser nobypassrls noinherit`);
     await sql.unsafe(`grant ${rlsRole} to current_user with inherit true, set true`);
     const grantsFile = await resolveRuntimeRoleGrantsFile();
@@ -324,7 +319,6 @@ describe("pre-tenant PostgreSQL RLS boundary", () => {
         creatorName: string;
         creatorInitials: string;
         version: string;
-        starCount: number;
       }[]>`
         select
           slug,
@@ -332,8 +326,7 @@ describe("pre-tenant PostgreSQL RLS boundary", () => {
           description,
           creator_name as "creatorName",
           creator_initials as "creatorInitials",
-          current_version as version,
-          star_count::int as "starCount"
+          current_version as version
         from companion_public_skill_preview(${shareToken})
       `;
       const memberTarget = await tx<{ orgId: string; slug: string }[]>`
@@ -354,10 +347,16 @@ describe("pre-tenant PostgreSQL RLS boundary", () => {
       creatorName: "Pre-tenant Owner",
       creatorInitials: "PO",
       version: "1.0.0",
-      starCount: 1,
     }]);
     expect(result.memberTarget).toEqual([{ orgId: orgA, slug: `pre-tenant-skill-${suffix}` }]);
     expect(result.outsiderTarget).toEqual([]);
+  });
+
+  it("removes the retired skill star storage", async () => {
+    const [row] = await sql<{ tableName: string | null }[]>`
+      select to_regclass('public.skill_stars')::text as "tableName"
+    `;
+    expect(row).toEqual({ tableName: null });
   });
 
   it("reveals only whether two users share an organization for avatar authorization", async () => {

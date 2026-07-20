@@ -85,7 +85,7 @@ export function ShareDialog({
             <span className="ml-share__rowico ml-share__rowico--ok" aria-hidden="true">
               <Icon name="check" size={15} />
             </span>
-            <span>Everyone in the workspace can find, star, and install it.</span>
+            <span>Everyone in the workspace can find and install it.</span>
           </div>
           <div className="ml-share__row">
             <span className="ml-share__rowico" aria-hidden="true">

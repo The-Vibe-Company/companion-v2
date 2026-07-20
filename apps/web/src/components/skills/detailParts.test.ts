@@ -41,8 +41,6 @@ const skill: SkillVM = {
   checksum: "sha256:abc",
   created: "2026-06-09",
   updated: "just now",
-  stars: 0,
-  starred: false,
   installStatus: "none",
   installedVersion: null,
   requiresCount: 0,

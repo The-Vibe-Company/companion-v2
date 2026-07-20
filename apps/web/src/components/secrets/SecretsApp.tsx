@@ -199,7 +199,6 @@ export function SecretsApp({
     orgTreeRows: TreeRow[];
     mineCount: number;
     orgCount: number;
-    starredCount: number;
     installedCount: number;
     installedUpdateCount: number;
     localUpdateCount: number;
@@ -353,13 +352,11 @@ export function SecretsApp({
         selection={null}
         mineCount={navigation.mineCount}
         orgCount={navigation.orgCount}
-        starredCount={navigation.starredCount}
         installedCount={navigation.installedCount}
         installedUpdateCount={navigation.installedUpdateCount}
         onOpenPalette={() => router.push("/skills")}
         onSelectMineAll={() => router.push(skillsRouteHref({ lib: "mine", kind: "all" }))}
         onSelectOrgAll={() => router.push(skillsRouteHref({ lib: "org", kind: "all" }))}
-        onSelectStarred={() => router.push(skillsRouteHref({ lib: "mine", kind: "starred" }))}
         onSelectInstalled={() => router.push(skillsRouteHref({ lib: "mine", kind: "installed" }))}
         onSelectLabel={navigateToLabel}
         onCreateLabel={noop}

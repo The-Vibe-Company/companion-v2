@@ -86,7 +86,7 @@ const COPY = {
   payoffTitle: "Every expert's best work, one search away.",
   payoffSub:
     "The library grows every week. New hires start with the whole company's playbook on day one.",
-  portalCaption: "This is the real thing. Click around: star, filter, pick a skill.",
+  portalCaption: "This is the real thing. Click around: filter, pick a skill.",
   portalDescs: {
     "linkedin-posts": "Léa's prompt for posts that hook in line one and never sound like a robot.",
     "meeting-summaries": "Paste a transcript, get decisions, owners and deadlines.",
@@ -133,32 +133,31 @@ type PortalRow = {
   scope: "private" | "team" | "public";
   scopeLabel: string;
   ver: string;
-  stars: number;
   when: string;
   recent?: boolean;
   draft?: boolean;
 };
 
 const PORTAL_ROWS: PortalRow[] = [
-  { id: "linkedin-posts", team: "marketing", who: "Léa", a: "terracotta", scope: "public", scopeLabel: "everyone", ver: "1.4.0", stars: 13, when: "2h ago", recent: true },
-  { id: "meeting-summaries", team: "product", who: "Marie", a: "violet", scope: "public", scopeLabel: "everyone", ver: "2.2.0", stars: 11, when: "yesterday", recent: true },
-  { id: "debug-my-setup", team: "platform", who: "Sam", a: "amber", scope: "team", scopeLabel: "platform", ver: "3.0.1", stars: 8, when: "3d ago", recent: true },
-  { id: "sales-research", team: "sales", who: "Jonas", a: "blue", scope: "team", scopeLabel: "sales", ver: "1.0.2", stars: 6, when: "1w ago" },
-  { id: "brand-voice", team: "marketing", who: "Léa", a: "terracotta", scope: "public", scopeLabel: "everyone", ver: "1.1.0", stars: 9, when: "2w ago" },
-  { id: "weekly-report", team: "you", who: "You", a: "slate", scope: "private", scopeLabel: "just you", ver: "0.9.1", stars: 0, when: "4w ago", draft: true },
+  { id: "linkedin-posts", team: "marketing", who: "Léa", a: "terracotta", scope: "public", scopeLabel: "everyone", ver: "1.4.0", when: "2h ago", recent: true },
+  { id: "meeting-summaries", team: "product", who: "Marie", a: "violet", scope: "public", scopeLabel: "everyone", ver: "2.2.0", when: "yesterday", recent: true },
+  { id: "debug-my-setup", team: "platform", who: "Sam", a: "amber", scope: "team", scopeLabel: "platform", ver: "3.0.1", when: "3d ago", recent: true },
+  { id: "sales-research", team: "sales", who: "Jonas", a: "blue", scope: "team", scopeLabel: "sales", ver: "1.0.2", when: "1w ago" },
+  { id: "brand-voice", team: "marketing", who: "Léa", a: "terracotta", scope: "public", scopeLabel: "everyone", ver: "1.1.0", when: "2w ago" },
+  { id: "weekly-report", team: "you", who: "You", a: "slate", scope: "private", scopeLabel: "just you", ver: "0.9.1", when: "4w ago", draft: true },
 ];
 const SCOPE_ICON: Record<PortalRow["scope"], string> = { private: "lock", team: "users", public: "globe" };
 
 /* Ticker chips — a slice of the library in motion. */
-type TickerSkill = { id: string; who: string; a: string; stars: number };
+type TickerSkill = { id: string; who: string; a: string };
 const TICKER_SKILLS: TickerSkill[] = [
-  { id: "linkedin-posts", who: "Léa", a: "terracotta", stars: 13 },
-  { id: "meeting-summaries", who: "Marie", a: "violet", stars: 11 },
-  { id: "debug-my-setup", who: "Sam", a: "amber", stars: 8 },
-  { id: "sales-research", who: "Jonas", a: "blue", stars: 6 },
-  { id: "brand-voice", who: "Léa", a: "terracotta", stars: 9 },
-  { id: "cold-emails", who: "Jonas", a: "blue", stars: 11 },
-  { id: "incident-postmortem", who: "Sam", a: "amber", stars: 7 },
+  { id: "linkedin-posts", who: "Léa", a: "terracotta" },
+  { id: "meeting-summaries", who: "Marie", a: "violet" },
+  { id: "debug-my-setup", who: "Sam", a: "amber" },
+  { id: "sales-research", who: "Jonas", a: "blue" },
+  { id: "brand-voice", who: "Léa", a: "terracotta" },
+  { id: "cold-emails", who: "Jonas", a: "blue" },
+  { id: "incident-postmortem", who: "Sam", a: "amber" },
 ];
 
 /* ------------------------------------------------------------ utilities --- */
@@ -276,7 +275,6 @@ function Ticker({ c }: { c: Copy }) {
             <span className="v5-ticker__chip" key={s.id + i}>
               <Avatar who={s.who} tone={s.a} sm />
               <span className="v5-ticker__name">{s.id}</span>
-              <span className="v5-ticker__stars">★ {s.stars}</span>
             </span>
           ))}
         </div>
@@ -374,35 +372,24 @@ function Moat({ c }: { c: Copy }) {
 
 function PortalCapture({ c }: { c: Copy }) {
   const [selected, setSelected] = useState("linkedin-posts");
-  const [starred, setStarred] = useState<Record<string, boolean>>({ "linkedin-posts": true, "meeting-summaries": true });
   const [installed, setInstalled] = useState<Record<string, boolean>>({ "meeting-summaries": true });
   const [nav, setNav] = useState("all");
   const [tab, setTab] = useState("all");
 
-  const starsOf = (r: PortalRow) => r.stars + (starred[r.id] ? 1 : 0);
   const teams = ["marketing", "product", "platform", "sales"];
 
   let rows = PORTAL_ROWS;
   if (nav === "mine") rows = rows.filter((r) => r.team === "you");
-  else if (nav === "starred") rows = rows.filter((r) => starred[r.id]);
   else if (nav.indexOf("team:") === 0) rows = rows.filter((r) => r.team === nav.slice(5));
-  if (tab === "picks") rows = rows.filter((r) => starsOf(r) >= 9);
   if (tab === "recent") rows = rows.filter((r) => r.recent);
 
   const sel = PORTAL_ROWS.find((r) => r.id === selected) ?? PORTAL_ROWS[0]!;
   const navLabel =
     nav === "mine"
       ? "my skills"
-      : nav === "starred"
-        ? "starred"
-        : nav.indexOf("team:") === 0
+      : nav.indexOf("team:") === 0
           ? "team: " + nav.slice(5)
           : null;
-
-  const toggleStar = (e: React.MouseEvent, id: string) => {
-    e.stopPropagation();
-    setStarred((s) => ({ ...s, [id]: !s[id] }));
-  };
 
   const NavItem = ({ k, icon, label, count }: { k: string; icon: string; label: string; count: number }) => (
     <button
@@ -425,7 +412,6 @@ function PortalCapture({ c }: { c: Copy }) {
           <NavItem k="mine" icon="user" label="My skills" count={PORTAL_ROWS.filter((r) => r.team === "you").length} />
           <div className="v5-portal__grouplabel">Workspace</div>
           <NavItem k="all" icon="layers" label="All skills" count={PORTAL_ROWS.length} />
-          <NavItem k="starred" icon="star" label="Starred" count={PORTAL_ROWS.filter((r) => starred[r.id]).length} />
           <div className="v5-portal__grouplabel">Teams</div>
           {teams.map((t) => (
             <NavItem key={t} k={"team:" + t} icon="users" label={t} count={PORTAL_ROWS.filter((r) => r.team === t).length} />
@@ -441,7 +427,7 @@ function PortalCapture({ c }: { c: Copy }) {
             </Button>
           </div>
           <div className="v5-portal__viewbar">
-            {([["all", "All skills"], ["picks", "Team picks"], ["recent", "Recently updated"]] as const).map(([k, label]) => (
+            {([["all", "All skills"], ["recent", "Recently updated"]] as const).map(([k, label]) => (
               <button
                 key={k}
                 type="button"
@@ -471,7 +457,6 @@ function PortalCapture({ c }: { c: Copy }) {
             <span>Skill</span>
             <span>Shared with</span>
             <span>Version</span>
-            <span style={{ textAlign: "right" }}>Stars</span>
             <span style={{ textAlign: "right" }}>Updated</span>
           </div>
           {rows.map((r) => (
@@ -495,15 +480,6 @@ function PortalCapture({ c }: { c: Copy }) {
                 {r.scopeLabel}
               </span>
               <span className="v5-portal__ver">{r.ver}</span>
-              <button
-                type="button"
-                aria-label={"Star " + r.id}
-                className={"v6-reset-btn v6-pstar v5-portal__stars" + (starred[r.id] ? " v5-portal__stars--on" : "")}
-                onClick={(e) => toggleStar(e, r.id)}
-              >
-                <Icon name="star" size={12} />
-                {starsOf(r)}
-              </button>
               <span className="v5-portal__when">{r.when}</span>
             </div>
           ))}
@@ -524,8 +500,6 @@ function PortalCapture({ c }: { c: Copy }) {
             </dd>
             <dt>version</dt>
             <dd>{sel.ver}</dd>
-            <dt>stars</dt>
-            <dd>{starsOf(sel)}</dd>
             <dt>updated</dt>
             <dd>{sel.when}</dd>
           </dl>
@@ -539,14 +513,6 @@ function PortalCapture({ c }: { c: Copy }) {
                 {c.libInstall}
               </Button>
             )}
-            <button
-              type="button"
-              className={"v6-reset-btn v5-portal__stars" + (starred[sel.id] ? " v5-portal__stars--on" : "")}
-              onClick={(e) => toggleStar(e, sel.id)}
-            >
-              <Icon name="star" size={12} />
-              {starsOf(sel)}
-            </button>
           </div>
         </aside>
       </div>

@@ -11,7 +11,7 @@ import type { ResolvedTarget } from "./dragGeometry";
 import type { DragItem } from "./SkillsApp";
 import type { TreeRow } from "./sidebarTree";
 
-type SidebarSelection = { lib: SkillsLibrary; kind: "all" | "starred" | "installed" | "label"; label?: string } | null;
+type SidebarSelection = { lib: SkillsLibrary; kind: "all" | "installed" | "label"; label?: string } | null;
 type MoveTarget = { path: string; label: string };
 
 function labelParent(path: string): string | null {
@@ -409,13 +409,11 @@ export function Sidebar({
   selection,
   mineCount,
   orgCount,
-  starredCount,
   installedCount,
   installedUpdateCount,
   onOpenPalette,
   onSelectMineAll,
   onSelectOrgAll,
-  onSelectStarred,
   onSelectInstalled,
   onSelectLabel,
   onCreateLabel,
@@ -459,13 +457,11 @@ export function Sidebar({
   selection: SidebarSelection;
   mineCount: number;
   orgCount: number;
-  starredCount: number;
   installedCount: number;
   installedUpdateCount: number;
   onOpenPalette: () => void;
   onSelectMineAll: () => void;
   onSelectOrgAll: () => void;
-  onSelectStarred: () => void;
   onSelectInstalled: () => void;
   onSelectLabel: (lib: SkillsLibrary, path: string) => void;
   onCreateLabel: (lib: SkillsLibrary, path: string, displayName?: string) => void;
@@ -654,18 +650,6 @@ export function Sidebar({
         </div>
         {mineOpen && (
           <div className="ml-kids">
-            <button
-              className={"navitem" + (inWorkspace && selection!.kind === "starred" ? " navitem--active" : "")}
-              aria-current={inWorkspace && selection!.kind === "starred" ? "page" : undefined}
-              onClick={() => runAndClose(onSelectStarred)}
-              title="Starred skills"
-            >
-              <span className="navitem__ico">
-                <Icon name="star" />
-              </span>
-              <span className="navitem__label">Starred</span>
-              <span className="navitem__count tnum">{starredCount}</span>
-            </button>
             <button
               className={"navitem" + (inWorkspace && selection!.kind === "installed" ? " navitem--active" : "")}
               aria-current={inWorkspace && selection!.kind === "installed" ? "page" : undefined}

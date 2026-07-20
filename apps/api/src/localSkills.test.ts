@@ -44,7 +44,7 @@ describe("companion skill package + row", () => {
     const pkg = await getCompanionSkillPackage();
     expect(pkg.key).toBe("companion");
     expect(pkg.checksum).toMatch(/^sha256:[0-9a-f]{64}$/);
-    expect(pkg.version).toBe("1.21.1");
+    expect(pkg.version).toBe("1.22.0");
     expect(pkg.sizeBytes).toBeGreaterThan(0);
     expect(pkg.integrity.packageChecksum).toBe(pkg.checksum);
     expect(pkg.integrity.files["SKILL.md"]).toMatch(/^sha256:[0-9a-f]{64}$/);
@@ -115,9 +115,9 @@ describe("companion skill package + row", () => {
       desc: "Create or repair manifest v2 with identity, env/secrets, dependency ids, notes, commands, and changelog.",
     });
     const changelog = row.changes.join("\n");
-    expect(changelog).toContain("token-readable GET /skills/{slug}");
-    expect(changelog).toContain("skills:read for canonical skill detail");
-    expect(changelog).toContain("already-distributed Companion 1.21.0 clients");
+    expect(changelog).toContain("Removes the retired skill star endpoint");
+    expect(changelog).toContain("star-free response contract");
+    expect(changelog).toContain("libraries, labels, search, dependencies, and install state");
     const manifest = JSON.parse(await readFile(join(companionSkillDir(), "companion.json"), "utf8")) as {
       metadata?: { changelog?: Array<{ version?: string; changes?: string[] }> };
     };

@@ -105,8 +105,6 @@ function fakeDb(opts: {
           checksum: version.checksum,
           size_bytes: version.sizeBytes,
           tools: [],
-          star_count: 0,
-          starred: false,
           installed: installedVersions.has(s.id),
           archived_at: null,
           created_at: createdAt,

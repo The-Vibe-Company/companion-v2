@@ -362,8 +362,8 @@ GET /public/skills/{share_token}
 ```
 
 The endpoint is public and does not use `COMPANION_TOKEN`. A 200 response contains
-`display_name`, `slug`, `description`, `current_version`, `creator_name`, `creator_initials`,
-`star_count`, and `updated_at`; personal, archived, or unknown tokens return 404. When helping a user
+`display_name`, `slug`, `description`, `current_version`, `creator_name`, `creator_initials`, and
+`updated_at`; personal, archived, or unknown tokens return 404. When helping a user
 copy or share a skill link, prefer the web URL `/s/{share_token}` for org skills. The signed-in web app
 uses a separate session-only resolver so it can switch to the token's workspace before opening the
 slug-keyed detail route; agents normally do not need to call that resolver.
@@ -826,7 +826,7 @@ Content-Type: application/json
 ```
 
 The response includes the unchanged `id`, `old_slug`, new `slug`, and nullable `title`. Versions,
-labels, installs, stars, comments, share token, dependency links, checksums, and historical package
+labels, installs, comments, share token, dependency links, checksums, and historical package
 archives remain attached to the same skill id. Public `/s/{share_token}` links continue to work and
 resolve to the new slug.
 
@@ -897,8 +897,8 @@ Allowed skills API tasks:
   label routes; file or unfile a skill with `POST` / `DELETE /skills/$SLUG/labels` for org skills or
   `POST` / `DELETE /skills/$SLUG/personal-labels` for personal skills. All work with a `skills:write`
   token and the path always travels in the body or query (see "Organize skills with labels").
-- Read or write skill comments and stars only when the caller has a valid signed-in session for
-  those routes. Do not assume a `cmp_pat_...` token can call session-only endpoints. A comment may
+- Read or write skill comments only when the caller has a valid signed-in session for those routes.
+  Do not assume a `cmp_pat_...` token can call session-only endpoints. A comment may
   carry up to six image attachments: add them by sending `POST /skills/$SLUG/comments` as
   `multipart/form-data` (a `body` field plus `image` files), and read a stored image from the
   `url` on each entry of the comment's `images` array.
@@ -993,7 +993,7 @@ skills view shows the correct status and version. Report the version from this s
 curl -s "$COMPANION_API_URL/local-skills/companion/installed" \
   -H "Authorization: Bearer $COMPANION_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"version":"1.21.1","agent":"<your assistant name>"}'
+  -d '{"version":"1.22.0","agent":"<your assistant name>"}'
 ```
 
 A `{ "ok": true, "status": "installed" }` response confirms the workspace now knows this machine has

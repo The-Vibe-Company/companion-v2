@@ -26,8 +26,6 @@ const baseRow = {
   size_bytes: 123,
   tools: [],
   requirements: [],
-  star_count: 0,
-  starred: false,
   installed: false,
   installed_version: null,
   install_status: "none",

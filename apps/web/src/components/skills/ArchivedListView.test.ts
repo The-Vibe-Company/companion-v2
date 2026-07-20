@@ -34,8 +34,6 @@ const archivedSkill: SkillVM = {
   checksum: null,
   created: "Jun 1, 2026",
   updated: "just now",
-  stars: 0,
-  starred: false,
   installStatus: "none",
   installedVersion: null,
   requiresCount: 0,

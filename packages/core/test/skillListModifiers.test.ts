@@ -31,8 +31,6 @@ function mainRow() {
     checksum: "sha256:" + "a".repeat(64),
     size_bytes: 123,
     tools: [],
-    star_count: 0,
-    starred: false,
     installed: false,
     archived_at: null,
     created_at: now,
@@ -161,6 +159,8 @@ describe("listSkills modifier attribution", () => {
     const [row] = await listSkills({ actor, orgId: ORG, database });
 
     expect(row).toBeDefined();
+    expect(row).not.toHaveProperty("star_count");
+    expect(row).not.toHaveProperty("starred");
     expect(row!.modifiers).toEqual([
       {
         user_id: "user-2",
