@@ -11,13 +11,20 @@ export const metadata: Metadata = {
     description: "A versioned registry of SKILL.md packages.",
     siteName: "Companion",
     type: "website",
-    images: [{ url: "/brand/companion-logo.png", width: 512, height: 512, alt: "Companion" }],
+    images: [
+      {
+        url: "/brand/og.png",
+        width: 1200,
+        height: 630,
+        alt: "Companion — Share skills with your whole team.",
+      },
+    ],
   },
   twitter: {
-    card: "summary",
+    card: "summary_large_image",
     title: "Companion · Skills",
     description: "A versioned registry of SKILL.md packages.",
-    images: ["/brand/companion-logo.png"],
+    images: [{ url: "/brand/og.png", alt: "Companion — Share skills with your whole team." }],
   },
   icons: {
     icon: "/brand/favicon.png",
