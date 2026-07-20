@@ -1,6 +1,7 @@
 "use client";
 
-import { useMemo, useState, type PointerEvent } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type PointerEvent } from "react";
+import { createPortal } from "react-dom";
 import { Icon } from "../Icon";
 import { UserAvatar } from "../UserAvatar";
 import type { SkillContributorVM, SkillVM } from "@/lib/types";
@@ -100,6 +101,132 @@ function skillDisplayName(skill: SkillVM): string {
 function compactDuplicateSlug(slug: string): string {
   const maxLength = 18;
   return slug.length > maxLength ? `…${slug.slice(-(maxLength - 1))}` : slug;
+}
+
+function SkillLabelOverflow({ paths }: { paths: string[] }) {
+  const tooltipId = useId();
+  const triggerRef = useRef<HTMLSpanElement>(null);
+  const tooltipRef = useRef<HTMLSpanElement>(null);
+  const closeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [open, setOpen] = useState(false);
+  const [position, setPosition] = useState({ left: -9999, top: -9999 });
+  const label = `${paths.length} more ${paths.length === 1 ? "folder" : "folders"}: ${paths.join(", ")}`;
+
+  const cancelClose = useCallback(() => {
+    if (closeTimerRef.current === null) return;
+    clearTimeout(closeTimerRef.current);
+    closeTimerRef.current = null;
+  }, []);
+
+  const showTooltip = useCallback(() => {
+    cancelClose();
+    setOpen(true);
+  }, [cancelClose]);
+
+  const scheduleClose = useCallback(() => {
+    cancelClose();
+    closeTimerRef.current = setTimeout(() => {
+      setOpen(false);
+      closeTimerRef.current = null;
+    }, 100);
+  }, [cancelClose]);
+
+  const positionTooltip = useCallback(() => {
+    const trigger = triggerRef.current;
+    const tooltip = tooltipRef.current;
+    if (!trigger || !tooltip) return;
+    const anchor = trigger.getBoundingClientRect();
+    const box = tooltip.getBoundingClientRect();
+    const padding = 12;
+    const gap = 6;
+    let left = anchor.right + gap;
+    if (left + box.width > window.innerWidth - padding) left = anchor.left - box.width - gap;
+    left = Math.min(Math.max(padding, left), window.innerWidth - padding - box.width);
+    const centeredTop = anchor.top + anchor.height / 2 - box.height / 2;
+    const top = Math.min(Math.max(padding, centeredTop), window.innerHeight - padding - box.height);
+    setPosition((current) => current.left === left && current.top === top ? current : { left, top });
+  }, []);
+
+  useLayoutEffect(() => {
+    if (open) positionTooltip();
+  }, [open, positionTooltip]);
+
+  useEffect(() => {
+    if (!open) return;
+    const dismissTooltip = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      cancelClose();
+      setOpen(false);
+    };
+    document.addEventListener("keydown", dismissTooltip);
+    window.addEventListener("resize", positionTooltip);
+    window.addEventListener("scroll", positionTooltip, true);
+    return () => {
+      document.removeEventListener("keydown", dismissTooltip);
+      window.removeEventListener("resize", positionTooltip);
+      window.removeEventListener("scroll", positionTooltip, true);
+    };
+  }, [cancelClose, open, positionTooltip]);
+
+  useEffect(() => () => cancelClose(), [cancelClose]);
+
+  return (
+    <>
+      <span
+        ref={triggerRef}
+        className="crow__label crow__label--more"
+        data-folders={paths.join(", ")}
+        role="listitem"
+        aria-label={label}
+        aria-describedby={open ? tooltipId : undefined}
+        tabIndex={0}
+        onMouseEnter={showTooltip}
+        onMouseLeave={scheduleClose}
+        onFocus={showTooltip}
+        onBlur={scheduleClose}
+      >
+        +{paths.length}
+      </span>
+      {open && typeof document !== "undefined" ? createPortal(
+        <span
+          ref={tooltipRef}
+          id={tooltipId}
+          className="crow__labeltooltip"
+          role="tooltip"
+          style={position}
+          onMouseEnter={cancelClose}
+          onMouseLeave={scheduleClose}
+        >
+          {paths.join(", ")}
+        </span>,
+        document.body,
+      ) : null}
+    </>
+  );
+}
+
+function SkillLabels({ labels }: { labels: string[] }) {
+  if (labels.length === 0) return null;
+
+  const visible = labels.slice(0, 2);
+  const hidden = labels.slice(2);
+
+  return (
+    <span className="crow__labels" role="list" aria-label="Folders">
+      {visible.map((path) => (
+        <span
+          className="crow__label"
+          key={path}
+          title={path}
+          role="listitem"
+          aria-label={`Folder: ${path}`}
+        >
+          <span className="crow__labeltext">{path}</span>
+        </span>
+      ))}
+      {hidden.length > 0 ? <SkillLabelOverflow paths={hidden} /> : null}
+    </span>
+  );
 }
 
 export function ListView({
@@ -315,13 +442,16 @@ export function ListView({
                 aria-label={`Open skill ${accessibleName}`}
                 onClick={() => onOpen(s.id)}
               />
-              <span className="crow__name crow__name--title">
-                <span className="crow__title">{displayName}</span>
-                {duplicateTitle ? (
-                  <span className="crow__slug" title={s.id}>{compactDuplicateSlug(s.id)}</span>
-                ) : null}
-                <ValidationMarker skill={s} />
-                <InstallMark state={s.installStatus} />
+              <span className="crow__skill">
+                <span className="crow__name crow__name--title">
+                  <span className="crow__title">{displayName}</span>
+                  {duplicateTitle ? (
+                    <span className="crow__slug" title={s.id}>{compactDuplicateSlug(s.id)}</span>
+                  ) : null}
+                  <ValidationMarker skill={s} />
+                  <InstallMark state={s.installStatus} />
+                </span>
+                <SkillLabels labels={s.labels} />
               </span>
               <PeopleStack skill={s} />
               <span className="r when when--by" title={`Updated by ${s.updaterName} · ${s.updated}`}>
