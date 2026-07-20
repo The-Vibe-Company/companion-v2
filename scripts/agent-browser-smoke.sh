@@ -8,6 +8,7 @@ DEFAULT_SMOKE_PASSWORD="adminadmin"
 SMOKE_EMAIL="${BROWSER_SMOKE_EMAIL:-$DEFAULT_SMOKE_EMAIL}"
 SMOKE_PASSWORD="${BROWSER_SMOKE_PASSWORD:-$DEFAULT_SMOKE_PASSWORD}"
 SMOKE_SKILL="incident-summary"
+SMOKE_SKILL_TITLE=""
 SMOKE_SKILL_DIR=""
 SMOKE_PROFILE=""
 # Filed under a NESTED label so the sidebar has a collapsed parent ("engineering") with a child
@@ -227,7 +228,7 @@ drag_and_drop_smoke() {
   wait_for_skills
 
   local src_sel dst_sel child_sel sx sy dx dy
-  src_sel="button[aria-label=\"Open skill ${SMOKE_SKILL}\"]"
+  src_sel=".crow[data-skill-slug=\"${SMOKE_SKILL}\"] .crow__hit"
   dst_sel='[data-skill-drop-kind="label"][data-skill-drop-path="engineering"]'
   child_sel='[data-skill-drop-path="engineering/tools"]'
 
@@ -283,7 +284,7 @@ api_url() {
 }
 
 prepare_fixtures() {
-  local api profile
+  local api profile info_json
   api="$(api_url)"
   profile="browser-smoke-${APP_URL##*:}"
   profile="${profile%%/*}"
@@ -314,6 +315,20 @@ prepare_fixtures() {
       exit 1
     fi
   fi
+
+  if ! info_json="$(pnpm --silent --filter @companion/cli dev --json skills info "$SMOKE_SKILL" --profile "$profile")"; then
+    printf '[agent-browser-smoke] Could not resolve the prepared skill title\n' >&2
+    exit 1
+  fi
+  SMOKE_SKILL_TITLE="$(printf '%s' "$info_json" | node -e '
+    let input = "";
+    process.stdin.on("data", (chunk) => input += chunk);
+    process.stdin.on("end", () => {
+      const skill = JSON.parse(input);
+      const title = typeof skill.display?.name === "string" ? skill.display.name.trim() : "";
+      process.stdout.write(title || skill.slug);
+    });
+  ')"
 }
 
 mark_companion_skill_installed() {
@@ -414,7 +429,7 @@ agent-browser open "$APP_URL/skills?lib=org"
 wait_for_skills
 agent-browser eval "for (const b of Array.from(document.querySelectorAll('button'))) { if (b.textContent && b.textContent.trim() === 'Clear') b.click(); }" >/dev/null
 agent-browser wait 300
-assert_body_contains "$SMOKE_SKILL"
+assert_body_contains "$SMOKE_SKILL_TITLE"
 assert_body_contains "Add skill"
 # Shared label folder tree (replaces the old owner/visibility sidebar): the smoke skill is filed under "engineering".
 assert_body_contains "engineering"
@@ -424,8 +439,8 @@ for width in 1024 760; do
   agent-browser set viewport "$width" 800
   agent-browser wait 150
   assert_eval_true "(() => {
-    const header = document.querySelector('.clist--deps .chead span:last-child');
-    const cells = Array.from(document.querySelectorAll('.clist--deps .crow > .crow__primary'));
+    const header = document.querySelector('.clist .chead span:last-child');
+    const cells = Array.from(document.querySelectorAll('.clist .crow > .crow__primary'));
     if (!header || cells.length === 0) return false;
     const expected = header.getBoundingClientRect();
     const headerColumns = getComputedStyle(header.parentElement).gridTemplateColumns;
@@ -442,7 +457,7 @@ for width in 1024 760; do
     "contextual row actions introduced horizontal overflow at ${width}px"
 done
 assert_eval_true "(() => {
-  const button = document.querySelector('button[aria-label=\"Install skill $SMOKE_SKILL\"]');
+  const button = document.querySelector('.crow[data-skill-slug=\"$SMOKE_SKILL\"] .rowact--primary');
   return button?.querySelector('.rowact__label')?.textContent?.trim() === 'Install';
 })()" "the compact Install row CTA includes the redundant word skill"
 agent-browser set viewport 1440 1000
@@ -456,9 +471,14 @@ assert_body_contains "Has dependencies"
 agent-browser press Escape
 
 log "Checking detail view"
-agent-browser find role button click --name "Open skill $SMOKE_SKILL"
+assert_eval_true "(() => {
+  const button = document.querySelector('.crow[data-skill-slug=\"$SMOKE_SKILL\"] .crow__hit');
+  if (!button) return false;
+  button.click();
+  return true;
+})()" "could not open the smoke skill by its stable slug"
 agent-browser wait 1000
-assert_body_contains "$SMOKE_SKILL"
+assert_body_contains "$SMOKE_SKILL_TITLE"
 wait_for_contextual_action "Install skill" "Install"
 
 log "Checking run launcher scrolling at a short desktop viewport"
@@ -527,7 +547,7 @@ agent-browser set device "iPhone 14"
 agent-browser open "$APP_URL/skills?lib=org"
 wait_for_skills
 assert_body_contains "Add skill"
-assert_body_contains "$SMOKE_SKILL"
+assert_body_contains "$SMOKE_SKILL_TITLE"
 
 log "Checking mobile run launcher"
 agent-browser set viewport 390 420

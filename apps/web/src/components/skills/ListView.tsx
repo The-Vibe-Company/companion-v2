@@ -93,10 +93,13 @@ function ValidationMarker({ skill }: { skill: SkillVM }) {
   );
 }
 
-function depsLabel(skill: SkillVM): string {
-  if (skill.requiresCount > 0) return `${skill.requiresCount} req`;
-  if (skill.usedByCount > 0) return `${skill.usedByCount} used`;
-  return "no deps";
+function skillDisplayName(skill: SkillVM): string {
+  return skill.display?.name?.trim() || skill.id;
+}
+
+function compactDuplicateSlug(slug: string): string {
+  const maxLength = 18;
+  return slug.length > maxLength ? `…${slug.slice(-(maxLength - 1))}` : slug;
 }
 
 export function ListView({
@@ -154,14 +157,30 @@ export function ListView({
     const needle = q.trim().toLowerCase();
     const matched = needle
       ? skills.filter(
-          (s) => s.id.toLowerCase().includes(needle) || s.description.toLowerCase().includes(needle),
+          (s) =>
+            skillDisplayName(s).toLowerCase().includes(needle) ||
+            s.id.toLowerCase().includes(needle) ||
+            s.description.toLowerCase().includes(needle),
         )
       : skills;
     if (sort === "default") return matched;
     const out = [...matched];
-    if (sort === "name") out.sort((a, b) => a.id.localeCompare(b.id));
+    if (sort === "name") {
+      out.sort(
+        (a, b) => skillDisplayName(a).localeCompare(skillDisplayName(b)) || a.id.localeCompare(b.id),
+      );
+    }
     return out;
   }, [skills, q, sort]);
+
+  const duplicateDisplayNames = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const skill of shown) {
+      const key = skillDisplayName(skill).toLowerCase();
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    return new Set([...counts].filter(([, count]) => count > 1).map(([name]) => name));
+  }, [shown]);
 
   return (
     <>
@@ -261,12 +280,10 @@ export function ListView({
         )}
       </div>
 
-      <div className="clist clist--deps">
+      <div className="clist">
         <div className="chead">
           <span>Skill</span>
           <span>People</span>
-          <span>Version</span>
-          <span>Deps</span>
           <span className="r">Updated</span>
           <span className="r">Action</span>
         </div>
@@ -274,9 +291,13 @@ export function ListView({
           const canDrag = !(library === "mine" && s.source === "installed");
           const dragging = canDrag && dragSkillId === s.id;
           const primary = resolveSkillActions(s, skillActionPermissions(s, actorId)).primary;
+          const displayName = skillDisplayName(s);
+          const duplicateTitle = duplicateDisplayNames.has(displayName.toLowerCase());
+          const accessibleName = duplicateTitle ? `${displayName} (${s.id})` : displayName;
           return (
             <div
               key={s.id}
+              data-skill-slug={s.id}
               className={"crow" + (lastId === s.id ? " is-active" : "") + (dragging ? " crow--dragging" : "")}
               title={peopleLabel(s)}
               onPointerDown={
@@ -291,35 +312,18 @@ export function ListView({
               <button
                 type="button"
                 className="crow__hit"
-                aria-label={`Open skill ${s.id}`}
+                aria-label={`Open skill ${accessibleName}`}
                 onClick={() => onOpen(s.id)}
               />
-              <span className="crow__name">
-                {s.id}
+              <span className="crow__name crow__name--title">
+                <span className="crow__title">{displayName}</span>
+                {duplicateTitle ? (
+                  <span className="crow__slug" title={s.id}>{compactDuplicateSlug(s.id)}</span>
+                ) : null}
                 <ValidationMarker skill={s} />
-                {s.description ? <span className="crow__desc">{s.description}</span> : null}
                 <InstallMark state={s.installStatus} />
               </span>
               <PeopleStack skill={s} />
-              <span className="ver">{s.version ?? "—"}</span>
-              <span className="crow__deps">
-                {s.requiresCount > 0 ? (
-                  <span
-                    className={"depspill" + (s.depWarn ? " depspill--warn" : "")}
-                    title={`${s.requiresCount} dependency${s.requiresCount === 1 ? "" : "ies"}`}
-                  >
-                    <Icon name="package" size={11} />
-                    {s.requiresCount}
-                  </span>
-                ) : s.usedByCount > 0 ? (
-                  <span className="depspill depspill--used" title={`Used by ${s.usedByCount}`}>
-                    <Icon name="corner-down-right" size={11} />
-                    {s.usedByCount}
-                  </span>
-                ) : (
-                  <span style={{ color: "var(--color-faint)" }}>—</span>
-                )}
-              </span>
               <span className="r when when--by" title={`Updated by ${s.updaterName} · ${s.updated}`}>
                 <UserAvatar
                   className="avatar"
@@ -335,7 +339,7 @@ export function ListView({
                   <button
                     type="button"
                     className="rowact rowact--primary"
-                    aria-label={`${primary.label} ${s.id}`}
+                    aria-label={`${primary.label} ${accessibleName}`}
                     title={primary.label}
                     onPointerDown={(event) => event.stopPropagation()}
                     onClick={() => onPrimaryAction(s, primary)}
@@ -346,8 +350,6 @@ export function ListView({
                 ) : null}
               </span>
               <span className="crow__mobilemeta">
-                <span>v{s.version ?? "—"}</span>
-                <span>{depsLabel(s)}</span>
                 <span>{s.updated}</span>
                 <span className="crow__mobile-install">
                   <InstallMark state={s.installStatus} />
