@@ -674,6 +674,12 @@ describe("SkillsApp initial route", () => {
         props: {
           initialMineSkills: [
             skill({
+              id: "draft-note",
+              scope: "personal",
+              source: "authored",
+              labels: ["drafts"],
+            }),
+            skill({
               id: "research-digest",
               scope: "personal",
               source: "authored",
@@ -690,8 +696,12 @@ describe("SkillsApp initial route", () => {
     await flushEffects();
 
     expect(window.location.search).toContain("view=label&label=drafts");
-    expect(Array.from(container.querySelectorAll(".cgroup__name"), (node) => node.textContent)).toEqual(["drafts"]);
+    expect(Array.from(container.querySelectorAll(".cgroup__name"), (node) => node.textContent)).toEqual([
+      "research",
+      "Without subfolder",
+    ]);
     expect(container.querySelectorAll('[data-skill-slug="research-digest"]')).toHaveLength(1);
+    expect(container.querySelectorAll(".crow--subfolder")).toHaveLength(0);
   });
 
   it("falls back to an empty list for an unknown label route", () => {

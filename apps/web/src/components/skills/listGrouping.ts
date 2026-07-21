@@ -1,7 +1,7 @@
 import type { LabelColor, LabelIcon, LabelVM, SkillIcon } from "@companion/contracts";
 import type { SkillVM } from "@/lib/types";
 
-export type SkillListGroupKind = "folder" | "installed" | "unfiled";
+export type SkillListGroupKind = "folder" | "direct" | "installed" | "unfiled";
 
 export interface SkillListIcon {
   name: SkillIcon | LabelIcon | "package";
@@ -50,11 +50,15 @@ export function pathsInLabelScope(paths: string[], activeLabel: string | null): 
   return paths.filter((path) => path === activeLabel || path.startsWith(`${activeLabel}/`));
 }
 
-function displayRelativePath(path: string, appearance: Map<string, LabelVM>): string {
+function displayRelativePath(path: string, groupPath: string, appearance: Map<string, LabelVM>): string {
   const segments = path.split("/");
+  const groupDepth = pathDepth(groupPath);
   return segments
-    .slice(1)
-    .map((segment, index) => appearance.get(segments.slice(0, index + 2).join("/"))?.displayName ?? segment)
+    .slice(groupDepth)
+    .map(
+      (segment, index) =>
+        appearance.get(segments.slice(0, groupDepth + index + 1).join("/"))?.displayName ?? segment,
+    )
     .join(" / ");
 }
 
@@ -90,6 +94,23 @@ export function groupSkillsByRoot(
 ): SkillListGroup[] {
   const appearance = new Map(labels.map((label) => [label.path, label]));
   const roots = new Map<string, SkillListGroup>();
+  const scopedPaths = new Map(
+    skills.map((skill) => [skill, mostSpecificPaths(pathsInLabelScope(skill.labels, activeLabel))]),
+  );
+  const hasScopedDescendants =
+    activeLabel !== null &&
+    [...scopedPaths.values()].some((paths) => paths.some((path) => path.startsWith(`${activeLabel}/`)));
+  const groupDepth = activeLabel ? pathDepth(activeLabel) + (hasScopedDescendants ? 1 : 0) : 1;
+  const activeAppearance = activeLabel ? appearance.get(activeLabel) : null;
+  const direct: SkillListGroup = {
+    key: `direct:${activeLabel ?? "root"}`,
+    kind: "direct",
+    path: activeLabel,
+    label: "Without subfolder",
+    icon: activeAppearance?.icon ?? "folder",
+    color: activeAppearance?.color ?? null,
+    rows: [],
+  };
   const installed: SkillListGroup = {
     key: "installed",
     kind: "installed",
@@ -116,14 +137,24 @@ export function groupSkillsByRoot(
     }
     // A folder route is an occurrence-scoped view: a skill filed in several roots must not leak
     // back into those other roots after the membership filter has selected it.
-    const specificPaths = mostSpecificPaths(pathsInLabelScope(skill.labels, activeLabel));
+    const specificPaths = scopedPaths.get(skill) ?? [];
     const pathsByRoot = new Map<string, string[]>();
+    let filedDirectly = false;
     for (const path of specificPaths) {
-      const root = path.split("/")[0];
+      if (activeLabel && hasScopedDescendants && path === activeLabel) {
+        filedDirectly = true;
+        direct.rows.push({
+          skill,
+          relativePaths: [],
+          icon: resolveSkillListIcon(skill, labels, [path]),
+        });
+        continue;
+      }
+      const root = path.split("/").slice(0, groupDepth).join("/");
       if (!root) continue;
       pathsByRoot.set(root, [...(pathsByRoot.get(root) ?? []), path]);
     }
-    if (pathsByRoot.size === 0) {
+    if (pathsByRoot.size === 0 && !filedDirectly) {
       unfiled.rows.push({ skill, relativePaths: [], icon: resolveSkillListIcon(skill, labels, []) });
       continue;
     }
@@ -135,7 +166,7 @@ export function groupSkillsByRoot(
           key: `folder:${root}`,
           kind: "folder",
           path: root,
-          label: rootAppearance?.displayName ?? root,
+          label: rootAppearance?.displayName ?? root.split("/").at(-1) ?? root,
           icon: rootAppearance?.icon ?? "folder",
           color: rootAppearance?.color ?? null,
           rows: [],
@@ -144,13 +175,14 @@ export function groupSkillsByRoot(
       }
       const relativePaths = paths
         .filter((path) => path !== root)
-        .map((path) => ({ path, label: displayRelativePath(path, appearance) }));
+        .map((path) => ({ path, label: displayRelativePath(path, root, appearance) }));
       group.rows.push({ skill, relativePaths, icon: resolveSkillListIcon(skill, labels, paths) });
     }
   }
 
   return [
     ...[...roots.values()].sort((left, right) => (left.path ?? "").localeCompare(right.path ?? "")),
+    ...(direct.rows.length ? [direct] : []),
     ...(installed.rows.length ? [installed] : []),
     ...(unfiled.rows.length ? [unfiled] : []),
   ];

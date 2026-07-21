@@ -300,7 +300,9 @@ quiet icon/name/count/chevron headers rather than cards or colored bands. Only c
 stored locally per workspace and library; searching temporarily reveals matching collapsed sections.
 Selecting a sidebar folder still rolls up skills from its descendants, while group occurrences, visible
 paths, and inherited folder icons are restricted to that selected branch; assignments under other roots
-do not reappear in the scoped view. Flat mode renders one row per skill with full folder chips from that
+do not reappear in the scoped view. Grouped sections advance to the immediate subfolder level, with a
+trailing `Without subfolder` section for skills filed directly in the selected folder; this keeps direct
+and immediate-child rows aligned. Flat mode renders one row per skill with full folder chips from that
 branch. Both modes use the literal monospace slug as
 the only row title and A-Z key. A row icon resolves from `companion.json.icon`, then the deepest custom
 folder icon for that occurrence (lexical path breaks equal-depth ties), then neutral `package`; inherited

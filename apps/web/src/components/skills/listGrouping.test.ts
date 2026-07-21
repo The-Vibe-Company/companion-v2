@@ -82,10 +82,46 @@ describe("skill list grouping", () => {
       "marketing",
     );
 
-    expect(groups.map((group) => group.label)).toEqual(["Marketing"]);
+    expect(groups.map((group) => group.label)).toEqual(["SEO"]);
     expect(groups[0]?.rows).toHaveLength(1);
-    expect(groups[0]?.rows[0]?.relativePaths).toEqual([{ path: "marketing/seo", label: "SEO" }]);
+    expect(groups[0]?.rows[0]?.relativePaths).toEqual([]);
     expect(groups[0]?.rows[0]?.icon).toEqual({ name: "globe", color: null });
+  });
+
+  it("groups a filtered view by subfolder and aligns direct skills in a trailing utility section", () => {
+    const groups = groupSkillsByRoot(
+      [
+        skill("campaign", { labels: ["marketing"] }),
+        skill("digest", { labels: ["marketing/reporting"] }),
+        skill("audit", { labels: ["marketing/seo"] }),
+      ],
+      labels,
+      "org",
+      "marketing",
+    );
+
+    expect(groups.map((group) => group.label)).toEqual(["Reporting", "SEO", "Without subfolder"]);
+    expect(groups.map((group) => group.key)).toEqual([
+      "folder:marketing/reporting",
+      "folder:marketing/seo",
+      "direct:marketing",
+    ]);
+    expect(groups.every((group) => group.rows.every((row) => row.relativePaths.length === 0))).toBe(true);
+    expect(groups[2]?.rows[0]?.skill.id).toBe("campaign");
+  });
+
+  it("keeps deeper descendants as relative paths below the immediate subfolder group", () => {
+    const groups = groupSkillsByRoot(
+      [skill("weekly", { labels: ["marketing/reporting/weekly"] })],
+      labels,
+      "org",
+      "marketing",
+    );
+
+    expect(groups.map((group) => group.label)).toEqual(["Reporting"]);
+    expect(groups[0]?.rows[0]?.relativePaths).toEqual([
+      { path: "marketing/reporting/weekly", label: "Weekly" },
+    ]);
   });
 
   it("derives relative paths from canonical segments when display names contain separators", () => {

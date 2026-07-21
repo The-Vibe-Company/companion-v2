@@ -309,11 +309,27 @@ describe("ListView grouped rhythm", () => {
     const grouped = render([multiFiled], { labels, groupBy: "folder", activeLabel: "marketing" });
     const flat = render([multiFiled], { labels, groupBy: "none", activeLabel: "marketing" });
 
-    expect(grouped).toContain('<span class="cgroup__name">Marketing</span>');
+    expect(grouped).toContain('<span class="cgroup__name">SEO</span>');
     expect(grouped).not.toContain('<span class="cgroup__name">Operations</span>');
     expect(grouped.match(/data-skill-slug="digest"/g)).toHaveLength(1);
+    expect(grouped).not.toContain("crow--subfolder");
     expect(flat).toContain('aria-label="Folder: marketing/seo"');
     expect(flat).not.toContain('aria-label="Folder: operations"');
+  });
+
+  it("uses a Without subfolder separator so direct and child rows share the same alignment", () => {
+    const html = render(
+      [
+        skill({ id: "campaign", labels: ["marketing"] }),
+        skill({ id: "digest", labels: ["marketing/seo"] }),
+      ],
+      { labels, groupBy: "folder", activeLabel: "marketing" },
+    );
+
+    expect(html).toContain('<span class="cgroup__name">SEO</span>');
+    expect(html).toContain('<span class="cgroup__name">Without subfolder</span>');
+    expect(html.match(/class="crow"/g)).toHaveLength(2);
+    expect(html).not.toContain("crow--subfolder");
   });
 
   it("puts installed and unfiled personal skills in dedicated trailing groups", () => {
