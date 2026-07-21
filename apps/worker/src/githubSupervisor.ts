@@ -145,9 +145,10 @@ async function processGitHubSyncClaim(input: {
     attemptAbort.signal.throwIfAborted();
     const skills = await loadGitHubSkillArchives(plan.skills, undefined, attemptAbort.signal);
     attemptAbort.signal.throwIfAborted();
-    const files = await renderSkillRepository({
+    const rendered = await renderSkillRepository({
       owner: plan.destination.owner,
       repo: plan.destination.name,
+      companionWebUrl: process.env.COMPANION_WEB_URL ?? "",
       skills,
       signal: attemptAbort.signal,
     });
@@ -158,7 +159,8 @@ async function processGitHubSyncClaim(input: {
       owner: plan.destination.owner,
       repo: plan.destination.name,
       branch: plan.destination.defaultBranch,
-      files,
+      ...rendered,
+      previousCommitSha: plan.destination.lastCommitSha,
       message: `chore(companion): sync ${skills.length} skill${skills.length === 1 ? "" : "s"}`,
       signal: attemptAbort.signal,
       assertFence,

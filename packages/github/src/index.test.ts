@@ -7,12 +7,15 @@ import { promisify } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { packDir, parseFrontmatter } from "@companion/skills";
 import {
+  COMPANION_README_END,
+  COMPANION_README_START,
   GitHubApiError,
   GitHubAppClient,
   GitHubOAuthClient,
   githubAppConfig,
   githubOAuthConfig,
   githubSyncEnabled,
+  mergeCompanionReadme,
   renderSkillRepository,
   type GitHubAppConfig,
   type GitHubOAuthConfig,
@@ -248,6 +251,16 @@ describe("GitHub App user-to-server calls", () => {
 });
 
 describe("deterministic repository renderer", () => {
+  it("renders an empty branded catalog and rejects an invalid Companion web origin", async () => {
+    const empty = await renderSkillRepository({
+      owner: "acme", repo: "skills", companionWebUrl: "https://companion.acme.test/path", skills: [],
+    });
+    expect(empty.readmeBlock.toString()).toContain("No skills are currently mirrored.");
+    expect(empty.readmeBlock.toString()).toContain("https://companion.acme.test/brand/companion-wordmark.png");
+    await expect(renderSkillRepository({ owner: "acme", repo: "skills", companionWebUrl: "not-a-url", skills: [] }))
+      .rejects.toThrow("COMPANION_WEB_URL");
+  });
+
   it("normalizes wrapper archives, preserves binaries and executable permissions, and is deterministic", async () => {
     const root = await mkdtemp(join(tmpdir(), "companion-github-render-"));
     tempDirs.push(root);
@@ -258,21 +271,33 @@ describe("deterministic repository renderer", () => {
     await chmod(join(wrapped, "scripts", "run.sh"), 0o755);
     await writeFile(join(wrapped, "asset.bin"), Buffer.from([0, 255, 17, 42]));
     const packed = await packDir(root);
-    const input = { owner: "acme", repo: "skills", skills: [{ slug: "wrapped", version: "1.2.3", checksum: packed.checksum, archive: packed.archive }] };
+    const input = {
+      owner: "acme",
+      repo: "skills",
+      companionWebUrl: "https://companion.acme.test",
+      skills: [{
+        slug: "wrapped", title: "Wrapped <Skill>", description: "Test & automate\nincidents", shareToken: "share/wrapped",
+        version: "1.2.3", checksum: packed.checksum, archive: packed.archive,
+      }],
+    };
     const first = await renderSkillRepository(input);
     const second = await renderSkillRepository(input);
     expect(first).toEqual(second);
-    expect(first.map((file) => file.path)).toEqual([
-      ".companion-sync.json", "README.md", "skills/wrapped/SKILL.md", "skills/wrapped/asset.bin", "skills/wrapped/scripts/run.sh",
+    expect(first.files.map((file) => file.path)).toEqual([
+      "skills/wrapped/SKILL.md", "skills/wrapped/asset.bin", "skills/wrapped/scripts/run.sh",
     ]);
-    expect(first.find((file) => file.path.endsWith("run.sh"))?.executable).toBe(true);
-    expect(first.find((file) => file.path.endsWith("asset.bin"))?.data).toEqual(Buffer.from([0, 255, 17, 42]));
-    const renderedFrontmatter = parseFrontmatter(first.find((file) => file.path.endsWith("SKILL.md"))!.data.toString());
+    expect(first.files.find((file) => file.path.endsWith("run.sh"))?.executable).toBe(true);
+    expect(first.files.find((file) => file.path.endsWith("asset.bin"))?.data).toEqual(Buffer.from([0, 255, 17, 42]));
+    const renderedFrontmatter = parseFrontmatter(first.files.find((file) => file.path.endsWith("SKILL.md"))!.data.toString());
     expect(renderedFrontmatter).toMatchObject({ ok: true, data: { name: "wrapped" } });
-    expect(first.find((file) => file.path === "README.md")?.data.toString()).toContain("Managed by Companion");
-    expect(JSON.parse(first.find((file) => file.path === ".companion-sync.json")!.data.toString())).toEqual({
+    expect(first.readmeBlock.toString()).toContain(COMPANION_README_START);
+    expect(first.readmeBlock.toString()).toContain("Wrapped &lt;Skill&gt;");
+    expect(first.readmeBlock.toString()).toContain("https://companion.acme.test/s/share%2Fwrapped");
+    expect(first.readmeBlock.toString()).toContain("companion-wordmark-dark.png");
+    expect(JSON.parse(first.manifest.toString())).toEqual({
       schema: 1, skills: [{ slug: "wrapped", version: "1.2.3", checksum: packed.checksum }],
     });
+    expect(first.managedSlugs).toEqual(["wrapped"]);
   });
 
   it("is discovered and installed by the pinned skills@1.5.9 CLI", async () => {
@@ -283,9 +308,18 @@ describe("deterministic repository renderer", () => {
     await writeFile(join(source, "SKILL.md"), "---\nname: compatible\ndescription: CLI compatibility test\n---\n# Compatible\n");
     const packed = await packDir(source);
     const repository = join(root, "repository");
-    const files = await renderSkillRepository({
-      owner: "acme", repo: "skills", skills: [{ slug: "compatible", version: "1.0.0", checksum: packed.checksum, archive: packed.archive }],
+    const rendered = await renderSkillRepository({
+      owner: "acme", repo: "skills", companionWebUrl: "https://companion.acme.test",
+      skills: [{
+        slug: "compatible", title: "Compatible", description: "CLI compatibility test", shareToken: "compatible-token",
+        version: "1.0.0", checksum: packed.checksum, archive: packed.archive,
+      }],
     });
+    const files = [
+      ...rendered.files,
+      { path: "README.md", data: mergeCompanionReadme({ current: null, managedBlock: rendered.readmeBlock }), executable: false },
+      { path: ".companion-sync.json", data: rendered.manifest, executable: false },
+    ];
     for (const file of files) {
       const path = join(repository, file.path);
       await mkdir(dirname(path), { recursive: true });
@@ -320,8 +354,46 @@ describe("deterministic repository renderer", () => {
     await expect(renderSkillRepository({
       owner: "acme",
       repo: "skills",
-      skills: [{ slug: "original", version: "1.0.0", checksum: expected.checksum, archive: replacement.archive }],
+      companionWebUrl: "https://companion.acme.test",
+      skills: [{
+        slug: "original", title: "Original", description: "Original", shareToken: "original-token",
+        version: "1.0.0", checksum: expected.checksum, archive: replacement.archive,
+      }],
     })).rejects.toThrow("archive checksum does not match");
+  });
+});
+
+describe("managed README merging", () => {
+  const block = Buffer.from(`${COMPANION_README_START}\nnew managed content\n${COMPANION_README_END}`);
+
+  it("generates the full README when it is absent or whitespace-only", () => {
+    expect(mergeCompanionReadme({ current: null, managedBlock: block }).toString()).toBe(`${block.toString()}\n`);
+    expect(mergeCompanionReadme({ current: Buffer.from(" \n"), managedBlock: block }).toString()).toBe(`${block.toString()}\n`);
+  });
+
+  it("preserves bytes outside the markers and replaces only the managed block", () => {
+    const current = Buffer.from(`intro\r\n${COMPANION_README_START}\nold\n${COMPANION_README_END}\nfooter\n`);
+    expect(mergeCompanionReadme({ current, managedBlock: block }).toString()).toBe(`intro\r\n${block.toString()}\nfooter\n`);
+  });
+
+  it("appends to an unmarked custom README and replaces an unchanged legacy README", () => {
+    expect(mergeCompanionReadme({ current: Buffer.from("# Custom\n"), managedBlock: block }).toString())
+      .toBe(`# Custom\n\n${block.toString()}\n`);
+    const legacy = Buffer.from("# Legacy Companion README\n");
+    expect(mergeCompanionReadme({ current: legacy, managedBlock: block, trustedPrevious: legacy }).toString())
+      .toBe(`${block.toString()}\n`);
+  });
+
+  it("rejects malformed, duplicate, oversized, and non-UTF-8 README content", () => {
+    expect(() => mergeCompanionReadme({ current: Buffer.from(COMPANION_README_START), managedBlock: block })).toThrow("invalid Companion markers");
+    expect(() => mergeCompanionReadme({ current: Buffer.from(`${block.toString()}\n${block.toString()}`), managedBlock: block })).toThrow("invalid Companion markers");
+    expect(() => mergeCompanionReadme({ current: Buffer.alloc(1024 * 1024 + 1), managedBlock: block })).toThrow("1 MB");
+    expect(() => mergeCompanionReadme({ current: Buffer.from([0xff]), managedBlock: block })).toThrow("valid UTF-8");
+  });
+
+  it("rejects a merge whose generated result crosses the README safety limit", () => {
+    const current = Buffer.alloc(1024 * 1024 - 1, "a");
+    expect(() => mergeCompanionReadme({ current, managedBlock: block })).toThrow("1 MB");
   });
 });
 
@@ -339,8 +411,129 @@ describe("atomic Git writes", () => {
     });
     expect(result).toEqual({ commitSha: "old-commit", branch: "main" });
     const treeBody = JSON.parse(String(execute.mock.calls[5]?.[1]?.body));
-    expect(treeBody).not.toHaveProperty("base_tree");
+    expect(treeBody).toMatchObject({ base_tree: "same-tree" });
     expect(execute).toHaveBeenCalledTimes(6);
+  });
+
+  it("overlays managed paths on the current tree while preserving custom files and manual skill folders", async () => {
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } });
+    const previousManifest = Buffer.from(JSON.stringify({
+      schema: 1,
+      skills: [
+        { slug: "managed", version: "1.0.0", checksum: "sha256:managed" },
+        { slug: "stale", version: "1.0.0", checksum: "sha256:stale" },
+      ],
+    }));
+    const currentReadme = Buffer.from(`# Custom intro\n\n${COMPANION_README_START}\nold\n${COMPANION_README_END}\n\nCustom footer\n`);
+    const previousReadme = Buffer.from("# Legacy managed README\n");
+    const finalTreeBodies: unknown[] = [];
+    const uploadedBlobs: Buffer[] = [];
+    let skillTree = 0;
+    const execute = vi.fn<typeof fetch>(async (request, init) => {
+      const url = String(request);
+      const method = init?.method ?? (init?.body ? "POST" : "GET");
+      if (url.endsWith("/access_tokens")) return response({ token: "installation-token" });
+      if (url === "https://api.github.com/repos/acme/skills") return response({ id: 700, default_branch: "main" });
+      if (url.includes("/git/ref/heads/") && method === "GET") return response({ object: { sha: "user-head" } });
+      if (url.endsWith("/git/commits/user-head") && method === "GET") return response({ tree: { sha: "current-tree" } });
+      if (url.endsWith("/compare/previous-companion...user-head") && method === "GET") return response({ status: "ahead" });
+      if (url.endsWith("/git/commits/previous-companion") && method === "GET") return response({ tree: { sha: "previous-tree" } });
+      if (url.endsWith("/git/trees/current-tree")) return response({ sha: "current-tree", truncated: false, tree: [
+        { path: ".companion-bootstrap", mode: "100644", type: "blob", sha: "bootstrap-blob" },
+        { path: "README.md", mode: "100644", type: "blob", sha: "current-readme" },
+        { path: "docs", mode: "040000", type: "tree", sha: "custom-docs" },
+        { path: "skills", mode: "040000", type: "tree", sha: "skills-tree" },
+      ] });
+      if (url.endsWith("/git/trees/previous-tree")) return response({ sha: "previous-tree", truncated: false, tree: [
+        { path: ".companion-sync.json", mode: "100644", type: "blob", sha: "previous-manifest" },
+        { path: "README.md", mode: "100644", type: "blob", sha: "previous-readme" },
+      ] });
+      if (url.endsWith("/git/trees/skills-tree")) return response({ sha: "skills-tree", truncated: false, tree: [
+        { path: "managed", mode: "040000", type: "tree", sha: "old-managed-tree" },
+        { path: "manual", mode: "040000", type: "tree", sha: "manual-tree" },
+        { path: "stale", mode: "040000", type: "tree", sha: "stale-tree" },
+      ] });
+      if (url.endsWith("/git/blobs/current-readme") && method === "GET") return response({ content: currentReadme.toString("base64"), encoding: "base64", size: currentReadme.length });
+      if (url.endsWith("/git/blobs/previous-readme") && method === "GET") return response({ content: previousReadme.toString("base64"), encoding: "base64", size: previousReadme.length });
+      if (url.endsWith("/git/blobs/previous-manifest") && method === "GET") return response({ content: previousManifest.toString("base64"), encoding: "base64", size: previousManifest.length });
+      if (url.endsWith("/git/blobs") && method === "POST") {
+        const body = JSON.parse(String(init?.body)) as { content: string };
+        const content = Buffer.from(body.content, "base64");
+        uploadedBlobs.push(content);
+        return response({ sha: `blob-${uploadedBlobs.length}` });
+      }
+      if (url.endsWith("/git/trees") && method === "POST") {
+        const body = JSON.parse(String(init?.body)) as { base_tree?: string; tree: unknown[] };
+        if (body.base_tree) {
+          finalTreeBodies.push(body);
+          return response({ sha: "final-tree" }, 201);
+        }
+        skillTree += 1;
+        return response({ sha: `skill-tree-${skillTree}` }, 201);
+      }
+      if (url.endsWith("/git/commits") && method === "POST") return response({ sha: "final-commit" }, 201);
+      if (url.includes("/git/refs/heads/") && method === "PATCH") return response({});
+      throw new Error(`unexpected GitHub request: ${method} ${url}`);
+    });
+
+    await expect(new GitHubAppClient(appConfig(privateKey), execute).writeRepository({
+      installationId: "91", repositoryId: "700", owner: "acme", repo: "skills", branch: "main",
+      previousCommitSha: "previous-companion",
+      managedSlugs: ["managed", "new"],
+      files: [
+        { path: "skills/managed/SKILL.md", data: Buffer.from("managed"), executable: false },
+        { path: "skills/new/SKILL.md", data: Buffer.from("new"), executable: false },
+      ],
+      manifest: Buffer.from(JSON.stringify({
+        schema: 1,
+        skills: [
+          { slug: "managed", version: "1.0.0", checksum: "sha256:managed" },
+          { slug: "new", version: "1.0.0", checksum: "sha256:new" },
+        ],
+      })),
+      readmeBlock: Buffer.from(`${COMPANION_README_START}\nnew block\n${COMPANION_README_END}`),
+      message: "Sync skills",
+    })).resolves.toEqual({ commitSha: "final-commit", branch: "main" });
+
+    expect(uploadedBlobs.some((blob) => blob.toString().includes("# Custom intro\n"))).toBe(true);
+    expect(uploadedBlobs.some((blob) => blob.toString().includes("Custom footer\n"))).toBe(true);
+    const finalTree = finalTreeBodies[0] as { base_tree: string; tree: Array<{ path: string; sha: string | null }> };
+    expect(finalTree.base_tree).toBe("current-tree");
+    expect(finalTree.tree).toEqual(expect.arrayContaining([
+      expect.objectContaining({ path: "README.md" }),
+      expect.objectContaining({ path: ".companion-sync.json" }),
+      expect.objectContaining({ path: "skills/managed", sha: "skill-tree-1" }),
+      expect.objectContaining({ path: "skills/new", sha: "skill-tree-2" }),
+      expect.objectContaining({ path: "skills/stale", sha: null }),
+    ]));
+    expect(finalTree.tree.some((entry) => entry.path === ".companion-bootstrap")).toBe(false);
+    expect(finalTree.tree.some((entry) => entry.path === "docs" || entry.path === "skills/manual")).toBe(false);
+  });
+
+  it("blocks a new managed slug that collides with a manual skill folder before creating Git objects", async () => {
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } });
+    const execute = vi.fn<typeof fetch>(async (request, init) => {
+      const url = String(request);
+      const method = init?.method ?? (init?.body ? "POST" : "GET");
+      if (url.endsWith("/access_tokens")) return response({ token: "installation-token" });
+      if (url === "https://api.github.com/repos/acme/skills") return response({ id: 700, default_branch: "main" });
+      if (url.includes("/git/ref/heads/")) return response({ object: { sha: "head" } });
+      if (url.endsWith("/git/commits/head")) return response({ tree: { sha: "root" } });
+      if (url.endsWith("/git/trees/root")) return response({ sha: "root", truncated: false, tree: [
+        { path: "skills", mode: "040000", type: "tree", sha: "skills-tree" },
+      ] });
+      if (url.endsWith("/git/trees/skills-tree")) return response({ sha: "skills-tree", truncated: false, tree: [
+        { path: "manual", mode: "040000", type: "tree", sha: "manual-tree" },
+      ] });
+      throw new Error(`unexpected GitHub request: ${method} ${url}`);
+    });
+    await expect(new GitHubAppClient(appConfig(privateKey), execute).writeRepository({
+      installationId: "91", repositoryId: "700", owner: "acme", repo: "skills", branch: "main",
+      managedSlugs: ["manual"],
+      files: [{ path: "skills/manual/SKILL.md", data: Buffer.from("managed"), executable: false }],
+      message: "Sync skills",
+    })).rejects.toThrow("is not owned by this mirror");
+    expect(execute.mock.calls.some(([request, init]) => String(request).endsWith("/git/blobs") && init?.method !== "GET")).toBe(false);
   });
 
   it("refuses a replacement repository at the same owner/name before creating Git objects", async () => {
@@ -355,11 +548,40 @@ describe("atomic Git writes", () => {
     expect(execute).toHaveBeenCalledTimes(2);
   });
 
+  it("does not trust ownership from a previous Companion commit outside the observed branch history", async () => {
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } });
+    const execute = vi.fn<typeof fetch>(async (request, init) => {
+      const url = String(request);
+      const method = init?.method ?? (init?.body ? "POST" : "GET");
+      if (url.endsWith("/access_tokens")) return response({ token: "installation-token" });
+      if (url === "https://api.github.com/repos/acme/skills") return response({ id: 700, default_branch: "main" });
+      if (url.includes("/git/ref/heads/")) return response({ object: { sha: "replacement-head" } });
+      if (url.endsWith("/git/commits/replacement-head")) return response({ tree: { sha: "replacement-root" } });
+      if (url.endsWith("/git/trees/replacement-root")) return response({ sha: "replacement-root", truncated: false, tree: [
+        { path: "skills", mode: "040000", type: "tree", sha: "replacement-skills" },
+      ] });
+      if (url.endsWith("/git/trees/replacement-skills")) return response({ sha: "replacement-skills", truncated: false, tree: [
+        { path: "managed", mode: "040000", type: "tree", sha: "manual-tree" },
+      ] });
+      if (url.endsWith("/compare/previous-companion...replacement-head")) return response({ status: "diverged" });
+      throw new Error(`unexpected GitHub request: ${method} ${url}`);
+    });
+
+    await expect(new GitHubAppClient(appConfig(privateKey), execute).writeRepository({
+      installationId: "91", repositoryId: "700", owner: "acme", repo: "skills", branch: "main",
+      previousCommitSha: "previous-companion", managedSlugs: ["managed"],
+      files: [{ path: "skills/managed/SKILL.md", data: Buffer.from("managed"), executable: false }],
+      message: "Sync skills",
+    })).rejects.toThrow("has no trusted ownership history");
+    expect(execute.mock.calls.some(([request, init]) => String(request).endsWith("/git/blobs") && init?.method !== "GET")).toBe(false);
+  });
+
   it("bootstraps a truly empty repository before publishing the managed tree as a fast-forward", async () => {
     const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } });
     let refReads = 0;
     const commitParents: string[][] = [];
     const finalizedCommits: Array<string | null> = [];
+    let bootstrapManifest = Buffer.alloc(0);
     const execute = vi.fn<typeof fetch>(async (request, init) => {
       const url = String(request);
       const method = init?.method ?? (init?.body ? "POST" : "GET");
@@ -372,12 +594,22 @@ describe("atomic Git writes", () => {
           : response({ object: { sha: "bootstrap-commit" } });
       }
       if (url.endsWith("/branches?per_page=1")) return response([]);
-      if (url.endsWith("/contents/.companion-bootstrap") && method === "PUT") {
+      if (url.endsWith("/contents/.companion-sync.json") && method === "PUT") {
+        const body = JSON.parse(String(init?.body)) as { content: string };
+        bootstrapManifest = Buffer.from(body.content, "base64");
         return response({ commit: { sha: "bootstrap-commit" } }, 201);
       }
       if (url.endsWith("/git/commits/bootstrap-commit") && method === "GET") {
         return response({ tree: { sha: "bootstrap-tree" } });
       }
+      if (url.endsWith("/git/trees/bootstrap-tree") && method === "GET") return response({
+        sha: "bootstrap-tree", truncated: false, tree: [
+          { path: ".companion-sync.json", mode: "100644", type: "blob", sha: "bootstrap-manifest" },
+        ],
+      });
+      if (url.endsWith("/git/blobs/bootstrap-manifest") && method === "GET") return response({
+        content: bootstrapManifest.toString("base64"), encoding: "base64", size: bootstrapManifest.length,
+      });
       if (url.endsWith("/git/blobs")) return response({ sha: "managed-blob" });
       if (url.endsWith("/git/trees")) return response({ sha: "managed-tree" });
       if (url.endsWith("/git/commits") && method === "POST") {
@@ -395,7 +627,9 @@ describe("atomic Git writes", () => {
       owner: "acme",
       repo: "skills",
       branch: "main",
-      files: [{ path: "README.md", data: Buffer.from("managed"), executable: false }],
+      managedSlugs: ["managed"],
+      files: [{ path: "skills/managed/SKILL.md", data: Buffer.from("managed"), executable: false }],
+      manifest: Buffer.from('{"schema":1,"skills":[{"slug":"managed","version":"1.0.0","checksum":"sha256:managed"}]}\n'),
       message: "Sync skills",
       finalize: async (publication) => {
         finalizedCommits.push(publication.commitSha);
@@ -406,10 +640,13 @@ describe("atomic Git writes", () => {
     expect(result).toEqual({ commitSha: "managed-commit", branch: "main" });
     expect(finalizedCommits).toEqual([null, "managed-commit"]);
     expect(commitParents).toEqual([["bootstrap-commit"]]);
-    const bootstrapCall = execute.mock.calls.find(([request]) => String(request).endsWith("/contents/.companion-bootstrap"));
-    expect(JSON.parse(String(bootstrapCall?.[1]?.body))).toEqual({
-      message: "chore(companion): initialize managed mirror",
-      content: Buffer.from("Managed by Companion\n").toString("base64"),
+    const bootstrapCall = execute.mock.calls.find(([request]) => String(request).endsWith("/contents/.companion-sync.json"));
+    const bootstrapBody = JSON.parse(String(bootstrapCall?.[1]?.body)) as { message: string; content: string };
+    expect(bootstrapBody.message).toBe("chore(companion): initialize managed mirror");
+    expect(JSON.parse(Buffer.from(bootstrapBody.content, "base64").toString())).toMatchObject({
+      schema: 1,
+      skills: [],
+      companion_ownership: { app_id: "123", previous_commit_sha: null },
     });
     const refUpdate = execute.mock.calls.find(([request, init]) =>
       String(request).includes("/git/refs/heads/") && init?.method === "PATCH",
@@ -498,5 +735,155 @@ describe("atomic Git writes", () => {
       .filter(([request, init]) => String(request).includes("/git/refs/heads/") && init?.method === "PATCH")
       .map(([, init]) => JSON.parse(String(init?.body)) as { force: boolean });
     expect(refBodies).toEqual([{ sha: "commit-1", force: false }, { sha: "commit-2", force: false }]);
+  });
+
+  it("recovers signed ownership after an ambiguous publication and a subsequent user README commit", async () => {
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } });
+    let published = false;
+    let completed = false;
+    let signedManifest = Buffer.alloc(0);
+    let managedReadme = Buffer.alloc(0);
+    let commitCreates = 0;
+    const execute = vi.fn<typeof fetch>(async (request, init) => {
+      const url = String(request);
+      const method = init?.method ?? (init?.body ? "POST" : "GET");
+      if (url.endsWith("/access_tokens")) return response({ token: "installation-token" });
+      if (url === "https://api.github.com/repos/acme/skills") return response({ id: 700, default_branch: "main" });
+      if (url.includes("/git/ref/heads/") && method === "GET") {
+        return response({ object: { sha: completed ? "companion-commit-2" : published ? "user-after" : "user-head" } });
+      }
+      if (url.endsWith("/git/commits/user-head") && method === "GET") return response({ tree: { sha: "user-tree" } });
+      if (url.endsWith("/git/commits/user-after") && method === "GET") return response({ tree: { sha: "user-after-tree" } });
+      if (url.endsWith("/git/commits/companion-commit-2") && method === "GET") return response({ tree: { sha: "second-desired-tree" } });
+      if (url.endsWith("/git/trees/user-tree") && method === "GET") return response({ sha: "user-tree", truncated: false, tree: [] });
+      if (url.endsWith("/git/trees/user-after-tree") && method === "GET") return response({ sha: "user-after-tree", truncated: false, tree: [
+        { path: ".companion-sync.json", mode: "100644", type: "blob", sha: "manifest-blob" },
+        { path: "README.md", mode: "100644", type: "blob", sha: "user-readme" },
+        { path: "skills", mode: "040000", type: "tree", sha: "skills-tree" },
+      ] });
+      if (url.endsWith("/git/trees/second-desired-tree") && method === "GET") return response({ sha: "second-desired-tree", truncated: false, tree: [
+        { path: ".companion-sync.json", mode: "100644", type: "blob", sha: "manifest-blob" },
+        { path: "README.md", mode: "100644", type: "blob", sha: "managed-readme" },
+        { path: "skills", mode: "040000", type: "tree", sha: "skills-tree" },
+      ] });
+      if (url.endsWith("/git/trees/skills-tree") && method === "GET") return response({ sha: "skills-tree", truncated: false, tree: [
+        { path: "new", mode: "040000", type: "tree", sha: "skill-tree" },
+      ] });
+      if (url.endsWith("/git/blobs/manifest-blob") && method === "GET") return response({
+        content: signedManifest.toString("base64"), encoding: "base64", size: signedManifest.length,
+      });
+      if (url.endsWith("/git/blobs/user-readme") && method === "GET") {
+        const content = Buffer.from("# User note after publication\n");
+        return response({ content: content.toString("base64"), encoding: "base64", size: content.length });
+      }
+      if (url.endsWith("/git/blobs/managed-readme") && method === "GET") return response({
+        content: managedReadme.toString("base64"), encoding: "base64", size: managedReadme.length,
+      });
+      if (url.endsWith("/git/blobs") && method === "POST") {
+        const body = JSON.parse(String(init?.body)) as { content: string };
+        const content = Buffer.from(body.content, "base64");
+        if (content.toString().includes("companion_ownership")) {
+          signedManifest = content;
+          return response({ sha: "manifest-blob" });
+        }
+        if (content.toString().includes(COMPANION_README_START)) {
+          managedReadme = content;
+          return response({ sha: "managed-readme" });
+        }
+        return response({ sha: "skill-blob" });
+      }
+      if (url.endsWith("/git/trees") && method === "POST") {
+        const body = JSON.parse(String(init?.body)) as { base_tree?: string };
+        if (!body.base_tree) return response({ sha: "skill-tree" });
+        return response({ sha: body.base_tree === "user-tree" ? "first-desired-tree" : "second-desired-tree" });
+      }
+      if (url.endsWith("/git/commits") && method === "POST") {
+        commitCreates += 1;
+        return response({ sha: `companion-commit-${commitCreates}` });
+      }
+      if (url.includes("/git/refs/heads/") && method === "PATCH") {
+        if (!published) {
+          published = true;
+          return response({ message: "Reference update result was ambiguous" }, 409);
+        }
+        completed = true;
+        return response({});
+      }
+      throw new Error(`unexpected GitHub request: ${method} ${url}`);
+    });
+
+    const client = new GitHubAppClient(appConfig(privateKey), execute);
+    const writeInput = {
+      installationId: "91", repositoryId: "700", owner: "acme", repo: "skills", branch: "main",
+      managedSlugs: ["new"],
+      files: [{ path: "skills/new/SKILL.md", data: Buffer.from("managed"), executable: false }],
+      manifest: Buffer.from('{"schema":1,"skills":[{"slug":"new","version":"1.0.0","checksum":"sha256:new"}]}\n'),
+      readmeBlock: Buffer.from(`${COMPANION_README_START}\nmanaged\n${COMPANION_README_END}`),
+      message: "Sync skills",
+    };
+    await expect(client.writeRepository(writeInput)).resolves.toEqual({ commitSha: "companion-commit-2", branch: "main" });
+    expect(signedManifest.toString()).toContain("companion_ownership");
+    expect(commitCreates).toBe(2);
+    await expect(client.writeRepository({ ...writeInput, previousCommitSha: "companion-commit-2" }))
+      .resolves.toEqual({ commitSha: "companion-commit-2", branch: "main" });
+    expect(commitCreates).toBe(2);
+  });
+
+  it("re-merges custom README content from the new head after a fast-forward race", async () => {
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } });
+    let observedHead = 0;
+    let refUpdates = 0;
+    const mergedReadmes: string[] = [];
+    const rootBases: string[] = [];
+    const execute = vi.fn<typeof fetch>(async (request, init) => {
+      const url = String(request);
+      const method = init?.method ?? (init?.body ? "POST" : "GET");
+      if (url.endsWith("/access_tokens")) return response({ token: "installation-token" });
+      if (url === "https://api.github.com/repos/acme/skills") return response({ id: 700, default_branch: "main" });
+      if (url.includes("/git/ref/heads/") && method === "GET") {
+        observedHead += 1;
+        return response({ object: { sha: `head-${observedHead}` } });
+      }
+      if (url.endsWith(`/git/commits/head-${observedHead}`) && method === "GET") return response({ tree: { sha: `root-${observedHead}` } });
+      if (url.endsWith(`/git/trees/root-${observedHead}`) && method === "GET") return response({
+        sha: `root-${observedHead}`, truncated: false, tree: [
+          { path: "README.md", mode: "100644", type: "blob", sha: `readme-${observedHead}` },
+        ],
+      });
+      if (url.endsWith(`/git/blobs/readme-${observedHead}`) && method === "GET") {
+        const content = Buffer.from(`# User edit ${observedHead}\n`);
+        return response({ content: content.toString("base64"), encoding: "base64", size: content.length });
+      }
+      if (url.endsWith("/git/blobs") && method === "POST") {
+        const body = JSON.parse(String(init?.body)) as { content: string };
+        const content = Buffer.from(body.content, "base64").toString();
+        if (content.includes(COMPANION_README_START)) mergedReadmes.push(content);
+        return response({ sha: `blob-${observedHead}-${mergedReadmes.length}` });
+      }
+      if (url.endsWith("/git/trees") && method === "POST") {
+        const body = JSON.parse(String(init?.body)) as { base_tree: string };
+        rootBases.push(body.base_tree);
+        return response({ sha: `desired-tree-${observedHead}` });
+      }
+      if (url.endsWith("/git/commits") && method === "POST") return response({ sha: `commit-${observedHead}` });
+      if (url.includes("/git/refs/heads/") && method === "PATCH") {
+        refUpdates += 1;
+        return refUpdates === 1 ? response({ message: "Reference update failed" }, 409) : response({});
+      }
+      throw new Error(`unexpected GitHub request: ${method} ${url}`);
+    });
+
+    await expect(new GitHubAppClient(appConfig(privateKey), execute).writeRepository({
+      installationId: "91", repositoryId: "700", owner: "acme", repo: "skills", branch: "main",
+      files: [], managedSlugs: [], manifest: Buffer.from('{"schema":1,"skills":[]}\n'),
+      readmeBlock: Buffer.from(`${COMPANION_README_START}\nmanaged\n${COMPANION_README_END}`),
+      message: "Sync skills",
+    })).resolves.toEqual({ commitSha: "commit-2", branch: "main" });
+
+    expect(rootBases).toEqual(["root-1", "root-2"]);
+    expect(mergedReadmes).toHaveLength(2);
+    expect(mergedReadmes[0]).toContain("# User edit 1\n");
+    expect(mergedReadmes[1]).toContain("# User edit 2\n");
+    expect(mergedReadmes[1]).not.toContain("# User edit 1\n");
   });
 });

@@ -135,6 +135,7 @@ private DNS is not reachable from a browser; browser requests intentionally stay
 ```dotenv
 NODE_ENV=production
 DATABASE_URL=<same companion_runtime URL as api>
+COMPANION_WEB_URL=https://${{web.RAILWAY_PUBLIC_DOMAIN}}
 COMPANION_BILLING_MODE=stripe
 COMPANION_ENTITLEMENTS_MODE=observe
 STRIPE_SECRET_KEY=<same live secret key as api>

@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
-import type {
-  CreateGitHubDestinationInput,
-  GitHubIntegrationResponse,
-  GitHubSyncDestination,
-  GitHubSyncMode,
-  UpdateGitHubDestinationInput,
+import {
+  companionManifestSchema,
+  type CreateGitHubDestinationInput,
+  type GitHubIntegrationResponse,
+  type GitHubSyncDestination,
+  type GitHubSyncMode,
+  type UpdateGitHubDestinationInput,
 } from "@companion/contracts";
 import { db, schema, type Db } from "@companion/db";
 import { canManageOrg } from "./authz";
@@ -482,12 +483,34 @@ export async function claimGitHubSyncDestinations(input: {
 }
 
 export interface GitHubSyncSkill {
-  id: string; slug: string; version: string; checksum: string; storagePath: string;
+  id: string;
+  slug: string;
+  title: string;
+  description: string;
+  shareToken: string;
+  version: string;
+  checksum: string;
+  storagePath: string;
 }
 
 export interface GitHubSyncGraphSkill extends GitHubSyncSkill {
   archived: boolean;
   dependencies: Array<{ slug: string; skillId: string | null }>;
+}
+
+export function resolveGitHubSyncSkillTitle(input: {
+  slug: string;
+  displayName: string | null;
+  frontmatter: string | null;
+}): string {
+  if (input.displayName) return input.displayName;
+  try {
+    const stored = JSON.parse(input.frontmatter ?? "") as { companion?: unknown };
+    const manifest = companionManifestSchema.safeParse(stored.companion);
+    return manifest.success ? manifest.data.display.name ?? input.slug : input.slug;
+  } catch {
+    return input.slug;
+  }
 }
 
 /** Pure selected-root + live dependency closure. Archived explicit roots are temporarily omitted. */
@@ -538,8 +561,11 @@ export async function getGitHubSyncPlan(input: {
   )).limit(1);
   if (!destination) throw new Error("GitHub destination lease was lost");
   const rows = await database.select({
-    id: schema.skills.id, slug: schema.skills.slug, archivedAt: schema.skills.archivedAt,
+    id: schema.skills.id, slug: schema.skills.slug, title: schema.skills.displayName,
+    description: schema.skills.description, shareToken: schema.skills.shareToken,
+    archivedAt: schema.skills.archivedAt,
     versionId: schema.skillVersions.id, version: schema.skillVersions.version,
+    frontmatter: schema.skillVersions.frontmatter,
     checksum: schema.skillVersions.checksum, storagePath: schema.skillVersions.storagePath,
   }).from(schema.skills).leftJoin(schema.skillVersions, and(
     eq(schema.skillVersions.orgId, schema.skills.orgId), eq(schema.skillVersions.id, schema.skills.currentVersionId),
@@ -569,6 +595,9 @@ export async function getGitHubSyncPlan(input: {
   const graph = rows.flatMap((row): GitHubSyncGraphSkill[] => row.versionId && row.version && row.checksum && row.storagePath ? [{
     id: row.id,
     slug: row.slug,
+    title: resolveGitHubSyncSkillTitle({ slug: row.slug, displayName: row.title, frontmatter: row.frontmatter }),
+    description: row.description,
+    shareToken: row.shareToken,
     version: row.version,
     checksum: row.checksum,
     storagePath: row.storagePath,
