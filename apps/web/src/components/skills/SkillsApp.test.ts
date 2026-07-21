@@ -667,6 +667,33 @@ describe("SkillsApp initial route", () => {
     expect(html).not.toContain("Open skill loose-skill");
   });
 
+  it("keeps a sidebar folder selection inside that branch for multi-filed personal skills", async () => {
+    const { container } = await mountSkillsApp(
+      { lib: "mine", kind: "all" },
+      {
+        props: {
+          initialMineSkills: [
+            skill({
+              id: "research-digest",
+              scope: "personal",
+              source: "authored",
+              labels: ["drafts/research", "operations"],
+            }),
+          ],
+          initialOrgSkills: [],
+        },
+      },
+    );
+    await flushEffects();
+
+    clickButton(container, "drafts");
+    await flushEffects();
+
+    expect(window.location.search).toContain("view=label&label=drafts");
+    expect(Array.from(container.querySelectorAll(".cgroup__name"), (node) => node.textContent)).toEqual(["drafts"]);
+    expect(container.querySelectorAll('[data-skill-slug="research-digest"]')).toHaveLength(1);
+  });
+
   it("falls back to an empty list for an unknown label route", () => {
     const html = render({ lib: "org", kind: "label", label: "does-not-exist" });
     expect(html).toContain("No organization skills match this view");

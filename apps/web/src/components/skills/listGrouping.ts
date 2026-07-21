@@ -44,6 +44,12 @@ export function mostSpecificPaths(paths: string[]): string[] {
   return unique.filter((path) => !unique.some((candidate) => candidate.startsWith(`${path}/`)));
 }
 
+/** Keep only folder assignments that belong to the selected sidebar branch. */
+export function pathsInLabelScope(paths: string[], activeLabel: string | null): string[] {
+  if (!activeLabel) return paths;
+  return paths.filter((path) => path === activeLabel || path.startsWith(`${activeLabel}/`));
+}
+
 function displayRelativePath(path: string, appearance: Map<string, LabelVM>): string {
   const segments = path.split("/");
   return segments
@@ -80,6 +86,7 @@ export function groupSkillsByRoot(
   skills: SkillVM[],
   labels: LabelVM[],
   library: "mine" | "org",
+  activeLabel: string | null = null,
 ): SkillListGroup[] {
   const appearance = new Map(labels.map((label) => [label.path, label]));
   const roots = new Map<string, SkillListGroup>();
@@ -107,7 +114,9 @@ export function groupSkillsByRoot(
       installed.rows.push({ skill, relativePaths: [], icon: resolveSkillListIcon(skill, labels, []) });
       continue;
     }
-    const specificPaths = mostSpecificPaths(skill.labels);
+    // A folder route is an occurrence-scoped view: a skill filed in several roots must not leak
+    // back into those other roots after the membership filter has selected it.
+    const specificPaths = mostSpecificPaths(pathsInLabelScope(skill.labels, activeLabel));
     const pathsByRoot = new Map<string, string[]>();
     for (const path of specificPaths) {
       const root = path.split("/")[0];

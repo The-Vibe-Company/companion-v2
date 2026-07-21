@@ -74,6 +74,20 @@ describe("skill list grouping", () => {
     expect(groups[1]?.rows[0]?.skill.id).toBe("digest");
   });
 
+  it("limits a multi-filed skill to the active sidebar label branch", () => {
+    const groups = groupSkillsByRoot(
+      [skill("digest", { labels: ["marketing/seo", "operations"] })],
+      labels,
+      "org",
+      "marketing",
+    );
+
+    expect(groups.map((group) => group.label)).toEqual(["Marketing"]);
+    expect(groups[0]?.rows).toHaveLength(1);
+    expect(groups[0]?.rows[0]?.relativePaths).toEqual([{ path: "marketing/seo", label: "SEO" }]);
+    expect(groups[0]?.rows[0]?.icon).toEqual({ name: "globe", color: null });
+  });
+
   it("derives relative paths from canonical segments when display names contain separators", () => {
     const groups = groupSkillsByRoot(
       [skill("campaign", { labels: ["sales/seo"] })],

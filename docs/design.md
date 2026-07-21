@@ -298,7 +298,10 @@ with an accessible overflow count. My Skills appends `Installed`, then `Without 
 list appends `Without folder`. Root sections follow the existing tree order, remain single-level, and use
 quiet icon/name/count/chevron headers rather than cards or colored bands. Only collapsed root keys are
 stored locally per workspace and library; searching temporarily reveals matching collapsed sections.
-Flat mode renders one row per skill with full folder chips. Both modes use the literal monospace slug as
+Selecting a sidebar folder still rolls up skills from its descendants, while group occurrences, visible
+paths, and inherited folder icons are restricted to that selected branch; assignments under other roots
+do not reappear in the scoped view. Flat mode renders one row per skill with full folder chips from that
+branch. Both modes use the literal monospace slug as
 the only row title and A-Z key. A row icon resolves from `companion.json.icon`, then the deepest custom
 folder icon for that occurrence (lexical path breaks equal-depth ties), then neutral `package`; inherited
 icons also inherit that folder's color. Local Skills and Archived keep their existing presentation.

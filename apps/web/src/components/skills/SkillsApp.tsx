@@ -1727,6 +1727,7 @@ export function SkillsApp({
             workspaceId={currentOrg.id}
             library={selection.lib}
             scopeKind={selection.kind}
+            activeLabel={activeLabel}
             breadcrumb={breadcrumb}
             groupBy={groupBy}
             onGroupByChange={setGroupBy}

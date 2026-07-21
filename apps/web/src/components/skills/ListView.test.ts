@@ -61,6 +61,7 @@ type ListOverrides = {
   groupBy?: SkillGroupBy;
   onGroupByChange?: (groupBy: SkillGroupBy) => void;
   library?: "mine" | "org";
+  activeLabel?: string | null;
 };
 
 function props(skills: SkillVM[], overrides: ListOverrides = {}) {
@@ -70,6 +71,7 @@ function props(skills: SkillVM[], overrides: ListOverrides = {}) {
     workspaceId: "org-1",
     library: overrides.library ?? ("org" as const),
     scopeKind: "all" as const,
+    activeLabel: overrides.activeLabel ?? null,
     breadcrumb: ["All skills"],
     groupBy: overrides.groupBy ?? ("none" as const),
     onGroupByChange: overrides.onGroupByChange ?? vi.fn(),
@@ -300,6 +302,18 @@ describe("ListView grouped rhythm", () => {
     expect(html).toContain('aria-label="Subfolder: marketing/seo"');
     expect(html).toContain('<span class="crow__labeltext">Reporting</span>');
     expect(html).toContain('<span class="crow__labeltext">SEO</span>');
+  });
+
+  it("keeps grouped and flat rows inside the selected label branch", () => {
+    const multiFiled = skill({ id: "digest", labels: ["marketing/seo", "operations"] });
+    const grouped = render([multiFiled], { labels, groupBy: "folder", activeLabel: "marketing" });
+    const flat = render([multiFiled], { labels, groupBy: "none", activeLabel: "marketing" });
+
+    expect(grouped).toContain('<span class="cgroup__name">Marketing</span>');
+    expect(grouped).not.toContain('<span class="cgroup__name">Operations</span>');
+    expect(grouped.match(/data-skill-slug="digest"/g)).toHaveLength(1);
+    expect(flat).toContain('aria-label="Folder: marketing/seo"');
+    expect(flat).not.toContain('aria-label="Folder: operations"');
   });
 
   it("puts installed and unfiled personal skills in dedicated trailing groups", () => {

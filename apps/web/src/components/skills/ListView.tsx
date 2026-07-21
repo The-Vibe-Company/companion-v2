@@ -20,6 +20,7 @@ import { chipParts, type Filter } from "./filters";
 import { FilterAdd } from "./FilterMenu";
 import {
   groupSkillsByRoot,
+  pathsInLabelScope,
   resolveSkillListIcon,
   type GroupedSkillRow,
   type SkillListPath,
@@ -231,6 +232,7 @@ function SkillRow({
   library,
   actorId,
   labels,
+  activeLabel,
   flat,
   lastId,
   dragSkillId,
@@ -242,6 +244,7 @@ function SkillRow({
   library: "mine" | "org";
   actorId: string;
   labels: LabelVM[];
+  activeLabel: string | null;
   flat: boolean;
   lastId: string | null;
   dragSkillId: string | null;
@@ -253,7 +256,8 @@ function SkillRow({
   const canDrag = !(library === "mine" && skill.source === "installed");
   const dragging = canDrag && dragSkillId === skill.id;
   const primary = resolveSkillActions(skill, skillActionPermissions(skill, actorId)).primary;
-  const icon = flat ? resolveSkillListIcon(skill, labels) : row.icon;
+  const scopedPaths = pathsInLabelScope(skill.labels, activeLabel);
+  const icon = flat ? resolveSkillListIcon(skill, labels, scopedPaths) : row.icon;
   return (
     <div
       data-skill-slug={skill.id}
@@ -279,7 +283,7 @@ function SkillRow({
           <InstallMark state={skill.installStatus} />
         </span>
         <SkillPaths
-          paths={flat ? skill.labels.map((path) => ({ path, label: path })) : row.relativePaths}
+          paths={flat ? scopedPaths.map((path) => ({ path, label: path })) : row.relativePaths}
           kind={flat ? "folder" : "subfolder"}
         />
       </span>
@@ -329,6 +333,7 @@ export function ListView({
   workspaceId,
   library,
   scopeKind,
+  activeLabel,
   breadcrumb,
   groupBy,
   onGroupByChange,
@@ -353,6 +358,7 @@ export function ListView({
   workspaceId: string;
   library: "mine" | "org";
   scopeKind: "all" | "installed" | "label";
+  activeLabel: string | null;
   breadcrumb: string[];
   groupBy: SkillGroupBy;
   onGroupByChange: (groupBy: SkillGroupBy) => void;
@@ -400,7 +406,10 @@ export function ListView({
     if (sort === "default") return matched;
     return [...matched].sort((left, right) => left.id.localeCompare(right.id));
   }, [skills, q, sort]);
-  const groups = useMemo(() => groupSkillsByRoot(shown, labels, library), [labels, library, shown]);
+  const groups = useMemo(
+    () => groupSkillsByRoot(shown, labels, library, activeLabel),
+    [activeLabel, labels, library, shown],
+  );
 
   const toggleGroup = useCallback(
     (key: string) => {
@@ -423,6 +432,7 @@ export function ListView({
     library,
     actorId,
     labels,
+    activeLabel,
     lastId,
     dragSkillId,
     onOpen,
