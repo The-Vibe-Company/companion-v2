@@ -19,6 +19,15 @@ export interface ApiVariables {
   tokenScopes: TokenScope[] | null;
 }
 
+function responseSetCookies(headers: Headers | undefined): string[] {
+  if (!headers) return [];
+  const cookieHeaders = headers as Headers & { getSetCookie?: () => string[] };
+  const cookies = cookieHeaders.getSetCookie?.();
+  if (cookies?.length) return cookies;
+  const cookie = headers.get("set-cookie");
+  return cookie ? [cookie] : [];
+}
+
 /** Extract a bearer credential from an `Authorization` header, if present. */
 export function bearerFromHeader(header: string | undefined): string | null {
   if (!header) return null;
@@ -27,7 +36,25 @@ export function bearerFromHeader(header: string | undefined): string | null {
 }
 
 export async function attachSession(c: Context<{ Variables: ApiVariables }>, next: () => Promise<void>) {
-  const session = await auth.api.getSession({ headers: c.req.raw.headers });
+  // Better Auth can refresh a rolling session while reading it. Request the response headers as well
+  // as the session and append every Set-Cookie to the public API response; otherwise only the database
+  // expiry moves and the browser keeps the original cookie deadline.
+  const sessionResult = (await auth.api.getSession({
+    headers: c.req.raw.headers,
+    query: {
+      // Server Components cannot attach an upstream Set-Cookie to their rendered response. They
+      // mark their internal API calls so only a same-origin browser request consumes the daily
+      // rolling refresh and receives the renewed cookie.
+      disableRefresh: c.req.header("x-companion-disable-session-refresh") === "1",
+    },
+    returnHeaders: true,
+  })) as unknown;
+  // Keep compatibility with lightweight test doubles that return the session value directly.
+  const returned =
+    sessionResult && typeof sessionResult === "object" && "response" in sessionResult
+      ? (sessionResult as { response: typeof auth.$Infer.Session | null; headers?: Headers })
+      : { response: sessionResult as typeof auth.$Infer.Session | null, headers: undefined };
+  const session = returned.response;
   c.set("user", session?.user ?? null);
   c.set("session", session?.session ?? null);
   c.set("tokenActor", null);
@@ -51,7 +78,18 @@ export async function attachSession(c: Context<{ Variables: ApiVariables }>, nex
       }
     }
   }
+  const sessionCookies = responseSetCookies(returned.headers);
   await next();
+  if (sessionCookies.length) {
+    // A downstream auth handler can deliberately replace the same cookie (for example, signing in
+    // with a stale token). Rebuild the response so read-time refresh/cleanup cookies come first and
+    // route mutation cookies remain last; prepared Hono headers set before `next()` are overwritten
+    // when a handler returns its own Response.
+    const routeCookies = responseSetCookies(c.res.headers);
+    c.res.headers.delete("set-cookie");
+    for (const cookie of sessionCookies) c.res.headers.append("set-cookie", cookie);
+    for (const cookie of routeCookies) c.res.headers.append("set-cookie", cookie);
+  }
 }
 
 /**

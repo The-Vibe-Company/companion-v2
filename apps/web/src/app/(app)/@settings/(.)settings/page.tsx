@@ -1,4 +1,5 @@
 import { SettingsDrawer, SettingsDrawerBackgroundGuard } from "@/components/org/SettingsDrawer";
+import { RetryButton } from "@/components/org/WorkspaceLoadError";
 import { loadSettingsPageData, type SettingsSearchParams } from "@/lib/settingsData";
 
 export const dynamic = "force-dynamic";
@@ -31,6 +32,7 @@ export default async function InterceptedSettingsPage({
                     Refresh the page to try again. If the problem continues, check that the API and
                     database are reachable.
                   </div>
+                  <RetryButton />
                 </div>
               </div>
             </div>

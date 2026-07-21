@@ -360,22 +360,36 @@ the source of truth for onboarding joins.
 - **Google OAuth** is conditional: wired only when `GOOGLE_CLIENT_ID` + `GOOGLE_CLIENT_SECRET` are set
   (the button always renders; otherwise the web route returns a friendly error). New Google users go to
   `/onboarding`, returning users to their `next` target.
+- **Rolling browser sessions.** Remembered sessions expire after 30 days of inactivity and refresh at
+  most once per day. The API session middleware requests Better Auth's response headers and forwards
+  every refreshed `Set-Cookie`; the authenticated web shell also performs a same-origin session check
+  when it mounts or becomes visible (throttled to five minutes), so both database and browser expiry
+  advance together. Server-rendered API calls explicitly disable session refresh because a React Server
+  Component cannot re-emit the API cookie; the browser keepalive is therefore the request that consumes
+  the daily refresh and persists it.
 - **Web ↔ API glue.** The web app never uses the Better Auth client SDK. Next.js route handlers under
   `apps/web/src/app/v1/auth/*` (`signin`, `signup`, `verify-email`, `verify-email/send`,
   `forgot-password`, `reset-password`, `google`) forward to the API's `/auth/*` server-side and re-emit
   the `Set-Cookie` on the **web origin**, keeping the session cookie same-origin (`shared lib/authProxy.ts`).
   When forwarding to Better Auth, these proxy routes use the configured canonical `COMPANION_WEB_URL` as
-  the trusted origin, so alias hosts such as `www` can still re-emit cookies without being registered as
-  separate Better Auth origins. The Google start route must also re-emit Better Auth's transient OAuth
+  the trusted origin. The web middleware permanently redirects the matching `www`/apex alias to that
+  canonical origin before auth starts, preventing split host-only cookies. The Google start route must
+  also re-emit Better Auth's transient OAuth
   state cookie before redirecting to Google; otherwise the API callback cannot validate `state`. The
   callback itself still lands on `/auth/*` through the web origin's rewrite. The reused 6-digit OTP UI is a
   single client state machine in `(auth)/login/LoginForm.tsx`.
+
+Server-rendered auth checks treat only an API `401` as signed out. Network failures and `5xx` responses
+are retried after 250 ms and 750 ms, then render a recoverable session-verification error instead of
+redirecting to Google; this preserves a valid browser cookie across API replacement during deployment.
 
 Production requirements: set `BETTER_AUTH_URL` to the API's public origin (the Google redirect URI is
 derived as `${BETTER_AUTH_URL}/auth/callback/google` and must be registered in Google Cloud); keep web
 and API **same-site** (prefer a same-origin reverse proxy for `/auth/*`) so both the OAuth-callback cookie
 and the re-emitted email/password cookie reach the web app; do **not** enable `crossSubDomainCookies`
 (host-only cookies are what the re-emit pattern relies on); serve over HTTPS so `Secure` cookies survive.
+`BETTER_AUTH_SECRET` and `BETTER_AUTH_COOKIE_PREFIX` must remain unchanged across deploys; changing either
+intentionally invalidates existing browser sessions.
 
 ## Onboarding & bootstrap
 

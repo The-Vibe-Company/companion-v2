@@ -3,6 +3,8 @@ import type { OnboardingContextResponse } from "@companion/contracts";
 import { serverApiFetch } from "@/lib/apiServer";
 import { OnboardingFlow } from "@/components/onboarding/OnboardingFlow";
 import type { OnboardingContext } from "@/lib/onboarding";
+import { AuthUnavailable } from "@/components/org/WorkspaceLoadError";
+import { loadServerAuth } from "@/lib/serverAuth";
 
 export const dynamic = "force-dynamic";
 
@@ -14,8 +16,10 @@ interface WhoAmI {
 }
 
 export default async function OnboardingPage() {
-  const whoami = await serverApiFetch<WhoAmI>("/v1/auth/whoami").catch(() => null);
-  if (!whoami) redirect("/login");
+  const authState = await loadServerAuth<WhoAmI>();
+  if (authState.status === "unauthenticated") redirect("/login");
+  if (authState.status === "unavailable") return <AuthUnavailable />;
+  const whoami = authState.user;
   if (whoami.onboarded) redirect("/skills");
 
   const raw = await serverApiFetch<OnboardingContextResponse>("/v1/onboarding/context").catch(() => null);

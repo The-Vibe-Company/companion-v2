@@ -4,6 +4,9 @@ import { drizzleAdapter } from "@better-auth/drizzle-adapter";
 import { db, schema } from "@companion/db";
 import { passwordResetCodeEmail, sendTransactionalEmail, verificationCodeEmail } from "@companion/email";
 
+export const SESSION_EXPIRES_IN_SECONDS = 60 * 60 * 24 * 30;
+export const SESSION_UPDATE_AGE_SECONDS = 60 * 60 * 24;
+
 export function getBetterAuthSecret(): string {
   const secret = process.env.BETTER_AUTH_SECRET;
   if (!secret && process.env.NODE_ENV !== "production") {
@@ -73,6 +76,13 @@ export const auth = betterAuth({
     sendOnSignIn: true,
   },
   socialProviders: googleSocialProvider(),
+  session: {
+    // Keep active devices signed in for 30 days. Better Auth refreshes the database expiry and
+    // session-token cookie at most once per day; the API middleware forwards that Set-Cookie to
+    // browser-facing responses so this remains a true rolling window.
+    expiresIn: SESSION_EXPIRES_IN_SECONDS,
+    updateAge: SESSION_UPDATE_AGE_SECONDS,
+  },
   plugins: [
     emailOTP({
       otpLength: 6,
