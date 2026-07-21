@@ -47,6 +47,9 @@ describe("pre-tenant PostgreSQL RLS boundary", () => {
   const rlsRole = `companion_pretenant_${suffix.replaceAll("-", "").slice(0, 20)}`;
   const invitationToken = `invite-${suffix}`;
   const apiTokenHash = `hash-${suffix}`;
+  const expiredRefreshHash = `expired-refresh-${suffix}`;
+  const staleRefreshHash = `stale-refresh-${suffix}`;
+  const revokedRefreshHash = `revoked-refresh-${suffix}`;
   const shareToken = `share-${suffix}`;
 
   async function withRuntimeRole<T>(fn: (tx: postgres.TransactionSql) => Promise<T>): Promise<T> {
@@ -112,16 +115,45 @@ describe("pre-tenant PostgreSQL RLS boundary", () => {
     `;
     await sql`
       insert into api_tokens (org_id, user_id, name, token_prefix, token_hash, scopes, expires_at)
-      values (
-        ${orgA}::uuid,
-        ${owner.id},
-        'Pre-tenant API token',
-        'cmp_pat_test',
-        ${apiTokenHash},
-        '["skills:read"]'::jsonb,
-        clock_timestamp() + interval '1 day'
-      )
+      values
+        (
+          ${orgA}::uuid,
+          ${owner.id},
+          'Pre-tenant API token',
+          'cmp_pat_test',
+          ${apiTokenHash},
+          '["skills:read"]'::jsonb,
+          clock_timestamp() + interval '1 day'
+        ),
+        (
+          ${orgA}::uuid,
+          ${owner.id},
+          'Expired refreshable token',
+          'cmp_pat_expire',
+          ${expiredRefreshHash},
+          '["skills:read","skills:write"]'::jsonb,
+          clock_timestamp() - interval '1 day'
+        ),
+        (
+          ${orgA}::uuid,
+          ${owner.id},
+          'Too-old token',
+          'cmp_pat_stale',
+          ${staleRefreshHash},
+          '["skills:read"]'::jsonb,
+          clock_timestamp() - interval '31 days'
+        ),
+        (
+          ${orgA}::uuid,
+          ${owner.id},
+          'Revoked token',
+          'cmp_pat_revoke',
+          ${revokedRefreshHash},
+          '["skills:read"]'::jsonb,
+          clock_timestamp() - interval '1 day'
+        )
     `;
+    await sql`update api_tokens set revoked_at = clock_timestamp() where token_hash = ${revokedRefreshHash}`;
     await sql`
       insert into skills (id, org_id, slug, display_name, description, creator_id, scope, share_token)
       values (
@@ -308,6 +340,38 @@ describe("pre-tenant PostgreSQL RLS boundary", () => {
       select last_used_at is not null as used from api_tokens where token_hash = ${apiTokenHash}
     `;
     expect(after).toEqual([{ used: true }]);
+  });
+
+  it("exposes only refresh-eligible PAT metadata through the narrow pre-tenant lock", async () => {
+    const result = await withRuntimeRole(async (tx) => {
+      const active = await tx<{ tokenName: string; expired: boolean; scopes: string[] }[]>`
+        select token_name as "tokenName", is_expired as expired, scopes
+        from companion_lock_api_token_for_refresh(${apiTokenHash})
+      `;
+      const expired = await tx<{ tokenName: string; expired: boolean; scopes: string[] }[]>`
+        select token_name as "tokenName", is_expired as expired, scopes
+        from companion_lock_api_token_for_refresh(${expiredRefreshHash})
+      `;
+      const stale = await tx`
+        select * from companion_lock_api_token_for_refresh(${staleRefreshHash})
+      `;
+      const revoked = await tx`
+        select * from companion_lock_api_token_for_refresh(${revokedRefreshHash})
+      `;
+      const unknown = await tx`
+        select * from companion_lock_api_token_for_refresh(${`unknown-${suffix}`})
+      `;
+      return { active, expired, stale, revoked, unknown };
+    });
+
+    expect(result.active).toEqual([{ tokenName: "Pre-tenant API token", expired: false, scopes: ["skills:read"] }]);
+    expect(result.expired).toEqual([
+      { tokenName: "Expired refreshable token", expired: true, scopes: ["skills:read", "skills:write"] },
+    ]);
+    expect(result.stale).toEqual([]);
+    expect(result.revoked).toEqual([]);
+    expect(result.unknown).toEqual(result.stale);
+    expect(JSON.stringify(result)).not.toContain(expiredRefreshHash);
   });
 
   it("serves the narrow public preview and resolves a share target only for members", async () => {

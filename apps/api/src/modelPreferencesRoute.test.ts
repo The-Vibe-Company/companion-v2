@@ -9,9 +9,11 @@ import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 const serviceMocks = vi.hoisted(() => {
   const noop = vi.fn(async () => undefined);
   return {
+    ApiTokenRefreshError: class ApiTokenRefreshError extends Error {},
     ensureUserBootstrap: noop,
     listOrgs: vi.fn(),
     resolveApiToken: vi.fn(),
+    refreshApiToken: vi.fn(),
     connectedProviderIds: vi.fn(async () => new Set<string>()),
     connectedOrgProviderIds: vi.fn(async () => new Set<string>()),
     getActivatedModels: vi.fn(),

@@ -1,10 +1,10 @@
 {
   "$schema": "https://thecompanion.sh/schemas/companion-manifest.v2.schema.json",
   "name": "companion",
-  "version": "1.22.0",
+  "version": "1.23.0",
   "title": "Companion",
-  "description": "Manage local SKILL.md packages with Companion: bootstrap context, self-update first, validate, publish, update, resolve dependencies, track installs, and repair manifests.",
-  "notes": "## What it does\n\nThe Companion skill gives your assistant one reliable workflow for local SKILL.md packages: validate, publish, update, organize, install, audit, and self-update.\n\n## Safety model\n\n- Reads only skill folders you point it at and Companion's own local state under ~/.companion.\n- Stores credentials in ~/.companion/credentials.json by workspace id and never prints tokens.\n- Confirms publishing or archival changes before mutating workspace skills.\n- Uses companion.json as the source of truth for package identity, version, env/secrets, dependencies, notes, commands, and changelog.\n\n## Local tracking\n\nCompanion records installed skills in ~/.companion/skills.lock.json under workspace-id keys so audits can compare local versions, checksums, and dependency snapshots against the workspace registry without storing tokens. Installs fan out into every tool the user works with (Claude Code, Codex, OpenCode, …); each record's targets[] array tracks the per-tool and per-project install locations, with project-scope installs kept in a per-project <repo>/.companion/skills.lock.json.",
+  "description": "Manage local SKILL.md packages with Companion: refresh eligible expired credentials, bootstrap context, self-update first, validate, publish, update, resolve dependencies, track installs, and repair manifests.",
+  "notes": "## What it does\n\nThe Companion skill gives your assistant one reliable workflow for local SKILL.md packages: refresh eligible expired credentials, validate, publish, update, organize, install, audit, and self-update.\n\n## Safety model\n\n- Reads only skill folders you point it at and Companion's own local state under ~/.companion.\n- Stores credentials in ~/.companion/credentials.json by workspace id, rotates an expired file-backed token only during its 30-day recovery window, and never prints tokens.\n- Confirms publishing or archival changes before mutating workspace skills.\n- Uses companion.json as the source of truth for package identity, version, env/secrets, dependencies, notes, commands, and changelog.\n\n## Local tracking\n\nCompanion records installed skills in ~/.companion/skills.lock.json under workspace-id keys so audits can compare local versions, checksums, and dependency snapshots against the workspace registry without storing tokens. Installs fan out into every tool the user works with (Claude Code, Codex, OpenCode, …); each record's targets[] array tracks the per-tool and per-project install locations, with project-scope installs kept in a per-project <repo>/.companion/skills.lock.json.",
   "metadata": {
     "companionSkillId": "b0780a97-6972-4a2b-8e88-f41a528900c7",
     "integrityFiles": [
@@ -24,6 +24,15 @@
       "evals/evals.json"
     ],
     "changelog": [
+      {
+        "version": "1.23.0",
+        "date": "2026-07-21",
+        "changes": [
+          "Refreshes a file-backed Companion token automatically when it expired within the last 30 days.",
+          "Preserves the token's exact name and scopes, revokes the expired token atomically, and stores the one-time replacement through a private atomic credentials-file swap.",
+          "Requires a fresh Use prompt for environment-provided, revoked, departed-user, or more-than-30-days-expired credentials without printing any token."
+        ]
+      },
       {
         "version": "1.22.0",
         "date": "2026-07-20",
@@ -285,6 +294,7 @@
   },
   "dependencies": {},
   "commands": [
+    { "name": "Refresh workspace credentials", "desc": "Replace an eligible expired file-backed token once without widening its scopes or printing the replacement." },
     { "name": "Bootstrap health check", "desc": "Gather workspace, self-update, local integrity, and installed-skill context in one fast pass." },
     { "name": "List skills", "desc": "List org, My Skills, reported installed skills, and local lockfile inventory." },
     { "name": "Publish a skill", "desc": "Validate a skill, ask Personal vs Org and folder placement, then publish it safely." },

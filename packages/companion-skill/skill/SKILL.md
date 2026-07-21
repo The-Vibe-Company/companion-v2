@@ -9,7 +9,8 @@ allowed-tools: read_file write_file run_shell
 # Companion
 
 This skill lets you manage the skills on this machine and keep them in sync with a Companion
-workspace: validate a skill, publish it, push an update, and check whether everything is current.
+workspace: validate a skill, publish it, push an update, refresh an eligible expired workspace
+credential, and check whether everything is current.
 Run the mandatory Companion self-update check once at the first Companion invocation in a
 conversation, and always confirm a change with the user before anything is published.
 
@@ -55,6 +56,17 @@ backward compatibility, if the file is the legacy flat shape `{ "apiUrl": "...",
 use those values and call token-supported `GET /local-skills/companion` to read its `workspaceId`.
 If neither source is available, stop and ask the user to copy the latest Companion install/use prompt
 from the workspace so fresh credentials can be saved.
+
+The mandatory bootstrap automatically checks file-backed credentials through
+`POST /tokens/refresh` before any other workspace call. An active token is left unchanged. A token
+expired for no more than 30 days is replaced once with a 90-day token carrying the exact same name
+and scopes; the old token is revoked atomically, and the replacement is written only to the active
+workspace entry through a private atomic `credentials.json` swap. Tokens that are revoked, more than
+30 days past expiry, or owned by a user who left the workspace require a fresh Companion **Use**
+prompt. A `COMPANION_TOKEN` supplied through the environment is never rewritten or rotated by the
+skill; if it has expired, ask the user to replace that environment value from a fresh **Use** prompt.
+Credential read-modify-write cycles use the shared `.credentials.lock` directory so concurrent
+bootstraps and **Use** prompts preserve every workspace entry.
 
 Never print the token back to the user or write it into a skill package. Only read
 `~/.companion/credentials.json` (or the Windows equivalent) for credentials, and otherwise treat
@@ -107,7 +119,8 @@ Run it from this skill package root:
 python3 scripts/bootstrap.py --json --auto-update-companion
 ```
 
-The bootstrap resolves credentials, calls `GET /local-skills/companion`, `GET /skills?lib=org`,
+The bootstrap resolves credentials, checks file-backed tokens with `POST /tokens/refresh`, then calls
+`GET /local-skills/companion`, `GET /skills?lib=org`,
 `GET /skills?lib=mine`, and `GET /skills?installed=true`, reads the active workspace entry in
 `~/.companion/skills.lock.json` or the legacy `skills.log.json` fallback, and returns a JSON context
 with `workspace`, `companion`, `integrity`, `skills`, `actions`, and `errors`.
@@ -993,7 +1006,7 @@ skills view shows the correct status and version. Report the version from this s
 curl -s "$COMPANION_API_URL/local-skills/companion/installed" \
   -H "Authorization: Bearer $COMPANION_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"version":"1.22.0","agent":"<your assistant name>"}'
+  -d '{"version":"1.23.0","agent":"<your assistant name>"}'
 ```
 
 A `{ "ok": true, "status": "installed" }` response confirms the workspace now knows this machine has

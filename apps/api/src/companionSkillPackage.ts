@@ -101,16 +101,38 @@ function buildPrompts(version: string): LocalSkillPrompts {
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
-const file = path.join(os.homedir(), ".companion", "credentials.json");
+const dir = path.join(os.homedir(), ".companion");
+const file = path.join(dir, "credentials.json");
+const lock = path.join(dir, ".credentials.lock");
 const workspaceId = "{workspaceId}";
 const entry = { apiUrl: "{base}", token: "{token}", updatedAt: new Date().toISOString() };
-let current = {};
-try { current = JSON.parse(fs.readFileSync(file, "utf8")); } catch {}
-const workspaces = current && current.schemaVersion === 2 && current.workspaces && typeof current.workspaces === "object"
-  ? current.workspaces
-  : {};
-const next = { schemaVersion: 2, activeWorkspaceId: workspaceId, workspaces: { ...workspaces, [workspaceId]: entry } };
-fs.writeFileSync(file, JSON.stringify(next, null, 2) + "\\n", { mode: 0o600 });
+fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+const deadline = Date.now() + 10000;
+for (;;) {
+  try { fs.mkdirSync(lock, { mode: 0o700 }); break; }
+  catch (error) {
+    if (!error || error.code !== "EEXIST") throw error;
+    try { if (Date.now() - fs.statSync(lock).mtimeMs > 300000) { fs.rmdirSync(lock); continue; } } catch {}
+    if (Date.now() >= deadline) throw new Error("timed out waiting to update credentials.json");
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+  }
+}
+let temp;
+try {
+  let current = {};
+  if (fs.existsSync(file)) current = JSON.parse(fs.readFileSync(file, "utf8"));
+  const workspaces = current && current.schemaVersion === 2 && current.workspaces && typeof current.workspaces === "object"
+    ? current.workspaces
+    : {};
+  const next = { schemaVersion: 2, activeWorkspaceId: workspaceId, workspaces: { ...workspaces, [workspaceId]: entry } };
+  temp = path.join(dir, ".credentials." + process.pid + "." + Date.now() + ".tmp");
+  fs.writeFileSync(temp, JSON.stringify(next, null, 2) + "\\n", { mode: 0o600 });
+  fs.renameSync(temp, file);
+  fs.chmodSync(file, 0o600);
+} finally {
+  if (temp) { try { fs.unlinkSync(temp); } catch {} }
+  try { fs.rmdirSync(lock); } catch {}
+}
 NODE`,
     'chmod 600 "$HOME/.companion/credentials.json" 2>/dev/null || true',
     "```",
@@ -120,14 +142,21 @@ NODE`,
     '$dir = Join-Path $HOME ".companion"',
     "New-Item -ItemType Directory -Force -Path $dir | Out-Null",
     '$file = Join-Path $dir "credentials.json"',
+    '$lock = Join-Path $dir ".credentials.lock"',
     '$workspaceId = "{workspaceId}"',
     '$entry = @{ apiUrl = "{base}"; token = "{token}"; updatedAt = (Get-Date).ToUniversalTime().ToString("o") }',
-    '$current = $null',
-    'if (Test-Path $file) { try { $current = Get-Content -Raw $file | ConvertFrom-Json } catch {} }',
-    '$workspaces = @{}',
-    'if ($current -and $current.schemaVersion -eq 2 -and $current.workspaces) { $current.workspaces.PSObject.Properties | ForEach-Object { $workspaces[$_.Name] = $_.Value } }',
-    '$workspaces[$workspaceId] = $entry',
-    '@{ schemaVersion = 2; activeWorkspaceId = $workspaceId; workspaces = $workspaces } | ConvertTo-Json -Depth 5 | Set-Content -NoNewline -Encoding UTF8 $file',
+    '$deadline = (Get-Date).AddSeconds(10)',
+    'while ($true) { try { New-Item -ItemType Directory -Path $lock -ErrorAction Stop | Out-Null; break } catch { if (Test-Path $lock) { $age = (Get-Date).ToUniversalTime() - (Get-Item $lock).LastWriteTimeUtc; if ($age.TotalMinutes -gt 5) { Remove-Item -Force $lock -ErrorAction SilentlyContinue; continue } }; if ((Get-Date) -ge $deadline) { throw "timed out waiting to update credentials.json" }; Start-Sleep -Milliseconds 50 } }',
+    '$temp = Join-Path $dir (".credentials." + [guid]::NewGuid().ToString("N") + ".tmp")',
+    'try {',
+    '  $current = $null',
+    '  if (Test-Path $file) { $current = Get-Content -Raw -ErrorAction Stop $file | ConvertFrom-Json -ErrorAction Stop }',
+    '  $workspaces = @{}',
+    '  if ($current -and $current.schemaVersion -eq 2 -and $current.workspaces) { $current.workspaces.PSObject.Properties | ForEach-Object { $workspaces[$_.Name] = $_.Value } }',
+    '  $workspaces[$workspaceId] = $entry',
+    '  @{ schemaVersion = 2; activeWorkspaceId = $workspaceId; workspaces = $workspaces } | ConvertTo-Json -Depth 5 | Set-Content -NoNewline -Encoding UTF8 $temp',
+    '  Move-Item -Force $temp $file',
+    '} finally { Remove-Item -Force $temp -ErrorAction SilentlyContinue; Remove-Item -Force $lock -ErrorAction SilentlyContinue }',
     "```",
   ].join("\n");
 

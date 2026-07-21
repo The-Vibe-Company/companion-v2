@@ -16,9 +16,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  */
 
 const serviceMocks = vi.hoisted(() => ({
+  ApiTokenRefreshError: class ApiTokenRefreshError extends Error {},
   ensureUserBootstrap: vi.fn(async () => undefined),
   listOrgs: vi.fn(),
   resolveApiToken: vi.fn(),
+  refreshApiToken: vi.fn(),
   getGitHubIntegration: vi.fn(),
   getGitHubUserCredential: vi.fn(),
   refreshGitHubConnectionCredential: vi.fn(),

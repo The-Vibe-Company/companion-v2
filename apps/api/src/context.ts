@@ -20,7 +20,7 @@ export interface ApiVariables {
 }
 
 /** Extract a bearer credential from an `Authorization` header, if present. */
-function bearerFrom(header: string | undefined): string | null {
+export function bearerFromHeader(header: string | undefined): string | null {
   if (!header) return null;
   const match = /^Bearer\s+(.+)$/i.exec(header.trim());
   return match ? match[1]!.trim() : null;
@@ -41,7 +41,7 @@ export async function attachSession(c: Context<{ Variables: ApiVariables }>, nex
     });
   } else {
     // No cookie session — try a personal access token (programmatic publish/install).
-    const bearer = bearerFrom(c.req.header("authorization"));
+    const bearer = bearerFromHeader(c.req.header("authorization"));
     if (bearer) {
       const resolved = await resolveApiToken(bearer);
       if (resolved) {

@@ -34,6 +34,29 @@
         "Still supports binding through --skill without falling back to a browser."
       ],
       "files": []
+    },
+    {
+      "id": 4,
+      "prompt": "Le token Companion dans ~/.companion/credentials.json a expiré hier. Relance le bootstrap sans me redemander une clé et sans afficher de secret.",
+      "expected_output": "Runs the mandatory bootstrap, uses POST /tokens/refresh for the file-backed credential, atomically stores the same-scope replacement in only the active workspace entry, and continues without revealing either token.",
+      "expectations": [
+        "Uses POST /tokens/refresh before other workspace API calls.",
+        "Preserves the existing token scopes and does not request broader permissions.",
+        "Updates only the active credentials.json workspace entry atomically with private permissions.",
+        "Never prints or returns the old or replacement token."
+      ],
+      "files": []
+    },
+    {
+      "id": 5,
+      "prompt": "Mon COMPANION_TOKEN exporté dans l'environnement est expiré depuis deux jours. Rafraîchis-le automatiquement et continue.",
+      "expected_output": "Does not rotate or persist an environment-provided token, explains that the environment cannot be rewritten safely, and requests a fresh Companion Use prompt without exposing the old credential.",
+      "expectations": [
+        "Does not call automatic token refresh for an environment-provided credential.",
+        "Does not write the environment token into credentials.json.",
+        "Requests a fresh Companion Use prompt and never prints the expired token."
+      ],
+      "files": []
     }
   ]
 }

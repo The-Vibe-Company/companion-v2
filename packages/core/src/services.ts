@@ -24,6 +24,7 @@ import type {
   SkillShareTarget,
   SkillVersionRow,
   TokenScope,
+  RefreshTokenResponse,
 } from "@companion/contracts";
 import {
   API_TOKEN_PREFIX,
@@ -37,6 +38,7 @@ import {
   publishSkillInputSchema,
   renameSkillInputSchema,
   skillFilterPreferencesSchema,
+  tokenScopesSchema,
   userAvatarPublicPath,
   type CompanionManifest,
   type PublishSkillInput,
@@ -61,6 +63,7 @@ import {
   getPreTenantSkillPreview,
   getPreTenantSkillShareTarget,
   listPreTenantOrganizations,
+  lockPreTenantApiTokenForRefresh,
   lockPreTenantInvitation,
   preTenantUsersShareOrganization,
   resolvePreTenantApiToken,
@@ -3213,6 +3216,14 @@ async function assertCanModifySkillRow(input: {
 /** Default lifetime of an issued token (90 days), unless overridden by the caller. */
 export const API_TOKEN_TTL_MS = 1000 * 60 * 60 * 24 * 90;
 
+/** Generic public failure for refresh-ineligible credentials; callers must not reveal which rule failed. */
+export class ApiTokenRefreshError extends Error {
+  constructor() {
+    super("token cannot be refreshed");
+    this.name = "ApiTokenRefreshError";
+  }
+}
+
 function hashApiToken(raw: string): string {
   return createHash("sha256").update(raw).digest("hex");
 }
@@ -3257,6 +3268,78 @@ export async function issueApiToken(input: {
     .returning({ id: schema.apiTokens.id });
   if (!row) throw new Error("could not issue token");
   return { id: row.id, token, prefix, scopes: input.scopes, expiresAt };
+}
+
+/**
+ * Refresh an expired PAT once during the fixed database-enforced 30-day recovery window.
+ *
+ * Active tokens are returned as metadata-only `current` responses. For an expired eligible token,
+ * the successor keeps the exact name and scopes, while insertion, old-token revocation, and the
+ * value-free audit entry commit atomically. The pre-tenant row lock serializes concurrent attempts.
+ */
+export async function refreshApiToken(rawToken: string, database: Db = db): Promise<RefreshTokenResponse> {
+  if (!rawToken.startsWith(API_TOKEN_PREFIX)) throw new ApiTokenRefreshError();
+  const tokenHash = hashApiToken(rawToken);
+
+  return database.transaction(async (rawTx) => {
+    const tx = rawTx as unknown as Db;
+    const candidate = await lockPreTenantApiTokenForRefresh(tx, tokenHash);
+    if (!candidate) throw new ApiTokenRefreshError();
+
+    const parsedScopes = tokenScopesSchema.safeParse(candidate.scopes);
+    if (!parsedScopes.success) throw new ApiTokenRefreshError();
+    const scopes: TokenScope[] = parsedScopes.data;
+    if (!candidate.is_expired) {
+      return {
+        status: "current" as const,
+        scopes,
+        expires_at: new Date(candidate.expires_at).toISOString(),
+      };
+    }
+
+    await tx.execute(
+      sql`select set_config('app.org_id', ${candidate.org_id}, true), set_config('app.user_id', ${candidate.user_id}, true)`,
+    );
+    const secret = randomBytes(24).toString("hex");
+    const token = `${API_TOKEN_PREFIX}${secret}`;
+    const prefix = token.slice(0, API_TOKEN_PREFIX.length + 6);
+    const expiresAt = new Date(Date.now() + API_TOKEN_TTL_MS);
+    const [replacement] = await tx
+      .insert(schema.apiTokens)
+      .values({
+        orgId: candidate.org_id,
+        userId: candidate.user_id,
+        name: candidate.token_name,
+        tokenPrefix: prefix,
+        tokenHash: hashApiToken(token),
+        scopes,
+        expiresAt,
+      })
+      .returning({ id: schema.apiTokens.id });
+    if (!replacement) throw new Error("could not issue replacement token");
+
+    await tx
+      .update(schema.apiTokens)
+      .set({ revokedAt: new Date() })
+      .where(and(eq(schema.apiTokens.id, candidate.token_id), isNull(schema.apiTokens.revokedAt)));
+    await tx.insert(schema.auditLog).values({
+      orgId: candidate.org_id,
+      actorId: candidate.user_id,
+      action: "api_token.refresh",
+      targetType: "api_token",
+      targetId: candidate.token_id,
+      metadata: { replacementTokenId: replacement.id },
+    });
+
+    return {
+      status: "rotated" as const,
+      id: replacement.id,
+      token,
+      prefix,
+      scopes,
+      expires_at: expiresAt.toISOString(),
+    };
+  });
 }
 
 /**
