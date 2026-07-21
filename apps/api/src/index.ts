@@ -282,8 +282,11 @@ import { StripeBillingGateway } from "@companion/billing";
 import {
   billingRuntimeConfig,
   assertBillingEnvironmentConfigured,
+  BillingPreviewProviderError,
   createBillingCheckout,
   createBillingPortal,
+  getBillingPreview,
+  getBillingPreviewSource,
   getBillingOverview,
   getRunPreferences,
   processStripeWebhook,
@@ -627,6 +630,25 @@ app.get("/v1/billing", async (c) => {
     return c.json(overview);
   } catch (error) {
     return jsonError(c, error, 401);
+  }
+});
+
+app.get("/v1/billing/preview", async (c) => {
+  try {
+    const source = await withTenant(c, ({ actor, orgId, database }) =>
+      getBillingPreviewSource({
+        actorId: actor.id,
+        orgId,
+        database,
+      }),
+    );
+    const preview = source
+      ? await getBillingPreview({ source, gateway: stripeBillingGateway() })
+      : { paymentMethod: null, latestInvoice: null };
+    c.header("Cache-Control", "private, no-store");
+    return c.json(preview);
+  } catch (error) {
+    return jsonError(c, error, error instanceof BillingPreviewProviderError ? 502 : 403);
   }
 });
 

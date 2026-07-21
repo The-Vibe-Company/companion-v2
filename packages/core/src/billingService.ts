@@ -1,5 +1,6 @@
 import { and, count, eq, sql } from "drizzle-orm";
 import type { BillingGateway, BillingSubscriptionSnapshot } from "@companion/billing";
+import type { BillingPreview } from "@companion/contracts";
 import { db, schema, type Db } from "@companion/db";
 import { PAYMENT_GRACE_MS, billingRuntimeConfig } from "./billing";
 import { listPreTenantBillingSyncCandidates, resolvePreTenantBillingOrganization } from "./preTenant";
@@ -24,12 +25,31 @@ async function withBillingTenantContext<T>(
   });
 }
 
+export class BillingPermissionError extends Error {
+  constructor() {
+    super("only organization owners and admins can manage billing");
+    this.name = "BillingPermissionError";
+  }
+}
+
+export class BillingPreviewProviderError extends Error {
+  constructor() {
+    super("billing payment details are temporarily unavailable");
+    this.name = "BillingPreviewProviderError";
+  }
+}
+
+export interface BillingPreviewSource {
+  customerId: string;
+  subscriptionId: string;
+}
+
 async function assertBillingManager(database: Db, actorId: string, orgId: string): Promise<void> {
   const membership = await database.query.memberships.findFirst({
     where: and(eq(schema.memberships.orgId, orgId), eq(schema.memberships.userId, actorId)),
   });
   if (!membership || !["owner", "admin"].includes(membership.orgRole)) {
-    throw new Error("only organization owners and admins can manage billing");
+    throw new BillingPermissionError();
   }
 }
 
@@ -185,6 +205,47 @@ export async function createBillingPortal(input: {
   });
   if (!billing?.stripeCustomerId) throw new Error("no Stripe customer exists for this organization");
   return { url: await input.gateway.createPortalSession({ customerId: billing.stripeCustomerId, returnUrl: `${input.appUrl}/settings?view=billing` }) };
+}
+
+export async function getBillingPreviewSource(input: {
+  actorId: string;
+  orgId: string;
+  database?: Db;
+}): Promise<BillingPreviewSource | null> {
+  const database = input.database ?? db;
+  await assertBillingManager(database, input.actorId, input.orgId);
+  const billing = await database.query.billingSubscriptions.findFirst({
+    where: eq(schema.billingSubscriptions.orgId, input.orgId),
+  });
+  if (!billing?.stripeCustomerId || !billing.stripeSubscriptionId) {
+    return null;
+  }
+  return { customerId: billing.stripeCustomerId, subscriptionId: billing.stripeSubscriptionId };
+}
+
+export async function getBillingPreview(input: {
+  source: BillingPreviewSource | null;
+  gateway: BillingGateway;
+}): Promise<BillingPreview> {
+  if (!input.source) return { paymentMethod: null, latestInvoice: null };
+  let preview: Awaited<ReturnType<BillingGateway["retrieveBillingPreview"]>>;
+  try {
+    preview = await input.gateway.retrieveBillingPreview({
+      customerId: input.source.customerId,
+      subscriptionId: input.source.subscriptionId,
+    });
+  } catch {
+    throw new BillingPreviewProviderError();
+  }
+  return {
+    paymentMethod: preview.paymentMethod,
+    latestInvoice: preview.latestInvoice
+      ? {
+          ...preview.latestInvoice,
+          createdAt: preview.latestInvoice.createdAt.toISOString(),
+        }
+      : null,
+  };
 }
 
 export async function processStripeWebhook(input: {

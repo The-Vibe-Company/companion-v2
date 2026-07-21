@@ -202,11 +202,12 @@ click_button_text() {
 
 # Center point (x y) of an element's bounding box, from real layout.
 box_center() {
-  agent-browser get box "$1" | node -e '
+  agent-browser get box "$1" --json | node -e '
     let input = "";
     process.stdin.on("data", (chunk) => input += chunk);
     process.stdin.on("end", () => {
-      const box = JSON.parse(input);
+      const payload = JSON.parse(input);
+      const box = payload.data ?? payload;
       process.stdout.write(String(Math.round(box.x + box.width / 2)) + " " + String(Math.round(box.y + box.height / 2)) + "\n");
     });
   '

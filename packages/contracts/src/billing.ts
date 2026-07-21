@@ -76,6 +76,34 @@ export const billingOverviewSchema = z.object({
 });
 export type BillingOverview = z.infer<typeof billingOverviewSchema>;
 
+export const billingPaymentMethodPreviewSchema = z.object({
+  type: z.string().min(1),
+  brand: z.string().min(1).nullable(),
+  last4: z.string().regex(/^\d{4}$/).nullable(),
+  expMonth: z.number().int().min(1).max(12).nullable(),
+  expYear: z.number().int().positive().nullable(),
+});
+export type BillingPaymentMethodPreview = z.infer<typeof billingPaymentMethodPreviewSchema>;
+
+export const billingInvoiceStatusSchema = z.enum(["open", "paid", "uncollectible", "void"]);
+export type BillingInvoiceStatus = z.infer<typeof billingInvoiceStatusSchema>;
+
+export const billingInvoicePreviewSchema = z.object({
+  number: z.string().min(1).nullable(),
+  createdAt: z.string().datetime(),
+  amountDue: z.number().int().nonnegative(),
+  currency: z.string().length(3),
+  status: billingInvoiceStatusSchema,
+  hostedInvoiceUrl: z.string().url().nullable(),
+});
+export type BillingInvoicePreview = z.infer<typeof billingInvoicePreviewSchema>;
+
+export const billingPreviewSchema = z.object({
+  paymentMethod: billingPaymentMethodPreviewSchema.nullable(),
+  latestInvoice: billingInvoicePreviewSchema.nullable(),
+});
+export type BillingPreview = z.infer<typeof billingPreviewSchema>;
+
 export const entitlementErrorCodeSchema = z.enum([
   "upgrade_required",
   "org_skill_limit_reached",

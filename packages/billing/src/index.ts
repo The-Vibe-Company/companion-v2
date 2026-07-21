@@ -20,6 +20,28 @@ export interface CheckoutSessionSnapshot {
   status: "open" | "complete" | "expired";
 }
 
+export interface BillingPaymentMethodSnapshot {
+  type: string;
+  brand: string | null;
+  last4: string | null;
+  expMonth: number | null;
+  expYear: number | null;
+}
+
+export interface BillingInvoiceSnapshot {
+  number: string | null;
+  createdAt: Date;
+  amountDue: number;
+  currency: string;
+  status: "open" | "paid" | "uncollectible" | "void";
+  hostedInvoiceUrl: string | null;
+}
+
+export interface BillingPreviewSnapshot {
+  paymentMethod: BillingPaymentMethodSnapshot | null;
+  latestInvoice: BillingInvoiceSnapshot | null;
+}
+
 export interface BillingGateway {
   validateConfiguration(): Promise<void>;
   createCustomer(orgId: string, name: string, idempotencyKey: string): Promise<string>;
@@ -35,6 +57,7 @@ export interface BillingGateway {
     idempotencyKey: string;
   }): Promise<CheckoutSessionSnapshot>;
   createPortalSession(input: { customerId: string; returnUrl: string }): Promise<string>;
+  retrieveBillingPreview(input: { customerId: string; subscriptionId: string }): Promise<BillingPreviewSnapshot>;
   updateSeatQuantity(input: {
     subscriptionId: string;
     itemId: string;
@@ -66,6 +89,43 @@ function subscriptionSnapshot(subscription: Stripe.Subscription): BillingSubscri
     cancelAtPeriodEnd: subscription.cancel_at_period_end,
     canceledAt: dateFromUnix(subscription.canceled_at),
   };
+}
+
+function paymentMethodSnapshot(paymentMethod: Stripe.PaymentMethod | null): BillingPaymentMethodSnapshot | null {
+  if (!paymentMethod) return null;
+  return {
+    type: paymentMethod.type,
+    brand: paymentMethod.card?.brand ?? null,
+    last4: paymentMethod.card?.last4 ?? null,
+    expMonth: paymentMethod.card?.exp_month ?? null,
+    expYear: paymentMethod.card?.exp_year ?? null,
+  };
+}
+
+function customerSourceSnapshot(source: Stripe.CustomerSource | null): BillingPaymentMethodSnapshot | null {
+  if (!source) return null;
+  if (source.object === "card") {
+    return {
+      type: "card",
+      brand: source.brand,
+      last4: source.last4,
+      expMonth: source.exp_month,
+      expYear: source.exp_year,
+    };
+  }
+  if (source.object === "bank_account") {
+    return { type: "bank_account", brand: null, last4: source.last4, expMonth: null, expYear: null };
+  }
+  if (source.object === "source") {
+    return {
+      type: source.type,
+      brand: source.card?.brand ?? null,
+      last4: source.card?.last4 ?? source.sepa_debit?.last4 ?? null,
+      expMonth: source.card?.exp_month ?? null,
+      expYear: source.card?.exp_year ?? null,
+    };
+  }
+  return { type: source.object, brand: null, last4: null, expMonth: null, expYear: null };
 }
 
 export class StripeBillingGateway implements BillingGateway {
@@ -178,6 +238,77 @@ export class StripeBillingGateway implements BillingGateway {
       return_url: input.returnUrl,
     });
     return session.url;
+  }
+
+  async retrieveBillingPreview(input: {
+    customerId: string;
+    subscriptionId: string;
+  }): Promise<BillingPreviewSnapshot> {
+    const [subscription, customer, invoices] = await Promise.all([
+      this.stripe.subscriptions.retrieve(input.subscriptionId, {
+        expand: ["default_payment_method", "default_source"],
+      }),
+      this.stripe.customers.retrieve(input.customerId, {
+        expand: ["invoice_settings.default_payment_method", "default_source"],
+      }),
+      this.stripe.invoices.list({
+        customer: input.customerId,
+        subscription: input.subscriptionId,
+        limit: 100,
+      }),
+    ]);
+    const activeCustomer = "deleted" in customer && customer.deleted ? null : (customer as Stripe.Customer);
+    const paymentInstrument = subscription.default_payment_method
+      ? { kind: "payment_method" as const, value: subscription.default_payment_method }
+      : subscription.default_source
+        ? { kind: "source" as const, value: subscription.default_source }
+        : activeCustomer?.invoice_settings.default_payment_method
+          ? { kind: "payment_method" as const, value: activeCustomer.invoice_settings.default_payment_method }
+          : activeCustomer?.default_source
+            ? { kind: "source" as const, value: activeCustomer.default_source }
+            : null;
+    const paymentMethod = paymentInstrument?.kind === "payment_method"
+      ? typeof paymentInstrument.value === "string"
+        ? await this.stripe.paymentMethods.retrieve(paymentInstrument.value)
+        : paymentInstrument.value
+      : null;
+    const source = paymentInstrument?.kind === "source"
+      ? typeof paymentInstrument.value === "string"
+        ? await this.stripe.customers.retrieveSource(input.customerId, paymentInstrument.value)
+        : paymentInstrument.value
+      : null;
+    let invoicePage = invoices;
+    let invoice = invoicePage.data.find(
+      (candidate): candidate is Stripe.Invoice & { status: BillingInvoiceSnapshot["status"] } =>
+        candidate.status !== null && candidate.status !== "draft",
+    );
+    while (!invoice && invoicePage.has_more) {
+      const lastInvoice = invoicePage.data.at(-1);
+      if (!lastInvoice) break;
+      invoicePage = await this.stripe.invoices.list({
+        customer: input.customerId,
+        subscription: input.subscriptionId,
+        limit: 100,
+        starting_after: lastInvoice.id,
+      });
+      invoice = invoicePage.data.find(
+        (candidate): candidate is Stripe.Invoice & { status: BillingInvoiceSnapshot["status"] } =>
+          candidate.status !== null && candidate.status !== "draft",
+      );
+    }
+    return {
+      paymentMethod: paymentMethodSnapshot(paymentMethod) ?? customerSourceSnapshot(source),
+      latestInvoice: invoice
+        ? {
+            number: invoice.number,
+            createdAt: new Date(invoice.created * 1_000),
+            amountDue: invoice.amount_due,
+            currency: invoice.currency,
+            status: invoice.status,
+            hostedInvoiceUrl: invoice.hosted_invoice_url ?? null,
+          }
+        : null,
+    };
   }
 
   async updateSeatQuantity(input: {

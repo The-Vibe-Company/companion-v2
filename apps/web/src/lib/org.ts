@@ -1,6 +1,6 @@
 "use client";
 
-import type { ApiTokenRow, IssuedToken, OrgRole, TokenScope } from "@companion/contracts";
+import type { ApiTokenRow, BillingPreview, IssuedToken, OrgRole, TokenScope } from "@companion/contracts";
 import { apiFetch } from "./apiClient";
 
 export async function setCurrentOrg(orgId: string): Promise<void> {
@@ -117,6 +117,10 @@ export async function startBillingCheckout(): Promise<{ url: string }> {
 
 export async function openBillingPortal(): Promise<{ url: string }> {
   return apiFetch("/v1/billing/portal", { method: "POST" });
+}
+
+export async function fetchBillingPreview(orgId: string): Promise<BillingPreview> {
+  return apiFetch("/v1/billing/preview", { headers: { "x-companion-org": orgId } });
 }
 
 export async function removeAccessDomain(domainId: string): Promise<void> {
