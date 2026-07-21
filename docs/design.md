@@ -13,7 +13,7 @@
 - **Email:** `packages/email` supports local log/Mailpit mode and Resend for production.
 - **Web:** Next.js App Router in `apps/web`; it calls the API, not Postgres or MinIO directly.
 - **CLI:** `cli` stores an API URL plus Better Auth session cookie and uses REST endpoints.
-- **Worker:** `apps/worker` runs independent billing and skill-run supervisors. `packages/billing`
+- **Worker:** `apps/worker` runs independent billing, skill-run, and GitHub-mirror supervisors. `packages/billing`
   is the framework-free Stripe adapter; `packages/core` owns plan computation, entitlements,
   quotas, run validation, and durable orchestration state.
 
@@ -57,10 +57,11 @@ service references, public domains, Stripe webhook registration, initial deploym
 ```
 apps/
   api/        # Hono backend, Better Auth, REST + tRPC
-  worker/     # independent Stripe reconciliation + durable skill-run supervisors
+  worker/     # Stripe, durable skill-run, and GitHub-mirror supervisors
   web/        # Next.js portal
 packages/
   billing/    # framework-free Stripe gateway
+  github/     # GitHub App OAuth, installation tokens, deterministic Git trees
   db/         # Drizzle schema, migrations, seeds
   auth/       # Better Auth config
   core/       # framework-free services, RBAC, scoping
@@ -77,7 +78,8 @@ Better Auth owns the core `user`, `session`, `account`, and `verification` table
 adds `profiles`, `organizations`, `memberships`, `invitations`,
 `skills`, `skill_versions`, `skill_version_dependencies`, `labels`, `skill_labels`,
 `skill_filter_preferences`, `skill_comments`, `skill_comment_images`, `local_skill_installs`,
-`api_tokens`, `billing_subscriptions`, `stripe_webhook_events`, `audit_log`, the secret-vault
+`api_tokens`, `github_connections`, `github_sync_destinations`,
+`github_sync_destination_skills`, `billing_subscriptions`, `stripe_webhook_events`, `audit_log`, the secret-vault
 tables, and the skill-run tables described below. There are **no teams**:
 the hierarchy is `Organization → User`. The former decorative `organizations.plan` column no longer
 exists: raw provider state lives in at most one `billing_subscriptions` row per organization, while
@@ -395,6 +397,105 @@ The signed-in web deep link uses a separate authenticated resolver,
 `GET /v1/skills/share-target/:token`, which returns `{org_id, slug}` only when the user is already a
 member of the token's workspace; `/s/:token/go` then sets `companion_org` before redirecting to the
 slug-keyed detail route, where the client replaces the address bar back to `/s/:token`.
+
+## GitHub Skill Mirrors
+
+Workspace Owners and Admins manage one-way `Companion → GitHub` mirrors from **Settings → GitHub**.
+Developers, non-members, cross-tenant actors, and every PAT are rejected: the HTTP surface is browser-session
+only and the framework-free core service repeats the membership plus `canManageOrg` gate. GitHub is never a
+source of truth. There are no import webhooks and no merge or two-way state; the next explicit, event-driven, or
+15-minute drift sync replaces direct GitHub changes.
+
+Authentication uses one GitHub App end to end. The browser authorization is a GitHub App user-to-server OAuth
+grant, protected by a ten-minute HMAC-signed `state` bound to `org_id`, `user_id`, and a matching HTTP-only
+nonce cookie. User access and refresh tokens use the existing per-org envelope encryption and never appear in
+responses, logs, or audit metadata. Refresh happens outside the database transaction and is persisted only by an
+update-only credential-generation-and-version compare-and-swap. If disconnect or reconnect wins that race, the API
+revokes the newly issued access token instead of recreating or overwriting the connection. Disconnect serializes
+on the org GitHub lifecycle lock and revokes the stored user token before deleting its encrypted envelope; a
+revocation failure rolls back the local disconnect rather than orphaning a live credential. The API uses the user
+token to list accessible App installations/repos and to create a public or private repo in the authorized account.
+The worker independently mints short-lived
+installation tokens from the App private key for Git Database writes. The private key and App ID are worker-only;
+the internet-facing API receives only the App slug, client ID, and client secret. SaaS sets
+`COMPANION_GITHUB_APP_MANAGED=true` and owns the official Companion App; self-hosted operators may register an
+App of any name/owner using `GITHUB_APP_ID`, `GITHUB_APP_SLUG`, `GITHUB_APP_CLIENT_ID`,
+`GITHUB_APP_CLIENT_SECRET`, and `GITHUB_APP_PRIVATE_KEY`, split across those services, and set
+`COMPANION_GITHUB_SYNC_ENABLED=true` on the API only after both halves are ready. Incomplete configuration
+disables the panel or supervisor without affecting the rest of Companion.
+
+The additive, RLS-protected model is:
+
+- `github_connections`: at most one user authorization per `org_id`, public GitHub identity metadata, encrypted
+  access/refresh credential envelopes, expiries, and credential generation/version fencing;
+- `github_sync_destinations`: multiple mirrors per org with installation/repository ids, default branch,
+  visibility, `all|selected` desired mode, desired/applied revisions, result metadata, retry schedule, and a
+  worker lease with owner, expiry, and a monotonic generation incremented on every claim. `repository_id` is
+  globally unique so two destinations or tenants cannot control the same repo;
+- `github_sync_destination_skills`: explicit selected-mode roots, joined by composite tenant foreign keys.
+
+Publishing or republishing an org skill, Share (`personal → org`), rename, archive, and restore increments the
+desired revision for every destination. The supervisor claims due rows through a narrow security-definer
+`FOR UPDATE SKIP LOCKED` function, coalesces revisions, and atomically binds the worker, exact claimed revision,
+five-minute lease, and new lease generation. Planning is one short tenant transaction: a lock-free read requires
+that exact live claim plus an existing connection, then snapshots the destination, selected roots, versions, and
+dependencies before releasing the database connection. Selected mode requires at least one explicit root;
+archived roots are temporarily omitted, while dependency closure follows stable `depends_on_skill_id` before the
+historical slug. A missing or archived required dependency fails before S3/GitHub I/O, preserving the last valid
+branch.
+
+All archive, render, and Git-object preparation happens after the planning transaction. A one-second per-claim
+monitor repeatedly checks the same connection/owner/generation/revision/expiry fence and aborts work when a
+disconnect, delete, newer desired revision, reclaim, or lease loss makes it stale. The whole attempt is bounded to
+240 seconds, below the five-minute lease; it does not extend the lease. If a newer revision overtakes a claim, the
+failure transition releases it directly to `pending` without consuming an attempt or backoff. A failure still
+owned by the exact current claim consumes the exponential retry budget; a stale claim cannot mutate error state.
+A 15-minute stale observation also becomes a desired revision.
+
+The renderer verifies each fetched archive against its persisted canonical checksum before expanding it without
+executing it, normalizes a wrapper directory, preserves exact binary bytes and executable bits, and emits only
+`README.md`, `.companion-sync.json`, and
+`skills/<slug>/…`. Ordering and metadata are deterministic and match the repository discovery shape consumed by
+`npx skills add owner/repo`. Archive fetches and blob uploads use bounded concurrency and aggregate
+size/file limits. On the first pool error they stop dequeuing, abort active requests, and settle every started
+operation before returning, so failed work cannot continue after its claim is released.
+
+For each write attempt, the worker re-fetches repository metadata and requires GitHub's immutable repository id to
+equal the stored `repository_id`; a replacement already present at the same owner/name is rejected before object
+preparation. A size-zero repository is probed for branches because GitHub reports both truly empty and small
+repositories as zero KB. GitHub's Git References API cannot initialize a repository with no branches, so the
+worker uses the Contents API under the final publication fence to create a managed bootstrap commit, releases the
+fence, then re-observes it as the parent; the final root-tree commit removes the bootstrap file. It then observes
+the branch, uploads blobs, builds a Git tree from an empty root (never `base_tree`), compares tree
+SHAs for no-op detection, and prepares a commit whose parent is the observed head—all outside PostgreSQL. Only the
+branch ref changes the managed branch. Finalization opens a short transaction, takes the org lifecycle
+advisory lock and connection row first, then locks and revalidates the exact destination claim. That fence is held
+only across a no-op completion, a 30-second-bounded empty-repository bootstrap, ref creation, or one update with
+`force:false`, followed
+immediately by the database completion. A one-second transaction keepalive aborts the publish on database-session
+loss.
+Non-fast-forward `409`/`422` races release the final transaction and re-observe/reprepare, for at most three write
+attempts; rate limits, revocation, and branch protection remain actionable destination errors.
+
+A ref timeout, abort, process loss, or database-session loss can be ambiguous: GitHub may have accepted the
+non-force update while the completion transaction rolled back. The retry heals this by observing the current
+branch and comparing its tree SHA with the freshly prepared desired tree. A match performs no ref write and
+records the observed head commit; a mismatch prepares from the new head and retries. This observation never
+imports files, merges GitHub state into Companion, or creates a two-way sync. Successful publication atomically
+removes unmanaged files from the branch. A successful disconnect clears all destination leases, and the monitor
+stops slow preparation without waiting for it; if a worker already owns the final fence, disconnect or destination
+deletion waits only for the bounded ref update plus completion. Reconnecting leaves destinations paused until an
+admin explicitly resumes each mirror.
+
+Browser-only endpoints are:
+
+- `GET /v1/integrations/github`, `POST /v1/integrations/github/connect`, and
+  `GET /v1/integrations/github/callback`;
+- `DELETE /v1/integrations/github/account`;
+- `GET|POST /v1/integrations/github/repositories`;
+- `POST /v1/integrations/github/destinations`,
+  `PATCH|DELETE /v1/integrations/github/destinations/:id`, and
+  `POST /v1/integrations/github/destinations/:id/sync`.
 
 ## Billing And Entitlements
 

@@ -21,7 +21,9 @@ import {
 import { MembersPane } from "./MembersPane";
 import { InvitationsPane } from "./InvitationsPane";
 import { BillingPane } from "./BillingPane";
+import { GitHubPane } from "./GitHubPane";
 import { InviteDialog } from "./dialogs";
+import { canonicalizeSettingsRoute } from "./model";
 import type { ApiKeyVM, Invite, OrgCtx, SettingsDialog, SettingsRoute } from "./model";
 
 /** Breadcrumb segments for the current route — [section, page] (ported from app.jsx). */
@@ -47,6 +49,8 @@ function crumbFor(ctx: OrgCtx, route: SettingsRoute): string[] {
       return [ws.name, "Members"];
     case "invitations":
       return [ws.name, "Invitations"];
+    case "github":
+      return [ws.name, ctx.canManage ? "GitHub" : "General"];
     case "billing":
       return [ws.name, "Billing"];
     default:
@@ -78,6 +82,7 @@ export function SettingsView({
   onDialog: (dialog: SettingsDialog) => void;
   onClose: () => void;
 }) {
+  const activeRoute = canonicalizeSettingsRoute(route, ctx.canManage);
   const personalModels: ModelScope = {
     title: "Models",
     desc: "Compose your run launcher: activate models and connect each provider with its own write-only API key.",
@@ -104,31 +109,32 @@ export function SettingsView({
     disconnect: (provider) => deleteOrgModelProviderConnection(provider).then(() => {}),
   };
   let pane: React.ReactNode;
-  if (route.view === "profile") pane = <ProfilePane ctx={ctx} />;
-  else if (route.view === "preferences") pane = <PreferencesPane ctx={ctx} />;
+  if (activeRoute.view === "profile") pane = <ProfilePane ctx={ctx} />;
+  else if (activeRoute.view === "preferences") pane = <PreferencesPane ctx={ctx} />;
   // Distinct keys: the two provider panes are the SAME component type at the same tree position,
   // so without a key React would reuse the state (loaded connected ids) across a direct
   // personal ↔ workspace view switch.
   // `providers`/`org-providers` are legacy aliases of the merged Models panes (old deep-links).
-  else if (route.view === "models" || route.view === "providers")
+  else if (activeRoute.view === "models" || activeRoute.view === "providers")
     pane = <ModelsPane key="models" scope={personalModels} />;
-  else if (route.view === "org-models" || route.view === "org-providers")
+  else if (activeRoute.view === "org-models" || activeRoute.view === "org-providers")
     pane = <ModelsPane key="org-models" scope={workspaceModels} />;
-  else if (route.view === "apikeys") pane = <ApiKeysPane ctx={ctx} keys={apiKeys} />;
-  else if (route.view === "general") pane = <WorkspaceGeneralPane ctx={ctx} />;
-  else if (route.view === "members") pane = <MembersPane ctx={ctx} onInvite={() => onDialog("invite")} />;
-  else if (route.view === "invitations")
+  else if (activeRoute.view === "apikeys") pane = <ApiKeysPane ctx={ctx} keys={apiKeys} />;
+  else if (activeRoute.view === "general") pane = <WorkspaceGeneralPane ctx={ctx} />;
+  else if (activeRoute.view === "members") pane = <MembersPane ctx={ctx} onInvite={() => onDialog("invite")} />;
+  else if (activeRoute.view === "invitations")
     pane = <InvitationsPane ctx={ctx} invites={invites} onInvite={() => onDialog("invite")} />;
-  else if (route.view === "billing") pane = <BillingPane ctx={ctx} />;
+  else if (activeRoute.view === "github") pane = <GitHubPane ctx={ctx} />;
+  else if (activeRoute.view === "billing") pane = <BillingPane ctx={ctx} />;
   else pane = <WorkspaceGeneralPane ctx={ctx} />;
 
-  const crumb = crumbFor(ctx, route);
+  const crumb = crumbFor(ctx, activeRoute);
 
   return (
     <div className="sx">
       <SettingsSidebar
         ctx={ctx}
-        route={route}
+        route={activeRoute}
         go={onView}
         onClose={onClose}
         apiKeyCount={apiKeys.length}

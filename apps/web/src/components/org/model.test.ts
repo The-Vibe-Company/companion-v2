@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { parseSettingsView } from "./model";
+import { canonicalizeSettingsRoute, parseSettingsView } from "./model";
 
 describe("parseSettingsView", () => {
   it("accepts every current pane view", () => {
-    for (const view of ["profile", "preferences", "models", "apikeys", "general", "org-models", "members", "invitations", "billing"] as const) {
+    for (const view of ["profile", "preferences", "models", "apikeys", "general", "org-models", "members", "invitations", "github", "billing"] as const) {
       expect(parseSettingsView(view)).toBe(view);
     }
   });
@@ -18,5 +18,10 @@ describe("parseSettingsView", () => {
     expect(parseSettingsView("")).toBe("profile");
     expect(parseSettingsView(null)).toBe("profile");
     expect(parseSettingsView(undefined)).toBe("profile");
+  });
+
+  it("canonicalizes a Developer GitHub deep-link to General", () => {
+    expect(canonicalizeSettingsRoute({ view: "github" }, false)).toEqual({ view: "general" });
+    expect(canonicalizeSettingsRoute({ view: "github" }, true)).toEqual({ view: "github" });
   });
 });

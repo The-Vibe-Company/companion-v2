@@ -90,7 +90,8 @@ BEGIN
       public.companion_public_skill_preview(text),
       public.companion_skill_share_target(text, text),
       public.companion_billing_org_for_stripe_event(text, text),
-      public.companion_list_billing_sync_candidates(timestamp with time zone, boolean, integer)
+      public.companion_list_billing_sync_candidates(timestamp with time zone, boolean, integer),
+      public.companion_claim_github_sync_destinations(text, integer, integer)
      TO %I',
     runtime_role
   );

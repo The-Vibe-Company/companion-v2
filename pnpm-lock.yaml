@@ -59,6 +59,9 @@ importers:
       '@companion/email':
         specifier: workspace:*
         version: link:../../packages/email
+      '@companion/github':
+        specifier: workspace:*
+        version: link:../../packages/github
       '@companion/sandbox':
         specifier: workspace:*
         version: link:../../packages/sandbox
@@ -205,6 +208,9 @@ importers:
       '@companion/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@companion/github':
+        specifier: workspace:*
+        version: link:../../packages/github
       '@companion/sandbox':
         specifier: workspace:*
         version: link:../../packages/sandbox
@@ -405,6 +411,28 @@ importers:
         specifier: ^6.5.1
         version: 6.12.4
     devDependencies:
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+      vitest:
+        specifier: 3.2.7
+        version: 3.2.7(@types/debug@4.1.13)(@types/node@22.19.20)(happy-dom@20.10.6)(tsx@4.22.4)(yaml@2.9.0)
+
+  packages/github:
+    dependencies:
+      '@companion/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+      '@companion/skills':
+        specifier: workspace:*
+        version: link:../skills
+    devDependencies:
+      '@types/node':
+        specifier: ^22.10.2
+        version: 22.19.20
+      skills:
+        specifier: 1.5.9
+        version: 1.5.9
       typescript:
         specifier: ^5.7.2
         version: 5.9.3
@@ -3982,6 +4010,11 @@ packages:
 
   sisteransi@1.0.5:
     resolution: {integrity: sha512-bLGGlR1QxBcynn2d5YmDX4MGjlZvy2MRBDRNHLJ8VI6l6+9FUiyTFNJ0IveOSP0bcXgVDPRcfGqA0pjaqUpfVg==}
+
+  skills@1.5.9:
+    resolution: {integrity: sha512-BjxnhlIy5IrQ30q1nGgNDSf4gy84iNA2o4Ieq4im/HsRvOjGtqvDNpb/xx15FZryXMnAPeDUWqU1ndPRQ0IyOQ==}
+    engines: {node: '>=18'}
+    hasBin: true
 
   source-map-js@1.2.1:
     resolution: {integrity: sha512-UXWMKhLOwVKb728IUtQPXxfYU+usdybtUrK/8uGE8CQMvrhOpwvzDBwj0QhSL7MQc7vIsISBG8VQ8+IDQxpfQA==}
@@ -8120,6 +8153,10 @@ snapshots:
   signal-exit@4.1.0: {}
 
   sisteransi@1.0.5: {}
+
+  skills@1.5.9:
+    dependencies:
+      yaml: 2.9.0
 
   source-map-js@1.2.1: {}
 

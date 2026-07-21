@@ -43,6 +43,14 @@ export const modelProviderConnectionScopeEnum = pgEnum("model_provider_connectio
   "personal",
   "organization",
 ]);
+export const githubSyncModeEnum = pgEnum("github_sync_mode", ["all", "selected"]);
+export const githubSyncStatusEnum = pgEnum("github_sync_status", [
+  "pending",
+  "syncing",
+  "synced",
+  "error",
+  "disconnected",
+]);
 
 const now = () => timestamp("created_at", { withTimezone: true }).notNull().defaultNow();
 const updatedAt = () => timestamp("updated_at", { withTimezone: true }).notNull().defaultNow();
@@ -705,6 +713,122 @@ export const skillInstalls = pgTable(
   (t) => ({
     pk: primaryKey({ columns: [t.orgId, t.userId, t.skillId] }),
     byOrgUser: index("skill_installs_org_user_idx").on(t.orgId, t.userId),
+  }),
+);
+
+/** One GitHub App user authorization per workspace. Plaintext OAuth credentials never enter Postgres. */
+export const githubConnections = pgTable(
+  "github_connections",
+  {
+    orgId: uuid("org_id")
+      .primaryKey()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    githubUserId: text("github_user_id").notNull(),
+    githubLogin: text("github_login").notNull(),
+    githubAvatarUrl: text("github_avatar_url"),
+    /** Rotated for every OAuth connect or refresh so stale refreshes cannot overwrite a replacement row. */
+    credentialGeneration: uuid("credential_generation").notNull().defaultRandom(),
+    credentialVersion: integer("credential_version").notNull().default(1),
+    accessCiphertext: text("access_ciphertext").notNull(),
+    accessIv: text("access_iv").notNull(),
+    accessAuthTag: text("access_auth_tag").notNull(),
+    accessWrappedDek: text("access_wrapped_dek").notNull(),
+    accessWrapIv: text("access_wrap_iv").notNull(),
+    accessWrapAuthTag: text("access_wrap_auth_tag").notNull(),
+    accessKeyId: text("access_key_id").notNull(),
+    refreshCiphertext: text("refresh_ciphertext"),
+    refreshIv: text("refresh_iv"),
+    refreshAuthTag: text("refresh_auth_tag"),
+    refreshWrappedDek: text("refresh_wrapped_dek"),
+    refreshWrapIv: text("refresh_wrap_iv"),
+    refreshWrapAuthTag: text("refresh_wrap_auth_tag"),
+    refreshKeyId: text("refresh_key_id"),
+    accessExpiresAt: timestamp("access_expires_at", { withTimezone: true }),
+    refreshExpiresAt: timestamp("refresh_expires_at", { withTimezone: true }),
+    connectedBy: text("connected_by").references(() => user.id, { onDelete: "set null" }),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    credentialVersionCheck: check("github_connections_credential_version_check", sql`${t.credentialVersion} >= 1`),
+  }),
+);
+
+/** A desired-state, one-way Companion → GitHub repository mirror. */
+export const githubSyncDestinations = pgTable(
+  "github_sync_destinations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    installationId: text("installation_id").notNull(),
+    repositoryId: text("repository_id").notNull(),
+    owner: text("owner").notNull(),
+    name: text("name").notNull(),
+    htmlUrl: text("html_url").notNull(),
+    defaultBranch: text("default_branch").notNull().default("main"),
+    private: boolean("private").notNull().default(true),
+    mode: githubSyncModeEnum("mode").notNull().default("all"),
+    status: githubSyncStatusEnum("status").notNull().default("pending"),
+    desiredRevision: integer("desired_revision").notNull().default(1),
+    appliedRevision: integer("applied_revision").notNull().default(0),
+    resolvedSkillCount: integer("resolved_skill_count").notNull().default(0),
+    lastSyncedAt: timestamp("last_synced_at", { withTimezone: true }),
+    lastObservedAt: timestamp("last_observed_at", { withTimezone: true }),
+    lastCommitSha: text("last_commit_sha"),
+    lastError: text("last_error"),
+    attempts: integer("attempts").notNull().default(0),
+    nextRetryAt: timestamp("next_retry_at", { withTimezone: true }),
+    leaseOwner: text("lease_owner"),
+    leaseUntil: timestamp("lease_until", { withTimezone: true }),
+    /** Monotonic fencing token incremented on every claim, including claims by the same worker. */
+    leaseGeneration: integer("lease_generation").notNull().default(0),
+    createdBy: text("created_by").references(() => user.id, { onDelete: "set null" }),
+    updatedBy: text("updated_by").references(() => user.id, { onDelete: "set null" }),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    uniqueOrgId: unique("github_sync_destinations_org_id_id_uq").on(t.orgId, t.id),
+    uniqueRepository: unique("github_sync_destinations_repository_uq").on(t.repositoryId),
+    due: index("github_sync_destinations_due_idx").on(t.status, t.nextRetryAt, t.leaseUntil),
+    revisionCheck: check(
+      "github_sync_destinations_revision_check",
+      sql`${t.desiredRevision} >= 1 AND ${t.appliedRevision} >= 0 AND ${t.appliedRevision} <= ${t.desiredRevision}`,
+    ),
+    attemptsCheck: check("github_sync_destinations_attempts_check", sql`${t.attempts} >= 0`),
+    leaseGenerationCheck: check(
+      "github_sync_destinations_lease_generation_check",
+      sql`${t.leaseGeneration} >= 0`,
+    ),
+  }),
+);
+
+/** Explicit roots for selected-mode mirrors. Dependency closure is derived live by the worker. */
+export const githubSyncDestinationSkills = pgTable(
+  "github_sync_destination_skills",
+  {
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    destinationId: uuid("destination_id").notNull(),
+    skillId: uuid("skill_id").notNull(),
+    createdAt: now(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.orgId, t.destinationId, t.skillId] }),
+    destinationFk: foreignKey({
+      columns: [t.orgId, t.destinationId],
+      foreignColumns: [githubSyncDestinations.orgId, githubSyncDestinations.id],
+      name: "github_sync_destination_skills_destination_org_fk",
+    }).onDelete("cascade"),
+    skillFk: foreignKey({
+      columns: [t.orgId, t.skillId],
+      foreignColumns: [skills.orgId, skills.id],
+      name: "github_sync_destination_skills_skill_org_fk",
+    }).onDelete("cascade"),
+    bySkill: index("github_sync_destination_skills_skill_idx").on(t.orgId, t.skillId),
   }),
 );
 

@@ -4,7 +4,7 @@ Companion runs as three Railway services from this repository plus a Railway Pos
 
 - `web`: the only public application service; it proxies `/auth`, `/v1`, and `/trpc` to `api`.
 - `api`: private Hono service. Its pre-deploy command applies Drizzle migrations under an advisory lock.
-- `worker`: private process with independent Stripe reconciliation and durable skill-run supervisors.
+- `worker`: private process with independent Stripe reconciliation, durable skill-run, and GitHub-mirror supervisors.
 - `Postgres`: Railway's PostgreSQL template.
 
 Keeping application traffic on the web origin avoids cross-origin session cookies. Stripe and CLI clients use the
@@ -73,6 +73,12 @@ BETTER_AUTH_URL=https://${{web.RAILWAY_PUBLIC_DOMAIN}}
 BETTER_AUTH_COOKIE_PREFIX=companion-production
 BETTER_AUTH_SECRET=<random secret of at least 32 bytes>
 COMPANION_SECRETS_MASTER_KEY=<shared base64 32-byte key; never rotate without a migration>
+GITHUB_APP_SLUG=<GitHub App slug>
+GITHUB_APP_CLIENT_ID=<GitHub App client id>
+GITHUB_APP_CLIENT_SECRET=<secret>
+GITHUB_APP_NAME=<user-facing App name>
+COMPANION_GITHUB_SYNC_ENABLED=true
+COMPANION_GITHUB_APP_MANAGED=false
 
 EMAIL_PROVIDER=resend
 EMAIL_FROM=Companion <noreply@your-domain.example>
@@ -137,6 +143,8 @@ STRIPE_PRO_PRICE_ID=<same live price id as api>
 STRIPE_PORTAL_CONFIGURATION_ID=<same live portal configuration id as api>
 
 COMPANION_SECRETS_MASTER_KEY=<exactly the same key as api>
+GITHUB_APP_ID=<GitHub App id>
+GITHUB_APP_PRIVATE_KEY=<base64-encoded PEM; worker only>
 S3_ENDPOINT=<same endpoint as api>
 S3_REGION=<same region as api>
 S3_ACCESS_KEY_ID=<same access key as api>

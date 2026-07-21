@@ -1,5 +1,6 @@
 import { startBillingSupervisor, type Supervisor } from "./billingSupervisor";
 import { startRunSupervisor } from "./runSupervisor";
+import { startGitHubSupervisor } from "./githubSupervisor";
 
 type SupervisorStart = () => Promise<Supervisor | null>;
 
@@ -16,12 +17,14 @@ async function startSafely(name: string, start: SupervisorStart): Promise<Superv
 export async function startWorkerSupervisors(input: {
   billing?: SupervisorStart;
   runs?: SupervisorStart;
-} = {}): Promise<{ billing: Supervisor | null; runs: Supervisor | null }> {
-  const [billing, runs] = await Promise.all([
+  github?: SupervisorStart;
+} = {}): Promise<{ billing: Supervisor | null; runs: Supervisor | null; github: Supervisor | null }> {
+  const [billing, runs, github] = await Promise.all([
     startSafely("billing", input.billing ?? startBillingSupervisor),
     startSafely("run", input.runs ?? startRunSupervisor),
+    startSafely("GitHub sync", input.github ?? startGitHubSupervisor),
   ]);
-  return { billing, runs };
+  return { billing, runs, github };
 }
 
 /**
@@ -31,7 +34,8 @@ export async function startWorkerSupervisors(input: {
 export function keepWorkerProcessAliveWhenIdle(input: {
   billing: Supervisor | null;
   runs: Supervisor | null;
+  github?: Supervisor | null;
 }): ReturnType<typeof setInterval> | null {
-  if (input.billing || input.runs) return null;
+  if (input.billing || input.runs || input.github) return null;
   return setInterval(() => undefined, 60_000);
 }

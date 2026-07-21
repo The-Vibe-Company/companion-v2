@@ -15,6 +15,7 @@
     "@companion/contracts": "workspace:*",
     "@companion/core": "workspace:*",
     "@companion/db": "workspace:*",
+    "@companion/github": "workspace:*",
     "@companion/sandbox": "workspace:*",
     "@companion/storage": "workspace:*",
     "drizzle-orm": "^0.45.2",

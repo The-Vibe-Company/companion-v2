@@ -67,6 +67,7 @@ import {
 } from "./preTenant";
 
 export * from "./secrets";
+export * from "./githubSync";
 
 // Org-wide shared label ("folder") services. Re-exported so callers keep importing everything from
 // `@companion/core/services`. `labels.ts` imports `getOrgRole`/`ActorContext` from here (both hoisted
@@ -114,6 +115,18 @@ export interface ActorContext {
   id: string;
   email: string;
   name: string;
+}
+
+async function enqueueGitHubAfterOrgSkillMutation(database: Db, orgId: string): Promise<void> {
+  await database.update(schema.githubSyncDestinations).set({
+    desiredRevision: sql`${schema.githubSyncDestinations.desiredRevision} + 1`,
+    status: sql`CASE WHEN ${schema.githubSyncDestinations.status} = 'syncing'::github_sync_status THEN 'syncing'::github_sync_status ELSE 'pending'::github_sync_status END`,
+    nextRetryAt: null,
+    updatedAt: new Date(),
+  }).where(and(
+    eq(schema.githubSyncDestinations.orgId, orgId),
+    sql`${schema.githubSyncDestinations.status} <> 'disconnected'`,
+  ));
 }
 
 export interface OrgSummary {
@@ -2133,6 +2146,7 @@ async function writeSkillVersion(input: {
     targetId: skill.id,
     metadata: { slug: payload.slug, version: payload.version, labels: payload.labels, dependencies: payload.dependencies },
   });
+  if (skill.scope === "org") await enqueueGitHubAfterOrgSkillMutation(database, input.orgId);
   return { id: skill.id, version: version.version };
 }
 
@@ -2951,6 +2965,7 @@ export async function archiveSkill(input: {
     targetId: skill.id,
     metadata: { slug: skill.slug, reason: input.reason ?? null },
   });
+  if (skill.scope === "org") await enqueueGitHubAfterOrgSkillMutation(database, input.orgId);
 }
 
 export async function restoreSkill(input: {
@@ -2988,6 +3003,7 @@ export async function restoreSkill(input: {
     targetId: skill.id,
     metadata: { slug: skill.slug },
   });
+  if (skill.scope === "org") await enqueueGitHubAfterOrgSkillMutation(database, input.orgId);
 }
 
 export async function renameSkill(input: {
@@ -3065,6 +3081,7 @@ export async function renameSkill(input: {
       targetId: skill.id,
       metadata: { old_slug: oldSlug, slug: row.slug, title: body.title ?? null },
     });
+    if (skill.scope === "org") await enqueueGitHubAfterOrgSkillMutation(tx, input.orgId);
 
     return {
       ok: true as const,
@@ -3165,6 +3182,7 @@ export async function shareSkill(input: {
       targetId: plan.root.id,
       metadata: { slug: plan.root.slug, shared_dependencies: sharedDependencies },
     });
+    await enqueueGitHubAfterOrgSkillMutation(tx, input.orgId);
     return { scope: "org" as const, shared_dependencies: sharedDependencies };
   });
   return result;
