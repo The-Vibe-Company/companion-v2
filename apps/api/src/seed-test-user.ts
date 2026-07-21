@@ -1,25 +1,50 @@
-import type { SkillRequirement } from "@companion/contracts";
 import { fallbackCompanionManifest } from "@companion/contracts";
 import {
   createOrg,
   ensureUserBootstrap,
+  installSkill,
   listOrgs,
-  listSkills,
   markOnboarded,
   publishSkillVersion,
   type ActorContext,
 } from "@companion/core/services";
 import { closeDb, db, schema, withTenantContext, type Db } from "@companion/db";
-import { buildNormalizedCompanionJson, packDir, parseFrontmatter, toStoredSkillVersionManifest } from "@companion/skills";
-import { putSkillArchive, skillArchiveKey } from "@companion/storage";
-import { and, eq, inArray } from "drizzle-orm";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import {
+  buildNormalizedCompanionJson,
+  compareSemver,
+  packDir,
+  parseFrontmatter,
+  skillChecksum,
+  toTar,
+  toStoredSkillVersionManifest,
+} from "@companion/skills";
+import {
+  getSkillArchive,
+  isStoragePreconditionFailure,
+  putSkillArchive,
+  skillArchiveKey,
+} from "@companion/storage";
+import { and, eq, inArray, isNull } from "drizzle-orm";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
+import {
+  DEMO_ARCHIVED_SLUGS,
+  DEMO_EMPTY_ORG_LABELS,
+  DEMO_EMPTY_PERSONAL_LABELS,
+  DEMO_FORCED_DEPENDENCIES,
+  DEMO_INSTALLS,
+  DEMO_INVALID_SKILLS,
+  DEMO_SKILL_CATALOG,
+  type SeedSkillSpec,
+  type SeedSkillVersionSpec,
+} from "./seed-demo-catalog";
 
 const DEFAULT_EMAIL = "admin@tvc.dev";
 const DEFAULT_PASSWORD = "adminadmin";
 const DEFAULT_NAME = "Admin";
+const SEED_VERSION_NOTE = "Seeded for local development";
 const LOCAL_DATABASE_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]"]);
 
 function seedEmail(): string {
@@ -72,25 +97,10 @@ function storageConfigured(): boolean {
   );
 }
 
-interface SeedSkillSpec {
-  slug: string;
-  version: string;
-  description: string;
-  body: string;
-  /** Initial label paths to file the skill under (org-wide shared folders). */
-  labels?: string[];
-  tools?: string[];
-  license?: string;
-  /** Declared required dependencies (must resolve cleanly — published earlier in the list). */
-  dependencies?: string[];
-  /** Declared required secrets / env vars + install notes (declarations only, never values). */
-  requirements?: SkillRequirement[];
-}
-
-function buildSkillMd(spec: Pick<SeedSkillSpec, "slug" | "version" | "description" | "body" | "tools" | "license">): string {
+function buildSkillMd(slug: string, spec: SeedSkillVersionSpec): string {
   const lines = [
     "---",
-    `name: ${spec.slug}`,
+    `name: ${slug}`,
     `description: ${JSON.stringify(spec.description)}`,
   ];
   if (spec.license) lines.push(`license: ${spec.license}`);
@@ -101,20 +111,34 @@ function buildSkillMd(spec: Pick<SeedSkillSpec, "slug" | "version" | "descriptio
   return `${lines.join("\n")}\n\n${spec.body.trim()}\n`;
 }
 
-async function seedSkill(actor: ActorContext, orgId: string, spec: SeedSkillSpec, database: Db): Promise<void> {
+async function seedSkill(
+  actor: ActorContext,
+  orgId: string,
+  skill: SeedSkillSpec,
+  spec: SeedSkillVersionSpec,
+  database: Db,
+): Promise<void> {
   const dir = await mkdtemp(join(tmpdir(), "companion-seed-skill-"));
   try {
-    const md = buildSkillMd(spec);
+    const md = buildSkillMd(skill.slug, spec);
     const companionManifest = fallbackCompanionManifest({
       summary: spec.description,
       requirements: spec.requirements ?? [],
       dependencies: spec.dependencies ?? [],
-      name: spec.slug,
+      display: spec.title ? { name: spec.title, summary: spec.description } : undefined,
+      icon: spec.icon,
+      notes: spec.notes,
+      name: skill.slug,
       version: spec.version,
-      changelog: [{ version: spec.version, date: "2026-06-24", changes: [`Seed ${spec.slug} ${spec.version}.`] }],
+      changelog: [{ version: spec.version, date: "2026-06-24", changes: [`Seed ${skill.slug} ${spec.version}.`] }],
     });
     await writeFile(join(dir, "SKILL.md"), md);
     await writeFile(join(dir, "companion.json"), buildNormalizedCompanionJson(companionManifest));
+    for (const file of spec.files ?? []) {
+      const path = join(dir, file.path);
+      await mkdir(dirname(path), { recursive: true });
+      await writeFile(path, file.content);
+    }
     const canonical = await packDir(dir);
     const parsed = parseFrontmatter(md);
     if (!parsed.ok) throw new Error(parsed.error);
@@ -122,7 +146,8 @@ async function seedSkill(actor: ActorContext, orgId: string, spec: SeedSkillSpec
     const key = skillArchiveKey({ orgId, slug: fm.name, version: spec.version });
     const payload = {
       slug: fm.name,
-      labels: spec.labels ?? [],
+      scope: skill.scope,
+      labels: skill.labels ?? [],
       version: spec.version,
       description: fm.description,
       checksum: canonical.checksum,
@@ -132,15 +157,16 @@ async function seedSkill(actor: ActorContext, orgId: string, spec: SeedSkillSpec
       body: parsed.body,
       tools: fm.allowedTools,
       license: fm.license ?? null,
-      note: "Seeded for local development",
+      note: SEED_VERSION_NOTE,
       dependencies: spec.dependencies ?? [],
     };
     try {
       await putSkillArchive({ key, body: canonical.archive, preventOverwrite: true });
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (!message.toLowerCase().includes("precondition") && !message.toLowerCase().includes("already exists")) {
-        throw error;
+      if (!isStoragePreconditionFailure(error)) throw error;
+      const storedArchive = await getSkillArchive({ key });
+      if (skillChecksum(toTar(storedArchive)) !== canonical.checksum) {
+        throw new Error(`archive collision for ${skill.slug}@${spec.version}: stored bytes do not match the seed`);
       }
     }
     await publishSkillVersion({ actor, orgId, payload, archiveKey: key, database });
@@ -149,14 +175,20 @@ async function seedSkill(actor: ActorContext, orgId: string, spec: SeedSkillSpec
   }
 }
 
-async function seedDemoContent(actor: ActorContext): Promise<void> {
+export async function seedDemoContent(actor: ActorContext): Promise<void> {
   const orgs = await listOrgs(actor);
   if (orgs.length === 0) return;
   const orgId = orgs[0]!.org_id;
 
-  const existingSlugs = await withTenantContext({ orgId, userId: actor.id }, async (database) => {
-    // Seed one empty label so the folder tree has a non-trivial, skill-less node out of the box.
-    await database.insert(schema.labels).values({ orgId, path: "growth", createdBy: actor.id }).onConflictDoNothing();
+  await withTenantContext({ orgId, userId: actor.id }, async (database) => {
+    await database
+      .insert(schema.labels)
+      .values(DEMO_EMPTY_ORG_LABELS.map((path) => ({ orgId, path, createdBy: actor.id })))
+      .onConflictDoNothing();
+    await database
+      .insert(schema.personalLabels)
+      .values(DEMO_EMPTY_PERSONAL_LABELS.map((path) => ({ orgId, ownerId: actor.id, path })))
+      .onConflictDoNothing();
 
     // Default workspace-activated models (ids from the sandbox catalog's offline fallback registry)
     // so the hard createRun activation gate never bricks a fresh dev workspace.
@@ -168,11 +200,6 @@ async function seedDemoContent(actor: ActorContext): Promise<void> {
         createdBy: actor.id,
       })
       .onConflictDoNothing();
-
-    // Include archived skills so a re-run does not try to republish ones the showcase archived.
-    return new Set(
-      (await listSkills({ actor, orgId, includeArchived: true, database })).map((skill) => skill.slug),
-    );
   });
 
   if (!storageConfigured()) {
@@ -180,141 +207,186 @@ async function seedDemoContent(actor: ActorContext): Promise<void> {
     return;
   }
 
-  // Ordered so every declared dependency is published before its dependents (publish blocks
-  // missing/cycle). Keep the primary incident-summary demo runnable: invalid dependency states
-  // belong in tests, not on the skill used by the browser smoke path.
-  const specs: SeedSkillSpec[] = [
-    {
-      slug: "markdown-report",
-      version: "2.1.0",
-      description: "Render structured findings into a clean Markdown report.",
-      body: "# markdown-report\n\nRenders structured findings into a clean Markdown report.",
-      labels: ["reporting", "engineering/tools"],
-      tools: ["read_file"],
-      license: "MIT",
-    },
-    {
-      slug: "log-parser",
-      version: "1.4.0",
-      description: "Parse heterogeneous log formats into a normalized event stream.",
-      body: "# log-parser\n\nParses heterogeneous log formats into a normalized event stream.",
-      labels: ["engineering/tools"],
-      tools: ["read_file"],
-      license: "MIT",
-    },
-    {
-      slug: "diff-tools",
-      version: "0.9.4",
-      description: "Compute and present structured diffs across files and revisions.",
-      body: "# diff-tools\n\nComputes and presents structured diffs across files and revisions.",
-      labels: ["engineering/tools"],
-      tools: ["read_file"],
-      license: "MIT",
-    },
-    {
-      slug: "slack-notify",
-      version: "1.1.0",
-      description: "Post a formatted notification to a Slack channel.",
-      body: "# slack-notify\n\nPosts a formatted notification to a Slack channel.",
-      labels: ["notifications"],
-      tools: ["run_python"],
-      license: "MIT",
-      requirements: [
-        {
-          key: "SLACK_BOT_TOKEN",
-          type: "secret",
-          required: true,
-          note: "Slack bot token (xoxb-…). Ask a workspace admin to install the Companion app, or create one at https://api.slack.com/apps → OAuth & Permissions.",
-        },
-        {
-          key: "SLACK_DEFAULT_CHANNEL",
-          type: "env",
-          required: false,
-          note: "Channel ID to post to when a message does not specify one. Defaults to #general.",
-        },
-      ],
-    },
-    {
-      slug: "vault-index",
-      version: "1.3.0",
-      description: "Maintain a searchable index over a Granite memory vault.",
-      body: "# vault-index\n\nMaintains a searchable index over a Granite memory vault.",
-      labels: ["memory"],
-      tools: ["read_file"],
-      license: "MIT",
-    },
-    {
-      slug: "granite-recall",
-      version: "1.0.0",
-      description: "Recall relevant memories from a Granite vault for a given query.",
-      body: "# granite-recall\n\nRecalls relevant memories from a Granite vault for a query.",
-      labels: ["memory"],
-      tools: ["read_file"],
-      license: "MIT",
-    },
-    {
-      slug: "screenshot-grab",
-      version: "0.2.0",
-      description: "Capture a rendered screenshot of a page region.",
-      body: "# screenshot-grab\n\nCaptures a rendered screenshot of a page region.",
-      // Intentionally unlabeled — exercises the "No label" filter.
-      tools: ["run_python"],
-      license: "MIT",
-    },
-    {
-      slug: "html-export",
-      version: "1.0.0",
-      description: "Export a report to a standalone HTML file. Superseded by markdown-report.",
-      body: "# html-export\n\nExports a report to a standalone HTML file.",
-      labels: ["reporting"],
-      tools: ["read_file"],
-      license: "MIT",
-    },
-    {
-      slug: "incident-summary",
-      version: "0.1.8",
-      description: "Summarize an incident timeline from logs into a concise postmortem draft.",
-      body: "# incident-summary\n\nReads a directory of log excerpts and produces a terse incident summary.",
-      labels: ["reporting", "engineering/tools"],
-      tools: ["read_file", "run_python"],
-      license: "MIT",
-      dependencies: ["log-parser", "markdown-report"],
-    },
-    {
-      slug: "email-digest",
-      version: "1.2.0",
-      description: "Compile a daily digest of activity into a short formatted email.",
-      body: "# email-digest\n\nCompiles a daily digest of activity into a short formatted email.",
-      labels: ["notifications", "reporting"],
-      tools: ["read_file"],
-      license: "MIT",
-      dependencies: ["markdown-report"],
-    },
-  ];
-
-  for (const spec of specs) {
-    if (existingSlugs.has(spec.slug)) continue;
-    try {
-      await withTenantContext({ orgId, userId: actor.id }, (database) => seedSkill(actor, orgId, spec, database));
-      console.log(`Seeded skill ${spec.slug}@${spec.version}`);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      console.warn(`Skipped skill ${spec.slug}: ${message}`);
+  // Catalog order keeps declared dependencies ahead of dependents. Versions within one skill are
+  // applied oldest-first, and the existence check makes interrupted and repeated seeds resumable.
+  for (const skill of DEMO_SKILL_CATALOG) {
+    const versions = [...skill.versions].sort((a, b) => compareSemver(a.version, b.version));
+    for (const version of versions) {
+      const state = await withTenantContext({ orgId, userId: actor.id }, async (database) => {
+        const row = await database.query.skills.findFirst({
+          where: and(eq(schema.skills.orgId, orgId), eq(schema.skills.slug, skill.slug)),
+        });
+        if (!row) return { compatible: true, exists: false, latest: null };
+        const currentVersion = row.currentVersionId
+          ? await database.query.skillVersions.findFirst({
+              where: and(
+                eq(schema.skillVersions.orgId, orgId),
+                eq(schema.skillVersions.id, row.currentVersionId),
+              ),
+            })
+          : null;
+        const compatible =
+          row.creatorId === actor.id &&
+          row.scope === skill.scope &&
+          currentVersion?.createdBy === actor.id &&
+          currentVersion.note === SEED_VERSION_NOTE;
+        const rows = await database
+          .select({ version: schema.skillVersions.version })
+          .from(schema.skillVersions)
+          .where(and(eq(schema.skillVersions.orgId, orgId), eq(schema.skillVersions.skillId, row.id)));
+        const existing = rows.map((item) => item.version);
+        return {
+          compatible,
+          exists: existing.includes(version.version),
+          latest: existing.sort((a, b) => compareSemver(b, a))[0] ?? null,
+        };
+      });
+      if (!state.compatible) {
+        console.warn(`Skipped skill ${skill.slug}@${version.version}: slug belongs to non-seed content`);
+        break;
+      }
+      if (state.exists) continue;
+      if (state.latest && compareSemver(version.version, state.latest) <= 0) {
+        console.warn(`Skipped skill ${skill.slug}@${version.version}: current seed data is already newer (${state.latest})`);
+        continue;
+      }
+      try {
+        await withTenantContext({ orgId, userId: actor.id }, (database) =>
+          seedSkill(actor, orgId, skill, version, database),
+        );
+        console.log(`Seeded skill ${skill.slug}@${version.version}`);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.warn(`Skipped skill ${skill.slug}@${version.version}: ${message}`);
+      }
     }
   }
 
-  await withTenantContext({ orgId, userId: actor.id }, (database) =>
-    seedDependencyShowcase(actor, orgId, database),
+  await withTenantContext({ orgId, userId: actor.id }, async (database) => {
+    const fixtures = await loadSeedFixtures(actor, orgId, database);
+    const preexistingInstalls = new Set(
+      (
+        await database.query.skillInstalls.findMany({
+          where: and(eq(schema.skillInstalls.orgId, orgId), eq(schema.skillInstalls.userId, actor.id)),
+        })
+      ).map((install) => install.skillId),
+    );
+    await seedDependencyShowcase(actor, orgId, fixtures, database);
+    for (const install of DEMO_INSTALLS) {
+      const skill = fixtures.get(install.slug);
+      if (!skill || skill.scope !== "org") continue;
+      const installClosure = await seedInstallClosure(orgId, skill.id, database);
+      // Installing a root upserts its dependency closure. If any row predated this seed run, skip
+      // the root so local versions, labels, sources, and timestamps remain the developer's choice.
+      if ([...installClosure].some((skillId) => preexistingInstalls.has(skillId))) continue;
+      const existing = await database.query.skillInstalls.findFirst({
+        where: and(
+          eq(schema.skillInstalls.orgId, orgId),
+          eq(schema.skillInstalls.userId, actor.id),
+          eq(schema.skillInstalls.skillId, skill.id),
+        ),
+      });
+      // Preserve an existing local install choice and avoid adding audit noise on every dev restart.
+      if (existing) continue;
+      await installSkill({
+        actor,
+        orgId,
+        slug: install.slug,
+        version: install.version,
+        source: "manual",
+        agentLabel: "Seed fixture",
+        database,
+      });
+    }
+  });
+}
+
+async function seedInstallClosure(
+  orgId: string,
+  rootSkillId: string,
+  database: Db,
+): Promise<Set<string>> {
+  const closure = new Set<string>();
+  const pending = [rootSkillId];
+  while (pending.length) {
+    const skillId = pending.pop()!;
+    if (closure.has(skillId)) continue;
+    closure.add(skillId);
+    const skill = await database.query.skills.findFirst({
+      where: and(eq(schema.skills.orgId, orgId), eq(schema.skills.id, skillId)),
+    });
+    if (!skill?.currentVersionId) continue;
+    const dependencies = await database
+      .select({ skillId: schema.skillVersionDependencies.dependsOnSkillId })
+      .from(schema.skillVersionDependencies)
+      .where(
+        and(
+          eq(schema.skillVersionDependencies.orgId, orgId),
+          eq(schema.skillVersionDependencies.skillVersionId, skill.currentVersionId),
+        ),
+      );
+    for (const dependency of dependencies) {
+      if (dependency.skillId) pending.push(dependency.skillId);
+    }
+  }
+  return closure;
+}
+
+interface SeedFixtureRow {
+  id: string;
+  slug: string;
+  scope: "org" | "personal";
+  currentVersionId: string;
+}
+
+async function loadSeedFixtures(actor: ActorContext, orgId: string, database: Db): Promise<Map<string, SeedFixtureRow>> {
+  const rows = await database
+    .select({
+      id: schema.skills.id,
+      slug: schema.skills.slug,
+      scope: schema.skills.scope,
+      creatorId: schema.skills.creatorId,
+      currentVersionId: schema.skills.currentVersionId,
+      currentVersion: schema.skillVersions.version,
+      currentVersionNote: schema.skillVersions.note,
+      currentVersionCreatorId: schema.skillVersions.createdBy,
+    })
+    .from(schema.skills)
+    .innerJoin(
+      schema.skillVersions,
+      and(
+        eq(schema.skillVersions.orgId, schema.skills.orgId),
+        eq(schema.skillVersions.id, schema.skills.currentVersionId),
+      ),
+    )
+    .where(eq(schema.skills.orgId, orgId));
+  const catalog = new Map(DEMO_SKILL_CATALOG.map((skill) => [skill.slug, skill] as const));
+  return new Map(
+    rows
+      .filter((row): row is typeof row & { currentVersionId: string } => {
+        const spec = catalog.get(row.slug);
+        const expectedVersion = spec?.versions.at(-1)?.version;
+        return Boolean(
+          spec &&
+            row.creatorId === actor.id &&
+            row.scope === spec.scope &&
+            row.currentVersion === expectedVersion &&
+            row.currentVersionCreatorId === actor.id &&
+            row.currentVersionNote === SEED_VERSION_NOTE &&
+            row.currentVersionId,
+        );
+      })
+      .map((row) => [row.slug, row] as const),
   );
 }
 
-/** Insert the cycle showcase directly, since it deliberately cannot pass publish-time checks. */
-async function seedDependencyShowcase(actor: ActorContext, orgId: string, database: Db): Promise<void> {
-  const rows = await database
-    .select({ id: schema.skills.id, slug: schema.skills.slug, currentVersionId: schema.skills.currentVersionId })
-    .from(schema.skills)
-    .where(eq(schema.skills.orgId, orgId));
-  const bySlug = new Map(rows.map((r) => [r.slug, r] as const));
+/** Insert deliberately invalid dependency states after normal publish-time validation has run. */
+async function seedDependencyShowcase(
+  actor: ActorContext,
+  orgId: string,
+  bySlug: Map<string, SeedFixtureRow>,
+  database: Db,
+): Promise<void> {
 
   const edge = (dependentSlug: string, dependsOnSlug: string) => {
     const dependent = bySlug.get(dependentSlug);
@@ -329,11 +401,9 @@ async function seedDependencyShowcase(actor: ActorContext, orgId: string, databa
     };
   };
 
-  const edges = [
-    // Cycle: vault-index ↔ granite-recall.
-    edge("vault-index", "granite-recall"),
-    edge("granite-recall", "vault-index"),
-  ].filter((e): e is NonNullable<typeof e> => e != null);
+  const edges = DEMO_FORCED_DEPENDENCIES.map(({ dependent, dependency }) => edge(dependent, dependency)).filter(
+    (e): e is NonNullable<typeof e> => e != null,
+  );
 
   if (edges.length) {
     await database.insert(schema.skillVersionDependencies).values(edges).onConflictDoNothing();
@@ -355,14 +425,29 @@ async function seedDependencyShowcase(actor: ActorContext, orgId: string, databa
   }
 
   // Keep two unrelated archived rows for archive-list and restore flows.
-  const toArchive = ["screenshot-grab", "html-export"].map((slug) => bySlug.get(slug)?.id).filter((id): id is string => !!id);
+  const toArchive = DEMO_ARCHIVED_SLUGS.map((slug) => bySlug.get(slug)?.id).filter((id): id is string => !!id);
   if (toArchive.length) {
     await database
       .update(schema.skills)
       .set({ archivedAt: new Date(), archivedBy: actor.id, archiveReason: "Superseded — seeded archive demo" })
-      .where(and(eq(schema.skills.orgId, orgId), inArray(schema.skills.id, toArchive)));
+      .where(and(eq(schema.skills.orgId, orgId), inArray(schema.skills.id, toArchive), isNull(schema.skills.archivedAt)));
   }
-  console.log("Seeded dependency showcase (cycle and archived rows)");
+
+  for (const fixture of DEMO_INVALID_SKILLS) {
+    const skill = bySlug.get(fixture.slug);
+    if (!skill) continue;
+    await database
+      .update(schema.skills)
+      .set({ validation: "invalid", validationError: fixture.error })
+      .where(and(eq(schema.skills.orgId, orgId), eq(schema.skills.id, skill.id)));
+    if (skill.currentVersionId) {
+      await database
+        .update(schema.skillVersions)
+        .set({ validation: "invalid", validationError: fixture.error })
+        .where(and(eq(schema.skillVersions.orgId, orgId), eq(schema.skillVersions.id, skill.currentVersionId)));
+    }
+  }
+  console.log("Seeded dependency, archive, and validation showcases");
 }
 
 async function createAuthUser(input: { email: string; password: string; name: string }): Promise<void> {
@@ -426,11 +511,14 @@ async function main(): Promise<void> {
   console.log(created ? createdMessage(email, password) : `Local test user ${email} already exists; leaving password unchanged`);
 }
 
-main()
-  .catch((error) => {
-    console.error(error);
-    process.exitCode = 1;
-  })
-  .finally(async () => {
-    await closeDb();
-  });
+const invokedPath = process.argv[1];
+if (invokedPath && import.meta.url === pathToFileURL(invokedPath).href) {
+  main()
+    .catch((error) => {
+      console.error(error);
+      process.exitCode = 1;
+    })
+    .finally(async () => {
+      await closeDb();
+    });
+}
