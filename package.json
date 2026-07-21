@@ -32,6 +32,7 @@
     "test:integration": "pnpm --filter @companion/api test:integration",
     "test:e2e": "node scripts/ci-playwright-policy.mjs && playwright test",
     "ci:quality": "turbo run lint typecheck test --continue=dependencies-successful",
+    "verify:change": "node scripts/verify-change.mjs",
     "browser:smoke": "bash scripts/agent-browser-smoke.sh",
     "smoke:api": "bash scripts/ci-api-smoke.sh",
     "smoke:rsc": "bash scripts/ci-rsc-smoke.sh",
