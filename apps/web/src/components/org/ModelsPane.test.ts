@@ -201,6 +201,173 @@ describe("ModelsPane", () => {
     expect(Array.from(container.querySelectorAll("button")).some((button) => button.textContent === "Add personal key")).toBe(true);
   });
 
+  it("groups activated models under one provider credential action", async () => {
+    // Product promise: one provider key controls readiness for every active model beneath it.
+    // Regression caught: returning to per-model Connect buttons would duplicate the same secret flow.
+    queryMocks.fetchModels.mockResolvedValue({
+      models: [
+        {
+          id: "openai/gpt-5",
+          provider: "openai",
+          provider_name: "OpenAI",
+          name: "GPT-5",
+          description: null,
+          context: 400_000,
+          cost_input: 1.75,
+          cost_output: null,
+          env_keys: ["OPENAI_API_KEY"],
+        },
+        {
+          id: "openai/gpt-4.1",
+          provider: "openai",
+          provider_name: "OpenAI",
+          name: "GPT-4.1",
+          description: null,
+          context: 1_000_000,
+          cost_input: 2,
+          cost_output: null,
+          env_keys: ["OPENAI_API_KEY"],
+        },
+      ],
+      providers: [{ id: "openai", name: "OpenAI", env_keys: ["OPENAI_API_KEY"], connected: false }],
+      activated: { personal: ["openai/gpt-5", "openai/gpt-4.1"], org: [] },
+    });
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    roots.push(root);
+    await act(async () => {
+      root.render(React.createElement(ModelsPane, {
+        scope: {
+          title: "Models",
+          desc: "Dedicated provider keys",
+          locked: false,
+          readiness: "any",
+          select: (activated: { personal: string[] }) => activated.personal,
+          save: vi.fn(),
+          loadConnected: vi.fn().mockResolvedValue([]),
+          connect: vi.fn(),
+          connectionScope: "personal",
+          disconnect: vi.fn(),
+        },
+      }));
+      await Promise.resolve();
+    });
+
+    expect(container.querySelectorAll(".models-provider")).toHaveLength(1);
+    expect(container.querySelectorAll(".models-provider-model")).toHaveLength(2);
+    expect(Array.from(container.querySelectorAll("button")).filter((button) => button.textContent === "Connect")).toHaveLength(1);
+    expect(container.textContent).toContain("Credentials apply to every active model below them");
+  });
+
+  it("keeps workspace provenance visible inside the personal provider group", async () => {
+    // A personal launcher must never make an inherited model look personally owned.
+    queryMocks.fetchModels.mockResolvedValue({
+      models: [{
+        id: "openai/gpt-5",
+        provider: "openai",
+        provider_name: "OpenAI",
+        name: "GPT-5",
+        description: null,
+        context: null,
+        cost_input: null,
+        cost_output: null,
+        env_keys: ["OPENAI_API_KEY"],
+      }],
+      providers: [{ id: "openai", name: "OpenAI", env_keys: ["OPENAI_API_KEY"], connected: true }],
+      activated: { personal: [], org: ["openai/gpt-5"] },
+    });
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    roots.push(root);
+    await act(async () => {
+      root.render(React.createElement(ModelsPane, {
+        scope: {
+          title: "Models",
+          desc: "Dedicated provider keys",
+          locked: false,
+          readiness: "any",
+          select: (activated: { personal: string[] }) => activated.personal,
+          ghost: { label: "From workspace", select: (activated: { org: string[] }) => activated.org },
+          save: vi.fn(),
+          loadConnected: vi.fn().mockResolvedValue([]),
+          connect: vi.fn(),
+          connectionScope: "personal",
+          disconnect: vi.fn(),
+        },
+      }));
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain("Inherited from workspace");
+    expect(container.textContent).toContain("From workspace");
+    expect(container.querySelector('.models-provider-model input[type="checkbox"]')).toBeNull();
+  });
+
+  it("discards a catalog credential draft when persistent search hides the catalog", async () => {
+    const { container } = await mountModelsPane([], false);
+    act(() => Array.from(container.querySelectorAll("button")).find((button) => button.textContent?.includes("Browse all"))?.click());
+    const trigger = container.querySelector('[data-provider-key-trigger="browse:openai"]') as HTMLButtonElement;
+    act(() => trigger.click());
+    const keyInput = container.querySelector('input[autocomplete="new-password"]') as HTMLInputElement;
+    setReactInputValue(keyInput, "discard-this-draft");
+
+    const search = container.querySelector('input[aria-label="Search active models or catalog"]') as HTMLInputElement;
+    setReactInputValue(search, "gpt");
+
+    expect(container.querySelector('input[autocomplete="new-password"]')).toBeNull();
+    setReactInputValue(search, "");
+    act(() => Array.from(container.querySelectorAll("button")).find((button) => button.textContent === "Add model")?.click());
+    expect(container.querySelector('[data-provider-key-trigger="browse:openai"]')).toBeTruthy();
+    expect(container.textContent).not.toContain("discard-this-draft");
+  });
+
+  it("keeps shared-model mutations unavailable in a locked workspace scope", async () => {
+    queryMocks.fetchModels.mockResolvedValue({
+      models: [{
+        id: "openai/gpt-5",
+        provider: "openai",
+        provider_name: "OpenAI",
+        name: "GPT-5",
+        description: null,
+        context: null,
+        cost_input: null,
+        cost_output: null,
+        env_keys: ["OPENAI_API_KEY"],
+      }],
+      providers: [{ id: "openai", name: "OpenAI", env_keys: ["OPENAI_API_KEY"], connected: true }],
+      activated: { personal: [], org: ["openai/gpt-5"] },
+    });
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    roots.push(root);
+    await act(async () => {
+      root.render(React.createElement(ModelsPane, {
+        scope: {
+          title: "Shared models",
+          desc: "Workspace provider keys",
+          locked: true,
+          readiness: "scope",
+          select: (activated: { org: string[] }) => activated.org,
+          save: vi.fn(),
+          loadConnected: vi.fn().mockResolvedValue([{ ...connection, scope: "organization" }]),
+          connect: vi.fn(),
+          connectionScope: "organization",
+          disconnect: vi.fn(),
+        },
+      }));
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain("All workspace members");
+    expect(container.textContent).toContain("Ready");
+    expect(container.querySelector('input[aria-label="Search active models or catalog"]')).toBeNull();
+    expect((container.querySelector('.models-provider-model input[type="checkbox"]') as HTMLInputElement).disabled).toBe(true);
+    expect(Array.from(container.querySelectorAll("button")).some((button) => /Connect|Replace|Disconnect|Remove|Add model/.test(`${button.textContent} ${button.getAttribute("aria-label")}`))).toBe(false);
+  });
+
   it("returns focus to the provider-key trigger after cancellation", async () => {
     const { container } = await mountModelsPane([], true);
     const trigger = Array.from(container.querySelectorAll("button")).find((button) => button.textContent === "Add personal key") as HTMLButtonElement;
