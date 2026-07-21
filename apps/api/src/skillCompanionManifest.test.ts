@@ -39,6 +39,7 @@ describe("withResolvedManifestDependencies", () => {
       },
       name: "manifest-v2",
       version: "1.2.0",
+      icon: "rocket",
       companionSkillId: "84d8bee1-5ad3-4676-8c16-730e2a15ba70",
       changelog: [
         { version: "1.2.0", date: "2026-06-24", changes: ["Publish version 1.2.0."] },
@@ -62,6 +63,7 @@ describe("withResolvedManifestDependencies", () => {
     expect(json).toMatchObject({
       name: "manifest-v2",
       version: "1.2.0",
+      icon: "rocket",
       title: "Manifest v2",
       description: "Uploaded manifest description.",
       notes: "## Notes\n\nKeep this package complete.",
@@ -86,7 +88,7 @@ describe("withResolvedManifestDependencies", () => {
 });
 
 describe("buildInlineCompanionManifest", () => {
-  it("preserves rich display description, requirements, and dependencies for inline edits", () => {
+  it("preserves icon, rich display description, requirements, and dependencies for inline edits", () => {
     const manifest = buildInlineCompanionManifest({
       description: "Updated short summary.",
       carriedDisplay: {
@@ -94,6 +96,7 @@ describe("buildInlineCompanionManifest", () => {
         summary: "Old summary.",
         description: "Long detail copy.",
       },
+      carriedIcon: "palette",
       carriedRequirements: [{ key: "OPENAI_API_KEY", type: "secret", slot_id: "c8868fb3-c654-5615-b477-ce8d807ab722", required: true, note: "Ask an admin." }],
       carriedDependencies: ["markdown-report"],
     });
@@ -103,6 +106,7 @@ describe("buildInlineCompanionManifest", () => {
       summary: "Updated short summary.",
       description: undefined,
     });
+    expect(manifest.icon).toBe("palette");
     expect(manifest.notes).toBe("Long detail copy.");
     expect(manifest.requirements.map((req) => req.key)).toEqual(["OPENAI_API_KEY"]);
     expect(manifest.environment.secrets.OPENAI_API_KEY?.slotId).toBe("c8868fb3-c654-5615-b477-ce8d807ab722");

@@ -9,6 +9,7 @@ import type {
   LabelVM,
   LocalSkillRow,
   SkillFilterPreferences,
+  SkillGroupBy,
   SkillSharePlan,
   BillingOverview,
 } from "@companion/contracts";
@@ -235,6 +236,7 @@ export function SkillsApp({
   const [selection, setSelection] = useState<Selection>(() => selectionFromRoute(initialRoute));
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const [filters, setFilters] = useState<Filter[]>(() => initialFilterPreferences.active_filters);
+  const [groupBy, setGroupBy] = useState<SkillGroupBy>(() => initialFilterPreferences.group_by);
   const [shareTarget, setShareTarget] = useState<SkillVM | null>(null);
   const [drag, setDrag] = useState<DragItem | null>(null);
   const personalSkillsEnabled = initialBilling.entitlements.personalSkills;
@@ -465,6 +467,7 @@ export function SkillsApp({
   // Re-derive selection / open skill / view when the server route (or org) changes.
   useEffect(() => {
     setFilters(initialFilterPreferences.active_filters);
+    setGroupBy(initialFilterPreferences.group_by);
     setSelection(selectionFromRoute(initialRoute));
     didInitializePersistenceRef.current = false;
     setPreferenceStatus("idle");
@@ -500,9 +503,10 @@ export function SkillsApp({
     }
   }, []);
 
-  const persistPreferences = useCallback((activeFilters: Filter[]) => {
+  const persistPreferences = useCallback((activeFilters: Filter[], nextGroupBy: SkillGroupBy) => {
     queuedPreferencesRef.current = {
       active_filters: activeFilters.map((f) => ({ ...f })),
+      group_by: nextGroupBy,
     };
     void flushPreferenceQueue();
   }, [flushPreferenceQueue]);
@@ -517,11 +521,11 @@ export function SkillsApp({
       return;
     }
     if (persistTimerRef.current) clearTimeout(persistTimerRef.current);
-    persistTimerRef.current = setTimeout(() => persistPreferences(filters), 350);
+    persistTimerRef.current = setTimeout(() => persistPreferences(filters, groupBy), 350);
     return () => {
       if (persistTimerRef.current) clearTimeout(persistTimerRef.current);
     };
-  }, [filters, persistPreferences]);
+  }, [filters, groupBy, persistPreferences]);
 
   const openUpload = useCallback(() => {
     if ((!personalSkillsEnabled && activeLibRef.current === "mine") || (orgCreateBlocked && activeLibRef.current === "org")) {
@@ -1274,9 +1278,9 @@ export function SkillsApp({
   }, []);
   const clearFilters = useCallback(() => setFilters([]), []);
   const retryPreferenceSave = useCallback(() => {
-    if (!queuedPreferencesRef.current) persistPreferences(filters);
+    if (!queuedPreferencesRef.current) persistPreferences(filters, groupBy);
     else void flushPreferenceQueue();
-  }, [filters, flushPreferenceQueue, persistPreferences]);
+  }, [filters, flushPreferenceQueue, groupBy, persistPreferences]);
 
   // --- Selection / navigation ------------------------------------------------
   const applySkillsRoute = useCallback(
@@ -1719,9 +1723,14 @@ export function SkillsApp({
         ) : (
           <ListView
             skills={filtered}
+            labels={labels}
+            workspaceId={currentOrg.id}
             library={selection.lib}
             scopeKind={selection.kind}
+            activeLabel={activeLabel}
             breadcrumb={breadcrumb}
+            groupBy={groupBy}
+            onGroupByChange={setGroupBy}
             onOpen={open}
             onUpload={openUpload}
             actorId={me.id}

@@ -13,6 +13,7 @@ const skill: SkillVM = {
   version: "1.2.3",
   validation: "valid",
   description: "A focused skill for incident handoffs.",
+  icon: null,
   notes: null,
   error: null,
   scope: "org",

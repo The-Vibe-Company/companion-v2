@@ -536,11 +536,13 @@ export const skillFilterPreferences = pgTable(
       .notNull()
       .references(() => user.id, { onDelete: "cascade" }),
     activeFilters: jsonb("active_filters").$type<unknown[]>().notNull().default([]),
+    groupBy: text("group_by").notNull().default("folder"),
     createdAt: now(),
     updatedAt: updatedAt(),
   },
   (t) => ({
     pk: primaryKey({ columns: [t.orgId, t.userId] }),
+    groupByCheck: check("skill_filter_preferences_group_by_check", sql`${t.groupBy} in ('folder', 'none')`),
   }),
 );
 

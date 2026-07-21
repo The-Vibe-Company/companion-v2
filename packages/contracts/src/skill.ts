@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { validationStateSchema, skillScopeSchema } from "./scope";
 import { SKILL_NAME_RE, SEMVER_RE, skillRequirementSchema } from "./frontmatter";
-import { companionChangelogEntrySchema, companionDisplaySchema } from "./companionManifest";
+import { companionChangelogEntrySchema, companionDisplaySchema, skillIconSchema } from "./companionManifest";
 import { labelPathSchema } from "./labels";
 import { localSkillStatusSchema } from "./localSkills";
 
@@ -169,6 +169,8 @@ export const skillListRowSchema = z.object({
   description: z.string(),
   /** Human display fields normalized from companion.json, with SKILL.md fallbacks. */
   display: companionDisplaySchema.default({}),
+  /** Portable catalog icon declared by the current companion.json version. */
+  icon: skillIconSchema.nullable().default(null),
   /** Markdown-compatible notes from companion.json, kept distinct from the short description. */
   notes: z.string().nullable().default(null),
   validation: validationStateSchema,

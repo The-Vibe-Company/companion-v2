@@ -96,8 +96,14 @@ on the API only after the worker is configured. Enable user-to-server OAuth and 
 **Administration: read/write**; register
 `${COMPANION_WEB_URL}/v1/integrations/github/callback` as the callback. Missing API credentials disable the
 GitHub panel, while missing worker credentials independently disable the mirror supervisor. Companion never
-accepts PATs for this integration and never imports from GitHub:
-each configured default branch is a one-way, fully managed mirror.
+accepts PATs for this integration and never imports skills from GitHub. The mirror updates only
+`.companion-sync.json`, its previously tracked or currently selected `skills/<slug>` folders, and the section of
+the root README between `<!-- COMPANION:START -->` and `<!-- COMPANION:END -->`; custom README content and all
+other repository files are preserved. A managed repository may have one case-insensitive root `README.md` variant;
+it must be a regular UTF-8 file and the merged README must remain at most 1 MiB. Invalid or duplicate markers,
+ambiguous README casing, symlinks, invalid UTF-8, and oversized merged content stop synchronization without a commit.
+The worker also needs `COMPANION_WEB_URL` so the generated README can link
+to Companion previews and brand assets.
 
 ### Conductor workspaces
 

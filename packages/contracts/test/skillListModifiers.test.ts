@@ -40,7 +40,13 @@ const baseRow = {
 
 describe("skillListRowSchema modifiers", () => {
   it("defaults modifiers to an empty list", () => {
-    expect(skillListRowSchema.parse(baseRow).modifiers).toEqual([]);
+    const parsed = skillListRowSchema.parse(baseRow);
+    expect(parsed.modifiers).toEqual([]);
+    expect(parsed.icon).toBeNull();
+  });
+
+  it("accepts a current portable manifest icon", () => {
+    expect(skillListRowSchema.parse({ ...baseRow, icon: "terminal" }).icon).toBe("terminal");
   });
 
   it("accepts resolved version publisher avatars", () => {

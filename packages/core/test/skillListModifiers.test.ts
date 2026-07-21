@@ -27,7 +27,7 @@ function mainRow() {
     labels: [],
     current_version: "1.0.0",
     license: null,
-    frontmatter: "{}",
+    frontmatter: JSON.stringify({ companion: { icon: "rocket" } }),
     checksum: "sha256:" + "a".repeat(64),
     size_bytes: 123,
     tools: [],
@@ -161,6 +161,7 @@ describe("listSkills modifier attribution", () => {
     expect(row).toBeDefined();
     expect(row).not.toHaveProperty("star_count");
     expect(row).not.toHaveProperty("starred");
+    expect(row!.icon).toBe("rocket");
     expect(row!.modifiers).toEqual([
       {
         user_id: "user-2",

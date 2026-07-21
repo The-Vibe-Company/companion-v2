@@ -57,6 +57,9 @@ const claim = {
 const skill = {
   id: "skill-1",
   slug: "incident",
+  title: "Incident response",
+  description: "Summarize and respond to incidents.",
+  shareToken: "incident-share-token",
   version: "1.0.0",
   checksum: "sha256:x",
   storagePath: "skills/incident.tgz",
@@ -68,11 +71,19 @@ const plan = {
     owner: "acme",
     name: "skills",
     defaultBranch: "main",
+    lastCommitSha: "previous-commit",
   },
   skills: [skill],
 };
+const rendered = {
+  files: [{ path: "skills/incident/SKILL.md", data: Buffer.from("skill"), executable: false }],
+  manifest: Buffer.from("manifest"),
+  readmeBlock: Buffer.from("readme"),
+  managedSlugs: ["incident"],
+};
 
 beforeEach(() => {
+  vi.stubEnv("COMPANION_WEB_URL", "https://companion.acme.test");
   let transactionId = 0;
   dbMocks.execute.mockResolvedValue([]);
   dbMocks.withTenant.mockImplementation(async (_context, callback) => callback({
@@ -87,6 +98,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.unstubAllEnvs();
   vi.restoreAllMocks();
   vi.clearAllMocks();
 });
@@ -122,7 +134,7 @@ describe("GitHub sync supervisor failure fencing", () => {
     coreMocks.claim.mockResolvedValueOnce([{ ...claim, claimedRevision: 8 }]).mockResolvedValue([]);
     coreMocks.plan.mockResolvedValue(plan);
     storageMocks.get.mockResolvedValue(Buffer.from("archive"));
-    githubMocks.render.mockResolvedValue([]);
+    githubMocks.render.mockResolvedValue(rendered);
     coreMocks.complete.mockResolvedValue(false);
     const client = {
       config: { appId: "1", privateKey: "key" },
@@ -193,7 +205,7 @@ describe("GitHub sync durable publication", () => {
     });
     githubMocks.render.mockImplementation(async () => {
       expect(activeTenantTransactions).toBe(0);
-      return [];
+      return rendered;
     });
     const events: string[] = [];
     let publishDatabase: unknown;
@@ -212,6 +224,11 @@ describe("GitHub sync durable publication", () => {
       writeRepository: vi.fn(async (input: Parameters<GitHubAppClient["writeRepository"]>[0]) => {
         expect(activeTenantTransactions).toBe(0);
         expect(input.signal).toBeInstanceOf(AbortSignal);
+        expect(input).toMatchObject({
+          previousCommitSha: "previous-commit",
+          managedSlugs: ["incident"],
+          files: rendered.files,
+        });
         await input.assertFence?.();
         expect(activeTenantTransactions).toBe(0);
         await input.finalize?.({
@@ -237,6 +254,10 @@ describe("GitHub sync durable publication", () => {
     });
     await vi.waitFor(() => expect(coreMocks.complete).toHaveBeenCalledTimes(1));
     expect(events).toEqual(["lock", "publish", "complete"]);
+    expect(githubMocks.render).toHaveBeenCalledWith(expect.objectContaining({
+      companionWebUrl: "https://companion.acme.test",
+      skills: [expect.objectContaining({ title: "Incident response", shareToken: "incident-share-token" })],
+    }));
     expect(dbMocks.execute.mock.calls.length).toBeGreaterThan(1);
     for (const operation of [coreMocks.plan, coreMocks.isLive, coreMocks.lockPublish, coreMocks.complete]) {
       expect(operation).toHaveBeenCalledWith(expect.objectContaining({
@@ -260,6 +281,9 @@ describe("GitHub archive loading limits", () => {
   const skills = Array.from({ length: 10 }, (_, index) => ({
     id: `skill-${index}`,
     slug: `skill-${index}`,
+    title: `Skill ${index}`,
+    description: `Skill ${index} description`,
+    shareToken: `skill-${index}-share-token`,
     version: "1.0.0",
     checksum: `sha256:${index}`,
     storagePath: `skills/${index}.tgz`,
