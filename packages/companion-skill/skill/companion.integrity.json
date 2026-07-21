@@ -9,7 +9,7 @@
     "scripts/check_updates.py": "sha256:c7da8735afd89e4c47764b64907ff3f295ae0f98f9c551cf77eb083c6bdf1116",
     "scripts/companion_lib.py": "sha256:3cc6e05408c160bd81fde4594d0b9f284a3b58d6536b8896a0524395fbf446f4",
     "scripts/create_secret.py": "sha256:f64b5f344c8b273bcef84b3fe833f09fd152af1875815d01c73e91692c9320d2",
-    "scripts/install_skill.py": "sha256:2f2f2ffb537f3d6007e57c56eb7caeaed7582e883932103d893aa333e32e997a",
+    "scripts/install_skill.py": "sha256:77c32e4048c43a08e6aab862d0ce9fd9ac6f9dfb149a82c8ceda7dd4d366be8c",
     "scripts/secrets_runtime.py": "sha256:6bf3dd8926ef0be974ebecb0f852dfd53e154b4f2e829c94ad3140a39e728d4d",
     "scripts/skill_guard.py": "sha256:27c9d27da0f7bbe39aeeb9f796f64671a8ac119b6be2f1295c92590cd8998a70",
     "scripts/sync_secrets.py": "sha256:7059dec3ccf12208f046251fc5d4046187e4423d6f59e5464b0e8c7e9718b83c",

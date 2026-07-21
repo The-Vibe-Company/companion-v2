@@ -44,7 +44,7 @@ describe("companion skill package + row", () => {
     const pkg = await getCompanionSkillPackage();
     expect(pkg.key).toBe("companion");
     expect(pkg.checksum).toMatch(/^sha256:[0-9a-f]{64}$/);
-    expect(pkg.version).toBe("1.23.0");
+    expect(pkg.version).toBe("1.24.0");
     expect(pkg.sizeBytes).toBeGreaterThan(0);
     expect(pkg.integrity.packageChecksum).toBe(pkg.checksum);
     expect(pkg.integrity.files["SKILL.md"]).toMatch(/^sha256:[0-9a-f]{64}$/);
@@ -119,9 +119,9 @@ describe("companion skill package + row", () => {
       desc: "Create or repair manifest v2 with identity, env/secrets, dependency ids, notes, commands, and changelog.",
     });
     const changelog = row.changes.join("\n");
-    expect(changelog).toContain("Refreshes a file-backed Companion token automatically");
-    expect(changelog).toContain("Preserves the token's exact name and scopes");
-    expect(changelog).toContain("Requires a fresh Use prompt");
+    expect(changelog).toContain("Plans the smallest duplicate-free set of physical skill roots");
+    expect(changelog).toContain("native OpenCode duplicate skill folders");
+    expect(changelog).toContain("rechecking symlink aliases immediately before removal");
     const manifest = JSON.parse(await readFile(join(companionSkillDir(), "companion.json"), "utf8")) as {
       metadata?: { changelog?: Array<{ version?: string; changes?: string[] }> };
     };

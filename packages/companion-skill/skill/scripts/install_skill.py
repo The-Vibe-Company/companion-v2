@@ -547,8 +547,11 @@ def preflight_duplicate_targets(
             for tool in duplicate_tools:
                 target_dir = resolve_target_dir(tool, scope, skill_name, project_root, registry)
                 planned_physical_paths = {
-                    physical_target_path(resolve_target_dir(planned, scope, skill_name, project_root, registry))
+                    physical_target_path(
+                        resolve_target_dir(planned, planned_scope, skill_name, project_root, registry)
+                    )
                     for planned in planned_tools
+                    for planned_scope in scopes
                 }
                 tracked, recorded = existing_target(
                     prior, skill_name, tool, scope, target_dir, project_root

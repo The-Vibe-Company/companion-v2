@@ -603,6 +603,46 @@ class FanOutTests(EnvSandbox):
         record = json.loads(companion_lib.lockfile_path().read_text())["workspaces"]["ws"]["skills"]["demo"]
         self.assertEqual([(row["tool"], row["scope"]) for row in record["targets"]], [("opencode", "user")])
 
+    def test_redundant_user_root_cannot_alias_planned_project_target(self) -> None:
+        project_root = self.root / "repo"
+        project_target = companion_lib.resolve_target_dir("claude-code", "project", "demo", project_root, REGISTRY)
+        project_target.mkdir(parents=True)
+        (project_target / "SKILL.md").write_text("shared target\n", encoding="utf-8")
+        agents_root = self.home / ".agents"
+        agents_root.mkdir()
+        (agents_root / "skills").symlink_to(project_target.parent, target_is_directory=True)
+        duplicate_target = companion_lib.resolve_target_dir("opencode", "user", "demo", project_root, REGISTRY)
+        checksum = companion_lib.compute_dir_checksum(duplicate_target)
+        prior = {
+            "demo": {
+                "targets": [
+                    {
+                        "tool": "opencode",
+                        "scope": "user",
+                        "path": str(duplicate_target),
+                        "checksum": checksum,
+                    }
+                ]
+            }
+        }
+        node = {"slug": "demo", "version": "1.0.0", "skill": {"name": "demo"}}
+
+        conflicts, prunable = install_skill.preflight_duplicate_targets(
+            [node],
+            ["opencode"],
+            ["claude-code"],
+            {"opencode"},
+            ["user", "project"],
+            REGISTRY,
+            project_root,
+            prior,
+            {},
+        )
+
+        self.assertEqual(prunable, [])
+        self.assertEqual(conflicts[0]["status"], "duplicate_path_alias")
+        self.assertTrue(project_target.exists())
+
     def test_planned_target_roots_cannot_alias_each_other(self) -> None:
         claude_skills = self.home / ".claude" / "skills"
         claude_skills.mkdir(parents=True)
