@@ -7,6 +7,7 @@ import { packDir } from "@companion/skills";
 const serviceMocks = vi.hoisted(() => {
   const noop = vi.fn(async () => undefined);
   return {
+    ApiTokenRefreshError: class ApiTokenRefreshError extends Error {},
     acceptInvitation: noop,
     addComment: noop,
     assertCommentTarget: noop,
@@ -77,6 +78,7 @@ const serviceMocks = vi.hoisted(() => {
     deletePersonalLabel: noop,
     ensureUserBootstrap: noop,
     resolveApiToken: vi.fn(),
+    refreshApiToken: vi.fn(),
     resolveDependencyReferences: vi.fn(async (input: { slugs: string[] }) =>
       input.slugs.map((slug) => ({ declaredSlug: slug, slug, skillId: null })),
     ),

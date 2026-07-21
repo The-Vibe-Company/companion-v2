@@ -7,6 +7,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const serviceMocks = vi.hoisted(() => {
   const noop = vi.fn(async () => undefined);
   return {
+    ApiTokenRefreshError: class ApiTokenRefreshError extends Error {},
     acceptInvitation: noop,
     addComment: noop,
     assertCommentTarget: noop,
@@ -86,6 +87,7 @@ const serviceMocks = vi.hoisted(() => {
     deletePersonalLabel: noop,
     ensureUserBootstrap: noop,
     resolveApiToken: vi.fn(),
+    refreshApiToken: vi.fn(),
   };
 });
 
@@ -232,5 +234,60 @@ describe("POST /v1/skills/create tenant context", () => {
     expect(serviceMocks.prepareSkillPublishDependencies).toHaveBeenCalledWith(
       expect.objectContaining({ actor: actorA, orgId: "org-1", slugs: [], database: expect.any(Object) }),
     );
+  });
+});
+
+describe("POST /v1/tokens/refresh", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it("returns active-token metadata without a plaintext token", async () => {
+    serviceMocks.refreshApiToken.mockResolvedValue({
+      status: "current",
+      scopes: ["skills:read"],
+      expires_at: "2026-08-01T00:00:00.000Z",
+    });
+    const res = await app.request("/v1/tokens/refresh", {
+      method: "POST",
+      headers: { Authorization: "Bearer cmp_pat_active" },
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toEqual({
+      status: "current",
+      scopes: ["skills:read"],
+      expires_at: "2026-08-01T00:00:00.000Z",
+    });
+    expect(body).not.toHaveProperty("token");
+  });
+
+  it("returns the replacement plaintext exactly on a rotated response", async () => {
+    serviceMocks.refreshApiToken.mockResolvedValue({
+      status: "rotated",
+      id: "token-2",
+      token: "cmp_pat_replacement",
+      prefix: "cmp_pat_replac",
+      scopes: ["skills:read"],
+      expires_at: "2026-10-19T00:00:00.000Z",
+    });
+    const res = await app.request("/v1/tokens/refresh", {
+      method: "POST",
+      headers: { Authorization: "Bearer cmp_pat_expired" },
+    });
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toMatchObject({ status: "rotated", token: "cmp_pat_replacement" });
+    expect(serviceMocks.refreshApiToken).toHaveBeenCalledWith("cmp_pat_expired");
+  });
+
+  it("makes missing and ineligible credentials indistinguishable", async () => {
+    serviceMocks.refreshApiToken.mockRejectedValue(new serviceMocks.ApiTokenRefreshError());
+    const ineligible = await app.request("/v1/tokens/refresh", {
+      method: "POST",
+      headers: { Authorization: "Bearer cmp_pat_too_old" },
+    });
+    const missing = await app.request("/v1/tokens/refresh", { method: "POST" });
+    expect(ineligible.status).toBe(401);
+    expect(missing.status).toBe(401);
+    await expect(ineligible.json()).resolves.toEqual({ ok: false, error: "token cannot be refreshed" });
+    await expect(missing.json()).resolves.toEqual({ ok: false, error: "token cannot be refreshed" });
   });
 });

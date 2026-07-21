@@ -33,10 +33,23 @@ For the legacy flat shape `{ "apiUrl": "...", "token": "..." }`, use those value
 token-supported `GET /local-skills/companion` to read its `workspaceId` before writing local
 inventory. Never print the token back to the user.
 
+Before any other API call, the bootstrap sends file-backed credentials to `POST /tokens/refresh`.
+The endpoint returns `{ "status": "current", "scopes": [...], "expires_at": "..." }` while the
+token is active. If it expired within the last 30 days, it returns a one-time replacement as
+`{ "status": "rotated", "id": "...", "token": "cmp_pat_...", "prefix": "...", "scopes": [...],
+"expires_at": "..." }`. The successor keeps the exact name and scopes, lasts 90 days, and revokes
+the expired token in the same transaction. Persist it atomically in only the active workspace entry
+before continuing, and never print it. Unknown, revoked, departed-user, and more-than-30-days-expired
+tokens all return the same `401`; obtain a fresh **Use** prompt instead. Do not call this endpoint for
+`COMPANION_TOKEN` supplied by the environment because the skill cannot safely rewrite that source.
+Both bootstrap and **Use** serialize the complete credentials read-modify-write cycle with the
+`.credentials.lock` directory before using a same-directory atomic replacement.
+
 These are the Companion skill-management endpoints a personal access token can call:
 
 | Action | Method & path | Scope |
 | --- | --- | --- |
+| Check or refresh the current file-backed PAT | `POST /tokens/refresh` | Preserves existing scopes |
 | List org library skills | `GET /skills?lib=org` | `skills:read` |
 | List My Skills | `GET /skills?lib=mine` | `skills:read` |
 | List reported installed skills | `GET /skills?installed=true` | `skills:read` |
@@ -275,8 +288,9 @@ Manifest v2 accepts an optional root `icon`. Valid values are `activity`, `bookm
 `square-stack`, `star`, `tag`, `terminal`, `users`, and `zap`. Preserve the field when normalizing,
 repairing, or republishing a manifest. Unknown values fail validation; omission remains compatible.
 
-Do not use this skill for workspace members, invitations, org settings mutation, or token
-management. The only PAT-readable org-settings surface for this skill is
+Do not use this skill for workspace members, invitations, org settings mutation, or general token
+management. The automatic current-token refresh above is the only token-management exception.
+The only PAT-readable org-settings surface for this skill is
 `GET /orgs/current/skill-naming-policy`.
 
 Listing the workspace catalog (`GET /skills?lib=org`), My Skills (`GET /skills?lib=mine`), and

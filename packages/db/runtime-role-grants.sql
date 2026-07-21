@@ -87,6 +87,7 @@ BEGIN
       public.companion_list_joinable_orgs(text),
       public.companion_lock_invitation_for_actor(text, text),
       public.companion_resolve_api_token(text),
+      public.companion_lock_api_token_for_refresh(text),
       public.companion_public_skill_preview(text),
       public.companion_skill_share_target(text, text),
       public.companion_billing_org_for_stripe_event(text, text),

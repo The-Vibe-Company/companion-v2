@@ -8,8 +8,8 @@
  * that the upgrade constraint is installed on the historical table.
  *
  * Why this test is integrated:
- * The guarantee depends on replaying the real migration history through 0045, seeding an old row,
- * and applying the exact 0046 SQL against PostgreSQL.
+ * The guarantee depends on replaying the real migration history through 0046, seeding an old row,
+ * and applying the exact 0047 SQL against PostgreSQL.
  *
  * Failure proof:
  * Removing the default, nullability, or check constraint makes one of the assertions fail.
@@ -42,13 +42,13 @@ async function applyMigrationFile(name: string): Promise<void> {
   }
 }
 
-describe("0046 skill grouping preference upgrade", () => {
+describe("0047 skill grouping preference upgrade", () => {
   beforeAll(async () => {
     await adminSql.unsafe(`create database "${databaseName}"`);
     upgradeSql = postgres(upgradeUrl.toString(), { max: 1 });
 
     const historicalMigrations = (await readdir(migrationsDir))
-      .filter((name) => /^\d{4}_.+\.sql$/.test(name) && name < "0046_skill_group_preference.sql")
+      .filter((name) => /^\d{4}_.+\.sql$/.test(name) && name < "0047_skill_group_preference.sql")
       .sort();
     for (const migration of historicalMigrations) await applyMigrationFile(migration);
 
@@ -66,7 +66,7 @@ describe("0046 skill grouping preference upgrade", () => {
       values (${orgId}::uuid, 'group-user', ${upgradeSql.json([{ type: "status", value: "valid" }])})
     `;
 
-    await applyMigrationFile("0046_skill_group_preference.sql");
+    await applyMigrationFile("0047_skill_group_preference.sql");
   }, 30_000);
 
   afterAll(async () => {

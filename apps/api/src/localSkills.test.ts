@@ -44,7 +44,7 @@ describe("companion skill package + row", () => {
     const pkg = await getCompanionSkillPackage();
     expect(pkg.key).toBe("companion");
     expect(pkg.checksum).toMatch(/^sha256:[0-9a-f]{64}$/);
-    expect(pkg.version).toBe("1.23.0");
+    expect(pkg.version).toBe("1.24.0");
     expect(pkg.sizeBytes).toBeGreaterThan(0);
     expect(pkg.integrity.packageChecksum).toBe(pkg.checksum);
     expect(pkg.integrity.files["SKILL.md"]).toMatch(/^sha256:[0-9a-f]{64}$/);
@@ -99,6 +99,10 @@ describe("companion skill package + row", () => {
     expect(row.integrity.files["scripts/bootstrap.py"]).toMatch(/^sha256:[0-9a-f]{64}$/);
     expect(row.commands.length).toBeGreaterThan(0);
     expect(row.commands).toContainEqual({
+      name: "Refresh workspace credentials",
+      desc: "Replace an eligible expired file-backed token once without widening its scopes or printing the replacement.",
+    });
+    expect(row.commands).toContainEqual({
       name: "Bootstrap health check",
       desc: "Gather workspace, self-update, local integrity, and installed-skill context in one fast pass.",
     });
@@ -121,6 +125,10 @@ describe("companion skill package + row", () => {
     const manifest = JSON.parse(await readFile(join(companionSkillDir(), "companion.json"), "utf8")) as {
       metadata?: { changelog?: Array<{ version?: string; changes?: string[] }> };
     };
+    const refreshChanges = manifest.metadata?.changelog?.find((entry) => entry.version === "1.23.0")?.changes?.join("\n") ?? "";
+    expect(refreshChanges).toContain("Refreshes a file-backed Companion token automatically");
+    expect(refreshChanges).toContain("Preserves the token's exact name and scopes");
+    expect(refreshChanges).toContain("Requires a fresh Use prompt");
     const billingChanges = manifest.metadata?.changelog?.find((entry) => entry.version === "1.19.0")?.changes?.join("\n") ?? "";
     expect(billingChanges).toContain("Documents the managed SaaS Free and Pro skill entitlements");
     expect(billingChanges).toContain("structured entitlement 403 responses");
@@ -143,11 +151,17 @@ describe("companion skill package + row", () => {
       expect(prompt).toContain("credentials.json");
       expect(prompt).toContain("schemaVersion");
       expect(prompt).toContain("activeWorkspaceId");
+      expect(prompt).toContain(".credentials.lock");
       expect(prompt).toContain("{base}");
       expect(prompt).toContain("{workspaceId}");
       expect(prompt).toContain("{token}");
       expect(prompt).toContain("Do not print the token");
     }
+    expect(row.prompts.use).toContain("renameSync");
+    expect(row.prompts.use).toContain("Move-Item -Force");
+    expect(row.prompts.use).toContain("fs.existsSync(file)");
+    expect(row.prompts.use).toContain("LastWriteTimeUtc");
+    expect(row.prompts.use).toContain("Get-Content -Raw -ErrorAction Stop");
     expect(row.prompts.update).toContain("/local-skills/companion/package");
     expect(row.prompts.update).toContain("python3 scripts/bootstrap.py --json --auto-update-companion");
     expect(row.prompts.update).toContain("local_customizations");
@@ -185,6 +199,8 @@ describe("companion skill package + row", () => {
     expect(skillMd).toContain("do not repeat it on later Companion turns");
     expect(skillMd).toContain("Do not validate, publish, update, archive, label, install");
     expect(skillMd).toContain("GET /local-skills/companion");
+    expect(skillMd).toContain("POST /tokens/refresh");
+    expect(skillMd).toContain("no more than 30 days");
     expect(skillMd).toContain("integrity");
     expect(skillMd).toContain("POST /local-skills/companion/installed");
     expect(skillMd).toContain("GET /v1/schemas/companion-manifest.v2.schema.json");
@@ -217,6 +233,7 @@ describe("companion skill package + row", () => {
     expect(apiRef).toContain("POST /skills?scope=org&label=marketing&label=marketing%2Fseo");
     expect(apiRef).toContain("POST /skills?scope=personal");
     expect(apiRef).toContain("GET /v1/schemas/companion-manifest.v2.schema.json");
+    expect(apiRef).toContain("POST /tokens/refresh");
     expect(apiRef).toContain("GET /skills?lib=mine");
     expect(apiRef).toContain("| Get skill metadata | `GET /skills/{slug}` | `skills:read` |");
     expect(apiRef).toContain("GET /skills?installed=true");

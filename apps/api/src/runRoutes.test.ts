@@ -5,6 +5,7 @@ process.env.COMPANION_GOLDEN_SNAPSHOT_ID = "snapshot-test";
 process.env.COMPANION_RUNS_ENABLED = "true";
 
 const serviceMocks = vi.hoisted(() => ({
+  ApiTokenRefreshError: class ApiTokenRefreshError extends Error {},
   RunBusyError: class RunBusyError extends Error {
     readonly code: string;
 
@@ -24,6 +25,7 @@ const serviceMocks = vi.hoisted(() => ({
   ensureUserBootstrap: vi.fn(async () => undefined),
   listOrgs: vi.fn(),
   resolveApiToken: vi.fn(),
+  refreshApiToken: vi.fn(),
   getRunOptions: vi.fn(),
   listRunConfigurations: vi.fn(),
   createRunConfiguration: vi.fn(),

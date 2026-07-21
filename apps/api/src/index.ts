@@ -39,6 +39,7 @@ import {
   getOrgLogoAsset,
   getSkillPublicPreviewByShareToken,
   getSkillShareTargetByShareToken,
+  ApiTokenRefreshError,
   issueApiToken,
   joinOrgByDomain,
   listApiTokens,
@@ -50,6 +51,7 @@ import {
   publishSkillVersion,
   assertCanPublishSkillVersion,
   prepareSkillPublishDependencies,
+  refreshApiToken,
   renameSkill,
   renameLabel,
   reportLocalSkillInstall,
@@ -153,6 +155,7 @@ import {
   createSkillInputSchema,
   deleteLabelInputSchema,
   issueTokenInputSchema,
+  refreshTokenResponseSchema,
   joinOnboardingOrgInputSchema,
   labelPathSchema,
   orgSettingsResponseSchema,
@@ -247,6 +250,7 @@ import { inviteEmail, sendTransactionalEmail } from "@companion/email";
 import {
   actorFromContext,
   attachSession,
+  bearerFromHeader,
   isTokenRequest,
   jsonError,
   orgIdFromContext,
@@ -2851,8 +2855,27 @@ app.get("/v1/tokens", async (c) => {
 });
 
 /**
+ * Return active-token metadata or replace an expired PAT during its 30-day recovery window.
+ * This route reads the bearer directly because an expired PAT intentionally cannot authenticate any
+ * other API surface. Ineligible credentials are indistinguishable to callers.
+ */
+app.post("/v1/tokens/refresh", async (c) => {
+  try {
+    const bearer = bearerFromHeader(c.req.header("authorization"));
+    if (!bearer) throw new ApiTokenRefreshError();
+    return c.json(refreshTokenResponseSchema.parse(await refreshApiToken(bearer)));
+  } catch (error) {
+    if (error instanceof ApiTokenRefreshError) {
+      return c.json({ ok: false, error: "token cannot be refreshed" }, 401);
+    }
+    return jsonError(c, error, 500);
+  }
+});
+
+/**
  * Issue a scoped personal access token for the guided-prompt / install flows.
- * Cookie session only — a token cannot mint another token. The plaintext is returned once.
+ * Cookie session only — ordinary PATs cannot mint arbitrary tokens. The dedicated refresh route
+ * above can only preserve an eligible token's existing name and scopes. Plaintext is returned once.
  */
 app.post("/v1/tokens", async (c) => {
   try {
