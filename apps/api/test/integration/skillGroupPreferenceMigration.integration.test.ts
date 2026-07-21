@@ -8,11 +8,13 @@
  * that the upgrade constraint is installed on the historical table.
  *
  * Why this test is integrated:
- * The guarantee depends on replaying the real migration history through 0046, seeding an old row,
- * and applying the exact 0047 SQL against PostgreSQL.
+ * The guarantee depends on replaying the real migration history through 0045, seeding an old row,
+ * simulating the former branch-local 0046 grouping migration, and applying the exact 0047 SQL
+ * against PostgreSQL. This also proves a rebase recovers the 0046 API-token refresh function.
  *
  * Failure proof:
- * Removing the default, nullability, or check constraint makes one of the assertions fail.
+ * Removing the default, nullability, check constraint, or refresh-function recovery makes an
+ * assertion fail.
  */
 import { randomUUID } from "node:crypto";
 import { readFile, readdir } from "node:fs/promises";
@@ -42,13 +44,13 @@ async function applyMigrationFile(name: string): Promise<void> {
   }
 }
 
-describe("0047 skill grouping preference upgrade", () => {
+describe("0047 skill grouping preference upgrade and rebase recovery", () => {
   beforeAll(async () => {
     await adminSql.unsafe(`create database "${databaseName}"`);
     upgradeSql = postgres(upgradeUrl.toString(), { max: 1 });
 
     const historicalMigrations = (await readdir(migrationsDir))
-      .filter((name) => /^\d{4}_.+\.sql$/.test(name) && name < "0047_skill_group_preference.sql")
+      .filter((name) => /^\d{4}_.+\.sql$/.test(name) && name < "0046_api_token_refresh.sql")
       .sort();
     for (const migration of historicalMigrations) await applyMigrationFile(migration);
 
@@ -66,6 +68,13 @@ describe("0047 skill grouping preference upgrade", () => {
       values (${orgId}::uuid, 'group-user', ${upgradeSql.json([{ type: "status", value: "valid" }])})
     `;
 
+    // This is the schema left behind by the branch-local migration that previously occupied 0046.
+    await upgradeSql.unsafe(
+      `alter table "skill_filter_preferences" add column "group_by" text default 'folder' not null`,
+    );
+    await upgradeSql.unsafe(
+      `alter table "skill_filter_preferences" add constraint "skill_filter_preferences_group_by_check" check ("group_by" in ('folder', 'none'))`,
+    );
     await applyMigrationFile("0047_skill_group_preference.sql");
   }, 30_000);
 
@@ -96,5 +105,12 @@ describe("0047 skill grouping preference upgrade", () => {
     await expect(
       upgradeSql`update skill_filter_preferences set group_by = 'team' where user_id = 'group-user'`,
     ).rejects.toMatchObject({ code: "23514" });
+  });
+
+  it("restores the token refresh function when the rebased 0046 was skipped", async () => {
+    const [row] = await upgradeSql<{ functionName: string | null }[]>`
+      select to_regprocedure('public.companion_lock_api_token_for_refresh(text)')::text as "functionName"
+    `;
+    expect(row?.functionName).toBe("companion_lock_api_token_for_refresh(text)");
   });
 });
