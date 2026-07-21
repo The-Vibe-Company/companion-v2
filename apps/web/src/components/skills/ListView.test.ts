@@ -294,6 +294,7 @@ describe("ListView grouped rhythm", () => {
     expect(html).toContain('<span class="cgroup__name">Marketing</span>');
     expect(html).toContain('<span class="cgroup__name">Operations</span>');
     expect(html.match(/data-skill-slug="digest"/g)).toHaveLength(2);
+    expect(html).toContain('class="crow crow--subfolder"');
     expect(html).toContain('aria-label="Subfolders"');
     expect(html).toContain('aria-label="Subfolder: Reporting"');
     expect(html).toContain('aria-label="Subfolder: SEO"');

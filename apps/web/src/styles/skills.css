@@ -339,6 +339,7 @@ body { background: var(--color-canvas); color: var(--color-fg); font-family: var
 .crow__primary { display: inline-flex; align-items: center; justify-content: flex-end; min-width: 0; }
 .crow__primary .rowact { max-width: 100%; min-width: 0; white-space: nowrap; }
 .crow__skill { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 6px 0; }
+.crow--subfolder .crow__skill { padding-left: var(--space-3); }
 .crow__skillicon { display: inline-flex; flex: none; color: var(--color-faint); }
 .crow__name { font-family: var(--font-mono); font-size: var(--text-sm); font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--color-fg); display: flex; align-items: center; gap: 8px; }
 .crow__name--title { font-family: var(--font-ui); }
