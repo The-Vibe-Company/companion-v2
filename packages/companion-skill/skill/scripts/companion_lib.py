@@ -444,6 +444,37 @@ def resolve_target_dir(
     return base / skill_name
 
 
+def resolve_additional_discovery_dirs(
+    tool: str,
+    scope: str,
+    skill_name: str,
+    project_root: Path | None,
+    registry: dict[str, Any],
+) -> list[Path]:
+    """Resolve visible skill roots that are discovered by a tool but never installation targets.
+
+    Compatibility roots shared with another configured tool are represented by ``discovers``. This
+    list is for native or legacy roots that Companion deliberately does not install into, but must
+    still inspect so an existing copy cannot remain visible beside the selected target.
+    """
+    spec = registry.get(tool)
+    if not spec:
+        fail(f"unknown tool {tool!r}")
+    templates = (spec.get("additionalDiscoveryDirs") or {}).get(scope) or []
+    paths: list[Path] = []
+    for template in templates:
+        if scope == "user":
+            base = Path(template).expanduser()
+        elif scope == "project":
+            if project_root is None:
+                fail("project scope requires a project root")
+            base = Path(project_root) / template
+        else:
+            fail(f"unknown scope {scope!r}")
+        paths.append(base / skill_name)
+    return paths
+
+
 def find_project_root(start: Path | None = None) -> Path | None:
     """Walk up from `start` (default cwd) to the nearest repo root (directory holding .git)."""
     current = (start or Path.cwd()).resolve()
@@ -605,6 +636,48 @@ def upsert_skill_lock_record(
         "targets": merged,
         "addedAt": now_iso(),
     }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(raw, indent=2) + "\n", encoding="utf-8")
+
+
+def remove_skill_lock_targets(
+    path: Path,
+    workspace_id: str | None,
+    api_url: str,
+    skill_name: str,
+    target_keys: set[tuple[str, str]],
+) -> None:
+    """Remove verified redundant (tool, scope) targets from one lockfile.
+
+    Folder deletion is handled by the installer first. This writer only removes the matching inventory
+    rows and preserves the rest of the skill record. It never stores credentials.
+    """
+    if not target_keys:
+        return
+    raw = load_json(path)
+    if not isinstance(raw, dict):
+        return
+    entry = workspace_lock_entry(raw, workspace_id, api_url)
+    if not isinstance(entry, dict) or not isinstance(entry.get("skills"), dict):
+        return
+    record = entry["skills"].get(skill_name)
+    if not isinstance(record, dict):
+        return
+    kept = [
+        row
+        for row in existing_target_rows(record)
+        if (str(row.get("tool")), str(row.get("scope"))) not in target_keys
+    ]
+    if len(kept) == len(existing_target_rows(record)):
+        return
+    if not kept:
+        del entry["skills"][skill_name]
+    else:
+        versions = [row.get("version") for row in kept if row.get("version")]
+        record["version"] = min(versions, key=cmp_to_key(compare_semver)) if versions else record.get("version")
+        record["targets"] = kept
+        record.pop("installPath", None)
+        record.pop("path", None)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(raw, indent=2) + "\n", encoding="utf-8")
 

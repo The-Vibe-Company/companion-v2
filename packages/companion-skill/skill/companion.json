@@ -1,7 +1,7 @@
 {
   "$schema": "https://thecompanion.sh/schemas/companion-manifest.v2.schema.json",
   "name": "companion",
-  "version": "1.23.0",
+  "version": "1.24.0",
   "title": "Companion",
   "description": "Manage local SKILL.md packages with Companion: refresh eligible expired credentials, bootstrap context, self-update first, validate, publish, update, resolve dependencies, track installs, and repair manifests.",
   "notes": "## What it does\n\nThe Companion skill gives your assistant one reliable workflow for local SKILL.md packages: refresh eligible expired credentials, validate, publish, update, organize, install, audit, and self-update.\n\n## Safety model\n\n- Reads only skill folders you point it at and Companion's own local state under ~/.companion.\n- Stores credentials in ~/.companion/credentials.json by workspace id, rotates an expired file-backed token only during its 30-day recovery window, and never prints tokens.\n- Confirms publishing or archival changes before mutating workspace skills.\n- Uses companion.json as the source of truth for package identity, version, env/secrets, dependencies, notes, commands, and changelog.\n\n## Local tracking\n\nCompanion records installed skills in ~/.companion/skills.lock.json under workspace-id keys so audits can compare local versions, checksums, and dependency snapshots against the workspace registry without storing tokens. Installs fan out into every tool the user works with (Claude Code, Codex, OpenCode, …); each record's targets[] array tracks the per-tool and per-project install locations, with project-scope installs kept in a per-project <repo>/.companion/skills.lock.json.",
@@ -24,6 +24,15 @@
       "evals/evals.json"
     ],
     "changelog": [
+      {
+        "version": "1.24.0",
+        "date": "2026-07-21",
+        "changes": [
+          "Plans the smallest duplicate-free set of physical skill roots from each configured tool's discovery metadata.",
+          "Blocks untracked, customized, unverifiable, and native OpenCode duplicate skill folders before package download.",
+          "Prunes identical Companion-tracked redundant copies only when their recorded path matches and after a complete install, while rechecking symlink aliases immediately before removal and preserving lock cleanup after per-target errors."
+        ]
+      },
       {
         "version": "1.23.0",
         "date": "2026-07-21",

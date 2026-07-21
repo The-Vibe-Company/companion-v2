@@ -216,9 +216,21 @@ assistant uses to upload, update, validate, and check whether the user's skills 
 workspace-id entry in the local `~/.companion/skills.lock.json` snapshot against the registry). Local
 credentials live separately in `~/.companion/credentials.json`, keyed by `organizations.id`; the
 lockfile keeps `apiUrl` metadata but never stores tokens. Legacy URL-keyed lockfiles are migrated on
-the next write, and `skills.log.json` is only a read-once legacy alias. Installs fan out through the
-bundled `scripts/tools.json` registry, currently covering Claude Code, Codex, and OpenCode; OpenCode
-uses the shared Agent Skills paths (`~/.agents/skills` and `.agents/skills`). The package and its presentation manifest ship in `packages/companion-skill`; the
+the next write, and `skills.log.json` is only a read-once legacy alias. Installs use the bundled
+`scripts/tools.json` registry, currently covering Claude Code, Codex, and OpenCode. Registry discovery
+metadata lets the installer select the smallest set of physical skill roots that covers every chosen
+tool once per explicitly requested scope without exposing one skill name twice inside that scope.
+User and project installs remain separate, intentional layers when the caller requests `both`.
+Before download it checks all other discovered roots and rejects roots that alias each other through
+symlinks;
+untracked, modified, or out-of-request duplicates block, while a matching Companion-tracked redundant
+target for a selected tool is pruned only after its lockfile path and checksum both match, the
+replacement install succeeds, and the stale target is removed from the lockfile. Native roots that
+Companion does not install into, including OpenCode's `~/.config/opencode/skills` and
+`.opencode/skills`, are still inspected and block installation when they contain a visible duplicate.
+The redundant root's physical path is rechecked immediately before removal so a symlink retargeted
+after preflight cannot redirect pruning onto a selected install target.
+The package and its presentation manifest ship in `packages/companion-skill`; the
 authoritative version is the `version` in the bundled `companion.json`, which the API packs (and
 caches) on demand. Local skill rows also expose official integrity metadata: the canonical package
 checksum plus SHA-256 hashes for tracked files such as `SKILL.md`, `companion.json`, and

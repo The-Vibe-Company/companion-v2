@@ -28,7 +28,7 @@
     "tool": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["displayName", "detect", "skillsDir", "format"],
+      "required": ["displayName", "detect", "skillsDir", "discovers", "format"],
       "properties": {
         "displayName": {
           "type": "string",
@@ -56,6 +56,33 @@
               "type": "string",
               "minLength": 1,
               "description": "Project-relative skills directory, e.g. \".claude/skills\" or \".agents/skills\" (joined under a repo root)."
+            }
+          }
+        },
+        "discovers": {
+          "type": "array",
+          "description": "Install-target keys whose skill directories this tool discovers. Used to cover multiple tools with one copy and prevent duplicate names in a tool's skill list.",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"
+          }
+        },
+        "additionalDiscoveryDirs": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Extra native or legacy roots this tool discovers but Companion does not install into. Existing copies in these roots block installation so duplicate names cannot remain visible.",
+          "properties": {
+            "user": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": { "type": "string", "minLength": 1 }
+            },
+            "project": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": { "type": "string", "minLength": 1 }
             }
           }
         },
