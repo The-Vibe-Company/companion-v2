@@ -23,18 +23,25 @@ REGISTRY = {
         "displayName": "Claude Code",
         "detect": ["~/.claude"],
         "skillsDir": {"user": "~/.claude/skills", "project": ".claude/skills"},
+        "discovers": ["claude-code"],
         "format": "skill-md",
     },
     "codex": {
         "displayName": "Codex",
         "detect": ["~/.codex"],
         "skillsDir": {"user": "~/.codex/skills", "project": ".codex/skills"},
+        "discovers": ["codex", "opencode"],
         "format": "skill-md",
     },
     "opencode": {
         "displayName": "OpenCode",
         "detect": ["~/.config/opencode"],
         "skillsDir": {"user": "~/.agents/skills", "project": ".agents/skills"},
+        "discovers": ["opencode", "claude-code"],
+        "additionalDiscoveryDirs": {
+            "user": ["~/.config/opencode/skills"],
+            "project": [".opencode/skills"],
+        },
         "format": "skill-md",
     },
 }
@@ -74,6 +81,25 @@ class RegistryTests(EnvSandbox):
         self.assertEqual(registry["opencode"]["detect"], ["~/.config/opencode"])
         self.assertEqual(registry["opencode"]["skillsDir"]["user"], "~/.agents/skills")
         self.assertEqual(registry["opencode"]["skillsDir"]["project"], ".agents/skills")
+        self.assertEqual(registry["codex"]["discovers"], ["codex", "opencode"])
+        self.assertEqual(registry["opencode"]["discovers"], ["opencode", "claude-code"])
+        self.assertEqual(
+            registry["opencode"]["additionalDiscoveryDirs"],
+            {"user": ["~/.config/opencode/skills"], "project": [".opencode/skills"]},
+        )
+
+    def test_plans_smallest_duplicate_free_target_set(self) -> None:
+        self.assertEqual(install_skill.plan_target_tools(["claude-code", "codex", "opencode"], REGISTRY), ["claude-code", "codex"])
+        self.assertEqual(install_skill.plan_target_tools(["claude-code", "opencode"], REGISTRY), ["claude-code"])
+        self.assertEqual(install_skill.plan_target_tools(["codex", "opencode"], REGISTRY), ["opencode"])
+
+    def test_duplicate_roots_follow_selected_tool_discovery(self) -> None:
+        self.assertEqual(
+            install_skill.duplicate_target_tools(
+                ["claude-code", "codex", "opencode"], ["claude-code", "codex"], REGISTRY
+            ),
+            ["opencode"],
+        )
 
     def test_detect_tools_finds_only_present_tools(self) -> None:
         (self.home / ".claude").mkdir()
@@ -342,6 +368,295 @@ class FanOutTests(EnvSandbox):
         self.assertEqual([], self._swap_dirs(self.home / ".claude" / "skills"))
         self.assertEqual([], self._swap_dirs(self.home / ".codex" / "skills"))
         self.assertEqual([], self._swap_dirs(self.home / ".agents" / "skills"))
+
+    def test_tracked_identical_duplicate_is_pruned_from_disk_and_lockfile(self) -> None:
+        pkg = self._package()
+        claude_target = companion_lib.resolve_target_dir("claude-code", "user", "demo", None, REGISTRY)
+        duplicate_target = companion_lib.resolve_target_dir("opencode", "user", "demo", None, REGISTRY)
+        install_skill.deploy_to_target(pkg, claude_target)
+        install_skill.deploy_to_target(pkg, duplicate_target)
+        skill = {"name": "demo", "slug": "demo", "skillId": "id", "version": "1.0.0", "checksum": "sha256:pkg"}
+        targets = [
+            {"tool": "claude-code", "scope": "user", "path": str(claude_target), "checksum": companion_lib.compute_dir_checksum(claude_target)},
+            {"tool": "opencode", "scope": "user", "path": str(duplicate_target), "checksum": companion_lib.compute_dir_checksum(duplicate_target)},
+        ]
+        companion_lib.upsert_skill_lock_record(
+            companion_lib.lockfile_path(), "ws", "https://api/v1", skill, targets, relative_to=None
+        )
+        prior = {"demo": json.loads(companion_lib.lockfile_path().read_text())["workspaces"]["ws"]["skills"]["demo"]}
+        node = {"slug": "demo", "version": "1.0.0", "skill": skill}
+
+        conflicts, prunable = install_skill.preflight_duplicate_targets(
+            [node], ["opencode"], ["claude-code"], {"opencode"}, ["user"], REGISTRY, None, prior, {}
+        )
+        self.assertEqual(conflicts, [])
+        self.assertEqual(len(prunable), 1)
+
+        removed = install_skill.prune_duplicate_targets(prunable, "ws", "https://api/v1", None)
+        self.assertEqual(removed[0]["status"], "removed")
+        self.assertFalse(duplicate_target.exists())
+        record = json.loads(companion_lib.lockfile_path().read_text())["workspaces"]["ws"]["skills"]["demo"]
+        self.assertEqual([(row["tool"], row["scope"]) for row in record["targets"]], [("claude-code", "user")])
+
+    def test_prune_checksum_error_preserves_cleanup_for_prior_removals(self) -> None:
+        pkg = self._package()
+        first = companion_lib.resolve_target_dir("claude-code", "user", "demo", None, REGISTRY)
+        second = companion_lib.resolve_target_dir("opencode", "user", "demo", None, REGISTRY)
+        install_skill.deploy_to_target(pkg, first)
+        install_skill.deploy_to_target(pkg, second)
+        first_checksum = companion_lib.compute_dir_checksum(first)
+        second_checksum = companion_lib.compute_dir_checksum(second)
+        skill = {"name": "demo", "slug": "demo", "skillId": "id", "version": "1.0.0", "checksum": "sha256:pkg"}
+        companion_lib.upsert_skill_lock_record(
+            companion_lib.lockfile_path(),
+            "ws",
+            "https://api/v1",
+            skill,
+            [
+                {"tool": "claude-code", "scope": "user", "path": str(first), "checksum": first_checksum},
+                {"tool": "opencode", "scope": "user", "path": str(second), "checksum": second_checksum},
+            ],
+            relative_to=None,
+        )
+        original_checksum = install_skill.compute_dir_checksum
+
+        def checksum_with_error(path: Path) -> str:
+            if path == second:
+                raise OSError("simulated read failure")
+            return original_checksum(path)
+
+        install_skill.compute_dir_checksum = checksum_with_error
+        try:
+            removed = install_skill.prune_duplicate_targets(
+                [
+                    {"slug": "demo", "tool": "claude-code", "scope": "user", "path": str(first), "checksum": first_checksum},
+                    {"slug": "demo", "tool": "opencode", "scope": "user", "path": str(second), "checksum": second_checksum},
+                ],
+                "ws",
+                "https://api/v1",
+                None,
+            )
+        finally:
+            install_skill.compute_dir_checksum = original_checksum
+
+        self.assertEqual([row["status"] for row in removed], ["removed", "error"])
+        self.assertFalse(first.exists())
+        self.assertTrue(second.exists())
+        record = json.loads(companion_lib.lockfile_path().read_text())["workspaces"]["ws"]["skills"]["demo"]
+        self.assertEqual([(row["tool"], row["scope"]) for row in record["targets"]], [("opencode", "user")])
+
+    def test_customized_duplicate_blocks_before_install(self) -> None:
+        pkg = self._package()
+        duplicate_target = companion_lib.resolve_target_dir("opencode", "user", "demo", None, REGISTRY)
+        install_skill.deploy_to_target(pkg, duplicate_target)
+        recorded = companion_lib.compute_dir_checksum(duplicate_target)
+        (duplicate_target / "SKILL.md").write_text("locally changed\n", encoding="utf-8")
+        prior = {
+            "demo": {
+                "targets": [
+                    {"tool": "opencode", "scope": "user", "path": str(duplicate_target), "checksum": recorded}
+                ]
+            }
+        }
+        node = {"slug": "demo", "version": "1.0.0", "skill": {"name": "demo"}}
+
+        conflicts, prunable = install_skill.preflight_duplicate_targets(
+            [node], ["opencode"], ["claude-code"], {"opencode"}, ["user"], REGISTRY, None, prior, {}
+        )
+        self.assertEqual(prunable, [])
+        self.assertEqual(conflicts[0]["status"], "duplicate_customized")
+        self.assertTrue(duplicate_target.exists())
+
+    def test_duplicate_in_unrequested_tool_blocks_instead_of_being_pruned(self) -> None:
+        pkg = self._package()
+        duplicate_target = companion_lib.resolve_target_dir("claude-code", "user", "demo", None, REGISTRY)
+        install_skill.deploy_to_target(pkg, duplicate_target)
+        checksum = companion_lib.compute_dir_checksum(duplicate_target)
+        prior = {
+            "demo": {
+                "targets": [
+                    {"tool": "claude-code", "scope": "user", "path": str(duplicate_target), "checksum": checksum}
+                ]
+            }
+        }
+        node = {"slug": "demo", "version": "1.0.0", "skill": {"name": "demo"}}
+
+        conflicts, prunable = install_skill.preflight_duplicate_targets(
+            [node], ["claude-code"], ["codex"], set(), ["user"], REGISTRY, None, prior, {}
+        )
+        self.assertEqual(prunable, [])
+        self.assertEqual(conflicts[0]["status"], "duplicate_outside_scope")
+        self.assertTrue(duplicate_target.exists())
+
+    def test_native_opencode_roots_block_duplicate_install(self) -> None:
+        project_root = self.root / "repo"
+        native_user = self.home / ".config" / "opencode" / "skills" / "demo"
+        native_project = project_root / ".opencode" / "skills" / "demo"
+        native_user.mkdir(parents=True)
+        native_project.mkdir(parents=True)
+        (native_user / "SKILL.md").write_text("native user\n", encoding="utf-8")
+        (native_project / "SKILL.md").write_text("native project\n", encoding="utf-8")
+        node = {"slug": "demo", "version": "1.0.0", "skill": {"name": "demo"}}
+
+        conflicts, checked = install_skill.preflight_additional_discovery_targets(
+            [node], ["opencode"], ["user", "project"], REGISTRY, project_root
+        )
+
+        self.assertEqual({row["status"] for row in conflicts}, {"duplicate_unmanaged_root"})
+        self.assertEqual({row["path"] for row in conflicts}, {str(native_user), str(native_project)})
+        self.assertEqual(set(checked), {str(native_user), str(native_project)})
+
+    def test_mismatched_lockfile_path_never_authorizes_duplicate_deletion(self) -> None:
+        pkg = self._package()
+        duplicate_target = companion_lib.resolve_target_dir("opencode", "user", "demo", None, REGISTRY)
+        install_skill.deploy_to_target(pkg, duplicate_target)
+        prior = {
+            "demo": {
+                "targets": [
+                    {
+                        "tool": "opencode",
+                        "scope": "user",
+                        "path": str(self.home / "moved" / "demo"),
+                        "checksum": companion_lib.compute_dir_checksum(duplicate_target),
+                    }
+                ]
+            }
+        }
+        node = {"slug": "demo", "version": "1.0.0", "skill": {"name": "demo"}}
+
+        conflicts, prunable = install_skill.preflight_duplicate_targets(
+            [node], ["opencode"], ["claude-code"], {"opencode"}, ["user"], REGISTRY, None, prior, {}
+        )
+
+        self.assertEqual(prunable, [])
+        self.assertEqual(conflicts[0]["status"], "duplicate_untracked")
+        self.assertTrue(duplicate_target.exists())
+
+    def test_symlinked_duplicate_root_cannot_alias_selected_target(self) -> None:
+        claude_skills = self.home / ".claude" / "skills"
+        claude_skills.mkdir(parents=True)
+        agents_root = self.home / ".agents"
+        agents_root.mkdir()
+        (agents_root / "skills").symlink_to(claude_skills, target_is_directory=True)
+        duplicate_target = claude_skills / "demo"
+        duplicate_target.mkdir()
+        (duplicate_target / "SKILL.md").write_text("same physical folder\n", encoding="utf-8")
+        checksum = companion_lib.compute_dir_checksum(duplicate_target)
+        prior = {
+            "demo": {
+                "targets": [
+                    {
+                        "tool": "opencode",
+                        "scope": "user",
+                        "path": str(self.home / ".agents" / "skills" / "demo"),
+                        "checksum": checksum,
+                    }
+                ]
+            }
+        }
+        node = {"slug": "demo", "version": "1.0.0", "skill": {"name": "demo"}}
+
+        conflicts, prunable = install_skill.preflight_duplicate_targets(
+            [node], ["opencode"], ["claude-code"], {"opencode"}, ["user"], REGISTRY, None, prior, {}
+        )
+
+        self.assertEqual(prunable, [])
+        self.assertEqual(conflicts[0]["status"], "duplicate_path_alias")
+        self.assertTrue(duplicate_target.exists())
+
+    def test_duplicate_root_retargeted_after_preflight_is_not_deleted(self) -> None:
+        pkg = self._package()
+        separate_skills = self.root / "separate-skills"
+        separate_skills.mkdir()
+        agents_root = self.home / ".agents"
+        agents_root.mkdir()
+        agents_link = agents_root / "skills"
+        agents_link.symlink_to(separate_skills, target_is_directory=True)
+        duplicate_target = agents_link / "demo"
+        install_skill.deploy_to_target(pkg, duplicate_target)
+        checksum = companion_lib.compute_dir_checksum(duplicate_target)
+        skill = {"name": "demo", "slug": "demo", "skillId": "id", "version": "1.0.0", "checksum": "sha256:pkg"}
+        companion_lib.upsert_skill_lock_record(
+            companion_lib.lockfile_path(),
+            "ws",
+            "https://api/v1",
+            skill,
+            [{"tool": "opencode", "scope": "user", "path": str(duplicate_target), "checksum": checksum}],
+            relative_to=None,
+        )
+        prior = {"demo": json.loads(companion_lib.lockfile_path().read_text())["workspaces"]["ws"]["skills"]["demo"]}
+        node = {"slug": "demo", "version": "1.0.0", "skill": skill}
+        conflicts, prunable = install_skill.preflight_duplicate_targets(
+            [node], ["opencode"], ["claude-code"], {"opencode"}, ["user"], REGISTRY, None, prior, {}
+        )
+        self.assertEqual(conflicts, [])
+        self.assertEqual(len(prunable), 1)
+
+        claude_target = companion_lib.resolve_target_dir("claude-code", "user", "demo", None, REGISTRY)
+        install_skill.deploy_to_target(pkg, claude_target)
+        agents_link.unlink()
+        agents_link.symlink_to(claude_target.parent, target_is_directory=True)
+        removed = install_skill.prune_duplicate_targets(prunable, "ws", "https://api/v1", None)
+
+        self.assertEqual(removed[0]["status"], "error")
+        self.assertTrue(claude_target.exists())
+        record = json.loads(companion_lib.lockfile_path().read_text())["workspaces"]["ws"]["skills"]["demo"]
+        self.assertEqual([(row["tool"], row["scope"]) for row in record["targets"]], [("opencode", "user")])
+
+    def test_redundant_user_root_cannot_alias_planned_project_target(self) -> None:
+        project_root = self.root / "repo"
+        project_target = companion_lib.resolve_target_dir("claude-code", "project", "demo", project_root, REGISTRY)
+        project_target.mkdir(parents=True)
+        (project_target / "SKILL.md").write_text("shared target\n", encoding="utf-8")
+        agents_root = self.home / ".agents"
+        agents_root.mkdir()
+        (agents_root / "skills").symlink_to(project_target.parent, target_is_directory=True)
+        duplicate_target = companion_lib.resolve_target_dir("opencode", "user", "demo", project_root, REGISTRY)
+        checksum = companion_lib.compute_dir_checksum(duplicate_target)
+        prior = {
+            "demo": {
+                "targets": [
+                    {
+                        "tool": "opencode",
+                        "scope": "user",
+                        "path": str(duplicate_target),
+                        "checksum": checksum,
+                    }
+                ]
+            }
+        }
+        node = {"slug": "demo", "version": "1.0.0", "skill": {"name": "demo"}}
+
+        conflicts, prunable = install_skill.preflight_duplicate_targets(
+            [node],
+            ["opencode"],
+            ["claude-code"],
+            {"opencode"},
+            ["user", "project"],
+            REGISTRY,
+            project_root,
+            prior,
+            {},
+        )
+
+        self.assertEqual(prunable, [])
+        self.assertEqual(conflicts[0]["status"], "duplicate_path_alias")
+        self.assertTrue(project_target.exists())
+
+    def test_planned_target_roots_cannot_alias_each_other(self) -> None:
+        claude_skills = self.home / ".claude" / "skills"
+        claude_skills.mkdir(parents=True)
+        codex_root = self.home / ".codex"
+        codex_root.mkdir()
+        (codex_root / "skills").symlink_to(claude_skills, target_is_directory=True)
+        node = {"slug": "demo", "version": "1.0.0", "skill": {"name": "demo"}}
+
+        conflicts = install_skill.target_alias_conflicts(
+            [node], [("claude-code", "user"), ("codex", "user")], REGISTRY, None
+        )
+
+        self.assertEqual(len(conflicts), 2)
+        self.assertEqual({row["status"] for row in conflicts}, {"target_path_alias"})
 
     def test_deploy_to_target_restores_and_deletes_backup_after_rename_failure(self) -> None:
         pkg = self._package()

@@ -6,18 +6,25 @@
       "displayName": "Claude Code",
       "detect": ["~/.claude"],
       "skillsDir": { "user": "~/.claude/skills", "project": ".claude/skills" },
+      "discovers": ["claude-code"],
       "format": "skill-md"
     },
     "codex": {
       "displayName": "Codex",
       "detect": ["~/.codex"],
       "skillsDir": { "user": "~/.codex/skills", "project": ".codex/skills" },
+      "discovers": ["codex", "opencode"],
       "format": "skill-md"
     },
     "opencode": {
       "displayName": "OpenCode",
       "detect": ["~/.config/opencode"],
       "skillsDir": { "user": "~/.agents/skills", "project": ".agents/skills" },
+      "discovers": ["opencode", "claude-code"],
+      "additionalDiscoveryDirs": {
+        "user": ["~/.config/opencode/skills"],
+        "project": [".opencode/skills"]
+      },
       "format": "skill-md"
     }
   }

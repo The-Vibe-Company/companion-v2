@@ -306,10 +306,20 @@ lockfile levels, same shape:
 
 The set of tools this machine uses is recorded in `~/.companion/config.json`
 (`{ "schemaVersion": 1, "tools": ["claude-code", "codex", "opencode"] }` — never any secret). The supported tools
-and their on-disk skill directories are declared in this skill's `scripts/tools.json` registry, which
-is extensible: adding a tool there is enough to make it an install target. The OpenCode target uses
-the shared Agent Skills paths (`~/.agents/skills` and `.agents/skills`) so the same installed package
-is discoverable by OpenCode's agent-compatible loader. `scripts/tools.schema.json`
+and their on-disk skill directories are declared in this skill's `scripts/tools.json` registry. Each
+tool also declares `discovers`, the install roots it reads. The installer uses that discovery matrix
+to choose the smallest set of physical copies that covers every configured tool exactly once per
+requested scope. A deliberate `--scope both` install still creates separate global and project
+layers. For
+example, with Claude Code, Codex, and OpenCode configured, it installs into the Claude Code and Codex
+roots; OpenCode reuses the Claude-compatible copy instead of receiving a duplicate under
+`~/.agents/skills`. Roots that a tool discovers but Companion deliberately does not install into are
+listed under `additionalDiscoveryDirs`; an existing skill in OpenCode's native
+`~/.config/opencode/skills` or `.opencode/skills` root blocks the install so it can be resolved
+explicitly. Automatic pruning additionally requires the lockfile's recorded path and checksum to
+match the redundant folder, and any symlink alias between selected or redundant roots blocks before
+installation. The redundant root's physical path is checked again immediately before removal to
+catch a symlink retargeted after preflight. `scripts/tools.schema.json`
 is its JSON Schema (referenced via `$schema`) describing the registry shape.
 
 ### List workspace and local skills
@@ -409,8 +419,12 @@ use right now. Resolve the target tools, confirm with the user, then fan out:
    `<repo>/.companion/skills.lock.json`. For a project-scope install, confirm the current repo is the
    intended one (project scope requires a repo root).
 3. **Let the installer resolve dependencies and preflight everything.** `install_skill.py` resolves
-   the requested version and its dependency closure, then calls the server secret preflight before
-   any package download or local mutation. Required missing bindings block only this install;
+   the requested version and its dependency closure, selects a duplicate-free set of install roots,
+   then checks every other root those tools discover before any package download or local mutation.
+   An extra untracked, locally modified, legacy-unverifiable, or out-of-request copy blocks the
+   install. An identical Companion-tracked copy for a selected tool that is now redundant is removed
+   only after every planned target installs, and its lockfile target is removed in the same pass. The
+   installer also calls the server secret preflight. Required missing bindings block only this install;
    optional missing bindings are warnings. Show the metadata-only plan once, get one global user
    confirmation, then pass `--confirm-secrets`. Never ask the user to paste or reveal a value.
    The legacy `--confirm-required-secrets` flag is rejected and never authorizes plaintext retrieval;

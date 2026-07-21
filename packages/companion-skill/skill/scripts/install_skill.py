@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import io
+import itertools
 import json
 import os
 import shutil
@@ -44,6 +45,8 @@ from companion_lib import (  # noqa: E402
     lockfile_path,
     normalize_targets,
     project_lockfile_path,
+    resolve_additional_discovery_dirs,
+    remove_skill_lock_targets,
     resolve_credentials,
     resolve_target_dir,
     upsert_skill_lock_record,
@@ -131,17 +134,79 @@ def deploy_to_target(package_dir: Path, target_dir: Path) -> None:
                 remove_swap_path(backup)
 
 
-def plan_targets(tools: list[str], scopes: list[str], project_root: Path | None) -> list[tuple[str, str]]:
+def plan_target_tools(tools: list[str], registry: dict[str, Any]) -> list[str]:
+    """Choose the smallest install-root set that covers every requested tool exactly once.
+
+    Some agents intentionally discover another agent's compatible skill directory. Installing into
+    every configured root would therefore surface the same skill name twice. The registry's
+    ``discovers`` matrix lets the planner reuse one physical copy without losing tool coverage.
+    """
+    requested = list(dict.fromkeys(tools))
+    for tool in requested:
+        discovered = registry[tool].get("discovers") or [tool]
+        unknown = [key for key in discovered if key not in registry]
+        if unknown:
+            fail(f"tool {tool!r} discovers unknown install target(s): {', '.join(unknown)}")
+
+    for size in range(1, len(requested) + 1):
+        for candidate in itertools.combinations(requested, size):
+            if all(
+                len(set(candidate).intersection(registry[tool].get("discovers") or [tool])) == 1
+                for tool in requested
+            ):
+                return list(candidate)
+    fail("configured tools have no duplicate-free skill install plan; update scripts/tools.json discovery metadata")
+
+
+def plan_targets(
+    tools: list[str],
+    scopes: list[str],
+    project_root: Path | None,
+    registry: dict[str, Any],
+) -> list[tuple[str, str]]:
+    target_tools = plan_target_tools(tools, registry)
     plan: list[tuple[str, str]] = []
     for scope in scopes:
         if scope == "project" and project_root is None:
             fail("project scope requested but no project root was found (run inside a repo or pass --project)")
-        for tool in tools:
+        for tool in target_tools:
             plan.append((tool, scope))
     return plan
 
 
-def existing_target(lock_records: dict[str, Any], skill_name: str, tool: str, scope: str) -> tuple[bool, str | None]:
+def duplicate_target_tools(tools: list[str], planned_tools: list[str], registry: dict[str, Any]) -> list[str]:
+    """Return discoverable install roots that would create a second visible copy."""
+    discovered = {
+        target
+        for tool in tools
+        for target in (registry[tool].get("discovers") or [tool])
+    }
+    return [tool for tool in registry if tool in discovered and tool not in set(planned_tools)]
+
+
+def normalized_target_path(path: str | Path, project_root: Path | None) -> Path:
+    """Return an absolute lexical path without following symlinks."""
+    candidate = Path(path).expanduser()
+    if not candidate.is_absolute():
+        if project_root is None:
+            return candidate
+        candidate = project_root / candidate
+    return Path(os.path.abspath(os.path.normpath(str(candidate))))
+
+
+def physical_target_path(path: str | Path) -> Path:
+    """Resolve existing parent symlinks so two lexical roots cannot alias the same folder."""
+    return Path(path).expanduser().resolve(strict=False)
+
+
+def existing_target(
+    lock_records: dict[str, Any],
+    skill_name: str,
+    tool: str,
+    scope: str,
+    expected_path: Path,
+    project_root: Path | None,
+) -> tuple[bool, str | None]:
     """Return (is_tracked, folder_checksum) for a (tool, scope) target in the prior lockfile.
 
     `is_tracked` distinguishes "Companion has a record for this target" from a hand-placed folder.
@@ -153,7 +218,13 @@ def existing_target(lock_records: dict[str, Any], skill_name: str, tool: str, sc
     if not isinstance(record, dict):
         return (False, None)
     for target in normalize_targets(record):
-        if target.get("tool") == tool and target.get("scope") == scope:
+        recorded_path = target.get("path")
+        if (
+            target.get("tool") == tool
+            and target.get("scope") == scope
+            and recorded_path
+            and normalized_target_path(recorded_path, project_root) == normalized_target_path(expected_path, project_root)
+        ):
             return (True, target.get("checksum"))
     return (False, None)
 
@@ -182,7 +253,7 @@ def target_conflict(
         return target_dir, None
 
     prior = prior_user if scope == "user" else prior_project
-    tracked, recorded = existing_target(prior, skill_name, tool, scope)
+    tracked, recorded = existing_target(prior, skill_name, tool, scope, target_dir, project_root)
     if not tracked:
         row = {
             "tool": tool,
@@ -229,6 +300,37 @@ def target_preflight_conflicts(
         )
         if conflict:
             conflicts.append(conflict)
+    return conflicts
+
+
+def target_alias_conflicts(
+    nodes: list[dict[str, Any]],
+    plan: list[tuple[str, str]],
+    registry: dict[str, Any],
+    project_root: Path | None,
+) -> list[dict[str, Any]]:
+    """Block planned targets that resolve through symlinks to the same physical folder."""
+    conflicts: list[dict[str, Any]] = []
+    for node in nodes:
+        by_physical_path: dict[Path, list[dict[str, str]]] = {}
+        for tool, scope in plan:
+            target_dir = resolve_target_dir(tool, scope, node["skill"]["name"], project_root, registry)
+            by_physical_path.setdefault(physical_target_path(target_dir), []).append(
+                {"tool": tool, "scope": scope, "path": str(target_dir)}
+            )
+        for aliases in by_physical_path.values():
+            if len(aliases) < 2:
+                continue
+            for alias in aliases:
+                conflicts.append(
+                    {
+                        "slug": node["slug"],
+                        "version": node["version"],
+                        **alias,
+                        "status": "target_path_alias",
+                        "reason": "multiple planned skill roots resolve to the same physical folder through a symlink; remove the alias or choose one target",
+                    }
+                )
     return conflicts
 
 
@@ -418,6 +520,190 @@ def preflight_target_conflicts(
         for conflict in target_preflight_conflicts(node["skill"]["name"], plan, registry, project_root, prior_user, prior_project, force):
             conflicts.append({"slug": node["slug"], "version": node["version"], **conflict})
     return conflicts
+
+
+def preflight_duplicate_targets(
+    nodes: list[dict[str, Any]],
+    duplicate_tools: list[str],
+    planned_tools: list[str],
+    auto_prune_tools: set[str],
+    scopes: list[str],
+    registry: dict[str, Any],
+    project_root: Path | None,
+    prior_user: dict[str, Any],
+    prior_project: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Classify extra visible copies as blocking or safely removable.
+
+    Only Companion-tracked folders whose current checksum still matches the lockfile are eligible for
+    automatic pruning. Untracked, customized, or legacy-unverifiable copies block before download.
+    """
+    conflicts: list[dict[str, Any]] = []
+    prunable: list[dict[str, Any]] = []
+    for node in nodes:
+        skill_name = node["skill"]["name"]
+        for scope in scopes:
+            prior = prior_user if scope == "user" else prior_project
+            for tool in duplicate_tools:
+                target_dir = resolve_target_dir(tool, scope, skill_name, project_root, registry)
+                planned_physical_paths = {
+                    physical_target_path(
+                        resolve_target_dir(planned, planned_scope, skill_name, project_root, registry)
+                    )
+                    for planned in planned_tools
+                    for planned_scope in scopes
+                }
+                tracked, recorded = existing_target(
+                    prior, skill_name, tool, scope, target_dir, project_root
+                )
+                if physical_target_path(target_dir) in planned_physical_paths:
+                    conflicts.append(
+                        {
+                            "slug": node["slug"],
+                            "version": node["version"],
+                            "tool": tool,
+                            "scope": scope,
+                            "path": str(target_dir),
+                            "status": "duplicate_path_alias",
+                            "reason": "the redundant root resolves to a selected install target through a symlink and cannot be pruned safely",
+                        }
+                    )
+                    continue
+                if not target_dir.exists() and (not tracked or tool not in auto_prune_tools):
+                    continue
+                base = {
+                    "slug": node["slug"],
+                    "version": node["version"],
+                    "tool": tool,
+                    "scope": scope,
+                    "path": str(target_dir),
+                    "physicalPath": str(physical_target_path(target_dir)),
+                    "plannedPhysicalPaths": sorted(str(path) for path in planned_physical_paths),
+                }
+                if tool not in auto_prune_tools:
+                    conflicts.append({
+                        **base,
+                        "status": "duplicate_outside_scope",
+                        "reason": "a second visible copy belongs to a tool outside this install request; include that tool or resolve the copy explicitly",
+                    })
+                    continue
+                if not target_dir.exists():
+                    prunable.append({**base, "checksum": recorded, "missing": True})
+                    continue
+                if not tracked:
+                    conflicts.append({
+                        **base,
+                        "status": "duplicate_untracked",
+                        "reason": "a second visible skill folder is not tracked by Companion; remove or archive it explicitly",
+                    })
+                    continue
+                if not recorded:
+                    conflicts.append({
+                        **base,
+                        "status": "duplicate_unverifiable",
+                        "reason": "the redundant tracked folder has no comparable checksum and cannot be removed safely",
+                    })
+                    continue
+                current = compute_dir_checksum(target_dir)
+                if current != recorded:
+                    conflicts.append({
+                        **base,
+                        "status": "duplicate_customized",
+                        "reason": "the redundant tracked folder has local customizations and cannot be removed safely",
+                    })
+                    continue
+                prunable.append({**base, "checksum": recorded})
+    return conflicts, prunable
+
+
+def preflight_additional_discovery_targets(
+    nodes: list[dict[str, Any]],
+    tools: list[str],
+    scopes: list[str],
+    registry: dict[str, Any],
+    project_root: Path | None,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Block unmanaged native/legacy roots that would remain visible beside an install target."""
+    conflicts: list[dict[str, Any]] = []
+    checked: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    for node in nodes:
+        skill_name = node["skill"]["name"]
+        for scope in scopes:
+            for tool in tools:
+                for target_dir in resolve_additional_discovery_dirs(
+                    tool, scope, skill_name, project_root, registry
+                ):
+                    key = (scope, str(target_dir))
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    checked.append(str(target_dir))
+                    if target_dir.exists():
+                        conflicts.append(
+                            {
+                                "slug": node["slug"],
+                                "version": node["version"],
+                                "tool": tool,
+                                "scope": scope,
+                                "path": str(target_dir),
+                                "status": "duplicate_unmanaged_root",
+                                "reason": "a second visible skill folder exists in a native or legacy root that Companion does not manage; remove or archive it explicitly",
+                            }
+                        )
+    return conflicts, checked
+
+
+def prune_duplicate_targets(
+    rows: list[dict[str, Any]],
+    workspace_id: str | None,
+    api_url: str,
+    project_root: Path | None,
+) -> list[dict[str, Any]]:
+    """Delete still-verified redundant folders, then remove their lockfile target rows."""
+    results: list[dict[str, Any]] = []
+    removed_by_lock: dict[tuple[Path, str], set[tuple[str, str]]] = {}
+    for row in rows:
+        target = Path(row["path"])
+        current_physical_path = physical_target_path(target)
+        expected_physical_path = row.get("physicalPath")
+        planned_physical_paths = set(row.get("plannedPhysicalPaths") or [])
+        if (
+            (expected_physical_path and str(current_physical_path) != expected_physical_path)
+            or str(current_physical_path) in planned_physical_paths
+        ):
+            results.append(
+                {
+                    **row,
+                    "status": "error",
+                    "reason": "redundant root changed physical path after preflight or now aliases a selected install target",
+                }
+            )
+            continue
+        if not target.exists():
+            results.append({**row, "status": "already_absent"})
+            lock_path = lockfile_path() if row["scope"] == "user" else project_lockfile_path(project_root)  # type: ignore[arg-type]
+            removed_by_lock.setdefault((lock_path, row["slug"]), set()).add((row["tool"], row["scope"]))
+            continue
+        try:
+            current = compute_dir_checksum(target)
+        except OSError as exc:
+            results.append({**row, "status": "error", "reason": f"cannot verify redundant folder: {exc}"})
+            continue
+        if current != row["checksum"]:
+            results.append({**row, "status": "error", "reason": "redundant folder changed after preflight"})
+            continue
+        try:
+            remove_swap_path(target)
+        except OSError as exc:
+            results.append({**row, "status": "error", "reason": str(exc)})
+            continue
+        lock_path = lockfile_path() if row["scope"] == "user" else project_lockfile_path(project_root)  # type: ignore[arg-type]
+        removed_by_lock.setdefault((lock_path, row["slug"]), set()).add((row["tool"], row["scope"]))
+        results.append({**row, "status": "removed", "reason": None})
+    for (path, slug), target_keys in removed_by_lock.items():
+        remove_skill_lock_targets(path, workspace_id, api_url, slug, target_keys)
+    return results
 
 
 def format_dependency_blockers(blockers: list[dict[str, Any]]) -> str:
@@ -678,7 +964,10 @@ def main() -> None:
     if "project" in scopes:
         project_root = Path(args.project).expanduser().resolve() if args.project else find_project_root()
 
-    install_target_plan = plan_targets(tools, scopes, project_root)
+    install_target_plan = plan_targets(tools, scopes, project_root, registry)
+    target_tools = list(dict.fromkeys(tool for tool, _scope in install_target_plan))
+    duplicate_tools = duplicate_target_tools(tools, target_tools, registry)
+    auto_prune_tools = set(tools).difference(target_tools)
 
     # Resolve prior records through workspace_lock_entry so customization detection still works on
     # activeWorkspaceId-, legacy URL-, or flat-keyed lockfiles (not only workspace_id/api_url keys).
@@ -725,8 +1014,31 @@ def main() -> None:
         prior_project,
         args.force,
     )
+    conflicts.extend(target_alias_conflicts(nodes, install_target_plan, registry, project_root))
     if conflicts:
         fail_preflight(args.json, format_target_conflicts(conflicts), conflicts=conflicts)
+
+    duplicate_conflicts, duplicate_prune_plan = preflight_duplicate_targets(
+        nodes,
+        duplicate_tools,
+        target_tools,
+        auto_prune_tools,
+        scopes,
+        registry,
+        project_root,
+        prior_user,
+        prior_project,
+    )
+    additional_duplicate_conflicts, additional_roots_checked = preflight_additional_discovery_targets(
+        nodes,
+        tools,
+        scopes,
+        registry,
+        project_root,
+    )
+    duplicate_conflicts.extend(additional_duplicate_conflicts)
+    if duplicate_conflicts:
+        fail_preflight(args.json, format_target_conflicts(duplicate_conflicts), conflicts=duplicate_conflicts)
 
     needs_secret_confirmation = bool(secret_preflight.get("items") or secret_preflight.get("tombstones"))
     if needs_secret_confirmation and not workspace_id:
@@ -766,10 +1078,15 @@ def main() -> None:
     # planned target for the root and its dependency closure installed; a partial fan-out must not mark
     # the root current while one of the local tools/scopes is still behind or missing.
     complete = bool(nodes) and len(installed) == len(nodes) * len(install_target_plan)
+    duplicate_prune = prune_duplicate_targets(
+        duplicate_prune_plan, workspace_id, api_url, project_root
+    ) if complete else []
+    if any(row["status"] == "error" for row in duplicate_prune):
+        complete = False
     report = None
     report_withheld = args.report and not complete
     if args.report and complete:
-        installed_tools = sorted({registry[row["tool"]].get("displayName", row["tool"]) for row in installed})
+        installed_tools = sorted({registry[tool].get("displayName", tool) for tool in tools})
         agent_label = args.agent or ", ".join(installed_tools)
         report = report_install(api_url, token, root["slug"], root["version"], agent_label)
 
@@ -777,6 +1094,9 @@ def main() -> None:
         "slug": root["slug"],
         "version": root["version"],
         "tools": tools,
+        "targetTools": target_tools,
+        "duplicateRootsChecked": duplicate_tools,
+        "additionalDuplicateRootsChecked": additional_roots_checked,
         "scopes": scopes,
         "projectRoot": str(project_root) if project_root else None,
         "installOrder": [node["slug"] for node in nodes],
@@ -788,6 +1108,7 @@ def main() -> None:
         "installedCount": len(installed),
         "installedSkillCount": len(install_result["completed"]),
         "skippedSkills": install_result["skipped"],
+        "duplicatePrune": duplicate_prune,
         "complete": complete,
         "report": report,
         "reportWithheld": report_withheld,
@@ -816,6 +1137,9 @@ def main() -> None:
             print(f"{len(errored)} target(s) failed to install; see the per-target results above.")
         if install_result["skipped"]:
             print(f"Skipped skill(s) after a failed dependency install: {', '.join(install_result['skipped'])}.")
+        removed_duplicates = [row for row in duplicate_prune if row["status"] in ("removed", "already_absent")]
+        if removed_duplicates:
+            print(f"Removed {len(removed_duplicates)} redundant skill target(s) and refreshed the lockfile.")
         if report_withheld:
             print("Aggregate install report withheld: not every planned target installed. Resolve the "
                   "skipped/failed targets (or pass --force), then report once all targets are current.")
