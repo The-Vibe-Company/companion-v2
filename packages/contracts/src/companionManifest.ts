@@ -3,6 +3,53 @@ import { SEMVER_RE, SKILL_NAME_RE, SKILL_REQUIREMENT_KEY_RE, skillRequirementSch
 
 export const COMPANION_MANIFEST_SCHEMA_URL = "https://thecompanion.sh/schemas/companion-manifest.v2.schema.json";
 
+/**
+ * Curated Lucide glyphs that a portable skill may use as its catalog icon. Control, navigation,
+ * destructive-action, and transient-state glyphs stay out of this package-facing vocabulary.
+ */
+export const SKILL_ICONS = [
+  "activity",
+  "bookmark",
+  "bot",
+  "box",
+  "boxes",
+  "braces",
+  "building-2",
+  "calendar",
+  "clock",
+  "code",
+  "cpu",
+  "file",
+  "file-code",
+  "file-text",
+  "flame",
+  "globe",
+  "hash",
+  "heart",
+  "image",
+  "key",
+  "layers",
+  "mail",
+  "megaphone",
+  "message-square",
+  "monitor",
+  "package",
+  "palette",
+  "pen-tool",
+  "plug-zap",
+  "rocket",
+  "shield",
+  "sparkles",
+  "square-stack",
+  "star",
+  "tag",
+  "terminal",
+  "users",
+  "zap",
+] as const;
+export type SkillIcon = (typeof SKILL_ICONS)[number];
+export const skillIconSchema = z.enum(SKILL_ICONS);
+
 export const companionDisplaySchema = z
   .object({
     name: z.string().min(1, "display name must not be empty").max(120, "display name must be at most 120 characters").optional(),
@@ -221,6 +268,7 @@ export const companionManifestSchema = z
     $schema: z.string().url().optional(),
     name: z.string().regex(SKILL_NAME_RE, "name must be kebab-case").optional(),
     version: z.string().regex(SEMVER_RE, "version must be valid semver").optional(),
+    icon: skillIconSchema.optional(),
     title: z.string().min(1).max(120).optional(),
     description: z.string().min(1).max(1024).optional(),
     notes: z.string().max(8000).optional(),
@@ -265,6 +313,7 @@ export const companionManifestSchema = z
       $schema: value.$schema,
       name: value.name,
       version: value.version,
+      icon: value.icon,
       title,
       description,
       notes,
@@ -300,6 +349,7 @@ export function companionManifestJson(manifest: CompanionManifest): Record<strin
   };
   if (manifest.name) out.name = manifest.name;
   if (manifest.version) out.version = manifest.version;
+  if (manifest.icon) out.icon = manifest.icon;
   if (manifest.title) out.title = manifest.title;
   if (manifest.description) out.description = manifest.description;
   if (manifest.notes) out.notes = manifest.notes;
@@ -318,6 +368,7 @@ export function fallbackCompanionManifest(input: {
   display?: CompanionDisplay | null;
   name?: string;
   version?: string;
+  icon?: SkillIcon;
   companionSkillId?: string;
   changelog?: CompanionChangelogEntry[];
   environment?: CompanionEnvironment;
@@ -336,6 +387,7 @@ export function fallbackCompanionManifest(input: {
   return companionManifestSchema.parse({
     name: input.name,
     version: input.version,
+    icon: input.icon,
     title: input.display?.name,
     description: input.display?.summary ?? summary,
     notes: input.notes ?? input.display?.description,

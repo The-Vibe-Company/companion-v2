@@ -330,6 +330,13 @@
       "when": 1784628000000,
       "tag": "0046_api_token_refresh",
       "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "7",
+      "when": 1784638800000,
+      "tag": "0047_skill_group_preference",
+      "breakpoints": true
     }
   ]
 }

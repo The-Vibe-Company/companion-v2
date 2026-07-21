@@ -79,6 +79,7 @@ Agent Skills-compatible; Companion-specific package data lives in `companion.jso
 
 - `name` — the skill slug. After an explicit Companion rename, update this to the returned slug.
 - `version` — the package version.
+- `icon` — optional portable catalog icon. Preserve it across every manifest rewrite.
 - `metadata.companionSkillId` — the published skill's stable id in the workspace registry.
 - `metadata.changelog` — release notes for each published version.
 - `environment.env` and `environment.secrets` — declarations only, never values.
@@ -192,6 +193,7 @@ Companion-specific declarations in `companion.json` at the package root:
   "$schema": "https://thecompanion.sh/schemas/companion-manifest.v2.schema.json",
   "name": "incident-summary",
   "version": "1.2.0",
+  "icon": "message-square",
   "title": "Incident summary",
   "description": "Generate clean incident handoffs from raw notes.",
   "notes": "## Notes\n\nMarkdown-compatible notes for humans and agents.",
@@ -233,6 +235,13 @@ Companion-specific declarations in `companion.json` at the package root:
   }
 }
 ```
+
+`icon` must be one of: `activity`, `bookmark`, `bot`, `box`, `boxes`, `braces`, `building-2`,
+`calendar`, `clock`, `code`, `cpu`, `file`, `file-code`, `file-text`, `flame`, `globe`, `hash`,
+`heart`, `image`, `key`, `layers`, `mail`, `megaphone`, `message-square`, `monitor`, `package`,
+`palette`, `pen-tool`, `plug-zap`, `rocket`, `shield`, `sparkles`, `square-stack`, `star`, `tag`,
+`terminal`, `users`, or `zap`. It is versioned package metadata, not a portal-editable folder icon.
+Omit it when the skill has no intentional icon; older manifests remain valid.
 
 Dependencies are **un-versioned**: they map a readable skill name to that skill's stable workspace id.
 Do not add version ranges. To know whether a dependency changed, compare the workspace registry
@@ -1006,7 +1015,7 @@ skills view shows the correct status and version. Report the version from this s
 curl -s "$COMPANION_API_URL/local-skills/companion/installed" \
   -H "Authorization: Bearer $COMPANION_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"version":"1.23.0","agent":"<your assistant name>"}'
+  -d '{"version":"1.24.0","agent":"<your assistant name>"}'
 ```
 
 A `{ "ok": true, "status": "installed" }` response confirms the workspace now knows this machine has

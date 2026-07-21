@@ -9,6 +9,7 @@ function mk(p: Partial<SkillVM> & { id: string }): SkillVM {
     version: "1.0.0",
     validation: "valid",
     description: "",
+    icon: null,
     notes: null,
     error: null,
     scope: "org",

@@ -122,6 +122,7 @@ owner must Share the skill into the org library first, and archived org skills r
 overlaid onto the current read model as `display.name` but never rewrites existing
 `skill_versions.frontmatter` rows or stored package archives.
 Companion-specific package data lives in root `companion.json`, not `SKILL.md`: `name`, `version`,
+an optional portable `icon` from the curated Skills icon catalog,
 human-facing `title`/`description`, Markdown-compatible `notes`, `metadata.companionSkillId`,
 `metadata.changelog`, `environment.env` / `environment.secrets` declarations (never values),
 `commands`, local-only `checks`, and un-versioned skill `dependencies` as `{ skillName: skillId }`.
@@ -131,7 +132,8 @@ the stable skill id plus the environment key. An explicit id survives a key rena
 unidentified declaration creates a new slot. `environment.env` is intentionally outside this model.
 `description` updates the existing `skills.description` listing field; the full normalized manifest rides in the existing
 `skill_versions.frontmatter` JSON under `companion` and is parsed back into the read shape
-(`skillListRowSchema.display` / `skillListRowSchema.requirements`) for the skill detail view; the
+(`skillListRowSchema.display` / `skillListRowSchema.icon` / `skillListRowSchema.requirements`) for the
+skill list and detail view; missing icons read as `null` and require no `skills.icon` column. The
 skill-level `display_name` override wins over the manifest title when present. Legacy
 packages that still declare `requirements` in `SKILL.md`, `display`, or dependency arrays are readable
 for compatibility and are normalized into `companion.json` on publish. Companion registry data is
@@ -283,10 +285,31 @@ creation/redemption attempts at 10/minute. Each attempt is claimed under a trans
 lock before validation or decryption, so parallel requests cannot exceed the budget; an anomaly audit
 signal is emitted after repeated refusals.
 
-`skill_filter_preferences` stores the current user's Skills Hub filter state for one organization.
+`skill_filter_preferences` stores the current user's Skills Hub filter and grouping state for one organization.
 The row is keyed by `(org_id, user_id)` and contains `active_filters` JSONB (the status / dependency /
-label filter chips). Saved custom views were removed, so there is no `custom_views`
-column. It is personal UI state, not a shared organization resource.
+label filter chips) plus non-null `group_by` (`folder` or `none`, default `folder`). The preference is
+saved as one complete snapshot so changing grouping cannot erase filters. Saved custom views were removed,
+so there is no `custom_views` column. It is personal UI state, not a shared organization resource.
+
+The My Skills and Organization lists use a flat Rhythm grouping by default. A section represents the
+first segment of a folder path; a skill is deduplicated inside that root and repeated only when assigned
+under distinct roots. Rows show at most two most-specific relative subpaths (ancestors are suppressed),
+with an accessible overflow count. My Skills appends `Installed`, then `Without folder`; the organization
+list appends `Without folder`. Root sections follow the existing tree order, remain single-level, and use
+quiet icon/name/count/chevron headers rather than cards or colored bands. Only collapsed root keys are
+stored locally per workspace and library; searching temporarily reveals matching collapsed sections.
+Selecting a sidebar folder still rolls up skills from its descendants, while group occurrences, visible
+paths, and inherited folder icons are restricted to that selected branch; assignments under other roots
+do not reappear in the scoped view. Grouped sections advance to the immediate subfolder level, with a
+leading `Without subfolder` section for skills filed directly in the selected folder; this keeps direct
+and immediate-child rows aligned. In unscoped root sections, direct rows lead and the remaining rows are
+clustered by immediate subfolder, preserving the selected sort inside each cluster. All grouped rows use
+the same horizontal inset regardless of relative path depth; ordering and quiet path metadata express the
+hierarchy instead of additional indentation. Flat mode renders one row per skill with full folder chips from that
+branch. Both modes use the literal monospace slug as
+the only row title and A-Z key. A row icon resolves from `companion.json.icon`, then the deepest custom
+folder icon for that occurrence (lexical path breaks equal-depth ties), then neutral `package`; inherited
+icons also inherit that folder's color. Local Skills and Archived keep their existing presentation.
 
 `skill_comments` powers the threaded **Discussion** on a skill's detail page. Beyond `body`/`author_id`
 it carries `parent_id` (a self-FK — `null` is a root thread, non-null is a reply; single-level nesting),

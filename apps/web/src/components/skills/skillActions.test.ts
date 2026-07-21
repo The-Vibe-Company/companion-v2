@@ -15,6 +15,7 @@ function skill(overrides: Partial<SkillVM> = {}): SkillVM {
     version: "1.0.0",
     validation: "valid",
     description: "Demo.",
+    icon: null,
     notes: null,
     error: null,
     scope: "org",

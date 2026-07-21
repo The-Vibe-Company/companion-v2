@@ -22,6 +22,7 @@ const skill: SkillVM = {
   version: "1.2.3",
   validation: "valid",
   description: "Research helper.",
+  icon: null,
   notes: null,
   error: null,
   scope: "org",

@@ -3,9 +3,9 @@ import { validationStateSchema } from "./scope";
 import { labelPathSchema } from "./labels";
 
 /**
- * The active skill filters a member has applied. Skills are flat and org-wide, so the only axes are
- * validation status, dependency relationships, and the library label folders (a specific
- * label path, or the "no label" pseudo-filter).
+ * The active skill filters and list grouping a member has applied. Filter axes are validation
+ * status, dependency relationships, and the library label folders (a specific label path, or the
+ * "no label" pseudo-filter). Grouping is an independent presentation preference.
  */
 export const skillFilterTypeSchema = z.enum(["status", "deps", "label", "nolabel"]);
 export type SkillFilterType = z.infer<typeof skillFilterTypeSchema>;
@@ -24,7 +24,11 @@ export const skillFilterSchema = z.discriminatedUnion("type", [
 ]);
 export type SkillFilter = z.infer<typeof skillFilterSchema>;
 
+export const skillGroupBySchema = z.enum(["folder", "none"]);
+export type SkillGroupBy = z.infer<typeof skillGroupBySchema>;
+
 export const skillFilterPreferencesSchema = z.object({
   active_filters: z.array(skillFilterSchema).max(20).default([]),
+  group_by: skillGroupBySchema.default("folder"),
 });
 export type SkillFilterPreferences = z.infer<typeof skillFilterPreferencesSchema>;

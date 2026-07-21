@@ -306,6 +306,24 @@ Selection uses a tinted row background plus an inset accent edge via box-shadow.
 
 **Resource rows** are the core component. Rows are dense, keyboard-focusable, and full-width. Default rows use surface plus hairline dividers; hover uses `surface-raised`; selected uses `accent-tint` and a 2px inset accent edge. Copy affordances can reveal on hover, but keyboard users must still reach them.
 
+**Skills Rhythm list** applies only to My Skills and Organization. The default grouped mode creates one
+flat section per root folder and uses a light icon/name/count/chevron header with no card, side stripe,
+colored band, or nested subsection. Subfolders stay as quiet relative-path metadata on the row, limited
+to two most-specific paths plus an accessible `+N`. Installed and Without folder are trailing utility
+sections. Sections start open and may collapse; search temporarily reveals matches. A compact
+Grouped/Flat control sits beside sort. Selecting a sidebar folder keeps descendant roll-up, but scopes
+group sections, visible paths, and inherited folder icons to that selected branch; other roots assigned
+to the same skill stay hidden. In that scoped view, sections advance to the immediate subfolder level;
+skills filed directly in the selected folder use a leading Without subfolder section so sibling rows
+stay aligned. In unscoped root sections, direct rows lead and remaining rows stay contiguous by immediate
+subfolder, while the selected sort remains stable inside each block. Every grouped row keeps the same
+horizontal inset regardless of subfolder depth; order and quiet path metadata carry the hierarchy rather
+than extra indentation. Flat mode keeps the full folder chips within that scope. In both modes the literal slug
+is the only visible row identity, set in monospace, and accessible labels repeat the slug rather than a
+display title. Skill icons resolve from the package manifest, then the deepest custom folder icon and
+color for that occurrence, then a neutral package glyph. Keep this rhythm dense on mobile by wrapping
+controls and metadata, not by turning rows or groups into cards.
+
 **Status dot plus label** is mandatory for health and lifecycle state. Dots are static 6px to 8px circles. No pulse, no glow, no animation.
 
 **Badges** are compact chips for scope, lifecycle, role, provider, and status. Use mono only for machine-like values. Status badges use low-tint backgrounds and borders; neutral badges use raised surface and muted text.
