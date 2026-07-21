@@ -316,7 +316,9 @@ group sections, visible paths, and inherited folder icons to that selected branc
 to the same skill stay hidden. In that scoped view, sections advance to the immediate subfolder level;
 skills filed directly in the selected folder use a leading Without subfolder section so sibling rows
 stay aligned. In unscoped root sections, direct rows lead and remaining rows stay contiguous by immediate
-subfolder, while the selected sort remains stable inside each block. Flat mode keeps the full folder chips within that scope. In both modes the literal slug
+subfolder, while the selected sort remains stable inside each block. Every grouped row keeps the same
+horizontal inset regardless of subfolder depth; order and quiet path metadata carry the hierarchy rather
+than extra indentation. Flat mode keeps the full folder chips within that scope. In both modes the literal slug
 is the only visible row identity, set in monospace, and accessible labels repeat the slug rather than a
 display title. Skill icons resolve from the package manifest, then the deepest custom folder icon and
 color for that occurrence, then a neutral package glyph. Keep this rhythm dense on mobile by wrapping

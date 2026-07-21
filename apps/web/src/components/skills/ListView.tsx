@@ -261,7 +261,7 @@ function SkillRow({
   return (
     <div
       data-skill-slug={skill.id}
-      className={`crow${!flat && row.relativePaths.length > 0 ? " crow--subfolder" : ""}${lastId === skill.id ? " is-active" : ""}${dragging ? " crow--dragging" : ""}`}
+      className={`crow${lastId === skill.id ? " is-active" : ""}${dragging ? " crow--dragging" : ""}`}
       title={peopleLabel(skill)}
       onPointerDown={
         canDrag
