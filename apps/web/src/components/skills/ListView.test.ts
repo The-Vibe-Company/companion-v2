@@ -328,6 +328,7 @@ describe("ListView grouped rhythm", () => {
 
     expect(html).toContain('<span class="cgroup__name">SEO</span>');
     expect(html).toContain('<span class="cgroup__name">Without subfolder</span>');
+    expect(html.indexOf(">Without subfolder<")).toBeLessThan(html.indexOf(">SEO<"));
     expect(html.match(/class="crow"/g)).toHaveLength(2);
     expect(html).not.toContain("crow--subfolder");
   });

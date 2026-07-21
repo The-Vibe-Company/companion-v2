@@ -74,6 +74,26 @@ describe("skill list grouping", () => {
     expect(groups[1]?.rows[0]?.skill.id).toBe("digest");
   });
 
+  it("places direct rows first and keeps matching subfolder rows contiguous", () => {
+    const groups = groupSkillsByRoot(
+      [
+        skill("incident-summary", { labels: ["marketing/seo"] }),
+        skill("diff-tools", { labels: ["marketing"] }),
+        skill("weekly-report", { labels: ["marketing/reporting"] }),
+        skill("log-parser", { labels: ["marketing/seo"] }),
+      ],
+      labels,
+      "org",
+    );
+
+    expect(groups[0]?.rows.map((row) => row.skill.id)).toEqual([
+      "diff-tools",
+      "weekly-report",
+      "incident-summary",
+      "log-parser",
+    ]);
+  });
+
   it("limits a multi-filed skill to the active sidebar label branch", () => {
     const groups = groupSkillsByRoot(
       [skill("digest", { labels: ["marketing/seo", "operations"] })],
@@ -88,7 +108,7 @@ describe("skill list grouping", () => {
     expect(groups[0]?.rows[0]?.icon).toEqual({ name: "globe", color: null });
   });
 
-  it("groups a filtered view by subfolder and aligns direct skills in a trailing utility section", () => {
+  it("groups a filtered view by subfolder and aligns direct skills in a leading utility section", () => {
     const groups = groupSkillsByRoot(
       [
         skill("campaign", { labels: ["marketing"] }),
@@ -100,14 +120,14 @@ describe("skill list grouping", () => {
       "marketing",
     );
 
-    expect(groups.map((group) => group.label)).toEqual(["Reporting", "SEO", "Without subfolder"]);
+    expect(groups.map((group) => group.label)).toEqual(["Without subfolder", "Reporting", "SEO"]);
     expect(groups.map((group) => group.key)).toEqual([
+      "direct:marketing",
       "folder:marketing/reporting",
       "folder:marketing/seo",
-      "direct:marketing",
     ]);
     expect(groups.every((group) => group.rows.every((row) => row.relativePaths.length === 0))).toBe(true);
-    expect(groups[2]?.rows[0]?.skill.id).toBe("campaign");
+    expect(groups[0]?.rows[0]?.skill.id).toBe("campaign");
   });
 
   it("keeps deeper descendants as relative paths below the immediate subfolder group", () => {

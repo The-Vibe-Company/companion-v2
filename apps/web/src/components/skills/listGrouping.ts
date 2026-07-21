@@ -63,6 +63,25 @@ function displayRelativePath(path: string, groupPath: string, appearance: Map<st
 }
 
 /**
+ * Keep direct rows first, then cluster rows by their first relative subfolder. The incoming order is
+ * preserved inside each bucket, so the selected Recently updated / A-Z sort still applies locally.
+ */
+function clusterRowsBySubfolder(rows: GroupedSkillRow[], groupPath: string): GroupedSkillRow[] {
+  const groupDepth = pathDepth(groupPath);
+  return rows
+    .map((row, index) => ({
+      row,
+      index,
+      bucket:
+        row.relativePaths
+          .map(({ path }) => path.split("/").slice(0, groupDepth + 1).join("/"))
+          .sort((left, right) => left.localeCompare(right))[0] ?? "",
+    }))
+    .sort((left, right) => left.bucket.localeCompare(right.bucket) || left.index - right.index)
+    .map(({ row }) => row);
+}
+
+/**
  * Resolve the closest custom folder icon. Depth wins; canonical path order makes equal-depth ties
  * stable across server responses and optimistic client updates.
  */
@@ -180,9 +199,13 @@ export function groupSkillsByRoot(
     }
   }
 
+  for (const group of roots.values()) {
+    if (group.path) group.rows = clusterRowsBySubfolder(group.rows, group.path);
+  }
+
   return [
-    ...[...roots.values()].sort((left, right) => (left.path ?? "").localeCompare(right.path ?? "")),
     ...(direct.rows.length ? [direct] : []),
+    ...[...roots.values()].sort((left, right) => (left.path ?? "").localeCompare(right.path ?? "")),
     ...(installed.rows.length ? [installed] : []),
     ...(unfiled.rows.length ? [unfiled] : []),
   ];
