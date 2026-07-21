@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, type PointerEvent, type Ref } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type PointerEvent, type Ref } from "react";
 import type { LabelColor, LabelIcon } from "@companion/contracts";
 import { LABEL_COLORS, LABEL_ICONS, labelDisplayNameToPath } from "@companion/contracts";
 import { Icon } from "../Icon";
@@ -30,6 +30,10 @@ function LabelMenu({
   onSetIcon,
   onAddSublabel,
   onMove,
+  onMoveUp,
+  onMoveDown,
+  canMoveUp,
+  canMoveDown,
   onRename,
   onDelete,
 }: {
@@ -41,6 +45,10 @@ function LabelMenu({
   onSetIcon: (path: string, icon: LabelIcon | null) => void;
   onAddSublabel: (parentPath: string) => void;
   onMove: (targetParent: string | null) => void;
+  onMoveUp: () => void;
+  onMoveDown: () => void;
+  canMoveUp: boolean;
+  canMoveDown: boolean;
   onRename: (from: string, to: string, displayName?: string) => void;
   onDelete: (path: string) => void;
 }) {
@@ -80,6 +88,7 @@ function LabelMenu({
     if (top + r.height > window.innerHeight - pad) top = Math.max(pad, window.innerHeight - r.height - pad);
     el.style.left = `${left}px`;
     el.style.top = `${top}px`;
+    queueMicrotask(() => el.querySelector<HTMLElement>('[role="menuitem"]:not([disabled])')?.focus());
   }, [pos]);
   useEffect(() => {
     setMoving(false);
@@ -90,7 +99,18 @@ function LabelMenu({
       if (menuRef.current && !menuRef.current.contains(e.target as Node)) onClose();
     };
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape") {
+        onClose();
+        return;
+      }
+      if ((e.key === "ArrowDown" || e.key === "ArrowUp") && menuRef.current?.contains(document.activeElement)) {
+        const items = [...menuRef.current.querySelectorAll<HTMLElement>('[role="menuitem"]:not([disabled])')];
+        if (items.length === 0) return;
+        const current = items.indexOf(document.activeElement as HTMLElement);
+        const delta = e.key === "ArrowDown" ? 1 : -1;
+        items[(current + delta + items.length) % items.length]?.focus();
+        e.preventDefault();
+      }
     };
     document.addEventListener("mousedown", onDown);
     document.addEventListener("keydown", onKey);
@@ -252,6 +272,14 @@ function LabelMenu({
           )}
         </>
       )}
+      <button type="button" className="menu__item" role="menuitem" disabled={!canMoveUp} onClick={onMoveUp}>
+        <span className="ico"><Icon name="arrow-up" size={14} /></span>
+        <span className="menu__label">Move up</span>
+      </button>
+      <button type="button" className="menu__item" role="menuitem" disabled={!canMoveDown} onClick={onMoveDown}>
+        <span className="ico"><Icon name="arrow-down" size={14} /></span>
+        <span className="menu__label">Move down</span>
+      </button>
       <button
         type="button"
         className="menu__item menu__item--danger"
@@ -296,7 +324,7 @@ function LabelTreeRows({
   dropDone: ResolvedTarget | null;
   onToggleExpand: (path: string) => void;
   onSelect: (path: string) => void;
-  onOpenMenu: (row: TreeRow, pos: { x: number; y: number }) => void;
+  onOpenMenu: (row: TreeRow, pos: { x: number; y: number }, trigger: HTMLElement) => void;
   onStartDrag: (item: DragItem, e: PointerEvent<HTMLElement>) => void;
   canManage: boolean;
 }) {
@@ -314,6 +342,18 @@ function LabelTreeRows({
     }
     return true;
   });
+  const afterTarget = hovered?.kind === "reorder" && hovered.lib === lib && hovered.position === "after"
+    ? visibleRows.find((row) => row.path === hovered.path)
+    : undefined;
+  let afterIndicatorPath = afterTarget?.path ?? null;
+  if (afterTarget) {
+    const targetIndex = visibleRows.findIndex((row) => row.path === afterTarget.path);
+    for (let index = targetIndex + 1; index < visibleRows.length; index += 1) {
+      const candidate = visibleRows[index]!;
+      if (candidate.depth <= afterTarget.depth) break;
+      afterIndicatorPath = candidate.path;
+    }
+  }
   return (
     <>
       {visibleRows.map((row) => {
@@ -321,7 +361,9 @@ function LabelTreeRows({
         const isOpen = expanded.has(row.path);
         const dragging = drag?.kind === "label" && drag.lib === lib && drag.path === row.path;
         const dropOk = hovered?.kind === "label" && hovered.lib === lib && hovered.path === row.path;
-        const dropJustDone = dropDone?.kind === "label" && dropDone.lib === lib && dropDone.path === row.path;
+        const reorderBefore = hovered?.kind === "reorder" && hovered.lib === lib && hovered.path === row.path && hovered.position === "before";
+        const reorderAfter = afterIndicatorPath === row.path;
+        const dropJustDone = (dropDone?.kind === "label" || dropDone?.kind === "reorder") && dropDone.lib === lib && dropDone.path === row.path;
         const openPending = openPendingPath === row.path && dropOk && drag?.kind === "skill";
         const forceDropIconColor = dropOk || openPending || dropJustDone;
         return (
@@ -331,6 +373,8 @@ function LabelTreeRows({
               (active ? " lblrow--active" : "") +
               (dragging ? " lblrow--dragging" : "") +
               (dropOk ? " lblrow--dropok" : "") +
+              (reorderBefore ? " lblrow--reorder-before" : "") +
+              (reorderAfter ? " lblrow--reorder-after" : "") +
               (openPending ? " lblrow--openpending" : "") +
               (dropJustDone ? " lblrow--dropdone" : "")
             }
@@ -342,7 +386,10 @@ function LabelTreeRows({
             data-skill-drop-kind={canManage ? "label" : undefined}
             data-skill-drop-lib={canManage ? lib : undefined}
             data-skill-drop-path={canManage ? row.path : undefined}
-            style={{ paddingLeft: 8 + row.depth * 14 }}
+            style={{
+              paddingLeft: 8 + row.depth * 14,
+              "--lbl-insert-left": `${28 + (reorderAfter && afterTarget ? afterTarget.depth : row.depth) * 14}px`,
+            } as CSSProperties}
           >
             {row.hasChildren ? (
               <button
@@ -382,7 +429,7 @@ function LabelTreeRows({
                 onClick={(e) => {
                   e.stopPropagation();
                   const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-                  onOpenMenu(row, { x: r.left, y: r.bottom + 4 });
+                  onOpenMenu(row, { x: r.left, y: r.bottom + 4 }, e.currentTarget);
                 }}
               >
                 <Icon name="more-horizontal" size={15} />
@@ -426,6 +473,7 @@ export function Sidebar({
   openPendingPath,
   dropDone,
   onReparentLabel,
+  onReorderLabel = () => {},
   onLabelStartDrag,
   onSelectLocal,
   onSelectArchived,
@@ -474,6 +522,7 @@ export function Sidebar({
   openPendingPath: string | null;
   dropDone: ResolvedTarget | null;
   onReparentLabel: (lib: SkillsLibrary, from: string, targetParent: string | null) => void;
+  onReorderLabel?: (lib: SkillsLibrary, from: string, target: string, position: "before" | "after") => void;
   onLabelStartDrag: (item: DragItem, e: PointerEvent<HTMLElement>) => void;
   onSelectLocal: () => void;
   onSelectArchived: () => void;
@@ -492,7 +541,12 @@ export function Sidebar({
   personalSkillsEnabled?: boolean;
   onUpgrade?: () => void;
 }) {
-  const [menu, setMenu] = useState<{ row: TreeRow; lib: SkillsLibrary; pos: { x: number; y: number } } | null>(null);
+  const [menu, setMenu] = useState<{
+    row: TreeRow;
+    lib: SkillsLibrary;
+    pos: { x: number; y: number };
+    trigger: HTMLElement;
+  } | null>(null);
   // The inline new-folder input, scoped to the library whose `+` (or "add sublabel") opened it.
   const [newFolder, setNewFolder] = useState<{ lib: SkillsLibrary; seed: string } | null>(null);
   const [newFolderValue, setNewFolderValue] = useState("");
@@ -571,6 +625,17 @@ export function Sidebar({
         />
       </div>
     ) : null;
+
+  const menuRows = menu ? (menu.lib === "mine" ? mineTreeRows : orgTreeRows) : [];
+  const menuSiblings = menu
+    ? menuRows.filter((row) => labelParent(row.path) === labelParent(menu.row.path))
+    : [];
+  const menuSiblingIndex = menu ? menuSiblings.findIndex((row) => row.path === menu.row.path) : -1;
+  const closeMenu = () => {
+    const trigger = menu?.trigger;
+    setMenu(null);
+    queueMicrotask(() => trigger?.focus());
+  };
 
   return (
     <aside ref={asideRef} className={"side" + (mobileOpen ? " side--mobile-open" : "") + (skillDropMode ? " side--skill-drop" : "")}>
@@ -682,7 +747,7 @@ export function Sidebar({
               dropDone={dropDone}
               onToggleExpand={onToggleExpand}
               onSelect={(path) => runAndClose(() => onSelectLabel("mine", path))}
-              onOpenMenu={(row, pos) => setMenu({ row, lib: "mine", pos })}
+              onOpenMenu={(row, pos, trigger) => setMenu({ row, lib: "mine", pos, trigger })}
               onStartDrag={onLabelStartDrag}
               canManage={!navigationOnly}
             />
@@ -745,7 +810,7 @@ export function Sidebar({
               dropDone={dropDone}
               onToggleExpand={onToggleExpand}
               onSelect={(path) => runAndClose(() => onSelectLabel("org", path))}
-              onOpenMenu={(row, pos) => setMenu({ row, lib: "org", pos })}
+              onOpenMenu={(row, pos, trigger) => setMenu({ row, lib: "org", pos, trigger })}
               onStartDrag={onLabelStartDrag}
               canManage={!navigationOnly}
             />
@@ -818,11 +883,25 @@ export function Sidebar({
               );
             })
             .map((row) => ({ path: row.path, label: row.displayName ?? row.leafName }))}
-          onClose={() => setMenu(null)}
+          onClose={closeMenu}
           onSetColor={(path, color) => onSetLabelColor(menu.lib, path, color)}
           onSetIcon={(path, icon) => onSetLabelIcon(menu.lib, path, icon)}
           onAddSublabel={(parent) => openNewFolder(menu.lib, parent)}
           onMove={(targetParent) => onReparentLabel(menu.lib, menu.row.path, targetParent)}
+          canMoveUp={menuSiblingIndex > 0}
+          canMoveDown={menuSiblingIndex >= 0 && menuSiblingIndex < menuSiblings.length - 1}
+          onMoveUp={() => {
+            if (menuSiblingIndex > 0) {
+              onReorderLabel(menu.lib, menu.row.path, menuSiblings[menuSiblingIndex - 1]!.path, "before");
+            }
+            closeMenu();
+          }}
+          onMoveDown={() => {
+            if (menuSiblingIndex >= 0 && menuSiblingIndex < menuSiblings.length - 1) {
+              onReorderLabel(menu.lib, menu.row.path, menuSiblings[menuSiblingIndex + 1]!.path, "after");
+            }
+            closeMenu();
+          }}
           onRename={(from, to, displayName) => onRenameLabel(menu.lib, from, to, displayName)}
           onDelete={(path) => onDeleteLabel(menu.lib, path)}
         />

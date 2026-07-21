@@ -1,0 +1,2 @@
+# The historical blob contains an embedded NUL; keep category drag changes reviewable as text.
+apps/web/src/components/skills/dragGeometry.ts text diff

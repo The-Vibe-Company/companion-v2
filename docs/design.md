@@ -285,11 +285,19 @@ creation/redemption attempts at 10/minute. Each attempt is claimed under a trans
 lock before validation or decryption, so parallel requests cannot exceed the budget; an anomaly audit
 signal is emitted after repeated refusals.
 
-`skill_filter_preferences` stores the current user's Skills Hub filter and grouping state for one organization.
+`skill_filter_preferences` stores the current user's Skills Hub filter, grouping, and sidebar order for one organization.
 The row is keyed by `(org_id, user_id)` and contains `active_filters` JSONB (the status / dependency /
-label filter chips) plus non-null `group_by` (`folder` or `none`, default `folder`). The preference is
-saved as one complete snapshot so changing grouping cannot erase filters. Saved custom views were removed,
-so there is no `custom_views` column. It is personal UI state, not a shared organization resource.
+label filter chips), non-null `group_by` (`folder` or `none`, default `folder`), and `sidebar_order` JSONB
+with independent depth-first path arrays for `mine` and `org`. The preference is saved as one complete
+snapshot so changing one axis cannot erase the others. Saved custom views were removed, so there is no
+`custom_views` column. It is personal UI state, not a shared organization resource.
+
+Without a saved sidebar order, folder siblings remain alphabetical. Once customized, ranked siblings lead
+and newly discovered paths follow alphabetically. The sidebar accepts insertion drops only between siblings;
+those drops update the caller's preference without mutating labels. A center drop retains the existing folder
+reparent operation, which remains shared for org labels. Rename preserves the caller's relative order, delete
+prunes the removed subtree, and reparent appends the moved subtree under its new parent. The main Skills list
+grouping remains independent of this sidebar-only preference.
 
 The My Skills and Organization lists use a flat Rhythm grouping by default. A section represents the
 first segment of a folder path; a skill is deduplicated inside that root and repeated only when assigned

@@ -10,6 +10,7 @@ import type {
   LocalSkillRow,
   SkillFilterPreferences,
   SkillGroupBy,
+  SkillSidebarOrder,
   SkillSharePlan,
   BillingOverview,
 } from "@companion/contracts";
@@ -76,7 +77,7 @@ import { useOrgActions } from "../org/useOrgActions";
 import { parseSettingsView } from "../org/model";
 import type { SettingsAppData, SettingsDialog, SettingsIntent, SettingsRoute, SettingsView } from "../org/model";
 import { matchFilters, type Filter } from "./filters";
-import { deriveTreeRows } from "./sidebarTree";
+import { deriveTreeRows, remapTreeOrder, removeTreeOrderPath, reorderTreeRows } from "./sidebarTree";
 import type { TreeRow } from "./sidebarTree";
 import type { SkillAction } from "./skillActions";
 
@@ -237,6 +238,7 @@ export function SkillsApp({
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const [filters, setFilters] = useState<Filter[]>(() => initialFilterPreferences.active_filters);
   const [groupBy, setGroupBy] = useState<SkillGroupBy>(() => initialFilterPreferences.group_by);
+  const [sidebarOrder, setSidebarOrder] = useState<SkillSidebarOrder>(() => initialFilterPreferences.sidebar_order);
   const [shareTarget, setShareTarget] = useState<SkillVM | null>(null);
   const [drag, setDrag] = useState<DragItem | null>(null);
   const personalSkillsEnabled = initialBilling.entitlements.personalSkills;
@@ -258,12 +260,14 @@ export function SkillsApp({
   const orgLabelsRef = useRef<LabelVM[]>(initialLabels.flat);
   const activeLibRef = useRef<SkillsLibrary>(activeLib);
   const dragRef = useRef<DragItem | null>(null);
+  const sidebarOrderRef = useRef<SkillSidebarOrder>(initialFilterPreferences.sidebar_order);
   mineSkillsRef.current = mineSkills;
   orgSkillsRef.current = orgSkills;
   archivedSkillsRef.current = archivedSkills;
   personalLabelsRef.current = personalLabels;
   orgLabelsRef.current = orgLabels;
   activeLibRef.current = activeLib;
+  sidebarOrderRef.current = sidebarOrder;
 
   const refreshSkillLibraries = useCallback(async () => {
     const generation = refreshGenerationRef.current + 1;
@@ -468,6 +472,8 @@ export function SkillsApp({
   useEffect(() => {
     setFilters(initialFilterPreferences.active_filters);
     setGroupBy(initialFilterPreferences.group_by);
+    setSidebarOrder(initialFilterPreferences.sidebar_order);
+    sidebarOrderRef.current = initialFilterPreferences.sidebar_order;
     setSelection(selectionFromRoute(initialRoute));
     didInitializePersistenceRef.current = false;
     setPreferenceStatus("idle");
@@ -492,7 +498,9 @@ export function SkillsApp({
           await saveSkillFilterPreferences(next);
           if (!queuedPreferencesRef.current) setPreferenceStatus("saved");
         } catch (error) {
-          queuedPreferencesRef.current = next;
+          // A complete newer snapshot may have arrived while this request was in flight.
+          // Keep that newest intent; only restore the failed snapshot when nothing superseded it.
+          if (!queuedPreferencesRef.current) queuedPreferencesRef.current = next;
           setPreferenceStatus("error");
           console.error("Could not save skill filter preferences", error);
           break;
@@ -503,10 +511,15 @@ export function SkillsApp({
     }
   }, []);
 
-  const persistPreferences = useCallback((activeFilters: Filter[], nextGroupBy: SkillGroupBy) => {
+  const persistPreferences = useCallback((
+    activeFilters: Filter[],
+    nextGroupBy: SkillGroupBy,
+    nextSidebarOrder: SkillSidebarOrder,
+  ) => {
     queuedPreferencesRef.current = {
       active_filters: activeFilters.map((f) => ({ ...f })),
       group_by: nextGroupBy,
+      sidebar_order: { mine: [...nextSidebarOrder.mine], org: [...nextSidebarOrder.org] },
     };
     void flushPreferenceQueue();
   }, [flushPreferenceQueue]);
@@ -521,11 +534,11 @@ export function SkillsApp({
       return;
     }
     if (persistTimerRef.current) clearTimeout(persistTimerRef.current);
-    persistTimerRef.current = setTimeout(() => persistPreferences(filters, groupBy), 350);
+    persistTimerRef.current = setTimeout(() => persistPreferences(filters, groupBy, sidebarOrder), 350);
     return () => {
       if (persistTimerRef.current) clearTimeout(persistTimerRef.current);
     };
-  }, [filters, groupBy, persistPreferences]);
+  }, [filters, groupBy, persistPreferences, sidebarOrder]);
 
   const openUpload = useCallback(() => {
     if ((!personalSkillsEnabled && activeLibRef.current === "mine") || (orgCreateBlocked && activeLibRef.current === "org")) {
@@ -784,12 +797,22 @@ export function SkillsApp({
   );
 
   const renameLabelPath = useCallback(
-    (lib: SkillsLibrary, from: string, to: string, displayName?: string) => {
+    (lib: SkillsLibrary, from: string, to: string, displayName?: string, appendToNewParent = false) => {
       if (from === to && displayName === undefined) return;
       const setLb = labelsSetterFor(lib);
       const setSk = skillsSetterFor(lib);
       const prevLabels = labelsRefFor(lib).current;
       const prevSkills = skillsRefFor(lib).current;
+      const prevSidebarOrder = sidebarOrderRef.current;
+      const currentRows = deriveTreeRows(
+        lib === "mine" ? skillsRefFor(lib).current.filter((skill) => skill.source === "authored") : skillsRefFor(lib).current,
+        labelsRefFor(lib).current,
+        prevSidebarOrder[lib],
+      );
+      const nextSidebarOrder = {
+        ...prevSidebarOrder,
+        [lib]: remapTreeOrder(currentRows.map((row) => row.path), from, to, appendToNewParent),
+      };
       const within = (p: string) => p === from || p.startsWith(from + "/");
       const remap = (p: string) => (within(p) ? to + p.slice(from.length) : p);
       setLb((arr) =>
@@ -800,6 +823,8 @@ export function SkillsApp({
         })),
       );
       setSk((arr) => arr.map((s) => ({ ...s, labels: s.labels.map(remap) })));
+      sidebarOrderRef.current = nextSidebarOrder;
+      setSidebarOrder(nextSidebarOrder);
       setSelection((sel) =>
         sel.lib === lib && sel.kind === "label" && sel.label && within(sel.label)
           ? { lib, kind: "label", label: remap(sel.label) }
@@ -813,6 +838,8 @@ export function SkillsApp({
       labelRpcs[lib].rename(from, to, { displayName }).catch((err: unknown) => {
         setLb(prevLabels);
         setSk(prevSkills);
+        sidebarOrderRef.current = prevSidebarOrder;
+        setSidebarOrder(prevSidebarOrder);
         setLabelNotice(err instanceof Error ? err.message : "Could not rename the folder.");
       });
     },
@@ -825,9 +852,16 @@ export function SkillsApp({
       const setSk = skillsSetterFor(lib);
       const prevLabels = labelsRefFor(lib).current;
       const prevSkills = skillsRefFor(lib).current;
+      const prevSidebarOrder = sidebarOrderRef.current;
+      const nextSidebarOrder = {
+        ...prevSidebarOrder,
+        [lib]: removeTreeOrderPath(prevSidebarOrder[lib], path),
+      };
       const within = (p: string) => p === path || p.startsWith(path + "/");
       setLb((arr) => arr.filter((l) => !within(l.path)));
       setSk((arr) => arr.map((s) => ({ ...s, labels: s.labels.filter((p) => !within(p)) })));
+      sidebarOrderRef.current = nextSidebarOrder;
+      setSidebarOrder(nextSidebarOrder);
       setSelection((sel) =>
         sel.lib === lib && sel.kind === "label" && sel.label && within(sel.label) ? { lib, kind: "all" } : sel,
       );
@@ -837,6 +871,8 @@ export function SkillsApp({
       labelRpcs[lib].del(path).catch((err: unknown) => {
         setLb(prevLabels);
         setSk(prevSkills);
+        sidebarOrderRef.current = prevSidebarOrder;
+        setSidebarOrder(prevSidebarOrder);
         setLabelNotice(err instanceof Error ? err.message : "Could not delete the folder.");
       });
     },
@@ -971,11 +1007,11 @@ export function SkillsApp({
         if (targetParent === from || targetParent.startsWith(from + "/")) return;
         const to = `${targetParent}/${leaf}`;
         if (to === from) return;
-        renameLabelPath(lib, from, to);
+        renameLabelPath(lib, from, to, undefined, true);
         return;
       }
       if (!from.includes("/")) return;
-      renameLabelPath(lib, from, leaf);
+      renameLabelPath(lib, from, leaf, undefined, true);
     },
     [renameLabelPath],
   );
@@ -1228,10 +1264,13 @@ export function SkillsApp({
   // Personal folders organize only AUTHORED personal skills (installed copies carry no personal labels),
   // so the personal tree is derived from that subset. The org tree is unchanged.
   const personalTreeRows = useMemo(
-    () => deriveTreeRows(mineSkills.filter((s) => s.source === "authored"), personalLabels),
-    [mineSkills, personalLabels],
+    () => deriveTreeRows(mineSkills.filter((s) => s.source === "authored"), personalLabels, sidebarOrder.mine),
+    [mineSkills, personalLabels, sidebarOrder.mine],
   );
-  const orgTreeRows = useMemo(() => deriveTreeRows(orgSkills, orgLabels), [orgSkills, orgLabels]);
+  const orgTreeRows = useMemo(
+    () => deriveTreeRows(orgSkills, orgLabels, sidebarOrder.org),
+    [orgSkills, orgLabels, sidebarOrder.org],
+  );
   const activeTreeRows = activeLib === "org" ? orgTreeRows : personalTreeRows;
 
   const mineCount = mineSkills.length;
@@ -1278,9 +1317,9 @@ export function SkillsApp({
   }, []);
   const clearFilters = useCallback(() => setFilters([]), []);
   const retryPreferenceSave = useCallback(() => {
-    if (!queuedPreferencesRef.current) persistPreferences(filters, groupBy);
+    if (!queuedPreferencesRef.current) persistPreferences(filters, groupBy, sidebarOrder);
     else void flushPreferenceQueue();
-  }, [filters, flushPreferenceQueue, groupBy, persistPreferences]);
+  }, [filters, flushPreferenceQueue, groupBy, persistPreferences, sidebarOrder]);
 
   // --- Selection / navigation ------------------------------------------------
   const applySkillsRoute = useCallback(
@@ -1608,12 +1647,28 @@ export function SkillsApp({
     for (const r of orgTreeRows) map.set(treeRowKey("org", r.path), { hasChildren: r.hasChildren });
     return map;
   }, [personalTreeRows, orgTreeRows]);
+  const reorderLabel = useCallback(
+    (lib: SkillsLibrary, from: string, target: string, position: "before" | "after") => {
+      const rows = lib === "mine" ? personalTreeRows : orgTreeRows;
+      const nextPaths = reorderTreeRows(rows, from, target, position);
+      if (!nextPaths) return;
+      const nextOrder = { ...sidebarOrderRef.current, [lib]: nextPaths };
+      sidebarOrderRef.current = nextOrder;
+      skipNextDebouncedPersistRef.current = true;
+      setSidebarOrder(nextOrder);
+      // Ordering can be changed from any sidebar-backed view, including immediately before
+      // navigating away from Skills. Start the queued save now instead of relying only on debounce.
+      persistPreferences(filters, groupBy, nextOrder);
+    },
+    [filters, groupBy, orgTreeRows, persistPreferences, personalTreeRows],
+  );
   const skillDrag = useSkillDrag({
     beginDrag,
     endDrag,
     onDropSkillOnLabel: dropSkillOnLabel,
     onDropSkillOnRoot: dropSkillOnRoot,
     onReparentLabel: reparentLabel,
+    onReorderLabel: reorderLabel,
     onToggleExpand: toggleExpand,
     expanded,
     treeRowsByPath,
@@ -1659,6 +1714,7 @@ export function SkillsApp({
         openPendingPath={skillDrag.openPendingPath}
         dropDone={skillDrag.dropDone}
         onReparentLabel={reparentLabel}
+        onReorderLabel={reorderLabel}
         onLabelStartDrag={skillDrag.startDrag}
         onSelectLocal={selectLocal}
         onSelectArchived={selectArchived}
@@ -1757,6 +1813,15 @@ export function SkillsApp({
           />
         )}
       </div>
+      {(currentView !== "workspace" || skill) && preferenceStatus !== "idle" ? (
+        <div className={`prefstatus prefstatus--${preferenceStatus} prefstatus--overlay`} role="status" aria-live="polite">
+          {preferenceStatus === "saving" ? "Saving" : null}
+          {preferenceStatus === "saved" ? "Saved" : null}
+          {preferenceStatus === "error" ? (
+            <>Not saved<button className="prefstatus__retry" onClick={retryPreferenceSave}>Retry</button></>
+          ) : null}
+        </div>
+      ) : null}
       {paletteOpen && (
         <CommandPalette
           allSkills={paletteSkills}

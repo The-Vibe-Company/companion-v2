@@ -24,6 +24,7 @@ function registryRow(over: Partial<SkillListRow> = {}): SkillListRow {
     share_token: "share-demo",
     description: "Demo skill",
     display: {},
+    icon: null,
     notes: null,
     validation: "valid",
     validation_error: null,

@@ -537,6 +537,10 @@ export const skillFilterPreferences = pgTable(
       .references(() => user.id, { onDelete: "cascade" }),
     activeFilters: jsonb("active_filters").$type<unknown[]>().notNull().default([]),
     groupBy: text("group_by").notNull().default("folder"),
+    sidebarOrder: jsonb("sidebar_order")
+      .$type<{ mine: string[]; org: string[] }>()
+      .notNull()
+      .default({ mine: [], org: [] }),
     createdAt: now(),
     updatedAt: updatedAt(),
   },

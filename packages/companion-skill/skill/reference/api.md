@@ -84,6 +84,8 @@ These are the Companion skill-management endpoints a personal access token can c
 | Delete a personal folder (cascades) | `DELETE /personal-labels` | `skills:write` |
 | File a personal skill into a personal folder | `POST /skills/{slug}/personal-labels` | `skills:write` |
 | Unfile a personal skill from a personal folder | `DELETE /skills/{slug}/personal-labels` | `skills:write` |
+| Read personal Skills UI preferences | `GET /skill-filter-preferences` | Browser session only |
+| Replace personal Skills UI preferences | `PUT /skill-filter-preferences` | Browser session only |
 | Current bundled Companion skill status + workspace id | `GET /local-skills/companion` | `skills:read` |
 | Download bundled Companion skill package | `GET /local-skills/companion/package` | `skills:read` |
 | Confirm this skill installed | `POST /local-skills/companion/installed` | `skills:write` |
@@ -598,6 +600,24 @@ assignment. Both return `{ "ok": true }`. All label routes require any signed-in
 Personal folder routes use the same request bodies and response shapes under `/personal-labels` and
 `/skills/{slug}/personal-labels`, but are scoped to the caller and only organize authored personal
 skills.
+
+Sidebar ordering is separate from the shared folder tree. Signed-in browser sessions read and replace
+`/skill-filter-preferences` as one snapshot:
+
+```json
+{
+  "active_filters": [],
+  "group_by": "folder",
+  "sidebar_order": {
+    "mine": ["drafts", "research"],
+    "org": ["engineering", "marketing", "marketing/seo"]
+  }
+}
+```
+
+Each order array contains canonical label paths in depth-first display order. Empty arrays preserve the
+alphabetical default. This is private UI state keyed by the current user and workspace; it never changes
+the shared label hierarchy. Personal access tokens cannot call these browser-session preference routes.
 
 ## Versions & checksums
 
