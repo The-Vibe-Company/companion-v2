@@ -207,7 +207,7 @@ box_center() {
     process.stdin.on("data", (chunk) => input += chunk);
     process.stdin.on("end", () => {
       const box = JSON.parse(input);
-      process.stdout.write(`${Math.round(box.x + box.width / 2)} ${Math.round(box.y + box.height / 2)}\n`);
+      process.stdout.write(String(Math.round(box.x + box.width / 2)) + " " + String(Math.round(box.y + box.height / 2)) + "\n");
     });
   '
 }
