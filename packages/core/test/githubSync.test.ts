@@ -1,12 +1,35 @@
 import { describe, expect, it } from "vitest";
 import type { Db } from "@companion/db";
-import { getGitHubIntegration, githubRetryDelayMs, resolveGitHubSkillClosure, type GitHubSyncGraphSkill } from "../src/githubSync";
+import {
+  getGitHubIntegration,
+  githubRetryDelayMs,
+  resolveGitHubSkillClosure,
+  resolveGitHubSyncSkillTitle,
+  type GitHubSyncGraphSkill,
+} from "../src/githubSync";
 
 const skill = (input: Partial<GitHubSyncGraphSkill> & Pick<GitHubSyncGraphSkill, "id" | "slug">): GitHubSyncGraphSkill => ({
+  title: input.slug,
+  description: `${input.slug} description`,
+  shareToken: `${input.slug}-share-token`,
   version: "1.0.0", checksum: `sha256:${input.id}`, storagePath: `${input.id}.tgz`, archived: false, dependencies: [], ...input,
 });
 
 describe("GitHub mirror skill closure", () => {
+  it("uses explicit rename overrides, then manifest display names, then the slug", () => {
+    const frontmatter = JSON.stringify({
+      companion: {
+        name: "machine-name",
+        version: "1.0.0",
+        description: "Description",
+        display: { name: "Human title" },
+      },
+    });
+    expect(resolveGitHubSyncSkillTitle({ slug: "machine-name", displayName: "Renamed", frontmatter })).toBe("Renamed");
+    expect(resolveGitHubSyncSkillTitle({ slug: "machine-name", displayName: null, frontmatter })).toBe("Human title");
+    expect(resolveGitHubSyncSkillTitle({ slug: "machine-name", displayName: null, frontmatter: "invalid" })).toBe("machine-name");
+  });
+
   it("mirrors every active org skill in all mode and temporarily omits archived skills", () => {
     const skills = resolveGitHubSkillClosure({
       mode: "all", selectedSkillIds: [], skills: [

@@ -1,4 +1,4 @@
-import { createSign } from "node:crypto";
+import { createSign, createVerify } from "node:crypto";
 import type { GitHubInstallation, GitHubRepositoryCandidate } from "@companion/contracts";
 import { buildNormalizedSkillMd, extractArchiveEntryBuffers, parseFrontmatter, skillChecksum, toTar } from "@companion/skills";
 
@@ -7,6 +7,7 @@ const WEB = "https://github.com";
 const API_VERSION = "2022-11-28";
 const LIST_PAGE_SIZE = 100;
 const REPOSITORY_LIST_CONCURRENCY = 6;
+const COMPANION_OWNERSHIP_KEY = "companion_ownership";
 
 export interface GitHubOAuthConfig {
   slug: string;
@@ -55,6 +56,92 @@ function appJwt(config: GitHubAppConfig): string {
   const signer = createSign("RSA-SHA256");
   signer.update(unsigned);
   return `${unsigned}.${signer.sign(config.privateKey).toString("base64url")}`;
+}
+
+function ownershipSignaturePayload(input: {
+  appId: string;
+  repositoryId: string;
+  previousCommitSha: string | null;
+  managedSlugs: string[];
+}): string {
+  return JSON.stringify({ schema: 1, ...input });
+}
+
+function signedOwnershipManifest(config: GitHubAppConfig, input: {
+  repositoryId: string;
+  previousCommitSha: string | null;
+  managedSlugs: string[];
+  manifest: Buffer;
+}): Buffer {
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(input.manifest.toString("utf8")) as Record<string, unknown>;
+  } catch {
+    throw new Error("Companion sync manifest is not valid JSON");
+  }
+  const ownership = parseManagedSlugs(input.manifest);
+  const managedSlugs = [...new Set(input.managedSlugs)].sort();
+  if (!ownership.valid || ownership.slugs.size !== managedSlugs.length || managedSlugs.some((slug) => !ownership.slugs.has(slug))) {
+    throw new Error("Companion sync manifest does not match the managed skill set");
+  }
+  const signer = createSign("RSA-SHA256");
+  signer.update(ownershipSignaturePayload({
+    appId: config.appId,
+    repositoryId: input.repositoryId,
+    previousCommitSha: input.previousCommitSha,
+    managedSlugs,
+  }));
+  return Buffer.from(`${JSON.stringify({
+    ...parsed,
+    [COMPANION_OWNERSHIP_KEY]: {
+      app_id: config.appId,
+      previous_commit_sha: input.previousCommitSha,
+      signature: signer.sign(config.privateKey).toString("base64url"),
+    },
+  }, null, 2)}\n`, "utf8");
+}
+
+function verifiedPendingOwnership(config: GitHubAppConfig, input: {
+  repositoryId: string;
+  expectedPreviousCommitSha?: string | null;
+  manifest: Buffer | null;
+}): Set<string> | null {
+  if (!input.manifest) return null;
+  try {
+    const parsed = JSON.parse(input.manifest.toString("utf8")) as Record<string, unknown>;
+    const raw = parsed[COMPANION_OWNERSHIP_KEY];
+    if (!raw || typeof raw !== "object") return null;
+    const proof = raw as Record<string, unknown>;
+    if (proof.app_id !== config.appId || typeof proof.signature !== "string") return null;
+    if (proof.previous_commit_sha !== null && typeof proof.previous_commit_sha !== "string") return null;
+    if (input.expectedPreviousCommitSha !== undefined && proof.previous_commit_sha !== input.expectedPreviousCommitSha) return null;
+    const ownership = parseManagedSlugs(input.manifest);
+    if (!ownership.valid) return null;
+    const managedSlugs = [...ownership.slugs].sort();
+    const verifier = createVerify("RSA-SHA256");
+    verifier.update(ownershipSignaturePayload({
+      appId: config.appId,
+      repositoryId: input.repositoryId,
+      previousCommitSha: proof.previous_commit_sha,
+      managedSlugs,
+    }));
+    return verifier.verify(config.privateKey, Buffer.from(proof.signature, "base64url")) ? ownership.slugs : null;
+  } catch {
+    return null;
+  }
+}
+
+function manifestProjectionMatches(current: Buffer | null, desired: Buffer): boolean {
+  if (!current) return false;
+  try {
+    const currentValue = JSON.parse(current.toString("utf8")) as Record<string, unknown>;
+    const desiredValue = JSON.parse(desired.toString("utf8")) as Record<string, unknown>;
+    delete currentValue[COMPANION_OWNERSHIP_KEY];
+    delete desiredValue[COMPANION_OWNERSHIP_KEY];
+    return JSON.stringify(currentValue) === JSON.stringify(desiredValue);
+  } catch {
+    return false;
+  }
 }
 
 export class GitHubApiError extends Error {
@@ -320,6 +407,121 @@ async function mapWithConcurrency<T, R>(
   return output;
 }
 
+export const COMPANION_README_START = "<!-- COMPANION:START -->";
+export const COMPANION_README_END = "<!-- COMPANION:END -->";
+
+const MAX_README_BYTES = 1024 * 1024;
+const MANIFEST_PATH = ".companion-sync.json";
+const SKILL_SLUG = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+
+interface GitHubTreeEntry {
+  path: string;
+  mode: "100644" | "100755" | "040000" | "160000" | "120000";
+  type: "blob" | "tree" | "commit";
+  sha: string;
+  size?: number;
+}
+
+interface GitHubTreeResponse {
+  sha: string;
+  tree: GitHubTreeEntry[];
+  truncated?: boolean;
+}
+
+interface TrustedRepositoryState {
+  managedSlugs: Set<string>;
+  ownershipKnown: boolean;
+  readme: Buffer | null;
+}
+
+function countOccurrences(value: Buffer, needle: Buffer): number {
+  let count = 0;
+  let cursor = 0;
+  while (cursor <= value.length - needle.length) {
+    const index = value.indexOf(needle, cursor);
+    if (index < 0) break;
+    count += 1;
+    cursor = index + needle.length;
+  }
+  return count;
+}
+
+function assertReadableMarkdown(value: Buffer): void {
+  if (value.byteLength > MAX_README_BYTES) throw new Error("GitHub README exceeds the 1 MB safety limit");
+  try {
+    new TextDecoder("utf-8", { fatal: true }).decode(value);
+  } catch {
+    throw new Error("GitHub README is not valid UTF-8");
+  }
+}
+
+/** Replace the sole managed block while preserving every byte outside it. */
+export function mergeCompanionReadme(input: {
+  current: Buffer | null;
+  managedBlock: Buffer;
+  trustedPrevious?: Buffer | null;
+}): Buffer {
+  const current = input.current ?? Buffer.alloc(0);
+  assertReadableMarkdown(current);
+  const start = Buffer.from(COMPANION_README_START);
+  const end = Buffer.from(COMPANION_README_END);
+  const starts = countOccurrences(current, start);
+  const ends = countOccurrences(current, end);
+  const startIndex = current.indexOf(start);
+  const endIndex = current.indexOf(end);
+
+  if (starts !== ends || starts > 1 || (starts === 1 && startIndex > endIndex)) {
+    throw new Error("GitHub README has invalid Companion markers; keep exactly one ordered START/END pair");
+  }
+  let merged: Buffer;
+  if (starts === 1) {
+    merged = Buffer.concat([
+      current.subarray(0, startIndex),
+      input.managedBlock,
+      current.subarray(endIndex + end.length),
+    ]);
+  } else if (!current.toString("utf8").trim() || (input.trustedPrevious && current.equals(input.trustedPrevious))) {
+    merged = Buffer.concat([input.managedBlock, Buffer.from("\n")]);
+  } else {
+    const separator = current.subarray(Math.max(0, current.length - 2)).equals(Buffer.from("\n\n"))
+      ? ""
+      : current.subarray(Math.max(0, current.length - 1)).equals(Buffer.from("\n")) ? "\n" : "\n\n";
+    merged = Buffer.concat([current, Buffer.from(separator), input.managedBlock, Buffer.from("\n")]);
+  }
+  assertReadableMarkdown(merged);
+  return merged;
+}
+
+function readmeEntry(entries: GitHubTreeEntry[]): GitHubTreeEntry | null {
+  const matches = entries.filter((entry) => entry.path.toLowerCase() === "readme.md");
+  if (matches.length > 1) throw new Error("GitHub repository contains multiple README.md case variants");
+  const entry = matches[0];
+  if (!entry) return null;
+  if (entry.type !== "blob" || entry.mode === "120000") {
+    throw new Error("GitHub README.md must be a regular file, not a symlink, tree, or submodule");
+  }
+  return entry;
+}
+
+function parseManagedSlugs(value: Buffer | null): { slugs: Set<string>; valid: boolean } {
+  if (!value || value.byteLength > MAX_README_BYTES) return { slugs: new Set(), valid: false };
+  try {
+    const parsed = JSON.parse(value.toString("utf8")) as { schema?: unknown; skills?: unknown };
+    if (parsed.schema !== 1 || !Array.isArray(parsed.skills)) return { slugs: new Set(), valid: false };
+    const slugs = new Set<string>();
+    for (const item of parsed.skills) {
+      const slug = item && typeof item === "object" && "slug" in item ? (item as { slug?: unknown }).slug : null;
+      if (typeof slug !== "string" || !SKILL_SLUG.test(slug) || slugs.has(slug)) {
+        return { slugs: new Set(), valid: false };
+      }
+      slugs.add(slug);
+    }
+    return { slugs, valid: true };
+  } catch {
+    return { slugs: new Set(), valid: false };
+  }
+}
+
 export class GitHubAppClient {
   constructor(public readonly config: GitHubAppConfig, private readonly execute: typeof fetch = globalThis.fetch) {}
 
@@ -337,6 +539,10 @@ export class GitHubAppClient {
     repo: string;
     branch: string;
     files: GitHubTreeFile[];
+    manifest?: Buffer;
+    readmeBlock?: Buffer;
+    managedSlugs?: string[];
+    previousCommitSha?: string | null;
     message: string;
     signal?: AbortSignal;
     assertFence?: () => Promise<void>;
@@ -348,6 +554,62 @@ export class GitHubAppClient {
   }): Promise<{ commitSha: string | null; branch: string }> {
     await input.assertFence?.();
     const token = await this.installationToken(input.installationId, input.signal);
+    const getTree = async (sha: string): Promise<GitHubTreeResponse> => {
+      const result = await githubFetch<GitHubTreeResponse>(
+        `/repos/${encodeURIComponent(input.owner)}/${encodeURIComponent(input.repo)}/git/trees/${encodeURIComponent(sha)}`,
+        { token, fetch: this.execute, signal: input.signal },
+      );
+      if (result.truncated) throw new Error("GitHub managed tree is too large to synchronize safely");
+      return result;
+    };
+    const getBlob = async (sha: string, maximumBytes = MAX_README_BYTES): Promise<Buffer> => {
+      const blob = await githubFetch<{ content: string; encoding: string; size?: number }>(
+        `/repos/${encodeURIComponent(input.owner)}/${encodeURIComponent(input.repo)}/git/blobs/${encodeURIComponent(sha)}`,
+        { token, fetch: this.execute, signal: input.signal },
+      );
+      if (blob.encoding !== "base64" || (blob.size ?? 0) > maximumBytes) {
+        throw new Error("GitHub managed file exceeds its safety limit or has an unsupported encoding");
+      }
+      const encoded = blob.content.replaceAll("\n", "");
+      if (encoded.length > Math.ceil(maximumBytes / 3) * 4 + 4) {
+        throw new Error("GitHub managed file exceeds its safety limit");
+      }
+      const value = Buffer.from(encoded, "base64");
+      if (value.byteLength > maximumBytes) throw new Error("GitHub managed file exceeds its safety limit");
+      return value;
+    };
+    const loadTrustedState = async (headSha: string): Promise<TrustedRepositoryState> => {
+      if (!input.previousCommitSha) return { managedSlugs: new Set(), ownershipKnown: true, readme: null };
+      try {
+        if (input.previousCommitSha !== headSha) {
+          const comparison = await githubFetch<{ status: string }>(
+            `/repos/${encodeURIComponent(input.owner)}/${encodeURIComponent(input.repo)}/compare/${encodeURIComponent(input.previousCommitSha)}...${encodeURIComponent(headSha)}`,
+            { token, fetch: this.execute, signal: input.signal },
+          );
+          if (!new Set(["ahead", "identical"]).has(comparison.status)) {
+            return { managedSlugs: new Set(), ownershipKnown: false, readme: null };
+          }
+        }
+        const commit = await githubFetch<{ tree: { sha: string } }>(
+          `/repos/${encodeURIComponent(input.owner)}/${encodeURIComponent(input.repo)}/git/commits/${encodeURIComponent(input.previousCommitSha)}`,
+          { token, fetch: this.execute, signal: input.signal },
+        );
+        const root = await getTree(commit.tree.sha);
+        const manifestEntry = root.tree.find((entry) => entry.path === MANIFEST_PATH && entry.type === "blob");
+        const previousReadmeEntry = readmeEntry(root.tree);
+        const [manifest, previousReadme] = await Promise.all([
+          manifestEntry ? getBlob(manifestEntry.sha) : Promise.resolve(null),
+          previousReadmeEntry ? getBlob(previousReadmeEntry.sha) : Promise.resolve(null),
+        ]);
+        const ownership = parseManagedSlugs(manifest);
+        return { managedSlugs: ownership.slugs, ownershipKnown: ownership.valid, readme: previousReadme };
+      } catch (error) {
+        if (error instanceof GitHubApiError && [404, 409].includes(error.status)) {
+          return { managedSlugs: new Set(), ownershipKnown: false, readme: null };
+        }
+        throw error;
+      }
+    };
     for (let attempt = 0; attempt < 3; attempt += 1) {
       await input.assertFence?.();
       const repo = await githubFetch<{ id: number; default_branch: string | null }>(`/repos/${encodeURIComponent(input.owner)}/${encodeURIComponent(input.repo)}`, {
@@ -359,12 +621,14 @@ export class GitHubAppClient {
       const branch = repo.default_branch || input.branch || "main";
       let parent: string | null = null;
       let currentTree: string | null = null;
+      let currentRoot: GitHubTreeResponse | null = null;
       let repositoryEmpty = false;
       try {
         const ref = await githubFetch<{ object: { sha: string } }>(`/repos/${encodeURIComponent(input.owner)}/${encodeURIComponent(input.repo)}/git/ref/heads/${encodeURIComponent(branch)}`, { token, fetch: this.execute, signal: input.signal });
         parent = ref.object.sha;
         const commit = await githubFetch<{ tree: { sha: string } }>(`/repos/${encodeURIComponent(input.owner)}/${encodeURIComponent(input.repo)}/git/commits/${parent}`, { token, fetch: this.execute, signal: input.signal });
         currentTree = commit.tree.sha;
+        if (input.readmeBlock || input.managedSlugs) currentRoot = await getTree(currentTree);
       } catch (error) {
         if (!(error instanceof GitHubApiError) || ![404, 409].includes(error.status)) throw error;
         const branches = await githubFetch<Array<{ name: string }>>(
@@ -376,14 +640,20 @@ export class GitHubAppClient {
       if (repositoryEmpty) {
         await input.assertFence?.();
         const bootstrap = async (signal: AbortSignal | undefined): Promise<void> => {
-          await githubFetch(`/repos/${encodeURIComponent(input.owner)}/${encodeURIComponent(input.repo)}/contents/.companion-bootstrap`, {
+          const bootstrapManifest = signedOwnershipManifest(this.config, {
+            repositoryId: input.repositoryId,
+            previousCommitSha: input.previousCommitSha ?? null,
+            managedSlugs: [],
+            manifest: Buffer.from('{"schema":1,"skills":[]}\n'),
+          });
+          await githubFetch(`/repos/${encodeURIComponent(input.owner)}/${encodeURIComponent(input.repo)}/contents/${MANIFEST_PATH}`, {
             token,
             fetch: this.execute,
             signal,
             method: "PUT",
             body: {
               message: "chore(companion): initialize managed mirror",
-              content: Buffer.from("Managed by Companion\n", "utf8").toString("base64"),
+              content: bootstrapManifest.toString("base64"),
             },
           });
           // GitHub refuses Create Reference while a repository has no branches. The Contents API
@@ -406,7 +676,60 @@ export class GitHubAppClient {
         throw new Error("GitHub empty repository initialization did not request a retry");
       }
       await input.assertFence?.();
-      const blobs = await mapWithConcurrency(input.files, 6, async (file, _index, signal) => ({
+      const managedSlugs = new Set(input.managedSlugs ?? []);
+      const trusted = input.readmeBlock || input.managedSlugs
+        ? await loadTrustedState(parent!)
+        : { managedSlugs: new Set<string>(), ownershipKnown: true, readme: null };
+      const rootEntries = currentRoot?.tree ?? [];
+      const currentManifestEntry = rootEntries.find((entry) => entry.path === MANIFEST_PATH && entry.type === "blob");
+      const currentManifest = currentManifestEntry ? await getBlob(currentManifestEntry.sha) : null;
+      const pendingOwnership = verifiedPendingOwnership(this.config, {
+        repositoryId: input.repositoryId,
+        expectedPreviousCommitSha: input.previousCommitSha ?? null,
+        manifest: currentManifest,
+      });
+      if (pendingOwnership) {
+        for (const slug of pendingOwnership) trusted.managedSlugs.add(slug);
+      }
+      const currentReadmeEntry = input.readmeBlock ? readmeEntry(rootEntries) : null;
+      const currentReadme = currentReadmeEntry ? await getBlob(currentReadmeEntry.sha) : null;
+      const readme = input.readmeBlock ? mergeCompanionReadme({
+        current: currentReadme,
+        managedBlock: input.readmeBlock,
+        trustedPrevious: trusted.readme,
+      }) : null;
+      const skillsRoot = rootEntries.find((entry) => entry.path === "skills");
+      let currentSkillEntries: GitHubTreeEntry[] = [];
+      if (skillsRoot) {
+        if (skillsRoot.type !== "tree") {
+          if (managedSlugs.size) throw new Error("GitHub path skills conflicts with the Companion skill directory");
+        } else {
+          currentSkillEntries = (await getTree(skillsRoot.sha)).tree;
+        }
+      }
+      const currentSkillNames = new Set(currentSkillEntries.map((entry) => entry.path));
+      const collisions = [...managedSlugs].filter((slug) => currentSkillNames.has(slug) && !trusted.managedSlugs.has(slug));
+      if (collisions.length > 0) {
+        const suffix = trusted.ownershipKnown ? "is not owned by this mirror" : "has no trusted ownership history";
+        throw new Error(`GitHub path skills/${collisions[0]} ${suffix}; move or remove it before synchronizing`);
+      }
+
+      const reusableManifest = input.manifest && manifestProjectionMatches(currentManifest, input.manifest)
+        && verifiedPendingOwnership(this.config, { repositoryId: input.repositoryId, manifest: currentManifest });
+      let projectedManifest = input.manifest
+        ? reusableManifest ? currentManifest! : signedOwnershipManifest(this.config, {
+          repositoryId: input.repositoryId,
+          previousCommitSha: input.previousCommitSha ?? null,
+          managedSlugs: input.managedSlugs ?? [],
+          manifest: input.manifest,
+        })
+        : null;
+
+      const extraFiles: GitHubTreeFile[] = [
+        ...(projectedManifest ? [{ path: MANIFEST_PATH, data: projectedManifest, executable: false }] : []),
+        ...(readme ? [{ path: currentReadmeEntry?.path ?? "README.md", data: readme, executable: false }] : []),
+      ];
+      const blobs = await mapWithConcurrency([...input.files, ...extraFiles], 6, async (file, _index, signal) => ({
         file,
         blob: await githubFetch<{ sha: string }>(`/repos/${encodeURIComponent(input.owner)}/${encodeURIComponent(input.repo)}/git/blobs`, {
           token, fetch: this.execute,
@@ -415,11 +738,56 @@ export class GitHubAppClient {
         }),
       }));
       await input.assertFence?.();
-      const tree = await githubFetch<{ sha: string }>(`/repos/${encodeURIComponent(input.owner)}/${encodeURIComponent(input.repo)}/git/trees`, {
-        token, fetch: this.execute, signal: input.signal, body: { tree: blobs.map(({ file, blob }) => ({
-          path: file.path, mode: file.executable ? "100755" : "100644", type: "blob", sha: blob.sha,
-        })) },
+      const blobByPath = new Map(blobs.map(({ file, blob }) => [file.path, blob.sha]));
+      const skillTrees = managedSlugs.size ? await mapWithConcurrency([...managedSlugs], 6, async (slug, _index, signal) => {
+        const prefix = `skills/${slug}/`;
+        const skillFiles = input.files.filter((file) => file.path.startsWith(prefix));
+        const result = await githubFetch<{ sha: string }>(`/repos/${encodeURIComponent(input.owner)}/${encodeURIComponent(input.repo)}/git/trees`, {
+          token,
+          fetch: this.execute,
+          signal: input.signal ? AbortSignal.any([input.signal, signal]) : signal,
+          body: { tree: skillFiles.map((file) => ({
+            path: file.path.slice(prefix.length), mode: file.executable ? "100755" : "100644", type: "blob", sha: blobByPath.get(file.path),
+          })) },
+        });
+        return { slug, sha: result.sha };
+      }) : [];
+      const directFiles = managedSlugs.size
+        ? extraFiles
+        : [...input.files, ...extraFiles];
+      const deletes = [...trusted.managedSlugs]
+        .filter((slug) => !managedSlugs.has(slug) && currentSkillNames.has(slug))
+        .map((slug) => {
+          const existing = currentSkillEntries.find((entry) => entry.path === slug)!;
+          return { path: `skills/${slug}`, mode: existing.mode, type: existing.type, sha: null };
+        });
+      const createRootTree = async (): Promise<{ sha: string }> => githubFetch<{ sha: string }>(`/repos/${encodeURIComponent(input.owner)}/${encodeURIComponent(input.repo)}/git/trees`, {
+        token, fetch: this.execute, signal: input.signal, body: {
+          ...(currentTree ? { base_tree: currentTree } : {}),
+          tree: [
+            ...directFiles.map((file) => ({
+              path: file.path, mode: file.executable ? "100755" : "100644", type: "blob", sha: blobByPath.get(file.path),
+            })),
+            ...skillTrees.map(({ slug, sha }) => ({ path: `skills/${slug}`, mode: "040000", type: "tree", sha })),
+            ...deletes,
+          ],
+        },
       });
+      let tree = await createRootTree();
+      if (currentTree !== tree.sha && input.manifest && projectedManifest === currentManifest && !pendingOwnership) {
+        projectedManifest = signedOwnershipManifest(this.config, {
+          repositoryId: input.repositoryId,
+          previousCommitSha: input.previousCommitSha ?? null,
+          managedSlugs: input.managedSlugs ?? [],
+          manifest: input.manifest,
+        });
+        const refreshedManifestBlob = await githubFetch<{ sha: string }>(`/repos/${encodeURIComponent(input.owner)}/${encodeURIComponent(input.repo)}/git/blobs`, {
+          token, fetch: this.execute, signal: input.signal,
+          body: { content: projectedManifest.toString("base64"), encoding: "base64" },
+        });
+        blobByPath.set(MANIFEST_PATH, refreshedManifestBlob.sha);
+        tree = await createRootTree();
+      }
       if (currentTree === tree.sha) {
         await input.finalize?.({ commitSha: parent, branch, publish: async () => undefined });
         return { commitSha: parent, branch };
@@ -427,7 +795,11 @@ export class GitHubAppClient {
       await input.assertFence?.();
       const commit = await githubFetch<{ sha: string }>(`/repos/${encodeURIComponent(input.owner)}/${encodeURIComponent(input.repo)}/git/commits`, {
         token, fetch: this.execute, signal: input.signal,
-        body: { message: input.message, tree: tree.sha, parents: parent ? [parent] : [] },
+        body: {
+          message: input.message,
+          tree: tree.sha,
+          parents: parent ? [parent] : [],
+        },
       });
       try {
         await input.assertFence?.();
@@ -454,14 +826,25 @@ export class GitHubAppClient {
 
 export interface GitHubTreeFile { path: string; data: Buffer; executable: boolean }
 
+export interface RenderedSkillRepository {
+  files: GitHubTreeFile[];
+  manifest: Buffer;
+  readmeBlock: Buffer;
+  managedSlugs: string[];
+}
+
 const MAX_RENDERED_FILES = 10_000;
 const MAX_RENDERED_BYTES = 128 * 1024 * 1024;
 
 export async function renderSkillRepository(input: {
   owner: string; repo: string;
-  skills: Array<{ slug: string; version: string; checksum: string; archive: Buffer }>;
+  companionWebUrl: string;
+  skills: Array<{
+    slug: string; title: string; description: string; shareToken: string;
+    version: string; checksum: string; archive: Buffer;
+  }>;
   signal?: AbortSignal;
-}): Promise<GitHubTreeFile[]> {
+}): Promise<RenderedSkillRepository> {
   const bytewise = (a: string, b: string) => a < b ? -1 : a > b ? 1 : 0;
   const files: GitHubTreeFile[] = [];
   const manifestSkills: Array<{ slug: string; version: string; checksum: string }> = [];
@@ -494,11 +877,34 @@ export async function renderSkillRepository(input: {
     }
     manifestSkills.push({ slug: skill.slug, version: skill.version, checksum: skill.checksum });
   }
-  const install = `npx skills add ${input.owner}/${input.repo}`;
-  const readme = `# ${input.repo}\n\n> Managed by Companion. Changes pushed directly to GitHub are overwritten.\n\nInstall these skills with:\n\n\`\`\`bash\n${install}\n\`\`\`\n\n## Skills\n\n${manifestSkills.map((skill) => `- **${skill.slug}** — \`${skill.version}\``).join("\n") || "No skills are currently mirrored."}\n`;
-  files.unshift(
-    { path: "README.md", data: Buffer.from(readme, "utf8"), executable: false },
-    { path: ".companion-sync.json", data: Buffer.from(`${JSON.stringify({ schema: 1, skills: manifestSkills }, null, 2)}\n`, "utf8"), executable: false },
-  );
-  return files.sort((a, b) => bytewise(a.path, b.path));
+  let web: URL;
+  try {
+    web = new URL(input.companionWebUrl);
+  } catch {
+    throw new Error("COMPANION_WEB_URL must be an absolute HTTP(S) URL without credentials");
+  }
+  if (!["http:", "https:"].includes(web.protocol) || web.username || web.password) {
+    throw new Error("COMPANION_WEB_URL must be an absolute HTTP(S) URL without credentials");
+  }
+  const origin = web.origin;
+  const escapeHtml = (value: string): string => value
+    .replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;").replaceAll("'", "&#39;");
+  const summary = (value: string): string => {
+    const normalized = value.replace(/\s+/g, " ").trim();
+    return normalized.length <= 220 ? normalized : `${normalized.slice(0, 217).trimEnd()}…`;
+  };
+  const rows = [...input.skills]
+    .sort((a, b) => bytewise(a.slug, b.slug))
+    .map((skill) => {
+      const href = `${origin}/s/${encodeURIComponent(skill.shareToken)}`;
+      return `<tr>\n<td><strong><a href="${escapeHtml(href)}">${escapeHtml(skill.title || skill.slug)}</a></strong><br><sub>${escapeHtml(summary(skill.description))}</sub></td>\n<td><code>${escapeHtml(skill.version)}</code></td>\n</tr>`;
+    }).join("\n");
+  const readme = `${COMPANION_README_START}\n<p align="center">\n  <a href="${escapeHtml(origin)}">\n    <picture>\n      <source media="(prefers-color-scheme: dark)" srcset="${escapeHtml(`${origin}/brand/companion-wordmark-dark.png`)}">\n      <img src="${escapeHtml(`${origin}/brand/companion-wordmark.png`)}" alt="Companion" width="420">\n    </picture>\n  </a>\n</p>\n\n# ${escapeHtml(input.repo)}\n\nA curated library of agent skills, published and kept up to date by [Companion](${escapeHtml(origin)}).\n\n## Install\n\n\`\`\`bash\nnpx skills add ${input.owner}/${input.repo}\n\`\`\`\n\n## Skills\n\n${rows ? `<table>\n<thead><tr><th>Skill</th><th>Version</th></tr></thead>\n<tbody>\n${rows}\n</tbody>\n</table>` : "No skills are currently mirrored."}\n\n---\n\n<sub>Companion manages only the content between the COMPANION markers. Content outside them is preserved.</sub>\n${COMPANION_README_END}`;
+  return {
+    files: files.sort((a, b) => bytewise(a.path, b.path)),
+    manifest: Buffer.from(`${JSON.stringify({ schema: 1, skills: manifestSkills }, null, 2)}\n`, "utf8"),
+    readmeBlock: Buffer.from(readme, "utf8"),
+    managedSlugs: manifestSkills.map((skill) => skill.slug),
+  };
 }
