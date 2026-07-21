@@ -4,6 +4,14 @@ spotlight_testing = false
 
 [scripts]
 setup = "corepack enable && pnpm install && (brew install postgresql@17 minio mailpit || true)"
-run = "bash scripts/dev-conductor.sh"
 archive = "bash scripts/dev-conductor.sh archive"
 run_mode = "concurrent"
+
+[scripts.run.dev]
+command = "bash scripts/dev-conductor.sh"
+default = true
+icon = "play"
+
+[scripts.run.check]
+command = "pnpm verify:change"
+icon = "test-tube"

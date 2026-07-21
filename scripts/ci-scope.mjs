@@ -61,6 +61,7 @@ export function classifyFiles(files, { forceFull = false } = {}) {
       /^scripts\/ci-scope(?:\.test)?\.mjs$/,
       /^scripts\/ci-playwright-policy(?:\.test)?\.mjs$/,
       /^scripts\/ci-gate(?:\.test)?\.mjs$/,
+      /^scripts\/verify-change(?:\.test)?\.mjs$/,
     ]),
   );
   const full = forceFull || workflowOrRootConfig;

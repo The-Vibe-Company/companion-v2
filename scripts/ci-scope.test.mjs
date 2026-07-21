@@ -127,6 +127,7 @@ test("lockfile, workflow, and CI gate changes force the full pipeline", () => {
     ".gitleaksignore",
     "tsconfig.base.json",
     "scripts/ci-gate.mjs",
+    "scripts/verify-change.mjs",
   ]) {
     const result = classifyFiles([file]);
     assert.equal(result.full, true);

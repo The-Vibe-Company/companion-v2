@@ -148,6 +148,10 @@ still uses Docker Compose (`scripts/dev-stack.sh`).
 
 ## When you finish a change
 
+- Run `pnpm verify:change` before handing off any change. It runs the fast checks selected from the
+  current diff against `origin/main`; exit code `2` means those checks passed but the printed Postgres,
+  browser, container, or dependency follow-up gates are still required. Use `pnpm verify:change -- --plan`
+  to inspect the validation plan without executing it.
 - If you changed architecture, the data model, RBAC, the provider seam, or a runtime integration,
   **update [`docs/design.md`](docs/design.md)** (and this file's anchors if paths moved). Keep the docs
   and the code in agreement.
