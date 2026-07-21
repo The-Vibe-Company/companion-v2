@@ -139,4 +139,75 @@ describe("Billing navigation", () => {
     expect(html).toContain("New sandbox work is blocked");
     expect(html).toContain("Aug 1, 2026");
   });
+
+  it("renders the Free ledger with an upgrade action and preserved-data limits", () => {
+    const ctx = selfHostedContext();
+    ctx.billing = {
+      ...selfHostedBilling,
+      billingEnabled: true,
+      entitlements: {
+        ...selfHostedBilling.entitlements,
+        effectivePlan: "free",
+        computedPlan: "free",
+        billingMode: "stripe",
+        entitlementMode: "enforce",
+        enforced: true,
+        personalSkills: false,
+        skillHistory: false,
+        orgSkillLimit: 20,
+      },
+      hiddenPersonalSkillCount: 3,
+      checkoutEnabled: true,
+      sandboxUsage: {
+        ...selfHostedBilling.sandboxUsage,
+        enabled: true,
+        enforced: true,
+        limit_minutes: 0,
+        remaining_minutes: 0,
+      },
+    };
+    const html = renderToString(React.createElement(BillingPane, { ctx }));
+    expect(html).toContain("Free plan limits");
+    expect(html).toContain("Upgrade to Pro");
+    expect(html).toMatch(/3(?:<!-- -->)? hidden until Pro/);
+    expect(html).toContain("Payment details will appear after a subscription starts");
+  });
+
+  it("keeps both portal and checkout actions for a restartable Free subscription", () => {
+    const ctx = selfHostedContext();
+    ctx.billing = {
+      ...selfHostedBilling,
+      billingEnabled: true,
+      entitlements: {
+        ...selfHostedBilling.entitlements,
+        effectivePlan: "free",
+        computedPlan: "free",
+        billingMode: "stripe",
+      },
+      stripeStatus: "canceled",
+      checkoutEnabled: true,
+      portalEnabled: true,
+    };
+    const html = renderToString(React.createElement(BillingPane, { ctx }));
+    expect(html).toContain("Manage billing");
+    expect(html).toContain("Upgrade to Pro");
+  });
+
+  it("keeps delinquency and scheduled-cancellation warnings above the ledger", () => {
+    const ctx = selfHostedContext();
+    ctx.billing = {
+      ...selfHostedBilling,
+      billingEnabled: true,
+      entitlements: { ...selfHostedBilling.entitlements, billingMode: "stripe", entitlementMode: "enforce", enforced: true },
+      stripeStatus: "past_due",
+      graceEndsAt: "2026-07-28T00:00:00.000Z",
+      currentPeriodEnd: "2026-08-21T00:00:00.000Z",
+      cancelAtPeriodEnd: true,
+      portalEnabled: true,
+    };
+    const html = renderToString(React.createElement(BillingPane, { ctx }));
+    expect(html).toContain("Payment needs attention");
+    expect(html).toContain("scheduled to end");
+    expect(html.indexOf("Payment needs attention")).toBeLessThan(html.indexOf("Billing summary"));
+  });
 });

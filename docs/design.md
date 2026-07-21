@@ -606,6 +606,15 @@ may manage payment methods, invoices, and end-of-period cancellation, but subscr
 updates must be disabled. Checkout creation is serialized per organization, reuses an open session,
 and checks Stripe for an existing subscription before creating another.
 
+Settings → Billing uses a compact invoice-ledger layout: plan, estimated subtotal, active seats, and renewal
+lead; sandbox usage, subscription state, and seat synchronization follow as aligned operational rows. The
+member-readable `GET /v1/billing` remains database-backed so loading settings and entitlement gates never
+depends on Stripe. Owners and Admins may additionally call browser-only `GET /v1/billing/preview` when the
+Billing pane is open. That endpoint reads Stripe live and returns only a sanitized default-payment summary
+(type, card brand/last four/expiry when applicable) plus the latest non-draft invoice (number, date, amount,
+status, and hosted invoice URL). Developers and non-members receive `403`; Stripe failures degrade only the
+preview and never hide the subscription, usage, or Customer Portal action. Preview data is not persisted.
+
 `active` subscriptions are Pro, including a scheduled cancellation before `current_period_end`.
 `past_due` and `unpaid` keep Pro through one non-renewable seven-day grace window. Missing,
 `incomplete`, `incomplete_expired`, `paused`, and `canceled` subscriptions are Free. A later successful
