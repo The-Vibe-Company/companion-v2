@@ -1,9 +1,11 @@
 import { randomUUID } from "node:crypto";
-import { and, asc, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, sql } from "drizzle-orm";
 import {
   companionManifestSchema,
   type CreateGitHubDestinationInput,
   type GitHubIntegrationResponse,
+  type GitHubSkillInclusion,
+  type GitHubSkillSyncResponse,
   type GitHubSyncDestination,
   type GitHubSyncMode,
   type UpdateGitHubDestinationInput,
@@ -18,6 +20,20 @@ const REFRESH_PURPOSE = "github-user-refresh-token";
 
 type DestinationRow = typeof schema.githubSyncDestinations.$inferSelect;
 type ConnectionRow = typeof schema.githubConnections.$inferSelect;
+
+export class GitHubSkillSyncConflictError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "GitHubSkillSyncConflictError";
+  }
+}
+
+export class GitHubSkillSyncNotFoundError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "GitHubSkillSyncNotFoundError";
+  }
+}
 
 function ciphertextFromConnection(row: ConnectionRow, prefix: "access" | "refresh"): OpaqueCiphertext | null {
   const ciphertext = row[`${prefix}Ciphertext`];
@@ -110,6 +126,136 @@ export async function getGitHubIntegration(input: {
       connected_at: connection?.createdAt.toISOString() ?? null,
     },
     destinations: destinations.map((row) => destinationContract(row, selectedByDestination.get(row.id) ?? [])),
+  };
+}
+
+export interface GitHubSkillInclusionGraphSkill {
+  id: string;
+  slug: string;
+  dependencies: Array<{ slug: string; skillId: string | null }>;
+}
+
+/**
+ * Resolve desired per-skill inclusion without failing the settings read on an unrelated broken edge.
+ * The worker's publication closure remains strict and will surface missing/archived dependencies as a
+ * destination error; this tolerant view only explains which active skills are reachable by intent.
+ */
+export function resolveGitHubSkillInclusions(input: {
+  mode: GitHubSyncMode;
+  selectedSkillIds: string[];
+  skills: GitHubSkillInclusionGraphSkill[];
+}): Map<string, GitHubSkillInclusion> {
+  const byId = new Map(input.skills.map((skill) => [skill.id, skill]));
+  const bySlug = new Map(input.skills.map((skill) => [skill.slug, skill]));
+  const inclusions = new Map<string, GitHubSkillInclusion>(input.skills.map((skill) => [skill.id, "none"]));
+  if (input.mode === "all") {
+    for (const skill of input.skills) inclusions.set(skill.id, "all");
+    return inclusions;
+  }
+
+  const roots = [...new Set(input.selectedSkillIds)].filter((id) => byId.has(id));
+  for (const id of roots) inclusions.set(id, "selected");
+  const visited = new Set(roots);
+  const queue = [...roots];
+  while (queue.length) {
+    const skill = byId.get(queue.shift()!);
+    if (!skill) continue;
+    for (const dependency of skill.dependencies) {
+      const target = dependency.skillId ? byId.get(dependency.skillId) : bySlug.get(dependency.slug);
+      if (!target || visited.has(target.id)) continue;
+      visited.add(target.id);
+      if (inclusions.get(target.id) === "none") inclusions.set(target.id, "dependency");
+      queue.push(target.id);
+    }
+  }
+  return inclusions;
+}
+
+export async function getGitHubSkillSyncOverview(input: {
+  actor: ActorContext;
+  orgId: string;
+  database?: Db;
+}): Promise<GitHubSkillSyncResponse> {
+  const database = input.database ?? db;
+  await assertGitHubAdmin(database, input.actor, input.orgId);
+  const [skills, destinations, selections] = await Promise.all([
+    database.select({
+      id: schema.skills.id,
+      slug: schema.skills.slug,
+      displayName: schema.skills.displayName,
+      currentVersionId: schema.skills.currentVersionId,
+      currentVersion: schema.skillVersions.version,
+      currentFrontmatter: schema.skillVersions.frontmatter,
+    }).from(schema.skills).leftJoin(schema.skillVersions, and(
+      eq(schema.skillVersions.orgId, schema.skills.orgId),
+      eq(schema.skillVersions.id, schema.skills.currentVersionId),
+    )).where(and(
+      eq(schema.skills.orgId, input.orgId),
+      eq(schema.skills.scope, "org"),
+      isNull(schema.skills.archivedAt),
+    )).orderBy(asc(schema.skills.slug)),
+    database.select({ id: schema.githubSyncDestinations.id, mode: schema.githubSyncDestinations.mode })
+      .from(schema.githubSyncDestinations)
+      .where(eq(schema.githubSyncDestinations.orgId, input.orgId))
+      .orderBy(asc(schema.githubSyncDestinations.createdAt)),
+    database.select({
+      destinationId: schema.githubSyncDestinationSkills.destinationId,
+      skillId: schema.githubSyncDestinationSkills.skillId,
+    }).from(schema.githubSyncDestinationSkills)
+      .where(eq(schema.githubSyncDestinationSkills.orgId, input.orgId)),
+  ]);
+  const versionIds = skills.flatMap((skill) => skill.currentVersionId ? [skill.currentVersionId] : []);
+  const dependencyRows = versionIds.length ? await database.select({
+    versionId: schema.skillVersionDependencies.skillVersionId,
+    slug: schema.skillVersionDependencies.dependsOnSlug,
+    skillId: schema.skillVersionDependencies.dependsOnSkillId,
+  }).from(schema.skillVersionDependencies).where(and(
+    eq(schema.skillVersionDependencies.orgId, input.orgId),
+    inArray(schema.skillVersionDependencies.skillVersionId, versionIds),
+  )) : [];
+  const dependenciesByVersion = new Map<string, Array<{ slug: string; skillId: string | null }>>();
+  for (const dependency of dependencyRows) {
+    dependenciesByVersion.set(dependency.versionId, [
+      ...(dependenciesByVersion.get(dependency.versionId) ?? []),
+      { slug: dependency.slug, skillId: dependency.skillId },
+    ]);
+  }
+  const graph = skills.map((skill): GitHubSkillInclusionGraphSkill => ({
+    id: skill.id,
+    slug: skill.slug,
+    dependencies: skill.currentVersionId ? dependenciesByVersion.get(skill.currentVersionId) ?? [] : [],
+  }));
+  const selectedByDestination = new Map<string, string[]>();
+  for (const selection of selections) {
+    selectedByDestination.set(selection.destinationId, [
+      ...(selectedByDestination.get(selection.destinationId) ?? []),
+      selection.skillId,
+    ]);
+  }
+  const inclusionByDestination = new Map(destinations.map((destination) => [
+    destination.id,
+    resolveGitHubSkillInclusions({
+      mode: destination.mode,
+      selectedSkillIds: selectedByDestination.get(destination.id) ?? [],
+      skills: graph,
+    }),
+  ]));
+
+  return {
+    skills: skills.map((skill) => ({
+      skill_id: skill.id,
+      slug: skill.slug,
+      display_name: resolveGitHubSyncSkillTitle({
+        slug: skill.slug,
+        displayName: skill.displayName,
+        frontmatter: skill.currentFrontmatter,
+      }),
+      current_version: skill.currentVersion,
+      destinations: destinations.map((destination) => ({
+        destination_id: destination.id,
+        inclusion: inclusionByDestination.get(destination.id)?.get(skill.id) ?? "none",
+      })),
+    })),
   };
 }
 
@@ -403,6 +549,99 @@ export async function updateGitHubDestination(input: {
       .returning({ id: schema.githubSyncDestinations.id });
     if (!updated) throw new Error("GitHub destination is disconnected or unavailable");
     await replaceSelections(tx as unknown as Db, input.orgId, input.destinationId, selected);
+  });
+}
+
+export async function setGitHubDestinationSkillSelection(input: {
+  actor: ActorContext;
+  orgId: string;
+  destinationId: string;
+  skillId: string;
+  selected: boolean;
+  database?: Db;
+}): Promise<boolean> {
+  const database = input.database ?? db;
+  await assertGitHubAdmin(database, input.actor, input.orgId);
+  return database.transaction(async (tx) => {
+    const tenantDb = tx as unknown as Db;
+    await lockGitHubLifecycle(tenantDb, input.orgId);
+    const [connection] = await tx.select({ orgId: schema.githubConnections.orgId }).from(schema.githubConnections)
+      .where(eq(schema.githubConnections.orgId, input.orgId)).limit(1).for("update");
+    const [destination] = await tx.select({
+      id: schema.githubSyncDestinations.id,
+      mode: schema.githubSyncDestinations.mode,
+      status: schema.githubSyncDestinations.status,
+      owner: schema.githubSyncDestinations.owner,
+      name: schema.githubSyncDestinations.name,
+    }).from(schema.githubSyncDestinations).where(and(
+      eq(schema.githubSyncDestinations.orgId, input.orgId),
+      eq(schema.githubSyncDestinations.id, input.destinationId),
+    )).limit(1).for("update");
+    const [skill] = await tx.select({ id: schema.skills.id, slug: schema.skills.slug }).from(schema.skills).where(and(
+      eq(schema.skills.orgId, input.orgId),
+      eq(schema.skills.id, input.skillId),
+      eq(schema.skills.scope, "org"),
+      isNull(schema.skills.archivedAt),
+    )).limit(1);
+    if (!destination) throw new GitHubSkillSyncNotFoundError("GitHub destination not found");
+    if (!skill) throw new GitHubSkillSyncNotFoundError("active organization skill not found");
+    if (!connection || destination.status === "disconnected") {
+      throw new GitHubSkillSyncConflictError("GitHub destination is disconnected; resume it before changing skills");
+    }
+    if (destination.mode !== "selected") {
+      throw new GitHubSkillSyncConflictError("all-skills mirrors are managed from the repository settings");
+    }
+    const selections = await tx.select({ skillId: schema.githubSyncDestinationSkills.skillId })
+      .from(schema.githubSyncDestinationSkills).where(and(
+        eq(schema.githubSyncDestinationSkills.orgId, input.orgId),
+        eq(schema.githubSyncDestinationSkills.destinationId, input.destinationId),
+      )).for("update");
+    const alreadySelected = selections.some((selection) => selection.skillId === input.skillId);
+    if (alreadySelected === input.selected) return false;
+    if (input.selected && selections.length >= 500) {
+      throw new GitHubSkillSyncConflictError("this mirror already has the maximum of 500 selected skills");
+    }
+    if (!input.selected && selections.length === 1) {
+      throw new GitHubSkillSyncConflictError("a selected-skills mirror must keep at least one skill");
+    }
+
+    if (input.selected) {
+      await tx.insert(schema.githubSyncDestinationSkills).values({
+        orgId: input.orgId,
+        destinationId: input.destinationId,
+        skillId: input.skillId,
+      });
+    } else {
+      await tx.delete(schema.githubSyncDestinationSkills).where(and(
+        eq(schema.githubSyncDestinationSkills.orgId, input.orgId),
+        eq(schema.githubSyncDestinationSkills.destinationId, input.destinationId),
+        eq(schema.githubSyncDestinationSkills.skillId, input.skillId),
+      ));
+    }
+    await tx.update(schema.githubSyncDestinations).set({
+      desiredRevision: sql`${schema.githubSyncDestinations.desiredRevision} + 1`,
+      status: sql`CASE WHEN ${schema.githubSyncDestinations.status} = 'syncing'::github_sync_status THEN 'syncing'::github_sync_status ELSE 'pending'::github_sync_status END`,
+      nextRetryAt: null,
+      lastError: null,
+      updatedBy: input.actor.id,
+      updatedAt: new Date(),
+    }).where(and(
+      eq(schema.githubSyncDestinations.orgId, input.orgId),
+      eq(schema.githubSyncDestinations.id, input.destinationId),
+    ));
+    await tx.insert(schema.auditLog).values({
+      orgId: input.orgId,
+      actorId: input.actor.id,
+      action: input.selected ? "github.destination.skill_added" : "github.destination.skill_removed",
+      targetType: "github_destination",
+      targetId: input.destinationId,
+      metadata: {
+        repository: `${destination.owner}/${destination.name}`,
+        skill_id: skill.id,
+        skill_slug: skill.slug,
+      },
+    });
+    return true;
   });
 }
 

@@ -6,12 +6,18 @@ import type {
   GitHubIntegrationResponse,
   GitHubInstallation,
   GitHubRepositoryCandidate,
+  GitHubSkillSelectionMutationResponse,
+  GitHubSkillSyncResponse,
   UpdateGitHubDestinationInput,
 } from "@companion/contracts";
 import { apiFetch } from "./apiClient";
 
 export function fetchGitHubIntegration(): Promise<GitHubIntegrationResponse> {
   return apiFetch("/v1/integrations/github");
+}
+
+export function fetchGitHubSkillSync(): Promise<GitHubSkillSyncResponse> {
+  return apiFetch("/v1/integrations/github/skills");
 }
 
 export function beginGitHubConnection(): Promise<{ url: string; install_url: string }> {
@@ -40,6 +46,20 @@ export function createGitHubDestination(input: CreateGitHubDestinationInput): Pr
 
 export function updateGitHubDestination(id: string, input: UpdateGitHubDestinationInput): Promise<{ ok: true }> {
   return apiFetch(`/v1/integrations/github/destinations/${id}`, { method: "PATCH", body: JSON.stringify(input) });
+}
+
+export function selectGitHubDestinationSkill(
+  destinationId: string,
+  skillId: string,
+): Promise<GitHubSkillSelectionMutationResponse> {
+  return apiFetch(`/v1/integrations/github/destinations/${destinationId}/skills/${skillId}`, { method: "PUT" });
+}
+
+export function unselectGitHubDestinationSkill(
+  destinationId: string,
+  skillId: string,
+): Promise<GitHubSkillSelectionMutationResponse> {
+  return apiFetch(`/v1/integrations/github/destinations/${destinationId}/skills/${skillId}`, { method: "DELETE" });
 }
 
 export function syncGitHubDestination(id: string, resumeDisconnected = false): Promise<{ ok: true }> {

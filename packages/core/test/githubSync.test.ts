@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 import type { Db } from "@companion/db";
 import {
   getGitHubIntegration,
+  getGitHubSkillSyncOverview,
   githubRetryDelayMs,
   resolveGitHubSkillClosure,
+  resolveGitHubSkillInclusions,
   resolveGitHubSyncSkillTitle,
   type GitHubSyncGraphSkill,
 } from "../src/githubSync";
@@ -80,6 +82,43 @@ describe("GitHub mirror skill closure", () => {
   });
 });
 
+describe("GitHub mirror skill inclusion view", () => {
+  const skills = [
+    { id: "root", slug: "root", dependencies: [{ slug: "helper", skillId: "helper" }] },
+    { id: "helper", slug: "helper", dependencies: [{ slug: "base", skillId: "base" }] },
+    { id: "base", slug: "base", dependencies: [] },
+    { id: "other", slug: "other", dependencies: [] },
+  ];
+
+  it("classifies all-mode skills as automatic roots", () => {
+    expect(Object.fromEntries(resolveGitHubSkillInclusions({ mode: "all", selectedSkillIds: [], skills }))).toEqual({
+      root: "all", helper: "all", base: "all", other: "all",
+    });
+  });
+
+  it("distinguishes explicit roots, transitive dependencies, and omitted skills", () => {
+    expect(Object.fromEntries(resolveGitHubSkillInclusions({
+      mode: "selected",
+      selectedSkillIds: ["root"],
+      skills,
+    }))).toEqual({ root: "selected", helper: "dependency", base: "dependency", other: "none" });
+  });
+
+  it("keeps the settings view available when another dependency edge is broken", () => {
+    expect(Object.fromEntries(resolveGitHubSkillInclusions({
+      mode: "selected",
+      selectedSkillIds: ["root"],
+      skills: [
+        { id: "root", slug: "root", dependencies: [
+          { slug: "missing", skillId: null },
+          { slug: "helper", skillId: "helper" },
+        ] },
+        { id: "helper", slug: "helper", dependencies: [] },
+      ],
+    }))).toEqual({ root: "selected", helper: "dependency" });
+  });
+});
+
 describe("GitHub integration governance", () => {
   const actor = { id: "user-1", email: "user@example.test", name: "User" };
   const orgId = "00000000-0000-4000-8000-000000000001";
@@ -88,6 +127,7 @@ describe("GitHub integration governance", () => {
     const select = () => {
       const builder = {
         from: () => builder,
+        leftJoin: () => builder,
         where: () => builder,
         orderBy: async () => [],
         then: (resolve: (rows: unknown[]) => unknown) => Promise.resolve([]).then(resolve),
@@ -119,6 +159,17 @@ describe("GitHub integration governance", () => {
       database: databaseForRole(role),
     });
     if (allowed) await expect(request).resolves.toMatchObject({ connection: { connected: false }, destinations: [] });
+    else await expect(request).rejects.toThrow("not allowed to manage GitHub synchronization");
+  });
+
+  it.each([
+    ["owner", true],
+    ["admin", true],
+    ["developer", false],
+    [null, false],
+  ] as const)("skill matrix role=%s -> allowed=%s", async (role, allowed) => {
+    const request = getGitHubSkillSyncOverview({ actor, orgId, database: databaseForRole(role) });
+    if (allowed) await expect(request).resolves.toEqual({ skills: [] });
     else await expect(request).rejects.toThrow("not allowed to manage GitHub synchronization");
   });
 

@@ -17,11 +17,14 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const serviceMocks = vi.hoisted(() => ({
   ApiTokenRefreshError: class ApiTokenRefreshError extends Error {},
+  GitHubSkillSyncConflictError: class GitHubSkillSyncConflictError extends Error {},
+  GitHubSkillSyncNotFoundError: class GitHubSkillSyncNotFoundError extends Error {},
   ensureUserBootstrap: vi.fn(async () => undefined),
   listOrgs: vi.fn(),
   resolveApiToken: vi.fn(),
   refreshApiToken: vi.fn(),
   getGitHubIntegration: vi.fn(),
+  getGitHubSkillSyncOverview: vi.fn(),
   getGitHubUserCredential: vi.fn(),
   refreshGitHubConnectionCredential: vi.fn(),
   saveGitHubConnection: vi.fn(),
@@ -30,6 +33,7 @@ const serviceMocks = vi.hoisted(() => ({
   updateGitHubDestination: vi.fn(),
   deleteGitHubDestination: vi.fn(),
   requestGitHubDestinationSync: vi.fn(),
+  setGitHubDestinationSkillSelection: vi.fn(),
 }));
 
 const dbMocks = vi.hoisted(() => {
@@ -99,12 +103,15 @@ describe("GitHub browser-session routes", () => {
     const destinationId = "00000000-0000-4000-8000-000000000010";
     const cases: Array<{ path: string; method?: string; body?: unknown }> = [
       { path: "/v1/integrations/github" },
+      { path: "/v1/integrations/github/skills" },
       { path: "/v1/integrations/github/connect", method: "POST", body: {} },
       { path: "/v1/integrations/github/account", method: "DELETE" },
       { path: "/v1/integrations/github/repositories" },
       { path: "/v1/integrations/github/repositories", method: "POST", body: { installation_id: "1", owner: "acme", name: "skills", private: true } },
       { path: "/v1/integrations/github/destinations", method: "POST", body: {} },
       { path: `/v1/integrations/github/destinations/${destinationId}`, method: "PATCH", body: { mode: "all", selected_skill_ids: [] } },
+      { path: `/v1/integrations/github/destinations/${destinationId}/skills/22222222-2222-4222-8222-222222222222`, method: "PUT", body: {} },
+      { path: `/v1/integrations/github/destinations/${destinationId}/skills/22222222-2222-4222-8222-222222222222`, method: "DELETE" },
       { path: `/v1/integrations/github/destinations/${destinationId}/sync`, method: "POST", body: {} },
       { path: `/v1/integrations/github/destinations/${destinationId}`, method: "DELETE" },
     ];
@@ -120,6 +127,8 @@ describe("GitHub browser-session routes", () => {
     expect(serviceMocks.getGitHubIntegration).not.toHaveBeenCalled();
     expect(serviceMocks.createGitHubDestination).not.toHaveBeenCalled();
     expect(serviceMocks.updateGitHubDestination).not.toHaveBeenCalled();
+    expect(serviceMocks.getGitHubSkillSyncOverview).not.toHaveBeenCalled();
+    expect(serviceMocks.setGitHubDestinationSkillSelection).not.toHaveBeenCalled();
     expect(serviceMocks.deleteGitHubDestination).not.toHaveBeenCalled();
   });
 
@@ -133,6 +142,47 @@ describe("GitHub browser-session routes", () => {
     const response = await app.request("/v1/integrations/github");
     expect(response.status).toBe(200);
     expect(serviceMocks.getGitHubIntegration).toHaveBeenCalledWith(expect.objectContaining({ actor: me, configured: true }));
+  });
+
+  it("serves the skill matrix and routes atomic selection changes through the tenant service", async () => {
+    authMocks.getSession.mockResolvedValue({ user: me, session: { id: "session" } });
+    serviceMocks.listOrgs.mockResolvedValue([{ org_id: "00000000-0000-4000-8000-000000000001", name: "Acme" }]);
+    serviceMocks.getGitHubSkillSyncOverview.mockResolvedValue({ skills: [] });
+    serviceMocks.setGitHubDestinationSkillSelection.mockResolvedValue(true);
+    const destinationId = "11111111-1111-4111-8111-111111111111";
+    const skillId = "22222222-2222-4222-8222-222222222222";
+
+    const overview = await app.request("/v1/integrations/github/skills");
+    const selected = await app.request(`/v1/integrations/github/destinations/${destinationId}/skills/${skillId}`, {
+      method: "PUT",
+    });
+    const removed = await app.request(`/v1/integrations/github/destinations/${destinationId}/skills/${skillId}`, {
+      method: "DELETE",
+    });
+
+    expect(overview.status).toBe(200);
+    expect(await overview.json()).toEqual({ skills: [] });
+    expect(selected.status).toBe(200);
+    expect(await selected.json()).toEqual({ ok: true, changed: true });
+    expect(removed.status).toBe(200);
+    expect(serviceMocks.setGitHubDestinationSkillSelection).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      actor: me, destinationId, skillId, selected: true,
+    }));
+    expect(serviceMocks.setGitHubDestinationSkillSelection).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      actor: me, destinationId, skillId, selected: false,
+    }));
+  });
+
+  it("maps skill-selection conflicts and missing resources to stable HTTP statuses", async () => {
+    authMocks.getSession.mockResolvedValue({ user: me, session: { id: "session" } });
+    serviceMocks.listOrgs.mockResolvedValue([{ org_id: "00000000-0000-4000-8000-000000000001", name: "Acme" }]);
+    const path = "/v1/integrations/github/destinations/11111111-1111-4111-8111-111111111111/skills/22222222-2222-4222-8222-222222222222";
+    serviceMocks.setGitHubDestinationSkillSelection
+      .mockRejectedValueOnce(new serviceMocks.GitHubSkillSyncConflictError("keep at least one skill"))
+      .mockRejectedValueOnce(new serviceMocks.GitHubSkillSyncNotFoundError("skill not found"));
+
+    expect((await app.request(path, { method: "DELETE" })).status).toBe(409);
+    expect((await app.request(path, { method: "PUT" })).status).toBe(404);
   });
 
   it("keeps GitHub repository I/O outside short tenant credential transactions", async () => {

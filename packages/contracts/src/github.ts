@@ -68,6 +68,35 @@ export const githubIntegrationResponseSchema = z.object({
 });
 export type GitHubIntegrationResponse = z.infer<typeof githubIntegrationResponseSchema>;
 
+export const githubSkillInclusionSchema = z.enum(["all", "selected", "dependency", "none"]);
+export type GitHubSkillInclusion = z.infer<typeof githubSkillInclusionSchema>;
+
+export const githubSkillSyncDestinationSchema = z.object({
+  destination_id: z.string().uuid(),
+  inclusion: githubSkillInclusionSchema,
+});
+export type GitHubSkillSyncDestination = z.infer<typeof githubSkillSyncDestinationSchema>;
+
+export const githubSkillSyncRowSchema = z.object({
+  skill_id: z.string().uuid(),
+  slug: z.string(),
+  display_name: z.string(),
+  current_version: z.string().nullable(),
+  destinations: z.array(githubSkillSyncDestinationSchema),
+});
+export type GitHubSkillSyncRow = z.infer<typeof githubSkillSyncRowSchema>;
+
+export const githubSkillSyncResponseSchema = z.object({
+  skills: z.array(githubSkillSyncRowSchema),
+});
+export type GitHubSkillSyncResponse = z.infer<typeof githubSkillSyncResponseSchema>;
+
+export const githubSkillSelectionMutationResponseSchema = z.object({
+  ok: z.literal(true),
+  changed: z.boolean(),
+});
+export type GitHubSkillSelectionMutationResponse = z.infer<typeof githubSkillSelectionMutationResponseSchema>;
+
 export const createGitHubRepositoryInputSchema = z.object({
   installation_id: z.string().min(1),
   owner: z.string().min(1).max(100),
