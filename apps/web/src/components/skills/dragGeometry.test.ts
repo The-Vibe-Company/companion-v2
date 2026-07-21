@@ -7,6 +7,7 @@ import {
   exceedsThreshold,
   isDwellCandidate,
   isLabelDropValid,
+  isLabelReorderValid,
   isRootDropValid,
   resolveDropTarget,
   sameDropTarget,
@@ -44,6 +45,15 @@ describe("isLabelDropValid", () => {
   });
   it("accepts a label onto an unrelated folder", () => {
     expect(isLabelDropValid(labelDrag, "org", "growth")).toBe(true);
+  });
+});
+
+describe("isLabelReorderValid", () => {
+  it("accepts only same-library sibling labels", () => {
+    expect(isLabelReorderValid(labelDrag, "org", "growth")).toBe(true);
+    expect(isLabelReorderValid(labelDrag, "mine", "growth")).toBe(false);
+    expect(isLabelReorderValid(labelDrag, "org", "marketing/seo")).toBe(false);
+    expect(isLabelReorderValid(skillDrag, "org", "growth")).toBe(false);
   });
 });
 
@@ -97,6 +107,32 @@ describe("resolveDropTarget", () => {
     expect(resolveDropTarget(surface({ kind: "label", lib: "org", path: "growth" }), null)).toBeNull();
     expect(resolveDropTarget(surface({ kind: "label", lib: "org" }), skillDrag)).toBeNull();
   });
+  it("resolves label edge zones as personal sibling reorder targets", () => {
+    const target = surface({ kind: "label", lib: "org", path: "growth" });
+    target.getBoundingClientRect = () => ({ top: 100, bottom: 140, height: 40 } as DOMRect);
+    expect(resolveDropTarget(target, labelDrag, 105)).toEqual({
+      lib: "org",
+      kind: "reorder",
+      path: "growth",
+      position: "before",
+    });
+    expect(resolveDropTarget(target, labelDrag, 135)).toEqual({
+      lib: "org",
+      kind: "reorder",
+      path: "growth",
+      position: "after",
+    });
+    expect(resolveDropTarget(target, labelDrag, 120)).toEqual({ lib: "org", kind: "label", path: "growth" });
+  });
+  it("does not expose reorder zones to skills or labels from another parent", () => {
+    const rootTarget = surface({ kind: "label", lib: "org", path: "growth" });
+    rootTarget.getBoundingClientRect = () => ({ top: 100, bottom: 140, height: 40 } as DOMRect);
+    expect(resolveDropTarget(rootTarget, skillDrag, 105)).toEqual({ lib: "org", kind: "label", path: "growth" });
+
+    const nestedTarget = surface({ kind: "label", lib: "org", path: "marketing/seo" });
+    nestedTarget.getBoundingClientRect = () => ({ top: 100, bottom: 140, height: 40 } as DOMRect);
+    expect(resolveDropTarget(nestedTarget, labelDrag, 105)).toBeNull();
+  });
 });
 
 describe("isDwellCandidate", () => {
@@ -123,6 +159,10 @@ describe("sameDropTarget", () => {
     expect(sameDropTarget({ lib: "org", kind: "label", path: "a" }, { lib: "org", kind: "label", path: "b" })).toBe(false);
     expect(sameDropTarget({ lib: "org", kind: "root" }, { lib: "org", kind: "root" })).toBe(true);
     expect(sameDropTarget({ lib: "org", kind: "root" }, null)).toBe(false);
+    expect(sameDropTarget(
+      { lib: "org", kind: "reorder", path: "a", position: "before" },
+      { lib: "org", kind: "reorder", path: "a", position: "after" },
+    )).toBe(false);
     expect(sameDropTarget(null, null)).toBe(true);
   });
 });

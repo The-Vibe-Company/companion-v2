@@ -173,7 +173,7 @@ import {
   setLabelColorInputSchema,
   setLabelIconInputSchema,
   skillFrontmatterSchema,
-  skillFilterPreferencesSchema,
+  skillFilterPreferencesInputSchema,
   companionDependencySlugs,
   companionManifestV2JsonSchema,
   updateOrgInputSchema,
@@ -1753,9 +1753,9 @@ app.get("/v1/skill-filter-preferences", async (c) => {
 });
 
 app.put("/v1/skill-filter-preferences", async (c) => {
-  let body: ReturnType<typeof skillFilterPreferencesSchema.parse>;
+  let body: ReturnType<typeof skillFilterPreferencesInputSchema.parse>;
   try {
-    body = skillFilterPreferencesSchema.parse(await c.req.json());
+    body = skillFilterPreferencesInputSchema.parse(await c.req.json());
   } catch (error) {
     return jsonError(c, error);
   }

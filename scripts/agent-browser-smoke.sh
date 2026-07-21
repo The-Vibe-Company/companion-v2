@@ -202,7 +202,14 @@ click_button_text() {
 
 # Center point (x y) of an element's bounding box, from real layout.
 box_center() {
-  agent-browser get box "$1" | awk '/^x:/{x=$2}/^y:/{y=$2}/^width:/{w=$2}/^height:/{h=$2}END{printf "%d %d\n", x + w / 2, y + h / 2}'
+  agent-browser get box "$1" | node -e '
+    let input = "";
+    process.stdin.on("data", (chunk) => input += chunk);
+    process.stdin.on("end", () => {
+      const box = JSON.parse(input);
+      process.stdout.write(String(Math.round(box.x + box.width / 2)) + " " + String(Math.round(box.y + box.height / 2)) + "\n");
+    });
+  '
 }
 
 # Ground truth (independent of the browser): does the skill now carry `label` directly?
@@ -412,6 +419,7 @@ prepare_fixtures
 
 log "Opening $APP_URL"
 agent-browser close >/dev/null 2>&1 || true
+sleep 1
 agent-browser set viewport 1440 1000
 agent-browser open "$APP_URL/login"
 agent-browser cookies clear >/dev/null 2>&1 || true
@@ -486,6 +494,7 @@ log "Checking run launcher scrolling at a short desktop viewport"
 agent-browser set viewport 1024 420
 click_button_text "Run skill"
 wait_for_body_contains "Configuration"
+agent-browser wait 300
 assert_eval_true "(() => {
   const dialog = document.querySelector('.run-launcher');
   const head = dialog?.querySelector('.og-dialog__head');
@@ -505,6 +514,7 @@ assert_eval_true "(() => {
   return contained && pinned && sectionsUnclipped && body.scrollHeight > body.clientHeight;
 })()" "run launcher is not contained, scrollable, and pinned at a short viewport"
 agent-browser eval "(() => { const body = document.querySelector('.run-launcher .og-dialog__body'); if (body) body.scrollTop = body.scrollHeight; })()" >/dev/null
+agent-browser wait 200
 assert_eval_true "document.querySelector('.run-launcher .og-dialog__body')?.scrollTop > 0" \
   "run launcher body did not scroll"
 assert_eval_true "(() => {
@@ -556,6 +566,7 @@ agent-browser open "$APP_URL/skills?lib=org&skill=$SMOKE_SKILL"
 wait_for_contextual_action "Install skill" "Install"
 click_button_text "Run skill"
 wait_for_body_contains "Configuration"
+agent-browser wait 300
 assert_eval_true "(() => {
   const dialog = document.querySelector('.run-launcher');
   const head = dialog?.querySelector('.og-dialog__head');
@@ -579,6 +590,7 @@ assert_eval_true "(() => {
     headRect.top >= dialogRect.top && footRect.bottom <= dialogRect.bottom;
 })()" "mobile run launcher is not fullscreen with a pinned, scrollable body"
 agent-browser eval "(() => { const body = document.querySelector('.run-launcher .og-dialog__body'); if (body) body.scrollTop = body.scrollHeight; })()" >/dev/null
+agent-browser wait 200
 assert_eval_true "(() => {
   const dialog = document.querySelector('.run-launcher');
   const head = dialog?.querySelector('.og-dialog__head');

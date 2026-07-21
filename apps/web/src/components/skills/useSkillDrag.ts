@@ -41,6 +41,12 @@ interface UseSkillDragOptions {
   onDropSkillOnLabel: (lib: SkillsLibrary, skillId: string, targetPath: string, sourceLabel: string | null) => void;
   onDropSkillOnRoot: (lib: SkillsLibrary, skillId: string, sourceLabel: string | null) => void;
   onReparentLabel: (lib: SkillsLibrary, from: string, targetParent: string | null) => void;
+  onReorderLabel: (
+    lib: SkillsLibrary,
+    from: string,
+    target: string,
+    position: "before" | "after",
+  ) => void;
   onToggleExpand: (path: string) => void;
   expanded: Set<string>;
   treeRowsByPath: Map<string, { hasChildren: boolean }>;
@@ -184,7 +190,7 @@ export function useSkillDrag(options: UseSkillDragOptions): SkillDrag {
       }
       positionGhost(e.clientX, e.clientY);
       const resolveEl = optsRef.current.resolveTargetEl ?? defaultResolveTargetEl;
-      const next = resolveDropTarget(resolveEl(e.clientX, e.clientY), itemRef.current);
+      const next = resolveDropTarget(resolveEl(e.clientX, e.clientY), itemRef.current, e.clientY);
       setHov(next);
       if (isDwellCandidate(next, itemRef.current, optsRef.current.treeRowsByPath, optsRef.current.expanded)) {
         scheduleDwell((next as { path: string }).path);
@@ -203,6 +209,8 @@ export function useSkillDrag(options: UseSkillDragOptions): SkillDrag {
         if (target.kind === "label") {
           if (item.kind === "skill") o.onDropSkillOnLabel(target.lib, item.skillId, target.path, item.sourceLabel);
           else o.onReparentLabel(target.lib, item.path, target.path);
+        } else if (target.kind === "reorder") {
+          if (item.kind === "label") o.onReorderLabel(target.lib, item.path, target.path, target.position);
         } else {
           if (item.kind === "skill") o.onDropSkillOnRoot(target.lib, item.skillId, item.sourceLabel);
           else o.onReparentLabel(target.lib, item.path, null);

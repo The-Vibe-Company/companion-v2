@@ -761,6 +761,10 @@ private folder tree under `/personal-labels`. A folder is a slash-separated, low
 such as `marketing/seo`, with an optional human-facing `displayName` such as `SEO`. A skill can hold
 several labels at once, and folders may be empty.
 
+The browser may display those folders in a per-user custom sidebar order. That order is private UI state,
+not part of the label tree and not a shared label mutation. Its preference routes require a signed-in
+browser session, so do not attempt to read or change sidebar ordering with this skill's personal access token.
+
 The path is always sent in the **request body or query**, never as a URL path segment, so that the
 slashes inside a path survive routing. Confirm any rename or delete with the user first, because both
 cascade across descendant folders for the relevant library.
@@ -1015,7 +1019,7 @@ skills view shows the correct status and version. Report the version from this s
 curl -s "$COMPANION_API_URL/local-skills/companion/installed" \
   -H "Authorization: Bearer $COMPANION_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"version":"1.24.0","agent":"<your assistant name>"}'
+  -d '{"version":"1.25.0","agent":"<your assistant name>"}'
 ```
 
 A `{ "ok": true, "status": "installed" }` response confirms the workspace now knows this machine has

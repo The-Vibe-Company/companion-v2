@@ -337,6 +337,13 @@
       "when": 1784638800000,
       "tag": "0047_skill_group_preference",
       "breakpoints": true
+    },
+    {
+      "idx": 48,
+      "version": "7",
+      "when": 1784642400000,
+      "tag": "0048_skill_sidebar_order_preference",
+      "breakpoints": true
     }
   ]
 }

@@ -17,6 +17,7 @@ import type {
   SkillDependencyStatus,
   SkillDependentRow,
   SkillFilterPreferences,
+  SkillFilterPreferencesInput,
   SkillListRow,
   SkillModifier,
   SkillPublicPreview,
@@ -37,6 +38,7 @@ import {
   parseStoredSkillFrontmatter,
   publishSkillInputSchema,
   renameSkillInputSchema,
+  skillFilterPreferencesInputSchema,
   skillFilterPreferencesSchema,
   tokenScopesSchema,
   userAvatarPublicPath,
@@ -1238,6 +1240,7 @@ export async function getSkillShareTargetByShareToken(input: {
 const EMPTY_SKILL_FILTER_PREFERENCES: SkillFilterPreferences = {
   active_filters: [],
   group_by: "folder",
+  sidebar_order: { mine: [], org: [] },
 };
 
 /**
@@ -1259,9 +1262,17 @@ function normalizePersistedSkillFilter(value: unknown): unknown | null {
   return value;
 }
 
-function normalizePersistedSkillPreferences(input: { activeFilters: unknown[]; groupBy?: unknown }) {
+function normalizePersistedSkillPreferences(input: {
+  activeFilters: unknown[];
+  groupBy?: unknown;
+  sidebarOrder?: unknown;
+}) {
   const norm = (arr: unknown[]) => arr.map(normalizePersistedSkillFilter).filter((f) => f != null);
-  return { active_filters: norm(input.activeFilters), group_by: input.groupBy ?? "folder" };
+  return {
+    active_filters: norm(input.activeFilters),
+    group_by: input.groupBy ?? "folder",
+    sidebar_order: input.sidebarOrder ?? { mine: [], org: [] },
+  };
 }
 
 export async function getSkillFilterPreferences(input: {
@@ -1284,12 +1295,12 @@ export async function getSkillFilterPreferences(input: {
 export async function setSkillFilterPreferences(input: {
   actor: ActorContext;
   orgId: string;
-  preferences: SkillFilterPreferences;
+  preferences: SkillFilterPreferencesInput;
   database?: Db;
 }): Promise<SkillFilterPreferences> {
   const database = input.database ?? db;
   await assertMember(database, input.actor, input.orgId);
-  const preferences = skillFilterPreferencesSchema.parse(input.preferences);
+  const preferences = skillFilterPreferencesInputSchema.parse(input.preferences);
   await database
     .insert(schema.skillFilterPreferences)
     .values({
@@ -1297,16 +1308,21 @@ export async function setSkillFilterPreferences(input: {
       userId: input.actor.id,
       activeFilters: preferences.active_filters,
       groupBy: preferences.group_by,
+      sidebarOrder: preferences.sidebar_order ?? EMPTY_SKILL_FILTER_PREFERENCES.sidebar_order,
     })
     .onConflictDoUpdate({
       target: [schema.skillFilterPreferences.orgId, schema.skillFilterPreferences.userId],
       set: {
         activeFilters: preferences.active_filters,
         groupBy: preferences.group_by,
+        ...(preferences.sidebar_order ? { sidebarOrder: preferences.sidebar_order } : {}),
         updatedAt: new Date(),
       },
     });
-  return preferences;
+  if (!preferences.sidebar_order) {
+    return getSkillFilterPreferences({ actor: input.actor, orgId: input.orgId, database });
+  }
+  return skillFilterPreferencesSchema.parse(preferences);
 }
 
 export async function getSkillBySlug(input: {

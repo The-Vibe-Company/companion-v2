@@ -127,6 +127,23 @@ body { background: var(--color-canvas); color: var(--color-fg); font-family: var
   background: var(--color-accent-edge);
   transform: scaleY(1.14);
 }
+.lblrow--reorder-before::after,
+.lblrow--reorder-after::after {
+  content: "";
+  position: absolute;
+  z-index: 2;
+  left: var(--lbl-insert-left, 28px);
+  right: 4px;
+  height: 2px;
+  border-radius: var(--radius-full);
+  background: var(--color-accent-edge);
+  box-shadow: 0 0 0 2px color-mix(in oklab, var(--color-accent-line) 48%, transparent);
+  pointer-events: none;
+}
+.lblrow--reorder-before::after { top: -1px; }
+.lblrow--reorder-after::after { bottom: -1px; }
+.lblrow--reorder-before,
+.lblrow--reorder-after { cursor: grabbing; }
 .lblrow--openpending {
   background:
     linear-gradient(90deg, color-mix(in oklab, var(--color-accent-edge) 18%, transparent), transparent 48%),
@@ -799,6 +816,8 @@ body { background: var(--color-canvas); color: var(--color-fg); font-family: var
 .prefstatus { display: inline-flex; align-items: center; gap: 8px; min-height: 28px; color: var(--color-faint); font-size: var(--text-xs); white-space: nowrap; }
 .prefstatus--error { color: var(--color-danger); }
 .prefstatus__retry { border: none; background: none; color: inherit; cursor: pointer; font: inherit; font-weight: 600; padding: 0; text-decoration: underline; text-underline-offset: 2px; }
+.prefstatus--overlay { position: fixed; z-index: 65; right: var(--space-4); bottom: var(--space-4); padding: 4px 10px;
+  border: 1px solid var(--color-line); border-radius: var(--radius-full); background: var(--color-surface-raised); box-shadow: var(--shadow-sm); }
 .clearfilters { border: none; background: none; cursor: pointer; color: var(--color-faint); font-family: var(--font-ui); font-size: var(--text-xs); padding: 0 6px; }
 .clearfilters:hover { color: var(--color-fg); }
 
@@ -946,6 +965,9 @@ body { background: var(--color-canvas); color: var(--color-fg); font-family: var
     padding: 0 10px;
   }
   .side--mobile-open .og-switch { display: block; }
+  .side--mobile-open .lblrow { min-height: 44px; }
+  .side--mobile-open .lblrow__main { padding-right: 48px; }
+  .side--mobile-open .lblrow__more { right: 0; width: 44px; height: 44px; opacity: 1; }
   .side-scrim {
     display: block;
     position: fixed;

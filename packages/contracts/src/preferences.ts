@@ -27,8 +27,21 @@ export type SkillFilter = z.infer<typeof skillFilterSchema>;
 export const skillGroupBySchema = z.enum(["folder", "none"]);
 export type SkillGroupBy = z.infer<typeof skillGroupBySchema>;
 
+export const skillSidebarOrderSchema = z.object({
+  mine: z.array(labelPathSchema).default([]),
+  org: z.array(labelPathSchema).default([]),
+});
+export type SkillSidebarOrder = z.infer<typeof skillSidebarOrderSchema>;
+
 export const skillFilterPreferencesSchema = z.object({
   active_filters: z.array(skillFilterSchema).max(20).default([]),
   group_by: skillGroupBySchema.default("folder"),
+  sidebar_order: skillSidebarOrderSchema.default({ mine: [], org: [] }),
 });
 export type SkillFilterPreferences = z.infer<typeof skillFilterPreferencesSchema>;
+
+/** PUT input keeps the new axis optional so a tab loaded before deployment cannot erase it. */
+export const skillFilterPreferencesInputSchema = skillFilterPreferencesSchema.extend({
+  sidebar_order: skillSidebarOrderSchema.optional(),
+});
+export type SkillFilterPreferencesInput = z.infer<typeof skillFilterPreferencesInputSchema>;

@@ -228,7 +228,7 @@ function appProps(
     initialLocalSkills: localSkills,
     // Default to no saved chips so the route selection alone drives the list; individual tests pass
     // their own `initialFilterPreferences` to exercise the saved-filter behavior.
-    initialFilterPreferences: { active_filters: [], group_by: "folder" },
+    initialFilterPreferences: { active_filters: [], group_by: "folder", sidebar_order: { mine: [], org: [] } },
     initialPersonalLabels: emptyLabels(),
     initialLabels: seededLabels,
     initialBilling: {
@@ -519,6 +519,7 @@ describe("SkillsApp initial route", () => {
           initialFilterPreferences: {
             active_filters: [{ type: "status", value: "valid" }],
             group_by: "folder",
+            sidebar_order: { mine: [], org: [] },
           },
         },
       },
@@ -534,6 +535,7 @@ describe("SkillsApp initial route", () => {
     expect(queryMocks.saveSkillFilterPreferences).toHaveBeenCalledWith({
       active_filters: [{ type: "status", value: "valid" }],
       group_by: "none",
+      sidebar_order: { mine: [], org: [] },
     });
   });
 
@@ -1429,6 +1431,124 @@ describe("SkillsApp optimistic label assignment", () => {
 });
 
 describe("SkillsApp drag-and-drop label reparenting", () => {
+  it("reorders sibling labels personally when dropped on an insertion edge", async () => {
+    vi.useFakeTimers();
+    const { container } = await mountSkillsApp({ lib: "org", kind: "all" });
+    await flushEffects();
+    queryMocks.saveSkillFilterPreferences.mockClear();
+
+    const target = folderRow(container, "growth");
+    target.getBoundingClientRect = () => ({ top: 100, bottom: 140, height: 40 } as DOMRect);
+    pressPointer(folderRow(container, "marketing"));
+    await movePointer(target, 30, 105);
+    expect(target.classList.contains("lblrow--reorder-before")).toBe(true);
+    await releasePointer(30, 105);
+
+    expect(queryMocks.renameLabel).not.toHaveBeenCalled();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(350);
+    });
+    expect(queryMocks.saveSkillFilterPreferences).toHaveBeenCalledWith({
+      active_filters: [],
+      group_by: "folder",
+      sidebar_order: {
+        mine: [],
+        org: ["marketing", "marketing/seo", "growth"],
+      },
+    });
+  });
+
+  it("offers keyboard-accessible sibling ordering from the folder menu", async () => {
+    vi.useFakeTimers();
+    const { container } = await mountSkillsApp({ lib: "org", kind: "all" });
+    await flushEffects();
+    queryMocks.saveSkillFilterPreferences.mockClear();
+
+    clickButton(container, "growth options");
+    await flushEffects();
+    expect(document.activeElement?.textContent).toContain("Rename");
+    act(() => document.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true })));
+    expect(document.activeElement?.textContent).toContain("Add sublabel");
+    clickButton(container, "Move down");
+    await flushEffects();
+    expect(document.activeElement?.getAttribute("aria-label")).toBe("growth options");
+
+    expect(queryMocks.renameLabel).not.toHaveBeenCalled();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(350);
+    });
+    expect(queryMocks.saveSkillFilterPreferences).toHaveBeenCalledWith({
+      active_filters: [],
+      group_by: "folder",
+      sidebar_order: {
+        mine: [],
+        org: ["marketing", "marketing/seo", "growth"],
+      },
+    });
+    expect(queryMocks.saveSkillFilterPreferences).toHaveBeenCalledTimes(1);
+  });
+
+  it("draws an after indicator below an expanded target subtree", async () => {
+    const { container } = await mountSkillsApp({ lib: "org", kind: "all" });
+    await flushEffects();
+    const marketing = folderRow(container, "marketing");
+    act(() => marketing.querySelector<HTMLButtonElement>(".lblrow__chev")!.click());
+    await flushEffects();
+    marketing.getBoundingClientRect = () => ({ top: 100, bottom: 140, height: 40 } as DOMRect);
+
+    pressPointer(folderRow(container, "growth"));
+    await movePointer(marketing, 30, 138);
+
+    expect(marketing.classList.contains("lblrow--reorder-after")).toBe(false);
+    expect(folderRow(container, "marketing/seo").classList.contains("lblrow--reorder-after")).toBe(true);
+    await releasePointer(30, 138);
+  });
+
+  it("keeps a newer reorder queued when an older save fails", async () => {
+    let rejectFirst!: (error: Error) => void;
+    queryMocks.saveSkillFilterPreferences.mockImplementationOnce(() => new Promise((_resolve, reject) => {
+      rejectFirst = reject;
+    }));
+    const { container } = await mountSkillsApp({ lib: "org", kind: "all" });
+    await flushEffects();
+
+    clickButton(container, "growth options");
+    await flushEffects();
+    clickButton(container, "Move down");
+    await flushEffects();
+    clickButton(container, "marketing options");
+    await flushEffects();
+    clickButton(container, "Move down");
+    await flushEffects();
+
+    await act(async () => rejectFirst(new Error("offline")));
+    clickButton(container, "Retry");
+    await flushEffects();
+
+    expect(queryMocks.saveSkillFilterPreferences).toHaveBeenLastCalledWith({
+      active_filters: [],
+      group_by: "folder",
+      sidebar_order: { mine: [], org: ["growth", "marketing", "marketing/seo"] },
+    });
+  });
+
+  it("shows preference failure and retry while a detail view is open", async () => {
+    queryMocks.saveSkillFilterPreferences.mockRejectedValueOnce(new Error("offline"));
+    const { container } = await mountSkillsApp(
+      { lib: "org", kind: "all", skill: "brand-kit" },
+      { url: "/skills?lib=org&skill=brand-kit" },
+    );
+    await flushEffects();
+
+    clickButton(container, "growth options");
+    await flushEffects();
+    clickButton(container, "Move down");
+    await flushEffects();
+
+    expect(container.textContent).toContain("Not saved");
+    expect(findButton(container, "Retry")).toBeTruthy();
+  });
+
   it("renames a dropped label under the target label", async () => {
     const { container } = await mountSkillsApp({ lib: "org", kind: "all" });
     await flushEffects();
