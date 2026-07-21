@@ -71,6 +71,20 @@ describe("skill list grouping", () => {
     expect(groups[1]?.rows[0]?.skill.id).toBe("digest");
   });
 
+  it("derives relative paths from canonical segments when display names contain separators", () => {
+    const groups = groupSkillsByRoot(
+      [skill("campaign", { labels: ["sales/seo"] })],
+      [
+        { path: "sales", displayName: "Sales / Marketing", color: null, icon: null },
+        { path: "sales/seo", displayName: "SEO", color: null, icon: null },
+      ],
+      "org",
+    );
+
+    expect(groups[0]?.label).toBe("Sales / Marketing");
+    expect(groups[0]?.rows[0]?.relativePaths).toEqual(["SEO"]);
+  });
+
   it("places installed and genuinely unfiled rows in separate trailing groups", () => {
     const groups = groupSkillsByRoot([
       skill("filed", { scope: "personal", source: "authored", labels: ["marketing"] }),

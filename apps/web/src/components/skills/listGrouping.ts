@@ -39,10 +39,11 @@ export function mostSpecificPaths(paths: string[]): string[] {
   return unique.filter((path) => !unique.some((candidate) => candidate.startsWith(`${path}/`)));
 }
 
-function displayPath(path: string, appearance: Map<string, LabelVM>): string {
+function displayRelativePath(path: string, appearance: Map<string, LabelVM>): string {
   const segments = path.split("/");
   return segments
-    .map((segment, index) => appearance.get(segments.slice(0, index + 1).join("/"))?.displayName ?? segment)
+    .slice(1)
+    .map((segment, index) => appearance.get(segments.slice(0, index + 2).join("/"))?.displayName ?? segment)
     .join(" / ");
 }
 
@@ -129,7 +130,7 @@ export function groupSkillsByRoot(
       }
       const relativePaths = paths
         .filter((path) => path !== root)
-        .map((path) => displayPath(path, appearance).split(" / ").slice(1).join(" / "));
+        .map((path) => displayRelativePath(path, appearance));
       group.rows.push({ skill, relativePaths, icon: resolveSkillListIcon(skill, labels, paths) });
     }
   }

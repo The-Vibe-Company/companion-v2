@@ -348,6 +348,17 @@ describe("ListView grouped rhythm", () => {
     expect(window.localStorage.getItem("companion:skills:collapsed-groups:v1:org-1:org")).toBe(
       '["folder:marketing"]',
     );
+    expect(toggle.disabled).toBe(true);
+
+    act(() => toggle.click());
+    expect(window.localStorage.getItem("companion:skills:collapsed-groups:v1:org-1:org")).toBe(
+      '["folder:marketing"]',
+    );
+
+    setInputValue(container.querySelector('input[type="search"]') as HTMLInputElement, "");
+    expect(toggle.disabled).toBe(false);
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(container.querySelector(".cgroup__rows")?.hasAttribute("hidden")).toBe(true);
   });
 });
 

@@ -515,7 +515,8 @@ export function ListView({
         </div>
         {groupBy === "folder"
           ? groups.map((group) => {
-              const isCollapsed = !q.trim() && collapsed.has(group.key);
+              const searching = !!q.trim();
+              const isCollapsed = !searching && collapsed.has(group.key);
               const headingId = `skill-group-${group.key.replace(/[^a-z0-9-]/gi, "-")}`;
               const rowsId = `${headingId}-rows`;
               return (
@@ -526,6 +527,7 @@ export function ListView({
                       className="cgroup__toggle"
                       aria-expanded={!isCollapsed}
                       aria-controls={rowsId}
+                      disabled={searching}
                       onClick={() => toggleGroup(group.key)}
                     >
                       <span className="cgroup__icon" style={group.color ? { color: group.color } : undefined}>
