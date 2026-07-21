@@ -111,6 +111,12 @@ COMPANION_SANDBOX_REGION=iad1
 COMPANION_SANDBOX_TIMEOUT_MS=300000
 ```
 
+`BETTER_AUTH_SECRET` and `BETTER_AUTH_COOKIE_PREFIX` are durable identity settings, not per-deploy
+values. Generate the secret once, store both as fixed Railway variables, and keep them identical across
+all API replicas and replacements. Regenerating the secret or renaming the prefix invalidates every
+existing browser session. Keep `COMPANION_WEB_URL`, `COMPANION_API_URL`, and `BETTER_AUTH_URL` on the
+same canonical public origin; Companion redirects its matching `www`/apex alias before auth begins.
+
 `COMPANION_ENTITLEMENTS_MODE=observe` is the safe first production rollout. Enable webhooks, then Checkout, then use
 `pilot` with explicit organization ids before switching to `enforce` globally.
 

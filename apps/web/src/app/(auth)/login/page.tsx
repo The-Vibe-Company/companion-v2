@@ -1,6 +1,7 @@
 import { redirect } from "next/navigation";
 import { LoginForm } from "./LoginForm";
-import { serverApiFetch } from "@/lib/apiServer";
+import { AuthUnavailable } from "@/components/org/WorkspaceLoadError";
+import { loadServerAuth } from "@/lib/serverAuth";
 
 function safeNext(value: string | string[] | undefined): string {
   const next = typeof value === "string" ? value : "";
@@ -32,10 +33,11 @@ export default async function LoginPage({
 }: {
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
-  const user = await serverApiFetch("/v1/auth/whoami").catch(() => null);
+  const authState = await loadServerAuth();
   const params = await searchParams;
   const next = safeNext(params.next);
-  if (user) redirect(next);
+  if (authState.status === "authenticated") redirect(next);
+  if (authState.status === "unavailable") return <AuthUnavailable />;
 
   return (
     <LoginForm

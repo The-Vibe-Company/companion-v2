@@ -10,7 +10,8 @@ import { loadOrgContext } from "@/lib/currentOrg";
 import { serverApiFetch } from "@/lib/apiServer";
 import { SkillsApp } from "@/components/skills/SkillsApp";
 import { parseSkillsRoute, skillsRouteSource } from "@/components/skills/route";
-import { WorkspaceLoadError } from "@/components/org/WorkspaceLoadError";
+import { AuthUnavailable, WorkspaceLoadError } from "@/components/org/WorkspaceLoadError";
+import { loadServerAuth } from "@/lib/serverAuth";
 import { mapSkill, type MeVM } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -25,14 +26,16 @@ export default async function SkillsPage({
   const params = await searchParams;
   const initialRoute = parseSkillsRoute(params);
   const initialRouteSource = skillsRouteSource(params);
-  const whoami = await serverApiFetch<{
+  const authState = await loadServerAuth<{
     userId: string;
     email: string;
     name: string;
     avatarUrl?: string | null;
     needsOnboarding?: boolean;
-  }>("/v1/auth/whoami").catch(() => null);
-  if (!whoami) redirect("/login");
+  }>();
+  if (authState.status === "unauthenticated") redirect("/login");
+  if (authState.status === "unavailable") return <AuthUnavailable />;
+  const whoami = authState.user;
   if (whoami.needsOnboarding) redirect("/onboarding");
 
   const orgContext = await loadOrgContext().catch(() => null);

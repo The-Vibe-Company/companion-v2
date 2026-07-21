@@ -34,6 +34,9 @@ export async function serverApiFetch<T>(path: string, init?: RequestInit): Promi
       headers: {
         ...(init?.body instanceof FormData ? {} : { "content-type": "application/json" }),
         cookie: cookieHeader,
+        // A Server Component cannot forward an API Set-Cookie to the browser. Leave the rolling
+        // refresh for SessionKeepAlive's same-origin browser request, which can persist it.
+        "x-companion-disable-session-refresh": "1",
         ...(init?.headers ?? {}),
       },
     });

@@ -760,8 +760,14 @@ app.post("/v1/auth/login-redirect", async (c) => {
 });
 
 app.get("/v1/auth/whoami", async (c) => {
+  let actor: ReturnType<typeof actorFromContext>;
   try {
-    const actor = actorFromContext(c);
+    actor = actorFromContext(c);
+  } catch (error) {
+    return jsonError(c, error, 401);
+  }
+
+  try {
     const orgs = await listOrgs(actor);
     const orgId = await orgIdFromContext(c).catch(() => null);
     const org = orgs.find((o) => o.org_id === orgId) ?? orgs[0] ?? null;
@@ -780,7 +786,9 @@ app.get("/v1/auth/whoami", async (c) => {
       needsOnboarding: !onboarded,
     });
   } catch (error) {
-    return jsonError(c, error, 401);
+    // Authentication was established above. Dependency/database failures must remain retryable
+    // server errors rather than masquerading as an authoritative signed-out response.
+    return jsonError(c, error, 500);
   }
 });
 

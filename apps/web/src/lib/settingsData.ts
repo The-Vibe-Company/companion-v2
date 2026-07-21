@@ -13,6 +13,7 @@ import {
 import { parseSettingsView } from "@/components/org/model";
 import type { SettingsAppData, SettingsDialog, SettingsRoute, SettingsView } from "@/components/org/model";
 import type { MeVM } from "@/lib/types";
+import { loadServerAuth } from "@/lib/serverAuth";
 
 export type SettingsSearchParams = Promise<Record<string, string | string[] | undefined>>;
 export { parseOrgSettingsResponse } from "@/lib/settingsViewModel";
@@ -33,14 +34,16 @@ export async function loadSettingsPageData(searchParams: SettingsSearchParams): 
   initialRoute: SettingsRoute;
   initialDialog: SettingsDialog;
 } | null> {
-  const whoami = await serverApiFetch<{
+  const authState = await loadServerAuth<{
     userId: string;
     email: string;
     name: string;
     avatarUrl?: string | null;
     needsOnboarding?: boolean;
-  }>("/v1/auth/whoami").catch(() => null);
-  if (!whoami) redirect("/login");
+  }>();
+  if (authState.status === "unauthenticated") redirect("/login");
+  if (authState.status === "unavailable") return null;
+  const whoami = authState.user;
   if (whoami.needsOnboarding) redirect("/onboarding");
 
   const orgContext = await loadOrgContext().catch(() => null);

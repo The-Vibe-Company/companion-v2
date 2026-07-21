@@ -2,10 +2,11 @@ import { redirect } from "next/navigation";
 import type { LabelsResponse, LocalSkillRow, OrgSettingsResponse, SecretRow, SkillListRow } from "@companion/contracts";
 import { loadOrgContext } from "@/lib/currentOrg";
 import { serverApiFetch } from "@/lib/apiServer";
-import { WorkspaceLoadError } from "@/components/org/WorkspaceLoadError";
+import { AuthUnavailable, WorkspaceLoadError } from "@/components/org/WorkspaceLoadError";
 import { SecretsApp } from "@/components/secrets/SecretsApp";
 import { mapSkill, type MeVM } from "@/lib/types";
 import { deriveTreeRows } from "@/components/skills/sidebarTree";
+import { loadServerAuth } from "@/lib/serverAuth";
 
 export const dynamic = "force-dynamic";
 
@@ -14,14 +15,16 @@ export default async function SecretsPage({ searchParams }: { searchParams: Prom
   const initialCreateKey = params.create === "1" && typeof params.key === "string" && /^[A-Za-z_][A-Za-z0-9_]*$/.test(params.key)
     ? params.key
     : null;
-  const whoami = await serverApiFetch<{
+  const authState = await loadServerAuth<{
     userId: string;
     email: string;
     name: string;
     avatarUrl?: string | null;
     needsOnboarding?: boolean;
-  }>("/v1/auth/whoami").catch(() => null);
-  if (!whoami) redirect("/login");
+  }>();
+  if (authState.status === "unauthenticated") redirect("/login");
+  if (authState.status === "unavailable") return <AuthUnavailable />;
+  const whoami = authState.user;
   if (whoami.needsOnboarding) redirect("/onboarding");
 
   const orgContext = await loadOrgContext().catch(() => null);
