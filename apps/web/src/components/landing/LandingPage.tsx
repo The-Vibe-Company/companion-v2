@@ -8,7 +8,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { Button, Badge } from "@/components/cds";
+import { Button } from "@/components/cds";
 import { Icon } from "@/components/Icon";
 
 const GITHUB_URL = "https://github.com/The-Vibe-Company/companion";
@@ -80,7 +80,7 @@ const COPY = {
   diffWithCap: "Decisions, owners, deadlines. Every single time.",
   diffPunchPre: "Same AI. Same question. ",
   diffPunchMark: "The method makes the difference.",
-  portalCaption: "This is the real thing — click around: filter, pick a skill.",
+  portalCaption: "click around: filter, pick a skill.",
   portalDescs: {
     "linkedin-posts": "Léa's method for posts that hook in line one and never sound like a robot.",
     "meeting-summaries": "Paste a transcript, get decisions, owners and deadlines.",
@@ -113,7 +113,7 @@ const COPY = {
   ],
   trustTitle: "Safe by default.",
   trustText:
-    "You choose exactly who sees each skill: just you, your team, or the whole company. And if you want, Companion runs entirely on your own servers — your methods and your data never leave the building.",
+    "Keep a skill private in My Skills or share it with your organization. Companion can run its control plane and skill registry on your own servers, so governance stays on infrastructure you control.",
   trustDevStrong: "For the tech-curious:",
   trustDevText:
     " skills are versioned SKILL.md files — an open standard, never a black box. Free and open source, MIT licensed.",
@@ -131,10 +131,10 @@ type Copy = typeof COPY;
 /* Portal rows — machine values stay literal, like a real screenshot. */
 type PortalRow = {
   id: string;
-  team: string;
+  library: "personal" | "org";
+  group: string;
   who: string;
   a: string;
-  scope: "private" | "team" | "public";
   scopeLabel: string;
   ver: string;
   when: string;
@@ -143,14 +143,14 @@ type PortalRow = {
 };
 
 const PORTAL_ROWS: PortalRow[] = [
-  { id: "linkedin-posts", team: "marketing", who: "Léa", a: "terracotta", scope: "public", scopeLabel: "everyone", ver: "1.4.0", when: "2h ago", recent: true },
-  { id: "meeting-summaries", team: "product", who: "Marie", a: "violet", scope: "public", scopeLabel: "everyone", ver: "2.2.0", when: "yesterday", recent: true },
-  { id: "debug-my-setup", team: "platform", who: "Sam", a: "amber", scope: "team", scopeLabel: "platform", ver: "3.0.1", when: "3d ago", recent: true },
-  { id: "sales-research", team: "sales", who: "Jonas", a: "blue", scope: "team", scopeLabel: "sales", ver: "1.0.2", when: "1w ago" },
-  { id: "brand-voice", team: "marketing", who: "Léa", a: "terracotta", scope: "public", scopeLabel: "everyone", ver: "1.1.0", when: "2w ago" },
-  { id: "weekly-report", team: "you", who: "You", a: "slate", scope: "private", scopeLabel: "just you", ver: "0.9.1", when: "4w ago", draft: true },
+  { id: "linkedin-posts", library: "org", group: "marketing", who: "Léa", a: "terracotta", scopeLabel: "Organization", ver: "1.4.0", when: "2h ago", recent: true },
+  { id: "meeting-summaries", library: "org", group: "product", who: "Marie", a: "violet", scopeLabel: "Organization", ver: "2.2.0", when: "yesterday", recent: true },
+  { id: "debug-my-setup", library: "org", group: "platform", who: "Sam", a: "amber", scopeLabel: "Organization", ver: "3.0.1", when: "3d ago", recent: true },
+  { id: "sales-research", library: "org", group: "sales", who: "Jonas", a: "blue", scopeLabel: "Organization", ver: "1.0.2", when: "1w ago" },
+  { id: "brand-voice", library: "org", group: "marketing", who: "Léa", a: "terracotta", scopeLabel: "Organization", ver: "1.1.0", when: "2w ago" },
+  { id: "weekly-report", library: "personal", group: "operations", who: "You", a: "slate", scopeLabel: "My Skills", ver: "0.9.1", when: "4w ago", draft: true },
 ];
-const SCOPE_ICON: Record<PortalRow["scope"], string> = { private: "lock", team: "users", public: "globe" };
+const SCOPE_ICON: Record<PortalRow["library"], string> = { personal: "lock", org: "users" };
 
 /* Ticker chips — the portal rows in motion, plus a couple of off-screen extras. */
 type TickerSkill = { id: string; who: string; a: string };
@@ -248,13 +248,14 @@ function Nav({ c }: { c: Copy }) {
         </nav>
         <span className="v10-nav__spacer"></span>
         <div className="v10-nav__actions">
-          <button
-            type="button"
+          <a
             className="v10-btn v10-btn--ghost v10-btn--sm"
-            onClick={() => window.open(GITHUB_URL, "_blank", "noopener,noreferrer")}
+            href={GITHUB_URL}
+            target="_blank"
+            rel="noopener noreferrer"
           >
             {c.github} ↗
-          </button>
+          </a>
           <Link href="/login" className="v10-btn v10-btn--primary v10-btn--sm">
             {c.navCta}
           </Link>
@@ -287,15 +288,9 @@ function Hero({ c }: { c: Copy }) {
           <Link href="/login" className="v10-btn v10-btn--primary">
             {c.ctaPrimary}
           </Link>
-          <button
-            type="button"
-            className="v10-btn v10-btn--ghost"
-            onClick={() => {
-              location.hash = "#problem";
-            }}
-          >
+          <a className="v10-btn v10-btn--ghost" href="#problem">
             {c.ctaSecondary}
-          </button>
+          </a>
         </div>
         <p className="v10-hero__note">{c.heroNote}</p>
         <div className="v10-hero__product v5-reveal">
@@ -442,25 +437,17 @@ function Compare({ c }: { c: Copy }) {
 function PortalCapture({ c }: { c: Copy }) {
   const [selected, setSelected] = useState("linkedin-posts");
   const [installed, setInstalled] = useState<Record<string, boolean>>({ "meeting-summaries": true });
-  const [nav, setNav] = useState("all");
+  const [nav, setNav] = useState<PortalRow["library"]>("org");
   const [tab, setTab] = useState("all");
 
-  const teams = ["marketing", "product", "platform", "sales"];
-
-  let rows = PORTAL_ROWS;
-  if (nav === "mine") rows = rows.filter((r) => r.team === "you");
-  else if (nav.indexOf("team:") === 0) rows = rows.filter((r) => r.team === nav.slice(5));
+  let rows = PORTAL_ROWS.filter((r) => r.library === nav);
   if (tab === "recent") rows = rows.filter((r) => r.recent);
 
-  const sel = PORTAL_ROWS.find((r) => r.id === selected) ?? PORTAL_ROWS[0]!;
-  const navLabel =
-    nav === "mine"
-      ? "my skills"
-      : nav.indexOf("team:") === 0
-          ? "team: " + nav.slice(5)
-          : null;
+  const selectedId = rows.some((r) => r.id === selected) ? selected : rows[0]?.id;
+  const sel = rows.find((r) => r.id === selectedId);
+  const navLabel = nav === "personal" ? "My Skills" : null;
 
-  const NavItem = ({ k, icon, label, count }: { k: string; icon: string; label: string; count: number }) => (
+  const NavItem = ({ k, icon, label, count }: { k: PortalRow["library"]; icon: string; label: string; count: number }) => (
     <button
       type="button"
       className={"v6-reset-btn v5-portal__navitem" + (nav === k ? " v5-portal__navitem--active" : "")}
@@ -477,24 +464,20 @@ function PortalCapture({ c }: { c: Copy }) {
         <aside className="v5-portal__side">
           <div className="v5-portal__org">
             <span className="v5-brand__mark v5-brand__mark--sm">Y</span>
-            Your team
+            Your organization
           </div>
-          <NavItem k="mine" icon="user" label="My skills" count={PORTAL_ROWS.filter((r) => r.team === "you").length} />
-          <div className="v5-portal__grouplabel">Workspace</div>
-          <NavItem k="all" icon="layers" label="All skills" count={PORTAL_ROWS.length} />
-          <div className="v5-portal__grouplabel">Teams</div>
-          {teams.map((t) => (
-            <NavItem key={t} k={"team:" + t} icon="users" label={t} count={PORTAL_ROWS.filter((r) => r.team === t).length} />
-          ))}
+          <div className="v5-portal__grouplabel">Libraries</div>
+          <NavItem k="personal" icon="user" label="My Skills" count={PORTAL_ROWS.filter((r) => r.library === "personal").length} />
+          <NavItem k="org" icon="users" label="Organization" count={PORTAL_ROWS.filter((r) => r.library === "org").length} />
         </aside>
         <div className="v5-portal__main">
           <div className="v5-portal__head">
-            <span className="v5-portal__title">Skills</span>
+            <span className="v5-portal__title">{nav === "personal" ? "My Skills" : "Organization"}</span>
             <span className="v5-portal__count">{rows.length}</span>
             <span className="v5-portal__spacer"></span>
-            <Button variant="primary" size="sm" onClick={() => { location.href = "/login"; }}>
+            <Link href="/login" className="cds-btn cds-btn--sm cds-btn--primary">
               Share a skill
-            </Button>
+            </Link>
           </div>
           <div className="v5-portal__viewbar">
             {([["all", "All skills"], ["recent", "Recently updated"]] as const).map(([k, label]) => (
@@ -515,9 +498,9 @@ function PortalCapture({ c }: { c: Copy }) {
             </span>
             {navLabel && (
               <span className="v5-fchip">
-                <Icon name="users" size={11} />
+                <Icon name="lock" size={11} />
                 {navLabel}
-                <button type="button" className="v6-reset-btn v6-fchip-x" aria-label="Clear filter" onClick={() => setNav("all")}>
+                <button type="button" className="v6-reset-btn v6-fchip-x" aria-label="Clear library filter" onClick={() => setNav("org")}>
                   <Icon name="x" size={11} />
                 </button>
               </span>
@@ -526,17 +509,17 @@ function PortalCapture({ c }: { c: Copy }) {
           <div className="v5-portal__chead" aria-hidden="true">
             <span></span>
             <span>Skill</span>
-            <span>Shared with</span>
+            <span>Library</span>
             <span>Version</span>
             <span style={{ textAlign: "right" }}>Updated</span>
           </div>
           {rows.map((r) => (
             <div
               key={r.id}
-              className={"v5-portal__crow" + (r.id === selected ? " v5-portal__crow--active" : "")}
+              className={"v5-portal__crow" + (r.id === selectedId ? " v5-portal__crow--active" : "")}
               role="button"
               tabIndex={0}
-              aria-pressed={r.id === selected}
+              aria-pressed={r.id === selectedId}
               onClick={() => setSelected(r.id)}
               onKeyDown={(e) => {
                 if (e.key === "Enter" || e.key === " ") {
@@ -548,7 +531,7 @@ function PortalCapture({ c }: { c: Copy }) {
               <span className={"v5-vdot" + (r.draft ? " v5-vdot--unknown" : "")}></span>
               <span className="v5-portal__name">{r.id}</span>
               <span className="v5-portal__scope">
-                <Icon name={SCOPE_ICON[r.scope]} size={11} />
+                <Icon name={SCOPE_ICON[r.library]} size={11} />
                 {r.scopeLabel}
               </span>
               <span className="v5-portal__ver">{r.ver}</span>
@@ -557,42 +540,50 @@ function PortalCapture({ c }: { c: Copy }) {
           ))}
           {rows.length === 0 && (
             <div className="v5-portal__cempty">
-              {nav === "mine" ? "Share your first skill to see it here." : "No skills match these filters."}
+              {nav === "personal" ? "No recently updated skills in My Skills." : "No skills match these filters."}
             </div>
           )}
         </div>
-        <aside className="v6-pdrawer">
-          <div className="v6-pdrawer__head">
-            <Avatar who={sel.who} tone={sel.a} sm />
-            <p className="v6-pdrawer__title">{sel.id}</p>
-            <span className="v5-portal__scope">
-              <Icon name={SCOPE_ICON[sel.scope]} size={11} />
-              {sel.scopeLabel}
-            </span>
-          </div>
-          <p className="v6-pdrawer__desc">{c.portalDescs[sel.id] || ""}</p>
-          <dl className="v6-pdrawer__kv">
-            <dt>shared by</dt>
-            <dd>
-              {sel.who} · {sel.team}
-            </dd>
-            <dt>version</dt>
-            <dd>{sel.ver}</dd>
-            <dt>updated</dt>
-            <dd>{sel.when}</dd>
-          </dl>
-          <div className="v6-pdrawer__actions">
-            {installed[sel.id] ? (
-              <Badge tone="ok" dot>
-                {c.libInstalled}
-              </Badge>
-            ) : (
-              <Button variant="primary" size="sm" onClick={() => setInstalled((s) => ({ ...s, [sel.id]: true }))}>
-                {c.libInstall}
+        {sel ? (
+          <aside className="v6-pdrawer" aria-labelledby={`portal-skill-${sel.id}`}>
+            <div className="v6-pdrawer__head">
+              <Avatar who={sel.who} tone={sel.a} sm />
+              <h3 className="v6-pdrawer__title" id={`portal-skill-${sel.id}`}>{sel.id}</h3>
+              <span className="v5-portal__scope">
+                <Icon name={SCOPE_ICON[sel.library]} size={11} />
+                {sel.scopeLabel}
+              </span>
+            </div>
+            <p className="v6-pdrawer__desc">{c.portalDescs[sel.id] || ""}</p>
+            <dl className="v6-pdrawer__kv">
+              <dt>{sel.library === "personal" ? "created by" : "shared by"}</dt>
+              <dd>
+                {sel.who} · {sel.group}
+              </dd>
+              <dt>version</dt>
+              <dd>{sel.ver}</dd>
+              <dt>updated</dt>
+              <dd>{sel.when}</dd>
+            </dl>
+            <div className="v6-pdrawer__actions" aria-live="polite">
+              <Button
+                variant="primary"
+                size="sm"
+                aria-disabled={Boolean(installed[sel.id])}
+                aria-pressed={Boolean(installed[sel.id])}
+                onClick={() => {
+                  if (!installed[sel.id]) setInstalled((s) => ({ ...s, [sel.id]: true }));
+                }}
+              >
+                {installed[sel.id] ? c.libInstalled : c.libInstall}
               </Button>
-            )}
-          </div>
-        </aside>
+            </div>
+          </aside>
+        ) : (
+          <aside className="v6-pdrawer v6-pdrawer--empty" aria-label="Skill details">
+            <p className="v6-pdrawer__desc">No skill selected.</p>
+          </aside>
+        )}
       </div>
       <div className="v5-libframe__caption">{c.portalCaption}</div>
     </div>
@@ -636,13 +627,14 @@ function Trust({ c }: { c: Copy }) {
             <strong>{c.trustDevStrong}</strong>
             {c.trustDevText}
           </span>
-          <button
-            type="button"
+          <a
             className="v10-btn v10-btn--ghost v10-btn--sm"
-            onClick={() => window.open(GITHUB_URL, "_blank", "noopener,noreferrer")}
+            href={GITHUB_URL}
+            target="_blank"
+            rel="noopener noreferrer"
           >
             GitHub ↗
-          </button>
+          </a>
         </div>
       </div>
     </div>
@@ -663,13 +655,14 @@ function Finale({ c }: { c: Copy }) {
           <Link href="/login" className="v10-btn v10-btn--primary v10-btn--lg">
             {c.finaleCta}
           </Link>
-          <button
-            type="button"
+          <a
             className="v10-btn v10-btn--ghost v10-btn--lg"
-            onClick={() => window.open(GITHUB_URL, "_blank", "noopener,noreferrer")}
+            href={GITHUB_URL}
+            target="_blank"
+            rel="noopener noreferrer"
           >
             {c.github} ↗
-          </button>
+          </a>
         </div>
         <p className="v10-finale__small">{c.finaleSmall}</p>
       </div>
@@ -709,8 +702,9 @@ export function LandingPage() {
 
   return (
     <div className="v10-landing">
+      <a className="v10-skip" href="#main-content">Skip to content</a>
       <Nav c={c} />
-      <main>
+      <main id="main-content">
         <Hero c={c} />
         <Ticker c={c} />
         <Problem c={c} />
