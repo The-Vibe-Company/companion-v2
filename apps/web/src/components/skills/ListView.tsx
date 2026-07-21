@@ -1,25 +1,31 @@
 "use client";
 
-import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type PointerEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type PointerEvent,
+} from "react";
 import { createPortal } from "react-dom";
+import type { LabelVM, SkillGroupBy } from "@companion/contracts";
 import { Icon } from "../Icon";
 import { UserAvatar } from "../UserAvatar";
 import type { SkillContributorVM, SkillVM } from "@/lib/types";
 import { InstallMark } from "./blocks";
 import { chipParts, type Filter } from "./filters";
 import { FilterAdd } from "./FilterMenu";
-import {
-  resolveSkillActions,
-  skillActionPermissions,
-  type SkillAction,
-} from "./skillActions";
+import { groupSkillsByRoot, resolveSkillListIcon, type GroupedSkillRow } from "./listGrouping";
+import { resolveSkillActions, skillActionPermissions, type SkillAction } from "./skillActions";
 
 type SortKey = "default" | "name";
 
 const SORT_OPTIONS: { key: SortKey; label: string }[] = [
-  // "default" preserves the server order (most recently updated first).
   { key: "default", label: "Recently updated" },
-  { key: "name", label: "Name (A–Z)" },
+  { key: "name", label: "Slug (A–Z)" },
 ];
 
 type Person = SkillContributorVM & { role: "creator" | "modifier" };
@@ -43,16 +49,12 @@ function peopleFor(skill: SkillVM): Person[] {
   return people;
 }
 
-function formatNames(names: string[]): string {
-  return names.join(", ");
-}
-
 function peopleLabel(skill: SkillVM): string {
   const modifierNames = peopleFor(skill)
     .filter((person) => person.role === "modifier")
     .map((person) => person.name);
   if (modifierNames.length === 0) return `Created by ${skill.authorName}.`;
-  return `Created by ${skill.authorName}. Updated by ${formatNames(modifierNames)}.`;
+  return `Created by ${skill.authorName}. Updated by ${modifierNames.join(", ")}.`;
 }
 
 function PeopleStack({ skill }: { skill: SkillVM }) {
@@ -65,13 +67,13 @@ function PeopleStack({ skill }: { skill: SkillVM }) {
       {visible.map((person) => (
         <UserAvatar
           key={person.id}
-          className={"avatar people__avatar people__avatar--" + person.role}
+          className={`avatar people__avatar people__avatar--${person.role}`}
           avatarUrl={person.avatarUrl}
           initials={person.initials}
           size={22}
         />
       ))}
-      {hidden > 0 && <span className="people__more">+{hidden}</span>}
+      {hidden > 0 ? <span className="people__more">+{hidden}</span> : null}
     </span>
   );
 }
@@ -94,35 +96,25 @@ function ValidationMarker({ skill }: { skill: SkillVM }) {
   );
 }
 
-function skillDisplayName(skill: SkillVM): string {
-  return skill.display?.name?.trim() || skill.id;
-}
-
-function compactDuplicateSlug(slug: string): string {
-  const maxLength = 18;
-  return slug.length > maxLength ? `…${slug.slice(-(maxLength - 1))}` : slug;
-}
-
-function SkillLabelOverflow({ paths }: { paths: string[] }) {
+function PathOverflow({ paths, kind }: { paths: string[]; kind: "folder" | "subfolder" }) {
   const tooltipId = useId();
   const triggerRef = useRef<HTMLSpanElement>(null);
   const tooltipRef = useRef<HTMLSpanElement>(null);
   const closeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [open, setOpen] = useState(false);
   const [position, setPosition] = useState({ left: -9999, top: -9999 });
-  const label = `${paths.length} more ${paths.length === 1 ? "folder" : "folders"}: ${paths.join(", ")}`;
+  const plural = kind === "folder" ? "folders" : "subfolders";
+  const label = `${paths.length} more ${paths.length === 1 ? kind : plural}: ${paths.join(", ")}`;
 
   const cancelClose = useCallback(() => {
     if (closeTimerRef.current === null) return;
     clearTimeout(closeTimerRef.current);
     closeTimerRef.current = null;
   }, []);
-
   const showTooltip = useCallback(() => {
     cancelClose();
     setOpen(true);
   }, [cancelClose]);
-
   const scheduleClose = useCallback(() => {
     cancelClose();
     closeTimerRef.current = setTimeout(() => {
@@ -130,7 +122,6 @@ function SkillLabelOverflow({ paths }: { paths: string[] }) {
       closeTimerRef.current = null;
     }, 100);
   }, [cancelClose]);
-
   const positionTooltip = useCallback(() => {
     const trigger = triggerRef.current;
     const tooltip = tooltipRef.current;
@@ -144,13 +135,12 @@ function SkillLabelOverflow({ paths }: { paths: string[] }) {
     left = Math.min(Math.max(padding, left), window.innerWidth - padding - box.width);
     const centeredTop = anchor.top + anchor.height / 2 - box.height / 2;
     const top = Math.min(Math.max(padding, centeredTop), window.innerHeight - padding - box.height);
-    setPosition((current) => current.left === left && current.top === top ? current : { left, top });
+    setPosition((current) => (current.left === left && current.top === top ? current : { left, top }));
   }, []);
 
   useLayoutEffect(() => {
     if (open) positionTooltip();
   }, [open, positionTooltip]);
-
   useEffect(() => {
     if (!open) return;
     const dismissTooltip = (event: KeyboardEvent) => {
@@ -167,7 +157,6 @@ function SkillLabelOverflow({ paths }: { paths: string[] }) {
       window.removeEventListener("scroll", positionTooltip, true);
     };
   }, [cancelClose, open, positionTooltip]);
-
   useEffect(() => () => cancelClose(), [cancelClose]);
 
   return (
@@ -187,53 +176,152 @@ function SkillLabelOverflow({ paths }: { paths: string[] }) {
       >
         +{paths.length}
       </span>
-      {open && typeof document !== "undefined" ? createPortal(
-        <span
-          ref={tooltipRef}
-          id={tooltipId}
-          className="crow__labeltooltip"
-          role="tooltip"
-          style={position}
-          onMouseEnter={cancelClose}
-          onMouseLeave={scheduleClose}
-        >
-          {paths.join(", ")}
-        </span>,
-        document.body,
-      ) : null}
+      {open && typeof document !== "undefined"
+        ? createPortal(
+            <span
+              ref={tooltipRef}
+              id={tooltipId}
+              className="crow__labeltooltip"
+              role="tooltip"
+              style={position}
+              onMouseEnter={cancelClose}
+              onMouseLeave={scheduleClose}
+            >
+              {paths.join(", ")}
+            </span>,
+            document.body,
+          )
+        : null}
     </>
   );
 }
 
-function SkillLabels({ labels }: { labels: string[] }) {
-  if (labels.length === 0) return null;
-
-  const visible = labels.slice(0, 2);
-  const hidden = labels.slice(2);
-
+function SkillPaths({ paths, kind }: { paths: string[]; kind: "folder" | "subfolder" }) {
+  if (paths.length === 0) return null;
+  const visible = paths.slice(0, 2);
+  const hidden = paths.slice(2);
+  const label = kind === "folder" ? "Folders" : "Subfolders";
   return (
-    <span className="crow__labels" role="list" aria-label="Folders">
+    <span className={`crow__labels${kind === "subfolder" ? " crow__labels--relative" : ""}`} role="list" aria-label={label}>
       {visible.map((path) => (
         <span
           className="crow__label"
           key={path}
           title={path}
           role="listitem"
-          aria-label={`Folder: ${path}`}
+          aria-label={`${kind === "folder" ? "Folder" : "Subfolder"}: ${path}`}
         >
           <span className="crow__labeltext">{path}</span>
         </span>
       ))}
-      {hidden.length > 0 ? <SkillLabelOverflow paths={hidden} /> : null}
+      {hidden.length > 0 ? <PathOverflow paths={hidden} kind={kind} /> : null}
     </span>
   );
 }
 
+function SkillRow({
+  row,
+  library,
+  actorId,
+  labels,
+  flat,
+  lastId,
+  dragSkillId,
+  onOpen,
+  onPrimaryAction,
+  onSkillStartDrag,
+}: {
+  row: GroupedSkillRow;
+  library: "mine" | "org";
+  actorId: string;
+  labels: LabelVM[];
+  flat: boolean;
+  lastId: string | null;
+  dragSkillId: string | null;
+  onOpen: (id: string) => void;
+  onPrimaryAction: (skill: SkillVM, action: SkillAction) => void;
+  onSkillStartDrag: (id: string, event: PointerEvent<HTMLElement>) => void;
+}) {
+  const skill = row.skill;
+  const canDrag = !(library === "mine" && skill.source === "installed");
+  const dragging = canDrag && dragSkillId === skill.id;
+  const primary = resolveSkillActions(skill, skillActionPermissions(skill, actorId)).primary;
+  const icon = flat ? resolveSkillListIcon(skill, labels) : row.icon;
+  return (
+    <div
+      data-skill-slug={skill.id}
+      className={`crow${lastId === skill.id ? " is-active" : ""}${dragging ? " crow--dragging" : ""}`}
+      title={peopleLabel(skill)}
+      onPointerDown={
+        canDrag
+          ? (event) => {
+              if (event.button !== 0) return;
+              onSkillStartDrag(skill.id, event);
+            }
+          : undefined
+      }
+    >
+      <button type="button" className="crow__hit" aria-label={`Open skill ${skill.id}`} onClick={() => onOpen(skill.id)} />
+      <span className="crow__skill">
+        <span className="crow__skillicon" style={icon.color ? { color: icon.color } : undefined}>
+          <Icon name={icon.name} size={15} />
+        </span>
+        <span className="crow__name">
+          <span className="crow__title">{skill.id}</span>
+          <ValidationMarker skill={skill} />
+          <InstallMark state={skill.installStatus} />
+        </span>
+        <SkillPaths paths={flat ? skill.labels : row.relativePaths} kind={flat ? "folder" : "subfolder"} />
+      </span>
+      <PeopleStack skill={skill} />
+      <span className="r when when--by" title={`Updated by ${skill.updaterName} · ${skill.updated}`}>
+        <UserAvatar
+          className="avatar"
+          avatarUrl={skill.updaterAvatarUrl}
+          initials={skill.updaterInitials}
+          size={14}
+          style={{ fontSize: 7 }}
+        />
+        {skill.updated}
+      </span>
+      <span className="crow__primary r">
+        {primary ? (
+          <button
+            type="button"
+            className="rowact rowact--primary"
+            aria-label={`${primary.label} ${skill.id}`}
+            title={primary.label}
+            onPointerDown={(event) => event.stopPropagation()}
+            onClick={() => onPrimaryAction(skill, primary)}
+          >
+            <Icon name={primary.icon} size={12} />
+            <span className="rowact__label">{primary.contextualLabel ?? primary.label}</span>
+          </button>
+        ) : null}
+      </span>
+      <span className="crow__mobilemeta">
+        <span>{skill.updated}</span>
+        <span className="crow__mobile-install">
+          <InstallMark state={skill.installStatus} />
+        </span>
+      </span>
+    </div>
+  );
+}
+
+function collapsedStorageKey(workspaceId: string, library: "mine" | "org"): string {
+  return `companion:skills:collapsed-groups:v1:${workspaceId}:${library}`;
+}
+
 export function ListView({
   skills,
+  labels,
+  workspaceId,
   library,
   scopeKind,
   breadcrumb,
+  groupBy,
+  onGroupByChange,
   onOpen,
   onUpload,
   actorId,
@@ -251,11 +339,13 @@ export function ListView({
   onUpgrade = () => {},
 }: {
   skills: SkillVM[];
-  /** Which library this list shows (drives scope-aware empty + upload copy). */
+  labels: LabelVM[];
+  workspaceId: string;
   library: "mine" | "org";
   scopeKind: "all" | "installed" | "label";
-  /** Folder breadcrumb for the active sidebar selection (e.g. ["marketing", "seo"]). */
   breadcrumb: string[];
+  groupBy: SkillGroupBy;
+  onGroupByChange: (groupBy: SkillGroupBy) => void;
   onOpen: (id: string) => void;
   onUpload: () => void;
   actorId: string;
@@ -263,61 +353,81 @@ export function ListView({
   lastId: string | null;
   filters: Filter[];
   onToggleFilter: (type: Filter["type"], value: string) => void;
-  onRemoveFilter: (f: Filter) => void;
+  onRemoveFilter: (filter: Filter) => void;
   onClearFilters: () => void;
   preferenceStatus: "idle" | "saving" | "saved" | "error";
   onRetryPreferences: () => void;
   dragSkillId: string | null;
-  /** Begin a pointer drag from a skill row (the hook gates it behind a small move threshold,
-   *  so a plain click still opens the skill). */
-  onSkillStartDrag: (id: string, e: PointerEvent<HTMLElement>) => void;
+  onSkillStartDrag: (id: string, event: PointerEvent<HTMLElement>) => void;
   upgradeNotice?: string | null;
   onUpgrade?: () => void;
 }) {
-  // Search + sort are local list-view affordances (label/status filtering lives in the sidebar / chips).
   const [q, setQ] = useState("");
   const [sort, setSort] = useState<SortKey>("default");
-
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
   const title = breadcrumb[breadcrumb.length - 1] ?? "All skills";
+  const storageKey = collapsedStorageKey(workspaceId, library);
+
+  useEffect(() => {
+    try {
+      const parsed = JSON.parse(window.localStorage.getItem(storageKey) ?? "[]");
+      setCollapsed(new Set(Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === "string") : []));
+    } catch {
+      setCollapsed(new Set());
+    }
+  }, [storageKey]);
 
   const shown = useMemo(() => {
     const needle = q.trim().toLowerCase();
     const matched = needle
       ? skills.filter(
-          (s) =>
-            skillDisplayName(s).toLowerCase().includes(needle) ||
-            s.id.toLowerCase().includes(needle) ||
-            s.description.toLowerCase().includes(needle),
+          (skill) =>
+            skill.id.toLowerCase().includes(needle) ||
+            skill.display?.name?.toLowerCase().includes(needle) ||
+            skill.description.toLowerCase().includes(needle),
         )
       : skills;
     if (sort === "default") return matched;
-    const out = [...matched];
-    if (sort === "name") {
-      out.sort(
-        (a, b) => skillDisplayName(a).localeCompare(skillDisplayName(b)) || a.id.localeCompare(b.id),
-      );
-    }
-    return out;
+    return [...matched].sort((left, right) => left.id.localeCompare(right.id));
   }, [skills, q, sort]);
+  const groups = useMemo(() => groupSkillsByRoot(shown, labels, library), [labels, library, shown]);
 
-  const duplicateDisplayNames = useMemo(() => {
-    const counts = new Map<string, number>();
-    for (const skill of shown) {
-      const key = skillDisplayName(skill).toLowerCase();
-      counts.set(key, (counts.get(key) ?? 0) + 1);
-    }
-    return new Set([...counts].filter(([, count]) => count > 1).map(([name]) => name));
-  }, [shown]);
+  const toggleGroup = useCallback(
+    (key: string) => {
+      setCollapsed((current) => {
+        const next = new Set(current);
+        if (next.has(key)) next.delete(key);
+        else next.add(key);
+        try {
+          window.localStorage.setItem(storageKey, JSON.stringify([...next].sort()));
+        } catch {
+          // Per-device folding is best-effort; the list remains fully usable without storage.
+        }
+        return next;
+      });
+    },
+    [storageKey],
+  );
+
+  const rowProps = {
+    library,
+    actorId,
+    labels,
+    lastId,
+    dragSkillId,
+    onOpen,
+    onPrimaryAction,
+    onSkillStartDrag,
+  };
 
   return (
     <>
       <header className="sh">
         <nav className="sh__crumb" aria-label="Folder">
-          {/* Ancestors only — the leaf segment is the <h2> title, so don't repeat it here. */}
-          {breadcrumb.slice(0, -1).map((seg, i) => (
-            <span className="sh__crumbseg" key={i}>
-              {i > 0 && <Icon name="chevron-right" size={12} />}
-              <span className="sh__crumbpar">{seg}</span>
+          {breadcrumb.slice(0, -1).map((segment, index) => (
+            <span className="sh__crumbseg" key={index}>
+              {index > 0 ? <Icon name="chevron-right" size={12} /> : null}
+              <span className="sh__crumbpar">{segment}</span>
             </span>
           ))}
         </nav>
@@ -330,13 +440,13 @@ export function ListView({
         </button>
       </header>
 
-      {upgradeNotice && (
+      {upgradeNotice ? (
         <div className="entitlement-bar" role="status">
           <Icon name="lock" size={14} />
           <span>{upgradeNotice}</span>
           <button className="btn-sec" onClick={onUpgrade}>View plans</button>
         </div>
-      )}
+      ) : null}
 
       <div className="listbar">
         <span className="listbar__search">
@@ -346,149 +456,103 @@ export function ListView({
             type="search"
             placeholder="Search skills"
             value={q}
-            onChange={(e) => setQ(e.target.value)}
+            onChange={(event) => setQ(event.target.value)}
             aria-label="Search skills in this view"
           />
         </span>
         <span className="listbar__spacer" />
+        <span className="listbar__group" role="group" aria-label="Group skills">
+          <button type="button" aria-pressed={groupBy === "folder"} onClick={() => onGroupByChange("folder")}>Grouped</button>
+          <button type="button" aria-pressed={groupBy === "none"} onClick={() => onGroupByChange("none")}>Flat</button>
+        </span>
         <label className="listbar__sort">
           <Icon name="chevrons-up-down" size={13} />
           <select
             className="listbar__sortsel"
             value={sort}
-            onChange={(e) => setSort(e.target.value as SortKey)}
+            onChange={(event) => setSort(event.target.value as SortKey)}
             aria-label="Sort skills"
           >
-            {SORT_OPTIONS.map((o) => (
-              <option key={o.key} value={o.key}>
-                {o.label}
-              </option>
-            ))}
+            {SORT_OPTIONS.map((option) => <option key={option.key} value={option.key}>{option.label}</option>)}
           </select>
         </label>
       </div>
 
       <div className="filterbar">
         <FilterAdd filters={filters} onToggle={onToggleFilter} />
-        {filters.map((f) => {
-          const p = chipParts(f);
+        {filters.map((filter) => {
+          const parts = chipParts(filter);
           return (
-            <span className="fchip" key={f.type + f.value}>
-              <span className="lead">
-                <Icon name={p.icon} size={12} />
-              </span>
-              {p.key && <span className="fchip__key">{p.key}:</span>}
-              <span className="fchip__val">{p.val}</span>
-              <button className="fchip__x" onClick={() => onRemoveFilter(f)} aria-label="Remove filter">
+            <span className="fchip" key={filter.type + filter.value}>
+              <span className="lead"><Icon name={parts.icon} size={12} /></span>
+              {parts.key ? <span className="fchip__key">{parts.key}:</span> : null}
+              <span className="fchip__val">{parts.val}</span>
+              <button className="fchip__x" onClick={() => onRemoveFilter(filter)} aria-label="Remove filter">
                 <Icon name="x" size={12} />
               </button>
             </span>
           );
         })}
-        {filters.length > 0 && (
-          <button className="clearfilters" onClick={onClearFilters}>
-            Clear
-          </button>
-        )}
+        {filters.length > 0 ? <button className="clearfilters" onClick={onClearFilters}>Clear</button> : null}
         <span className="filterbar__spacer" />
-        {preferenceStatus !== "idle" && (
-          <span className={"prefstatus prefstatus--" + preferenceStatus} role="status" aria-live="polite">
-            {preferenceStatus === "saving" && "Saving"}
-            {preferenceStatus === "saved" && "Saved"}
-            {preferenceStatus === "error" && (
-              <>
-                Not saved
-                <button className="prefstatus__retry" onClick={onRetryPreferences}>
-                  Retry
-                </button>
-              </>
-            )}
+        {preferenceStatus !== "idle" ? (
+          <span className={`prefstatus prefstatus--${preferenceStatus}`} role="status" aria-live="polite">
+            {preferenceStatus === "saving" ? "Saving" : null}
+            {preferenceStatus === "saved" ? "Saved" : null}
+            {preferenceStatus === "error" ? (
+              <>Not saved<button className="prefstatus__retry" onClick={onRetryPreferences}>Retry</button></>
+            ) : null}
           </span>
-        )}
+        ) : null}
       </div>
 
-      <div className="clist">
+      <div className={`clist${groupBy === "folder" ? " clist--grouped" : ""}`}>
         <div className="chead">
           <span>Skill</span>
           <span>People</span>
           <span className="r">Updated</span>
           <span className="r">Action</span>
         </div>
-        {shown.map((s) => {
-          const canDrag = !(library === "mine" && s.source === "installed");
-          const dragging = canDrag && dragSkillId === s.id;
-          const primary = resolveSkillActions(s, skillActionPermissions(s, actorId)).primary;
-          const displayName = skillDisplayName(s);
-          const duplicateTitle = duplicateDisplayNames.has(displayName.toLowerCase());
-          const accessibleName = duplicateTitle ? `${displayName} (${s.id})` : displayName;
-          return (
-            <div
-              key={s.id}
-              data-skill-slug={s.id}
-              className={"crow" + (lastId === s.id ? " is-active" : "") + (dragging ? " crow--dragging" : "")}
-              title={peopleLabel(s)}
-              onPointerDown={
-                canDrag
-                  ? (e) => {
-                      if (e.button !== 0) return;
-                      onSkillStartDrag(s.id, e);
-                    }
-                  : undefined
-              }
-            >
-              <button
-                type="button"
-                className="crow__hit"
-                aria-label={`Open skill ${accessibleName}`}
-                onClick={() => onOpen(s.id)}
+        {groupBy === "folder"
+          ? groups.map((group) => {
+              const isCollapsed = !q.trim() && collapsed.has(group.key);
+              const headingId = `skill-group-${group.key.replace(/[^a-z0-9-]/gi, "-")}`;
+              const rowsId = `${headingId}-rows`;
+              return (
+                <section className="cgroup" key={group.key} aria-labelledby={headingId}>
+                  <h3 className="cgroup__heading" id={headingId}>
+                    <button
+                      type="button"
+                      className="cgroup__toggle"
+                      aria-expanded={!isCollapsed}
+                      aria-controls={rowsId}
+                      onClick={() => toggleGroup(group.key)}
+                    >
+                      <span className="cgroup__icon" style={group.color ? { color: group.color } : undefined}>
+                        <Icon name={group.icon} size={15} />
+                      </span>
+                      <span className="cgroup__name">{group.label}</span>
+                      <span className="cgroup__count tnum">{group.rows.length}</span>
+                      <span className={`cgroup__chevron${isCollapsed ? "" : " is-open"}`}><Icon name="chevron-right" size={13} /></span>
+                    </button>
+                  </h3>
+                  <div className="cgroup__rows" id={rowsId} hidden={isCollapsed}>
+                    {group.rows.map((row) => (
+                      <SkillRow key={`${group.key}:${row.skill.id}`} row={row} flat={false} {...rowProps} />
+                    ))}
+                  </div>
+                </section>
+              );
+            })
+          : shown.map((skill) => (
+              <SkillRow
+                key={skill.id}
+                row={{ skill, relativePaths: [], icon: resolveSkillListIcon(skill, labels) }}
+                flat
+                {...rowProps}
               />
-              <span className="crow__skill">
-                <span className="crow__name crow__name--title">
-                  <span className="crow__title">{displayName}</span>
-                  {duplicateTitle ? (
-                    <span className="crow__slug" title={s.id}>{compactDuplicateSlug(s.id)}</span>
-                  ) : null}
-                  <ValidationMarker skill={s} />
-                  <InstallMark state={s.installStatus} />
-                </span>
-                <SkillLabels labels={s.labels} />
-              </span>
-              <PeopleStack skill={s} />
-              <span className="r when when--by" title={`Updated by ${s.updaterName} · ${s.updated}`}>
-                <UserAvatar
-                  className="avatar"
-                  avatarUrl={s.updaterAvatarUrl}
-                  initials={s.updaterInitials}
-                  size={14}
-                  style={{ fontSize: 7 }}
-                />
-                {s.updated}
-              </span>
-              <span className="crow__primary r">
-                {primary ? (
-                  <button
-                    type="button"
-                    className="rowact rowact--primary"
-                    aria-label={`${primary.label} ${accessibleName}`}
-                    title={primary.label}
-                    onPointerDown={(event) => event.stopPropagation()}
-                    onClick={() => onPrimaryAction(s, primary)}
-                  >
-                    <Icon name={primary.icon} size={12} />
-                    <span className="rowact__label">{primary.contextualLabel ?? primary.label}</span>
-                  </button>
-                ) : null}
-              </span>
-              <span className="crow__mobilemeta">
-                <span>{s.updated}</span>
-                <span className="crow__mobile-install">
-                  <InstallMark state={s.installStatus} />
-                </span>
-              </span>
-            </div>
-          );
-        })}
-        {!shown.length && (
+            ))}
+        {!shown.length ? (
           <div className="empty">
             <Icon name="search-x" size={22} style={{ color: "var(--color-faint)" }} />
             <div className="empty__title">{q.trim() ? "No skills match" : "Nothing here yet"}</div>
@@ -498,11 +562,11 @@ export function ListView({
                 : scopeKind === "installed"
                   ? "You have not installed any organization skills yet. Open one in Organization to install it."
                   : library === "mine"
-                      ? "No skills in My Skills yet. Add a skill, or install one from the organization library."
-                      : "No organization skills match this view. Clear the filters to see them all."}
+                    ? "No skills in My Skills yet. Add a skill, or install one from the organization library."
+                    : "No organization skills match this view. Clear the filters to see them all."}
             </div>
           </div>
-        )}
+        ) : null}
       </div>
     </>
   );

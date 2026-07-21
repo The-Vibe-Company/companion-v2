@@ -2,6 +2,7 @@ import type {
   OrgRole,
   CompanionDisplay,
   LabelVM,
+  SkillIcon,
   SkillListRow,
   SkillModifier,
   SkillRequirement,
@@ -27,6 +28,8 @@ export interface SkillVM {
   validation: ValidationState;
   description: string;
   display?: CompanionDisplay;
+  /** Portable catalog icon declared by the current companion.json version. */
+  icon: SkillIcon | null;
   notes: string | null;
   error: string | null;
   /** Which library this row belongs to: 'org' (shared) or 'personal' (private to the creator). */
@@ -89,6 +92,7 @@ export function mapSkill(row: SkillListRow): SkillVM {
     validation: row.validation,
     description: row.description,
     display: row.display ?? {},
+    icon: row.icon ?? null,
     notes: row.notes ?? null,
     error: row.validation_error,
     scope: row.scope ?? "org",

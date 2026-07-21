@@ -106,6 +106,7 @@ function parseCompanionManifest(f: RawFindings, fallback: { summary: string; req
       summary: result.data.description ?? fallback.summary,
       name: result.data.name,
       version: result.data.version,
+      icon: result.data.icon,
       companionSkillId: result.data.metadata.companionSkillId,
       display: result.data.display,
       requirements: result.data.requirements,

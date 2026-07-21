@@ -8,7 +8,7 @@ const ORG = "00000000-0000-0000-0000-000000000001";
 
 function fakeDb(options: {
   member?: boolean;
-  existing?: { activeFilters: unknown[] } | null;
+  existing?: { activeFilters: unknown[]; groupBy?: unknown } | null;
 } = {}) {
   const state: {
     inserted?: Record<string, unknown>;
@@ -36,7 +36,7 @@ function fakeDb(options: {
 }
 
 describe("skill filter preferences (status / deps / label / nolabel)", () => {
-  it("validates the shared preference contract (active_filters only — no saved views)", () => {
+  it("validates filters and the persisted list grouping mode", () => {
     const parsed = skillFilterPreferencesSchema.parse({
       active_filters: [
         { type: "status", value: "valid" },
@@ -46,9 +46,12 @@ describe("skill filter preferences (status / deps / label / nolabel)", () => {
       ],
     });
     expect(parsed.active_filters).toContainEqual({ type: "label", value: "marketing/seo" });
+    expect(parsed.group_by).toBe("folder");
     // The saved-view axis is gone entirely.
     expect("custom_views" in parsed).toBe(false);
-    expect(skillFilterPreferencesSchema.parse({})).toEqual({ active_filters: [] });
+    expect(skillFilterPreferencesSchema.parse({})).toEqual({ active_filters: [], group_by: "folder" });
+    expect(skillFilterPreferencesSchema.parse({ group_by: "none" }).group_by).toBe("none");
+    expect(() => skillFilterPreferencesSchema.parse({ group_by: "team" })).toThrow();
 
     // Removed owner-era filter types no longer parse.
     expect(() => skillFilterPreferencesSchema.parse({ active_filters: [{ type: "visibility", value: "team" }] })).toThrow();
@@ -63,6 +66,7 @@ describe("skill filter preferences (status / deps / label / nolabel)", () => {
     const { database } = fakeDb();
     await expect(getSkillFilterPreferences({ actor, orgId: ORG, database })).resolves.toEqual({
       active_filters: [],
+      group_by: "folder",
     });
   });
 
@@ -72,6 +76,7 @@ describe("skill filter preferences (status / deps / label / nolabel)", () => {
     });
     await expect(getSkillFilterPreferences({ actor, orgId: ORG, database })).resolves.toEqual({
       active_filters: [{ type: "label", value: "marketing" }],
+      group_by: "folder",
     });
   });
 
@@ -94,6 +99,7 @@ describe("skill filter preferences (status / deps / label / nolabel)", () => {
         { type: "status", value: "valid" },
         { type: "deps", value: "has" },
       ],
+      group_by: "folder",
     });
   });
 
@@ -103,12 +109,13 @@ describe("skill filter preferences (status / deps / label / nolabel)", () => {
       actor,
       orgId: ORG,
       database,
-      preferences: { active_filters: [{ type: "label", value: "growth" }] },
+      preferences: { active_filters: [{ type: "label", value: "growth" }], group_by: "none" },
     });
     expect(state.inserted).toMatchObject({
       orgId: ORG,
       userId: actor.id,
       activeFilters: [{ type: "label", value: "growth" }],
+      groupBy: "none",
     });
     expect(state.inserted && "customViews" in state.inserted).toBe(false);
     expect(onConflictDoUpdate).toHaveBeenCalledOnce();
@@ -120,7 +127,7 @@ describe("skill filter preferences (status / deps / label / nolabel)", () => {
       getSkillFilterPreferences({ actor, orgId: ORG, database }),
     ).rejects.toThrow("not a member of this organization");
     await expect(
-      setSkillFilterPreferences({ actor, orgId: ORG, database, preferences: { active_filters: [] } }),
+      setSkillFilterPreferences({ actor, orgId: ORG, database, preferences: { active_filters: [], group_by: "folder" } }),
     ).rejects.toThrow("not a member of this organization");
   });
 });

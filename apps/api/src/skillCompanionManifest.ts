@@ -5,6 +5,7 @@ import {
   fallbackCompanionManifest,
   type CompanionDisplay,
   type CompanionManifest,
+  type SkillIcon,
   type SkillRequirement,
 } from "@companion/contracts";
 
@@ -33,6 +34,7 @@ export function buildInlineCompanionManifest(input: {
   description: string;
   carriedDisplay?: CompanionDisplay | null;
   carriedNotes?: string | null;
+  carriedIcon?: SkillIcon | null;
   carriedRequirements: SkillRequirement[];
   carriedDependencies: string[] | Record<string, string>;
   name?: string;
@@ -54,6 +56,7 @@ export function buildInlineCompanionManifest(input: {
     dependencies: input.carriedDependencies,
     name: input.name,
     version: input.version,
+    icon: input.carriedIcon ?? undefined,
     companionSkillId: input.companionSkillId,
     changelog: input.version
       ? [{ version: input.version, date: new Date().toISOString().slice(0, 10), changes: [`Publish version ${input.version}.`] }]

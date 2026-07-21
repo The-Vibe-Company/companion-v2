@@ -429,7 +429,8 @@ agent-browser open "$APP_URL/skills?lib=org"
 wait_for_skills
 agent-browser eval "for (const b of Array.from(document.querySelectorAll('button'))) { if (b.textContent && b.textContent.trim() === 'Clear') b.click(); }" >/dev/null
 agent-browser wait 300
-assert_body_contains "$SMOKE_SKILL_TITLE"
+# List identity is intentionally the stable slug; the human title remains detail-only.
+assert_body_contains "$SMOKE_SKILL"
 assert_body_contains "Add skill"
 # Shared label folder tree (replaces the old owner/visibility sidebar): the smoke skill is filed under "engineering".
 assert_body_contains "engineering"
@@ -547,7 +548,7 @@ agent-browser set device "iPhone 14"
 agent-browser open "$APP_URL/skills?lib=org"
 wait_for_skills
 assert_body_contains "Add skill"
-assert_body_contains "$SMOKE_SKILL_TITLE"
+assert_body_contains "$SMOKE_SKILL"
 
 log "Checking mobile run launcher"
 agent-browser set viewport 390 420

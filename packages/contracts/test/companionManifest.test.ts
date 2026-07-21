@@ -6,7 +6,9 @@ import {
   companionManifestJson,
   companionManifestSchema,
   fallbackCompanionManifest,
+  SKILL_ICONS,
 } from "../src/companionManifest";
+import { companionManifestV2JsonSchema } from "../src/companionManifestJsonSchema";
 
 describe("companionManifestSchema", () => {
   it("parses manifest v2 fields", () => {
@@ -14,6 +16,7 @@ describe("companionManifestSchema", () => {
       $schema: COMPANION_MANIFEST_SCHEMA_URL,
       name: "incident-summary",
       version: "1.2.0",
+      icon: "bot",
       title: "Incident summary",
       description: "Generate clean incident handoffs from raw notes.",
       notes: "## Notes\n\nMarkdown notes.",
@@ -38,6 +41,7 @@ describe("companionManifestSchema", () => {
 
     expect(parsed.name).toBe("incident-summary");
     expect(parsed.version).toBe("1.2.0");
+    expect(parsed.icon).toBe("bot");
     expect(parsed.metadata.companionSkillId).toBe("84d8bee1-5ad3-4676-8c16-730e2a15ba70");
     expect(companionDependencySlugs(parsed)).toEqual(["markdown-report"]);
     expect(companionEnvironmentToRequirements(parsed.environment).map((r) => r.key)).toEqual([
@@ -50,6 +54,7 @@ describe("companionManifestSchema", () => {
     expect(parsed.notes).toBe("## Notes\n\nMarkdown notes.");
     expect(parsed.display.summary).toBe("Generate clean incident handoffs from raw notes.");
     expect(companionManifestJson(parsed)).toMatchObject({
+      icon: "bot",
       checks: { updates: { runtime: "python", script: "scripts/check_updates.py", timeoutSeconds: 30 } },
     });
     expect(parsed.display.description).toBeUndefined();
@@ -91,6 +96,12 @@ describe("companionManifestSchema", () => {
         ),
       }),
     ).toThrow(/64 dependencies/);
+  });
+
+  it("accepts only the curated skill icon catalog", () => {
+    expect(companionManifestSchema.parse({ icon: "sparkles" }).icon).toBe("sparkles");
+    expect(() => companionManifestSchema.parse({ icon: "trash-2" })).toThrow();
+    expect((companionManifestV2JsonSchema.properties.icon as { enum: string[] }).enum).toEqual(SKILL_ICONS);
   });
 
   it("rejects unsafe local update check declarations", () => {
@@ -142,10 +153,12 @@ describe("companionManifestSchema", () => {
   it("builds a fallback manifest from SKILL.md data", () => {
     const manifest = fallbackCompanionManifest({
       summary: "Fallback summary.",
+      icon: "terminal",
       requirements: [{ key: "SOME_TOKEN", type: "secret", required: true, note: "" }],
     });
 
     expect(manifest.description).toBe("Fallback summary.");
+    expect(manifest.icon).toBe("terminal");
     expect(manifest.requirements.map((r) => r.key)).toEqual(["SOME_TOKEN"]);
     expect(manifest.dependencies).toEqual({});
   });

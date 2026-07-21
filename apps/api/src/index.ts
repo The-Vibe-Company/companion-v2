@@ -2359,18 +2359,19 @@ app.post("/v1/skills/create", bodyLimit({ maxSize: 2 * 1024 * 1024, onError: (c)
     // forward the current version's declared dependencies and requirements (declared secrets/env
     // setup notes) so an inline edit never silently drops them — this path rebuilds the frontmatter
     // from id/description/body alone (there is no companion.json or frontmatter editor here).
-    const { carriedDependencies, carriedRequirements, carriedDisplay, carriedNotes, exists } = await withTenant(
+    const { carriedDependencies, carriedRequirements, carriedDisplay, carriedNotes, carriedIcon, exists } = await withTenant(
       c,
       async ({ actor: a, orgId: o, database }) => {
         const existing = await getSkillBySlug({ actor: a, orgId: o, slug: input.id, database });
         if (!existing?.current_version)
-          return { carriedDependencies: [], carriedRequirements: [], carriedDisplay: null, carriedNotes: null, exists: !!existing };
+          return { carriedDependencies: [], carriedRequirements: [], carriedDisplay: null, carriedNotes: null, carriedIcon: null, exists: !!existing };
         const deps = await getSkillDependencies({ actor: a, orgId: o, slug: input.id, database });
         return {
           carriedDependencies: deps.requires.map((r) => r.slug),
           carriedRequirements: existing.requirements,
           carriedDisplay: existing.display,
           carriedNotes: existing.notes,
+          carriedIcon: existing.icon,
           exists: true,
         };
       },
@@ -2384,6 +2385,7 @@ app.post("/v1/skills/create", bodyLimit({ maxSize: 2 * 1024 * 1024, onError: (c)
       description: input.description,
       carriedDisplay,
       carriedNotes,
+      carriedIcon,
       carriedRequirements,
       carriedDependencies: preparedCarriedDependencies.manifestDependencies,
       name: input.id,

@@ -85,6 +85,7 @@ function skill(overrides: Partial<SkillVM> & { id: string }): SkillVM {
     version: "1.0.0",
     validation: "valid",
     description: "Test skill",
+    icon: null,
     notes: null,
     error: null,
     scope: "org",
@@ -227,7 +228,7 @@ function appProps(
     initialLocalSkills: localSkills,
     // Default to no saved chips so the route selection alone drives the list; individual tests pass
     // their own `initialFilterPreferences` to exercise the saved-filter behavior.
-    initialFilterPreferences: { active_filters: [] },
+    initialFilterPreferences: { active_filters: [], group_by: "folder" },
     initialPersonalLabels: emptyLabels(),
     initialLabels: seededLabels,
     initialBilling: {
@@ -505,6 +506,35 @@ describe("SkillsApp initial route", () => {
     expect(html).toContain("seo-helper");
     expect(html).toContain("brand-kit");
     expect(html).toContain("loose-skill");
+    expect(html).toContain('aria-pressed="true">Grouped</button>');
+    expect(html).toContain("Without folder");
+  });
+
+  it("persists a grouping change with the complete current filter snapshot", async () => {
+    vi.useFakeTimers();
+    const { container } = await mountSkillsApp(
+      { lib: "org", kind: "all" },
+      {
+        props: {
+          initialFilterPreferences: {
+            active_filters: [{ type: "status", value: "valid" }],
+            group_by: "folder",
+          },
+        },
+      },
+    );
+    await flushEffects();
+    queryMocks.saveSkillFilterPreferences.mockClear();
+
+    clickButton(container, "Flat");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(350);
+    });
+
+    expect(queryMocks.saveSkillFilterPreferences).toHaveBeenCalledWith({
+      active_filters: [{ type: "status", value: "valid" }],
+      group_by: "none",
+    });
   });
 
   it("renders the Installed view (My Skills) from the initial route", () => {

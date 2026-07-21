@@ -11,6 +11,7 @@ const archivedSkill: SkillVM = {
   version: "1.0.0",
   validation: "valid",
   description: "Archived demo.",
+  icon: null,
   notes: null,
   error: null,
   scope: "org",

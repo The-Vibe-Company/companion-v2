@@ -8,6 +8,16 @@
   "properties": {
     "$schema": { "const": "https://thecompanion.sh/schemas/companion-manifest.v2.schema.json" },
     "name": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$" },
+    "icon": {
+      "type": "string",
+      "enum": [
+        "activity", "bookmark", "bot", "box", "boxes", "braces", "building-2", "calendar",
+        "clock", "code", "cpu", "file", "file-code", "file-text", "flame", "globe", "hash",
+        "heart", "image", "key", "layers", "mail", "megaphone", "message-square", "monitor",
+        "package", "palette", "pen-tool", "plug-zap", "rocket", "shield", "sparkles",
+        "square-stack", "star", "tag", "terminal", "users", "zap"
+      ]
+    },
     "version": {
       "type": "string",
       "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-((?:0|[1-9]\\d*|\\d*[A-Za-z-][0-9A-Za-z-]*)(?:\\.(?:0|[1-9]\\d*|\\d*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\\+([0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*))?$"

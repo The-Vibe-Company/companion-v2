@@ -188,6 +188,7 @@ function parseStoredCompanionManifest(frontmatter: string, fallbackSummary: stri
         },
         name: parsed.data.name,
         version: parsed.data.version,
+        icon: parsed.data.icon,
         companionSkillId: parsed.data.metadata.companionSkillId,
         changelog: parsed.data.metadata.changelog,
         environment: parsed.data.environment,
@@ -1041,6 +1042,7 @@ export async function listSkills(input: {
       slug: r.slug,
       description: summary,
       display,
+      icon: companion.icon ?? null,
       notes: companion.notes ?? null,
       scope: r.scope ?? "org",
       // `source` is only meaningful in the My-Skills (`mine`) view: 'authored' = a personal skill the
@@ -1232,6 +1234,7 @@ export async function getSkillShareTargetByShareToken(input: {
 
 const EMPTY_SKILL_FILTER_PREFERENCES: SkillFilterPreferences = {
   active_filters: [],
+  group_by: "folder",
 };
 
 /**
@@ -1253,9 +1256,9 @@ function normalizePersistedSkillFilter(value: unknown): unknown | null {
   return value;
 }
 
-function normalizePersistedSkillPreferences(input: { activeFilters: unknown[] }) {
+function normalizePersistedSkillPreferences(input: { activeFilters: unknown[]; groupBy?: unknown }) {
   const norm = (arr: unknown[]) => arr.map(normalizePersistedSkillFilter).filter((f) => f != null);
-  return { active_filters: norm(input.activeFilters) };
+  return { active_filters: norm(input.activeFilters), group_by: input.groupBy ?? "folder" };
 }
 
 export async function getSkillFilterPreferences(input: {
@@ -1290,11 +1293,13 @@ export async function setSkillFilterPreferences(input: {
       orgId: input.orgId,
       userId: input.actor.id,
       activeFilters: preferences.active_filters,
+      groupBy: preferences.group_by,
     })
     .onConflictDoUpdate({
       target: [schema.skillFilterPreferences.orgId, schema.skillFilterPreferences.userId],
       set: {
         activeFilters: preferences.active_filters,
+        groupBy: preferences.group_by,
         updatedAt: new Date(),
       },
     });
