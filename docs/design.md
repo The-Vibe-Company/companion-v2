@@ -497,15 +497,31 @@ stops slow preparation without waiting for it; if a worker already owns the fina
 deletion waits only for the bounded ref update plus completion. Reconnecting leaves destinations paused until an
 admin explicitly resumes each mirror.
 
+Settings → GitHub has repository-centric and skill-centric views for Owners and Admins. The skill view lists only
+active organization skills and computes desired inclusion per destination as `all` (automatic root), `selected`
+(explicit root), `dependency` (transitively required by another selected root), or `none`. Inclusion is intentionally
+separate from the destination's operational status: until a pending/syncing/error destination reaches `synced`, its
+GitHub branch may still contain the last applied revision. Broken or archived dependency edges never make this
+governance view unreadable; the strict worker plan still rejects them before GitHub I/O and exposes the destination
+error. All-mode, dependency-only, and disconnected rows are read-only in the skill view.
+
+Skill-centric selection changes use additive, idempotent endpoints rather than replacing a potentially stale full
+selection array. They take the same org lifecycle lock as destination editing, lock the destination, require a live
+connection plus `selected` mode, and update the join plus desired revision atomically. Removing the final explicit
+root is rejected, as are personal/archived/cross-tenant skills. Effective changes clear stale retry/error state,
+preserve an in-flight `syncing` status (otherwise set `pending`), and write a per-skill audit event.
+
 Browser-only endpoints are:
 
 - `GET /v1/integrations/github`, `POST /v1/integrations/github/connect`, and
   `GET /v1/integrations/github/callback`;
+- `GET /v1/integrations/github/skills`;
 - `DELETE /v1/integrations/github/account`;
 - `GET|POST /v1/integrations/github/repositories`;
 - `POST /v1/integrations/github/destinations`,
   `PATCH|DELETE /v1/integrations/github/destinations/:id`, and
-  `POST /v1/integrations/github/destinations/:id/sync`.
+  `POST /v1/integrations/github/destinations/:id/sync`;
+- `PUT|DELETE /v1/integrations/github/destinations/:id/skills/:skillId`.
 
 ## Billing And Entitlements
 

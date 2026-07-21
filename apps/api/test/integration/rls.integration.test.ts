@@ -1,19 +1,23 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { sql as drizzleSql } from "drizzle-orm";
-import { schema, sql as applicationSql, withTenantContext } from "@companion/db";
+import { schema, sql as applicationSql, withTenantContext, type Db } from "@companion/db";
 import {
   completeGitHubSync,
   createGitHubDestination,
   deleteGitHubConnection,
   failGitHubSync,
   getGitHubSyncPlan,
+  getGitHubSkillSyncOverview,
   getGitHubUserCredential,
+  GitHubSkillSyncConflictError,
+  GitHubSkillSyncNotFoundError,
   isGitHubSyncFenceLive,
   lockGitHubSyncPublishFence,
   refreshGitHubConnectionCredential,
   requestGitHubDestinationSync,
   saveGitHubConnection,
+  setGitHubDestinationSkillSelection,
   updateGitHubDestination,
 } from "@companion/core/services";
 import {
@@ -47,6 +51,8 @@ describe("Postgres tenant isolation", () => {
   let skillA: SeededSkill;
   let skillB: SeededSkill;
   let mirrorSkillA: SeededSkill;
+  let mirrorSkillA2: SeededSkill;
+  let mirrorSkillA3: SeededSkill;
   const githubDestinationA = randomUUID();
   const githubDestinationB = randomUUID();
   const githubTokenSentinel = "github-user-token-MUST-NOT-PERSIST";
@@ -72,6 +78,18 @@ describe("Postgres tenant isolation", () => {
       orgId: fixture.orgA,
       creator: fixture.owner,
       slug: `mirror-a-${fixture.suffix}`,
+      scope: "org",
+    });
+    mirrorSkillA2 = await seedSkill({
+      orgId: fixture.orgA,
+      creator: fixture.owner,
+      slug: `mirror-a-second-${fixture.suffix}`,
+      scope: "org",
+    });
+    mirrorSkillA3 = await seedSkill({
+      orgId: fixture.orgA,
+      creator: fixture.owner,
+      slug: `mirror-a-third-${fixture.suffix}`,
       scope: "org",
     });
     await seedPersonalLabel({ orgId: fixture.orgA, owner: fixture.owner, skillId: skillA.id, path: "private/rls" });
@@ -227,6 +245,282 @@ describe("Postgres tenant isolation", () => {
       values
         (${fixture.orgB}::uuid, 'other-installation', 'repository-a', 'acme-b', 'duplicate', 'https://github.com/acme-b/duplicate', 'main', ${fixture.outsider.id})
     `).rejects.toThrow(/github_sync_destinations_repository_uq/);
+  });
+
+  it("keeps the skill matrix tenant-scoped and mutates selected roots atomically", async () => {
+    const ownerOverview = await withTenantContext({ orgId: fixture.orgA, userId: fixture.owner.id }, (database) =>
+      getGitHubSkillSyncOverview({ actor: fixture.owner, orgId: fixture.orgA, database }),
+    );
+    expect(ownerOverview.skills.map((skill) => skill.skill_id)).toEqual(expect.arrayContaining([
+      mirrorSkillA.id,
+      mirrorSkillA2.id,
+      mirrorSkillA3.id,
+    ]));
+    expect(ownerOverview.skills.map((skill) => skill.skill_id)).not.toContain(skillA.id);
+    expect(ownerOverview.skills.map((skill) => skill.skill_id)).not.toContain(skillB.id);
+    expect(ownerOverview.skills.find((skill) => skill.skill_id === mirrorSkillA.id)?.destinations).toEqual([
+      { destination_id: githubDestinationA, inclusion: "selected" },
+    ]);
+
+    const allDestination = randomUUID();
+    const [originalVersion] = await integrationSql<Array<{ frontmatter: string }>>`
+      select frontmatter from skill_versions where id = ${mirrorSkillA.versionId}::uuid
+    `;
+    try {
+      await integrationSql`
+        update skill_versions
+        set frontmatter = ${JSON.stringify({ companion: { title: "Canonical mirror skill" } })}
+        where id = ${mirrorSkillA.versionId}::uuid
+      `;
+      await integrationSql`
+        insert into skill_version_dependencies
+          (org_id, skill_version_id, skill_id, depends_on_slug, depends_on_skill_id)
+        values
+          (${fixture.orgA}::uuid, ${mirrorSkillA.versionId}::uuid, ${mirrorSkillA.id}::uuid,
+           ${mirrorSkillA2.slug}, ${mirrorSkillA2.id}::uuid),
+          (${fixture.orgA}::uuid, ${mirrorSkillA2.versionId}::uuid, ${mirrorSkillA2.id}::uuid,
+           ${mirrorSkillA3.slug}, ${mirrorSkillA3.id}::uuid)
+      `;
+      await integrationSql`
+        insert into github_sync_destinations
+          (id, org_id, installation_id, repository_id, owner, name, html_url, default_branch, mode, created_by)
+        values
+          (${allDestination}::uuid, ${fixture.orgA}::uuid, 'installation-all', ${`repository-all-${allDestination}`},
+           'acme-a', 'all-skills', 'https://github.com/acme-a/all-skills', 'main', 'all', ${fixture.owner.id})
+      `;
+      const matrix = await withTenantContext({ orgId: fixture.orgA, userId: fixture.owner.id }, (database) =>
+        getGitHubSkillSyncOverview({ actor: fixture.owner, orgId: fixture.orgA, database }),
+      );
+      expect(matrix.skills.find((skill) => skill.skill_id === mirrorSkillA.id)).toMatchObject({
+        display_name: "Canonical mirror skill",
+        destinations: expect.arrayContaining([
+          { destination_id: githubDestinationA, inclusion: "selected" },
+          { destination_id: allDestination, inclusion: "all" },
+        ]),
+      });
+      for (const dependency of [mirrorSkillA2, mirrorSkillA3]) {
+        expect(matrix.skills.find((skill) => skill.skill_id === dependency.id)?.destinations).toEqual(expect.arrayContaining([
+          { destination_id: githubDestinationA, inclusion: "dependency" },
+          { destination_id: allDestination, inclusion: "all" },
+        ]));
+      }
+    } finally {
+      await integrationSql`delete from github_sync_destinations where id = ${allDestination}::uuid`;
+      await integrationSql`
+        delete from skill_version_dependencies
+        where skill_version_id in (${mirrorSkillA.versionId}::uuid, ${mirrorSkillA2.versionId}::uuid)
+      `;
+      await integrationSql`
+        update skill_versions set frontmatter = ${originalVersion!.frontmatter}
+        where id = ${mirrorSkillA.versionId}::uuid
+      `;
+    }
+
+    await expect(withTenantContext({ orgId: fixture.orgA, userId: fixture.outsider.id }, (database) =>
+      getGitHubSkillSyncOverview({ actor: fixture.outsider, orgId: fixture.orgA, database }),
+    )).rejects.toThrow("not allowed to manage GitHub synchronization");
+
+    for (const permission of [
+      { actor: fixture.owner, allowed: true },
+      { actor: fixture.admin, allowed: true },
+      { actor: fixture.developer, allowed: false },
+      { actor: fixture.outsider, allowed: false },
+    ]) {
+      const mutation = withTenantContext({ orgId: fixture.orgA, userId: permission.actor.id }, (database) =>
+        setGitHubDestinationSkillSelection({
+          actor: permission.actor,
+          orgId: fixture.orgA,
+          destinationId: githubDestinationA,
+          skillId: mirrorSkillA.id,
+          selected: true,
+          database,
+        }),
+      );
+      if (permission.allowed) await expect(mutation).resolves.toBe(false);
+      else await expect(mutation).rejects.toThrow("not allowed to manage GitHub synchronization");
+    }
+
+    await withTenantContext({ orgId: fixture.orgA, userId: fixture.owner.id }, async (database) => {
+      for (const invalid of [
+        { destinationId: githubDestinationB, skillId: mirrorSkillA2.id },
+        { destinationId: githubDestinationA, skillId: skillB.id },
+        { destinationId: githubDestinationA, skillId: skillA.id },
+      ]) {
+        await expect(setGitHubDestinationSkillSelection({
+          actor: fixture.owner, orgId: fixture.orgA, ...invalid, selected: true, database,
+        })).rejects.toBeInstanceOf(GitHubSkillSyncNotFoundError);
+      }
+
+      await database.update(schema.skills).set({ archivedAt: new Date() })
+        .where(drizzleSql`${schema.skills.id} = ${mirrorSkillA2.id}::uuid`);
+      await expect(setGitHubDestinationSkillSelection({
+        actor: fixture.owner, orgId: fixture.orgA, destinationId: githubDestinationA,
+        skillId: mirrorSkillA2.id, selected: true, database,
+      })).rejects.toBeInstanceOf(GitHubSkillSyncNotFoundError);
+      await database.update(schema.skills).set({ archivedAt: null })
+        .where(drizzleSql`${schema.skills.id} = ${mirrorSkillA2.id}::uuid`);
+
+      await database.update(schema.githubSyncDestinations).set({ mode: "all" })
+        .where(drizzleSql`${schema.githubSyncDestinations.id} = ${githubDestinationA}::uuid`);
+      await expect(setGitHubDestinationSkillSelection({
+        actor: fixture.owner, orgId: fixture.orgA, destinationId: githubDestinationA,
+        skillId: mirrorSkillA2.id, selected: true, database,
+      })).rejects.toBeInstanceOf(GitHubSkillSyncConflictError);
+      await database.update(schema.githubSyncDestinations).set({ mode: "selected", status: "disconnected" })
+        .where(drizzleSql`${schema.githubSyncDestinations.id} = ${githubDestinationA}::uuid`);
+      await expect(setGitHubDestinationSkillSelection({
+        actor: fixture.owner, orgId: fixture.orgA, destinationId: githubDestinationA,
+        skillId: mirrorSkillA2.id, selected: true, database,
+      })).rejects.toBeInstanceOf(GitHubSkillSyncConflictError);
+    });
+
+    const beforeSyncing = await withTenantContext({ orgId: fixture.orgA, userId: fixture.owner.id }, async (database) => {
+      await database.update(schema.githubSyncDestinations).set({
+        status: "syncing",
+        lastError: "stale failure",
+        nextRetryAt: new Date(Date.now() + 60_000),
+      }).where(drizzleSql`${schema.githubSyncDestinations.id} = ${githubDestinationA}::uuid`);
+      return database.query.githubSyncDestinations.findFirst({
+        where: drizzleSql`${schema.githubSyncDestinations.id} = ${githubDestinationA}::uuid`,
+      });
+    });
+    await withTenantContext({ orgId: fixture.orgA, userId: fixture.owner.id }, async (database) => {
+      await expect(setGitHubDestinationSkillSelection({
+        actor: fixture.owner, orgId: fixture.orgA, destinationId: githubDestinationA,
+        skillId: mirrorSkillA2.id, selected: true, database,
+      })).resolves.toBe(true);
+      await expect(database.query.githubSyncDestinations.findFirst({
+        where: drizzleSql`${schema.githubSyncDestinations.id} = ${githubDestinationA}::uuid`,
+      })).resolves.toMatchObject({
+        desiredRevision: (beforeSyncing?.desiredRevision ?? 0) + 1,
+        status: "syncing",
+        lastError: null,
+        nextRetryAt: null,
+      });
+      await database.update(schema.githubSyncDestinations).set({
+        status: "error",
+        lastError: "another stale failure",
+        nextRetryAt: new Date(Date.now() + 60_000),
+      }).where(drizzleSql`${schema.githubSyncDestinations.id} = ${githubDestinationA}::uuid`);
+      await expect(setGitHubDestinationSkillSelection({
+        actor: fixture.owner, orgId: fixture.orgA, destinationId: githubDestinationA,
+        skillId: mirrorSkillA2.id, selected: true, database,
+      })).resolves.toBe(false);
+      await expect(setGitHubDestinationSkillSelection({
+        actor: fixture.owner, orgId: fixture.orgA, destinationId: githubDestinationA,
+        skillId: mirrorSkillA.id, selected: false, database,
+      })).resolves.toBe(true);
+      await expect(setGitHubDestinationSkillSelection({
+        actor: fixture.owner, orgId: fixture.orgA, destinationId: githubDestinationA,
+        skillId: mirrorSkillA2.id, selected: false, database,
+      })).rejects.toBeInstanceOf(GitHubSkillSyncConflictError);
+      await setGitHubDestinationSkillSelection({
+        actor: fixture.owner, orgId: fixture.orgA, destinationId: githubDestinationA,
+        skillId: mirrorSkillA.id, selected: true, database,
+      });
+      await setGitHubDestinationSkillSelection({
+        actor: fixture.owner, orgId: fixture.orgA, destinationId: githubDestinationA,
+        skillId: mirrorSkillA2.id, selected: false, database,
+      });
+    });
+    const after = await withTenantContext({ orgId: fixture.orgA, userId: fixture.owner.id }, async (database) => ({
+      destination: await database.query.githubSyncDestinations.findFirst({
+        where: drizzleSql`${schema.githubSyncDestinations.id} = ${githubDestinationA}::uuid`,
+      }),
+      selections: await database.select({ skillId: schema.githubSyncDestinationSkills.skillId })
+        .from(schema.githubSyncDestinationSkills)
+        .where(drizzleSql`${schema.githubSyncDestinationSkills.orgId} = ${fixture.orgA}::uuid and ${schema.githubSyncDestinationSkills.destinationId} = ${githubDestinationA}::uuid`),
+      audits: await database.select({ action: schema.auditLog.action }).from(schema.auditLog).where(
+        drizzleSql`${schema.auditLog.orgId} = ${fixture.orgA}::uuid and ${schema.auditLog.targetId} = ${githubDestinationA} and ${schema.auditLog.action} in ('github.destination.skill_added', 'github.destination.skill_removed')`,
+      ),
+    }));
+    expect(after.destination).toMatchObject({
+      desiredRevision: (beforeSyncing?.desiredRevision ?? 0) + 4,
+      status: "pending",
+      lastError: null,
+      nextRetryAt: null,
+    });
+    expect(after.selections).toEqual([{ skillId: mirrorSkillA.id }]);
+    expect(after.audits).toHaveLength(4);
+  });
+
+  it("serializes concurrent selected-root mutations without losing either update", async () => {
+    const before = await withTenantContext({ orgId: fixture.orgA, userId: fixture.owner.id }, (database) =>
+      database.query.githubSyncDestinations.findFirst({
+        where: drizzleSql`${schema.githubSyncDestinations.id} = ${githubDestinationA}::uuid`,
+      }),
+    );
+    const mutateOnIndependentSession = (actor: typeof fixture.owner, skillId: string) =>
+      integrationDb.transaction(async (tx) => {
+        await tx.execute(drizzleSql`select set_config('app.org_id', ${fixture.orgA}, true), set_config('app.user_id', ${actor.id}, true)`);
+        return setGitHubDestinationSkillSelection({
+          actor, orgId: fixture.orgA, destinationId: githubDestinationA,
+          skillId, selected: true, database: tx as unknown as Db,
+        });
+      });
+    let releaseLifecycleLock!: () => void;
+    let lifecycleLockHeld!: () => void;
+    const lifecycleLockWasHeld = new Promise<void>((resolve) => { lifecycleLockHeld = resolve; });
+    const lifecycleLockBarrier = new Promise<void>((resolve) => { releaseLifecycleLock = resolve; });
+    const blocker = integrationDb.transaction(async (tx) => {
+      await tx.execute(drizzleSql`select pg_advisory_xact_lock(hashtext(${`companion:github:${fixture.orgA}`}))`);
+      lifecycleLockHeld();
+      await lifecycleLockBarrier;
+    });
+    let mutations: Promise<[boolean, boolean]> | undefined;
+    try {
+      await lifecycleLockWasHeld;
+      mutations = Promise.all([
+        mutateOnIndependentSession(fixture.owner, mirrorSkillA2.id),
+        mutateOnIndependentSession(fixture.admin, mirrorSkillA3.id),
+      ]);
+      let waitingOnLifecycleLock = 0;
+      for (let attempt = 0; attempt < 200; attempt += 1) {
+        const [locks] = await integrationSql<Array<{ waiting: number }>>`
+          select count(*)::int as waiting
+          from pg_locks
+          where locktype = 'advisory'
+            and database = (select oid from pg_database where datname = current_database())
+            and not granted
+        `;
+        waitingOnLifecycleLock = locks?.waiting ?? 0;
+        if (waitingOnLifecycleLock >= 2) break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(waitingOnLifecycleLock).toBeGreaterThanOrEqual(2);
+      releaseLifecycleLock();
+      await expect(mutations).resolves.toEqual([true, true]);
+    } finally {
+      releaseLifecycleLock();
+      await blocker;
+      await mutations?.catch(() => undefined);
+    }
+
+    const after = await withTenantContext({ orgId: fixture.orgA, userId: fixture.owner.id }, async (database) => ({
+      destination: await database.query.githubSyncDestinations.findFirst({
+        where: drizzleSql`${schema.githubSyncDestinations.id} = ${githubDestinationA}::uuid`,
+      }),
+      selections: await database.select({ skillId: schema.githubSyncDestinationSkills.skillId })
+        .from(schema.githubSyncDestinationSkills)
+        .where(drizzleSql`${schema.githubSyncDestinationSkills.destinationId} = ${githubDestinationA}::uuid`),
+    }));
+    expect(after.destination?.desiredRevision).toBe((before?.desiredRevision ?? 0) + 2);
+    expect(after.selections.map((selection) => selection.skillId)).toEqual(expect.arrayContaining([
+      mirrorSkillA.id,
+      mirrorSkillA2.id,
+      mirrorSkillA3.id,
+    ]));
+
+    await withTenantContext({ orgId: fixture.orgA, userId: fixture.owner.id }, async (database) => {
+      await setGitHubDestinationSkillSelection({
+        actor: fixture.owner, orgId: fixture.orgA, destinationId: githubDestinationA,
+        skillId: mirrorSkillA2.id, selected: false, database,
+      });
+      await setGitHubDestinationSkillSelection({
+        actor: fixture.owner, orgId: fixture.orgA, destinationId: githubDestinationA,
+        skillId: mirrorSkillA3.id, selected: false, database,
+      });
+    });
   });
 
   it("serializes destination creation with disconnect and never claims an orphan destination", async () => {

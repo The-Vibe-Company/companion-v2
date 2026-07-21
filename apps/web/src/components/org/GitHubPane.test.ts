@@ -6,10 +6,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   GitHubConnection,
   GitHubIntegrationResponse,
+  GitHubSkillSyncResponse,
   GitHubSyncDestination,
   SkillListRow,
 } from "@companion/contracts";
 import { GitHubPane } from "./GitHubPane";
+import { ApiFetchError } from "@/lib/apiClient";
 import type { OrgCtx } from "./model";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -21,8 +23,11 @@ const githubMocks = vi.hoisted(() => ({
   deleteGitHubDestination: vi.fn(),
   disconnectGitHubAccount: vi.fn(),
   fetchGitHubIntegration: vi.fn(),
+  fetchGitHubSkillSync: vi.fn(),
   fetchGitHubRepositories: vi.fn(),
+  selectGitHubDestinationSkill: vi.fn(),
   syncGitHubDestination: vi.fn(),
+  unselectGitHubDestinationSkill: vi.fn(),
   updateGitHubDestination: vi.fn(),
 }));
 const queryMocks = vi.hoisted(() => ({ fetchSkillLibrary: vi.fn() }));
@@ -34,6 +39,8 @@ const roots: Root[] = [];
 const destinationId = "11111111-1111-4111-8111-111111111111";
 const activeSkillId = "22222222-2222-4222-8222-222222222222";
 const archivedSkillId = "33333333-3333-4333-8333-333333333333";
+const secondDestinationId = "44444444-4444-4444-8444-444444444444";
+const thirdDestinationId = "55555555-5555-4555-8555-555555555555";
 
 const connected: GitHubConnection = {
   configured: true,
@@ -81,6 +88,18 @@ function skill(id: string, slug: string, archived: boolean): SkillListRow {
   } as SkillListRow;
 }
 
+function skillSyncOverview(destinations: GitHubSkillSyncResponse["skills"][number]["destinations"]): GitHubSkillSyncResponse {
+  return {
+    skills: [{
+      skill_id: activeSkillId,
+      slug: "active-skill",
+      display_name: "Active skill",
+      current_version: "1.0.0",
+      destinations,
+    }],
+  };
+}
+
 async function mount(integration: GitHubIntegrationResponse) {
   githubMocks.fetchGitHubIntegration.mockResolvedValue(integration);
   const container = document.createElement("div");
@@ -103,6 +122,14 @@ function buttonByText(container: HTMLElement, text: string): HTMLButtonElement {
   return button;
 }
 
+function setInputValue(input: HTMLInputElement, value: string) {
+  const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
+  act(() => {
+    setter?.call(input, value);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+}
+
 beforeEach(() => {
   for (const mock of Object.values(githubMocks)) mock.mockReset();
   queryMocks.fetchSkillLibrary.mockReset().mockResolvedValue([]);
@@ -111,9 +138,12 @@ beforeEach(() => {
     installations: [],
     install_url: "https://github.com/apps/companion/installations/new",
   });
+  githubMocks.fetchGitHubSkillSync.mockResolvedValue({ skills: [] });
   githubMocks.deleteGitHubDestination.mockResolvedValue({ ok: true });
   githubMocks.disconnectGitHubAccount.mockResolvedValue({ ok: true });
   githubMocks.syncGitHubDestination.mockResolvedValue({ ok: true });
+  githubMocks.selectGitHubDestinationSkill.mockResolvedValue({ ok: true, changed: true });
+  githubMocks.unselectGitHubDestinationSkill.mockResolvedValue({ ok: true, changed: true });
 });
 
 afterEach(() => {
@@ -125,6 +155,227 @@ afterEach(() => {
 });
 
 describe("GitHubPane", () => {
+  it("opens the Skills tab with complete automatic, selected, and dependency states", async () => {
+    const destinations = [
+      destination(),
+      destination({ id: secondDestinationId, repository_id: "repository-2", name: "selected-skills", full_name: "acme/selected-skills", html_url: "https://github.com/acme/selected-skills", mode: "selected", selected_skill_ids: [activeSkillId], status: "pending" }),
+      destination({ id: thirdDestinationId, repository_id: "repository-3", name: "dependency-skills", full_name: "acme/dependency-skills", html_url: "https://github.com/acme/dependency-skills", mode: "selected", selected_skill_ids: [archivedSkillId], status: "error", last_error: "Branch protection rejected the update" }),
+    ];
+    githubMocks.fetchGitHubSkillSync.mockResolvedValue(skillSyncOverview([
+      { destination_id: destinationId, inclusion: "all" },
+      { destination_id: secondDestinationId, inclusion: "selected" },
+      { destination_id: thirdDestinationId, inclusion: "dependency" },
+    ]));
+    const container = await mount({ connection: connected, destinations });
+
+    await act(async () => {
+      buttonByText(container, "Skills").click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(container.textContent).toContain("Organization skills");
+    expect(container.textContent).toContain("3 of 3 repositories");
+    expect(container.textContent).toContain("error");
+
+    await act(async () => { buttonByText(container, "Active skill").click(); });
+    expect(container.textContent).toContain("Automatic");
+    expect(container.textContent).toContain("Selected");
+    expect(container.textContent).toContain("Required dependency");
+    const toggles = Array.from(container.querySelectorAll<HTMLInputElement>('.gh-skill-switch input'));
+    expect(toggles.map((toggle) => [toggle.checked, toggle.disabled])).toEqual([
+      [true, true],
+      [true, false],
+      [true, true],
+    ]);
+  });
+
+  it("filters skills and supports arrow-key tab navigation", async () => {
+    githubMocks.fetchGitHubSkillSync.mockResolvedValue({
+      skills: [
+        ...skillSyncOverview([]).skills,
+        { skill_id: archivedSkillId, slug: "release-helper", display_name: "Release helper", current_version: "2.0.0", destinations: [] },
+      ],
+    });
+    const container = await mount({ connection: connected, destinations: [] });
+    const repositoriesTab = buttonByText(container, "Repositories");
+
+    await act(async () => {
+      repositoriesTab.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(buttonByText(container, "Skills").getAttribute("aria-selected")).toBe("true");
+    const search = container.querySelector<HTMLInputElement>('.gh-skill-search input')!;
+    setInputValue(search, "release");
+    expect(container.textContent).toContain("Release helper");
+    expect(container.textContent).not.toContain("Active skill");
+
+    await act(async () => {
+      buttonByText(container, "Skills").dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    });
+    expect(repositoriesTab.getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("blocks the last-skill removal inline and returns to the matching repository", async () => {
+    const selected = destination({ mode: "selected", selected_skill_ids: [activeSkillId] });
+    githubMocks.fetchGitHubSkillSync.mockResolvedValue(skillSyncOverview([
+      { destination_id: destinationId, inclusion: "selected" },
+    ]));
+    githubMocks.unselectGitHubDestinationSkill.mockRejectedValue(new ApiFetchError("a selected-skills mirror must keep at least one skill", 409));
+    const container = await mount({ connection: connected, destinations: [selected] });
+
+    await act(async () => {
+      buttonByText(container, "Skills").click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await act(async () => { buttonByText(container, "Active skill").click(); });
+    const toggle = container.querySelector<HTMLInputElement>('.gh-skill-switch input')!;
+    await act(async () => {
+      toggle.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(githubMocks.unselectGitHubDestinationSkill).toHaveBeenCalledWith(destinationId, activeSkillId);
+    expect(container.textContent).toContain("must keep at least one skill");
+
+    await act(async () => { buttonByText(container, "Manage repository").click(); });
+    expect(buttonByText(container, "Repositories").getAttribute("aria-selected")).toBe("true");
+    expect(document.activeElement?.textContent).toContain("acme/companion-skills");
+  });
+
+  it("adds a skill atomically, refreshes both views, and announces the pending sync", async () => {
+    const selected = destination({ mode: "selected", selected_skill_ids: [archivedSkillId] });
+    githubMocks.fetchGitHubSkillSync
+      .mockResolvedValueOnce(skillSyncOverview([{ destination_id: destinationId, inclusion: "none" }]))
+      .mockResolvedValue(skillSyncOverview([{ destination_id: destinationId, inclusion: "selected" }]));
+    const container = await mount({ connection: connected, destinations: [selected] });
+    await act(async () => {
+      buttonByText(container, "Skills").click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await act(async () => { buttonByText(container, "Active skill").click(); });
+
+    const toggle = container.querySelector<HTMLInputElement>('.gh-skill-switch input')!;
+    expect(toggle.checked).toBe(false);
+    await act(async () => {
+      toggle.click();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(githubMocks.selectGitHubDestinationSkill).toHaveBeenCalledWith(destinationId, activeSkillId);
+    expect(githubMocks.fetchGitHubSkillSync).toHaveBeenCalledTimes(2);
+    expect(githubMocks.fetchGitHubIntegration).toHaveBeenCalledTimes(2);
+    expect(container.textContent).toContain("Synchronization is pending");
+    expect(container.querySelector<HTMLInputElement>('.gh-skill-switch input')?.checked).toBe(true);
+  });
+
+  it("reports a saved selection whose refreshed state failed and retries locally", async () => {
+    const selected = destination({ mode: "selected", selected_skill_ids: [archivedSkillId] });
+    githubMocks.fetchGitHubSkillSync
+      .mockResolvedValueOnce(skillSyncOverview([{ destination_id: destinationId, inclusion: "none" }]))
+      .mockRejectedValueOnce(new Error("Skill matrix refresh failed"))
+      .mockResolvedValueOnce(skillSyncOverview([{ destination_id: destinationId, inclusion: "selected" }]));
+    const container = await mount({ connection: connected, destinations: [selected] });
+    await act(async () => {
+      buttonByText(container, "Skills").click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await act(async () => { buttonByText(container, "Active skill").click(); });
+
+    await act(async () => {
+      container.querySelector<HTMLInputElement>('.gh-skill-switch input')!.click();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain("The selection was saved, but the refreshed synchronization state could not be loaded.");
+    expect(container.textContent).not.toContain("Synchronization is pending");
+    expect(container.querySelector<HTMLInputElement>('.gh-skill-switch input')?.checked).toBe(false);
+
+    await act(async () => {
+      buttonByText(container, "Retry refresh").click();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(container.textContent).not.toContain("refreshed synchronization state could not be loaded");
+    expect(container.querySelector<HTMLInputElement>('.gh-skill-switch input')?.checked).toBe(true);
+  });
+
+  it("serializes skill selection changes in the panel", async () => {
+    const destinations = [
+      destination({ mode: "selected", selected_skill_ids: [archivedSkillId] }),
+      destination({
+        id: secondDestinationId,
+        repository_id: "repository-2",
+        name: "selected-skills",
+        full_name: "acme/selected-skills",
+        html_url: "https://github.com/acme/selected-skills",
+        mode: "selected",
+        selected_skill_ids: [archivedSkillId],
+      }),
+    ];
+    githubMocks.fetchGitHubSkillSync
+      .mockResolvedValueOnce(skillSyncOverview([
+        { destination_id: destinationId, inclusion: "none" },
+        { destination_id: secondDestinationId, inclusion: "none" },
+      ]))
+      .mockResolvedValue(skillSyncOverview([
+        { destination_id: destinationId, inclusion: "selected" },
+        { destination_id: secondDestinationId, inclusion: "none" },
+      ]));
+    let releaseMutation!: () => void;
+    githubMocks.selectGitHubDestinationSkill.mockImplementationOnce(() =>
+      new Promise((resolve) => { releaseMutation = () => resolve({ ok: true, changed: true }); }),
+    );
+    const container = await mount({ connection: connected, destinations });
+    await act(async () => {
+      buttonByText(container, "Skills").click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await act(async () => { buttonByText(container, "Active skill").click(); });
+    const toggles = Array.from(container.querySelectorAll<HTMLInputElement>('.gh-skill-switch input'));
+
+    act(() => { toggles[0]!.click(); });
+    expect(toggles.every((toggle) => toggle.disabled)).toBe(true);
+    act(() => { toggles[1]!.click(); });
+    expect(githubMocks.selectGitHubDestinationSkill).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      releaseMutation();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(githubMocks.selectGitHubDestinationSkill).toHaveBeenCalledWith(destinationId, activeSkillId);
+  });
+
+  it("returns keyboard focus to the skill row after leaving its detail", async () => {
+    githubMocks.fetchGitHubSkillSync.mockResolvedValue(skillSyncOverview([]));
+    const container = await mount({ connection: connected, destinations: [] });
+    await act(async () => {
+      buttonByText(container, "Skills").click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await act(async () => { buttonByText(container, "Active skill").click(); });
+
+    await act(async () => {
+      (container.querySelector(".gh-skill-detail__head button") as HTMLButtonElement).click();
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    });
+
+    expect(document.activeElement).toBe(container.querySelector(".gh-skill-row"));
+    expect(document.activeElement?.textContent).toContain("Active skill");
+  });
+
   it("does not expose repository actions when configuration is disabled despite stale connection metadata", async () => {
     const container = await mount({
       connection: { ...connected, configured: false },
@@ -210,6 +461,43 @@ describe("GitHubPane", () => {
     const archivedLabel = Array.from(container.querySelectorAll(".gh-skills label"))
       .find((label) => label.textContent?.includes("Archived skill"));
     expect((archivedLabel?.querySelector("input") as HTMLInputElement | null)?.checked).toBe(true);
+  });
+
+  it("preserves an unsaved repository editor while switching tabs", async () => {
+    const activeSkill = skill(activeSkillId, "active-skill", false);
+    queryMocks.fetchSkillLibrary.mockImplementation(async (_library: string, archived = false) =>
+      archived ? [] : [activeSkill],
+    );
+    const container = await mount({
+      connection: connected,
+      destinations: [destination({
+        mode: "selected",
+        selected_skill_ids: [activeSkillId],
+        resolved_skill_count: 1,
+      })],
+    });
+
+    await act(async () => {
+      buttonByText(container, "Edit selection").click();
+      await Promise.resolve();
+    });
+    const skillLabel = Array.from(container.querySelectorAll(".gh-skills label"))
+      .find((label) => label.textContent?.includes("Active skill"));
+    const checkbox = skillLabel?.querySelector("input") as HTMLInputElement;
+    act(() => { checkbox.click(); });
+    expect(checkbox.checked).toBe(false);
+
+    await act(async () => {
+      buttonByText(container, "Skills").click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await act(async () => { buttonByText(container, "Repositories").click(); });
+
+    expect(container.textContent).toContain("Edit acme/companion-skills");
+    const remountedSkillLabel = Array.from(container.querySelectorAll(".gh-skills label"))
+      .find((label) => label.textContent?.includes("Active skill"));
+    expect((remountedSkillLabel?.querySelector("input") as HTMLInputElement | null)?.checked).toBe(false);
   });
 
   it("requires confirmation before resuming a disconnected mirror", async () => {

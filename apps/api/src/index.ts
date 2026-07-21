@@ -138,10 +138,14 @@ import {
   deleteGitHubConnection,
   deleteGitHubDestination,
   getGitHubIntegration,
+  getGitHubSkillSyncOverview,
   getGitHubUserCredential,
+  GitHubSkillSyncConflictError,
+  GitHubSkillSyncNotFoundError,
   refreshGitHubConnectionCredential,
   requestGitHubDestinationSync,
   saveGitHubConnection,
+  setGitHubDestinationSkillSelection,
   updateGitHubDestination,
 } from "@companion/core/services";
 import { SecretConfigurationError, loadSecretsMasterKey } from "@companion/core";
@@ -857,6 +861,17 @@ app.get("/v1/integrations/github", async (c) => {
   }
 });
 
+app.get("/v1/integrations/github/skills", async (c) => {
+  try {
+    const result = await withTenant(c, ({ actor, orgId, database }) =>
+      getGitHubSkillSyncOverview({ actor, orgId, database }),
+    );
+    return c.json(result);
+  } catch (error) {
+    return jsonError(c, error, 403);
+  }
+});
+
 app.post("/v1/integrations/github/connect", async (c) => {
   try {
     const client = githubClient();
@@ -1005,6 +1020,44 @@ app.patch("/v1/integrations/github/destinations/:id", async (c) => {
     return c.json({ ok: true });
   } catch (error) {
     return jsonError(c, error, 400);
+  }
+});
+
+function githubSkillSelectionError(c: Context, error: unknown): Response {
+  if (error instanceof GitHubSkillSyncConflictError) return jsonError(c, error, 409);
+  if (error instanceof GitHubSkillSyncNotFoundError) return jsonError(c, error, 404);
+  return jsonError(c, error, 403);
+}
+
+app.put("/v1/integrations/github/destinations/:id/skills/:skillId", async (c) => {
+  try {
+    const changed = await withTenant(c, ({ actor, orgId, database }) => setGitHubDestinationSkillSelection({
+      actor,
+      orgId,
+      destinationId: c.req.param("id"),
+      skillId: c.req.param("skillId"),
+      selected: true,
+      database,
+    }));
+    return c.json({ ok: true as const, changed });
+  } catch (error) {
+    return githubSkillSelectionError(c, error);
+  }
+});
+
+app.delete("/v1/integrations/github/destinations/:id/skills/:skillId", async (c) => {
+  try {
+    const changed = await withTenant(c, ({ actor, orgId, database }) => setGitHubDestinationSkillSelection({
+      actor,
+      orgId,
+      destinationId: c.req.param("id"),
+      skillId: c.req.param("skillId"),
+      selected: false,
+      database,
+    }));
+    return c.json({ ok: true as const, changed });
+  } catch (error) {
+    return githubSkillSelectionError(c, error);
   }
 });
 

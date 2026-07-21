@@ -23,9 +23,11 @@ import { fetchSkillLibrary } from "@/lib/queries";
 import { Icon } from "../Icon";
 import { UserAvatar } from "../UserAvatar";
 import { PaneHead } from "./paneKit";
+import { GitHubSkillsPanel } from "./GitHubSkillsPanel";
 import type { OrgCtx } from "./model";
 
 type Editor = { kind: "new" } | { kind: "edit"; destination: GitHubSyncDestination } | null;
+type GitHubTab = "repositories" | "skills";
 type FocusTarget =
   | { kind: "connect" }
   | { kind: "destination"; id: string }
@@ -49,6 +51,7 @@ export function GitHubPane({ ctx }: { ctx: OrgCtx }) {
   const [installations, setInstallations] = useState<GitHubInstallation[]>([]);
   const [installUrl, setInstallUrl] = useState<string | null>(null);
   const [skills, setSkills] = useState<SkillListRow[]>([]);
+  const [activeTab, setActiveTab] = useState<GitHubTab>("repositories");
   const [editor, setEditor] = useState<Editor>(null);
   const [selectedRepoId, setSelectedRepoId] = useState("");
   const [mode, setMode] = useState<GitHubSyncMode>("all");
@@ -69,6 +72,7 @@ export function GitHubPane({ ctx }: { ctx: OrgCtx }) {
   const mirrorsHeadingRef = useRef<HTMLHeadingElement>(null);
   const destinationLinkRefs = useRef(new Map<string, HTMLAnchorElement>());
   const pendingFocusRef = useRef<FocusTarget | null>(null);
+  const tabRefs = useRef(new Map<GitHubTab, HTMLButtonElement>());
 
   const load = useCallback(async (focusTarget?: FocusTarget) => {
     setIntegrationLoading(true);
@@ -77,8 +81,10 @@ export function GitHubPane({ ctx }: { ctx: OrgCtx }) {
       setLoadError(null);
       if (focusTarget) pendingFocusRef.current = focusTarget;
       setIntegration(next);
+      return true;
     } catch (cause) {
       setLoadError(cause instanceof Error ? cause.message : String(cause));
+      return false;
     } finally {
       setIntegrationLoading(false);
     }
@@ -110,7 +116,7 @@ export function GitHubPane({ ctx }: { ctx: OrgCtx }) {
         ? destinationLinkRefs.current.get(pending.id) ?? null
         : mirrorsHeadingRef.current;
     if (target?.isConnected) target.focus();
-  }, [integration]);
+  }, [activeTab, integration]);
 
   const clearErrors = useCallback(() => {
     setCallbackError(null);
@@ -126,7 +132,7 @@ export function GitHubPane({ ctx }: { ctx: OrgCtx }) {
     if (!createOwner && github.installations[0]) setCreateOwner(github.installations[0].owner);
   }, [createOwner]);
 
-  const openNew = async (trigger: HTMLElement) => {
+  const openNew = async (trigger: HTMLElement | null) => {
     editorReturnFocusRef.current = trigger;
     setEditor({ kind: "new" });
     setMode("all");
@@ -234,6 +240,16 @@ export function GitHubPane({ ctx }: { ctx: OrgCtx }) {
   const actionOrCallbackError = callbackError ?? actionError;
   const displayedError = actionOrCallbackError ?? loadError;
 
+  const selectTab = (tab: GitHubTab) => {
+    setActiveTab(tab);
+    clearErrors();
+  };
+
+  const manageDestinationFromSkill = (destinationId: string) => {
+    pendingFocusRef.current = { kind: "destination", id: destinationId };
+    setActiveTab("repositories");
+  };
+
   if (!integration) {
     return (
       <div className="sx-pane sx-pane--github">
@@ -259,7 +275,7 @@ export function GitHubPane({ ctx }: { ctx: OrgCtx }) {
       <PaneHead
         title="GitHub"
         desc="Mirror organization skills to GitHub repositories. Companion is the source of truth and replaces the repository branch on every sync."
-        action={connection.configured && connection.connected && !editor ? (
+        action={connection.configured && connection.connected && activeTab === "repositories" && !editor ? (
           <button ref={addRepositoryButtonRef} className="btn-primary" onClick={(event) => void openNew(event.currentTarget)}><Icon name="plus" size={14} />Add repository</button>
         ) : undefined}
       />
@@ -312,8 +328,45 @@ export function GitHubPane({ ctx }: { ctx: OrgCtx }) {
             }} disabled={busy === "disconnect"}>Disconnect</button>
           </section>
 
-          {editor && (
-            <section className="gh-editor" aria-labelledby="github-editor-title">
+          <div
+            className="gh-tabs"
+            role="tablist"
+            aria-label="GitHub synchronization views"
+            onKeyDown={(event) => {
+              if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+              event.preventDefault();
+              const tabs: GitHubTab[] = ["repositories", "skills"];
+              const currentIndex = tabs.indexOf(activeTab);
+              const next = event.key === "Home"
+                ? tabs[0]!
+                : event.key === "End"
+                  ? tabs.at(-1)!
+                  : tabs[(currentIndex + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length]!;
+              selectTab(next);
+              tabRefs.current.get(next)?.focus();
+            }}
+          >
+            {(["repositories", "skills"] as const).map((tab) => (
+              <button
+                key={tab}
+                ref={(node) => { if (node) tabRefs.current.set(tab, node); else tabRefs.current.delete(tab); }}
+                id={`github-tab-${tab}`}
+                role="tab"
+                aria-selected={activeTab === tab}
+                aria-controls={`github-panel-${tab}`}
+                tabIndex={activeTab === tab ? 0 : -1}
+                onClick={() => selectTab(tab)}
+              >
+                <Icon name={tab === "repositories" ? "git-branch" : "package"} size={14} />
+                {tab === "repositories" ? "Repositories" : "Skills"}
+              </button>
+            ))}
+          </div>
+
+          {activeTab === "repositories" ? (
+            <div id="github-panel-repositories" role="tabpanel" aria-labelledby="github-tab-repositories">
+              {editor && (
+                <section className="gh-editor" aria-labelledby="github-editor-title">
               <div className="gh-editor__head">
                 <div><h2 id="github-editor-title" ref={editorHeadingRef} tabIndex={-1}>{editor.kind === "new" ? "Add a repository mirror" : `Edit ${editor.destination.full_name}`}</h2>
                   <p>{editor.kind === "new" ? "Choose an App-accessible repo or create a new one." : "Change which organization skills this mirror publishes."}</p></div>
@@ -377,10 +430,10 @@ export function GitHubPane({ ctx }: { ctx: OrgCtx }) {
                 <button className="btn-primary" disabled={!canSave || busy === "save"} onClick={() => void saveEditor()}><Icon name="check" size={14} />{editor.kind === "new" ? "Add mirror" : "Save selection"}</button>
                 <button className="btn-sec" onClick={closeEditor}>Cancel</button>
               </div>
-            </section>
-          )}
+                </section>
+              )}
 
-          <section className="sx-sec">
+              <section className="sx-sec">
             <h2 ref={mirrorsHeadingRef} className="sx-sec__h" tabIndex={-1}>Repository mirrors</h2>
             <p className="sx-sec__d">GitHub changes are overwritten on the next sync or drift check. Disconnecting a mirror never deletes its repository.</p>
             {destinations.length === 0 ? (
@@ -434,7 +487,21 @@ export function GitHubPane({ ctx }: { ctx: OrgCtx }) {
                 })}
               </div>
             )}
-          </section>
+              </section>
+            </div>
+          ) : (
+            <div id="github-panel-skills" role="tabpanel" aria-labelledby="github-tab-skills">
+              <GitHubSkillsPanel
+                destinations={destinations}
+                onRefreshDestinations={() => load()}
+                onManageDestination={manageDestinationFromSkill}
+                onAddRepository={() => {
+                  setActiveTab("repositories");
+                  void openNew(null);
+                }}
+              />
+            </div>
+          )}
         </>
       )}
     </div>
