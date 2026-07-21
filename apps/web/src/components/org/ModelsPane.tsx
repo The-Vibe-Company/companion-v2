@@ -8,12 +8,9 @@ import { fetchModels } from "@/lib/runQueries";
 import { filterModelGroups, groupModelsByProvider, toModelProviders, type ModelGroupVM } from "@/components/runs/derive";
 
 /* ============================ Models (activation + dedicated provider credentials) =====================
-   One pane per scope (Account → Models, Workspace → Shared models; same keyed-usage rule as the old
-   provider panes). The organizing concept is READINESS, not configuration: the deck at the top
-   mirrors exactly what the run launcher will offer, each row telling the one truth that matters —
-   `Ready` (activated + a provider credential) or `Needs key` (entered write-only on the row).
-   Below it, a search-first add bar over the full models.dev catalog, then a per-provider browse
-   accordion for exploration. Activation is a hard gate: createRun rejects non-activated models. */
+   One pane per scope (Account → Models, Workspace → Shared models). The workbench is provider-first:
+   a provider credential determines readiness for every activated model grouped beneath it. Search stays
+   persistent over the full models.dev catalog, while activation remains the hard createRun gate. */
 
 export interface ModelScope {
   title: string;
@@ -47,6 +44,11 @@ function modelMeta(m: ModelRow): string | null {
   return parts.length ? parts.join(" · ") : null;
 }
 
+type LauncherProviderGroup = {
+  provider: ModelGroupVM["provider"];
+  models: Array<{ model: ModelRow; inherited: boolean }>;
+};
+
 export function ModelsPane({ scope }: { scope: ModelScope }) {
   const [catalog, setCatalog] = useState<ModelsResponse | null>(null);
   const [activated, setActivated] = useState<string[]>([]);
@@ -59,13 +61,17 @@ export function ModelsPane({ scope }: { scope: ModelScope }) {
   const [query, setQuery] = useState("");
   const [savingId, setSavingId] = useState<string | null>(null);
   const [disconnectingProvider, setDisconnectingProvider] = useState<string | null>(null);
+  const [catalogOpen, setCatalogOpen] = useState(false);
   /** The ONE spot whose inline write-only credential editor is open. */
   const [keyEntry, setKeyEntry] = useState<{
     anchor: string;
     providerId: string;
     returnFocus: HTMLButtonElement;
   } | null>(null);
+  /** Expanded providers in the active workbench. */
   const [open, setOpen] = useState<Set<string>>(() => new Set());
+  /** Expanded providers in the full catalog browser. */
+  const [browseOpen, setBrowseOpen] = useState<Set<string>>(() => new Set());
   const [tick, setTick] = useState(0);
   /** Full refetch — the server recomputes `connected`, so disconnects can't leave stale "Ready". */
   const reload = () => setTick((t) => t + 1);
@@ -76,11 +82,17 @@ export function ModelsPane({ scope }: { scope: ModelScope }) {
     Promise.all([fetchModels(), scope.loadConnected()])
       .then(([response, connections]) => {
         if (!live) return;
+        const selected = scope.select(response.activated);
+        const inherited = scope.ghost ? scope.ghost.select(response.activated) : [];
+        const responseById = new Map(response.models.map((model) => [model.id, model]));
         setCatalog(response);
-        setActivated(scope.select(response.activated));
-        setGhostIds(scope.ghost ? scope.ghost.select(response.activated) : []);
+        setActivated(selected);
+        setGhostIds(inherited);
         setScopeConnections(new Map(connections.map((connection) => [connection.provider, connection])));
         setConnectedNow(new Set());
+        setOpen(new Set([...selected, ...inherited].map((id) => responseById.get(id)?.provider).filter((id): id is string => !!id)));
+        setBrowseOpen(new Set());
+        setCatalogOpen(false);
       })
       .catch((e) => live && setError(e instanceof Error ? e.message : "Could not load the model catalog."));
     return () => {
@@ -105,7 +117,10 @@ export function ModelsPane({ scope }: { scope: ModelScope }) {
   const ghost = ghostIds.filter((id) => !activatedSet.has(id)).map((id) => byId.get(id)).filter((m): m is ModelRow => !!m);
   const launcher = [...deck, ...ghost];
   const readyCount = launcher.filter((m) => usable(m.provider)).length;
-  const needsKeyCount = launcher.length - readyCount;
+  const unavailableCount = launcher.filter(
+    (model) => !usable(model.provider) && (providersById.get(model.provider)?.envKeys.length ?? 0) === 0,
+  ).length;
+  const needsKeyCount = launcher.length - readyCount - unavailableCount;
 
   const groups = useMemo(() => {
     if (!catalog) return [];
@@ -113,6 +128,20 @@ export function ModelsPane({ scope }: { scope: ModelScope }) {
     const active = (g: ModelGroupVM) => g.models.some((m) => activatedSet.has(m.id));
     return [...all].sort((a, b) => Number(active(b)) - Number(active(a)));
   }, [catalog, providers, connectedNow, activatedSet]);
+
+  const launcherGroups = useMemo(() => {
+    const items = [
+      ...deck.map((model) => ({ model, inherited: false })),
+      ...ghost.map((model) => ({ model, inherited: true })),
+    ];
+    const activeProviderIds = new Set(items.map((item) => item.model.provider));
+    return groups
+      .filter((group) => activeProviderIds.has(group.provider.id))
+      .map((group) => ({
+        provider: group.provider,
+        models: items.filter((item) => item.model.provider === group.provider.id),
+      }));
+  }, [deck, ghost, groups]);
 
   const searching = query.trim().length > 0;
   const searchMatches = useMemo(
@@ -137,7 +166,11 @@ export function ModelsPane({ scope }: { scope: ModelScope }) {
       setSavingId(null);
     }
   };
-  const addModel = (id: string) => void save([...activated, id], id);
+  const addModel = (id: string) => {
+    const providerId = byId.get(id)?.provider;
+    if (providerId) setOpen((previous) => new Set(previous).add(providerId));
+    void save([...activated, id], id);
+  };
   const removeModel = (id: string) => void save(activated.filter((m) => m !== id), id);
   const toggleModel = (id: string) => (activatedSet.has(id) ? removeModel(id) : addModel(id));
 
@@ -180,6 +213,10 @@ export function ModelsPane({ scope }: { scope: ModelScope }) {
     setKeyEntry(null);
     restoreKeyFocus(entry);
   };
+  const setCatalogVisible = (visible: boolean) => {
+    if (!visible && keyEntry?.anchor.startsWith("browse:")) setKeyEntry(null);
+    setCatalogOpen(visible);
+  };
 
   /** Render the binding editor at exactly ONE anchor. */
   const keyRowAt = (anchor: string) =>
@@ -195,8 +232,10 @@ export function ModelsPane({ scope }: { scope: ModelScope }) {
       />
     ) : null;
 
+  const inheritedSet = new Set(ghostIds);
+
   return (
-    <div className="sx-pane">
+    <div className="sx-pane sx-pane--models">
       <PaneHead title={scope.title} desc={scope.desc} />
 
       {error && (
@@ -210,142 +249,122 @@ export function ModelsPane({ scope }: { scope: ModelScope }) {
         <SkeletonDeck />
       ) : (
         <>
-          {/* ---- The deck: exactly what the run launcher offers ---- */}
-          <div className="mlist__lbl">
-            <span>
-              {launcher.length === 0
-                ? "In your launcher"
-                : `${launcher.length} ${launcher.length === 1 ? "model" : "models"} in ${scope.ghost ? "your" : "the"} launcher · ${readyCount} ready${needsKeyCount ? ` · ${needsKeyCount} ${needsKeyCount === 1 ? "needs" : "need"} a provider key` : ""}`}
-            </span>
+          <div className="models-workbench__summary" aria-label="Launcher readiness">
+            <span><b>{launcher.length}</b> {launcher.length === 1 ? "model" : "models"} in {scope.ghost ? "your" : "the"} launcher</span>
+            <i aria-hidden />
+            <span className="is-ready"><b>{readyCount}</b> ready</span>
+            {needsKeyCount > 0 && <><i aria-hidden /><span className="is-warning"><b>{needsKeyCount}</b> {needsKeyCount === 1 ? "needs" : "need"} a key</span></>}
+            {unavailableCount > 0 && <><i aria-hidden /><span><b>{unavailableCount}</b> unavailable</span></>}
+            {ghost.length > 0 && <><i aria-hidden /><span><b>{ghost.length}</b> inherited</span></>}
           </div>
-          {launcher.length === 0 ? (
-            <div className="sx-empty">
-              {scope.locked
-                ? "Your workspace hasn’t activated any models yet."
-                : "The run launcher only shows models you activate. Search below to add your first."}
-            </div>
-          ) : (
-            <div className="mlist">
-              {deck.map((m) => (
-                <DeckRow
-                  key={m.id}
-                  model={m}
-                  ready={usable(m.provider)}
-                  hasScopeConnection={scopeConnections.has(m.provider)}
-                  connectionScope={scope.connectionScope}
-                  canConnect={(providersById.get(m.provider)?.envKeys.length ?? 0) > 0}
-                  keyTriggerId={`deck:${m.id}`}
-                  locked={scope.locked}
-                  pending={savingId === m.id}
-                  keyRow={keyRowAt(`deck:${m.id}`)}
-                  keyEntryOpenForProvider={keyEntry?.providerId === m.provider}
-                  onAskKey={(trigger) => openKeyEntry(`deck:${m.id}`, m.provider, trigger)}
-                  onRemove={() => removeModel(m.id)}
+
+          {!scope.locked && (
+            <div className="models-workbench__toolbar">
+              <div className="og-search models-workbench__search">
+                <Icon name="search" size={15} />
+                <input
+                  value={query}
+                  onChange={(event) => {
+                    setQuery(event.target.value);
+                    if (event.target.value.trim()) setCatalogVisible(false);
+                  }}
+                  placeholder={`Search active models, providers, or ${catalog.models.length.toLocaleString("en-US")} catalog models`}
+                  aria-label="Search active models or catalog"
                 />
-              ))}
-              {ghost.length > 0 && (
-                <>
-                  <div
-                    className="mono"
-                    style={{
-                      padding: "7px 12px",
-                      fontSize: 10,
-                      color: "var(--color-faint)",
-                      background: "var(--color-surface-sunken)",
-                      borderBottom: "1px solid var(--color-line)",
-                    }}
-                  >
-                    {scope.ghost!.label} · {ghost.length}
-                  </div>
-                  {ghost.map((m) => (
-                    <DeckRow
-                      key={m.id}
-                      model={m}
-                      ready={usable(m.provider)}
-                      hasScopeConnection={scopeConnections.has(m.provider)}
-                      connectionScope={scope.connectionScope}
-                      canConnect={(providersById.get(m.provider)?.envKeys.length ?? 0) > 0}
-                      keyTriggerId={`ghost:${m.id}`}
-                      locked={scope.locked}
-                      pending={false}
-                      shared
-                      keyRow={keyRowAt(`ghost:${m.id}`)}
-                      keyEntryOpenForProvider={keyEntry?.providerId === m.provider}
-                      onAskKey={(trigger) => openKeyEntry(`ghost:${m.id}`, m.provider, trigger)}
-                    />
-                  ))}
-                </>
-              )}
+              </div>
+              <button
+                type="button"
+                className={catalogOpen ? "btn-sec" : "btn-primary"}
+                aria-expanded={catalogOpen}
+                onClick={() => {
+                  setQuery("");
+                  setCatalogVisible(!catalogOpen);
+                }}
+              >
+                <Icon name={catalogOpen ? "x" : "plus"} size={14} />
+                {catalogOpen ? "Close catalog" : "Add model"}
+              </button>
             </div>
           )}
 
-          {!scope.locked && (
-            <>
-              {/* ---- Add bar: search-first over the full catalog ---- */}
-              <div className="mlist__lbl" style={{ marginTop: 18 }}>
-                <span>Add models</span>
-                <span className="n">{catalog.models.length}</span>
-              </div>
-              <div className="og-toolbar" style={{ marginBottom: 10 }}>
-                <div className="og-search">
-                  <Icon name="search" size={15} />
-                  <input
-                    value={query}
-                    onChange={(e) => setQuery(e.target.value)}
-                    placeholder={`Search ${catalog.models.length.toLocaleString("en-US")} models or providers`}
-                    aria-label="Search models or providers"
-                  />
-                </div>
+          {searching && (
+            <SearchResults
+              matches={searchMatches}
+              activated={activatedSet}
+              inherited={inheritedSet}
+              saving={savingId !== null}
+              query={query}
+              onActivate={addModel}
+            />
+          )}
+
+          <div className="models-workbench__layout">
+            <div className="models-workbench__main">
+              <div className="models-workbench__label">
+                <span>Active providers</span>
+                <span>Credentials apply to every active model below them</span>
               </div>
 
-              {searching ? (
-                searchMatches.length === 0 ? (
-                  <div className="sx-empty">No models match &ldquo;{query.trim()}&rdquo;.</div>
-                ) : (
-                  <>
-                    <div className="mlist" style={{ maxHeight: 420, overflowY: "auto" }}>
-                      {searchMatches.slice(0, SEARCH_RESULT_CAP).map((m) => {
-                        const on = activatedSet.has(m.id);
-                        const meta = modelMeta(m);
-                        return (
-                          <div className="mrow" key={m.id}>
-                            <div className="mrow__id">
-                              <div className="og-mname">{m.name}</div>
-                              <div className="og-memail">
-                                {m.id}
-                                {meta ? ` · ${meta}` : ""}
-                              </div>
-                            </div>
-                            <div className="mrow__end">
-                              {on ? (
-                                <span className="badge scopebadge">In launcher</span>
-                              ) : (
-                                <button className="btn-sec" disabled={savingId !== null} onClick={() => addModel(m.id)}>
-                                  Activate
-                                </button>
-                              )}
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                    {searchMatches.length > SEARCH_RESULT_CAP && (
-                      <p style={{ margin: "8px 2px 0", fontSize: 11, color: "var(--color-faint)" }}>
-                        Showing the first {SEARCH_RESULT_CAP} of {searchMatches.length} matches. Keep typing to narrow down.
-                      </p>
-                    )}
-                  </>
-                )
+              {launcherGroups.length === 0 ? (
+                <div className="sx-empty models-workbench__empty">
+                  {scope.locked
+                    ? "Your workspace hasn’t activated any models yet."
+                    : "The run launcher only shows models you activate. Search above or browse the catalog to add your first."}
+                </div>
               ) : (
-                /* ---- Browse: per-provider accordion, dedicated credentials on the headers ---- */
-                <div
-                  style={{
-                    border: "1px solid var(--color-line)",
-                    borderRadius: "var(--radius-md)",
-                    overflow: "hidden auto",
-                    maxHeight: 480,
-                  }}
+                <div className="models-provider-stack">
+                  {launcherGroups.map((group) => {
+                    const owned = group.models.find((item) => !item.inherited);
+                    const anchor = owned ? `deck:${owned.model.id}` : `ghost:${group.models[0]!.model.id}`;
+                    return (
+                      <ActiveProviderGroup
+                        key={group.provider.id}
+                        group={group}
+                        ready={usable(group.provider.id)}
+                        connection={scopeConnections.get(group.provider.id) ?? null}
+                        connectionScope={scope.connectionScope}
+                        locked={scope.locked}
+                        expanded={open.has(group.provider.id)}
+                        savingId={savingId}
+                        disconnecting={disconnectingProvider === group.provider.id}
+                        keyTriggerId={anchor}
+                        keyRow={keyRowAt(anchor)}
+                        keyEntryOpenForProvider={keyEntry?.providerId === group.provider.id}
+                        onToggleExpanded={() =>
+                          setOpen((previous) => {
+                            const next = new Set(previous);
+                            if (next.has(group.provider.id)) next.delete(group.provider.id);
+                            else next.add(group.provider.id);
+                            return next;
+                          })
+                        }
+                        onAskKey={(trigger) => {
+                          openKeyEntry(anchor, group.provider.id, trigger);
+                          setOpen((previous) => new Set(previous).add(group.provider.id));
+                        }}
+                        onDisconnect={() => void disconnect(group.provider.id)}
+                        onRemoveModel={removeModel}
+                      />
+                    );
+                  })}
+                </div>
+              )}
+
+              {!scope.locked && !searching && (
+                <button
+                  type="button"
+                  className="models-workbench__browse"
+                  aria-expanded={catalogOpen}
+                  onClick={() => setCatalogVisible(!catalogOpen)}
                 >
+                  <Icon name="layers" size={14} />
+                  {catalogOpen ? "Hide model catalog" : `Browse all ${catalog.models.length.toLocaleString("en-US")} models`}
+                  <Icon name={catalogOpen ? "chevron-up" : "chevron-right"} size={14} />
+                </button>
+              )}
+
+              {!scope.locked && catalogOpen && (
+                <div className="models-catalog" aria-label="Model catalog by provider">
                   {groups.map((group) => (
                     <ProviderModelsGroup
                       key={group.provider.id}
@@ -356,10 +375,10 @@ export function ModelsPane({ scope }: { scope: ModelScope }) {
                       connectionScope={scope.connectionScope}
                       keyTriggerId={`browse:${group.provider.id}`}
                       disconnecting={disconnectingProvider === group.provider.id}
-                      expanded={open.has(group.provider.id)}
+                      expanded={browseOpen.has(group.provider.id)}
                       onToggleExpanded={() =>
-                        setOpen((prev) => {
-                          const next = new Set(prev);
+                        setBrowseOpen((previous) => {
+                          const next = new Set(previous);
                           if (next.has(group.provider.id)) next.delete(group.provider.id);
                           else next.add(group.provider.id);
                           return next;
@@ -367,9 +386,10 @@ export function ModelsPane({ scope }: { scope: ModelScope }) {
                       }
                       savingId={savingId}
                       keyRow={keyRowAt(`browse:${group.provider.id}`)}
+                      keyEntryOpenForProvider={keyEntry?.providerId === group.provider.id}
                       onAskKey={(trigger) => {
                         openKeyEntry(`browse:${group.provider.id}`, group.provider.id, trigger);
-                        setOpen((prev) => new Set(prev).add(group.provider.id));
+                        setBrowseOpen((previous) => new Set(previous).add(group.provider.id));
                       }}
                       onDisconnect={() => void disconnect(group.provider.id)}
                       onToggleModel={toggleModel}
@@ -377,117 +397,281 @@ export function ModelsPane({ scope }: { scope: ModelScope }) {
                   ))}
                 </div>
               )}
-            </>
-          )}
+            </div>
+
+            {launcherGroups.length > 0 && (
+              <ProviderRail
+                groups={launcherGroups}
+                readyCount={readyCount}
+                needsKeyCount={needsKeyCount}
+                unavailableCount={unavailableCount}
+                inheritedCount={ghost.length}
+                usable={usable}
+                connectionScope={scope.connectionScope}
+              />
+            )}
+          </div>
         </>
       )}
     </div>
   );
 }
 
-/** Dot + text — status never rides on color alone. */
-function ReadyBadge({ ready }: { ready: boolean }) {
+function ProviderStatus({ ready, available = true }: { ready: boolean; available?: boolean }) {
+  const state = ready ? "ready" : available ? "needs-key" : "unavailable";
+  const label = ready ? "Ready" : available ? "Needs key" : "Unavailable";
   return (
-    <span
-      className="mono"
-      style={{
-        display: "inline-flex",
-        alignItems: "center",
-        gap: 6,
-        fontSize: 10,
-        color: ready ? "var(--color-ok)" : "var(--color-warn)",
-        flex: "none",
-        width: 74,
-      }}
-    >
-      <span
-        aria-hidden
-        style={{ width: 7, height: 7, borderRadius: "50%", background: "currentColor", flex: "none" }}
-      />
-      {ready ? "Ready" : "Needs key"}
+    <span className={`models-provider-status models-provider-status--${state}`}>
+      <i aria-hidden />
+      {label}
     </span>
   );
 }
 
-/** One launcher row: status, identity, and the single action that matters right now. */
-function DeckRow({
-  model,
-  ready,
-  hasScopeConnection,
-  connectionScope,
-  canConnect,
-  keyTriggerId,
-  locked,
-  pending,
-  shared,
-  keyRow,
-  keyEntryOpenForProvider,
-  onAskKey,
-  onRemove,
+function SearchResults({
+  matches,
+  activated,
+  inherited,
+  saving,
+  query,
+  onActivate,
 }: {
-  model: ModelRow;
-  ready: boolean;
-  hasScopeConnection: boolean;
-  connectionScope: "personal" | "organization";
-  canConnect: boolean;
-  keyTriggerId: string;
-  locked: boolean;
-  pending: boolean;
-  shared?: boolean;
-  keyRow: React.ReactNode;
-  /** True when this provider's binding editor is already open elsewhere. */
-  keyEntryOpenForProvider?: boolean;
-  onAskKey: (trigger: HTMLButtonElement) => void;
-  onRemove?: () => void;
+  matches: ModelRow[];
+  activated: ReadonlySet<string>;
+  inherited: ReadonlySet<string>;
+  saving: boolean;
+  query: string;
+  onActivate: (id: string) => void;
 }) {
-  const meta = modelMeta(model);
+  if (matches.length === 0) return <div className="sx-empty models-search-empty">No models match &ldquo;{query.trim()}&rdquo;.</div>;
   return (
-    <>
-      <div className="mrow" style={{ opacity: pending ? 0.6 : 1 }}>
-        <ReadyBadge ready={ready} />
-        <div className="mrow__id">
-          <div className="og-mname">{model.name}</div>
-          <div className="og-memail">
-            {model.id}
-            {meta ? ` · ${meta}` : ""}
-          </div>
-        </div>
-        <div className="mrow__end">
-          {shared && <span className="badge scopebadge">shared</span>}
-          {!locked && !keyEntryOpenForProvider && canConnect && (
-            <button
-              type="button"
-              className="btn-sec"
-              data-provider-key-trigger={keyTriggerId}
-              onClick={(event) => onAskKey(event.currentTarget)}
-            >
-              {!ready
-                ? `Connect ${model.provider_name}`
-                : hasScopeConnection
-                  ? "Replace provider key"
-                  : connectionScope === "personal"
-                    ? "Add personal key"
-                    : `Connect ${model.provider_name}`}
-            </button>
-          )}
-          {!locked && !keyEntryOpenForProvider && !canConnect && !ready && (
-            <span className="mono" title="This provider does not declare a supported API-key environment variable.">
-              Unavailable
-            </span>
-          )}
-          {!locked && onRemove && (
-            <button className="mrow__x" title={`Remove ${model.name}`} disabled={pending} onClick={onRemove}>
-              <Icon name="x" size={15} />
-            </button>
-          )}
-        </div>
+    <section className="models-search-results" aria-label="Model search results">
+      <div className="models-search-results__head">
+        <span>{matches.length} {matches.length === 1 ? "match" : "matches"}</span>
+        {matches.length > SEARCH_RESULT_CAP && <span>Showing first {SEARCH_RESULT_CAP}</span>}
       </div>
-      {keyRow}
-    </>
+      <div className="models-search-results__list">
+        {matches.slice(0, SEARCH_RESULT_CAP).map((model) => {
+          const activeHere = activated.has(model.id);
+          const inheritedHere = inherited.has(model.id) && !activeHere;
+          const meta = modelMeta(model);
+          return (
+            <div className="models-search-row" key={model.id}>
+              <span className="models-provider-mark" aria-hidden>{model.provider_name.slice(0, 1).toUpperCase()}</span>
+              <div className="models-search-row__identity">
+                <strong>{model.name}</strong>
+                <code title={model.id}>{model.id}</code>
+                {meta && <small>{meta}</small>}
+              </div>
+              <span className="models-search-row__provider">{model.provider_name}</span>
+              {activeHere ? (
+                <span className="badge scopebadge">In launcher</span>
+              ) : (
+                <button
+                  type="button"
+                  className="btn-sec"
+                  disabled={saving}
+                  aria-label={inheritedHere ? `Add ${model.name} personally` : `Activate ${model.name}`}
+                  onClick={() => onActivate(model.id)}
+                >
+                  <Icon name="plus" size={13} />
+                  {inheritedHere ? "Add personally" : "Activate"}
+                </button>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </section>
   );
 }
 
-/** One provider header (chevron, counts, binding state) + its checkbox model rows. */
+function ActiveProviderGroup({
+  group,
+  ready,
+  connection,
+  connectionScope,
+  locked,
+  expanded,
+  savingId,
+  disconnecting,
+  keyTriggerId,
+  keyRow,
+  keyEntryOpenForProvider,
+  onToggleExpanded,
+  onAskKey,
+  onDisconnect,
+  onRemoveModel,
+}: {
+  group: LauncherProviderGroup;
+  ready: boolean;
+  connection: ModelProviderConnectionRow | null;
+  connectionScope: "personal" | "organization";
+  locked: boolean;
+  expanded: boolean;
+  savingId: string | null;
+  disconnecting: boolean;
+  keyTriggerId: string;
+  keyRow: React.ReactNode;
+  keyEntryOpenForProvider: boolean;
+  onToggleExpanded: () => void;
+  onAskKey: (trigger: HTMLButtonElement) => void;
+  onDisconnect: () => void;
+  onRemoveModel: (id: string) => void;
+}) {
+  const { provider, models } = group;
+  const canConnect = provider.envKeys.length > 0;
+  const inheritedOnly = models.every((item) => item.inherited);
+  const credential = connection
+    ? `${connection.key_name} · v${connection.credential_version}`
+    : ready
+      ? "Workspace credential"
+      : canConnect
+        ? connectionScope === "personal" ? "No personal key" : "Workspace key missing"
+        : "No supported key field";
+  const scopeLabel = connectionScope === "organization"
+    ? "All workspace members"
+    : connection
+      ? "Only you"
+      : ready || inheritedOnly
+        ? "Inherited from workspace"
+        : "Only you";
+
+  return (
+    <section className={`models-provider${!canConnect && !ready ? " is-unavailable" : ""}`}>
+      <div className="models-provider__head">
+        <button
+          type="button"
+          className="models-provider__expand"
+          aria-label={expanded ? `Collapse ${provider.name}` : `Expand ${provider.name}`}
+          aria-expanded={expanded}
+          onClick={onToggleExpanded}
+        >
+          <Icon name={expanded ? "chevron-down" : "chevron-right"} size={13} />
+        </button>
+        <span className="models-provider-mark" aria-hidden>{provider.name.slice(0, 1).toUpperCase()}</span>
+        <div className="models-provider__title">
+          <h2>{provider.name}</h2>
+          <p title={credential}>{credential}</p>
+        </div>
+        <span className="models-provider__scope">
+          <Icon name={scopeLabel.startsWith("Only") ? "user" : "building-2"} size={13} />
+          {scopeLabel}
+        </span>
+        <span className="models-provider__count">{models.length} active</span>
+        <ProviderStatus ready={ready} available={canConnect} />
+        {!locked && !keyEntryOpenForProvider && canConnect && (
+          <button
+            type="button"
+            className={!ready ? "btn-primary models-provider__key-action" : "btn-sec models-provider__key-action"}
+            data-provider-key-trigger={keyTriggerId}
+            onClick={(event) => onAskKey(event.currentTarget)}
+          >
+            {connection ? "Replace provider key" : ready && connectionScope === "personal" ? "Add personal key" : "Connect"}
+          </button>
+        )}
+        {!locked && connection && !keyEntryOpenForProvider && (
+          <button
+            type="button"
+            className="models-provider__disconnect"
+            title={`Disconnect ${provider.name}`}
+            aria-label={`Disconnect ${provider.name}`}
+            disabled={disconnecting}
+            onClick={onDisconnect}
+          >
+            <Icon name="trash-2" size={14} />
+          </button>
+        )}
+      </div>
+      {keyRow}
+      {expanded && (
+        <div className="models-provider__models">
+          {models.map(({ model, inherited }) => {
+            const meta = modelMeta(model);
+            const pending = savingId === model.id;
+            return (
+              <div className="models-provider-model" key={model.id} aria-busy={pending || undefined}>
+                {inherited ? (
+                  <span className="models-provider-model__inherited" title="From workspace"><Icon name="building-2" size={12} /></span>
+                ) : (
+                  <input
+                    type="checkbox"
+                    checked
+                    disabled={locked || savingId !== null}
+                    aria-label={`Deactivate ${model.name}`}
+                    onChange={() => onRemoveModel(model.id)}
+                  />
+                )}
+                <div className="models-provider-model__identity">
+                  <strong>{model.name}</strong>
+                  <code title={model.id}>{model.id}</code>
+                  {inherited && <span>From workspace</span>}
+                </div>
+                <ProviderStatus ready={ready} available={canConnect} />
+                {meta && <small>{meta}</small>}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function ProviderRail({
+  groups,
+  readyCount,
+  needsKeyCount,
+  unavailableCount,
+  inheritedCount,
+  usable,
+  connectionScope,
+}: {
+  groups: LauncherProviderGroup[];
+  readyCount: number;
+  needsKeyCount: number;
+  unavailableCount: number;
+  inheritedCount: number;
+  usable: (providerId: string) => boolean;
+  connectionScope: "personal" | "organization";
+}) {
+  return (
+    <aside className="models-workbench__rail" aria-label="Provider summary">
+      <section className="models-rail-block">
+        <h2>Launcher readiness</h2>
+        <div className="models-rail-metrics">
+          <span><ProviderStatus ready /><b>{readyCount}</b></span>
+          <span><ProviderStatus ready={false} /><b>{needsKeyCount}</b></span>
+          {unavailableCount > 0 && <span><ProviderStatus ready={false} available={false} /><b>{unavailableCount}</b></span>}
+          {inheritedCount > 0 && <span className="models-rail-inherited"><span>Inherited</span><b>{inheritedCount}</b></span>}
+        </div>
+      </section>
+      <section className="models-rail-block models-rail-providers">
+        <div className="models-rail-block__head"><h2>Providers</h2><span>{groups.length}</span></div>
+        {groups.map((group) => {
+          const available = group.provider.envKeys.length > 0;
+          return (
+            <div className="models-rail-provider" key={group.provider.id}>
+              <span className="models-provider-mark" aria-hidden>{group.provider.name.slice(0, 1).toUpperCase()}</span>
+              <strong>{group.provider.name}</strong>
+              <ProviderStatus ready={usable(group.provider.id)} available={available} />
+            </div>
+          );
+        })}
+      </section>
+      <div className="models-rail-note">
+        <Icon name={connectionScope === "organization" ? "shield-check" : "lock"} size={15} />
+        <div>
+          <strong>{connectionScope === "organization" ? "Owner and admin access" : "Keys stay write-only"}</strong>
+          <p>{connectionScope === "organization"
+            ? "Workspace provider keys are available to every member and managed by owners and admins."
+            : "Plaintext credentials are encrypted immediately and never shown again."}</p>
+        </div>
+      </div>
+    </aside>
+  );
+}
+
 function ProviderModelsGroup({
   group,
   activated,
@@ -500,15 +684,14 @@ function ProviderModelsGroup({
   onToggleExpanded,
   savingId,
   keyRow,
+  keyEntryOpenForProvider,
   onAskKey,
   onDisconnect,
   onToggleModel,
 }: {
   group: ModelGroupVM;
   activated: ReadonlySet<string>;
-  /** A key reaches this provider from any scope. */
   usable: boolean;
-  /** THIS scope holds this provider credential (disconnect is offered). */
   connection: ModelProviderConnectionRow | null;
   connectionScope: "personal" | "organization";
   keyTriggerId: string;
@@ -517,139 +700,79 @@ function ProviderModelsGroup({
   onToggleExpanded: () => void;
   savingId: string | null;
   keyRow: React.ReactNode;
+  keyEntryOpenForProvider: boolean;
   onAskKey: (trigger: HTMLButtonElement) => void;
   onDisconnect: () => void;
   onToggleModel: (id: string) => void;
 }) {
   const { provider } = group;
-  const activeCount = group.models.reduce((n, m) => n + (activated.has(m.id) ? 1 : 0), 0);
+  const activeCount = group.models.reduce((count, model) => count + (activated.has(model.id) ? 1 : 0), 0);
   const canConnect = provider.envKeys.length > 0;
-
   return (
-    <div>
-      <div
-        className="provider-group__head"
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 8,
-          padding: "0 12px 0 0",
-          background: "var(--color-surface-sunken)",
-          borderBottom: "1px solid var(--color-line)",
-        }}
-      >
+    <section className="models-catalog-provider">
+      <div className="models-catalog-provider__head">
         <button
           type="button"
+          className="models-catalog-provider__expand"
           onClick={onToggleExpanded}
           aria-expanded={expanded}
           aria-label={expanded ? `Collapse ${provider.name}` : `Expand ${provider.name}`}
-          style={{
-            flex: 1,
-            minWidth: 0,
-            display: "flex",
-            alignItems: "center",
-            gap: 6,
-            padding: "9px 11px",
-            border: "none",
-            background: "none",
-            cursor: "pointer",
-            fontFamily: "var(--font-ui)",
-            color: "var(--color-fg)",
-          }}
         >
-          <Icon
-            name={expanded ? "chevron-down" : "chevron-right"}
-            size={12}
-            style={{ color: "var(--color-faint)", flex: "none" }}
-          />
-          <span style={{ fontSize: "var(--text-xs)", fontWeight: 600 }}>{provider.name}</span>
-          <span className="mono" style={{ fontSize: 10, color: "var(--color-faint)" }}>
-            {group.models.length}
-          </span>
-          {activeCount > 0 && (
-            <span className="mono" style={{ fontSize: 10, color: "var(--color-ok)" }}>
-              · {activeCount} activated
-            </span>
-          )}
+          <Icon name={expanded ? "chevron-down" : "chevron-right"} size={12} />
+          <span className="models-provider-mark" aria-hidden>{provider.name.slice(0, 1).toUpperCase()}</span>
+          <strong>{provider.name}</strong>
+          <span>{group.models.length}</span>
+          {activeCount > 0 && <em>{activeCount} active</em>}
         </button>
-        {usable ? (
-          <span
-            className="mono"
-            style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 10, color: "var(--color-ok)" }}
-          >
-            <Icon name="check" size={11} />
-            connected
-          </span>
-        ) : null}
-        {keyRow === null && canConnect && (
+        <ProviderStatus ready={usable} available={canConnect} />
+        {!keyEntryOpenForProvider && canConnect && (
           <button
             type="button"
             className="btn-sec"
             data-provider-key-trigger={keyTriggerId}
             onClick={(event) => onAskKey(event.currentTarget)}
           >
-            {connection
-              ? "Replace"
-              : usable && connectionScope === "personal"
-                ? "Add personal key"
-                : "Connect"}
+            {connection ? "Replace" : usable && connectionScope === "personal" ? "Add personal key" : "Connect"}
           </button>
         )}
-        {connection && (
-          <>
-            <span className="provider-key-meta" title={`${connection.key_name} · credential version ${connection.credential_version}`}>
-              {connection.key_name} · v{connection.credential_version}
-            </span>
-            <button
-              type="button"
-              className="mrow__x"
-              title={`Disconnect ${provider.name}`}
-              aria-label={`Disconnect ${provider.name}`}
-              disabled={disconnecting}
-              onClick={onDisconnect}
-            >
-              <Icon name="trash-2" size={15} />
-            </button>
-          </>
+        {connection && !keyEntryOpenForProvider && (
+          <button
+            type="button"
+            className="models-provider__disconnect"
+            title={`Disconnect ${provider.name}`}
+            aria-label={`Disconnect ${provider.name}`}
+            disabled={disconnecting}
+            onClick={onDisconnect}
+          >
+            <Icon name="trash-2" size={14} />
+          </button>
         )}
       </div>
-      {expanded && keyRow}
-      {expanded &&
-        group.models.map((m) => {
-          const on = activated.has(m.id);
-          const meta = modelMeta(m);
-          return (
-            <label
-              key={m.id}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 10,
-                padding: "8px 12px 8px 29px",
-                borderBottom: "1px solid var(--color-line)",
-                cursor: "pointer",
-                opacity: savingId === m.id ? 0.6 : 1,
-              }}
-            >
-              <input
-                type="checkbox"
-                checked={on}
-                disabled={savingId !== null}
-                onChange={() => onToggleModel(m.id)}
-                aria-label={`${on ? "Deactivate" : "Activate"} ${m.name}`}
-                style={{ flex: "none" }}
-              />
-              <span style={{ minWidth: 0, display: "flex", flexDirection: "column" }}>
-                <span style={{ fontSize: "var(--text-sm)", color: "var(--color-fg)", fontWeight: 500 }}>{m.name}</span>
-                <span className="mono" style={{ fontSize: 10, color: "var(--color-faint)" }}>
-                  {m.id}
-                  {meta ? ` · ${meta}` : ""}
+      {keyRow}
+      {expanded && (
+        <div className="models-catalog-provider__models">
+          {group.models.map((model) => {
+            const active = activated.has(model.id);
+            const meta = modelMeta(model);
+            return (
+              <label className="models-catalog-model" key={model.id} aria-busy={savingId === model.id || undefined}>
+                <input
+                  type="checkbox"
+                  checked={active}
+                  disabled={savingId !== null}
+                  onChange={() => onToggleModel(model.id)}
+                  aria-label={`${active ? "Deactivate" : "Activate"} ${model.name}`}
+                />
+                <span>
+                  <strong>{model.name}</strong>
+                  <code title={model.id}>{model.id}{meta ? ` · ${meta}` : ""}</code>
                 </span>
-              </span>
-            </label>
-          );
-        })}
-    </div>
+              </label>
+            );
+          })}
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -703,7 +826,7 @@ export function ProviderKeyRow({
     // data-esc-guard: the settings drawer's capture-phase Escape handler yields to this widget,
     // so Escape cancels the key entry instead of closing the whole drawer mid-typing.
     <div
-      className="mrow"
+      className="mrow models-provider-key-row"
       data-esc-guard
       style={{ flexWrap: "wrap", gap: 8 }}
       onKeyDown={(event) => {
