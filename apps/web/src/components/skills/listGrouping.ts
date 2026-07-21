@@ -10,8 +10,13 @@ export interface SkillListIcon {
 
 export interface GroupedSkillRow {
   skill: SkillVM;
-  relativePaths: string[];
+  relativePaths: SkillListPath[];
   icon: SkillListIcon;
+}
+
+export interface SkillListPath {
+  path: string;
+  label: string;
 }
 
 export interface SkillListGroup {
@@ -130,7 +135,7 @@ export function groupSkillsByRoot(
       }
       const relativePaths = paths
         .filter((path) => path !== root)
-        .map((path) => displayRelativePath(path, appearance));
+        .map((path) => ({ path, label: displayRelativePath(path, appearance) }));
       group.rows.push({ skill, relativePaths, icon: resolveSkillListIcon(skill, labels, paths) });
     }
   }

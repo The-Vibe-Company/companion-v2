@@ -18,7 +18,12 @@ import type { SkillContributorVM, SkillVM } from "@/lib/types";
 import { InstallMark } from "./blocks";
 import { chipParts, type Filter } from "./filters";
 import { FilterAdd } from "./FilterMenu";
-import { groupSkillsByRoot, resolveSkillListIcon, type GroupedSkillRow } from "./listGrouping";
+import {
+  groupSkillsByRoot,
+  resolveSkillListIcon,
+  type GroupedSkillRow,
+  type SkillListPath,
+} from "./listGrouping";
 import { resolveSkillActions, skillActionPermissions, type SkillAction } from "./skillActions";
 
 type SortKey = "default" | "name";
@@ -96,7 +101,7 @@ function ValidationMarker({ skill }: { skill: SkillVM }) {
   );
 }
 
-function PathOverflow({ paths, kind }: { paths: string[]; kind: "folder" | "subfolder" }) {
+function PathOverflow({ paths, kind }: { paths: SkillListPath[]; kind: "folder" | "subfolder" }) {
   const tooltipId = useId();
   const triggerRef = useRef<HTMLSpanElement>(null);
   const tooltipRef = useRef<HTMLSpanElement>(null);
@@ -104,7 +109,9 @@ function PathOverflow({ paths, kind }: { paths: string[]; kind: "folder" | "subf
   const [open, setOpen] = useState(false);
   const [position, setPosition] = useState({ left: -9999, top: -9999 });
   const plural = kind === "folder" ? "folders" : "subfolders";
-  const label = `${paths.length} more ${paths.length === 1 ? kind : plural}: ${paths.join(", ")}`;
+  const canonicalPaths = paths.map(({ path }) => path);
+  const tooltipText = paths.map(({ label, path }) => (label === path ? path : `${label} (${path})`)).join(", ");
+  const label = `${paths.length} more ${paths.length === 1 ? kind : plural}: ${canonicalPaths.join(", ")}`;
 
   const cancelClose = useCallback(() => {
     if (closeTimerRef.current === null) return;
@@ -164,7 +171,7 @@ function PathOverflow({ paths, kind }: { paths: string[]; kind: "folder" | "subf
       <span
         ref={triggerRef}
         className="crow__label crow__label--more"
-        data-folders={paths.join(", ")}
+        data-folders={canonicalPaths.join(", ")}
         role="listitem"
         aria-label={label}
         aria-describedby={open ? tooltipId : undefined}
@@ -187,7 +194,7 @@ function PathOverflow({ paths, kind }: { paths: string[]; kind: "folder" | "subf
               onMouseEnter={cancelClose}
               onMouseLeave={scheduleClose}
             >
-              {paths.join(", ")}
+              {tooltipText}
             </span>,
             document.body,
           )
@@ -196,14 +203,14 @@ function PathOverflow({ paths, kind }: { paths: string[]; kind: "folder" | "subf
   );
 }
 
-function SkillPaths({ paths, kind }: { paths: string[]; kind: "folder" | "subfolder" }) {
+function SkillPaths({ paths, kind }: { paths: SkillListPath[]; kind: "folder" | "subfolder" }) {
   if (paths.length === 0) return null;
   const visible = paths.slice(0, 2);
   const hidden = paths.slice(2);
   const label = kind === "folder" ? "Folders" : "Subfolders";
   return (
     <span className={`crow__labels${kind === "subfolder" ? " crow__labels--relative" : ""}`} role="list" aria-label={label}>
-      {visible.map((path) => (
+      {visible.map(({ path, label: pathLabel }) => (
         <span
           className="crow__label"
           key={path}
@@ -211,7 +218,7 @@ function SkillPaths({ paths, kind }: { paths: string[]; kind: "folder" | "subfol
           role="listitem"
           aria-label={`${kind === "folder" ? "Folder" : "Subfolder"}: ${path}`}
         >
-          <span className="crow__labeltext">{path}</span>
+          <span className="crow__labeltext">{pathLabel}</span>
         </span>
       ))}
       {hidden.length > 0 ? <PathOverflow paths={hidden} kind={kind} /> : null}
@@ -271,7 +278,10 @@ function SkillRow({
           <ValidationMarker skill={skill} />
           <InstallMark state={skill.installStatus} />
         </span>
-        <SkillPaths paths={flat ? skill.labels : row.relativePaths} kind={flat ? "folder" : "subfolder"} />
+        <SkillPaths
+          paths={flat ? skill.labels.map((path) => ({ path, label: path })) : row.relativePaths}
+          kind={flat ? "folder" : "subfolder"}
+        />
       </span>
       <PeopleStack skill={skill} />
       <span className="r when when--by" title={`Updated by ${skill.updaterName} · ${skill.updated}`}>

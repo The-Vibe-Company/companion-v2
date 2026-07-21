@@ -296,9 +296,10 @@ describe("ListView grouped rhythm", () => {
     expect(html.match(/data-skill-slug="digest"/g)).toHaveLength(2);
     expect(html).toContain('class="crow crow--subfolder"');
     expect(html).toContain('aria-label="Subfolders"');
-    expect(html).toContain('aria-label="Subfolder: Reporting"');
-    expect(html).toContain('aria-label="Subfolder: SEO"');
-    expect(html).not.toContain('aria-label="Folder: marketing/reporting"');
+    expect(html).toContain('aria-label="Subfolder: marketing/reporting"');
+    expect(html).toContain('aria-label="Subfolder: marketing/seo"');
+    expect(html).toContain('<span class="crow__labeltext">Reporting</span>');
+    expect(html).toContain('<span class="crow__labeltext">SEO</span>');
   });
 
   it("puts installed and unfiled personal skills in dedicated trailing groups", () => {
@@ -359,6 +360,24 @@ describe("ListView grouped rhythm", () => {
     expect(toggle.disabled).toBe(false);
     expect(toggle.getAttribute("aria-expanded")).toBe("false");
     expect(container.querySelector(".cgroup__rows")?.hasAttribute("hidden")).toBe(true);
+  });
+
+  it("uses canonical subfolder paths for identity while keeping aliases compact", () => {
+    const html = render(
+      [skill({ labels: ["marketing/seo-content", "marketing/seo-technical"] })],
+      {
+        groupBy: "folder",
+        labels: [
+          { path: "marketing", displayName: "Marketing", color: null, icon: null },
+          { path: "marketing/seo-content", displayName: "SEO", color: null, icon: null },
+          { path: "marketing/seo-technical", displayName: "SEO", color: null, icon: null },
+        ],
+      },
+    );
+
+    expect(html).toContain('title="marketing/seo-content"');
+    expect(html).toContain('title="marketing/seo-technical"');
+    expect(html.match(/class="crow__labeltext">SEO/g)).toHaveLength(2);
   });
 });
 

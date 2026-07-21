@@ -67,7 +67,10 @@ describe("skill list grouping", () => {
 
     expect(groups.map((group) => group.label)).toEqual(["Marketing", "Operations"]);
     expect(groups[0]?.rows).toHaveLength(1);
-    expect(groups[0]?.rows[0]?.relativePaths).toEqual(["Reporting", "SEO"]);
+    expect(groups[0]?.rows[0]?.relativePaths).toEqual([
+      { path: "marketing/reporting", label: "Reporting" },
+      { path: "marketing/seo", label: "SEO" },
+    ]);
     expect(groups[1]?.rows[0]?.skill.id).toBe("digest");
   });
 
@@ -82,7 +85,24 @@ describe("skill list grouping", () => {
     );
 
     expect(groups[0]?.label).toBe("Sales / Marketing");
-    expect(groups[0]?.rows[0]?.relativePaths).toEqual(["SEO"]);
+    expect(groups[0]?.rows[0]?.relativePaths).toEqual([{ path: "sales/seo", label: "SEO" }]);
+  });
+
+  it("keeps canonical identity when sibling paths share a display alias", () => {
+    const groups = groupSkillsByRoot(
+      [skill("audit", { labels: ["marketing/seo-content", "marketing/seo-technical"] })],
+      [
+        ...labels,
+        { path: "marketing/seo-content", displayName: "SEO", color: null, icon: null },
+        { path: "marketing/seo-technical", displayName: "SEO", color: null, icon: null },
+      ],
+      "org",
+    );
+
+    expect(groups[0]?.rows[0]?.relativePaths).toEqual([
+      { path: "marketing/seo-content", label: "SEO" },
+      { path: "marketing/seo-technical", label: "SEO" },
+    ]);
   });
 
   it("places installed and genuinely unfiled rows in separate trailing groups", () => {
