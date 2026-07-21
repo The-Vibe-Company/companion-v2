@@ -1,10 +1,10 @@
 "use client";
 
-/* Companion marketing landing (v6A "Keystroke").
-   Ported from the claude.ai/design handoff (landing-v6a-app.jsx). English-only,
-   yellow accent. Reuses the app's Button/Badge (cds) and Icon (lucide) so the
-   page stays in sync with the real design system. The portal demo is
-   presentational — it mirrors the real Skills list but is not API-wired. */
+/* Companion marketing landing (v10 "Linear Light").
+   Clean, precise, product-forward light design: near-white surfaces, fine
+   hairlines, soft shadows, restrained yellow accent, big real-product hero.
+   Copy stays non-technical (skill = recipe). The portal demo mirrors the
+   real Skills list but is presentational, not API-wired. */
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
@@ -17,24 +17,24 @@ const SKILL_MD_URL = "https://github.com/anthropics/skills";
 /* ---------------------------------------------------------------- copy --- */
 
 const COPY = {
-  nav: { story: "How it works", moat: "Why it matters", library: "The library" },
+  nav: { idea: "The idea", difference: "The difference", why: "Why it matters" },
   github: "GitHub",
   navCta: "Get started",
-  heroBadge: "The team skill library",
+  heroBadge: "For teams using AI",
   heroTitlePre: "You can't be good at everything. ",
   heroTitleMark: "Your team already is.",
   heroSub:
-    "Skills are your colleagues' best prompts, packaged. Browse the team library, pick the ones you need, and use them in your AI for anything.",
+    "In every company, a few people have cracked how to get great results from AI. Companion is the team library where they save those methods — so everyone else gets the same results, in one click.",
   ctaPrimary: "Start your team's library",
   ctaSecondary: "See how it works",
-  heroNote: "Free and open source",
+  heroNote: "Free · Open source · Yours to keep",
+  tickerLabel: "A few skills already in the library",
   libInstall: "Use this skill",
   libInstalled: "Added",
-  tickerLabel: "A few skills your colleagues have already shared",
-  lossNum: "01 · Without Companion",
-  lossTitle: "The same prompt, written four times.",
+  lossNum: "Sound familiar?",
+  lossTitle: "“Anyone got a good prompt for meeting notes?”",
   lossSub:
-    "You're brilliant at your job, so your prompts for it are brilliant too. Same for everyone else, in their own corner. But nothing circulates: each team quietly rebuilds what another already perfected.",
+    "Tuesday, 9:14. Marie has the perfect method — buried in her notes app. Jonas asks the chat. Tom rewrites his own from scratch. The know-how exists, it just doesn't travel.",
   lossPunch: "Hours lost, every week, in every team.",
   lostNote: { where: "Marie · product", text: "Meeting-summary prompt v7. The good one." },
   lostDm: {
@@ -45,78 +45,82 @@ const COPY = {
   },
   lostDoc: { where: "Tom · engineering", text: "meeting-notes-prompt-FINAL-v2" },
   lostGhost: { where: "you, next week", text: "About to write it a fourth time" },
-  turnNum: "02 · With Companion",
-  turnTitle: "Borrow the expert, every time.",
-  turnSub:
-    "A skill is an expert's know-how, packaged: the best prompt for the job, written by the person who does that job best, ready for anyone to use.",
-  turnSteps: [
+  ideaNum: "The idea",
+  ideaTitle: "A skill is a recipe for a task.",
+  ideaSub:
+    "The person who does a task best writes down exactly how they do it — what to ask, what to check, what to avoid. That's a skill. From then on, anyone can do that task the same way, with the same result.",
+  ideaPoints: [
     {
-      title: "Experts share",
-      desc: "Léa shares her LinkedIn skill, Sam his troubleshooting helper. Each one comes from the person who knows that job best.",
+      icon: "user",
+      title: "Written by your best person",
+      desc: "Not downloaded from the internet — Marie's method, from Marie.",
     },
     {
-      title: "Everyone borrows",
-      desc: "Find it in the library, pick it, use it. You write like marketing, plan like product, research like sales.",
+      icon: "zap",
+      title: "Used in one click",
+      desc: "No digging through docs, no asking around. Pick it and go.",
     },
     {
-      title: "Simply and safely",
-      desc: "Each skill is shared exactly as widely as its owner decides: just you, your team, or the whole company.",
-    },
-  ],
-  moatNum: "Why it matters",
-  moatTitlePre: "The advantage ",
-  moatTitleMark: "no AI can copy.",
-  moatSub:
-    "You're building a company. Everyone has access to the same AI. What's yours is how your people use it: the prompts your experts refined on your problems, your customers, your real work. Skills capture that know-how and keep it in the building.",
-  moatCols: [
-    {
-      title: "Built on your reality",
-      desc: "Not generic prompt-library filler. The exact approach that works on your customers, your product, your tone.",
-    },
-    {
-      title: "AI can't guess it",
-      desc: "AI writes a fluent first draft. It can't know how your best person actually does the job. Your team does.",
-    },
-    {
-      title: "Competitors don't have it",
-      desc: "This is your own know-how, getting better every week. The longer you run, the wider the gap.",
+      icon: "arrow-up-circle",
+      title: "Better every week",
+      desc: "When Marie improves her method, everyone's version improves with it.",
     },
   ],
-  payoffNum: "03 · The result",
-  payoffTitle: "Every expert's best work, one search away.",
-  payoffSub:
-    "The library grows every week. New hires start with the whole company's playbook on day one.",
-  portalCaption: "This is the real thing. Click around: filter, pick a skill.",
+  diffNum: "The difference",
+  diffTitle: "Same question. Different league.",
+  diffWithoutLabel: "Without the skill",
+  diffYou: "can you sum up this meeting?",
+  diffWithoutAi:
+    "The meeting covered the onboarding project and next steps. The team discussed timelines and some budget topics. A few action items were noted. Overall, it was a productive session.",
+  diffWithoutCap: "Polite. Vague. Useless.",
+  diffWithLabel: "With Marie's skill",
+  diffWithChip: "meeting summaries · by Marie",
+  diffWithAi1: "Decisions (3) — We will ship the new onboarding on the 24th…",
+  diffWithAi2: "Actions (5) — Sam: staging fix, due Thursday…",
+  diffWithCap: "Decisions, owners, deadlines. Every single time.",
+  diffPunchPre: "Same AI. Same question. ",
+  diffPunchMark: "The method makes the difference.",
+  portalCaption: "This is the real thing — click around: filter, pick a skill.",
   portalDescs: {
-    "linkedin-posts": "Léa's prompt for posts that hook in line one and never sound like a robot.",
+    "linkedin-posts": "Léa's method for posts that hook in line one and never sound like a robot.",
     "meeting-summaries": "Paste a transcript, get decisions, owners and deadlines.",
     "debug-my-setup": "Sam's checklist for fixing a broken setup, step by step.",
     "sales-research": "A 10-minute company brief before any sales call.",
     "brand-voice": "Rewrites anything in the company tone.",
     "weekly-report": "Your Friday report, assembled from the week's notes.",
   } as Record<string, string>,
-  proofs: [
+  whyNum: "Why it matters",
+  whyTitlePre: "Know-how that ",
+  whyTitleMark: "stays in the building.",
+  whySub:
+    "Anyone can buy the same AI. Nobody else has your people's skills. That edge is yours — and it gets sharper every week.",
+  whyCols: [
     {
+      icon: "search",
       title: "Nothing gets reinvented",
       desc: "Search before you write. If someone already cracked it, it's in the library, with their name on it.",
     },
     {
-      title: "The best version wins",
-      desc: "Each skill comes from the person who does that job best, and every improvement they make reaches everyone instantly.",
+      icon: "users",
+      title: "People leave, skills stay",
+      desc: "When Marie moves on, her method doesn't. New hires start with the whole company's playbook on day one.",
     },
     {
-      title: "Simple and secure",
-      desc: "Sharing is explicit. Every skill is visible exactly as widely as its owner decides, and you always know who can use what.",
+      icon: "arrow-up-circle",
+      title: "Better every week",
+      desc: "One person improves a skill, everyone gets the improvement. The gap with the outside grows quietly.",
     },
   ],
-  buildersStrong: "For developers:",
-  buildersText:
-    " a real toolchain underneath. Versioned skills, a command line, and the open SKILL.md standard. Never a black box.",
-  finaleTitle: "Your company is full of experts. Borrow them.",
-  finaleSub: "Up and running in minutes. The first skills can be live this afternoon.",
-  finaleNote: "Your next prompt is already written.",
-  finaleSmall:
-    "Open source, MIT licensed. And if you ever need it, it can run entirely on your own infrastructure.",
+  trustTitle: "Safe by default.",
+  trustText:
+    "You choose exactly who sees each skill: just you, your team, or the whole company. And if you want, Companion runs entirely on your own servers — your methods and your data never leave the building.",
+  trustDevStrong: "For the tech-curious:",
+  trustDevText:
+    " skills are versioned SKILL.md files — an open standard, never a black box. Free and open source, MIT licensed.",
+  finaleTitlePre: "Your company is full of experts. ",
+  finaleTitleMark: "Borrow them.",
+  finaleSub: "Set up takes an afternoon. The first skills can be shared today.",
+  finaleSmall: "Free and open source · runs on your own infrastructure if you want",
   finaleCta: "Get started",
   footerBy: "an open source tool by The Vibe Company",
   footerDocs: "Documentation",
@@ -148,14 +152,10 @@ const PORTAL_ROWS: PortalRow[] = [
 ];
 const SCOPE_ICON: Record<PortalRow["scope"], string> = { private: "lock", team: "users", public: "globe" };
 
-/* Ticker chips — a slice of the library in motion. */
+/* Ticker chips — the portal rows in motion, plus a couple of off-screen extras. */
 type TickerSkill = { id: string; who: string; a: string };
 const TICKER_SKILLS: TickerSkill[] = [
-  { id: "linkedin-posts", who: "Léa", a: "terracotta" },
-  { id: "meeting-summaries", who: "Marie", a: "violet" },
-  { id: "debug-my-setup", who: "Sam", a: "amber" },
-  { id: "sales-research", who: "Jonas", a: "blue" },
-  { id: "brand-voice", who: "Léa", a: "terracotta" },
+  ...PORTAL_ROWS.filter((r) => !r.draft).map((r) => ({ id: r.id, who: r.who, a: r.a })),
   { id: "cold-emails", who: "Jonas", a: "blue" },
   { id: "incident-postmortem", who: "Sam", a: "amber" },
 ];
@@ -198,32 +198,64 @@ function Avatar({ who, tone, sm }: { who: string; tone: string; sm?: boolean }) 
   );
 }
 
+/* The skill card — the "recipe" made tangible. */
+function SkillCard() {
+  return (
+    <div className="v10-skill" aria-label="Example of a skill">
+      <span className="v10-skill__chip">
+        <Icon name="zap" size={11} /> Skill
+      </span>
+      <h3 className="v10-skill__title">Meeting summaries</h3>
+      <p className="v10-skill__desc">Turn a raw meeting transcript into decisions, owners and deadlines.</p>
+      <div className="v10-skill__who">
+        <Avatar who="Marie" tone="violet" sm />
+        Written by Marie · Product
+      </div>
+      <div className="v10-skill__stats">
+        <span>
+          <Icon name="users" size={11} /> Used by 23 teammates
+        </span>
+        <span>
+          <Icon name="history" size={11} /> Updated this week
+        </span>
+      </div>
+      <Link href="/login" className="v10-btn v10-btn--primary v10-btn--sm v10-skill__cta">
+        Use this skill
+      </Link>
+    </div>
+  );
+}
+
 /* ------------------------------------------------------------- sections --- */
 
 function Nav({ c }: { c: Copy }) {
   return (
-    <header className="v5-nav">
-      <div className="v5-wrap v5-nav__inner">
+    <header className="v10-nav">
+      <div className="v10-wrap v10-nav__inner">
         <a className="v5-brand" href="#top" aria-label="Companion">
-          <span className="v5-brand__wordmark" role="img" aria-label="Companion" />
+          <span className="v10-wordmark" role="img" aria-label="Companion" />
         </a>
-        <nav className="v5-nav__links" aria-label="Sections">
-          <a className="v5-nav__link" href="#loss">
-            {c.nav.story}
+        <nav className="v10-nav__links" aria-label="Sections">
+          <a className="v10-nav__link" href="#idea">
+            {c.nav.idea}
           </a>
-          <a className="v5-nav__link" href="#moat">
-            {c.nav.moat}
+          <a className="v10-nav__link" href="#difference">
+            {c.nav.difference}
           </a>
-          <a className="v5-nav__link" href="#payoff">
-            {c.nav.library}
+          <a className="v10-nav__link" href="#why">
+            {c.nav.why}
           </a>
         </nav>
-        <span className="v5-nav__spacer"></span>
-        <div className="v5-nav__actions">
-          <Button variant="ghost" size="sm" onClick={() => window.open(GITHUB_URL, "_blank", "noopener,noreferrer")}>
+        <span className="v10-nav__spacer"></span>
+        <div className="v10-nav__actions">
+          <button
+            type="button"
+            className="v10-btn v10-btn--ghost v10-btn--sm"
+            onClick={() => window.open(GITHUB_URL, "_blank", "noopener,noreferrer")}
+          >
             {c.github} ↗
-          </Button>
-          <Link href="/login" className="cds-btn cds-btn--sm cds-btn--primary">
+          </button>
+          <Link href="/login" className="v10-btn v10-btn--primary v10-btn--sm">
             {c.navCta}
           </Link>
         </div>
@@ -239,25 +271,37 @@ function Hero({ c }: { c: Copy }) {
     return () => clearTimeout(id);
   }, []);
   return (
-    <section className="v5-hero v5-wrap" id="top" data-screen-label="hero">
-      <span className="v5-hero__badge">
-        <span className="v5-hero__badge-dot" aria-hidden="true"></span>
-        {c.heroBadge}
-      </span>
-      <h1>
-        {c.heroTitlePre}
-        <span className={"v5-mark" + (swept ? " v5-mark--on" : "")}>{c.heroTitleMark}</span>
-      </h1>
-      <p className="v5-hero__sub">{c.heroSub}</p>
-      <div className="v5-hero__ctas">
-        <Link href="/login" className="cds-btn cds-btn--md cds-btn--primary">
-          {c.ctaPrimary}
-        </Link>
-        <Button variant="secondary" onClick={() => { location.hash = "#loss"; }}>
-          {c.ctaSecondary}
-        </Button>
+    <section className="v10-hero" id="top" data-screen-label="hero">
+      <div className="v10-hero__glow" aria-hidden="true"></div>
+      <div className="v10-wrap v10-hero__inner">
+        <span className="v10-badge">
+          <span className="v10-badge__dot" aria-hidden="true"></span>
+          {c.heroBadge}
+        </span>
+        <h1 className="v10-h1">
+          {c.heroTitlePre}
+          <span className={"v10-hl" + (swept ? " v10-hl--on" : "")}>{c.heroTitleMark}</span>
+        </h1>
+        <p className="v10-hero__sub">{c.heroSub}</p>
+        <div className="v10-hero__ctas">
+          <Link href="/login" className="v10-btn v10-btn--primary">
+            {c.ctaPrimary}
+          </Link>
+          <button
+            type="button"
+            className="v10-btn v10-btn--ghost"
+            onClick={() => {
+              location.hash = "#problem";
+            }}
+          >
+            {c.ctaSecondary}
+          </button>
+        </div>
+        <p className="v10-hero__note">{c.heroNote}</p>
+        <div className="v10-hero__product v5-reveal">
+          <PortalCapture c={c} />
+        </div>
       </div>
-      <p className="v5-hero__note">{c.heroNote}</p>
     </section>
   );
 }
@@ -265,16 +309,16 @@ function Hero({ c }: { c: Copy }) {
 function Ticker({ c }: { c: Copy }) {
   const chips = [...TICKER_SKILLS, ...TICKER_SKILLS];
   return (
-    <section className="v5-ticker" data-screen-label="skill-ticker" aria-hidden="true">
-      <div className="v5-wrap">
-        <span className="v5-ticker__label">{c.tickerLabel}</span>
+    <section className="v10-ticker" data-screen-label="skill-ticker" aria-hidden="true">
+      <div className="v10-wrap">
+        <span className="v10-ticker__label">{c.tickerLabel}</span>
       </div>
-      <div className="v5-ticker__mask">
-        <div className="v5-ticker__track">
+      <div className="v10-ticker__mask">
+        <div className="v10-ticker__track">
           {chips.map((s, i) => (
-            <span className="v5-ticker__chip" key={s.id + i}>
+            <span className="v10-ticker__chip" key={s.id + i}>
               <Avatar who={s.who} tone={s.a} sm />
-              <span className="v5-ticker__name">{s.id}</span>
+              <span className="v10-ticker__name">{s.id}</span>
             </span>
           ))}
         </div>
@@ -283,40 +327,42 @@ function Ticker({ c }: { c: Copy }) {
   );
 }
 
-function Loss({ c }: { c: Copy }) {
+function Problem({ c }: { c: Copy }) {
   return (
-    <section className="v5-act v5-loss" id="loss" data-screen-label="act-2-loss">
-      <div className="v5-wrap v5-loss__grid">
+    <section className="v10-sec" id="problem" data-screen-label="the-problem">
+      <div className="v10-wrap v10-problem__grid">
         <div>
-          <p className="v5-act__num">{c.lossNum}</p>
-          <h2 className="v5-reveal">{c.lossTitle}</h2>
-          <p className="v5-act__sub v5-reveal">{c.lossSub}</p>
-          <p className="v5-loss__punch v5-reveal">{c.lossPunch}</p>
+          <p className="v10-kick">{c.lossNum}</p>
+          <h2 className="v10-h2 v5-reveal">{c.lossTitle}</h2>
+          <p className="v10-sub v5-reveal">{c.lossSub}</p>
+          <p className="v10-punch v5-reveal">
+            <span className="v10-hl v10-hl--lit">{c.lossPunch}</span>
+          </p>
         </div>
-        <div className="v5-scatter v5-reveal" aria-hidden="true">
-          <div className="v5-lost v5-lost--note">
-            <div className="v5-lost__where">{c.lostNote.where}</div>
-            <div className="v5-lost__text">{c.lostNote.text}</div>
+        <div className="v10-scatter v5-reveal" aria-hidden="true">
+          <div className="v10-art v10-art--note">
+            <div className="v10-art__where">{c.lostNote.where}</div>
+            <div className="v10-art__text">{c.lostNote.text}</div>
           </div>
-          <div className="v5-lost v5-lost--dm">
-            <div className="v5-dm__row">
+          <div className="v10-art v10-art--dm">
+            <div className="v10-dm__row">
               <Avatar who={c.lostDm.who} tone={c.lostDm.a} sm />
-              <div className="v5-dm__bubble">
-                <div className="v5-lost__text">{c.lostDm.text}</div>
+              <div className="v10-dm__bubble">
+                <div className="v10-art__text">{c.lostDm.text}</div>
               </div>
             </div>
-            <div className="v5-dm__time">{c.lostDm.time}</div>
+            <div className="v10-dm__time">{c.lostDm.time}</div>
           </div>
-          <div className="v5-lost v5-lost--doc">
-            <div className="v5-lost__where">{c.lostDoc.where}</div>
-            <div className="v5-lost__text">{c.lostDoc.text}</div>
-            <div className="v5-docline"></div>
-            <div className="v5-docline"></div>
-            <div className="v5-docline v5-docline--short"></div>
+          <div className="v10-art v10-art--doc">
+            <div className="v10-art__where">{c.lostDoc.where}</div>
+            <div className="v10-art__text">{c.lostDoc.text}</div>
+            <div className="v10-docline"></div>
+            <div className="v10-docline"></div>
+            <div className="v10-docline v10-docline--short"></div>
           </div>
-          <div className="v5-lost v5-lost--ghost">
-            <div className="v5-lost__where">{c.lostGhost.where}</div>
-            <div className="v5-lost__text">{c.lostGhost.text}</div>
+          <div className="v10-art v10-art--ghost">
+            <div className="v10-art__where">{c.lostGhost.where}</div>
+            <div className="v10-art__text">{c.lostGhost.text}</div>
           </div>
         </div>
       </div>
@@ -324,47 +370,70 @@ function Loss({ c }: { c: Copy }) {
   );
 }
 
-function Turn({ c }: { c: Copy }) {
+function Idea({ c }: { c: Copy }) {
   return (
-    <section className="v5-act v5-turn" data-screen-label="act-3-turn">
-      <div className="v5-wrap">
-        <div className="v5-turn__head">
-          <p className="v5-act__num">{c.turnNum}</p>
-          <h2 className="v5-reveal">{c.turnTitle}</h2>
-          <p className="v5-act__sub v5-reveal">{c.turnSub}</p>
+    <section className="v10-sec v10-sec--dim" id="idea" data-screen-label="the-idea">
+      <div className="v10-wrap v10-idea__grid">
+        <div>
+          <p className="v10-kick">{c.ideaNum}</p>
+          <h2 className="v10-h2 v5-reveal">{c.ideaTitle}</h2>
+          <p className="v10-sub v5-reveal">{c.ideaSub}</p>
+          <div className="v10-idea__points">
+            {c.ideaPoints.map((p) => (
+              <div className="v10-idea__point v5-reveal" key={p.title}>
+                <span className="v10-pic" aria-hidden="true">
+                  <Icon name={p.icon} size={15} />
+                </span>
+                <div>
+                  <h3>{p.title}</h3>
+                  <p>{p.desc}</p>
+                </div>
+              </div>
+            ))}
+          </div>
         </div>
-        <div className="v5-turn__steps">
-          {c.turnSteps.map((s, i) => (
-            <article className="v5-turn__step v5-reveal" key={s.title}>
-              <span className="v5-turn__step-num">0{i + 1}</span>
-              <h3>{s.title}</h3>
-              <p>{s.desc}</p>
-            </article>
-          ))}
+        <div className="v5-reveal">
+          <SkillCard />
         </div>
       </div>
     </section>
   );
 }
 
-function Moat({ c }: { c: Copy }) {
+function Compare({ c }: { c: Copy }) {
   return (
-    <section className="v5-act v5-moat" id="moat" data-screen-label="moat">
-      <div className="v5-wrap v5-moat__inner">
-        <p className="v5-act__num">{c.moatNum}</p>
-        <h2 className="v5-reveal">
-          {c.moatTitlePre}
-          <span className="v5-mark v5-mark--lit">{c.moatTitleMark}</span>
-        </h2>
-        <p className="v5-act__sub v5-moat__lead v5-reveal">{c.moatSub}</p>
-        <div className="v5-moat__cols">
-          {c.moatCols.map((col) => (
-            <div className="v5-moat__col v5-reveal" key={col.title}>
-              <h3>{col.title}</h3>
-              <p>{col.desc}</p>
+    <section className="v10-sec" id="difference" data-screen-label="the-difference">
+      <div className="v10-wrap">
+        <p className="v10-kick">{c.diffNum}</p>
+        <h2 className="v10-h2 v5-reveal">{c.diffTitle}</h2>
+        <div className="v10-cmp">
+          <div className="v5-reveal">
+            <p className="v10-cmp__label">{c.diffWithoutLabel}</p>
+            <div className="v10-cmp__card">
+              <div className="v10-cmp__you">{c.diffYou}</div>
+              <div className="v10-cmp__ai">{c.diffWithoutAi}</div>
             </div>
-          ))}
+            <p className="v10-cmp__cap">{c.diffWithoutCap}</p>
+          </div>
+          <div className="v5-reveal">
+            <p className="v10-cmp__label v10-cmp__label--good">{c.diffWithLabel}</p>
+            <div className="v10-cmp__card v10-cmp__card--good">
+              <div className="v10-cmp__you">{c.diffYou}</div>
+              <div className="v10-cmp__ai v10-cmp__ai--good">
+                <span className="v10-cmp__skill">
+                  <Icon name="zap" size={11} /> {c.diffWithChip}
+                </span>
+                <span>{c.diffWithAi1}</span>
+                <span>{c.diffWithAi2}</span>
+              </div>
+            </div>
+            <p className="v10-cmp__cap">{c.diffWithCap}</p>
+          </div>
         </div>
+        <p className="v10-punchline v5-reveal">
+          {c.diffPunchPre}
+          <span className="v10-hl v10-hl--lit">{c.diffPunchMark}</span>
+        </p>
       </div>
     </section>
   );
@@ -395,6 +464,7 @@ function PortalCapture({ c }: { c: Copy }) {
     <button
       type="button"
       className={"v6-reset-btn v5-portal__navitem" + (nav === k ? " v5-portal__navitem--active" : "")}
+      aria-current={nav === k ? "true" : undefined}
       onClick={() => setNav(k)}
     >
       <Icon name={icon} size={14} /> {label} <span className="v5-portal__navcount">{count}</span>
@@ -402,7 +472,7 @@ function PortalCapture({ c }: { c: Copy }) {
   );
 
   return (
-    <div className="v5-libframe v6-pframe v5-reveal" data-screen-label="portal-capture">
+    <div className="v10-libframe v6-pframe" data-screen-label="portal-capture">
       <div className="v5-portal">
         <aside className="v5-portal__side">
           <div className="v5-portal__org">
@@ -422,7 +492,7 @@ function PortalCapture({ c }: { c: Copy }) {
             <span className="v5-portal__title">Skills</span>
             <span className="v5-portal__count">{rows.length}</span>
             <span className="v5-portal__spacer"></span>
-            <Button variant="primary" size="sm">
+            <Button variant="primary" size="sm" onClick={() => { location.href = "/login"; }}>
               Share a skill
             </Button>
           </div>
@@ -432,6 +502,7 @@ function PortalCapture({ c }: { c: Copy }) {
                 key={k}
                 type="button"
                 className={"v6-reset-btn v5-portal__view" + (tab === k ? " v5-portal__view--active" : "")}
+                aria-current={tab === k ? "true" : undefined}
                 onClick={() => setTab(k)}
               >
                 {label}
@@ -465,6 +536,7 @@ function PortalCapture({ c }: { c: Copy }) {
               className={"v5-portal__crow" + (r.id === selected ? " v5-portal__crow--active" : "")}
               role="button"
               tabIndex={0}
+              aria-pressed={r.id === selected}
               onClick={() => setSelected(r.id)}
               onKeyDown={(e) => {
                 if (e.key === "Enter" || e.key === " ") {
@@ -483,10 +555,16 @@ function PortalCapture({ c }: { c: Copy }) {
               <span className="v5-portal__when">{r.when}</span>
             </div>
           ))}
+          {rows.length === 0 && (
+            <div className="v5-portal__cempty">
+              {nav === "mine" ? "Share your first skill to see it here." : "No skills match these filters."}
+            </div>
+          )}
         </div>
         <aside className="v6-pdrawer">
           <div className="v6-pdrawer__head">
-            <h3 className="v6-pdrawer__title">{sel.id}</h3>
+            <Avatar who={sel.who} tone={sel.a} sm />
+            <p className="v6-pdrawer__title">{sel.id}</p>
             <span className="v5-portal__scope">
               <Icon name={SCOPE_ICON[sel.scope]} size={11} />
               {sel.scopeLabel}
@@ -521,20 +599,24 @@ function PortalCapture({ c }: { c: Copy }) {
   );
 }
 
-function Payoff({ c }: { c: Copy }) {
+function Why({ c }: { c: Copy }) {
   return (
-    <section className="v5-act" id="payoff" data-screen-label="act-4-payoff">
-      <div className="v5-wrap">
-        <p className="v5-act__num">{c.payoffNum}</p>
-        <h2 className="v5-reveal">{c.payoffTitle}</h2>
-        <p className="v5-act__sub v5-reveal">{c.payoffSub}</p>
-        <PortalCapture c={c} />
-        <div className="v5-proofs">
-          {c.proofs.map((p, i) => (
-            <div className="v5-proof v5-reveal" key={p.title}>
-              <span className="v5-proof__num">0{i + 1}</span>
-              <h3>{p.title}</h3>
-              <p>{p.desc}</p>
+    <section className="v10-sec v10-sec--dim" id="why" data-screen-label="why-it-matters">
+      <div className="v10-wrap">
+        <p className="v10-kick v10-kick--center">{c.whyNum}</p>
+        <h2 className="v10-h2 v10-h2--center v5-reveal">
+          {c.whyTitlePre}
+          <span className="v10-hl v10-hl--lit">{c.whyTitleMark}</span>
+        </h2>
+        <p className="v10-sub v10-sub--center v5-reveal">{c.whySub}</p>
+        <div className="v10-why">
+          {c.whyCols.map((col) => (
+            <div className="v10-why__card v5-reveal" key={col.title}>
+              <span className="v10-pic" aria-hidden="true">
+                <Icon name={col.icon} size={16} />
+              </span>
+              <h3>{col.title}</h3>
+              <p>{col.desc}</p>
             </div>
           ))}
         </div>
@@ -543,19 +625,25 @@ function Payoff({ c }: { c: Copy }) {
   );
 }
 
-function Builders({ c }: { c: Copy }) {
+function Trust({ c }: { c: Copy }) {
   return (
-    <div className="v5-builders" id="devs" data-screen-label="for-developers">
-      <div className="v5-wrap v5-builders__inner">
-        <span className="v5-builders__text">
-          <strong>{c.buildersStrong}</strong>
-          {c.buildersText}
-        </span>
-        <span className="v5-builders__code">companion skills push · pull · sync</span>
-        <span className="v5-builders__spacer"></span>
-        <Button variant="secondary" size="sm" onClick={() => window.open(GITHUB_URL, "_blank", "noopener,noreferrer")}>
-          GitHub ↗
-        </Button>
+    <div className="v10-trust" data-screen-label="trust">
+      <div className="v10-wrap v10-trust__inner">
+        <h2 className="v10-trust__title">{c.trustTitle}</h2>
+        <p className="v10-trust__text">{c.trustText}</p>
+        <div className="v10-trust__dev">
+          <span className="v10-trust__devtext">
+            <strong>{c.trustDevStrong}</strong>
+            {c.trustDevText}
+          </span>
+          <button
+            type="button"
+            className="v10-btn v10-btn--ghost v10-btn--sm"
+            onClick={() => window.open(GITHUB_URL, "_blank", "noopener,noreferrer")}
+          >
+            GitHub ↗
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -563,23 +651,27 @@ function Builders({ c }: { c: Copy }) {
 
 function Finale({ c }: { c: Copy }) {
   return (
-    <section className="v5-finale" id="start" data-screen-label="finale">
-      <div className="v5-wrap">
-        <h2>{c.finaleTitle}</h2>
-        <p className="v5-finale__sub">{c.finaleSub}</p>
-        <div className="v5-finale__note">
-          <span className="v5-note__tape" aria-hidden="true"></span>
-          {c.finaleNote}
-        </div>
-        <div className="v5-finale__ctas">
-          <Link href="/login" className="cds-btn cds-btn--md cds-btn--primary">
+    <section className="v10-finale" id="start" data-screen-label="finale">
+      <div className="v10-finale__glow" aria-hidden="true"></div>
+      <div className="v10-wrap">
+        <h2 className="v10-h2 v10-h2--center">
+          {c.finaleTitlePre}
+          <span className="v10-hl v10-hl--lit">{c.finaleTitleMark}</span>
+        </h2>
+        <p className="v10-finale__sub">{c.finaleSub}</p>
+        <div className="v10-finale__ctas">
+          <Link href="/login" className="v10-btn v10-btn--primary v10-btn--lg">
             {c.finaleCta}
           </Link>
-          <Button variant="secondary" onClick={() => window.open(GITHUB_URL, "_blank", "noopener,noreferrer")}>
+          <button
+            type="button"
+            className="v10-btn v10-btn--ghost v10-btn--lg"
+            onClick={() => window.open(GITHUB_URL, "_blank", "noopener,noreferrer")}
+          >
             {c.github} ↗
-          </Button>
+          </button>
         </div>
-        <p className="v5-finale__small">{c.finaleSmall}</p>
+        <p className="v10-finale__small">{c.finaleSmall}</p>
       </div>
     </section>
   );
@@ -587,13 +679,13 @@ function Finale({ c }: { c: Copy }) {
 
 function Footer({ c }: { c: Copy }) {
   return (
-    <footer className="v5-footer">
-      <div className="v5-wrap v5-footer__inner">
+    <footer className="v10-footer">
+      <div className="v10-wrap v10-footer__inner">
         <span className="v5-brand">
-          <span className="v5-brand__wordmark v5-brand__wordmark--sm" role="img" aria-label="Companion" />
+          <span className="v10-wordmark v10-wordmark--sm" role="img" aria-label="Companion" />
         </span>
         <span>{c.footerBy}</span>
-        <span className="v5-footer__links">
+        <span className="v10-footer__links">
           <a href={GITHUB_URL} target="_blank" rel="noreferrer">
             GitHub ↗
           </a>
@@ -616,16 +708,16 @@ export function LandingPage() {
   useReveal();
 
   return (
-    <div className="v5-landing">
+    <div className="v10-landing">
       <Nav c={c} />
       <main>
         <Hero c={c} />
         <Ticker c={c} />
-        <Loss c={c} />
-        <Turn c={c} />
-        <Moat c={c} />
-        <Payoff c={c} />
-        <Builders c={c} />
+        <Problem c={c} />
+        <Idea c={c} />
+        <Compare c={c} />
+        <Why c={c} />
+        <Trust c={c} />
         <Finale c={c} />
       </main>
       <Footer c={c} />
