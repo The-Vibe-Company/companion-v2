@@ -19,15 +19,24 @@ export interface SkillListPath {
   label: string;
 }
 
-export interface SkillListGroup {
+interface SkillListDirectGroup {
   key: string;
-  kind: SkillListGroupKind;
+  kind: "direct";
+  path: string | null;
+  rows: GroupedSkillRow[];
+}
+
+interface SkillListSectionGroup {
+  key: string;
+  kind: Exclude<SkillListGroupKind, "direct">;
   path: string | null;
   label: string;
   icon: LabelIcon | "folder";
   color: LabelColor | null;
   rows: GroupedSkillRow[];
 }
+
+export type SkillListGroup = SkillListDirectGroup | SkillListSectionGroup;
 
 function pathDepth(path: string): number {
   return path.split("/").length;
@@ -112,7 +121,7 @@ export function groupSkillsByRoot(
   activeLabel: string | null = null,
 ): SkillListGroup[] {
   const appearance = new Map(labels.map((label) => [label.path, label]));
-  const roots = new Map<string, SkillListGroup>();
+  const roots = new Map<string, SkillListSectionGroup>();
   const scopedPaths = new Map(
     skills.map((skill) => [skill, mostSpecificPaths(pathsInLabelScope(skill.labels, activeLabel))]),
   );
@@ -120,17 +129,13 @@ export function groupSkillsByRoot(
     activeLabel !== null &&
     [...scopedPaths.values()].some((paths) => paths.some((path) => path.startsWith(`${activeLabel}/`)));
   const groupDepth = activeLabel ? pathDepth(activeLabel) + (hasScopedDescendants ? 1 : 0) : 1;
-  const activeAppearance = activeLabel ? appearance.get(activeLabel) : null;
-  const direct: SkillListGroup = {
+  const direct: SkillListDirectGroup = {
     key: `direct:${activeLabel ?? "root"}`,
     kind: "direct",
     path: activeLabel,
-    label: "Without subfolder",
-    icon: activeAppearance?.icon ?? "folder",
-    color: activeAppearance?.color ?? null,
     rows: [],
   };
-  const installed: SkillListGroup = {
+  const installed: SkillListSectionGroup = {
     key: "installed",
     kind: "installed",
     path: null,
@@ -139,7 +144,7 @@ export function groupSkillsByRoot(
     color: null,
     rows: [],
   };
-  const unfiled: SkillListGroup = {
+  const unfiled: SkillListSectionGroup = {
     key: "unfiled",
     kind: "unfiled",
     path: null,
@@ -160,7 +165,7 @@ export function groupSkillsByRoot(
     const pathsByRoot = new Map<string, string[]>();
     let filedDirectly = false;
     for (const path of specificPaths) {
-      if (activeLabel && hasScopedDescendants && path === activeLabel) {
+      if (activeLabel && path === activeLabel) {
         filedDirectly = true;
         direct.rows.push({
           skill,

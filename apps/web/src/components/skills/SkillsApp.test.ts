@@ -697,9 +697,10 @@ describe("SkillsApp initial route", () => {
 
     expect(window.location.search).toContain("view=label&label=drafts");
     expect(Array.from(container.querySelectorAll(".cgroup__name"), (node) => node.textContent)).toEqual([
-      "Without subfolder",
       "research",
     ]);
+    expect(container.textContent).not.toContain("Without subfolder");
+    expect(container.querySelector('[data-skill-slug="draft-note"]')).not.toBeNull();
     expect(container.querySelectorAll('[data-skill-slug="research-digest"]')).toHaveLength(1);
     expect(container.querySelectorAll(".crow--subfolder")).toHaveLength(0);
   });

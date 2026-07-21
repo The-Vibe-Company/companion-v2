@@ -301,9 +301,9 @@ stored locally per workspace and library; searching temporarily reveals matching
 Selecting a sidebar folder still rolls up skills from its descendants, while group occurrences, visible
 paths, and inherited folder icons are restricted to that selected branch; assignments under other roots
 do not reappear in the scoped view. Grouped sections advance to the immediate subfolder level, with a
-leading `Without subfolder` section for skills filed directly in the selected folder; this keeps direct
-and immediate-child rows aligned. In unscoped root sections, direct rows lead and the remaining rows are
-clustered by immediate subfolder, preserving the selected sort inside each cluster. All grouped rows use
+leading headerless block of plain rows for skills filed directly in the selected folder. These rows are
+not collapsible. In unscoped root sections, direct rows lead and the remaining rows are clustered by
+immediate subfolder, preserving the selected sort inside each cluster. All grouped rows use
 the same horizontal inset regardless of relative path depth; ordering and quiet path metadata express the
 hierarchy instead of additional indentation. Flat mode renders one row per skill with full folder chips from that
 branch. Both modes use the literal monospace slug as
