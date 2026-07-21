@@ -65,7 +65,10 @@ describe("skill list grouping", () => {
       skill("digest", { labels: ["marketing", "marketing/reporting", "marketing/seo", "operations"] }),
     ], labels, "org");
 
-    expect(groups.map((group) => group.label)).toEqual(["Marketing", "Operations"]);
+    expect(groups.map((group) => (group.kind === "direct" ? null : group.label))).toEqual([
+      "Marketing",
+      "Operations",
+    ]);
     expect(groups[0]?.rows).toHaveLength(1);
     expect(groups[0]?.rows[0]?.relativePaths).toEqual([
       { path: "marketing/reporting", label: "Reporting" },
@@ -102,13 +105,13 @@ describe("skill list grouping", () => {
       "marketing",
     );
 
-    expect(groups.map((group) => group.label)).toEqual(["SEO"]);
+    expect(groups.map((group) => (group.kind === "direct" ? null : group.label))).toEqual(["SEO"]);
     expect(groups[0]?.rows).toHaveLength(1);
     expect(groups[0]?.rows[0]?.relativePaths).toEqual([]);
     expect(groups[0]?.rows[0]?.icon).toEqual({ name: "globe", color: null });
   });
 
-  it("groups a filtered view by subfolder and aligns direct skills in a leading utility section", () => {
+  it("groups a filtered view by subfolder and keeps direct skills in a leading headerless block", () => {
     const groups = groupSkillsByRoot(
       [
         skill("campaign", { labels: ["marketing"] }),
@@ -120,13 +123,29 @@ describe("skill list grouping", () => {
       "marketing",
     );
 
-    expect(groups.map((group) => group.label)).toEqual(["Without subfolder", "Reporting", "SEO"]);
+    expect(groups.map((group) => group.kind)).toEqual(["direct", "folder", "folder"]);
     expect(groups.map((group) => group.key)).toEqual([
       "direct:marketing",
       "folder:marketing/reporting",
       "folder:marketing/seo",
     ]);
+    expect("label" in groups[0]!).toBe(false);
     expect(groups.every((group) => group.rows.every((row) => row.relativePaths.length === 0))).toBe(true);
+    expect(groups[0]?.rows[0]?.skill.id).toBe("campaign");
+  });
+
+  it("keeps exact-path rows headerless when the selected folder has no visible descendants", () => {
+    const groups = groupSkillsByRoot(
+      [skill("campaign", { labels: ["marketing"] })],
+      labels,
+      "org",
+      "marketing",
+    );
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0]?.kind).toBe("direct");
+    expect(groups[0]?.key).toBe("direct:marketing");
+    expect("label" in groups[0]!).toBe(false);
     expect(groups[0]?.rows[0]?.skill.id).toBe("campaign");
   });
 
@@ -138,7 +157,7 @@ describe("skill list grouping", () => {
       "marketing",
     );
 
-    expect(groups.map((group) => group.label)).toEqual(["Reporting"]);
+    expect(groups.map((group) => (group.kind === "direct" ? null : group.label))).toEqual(["Reporting"]);
     expect(groups[0]?.rows[0]?.relativePaths).toEqual([
       { path: "marketing/reporting/weekly", label: "Weekly" },
     ]);
@@ -154,7 +173,8 @@ describe("skill list grouping", () => {
       "org",
     );
 
-    expect(groups[0]?.label).toBe("Sales / Marketing");
+    expect(groups[0]?.kind).toBe("folder");
+    expect(groups[0]?.kind === "direct" ? null : groups[0]?.label).toBe("Sales / Marketing");
     expect(groups[0]?.rows[0]?.relativePaths).toEqual([{ path: "sales/seo", label: "SEO" }]);
   });
 

@@ -535,6 +535,11 @@ export function ListView({
         </div>
         {groupBy === "folder"
           ? groups.map((group) => {
+              if (group.kind === "direct") {
+                return group.rows.map((row) => (
+                  <SkillRow key={`${group.key}:${row.skill.id}`} row={row} flat={false} {...rowProps} />
+                ));
+              }
               const searching = !!q.trim();
               const isCollapsed = !searching && collapsed.has(group.key);
               const headingId = `skill-group-${group.key.replace(/[^a-z0-9-]/gi, "-")}`;

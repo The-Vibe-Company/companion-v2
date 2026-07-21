@@ -317,7 +317,7 @@ describe("ListView grouped rhythm", () => {
     expect(flat).not.toContain('aria-label="Folder: operations"');
   });
 
-  it("uses a Without subfolder separator so direct and child rows share the same alignment", () => {
+  it("renders direct rows before subfolder sections without a heading or collapse control", () => {
     const html = render(
       [
         skill({ id: "campaign", labels: ["marketing"] }),
@@ -327,10 +327,27 @@ describe("ListView grouped rhythm", () => {
     );
 
     expect(html).toContain('<span class="cgroup__name">SEO</span>');
-    expect(html).toContain('<span class="cgroup__name">Without subfolder</span>');
-    expect(html.indexOf(">Without subfolder<")).toBeLessThan(html.indexOf(">SEO<"));
+    expect(html).not.toContain("Without subfolder");
+    expect(html.indexOf('data-skill-slug="campaign"')).toBeLessThan(html.indexOf(">SEO<"));
+    expect(html).not.toContain("skill-group-direct-marketing");
     expect(html.match(/class="crow"/g)).toHaveLength(2);
     expect(html).not.toContain("crow--subfolder");
+  });
+
+  it("keeps direct search results headerless when descendant rows stop matching", async () => {
+    const container = await mount(
+      [
+        skill({ id: "campaign", labels: ["marketing"] }),
+        skill({ id: "digest", labels: ["marketing/seo"] }),
+      ],
+      { labels, groupBy: "folder", activeLabel: "marketing" },
+    );
+
+    setInputValue(container.querySelector('input[type="search"]') as HTMLInputElement, "campaign");
+
+    expect(container.querySelector('[data-skill-slug="campaign"]')).not.toBeNull();
+    expect(container.querySelector('[data-skill-slug="digest"]')).toBeNull();
+    expect(container.querySelector(".cgroup__heading")).toBeNull();
   });
 
   it("puts installed and unfiled personal skills in dedicated trailing groups", () => {
