@@ -12,13 +12,20 @@ import hashlib
 import json
 import os
 import sys
+import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from functools import cmp_to_key
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
+
+
+class TokenRefreshUnavailable(Exception):
+    """The supplied PAT is not eligible for automatic refresh."""
 
 
 def fail(message: str) -> None:
@@ -101,6 +108,34 @@ def api_put_json(base: str, token: str, path: str, payload: dict[str, Any] | Non
         fail(f"PUT {url} failed: {exc.reason}")
 
 
+def api_refresh_token(base: str, token: str) -> dict[str, Any]:
+    """Check or refresh one PAT without exposing it in failures."""
+    url = f"{base.rstrip('/')}/tokens/refresh"
+    request = urllib.request.Request(
+        url,
+        data=b"{}",
+        method="POST",
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        # Every ineligible credential deliberately receives the same response. Do not include its
+        # body because future server diagnostics must never risk echoing credential material.
+        if exc.code == 401:
+            raise TokenRefreshUnavailable("Companion credentials need to be refreshed from a new Use prompt") from None
+        fail(f"POST {url} failed with HTTP {exc.code}")
+    except urllib.error.URLError as exc:
+        fail(f"POST {url} failed: {exc.reason}")
+
+    if not isinstance(payload, dict) or payload.get("status") not in {"current", "rotated"}:
+        fail(f"POST {url} returned an unexpected response")
+    if payload["status"] == "rotated" and not isinstance(payload.get("token"), str):
+        fail(f"POST {url} returned a rotated response without a token")
+    return payload
+
+
 def companion_home() -> Path:
     """Return ~/.companion, honoring COMPANION_HOME for tests and overrides."""
     override = os.environ.get("COMPANION_HOME")
@@ -109,12 +144,12 @@ def companion_home() -> Path:
     return Path.home() / ".companion"
 
 
-def resolve_credentials() -> tuple[str, str, str | None]:
+def resolve_credentials_with_source() -> tuple[str, str, str | None, str]:
     api_url = os.environ.get("COMPANION_API_URL")
     token = os.environ.get("COMPANION_TOKEN")
     workspace_id = os.environ.get("COMPANION_WORKSPACE_ID")
     if api_url and token:
-        return api_url, token, workspace_id
+        return api_url, token, workspace_id, "environment"
 
     credentials_path = companion_home() / "credentials.json"
     credentials = load_json(credentials_path)
@@ -132,13 +167,127 @@ def resolve_credentials() -> tuple[str, str, str | None]:
         token = entry.get("token")
         if not api_url or not token:
             fail(f"credentials entry {active} is missing apiUrl or token")
-        return str(api_url), str(token), str(active)
+        return str(api_url), str(token), str(active), "credentials_file"
 
     api_url = credentials.get("apiUrl")
     token = credentials.get("token")
     if api_url and token:
-        return str(api_url), str(token), workspace_id
+        return str(api_url), str(token), workspace_id, "credentials_file"
     fail("credentials.json is missing apiUrl or token")
+
+
+def resolve_credentials() -> tuple[str, str, str | None]:
+    api_url, token, workspace_id, _source = resolve_credentials_with_source()
+    return api_url, token, workspace_id
+
+
+def _atomic_json_write(path: Path, payload: dict[str, Any]) -> None:
+    """Write private JSON through a same-directory temp file and atomic replacement."""
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    temp_path = Path(temp_name)
+    try:
+        if hasattr(os, "fchmod"):
+            os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(payload, stream, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp_path, path)
+        os.chmod(path, 0o600)
+    except BaseException:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        temp_path.unlink(missing_ok=True)
+        raise
+
+
+@contextmanager
+def credentials_write_lock(timeout_seconds: float = 10.0) -> Iterator[None]:
+    """Serialize credential read-modify-write cycles across bootstrap and Use prompt processes."""
+    directory = companion_home()
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    lock_path = directory / ".credentials.lock"
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        try:
+            lock_path.mkdir(mode=0o700)
+            break
+        except FileExistsError:
+            try:
+                stale = time.time() - lock_path.stat().st_mtime > 300
+                if stale:
+                    lock_path.rmdir()
+                    continue
+            except FileNotFoundError:
+                continue
+            except OSError:
+                pass
+            if time.monotonic() >= deadline:
+                fail("timed out waiting to update credentials.json")
+            time.sleep(0.05)
+    try:
+        yield
+    finally:
+        try:
+            lock_path.rmdir()
+        except FileNotFoundError:
+            pass
+
+
+def preflight_credentials_write() -> None:
+    """Prove the credentials directory accepts a private temp file before server-side rotation."""
+    path = companion_home() / "credentials.json"
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.preflight.", suffix=".tmp", dir=path.parent)
+    try:
+        if hasattr(os, "fchmod"):
+            os.fchmod(fd, 0o600)
+    finally:
+        os.close(fd)
+        Path(temp_name).unlink(missing_ok=True)
+
+
+def store_refreshed_credential(
+    api_url: str,
+    workspace_id: str | None,
+    previous_token: str,
+    replacement_token: str,
+) -> None:
+    """Replace only the selected credential entry, preserving every other workspace."""
+    path = companion_home() / "credentials.json"
+    credentials = load_json(path)
+    if not isinstance(credentials, dict):
+        fail("credentials.json disappeared before the refreshed token could be saved")
+
+    if credentials.get("schemaVersion") == 2 and isinstance(credentials.get("workspaces"), dict):
+        active = workspace_id or credentials.get("activeWorkspaceId")
+        entry = credentials["workspaces"].get(active) if active else None
+        if not active or not isinstance(entry, dict):
+            fail("the active workspace credential changed during token refresh")
+        if entry.get("apiUrl") != api_url or entry.get("token") != previous_token:
+            fail("the active workspace credential changed during token refresh")
+        next_credentials = dict(credentials)
+        next_workspaces = dict(credentials["workspaces"])
+        next_workspaces[str(active)] = {
+            **entry,
+            "token": replacement_token,
+            "updatedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        }
+        next_credentials["workspaces"] = next_workspaces
+    else:
+        if credentials.get("apiUrl") != api_url or credentials.get("token") != previous_token:
+            fail("the legacy credential changed during token refresh")
+        next_credentials = {
+            **credentials,
+            "token": replacement_token,
+            "updatedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        }
+
+    _atomic_json_write(path, next_credentials)
 
 
 def parse_semver(version: str | None) -> tuple[int, int, int, list[str]] | None:

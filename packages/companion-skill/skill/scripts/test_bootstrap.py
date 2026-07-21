@@ -7,6 +7,7 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import unittest
 import zipfile
 from contextlib import redirect_stderr
@@ -117,6 +118,24 @@ class BootstrapTests(unittest.TestCase):
         with mock.patch.object(bootstrap, "api_get", side_effect=fake_get):
             return bootstrap.collect_context(**kwargs)
 
+    def write_credentials(self, token="cmp_pat_OLD", extra_workspaces=None):
+        credentials = {
+            "schemaVersion": 2,
+            "activeWorkspaceId": "ws-1",
+            "workspaces": {
+                "ws-1": {
+                    "apiUrl": "https://api.example/v1",
+                    "token": token,
+                    "updatedAt": "2026-01-01T00:00:00Z",
+                },
+                **(extra_workspaces or {}),
+            },
+        }
+        path = self.home / "credentials.json"
+        path.write_text(json.dumps(credentials), encoding="utf-8")
+        os.chmod(path, 0o600)
+        return path
+
     def test_missing_credentials_reports_error_without_token(self):
         with mock.patch.dict(os.environ, {"COMPANION_API_URL": "", "COMPANION_TOKEN": "", "COMPANION_WORKSPACE_ID": ""}):
             with redirect_stderr(StringIO()):
@@ -135,6 +154,141 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(1, len(ctx["skills"]["updates"]))
         self.assertIn({"kind": "review_skill_updates", "count": 1}, ctx["actions"])
         self.assertNotIn("cmp_pat_SECRET", json.dumps(ctx))
+
+    def test_file_credential_is_checked_without_rewriting_an_active_token(self):
+        path = self.write_credentials()
+        before = path.read_bytes()
+        with (
+            mock.patch.dict(
+                os.environ,
+                {"COMPANION_API_URL": "", "COMPANION_TOKEN": "", "COMPANION_WORKSPACE_ID": ""},
+            ),
+            mock.patch.object(
+                bootstrap,
+                "api_refresh_token",
+                return_value={
+                    "status": "current",
+                    "scopes": ["skills:read"],
+                    "expires_at": "2026-08-01T00:00:00.000Z",
+                },
+            ),
+        ):
+            ctx = self.run_with_api(skill_row(integrity=self.integrity_for_local_files()))
+        self.assertEqual("current", ctx["credentials"]["status"])
+        self.assertEqual(before, path.read_bytes())
+
+    def test_expired_file_credential_rotates_atomically_and_preserves_other_workspaces(self):
+        path = self.write_credentials(
+            extra_workspaces={
+                "ws-2": {
+                    "apiUrl": "https://other.example/v1",
+                    "token": "cmp_pat_OTHER",
+                    "updatedAt": "2026-01-02T00:00:00Z",
+                }
+            }
+        )
+        with (
+            mock.patch.dict(
+                os.environ,
+                {"COMPANION_API_URL": "", "COMPANION_TOKEN": "", "COMPANION_WORKSPACE_ID": ""},
+            ),
+            mock.patch.object(
+                bootstrap,
+                "api_refresh_token",
+                return_value={
+                    "status": "rotated",
+                    "id": "replacement-id",
+                    "token": "cmp_pat_REPLACEMENT",
+                    "prefix": "cmp_pat_REPLAC",
+                    "scopes": ["skills:read"],
+                    "expires_at": "2026-10-19T00:00:00.000Z",
+                },
+            ),
+        ):
+            ctx = self.run_with_api(skill_row(integrity=self.integrity_for_local_files()))
+        stored = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual("cmp_pat_REPLACEMENT", stored["workspaces"]["ws-1"]["token"])
+        self.assertEqual("cmp_pat_OTHER", stored["workspaces"]["ws-2"]["token"])
+        self.assertEqual(0o600, path.stat().st_mode & 0o777)
+        self.assertEqual("rotated", ctx["credentials"]["status"])
+        self.assertNotIn("cmp_pat_REPLACEMENT", json.dumps(ctx))
+        self.assertNotIn("cmp_pat_OLD", json.dumps(ctx))
+
+    def test_credentials_lock_serializes_read_modify_write_cycles(self):
+        acquired = threading.Event()
+
+        def wait_for_lock():
+            with bootstrap.credentials_write_lock():
+                acquired.set()
+
+        with bootstrap.credentials_write_lock():
+            waiter = threading.Thread(target=wait_for_lock)
+            waiter.start()
+            self.assertFalse(acquired.wait(0.1))
+
+        waiter.join(timeout=2)
+        self.assertTrue(acquired.is_set())
+        self.assertFalse((self.home / ".credentials.lock").exists())
+
+    def test_ineligible_file_credential_requests_a_fresh_use_prompt_without_leaking_it(self):
+        self.write_credentials()
+        with (
+            mock.patch.dict(
+                os.environ,
+                {"COMPANION_API_URL": "", "COMPANION_TOKEN": "", "COMPANION_WORKSPACE_ID": ""},
+            ),
+            mock.patch.object(
+                bootstrap,
+                "api_refresh_token",
+                side_effect=bootstrap.TokenRefreshUnavailable("Companion credentials need to be refreshed from a new Use prompt"),
+            ),
+        ):
+            ctx = bootstrap.collect_context()
+        self.assertEqual("manual_refresh_required", ctx["credentials"]["status"])
+        self.assertIn(
+            {"kind": "refresh_credentials_manually", "source": "credentials_file"},
+            ctx["actions"],
+        )
+        self.assertNotIn("cmp_pat_OLD", json.dumps(ctx))
+
+    def test_expired_environment_credential_is_never_rotated_or_persisted(self):
+        with (
+            mock.patch.object(bootstrap, "api_refresh_token") as refresh,
+            mock.patch.object(bootstrap, "api_get", side_effect=SystemExit("GET failed with HTTP 401")),
+        ):
+            ctx = bootstrap.collect_context()
+        refresh.assert_not_called()
+        self.assertEqual("manual_refresh_required", ctx["credentials"]["status"])
+        self.assertIn(
+            {"kind": "refresh_credentials_manually", "source": "environment"},
+            ctx["actions"],
+        )
+
+    def test_post_rotation_write_failure_stops_without_exposing_the_replacement(self):
+        self.write_credentials()
+        with (
+            mock.patch.dict(
+                os.environ,
+                {"COMPANION_API_URL": "", "COMPANION_TOKEN": "", "COMPANION_WORKSPACE_ID": ""},
+            ),
+            mock.patch.object(
+                bootstrap,
+                "api_refresh_token",
+                return_value={
+                    "status": "rotated",
+                    "id": "replacement-id",
+                    "token": "cmp_pat_REPLACEMENT",
+                    "prefix": "cmp_pat_REPLAC",
+                    "scopes": ["skills:read"],
+                    "expires_at": "2026-10-19T00:00:00.000Z",
+                },
+            ),
+            mock.patch.object(bootstrap, "store_refreshed_credential", side_effect=OSError("read-only file")),
+        ):
+            ctx = bootstrap.collect_context()
+        self.assertTrue(ctx["errors"])
+        self.assertIn("fresh Companion Use prompt", ctx["errors"][0]["message"])
+        self.assertNotIn("cmp_pat_REPLACEMENT", json.dumps(ctx))
 
     def test_unexpected_skill_list_shape_reports_error(self):
         def fake_get(_api_url, _token, path):

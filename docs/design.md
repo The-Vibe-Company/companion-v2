@@ -241,7 +241,17 @@ Companion-reported install state; exact disk inventory remains local in `~/.comp
 `api_tokens` holds scoped personal access tokens for programmatic publish/install.
 Only the `sha256` `token_hash` is stored (the plaintext `cmp_pat_…` is shown once); each row carries
 `scopes` (`skills:read` / `skills:write` / `secrets:read` / `secrets:write`), an `expires_at`
-(90-day default), and `revoked_at`. `secrets:write` gives a PAT the same metadata and binding mutation
+(90-day default), and `revoked_at`. `POST /v1/tokens/refresh` is the single expired-PAT exception to
+normal authentication: it leaves active tokens unchanged and lets an unrevoked token expired no more
+than 30 days ago create exactly one 90-day successor with the same user, organization, name, and
+scopes. A narrow pre-tenant `SECURITY DEFINER` lookup verifies current membership and locks both the
+old token and membership rows; successor insertion, old-token revocation, and a value-free
+`api_token.refresh` audit event then
+commit in one tenant-scoped transaction. Unknown, revoked, stale, and departed-user credentials are
+indistinguishable. The bundled bootstrap uses this only for file-backed credentials and atomically
+updates the active workspace entry under the same inter-process lock used by the **Use** prompt;
+environment-provided tokens require manual replacement.
+`secrets:write` gives a PAT the same metadata and binding mutation
 capabilities as its signed-in user: create, rename, rotate, change audience/recipients, bind/unbind,
 manage suggestions, and delete. The service still enforces workspace membership, secret
 ownership/audience access, skill access, and slot identity. Plaintext remains write-only except
@@ -661,7 +671,9 @@ accepted **only** on the PAT-enabled skills endpoints (`GET /v1/skills`, `GET /v
 `GET /v1/skills/:slug/versions/:version/files`, the skills install/dependency/archive/share/label
 surfaces, `GET /v1/orgs/current/skill-naming-policy`, the `/v1/local-skills*` endpoints, and the
 Secrets metadata, configuration, retrieval, vault, binding, and suggestion routes listed above); every
-other endpoint rejects tokens. Token requests are scope-gated (`skills:write` to publish/create/rename/mutate,
+other endpoint rejects tokens. The one recovery-only exception is `POST /v1/tokens/refresh`, which
+reads the bearer directly because an eligible token may already be expired and cannot authenticate
+elsewhere. Token requests are scope-gated (`skills:write` to publish/create/rename/mutate,
 `skills:read` to read/download and read the org skill-naming policy, `secrets:read` to read authorized
 secret metadata and perform preflight/grant/redemption, `secrets:write` for every Secrets mutation).
 Reading the local-skills catalog

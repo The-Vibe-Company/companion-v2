@@ -9,9 +9,12 @@ export type TokenScope = z.infer<typeof tokenScopeSchema>;
 
 export const TOKEN_SCOPES: readonly TokenScope[] = ["skills:read", "skills:write", "secrets:read", "secrets:write"] as const;
 
+/** A non-empty, validated set of capabilities carried by a personal access token. */
+export const tokenScopesSchema = z.array(tokenScopeSchema).min(1);
+
 /** Body of `POST /v1/tokens` — request a scoped token. */
 export const issueTokenInputSchema = z.object({
-  scopes: z.array(tokenScopeSchema).min(1),
+  scopes: tokenScopesSchema,
   name: z.string().min(1).max(120).optional(),
 });
 export type IssueTokenInput = z.infer<typeof issueTokenInputSchema>;
@@ -21,10 +24,26 @@ export const issuedTokenSchema = z.object({
   id: z.string(),
   token: z.string().startsWith(API_TOKEN_PREFIX),
   prefix: z.string().startsWith(API_TOKEN_PREFIX),
-  scopes: z.array(tokenScopeSchema).min(1),
+  scopes: tokenScopesSchema,
   expires_at: z.string(),
 });
 export type IssuedToken = z.infer<typeof issuedTokenSchema>;
+
+/**
+ * Response of `POST /v1/tokens/refresh`.
+ *
+ * An active token is left untouched and its plaintext is never returned. An eligible expired
+ * token is replaced once; only that branch returns the successor plaintext.
+ */
+export const refreshTokenResponseSchema = z.discriminatedUnion("status", [
+  z.object({
+    status: z.literal("current"),
+    scopes: tokenScopesSchema,
+    expires_at: z.string(),
+  }),
+  issuedTokenSchema.extend({ status: z.literal("rotated") }),
+]);
+export type RefreshTokenResponse = z.infer<typeof refreshTokenResponseSchema>;
 
 /** A stored token's metadata — never includes the secret. */
 export const apiTokenRowSchema = z.object({
@@ -33,7 +52,7 @@ export const apiTokenRowSchema = z.object({
   user_id: z.string(),
   name: z.string(),
   prefix: z.string().startsWith(API_TOKEN_PREFIX),
-  scopes: z.array(tokenScopeSchema).min(1),
+  scopes: tokenScopesSchema,
   expires_at: z.string(),
   last_used_at: z.string().nullable(),
   revoked_at: z.string().nullable(),

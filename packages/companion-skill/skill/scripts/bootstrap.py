@@ -25,11 +25,16 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from bootstrap_integrity import INTEGRITY_BASELINE_FILE, compare_integrity, local_companion_version, sha256_file  # noqa: E402,F401
 from bootstrap_update import companion_auto_update_result, install_companion_update  # noqa: E402
 from companion_lib import (  # noqa: E402
+    TokenRefreshUnavailable,
     api_get,
+    api_refresh_token,
     compare_semver,
+    credentials_write_lock,
     load_local_inventory,
     load_project_inventory,
-    resolve_credentials,
+    preflight_credentials_write,
+    resolve_credentials_with_source,
+    store_refreshed_credential,
     status_for_local,
 )
 
@@ -142,6 +147,7 @@ def collect_context(auto_update: bool = False, agent: str = "companion-bootstrap
         "schemaVersion": 1,
         "checkedAt": now_iso(),
         "workspace": {"id": None, "apiUrl": None},
+        "credentials": {"source": None, "status": "unknown", "expiresAt": None},
         "companion": {
             "key": "companion",
             "skillDir": str(skill_dir),
@@ -157,9 +163,45 @@ def collect_context(auto_update: bool = False, agent: str = "companion-bootstrap
         "errors": [],
     }
 
+    credential_source: str | None = None
     try:
-        api_url, token, workspace_id = resolve_credentials()
+        api_url, token, workspace_id, credential_source = resolve_credentials_with_source()
         context["workspace"] = {"id": workspace_id, "apiUrl": api_url}
+        context["credentials"]["source"] = credential_source
+
+        if credential_source == "credentials_file":
+            # The server revokes an expired token in the same transaction that creates its
+            # replacement. Serialize the whole read/check/refresh/write cycle with the Use prompt,
+            # then re-read inside the lock so a waiter never overwrites a newer workspace entry.
+            with credentials_write_lock():
+                locked_api_url, locked_token, locked_workspace_id, locked_source = resolve_credentials_with_source()
+                if locked_source != "credentials_file" or locked_workspace_id != workspace_id:
+                    raise SystemExit("the active workspace credential changed during token refresh")
+                api_url, token = locked_api_url, locked_token
+                context["workspace"]["apiUrl"] = api_url
+                preflight_credentials_write()
+                try:
+                    refresh = api_refresh_token(api_url, token)
+                except TokenRefreshUnavailable as exc:
+                    context["credentials"]["status"] = "manual_refresh_required"
+                    context["actions"].append({"kind": "refresh_credentials_manually", "source": credential_source})
+                    raise SystemExit(str(exc)) from None
+                context["credentials"].update(
+                    {"status": refresh["status"], "expiresAt": refresh.get("expires_at")}
+                )
+                if refresh["status"] == "rotated":
+                    replacement = str(refresh["token"])
+                    try:
+                        store_refreshed_credential(api_url, workspace_id, token, replacement)
+                    except BaseException:
+                        raise SystemExit(
+                            "a replacement token was issued but credentials.json could not be updated; "
+                            "copy a fresh Companion Use prompt"
+                        ) from None
+                    token = replacement
+        else:
+            context["credentials"]["status"] = "environment_unmanaged"
+
         local_skill = api_get(api_url, token, "/local-skills/companion")
         if not workspace_id:
             workspace_id = local_skill.get("workspaceId")
@@ -204,6 +246,10 @@ def collect_context(auto_update: bool = False, agent: str = "companion-bootstrap
         except BaseException as exc:
             context["errors"].append({"message": redact_error(exc)})
     except SystemExit as exc:
+        if credential_source == "environment" and "HTTP 401" in str(exc):
+            context["credentials"]["status"] = "manual_refresh_required"
+            if not any(action.get("kind") == "refresh_credentials_manually" for action in context["actions"]):
+                context["actions"].append({"kind": "refresh_credentials_manually", "source": credential_source})
         context["errors"].append({"message": redact_error(exc)})
     except BaseException as exc:  # keep bootstrap output useful even on unexpected local failures
         context["errors"].append({"message": redact_error(exc)})
@@ -213,10 +259,12 @@ def collect_context(auto_update: bool = False, agent: str = "companion-bootstrap
 
 def print_summary(context: dict[str, Any]) -> None:
     companion = context["companion"]
+    credentials = context["credentials"]
     integrity = context["integrity"]
     skills = context["skills"]
     print(f"Workspace: {context['workspace'].get('id') or 'unknown'}")
     print(f"API: {context['workspace'].get('apiUrl') or 'unknown'}")
+    print(f"Credentials: {credentials.get('status')} ({credentials.get('source') or 'unknown source'})")
     print(
         "Companion: "
         f"local {companion.get('localVersion') or 'unknown'} / "

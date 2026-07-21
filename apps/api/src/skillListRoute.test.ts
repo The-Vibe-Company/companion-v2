@@ -5,6 +5,7 @@ process.env.COMPANION_SECRETS_MASTER_KEY ??= Buffer.alloc(32, 7).toString("base6
 const serviceMocks = vi.hoisted(() => {
   const noop = vi.fn(async () => undefined);
   return {
+    ApiTokenRefreshError: class ApiTokenRefreshError extends Error {},
     acceptInvitation: noop,
     addComment: noop,
     assertCommentTarget: noop,
@@ -89,6 +90,7 @@ const serviceMocks = vi.hoisted(() => {
     redeemSecretRetrievalGrant: vi.fn(),
     ensureUserBootstrap: noop,
     resolveApiToken: vi.fn(),
+    refreshApiToken: vi.fn(),
     resolveDependencyReferences: vi.fn(async (input: { slugs: string[] }) =>
       input.slugs.map((slug) => ({ declaredSlug: slug, slug, skillId: null })),
     ),

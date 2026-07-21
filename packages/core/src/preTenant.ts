@@ -98,6 +98,33 @@ export async function resolvePreTenantApiToken(
   return resultRows<PreTenantApiTokenRow>(result)[0] ?? null;
 }
 
+export interface PreTenantRefreshableApiTokenRow {
+  token_id: string;
+  org_id: string;
+  user_id: string;
+  token_name: string;
+  scopes: unknown;
+  expires_at: string;
+  is_expired: boolean;
+}
+
+/**
+ * Lock a PAT for the dedicated refresh flow before a tenant is known.
+ *
+ * The SECURITY DEFINER function applies the fixed 30-day recovery window, rejects revoked tokens
+ * and departed users, and never returns the token hash. Its row lock remains held by the caller's
+ * transaction so only one concurrent request can replace an expired token.
+ */
+export async function lockPreTenantApiTokenForRefresh(
+  database: Db,
+  tokenHash: string,
+): Promise<PreTenantRefreshableApiTokenRow | null> {
+  const result = await database.execute(sql`
+    select * from companion_lock_api_token_for_refresh(${tokenHash})
+  `);
+  return resultRows<PreTenantRefreshableApiTokenRow>(result)[0] ?? null;
+}
+
 export interface PreTenantSkillPreviewRow {
   slug: string;
   display_name: string | null;
