@@ -37,6 +37,7 @@ import {
   isRunWorkerReady,
   markRunPromptSendAttempted,
   removeRunWorkerHeartbeat,
+  reconcileRunArtifactPaths,
   requestRunPromptCancellation,
   reserveRunAttachmentUploads,
   resolveRunDependencyClosure,
@@ -531,6 +532,14 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
       `;
     });
     expect(reconciled).toEqual([{ reconciled: true }]);
+    await expect(reconcileRunArtifactPaths({
+      orgId: orgA,
+      runId: freezeRunId,
+      creatorId: owner.id,
+      workerId: "freeze-worker",
+      paths: ["artifacts/lease.txt"],
+      database: db,
+    })).resolves.toBe(true);
     const [readImage] = await sql<{ ready: boolean }[]>`
       select ready from skill_run_artifacts
       where org_id = ${orgA}::uuid and run_id = ${freezeRunId}::uuid

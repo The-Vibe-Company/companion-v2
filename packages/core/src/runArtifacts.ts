@@ -226,10 +226,15 @@ export async function reconcileRunArtifactPaths(input: {
   paths: string[];
   database?: Db;
 }): Promise<boolean> {
+  // Drizzle/postgres.js serializes a bare JavaScript array parameter as its scalar contents when
+  // interpolated through `sql`, so a single path became `artifacts/file.txt` and PostgreSQL rejected
+  // the `::text[]` cast. Send JSON as one parameter and build the text array server-side; this also
+  // represents an empty completed scan as `ARRAY[]::text[]` without assembling raw SQL fragments.
+  const pathsJson = JSON.stringify(input.paths);
   const result = await (input.database ?? db).execute(sql`
     select companion_reconcile_skill_run_artifact_paths(
       ${input.orgId}::uuid, ${input.runId}::uuid, ${input.creatorId}, ${input.workerId},
-      ${input.paths}::text[]
+      ARRAY(SELECT jsonb_array_elements_text(${pathsJson}::jsonb))
     ) as reconciled
   `);
   return Array.from(result as unknown as Iterable<{ reconciled: boolean }>)[0]?.reconciled ?? false;
