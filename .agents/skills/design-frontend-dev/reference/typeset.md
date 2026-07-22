@@ -111,17 +111,9 @@ Build a clear type scale:
 
 When the type carries the hierarchy on its own, hand off to `Impeccable polish` for the final pass.
 
-## Live-mode signature params
+## Explore typography variants
 
-Each variant MUST declare a `scale` param controlling the hierarchy ratio. Express all font sizes in the variant's scoped CSS through `calc(var(--p-scale, 1) * <base>)` or, better, scale the type ramp via `clamp(min, calc(var(--p-scale, 1) * Npx), max)`. Users slide from subdued to commanding.
-
-```json
-{"id":"scale","kind":"range","min":0.85,"max":1.3,"step":0.05,"default":1,"label":"Scale"}
-```
-
-Where the variant riffs on a specific pairing, expose the pairing choice as a `steps` param (e.g. "serif display + sans body" vs. "mono display + sans body" vs. "all-sans"). Each branch routes through `:scope[data-p-pairing="X"]` selectors in scoped CSS.
-
-When proposing typography variants, name the tunable parameters directly, such as scale, pairing, weight contrast, tracking, or measure.
+When proposing variants, name the typographic dimension being explored—such as scale, pairing, weight contrast, tracking, or measure—and keep the comparison focused. Describe the concrete type-ramp or pairing change in ordinary CSS terms without introducing tool-specific parameters, attributes, or runtime controls.
 
 ---
 

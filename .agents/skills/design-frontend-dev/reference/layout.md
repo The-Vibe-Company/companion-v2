@@ -140,22 +140,6 @@ Create a systematic plan:
 
 When the rhythm and hierarchy land, hand off to `Impeccable polish` for the final pass.
 
-## Live-mode signature params
+## Explore layout variants
 
-Each variant MUST declare a `density` param. Drive all spacing tokens in the variant's scoped CSS through `calc(var(--p-density, 1) * <base>)`: paddings, gaps, column widths. Users slide from airy to packed and see layout re-breathe with no regeneration.
-
-```json
-{"id":"density","kind":"range","min":0.6,"max":1.4,"step":0.05,"default":1,"label":"Density"}
-```
-
-For variants whose topology genuinely changes (stacked vs. side-by-side, grid vs. bento), use a `steps` param whose scoped CSS branches via `:scope[data-p-structure="X"]`. One structure param + one density param is a powerful combo; resist adding a third.
-
-```json
-{"id":"structure","kind":"steps","default":"grid","label":"Structure","options":[
-  {"value":"stacked","label":"Stacked"},
-  {"value":"grid","label":"Grid"},
-  {"value":"bento","label":"Bento"}
-]}
-```
-
-When proposing layout variants, name the tunable parameters directly, such as density, structure, image scale, or section rhythm.
+When proposing variants, name the design dimension being explored—such as density, structure, image scale, or section rhythm—and keep the comparison focused. If the topology genuinely changes (stacked vs. side-by-side, grid vs. bento), explain why that structure better serves the content instead of adding tool-specific controls or markup.

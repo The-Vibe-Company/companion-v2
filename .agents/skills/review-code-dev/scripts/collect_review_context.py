@@ -12,6 +12,7 @@ import shlex
 import stat
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -50,7 +51,8 @@ SECRET_VALUE_RE = re.compile(
     r"xox[baprs]-[A-Za-z0-9-]{10,}|sk-[A-Za-z0-9_-]{20,})"
 )
 PRIVATE_KEY_BLOCK_RE = re.compile(
-    r"-----BEGIN ([A-Z0-9 ]*PRIVATE KEY)-----.*?-----END \1-----",
+    r"-----BEGIN (?P<label>[A-Z0-9 ]*PRIVATE KEY)-----.*?"
+    r"(?:-----END (?P=label)-----|\Z)",
     re.DOTALL,
 )
 
@@ -263,6 +265,39 @@ def redact_and_truncate(text: str, max_bytes: int) -> dict[str, Any]:
     return truncate_text(redact_diff_text(text), max_bytes)
 
 
+def collect_git_diff(
+    repo: Path,
+    args: list[str],
+    max_bytes: int,
+    timeout: int = 120,
+) -> dict[str, Any]:
+    read_ahead = 65_536
+    with tempfile.TemporaryFile() as output_file:
+        try:
+            proc = subprocess.run(
+                ["git", *args],
+                cwd=str(repo),
+                stdout=output_file,
+                stderr=subprocess.PIPE,
+                timeout=timeout,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise SystemExit(f"git {' '.join(args)} timed out after {timeout}s") from exc
+        if proc.returncode != 0:
+            stderr = proc.stderr.decode("utf-8", errors="replace").strip()
+            raise SystemExit(f"git {' '.join(args)} failed: {stderr}")
+        byte_length = output_file.tell()
+        output_file.seek(0)
+        raw = output_file.read(max_bytes + read_ahead)
+
+    redacted = redact_diff_text(raw.decode("utf-8", errors="replace"))
+    payload = truncate_text(redacted, max_bytes)
+    payload["byte_length"] = byte_length
+    payload["truncated"] = payload["truncated"] or byte_length > len(raw)
+    return payload
+
+
 def collect_untracked_previews(repo: Path, files: list[str]) -> list[dict[str, Any]]:
     previews: list[dict[str, Any]] = []
     total = 0
@@ -341,8 +376,9 @@ def collect_worktree_state(
             collect_untracked_previews(repo, untracked_names) if include_untracked_previews else []
         ),
         "staged_diff": (
-            redact_and_truncate(
-                require_ok(git(["diff", "--cached"], repo, timeout=120)),
+            collect_git_diff(
+                repo,
+                ["diff", "--cached"],
                 max_diff_bytes,
             )
             if include_staged_diff
@@ -366,7 +402,7 @@ def collect_uncommitted(
     result = {
         "mode": "uncommitted",
         "changed_files": changed,
-        "diff": redact_and_truncate(require_ok(git(["diff"], repo, timeout=120)), max_diff_bytes),
+        "diff": collect_git_diff(repo, ["diff"], max_diff_bytes),
     }
     result.update(worktree_state)
     return result
@@ -382,7 +418,7 @@ def collect_base(repo: Path, base: str, max_diff_bytes: int) -> dict[str, Any]:
         "diff_range": diff_range,
         "changed_files": split_names(require_ok(git(["diff", "--name-only", diff_range], repo))),
         "diff_stat": require_ok(git(["diff", "--stat", diff_range], repo, timeout=120)),
-        "diff": redact_and_truncate(require_ok(git(["diff", diff_range], repo, timeout=120)), max_diff_bytes),
+        "diff": collect_git_diff(repo, ["diff", diff_range], max_diff_bytes),
     }
 
 
@@ -395,8 +431,9 @@ def collect_commit(repo: Path, commit: str, max_diff_bytes: int) -> dict[str, An
         "commit": {"hash": full_hash, "short_hash": short_hash, "subject": subject},
         "changed_files": names,
         "diff_stat": require_ok(git(["show", "--stat", "--format=fuller", commit], repo, timeout=120)),
-        "diff": redact_and_truncate(
-            require_ok(git(["show", "--format=fuller", "--patch", commit], repo, timeout=120)),
+        "diff": collect_git_diff(
+            repo,
+            ["show", "--format=fuller", "--patch", commit],
             max_diff_bytes,
         ),
     }

@@ -189,6 +189,24 @@ class CollectReviewContextTests(unittest.TestCase):
             self.assertEqual(len(preview["text"]), collector.DEFAULT_MAX_UNTRACKED_FILE_BYTES)
             self.assertTrue(preview["truncated"])
 
+    def test_git_diff_collection_spools_and_clips_large_patches(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            git(repo, "init", "-b", "main")
+            git(repo, "config", "user.email", "test@example.test")
+            git(repo, "config", "user.name", "Test")
+            target = repo / "large.txt"
+            target.write_text("base\n", encoding="utf-8")
+            git(repo, "add", "large.txt")
+            git(repo, "commit", "-m", "base")
+            target.write_text("x" * 200_000, encoding="utf-8")
+
+            diff = collector.collect_git_diff(repo, ["diff"], 1_000)
+
+            self.assertTrue(diff["truncated"])
+            self.assertGreater(diff["byte_length"], 100_000)
+            self.assertLessEqual(len(diff["text"].encode("utf-8")), 1_000)
+
 
 if __name__ == "__main__":
     unittest.main()
