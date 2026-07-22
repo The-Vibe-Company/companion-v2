@@ -1245,6 +1245,7 @@ export async function enqueueRunPrompt(input: {
           previewKind: attachment.previewKind ?? null,
           byteSize: attachment.byteSize,
           storageKey: attachment.storageKey,
+          createdAt: promptCreatedAt,
         })),
       );
       await transaction.delete(schema.skillRunAttachmentUploads).where(
@@ -1293,6 +1294,7 @@ export async function enqueueRunPrompt(input: {
         preview_content_type: attachment.previewContentType ?? null,
         preview_kind: attachment.previewKind ?? null,
         byte_size: attachment.byteSize,
+        created_at: promptCreatedAt.toISOString(),
       })),
     };
   };
