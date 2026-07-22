@@ -534,6 +534,7 @@ export const runChatEventSchema = z.discriminatedUnion("type", [
     message: z.string().max(RUN_CHAT_MESSAGE_MAX).nullable().default(null),
   }),
   z.object({ type: z.literal("session.idle"), session_id: z.string().max(RUN_CHAT_ID_MAX) }),
+  z.object({ type: z.literal("artifacts.collecting") }),
   z.object({ type: z.literal("artifacts.updated"), count: z.number().int().nonnegative().max(RUN_ARTIFACT_MAX_FILES) }),
   z.object({
     type: z.literal("prompt.status"),
@@ -592,6 +593,17 @@ export const skillRunRowSchema = z.object({
 });
 export type SkillRunRow = z.infer<typeof skillRunRowSchema>;
 
+export const runFilePreviewKindSchema = z.enum([
+  "text",
+  "markdown",
+  "csv",
+  "image",
+  "video",
+  "pdf",
+  "xlsx",
+]);
+export type RunFilePreviewKind = z.infer<typeof runFilePreviewKindSchema>;
+
 export const skillRunAttachmentRowSchema = z.object({
   id: z.string(),
   prompt_id: runUuidSchema,
@@ -600,7 +612,9 @@ export const skillRunAttachmentRowSchema = z.object({
   file_name: z.string(),
   content_type: z.string(),
   preview_content_type: z.string().nullable().default(null),
+  preview_kind: runFilePreviewKindSchema.nullable().optional(),
   byte_size: z.number().int().nonnegative(),
+  created_at: z.string().datetime().optional(),
 });
 export type SkillRunAttachmentRow = z.infer<typeof skillRunAttachmentRowSchema>;
 
@@ -636,7 +650,9 @@ export const skillRunArtifactRowSchema = z.object({
   content_type: z.string().min(1).max(255),
   byte_size: z.number().int().positive().max(RUN_ARTIFACT_MAX_BYTES),
   previewable: z.boolean(),
+  preview_kind: runFilePreviewKindSchema.nullable().optional(),
   expires_at: z.string().datetime(),
+  updated_at: z.string().datetime().optional(),
 });
 export type SkillRunArtifactRow = z.infer<typeof skillRunArtifactRowSchema>;
 

@@ -53,6 +53,9 @@ const serviceMocks = vi.hoisted(() => ({
     previewContentType: data.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
       ? "image/png"
       : null,
+    previewKind: data.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+      ? "image"
+      : null,
   })),
   isRunWorkerReady: vi.fn(async () => true),
   setProviderConnection: vi.fn(),
@@ -653,7 +656,15 @@ describe("session-only RunSkill routes", () => {
     });
     const attachment = await app.request("/v1/runs/run-1/artifacts/artifact-2");
     expect(attachment.headers.get("content-disposition")).toBe('attachment; filename="report.html"');
-    serviceMocks.getRunArtifact.mockRejectedValueOnce(new Error("artifact not found"));
+    serviceMocks.getRunArtifact.mockResolvedValue({
+      fileName: "report.pdf",
+      contentType: "application/pdf",
+      storageKey: "org/run-artifacts/run/pdf",
+      previewable: true,
+    });
+    const pdf = await app.request("/v1/runs/run-1/artifacts/artifact-pdf");
+    expect(pdf.headers.get("content-disposition")).toBe('attachment; filename="report.pdf"');
+    serviceMocks.getRunArtifact.mockRejectedValue(new Error("artifact not found"));
     expect((await app.request("/v1/runs/run-1/artifacts/expired")).status).toBe(404);
   });
 

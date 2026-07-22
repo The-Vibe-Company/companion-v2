@@ -73,7 +73,15 @@ function useStreamingMarkdownText(text: string, streaming: boolean): string {
 }
 
 /** Parsing is isolated so parent/delta renders with the same throttled text are effectively free. */
-const ParsedMarkdown = memo(function ParsedMarkdown({ text }: { text: string }) {
+const ParsedMarkdown = memo(function ParsedMarkdown({
+  text,
+  artifactPaths,
+  onOpenArtifact,
+}: {
+  text: string;
+  artifactPaths: Record<string, string>;
+  onOpenArtifact?: (artifactId: string) => void;
+}) {
   return (
     <ReactMarkdown
       remarkPlugins={[remarkGfm]}
@@ -81,6 +89,10 @@ const ParsedMarkdown = memo(function ParsedMarkdown({ text }: { text: string }) 
       components={{
         pre: CodeBlock,
         a: ({ href, children, ...props }) => {
+          const artifactId = href ? artifactPaths[href] : undefined;
+          if (artifactId && onOpenArtifact) {
+            return <button type="button" className="run-artifact-link" onClick={() => onOpenArtifact(artifactId)}>{children}</button>;
+          }
           const external = Boolean(href && /^https?:\/\//i.test(href));
           return (
             <a
@@ -101,9 +113,13 @@ const ParsedMarkdown = memo(function ParsedMarkdown({ text }: { text: string }) 
             Image not loaded{alt ? ` · ${alt}` : ""}
           </span>
         ),
-        code: ({ className, children, ...props }) => (
-          <code className={className} {...props}>{children}</code>
-        ),
+        code: ({ className, children, ...props }) => {
+          const value = plainText(children).trim();
+          const artifactId = !className && !value.includes("\n") ? artifactPaths[value] : undefined;
+          return artifactId && onOpenArtifact
+            ? <button type="button" className="run-artifact-link run-artifact-link--code" onClick={() => onOpenArtifact(artifactId)}>{value}</button>
+            : <code className={className} {...props}>{children}</code>;
+        },
       }}
     >
       {text}
@@ -112,11 +128,21 @@ const ParsedMarkdown = memo(function ParsedMarkdown({ text }: { text: string }) 
 });
 
 /** Full GFM rendering for assistant output. Raw HTML stays escaped by react-markdown. */
-export const ChatMarkdown = memo(function ChatMarkdown({ text, streaming = false }: { text: string; streaming?: boolean }) {
+export const ChatMarkdown = memo(function ChatMarkdown({
+  text,
+  streaming = false,
+  artifactPaths = {},
+  onOpenArtifact,
+}: {
+  text: string;
+  streaming?: boolean;
+  artifactPaths?: Record<string, string>;
+  onOpenArtifact?: (artifactId: string) => void;
+}) {
   const renderedText = useStreamingMarkdownText(text, streaming);
   return (
     <div className="run-md">
-      <ParsedMarkdown text={renderedText} />
+      <ParsedMarkdown text={renderedText} artifactPaths={artifactPaths} onOpenArtifact={onOpenArtifact} />
       {streaming ? <span className="chat-caret" aria-hidden="true" /> : null}
     </div>
   );

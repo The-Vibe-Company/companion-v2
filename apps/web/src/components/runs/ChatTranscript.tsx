@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { MessageScroller, useMessageScrollerScrollable } from "@shadcn/react/message-scroller";
 import type { SkillRunDetail } from "@companion/contracts";
 import { formatDurationSeconds } from "@/lib/format";
@@ -138,13 +138,19 @@ export function ChatTranscript({
   rowExpanded: (id: string, defaultOpen: boolean) => boolean;
   onToggleRow: (id: string, defaultOpen: boolean) => void;
   onReconnect: () => void;
-  onOpenFiles: () => void;
+  onOpenFiles: (artifactId?: string) => void;
 }) {
   const terminalStatus = run?.status ?? "starting";
   const revision = [
     chat.items.length,
     run?.artifacts.length ?? 0,
   ].join(":");
+  const artifactPaths = useMemo(() => Object.fromEntries(
+    (run?.artifacts ?? []).flatMap((artifact) => {
+      const normalized = artifact.path.startsWith("./") ? artifact.path : `./${artifact.path}`;
+      return [[normalized, artifact.id], [normalized.slice(2), artifact.id]];
+    }),
+  ), [run?.artifacts]);
 
   return (
     <MessageScroller.Provider
@@ -218,7 +224,7 @@ export function ChatTranscript({
               return (
                 <MessageScroller.Item key={item.id} messageId={item.id} className="run-message run-message--assistant">
                   <div className="run-message__assistant">
-                    <ChatMarkdown text={item.text} streaming={item.streaming} />
+                    <ChatMarkdown text={item.text} streaming={item.streaming} artifactPaths={artifactPaths} onOpenArtifact={onOpenFiles} />
                     {!item.streaming && item.text && <CopyMessageButton text={item.text} />}
                   </div>
                 </MessageScroller.Item>
@@ -226,7 +232,7 @@ export function ChatTranscript({
             })}
             {run && run.artifacts.length > 0 && (
               <MessageScroller.Item messageId={`${run.id}:artifacts`} className="run-marker">
-                <button type="button" className="run-generated-marker" onClick={onOpenFiles}>
+                <button type="button" className="run-generated-marker" onClick={() => onOpenFiles(run.artifacts.at(-1)?.id)}>
                   <Icon name="folder-open" size={13} />
                   Generated files updated · {run.artifacts.length}
                 </button>

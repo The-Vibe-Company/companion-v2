@@ -535,6 +535,7 @@ function applyEvent(state: ChatState, event: RunChatEvent, resolveToolLabel: Res
           return item;
         }),
       };
+    case "artifacts.collecting":
     case "artifacts.updated":
       return state;
     case "prompt.status":

@@ -10,6 +10,7 @@ import {
   assertRetainedConversationAvailable,
   createSandboxTimeoutExtender,
   collectAndCacheRunArtifacts,
+  createSingleFlightArtifactCollector,
   createRecorderIdleBarrierTracker,
   dispatchPromptAfterAttachmentMount,
   isTransientRunFailure,
@@ -19,6 +20,7 @@ import {
   runFailureEvent,
   sandboxTimeoutExtensionSchedule,
   shouldHeartbeatRunLease,
+  toolMayWriteArtifacts,
 } from "./runSupervisor";
 
 afterEach(() => {
@@ -347,11 +349,31 @@ describe("run artifact publication", () => {
   const actor = { id: "user-1", email: "user@example.test", name: "User" };
   const ref: SandboxRef = { sandboxName: "run-test", sandboxId: "run-test", region: "iad1", timeoutMs: 60_000 };
 
+  it("publishes an empty successful scan so collecting state always settles", async () => {
+    const append = vi.fn(async () => undefined);
+    const reconcileMetadata = vi.fn(async () => true);
+    const ready = await collectAndCacheRunArtifacts({
+      job: job as never,
+      actor,
+      workerId: "worker-1",
+      ctx: { runtime: { collectOutputFiles: async () => [] } as unknown as RunSandboxRuntime } as never,
+      ref,
+      imagePaths: [],
+      redactor: createRunRedactor([]),
+      signal: new AbortController().signal,
+      dependencies: { append, reconcileMetadata },
+    });
+    expect(ready).toBe(0);
+    expect(reconcileMetadata).toHaveBeenCalledWith(expect.objectContaining({ paths: [] }));
+    expect(append).toHaveBeenCalledWith([{ type: "artifacts.updated", count: 0 }]);
+  });
+
   it("uses one deterministic object key and renews the same path through reservation and ready", async () => {
     const putMetadata = vi.fn(async (_input: Parameters<typeof putRunArtifactMetadata>[0]) => true);
     const putObject = vi.fn(async (_input: { body: Uint8Array }) => undefined);
     const headObject = vi.fn(async () => null);
     const append = vi.fn(async () => undefined);
+    const reconcileMetadata = vi.fn(async () => true);
     const collectOutputFiles = vi.fn(async () => [{ path: "artifacts/cat.png", data: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), byteSize: 8 }]);
     const ready = await collectAndCacheRunArtifacts({
       job: job as never,
@@ -362,9 +384,10 @@ describe("run artifact publication", () => {
       imagePaths: [],
       redactor: createRunRedactor([]),
       signal: new AbortController().signal,
-      dependencies: { putMetadata, headObject, putObject, append, now: () => Date.parse("2026-07-16T12:00:00Z") },
+      dependencies: { putMetadata, reconcileMetadata, headObject, putObject, append, now: () => Date.parse("2026-07-16T12:00:00Z") },
     });
     expect(ready).toBe(1);
+    expect(reconcileMetadata).toHaveBeenCalledWith(expect.objectContaining({ paths: ["artifacts/cat.png"] }));
     expect(putMetadata).toHaveBeenCalledTimes(3);
     expect(putMetadata.mock.calls[0]![0]).toMatchObject({ ready: false, path: "artifacts/cat.png" });
     expect(putMetadata.mock.calls[1]![0]).toMatchObject({ ready: false, path: "artifacts/cat.png" });
@@ -408,6 +431,7 @@ describe("run artifact publication", () => {
     expect(putMetadata).toHaveBeenCalledTimes(2);
     expect(putMetadata.mock.calls[0]![0]).toMatchObject({ ready: false });
     expect(append).toHaveBeenCalledWith([
+      { type: "artifacts.updated", count: 0 },
       expect.objectContaining({ type: "run.warning", code: "artifact_collection_failed" }),
     ]);
   });
@@ -447,6 +471,38 @@ describe("run artifact publication", () => {
     expect(uploaded.toString("utf8")).toBe("before [REDACTED] after");
     expect(uploaded.includes(Buffer.from(secret))).toBe(false);
     expect(putMetadata.mock.calls.at(-1)?.[0]).toMatchObject({ ready: true, byteSize: uploaded.length });
+  });
+
+  it("retires a prior path when redaction leaves no publishable bytes", async () => {
+    const secret = "provider-secret-value";
+    const reconcileMetadata = vi.fn(async () => true);
+    const append = vi.fn(async () => undefined);
+    const ready = await collectAndCacheRunArtifacts({
+      job: job as never,
+      actor,
+      workerId: "worker-1",
+      ctx: {
+        runtime: {
+          collectOutputFiles: async () => [{
+            path: "artifacts/secret.txt",
+            data: Buffer.from(secret),
+            byteSize: secret.length,
+          }],
+        } as unknown as RunSandboxRuntime,
+      } as never,
+      ref,
+      imagePaths: [],
+      redactor: { redactBytes: () => Buffer.alloc(0) } as never,
+      signal: new AbortController().signal,
+      dependencies: { reconcileMetadata, append },
+    });
+
+    expect(ready).toBe(0);
+    expect(reconcileMetadata).toHaveBeenCalledWith(expect.objectContaining({ paths: [] }));
+    expect(append).toHaveBeenCalledWith([
+      { type: "artifacts.updated", count: 0 },
+      expect.objectContaining({ type: "run.warning", code: "artifact_collection_failed" }),
+    ]);
   });
 
   it("revalidates the exact lease and retries with the latest ETag after a CAS collision", async () => {
@@ -519,6 +575,7 @@ describe("run artifact publication", () => {
     expect(ready).toBe(0);
     expect(putObject).not.toHaveBeenCalled();
     expect(append).toHaveBeenCalledWith([
+      { type: "artifacts.updated", count: 0 },
       expect.objectContaining({ type: "run.warning", code: "artifact_collection_failed" }),
     ]);
   });
@@ -556,8 +613,37 @@ describe("run artifact publication", () => {
     await expect(result).resolves.toBe(0);
     expect(uploadSignal?.aborted).toBe(true);
     expect(append).toHaveBeenCalledWith([
+      { type: "artifacts.updated", count: 0 },
       expect.objectContaining({ type: "run.warning", code: "artifact_collection_failed" }),
     ]);
+  });
+});
+
+describe("live artifact collection triggers", () => {
+  it("recognizes artifact writes and targeted shell commands without scanning unrelated tools", () => {
+    expect(toolMayWriteArtifacts("write", '{"filePath":"/vercel/sandbox/artifacts/todo.txt"}')).toBe(true);
+    expect(toolMayWriteArtifacts("edit", '{"path":"artifacts/report.md"}')).toBe(true);
+    expect(toolMayWriteArtifacts("apply_patch", "*** Update File: ./artifacts/report.md")).toBe(true);
+    expect(toolMayWriteArtifacts("bash", '{"command":"python build.py > artifacts/report.csv"}')).toBe(true);
+    expect(toolMayWriteArtifacts("write", '{"filePath":"src/index.ts"}')).toBe(false);
+    expect(toolMayWriteArtifacts("read", '{"filePath":"artifacts/report.md"}')).toBe(false);
+  });
+
+  it("coalesces concurrent requests into one in-flight scan and one trailing scan", async () => {
+    let release!: () => void;
+    const firstGate = new Promise<void>((resolve) => { release = resolve; });
+    const collect = vi.fn()
+      .mockImplementationOnce(() => firstGate)
+      .mockResolvedValue(undefined);
+    const collector = createSingleFlightArtifactCollector(collect);
+
+    collector.request();
+    collector.request();
+    collector.request();
+    expect(collect).toHaveBeenCalledTimes(1);
+    release();
+    await collector.waitForIdle();
+    expect(collect).toHaveBeenCalledTimes(2);
   });
 });
 

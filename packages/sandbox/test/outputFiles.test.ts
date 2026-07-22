@@ -9,6 +9,7 @@ import {
 type Node = { kind: "file" | "directory" | "symlink" | "socket"; data?: Buffer; real?: string };
 
 function fakeFs(nodes: Record<string, Node>): SandboxOutputFileSystem {
+  const missing = () => Object.assign(new Error("ENOENT"), { code: "ENOENT" });
   const stat = (node: Node): Stats => ({
     size: node.data?.length ?? 0,
     isFile: () => node.kind === "file",
@@ -21,22 +22,22 @@ function fakeFs(nodes: Record<string, Node>): SandboxOutputFileSystem {
       const names = [...new Set(Object.keys(nodes)
         .filter((candidate) => candidate.startsWith(prefix) && !candidate.slice(prefix.length).includes("/"))
         .map((candidate) => candidate.slice(prefix.length)))];
-      if (!nodes[directory] || nodes[directory]?.kind !== "directory") throw new Error("ENOENT");
+      if (!nodes[directory] || nodes[directory]?.kind !== "directory") throw missing();
       return names.map((name) => ({ name } as Dirent));
     },
     async lstat(file) {
       const node = nodes[file];
-      if (!node) throw new Error("ENOENT");
+      if (!node) throw missing();
       return stat(node);
     },
     async realpath(file) {
       const node = nodes[file];
-      if (!node) throw new Error("ENOENT");
+      if (!node) throw missing();
       return node.real ?? file;
     },
     async readFile(file) {
       const node = nodes[file];
-      if (!node?.data) throw new Error("ENOENT");
+      if (!node?.data) throw missing();
       return node.data;
     },
   };
@@ -96,11 +97,23 @@ describe("sandbox output collection", () => {
     }
     const fs = fakeFs(nodes);
     const lstat = vi.spyOn(fs, "lstat");
-    const files = await collectSandboxOutputFiles({
+    await expect(collectSandboxOutputFiles({
       fs, imagePaths: [], maxFiles: 20, maxFileBytes: 1024, maxTotalBytes: 4096,
-    });
-    expect(files).toEqual([]);
+    })).rejects.toThrow("safe scan limit");
     expect(lstat).not.toHaveBeenCalled();
+  });
+
+  it("fails an incomplete artifact scan instead of publishing omissions as deletions", async () => {
+    const root = "/vercel/sandbox";
+    const fs = fakeFs({
+      [`${root}/artifacts`]: { kind: "directory" },
+      [`${root}/artifacts/report.txt`]: { kind: "file", data: Buffer.from("report") },
+    });
+    fs.lstat = vi.fn(async () => { throw new Error("provider temporarily unavailable"); });
+
+    await expect(collectSandboxOutputFiles({
+      fs, imagePaths: [], maxFiles: 20, maxFileBytes: 1024, maxTotalBytes: 4096,
+    })).rejects.toThrow("provider temporarily unavailable");
   });
 });
 

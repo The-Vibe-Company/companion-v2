@@ -56,6 +56,7 @@ import {
   persistRunTranscript,
   detectRunArtifactType,
   putRunArtifactMetadata,
+  reconcileRunArtifactPaths,
   removeRunWorkerHeartbeat,
   runArtifactId,
   RunBusyError,
@@ -622,6 +623,50 @@ function redactStreamEvent(
   return [event];
 }
 
+export function toolMayWriteArtifacts(tool: string, serializedInput: string): boolean {
+  const normalizedTool = tool.toLowerCase().replaceAll("-", "_");
+  if (!["write", "edit", "apply_patch", "patch", "bash", "shell", "command"].includes(normalizedTool)) {
+    return false;
+  }
+  return /(?:^|[\s"'`:=])(\.\/)?artifacts(?:\/|\\|(?=[\s"'`]))|\/vercel\/sandbox\/artifacts(?:\/|\\|(?=[\s"'`]))/i.test(serializedInput);
+}
+
+export function createSingleFlightArtifactCollector(collect: () => Promise<void>): {
+  request: () => void;
+  collectNow: () => Promise<void>;
+  waitForIdle: () => Promise<void>;
+} {
+  let active: Promise<void> | null = null;
+  let rerun = false;
+  const kick = (): Promise<void> => {
+    if (active) {
+      rerun = true;
+      return active;
+    }
+    active = (async () => {
+      do {
+        rerun = false;
+        await collect();
+      } while (rerun);
+    })().finally(() => {
+      active = null;
+    });
+    return active;
+  };
+  return {
+    request() {
+      void kick().catch(() => undefined);
+    },
+    collectNow() {
+      if (active) rerun = true;
+      return kick();
+    },
+    async waitForIdle() {
+      await active;
+    },
+  };
+}
+
 function startRecorder(input: {
   job: ClaimedRunJob;
   actor: ActorContext;
@@ -631,12 +676,14 @@ function startRecorder(input: {
   redactor: RunRedactor;
   config: RunWorkerConfig;
   shutdownSignal: AbortSignal;
+  onArtifactToolDone?: () => void;
 }): RecorderHandle {
   const chat = input.ctx.chat!;
   const state: RecorderState = { busy: false, idleAt: null, fatal: null, readImagePaths: new Set() };
   const abort = new AbortController();
   const recorderSignal = AbortSignal.any([abort.signal, input.shutdownSignal]);
   const streams = new Map<string, RunStreamingRedactor>();
+  const artifactToolCalls = new Set<string>();
   const idleBarriers = createRecorderIdleBarrierTracker();
   let stopped = false;
   let resolveStarted!: () => void;
@@ -741,6 +788,10 @@ function startRecorder(input: {
               state.readImagePaths.add(imagePath);
             }
           }
+          if (event.type === "tool.start" && toolMayWriteArtifacts(event.tool, event.input)) {
+            artifactToolCalls.add(event.call_id);
+          }
+          const artifactToolDone = event.type === "tool.done" && artifactToolCalls.delete(event.call_id);
           // Only the atomic transcript + session.idle barrier is allowed to mark the recorder
           // dispatch-ready. A generic status:idle can arrive before that snapshot is durable.
           if (event.type === "status" && event.state !== "idle") state.busy = true;
@@ -761,6 +812,7 @@ function startRecorder(input: {
             continue recorderLoop;
           } else {
             await appendEvents(input.job, input.actor, normalized, input.redactor);
+            if (artifactToolDone) input.onArtifactToolDone?.();
           }
           reconnectMs = input.config.recorderReconnectMinMs;
         }
@@ -791,6 +843,7 @@ function startRecorder(input: {
       await loop.catch(() => undefined);
       for (const stream of streams.values()) stream.clear();
       streams.clear();
+      artifactToolCalls.clear();
     },
   };
 }
@@ -806,6 +859,7 @@ export async function collectAndCacheRunArtifacts(input: {
   signal: AbortSignal;
   dependencies?: {
     putMetadata?: typeof putRunArtifactMetadata;
+    reconcileMetadata?: typeof reconcileRunArtifactPaths;
     headObject?: (input: { key: string; signal: AbortSignal }) => Promise<{ etag: string } | null>;
     putObject?: (input: {
       key: string;
@@ -821,6 +875,9 @@ export async function collectAndCacheRunArtifacts(input: {
   };
 }): Promise<number> {
   const putMetadata = input.dependencies?.putMetadata ?? putRunArtifactMetadata;
+  const reconcileMetadata = input.dependencies
+    ? input.dependencies.reconcileMetadata ?? (async () => true)
+    : reconcileRunArtifactPaths;
   const headObject = input.dependencies?.headObject ?? ((object) => headSkillArchive(object));
   const putObject = input.dependencies?.putObject ?? ((object) => putSkillArchive(object));
   const isPreconditionFailure = input.dependencies?.isPreconditionFailure ?? isStoragePreconditionFailure;
@@ -841,15 +898,33 @@ export async function collectAndCacheRunArtifacts(input: {
         signal,
       }),
     });
-    let ready = 0;
+    const publishable: Array<{ file: (typeof files)[number]; data: Buffer }> = [];
+    let publishableBytes = 0;
     let failed = 0;
-    let cachedBytes = 0;
     for (const file of files) {
       const data = input.redactor.redactBytes(file.data);
-      if (data.length <= 0 || data.length > RUN_ARTIFACT_MAX_BYTES || cachedBytes + data.length > RUN_ARTIFACT_MAX_TOTAL_BYTES) {
+      if (
+        data.length <= 0
+        || data.length > RUN_ARTIFACT_MAX_BYTES
+        || publishableBytes + data.length > RUN_ARTIFACT_MAX_TOTAL_BYTES
+      ) {
         failed += 1;
         continue;
       }
+      publishable.push({ file, data });
+      publishableBytes += data.length;
+    }
+    const reconciled = await reconcileMetadata({
+      orgId: input.job.orgId,
+      runId: input.job.runId,
+      creatorId: input.job.creatorId,
+      workerId: input.workerId,
+      paths: publishable.map(({ file }) => file.path),
+      database: db,
+    });
+    if (!reconciled) throw new LostLease();
+    let ready = 0;
+    for (const { file, data } of publishable) {
       const id = runArtifactId(input.job.runId, file.path);
       const storageKey = runArtifactKey({ orgId: input.job.orgId, runId: input.job.runId, artifactId: id });
       const detected = detectRunArtifactType(file.path, data);
@@ -865,6 +940,7 @@ export async function collectAndCacheRunArtifacts(input: {
         contentType: detected.contentType,
         byteSize: data.length,
         previewable: detected.previewable,
+        previewKind: detected.previewKind,
         storageKey,
         expiresAt,
       };
@@ -909,13 +985,12 @@ export async function collectAndCacheRunArtifacts(input: {
         const finalized = await putMetadata({ ...metadata, ready: true, database: db });
         if (!finalized) throw new LostLease();
         ready += 1;
-        cachedBytes += data.length;
       } catch {
         failed += 1;
       }
     }
     const events: RunChatEvent[] = [];
-    if (ready > 0) events.push({ type: "artifacts.updated", count: ready });
+    events.push({ type: "artifacts.updated", count: ready });
     if (failed > 0) {
       events.push({
         type: "run.warning",
@@ -1455,6 +1530,7 @@ async function processClaimedJob(input: {
   }, 1_000);
 
   let recorder: RecorderHandle | null = null;
+  let artifactCollector: ReturnType<typeof createSingleFlightArtifactCollector> | null = null;
   let plan: RunExecutionPlan | null = null;
   let ref: SandboxRef | null = null;
   let redactor = createRunRedactor([]);
@@ -1705,6 +1781,21 @@ async function processClaimedJob(input: {
       lastActiveAt: new Date(),
     });
 
+    artifactCollector = createSingleFlightArtifactCollector(async () => {
+      await appendEvents(job, actor, [{ type: "artifacts.collecting" }], redactor);
+      const imagePaths = recorder ? [...recorder.state.readImagePaths] : [];
+      recorder?.state.readImagePaths.clear();
+      await collectAndCacheRunArtifacts({
+        job,
+        actor,
+        workerId,
+        ctx,
+        ref: activeRef,
+        imagePaths,
+        redactor,
+        signal: jobAbort.signal,
+      });
+    });
     recorder = startRecorder({
       job,
       actor,
@@ -1714,6 +1805,7 @@ async function processClaimedJob(input: {
       redactor,
       config,
       shutdownSignal: jobAbort.signal,
+      onArtifactToolDone: () => artifactCollector?.request(),
     });
     // The adapter resolves `started` only after OpenCode's event subscription is established.
     // Bound the handshake so a permanently broken SSE route becomes a retryable job failure.
@@ -2040,18 +2132,8 @@ async function processClaimedJob(input: {
             timeoutMs: activePlan.row.timeoutMs,
             shutdownSignal: jobAbort.signal,
           });
-          const imagePaths = [...recorder.state.readImagePaths];
-          recorder.state.readImagePaths.clear();
-          await collectAndCacheRunArtifacts({
-            job,
-            actor,
-            workerId,
-            ctx,
-            ref: activeRef,
-            imagePaths,
-            redactor,
-            signal: jobAbort.signal,
-          });
+          // Keep a definitive end-of-turn scan even when tool-triggered scans already published.
+          await artifactCollector.collectNow();
           const completion = await tenant(job, (database) =>
             completeRunPrompt({ actor, orgId: job.orgId, runId: job.runId, promptId: prompt.id, workerId, database }),
           );
@@ -2119,18 +2201,8 @@ async function processClaimedJob(input: {
     // final transcript collection so a racing API request cannot enqueue abandoned work.
     await saveFinalTranscript(job, actor, ctx, chatTarget, activeSessionId, redactor, jobAbort.signal);
     if (jobAbort.signal.aborted) throw leaseLost ? new LostLease() : abortFailure(jobAbort.signal);
-    const finalImagePaths = recorder ? [...recorder.state.readImagePaths] : [];
-    recorder?.state.readImagePaths.clear();
-    await collectAndCacheRunArtifacts({
-      job,
-      actor,
-      workerId,
-      ctx,
-      ref: activeRef,
-      imagePaths: finalImagePaths,
-      redactor,
-      signal: jobAbort.signal,
-    });
+    // Freeze/recovery retains its own definitive scan and coalesces with any last tool completion.
+    await artifactCollector.collectNow();
     await setPhase(job, actor, workerId, "freeze");
     await timeoutExtender.stop();
     await recorder.stop();
@@ -2152,6 +2224,7 @@ async function processClaimedJob(input: {
     });
   } catch (error) {
     await timeoutExtender.stop();
+    await artifactCollector?.waitForIdle().catch(() => undefined);
     await recorder?.stop();
     recorder = null;
     if (!input.shutdownSignal.aborted) {

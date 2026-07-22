@@ -24,6 +24,7 @@ import {
   type RunDependencyPin,
   type RunInputSelection,
   type RunInputSnapshot,
+  type RunFilePreviewKind,
   type RunModelProviderInputSnapshot,
   type RunSecretInputSnapshot,
   type RunVariableInputSnapshot,
@@ -191,6 +192,7 @@ export interface CreateRunAttachment {
   contentType: string;
   /** Server-verified inline MIME. Omitted/null keeps the attachment download-only. */
   previewContentType?: string | null;
+  previewKind?: RunFilePreviewKind | null;
   byteSize: number;
   storageKey: string;
 }
@@ -1068,6 +1070,7 @@ async function loadAttachments(database: Db, orgId: string, runId: string): Prom
       fileName: schema.skillRunAttachments.fileName,
       contentType: schema.skillRunAttachments.contentType,
       previewContentType: schema.skillRunAttachments.previewContentType,
+      previewKind: schema.skillRunAttachments.previewKind,
       byteSize: schema.skillRunAttachments.byteSize,
       storageKey: schema.skillRunAttachments.storageKey,
       createdAt: schema.skillRunAttachments.createdAt,
@@ -1124,7 +1127,9 @@ function toAttachmentRow(row: AttachmentWithMessageRow): SkillRunAttachmentRow {
     file_name: row.fileName,
     content_type: row.contentType,
     preview_content_type: row.previewContentType,
+    preview_kind: row.previewKind,
     byte_size: row.byteSize,
+    created_at: row.createdAt.toISOString(),
   };
 }
 
@@ -1136,7 +1141,9 @@ function toArtifactRow(row: typeof schema.skillRunArtifacts.$inferSelect): Skill
     content_type: row.contentType,
     byte_size: row.byteSize,
     previewable: row.previewable,
+    preview_kind: row.previewKind,
     expires_at: row.expiresAt.toISOString(),
+    updated_at: row.updatedAt.toISOString(),
   };
 }
 
@@ -1763,6 +1770,7 @@ async function createRunInTransaction(input: {
         fileName: attachment.fileName,
         contentType: attachment.contentType,
         previewContentType: attachment.previewContentType ?? null,
+        previewKind: attachment.previewKind ?? null,
         byteSize: attachment.byteSize,
         storageKey: attachment.storageKey,
       })),
@@ -1943,6 +1951,7 @@ export async function getRunAttachment(input: {
   fileName: string;
   contentType: string;
   previewContentType: string | null;
+  previewKind: RunFilePreviewKind | null;
   storageKey: string;
 }> {
   const database = input.database ?? db;
@@ -1958,6 +1967,7 @@ export async function getRunAttachment(input: {
     fileName: attachment.fileName,
     contentType: attachment.contentType,
     previewContentType: attachment.previewContentType,
+    previewKind: attachment.previewKind,
     storageKey: attachment.storageKey,
   };
 }
@@ -2028,6 +2038,7 @@ export async function getRunPromptAttachments(input: {
       fileName: attachment.fileName,
       contentType: attachment.contentType,
       previewContentType: attachment.previewContentType,
+      previewKind: attachment.previewKind,
       byteSize: attachment.byteSize,
       storageKey: attachment.storageKey,
     }));
@@ -2137,6 +2148,7 @@ export async function loadRunMaterializationPlan(input: {
       fileName: attachment.fileName,
       contentType: attachment.contentType,
       previewContentType: attachment.previewContentType,
+      previewKind: attachment.previewKind,
       byteSize: attachment.byteSize,
       storageKey: attachment.storageKey,
     })),
@@ -2333,6 +2345,7 @@ export async function loadRunExecutionPlan(input: {
       fileName: attachment.fileName,
       contentType: attachment.contentType,
       previewContentType: attachment.previewContentType,
+      previewKind: attachment.previewKind,
       byteSize: attachment.byteSize,
       storageKey: attachment.storageKey,
     })),

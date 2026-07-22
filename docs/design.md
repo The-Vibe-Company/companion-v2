@@ -920,7 +920,11 @@ content; only the sandbox does.
   `<attachmentId>-<filename>`, and streamed back creator-only. A server-derived
   `preview_content_type` permits inline PNG, JPEG, GIF, WebP, AVIF, MP4, or WebM only after binary
   signature validation; browser MIME and filename extensions never grant inline rendering. Other
-  files and `?download=1` use `Content-Disposition: attachment`. Every response uses `nosniff`,
+  files and `?download=1` use `Content-Disposition: attachment`. The additive `preview_kind`
+  (`text | markdown | csv | image | video | pdf | xlsx | null`) selects a read-only frontend
+  renderer independently from response disposition; text requires an allowed extension plus valid
+  UTF-8, while PDF/XLSX require their binary/package signatures. HTML and SVG are always null.
+  Every response uses `nosniff`,
   private/no-store caching and same-origin isolation. Videos support strict single HTTP byte ranges.
   A partial response honors `If-Range` only when its strong ETag matches the selected object; weak,
   stale, date, or malformed validators ignore Range and return the complete `200` representation.
@@ -942,7 +946,20 @@ content; only the sandbox does.
   run/path id and storage key make later versions replace the prior object and renew its TTL; an ETag
   compare-and-swap plus an exact lease check immediately before every PUT fences stale workers.
   Metadata follows `ready=false reservation → conditional S3 overwrite → ready=true`; only ready,
-  unexpired rows are visible. Raster images plus signature-validated MP4/WebM may render inline;
+  unexpired rows are visible. Every successful full scan first marks paths absent from its current
+  `./artifacts/` path set non-ready under the exact worker lease, expires them for asynchronous object
+  cleanup, and immediately releases their ready-row quota. Explicitly read raster files outside that
+  managed tree are cached snapshots: later directory scans do not invalidate them, and their normal
+  24-hour TTL bounds retention. Directory/stat/read errors and scan guard exhaustion
+  fail the scan instead of treating a partial result as authoritative deletion. Raster images plus
+  signature-validated MP4/WebM may render inline;
+  `preview_kind` additionally allows escaped UTF-8 text/Markdown/CSV and signature-validated PDF or
+  XLSX to be fetched as attachments and rendered by isolated read-only viewers. XLSX classification
+  rejects excessive per-entry/total expansion and compression ratios before the bounded Worker parser
+  runs; the client also terminates parsing that exceeds its deadline. Artifact Markdown blocks remote
+  image loads, and direct media URLs carry the artifact update generation so same-path rewrites reload.
+  HTML, SVG, archives,
+  and unknown binaries are download-only.
   video delivery uses the same conditional, range-streamed object path as input attachments. The API
   reads replaceable artifact metadata on both sides of S3 `HEAD`, pins the streamed `GET` with that
   object's ETag, and retries when either generation changes; a response can therefore expose bytes
@@ -978,6 +995,9 @@ content; only the sandbox does.
   exact worker-lease write policy. Narrow reservation/finalization and cleanup functions are the only
   cross-tenant seams. Cleanup locks and rechecks the expired row across S3 deletion before removing
   metadata, so replacement and sweeping cannot orphan or publish bytes.
+- Migration `0051_run_file_previews.sql` additively adds `preview_kind` to artifacts and attachments,
+  backfills only previously verified media and safely escaped textual formats, and adds the exact
+  lease-scoped v2 metadata writer. PDF/XLSX rows are classified only when newly inspected from bytes.
 - Migration `0042_run_prompt_queue_stop.sql` adds prompt-level cancellation, worker stop-protocol negotiation and
   the signature-derived attachment preview type. Existing attachments remain download-only.
 - Migration `0043_run_prompt_dispatch_barrier.sql` adds dispatch protocol 2, the immutable pre-send
@@ -1064,8 +1084,10 @@ to advance.
 5. establish the recorder, then find or create the deterministic session;
 6. send the persisted initial/follow-up prompt with its deterministic `messageID`;
 7. batch redacted events and snapshot the transcript;
-8. after every completed turn and once immediately before freeze, collect bounded outputs and publish
-   an `artifacts.updated` event after ready metadata commits; collection failures emit a durable
+8. after every artifact-targeted `write`, `edit`, patch, or shell tool completes, enqueue a
+   single-flight/coalesced bounded output scan. Emit `artifacts.collecting` before each scan and
+   always emit `artifacts.updated` after a successful scan, including an empty result. Keep the
+   definitive end-of-turn, pre-freeze, and recovery scans; collection failures emit a durable
    non-terminal `run.warning`;
 9. freeze after inactivity, stop the named sandbox for bounded reactivation, then destroy it
    idempotently after the seven-day deadline.
@@ -1124,9 +1146,16 @@ attachment and composer components. User turns anchor the viewport; streaming fo
 reader remains at the live edge, otherwise a labeled jump control exposes new content. The assistant
 is unframed, user turns use compact neutral bubbles, and tools/reasoning remain dense operational
 markers. The multiline composer stays available during a turn and displays the durable FIFO above
-it. Input files render beside their prompt; generated artifacts remain a run-level collection opened
-from the 460px Files drawer because the artifact contract does not attribute a path version to one
-turn. Local object-URL previews are revoked on removal, successful send and unmount.
+it. Input files render beside their prompt. The first generated artifact automatically opens a
+non-modal right-hand canvas and selects that file; later files add a badge without stealing the
+active selection. Desktop uses a keyboard-accessible, locally remembered 420px–70vw split pane
+(640px initial width). Mobile/tablet uses a full-screen `Files → Preview` flow. The explorer preserves
+the `./artifacts/` hierarchy under Generated and groups Uploaded files by prompt. Bounded viewers
+render escaped text/code/Markdown/JSON/YAML, CSV tables, XLSX sheets in a dynamically loaded Web
+Worker, signature-validated media, and PDF. Every obsolete fetch is aborted and every local object
+URL is revoked; unsupported, oversized, expired, empty, collecting, loading, and retry/download error
+states are explicit. Generated-file markers and matching `./artifacts/...` Markdown paths open the
+same canvas.
 
 `packages/sandbox/src/opencodeChat.ts` absorbs pinned-SDK event churn. `run.warning` is non-terminal
 (for example a transient recorder reconnect); `run.error` represents a runtime failure. The worker
