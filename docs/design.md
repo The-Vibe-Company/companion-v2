@@ -334,8 +334,8 @@ Without a saved sidebar order, folder siblings remain alphabetical. Once customi
 and newly discovered paths follow alphabetically. The sidebar accepts insertion drops only between siblings;
 those drops update the caller's preference without mutating labels. A center drop retains the existing folder
 reparent operation, which remains shared for org labels. Rename preserves the caller's relative order, delete
-prunes the removed subtree, and reparent appends the moved subtree under its new parent. The main Skills list
-grouping remains independent of this sidebar-only preference.
+prunes the removed subtree, and reparent appends the moved subtree under its new parent. The grouped Skills list
+mirrors the same sibling order at the root and at every visible subfolder level.
 
 The My Skills and Organization lists use a flat Rhythm grouping by default. A section represents the
 first segment of a folder path; a skill is deduplicated inside that root and repeated only when assigned

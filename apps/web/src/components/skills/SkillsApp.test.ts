@@ -1431,6 +1431,48 @@ describe("SkillsApp optimistic label assignment", () => {
 });
 
 describe("SkillsApp drag-and-drop label reparenting", () => {
+  it("restores the persisted sidebar order in the grouped list", async () => {
+    const { container } = await mountSkillsApp(
+      { lib: "org", kind: "all" },
+      {
+        props: {
+          initialOrgSkills: [...seededSkills(), skill({ id: "growth-skill", labels: ["growth"] })],
+          initialFilterPreferences: {
+            active_filters: [],
+            group_by: "folder",
+            sidebar_order: { mine: [], org: ["marketing", "marketing/seo", "growth"] },
+          },
+        },
+      },
+    );
+    await flushEffects();
+
+    expect(Array.from(container.querySelectorAll(".cgroup__name"), (node) => node.textContent)).toEqual([
+      "marketing",
+      "growth",
+      "Without folder",
+    ]);
+  });
+
+  it("reflects a sidebar category reorder immediately in the grouped list", async () => {
+    const { container } = await mountSkillsApp(
+      { lib: "org", kind: "all" },
+      { props: { initialOrgSkills: [...seededSkills(), skill({ id: "growth-skill", labels: ["growth"] })] } },
+    );
+    await flushEffects();
+    const headings = () =>
+      Array.from(container.querySelectorAll(".cgroup__name"), (node) => node.textContent);
+    expect(headings()).toEqual(["growth", "marketing", "Without folder"]);
+
+    const target = folderRow(container, "growth");
+    target.getBoundingClientRect = () => ({ top: 100, bottom: 140, height: 40 } as DOMRect);
+    pressPointer(folderRow(container, "marketing"));
+    await movePointer(target, 30, 105);
+    await releasePointer(30, 105);
+
+    expect(headings()).toEqual(["marketing", "growth", "Without folder"]);
+  });
+
   it("reorders sibling labels personally when dropped on an insertion edge", async () => {
     vi.useFakeTimers();
     const { container } = await mountSkillsApp({ lib: "org", kind: "all" });

@@ -77,6 +77,22 @@ describe("skill list grouping", () => {
     expect(groups[1]?.rows[0]?.skill.id).toBe("digest");
   });
 
+  it("follows the preferred root order and appends unknown roots alphabetically", () => {
+    const groups = groupSkillsByRoot(
+      [
+        skill("sales", { labels: ["sales"] }),
+        skill("marketing", { labels: ["marketing"] }),
+        skill("operations", { labels: ["operations"] }),
+      ],
+      labels,
+      "org",
+      null,
+      ["operations"],
+    );
+
+    expect(groups.map((group) => group.path)).toEqual(["operations", "marketing", "sales"]);
+  });
+
   it("places direct rows first and keeps matching subfolder rows contiguous", () => {
     const groups = groupSkillsByRoot(
       [
@@ -94,6 +110,28 @@ describe("skill list grouping", () => {
       "weekly-report",
       "incident-summary",
       "log-parser",
+    ]);
+  });
+
+  it("keeps direct rows first and clusters descendants in preferred sibling order", () => {
+    const groups = groupSkillsByRoot(
+      [
+        skill("report", { labels: ["marketing/reporting"] }),
+        skill("direct", { labels: ["marketing"] }),
+        skill("seo-first", { labels: ["marketing/seo"] }),
+        skill("seo-second", { labels: ["marketing/seo"] }),
+      ],
+      labels,
+      "org",
+      null,
+      ["marketing", "marketing/seo", "marketing/reporting"],
+    );
+
+    expect(groups[0]?.rows.map((row) => row.skill.id)).toEqual([
+      "direct",
+      "seo-first",
+      "seo-second",
+      "report",
     ]);
   });
 
@@ -132,6 +170,21 @@ describe("skill list grouping", () => {
     expect("label" in groups[0]!).toBe(false);
     expect(groups.every((group) => group.rows.every((row) => row.relativePaths.length === 0))).toBe(true);
     expect(groups[0]?.rows[0]?.skill.id).toBe("campaign");
+  });
+
+  it("orders scoped subfolder sections like their sidebar siblings", () => {
+    const groups = groupSkillsByRoot(
+      [
+        skill("report", { labels: ["marketing/reporting"] }),
+        skill("audit", { labels: ["marketing/seo"] }),
+      ],
+      labels,
+      "org",
+      "marketing",
+      ["marketing", "marketing/seo", "marketing/reporting"],
+    );
+
+    expect(groups.map((group) => group.path)).toEqual(["marketing/seo", "marketing/reporting"]);
   });
 
   it("keeps exact-path rows headerless when the selected folder has no visible descendants", () => {
@@ -196,15 +249,27 @@ describe("skill list grouping", () => {
   });
 
   it("places installed and genuinely unfiled rows in separate trailing groups", () => {
-    const groups = groupSkillsByRoot([
-      skill("filed", { scope: "personal", source: "authored", labels: ["marketing"] }),
-      skill("installed", { source: "installed" }),
-      skill("loose", { scope: "personal", source: "authored" }),
-    ], labels, "mine");
+    const groups = groupSkillsByRoot(
+      [
+        skill("filed", { scope: "personal", source: "authored", labels: ["marketing"] }),
+        skill("operations", { scope: "personal", source: "authored", labels: ["operations"] }),
+        skill("installed", { source: "installed" }),
+        skill("loose", { scope: "personal", source: "authored" }),
+      ],
+      labels,
+      "mine",
+      null,
+      ["operations", "marketing"],
+    );
 
-    expect(groups.map((group) => group.key)).toEqual(["folder:marketing", "installed", "unfiled"]);
-    expect(groups[1]?.rows[0]?.skill.id).toBe("installed");
-    expect(groups[2]?.rows[0]?.skill.id).toBe("loose");
+    expect(groups.map((group) => group.key)).toEqual([
+      "folder:operations",
+      "folder:marketing",
+      "installed",
+      "unfiled",
+    ]);
+    expect(groups[2]?.rows[0]?.skill.id).toBe("installed");
+    expect(groups[3]?.rows[0]?.skill.id).toBe("loose");
   });
 
   it("prefers a manifest icon, otherwise inherits the deepest custom folder icon", () => {
