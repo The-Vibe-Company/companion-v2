@@ -63,6 +63,20 @@ def tracked_artifacts(repo: Path, artifact_root: Path = ARTIFACT_ROOT) -> list[s
     return [line for line in result.stdout.splitlines() if line.strip()]
 
 
+def safe_artifact_root(repo: Path, artifact_root: Path) -> Path:
+    current = repo.resolve()
+    for part in artifact_root.parts:
+        current = current / part
+        if current.is_symlink():
+            raise SystemExit(f"Artifact root contains a symlink component: {current}")
+    resolved = current.resolve()
+    try:
+        resolved.relative_to(repo.resolve())
+    except ValueError as exc:
+        raise SystemExit("Artifact root resolves outside the repository.") from exc
+    return resolved
+
+
 def ensure_local_exclude(
     repo: Path,
     artifact_root: Path = ARTIFACT_ROOT,
@@ -116,6 +130,7 @@ def main() -> int:
     repo = detect_repo(cwd)
     if repo is None:
         raise SystemExit("Mega Code Review requires a Git repository for non-committable artifacts.")
+    artifact_dir = safe_artifact_root(repo, artifact_root)
 
     tracked = tracked_artifacts(repo, artifact_root)
     if tracked:
@@ -138,7 +153,7 @@ def main() -> int:
 
     timestamp = args.timestamp or datetime.now().strftime("%Y%m%d-%H%M%S")
     repo_slug = slugify(args.repo_slug or repo.name)
-    run_dir = repo / artifact_root / "runs" / f"{timestamp}-{repo_slug}"
+    run_dir = artifact_dir / "runs" / f"{timestamp}-{repo_slug}"
     run_dir.mkdir(parents=True, exist_ok=False)
 
     rel_run_dir = run_dir.relative_to(repo).as_posix()

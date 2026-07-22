@@ -18,7 +18,7 @@ FRONTEND_RE = re.compile(
     re.IGNORECASE,
 )
 BACKEND_RE = re.compile(
-    r"(\.(py|rb|go|rs|java|kt|php|cs)$|(^|/)(api|server|backend|services|jobs|workers|controllers|models|routes)/)",
+    r"(\.(ts|mts|cts|py|rb|go|rs|java|kt|php|cs)$|(^|/)(api|server|backend|services|jobs|workers|controllers|models|routes)/)",
     re.IGNORECASE,
 )
 DB_RE = re.compile(r"(^|/)(migrations?|schema|prisma|db)/|schema\.(sql|rb|prisma)$", re.IGNORECASE)
@@ -92,12 +92,25 @@ def collect_review_context(repo_root: Path, base: str | None) -> dict:
 
 
 def parse_name_status(output: str) -> list[dict[str, str]]:
-    changed = []
-    for line in lines(output):
-        parts = line.split("\t")
-        if len(parts) >= 2:
-            path = parts[-1]
-            changed.append({"status": parts[0], "path": path})
+    changed: list[dict[str, str]] = []
+    parts = output.split("\0")
+    index = 0
+    while index < len(parts):
+        status = parts[index]
+        index += 1
+        if not status or index >= len(parts):
+            continue
+        if status.startswith(("R", "C")):
+            if index + 1 >= len(parts):
+                break
+            old_path, path = parts[index], parts[index + 1]
+            index += 2
+            changed.append({"status": status, "old_path": old_path, "path": path})
+        else:
+            path = parts[index]
+            index += 1
+            if path:
+                changed.append({"status": status, "path": path})
     return changed
 
 
@@ -114,8 +127,7 @@ def find_project_files(repo_root: Path) -> tuple[list[str], list[str]]:
         if path.is_file() and path.name in MANIFEST_NAMES:
             manifests.append(rel)
         if path.is_file() and (
-            any(rel.startswith(part) for part in CI_PARTS if "/" in part)
-            or rel in CI_PARTS
+            any(rel == part or rel.startswith(part.rstrip("/") + "/") for part in CI_PARTS)
         ):
             ci_files.append(rel)
     return sorted(manifests), sorted(ci_files)
@@ -141,10 +153,10 @@ def main() -> None:
     merge_base = merge_base_result.stdout.strip() if merge_base_result.returncode == 0 else None
     diff_range = review_context["diff_range"]
 
-    name_status = git(repo_root, ["diff", "--name-status", diff_range])
+    name_status = git(repo_root, ["diff", "--name-status", "-z", diff_range])
     status = git(repo_root, ["status", "--short"])
     changed_files = parse_name_status(name_status.stdout)
-    paths = [item["path"] for item in changed_files]
+    paths = [path for item in changed_files for path in (item.get("old_path"), item["path"]) if path]
     manifests, ci_files = find_project_files(repo_root)
 
     context = {

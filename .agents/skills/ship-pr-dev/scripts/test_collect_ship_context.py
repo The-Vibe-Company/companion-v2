@@ -32,11 +32,14 @@ class CollectShipContextTests(unittest.TestCase):
             workflow = repo / ".github" / "workflows" / "ci.yml"
             workflow.parent.mkdir(parents=True)
             workflow.write_text("name: CI\n", encoding="utf-8")
+            circle = repo / ".circleci" / "config.yml"
+            circle.parent.mkdir(parents=True)
+            circle.write_text("version: 2.1\n", encoding="utf-8")
             ignored = repo / "ignored" / "package.json"
             ignored.parent.mkdir(parents=True)
             ignored.write_text("{}\n", encoding="utf-8")
             subprocess.run(
-                ["git", "add", ".gitignore", "package.json", ".github/workflows/ci.yml"],
+                ["git", "add", ".gitignore", "package.json", ".github/workflows/ci.yml", ".circleci/config.yml"],
                 cwd=repo,
                 check=True,
                 stdout=subprocess.PIPE,
@@ -45,7 +48,7 @@ class CollectShipContextTests(unittest.TestCase):
             manifests, ci_files = collector.find_project_files(repo)
 
             self.assertEqual(manifests, ["package.json", "pyproject.toml"])
-            self.assertEqual(ci_files, [".github/workflows/ci.yml"])
+            self.assertEqual(ci_files, [".circleci/config.yml", ".github/workflows/ci.yml"])
             self.assertNotIn("ignored/package.json", manifests)
 
     def test_ship_artifacts_use_review_gate_safety_helpers(self) -> None:
@@ -99,6 +102,16 @@ class CollectShipContextTests(unittest.TestCase):
 
             self.assertEqual(payload["diff_ref"], "origin/main")
             self.assertEqual(payload["diff_range"], "origin/main...HEAD")
+
+    def test_name_status_preserves_rename_source_for_impact_detection(self) -> None:
+        changed = collector.parse_name_status("R100\0apps/api/route.ts\0docs/route.md\0")
+
+        self.assertEqual(
+            changed,
+            [{"status": "R100", "old_path": "apps/api/route.ts", "path": "docs/route.md"}],
+        )
+        paths = [path for item in changed for path in (item.get("old_path"), item["path"]) if path]
+        self.assertTrue(any(collector.BACKEND_RE.search(path) for path in paths))
 
 
 if __name__ == "__main__":

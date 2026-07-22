@@ -8,6 +8,7 @@ from fnmatch import fnmatchcase
 import json
 import os
 import re
+import shlex
 import stat
 import subprocess
 import sys
@@ -38,14 +39,19 @@ SECRET_FILENAME_PATTERNS = (
     "id_ed25519",
 )
 SECRET_ASSIGNMENT_RE = re.compile(
-    r"(?i)(\b(?:api[_-]?key|access[_-]?token|auth[_-]?token|refresh[_-]?token|"
-    r"client[_-]?secret|private[_-]?key|secret|password|passwd|authorization)\b\s*[:=]\s*)"
+    r"(?i)(?<![a-z0-9_.-])((?:[\"'])?(?:[a-z][a-z0-9_.-]*[_-])?(?:api[_-]?key|access[_-]?token|"
+    r"auth[_-]?token|refresh[_-]?token|client[_-]?secret|private[_-]?key|secret|"
+    r"password|passwd|authorization|token|key)(?:[\"'])?\s*[:=]\s*)"
     r"(?:\"(?:\\.|[^\"\\\r\n])*\"|'(?:\\.|[^'\\\r\n])*'|[^\s#]+)"
 )
 BEARER_RE = re.compile(r"(?i)(\bbearer\s+)([A-Za-z0-9._~+/=-]{8,})")
 SECRET_VALUE_RE = re.compile(
     r"(?i)(AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9_]{20,}|"
     r"xox[baprs]-[A-Za-z0-9-]{10,}|sk-[A-Za-z0-9_-]{20,})"
+)
+PRIVATE_KEY_BLOCK_RE = re.compile(
+    r"-----BEGIN ([A-Z0-9 ]*PRIVATE KEY)-----.*?-----END \1-----",
+    re.DOTALL,
 )
 
 
@@ -201,7 +207,7 @@ def detect_base_branch(repo: Path) -> str:
 
 
 def resolve_diff_ref(repo: Path, base: str) -> str:
-    if "/" in base or base.startswith("refs/"):
+    if base.startswith("refs/") or base.startswith("origin/"):
         return base
     origin_ref = f"origin/{base}"
     verify = git(["rev-parse", "--verify", "--quiet", origin_ref], repo)
@@ -226,14 +232,35 @@ def is_secret_like_path(name: str) -> bool:
 
 
 def redact_secret_text(text: str) -> str:
+    text = PRIVATE_KEY_BLOCK_RE.sub("<redacted-private-key>", text)
     text = SECRET_ASSIGNMENT_RE.sub(lambda match: f"{match.group(1)}<redacted>", text)
     text = BEARER_RE.sub(lambda match: f"{match.group(1)}<redacted>", text)
     text = SECRET_VALUE_RE.sub("<redacted-secret>", text)
     return text
 
 
+def redact_diff_text(text: str) -> str:
+    output: list[str] = []
+    secret_section = False
+    for line in text.splitlines(keepends=True):
+        if line.startswith("diff --git "):
+            try:
+                parts = shlex.split(line.rstrip("\r\n"))
+            except ValueError:
+                parts = []
+            paths = [part[2:] for part in parts[2:4] if part.startswith(("a/", "b/"))]
+            secret_section = any(is_secret_like_path(path) for path in paths)
+            output.append(line)
+            if secret_section:
+                output.append("[diff content redacted: secret-like path]\n")
+            continue
+        if not secret_section:
+            output.append(line)
+    return redact_secret_text("".join(output))
+
+
 def redact_and_truncate(text: str, max_bytes: int) -> dict[str, Any]:
-    return truncate_text(redact_secret_text(text), max_bytes)
+    return truncate_text(redact_diff_text(text), max_bytes)
 
 
 def collect_untracked_previews(repo: Path, files: list[str]) -> list[dict[str, Any]]:
@@ -301,6 +328,8 @@ def collect_worktree_state(
     repo: Path,
     max_diff_bytes: int,
     entries: list[dict[str, str]] | None = None,
+    include_untracked_previews: bool = True,
+    include_staged_diff: bool = True,
 ) -> dict[str, Any]:
     status_entries = entries if entries is not None else git_status_entries(repo)
     untracked_names = parse_untracked_files(status_entries)
@@ -308,10 +337,16 @@ def collect_worktree_state(
         "status_porcelain": format_status_entries(status_entries),
         "worktree_changed_files": parse_status_files(status_entries),
         "untracked_files": untracked_names,
-        "untracked_file_previews": collect_untracked_previews(repo, untracked_names),
-        "staged_diff": redact_and_truncate(
-            require_ok(git(["diff", "--cached"], repo, timeout=120)),
-            max_diff_bytes,
+        "untracked_file_previews": (
+            collect_untracked_previews(repo, untracked_names) if include_untracked_previews else []
+        ),
+        "staged_diff": (
+            redact_and_truncate(
+                require_ok(git(["diff", "--cached"], repo, timeout=120)),
+                max_diff_bytes,
+            )
+            if include_staged_diff
+            else {"text": "", "truncated": False, "byte_length": 0}
         ),
     }
 
@@ -381,19 +416,27 @@ def main() -> int:
     cwd = Path(args.cwd).resolve()
     repo = detect_repo(cwd)
     status_entries = git_status_entries(repo)
-    worktree = collect_worktree_state(repo, args.max_diff_bytes, status_entries)
+    status_porcelain = format_status_entries(status_entries)
     mode = args.mode
     if mode == "auto":
         if args.commit:
             mode = "commit"
         elif args.base is not None:
             mode = "base"
-        elif worktree["status_porcelain"].strip():
+        elif status_porcelain.strip():
             mode = "uncommitted"
         elif args.prompt:
             mode = "custom"
         else:
             mode = "base"
+
+    worktree = collect_worktree_state(
+        repo,
+        args.max_diff_bytes,
+        status_entries,
+        include_untracked_previews=mode == "uncommitted",
+        include_staged_diff=mode == "uncommitted",
+    )
 
     payload: dict[str, Any] = {
         "repo_root": str(repo),
