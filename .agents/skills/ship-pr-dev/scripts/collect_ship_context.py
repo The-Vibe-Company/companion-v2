@@ -4,10 +4,10 @@
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import json
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 from review_dependency import resolve_review_skill_dir
@@ -62,14 +62,33 @@ def lines(text: str) -> list[str]:
     return [line for line in text.splitlines() if line.strip()]
 
 
-def load_review_collector():
-    module_path = resolve_review_skill_dir() / "scripts" / "collect_review_context.py"
-    spec = importlib.util.spec_from_file_location("review_code_dev_collect_context", module_path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot load review-code-dev context collector: {module_path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+def collect_review_context(repo_root: Path, base: str | None) -> dict:
+    collector_path = resolve_review_skill_dir() / "scripts" / "collect_review_context.py"
+    command = [
+        sys.executable,
+        str(collector_path),
+        "--cwd",
+        str(repo_root),
+        "--mode",
+        "base",
+    ]
+    if base:
+        command.extend(["--base", base])
+    result = run(repo_root, command)
+    if result.returncode != 0:
+        raise RuntimeError(
+            "review-code-dev context collection failed: "
+            + (result.stderr.strip() or f"exit code {result.returncode}")
+        )
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("review-code-dev context collector returned invalid JSON") from exc
+    required = {"diff_ref", "diff_range", "diff_stat"}
+    if not required.issubset(payload):
+        missing = ", ".join(sorted(required - payload.keys()))
+        raise RuntimeError(f"review-code-dev context is missing required fields: {missing}")
+    return payload
 
 
 def parse_name_status(output: str) -> list[dict[str, str]]:
@@ -116,13 +135,7 @@ def main() -> None:
     repo_root = Path(root.stdout.strip()).resolve()
 
     branch = git(repo_root, ["branch", "--show-current"]).stdout.strip() or "DETACHED"
-    review_collector = load_review_collector()
-    requested_base = args.base or review_collector.detect_base_branch(repo_root)
-    review_context = review_collector.collect_base(
-        repo_root,
-        requested_base,
-        review_collector.DEFAULT_MAX_DIFF_BYTES,
-    )
+    review_context = collect_review_context(repo_root, args.base)
     base = review_context["diff_ref"]
     merge_base_result = git(repo_root, ["merge-base", base, "HEAD"])
     merge_base = merge_base_result.stdout.strip() if merge_base_result.returncode == 0 else None

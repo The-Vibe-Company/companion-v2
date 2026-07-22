@@ -77,6 +77,29 @@ class CollectShipContextTests(unittest.TestCase):
             with patch.dict(os.environ, {"REVIEW_CODE_DEV_SKILL_DIR": str(skill_dir)}):
                 self.assertEqual(resolve_review_skill_dir(), skill_dir.resolve())
 
+    def test_review_context_uses_dependency_cli_json_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            skill_dir = root / "review-code-dev"
+            scripts = skill_dir / "scripts"
+            scripts.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text("---\nname: review-code-dev\n---\n", encoding="utf-8")
+            fake_collector = scripts / "collect_review_context.py"
+            fake_collector.write_text(
+                "import json, sys\n"
+                "assert '--mode' in sys.argv and sys.argv[sys.argv.index('--mode') + 1] == 'base'\n"
+                "assert '--base' in sys.argv and sys.argv[sys.argv.index('--base') + 1] == 'main'\n"
+                "print(json.dumps({'diff_ref': 'origin/main', "
+                "'diff_range': 'origin/main...HEAD', 'diff_stat': '1 file changed'}))\n",
+                encoding="utf-8",
+            )
+
+            with patch.dict(os.environ, {"REVIEW_CODE_DEV_SKILL_DIR": str(skill_dir)}):
+                payload = collector.collect_review_context(root, "main")
+
+            self.assertEqual(payload["diff_ref"], "origin/main")
+            self.assertEqual(payload["diff_range"], "origin/main...HEAD")
+
 
 if __name__ == "__main__":
     unittest.main()

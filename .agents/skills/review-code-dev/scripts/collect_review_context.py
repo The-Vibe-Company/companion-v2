@@ -188,12 +188,14 @@ def detect_base_branch(repo: Path) -> str:
         ref = default["stdout"].strip()
         if ref.startswith("refs/remotes/origin/"):
             return ref.removeprefix("refs/remotes/origin/")
-    upstream = git(["rev-parse", "--abbrev-ref", "@{upstream}"], repo)
-    if upstream["exit_code"] == 0:
-        branch = upstream["stdout"].strip()
-        if branch.startswith("origin/"):
-            return branch.removeprefix("origin/")
-        if branch:
+
+    for branch, ref in (
+        ("main", "origin/main"),
+        ("master", "origin/master"),
+        ("main", "main"),
+        ("master", "master"),
+    ):
+        if git(["rev-parse", "--verify", "--quiet", ref], repo)["exit_code"] == 0:
             return branch
     return "main"
 

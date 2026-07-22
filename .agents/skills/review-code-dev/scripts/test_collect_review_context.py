@@ -53,6 +53,29 @@ class CollectReviewContextTests(unittest.TestCase):
             self.assertEqual(context["diff_range"], "origin/main...HEAD")
             self.assertEqual(context["changed_files"], ["feature.txt"])
 
+    def test_feature_upstream_is_ignored_when_origin_head_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            origin = root / "origin.git"
+            repo = root / "repo"
+            subprocess.run(["git", "init", "--bare", str(origin)], check=True, stdout=subprocess.PIPE)
+            subprocess.run(["git", "clone", str(origin), str(repo)], check=True, stdout=subprocess.PIPE)
+            git(repo, "config", "user.email", "test@example.test")
+            git(repo, "config", "user.name", "Test")
+            git(repo, "checkout", "-b", "main")
+            (repo / "base.txt").write_text("base\n", encoding="utf-8")
+            git(repo, "add", "base.txt")
+            git(repo, "commit", "-m", "base")
+            git(repo, "push", "-u", "origin", "main")
+            git(repo, "checkout", "-b", "feature")
+            (repo / "feature.txt").write_text("feature\n", encoding="utf-8")
+            git(repo, "add", "feature.txt")
+            git(repo, "commit", "-m", "feature")
+            git(repo, "push", "-u", "origin", "feature")
+
+            self.assertNotEqual(git(repo, "rev-parse", "--abbrev-ref", "@{upstream}"), "origin/main")
+            self.assertEqual(collector.detect_base_branch(repo), "main")
+
     def test_redacts_tracked_and_quoted_secrets(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)

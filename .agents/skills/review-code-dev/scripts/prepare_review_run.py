@@ -97,22 +97,39 @@ def main() -> int:
     parser.add_argument("--cwd", default=".", help="Repository working directory")
     parser.add_argument("--repo-slug", help="Slug to use in the run directory name")
     parser.add_argument("--timestamp", help="YYYYMMDD-HHMMSS timestamp override")
+    parser.add_argument("--artifact-root", default=ARTIFACT_ROOT.as_posix())
+    parser.add_argument("--exclude-marker", default=EXCLUDE_MARKER)
+    parser.add_argument("--probe-name", default=".review-code-dev-ignore-check")
+    parser.add_argument("--skill-name", default="review-code-dev")
     parser.add_argument("--output", help="Write metadata JSON to this path")
     args = parser.parse_args()
 
     cwd = Path(args.cwd).resolve()
+    artifact_root = Path(args.artifact_root)
+    if (
+        artifact_root.is_absolute()
+        or ".." in artifact_root.parts
+        or len(artifact_root.parts) < 2
+        or artifact_root.parts[0] != "plans"
+    ):
+        raise SystemExit("Artifact root must be a repository-relative path below plans/.")
     repo = detect_repo(cwd)
     if repo is None:
         raise SystemExit("Mega Code Review requires a Git repository for non-committable artifacts.")
 
-    tracked = tracked_artifacts(repo)
+    tracked = tracked_artifacts(repo, artifact_root)
     if tracked:
         raise SystemExit(
-            "Refusing to write artifacts because plans/review-code-dev is already tracked by Git: "
+            f"Refusing to write artifacts because {artifact_root.as_posix()} is already tracked by Git: "
             + ", ".join(tracked[:10])
         )
 
-    exclude = ensure_local_exclude(repo)
+    exclude = ensure_local_exclude(
+        repo,
+        artifact_root,
+        args.exclude_marker,
+        args.probe_name,
+    )
     if not exclude["verified"]:
         raise SystemExit(
             "Refusing to write artifacts because Git ignore verification failed for "
@@ -121,18 +138,20 @@ def main() -> int:
 
     timestamp = args.timestamp or datetime.now().strftime("%Y%m%d-%H%M%S")
     repo_slug = slugify(args.repo_slug or repo.name)
-    run_dir = repo / ARTIFACT_ROOT / "runs" / f"{timestamp}-{repo_slug}"
+    run_dir = repo / artifact_root / "runs" / f"{timestamp}-{repo_slug}"
     run_dir.mkdir(parents=True, exist_ok=False)
 
     rel_run_dir = run_dir.relative_to(repo).as_posix()
     metadata = {
+        "skill": args.skill_name,
         "repo_root": str(repo),
         "run_dir": str(run_dir),
         "run_dir_relative": rel_run_dir,
-        "artifact_root": ARTIFACT_ROOT.as_posix(),
+        "artifact_root": artifact_root.as_posix(),
         "git_exclude": exclude,
         "tracked_artifacts": tracked,
         "non_committable": True,
+        "git_ignore_rule": f"/{artifact_root.as_posix().strip('/')}/",
     }
 
     metadata_path = Path(args.output).resolve() if args.output else run_dir / "run-metadata.json"
