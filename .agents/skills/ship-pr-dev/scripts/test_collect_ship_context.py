@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 
 MODULE_PATH = Path(__file__).with_name("collect_ship_context.py")
+PREPARE_PATH = Path(__file__).with_name("prepare_ship_run.py")
 SPEC = importlib.util.spec_from_file_location("collect_ship_context", MODULE_PATH)
 assert SPEC and SPEC.loader
 collector = importlib.util.module_from_spec(SPEC)
@@ -40,6 +43,26 @@ class CollectShipContextTests(unittest.TestCase):
             self.assertEqual(manifests, ["package.json", "pyproject.toml"])
             self.assertEqual(ci_files, [".github/workflows/ci.yml"])
             self.assertNotIn("ignored/package.json", manifests)
+
+    def test_ship_artifacts_use_review_gate_safety_helpers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, stdout=subprocess.PIPE)
+
+            result = subprocess.run(
+                [sys.executable, str(PREPARE_PATH), "--cwd", str(repo)],
+                check=True,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            metadata = json.loads(result.stdout)
+
+            self.assertEqual(metadata["artifact_root"], "plans/ship-pr-dev")
+            self.assertTrue(metadata["git_exclude"]["verified"])
+            self.assertTrue(metadata["non_committable"])
+            exclude = (repo / ".git" / "info" / "exclude").read_text(encoding="utf-8")
+            self.assertIn("/plans/ship-pr-dev/", exclude.splitlines())
 
 
 if __name__ == "__main__":

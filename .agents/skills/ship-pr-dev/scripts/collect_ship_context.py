@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import re
 import subprocess
@@ -59,15 +60,14 @@ def lines(text: str) -> list[str]:
     return [line for line in text.splitlines() if line.strip()]
 
 
-def detect_base(repo_root: Path) -> str:
-    origin_head = git(repo_root, ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"])
-    if origin_head.returncode == 0 and origin_head.stdout.strip():
-        return origin_head.stdout.strip()
-
-    for candidate in ("origin/main", "origin/master", "main", "master"):
-        if git(repo_root, ["rev-parse", "--verify", "--quiet", candidate]).returncode == 0:
-            return candidate
-    return "origin/main"
+def load_review_collector():
+    module_path = Path(__file__).resolve().parents[2] / "review-code-dev" / "scripts" / "collect_review_context.py"
+    spec = importlib.util.spec_from_file_location("review_code_dev_collect_context", module_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load review-code-dev context collector: {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def parse_name_status(output: str) -> list[dict[str, str]]:
@@ -114,13 +114,19 @@ def main() -> None:
     repo_root = Path(root.stdout.strip()).resolve()
 
     branch = git(repo_root, ["branch", "--show-current"]).stdout.strip() or "DETACHED"
-    base = args.base or detect_base(repo_root)
+    review_collector = load_review_collector()
+    requested_base = args.base or review_collector.detect_base_branch(repo_root)
+    review_context = review_collector.collect_base(
+        repo_root,
+        requested_base,
+        review_collector.DEFAULT_MAX_DIFF_BYTES,
+    )
+    base = review_context["diff_ref"]
     merge_base_result = git(repo_root, ["merge-base", base, "HEAD"])
     merge_base = merge_base_result.stdout.strip() if merge_base_result.returncode == 0 else None
-    diff_range = f"{base}...HEAD"
+    diff_range = review_context["diff_range"]
 
     name_status = git(repo_root, ["diff", "--name-status", diff_range])
-    stat = git(repo_root, ["diff", "--stat", diff_range])
     status = git(repo_root, ["status", "--short"])
     changed_files = parse_name_status(name_status.stdout)
     paths = [item["path"] for item in changed_files]
@@ -133,7 +139,7 @@ def main() -> None:
         "merge_base": merge_base,
         "diff_range": diff_range,
         "git_status_short": lines(status.stdout),
-        "diff_stat": stat.stdout.strip(),
+        "diff_stat": review_context["diff_stat"].strip(),
         "changed_files": changed_files,
         "impact": {
             "frontend": any(FRONTEND_RE.search(path) for path in paths),

@@ -4,52 +4,23 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
-import re
-import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
 
-def run_git(cwd: Path, args: list[str], check: bool = False) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["git", *args],
-        cwd=str(cwd),
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=check,
-    )
+ARTIFACT_ROOT = Path("plans/ship-pr-dev")
 
 
-def slugify(value: str) -> str:
-    value = re.sub(r"[^a-zA-Z0-9._-]+", "-", value.strip())
-    value = value.strip("-._").lower()
-    return value or "repo"
-
-
-def ensure_git_ignore(repo_root: Path) -> None:
-    git_dir = run_git(repo_root, ["rev-parse", "--git-dir"], check=True).stdout.strip()
-    git_path = Path(git_dir)
-    if not git_path.is_absolute():
-        git_path = repo_root / git_path
-    exclude_path = git_path / "info" / "exclude"
-    exclude_path.parent.mkdir(parents=True, exist_ok=True)
-    exclude = exclude_path.read_text(encoding="utf-8") if exclude_path.exists() else ""
-    ignore_line = "/plans/ship-pr-dev/"
-    if ignore_line not in exclude.splitlines():
-        with exclude_path.open("a", encoding="utf-8") as handle:
-            if exclude and not exclude.endswith("\n"):
-                handle.write("\n")
-            handle.write(f"{ignore_line}\n")
-
-    check_ignore = run_git(repo_root, ["check-ignore", "-q", "plans/ship-pr-dev/"])
-    if check_ignore.returncode != 0:
-        raise SystemExit("plans/ship-pr-dev/ is not ignored by Git; refusing to write artifacts")
-
-    tracked = run_git(repo_root, ["ls-files", "plans/ship-pr-dev/"]).stdout.strip()
-    if tracked:
-        raise SystemExit("plans/ship-pr-dev/ is tracked by Git; refusing to write artifacts")
+def load_review_preparer():
+    module_path = Path(__file__).resolve().parents[2] / "review-code-dev" / "scripts" / "prepare_review_run.py"
+    spec = importlib.util.spec_from_file_location("review_code_dev_prepare_run", module_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load review-code-dev artifact safety helpers: {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def main() -> None:
@@ -58,16 +29,25 @@ def main() -> None:
     args = parser.parse_args()
 
     cwd = Path(args.cwd).resolve()
-    root_result = run_git(cwd, ["rev-parse", "--show-toplevel"])
-    if root_result.returncode != 0:
+    review_preparer = load_review_preparer()
+    repo_root = review_preparer.detect_repo(cwd)
+    if repo_root is None:
         raise SystemExit("ship-pr-dev requires a Git repository")
-
-    repo_root = Path(root_result.stdout.strip()).resolve()
-    ensure_git_ignore(repo_root)
+    tracked = review_preparer.tracked_artifacts(repo_root, ARTIFACT_ROOT)
+    if tracked:
+        raise SystemExit("plans/ship-pr-dev/ is tracked by Git; refusing to write artifacts")
+    exclude = review_preparer.ensure_local_exclude(
+        repo_root,
+        ARTIFACT_ROOT,
+        "# Ship PR artifacts",
+        ".ship-pr-dev-ignore-check",
+    )
+    if not exclude["verified"]:
+        raise SystemExit("plans/ship-pr-dev/ is not ignored by Git; refusing to write artifacts")
 
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-    repo_slug = slugify(repo_root.name)
-    run_dir = repo_root / "plans" / "ship-pr-dev" / "runs" / f"{timestamp}-{repo_slug}"
+    repo_slug = review_preparer.slugify(repo_root.name)
+    run_dir = repo_root / ARTIFACT_ROOT / "runs" / f"{timestamp}-{repo_slug}"
     run_dir.mkdir(parents=True, exist_ok=False)
 
     metadata = {
@@ -77,6 +57,9 @@ def main() -> None:
         "repo_root": str(repo_root),
         "repo_slug": repo_slug,
         "run_dir": str(run_dir),
+        "artifact_root": ARTIFACT_ROOT.as_posix(),
+        "git_exclude": exclude,
+        "tracked_artifacts": tracked,
         "non_committable": True,
         "git_ignore_rule": "/plans/ship-pr-dev/",
     }

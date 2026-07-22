@@ -50,30 +50,39 @@ def detect_repo(cwd: Path) -> Path | None:
 
 def git_path(repo: Path, path: str) -> Path:
     result = run(["git", "rev-parse", "--git-path", path], repo)
-    return Path(require_ok(result).strip()).resolve()
+    resolved = Path(require_ok(result).strip())
+    if not resolved.is_absolute():
+        resolved = repo / resolved
+    return resolved.resolve()
 
 
-def tracked_artifacts(repo: Path) -> list[str]:
-    result = run(["git", "ls-files", "--", ARTIFACT_ROOT.as_posix()], repo)
+def tracked_artifacts(repo: Path, artifact_root: Path = ARTIFACT_ROOT) -> list[str]:
+    result = run(["git", "ls-files", "--", artifact_root.as_posix()], repo)
     if result.returncode != 0:
         raise SystemExit(result.stderr.strip() or "git ls-files failed")
     return [line for line in result.stdout.splitlines() if line.strip()]
 
 
-def ensure_local_exclude(repo: Path) -> dict[str, Any]:
+def ensure_local_exclude(
+    repo: Path,
+    artifact_root: Path = ARTIFACT_ROOT,
+    exclude_marker: str = EXCLUDE_MARKER,
+    probe_name: str = ".review-code-dev-ignore-check",
+) -> dict[str, Any]:
     exclude_path = git_path(repo, "info/exclude")
     exclude_path.parent.mkdir(parents=True, exist_ok=True)
     before = exclude_path.read_text(encoding="utf-8") if exclude_path.exists() else ""
 
-    missing = [line for line in EXCLUDE_LINES if line not in before.splitlines()]
+    exclude_lines = (f"/{artifact_root.as_posix().strip('/')}/",)
+    missing = [line for line in exclude_lines if line not in before.splitlines()]
     added = False
     if missing:
         suffix = "" if before.endswith("\n") or not before else "\n"
-        block = suffix + EXCLUDE_MARKER + "\n" + "\n".join(missing) + "\n"
+        block = suffix + exclude_marker + "\n" + "\n".join(missing) + "\n"
         exclude_path.write_text(before + block, encoding="utf-8")
         added = True
 
-    probe = ARTIFACT_ROOT / ".review-code-dev-ignore-check"
+    probe = artifact_root / probe_name
     check = run(["git", "check-ignore", "-q", "--", probe.as_posix()], repo)
     return {
         "path": str(exclude_path),
