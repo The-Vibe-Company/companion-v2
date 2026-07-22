@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -26,15 +26,22 @@ function runClient(
 
 describe("compiled Companion agent client", () => {
   it("starts as a standalone ESM executable", () => {
-    const result = spawnSync(process.execPath, [clientPath], {
-      input: "{}",
-      encoding: "utf8",
-      env: process.env,
-    });
+    const fixtureRoot = mkdtempSync(join(tmpdir(), "companion-standalone-bundle-"));
+    const isolatedClientPath = join(fixtureRoot, "companion-agent-client.mjs");
+    copyFileSync(clientPath, isolatedClientPath);
+    try {
+      const result = spawnSync(process.execPath, [isolatedClientPath], {
+        input: "{}",
+        encoding: "utf8",
+        env: process.env,
+      });
 
-    expect(result.status).toBe(1);
-    expect(JSON.parse(result.stdout)).toEqual({ ok: false, error: "expected one JSON request on stdin" });
-    expect(result.stderr).toBe("");
+      expect(result.status).toBe(1);
+      expect(JSON.parse(result.stdout)).toEqual({ ok: false, error: "expected one JSON request on stdin" });
+      expect(result.stderr).toBe("");
+    } finally {
+      rmSync(fixtureRoot, { recursive: true, force: true });
+    }
   });
 
   it("rejects a checksum mismatch before writing a downloaded package", async () => {

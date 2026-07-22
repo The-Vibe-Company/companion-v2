@@ -145,18 +145,27 @@ export function canonicalAgentAuthHeaders(
   configuredUrl = configuredAgentAuthUrl(),
 ): Headers | null {
   const origin = canonicalOrigin(configuredUrl);
+  const companionProxyOrigin = singleForwardedValue(input.get("x-companion-agent-auth-origin"));
+  if (companionProxyOrigin === undefined) return null;
+  const companionProxyMatched = companionProxyOrigin !== null;
+  if (companionProxyMatched && companionProxyOrigin !== origin.origin) return null;
+
   const forwardedHost = singleForwardedValue(input.get("x-forwarded-host"));
   const forwardedProto = singleForwardedValue(input.get("x-forwarded-proto"));
   const forwardedPort = singleForwardedValue(input.get("x-forwarded-port"));
   if (forwardedHost === undefined || forwardedProto === undefined || forwardedPort === undefined) return null;
 
-  if (forwardedHost !== null && !isCanonicalHost(forwardedHost, origin)) return null;
-  if (forwardedProto !== null && `${forwardedProto.toLowerCase()}:` !== origin.protocol) return null;
-  if (forwardedPort !== null && forwardedPort !== effectivePort(origin)) return null;
+  if (!companionProxyMatched) {
+    if (forwardedHost !== null && !isCanonicalHost(forwardedHost, origin)) return null;
+    if (forwardedProto !== null && `${forwardedProto.toLowerCase()}:` !== origin.protocol) return null;
+    if (forwardedPort !== null && forwardedPort !== effectivePort(origin)) return null;
+  }
 
   const directHost = singleForwardedValue(input.get("host"));
   if (directHost === undefined) return null;
-  if (forwardedHost === null && directHost !== null && !isCanonicalHost(directHost, origin)) return null;
+  if (!companionProxyMatched && forwardedHost === null && directHost !== null && !isCanonicalHost(directHost, origin)) {
+    return null;
+  }
 
   const headers = new Headers(input);
   headers.set("host", origin.host);
@@ -166,6 +175,7 @@ export function canonicalAgentAuthHeaders(
   headers.delete("x-forwarded-host");
   headers.delete("x-forwarded-proto");
   headers.delete("x-forwarded-port");
+  headers.delete("x-companion-agent-auth-origin");
   return headers;
 }
 

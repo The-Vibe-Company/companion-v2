@@ -80,6 +80,23 @@ explicit legacy mode; do not fall back automatically.
 A skill is a folder with a `SKILL.md` and a `companion.json` at its root. `SKILL.md` stays
 Agent Skills-compatible; Companion-specific package data lives in `companion.json`.
 
+### Connect with Agent Auth
+
+If the selected workspace has no `agentAuth` reference yet, run the explicit connection action from
+this skill package root. `apiUrl` and `workspaceId` are the non-secret values from the workspace's
+**Use with an agent** prompt or existing credentials entry:
+
+```sh
+printf '%s' '{"action":"connect","apiUrl":"https://companion.acme.dev/v1","workspaceId":"6a9c3cfd-6a1e-4a7b-8f77-1f7f0e62e3d4","name":"Codex"}' \
+  | node scripts/companion-agent-client.mjs
+```
+
+The client emits value-free approval status events on stderr, opens the device-approval page when the
+platform supports it, and waits for approval. A successful result saves only the `{ issuer, agentId }`
+reference in schema-v3 credentials; private keys remain in the separate mode-0600 Agent Auth store.
+Then rerun the original Companion operation. Do not switch to legacy PAT mode unless the user
+explicitly requests that compatibility path.
+
 `companion.json` is the package manifest. It records:
 
 - `name` — the skill slug. After an explicit Companion rename, update this to the returned slug.
