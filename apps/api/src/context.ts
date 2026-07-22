@@ -1,7 +1,7 @@
 import { getCookie } from "hono/cookie";
 import type { Context } from "hono";
 import type { TokenScope } from "@companion/contracts";
-import { auth } from "@companion/auth";
+import { auth, authenticateAgentRequest, type AgentCapabilityName } from "@companion/auth";
 import {
   ensureUserBootstrap,
   listOrgs,
@@ -17,6 +17,9 @@ export interface ApiVariables {
   tokenActor: ActorContext | null;
   tokenOrgId: string | null;
   tokenScopes: TokenScope[] | null;
+  programmaticAuthKind: "pat" | "agent" | null;
+  agentId: string | null;
+  agentCapability: AgentCapabilityName | null;
 }
 
 function responseSetCookies(headers: Headers | undefined): string[] {
@@ -60,6 +63,9 @@ export async function attachSession(c: Context<{ Variables: ApiVariables }>, nex
   c.set("tokenActor", null);
   c.set("tokenOrgId", null);
   c.set("tokenScopes", null);
+  c.set("programmaticAuthKind", null);
+  c.set("agentId", null);
+  c.set("agentCapability", null);
   if (session?.user) {
     await ensureUserBootstrap({
       id: session.user.id,
@@ -75,6 +81,24 @@ export async function attachSession(c: Context<{ Variables: ApiVariables }>, nex
         c.set("tokenActor", resolved.actor);
         c.set("tokenOrgId", resolved.orgId);
         c.set("tokenScopes", resolved.scopes);
+        c.set("programmaticAuthKind", "pat");
+      } else {
+        const workspaceId =
+          c.req.header("x-companion-workspace-id") ?? c.req.header("x-companion-org") ?? null;
+        const agent = await authenticateAgentRequest({
+          headers: c.req.raw.headers,
+          method: c.req.method,
+          pathname: c.req.path,
+          workspaceId,
+        });
+        if (agent) {
+          c.set("tokenActor", agent.actor);
+          c.set("tokenOrgId", agent.workspaceId);
+          c.set("tokenScopes", [agent.capability]);
+          c.set("programmaticAuthKind", "agent");
+          c.set("agentId", agent.session.agentId);
+          c.set("agentCapability", agent.capability);
+        }
       }
     }
   }
@@ -113,7 +137,12 @@ export function actorFromContext(
 
 /** True when the request is authenticated by a personal access token rather than a cookie session. */
 export function isTokenRequest(c: Context<{ Variables: ApiVariables }>): boolean {
-  return !c.get("user") && !!c.get("tokenActor");
+  return c.get("programmaticAuthKind") === "pat";
+}
+
+/** True only for a validated delegated-agent JWT (never for a PAT). */
+export function isAgentRequest(c: Context<{ Variables: ApiVariables }>): boolean {
+  return c.get("programmaticAuthKind") === "agent";
 }
 
 /**

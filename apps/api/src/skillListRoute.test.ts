@@ -12,12 +12,15 @@ const serviceMocks = vi.hoisted(() => {
     addOrgAccessDomain: noop,
     archiveSkill: noop,
     assignLabel: noop,
+    authorizePublicSkillPackageForSession: vi.fn(),
     buildDependencyPlan: noop,
     buildSkillSharePlan: vi.fn(),
+    clearSkillPublicVersion: vi.fn(),
     completeOnboarding: noop,
     createInvitation: noop,
     createLabel: noop,
     createOrg: noop,
+    consumePublicSkillTransferTicket: vi.fn(),
     deleteLabel: noop,
     DependencyPublishError: class DependencyPublishError extends Error {},
     computeLocalSkillStatus: vi.fn(() => "installed"),
@@ -30,7 +33,7 @@ const serviceMocks = vi.hoisted(() => {
     getSkillFilterPreferences: noop,
     getOrgSettings: noop,
     getSkillNamingPolicy: vi.fn(),
-    getDownloadVersion: noop,
+    getDownloadVersion: vi.fn(),
     getCommentImageAsset: noop,
     getOrgLogoAsset: noop,
     getSkillPublicPreviewByShareToken: vi.fn(),
@@ -57,6 +60,7 @@ const serviceMocks = vi.hoisted(() => {
     setLabelIcon: noop,
     setMemberRole: noop,
     setSkillFilterPreferences: noop,
+    setSkillPublicVersion: vi.fn(),
     setOrgLogoFromUpload: noop,
     orgLogoPublicPath: vi.fn(() => "/org-logo.png"),
     shareSkill: vi.fn(),
@@ -102,6 +106,10 @@ const serviceMocks = vi.hoisted(() => {
       const references = input.slugs.map((slug) => ({ declaredSlug: slug, slug, skillId: null }));
       return { references, slugs: [...new Set(input.slugs)], manifestDependencies: {} };
     }),
+    SkillPublicReleaseConflictError: class SkillPublicReleaseConflictError extends Error {},
+    SkillPublicReleaseForbiddenError: class SkillPublicReleaseForbiddenError extends Error {},
+    SkillPublicReleaseNotFoundError: class SkillPublicReleaseNotFoundError extends Error {},
+    SkillPublicReleaseValidationError: class SkillPublicReleaseValidationError extends Error {},
   };
 });
 
@@ -113,6 +121,12 @@ const authMocks = vi.hoisted(() => ({
   getSession: vi.fn(async (): Promise<unknown | null> => null),
   handler: vi.fn(),
 }));
+
+const storageMocks = vi.hoisted(() => ({
+  getSkillArchive: vi.fn(async () => Buffer.from("stored-tar")),
+  putPublicSkillReleaseSnapshot: vi.fn(async () => "org-1/public-releases/sha256/snapshot.zip"),
+}));
+const skillsMocks = vi.hoisted(() => ({ tarGzToZip: vi.fn(async () => Buffer.from("public-zip-bytes")) }));
 
 vi.mock("@hono/node-server", () => ({
   serve: vi.fn(),
@@ -126,11 +140,21 @@ vi.mock("@companion/auth", () => ({
     handler: authMocks.handler,
     $Infer: {},
   },
+  registerAgentCapabilityExecutor: vi.fn(() => () => undefined),
 }));
 
 vi.mock("@companion/db", () => dbMocks);
 
 vi.mock("@companion/core/services", () => serviceMocks);
+vi.mock("@companion/storage", async (importActual) => ({
+  ...(await importActual<typeof import("@companion/storage")>()),
+  getSkillArchive: storageMocks.getSkillArchive,
+  putPublicSkillReleaseSnapshot: storageMocks.putPublicSkillReleaseSnapshot,
+}));
+vi.mock("@companion/skills", async (importActual) => ({
+  ...(await importActual<typeof import("@companion/skills")>()),
+  tarGzToZip: skillsMocks.tarGzToZip,
+}));
 
 import { app } from "./index";
 
@@ -152,6 +176,12 @@ describe("Secrets PAT boundary and retrieval protocol", () => {
     vi.clearAllMocks();
     authMocks.getSession.mockResolvedValue(null);
     serviceMocks.resolveApiToken.mockImplementation(async (token: string) => tokenFor(token));
+    serviceMocks.getDownloadVersion.mockResolvedValue({
+      versionId: "version-2",
+      isCurrent: true,
+      version: "2.0.0",
+      storagePath: "skills/review/2.0.0.tar.gz",
+    });
   });
 
   it("allows authorized metadata reads only with secrets:read", async () => {
@@ -330,12 +360,18 @@ describe("GET /v1/public/skills/:token", () => {
       creator_name: "Ada Lovelace",
       creator_initials: "AL",
       updated_at: "2026-06-25T10:00:00.000Z",
+      public_release: {
+        version: "1.2.3",
+        checksum: `sha256:${"a".repeat(64)}`,
+        size_bytes: 123,
+        released_at: "2026-06-24T10:00:00.000Z",
+      },
     });
 
     const res = await app.request("/v1/public/skills/share-token-1");
 
     expect(res.status).toBe(200);
-    expect(res.headers.get("cache-control")).toBe("public, s-maxage=300, stale-while-revalidate=600");
+    expect(res.headers.get("cache-control")).toBe("no-store");
     await expect(res.json()).resolves.toEqual({
       display_name: "Mega Code Review",
       slug: "mega-code-review",
@@ -344,6 +380,12 @@ describe("GET /v1/public/skills/:token", () => {
       creator_name: "Ada Lovelace",
       creator_initials: "AL",
       updated_at: "2026-06-25T10:00:00.000Z",
+      public_release: {
+        version: "1.2.3",
+        checksum: `sha256:${"a".repeat(64)}`,
+        size_bytes: 123,
+        released_at: "2026-06-24T10:00:00.000Z",
+      },
     });
     expect(serviceMocks.getSkillPublicPreviewByShareToken).toHaveBeenCalledWith({ token: "share-token-1" });
     expect(dbMocks.withTenantContext).not.toHaveBeenCalled();
@@ -363,6 +405,160 @@ describe("removed skill star endpoint", () => {
   it("returns the normal 404", async () => {
     const res = await app.request("/v1/skills/mega-code-review/star", { method: "POST" });
     expect(res.status).toBe(404);
+  });
+});
+
+describe("PUT/DELETE /v1/skills/:slug/public-version", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    authMocks.getSession.mockResolvedValue(null);
+    serviceMocks.resolveApiToken.mockImplementation(async (token: string) => tokenFor(token));
+    serviceMocks.getDownloadVersion.mockResolvedValue({
+      versionId: "version-2",
+      isCurrent: true,
+      version: "2.0.0",
+      storagePath: "skills/review/2.0.0.tar.gz",
+    });
+  });
+
+  it("promotes the exact current version with skills:write", async () => {
+    serviceMocks.setSkillPublicVersion.mockResolvedValue({
+      ok: true,
+      public_version: "2.0.0",
+      share_token: "share-token-1",
+      changed: true,
+    });
+
+    const response = await app.request("/v1/skills/review/public-version", {
+      method: "PUT",
+      headers: { authorization: "Bearer write-only", "content-type": "application/json" },
+      body: JSON.stringify({ version: "2.0.0" }),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ public_version: "2.0.0", changed: true });
+    expect(serviceMocks.getDownloadVersion).toHaveBeenCalledWith(expect.objectContaining({
+      actor: actorA,
+      orgId: "org-1",
+      slug: "review",
+      version: "2.0.0",
+      forPublicRelease: true,
+    }));
+    expect(serviceMocks.setSkillPublicVersion).toHaveBeenCalledWith(expect.objectContaining({
+      actor: actorA,
+      orgId: "org-1",
+      slug: "review",
+      version: "2.0.0",
+      packageChecksum: "sha256:a351d9ebec44a0a9e50a392a84d43d2cb610b74149bb6baf0d8f74da55765761",
+      packageSizeBytes: 16,
+      expectedCurrentVersionId: "version-2",
+    }));
+    expect(storageMocks.putPublicSkillReleaseSnapshot).toHaveBeenCalledWith({
+      orgId: "org-1",
+      checksum: "sha256:a351d9ebec44a0a9e50a392a84d43d2cb610b74149bb6baf0d8f74da55765761",
+      body: Buffer.from("public-zip-bytes"),
+    });
+  });
+
+  it("returns 409 when a prepared current version becomes non-current during promotion", async () => {
+    serviceMocks.setSkillPublicVersion.mockRejectedValueOnce(
+      new serviceMocks.SkillPublicReleaseConflictError("the current skill version changed concurrently"),
+    );
+
+    const response = await app.request("/v1/skills/review/public-version", {
+      method: "PUT",
+      headers: { authorization: "Bearer write-only", "content-type": "application/json" },
+      body: JSON.stringify({ version: "2.0.0" }),
+    });
+
+    expect(response.status).toBe(409);
+    expect(storageMocks.putPublicSkillReleaseSnapshot).toHaveBeenCalledOnce();
+    expect(serviceMocks.setSkillPublicVersion).toHaveBeenCalledWith(expect.objectContaining({
+      version: "2.0.0",
+      expectedCurrentVersionId: "version-2",
+    }));
+  });
+
+  it("performs Core public-release authorization before writing the snapshot", async () => {
+    serviceMocks.getDownloadVersion.mockRejectedValueOnce(
+      new serviceMocks.SkillPublicReleaseForbiddenError("forbidden"),
+    );
+
+    const response = await app.request("/v1/skills/review/public-version", {
+      method: "PUT",
+      headers: { authorization: "Bearer write-only", "content-type": "application/json" },
+      body: JSON.stringify({ version: "2.0.0" }),
+    });
+
+    expect(response.status).toBe(403);
+    expect(storageMocks.putPublicSkillReleaseSnapshot).not.toHaveBeenCalled();
+    expect(serviceMocks.setSkillPublicVersion).not.toHaveBeenCalled();
+  });
+
+  it("does not promote a historical archive that cannot be converted safely", async () => {
+    skillsMocks.tarGzToZip.mockRejectedValueOnce(new Error("Windows-unsafe path segment"));
+
+    const response = await app.request("/v1/skills/review/public-version", {
+      method: "PUT",
+      headers: { authorization: "Bearer write-only", "content-type": "application/json" },
+      body: JSON.stringify({ version: "2.0.0" }),
+    });
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "the stored skill package is not safe for public installation; publish a corrected version first",
+    });
+    expect(storageMocks.putPublicSkillReleaseSnapshot).not.toHaveBeenCalled();
+    expect(serviceMocks.setSkillPublicVersion).not.toHaveBeenCalled();
+  });
+
+  it("rejects missing write scope and maps authorization/CAS failures", async () => {
+    const missingScope = await app.request("/v1/skills/review/public-version", {
+      method: "PUT",
+      headers: { authorization: "Bearer read-a", "content-type": "application/json" },
+      body: JSON.stringify({ version: "2.0.0" }),
+    });
+    expect(missingScope.status).toBe(400);
+
+    serviceMocks.setSkillPublicVersion.mockRejectedValueOnce(
+      new serviceMocks.SkillPublicReleaseForbiddenError("forbidden"),
+    );
+    const forbidden = await app.request("/v1/skills/review/public-version", {
+      method: "PUT",
+      headers: { authorization: "Bearer write-only", "content-type": "application/json" },
+      body: JSON.stringify({ version: "2.0.0" }),
+    });
+    expect(forbidden.status).toBe(403);
+
+    serviceMocks.setSkillPublicVersion.mockRejectedValueOnce(
+      new serviceMocks.SkillPublicReleaseConflictError("concurrent"),
+    );
+    const conflict = await app.request("/v1/skills/review/public-version", {
+      method: "PUT",
+      headers: { authorization: "Bearer write-only", "content-type": "application/json" },
+      body: JSON.stringify({ version: "2.0.0" }),
+    });
+    expect(conflict.status).toBe(409);
+  });
+
+  it("withdraws idempotently without rotating the share token", async () => {
+    serviceMocks.clearSkillPublicVersion.mockResolvedValue({
+      ok: true,
+      public_version: null,
+      share_token: "share-token-1",
+      changed: false,
+    });
+    const response = await app.request("/v1/skills/review/public-version", {
+      method: "DELETE",
+      headers: { authorization: "Bearer write-only" },
+    });
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      ok: true,
+      public_version: null,
+      share_token: "share-token-1",
+      changed: false,
+    });
   });
 });
 

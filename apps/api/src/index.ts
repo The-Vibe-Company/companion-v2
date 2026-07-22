@@ -1,5 +1,5 @@
 import { serve } from "@hono/node-server";
-import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -17,10 +17,21 @@ import {
   assignLabel,
   buildDependencyPlan,
   buildSkillSharePlan,
+  authorizePublicSkillPackageForSession,
+  clearSkillPublicVersion,
   completeOnboarding,
+  createPublicSkillTransferTicket,
+  createLocalSkillDownloadTransferTicket,
+  createSkillDownloadTransferTicket,
+  createSkillFileDownloadTransferTicket,
+  createSkillUploadTransferTicket,
   createInvitation,
   createLabel,
   createOrg,
+  consumePublicSkillTransferTicket,
+  consumeSkillPackageTransferTicket,
+  preflightSkillPackageTransferTicket,
+  revalidateAgentTransferTicket,
   deleteLabel,
   DependencyPublishError,
   computeLocalSkillStatus,
@@ -64,6 +75,7 @@ import {
   setLabelIcon,
   setMemberRole,
   setSkillFilterPreferences,
+  setSkillPublicVersion,
   setOrgLogoFromUpload,
   orgLogoPublicPath,
   setUserAvatarFromUpload,
@@ -147,6 +159,10 @@ import {
   saveGitHubConnection,
   setGitHubDestinationSkillSelection,
   updateGitHubDestination,
+  SkillPublicReleaseConflictError,
+  SkillPublicReleaseForbiddenError,
+  SkillPublicReleaseNotFoundError,
+  SkillPublicReleaseValidationError,
 } from "@companion/core/services";
 import { SecretConfigurationError, loadSecretsMasterKey } from "@companion/core";
 import {
@@ -186,6 +202,7 @@ import {
   MAX_COMMENT_IMAGE_BYTES,
   updateUserProfileInputSchema,
   setModelProviderConnectionInputSchema,
+  setSkillPublicVersionInputSchema,
   setActivatedModelsInputSchema,
   launchRunFieldsSchema,
   runPromptFieldsSchema,
@@ -222,6 +239,8 @@ import {
   InvalidSkillArchiveRangeError,
   isStoragePreconditionFailure,
   getOrgLogo,
+  publicSkillReleaseKey,
+  putPublicSkillReleaseSnapshot,
   putOrgLogo,
   putUserAvatar,
   getUserAvatar,
@@ -249,12 +268,13 @@ import {
   validateSkillArchive,
 } from "@companion/skills";
 import { sql as postgresSql, withTenantContext, type Db } from "@companion/db";
-import { auth } from "@companion/auth";
+import { auth, registerAgentCapabilityExecutor } from "@companion/auth";
 import { inviteEmail, sendTransactionalEmail } from "@companion/email";
 import {
   actorFromContext,
   attachSession,
   bearerFromHeader,
+  isAgentRequest,
   isTokenRequest,
   jsonError,
   orgIdFromContext,
@@ -273,6 +293,7 @@ import {
   runEventFrame,
   runReadyFrame,
 } from "./runEvents";
+import { registerAgentAuthRoutes } from "./agentAuthRoutes";
 import {
   deterministicRunAttachmentId,
   putRunAttachmentOnce,
@@ -297,6 +318,175 @@ const app = new Hono<{ Variables: ApiVariables }>();
 
 export { app };
 
+function capabilityRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function assertCapabilityWorkspace(grant: { constraints?: unknown }, workspaceId: unknown): asserts workspaceId is string {
+  if (typeof workspaceId !== "string" || !workspaceId.trim()) {
+    throw new Error("a workspaceId constraint is required");
+  }
+  const constraints = capabilityRecord(grant.constraints);
+  const constrained = constraints?.workspaceId;
+  const exact = typeof constrained === "string"
+    ? constrained
+    : capabilityRecord(constrained)?.eq;
+  if (exact !== workspaceId) throw new Error("capability grant does not allow this workspace");
+}
+
+registerAgentCapabilityExecutor(
+  "public-skills:install",
+  async ({ arguments: capabilityArguments, session, grant }) => {
+    const token = capabilityArguments?.token;
+    const version = capabilityArguments?.version;
+    if (typeof token !== "string" || typeof version !== "string" || !token.trim() || !version.trim()) {
+      throw new Error("public-skills:install requires an exact token and version");
+    }
+    return createPublicSkillTransferTicket({
+      token,
+      version,
+      userId: session.user.id,
+      agentId: session.agentId,
+      agentGrantId: grant.id,
+    });
+  },
+);
+
+registerAgentCapabilityExecutor(
+  "skills:read",
+  async ({ arguments: capabilityArguments, session, grant }) => {
+    const workspaceId = capabilityArguments?.workspaceId;
+    assertCapabilityWorkspace(grant, workspaceId);
+    const transfer = capabilityRecord(capabilityArguments?.transfer);
+    if (!transfer) {
+      return { ok: true, capability: "skills:read", transport: "companion-rest", workspace_id: workspaceId };
+    }
+    if (
+      !["download", "download-file", "download-local"].includes(String(transfer.action))
+      || typeof transfer.slug !== "string"
+      || typeof transfer.version !== "string"
+      || (transfer.action === "download-file" && typeof transfer.path !== "string")
+    ) {
+      throw new Error("skills:read transfer requires an exact package/file kind, slug/key, version, and file path when applicable");
+    }
+    const actor = {
+      id: session.user.id,
+      email: session.user.email,
+      name: session.user.name || session.user.email,
+    };
+    if (transfer.action === "download-local") {
+      if (transfer.slug !== COMPANION_SKILL_KEY) throw new Error(`unknown local skill: ${transfer.slug}`);
+      const pkg = await getCompanionSkillPackage();
+      if (pkg.version !== transfer.version) {
+        throw new Error(`local skill version ${transfer.version} is not available`);
+      }
+      const checksum = `sha256:${createHash("sha256").update(pkg.zip).digest("hex")}`;
+      return withTenantContext({ orgId: workspaceId, userId: actor.id }, (database) =>
+        createLocalSkillDownloadTransferTicket({
+          actor,
+          orgId: workspaceId,
+          key: transfer.slug as string,
+          version: transfer.version as string,
+          packageChecksum: checksum,
+          packageSizeBytes: pkg.zip.length,
+          agentId: session.agentId,
+          agentGrantId: grant.id,
+          database,
+        }),
+      );
+    }
+    const found = await withTenantContext({ orgId: workspaceId, userId: actor.id }, (database) =>
+      getDownloadVersion({
+        actor,
+        orgId: workspaceId,
+        slug: transfer.slug as string,
+        version: transfer.version as string,
+        database,
+      }),
+    );
+    if (transfer.action === "download-file") {
+      const file = await extractArchiveFileContent(
+        toTar(await getSkillArchive({ key: found.storagePath })),
+        transfer.path as string,
+      );
+      if (file.status !== "ok") throw new Error(file.message);
+      const checksum = `sha256:${createHash("sha256").update(file.bytes).digest("hex")}`;
+      return withTenantContext({ orgId: workspaceId, userId: actor.id }, (database) =>
+        createSkillFileDownloadTransferTicket({
+          actor,
+          orgId: workspaceId,
+          slug: transfer.slug as string,
+          version: transfer.version as string,
+          filePath: file.path,
+          storagePath: found.storagePath,
+          fileChecksum: checksum,
+          fileSizeBytes: file.bytes.length,
+          agentId: session.agentId,
+          agentGrantId: grant.id,
+          database,
+        }),
+      );
+    }
+    const zip = await tarGzToZip(await getSkillArchive({ key: found.storagePath }));
+    const checksum = `sha256:${createHash("sha256").update(zip).digest("hex")}`;
+    return withTenantContext({ orgId: workspaceId, userId: actor.id }, (database) =>
+      createSkillDownloadTransferTicket({
+        actor,
+        orgId: workspaceId,
+        slug: transfer.slug as string,
+        version: transfer.version as string,
+        storagePath: found.storagePath,
+        packageChecksum: checksum,
+        packageSizeBytes: zip.length,
+        agentId: session.agentId,
+        agentGrantId: grant.id,
+        database,
+      }),
+    );
+  },
+);
+
+registerAgentCapabilityExecutor(
+  "skills:write",
+  async ({ arguments: capabilityArguments, session, grant }) => {
+    const workspaceId = capabilityArguments?.workspaceId;
+    assertCapabilityWorkspace(grant, workspaceId);
+    const transfer = capabilityRecord(capabilityArguments?.transfer);
+    if (!transfer) {
+      return { ok: true, capability: "skills:write", transport: "companion-rest", workspace_id: workspaceId };
+    }
+    if (
+      transfer.action !== "upload"
+      || typeof transfer.slug !== "string"
+      || typeof transfer.version !== "string"
+      || typeof transfer.checksum !== "string"
+      || typeof transfer.sizeBytes !== "number"
+    ) {
+      throw new Error("skills:write transfer requires upload slug, version, checksum, and sizeBytes");
+    }
+    const actor = {
+      id: session.user.id,
+      email: session.user.email,
+      name: session.user.name || session.user.email,
+    };
+    return withTenantContext({ orgId: workspaceId, userId: actor.id }, (database) =>
+      createSkillUploadTransferTicket({
+        actor,
+        orgId: workspaceId,
+        slug: transfer.slug as string,
+        version: transfer.version as string,
+        packageChecksum: transfer.checksum as string,
+        packageSizeBytes: transfer.sizeBytes as number,
+        agentId: session.agentId,
+        agentGrantId: grant.id,
+        database,
+      }),
+    );
+  },
+);
+
 function stripeBillingGateway(): StripeBillingGateway {
   const secretKey = process.env.STRIPE_SECRET_KEY?.trim();
   const priceId = process.env.STRIPE_PRO_PRICE_ID?.trim();
@@ -314,7 +504,9 @@ app.get("/v1/public/skills/:token", async (c) => {
   try {
     const preview = await getSkillPublicPreviewByShareToken({ token: c.req.param("token") });
     if (!preview) return jsonError(c, "skill not found", 404);
-    c.header("Cache-Control", "public, s-maxage=300, stale-while-revalidate=600");
+    // Promotion, withdrawal, and archive must take effect immediately; never let an edge keep an
+    // install button alive for a release whose exact package route has already been revoked.
+    c.header("Cache-Control", "no-store");
     return c.json(preview);
   } catch (error) {
     return jsonError(c, error);
@@ -498,6 +690,8 @@ function rejectLegacySkillVisibilityInput(hasField: (name: string) => boolean): 
  * Shared publish tail: store the canonical archive (idempotently) and write a new
  * skill_versions row, authorizing first and cleaning up the blob on failure.
  */
+class TransferTicketAuthorizationChangedError extends Error {}
+
 async function publishCanonical(input: {
   actor: ReturnType<typeof actorFromContext>;
   orgId: string;
@@ -514,6 +708,8 @@ async function publishCanonical(input: {
   /** SKILL.md markdown body — persisted server-side to power full-text content search. */
   body: string;
   dependencies?: Awaited<ReturnType<typeof prepareSkillPublishDependencies>>;
+  /** Runs after external storage work and immediately before the tenant mutation. */
+  beforeCommit?: () => Promise<boolean>;
 }): Promise<{ id: string; slug: string; version: string; checksum: string; sizeBytes: number }> {
   const { actor, orgId, canonical, fm, companionManifest, skillId, scope, labels, version, note, body, dependencies } =
     input;
@@ -541,6 +737,11 @@ async function publishCanonical(input: {
   );
   await putSkillArchive({ key, body: canonical.archive, preventOverwrite: true });
   try {
+    if (input.beforeCommit && !await input.beforeCommit()) {
+      throw new TransferTicketAuthorizationChangedError(
+        "transfer ticket authorization changed before publication",
+      );
+    }
     const published = await withTenantContext({ orgId, userId: actor.id }, (database) =>
       publishSkillVersion({ actor, orgId, payload, archiveKey: key, dependencies, database }),
     );
@@ -557,13 +758,15 @@ app.use(
   "*",
   cors({
     origin: [process.env.COMPANION_WEB_URL ?? "http://127.0.0.1:3000"],
-    allowHeaders: ["Content-Type", "Authorization", "Idempotency-Key", "Last-Event-ID", "x-companion-org"],
+    allowHeaders: ["Content-Type", "Authorization", "Idempotency-Key", "Last-Event-ID", "x-companion-org", "x-companion-workspace-id", "x-companion-transfer-ticket"],
     allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     credentials: true,
   }),
 );
 
 app.use("*", attachSession);
+
+registerAgentAuthRoutes(app);
 
 app.get("/health", (c) => c.json({ ok: true }));
 
@@ -1849,7 +2052,7 @@ app.post("/v1/skills/:slug/rename", async (c) => {
     );
     return c.json(result);
   } catch (error) {
-    return jsonError(c, error);
+    return jsonError(c, error, error instanceof SkillPublicReleaseConflictError ? 409 : 400);
   }
 });
 
@@ -2191,6 +2394,93 @@ app.get("/v1/skills/:slug/dependencies", async (c) => {
   }
 });
 
+function publicReleaseRouteError(c: Context, error: unknown): Response {
+  if (error instanceof SkillPublicReleaseNotFoundError) return jsonError(c, error, 404);
+  if (error instanceof SkillPublicReleaseForbiddenError) return jsonError(c, error, 403);
+  if (error instanceof SkillPublicReleaseConflictError) return jsonError(c, error, 409);
+  if (error instanceof SkillPublicReleaseValidationError) return jsonError(c, error, 400);
+  return jsonError(c, error);
+}
+
+/** Pin/promote the current version. Session, legacy PAT, or delegated skills:write capability. */
+app.put("/v1/skills/:slug/public-version", async (c) => {
+  try {
+    actorFromContext(c, true);
+    requireScope(c, "skills:write");
+    const body = setSkillPublicVersionInputSchema.parse(await c.req.json());
+    const packageVersion = await withTenant(
+      c,
+      async ({ actor, orgId, database }) => ({
+        orgId,
+        ...await getDownloadVersion({
+          actor,
+          orgId,
+          slug: c.req.param("slug"),
+          version: body.version,
+          forPublicRelease: true,
+          database,
+        }),
+      }),
+      true,
+    );
+    if (!packageVersion.isCurrent) {
+      throw new SkillPublicReleaseValidationError("only the current skill version can be made public");
+    }
+    const storedArchive = await getSkillArchive({ key: packageVersion.storagePath });
+    let publicZip: Buffer;
+    try {
+      publicZip = await tarGzToZip(storedArchive);
+    } catch {
+      throw new SkillPublicReleaseValidationError(
+        "the stored skill package is not safe for public installation; publish a corrected version first",
+      );
+    }
+    const packageChecksum = `sha256:${createHash("sha256").update(publicZip).digest("hex")}`;
+    await putPublicSkillReleaseSnapshot({
+      orgId: packageVersion.orgId,
+      checksum: packageChecksum,
+      body: publicZip,
+    });
+    return c.json(
+      await withTenant(
+        c,
+        ({ actor, orgId, database }) =>
+          setSkillPublicVersion({
+            actor,
+            orgId,
+            slug: c.req.param("slug"),
+            version: body.version,
+            packageChecksum,
+            packageSizeBytes: publicZip.length,
+            expectedCurrentVersionId: packageVersion.versionId,
+            database,
+          }),
+        true,
+      ),
+    );
+  } catch (error) {
+    return publicReleaseRouteError(c, error);
+  }
+});
+
+/** Idempotently withdraw package access. The share token and immutable version stay intact. */
+app.delete("/v1/skills/:slug/public-version", async (c) => {
+  try {
+    actorFromContext(c, true);
+    requireScope(c, "skills:write");
+    return c.json(
+      await withTenant(
+        c,
+        ({ actor, orgId, database }) =>
+          clearSkillPublicVersion({ actor, orgId, slug: c.req.param("slug"), database }),
+        true,
+      ),
+    );
+  } catch (error) {
+    return publicReleaseRouteError(c, error);
+  }
+});
+
 /** Archive a skill — hides it from normal lists but keeps it viewable/restorable/downloadable. */
 app.post("/v1/skills/:slug/archive", async (c) => {
   try {
@@ -2236,10 +2526,52 @@ app.post("/v1/skills/:slug/restore", async (c) => {
  */
 app.post("/v1/skills", bodyLimit({ maxSize: 32 * 1024 * 1024, onError: (c) => jsonError(c, "package exceeds the 32 MB upload limit", 413) }), async (c) => {
   try {
-    const actor = actorFromContext(c, true);
-    requireScope(c, "skills:write");
-    const orgId = await orgIdFromContext(c);
     const contentType = c.req.header("content-type") ?? "";
+    const transferTicket = c.req.header("x-companion-transfer-ticket")?.trim() || null;
+    let actor: ReturnType<typeof actorFromContext>;
+    let orgId: string;
+    let ticketArchive: Buffer | null = null;
+    let transferBinding: NonNullable<Awaited<ReturnType<typeof consumeSkillPackageTransferTicket>>> | null = null;
+
+    if (transferTicket) {
+      if (contentType.includes("multipart/form-data")) {
+        return jsonError(c, "Agent Auth transfer tickets require a raw archive body", 400);
+      }
+      const action = c.req.query("action") ?? "publish";
+      const slug = c.req.query("expect_slug")?.trim();
+      const version = c.req.query("version")?.trim();
+      if (!["publish", "validate"].includes(action) || !slug || !version) {
+        return jsonError(c, "Agent Auth uploads require action=publish|validate, expect_slug, and version", 400);
+      }
+      if (!await preflightSkillPackageTransferTicket({
+        ticket: transferTicket,
+        action: "skill_package.upload",
+        slug,
+        version,
+      })) {
+        return jsonError(c, "transfer ticket is invalid, expired, revoked, already used, or does not match this upload", 401);
+      }
+      ticketArchive = Buffer.from(await c.req.arrayBuffer());
+      if (!ticketArchive.length) throw new Error("request body is empty");
+      const checksum = `sha256:${createHash("sha256").update(ticketArchive).digest("hex")}`;
+      transferBinding = await consumeSkillPackageTransferTicket({
+        ticket: transferTicket,
+        action: "skill_package.upload",
+        slug,
+        version,
+        checksum,
+        sizeBytes: ticketArchive.length,
+      });
+      if (!transferBinding) {
+        return jsonError(c, "transfer ticket is invalid, expired, revoked, already used, or does not match this upload", 401);
+      }
+      actor = transferBinding.actor;
+      orgId = transferBinding.orgId;
+    } else {
+      actor = actorFromContext(c, true);
+      requireScope(c, "skills:write");
+      orgId = await orgIdFromContext(c);
+    }
 
     let archive: Buffer;
     let action: string;
@@ -2272,7 +2604,7 @@ app.post("/v1/skills", bodyLimit({ maxSize: 32 * 1024 * 1024, onError: (c) => js
     } else {
       const url = new URL(c.req.url);
       rejectLegacySkillVisibilityInput((name) => url.searchParams.has(name));
-      archive = Buffer.from(await c.req.arrayBuffer());
+      archive = ticketArchive ?? Buffer.from(await c.req.arrayBuffer());
       if (!archive.length) throw new Error("request body is empty");
       action = c.req.query("action") ?? "publish";
       versionRaw = c.req.query("version");
@@ -2300,6 +2632,9 @@ app.post("/v1/skills", bodyLimit({ maxSize: 32 * 1024 * 1024, onError: (c) => js
       return c.json({ result, error: result.error ?? "validation failed" }, 422);
     }
     const fm = result.frontmatter;
+    if (transferBinding && fm.name !== transferBinding.slug) {
+      return c.json({ result, error: "package name does not match the Agent Auth upload ticket" }, 422);
+    }
     // Identity guard, enforced on every publish/validate so a buggy or malicious agent can never
     // retarget a skill. `slugSkill` is the skill that currently owns this slug (null on a fresh create
     // — it doubles as the "is this an update?" probe); `companionIdSkill` is the skill the package's
@@ -2315,6 +2650,18 @@ app.post("/v1/skills", bodyLimit({ maxSize: 32 * 1024 * 1024, onError: (c) => js
           : null,
       }),
     );
+    if (
+      transferBinding
+      && (
+        (transferBinding.expectedSkillId !== null && slugSkill?.id !== transferBinding.expectedSkillId)
+        || (transferBinding.expectedSkillId === null && !!slugSkill)
+      )
+    ) {
+      return c.json({ result, error: "skill target changed after the Agent Auth upload ticket was issued" }, 409);
+    }
+    if (transferBinding?.expectedSkillId && expectSkillId !== transferBinding.expectedSkillId) {
+      return c.json({ result, error: "expect_skill_id does not match the Agent Auth upload ticket" }, 422);
+    }
     try {
       assertNoCompanionRetarget({
         frontmatter: fm,
@@ -2369,17 +2716,16 @@ app.post("/v1/skills", bodyLimit({ maxSize: 32 * 1024 * 1024, onError: (c) => js
     // Dependency preflight: which declared deps are published / must be uploaded / dropped, plus any
     // blockers (missing / cycle). Skills are flat — there is no owner-cover constraint. Computed for
     // both validate (preview) and publish.
-    const dependencyPlan = await withTenant(
-      c,
-      ({ actor: a, orgId: o, database }) =>
+    const dependencyPlan = await withTenantContext(
+      { orgId, userId: actor.id },
+      (database) =>
         buildDependencyPlan({
-          actor: a,
-          orgId: o,
+          actor,
+          orgId,
           slug: fm.name,
           declaredSlugs: dependencyValues,
           database,
         }),
-      true,
     );
     if (parsedAction === "validate") return c.json({ result, dependency_plan: dependencyPlan });
     const target = await resolvePublishTarget({
@@ -2391,6 +2737,15 @@ app.post("/v1/skills", bodyLimit({ maxSize: 32 * 1024 * 1024, onError: (c) => js
       metadataSkillId: result.companion_manifest?.metadata.companionSkillId ?? fm.metadata.companion_skill_id,
       legacyVersion: result.legacy?.version,
     });
+    if (
+      transferBinding
+      && (
+        target.version !== transferBinding.version
+        || (transferBinding.expectedSkillId !== null && target.skillId !== transferBinding.expectedSkillId)
+      )
+    ) {
+      return c.json({ result, error: "publish target does not match the Agent Auth upload ticket" }, 422);
+    }
     const normalized = await canonicalizeSkillArchive(archive, {
       skillId: target.skillId,
       version: target.version,
@@ -2416,8 +2771,14 @@ app.post("/v1/skills", bodyLimit({ maxSize: 32 * 1024 * 1024, onError: (c) => js
         note: messageRaw ?? "",
         body: normalizedResult.body ?? "",
         dependencies: preparedDependencies,
+        beforeCommit: transferBinding && transferTicket
+          ? () => revalidateAgentTransferTicket({ ticket: transferTicket })
+          : undefined,
       });
     } catch (error) {
+      if (error instanceof TransferTicketAuthorizationChangedError) {
+        return jsonError(c, error, 401);
+      }
       // Unresolved dependencies (missing / cycle) — surface the plan, don't 500.
       if (error instanceof DependencyPublishError) {
         return c.json({ error: error.message, dependency_plan: error.plan }, 422);
@@ -2523,8 +2884,65 @@ app.get("/v1/skills/:slug/download", async (c) => {
         getDownloadVersion({ actor, orgId, slug: c.req.param("slug"), version, database }),
       true,
     );
+    // Agent JWTs may read version metadata, but package bytes always flow
+    // through a one-use transfer ticket. Do not hand an agent a signed object
+    // URL that would bypass that binding. Existing session/PAT behavior stays
+    // compatible.
+    if (isAgentRequest(c)) return c.json(found);
     const url = await signedSkillArchiveUrl({ key: found.storagePath });
     return c.json({ ...found, url });
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
+/**
+ * Download the exact pinned public release. Anonymous requests and PATs are deliberately rejected:
+ * callers need either a verified Better Auth browser session or a one-use Agent Auth transfer
+ * ticket supplied in a header (never in the URL).
+ */
+app.get("/v1/public/skills/:token/versions/:version/package", async (c) => {
+  try {
+    const token = c.req.param("token");
+    const version = c.req.param("version");
+    const user = c.get("user");
+    const transferTicket = c.req.header("x-companion-transfer-ticket")?.trim() || null;
+    let consumedAgentTicket: string | null = null;
+    let found;
+    if (user) {
+      if (!user.emailVerified) return jsonError(c, "a verified account is required", 401);
+      found = await authorizePublicSkillPackageForSession({ token, version, userId: user.id });
+      if (!found) return jsonError(c, "public skill release not found", 404);
+    } else if (transferTicket) {
+      found = await consumePublicSkillTransferTicket({ ticket: transferTicket, token, version });
+      if (!found) return jsonError(c, "transfer ticket is invalid, expired, revoked, or already used", 401);
+      consumedAgentTicket = transferTicket;
+    } else {
+      return jsonError(c, "sign in or use an approved Agent Auth transfer ticket", 401);
+    }
+
+    const zip = await getSkillArchive({
+      key: publicSkillReleaseKey({ orgId: found.orgId, checksum: found.checksum }),
+    });
+    const zipChecksum = `sha256:${createHash("sha256").update(zip).digest("hex")}`;
+    if (zip.length !== found.sizeBytes || zipChecksum !== found.checksum) {
+      return jsonError(c, "public package bytes no longer match the pinned release metadata", 409);
+    }
+    if (consumedAgentTicket && !await revalidateAgentTransferTicket({ ticket: consumedAgentTicket })) {
+      return jsonError(c, "transfer authorization was revoked before package delivery", 401);
+    }
+    return new Response(new Uint8Array(zip), {
+      headers: {
+        "content-type": "application/zip",
+        "content-disposition": `attachment; filename="${found.slug}.zip"`,
+        "content-length": String(zip.length),
+        "cache-control": "private, no-store",
+        // This checksum and size cover the exact ZIP bytes in this response.
+        "x-companion-package-checksum": found.checksum,
+        "x-companion-package-size": String(found.sizeBytes),
+        "x-companion-public-version": found.version,
+      },
+    });
   } catch (error) {
     return jsonError(c, error);
   }
@@ -2551,16 +2969,76 @@ async function loadSkillVersionArchive(
  */
 app.get("/v1/skills/:slug/versions/:version/package", async (c) => {
   try {
-    actorFromContext(c, true);
-    requireScope(c, "skills:read");
     const slug = c.req.param("slug");
-    const { tarGz } = await loadSkillVersionArchive(c, slug, c.req.param("version"));
+    const version = c.req.param("version");
+    const transferTicket = c.req.header("x-companion-transfer-ticket")?.trim() || null;
+    let tarGz: Buffer;
+    let transferBinding: NonNullable<Awaited<ReturnType<typeof consumeSkillPackageTransferTicket>>> | null = null;
+    if (transferTicket) {
+      transferBinding = await consumeSkillPackageTransferTicket({
+        ticket: transferTicket,
+        action: "skill_package.download",
+        slug,
+        version,
+      });
+      if (!transferBinding) {
+        return jsonError(c, "transfer ticket is invalid, expired, revoked, already used, or does not match this package", 401);
+      }
+      const loaded = await withTenantContext(
+        { orgId: transferBinding.orgId, userId: transferBinding.actor.id },
+        async (database) => {
+          const found = await getDownloadVersion({
+            actor: transferBinding!.actor,
+            orgId: transferBinding!.orgId,
+            slug,
+            version,
+            database,
+          });
+          const skill = await getSkillBySlug({
+            actor: transferBinding!.actor,
+            orgId: transferBinding!.orgId,
+            slug,
+            database,
+          });
+          const versions = await listSkillVersions({
+            actor: transferBinding!.actor,
+            orgId: transferBinding!.orgId,
+            slug,
+            database,
+          });
+          const exactVersion = versions.find((candidate) => candidate.version === version);
+          if (
+            !skill
+            || skill.id !== transferBinding!.expectedSkillId
+            || exactVersion?.id !== transferBinding!.expectedSkillVersionId
+          ) {
+            throw new Error("skill package changed after the transfer ticket was issued");
+          }
+          return found;
+        },
+      );
+      tarGz = await getSkillArchive({ key: loaded.storagePath });
+    } else {
+      actorFromContext(c, true);
+      requireScope(c, "skills:read");
+      ({ tarGz } = await loadSkillVersionArchive(c, slug, version));
+    }
     const zip = await tarGzToZip(tarGz);
+    const checksum = `sha256:${createHash("sha256").update(zip).digest("hex")}`;
+    if (transferBinding && (checksum !== transferBinding.checksum || zip.length !== transferBinding.sizeBytes)) {
+      return jsonError(c, "package bytes no longer match the Agent Auth transfer ticket", 409);
+    }
+    if (transferBinding && transferTicket && !await revalidateAgentTransferTicket({ ticket: transferTicket })) {
+      return jsonError(c, "transfer authorization was revoked before package delivery", 401);
+    }
     return new Response(new Uint8Array(zip), {
       headers: {
         "content-type": "application/zip",
         "content-disposition": `attachment; filename="${slug}.zip"`,
         "content-length": String(zip.length),
+        "cache-control": "private, no-store",
+        "x-companion-package-checksum": checksum,
+        "x-companion-package-size": String(zip.length),
       },
     });
   } catch (error) {
@@ -2593,12 +3071,63 @@ app.get("/v1/skills/:slug/versions/:version/files", async (c) => {
  */
 app.get("/v1/skills/:slug/versions/:version/files/content", async (c) => {
   try {
-    actorFromContext(c, true);
-    requireScope(c, "skills:read");
     const path = c.req.query("path");
     if (!path) return jsonError(c, new Error("path is required"), 400);
     const slug = c.req.param("slug");
-    const { tarGz } = await loadSkillVersionArchive(c, slug, c.req.param("version"));
+    const version = c.req.param("version");
+    const transferTicket = c.req.header("x-companion-transfer-ticket")?.trim() || null;
+    let tarGz: Buffer;
+    let transferBinding: NonNullable<Awaited<ReturnType<typeof consumeSkillPackageTransferTicket>>> | null = null;
+    if (transferTicket) {
+      transferBinding = await consumeSkillPackageTransferTicket({
+        ticket: transferTicket,
+        action: "skill_file.download",
+        slug,
+        version,
+        filePath: path,
+      });
+      if (!transferBinding) {
+        return jsonError(c, "transfer ticket is invalid, expired, revoked, already used, or does not match this file", 401);
+      }
+      const loaded = await withTenantContext(
+        { orgId: transferBinding.orgId, userId: transferBinding.actor.id },
+        async (database) => {
+          const found = await getDownloadVersion({
+            actor: transferBinding!.actor,
+            orgId: transferBinding!.orgId,
+            slug,
+            version,
+            database,
+          });
+          const skill = await getSkillBySlug({
+            actor: transferBinding!.actor,
+            orgId: transferBinding!.orgId,
+            slug,
+            database,
+          });
+          const versions = await listSkillVersions({
+            actor: transferBinding!.actor,
+            orgId: transferBinding!.orgId,
+            slug,
+            database,
+          });
+          const exactVersion = versions.find((candidate) => candidate.version === version);
+          if (
+            !skill
+            || skill.id !== transferBinding!.expectedSkillId
+            || exactVersion?.id !== transferBinding!.expectedSkillVersionId
+          ) {
+            throw new Error("skill file changed after the transfer ticket was issued");
+          }
+          return found;
+        },
+      );
+      tarGz = await getSkillArchive({ key: loaded.storagePath });
+    } else {
+      actorFromContext(c, true);
+      requireScope(c, "skills:read");
+      ({ tarGz } = await loadSkillVersionArchive(c, slug, version));
+    }
     const tar = toTar(tarGz);
     const file = await extractArchiveFileContent(tar, path);
     if (file.status !== "ok") {
@@ -2609,16 +3138,37 @@ app.get("/v1/skills/:slug/versions/:version/files/content", async (c) => {
               413;
       return jsonError(c, new Error(file.message), status);
     }
+    if (transferBinding) {
+      const checksum = `sha256:${createHash("sha256").update(file.bytes).digest("hex")}`;
+      if (
+        transferBinding.filePath !== file.path
+        || transferBinding.checksum !== checksum
+        || transferBinding.sizeBytes !== file.bytes.length
+      ) {
+        return jsonError(c, "file bytes no longer match the Agent Auth transfer ticket", 409);
+      }
+    }
 
     const leaf = file.path.split("/").pop() || "file";
     const filename = leaf.replace(/["\r\n]/g, "_");
+    const transferHeaders: Record<string, string> = transferBinding
+      ? {
+          "x-companion-file-checksum": transferBinding.checksum,
+          "x-companion-file-size": String(transferBinding.sizeBytes),
+        }
+      : {};
+    if (transferBinding && transferTicket && !await revalidateAgentTransferTicket({ ticket: transferTicket })) {
+      return jsonError(c, "transfer authorization was revoked before file delivery", 401);
+    }
     return new Response(new Uint8Array(file.bytes), {
       headers: {
         "content-type": file.content_type,
         "content-disposition": `inline; filename="${filename}"`,
         "content-length": String(file.bytes.length),
+        "cache-control": "private, no-store",
         "x-content-type-options": "nosniff",
         "content-security-policy": "sandbox; default-src 'none'; img-src data: blob:; style-src 'unsafe-inline'",
+        ...transferHeaders,
       },
     });
   } catch (error) {
@@ -2673,16 +3223,41 @@ app.get("/v1/local-skills/:key", async (c) => {
 /** Download the bundled local skill as a `.zip` for the assistant to unpack. Auth like skill packages. */
 app.get("/v1/local-skills/:key/package", async (c) => {
   try {
-    actorFromContext(c, true);
-    requireScope(c, "skills:read");
     const key = c.req.param("key");
     if (key !== COMPANION_SKILL_KEY) return c.json({ error: `unknown local skill: ${key}` }, 404);
+    const transferTicket = c.req.header("x-companion-transfer-ticket")?.trim() || null;
+    if (!transferTicket) {
+      actorFromContext(c, true);
+      requireScope(c, "skills:read");
+    }
     const pkg = await getCompanionSkillPackage();
+    const transportChecksum = `sha256:${createHash("sha256").update(pkg.zip).digest("hex")}`;
+    let consumedAgentTicket: string | null = null;
+    if (transferTicket) {
+      const binding = await consumeSkillPackageTransferTicket({
+        ticket: transferTicket,
+        action: "local_skill.download",
+        slug: key,
+        version: pkg.version,
+        checksum: transportChecksum,
+        sizeBytes: pkg.zip.length,
+      });
+      if (!binding) {
+        return jsonError(c, "transfer ticket is invalid, expired, revoked, already used, or does not match this local skill", 401);
+      }
+      consumedAgentTicket = transferTicket;
+    }
+    if (consumedAgentTicket && !await revalidateAgentTransferTicket({ ticket: consumedAgentTicket })) {
+      return jsonError(c, "transfer authorization was revoked before package delivery", 401);
+    }
     return new Response(new Uint8Array(pkg.zip), {
       headers: {
         "content-type": "application/zip",
         "content-disposition": `attachment; filename="${key}.zip"`,
         "content-length": String(pkg.zip.length),
+        "cache-control": "private, no-store",
+        "x-companion-package-checksum": transportChecksum,
+        "x-companion-package-size": String(pkg.zip.length),
         "x-skill-checksum": pkg.checksum,
         "x-skill-version": pkg.version,
       },
@@ -2695,8 +3270,8 @@ app.get("/v1/local-skills/:key/package", async (c) => {
 /**
  * The install callback. The local skill posts here at the end of its install (and after updates) to
  * record that this member has it, and at which version. This mutates workspace state (and writes an
- * audit row), so token callers need `skills:write` — a read-only PAT cannot report/spoof an install.
- * The install prompt mints a read+write token, so the skill satisfies this.
+ * audit row), so delegated agents request `skills:write` progressively. Explicit legacy PAT callers
+ * still need the same scope; no install prompt silently creates one.
  */
 app.post("/v1/local-skills/:key/installed", async (c) => {
   try {

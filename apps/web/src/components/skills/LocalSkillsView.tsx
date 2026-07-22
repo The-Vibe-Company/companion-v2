@@ -2,9 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import type { LocalSkillRow, LocalSkillStatus, TokenScope } from "@companion/contracts";
-import { TOKEN_SCOPES } from "@companion/contracts";
-import { apiBase, fetchLocalSkills, issueToken } from "@/lib/queries";
+import type { LocalSkillRow, LocalSkillStatus } from "@companion/contracts";
+import { apiBase, fetchLocalSkills } from "@/lib/queries";
 import { REQUIRED_LOCAL_SKILL_KEY } from "@/lib/companionSkillGate";
 import { Icon } from "../Icon";
 import { CodeBlock, useModalA11y } from "./UploadDialog";
@@ -63,7 +62,6 @@ function fillPrompt(
   template: string,
   base: string,
   workspaceId: string,
-  token: string,
   agent = "<your assistant>",
 ): string {
   return template
@@ -71,8 +69,10 @@ function fillPrompt(
     .join(base)
     .split("{workspaceId}")
     .join(workspaceId)
+    // A mixed-version API may still return an old PAT template. Never mint or inject a credential
+    // silently; leave an explicit instruction instead until the API rollout completes.
     .split("{token}")
-    .join(token)
+    .join("[PAT intentionally omitted; use Agent Auth]")
     .split("<your assistant>")
     .join(agent);
 }
@@ -161,39 +161,6 @@ function MarkdownNotes({ value }: { value: string }) {
   }
   flushList();
   return <div className="ls-md">{blocks}</div>;
-}
-
-/**
- * Mint a scoped personal-access token once, on first reveal. Shared by the detail drawer and the
- * install gate so both hand the assistant a real, authenticatable credential (never a placeholder).
- * Owns only the token + phase + retry; clipboard, copy state, and prompt templating stay at the
- * call site because the drawer and the gate copy different variants.
- */
-function usePromptToken(scopes: readonly TokenScope[] = TOKEN_SCOPES): {
-  token: string | null;
-  phase: "loading" | "ready" | "error";
-  retry: () => void;
-} {
-  const [token, setToken] = useState<string | null>(null);
-  const [phase, setPhase] = useState<"loading" | "ready" | "error">("loading");
-  const mintedRef = useRef(false);
-  const mint = useCallback(async () => {
-    setPhase("loading");
-    try {
-      const issued = await issueToken([...scopes]);
-      setToken(issued.token);
-      setPhase("ready");
-    } catch {
-      setToken(null);
-      setPhase("error");
-    }
-  }, [scopes]);
-  useEffect(() => {
-    if (mintedRef.current) return;
-    mintedRef.current = true;
-    void mint();
-  }, [mint]);
-  return { token, phase, retry: mint };
 }
 
 /** Per-(workspace, skill) dismissal key for the install gate, so it nags once, not on every visit. */
@@ -468,72 +435,35 @@ function InstallGate({
   onDismiss: () => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
-  const [token, setToken] = useState<string | null>(null);
   const [assistant, setAssistant] = useState<AssistantId>("claude-code");
   const [copied, setCopied] = useState(false);
-  const [failed, setFailed] = useState(false);
   const [clipFailed, setClipFailed] = useState(false);
-  const [busy, setBusy] = useState(false);
   useModalA11y(ref, onDismiss);
 
   const base = apiBase();
-  // Lazy mint with in-flight de-duplication: a token is created only on copy, and concurrent clicks
-  // share one request (refs settle synchronously, unlike React state) so we never leave duplicate
-  // 90-day credentials behind. The token also lives only here, never persisted. Mirrors the upload
-  // dialog's ensure() pattern.
-  const tokenRef = useRef<string | null>(null);
-  const inflightRef = useRef<Promise<string> | null>(null);
-  const ensureToken = useCallback(async () => {
-    if (tokenRef.current) return tokenRef.current;
-    if (inflightRef.current) return inflightRef.current;
-    const pending = (async () => {
-      try {
-        const issued = await issueToken([...TOKEN_SCOPES]);
-        tokenRef.current = issued.token;
-        setToken(issued.token);
-        return issued.token;
-      } finally {
-        inflightRef.current = null;
-      }
-    })();
-    inflightRef.current = pending;
-    return pending;
-  }, []);
-
   const meta = ASSISTANTS[assistant];
   // The chosen assistant fills the prompt's `agent` slot, so the report-back step names the assistant
   // that actually runs the install.
-  const buildPrompt = useCallback(
-    (tok: string) => fillPrompt(skill.prompts.install, base, workspaceId, tok, meta.name),
+  const displayPrompt = useMemo(
+    () => fillPrompt(skill.prompts.install, base, workspaceId, meta.name),
     [base, meta.name, skill.prompts.install, workspaceId],
   );
-  // Until the user copies, the token slot shows a placeholder so nothing secret is minted on open.
-  const displayPrompt = buildPrompt(token ?? "cmp_pat_…");
 
   const copyPrompt = useCallback(async () => {
-    setFailed(false);
     setClipFailed(false);
-    setBusy(true);
-    try {
-      const value = buildPrompt(await ensureToken());
-      if (!navigator.clipboard) {
-        setClipFailed(true); // no API: the prompt (now showing the real token) is selectable by hand
-        return;
-      }
-      try {
-        await navigator.clipboard.writeText(value);
-      } catch {
-        setClipFailed(true);
-        return;
-      }
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1800);
-    } catch {
-      setFailed(true); // token mint failed
-    } finally {
-      setBusy(false);
+    if (!navigator.clipboard) {
+      setClipFailed(true);
+      return;
     }
-  }, [buildPrompt, ensureToken]);
+    try {
+      await navigator.clipboard.writeText(displayPrompt);
+    } catch {
+      setClipFailed(true);
+      return;
+    }
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1800);
+  }, [displayPrompt]);
 
   return (
     <>
@@ -610,18 +540,11 @@ function InstallGate({
             <span className="ls-gate__promptlabel">Give this to {meta.name}</span>
             <span className="ls-gate__hint">{meta.hint}</span>
           </div>
-          {/* Plain pre + a single copy path (the footer button): unlike CodeBlock, this never falls
-              back to copying the masked placeholder when the on-copy token mint fails. */}
+          {/* Plain pre + a single copy path. Agent Auth approval happens after the prompt is handed off. */}
           <pre className="ls-gate__prompt">{displayPrompt}</pre>
           <p className="ls-prompt-hint">
-            A scoped skills:read + skills:write + secrets:read + secrets:write token is added when you copy. It expires in 90 days.
+            The assistant starts a delegated device flow. Permissions are approved per workspace and requested only when needed.
           </p>
-          {failed && (
-            <div className="ls-copied ls-copied--warn" role="alert">
-              <Icon name="alert-triangle" size={14} />
-              Could not create an access token. Check your connection, then copy again.
-            </div>
-          )}
           {clipFailed && (
             <div className="ls-copied ls-copied--warn" role="alert">
               <Icon name="alert-triangle" size={14} />
@@ -641,7 +564,7 @@ function InstallGate({
               Copied
             </span>
           )}
-          <button type="button" className="btn-primary" onClick={copyPrompt} disabled={busy}>
+          <button type="button" className="btn-primary" onClick={copyPrompt}>
             <Icon name={copied ? "check" : "copy"} size={14} />
             {copied ? "Copied" : "Copy prompt"}
           </button>
@@ -669,10 +592,6 @@ export function LocalSkillDrawer({
 
   useModalA11y(ref, onClose);
 
-  // A fresh token is minted once when the drawer opens; copy/send are gated on "ready" so a failed
-  // mint can never hand off a placeholder credential the assistant can't authenticate with.
-  const { token, phase, retry } = usePromptToken();
-
   const base = apiBase();
   const isInstalled = skill.status === "installed";
   const isUpdate = skill.status === "update";
@@ -682,7 +601,7 @@ export function LocalSkillDrawer({
 
   // The prompt TEXT is derived below from the current template, so it stays correct even if `skill`
   // (and its status) changes while the drawer is open.
-  const prompt = token ? fillPrompt(template, base, workspaceId, token) : null;
+  const prompt = fillPrompt(template, base, workspaceId);
 
   const writeClipboard = useCallback(async (value: string): Promise<boolean> => {
     if (!navigator.clipboard) return true; // no API: the prompt is still visible to copy manually
@@ -704,17 +623,15 @@ export function LocalSkillDrawer({
   }, [prompt, writeClipboard]);
 
   const copyDefaultPrompt = useCallback(async () => {
-    if (!token) return;
     setPromptMode("default");
-    await copyPrompt("prompt", fillPrompt(promptFor(skill), base, workspaceId, token));
-  }, [base, copyPrompt, skill, token, workspaceId]);
+    await copyPrompt("prompt", fillPrompt(promptFor(skill), base, workspaceId));
+  }, [base, copyPrompt, skill, workspaceId]);
 
   const copyReinstallPrompt = useCallback(async () => {
-    if (!token) return;
-    const reinstallPrompt = fillPrompt(skill.prompts.install, base, workspaceId, token);
+    const reinstallPrompt = fillPrompt(skill.prompts.install, base, workspaceId);
     setPromptMode("reinstall");
     await copyPrompt("reinstall", reinstallPrompt);
-  }, [base, copyPrompt, skill.prompts.install, token, workspaceId]);
+  }, [base, copyPrompt, skill.prompts.install, workspaceId]);
 
   const handAndConfirm = useCallback(async () => {
     if (!prompt || !(await writeClipboard(prompt))) return;
@@ -815,40 +732,21 @@ export function LocalSkillDrawer({
               <Icon name="message-square" size={13} />
               What your assistant will be told
             </div>
-            {phase === "loading" && (
-              <div className="ls-prompt-state">
-                <Icon name="loader" size={15} className="ls-spin" />
-                Preparing a secure access token…
+            <CodeBlock text={prompt} scroll copyLabel="Copy prompt" />
+            <p className="ls-prompt-hint">Delegated Agent Auth · one-minute JWTs · progressive workspace approval.</p>
+            {copied && (
+              <div className="ls-copied" role="status">
+                <Icon name="check" size={14} />
+                {copied === "reinstall"
+                  ? "Reinstall prompt copied. Paste it into your assistant."
+                  : "Copied to your clipboard. Paste it into your assistant."}
               </div>
             )}
-            {phase === "error" && (
-              <div className="up-errblock" role="alert">
-                Could not create an access token. Check your connection, then
-                <button type="button" className="ls-retry" onClick={() => void retry()}>
-                  try again
-                </button>
-                .
+            {clipFailed && (
+              <div className="ls-copied ls-copied--warn" role="alert">
+                <Icon name="alert-triangle" size={14} />
+                Couldn&rsquo;t copy automatically. Select the prompt above and copy it.
               </div>
-            )}
-            {phase === "ready" && prompt && (
-              <>
-                <CodeBlock text={prompt} scroll copyLabel="Copy prompt" />
-                <p className="ls-prompt-hint">Scoped to skills:read + skills:write + secrets:read + secrets:write, expires in 90 days.</p>
-                {copied && (
-                  <div className="ls-copied" role="status">
-                    <Icon name="check" size={14} />
-                    {copied === "reinstall"
-                      ? "Reinstall prompt copied. Paste it into your assistant."
-                      : "Copied to your clipboard. Paste it into your assistant."}
-                  </div>
-                )}
-                {clipFailed && (
-                  <div className="ls-copied ls-copied--warn" role="alert">
-                    <Icon name="alert-triangle" size={14} />
-                    Couldn&rsquo;t copy automatically. Select the prompt above and copy it.
-                  </div>
-                )}
-              </>
             )}
           </section>
         </div>
@@ -856,7 +754,7 @@ export function LocalSkillDrawer({
         <div className="ls-drawer__foot">
           {isInstalled ? (
             <>
-              <button className="btn-ghost" type="button" onClick={copyDefaultPrompt} disabled={phase !== "ready"}>
+              <button className="btn-ghost" type="button" onClick={copyDefaultPrompt}>
                 <Icon name={copied === "prompt" ? "check" : "copy"} size={14} />
                 {copied === "prompt" ? "Copied" : "Copy prompt"}
               </button>
@@ -864,7 +762,6 @@ export function LocalSkillDrawer({
                 className="btn-primary"
                 type="button"
                 onClick={handAndConfirm}
-                disabled={phase !== "ready"}
               >
                 <Icon name="sparkles" size={14} />
                 Use with assistant
@@ -877,12 +774,11 @@ export function LocalSkillDrawer({
                   className="ls-textbtn"
                   type="button"
                   onClick={copyReinstallPrompt}
-                  disabled={phase !== "ready"}
                 >
                   {copied === "reinstall" ? "Copied" : "Reinstall Skill?"}
                 </button>
               )}
-              <button className="btn-primary" type="button" onClick={copyDefaultPrompt} disabled={phase !== "ready"}>
+              <button className="btn-primary" type="button" onClick={copyDefaultPrompt}>
                 <Icon name={copied === "prompt" ? "check" : "copy"} size={14} />
                 {copied === "prompt" ? "Copied" : primaryLabel}
               </button>

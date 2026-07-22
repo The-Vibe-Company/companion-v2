@@ -43,6 +43,7 @@ vi.mock("@companion/auth", () => ({
     handler: authMocks.handler,
     $Infer: {},
   },
+  registerAgentCapabilityExecutor: vi.fn(() => () => undefined),
 }));
 
 vi.mock("@companion/db", () => dbMocks);

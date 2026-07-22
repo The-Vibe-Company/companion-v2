@@ -200,6 +200,31 @@ click_button_text() {
   fi
 }
 
+# Opening a portal dialog can race a responsive/detail refresh in Next dev. Retry only until the
+# actual launcher DOM is mounted; subsequent assertions still exercise the real dialog behavior.
+open_run_launcher() {
+  local result
+  for _ in $(seq 1 10); do
+    result="$(agent-browser eval "!!document.querySelector('.run-launcher')" || true)"
+    if [ "$result" = "true" ]; then
+      agent-browser wait 400 >/dev/null
+      result="$(agent-browser eval "!!document.querySelector('.run-launcher')" || true)"
+      if [ "$result" = "true" ]; then
+        # Chrome-for-Testing can leave CSS animations at virtual time 0 between CLI commands. Finish
+        # only the mounted launcher's entrance animation before asserting its final geometry.
+        agent-browser eval "document.querySelector('.run-launcher')?.getAnimations().forEach((animation) => animation.finish())" >/dev/null
+        return 0
+      fi
+    fi
+    click_button_text "Run skill"
+    agent-browser wait 150 >/dev/null
+  done
+  printf '[agent-browser-smoke] Run launcher did not open after the detail became interactive\n' >&2
+  agent-browser get url >&2 || true
+  body_text >&2 || true
+  exit 1
+}
+
 # Center point (x y) of an element's bounding box, from real layout.
 box_center() {
   agent-browser get box "$1" --json | node -e '
@@ -493,7 +518,11 @@ wait_for_contextual_action "Install skill" "Install"
 
 log "Checking run launcher scrolling at a short desktop viewport"
 agent-browser set viewport 1024 420
-click_button_text "Run skill"
+# Reload the deep link after the viewport transition. This gives the layout and the browser's
+# connection pool one settled navigation before the launcher issues its Strict Mode option reads.
+agent-browser open "$APP_URL/skills?lib=org&skill=$SMOKE_SKILL"
+wait_for_contextual_action "Install skill" "Install"
+open_run_launcher
 wait_for_body_contains "Configuration"
 agent-browser wait 300
 assert_eval_true "(() => {
@@ -565,7 +594,7 @@ log "Checking mobile run launcher"
 agent-browser set viewport 390 420
 agent-browser open "$APP_URL/skills?lib=org&skill=$SMOKE_SKILL"
 wait_for_contextual_action "Install skill" "Install"
-click_button_text "Run skill"
+open_run_launcher
 wait_for_body_contains "Configuration"
 agent-browser wait 300
 assert_eval_true "(() => {

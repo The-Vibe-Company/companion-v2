@@ -18,7 +18,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 
-from companion_lib import api_post_json, companion_home, load_json
+from companion_lib import api_post_json, api_redeem_secret_plan, companion_home, load_json
 
 try:  # Unix/macOS
     import fcntl
@@ -334,12 +334,7 @@ def preflight_manual(api_url: str, token: str, secret_id: str, env_key: str, pro
 
 
 def redeem_plan(api_url: str, token: str, plan_id: str) -> dict[str, Any]:
-    grant = api_post_json(api_url, token, f"/secret-retrievals/{plan_id}/grant", {})
-    raw_grant = grant.get("grant") if isinstance(grant, dict) else None
-    if not isinstance(raw_grant, str):
-        raise RuntimeError("Companion did not return a retrieval grant")
-    # The grant is held only in this stack frame and is never returned or persisted.
-    return api_post_json(api_url, token, "/secret-grants/redeem", {"grant": raw_grant})
+    return api_redeem_secret_plan(api_url, token, plan_id)
 
 
 def state_path() -> Path:

@@ -1,20 +1,108 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
   deleteSkillArchive,
   headSkillArchive,
   InvalidSkillArchiveRangeError,
   isStoragePreconditionFailure,
+  publicSkillReleaseKey,
   putSkillArchive,
+  putPublicSkillReleaseSnapshot,
   resolveSkillArchiveByteRange,
   skillArchiveKey,
   streamSkillArchive,
 } from "../src";
+
+const storageConfig = {
+  endpoint: "http://127.0.0.1:9000",
+  region: "us-east-1",
+  accessKeyId: "companion",
+  secretAccessKey: "companion-secret",
+  bucket: "skill-archives",
+  forcePathStyle: true,
+};
 
 describe("skillArchiveKey", () => {
   it("uses the stable tenant/slug/version path", () => {
     expect(skillArchiveKey({ orgId: "org-1", slug: "pdf-extract", version: "1.2.3" })).toBe(
       "org-1/pdf-extract/1.2.3.tar.gz",
     );
+  });
+});
+
+describe("public skill release snapshots", () => {
+  it("persists exact ZIP bytes once under their tenant-scoped content address", async () => {
+    const body = Buffer.from("stable-public-zip");
+    const checksum = `sha256:${createHash("sha256").update(body).digest("hex")}`;
+    const sent: unknown[] = [];
+    const key = await putPublicSkillReleaseSnapshot({
+      orgId: "org-1",
+      checksum,
+      body,
+      client: {
+        send: async (command: { input: unknown }) => {
+          sent.push(command.input);
+          return { ETag: '"snapshot"' };
+        },
+      } as never,
+      config: storageConfig,
+    });
+
+    expect(key).toBe(`org-1/public-releases/sha256/${checksum.slice("sha256:".length)}.zip`);
+    expect(publicSkillReleaseKey({ orgId: "org-1", checksum })).toBe(key);
+    expect(sent).toEqual([expect.objectContaining({
+      Key: key,
+      Body: body,
+      ContentType: "application/zip",
+      IfNoneMatch: "*",
+    })]);
+  });
+
+  it("accepts an idempotent collision only when the stored bytes match", async () => {
+    const body = Buffer.from("same-public-zip");
+    const checksum = `sha256:${createHash("sha256").update(body).digest("hex")}`;
+    let calls = 0;
+    const client = {
+      send: async () => {
+        calls += 1;
+        if (calls === 1) throw Object.assign(new Error("exists"), { name: "PreconditionFailed" });
+        return { Body: { transformToByteArray: async () => new Uint8Array(body) } };
+      },
+    };
+    await expect(putPublicSkillReleaseSnapshot({
+      orgId: "org-1",
+      checksum,
+      body,
+      client: client as never,
+      config: storageConfig,
+    })).resolves.toBe(publicSkillReleaseKey({ orgId: "org-1", checksum }));
+
+    calls = 0;
+    const corruptClient = {
+      send: async () => {
+        calls += 1;
+        if (calls === 1) throw Object.assign(new Error("exists"), { name: "PreconditionFailed" });
+        return { Body: { transformToByteArray: async () => new Uint8Array(Buffer.from("corrupt")) } };
+      },
+    };
+    await expect(putPublicSkillReleaseSnapshot({
+      orgId: "org-1",
+      checksum,
+      body,
+      client: corruptClient as never,
+      config: storageConfig,
+    })).rejects.toThrow("does not match its content address");
+  });
+
+  it("rejects a claimed digest before touching storage", async () => {
+    const send = async () => ({ ETag: '"unused"' });
+    await expect(putPublicSkillReleaseSnapshot({
+      orgId: "org-1",
+      checksum: `sha256:${"0".repeat(64)}`,
+      body: Buffer.from("different"),
+      client: { send } as never,
+      config: storageConfig,
+    })).rejects.toThrow("do not match");
   });
 });
 

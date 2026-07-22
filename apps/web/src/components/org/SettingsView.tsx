@@ -22,6 +22,7 @@ import { MembersPane } from "./MembersPane";
 import { InvitationsPane } from "./InvitationsPane";
 import { BillingPane } from "./BillingPane";
 import { GitHubPane } from "./GitHubPane";
+import { ConnectedAgentsPane } from "./ConnectedAgentsPane";
 import { InviteDialog } from "./dialogs";
 import { canonicalizeSettingsRoute } from "./model";
 import type { ApiKeyVM, Invite, OrgCtx, SettingsDialog, SettingsRoute } from "./model";
@@ -40,6 +41,8 @@ function crumbFor(ctx: OrgCtx, route: SettingsRoute): string[] {
       return ["Account", "Models"];
     case "apikeys":
       return ["Account", "API keys"];
+    case "agents":
+      return ["Account", "Connected agents"];
     case "org-providers":
     case "org-models":
       return [ws.name, "Shared models"];
@@ -120,6 +123,7 @@ export function SettingsView({
   else if (activeRoute.view === "org-models" || activeRoute.view === "org-providers")
     pane = <ModelsPane key="org-models" scope={workspaceModels} />;
   else if (activeRoute.view === "apikeys") pane = <ApiKeysPane ctx={ctx} keys={apiKeys} />;
+  else if (activeRoute.view === "agents") pane = <ConnectedAgentsPane />;
   else if (activeRoute.view === "general") pane = <WorkspaceGeneralPane ctx={ctx} />;
   else if (activeRoute.view === "members") pane = <MembersPane ctx={ctx} onInvite={() => onDialog("invite")} />;
   else if (activeRoute.view === "invitations")

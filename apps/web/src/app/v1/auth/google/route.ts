@@ -18,11 +18,14 @@ function webOrigin(request: NextRequest): string {
 export async function GET(request: NextRequest): Promise<NextResponse> {
   const origin = webOrigin(request);
   const next = safeNext(request.nextUrl.searchParams.get("next"));
-  const errorRedirect = () =>
-    NextResponse.redirect(
-      new URL(`/login?error=${encodeURIComponent("Google sign-in is unavailable.")}`, origin),
-      303,
-    );
+  const loginErrorUrl = (message: string) => {
+    const url = new URL("/login", origin);
+    url.searchParams.set("error", message);
+    url.searchParams.set("next", next);
+    return url;
+  };
+  const errorRedirect = () => NextResponse.redirect(loginErrorUrl("Google sign-in is unavailable."), 303);
+  const callbackURL = new URL(next, origin).toString();
 
   try {
     const response = await fetch(`${apiBaseUrl()}/auth/sign-in/social`, {
@@ -32,9 +35,11 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       headers: { "content-type": "application/json", origin },
       body: JSON.stringify({
         provider: "google",
-        callbackURL: new URL(next, origin).toString(),
-        newUserCallbackURL: new URL("/onboarding", origin).toString(),
-        errorCallbackURL: new URL(`/login?error=${encodeURIComponent("Google sign-in failed.")}`, origin).toString(),
+        callbackURL,
+        // `/skills` already redirects a not-yet-onboarded user to `/onboarding`. Keeping the same
+        // validated target for new users preserves public-install and device-approval return paths.
+        newUserCallbackURL: callbackURL,
+        errorCallbackURL: loginErrorUrl("Google sign-in failed.").toString(),
       }),
     });
     const json = (await response.json().catch(() => null)) as AuthJson;

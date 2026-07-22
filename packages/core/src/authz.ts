@@ -87,6 +87,18 @@ export function canManagePersonalSkill(actorId: string, skill: SkillScopeRef): b
   return skill.scope === "personal" && skill.creatorId === actorId;
 }
 
+/**
+ * Public releases are narrower than normal org-skill editing: only the original creator or an org
+ * Owner/Admin may pin, promote, or withdraw one. Membership is intentionally not inferred here and
+ * must be established by the caller before this capability gate runs.
+ */
+export function canManagePublicSkill(
+  actor: { id: string; orgRole: OrgRole },
+  skill: SkillScopeRef,
+): boolean {
+  return skill.scope === "org" && (skill.creatorId === actor.id || isOrgAdmin(actor.orgRole));
+}
+
 /* ---- Per-run privacy gate (skill runs) --------------------------------------- */
 
 /** The minimal run shape the privacy gate needs: who launched it. */

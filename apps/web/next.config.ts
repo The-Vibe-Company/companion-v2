@@ -12,6 +12,9 @@ const config: NextConfig = {
   async rewrites() {
     const api = process.env.COMPANION_API_URL ?? "http://127.0.0.1:3001";
     return [
+      // Agent Auth discovery must live at the public instance root. In local development Web and
+      // API use separate origins, so expose the API document through the same URL users copy.
+      { source: "/.well-known/agent-configuration", destination: `${api}/.well-known/agent-configuration` },
       { source: "/auth/:path*", destination: `${api}/auth/:path*` },
       { source: "/v1/:path*", destination: `${api}/v1/:path*` },
       { source: "/trpc/:path*", destination: `${api}/trpc/:path*` },

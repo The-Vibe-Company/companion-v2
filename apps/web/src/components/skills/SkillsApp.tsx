@@ -45,7 +45,6 @@ import { LocalSkillsView } from "./LocalSkillsView";
 import { CommandPalette } from "./CommandPalette";
 import { UploadDialog, InstallDialog } from "./UploadDialog";
 import {
-  parseSkillShareTokenPath,
   parseSkillsRoute,
   canonicalSkillsRouteHref,
   skillShareHref,
@@ -60,6 +59,7 @@ import {
   type SkillsRouteSource,
 } from "./route";
 import { ShareDialog } from "./ShareDialog";
+import { PublicReleaseDialog } from "./PublicReleaseDialog";
 import {
   assignPersonalSkillLabel,
   createPersonalLabel as createPersonalLabelRpc,
@@ -190,7 +190,7 @@ function restoreRowAtSnapshot<T extends { id: string }>(
 }
 
 function isSkillsClientPath(pathname: string): boolean {
-  return pathname === "/skills" || parseSkillShareTokenPath(pathname) !== null;
+  return pathname === "/skills";
 }
 
 export function SkillsApp({
@@ -375,6 +375,7 @@ export function SkillsApp({
   const [uploadOpen, setUploadOpen] = useState(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [updateSkill, setUpdateSkill] = useState<SkillVM | null>(null);
+  const [publicReleaseSkill, setPublicReleaseSkill] = useState<SkillVM | null>(null);
   const [installSkill, setInstallSkill] = useState<SkillVM | null>(null);
   const [labelNotice, setLabelNotice] = useState<string | null>(null);
   const [openId, setOpenId] = useState<string | null>(() =>
@@ -414,20 +415,9 @@ export function SkillsApp({
     return orgSkillsRef.current.find(isShareable) ?? mineSkillsRef.current.find(isShareable) ?? null;
   }, []);
 
-  const skillForShareToken = useCallback((token: string): SkillVM | null => {
-    const isMatch = (s: SkillVM) => s.shareToken === token && s.scope === "org" && !s.archived;
-    return orgSkillsRef.current.find(isMatch) ?? mineSkillsRef.current.find(isMatch) ?? null;
-  }, []);
-
   const hrefForSkillsRoute = useCallback(
-    (route: SkillsRoute): string => {
-      if (route.kind !== "local" && route.kind !== "archived" && route.skill) {
-        const shared = shareableSkillForSlug(route.skill);
-        return canonicalSkillsRouteHref(route, shared?.shareToken ?? null);
-      }
-      return canonicalSkillsRouteHref(route, null);
-    },
-    [shareableSkillForSlug],
+    (route: SkillsRoute): string => canonicalSkillsRouteHref(route),
+    [],
   );
 
   const writeSkillsUrl = useCallback((route: SkillsRoute, history: "push" | "replace") => {
@@ -451,10 +441,6 @@ export function SkillsApp({
   const pushSkillsUrl = useCallback((route: SkillsRoute) => writeSkillsUrl(route, "push"), [writeSkillsUrl]);
   const clearCurrentSkillUrl = useCallback(() => {
     if (typeof window === "undefined" || !isSkillsClientPath(window.location.pathname)) return;
-    if (parseSkillShareTokenPath(window.location.pathname)) {
-      replaceSkillsUrl({ lib: "org", kind: "all" });
-      return;
-    }
     replaceSkillsUrl(skillsRouteWithoutSkill(parseSkillsRoute(window.location.search)));
   }, [replaceSkillsUrl]);
 
@@ -1235,6 +1221,9 @@ export function SkillsApp({
         case "publish-version":
           setUpdateSkill(target);
           return;
+        case "manage-public":
+          setPublicReleaseSkill(target);
+          return;
         case "archive":
           archiveSkillById(target.id);
           return;
@@ -1392,12 +1381,9 @@ export function SkillsApp({
       }
       settingsWarmupRef.current = null;
       setLocalSettings(null);
-      const shareToken = parseSkillShareTokenPath(window.location.pathname);
-      if (shareToken) {
-        const shared = skillForShareToken(shareToken);
-        applySkillsRoute(shared ? { lib: "org", kind: "all", skill: shared.id } : { lib: "org", kind: "all" }, "none");
-        return;
-      }
+      // Every non-Skills pathname belongs to its own Next.js route. In particular, `/s/:token`
+      // must render the public page and is never interpreted by the authenticated Skills shell.
+      if (window.location.pathname !== "/skills") return;
       if (window.location.pathname === "/skills") {
         const route = parseSkillsRoute(window.location.search);
         const source = skillsRouteSource(window.location.search);
@@ -1415,7 +1401,7 @@ export function SkillsApp({
     };
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
-  }, [applySkillsRoute, initialFilterPreferences.active_filters, loadArchived, showLocalSettings, skillForShareToken]);
+  }, [applySkillsRoute, initialFilterPreferences.active_filters, loadArchived, showLocalSettings]);
 
   // --- Open / navigate -------------------------------------------------------
   const detailPool = currentView === "archived" ? archivedSkills : filtered;
@@ -1482,9 +1468,7 @@ export function SkillsApp({
       return;
     }
     setOpenId(null);
-    replaceSkillsUrl(
-      parseSkillShareTokenPath(window.location.pathname) ? { lib: "org", kind: "all" } : routeForCurrentSurface(),
-    );
+    replaceSkillsUrl(routeForCurrentSurface());
   }, [replaceSkillsUrl, routeForCurrentSurface]);
   /** Open one of the current skill's runs (`?skill=…&run=…`) — deep-linkable transcript/chat. */
   const openRun = useCallback(
@@ -1579,7 +1563,7 @@ export function SkillsApp({
   // Keyboard: ⌘K toggles palette; ⌘⇧C copies the public link; Esc back to list; ↑/↓ move between skills.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (uploadOpen || updateSkill || installSkill || shareTarget) return;
+      if (uploadOpen || updateSkill || installSkill || shareTarget || publicReleaseSkill) return;
       // Modal surfaces own Escape, arrows and Cmd/Ctrl shortcuts. Letting the skill shell handle
       // them would unmount the launcher and move its prompt/files into another skill's route.
       if (document.querySelector('[role="dialog"][aria-modal="true"]')) return;
@@ -1623,7 +1607,7 @@ export function SkillsApp({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [openId, paletteOpen, mobileSidebarOpen, uploadOpen, updateSkill, installSkill, shareTarget, back, go, shareableSkillForSlug]);
+  }, [openId, paletteOpen, mobileSidebarOpen, uploadOpen, updateSkill, installSkill, shareTarget, publicReleaseSkill, back, go, shareableSkillForSlug]);
 
   const localActive = currentView === "local";
   const archivedActive = currentView === "archived";
@@ -1839,6 +1823,7 @@ export function SkillsApp({
       {uploadOpen && (
         <UploadDialog
           mode="create"
+          workspaceId={currentOrg.id}
           scope={activeLib === "org" ? "org" : "personal"}
           allLabels={activeTreePaths}
           defaultLabels={activeLabel ? [activeLabel] : []}
@@ -1855,6 +1840,7 @@ export function SkillsApp({
       {updateSkill && (
         <UploadDialog
           mode="update"
+          workspaceId={currentOrg.id}
           skill={updateSkill}
           scope={updateSkill.scope === "personal" ? "personal" : "org"}
           allLabels={(updateSkill.scope === "personal" ? personalTreeRows : orgTreeRows).map((r) => r.path)}
@@ -1871,6 +1857,7 @@ export function SkillsApp({
       {installSkill && (
         <InstallDialog
           skill={installSkill}
+          workspaceId={currentOrg.id}
           onClose={() => setInstallSkill(null)}
           onReported={reconcileInstallReport}
         />
@@ -1900,6 +1887,24 @@ export function SkillsApp({
           orgName={currentOrg.name}
           onConfirm={(plan) => confirmShare(shareTarget, plan)}
           onClose={() => setShareTarget(null)}
+        />
+      )}
+      {publicReleaseSkill && (
+        <PublicReleaseDialog
+          skill={publicReleaseSkill}
+          onClose={() => setPublicReleaseSkill(null)}
+          onChanged={(publicVersion) => {
+            const updateRows = (rows: SkillVM[]) =>
+              rows.map((row) => (row.id === publicReleaseSkill.id ? { ...row, publicVersion } : row));
+            const nextMine = updateRows(mineSkillsRef.current);
+            const nextOrg = updateRows(orgSkillsRef.current);
+            mineSkillsRef.current = nextMine;
+            orgSkillsRef.current = nextOrg;
+            setMineSkills(nextMine);
+            setOrgSkills(nextOrg);
+            setPublicReleaseSkill((current) => current ? { ...current, publicVersion } : current);
+            setToast({ msg: publicVersion ? `Public v${publicVersion} is live` : "Public package access removed" });
+          }}
         />
       )}
       {toast && (

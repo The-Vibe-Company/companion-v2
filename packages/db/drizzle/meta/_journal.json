@@ -344,6 +344,20 @@
       "when": 1784642400000,
       "tag": "0048_skill_sidebar_order_preference",
       "breakpoints": true
+    },
+    {
+      "idx": 49,
+      "version": "7",
+      "when": 1784646000000,
+      "tag": "0049_authenticated_public_releases",
+      "breakpoints": true
+    },
+    {
+      "idx": 50,
+      "version": "7",
+      "when": 1784649600000,
+      "tag": "0050_agent_auth_identity",
+      "breakpoints": true
     }
   ]
 }

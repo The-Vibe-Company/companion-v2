@@ -134,6 +134,10 @@ export interface PreTenantSkillPreviewRow {
   current_version: string;
   frontmatter: string;
   updated_at: string;
+  public_version: string | null;
+  public_checksum: string | null;
+  public_size_bytes: number | null;
+  public_released_at: string | null;
 }
 
 export async function getPreTenantSkillPreview(
@@ -144,6 +148,178 @@ export async function getPreTenantSkillPreview(
     select * from companion_public_skill_preview(${token})
   `);
   return resultRows<PreTenantSkillPreviewRow>(result)[0] ?? null;
+}
+
+/** Exact immutable public package resolved before a tenant context is known. */
+export interface PreTenantPublicSkillPackageRow {
+  org_id: string;
+  skill_id: string;
+  skill_version_id: string;
+  slug: string;
+  version: string;
+  storage_path: string;
+  checksum: string;
+  size_bytes: number;
+}
+
+/** Session authorization also writes the tenant-owned audit entry inside the DB function. */
+export async function authorizePreTenantPublicSkillPackage(
+  database: Db,
+  input: { token: string; version: string; userId: string },
+): Promise<PreTenantPublicSkillPackageRow | null> {
+  const result = await database.execute(sql`
+    select * from companion_authorize_public_skill_package(${input.token}, ${input.version}, ${input.userId})
+  `);
+  return resultRows<PreTenantPublicSkillPackageRow>(result)[0] ?? null;
+}
+
+export interface PreTenantIssuedTransferTicketRow {
+  ticket_id: string;
+  org_id: string;
+  skill_id: string;
+  skill_version_id: string;
+  version: string;
+  checksum: string;
+  size_bytes: number;
+  expires_at: string;
+}
+
+/**
+ * Persist only the hash of an Agent Auth transfer ticket. The caller has already authenticated and
+ * authorized the delegated user/agent; the DB function revalidates the exact live public release.
+ */
+export async function issuePreTenantPublicSkillTransferTicket(
+  database: Db,
+  input: {
+    token: string;
+    version: string;
+    userId: string;
+    agentId: string;
+    agentGrantId?: string | null;
+    tokenHash: string;
+    expiresAt: Date;
+  },
+): Promise<PreTenantIssuedTransferTicketRow | null> {
+  const result = await database.execute(sql`
+    select * from companion_issue_public_skill_transfer_ticket(
+      ${input.token}, ${input.version}, ${input.userId}, ${input.agentId},
+      ${input.agentGrantId ?? null}, ${input.tokenHash},
+      ${input.expiresAt.toISOString()}::timestamp with time zone
+    )
+  `);
+  return resultRows<PreTenantIssuedTransferTicketRow>(result)[0] ?? null;
+}
+
+export interface PreTenantConsumedTransferTicketRow extends PreTenantPublicSkillPackageRow {
+  user_id: string;
+  agent_id: string;
+  agent_grant_id: string | null;
+}
+
+/** Atomically claim a one-use ticket and revalidate release/checksum/size at consumption time. */
+export async function consumePreTenantPublicSkillTransferTicket(
+  database: Db,
+  input: { tokenHash: string; token: string; version: string },
+): Promise<PreTenantConsumedTransferTicketRow | null> {
+  const result = await database.execute(sql`
+    select * from companion_consume_public_skill_transfer_ticket(
+      ${input.tokenHash}, ${input.token}, ${input.version}
+    )
+  `);
+  return resultRows<PreTenantConsumedTransferTicketRow>(result)[0] ?? null;
+}
+
+export type PreTenantSkillTransferAction =
+  | "skill_package.download"
+  | "skill_file.download"
+  | "skill_package.upload"
+  | "local_skill.download";
+
+export interface PreTenantConsumedSkillTransferTicketRow {
+  ticket_id: string;
+  org_id: string;
+  user_id: string;
+  user_email: string;
+  user_name: string;
+  agent_id: string;
+  agent_grant_id: string | null;
+  action: PreTenantSkillTransferAction;
+  skill_id: string | null;
+  skill_version_id: string | null;
+  skill_slug: string;
+  version: string;
+  file_path: string | null;
+  checksum: string;
+  size_bytes: number;
+  expires_at: string;
+}
+
+/**
+ * Atomically claim a private skill package/file transfer ticket before a tenant is known. The database function
+ * checks the exact request binding and live membership; callers must still re-enter Core under the
+ * returned tenant/user context to revalidate resource-level visibility or publish authorization.
+ */
+export async function consumePreTenantSkillTransferTicket(
+  database: Db,
+  input: {
+    tokenHash: string;
+    action: PreTenantSkillTransferAction;
+    slug: string;
+    version: string;
+    checksum?: string | null;
+    sizeBytes?: number | null;
+    filePath?: string | null;
+  },
+): Promise<PreTenantConsumedSkillTransferTicketRow | null> {
+  const result = await database.execute(sql`
+    select * from companion_consume_agent_transfer_ticket(
+      ${input.tokenHash}, ${input.action}, ${input.slug}, ${input.version},
+      ${input.checksum ?? null}, ${input.sizeBytes ?? null}, ${input.filePath ?? null}
+    )
+  `);
+  return resultRows<PreTenantConsumedSkillTransferTicketRow>(result)[0] ?? null;
+}
+
+/** Check a ticket's cheap mutable bindings before accepting a large upload body. */
+export async function preflightPreTenantAgentTransferTicket(
+  database: Db,
+  input: {
+    tokenHash: string;
+    action: PreTenantSkillTransferAction;
+    slug: string;
+    version: string;
+  },
+): Promise<boolean> {
+  const result = await database.execute(sql`
+    select companion_preflight_agent_transfer_ticket(
+      ${input.tokenHash}, ${input.action}, ${input.slug}, ${input.version}
+    ) as "authorized"
+  `);
+  return resultRows<{ authorized: boolean }>(result)[0]?.authorized ?? false;
+}
+
+/** Revoke every unconsumed ticket for an Agent Auth agent, or only one capability grant. */
+export async function revokePreTenantAgentTransferTickets(
+  database: Db,
+  input: { userId: string; agentId: string; agentGrantId?: string | null },
+): Promise<number> {
+  const result = await database.execute(sql`
+    select companion_revoke_agent_transfer_tickets(
+      ${input.userId}, ${input.agentId}, ${input.agentGrantId ?? null}
+    ) as "count"
+  `);
+  return Number(resultRows<{ count: number | string }>(result)[0]?.count ?? 0);
+}
+
+/** Recheck the live Agent Auth identity behind an already-consumed transfer ticket. */
+export async function revalidatePreTenantAgentTransferTicket(
+  database: Db,
+  tokenHash: string,
+): Promise<boolean> {
+  const result = await database.execute(sql`
+    select companion_revalidate_agent_transfer_ticket(${tokenHash}) as "authorized"
+  `);
+  return resultRows<{ authorized: boolean }>(result)[0]?.authorized ?? false;
 }
 
 export async function getPreTenantSkillShareTarget(

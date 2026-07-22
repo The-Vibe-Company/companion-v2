@@ -139,6 +139,12 @@ export function SettingsSidebar({
               meta={String(apiKeyCount)}
               onClick={() => goTo({ view: "apikeys" })}
             />
+            <NavItem
+              active={is("agents")}
+              icon="bot"
+              label="Connected agents"
+              onClick={() => goTo({ view: "agents" })}
+            />
           </div>
 
           <div className="sx-group">

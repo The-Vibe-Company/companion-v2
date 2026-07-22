@@ -43,6 +43,8 @@
     "zod": "^3.24.1"
   },
   "devDependencies": {
+    "@auth/agent": "0.6.2",
+    "@auth/agent-cli": "0.5.1",
     "@types/node": "^22.10.2",
     "tsup": "^8.3.5",
     "tsx": "^4.19.2",

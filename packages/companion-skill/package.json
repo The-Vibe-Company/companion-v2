@@ -11,13 +11,24 @@
     "skill"
   ],
   "scripts": {
+    "build": "pnpm build:agent-client",
+    "build:agent-client": "tsup",
     "check:integrity": "node scripts/update-integrity.mjs --check",
     "check:version-bump": "pnpm check:integrity && node scripts/check-version-bump.mjs",
+    "test": "vitest run client",
     "update:integrity": "node scripts/update-integrity.mjs",
     "typecheck": "tsc --noEmit"
   },
+  "dependencies": {
+    "@auth/agent": "0.6.2",
+    "@companion/contracts": "workspace:*",
+    "fflate": "^0.8.2",
+    "yaml": "^2.6.1"
+  },
   "devDependencies": {
     "@types/node": "^22.10.2",
-    "typescript": "^5.7.2"
+    "tsup": "^8.3.5",
+    "typescript": "^5.7.2",
+    "vitest": "3.2.7"
   }
 }

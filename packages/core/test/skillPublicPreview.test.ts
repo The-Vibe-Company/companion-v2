@@ -27,6 +27,10 @@ describe("getSkillPublicPreviewByShareToken", () => {
           },
         }),
         updated_at: "2026-06-25 10:00:00+00",
+        public_version: null,
+        public_checksum: null,
+        public_size_bytes: null,
+        public_released_at: null,
       },
     ]);
 
@@ -41,10 +45,44 @@ describe("getSkillPublicPreviewByShareToken", () => {
       creator_name: "Ada Lovelace",
       creator_initials: "AL",
       updated_at: "2026-06-25T10:00:00.000Z",
+      public_release: null,
     });
     expect(preview).not.toHaveProperty("id");
     expect(preview).not.toHaveProperty("org_id");
     expect(preview).not.toHaveProperty("creator_id");
+  });
+
+  it("surfaces the pinned release metadata without replacing the internal current-version label", async () => {
+    const { database } = fakeDb([
+      {
+        slug: "mega-code-review",
+        description: "Internal current description.",
+        creator_name: "Ada Lovelace",
+        creator_initials: "AL",
+        current_version: "2.0.0",
+        frontmatter: JSON.stringify({
+          description: "Pinned release description.",
+          companion: { display: { name: "Pinned review", summary: "Pinned release summary." } },
+        }),
+        updated_at: "2026-06-20 08:00:00+00",
+        public_version: "1.4.0",
+        public_checksum: `sha256:${"a".repeat(64)}`,
+        public_size_bytes: 42,
+        public_released_at: "2026-06-20 08:00:00+00",
+      },
+    ]);
+
+    await expect(getSkillPublicPreviewByShareToken({ token: "share-token-1", database })).resolves.toMatchObject({
+      display_name: "Pinned review",
+      description: "Pinned release summary.",
+      current_version: "2.0.0",
+      public_release: {
+        version: "1.4.0",
+        checksum: `sha256:${"a".repeat(64)}`,
+        size_bytes: 42,
+        released_at: "2026-06-20T08:00:00.000Z",
+      },
+    });
   });
 
   it("returns null for unknown, personal, or archived tokens filtered out by the query", async () => {

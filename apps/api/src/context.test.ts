@@ -3,6 +3,7 @@ import { Hono } from "hono";
 
 const authMocks = vi.hoisted(() => ({
   getSession: vi.fn(),
+  authenticateAgentRequest: vi.fn(),
 }));
 
 const serviceMocks = vi.hoisted(() => ({
@@ -16,6 +17,7 @@ vi.mock("@companion/auth", () => ({
     api: { getSession: authMocks.getSession },
     $Infer: {},
   },
+  authenticateAgentRequest: authMocks.authenticateAgentRequest,
 }));
 
 vi.mock("@companion/core/services", () => serviceMocks);
@@ -25,6 +27,8 @@ import { attachSession, type ApiVariables } from "./context";
 describe("attachSession", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    authMocks.getSession.mockResolvedValue(null);
+    serviceMocks.resolveApiToken.mockResolvedValue(null);
   });
 
   it("forwards every rolling-session cookie returned by Better Auth", async () => {
@@ -111,5 +115,47 @@ describe("attachSession", () => {
     expect(cookies).toHaveLength(2);
     expect(cookies[0]).toContain("Max-Age=0");
     expect(cookies[1]).toContain("session_token=fresh");
+  });
+
+  it("maps a validated agent grant using the canonical workspace header", async () => {
+    authMocks.authenticateAgentRequest.mockResolvedValue({
+      actor: { id: "user-1", email: "user@example.test", name: "User" },
+      workspaceId: "169b768e-b1d0-4dde-a62e-575022debe88",
+      capability: "skills:read",
+      session: { agentId: "agent-1" },
+    });
+
+    const app = new Hono<{ Variables: ApiVariables }>();
+    app.use("*", attachSession);
+    app.get("/v1/skills", (c) =>
+      c.json({
+        actorId: c.get("tokenActor")?.id,
+        workspaceId: c.get("tokenOrgId"),
+        capability: c.get("agentCapability"),
+        kind: c.get("programmaticAuthKind"),
+      }),
+    );
+
+    const response = await app.request("/v1/skills", {
+      headers: {
+        authorization: "Bearer signed.agent.jwt",
+        "x-companion-workspace-id": "169b768e-b1d0-4dde-a62e-575022debe88",
+      },
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      actorId: "user-1",
+      workspaceId: "169b768e-b1d0-4dde-a62e-575022debe88",
+      capability: "skills:read",
+      kind: "agent",
+    });
+    expect(authMocks.authenticateAgentRequest).toHaveBeenCalledWith(
+      expect.objectContaining({
+        method: "GET",
+        pathname: "/v1/skills",
+        workspaceId: "169b768e-b1d0-4dde-a62e-575022debe88",
+      }),
+    );
   });
 });

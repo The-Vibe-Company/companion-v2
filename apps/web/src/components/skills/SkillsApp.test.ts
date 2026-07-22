@@ -1060,7 +1060,7 @@ describe("SkillsApp contextual skill actions", () => {
     await flushEffects();
 
     expect(container.textContent).toContain("brand-kit");
-    expect(window.location.pathname).toBe("/s/share-brand-kit");
+    expect(window.location.pathname + window.location.search).toBe("/skills?lib=org&skill=brand-kit");
     clickButton(container, "More actions");
     expect(container.textContent).toContain("Mark as not installed");
   });
@@ -1629,7 +1629,7 @@ describe("SkillsApp navigation", () => {
 
     clickButton(container, "Open skill loose-skill");
     await flushEffects();
-    expect(window.location.pathname + window.location.search).toBe("/s/share-loose-skill");
+    expect(window.location.pathname + window.location.search).toBe("/skills?lib=org&skill=loose-skill");
     expectContextualInstallButton(container);
 
     // Browser Back returns to the org list (the entry before the pushed detail).
@@ -1643,7 +1643,7 @@ describe("SkillsApp navigation", () => {
     expect(container.querySelector(".dpage")).toBeNull();
   });
 
-  it("uses the public share URL when opening an org skill under a label", async () => {
+  it("keeps an org skill detail under its authenticated label route", async () => {
     const { container } = await mountSkillsApp(
       { lib: "org", kind: "label", label: "marketing/seo" },
       { url: "/skills?lib=org&view=label&label=marketing%2Fseo" },
@@ -1653,11 +1653,13 @@ describe("SkillsApp navigation", () => {
     clickButton(container, "Open skill seo-helper");
     await flushEffects();
 
-    expect(window.location.pathname + window.location.search).toBe("/s/share-seo-helper");
+    expect(window.location.pathname + window.location.search).toBe(
+      "/skills?lib=org&view=label&label=marketing%2Fseo&skill=seo-helper",
+    );
     expectContextualInstallButton(container);
   });
 
-  it("re-opens an org skill from a public share URL history entry", async () => {
+  it("does not project a public share URL history entry into authenticated skill detail", async () => {
     const { container } = await mountSkillsApp({ lib: "org", kind: "all" }, { url: "/skills?lib=org" });
     await flushEffects();
     expect(container.querySelector(".dpage")).toBeNull();
@@ -1668,8 +1670,7 @@ describe("SkillsApp navigation", () => {
     });
 
     expect(window.location.pathname + window.location.search).toBe("/s/share-brand-kit");
-    expect(container.textContent).toContain("brand-kit");
-    expectContextualInstallButton(container);
+    expect(container.querySelector(".dpage")).toBeNull();
   });
 
   it("keeps personal skill detail URLs on the signed-in skills route", async () => {
@@ -1700,7 +1701,7 @@ describe("SkillsApp navigation", () => {
       await flushEffects();
       clickButton(container, "Open skill loose-skill");
       await flushEffects();
-      expect(window.location.pathname).toBe("/s/share-loose-skill");
+      expect(window.location.pathname + window.location.search).toBe("/skills?lib=org&skill=loose-skill");
 
       await act(async () => {
         window.dispatchEvent(
@@ -1762,7 +1763,7 @@ describe("SkillsApp navigation", () => {
         );
       });
 
-      expect(window.location.pathname).toBe("/s/share-loose-skill");
+      expect(window.location.pathname + window.location.search).toBe("/skills?lib=org&skill=loose-skill");
     } finally {
       if (prior) Object.defineProperty(navigator, "clipboard", prior);
       else Reflect.deleteProperty(navigator, "clipboard");
@@ -1776,7 +1777,7 @@ describe("SkillsApp navigation", () => {
     );
     await flushEffects();
     expectContextualInstallButton(container);
-    expect(window.location.pathname + window.location.search).toBe("/s/share-seo-helper");
+    expect(window.location.pathname + window.location.search).toBe("/skills?lib=org&skill=seo-helper");
 
     // The detail crumb's back button is labeled by the library (the org name for an org skill).
     clickButton(container, "Acme");
@@ -1856,7 +1857,9 @@ describe("SkillsApp label folder creation", () => {
     // Open a skill under the active folder so the route carries both label + skill.
     clickButton(container, "Open skill seo-helper");
     await flushEffects();
-    expect(window.location.pathname + window.location.search).toBe("/s/share-seo-helper");
+    expect(window.location.pathname + window.location.search).toBe(
+      "/skills?lib=org&view=label&label=marketing%2Fseo&skill=seo-helper",
+    );
 
     // Rename the active leaf folder (marketing/seo → marketing/growth) via its options menu.
     clickButton(container, "marketing/seo options");
@@ -1873,8 +1876,10 @@ describe("SkillsApp label folder creation", () => {
     await flushEffects();
 
     expect(queryMocks.renameLabel).toHaveBeenCalledWith("marketing/seo", "marketing/growth", { displayName: "growth" });
-    // The detail URL remains the skill's public share link while the selection state keeps the detail open.
-    expect(window.location.pathname + window.location.search).toBe("/s/share-seo-helper");
+    // The authenticated detail stays open and its canonical label route follows the rename.
+    expect(window.location.pathname + window.location.search).toBe(
+      "/skills?lib=org&view=label&label=marketing%2Fgrowth&skill=seo-helper",
+    );
   });
 
   it("renames a folder display name while keeping the same canonical path", async () => {
@@ -1953,9 +1958,9 @@ describe("Companion skills install gate", () => {
       changes: [],
       integrity: { packageChecksum: `sha256:${"a".repeat(64)}`, files: { "SKILL.md": `sha256:${"b".repeat(64)}` } },
       prompts: {
-        install: "install {base} {workspaceId} {token}",
-        update: "update {base} {workspaceId} {token}",
-        use: "use {base} {workspaceId} {token}",
+        install: "install {base} {workspaceId} with Agent Auth",
+        update: "update {base} {workspaceId} with Agent Auth",
+        use: "use {base} {workspaceId} with Agent Auth",
       },
       ...extra,
     };
@@ -1983,7 +1988,7 @@ describe("Companion skills install gate", () => {
     expect(window.localStorage.getItem(dismissKey)).toBe("1");
   });
 
-  it("mints the scoped token only when the prompt is copied", async () => {
+  it("copies an Agent Auth prompt without minting a PAT", async () => {
     const { container } = await mountSkillsApp(
       { kind: "local" },
       { props: { initialLocalSkills: [localSkill("none")] } },
@@ -1993,12 +1998,12 @@ describe("Companion skills install gate", () => {
 
     clickGateCopy(container);
     await flushEffects();
-    expect(queryMocks.issueToken).toHaveBeenCalledWith(["skills:read", "skills:write", "secrets:read", "secrets:write"]);
-    expect(clipboardWrite).toHaveBeenCalledWith("install http://127.0.0.1:3001 org-1 cmp_pat_test");
+    expect(queryMocks.issueToken).not.toHaveBeenCalled();
+    expect(clipboardWrite).toHaveBeenCalledWith("install http://127.0.0.1:3001 org-1 with Agent Auth");
     expect(container.textContent).toContain("Copied");
   });
 
-  it("surfaces a retry path when the on-copy token mint fails", async () => {
+  it("does not depend on the legacy token endpoint", async () => {
     queryMocks.issueToken.mockRejectedValueOnce(new Error("network down"));
     const { container } = await mountSkillsApp(
       { kind: "local" },
@@ -2008,17 +2013,12 @@ describe("Companion skills install gate", () => {
 
     clickGateCopy(container);
     await flushEffects();
-    // The first mint failed: the gate stays open and surfaces the error.
-    expect(container.textContent).toContain("Could not create an access token");
-
-    // Copying again uses the default (resolving) mock and clears the error.
-    clickGateCopy(container);
-    await flushEffects();
-    expect(container.textContent).not.toContain("Could not create an access token");
+    expect(queryMocks.issueToken).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("delegated device flow");
     expect(container.textContent).toContain("Copied");
   });
 
-  it("mints at most one token for rapid copy clicks", async () => {
+  it("never mints a token for rapid copy clicks", async () => {
     const { container } = await mountSkillsApp(
       { kind: "local" },
       { props: { initialLocalSkills: [localSkill("none")] } },
@@ -2031,8 +2031,7 @@ describe("Companion skills install gate", () => {
       btn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
     await flushEffects();
-    // The in-flight mint is shared, so two clicks create only one credential.
-    expect(queryMocks.issueToken).toHaveBeenCalledTimes(1);
+    expect(queryMocks.issueToken).not.toHaveBeenCalled();
   });
 
   it("does not claim success when the clipboard write is blocked", async () => {
@@ -2045,8 +2044,7 @@ describe("Companion skills install gate", () => {
 
     clickGateCopy(container);
     await flushEffects();
-    // The token still minted, but the UI must not falsely report a copy.
-    expect(queryMocks.issueToken).toHaveBeenCalledWith(["skills:read", "skills:write", "secrets:read", "secrets:write"]);
+    expect(queryMocks.issueToken).not.toHaveBeenCalled();
     expect(container.textContent).toContain("Select the prompt above");
     expect(container.textContent).not.toContain("Copied");
   });

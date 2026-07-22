@@ -125,14 +125,8 @@ export function skillsRouteHref(route: SkillsRoute): string {
   return params.length ? `/skills?${params.join("&")}` : "/skills";
 }
 
-/**
- * Public org-skill details use their share URL, but a private run transcript must remain on the
- * authenticated skills route so its creator-only `run` cursor survives reload and browser Back.
- */
-export function canonicalSkillsRouteHref(route: SkillsRoute, shareToken: string | null): string {
-  if (shareToken && route.kind !== "local" && route.kind !== "archived" && route.skill && !route.run) {
-    return skillShareHref(shareToken);
-  }
+/** Authenticated skill navigation always stays under `/skills`; share links are explicit actions. */
+export function canonicalSkillsRouteHref(route: SkillsRoute, _shareToken: string | null = null): string {
   return skillsRouteHref(route);
 }
 

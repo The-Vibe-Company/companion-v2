@@ -6,6 +6,7 @@ import {
   S3Client,
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import { createHash } from "node:crypto";
 
 export interface StorageConfig {
   endpoint: string;
@@ -48,6 +49,66 @@ export function createStorageClient(config = getStorageConfig()): S3Client {
 
 export function skillArchiveKey(input: { orgId: string; slug: string; version: string }): string {
   return `${input.orgId}/${input.slug}/${input.version}.tar.gz`;
+}
+
+const SHA256_CHECKSUM_PATTERN = /^sha256:([0-9a-f]{64})$/;
+
+/**
+ * Content-addressed key for the exact ZIP bytes of a public release. The owning org remains the
+ * first path segment so object-storage lifecycle and incident tooling retain the tenant boundary.
+ */
+export function publicSkillReleaseKey(input: { orgId: string; checksum: string }): string {
+  const digest = SHA256_CHECKSUM_PATTERN.exec(input.checksum)?.[1];
+  if (!digest) throw new Error("public skill release checksum must be a sha256 digest");
+  if (!input.orgId || input.orgId.includes("/") || input.orgId.includes("\\") || input.orgId.includes("..")) {
+    throw new Error("public skill release org id is invalid");
+  }
+  return `${input.orgId}/public-releases/sha256/${digest}.zip`;
+}
+
+/**
+ * Persist a public ZIP once under its content address. A retry may observe an existing object, but
+ * it is accepted only after reading and hashing those exact bytes; the helper never overwrites it.
+ */
+export async function putPublicSkillReleaseSnapshot(input: {
+  orgId: string;
+  checksum: string;
+  body: Uint8Array;
+  signal?: AbortSignal;
+  client?: S3Client;
+  config?: StorageConfig;
+}): Promise<string> {
+  const key = publicSkillReleaseKey(input);
+  const body = Buffer.from(input.body);
+  const actualChecksum = `sha256:${createHash("sha256").update(body).digest("hex")}`;
+  if (actualChecksum !== input.checksum) {
+    throw new Error("public skill release bytes do not match their content address");
+  }
+
+  try {
+    await putSkillArchive({
+      key,
+      body,
+      contentType: "application/zip",
+      preventOverwrite: true,
+      signal: input.signal,
+      client: input.client,
+      config: input.config,
+    });
+  } catch (error) {
+    if (!isStoragePreconditionFailure(error)) throw error;
+    const existing = await getSkillArchive({
+      key,
+      signal: input.signal,
+      client: input.client,
+      config: input.config,
+    });
+    const existingChecksum = `sha256:${createHash("sha256").update(existing).digest("hex")}`;
+    if (existing.length !== body.length || existingChecksum !== input.checksum) {
+      throw new Error("stored public skill release does not match its content address");
+    }
+  }
+  return key;
 }
 
 /** Stored workspace brand logo for an org (content-type is kept on the object). */

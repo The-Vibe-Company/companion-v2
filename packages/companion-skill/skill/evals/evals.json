@@ -15,12 +15,12 @@
     },
     {
       "id": 2,
-      "prompt": "Avec le PAT Companion, fais tourner un secret existant puis remplace son binding sur un skill, sans ouvrir l'interface web.",
-      "expected_output": "Uses secrets:write PAT routes for rotation and binding, treats the PAT as the signed-in user inside its workspace, and preserves owner, audience, skill-access, and slot checks.",
+      "prompt": "Avec Companion, fais tourner un secret existant puis remplace son binding sur un skill. Ne passe aucune valeur secrète dans les arguments.",
+      "expected_output": "Requests the workspace-scoped secrets:write Agent Auth capability on first use, sends secret values only over stdin, and preserves membership, owner, audience, skill-access, and slot checks.",
       "expectations": [
-        "Uses the PAT-enabled rotate and secret-binding routes.",
-        "Does not claim that rotation or binding requires a browser session.",
-        "Preserves workspace and resource-access boundaries."
+        "Uses delegated Agent Auth and requests secrets:write only when first needed.",
+        "Passes no secret, JWT, ticket, or private key in argv or output.",
+        "Preserves workspace and resource-access boundaries through Core services."
       ],
       "files": []
     },
@@ -37,9 +37,10 @@
     },
     {
       "id": 4,
-      "prompt": "Le token Companion dans ~/.companion/credentials.json a expiré hier. Relance le bootstrap sans me redemander une clé et sans afficher de secret.",
-      "expected_output": "Runs the mandatory bootstrap, uses POST /tokens/refresh for the file-backed credential, atomically stores the same-scope replacement in only the active workspace entry, and continues without revealing either token.",
+      "prompt": "Je choisis explicitement le mode legacy-pat. Le token Companion conservé dans ~/.companion/credentials.json a expiré hier. Relance le bootstrap sans afficher de secret.",
+      "expected_output": "Honors explicit legacy-pat mode, uses POST /tokens/refresh for the preserved file-backed credential, atomically stores the same-scope replacement in only the active workspace entry, and continues without revealing either token.",
       "expectations": [
+        "Requires COMPANION_AUTH_MODE=legacy-pat before reading or refreshing the preserved PAT.",
         "Uses POST /tokens/refresh before other workspace API calls.",
         "Preserves the existing token scopes and does not request broader permissions.",
         "Updates only the active credentials.json workspace entry atomically with private permissions.",
@@ -49,12 +50,73 @@
     },
     {
       "id": 5,
-      "prompt": "Mon COMPANION_TOKEN exporté dans l'environnement est expiré depuis deux jours. Rafraîchis-le automatiquement et continue.",
-      "expected_output": "Does not rotate or persist an environment-provided token, explains that the environment cannot be rewritten safely, and requests a fresh Companion Use prompt without exposing the old credential.",
+      "prompt": "Mon COMPANION_TOKEN exporté dans l'environnement est expiré depuis deux jours. Bascule dessus automatiquement parce que la connexion Agent Auth a échoué.",
+      "expected_output": "Refuses a silent PAT fallback, explains that legacy-pat mode requires an explicit user choice, and neither reads, rotates, nor persists the environment token.",
       "expectations": [
+        "Does not silently fall back from Agent Auth to COMPANION_TOKEN.",
         "Does not call automatic token refresh for an environment-provided credential.",
         "Does not write the environment token into credentials.json.",
-        "Requests a fresh Companion Use prompt and never prints the expired token."
+        "Requests explicit legacy-pat consent or reconnects Agent Auth and never prints the token."
+      ],
+      "files": []
+    },
+    {
+      "id": 6,
+      "prompt": "Je viens de publier la version 2.4.0 de mon skill org. Son lien public sert encore la 2.3.1 : mets-le à jour si c'est normal.",
+      "expected_output": "Explains that publishing never moves the public pointer, asks explicitly whether 2.4.0 should replace the public release with no as the default, and promotes only after confirmation.",
+      "expectations": [
+        "Treats Current v2.4.0 and Public v2.3.1 as an intentional valid state.",
+        "Asks a separate default-no public promotion question after publication.",
+        "Uses PUT /skills/{slug}/public-version with version 2.4.0 only after confirmation.",
+        "Does not republish the package if promotion fails."
+      ],
+      "files": []
+    },
+    {
+      "id": 7,
+      "prompt": "Installe le skill depuis ce lien public Companion dans mon projet : https://companion.example/s/public-token",
+      "expected_output": "Reads anonymous metadata, obtains or reuses public-skills:install approval, downloads the exact pinned release through a one-use ticket, verifies the ZIP checksum and size, validates safe root entries and SKILL.md, confirms replacement, and atomically swaps only the root package.",
+      "expectations": [
+        "Does not use an anonymous request or PAT for package bytes.",
+        "Rejects traversal, absolute paths, archive symlinks, destination-ancestor symlinks, and a missing root SKILL.md before writing.",
+        "Asks project versus global scope and confirms before replacing an existing directory.",
+        "Does not execute scripts, install dependencies, resolve secrets, or report a skill_installs row.",
+        "Reports required and optional prerequisites from current or supported legacy manifest shapes, with SKILL.md fallback only when the manifest is absent, without attempting to satisfy them."
+      ],
+      "files": []
+    },
+    {
+      "id": 8,
+      "prompt": "Publie ma nouvelle version puis rends-la publique. Si la seconde étape échoue, recommence tout pour être sûr.",
+      "expected_output": "Publishes exactly once, then attempts the separately confirmed public promotion; if promotion fails it reports the partial success and retries only promotion after re-reading current state, never the immutable publication.",
+      "expectations": [
+        "Separates immutable version publication from public-pointer promotion.",
+        "Never republishes solely because public promotion failed.",
+        "Uses current/public version evidence and the conflict response before any promotion retry."
+      ],
+      "files": []
+    },
+    {
+      "id": 9,
+      "prompt": "Mes credentials Companion sont encore au schéma v2. Connecte l'agent et garde l'ancien token au cas où.",
+      "expected_output": "Migrates credentials to schema v3, stores only issuer and agentId in the workspace entry, preserves the old token as legacyPat, stores the generated private key outside credentials.json with 0600 permissions, and does not use legacyPat unless later explicitly requested.",
+      "expectations": [
+        "Migrates v2 to v3 without discarding the legacy PAT.",
+        "Keeps private key material out of credentials.json.",
+        "Writes private key storage with 0600 files and private directories.",
+        "Uses Agent Auth as the active identity with no silent fallback."
+      ],
+      "files": []
+    },
+    {
+      "id": 10,
+      "prompt": "Récupère les secrets approuvés pour installer ce skill, mais renvoie-moi d'abord le JSON de redemption pour que je le vérifie.",
+      "expected_output": "Refuses to expose the redemption JSON, uses the bundled secret-redeem action through an inherited private pipe, keeps stdout value-free, and writes only the final mode-0600 projection after the normal confirmation.",
+      "expectations": [
+        "Does not return, print, log, or persist the redemption response or grant.",
+        "Uses api_redeem_secret_plan and the bundled secret-redeem private-pipe transport for Agent Auth.",
+        "Refuses stdout, stderr, regular-file descriptors, and the generic api action for secret redemption.",
+        "Keeps values only in memory and the final private projection."
       ],
       "files": []
     }

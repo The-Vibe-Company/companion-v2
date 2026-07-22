@@ -34,6 +34,7 @@ const authMocks = vi.hoisted(() => ({
 vi.mock("@hono/node-server", () => ({ serve: vi.fn() }));
 vi.mock("@companion/auth", () => ({
   auth: { api: { getSession: authMocks.getSession }, handler: authMocks.handler, $Infer: {} },
+  registerAgentCapabilityExecutor: vi.fn(() => () => undefined),
 }));
 vi.mock("@companion/db", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@companion/db")>()),

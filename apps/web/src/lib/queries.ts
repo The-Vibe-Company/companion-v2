@@ -2,7 +2,6 @@
 
 import type {
   DependencyPlan,
-  IssuedToken,
   LabelColor,
   LabelIcon,
   LabelsResponse,
@@ -19,7 +18,7 @@ import type {
   SkillSharePlan,
   ShareSkillResult,
   SkillVersionRow,
-  TokenScope,
+  SkillPublicVersionResult,
   ValidationResult,
   FrontmatterWarning,
 } from "@companion/contracts";
@@ -44,14 +43,6 @@ export function apiBase(): string {
   if (env) return env.replace(/\/$/, "");
   if (typeof window !== "undefined") return `${window.location.origin}/v1`;
   return "/v1";
-}
-
-/** Mint a scoped personal access token (used by the guided-prompt methods). */
-export async function issueToken(scopes: TokenScope[], name?: string): Promise<IssuedToken> {
-  return apiFetch<IssuedToken>("/v1/tokens", {
-    method: "POST",
-    body: JSON.stringify({ scopes, name }),
-  });
 }
 
 /** Publish a packaged skill (.zip or .tar.gz) via the multipart upload path. */
@@ -129,6 +120,21 @@ export async function createSkillInline(input: {
 /** Direct URL for a specific version packaged as a `.zip` (the install download button). */
 export function versionPackageUrl(slug: string, version: string): string {
   return `/v1/skills/${encodeURIComponent(slug)}/versions/${encodeURIComponent(version)}/package`;
+}
+
+/** Pin the current immutable version as the skill's public release. */
+export async function setSkillPublicVersion(slug: string, version: string): Promise<SkillPublicVersionResult> {
+  return apiFetch<SkillPublicVersionResult>(`/v1/skills/${encodeURIComponent(slug)}/public-version`, {
+    method: "PUT",
+    body: JSON.stringify({ version }),
+  });
+}
+
+/** Remove package access while preserving the stable metadata token. Idempotent server-side. */
+export async function clearSkillPublicVersion(slug: string): Promise<SkillPublicVersionResult> {
+  return apiFetch<SkillPublicVersionResult>(`/v1/skills/${encodeURIComponent(slug)}/public-version`, {
+    method: "DELETE",
+  });
 }
 
 export interface SkillDetailData {

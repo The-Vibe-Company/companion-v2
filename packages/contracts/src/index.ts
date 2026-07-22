@@ -18,3 +18,4 @@ export * from "./skillRuns";
 export * from "./secrets";
 export * from "./billing";
 export * from "./github";
+export * from "./agentOperations";

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import contextlib
+import io
 import os
 import sys
 import tempfile
@@ -13,6 +15,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import secrets_runtime  # noqa: E402
+import companion_lib  # noqa: E402
 
 
 WORKSPACE = "7ab5fcf5-c49c-4a67-bad8-d6b36e28a1dc"
@@ -196,6 +199,63 @@ class SecretRuntimeTests(unittest.TestCase):
         self.assertFalse(env_path.exists())
         self.assertFalse(marker.exists())
         self.assertFalse(env_backup.exists())
+
+    @unittest.skipUnless(os.name == "posix", "private inherited descriptors require POSIX")
+    def test_agent_secret_redemption_uses_private_pipe_not_argv_or_stdout(self) -> None:
+        fake_node = self.root / "fake-node"
+        fake_client = self.root / "companion-agent-client.mjs"
+        trace = self.root / "trace.json"
+        fake_client.write_text("// marker", encoding="utf-8")
+        fake_node.write_text(
+            """#!/usr/bin/env python3
+import json
+import os
+import sys
+
+request = json.load(sys.stdin)
+with open(os.environ["COMPANION_TEST_TRACE"], "w", encoding="utf-8") as handle:
+    json.dump({"argv": sys.argv, "request": request}, handle)
+payload = {"items": [{"env_key": "DEMO_TOKEN", "value": os.environ["COMPANION_TEST_SECRET"]}], "tombstones": []}
+os.write(int(request["outputFd"]), json.dumps(payload).encode("utf-8"))
+os.close(int(request["outputFd"]))
+print(json.dumps({"ok": True, "data": {"items": 1, "tombstones": 0}}))
+""",
+            encoding="utf-8",
+        )
+        fake_node.chmod(0o700)
+        previous = {
+            key: os.environ.get(key)
+            for key in ("COMPANION_NODE", "COMPANION_AGENT_CLIENT", "COMPANION_TEST_TRACE", "COMPANION_TEST_SECRET")
+        }
+        os.environ.update(
+            {
+                "COMPANION_NODE": str(fake_node),
+                "COMPANION_AGENT_CLIENT": str(fake_client),
+                "COMPANION_TEST_TRACE": str(trace),
+                "COMPANION_TEST_SECRET": SENTINEL,
+            }
+        )
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                redeemed = companion_lib._agent_secret_redeem(
+                    f"{companion_lib.AGENT_CREDENTIAL_PREFIX}{WORKSPACE}",
+                    "plan-123",
+                )
+        finally:
+            for key, value in previous.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+        self.assertEqual(redeemed["items"][0]["value"], SENTINEL)
+        self.assertNotIn(SENTINEL, stdout.getvalue())
+        self.assertNotIn(SENTINEL, stderr.getvalue())
+        recorded = trace.read_text(encoding="utf-8")
+        self.assertNotIn(SENTINEL, recorded)
+        self.assertNotIn("value", recorded)
 
 
 if __name__ == "__main__":

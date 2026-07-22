@@ -11,8 +11,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -28,6 +31,10 @@ class TokenRefreshUnavailable(Exception):
     """The supplied PAT is not eligible for automatic refresh."""
 
 
+AGENT_CREDENTIAL_PREFIX = "companion_agent:"
+MAX_SECRET_REDEMPTION_BYTES = 16 * 1024 * 1024
+
+
 def fail(message: str) -> None:
     raise SystemExit(f"error: {message}")
 
@@ -41,7 +48,139 @@ def load_json(path: Path) -> dict[str, Any] | None:
         fail(f"{path} is not valid JSON: {exc}")
 
 
+def _is_agent_credential(token: str) -> bool:
+    return token.startswith(AGENT_CREDENTIAL_PREFIX)
+
+
+def _agent_workspace_id(token: str) -> str:
+    if not _is_agent_credential(token) or not token.removeprefix(AGENT_CREDENTIAL_PREFIX):
+        fail("invalid local Agent Auth credential reference")
+    return token.removeprefix(AGENT_CREDENTIAL_PREFIX)
+
+
+def _agent_client_path() -> Path:
+    override = os.environ.get("COMPANION_AGENT_CLIENT")
+    if override:
+        return Path(override).expanduser().resolve()
+    return Path(__file__).resolve().parent / "companion-agent-client.mjs"
+
+
+def _agent_request(token: str, payload: dict[str, Any]) -> Any:
+    """Run the bundled Agent Auth client over JSON stdin/stdout; no credential enters argv."""
+    client = _agent_client_path()
+    if not client.is_file():
+        fail(f"Agent Auth client is missing at {client}; reinstall or update the Companion skill")
+    node = shutil.which(os.environ.get("COMPANION_NODE", "node"))
+    if not node:
+        fail("Node.js 20 or newer is required for Companion Agent Auth")
+    request = {**payload, "workspaceId": _agent_workspace_id(token)}
+    completed = subprocess.run(
+        [node, str(client)],
+        input=json.dumps(request),
+        text=True,
+        stdout=subprocess.PIPE,
+        check=False,
+    )
+    try:
+        result = json.loads(completed.stdout)
+    except json.JSONDecodeError:
+        fail("the Companion Agent Auth client returned an invalid response")
+    if completed.returncode != 0 or not isinstance(result, dict) or result.get("ok") is False:
+        message = result.get("error") if isinstance(result, dict) else None
+        fail(str(message or "the Companion Agent Auth request failed"))
+    return result.get("data")
+
+
+def _agent_secret_redeem(token: str, plan_id: str) -> dict[str, Any]:
+    """Redeem one plan through an inherited pipe so plaintext never reaches stdout or argv."""
+    if os.name != "posix":  # pragma: no cover - the bundled local workflow currently targets macOS/Linux
+        fail("Agent Auth secret redemption requires a POSIX private pipe")
+    if not plan_id or "/" in plan_id or "\\" in plan_id:
+        fail("invalid secret retrieval plan id")
+
+    client = _agent_client_path()
+    if not client.is_file():
+        fail(f"Agent Auth client is missing at {client}; reinstall or update the Companion skill")
+    node = shutil.which(os.environ.get("COMPANION_NODE", "node"))
+    if not node:
+        fail("Node.js 20 or newer is required for Companion Agent Auth")
+
+    read_fd, write_fd = os.pipe()
+    secret_bytes = bytearray()
+    reader_errors: list[BaseException] = []
+    too_large = threading.Event()
+
+    def read_private_pipe() -> None:
+        try:
+            with os.fdopen(read_fd, "rb", closefd=True) as stream:
+                while True:
+                    chunk = stream.read(64 * 1024)
+                    if not chunk:
+                        break
+                    if len(secret_bytes) + len(chunk) <= MAX_SECRET_REDEMPTION_BYTES:
+                        secret_bytes.extend(chunk)
+                    else:
+                        too_large.set()
+        except BaseException as exc:  # pragma: no cover - defensive transport failure
+            reader_errors.append(exc)
+
+    request = {
+        "action": "secret-redeem",
+        "workspaceId": _agent_workspace_id(token),
+        "planId": plan_id,
+        "outputFd": write_fd,
+    }
+    try:
+        process = subprocess.Popen(
+            [node, str(client)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            text=True,
+            close_fds=True,
+            pass_fds=(write_fd,),
+        )
+    except BaseException:
+        os.close(read_fd)
+        os.close(write_fd)
+        raise
+
+    # Only the child retains the write side. Reading concurrently prevents a large redemption from
+    # filling the kernel pipe buffer while the parent waits for the value-free stdout envelope.
+    os.close(write_fd)
+    reader = threading.Thread(target=read_private_pipe, name="companion-secret-pipe", daemon=True)
+    reader.start()
+    try:
+        stdout, _ = process.communicate(json.dumps(request))
+    except BaseException:
+        process.kill()
+        process.wait()
+        reader.join()
+        raise
+    reader.join()
+
+    try:
+        result = json.loads(stdout)
+    except json.JSONDecodeError:
+        fail("the Companion Agent Auth client returned an invalid response")
+    if process.returncode != 0 or not isinstance(result, dict) or result.get("ok") is False:
+        message = result.get("error") if isinstance(result, dict) else None
+        fail(str(message or "the Companion Agent Auth secret request failed"))
+    if reader_errors:
+        fail("the Companion Agent Auth private secret pipe failed")
+    if too_large.is_set():
+        fail("the Companion Agent Auth secret response exceeded the safe size limit")
+    try:
+        redeemed = json.loads(secret_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        fail("the Companion Agent Auth private secret response was invalid")
+    if not isinstance(redeemed, dict):
+        fail("the Companion Agent Auth private secret response was invalid")
+    return redeemed
+
+
 def api_get(base: str, token: str, path: str) -> Any:
+    if _is_agent_credential(token):
+        return _agent_request(token, {"action": "api", "method": "GET", "path": path})
     url = f"{base.rstrip('/')}{path}"
     request = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
     try:
@@ -56,6 +195,14 @@ def api_get(base: str, token: str, path: str) -> Any:
 
 def api_download_bytes(base: str, token: str, path: str) -> bytes:
     """Download a binary payload (e.g. a skill package zip) from the workspace API."""
+    if _is_agent_credential(token):
+        with tempfile.TemporaryDirectory(prefix="companion-agent-download-") as directory:
+            destination = Path(directory) / "package.bin"
+            _agent_request(
+                token,
+                {"action": "download", "path": path, "outputPath": str(destination)},
+            )
+            return destination.read_bytes()
     url = f"{base.rstrip('/')}{path}"
     request = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
     try:
@@ -70,6 +217,15 @@ def api_download_bytes(base: str, token: str, path: str) -> bytes:
 
 def api_post_json(base: str, token: str, path: str, payload: dict[str, Any] | None = None) -> Any:
     """POST JSON to Companion without ever including the bearer token in errors or persisted state."""
+    if _is_agent_credential(token):
+        if path == "/secret-grants/redeem" or (
+            path.startswith("/secret-retrievals/") and path.endswith("/grant")
+        ):
+            fail("secret grants and redeemed values require the private Agent Auth pipe")
+        return _agent_request(
+            token,
+            {"action": "api", "method": "POST", "path": path, "body": payload or {}},
+        )
     url = f"{base.rstrip('/')}{path}"
     body = json.dumps(payload or {}).encode("utf-8")
     request = urllib.request.Request(
@@ -88,8 +244,24 @@ def api_post_json(base: str, token: str, path: str, payload: dict[str, Any] | No
         fail(f"POST {url} failed: {exc.reason}")
 
 
+def api_redeem_secret_plan(base: str, token: str, plan_id: str) -> dict[str, Any]:
+    """Redeem a plan without exposing plaintext through the Agent Auth JSON transport."""
+    if _is_agent_credential(token):
+        return _agent_secret_redeem(token, plan_id)
+    grant = api_post_json(base, token, f"/secret-retrievals/{plan_id}/grant", {})
+    raw_grant = grant.get("grant") if isinstance(grant, dict) else None
+    if not isinstance(raw_grant, str):
+        fail("Companion did not return a retrieval grant")
+    return api_post_json(base, token, "/secret-grants/redeem", {"grant": raw_grant})
+
+
 def api_put_json(base: str, token: str, path: str, payload: dict[str, Any] | None = None) -> Any:
     """PUT JSON to Companion without ever including the bearer token in errors or persisted state."""
+    if _is_agent_credential(token):
+        return _agent_request(
+            token,
+            {"action": "api", "method": "PUT", "path": path, "body": payload or {}},
+        )
     url = f"{base.rstrip('/')}{path}"
     body = json.dumps(payload or {}).encode("utf-8")
     request = urllib.request.Request(
@@ -110,6 +282,8 @@ def api_put_json(base: str, token: str, path: str, payload: dict[str, Any] | Non
 
 def api_refresh_token(base: str, token: str) -> dict[str, Any]:
     """Check or refresh one PAT without exposing it in failures."""
+    if _is_agent_credential(token):
+        raise TokenRefreshUnavailable("Agent Auth credentials use grants, not PAT refresh")
     url = f"{base.rstrip('/')}/tokens/refresh"
     request = urllib.request.Request(
         url,
@@ -144,17 +318,49 @@ def companion_home() -> Path:
     return Path.home() / ".companion"
 
 
+def _legacy_mode_enabled() -> bool:
+    return os.environ.get("COMPANION_AUTH_MODE", "").strip().lower() == "legacy-pat"
+
+
 def resolve_credentials_with_source() -> tuple[str, str, str | None, str]:
     api_url = os.environ.get("COMPANION_API_URL")
     token = os.environ.get("COMPANION_TOKEN")
     workspace_id = os.environ.get("COMPANION_WORKSPACE_ID")
     if api_url and token:
+        if not _legacy_mode_enabled():
+            fail(
+                "COMPANION_TOKEN is a legacy PAT; set COMPANION_AUTH_MODE=legacy-pat to use it "
+                "explicitly, or connect this workspace with Agent Auth"
+            )
         return api_url, token, workspace_id, "environment"
 
     credentials_path = companion_home() / "credentials.json"
     credentials = load_json(credentials_path)
     if not credentials:
         fail("missing Companion credentials; set COMPANION_API_URL and COMPANION_TOKEN or refresh ~/.companion/credentials.json")
+
+    if credentials.get("schemaVersion") == 3 and isinstance(credentials.get("workspaces"), dict):
+        active = credentials.get("activeWorkspaceId")
+        if not active:
+            fail("credentials.json has no activeWorkspaceId")
+        entry = credentials["workspaces"].get(active)
+        if not isinstance(entry, dict):
+            fail(f"credentials.json has no workspace entry for {active}")
+        api_url = entry.get("apiUrl")
+        legacy_pat = entry.get("legacyPat")
+        if _legacy_mode_enabled():
+            if api_url and isinstance(legacy_pat, dict) and legacy_pat.get("token"):
+                return str(api_url), str(legacy_pat["token"]), str(active), "credentials_file"
+            fail(f"explicit legacy-pat mode was selected, but credentials entry {active} has no preserved PAT")
+        agent_auth = entry.get("agentAuth")
+        if api_url and isinstance(agent_auth, dict) and agent_auth.get("issuer") and agent_auth.get("agentId"):
+            return str(api_url), f"{AGENT_CREDENTIAL_PREFIX}{active}", str(active), "agent_auth"
+        if isinstance(legacy_pat, dict) and legacy_pat.get("token"):
+            fail(
+                f"credentials entry {active} has only a legacy PAT; connect Agent Auth or set "
+                "COMPANION_AUTH_MODE=legacy-pat explicitly"
+            )
+        fail(f"credentials entry {active} is not connected with Agent Auth")
 
     if credentials.get("schemaVersion") == 2 and isinstance(credentials.get("workspaces"), dict):
         active = credentials.get("activeWorkspaceId")
@@ -165,6 +371,11 @@ def resolve_credentials_with_source() -> tuple[str, str, str | None, str]:
             fail(f"credentials.json has no workspace entry for {active}")
         api_url = entry.get("apiUrl")
         token = entry.get("token")
+        if not _legacy_mode_enabled():
+            fail(
+                "credentials.json schema v2 contains a legacy PAT; run the Agent Auth connect flow "
+                "to migrate to schema v3, or set COMPANION_AUTH_MODE=legacy-pat explicitly"
+            )
         if not api_url or not token:
             fail(f"credentials entry {active} is missing apiUrl or token")
         return str(api_url), str(token), str(active), "credentials_file"
@@ -172,8 +383,13 @@ def resolve_credentials_with_source() -> tuple[str, str, str | None, str]:
     api_url = credentials.get("apiUrl")
     token = credentials.get("token")
     if api_url and token:
+        if not _legacy_mode_enabled():
+            fail(
+                "legacy flat Companion credentials require COMPANION_AUTH_MODE=legacy-pat; "
+                "connect Agent Auth to create schema v3 credentials"
+            )
         return str(api_url), str(token), workspace_id, "credentials_file"
-    fail("credentials.json is missing apiUrl or token")
+    fail("credentials.json is missing an Agent Auth connection")
 
 
 def resolve_credentials() -> tuple[str, str, str | None]:
@@ -263,7 +479,27 @@ def store_refreshed_credential(
     if not isinstance(credentials, dict):
         fail("credentials.json disappeared before the refreshed token could be saved")
 
-    if credentials.get("schemaVersion") == 2 and isinstance(credentials.get("workspaces"), dict):
+    if credentials.get("schemaVersion") == 3 and isinstance(credentials.get("workspaces"), dict):
+        active = workspace_id or credentials.get("activeWorkspaceId")
+        entry = credentials["workspaces"].get(active) if active else None
+        if not active or not isinstance(entry, dict):
+            fail("the active workspace credential changed during token refresh")
+        legacy = entry.get("legacyPat")
+        if entry.get("apiUrl") != api_url or not isinstance(legacy, dict) or legacy.get("token") != previous_token:
+            fail("the active workspace legacy credential changed during token refresh")
+        next_credentials = dict(credentials)
+        next_workspaces = dict(credentials["workspaces"])
+        next_workspaces[str(active)] = {
+            **entry,
+            "legacyPat": {
+                **legacy,
+                "token": replacement_token,
+                "updatedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            },
+            "updatedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        }
+        next_credentials["workspaces"] = next_workspaces
+    elif credentials.get("schemaVersion") == 2 and isinstance(credentials.get("workspaces"), dict):
         active = workspace_id or credentials.get("activeWorkspaceId")
         entry = credentials["workspaces"].get(active) if active else None
         if not active or not isinstance(entry, dict):

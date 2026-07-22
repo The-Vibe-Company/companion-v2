@@ -26,7 +26,11 @@ export default async function SkillOpenGraphImage({ params }: { params: Promise<
   const title = preview?.display_name ?? "Skill not found";
   const slug = preview?.slug ?? "companion";
   const description = preview ? truncateMeta(preview.description, 170) : "This Companion skill preview is unavailable.";
-  const version = preview?.current_version ? `v${preview.current_version}` : "Companion";
+  const version = preview?.public_release
+    ? `Public v${preview.public_release.version}`
+    : preview?.current_version
+      ? `v${preview.current_version}`
+      : "Companion";
 
   return new ImageResponse(
     (

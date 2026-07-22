@@ -17,6 +17,7 @@ import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { postgresAgentAuthStorage } from "@companion/auth";
 import { extractRuntimeRoleGrantBlock, resolveRuntimeRoleGrantsFile } from "../../src/migrate";
 
 const databaseUrl = process.env.DATABASE_MIGRATION_URL
@@ -185,8 +186,33 @@ describe("pre-tenant PostgreSQL RLS boundary", () => {
     `;
     await sql`
       update skills
-      set current_version_id = ${versionId}::uuid
+      set current_version_id = ${versionId}::uuid,
+          public_version_id = ${versionId}::uuid,
+          public_package_checksum = ${`sha256:${"b".repeat(64)}`},
+          public_package_size_bytes = 987,
+          public_released_at = clock_timestamp()
       where org_id = ${orgA}::uuid and id = ${skillId}::uuid
+    `;
+    await sql`
+      insert into agent_host (id, name, user_id, public_key, status)
+      values
+        ('host-agent-pretenant', 'Public pre-tenant host', ${outsider.id}, 'host-public-key', 'active'),
+        ('host-agent-private-pretenant', 'Private pre-tenant host', ${owner.id}, 'host-private-key', 'active')
+    `;
+    await sql`
+      insert into agent (id, name, user_id, host_id, status, mode, public_key)
+      values
+        ('agent-pretenant', 'Public pre-tenant agent', ${outsider.id}, 'host-agent-pretenant', 'active', 'delegated', 'agent-public-key'),
+        ('agent-private-pretenant', 'Private pre-tenant agent', ${owner.id}, 'host-agent-private-pretenant', 'active', 'delegated', 'agent-private-key')
+    `;
+    await sql`
+      insert into agent_capability_grant (id, agent_id, capability, granted_by, status, constraints)
+      values
+        ('grant-pretenant', 'agent-pretenant', 'public-skills:install', ${outsider.id}, 'active', null),
+        (
+          'grant-private-pretenant', 'agent-private-pretenant', 'skills:read', ${owner.id}, 'active',
+          ${JSON.stringify({ workspaceId: { eq: orgA } })}
+        )
     `;
     await sql.unsafe(`create role ${rlsRole} login nosuperuser nobypassrls noinherit`);
     await sql.unsafe(`grant ${rlsRole} to current_user with inherit true, set true`);
@@ -414,6 +440,112 @@ describe("pre-tenant PostgreSQL RLS boundary", () => {
     }]);
     expect(result.memberTarget).toEqual([{ orgId: orgA, slug: `pre-tenant-skill-${suffix}` }]);
     expect(result.outsiderTarget).toEqual([]);
+  });
+
+  it("authorizes exact public ZIP bytes and consumes delegated transfer tickets once without a tenant GUC", async () => {
+    const ticketHash = "c".repeat(64);
+    const result = await withRuntimeRole(async (tx) => {
+      const sessionPackage = await tx<{ version: string; checksum: string; sizeBytes: number }[]>`
+        select version, checksum, size_bytes::int as "sizeBytes"
+        from companion_authorize_public_skill_package(${shareToken}, '1.0.0', ${outsider.id})
+      `;
+      const wrongVersion = await tx`
+        select * from companion_authorize_public_skill_package(${shareToken}, '0.9.0', ${outsider.id})
+      `;
+      const issued = await tx<{ checksum: string; sizeBytes: number }[]>`
+        select checksum, size_bytes::int as "sizeBytes"
+        from companion_issue_public_skill_transfer_ticket(
+          ${shareToken}, '1.0.0', ${outsider.id}, 'agent-pretenant', 'grant-pretenant',
+          ${ticketHash}, clock_timestamp() + interval '30 seconds'
+        )
+      `;
+      const first = await tx<{ version: string; checksum: string; sizeBytes: number }[]>`
+        select version, checksum, size_bytes::int as "sizeBytes"
+        from companion_consume_public_skill_transfer_ticket(${ticketHash}, ${shareToken}, '1.0.0')
+      `;
+      const replay = await tx`
+        select * from companion_consume_public_skill_transfer_ticket(${ticketHash}, ${shareToken}, '1.0.0')
+      `;
+      const directlyVisible = await tx<{ count: number }[]>`
+        select count(*)::int as count from agent_transfer_tickets
+      `;
+      return { sessionPackage, wrongVersion, issued, first, replay, directlyVisible };
+    });
+
+    const transport = { version: "1.0.0", checksum: `sha256:${"b".repeat(64)}`, sizeBytes: 987 };
+    expect(result.sessionPackage).toEqual([transport]);
+    expect(result.wrongVersion).toEqual([]);
+    expect(result.issued).toEqual([{ checksum: transport.checksum, sizeBytes: 987 }]);
+    expect(result.first).toEqual([transport]);
+    expect(result.replay).toEqual([]);
+    expect(result.directlyVisible).toEqual([{ count: 0 }]);
+  });
+
+  it("consumes a tenant skill transfer ticket through the narrow runtime grant and still hides its row", async () => {
+    const ticketHash = "d".repeat(64);
+    const checksum = `sha256:${"e".repeat(64)}`;
+    await sql`
+      insert into agent_transfer_tickets (
+        org_id, user_id, agent_id, agent_grant_id, action, skill_id, skill_version_id,
+        skill_slug, version, checksum, size_bytes, token_hash, expires_at
+      ) values (
+        ${orgA}::uuid, ${owner.id}, 'agent-private-pretenant', 'grant-private-pretenant',
+        'skill_package.download', ${skillId}::uuid, ${versionId}::uuid,
+        ${`pre-tenant-skill-${suffix}`}, '1.0.0', ${checksum}, 654,
+        ${ticketHash}, clock_timestamp() + interval '30 seconds'
+      )
+    `;
+
+    const result = await withRuntimeRole(async (tx) => {
+      const first = await tx<{
+        orgId: string;
+        userId: string;
+        action: string;
+        slug: string;
+        version: string;
+        checksum: string;
+        sizeBytes: number;
+      }[]>`
+        select org_id::text as "orgId", user_id as "userId", action,
+               skill_slug as slug, version, checksum, size_bytes::int as "sizeBytes"
+        from companion_consume_agent_transfer_ticket(
+          ${ticketHash}, 'skill_package.download', ${`pre-tenant-skill-${suffix}`},
+          '1.0.0', null, null
+        )
+      `;
+      const replay = await tx`
+        select * from companion_consume_agent_transfer_ticket(
+          ${ticketHash}, 'skill_package.download', ${`pre-tenant-skill-${suffix}`},
+          '1.0.0', null, null
+        )
+      `;
+      const directlyVisible = await tx<{ count: number }[]>`
+        select count(*)::int as count from agent_transfer_tickets where token_hash = ${ticketHash}
+      `;
+      return { first, replay, directlyVisible };
+    });
+
+    expect(result.first).toEqual([{
+      orgId: orgA,
+      userId: owner.id,
+      action: "skill_package.download",
+      slug: `pre-tenant-skill-${suffix}`,
+      version: "1.0.0",
+      checksum,
+      sizeBytes: 654,
+    }]);
+    expect(result.replay).toEqual([]);
+    expect(result.directlyVisible).toEqual([{ count: 0 }]);
+  });
+
+  it("atomically rejects a concurrent replay claim for the same Agent Auth JTI", async () => {
+    const key = `agent-auth:jti:integration-${suffix}`;
+    const claims = await Promise.allSettled([
+      postgresAgentAuthStorage.set(key, "1", 60),
+      postgresAgentAuthStorage.set(key, "1", 60),
+    ]);
+    expect(claims.map((claim) => claim.status).sort()).toEqual(["fulfilled", "rejected"]);
+    await postgresAgentAuthStorage.delete(key);
   });
 
   it("removes the retired skill star storage", async () => {

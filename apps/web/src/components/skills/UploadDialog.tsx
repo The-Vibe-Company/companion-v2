@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import type {
   DependencyPlan,
@@ -14,8 +14,8 @@ import {
   createSkillInline,
   fetchSkillBySlug,
   fetchSkillDependencies,
-  issueToken,
   publishSkillPackage,
+  setSkillPublicVersion,
   validateSkillPackage,
   versionPackageUrl,
 } from "@/lib/queries";
@@ -30,15 +30,15 @@ import { SkillSecretConfiguration } from "../secrets/SkillSecretConfiguration";
  * upload request as repeatable `label` fields and never written into SKILL.md.
  */
 function skillUploadQuery(
-  target?: { slug: string; skillId: string; version?: string },
-  action?: "validate",
+  target: { slug: string; skillId?: string; version: string },
+  action: "validate" | "publish",
 ): string {
   const qs = new URLSearchParams();
-  if (action) qs.set("action", action);
-  if (target) {
-    qs.set("expect_slug", target.slug);
+  qs.set("action", action);
+  qs.set("expect_slug", target.slug);
+  qs.set("version", target.version);
+  if (target.skillId) {
     qs.set("expect_skill_id", target.skillId);
-    if (target.version) qs.set("version", target.version);
   }
   return qs.toString();
 }
@@ -48,12 +48,6 @@ function nextVersion(v: string | null): string {
   const m = String(v || "0.0.0").match(/^(\d+)\.(\d+)\.(\d+)/);
   if (!m) return "1.0.0";
   return `${m[1]}.${m[2]}.${Number(m[3]) + 1}`;
-}
-
-function maskToken(t: string): string {
-  if (!t) return "";
-  const body = t.slice(8);
-  return "cmp_pat_" + "•".repeat(Math.max(0, body.length - 4)) + body.slice(-4);
 }
 
 function fmtSize(bytes: number): string {
@@ -366,102 +360,6 @@ export function useModalA11y(
   }, [active, ref, onClose, restoreFocusTo]);
 }
 
-/** Token row: lazily mints a scoped token on first reveal / copy / regenerate. */
-export function TokenRow({
-  token,
-  ensure,
-  regen,
-  hint,
-}: {
-  token: string | null;
-  ensure: () => Promise<string>;
-  regen: () => Promise<string>;
-  hint: React.ReactNode;
-}) {
-  const [revealed, setRevealed] = useState(false);
-  const [copied, setCopied] = useState(false);
-  const [busy, setBusy] = useState(false);
-
-  const reveal = async () => {
-    if (!token) {
-      setBusy(true);
-      try {
-        await ensure();
-        setRevealed(true);
-      } finally {
-        setBusy(false);
-      }
-      return;
-    }
-    setRevealed((r) => !r);
-  };
-  const copy = async () => {
-    setBusy(true);
-    try {
-      const t = token ?? (await ensure());
-      if (navigator.clipboard) await navigator.clipboard.writeText(t).catch(() => {});
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1600);
-    } finally {
-      setBusy(false);
-    }
-  };
-  const regenerate = async () => {
-    setBusy(true);
-    try {
-      await regen();
-      setRevealed(true);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const display = token
-    ? revealed
-      ? token
-      : maskToken(token)
-    : "click reveal to generate a token";
-
-  return (
-    <>
-      <div className="up-token">
-        <span className="up-token__key">
-          <Icon name="key-round" size={14} />
-        </span>
-        <span className={"up-token__val" + (token && revealed ? "" : " is-masked")}>{display}</span>
-        <button
-          className="up-token__btn"
-          type="button"
-          title={token && revealed ? "Hide" : "Reveal"}
-          onClick={reveal}
-          disabled={busy}
-        >
-          <Icon name={token && revealed ? "eye-off" : "eye"} size={14} />
-        </button>
-        <button
-          className={"up-token__btn" + (copied ? " is-done" : "")}
-          type="button"
-          title="Copy token"
-          onClick={copy}
-          disabled={busy}
-        >
-          <Icon name={copied ? "check" : "copy"} size={14} />
-        </button>
-        <button
-          className="up-token__btn"
-          type="button"
-          title="Generate a new token"
-          onClick={regenerate}
-          disabled={busy}
-        >
-          <Icon name="refresh-cw" size={14} />
-        </button>
-      </div>
-      <p className="up-hint">{hint}</p>
-    </>
-  );
-}
-
 /* ----------------------------------------------------------- upload panels */
 
 const UP_METHODS = [
@@ -470,7 +368,7 @@ const UP_METHODS = [
     icon: "sparkles",
     name: "Use an AI assistant",
     tag: "AI",
-    desc: "Hand a guided prompt and a scoped token to an agent.",
+    desc: "Hand a guided prompt to a delegated Companion agent.",
   },
   {
     id: "zip",
@@ -492,7 +390,7 @@ function PromptPanel({
   setLabels,
   allLabels,
   scope,
-  ensure,
+  workspaceId,
   isUpdate,
   target,
 }: {
@@ -500,30 +398,37 @@ function PromptPanel({
   setLabels: (labels: string[]) => void;
   allLabels: string[];
   scope: "personal" | "org";
-  ensure: () => Promise<string>;
+  workspaceId: string;
   isUpdate: boolean;
   target?: {
     slug: string;
     skillId: string;
     currentVersion: string | null;
     nextVersion: string;
+    publicVersion?: string | null;
   };
 }) {
   const base = apiBase();
-  const queryTarget = target ? { slug: target.slug, skillId: target.skillId, version: target.nextVersion } : undefined;
+  const queryTarget = target
+    ? { slug: target.slug, skillId: target.skillId, version: target.nextVersion }
+    : { slug: "URL_ENCODED_SKILL_SLUG", version: "1.0.0" };
   const validateQuery = skillUploadQuery(queryTarget, "validate");
   // New skills publish into the chosen library (`scope`); re-publish keeps the existing scope. Folders
-  // are appended as repeatable `label` params. Build from non-empty parts so a bare create has no `?&`.
+  // are appended as repeatable `label` params. Both URLs retain the exact slug/version binding required
+  // by the delegated transfer client; a new-skill assistant replaces the explicit slug placeholder.
   const publishParams = [
-    skillUploadQuery(queryTarget),
+    skillUploadQuery(queryTarget, "publish"),
     ...(isUpdate ? [] : [`scope=${scope}`, ...labels.map((p) => `label=${encodeURIComponent(p)}`)]),
-  ].filter(Boolean);
+  ];
   const publishQuery = publishParams.join("&");
   const validateUrl = `${base}/skills?${validateQuery}`;
   const publishUrl = `${base}/skills?${publishQuery}`;
-  const buildPrompt = (tok: string) =>
+  const agentAuthContext = `Companion API URL: ${base}\nWorkspace ID: ${workspaceId}\nAuthentication: the installed Companion helper's bundled delegated Agent Auth client (JSON over stdin/stdout; no embedded PAT)`;
+  const buildPrompt = () =>
     target
       ? `You are updating an existing Companion skill through the workspace API.
+
+${agentAuthContext}
 
 Target skill slug: ${target.slug}
 Target Companion skill id: ${target.skillId}
@@ -542,16 +447,22 @@ Workflow:
 3. Keep vendor data under metadata. Do not add top-level version, tools, scope, or visibility fields.
 4. Package SKILL.md with any referenced files once.
 5. Validate first: create a POST request to the validation endpoint with the archive as the body.
-6. Use Authorization: Bearer ${tok} and Content-Type: application/zip or application/gzip.
+6. Authenticate with the installed Companion helper's delegated Agent Auth client. Request skills:write constrained to this workspace if it is not already granted. Never silently fall back to a PAT. Send the archive as Content-Type: application/zip or application/gzip.
 7. Read the validation response. If it reports package name mismatch, target skill id mismatch, missing target skill, or metadata.companion_skill_id mismatch, do not edit the package and do not publish. Tell the user this appears to be a different skill.
 8. If result.ok is not true for any other reason, do not publish. Fix only the validation issue named by Companion, then validate once more.
 9. Publish only after validation is accepted: create a POST request to the publish endpoint with the same validated archive as the body.
-10. Report the published skill id and version from the response. Never publish after failed validation or ambiguous identity.`
+10. Report the published skill id and version from the response. Never publish after failed validation or ambiguous identity.${
+          target.publicVersion
+            ? `\n11. This skill currently exposes public v${target.publicVersion}. After publication succeeds, ask whether v${target.nextVersion} should replace it, with "no" as the default. Only after an explicit yes, send PUT ${base}/skills/${encodeURIComponent(target.slug)}/public-version with JSON {"version":"${target.nextVersion}"} using the same authenticated Agent Auth session. If promotion fails, report that the new version is published but still private; never publish it again.`
+            : ""
+        }`
       : `You are publishing a Companion skill through the workspace API, into ${
           scope === "org"
             ? "the ORGANIZATION library (visible to every member of the workspace)"
             : "the user's PRIVATE My Skills library (visible only to them until they share it)"
         }.
+
+${agentAuthContext}
 
 The package is a standard Agent Skill: SKILL.md at the root, with YAML frontmatter containing name and description.
 
@@ -563,19 +474,20 @@ ${publishUrl}
 
 Workflow:
 1. Read SKILL.md and confirm the frontmatter has name and description.
-2. Keep vendor data under metadata. Do not add top-level version, tools, scope, or visibility fields.
-3. Package SKILL.md with any referenced files once.
-4. Validate first: create a POST request to the validation endpoint with the archive as the body.
-5. Use Authorization: Bearer ${tok} and Content-Type: application/zip or application/gzip.
-6. Read the validation response. If result.ok is not true, or if the response is 422, do not publish. Fix only the validation issue named by Companion, then validate once more.
-7. Publish only after validation is accepted: create a POST request to the publish endpoint with the same validated archive as the body.
-8. Report the published skill id and Companion-assigned version from the response. Never publish after failed validation or ambiguous identity.`;
-  const displayPrompt = buildPrompt("cmp_pat_…");
+2. URL-encode that exact frontmatter name and replace URL_ENCODED_SKILL_SLUG in both endpoints before making either request. Never send the placeholder. This first release is v1.0.0.
+3. Keep vendor data under metadata. Do not add top-level version, tools, scope, or visibility fields.
+4. Package SKILL.md with any referenced files once.
+5. Validate first: create a POST request to the validation endpoint with the archive as the body.
+6. Authenticate with the installed Companion helper's delegated Agent Auth client. Request skills:write constrained to this workspace if it is not already granted. Never silently fall back to a PAT. Send the archive as Content-Type: application/zip or application/gzip.
+7. Read the validation response. If result.ok is not true, or if the response is 422, do not publish. Fix only the validation issue named by Companion, then validate once more.
+8. Publish only after validation is accepted: create a POST request to the publish endpoint with the same validated archive as the body.
+9. Report the published skill id and Companion-assigned version from the response. Never publish after failed validation or ambiguous identity.`;
+  const displayPrompt = buildPrompt();
   return (
     <>
       <p className="up-panel__lede">
-        Hand this prompt to your assistant. Copying it mints a short-lived <b>skills:write</b> token
-        (90-day expiry) and drops it into the prompt for you, so the agent can validate and publish
+        Hand this prompt to your assistant. The Companion helper requests a delegated <b>skills:write</b> grant
+        for this workspace, so the agent can validate and publish
         {scope === "org" ? " to the organization" : " into your private My Skills"} on your behalf.
       </p>
       {!isUpdate && (
@@ -598,7 +510,6 @@ Workflow:
           text={displayPrompt}
           scroll
           copyLabel="Copy prompt"
-          resolveText={async () => buildPrompt(await ensure())}
         />
       </div>
     </>
@@ -881,7 +792,21 @@ interface PublishOutcome {
   archiveWarning?: string;
 }
 
-function DonePanel({ result, update }: { result: PublishOutcome; update: boolean }) {
+function DonePanel({
+  result,
+  update,
+  previousPublicVersion,
+  promotionChoice,
+  onPromotionChoice,
+  promotionError,
+}: {
+  result: PublishOutcome;
+  update: boolean;
+  previousPublicVersion?: string | null;
+  promotionChoice: "keep" | "replace";
+  onPromotionChoice: (choice: "keep" | "replace") => void;
+  promotionError?: string | null;
+}) {
   return (
     <div className="up-done">
       <span className="up-done__badge">
@@ -921,6 +846,39 @@ function DonePanel({ result, update }: { result: PublishOutcome; update: boolean
           </span>
         </div>
       </div>
+      {update && previousPublicVersion && (
+        <fieldset className="up-public-choice">
+          <legend>Replace the public release?</legend>
+          <p>
+            Publishing succeeded. Public <span className="mono">v{previousPublicVersion}</span> stays installable unless you explicitly promote <span className="mono">v{result.version}</span>.
+          </p>
+          <label>
+            <input
+              type="radio"
+              name="public-release-choice"
+              checked={promotionChoice === "keep"}
+              onChange={() => onPromotionChoice("keep")}
+            />
+            <span>
+              <b>Keep v{previousPublicVersion} public</b>
+              <small>Default. The new version remains internal.</small>
+            </span>
+          </label>
+          <label>
+            <input
+              type="radio"
+              name="public-release-choice"
+              checked={promotionChoice === "replace"}
+              onChange={() => onPromotionChoice("replace")}
+            />
+            <span>
+              <b>Make v{result.version} public</b>
+              <small>The stable link will install this exact version.</small>
+            </span>
+          </label>
+          {promotionError && <div className="up-errblock" role="alert">{promotionError}</div>}
+        </fieldset>
+      )}
     </div>
   );
 }
@@ -1118,6 +1076,7 @@ export function UploadDialog({
   mode = "create",
   skill = null,
   scope = "personal",
+  workspaceId,
   allLabels = [],
   defaultLabels = [],
   knownSkillSlugs = [],
@@ -1128,6 +1087,8 @@ export function UploadDialog({
   skill?: SkillVM | null;
   /** Library to publish into on create: 'personal' (My Skills) or 'org'. Ignored on update. */
   scope?: "personal" | "org";
+  /** Exact organization id used to constrain every delegated Agent Auth capability. */
+  workspaceId: string;
   /** Every folder path in the target library (for the optional initial folder picker on create). */
   allLabels?: string[];
   /** Folders to pre-file a brand-new skill under on create (e.g. the active sidebar folder), so the
@@ -1136,13 +1097,12 @@ export function UploadDialog({
   /** Accessible workspace slugs, used to distinguish an update package from a new publish after validation. */
   knownSkillSlugs?: string[];
   onClose: () => void;
-  onPublished: () => void;
+  onPublished: (outcome: PublishOutcome) => void;
 }) {
   const isUpdate = mode === "update" && !!skill;
   const [method, setMethod] = useState<UploadMethod>("prompt");
   // Optional initial folders to file a brand-new skill under (org-wide shared; create only).
   const [labels, setLabels] = useState<string[]>(defaultLabels);
-  const [token, setToken] = useState<string | null>(null);
   const [file, setFile] = useState<File | null>(null);
   const [validation, setValidation] = useState<ValidationResult | null>(null);
   const [dependencyPlan, setDependencyPlan] = useState<DependencyPlan | null>(null);
@@ -1158,8 +1118,16 @@ export function UploadDialog({
   const [result, setResult] = useState<PublishOutcome | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [promotionChoice, setPromotionChoice] = useState<"keep" | "replace">("keep");
+  const [promotionBusy, setPromotionBusy] = useState(false);
+  const [promotionError, setPromotionError] = useState<string | null>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
   const ver = isUpdate ? nextVersion(skill!.version) : "1.0.0";
+  // `canManagePublic` is projected by Core from creator/Owner/Admin authorization. Keep every
+  // promotion surface on that one server decision: ordinary org Developers may publish versions,
+  // but must not be offered a public-release mutation they cannot perform.
+  const manageablePublicVersion =
+    isUpdate && skill?.canManagePublic === true ? (skill.publicVersion ?? null) : null;
 
   useEffect(() => {
     if (!file) {
@@ -1199,18 +1167,6 @@ export function UploadDialog({
     };
   }, [file, isUpdate, skill, ver]);
 
-  const ensureToken = useCallback(async () => {
-    if (token) return token;
-    const issued = await issueToken(["skills:write"]);
-    setToken(issued.token);
-    return issued.token;
-  }, [token]);
-  const regenToken = useCallback(async () => {
-    const issued = await issueToken(["skills:write"]);
-    setToken(issued.token);
-    return issued.token;
-  }, []);
-
   useModalA11y(dialogRef, onClose);
 
   const idFromZip = isUpdate
@@ -1227,7 +1183,29 @@ export function UploadDialog({
 
   const finishPublish = (outcome: PublishOutcome) => {
     setResult(outcome);
-    onPublished();
+    setPromotionChoice("keep");
+    setPromotionError(null);
+    onPublished(outcome);
+  };
+
+  const finishDone = async () => {
+    if (!result || promotionBusy) return;
+    if (manageablePublicVersion && promotionChoice === "replace") {
+      setPromotionBusy(true);
+      setPromotionError(null);
+      try {
+        await setSkillPublicVersion(skill!.id, result.version);
+        // Publishing is already complete. This callback only refreshes the client snapshot after the
+        // independent promotion; a failed promotion never retries or re-uploads the package.
+        onPublished(result);
+      } catch (cause) {
+        setPromotionError(cause instanceof Error ? cause.message : "The version was published, but public promotion failed.");
+        setPromotionBusy(false);
+        return;
+      }
+      setPromotionBusy(false);
+    }
+    onClose();
   };
 
   const runZip = async () => {
@@ -1424,7 +1402,14 @@ export function UploadDialog({
         {result ? (
           <>
             <div className="up__panel" role="status" aria-live="polite">
-              <DonePanel result={result} update={isUpdate} />
+              <DonePanel
+                result={result}
+                update={isUpdate}
+                previousPublicVersion={manageablePublicVersion}
+                promotionChoice={promotionChoice}
+                onPromotionChoice={setPromotionChoice}
+                promotionError={promotionError}
+              />
             </div>
             <div className="up__foot">
               <span className="up__footspacer" />
@@ -1434,9 +1419,11 @@ export function UploadDialog({
                   Add another skill
                 </button>
               )}
-              <button className="btn-primary" type="button" onClick={onClose}>
-                <Icon name="arrow-right" size={14} />
-                Done
+              <button className="btn-primary" type="button" onClick={finishDone} disabled={promotionBusy}>
+                {promotionBusy ? <span className="cds-spinner" /> : <Icon name="arrow-right" size={14} />}
+                {manageablePublicVersion && promotionChoice === "replace"
+                  ? `Make v${result.version} public`
+                  : "Done"}
               </button>
             </div>
           </>
@@ -1522,7 +1509,7 @@ export function UploadDialog({
                     setLabels={setLabels}
                     allLabels={allLabels}
                     scope={scope}
-                    ensure={ensureToken}
+                    workspaceId={workspaceId}
                     isUpdate={isUpdate}
                     target={
                       isUpdate
@@ -1531,6 +1518,7 @@ export function UploadDialog({
                             skillId: skill!.uuid,
                             currentVersion: skill!.version,
                             nextVersion: ver,
+                            publicVersion: manageablePublicVersion,
                           }
                         : undefined
                     }
@@ -1678,10 +1666,12 @@ function InstallDone({ result }: { result: { id: string; version: string; target
 
 export function InstallDialog({
   skill,
+  workspaceId,
   onClose,
   onReported,
 }: {
   skill: SkillVM;
+  workspaceId: string;
   onClose: () => void;
   onReported: (skill: SkillVM) => void;
 }) {
@@ -1691,7 +1681,6 @@ export function InstallDialog({
   const actionLabel = updating ? "Update skill" : "Install skill";
   const actionVerb = updating ? "Update" : "Install";
   const [method, setMethod] = useState<InstallMethod>("prompt");
-  const [token, setToken] = useState<string | null>(null);
   const [target, setTarget] = useState<TargetId>("claude");
   const [result, setResult] = useState<{
     id: string;
@@ -1746,35 +1735,29 @@ export function InstallDialog({
     };
   }, [id, onReported, reported, skill.version]);
 
-  // The Companion installer reads packages, confirms personal install state, and performs the
-  // non-replayable secret retrieval flow with read-only skill and secret scopes.
-  const ensureToken = useCallback(async () => {
-    if (token) return token;
-    const issued = await issueToken(["skills:read", "secrets:read"]);
-    setToken(issued.token);
-    return issued.token;
-  }, [token]);
-  const regenToken = useCallback(async () => {
-    const issued = await issueToken(["skills:read", "secrets:read"]);
-    setToken(issued.token);
-    return issued.token;
-  }, []);
-
   useModalA11y(dialogRef, onClose);
 
   const path = targetPath(target, id);
   const base = apiBase();
-  const buildPrompt = (tok: string) =>
+  const buildPrompt = () =>
     `You are ${updating ? "updating" : "installing"} the Companion skill ${id}.
 
 Version: ${version}
-Package URL: ${base}/skills/${id}/versions/${version}/package
-Authorization header: Bearer ${tok}
+Companion API URL: ${base}
+Workspace ID: ${workspaceId}
+Exact package operation: GET /skills/${encodeURIComponent(id)}/versions/${encodeURIComponent(version)}/package
 
-Use the installed Companion helper skill to install this exact skill and version into the appropriate local skills folder for the user's agent. Its workflow must run the server secret preflight, stop if required configuration is missing, ask for one global confirmation, redeem the one-time grant only after confirmation, and commit the package with its .env projection atomically. Confirm SKILL.md sits at the package root, report warnings for optional secrets, and report the ${updating ? "updated" : "installed"} location when done. Do not print, log, or persist any secret value outside that projection.
+Use the installed Companion helper skill and its bundled scripts/companion-agent-client.mjs transport. All client requests use one JSON value on stdin and value-free JSON on stdout; do not construct Authorization headers yourself.
 
-When the skill is installed, confirm it to Companion so it shows as installed in the workspace: send POST ${base}/skills/${id}/install with header "Authorization: Bearer ${tok}" and JSON body {"version":"${version}","agent":"<the agent you are>","source":"agent"}.`;
-  const displayPrompt = buildPrompt(token ?? "cmp_pat_…");
+Workflow:
+1. From the installed Companion helper root, connect with {"action":"connect","apiUrl":"${base}","workspaceId":"${workspaceId}","name":"<the agent you are>"}. The delegated device flow requests skills:read constrained to workspace ${workspaceId} and stores only the non-secret {issuer, agentId} reference in credentials.json.
+2. Use the helper's install_skill.py workflow to install exactly ${id}@${version}. Ask which tools and whether global, project, or both before writing. The helper downloads through the bundled client's one-use skills:read transfer ticket, verifies the package, and performs the atomic install.
+3. Run the server secret preflight before downloading or mutating local files. The first secret operation must request secrets:read constrained to workspace ${workspaceId}; stop if required configuration is missing and report optional warnings.
+4. Show the metadata-only plan once and ask for one global confirmation. Redeem the one-time secret grant only after confirmation, through the helper's private pipe, and commit the package with its .env projection atomically. Never print, log, pass through argv, or persist a secret anywhere else.
+5. Confirm SKILL.md is at the package root and report the ${updating ? "updated" : "installed"} locations. Use install_skill.py --report (or the bundled client's registered POST /skills/${encodeURIComponent(id)}/install operation) with {"version":"${version}","agent":"<the agent you are>","source":"agent"} so Companion records the install.
+
+Agent Auth is mandatory for this prompt. Do not mint a PAT, inject a bearer token, or silently fall back if device approval fails. Stop and ask the user instead.`;
+  const displayPrompt = buildPrompt();
 
   const download = async () => {
     if (!skill.version) return;
@@ -1956,17 +1939,12 @@ When the skill is installed, confirm it to Companion so it shows as installed in
                       <SkillSecretConfiguration slug={id} canSuggest={false} />
                     </div>
                     <div className="up-step">
-                      <StepLabel n="2">Access token</StepLabel>
-                      <TokenRow
-                        token={token}
-                        ensure={ensureToken}
-                        regen={regenToken}
-                        hint={
-                          <>
-                            Scoped to <b>skills:read + secrets:read</b>, expires in 90 days.
-                          </>
-                        }
-                      />
+                      <StepLabel n="2">Delegated access</StepLabel>
+                      <p className="up-seg-note">
+                        The Companion helper requests <b>skills:read</b>, then <b>secrets:read</b> only when
+                        needed, both constrained to workspace <span className="mono">{workspaceId}</span>.
+                        Request JWTs last 60 seconds; no PAT is included in this prompt.
+                      </p>
                     </div>
                     <div className="up-step">
                       <StepLabel n="3">Prompt</StepLabel>
@@ -1974,7 +1952,6 @@ When the skill is installed, confirm it to Companion so it shows as installed in
                         text={displayPrompt}
                         scroll
                         copyLabel="Copy prompt"
-                        resolveText={async () => buildPrompt(await ensureToken())}
                       />
                     </div>
                   </>

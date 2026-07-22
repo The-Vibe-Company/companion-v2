@@ -33,6 +33,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from companion_lib import (  # noqa: E402
     api_download_bytes,
     api_get,
+    api_post_json,
     compute_dir_checksum,
     config_path,
     detect_tools,
@@ -58,9 +59,7 @@ from secrets_runtime import (  # noqa: E402
     update_projection_state,
 )
 
-import urllib.error  # noqa: E402
 import urllib.parse  # noqa: E402
-import urllib.request  # noqa: E402
 
 
 def api_quote(value: str) -> str:
@@ -602,22 +601,12 @@ def install_nodes(
 
 
 def report_install(api_url: str, token: str, slug: str, version: str, agent: str) -> dict[str, Any]:
-    url = f"{api_url.rstrip('/')}/skills/{api_quote(slug)}/install"
-    body = json.dumps({"version": version, "agent": agent, "source": "agent"}).encode("utf-8")
-    request = urllib.request.Request(
-        url,
-        data=body,
-        method="POST",
-        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+    return api_post_json(
+        api_url,
+        token,
+        f"/skills/{api_quote(slug)}/install",
+        {"version": version, "agent": agent, "source": "agent"},
     )
-    try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        fail(f"POST {url} failed with HTTP {exc.code}: {detail}")
-    except urllib.error.URLError as exc:
-        fail(f"POST {url} failed: {exc.reason}")
 
 
 def resolve_tools(args_tools: str | None, registry: dict[str, Any]) -> list[str]:

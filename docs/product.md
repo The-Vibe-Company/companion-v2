@@ -80,11 +80,17 @@ images are deployable) is the entire point: capability without the security free
 ### Pillar 3 — Skills Hub
 Anyone can upload a [`SKILL.md`](https://github.com/anthropics/skills) package (a folder with
 `SKILL.md` frontmatter plus optional `scripts/`, `references/`, `assets/`). The hub **validates** it,
-assigns a **semantic version**, and stores it in the registry. Every skill is visible to the whole org;
+assigns a **semantic version**, and stores it in the registry. Organization skills are visible to the
+whole org;
 members file skills under **labels** to keep them organized, then **attach opt-in** to agents — anyone
 chooses exactly which skill versions go on which agents, and the agent picks them up on its next
 reconcile. The hub is both a **registry** (publish, version, browse, label) and a **binding mechanism**
 (attach to agents).
+
+The creator of an organization skill, or an Owner/Admin, may pin its current immutable version as a
+**public release**. The stable link exposes metadata to anyone, while package bytes require a verified
+Companion account or a delegated agent approved through Agent Auth. Publishing a newer internal
+version never changes the public release automatically.
 
 ---
 
@@ -115,6 +121,18 @@ A Builder uploads a `SKILL.md` package → the portal **validates** the frontmat
 enters the registry, visible to the whole org → the Builder files it under one or more **labels** to
 keep it organized → any member **attaches** it (opt-in) to an agent → the agent gains the skill on its
 next run. Versioning lets members **pin** or **upgrade**.
+
+### Public skill release — pin → share → authenticated install
+A creator or Owner/Admin opens an organization skill → explicitly pins its current version → shares
+the stable `/s/{token}` link. A visitor can inspect the pinned public metadata without signing in,
+then either downloads the exact ZIP with a verified account or copies an install prompt. The prompt
+connects Claude Code or Codex through delegated device approval, verifies the ZIP, asks for global or
+project scope and replacement consent, and installs only that root skill without executing scripts or
+resolving dependencies/secrets. A later publish leaves the old public release active until an explicit
+promotion; unpublishing removes package access without changing the URL.
+Renaming is unavailable while a release is pinned, because the stable page identity must continue to
+match the immutable package. The creator or an Owner/Admin first removes the release, renames the
+skill, publishes a version with the new name, and explicitly makes that version public.
 
 ---
 

@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { schema, type Db } from "@companion/db";
-import { renameSkill, type ActorContext } from "../src/services";
+import type { SQL } from "drizzle-orm";
+import { PgDialect } from "drizzle-orm/pg-core";
+import { renameSkill, SkillPublicReleaseConflictError, type ActorContext } from "../src/services";
 
 const ORG = "00000000-0000-0000-0000-0000000000aa";
 const owner: ActorContext = { id: "user-owner", email: "owner@example.test", name: "Owner" };
@@ -14,6 +16,7 @@ interface SkillRow {
   scope: "personal" | "org";
   creatorId: string;
   shareToken: string;
+  publicVersionId: string | null;
 }
 
 function skill(overrides: Partial<SkillRow> = {}): SkillRow {
@@ -25,6 +28,7 @@ function skill(overrides: Partial<SkillRow> = {}): SkillRow {
     scope: "org",
     creatorId: owner.id,
     shareToken: "share-token-1",
+    publicVersionId: null,
     ...overrides,
   };
 }
@@ -34,6 +38,7 @@ function fakeDb(opts: {
   conflict?: SkillRow | null;
   role?: "owner" | "admin" | "developer" | null;
   updateReturnsNoRows?: boolean;
+  rowAfterFailedUpdate?: SkillRow | null;
 }) {
   const role = opts.role === undefined ? "developer" : opts.role;
   const row = opts.row ? { ...opts.row } : null;
@@ -47,8 +52,13 @@ function fakeDb(opts: {
     updates: 0,
     relatedBefore: structuredClone(related),
     row,
+    updateWhere: null as SQL | null,
   };
-  const skillFinds: Array<SkillRow | null | undefined> = [row, opts.conflict ?? null];
+  const skillFinds: Array<SkillRow | null | undefined> = [
+    row,
+    opts.conflict ?? null,
+    opts.rowAfterFailedUpdate,
+  ];
 
   const handle = {
     query: {
@@ -62,7 +72,8 @@ function fakeDb(opts: {
     update: (table: unknown) => ({
       set(patch: Partial<SkillRow> & { updatedAt?: Date }) {
         return {
-          where() {
+          where(clause: SQL) {
+            captured.updateWhere = clause;
             return {
               returning: async () => {
                 if (table !== schema.skills || !row || opts.updateReturnsNoRows) return [];
@@ -143,6 +154,49 @@ describe("renameSkill", () => {
       }),
     ).rejects.toThrow("already exists in this workspace");
     expect(captured.updates).toBe(0);
+  });
+
+  it("requires explicit withdrawal before renaming a skill with a pinned public release", async () => {
+    const { database, captured } = fakeDb({ row: skill({ publicVersionId: "version-1" }) });
+
+    await expect(renameSkill({
+      actor: owner,
+      orgId: ORG,
+      slug: "skill-creator",
+      newSlug: "skill-creator-and-eval",
+      database,
+    })).rejects.toBeInstanceOf(SkillPublicReleaseConflictError);
+    expect(captured.updates).toBe(0);
+    expect(captured.row?.slug).toBe("skill-creator");
+    expect(captured.audit).toBeNull();
+  });
+
+  /**
+   * Product promise: a rename and promotion cannot both commit and leave a pinned ZIP whose
+   * immutable manifest uses the old slug.
+   * Regression caught: public-version preflight happened before the rename transaction without a CAS fence.
+   * Why unit-level: Core owns both the conditional UPDATE and conflict classification.
+   * Failure proof: removing the null predicate fails SQL inspection; removing recheck changes the error class.
+   */
+  it("returns a public-release conflict when promotion wins after rename preflight", async () => {
+    const promoted = skill({ publicVersionId: "version-1" });
+    const { database, captured } = fakeDb({
+      row: skill(),
+      updateReturnsNoRows: true,
+      rowAfterFailedUpdate: promoted,
+    });
+
+    await expect(renameSkill({
+      actor: owner,
+      orgId: ORG,
+      slug: "skill-creator",
+      newSlug: "skill-creator-and-eval",
+      database,
+    })).rejects.toBeInstanceOf(SkillPublicReleaseConflictError);
+    expect(captured.audit).toBeNull();
+
+    const compiled = new PgDialect().sqlToQuery(captured.updateWhere!);
+    expect(compiled.sql).toContain('"skills"."public_version_id" is null');
   });
 
   it("rejects invalid and unchanged slugs", async () => {

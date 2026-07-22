@@ -799,6 +799,12 @@ body { background: var(--color-canvas); color: var(--color-fg); font-family: var
 .entitlement-bar .btn-sec { height: 30px; background: var(--color-surface); }
 .entitlement-bar--detail { margin-bottom: 18px; border: 1px solid var(--color-warn-line); border-radius: var(--radius-md); }
 
+/* Pinned public release status in skill detail. */
+.dpublic { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; margin-top: 12px; color: var(--color-muted); font-size: var(--text-xs); }
+.dpublic > span { min-width: 0; }
+.dpublic b { color: var(--color-fg); font-weight: 500; }
+.dpublic .btn-sec { height: 30px; margin-left: auto; }
+
 /* --- Filter bar + chips -------------------------------------------------- */
 .filterbar { display: flex; align-items: center; gap: 8px; padding: 9px var(--space-5); border-bottom: 1px solid var(--color-line); flex-wrap: wrap; flex: none; }
 .filter-add-wrap { position: relative; display: inline-flex; }

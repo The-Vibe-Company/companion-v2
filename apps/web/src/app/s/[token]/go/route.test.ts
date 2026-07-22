@@ -53,13 +53,13 @@ describe("skill share go route", () => {
     expect(response.headers.get("location")).toBe("http://127.0.0.1:55000/skills?lib=org&skill=mega-code-review");
   });
 
-  it("redirects unauthenticated users to login with the original share URL as next", async () => {
+  it("returns unauthenticated users to the explicit Open in Companion action", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => Response.json({ ok: false, error: "not authenticated" }, { status: 401 })));
 
     const response = await GET(getRequest(), params);
 
     expect(response.status).toBe(307);
-    expect(response.headers.get("location")).toBe("http://127.0.0.1:55000/login?next=%2Fs%2Fshare-token-1");
+    expect(response.headers.get("location")).toBe("http://127.0.0.1:55000/login?next=%2Fs%2Fshare-token-1%2Fgo");
   });
 
   it("falls back to the public preview when the token is inaccessible to the signed-in user", async () => {

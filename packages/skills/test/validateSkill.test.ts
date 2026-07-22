@@ -290,6 +290,11 @@ describe("packDir — determinism & integrity", () => {
     const dir = await makeSkillDir({ "README.md": "no manifest\n" });
     await expect(packDir(dir)).rejects.toThrow(/SKILL.md not found/);
   });
+
+  it("refuses to pack a Linux/macOS source tree with a Windows-reserved file", async () => {
+    const dir = await makeSkillDir({ "SKILL.md": VALID_SKILL_MD, "references/NUL.txt": "unsafe\n" });
+    await expect(packDir(dir)).rejects.toThrow(/Windows-unsafe path segment/);
+  });
 });
 
 describe("prepareSkillDirForPublish", () => {
@@ -463,6 +468,33 @@ describe("validateSkillArchive — adversarial", () => {
     const res = await validateSkillArchive(gzipSync(tar));
     expect(res.ok).toBe(false);
     expect(check(res.checks, "traversal")?.status).toBe("fail");
+  });
+
+  it.each([
+    "assets/file:payload",
+    "assets/NUL.txt",
+    "assets/COM1",
+    "assets/trailing.",
+    "assets/trailing ",
+  ])("rejects the Windows-unsafe archive path %s", async (name) => {
+    const tar = await buildTar([
+      { name: "SKILL.md", content: VALID_SKILL_MD },
+      { name, content: "unsafe" },
+    ]);
+    const res = await validateSkillArchive(tar);
+    expect(res.ok).toBe(false);
+    expect(check(res.checks, "traversal")?.detail).toMatch(/Windows-unsafe path segment/);
+  });
+
+  it("rejects case-folding collisions in directory segments", async () => {
+    const tar = await buildTar([
+      { name: "SKILL.md", content: VALID_SKILL_MD },
+      { name: "Docs/first.md", content: "first" },
+      { name: "docs/second.md", content: "second" },
+    ]);
+    const res = await validateSkillArchive(tar);
+    expect(res.ok).toBe(false);
+    expect(check(res.checks, "traversal")?.detail).toMatch(/Windows-colliding path/);
   });
 
   it("rejects an absolute-path entry", async () => {

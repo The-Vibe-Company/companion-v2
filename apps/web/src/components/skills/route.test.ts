@@ -185,9 +185,9 @@ describe("run transcript routing (?skill=…&run=…)", () => {
     expect(parseSkillsRoute(skillsRouteHref(route))).toEqual(route);
   });
 
-  it("keeps creator-only org runs on the authenticated route instead of the public share URL", () => {
+  it("keeps every authenticated org detail and run under /skills", () => {
     const detail = { lib: "org" as const, kind: "all" as const, skill: "digest" };
-    expect(canonicalSkillsRouteHref(detail, "public-token")).toBe("/s/public-token");
+    expect(canonicalSkillsRouteHref(detail, "public-token")).toBe("/skills?lib=org&skill=digest");
     expect(canonicalSkillsRouteHref({ ...detail, run: "r-1" }, "public-token")).toBe(
       "/skills?lib=org&skill=digest&run=r-1",
     );

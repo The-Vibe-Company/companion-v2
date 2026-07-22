@@ -133,6 +133,7 @@ describe("skill update flow", () => {
     const html = renderToString(
       React.createElement(UploadDialog, {
         mode: "update",
+        workspaceId: "org-1",
         skill,
         onClose: vi.fn(),
         onPublished: vi.fn(),
@@ -147,19 +148,56 @@ describe("skill update flow", () => {
     expect(html).toContain("Validation endpoint");
     expect(html).toContain("Publish endpoint");
     expect(html).toContain("action=validate");
+    expect(html).toContain("action=publish");
+    expect(html).toContain("expect_slug=research-agent");
     expect(html).toContain("expect_skill_id=skill-1");
+    expect(html).toContain("version=1.2.4");
     expect(html).toContain("metadata.companion_skill_id");
     expect(html).toContain("do not edit the package and do not publish");
     expect(html).toContain("this appears to be a different skill");
     expect(html).toContain("Never publish after failed validation or ambiguous identity");
+    expect(html).toContain("delegated Agent Auth client");
+    expect(html).toContain("Never silently fall back to a PAT");
+    expect(html).not.toContain("cmp_pat_");
     expect(html).not.toContain("Command line");
     expect(html).not.toContain("companion CLI");
+  });
+
+  it("tells an agent to keep the public release unless the user explicitly promotes", () => {
+    const html = renderToString(
+      React.createElement(UploadDialog, {
+        mode: "update",
+        workspaceId: "org-1",
+        skill: { ...skill, publicVersion: "1.2.3", canManagePublic: true },
+        onClose: vi.fn(),
+        onPublished: vi.fn(),
+      }),
+    );
+    expect(html).toContain("currently exposes public v1.2.3");
+    expect(html).toContain("with &quot;no&quot; as the default");
+    expect(html).toContain("never publish it again");
+  });
+
+  it("does not offer or instruct public promotion to a non-managing Developer", () => {
+    const html = renderToString(
+      React.createElement(UploadDialog, {
+        mode: "update",
+        workspaceId: "org-1",
+        skill: { ...skill, publicVersion: "1.2.3", canManagePublic: false },
+        onClose: vi.fn(),
+        onPublished: vi.fn(),
+      }),
+    );
+    expect(html).not.toContain("currently exposes public v1.2.3");
+    expect(html).not.toContain("Replace the public release?");
+    expect(html).not.toContain("/public-version");
   });
 
   it("uses Update skill only for installing the newest registry version", () => {
     const html = renderToString(
       React.createElement(InstallDialog, {
         skill: { ...skill, installStatus: "update", installedVersion: "1.1.0" },
+        workspaceId: "org-1",
         onClose: vi.fn(),
         onReported: vi.fn(),
       }),
@@ -169,11 +207,24 @@ describe("skill update flow", () => {
     expect(html).toContain("Use an AI assistant");
     expect(html).toContain("Download package");
     expect(html).not.toContain("Publish new version");
+    expect(html).toContain("scripts/companion-agent-client.mjs");
+    expect(html).toContain('&quot;workspaceId&quot;:&quot;org-1&quot;');
+    expect(html).toContain("skills:read");
+    expect(html).toContain("secrets:read");
+    expect(html).toContain("no PAT is included in this prompt");
+    expect(html).toContain("Agent Auth is mandatory for this prompt");
+    expect(html).not.toContain("COMPANION_AUTH_MODE");
+    expect(html).not.toContain("legacy-pat");
+    expect(html).not.toContain("cmp_pat_");
+    expect(html).not.toContain("Authorization: Bearer");
+    expect(html).not.toContain("Bearer cmp_");
+    expect(html).not.toContain("Access token");
   });
 
   it("renders create prompt with validation before publish", () => {
     const html = renderToString(
       React.createElement(UploadDialog, {
+        workspaceId: "org-1",
         onClose: vi.fn(),
         onPublished: vi.fn(),
       }),
@@ -182,6 +233,11 @@ describe("skill update flow", () => {
     expect(html).toContain("Validation endpoint");
     expect(html).toContain("Publish endpoint");
     expect(html).toContain("action=validate");
+    expect(html).toContain("action=publish");
+    expect(html).toContain("expect_slug=URL_ENCODED_SKILL_SLUG");
+    expect(html).toContain("version=1.0.0");
+    expect(html).toContain("replace URL_ENCODED_SKILL_SLUG in both endpoints");
+    expect(html).toContain("Never send the placeholder");
     expect(html).toContain("Validate first");
     expect(html).toContain("Publish only after validation is accepted");
   });

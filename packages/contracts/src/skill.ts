@@ -210,6 +210,10 @@ export const skillListRowSchema = z.object({
    */
   modifiers: z.array(skillModifierSchema).default([]),
   current_version: z.string().nullable(),
+  /** Immutable version pinned to the public share link; null keeps the link metadata-only. */
+  public_version: z.string().nullable().default(null),
+  /** Creator or org Owner/Admin. Always false for personal skills. */
+  can_manage_public: z.boolean().default(false),
   license: z.string().nullable(),
   compatibility: z.string().nullable(),
   metadata: z.record(z.string()),
@@ -239,6 +243,20 @@ export const skillListRowSchema = z.object({
 });
 export type SkillListRow = z.infer<typeof skillListRowSchema>;
 
+/** Body for `PUT /v1/skills/:slug/public-version`. Only the current immutable version is accepted. */
+export const setSkillPublicVersionInputSchema = z.object({
+  version: z.string().regex(SEMVER_RE, "version must be a valid semver"),
+});
+export type SetSkillPublicVersionInput = z.infer<typeof setSkillPublicVersionInputSchema>;
+
+export const skillPublicVersionResultSchema = z.object({
+  ok: z.literal(true),
+  public_version: z.string().nullable(),
+  share_token: z.string(),
+  changed: z.boolean(),
+});
+export type SkillPublicVersionResult = z.infer<typeof skillPublicVersionResultSchema>;
+
 /** Public, unauthenticated skill-link preview shape. Metadata-only; never includes tenant ids or package content. */
 export const skillPublicPreviewSchema = z.object({
   display_name: z.string(),
@@ -248,6 +266,12 @@ export const skillPublicPreviewSchema = z.object({
   creator_name: z.string(),
   creator_initials: z.string(),
   updated_at: z.string(),
+  public_release: z.object({
+    version: z.string(),
+    checksum: z.string(),
+    size_bytes: z.number().int().nonnegative(),
+    released_at: z.string(),
+  }).nullable(),
 });
 export type SkillPublicPreview = z.infer<typeof skillPublicPreviewSchema>;
 
