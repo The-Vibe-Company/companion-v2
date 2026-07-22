@@ -6,7 +6,9 @@ export default defineConfig({
     js: 'import { createRequire as __companionCreateRequire } from "node:module"; const require = __companionCreateRequire(import.meta.url);',
   },
   format: ["esm"],
-  noExternal: [/^@companion\//],
+  // Agent Auth depends on Zod 4 (`.meta()`), while the API still uses Zod 3. Bundle each
+  // dependency-local copy so the flattened API artifact cannot resolve Agent Auth against Zod 3.
+  noExternal: [/^@companion\//, /^zod(?:\/.*)?$/],
   external: [
     "@aws-sdk/client-s3",
     "@aws-sdk/s3-request-presigner",
@@ -22,7 +24,6 @@ export default defineConfig({
     "stripe",
     "tar-stream",
     "yaml",
-    "zod",
   ],
   sourcemap: true,
   clean: true,
