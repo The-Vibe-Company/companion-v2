@@ -40,8 +40,10 @@ def parse(text: str) -> list[dict[str, Any]]:
             priority, location, title = match.groups()
             location = location.strip()
             loc_match = LOCATION_RE.match(location)
-            file_name = loc_match.group(1).strip() if loc_match else location
-            line_no = int(loc_match.group(2)) if loc_match else None
+            if loc_match is None:
+                raise ValueError(f"finding location must include file:line: {location}")
+            file_name = loc_match.group(1).strip()
+            line_no = int(loc_match.group(2))
             current = {
                 "priority": f"P{priority}",
                 "file": file_name,

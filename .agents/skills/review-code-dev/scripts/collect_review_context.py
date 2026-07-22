@@ -39,8 +39,8 @@ SECRET_FILENAME_PATTERNS = (
 )
 SECRET_ASSIGNMENT_RE = re.compile(
     r"(?i)(\b(?:api[_-]?key|access[_-]?token|auth[_-]?token|refresh[_-]?token|"
-    r"client[_-]?secret|private[_-]?key|secret|password|passwd|authorization)\b"
-    r"\s*[:=]\s*[\"']?)([^\"'\s#]+)"
+    r"client[_-]?secret|private[_-]?key|secret|password|passwd|authorization)\b\s*[:=]\s*)"
+    r"(?:\"(?:\\.|[^\"\\\r\n])*\"|'(?:\\.|[^'\\\r\n])*'|[^\s#]+)"
 )
 BEARER_RE = re.compile(r"(?i)(\bbearer\s+)([A-Za-z0-9._~+/=-]{8,})")
 SECRET_VALUE_RE = re.compile(
@@ -230,6 +230,10 @@ def redact_secret_text(text: str) -> str:
     return text
 
 
+def redact_and_truncate(text: str, max_bytes: int) -> dict[str, Any]:
+    return truncate_text(redact_secret_text(text), max_bytes)
+
+
 def collect_untracked_previews(repo: Path, files: list[str]) -> list[dict[str, Any]]:
     previews: list[dict[str, Any]] = []
     total = 0
@@ -271,21 +275,21 @@ def collect_untracked_previews(repo: Path, files: list[str]) -> list[dict[str, A
 
         limit = min(DEFAULT_MAX_UNTRACKED_FILE_BYTES, DEFAULT_MAX_UNTRACKED_TOTAL_BYTES - total)
         try:
-            data = raw_path.read_bytes()
+            with raw_path.open("rb") as handle:
+                data = handle.read(limit + 1)
         except OSError as exc:
             item["error"] = str(exc)
             previews.append(item)
             continue
 
-        item["byte_length"] = len(data)
-        if b"\x00" in data[: min(len(data), limit)]:
+        clipped = data[:limit]
+        if b"\x00" in clipped:
             item["type"] = "binary"
             previews.append(item)
             continue
 
-        clipped = data[:limit]
         item["text"] = redact_secret_text(clipped.decode("utf-8", errors="replace"))
-        item["truncated"] = len(data) > limit
+        item["truncated"] = st.st_size > limit
         total += len(clipped)
         previews.append(item)
     return previews
@@ -303,7 +307,10 @@ def collect_worktree_state(
         "worktree_changed_files": parse_status_files(status_entries),
         "untracked_files": untracked_names,
         "untracked_file_previews": collect_untracked_previews(repo, untracked_names),
-        "staged_diff": truncate_text(require_ok(git(["diff", "--cached"], repo, timeout=120)), max_diff_bytes),
+        "staged_diff": redact_and_truncate(
+            require_ok(git(["diff", "--cached"], repo, timeout=120)),
+            max_diff_bytes,
+        ),
     }
 
 
@@ -322,7 +329,7 @@ def collect_uncommitted(
     result = {
         "mode": "uncommitted",
         "changed_files": changed,
-        "diff": truncate_text(require_ok(git(["diff"], repo, timeout=120)), max_diff_bytes),
+        "diff": redact_and_truncate(require_ok(git(["diff"], repo, timeout=120)), max_diff_bytes),
     }
     result.update(worktree_state)
     return result
@@ -338,7 +345,7 @@ def collect_base(repo: Path, base: str, max_diff_bytes: int) -> dict[str, Any]:
         "diff_range": diff_range,
         "changed_files": split_names(require_ok(git(["diff", "--name-only", diff_range], repo))),
         "diff_stat": require_ok(git(["diff", "--stat", diff_range], repo, timeout=120)),
-        "diff": truncate_text(require_ok(git(["diff", diff_range], repo, timeout=120)), max_diff_bytes),
+        "diff": redact_and_truncate(require_ok(git(["diff", diff_range], repo, timeout=120)), max_diff_bytes),
     }
 
 
@@ -351,7 +358,10 @@ def collect_commit(repo: Path, commit: str, max_diff_bytes: int) -> dict[str, An
         "commit": {"hash": full_hash, "short_hash": short_hash, "subject": subject},
         "changed_files": names,
         "diff_stat": require_ok(git(["show", "--stat", "--format=fuller", commit], repo, timeout=120)),
-        "diff": truncate_text(require_ok(git(["show", "--format=fuller", "--patch", commit], repo, timeout=120)), max_diff_bytes),
+        "diff": redact_and_truncate(
+            require_ok(git(["show", "--format=fuller", "--patch", commit], repo, timeout=120)),
+            max_diff_bytes,
+        ),
     }
 
 

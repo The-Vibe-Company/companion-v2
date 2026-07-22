@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+
+from review_dependency import resolve_review_skill_dir
 
 
 MODULE_PATH = Path(__file__).with_name("collect_ship_context.py")
@@ -63,6 +67,15 @@ class CollectShipContextTests(unittest.TestCase):
             self.assertTrue(metadata["non_committable"])
             exclude = (repo / ".git" / "info" / "exclude").read_text(encoding="utf-8")
             self.assertIn("/plans/ship-pr-dev/", exclude.splitlines())
+
+    def test_review_dependency_supports_explicit_non_sibling_install(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            skill_dir = Path(tmp) / "custom-review-install"
+            (skill_dir / "scripts").mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text("---\nname: review-code-dev\n---\n", encoding="utf-8")
+
+            with patch.dict(os.environ, {"REVIEW_CODE_DEV_SKILL_DIR": str(skill_dir)}):
+                self.assertEqual(resolve_review_skill_dir(), skill_dir.resolve())
 
 
 if __name__ == "__main__":

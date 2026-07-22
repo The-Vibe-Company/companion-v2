@@ -9,12 +9,14 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+from review_dependency import resolve_review_skill_dir
+
 
 ARTIFACT_ROOT = Path("plans/ship-pr-dev")
 
 
 def load_review_preparer():
-    module_path = Path(__file__).resolve().parents[2] / "review-code-dev" / "scripts" / "prepare_review_run.py"
+    module_path = resolve_review_skill_dir() / "scripts" / "prepare_review_run.py"
     spec = importlib.util.spec_from_file_location("review_code_dev_prepare_run", module_path)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"cannot load review-code-dev artifact safety helpers: {module_path}")

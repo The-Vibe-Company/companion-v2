@@ -53,6 +53,37 @@ class CollectReviewContextTests(unittest.TestCase):
             self.assertEqual(context["diff_range"], "origin/main...HEAD")
             self.assertEqual(context["changed_files"], ["feature.txt"])
 
+    def test_redacts_tracked_and_quoted_secrets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            git(repo, "init", "-b", "main")
+            git(repo, "config", "user.email", "test@example.test")
+            git(repo, "config", "user.name", "Test")
+            target = repo / "config.txt"
+            target.write_text("safe=true\n", encoding="utf-8")
+            git(repo, "add", "config.txt")
+            git(repo, "commit", "-m", "base")
+            target.write_text('password = "hunter2 backup"\n', encoding="utf-8")
+            git(repo, "add", "config.txt")
+
+            context = collector.collect_worktree_state(repo, 1_000_000)
+            staged = context["staged_diff"]["text"]
+            self.assertIn("password = <redacted>", staged)
+            self.assertNotIn("hunter2", staged)
+            self.assertNotIn("backup", staged)
+
+    def test_untracked_preview_is_bounded_before_decoding(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            git(repo, "init", "-b", "main")
+            target = repo / "large.txt"
+            target.write_text("x" * (collector.DEFAULT_MAX_UNTRACKED_FILE_BYTES + 100), encoding="utf-8")
+
+            preview = collector.collect_untracked_previews(repo, ["large.txt"])[0]
+            self.assertEqual(preview["byte_length"], target.stat().st_size)
+            self.assertEqual(len(preview["text"]), collector.DEFAULT_MAX_UNTRACKED_FILE_BYTES)
+            self.assertTrue(preview["truncated"])
+
 
 if __name__ == "__main__":
     unittest.main()

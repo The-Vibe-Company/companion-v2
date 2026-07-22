@@ -10,6 +10,8 @@ import re
 import subprocess
 from pathlib import Path
 
+from review_dependency import resolve_review_skill_dir
+
 
 FRONTEND_RE = re.compile(
     r"(\.(tsx|jsx|vue|svelte|css|scss|less)$|(^|/)(components|pages|routes|app|styles|theme|tokens|assets)/)",
@@ -61,7 +63,7 @@ def lines(text: str) -> list[str]:
 
 
 def load_review_collector():
-    module_path = Path(__file__).resolve().parents[2] / "review-code-dev" / "scripts" / "collect_review_context.py"
+    module_path = resolve_review_skill_dir() / "scripts" / "collect_review_context.py"
     spec = importlib.util.spec_from_file_location("review_code_dev_collect_context", module_path)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"cannot load review-code-dev context collector: {module_path}")

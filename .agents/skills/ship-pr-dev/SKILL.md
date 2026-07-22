@@ -37,7 +37,7 @@ Read only the files needed for the invocation:
 - `references/readiness-gates.md` - stop conditions, verification expectations, and review gate policy.
 - `references/pr-template.md` - PR body structure and final handoff format.
 
-Also read the `review-code-dev` skill before the review gate. In a repository install it lives at `.agents/skills/review-code-dev/SKILL.md`; in another runtime, resolve the installed skill named `review-code-dev`.
+Also read the `review-code-dev` skill before the review gate. In a repository install it lives at `.agents/skills/review-code-dev/SKILL.md`; in another runtime, resolve the installed skill named `review-code-dev`. Helper scripts search common skill libraries and accept `REVIEW_CODE_DEV_SKILL_DIR` as an explicit override.
 
 ## Workflow Summary
 
