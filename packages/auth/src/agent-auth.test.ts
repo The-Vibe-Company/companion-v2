@@ -16,7 +16,7 @@ import {
   emitAgentAuthEvent,
   registerAgentAuthEventSink,
 } from "./agent-auth";
-import { auth, getAgentConfiguration } from "./index";
+import { auth, companionAgentAuthPlugin, getAgentConfiguration } from "./index";
 
 const execFileAsync = promisify(execFile);
 const tempPaths: string[] = [];
@@ -53,6 +53,51 @@ function sessionWithGrant(constraints: Constraints): AgentSession {
 }
 
 describe("Agent Auth operation registry", () => {
+  it("lets a configured approval proceed with an active session created 30 days ago", async () => {
+    const agent = {
+      id: "agent-1",
+      hostId: "host-1",
+      userId: "user-1",
+      mode: "delegated",
+      status: "active",
+      name: "Agent",
+    };
+    const grant = {
+      id: "grant-1",
+      agentId: agent.id,
+      capability: "skills:read",
+      status: "pending",
+      constraints: null,
+    };
+    const adapter = {
+      findOne: vi.fn(async ({ model }: { model: string }) => model === "agent" ? agent : null),
+      findMany: vi.fn(async ({ model }: { model: string }) =>
+        model === "agentCapabilityGrant" ? [grant] : []),
+      update: vi.fn(async () => null),
+      delete: vi.fn(async () => null),
+    };
+
+    const result = await companionAgentAuthPlugin.endpoints.approveCapability({
+      body: {
+        agent_id: agent.id,
+        action: "approve",
+        capabilities: [grant.capability],
+      },
+      context: {
+        session: {
+          user: { id: agent.userId },
+          session: { createdAt: new Date(Date.now() - 30 * 24 * 60 * 60_000) },
+        },
+        adapter,
+      },
+      headers: new Headers(),
+      json: (body: unknown) => body,
+    } as never);
+
+    expect(result).toMatchObject({ status: "approved", added: ["skills:read"] });
+    expect(adapter.update).toHaveBeenCalled();
+  });
+
   it("is closed over the five configured capabilities", () => {
     expect(AGENT_AUTH_CAPABILITIES.map((capability) => capability.name)).toEqual([
       "skills:read",

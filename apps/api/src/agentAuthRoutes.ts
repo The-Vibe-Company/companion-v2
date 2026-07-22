@@ -12,11 +12,14 @@ import {
 } from "@companion/auth";
 import { listOrgs, revokeAgentTransferTickets } from "@companion/core/services";
 import { sql } from "@companion/db";
-import { actorFromContext, jsonError, type ApiVariables } from "./context";
+import {
+  actorFromContext,
+  AuthenticationRequiredError,
+  jsonError,
+  type ApiVariables,
+} from "./context";
 
 type ApiApp = Hono<{ Variables: ApiVariables }>;
-
-const DEVICE_APPROVAL_FRESH_SESSION_MS = 5 * 60_000;
 
 export interface ConnectedAgentRow {
   agent_id: string;
@@ -224,28 +227,6 @@ export function isUnambiguousDeviceApproval(
   );
 }
 
-/** Device approval is a privilege escalation and must never rely on a merely valid old session. */
-export function isFreshDeviceApprovalSession(createdAt: Date | string | number | null | undefined, now = Date.now()): boolean {
-  if (createdAt == null) return false;
-  const createdAtMs = createdAt instanceof Date ? createdAt.getTime() : new Date(createdAt).getTime();
-  if (!Number.isFinite(createdAtMs)) return false;
-  const age = now - createdAtMs;
-  return age >= 0 && age <= DEVICE_APPROVAL_FRESH_SESSION_MS;
-}
-
-function requireFreshDeviceApprovalSession(c: Parameters<typeof actorFromContext>[0]): Response | null {
-  const session = c.get("session");
-  if (isFreshDeviceApprovalSession(session?.createdAt)) return null;
-  return c.json(
-    {
-      ok: false,
-      error: "fresh_session_required",
-      message: "Sign in again before reviewing or resolving an agent capability request.",
-    },
-    403,
-  );
-}
-
 async function resolveDeviceApproval(input: {
   actor: Parameters<typeof listOrgs>[0];
   agentId: string;
@@ -332,6 +313,13 @@ function unsafeDeviceApproval(
     ? "Request each workspace's capabilities in a separate device approval."
     : "Tenant capabilities require one exact workspaceId UUID constraint.";
   return c.json({ ok: false, error, message }, 422);
+}
+
+function deviceApprovalJsonError(
+  c: Parameters<typeof actorFromContext>[0],
+  error: unknown,
+): Response {
+  return jsonError(c, error, error instanceof AuthenticationRequiredError ? 401 : 400);
 }
 
 function jsonObject(value: unknown): Record<string, unknown> | null {
@@ -457,14 +445,14 @@ const denySchema = z.object({
  * Mount the root discovery endpoint and signed-in management wrappers.
  *
  * Better Auth continues to own registration, device polling, JWT validation,
- * grant persistence and fresh-session enforcement below `/auth`. These
+ * grant persistence and valid-session enforcement below `/auth`. These
  * wrappers only provide stable product-facing response shapes.
  */
 export function registerAgentAuthRoutes(app: ApiApp): void {
   // The upstream 0.6.2 approval endpoint cannot distinguish two pending grants
   // with the same capability name but different constraints. Its direct-grant
   // endpoint is even broader: any ordinary session can activate a grant without
-  // device approval or our five-minute freshness check. Product approval must
+  // device approval. Product approval must
   // always pass through the guarded wrapper below, so neither upstream mutator
   // may fall through to the Better Auth wildcard handler.
   const rejectRawCapabilityApproval = (c: Context<{ Variables: ApiVariables }>) =>
@@ -518,8 +506,6 @@ export function registerAgentAuthRoutes(app: ApiApp): void {
   app.get("/v1/agent-auth/device-approval", async (c) => {
     try {
       const actor = actorFromContext(c);
-      const staleSession = requireFreshDeviceApprovalSession(c);
-      if (staleSession) return staleSession;
       const query = deviceQuerySchema.parse(c.req.query());
       const resolved = await resolveDeviceApproval({
         actor,
@@ -549,15 +535,13 @@ export function registerAgentAuthRoutes(app: ApiApp): void {
         },
       });
     } catch (error) {
-      return jsonError(c, error);
+      return deviceApprovalJsonError(c, error);
     }
   });
 
   app.post("/v1/agent-auth/device-approval/approve", async (c) => {
     try {
       const actor = actorFromContext(c);
-      const staleSession = requireFreshDeviceApprovalSession(c);
-      if (staleSession) return staleSession;
       const body = approveSchema.parse(await c.req.json());
       const resolved = await resolveDeviceApproval({ actor, agentId: body.agent_id, code: body.code });
       if (!resolved) return c.json({ ok: false, error: "device approval request not found" }, 404);
@@ -579,15 +563,13 @@ export function registerAgentAuthRoutes(app: ApiApp): void {
       });
       return c.json({ ok: true, status: "approved" as const });
     } catch (error) {
-      return jsonError(c, error);
+      return deviceApprovalJsonError(c, error);
     }
   });
 
   app.post("/v1/agent-auth/device-approval/deny", async (c) => {
     try {
       const actor = actorFromContext(c);
-      const staleSession = requireFreshDeviceApprovalSession(c);
-      if (staleSession) return staleSession;
       const body = denySchema.parse(await c.req.json());
       const resolved = await resolveDeviceApproval({ actor, agentId: body.agent_id, code: body.code });
       if (!resolved) return c.json({ ok: false, error: "device approval request not found" }, 404);
@@ -601,7 +583,7 @@ export function registerAgentAuthRoutes(app: ApiApp): void {
       });
       return c.json({ ok: true, status: "denied" as const });
     } catch (error) {
-      return jsonError(c, error);
+      return deviceApprovalJsonError(c, error);
     }
   });
 

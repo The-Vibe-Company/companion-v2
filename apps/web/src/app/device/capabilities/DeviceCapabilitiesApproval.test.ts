@@ -96,8 +96,8 @@ describe("DeviceCapabilitiesApproval", () => {
     expect(host.textContent).toContain("Agent approved");
   });
 
-  it("offers a return-preserving reauthentication action for a stale session", async () => {
-    apiFetch.mockReset().mockRejectedValueOnce(new ApiFetchError("fresh_session_required", 403));
+  it("offers a return-preserving reauthentication action for an expired session", async () => {
+    apiFetch.mockReset().mockRejectedValueOnce(new ApiFetchError("not authenticated", 401));
 
     await act(async () => {
       root.render(React.createElement(DeviceCapabilitiesApproval, {
@@ -106,7 +106,7 @@ describe("DeviceCapabilitiesApproval", () => {
       }));
     });
 
-    expect(host.textContent).toContain("Sign in again to continue");
+    expect(host.textContent).toContain("Your session has expired");
     const form = host.querySelector<HTMLFormElement>('form[action="/v1/auth/logout"]');
     expect(form).not.toBeNull();
     expect(form?.querySelector<HTMLInputElement>('input[name="next"]')?.value).toBe(

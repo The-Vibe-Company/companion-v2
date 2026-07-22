@@ -26,6 +26,8 @@ export { postgresAgentAuthStorage } from "./postgres-secondary-storage";
 
 export const SESSION_EXPIRES_IN_SECONDS = 60 * 60 * 24 * 30;
 export const SESSION_UPDATE_AGE_SECONDS = 60 * 60 * 24;
+/** A valid rolling browser session is sufficient to approve Agent Auth capabilities. */
+export const AGENT_AUTH_FRESH_SESSION_WINDOW_SECONDS = 0;
 
 export function getBetterAuthSecret(): string {
   const secret = process.env.BETTER_AUTH_SECRET;
@@ -81,6 +83,46 @@ function agentDeviceAuthorizationPage(): string {
   return new URL("/device/capabilities", webBase).toString();
 }
 
+export const companionAgentAuthPlugin: ReturnType<typeof agentAuth> = agentAuth({
+  providerName: "Companion",
+  providerDescription: "Deploy, govern, and install organization skills through narrowly delegated capabilities.",
+  modes: ["delegated"],
+  capabilities: [...AGENT_AUTH_CAPABILITIES],
+  validateCapabilities: (requested) =>
+    requested.every((name) => AGENT_AUTH_CAPABILITIES.some((capability) => capability.name === name)),
+  requireAuthForCapabilities: false,
+  approvalMethods: ["device_authorization"],
+  resolveApprovalMethod: () => "device_authorization",
+  deviceAuthorizationPage: agentDeviceAuthorizationPage(),
+  // Dynamic host registration remains enabled, but only with inline public JWKs. Agent Auth
+  // 0.6.2 fetches remote JWKS URLs before signature verification, so both this callback and the
+  // outer request guard reject that transport before the plugin can perform network I/O.
+  allowDynamicHostRegistration: (ctx) =>
+    !authorizationUsesRemoteAgentJwks(ctx.headers?.get("authorization")),
+  defaultHostCapabilities: [],
+  jwtMaxAge: 60,
+  // Better Auth already rejects missing or expired browser sessions. Do not layer a recent-login
+  // requirement on top: an active rolling session remains valid for device approval.
+  freshSessionWindow: AGENT_AUTH_FRESH_SESSION_WINDOW_SECONDS,
+  // Agent records and grants persist until explicit revocation. Every
+  // request still uses a one-minute JWT and consumes its JTI exactly once.
+  agentSessionTTL: 0,
+  agentMaxLifetime: 0,
+  absoluteLifetime: 0,
+  resolveGrantTTL: () => null,
+  jtiCacheStorage: "secondary-storage",
+  jwksCacheStorage: "secondary-storage",
+  dangerouslySkipJtiCheck: false,
+  // Agent Auth 0.6.2 adds the request Host to accepted JWT audiences when proxy trust is enabled.
+  // The exported handler canonicalizes Agent Auth origin headers instead, so the plugin only
+  // evaluates the configured public origin.
+  trustProxy: false,
+  async onExecute({ capability, arguments: args, agentSession, grant }) {
+    return executeAgentCapability({ capability, arguments: args, session: agentSession, grant });
+  },
+  onEvent: emitAgentAuthEvent,
+});
+
 const configuredAuth = betterAuth({
   baseURL: process.env.BETTER_AUTH_URL ?? process.env.COMPANION_API_URL ?? "http://127.0.0.1:3001",
   basePath: "/auth",
@@ -131,43 +173,7 @@ const configuredAuth = betterAuth({
         await sendTransactionalEmail(mail);
       },
     }),
-    agentAuth({
-      providerName: "Companion",
-      providerDescription: "Deploy, govern, and install organization skills through narrowly delegated capabilities.",
-      modes: ["delegated"],
-      capabilities: [...AGENT_AUTH_CAPABILITIES],
-      validateCapabilities: (requested) =>
-        requested.every((name) => AGENT_AUTH_CAPABILITIES.some((capability) => capability.name === name)),
-      requireAuthForCapabilities: false,
-      approvalMethods: ["device_authorization"],
-      resolveApprovalMethod: () => "device_authorization",
-      deviceAuthorizationPage: agentDeviceAuthorizationPage(),
-      // Dynamic host registration remains enabled, but only with inline public JWKs. Agent Auth
-      // 0.6.2 fetches remote JWKS URLs before signature verification, so both this callback and the
-      // outer request guard reject that transport before the plugin can perform network I/O.
-      allowDynamicHostRegistration: (ctx) =>
-        !authorizationUsesRemoteAgentJwks(ctx.headers?.get("authorization")),
-      defaultHostCapabilities: [],
-      jwtMaxAge: 60,
-      freshSessionWindow: 5 * 60,
-      // Agent records and grants persist until explicit revocation. Every
-      // request still uses a one-minute JWT and consumes its JTI exactly once.
-      agentSessionTTL: 0,
-      agentMaxLifetime: 0,
-      absoluteLifetime: 0,
-      resolveGrantTTL: () => null,
-      jtiCacheStorage: "secondary-storage",
-      jwksCacheStorage: "secondary-storage",
-      dangerouslySkipJtiCheck: false,
-      // Agent Auth 0.6.2 adds the request Host to accepted JWT audiences when proxy trust is enabled.
-      // The exported handler canonicalizes Agent Auth origin headers instead, so the plugin only
-      // evaluates the configured public origin.
-      trustProxy: false,
-      async onExecute({ capability, arguments: args, agentSession, grant }) {
-        return executeAgentCapability({ capability, arguments: args, session: agentSession, grant });
-      },
-      onEvent: emitAgentAuthEvent,
-    }),
+    companionAgentAuthPlugin,
   ],
   advanced: {
     cookiePrefix: process.env.BETTER_AUTH_COOKIE_PREFIX ?? "better-auth",

@@ -132,7 +132,14 @@ export function actorFromContext(
     if (!allowToken) throw new Error("personal access tokens are not allowed on this endpoint");
     return tokenActor;
   }
-  throw new Error("not authenticated");
+  throw new AuthenticationRequiredError();
+}
+
+export class AuthenticationRequiredError extends Error {
+  constructor() {
+    super("not authenticated");
+    this.name = "AuthenticationRequiredError";
+  }
 }
 
 /** True when the request is authenticated by a personal access token rather than a cookie session. */
