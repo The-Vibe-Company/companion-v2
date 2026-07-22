@@ -83,25 +83,13 @@ def parse_name_status(output: str) -> list[dict[str, str]]:
 def find_project_files(repo_root: Path) -> tuple[list[str], list[str]]:
     manifests: list[str] = []
     ci_files: list[str] = []
-    skip = {
-        ".git",
-        ".kilocode",
-        ".next",
-        ".venv",
-        "__pycache__",
-        "build",
-        "dist",
-        "node_modules",
-        "output",
-        "outputs",
-        "plans",
-        "tmp",
-        "vendor",
-    }
-    for path in repo_root.rglob("*"):
-        if any(part in skip for part in path.relative_to(repo_root).parts):
+    listed = git(repo_root, ["ls-files", "-z", "--cached", "--others", "--exclude-standard"])
+    if listed.returncode != 0:
+        raise RuntimeError(f"failed to list repository files: {listed.stderr.strip()}")
+    for rel in listed.stdout.split("\0"):
+        if not rel:
             continue
-        rel = str(path.relative_to(repo_root))
+        path = repo_root / rel
         if path.is_file() and path.name in MANIFEST_NAMES:
             manifests.append(rel)
         if path.is_file() and (

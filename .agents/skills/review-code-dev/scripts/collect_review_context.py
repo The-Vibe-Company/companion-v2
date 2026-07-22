@@ -183,6 +183,11 @@ def github_repo_from_origin(repo: Path) -> dict[str, str] | None:
 
 
 def detect_base_branch(repo: Path) -> str:
+    default = git(["symbolic-ref", "refs/remotes/origin/HEAD"], repo)
+    if default["exit_code"] == 0:
+        ref = default["stdout"].strip()
+        if ref.startswith("refs/remotes/origin/"):
+            return ref.removeprefix("refs/remotes/origin/")
     upstream = git(["rev-parse", "--abbrev-ref", "@{upstream}"], repo)
     if upstream["exit_code"] == 0:
         branch = upstream["stdout"].strip()
@@ -190,11 +195,6 @@ def detect_base_branch(repo: Path) -> str:
             return branch.removeprefix("origin/")
         if branch:
             return branch
-    default = git(["symbolic-ref", "refs/remotes/origin/HEAD"], repo)
-    if default["exit_code"] == 0:
-        ref = default["stdout"].strip()
-        if ref.startswith("refs/remotes/origin/"):
-            return ref.removeprefix("refs/remotes/origin/")
     return "main"
 
 
@@ -330,13 +330,15 @@ def collect_uncommitted(
 
 def collect_base(repo: Path, base: str, max_diff_bytes: int) -> dict[str, Any]:
     diff_ref = resolve_diff_ref(repo, base)
+    diff_range = f"{diff_ref}...HEAD"
     return {
         "mode": "base",
         "base_branch": base,
         "diff_ref": diff_ref,
-        "changed_files": split_names(require_ok(git(["diff", "--name-only", diff_ref], repo))),
-        "diff_stat": require_ok(git(["diff", diff_ref, "--stat"], repo, timeout=120)),
-        "diff": truncate_text(require_ok(git(["diff", diff_ref], repo, timeout=120)), max_diff_bytes),
+        "diff_range": diff_range,
+        "changed_files": split_names(require_ok(git(["diff", "--name-only", diff_range], repo))),
+        "diff_stat": require_ok(git(["diff", "--stat", diff_range], repo, timeout=120)),
+        "diff": truncate_text(require_ok(git(["diff", diff_range], repo, timeout=120)), max_diff_bytes),
     }
 
 
