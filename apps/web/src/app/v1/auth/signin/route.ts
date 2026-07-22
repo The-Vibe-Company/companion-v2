@@ -30,6 +30,16 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   // requireEmailVerification + sendOnSignIn: an unverified sign-in re-mails a fresh OTP, so route the
   // client straight to the verify screen instead of showing a credentials error.
   if (authErrorCode(json) === "EMAIL_NOT_VERIFIED") {
+    const resend = await forwardAuth(request, "/auth/email-otp/send-verification-otp", {
+      email,
+      type: "email-verification",
+    });
+    if (!resend.response.ok && resend.response.status !== 429) {
+      return NextResponse.json(
+        { ok: false, message: authErrorMessage(resend.json, "Could not send the verification code.") },
+        { status: resend.response.status >= 500 ? 502 : resend.response.status },
+      );
+    }
     return NextResponse.json({ ok: false, needsVerification: true, email });
   }
 
