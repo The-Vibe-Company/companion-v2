@@ -48,6 +48,26 @@ describe("Agent Auth canonical public origin", () => {
     }), publicOrigin)).toBeNull();
   });
 
+  it("accepts the fixed public-origin marker from a proxy that rewrites forwarding headers", () => {
+    const canonical = canonicalAgentAuthHeaders(new Headers({
+      host: "api.internal:8080",
+      "x-forwarded-host": "railway.internal",
+      "x-forwarded-proto": "https",
+      "x-companion-agent-auth-origin": publicOrigin,
+    }), publicOrigin);
+    expect(canonical?.get("host")).toBe("companion.example.com");
+    expect(canonical?.get("x-companion-agent-auth-origin")).toBeNull();
+
+    expect(canonicalAgentAuthHeaders(new Headers({
+      host: "api.internal:8080",
+      "x-companion-agent-auth-origin": "https://attacker.example",
+    }), publicOrigin)).toBeNull();
+    expect(canonicalAgentAuthHeaders(new Headers({
+      host: "api.internal:8080",
+      "x-companion-agent-auth-origin": `${publicOrigin}, https://attacker.example`,
+    }), publicOrigin)).toBeNull();
+  });
+
   it("canonicalizes only Agent Auth protocol routes and preserves request bodies", async () => {
     expect(isAgentAuthProtocolPath("/auth/agent/register")).toBe(true);
     expect(isAgentAuthProtocolPath("/auth/host/update")).toBe(true);

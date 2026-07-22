@@ -46,9 +46,17 @@ The official client takes one JSON request on stdin and returns one value-free J
 stdout:
 
 ```sh
+printf '%s' '{"action":"connect","apiUrl":"https://companion.acme.dev/v1","workspaceId":"6a9c3cfd-6a1e-4a7b-8f77-1f7f0e62e3d4","name":"Codex"}' \
+  | node scripts/companion-agent-client.mjs
+
 printf '%s' '{"action":"api","method":"GET","path":"/skills?lib=org"}' \
   | node scripts/companion-agent-client.mjs
 ```
+
+Use `action: "connect"` once when the workspace has no Agent Auth reference. It performs discovery,
+dynamic host registration, and the device-approval flow, writes value-free status events to stderr,
+and persists the resulting non-secret workspace reference. Rerun the requested API action after
+approval.
 
 Uploads use `action: "upload"` plus `inputPath` and an exact query containing
 `action=publish|validate`, `expect_slug`, and `version`; existing skills also require
