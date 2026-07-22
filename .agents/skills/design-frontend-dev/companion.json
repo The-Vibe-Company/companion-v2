@@ -13,7 +13,8 @@
         "date": "2026-07-22",
         "changes": [
           "Remove residual live-mode parameter instructions from layout and typography guidance.",
-          "Correct the bundled evaluation skill name."
+          "Correct the bundled evaluation skill name.",
+          "Replace third-party image hotlink guidance with host-authorized local asset guidance."
         ]
       },
       {
