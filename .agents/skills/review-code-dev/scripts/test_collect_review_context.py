@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -118,6 +120,9 @@ class CollectReviewContextTests(unittest.TestCase):
             '"api_key": "json api secret",',
             'GITHUB_TOKEN=environment-secret',
             'SERVICE_PRIVATE_KEY: yaml-secret',
+            'DATABASE_URL=postgres://admin:db-password@db.internal/app',
+            'SERVICE_DSN="redis://cache:cache-password@redis.internal/0"',
+            'prefix github_pat_1234567890abcdefghijklmnop suffix',
             'monkey=banana',
         ])
 
@@ -127,7 +132,10 @@ class CollectReviewContextTests(unittest.TestCase):
         self.assertNotIn("json api secret", redacted)
         self.assertNotIn("environment-secret", redacted)
         self.assertNotIn("yaml-secret", redacted)
-        self.assertEqual(redacted.count("<redacted>"), 4)
+        self.assertNotIn("db-password", redacted)
+        self.assertNotIn("cache-password", redacted)
+        self.assertNotIn("github_pat_", redacted)
+        self.assertEqual(redacted.count("<redacted>"), 6)
         self.assertIn("monkey=banana", redacted)
 
     def test_redacts_secret_file_diffs_and_private_key_blocks(self) -> None:
@@ -171,11 +179,60 @@ class CollectReviewContextTests(unittest.TestCase):
                 entries,
                 include_untracked_previews=False,
                 include_staged_diff=False,
+                include_unstaged_diff=False,
             )
 
             self.assertEqual(state["untracked_files"], ["private-notes.txt"])
             self.assertEqual(state["untracked_file_previews"], [])
             self.assertEqual(state["staged_diff"]["text"], "")
+            self.assertEqual(state["unstaged_diff"]["text"], "")
+
+    def test_base_mode_can_explicitly_include_worktree_patches(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            git(repo, "init", "-b", "main")
+            git(repo, "config", "user.email", "test@example.test")
+            git(repo, "config", "user.name", "Test")
+            target = repo / "tracked.txt"
+            target.write_text("base\n", encoding="utf-8")
+            git(repo, "add", "tracked.txt")
+            git(repo, "commit", "-m", "base")
+            target.write_text("unstaged\n", encoding="utf-8")
+            (repo / "new.txt").write_text("new work\n", encoding="utf-8")
+
+            state = collector.collect_worktree_state(
+                repo,
+                1_000_000,
+                include_untracked_previews=True,
+                include_staged_diff=True,
+                include_unstaged_diff=True,
+            )
+
+            self.assertIn("unstaged", state["unstaged_diff"]["text"])
+            self.assertEqual(state["untracked_file_previews"][0]["text"], "new work\n")
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(MODULE_PATH),
+                    "--cwd",
+                    str(repo),
+                    "--mode",
+                    "base",
+                    "--base",
+                    "main",
+                    "--include-worktree",
+                ],
+                check=True,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            payload = json.loads(result.stdout)
+            self.assertIn("tracked.txt", payload["changed_files"])
+            self.assertIn("new.txt", payload["changed_files"])
+            self.assertIn("unstaged", payload["unstaged_diff"]["text"])
+            self.assertEqual(payload["untracked_file_previews"][0]["text"], "new work\n")
 
     def test_untracked_preview_is_bounded_before_decoding(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

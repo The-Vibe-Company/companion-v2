@@ -124,6 +124,8 @@ For frontend diffs, run a frontend-focused `review-code-dev` pass on the impacte
 
 Run `review-code-dev` against the branch/base diff after verification is green enough to review. Use a fresh context or subagent whenever available, and pass only the repo path, base branch, changed-file summary, user goal, and requested review depth.
 
+Because this gate runs before the commit phase, collect its base-mode context with `review-code-dev/scripts/collect_review_context.py --include-worktree` so the exact staged, unstaged, and untracked implementation is reviewed. This opt-in is required here and should remain omitted for ordinary committed branch reviews.
+
 Use `deep` mode when the diff touches auth, billing, data export, migrations, permissions, public APIs, frontend UX, or cross-module architecture. Otherwise use `standard`.
 
 Write the review result and artifact location in `RUN_DIR/review-gate.md`. Fix confirmed P0/P1/P2 issues, then re-run verification and the review gate within the loop caps. Do not publish helper speculation as a blocker unless the lead review verified it.

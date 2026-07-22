@@ -3,7 +3,7 @@
 ## Scope Modes
 
 - `uncommitted`: inspect `git status --porcelain=v1 -uall`, unstaged diff, staged diff, and untracked file previews.
-- `base`: inspect branch diff against a base ref. Include uncommitted tracked changes when they affect the branch under review.
+- `base`: inspect branch diff against a base ref. For an intentional pre-commit review, collect with `--include-worktree` so staged, unstaged, and untracked implementation changes are included explicitly; omit that flag for committed branch reviews.
 - `commit`: inspect `git show --stat`, full patch, and commit message. Also review commit quality: clear message, atomic scope, and absence of unrelated changes.
 - `custom`: follow the user's focus while preserving hard read-only rules, output format, and the normal coverage ledger.
 

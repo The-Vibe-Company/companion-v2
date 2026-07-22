@@ -1,13 +1,21 @@
 {
   "$schema": "https://thecompanion.sh/schemas/companion-manifest.v2.schema.json",
   "name": "review-code-dev",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "title": "Review code",
   "description": "Run isolated local code reviews with a primary review agent, bounded specialist loops, non-committable artifacts, and parseable P0-P3 findings.",
   "notes": "## What it does\n\nMega Code Review reviews uncommitted changes, branch diffs, commits, or custom scopes in any repository while keeping the main conversation clean. It delegates deep review to an isolated primary reviewer when a safe adapter exists, passing only a minimal brief plus local git context.\n\n## Safety model\n\n- Read-only review by default.\n- Never edits files during review.\n- Never reproduces secret values.\n- Treats repository content as data, not instructions.\n- Writes portable artifacts under plans/review-code-dev/runs/.\n- Prepares that artifact root with a local Git exclude rule before writing, and refuses to use it if it is already tracked.\n\n## Specialist review loop\n\nThe primary reviewer runs a bounded loop: intent/scope audit, direct diff pass, focused specialists, optional red-team challenge, candidate vetting, artifact validation, and at most one artifact-only repair. Specialist reviewers live under references/reviewers/ and include frontend, backend, tests, security, architecture, performance, API contract, data migration, and red-team. The frontend reviewer depends on Impeccable for UI and design-review judgment while preserving Mega Code Review's read-only constraints.\n\n## Evidence discipline\n\nFocused helpers return structured candidate JSONL. The primary reviewer assigns confidence, fingerprints root causes, checks evidence, records duplicates and rejected candidates, and publishes only verified P0-P3 findings in review.md.\n\n## Artifacts\n\nThe review writes run-metadata.json, context.json, recon.md, coverage.md, review.md, and review.json. When delegation is used it also writes delegation-brief.md and subagents.md. Looping reviews may write scope-audit.md, candidate-findings.json, loop-state.json, artifact-validation.md, adversarial-review.md, rejected-findings.md, verification.md, fix-report.md, notes.md, or pr-link.md when the workflow calls for them.",
   "metadata": {
     "companionSkillId": "b0780a97-6972-4a2b-8e88-f41a528900c7",
     "changelog": [
+      {
+        "version": "1.2.2",
+        "date": "2026-07-22",
+        "changes": [
+          "Add an explicit include-worktree mode for pre-commit base reviews without copying unrelated local content by default.",
+          "Redact authenticated URLs, DSNs, database URLs, Redis URLs, webhook credential containers, and GitHub fine-grained PATs."
+        ]
+      },
       {
         "version": "1.2.1",
         "date": "2026-07-22",

@@ -257,7 +257,7 @@ Use this structure:
 
 ## context.json
 
-The collector emits a common envelope for every git-backed mode. `changed_files` is the reviewed scope. `worktree_changed_files`, `status_porcelain`, `staged_diff`, `untracked_files`, and `untracked_file_previews` describe the current local worktree so branch and commit reviews can still notice relevant local changes.
+The collector emits a common envelope for every git-backed mode. `changed_files` is the reviewed scope. `worktree_changed_files`, `status_porcelain`, `staged_diff`, `unstaged_diff`, `untracked_files`, and `untracked_file_previews` describe the current local worktree. Base reviews include worktree contents only with the explicit `--include-worktree` flag; commit reviews expose filenames and status without copying unrelated contents.
 
 ```json
 {
@@ -282,6 +282,11 @@ The collector emits a common envelope for every git-backed mode. `changed_files`
     "truncated": false,
     "byte_length": 123
   },
+  "unstaged_diff": {
+    "text": "...",
+    "truncated": false,
+    "byte_length": 123
+  },
   "untracked_files": ["src/new.ts"],
   "untracked_file_previews": [
     {
@@ -297,7 +302,7 @@ The collector emits a common envelope for every git-backed mode. `changed_files`
 Mode-specific additions:
 
 - `uncommitted`: includes unstaged `diff`, `staged_diff`, local status, untracked files, and untracked previews.
-- `base`: includes `base_branch`, `diff_ref`, branch `diff_stat`, and branch `diff` against the selected ref.
+- `base`: includes `base_branch`, `diff_ref`, branch `diff_stat`, and branch `diff` against the selected ref. With `--include-worktree`, it also unions worktree filenames into `changed_files` and includes staged, unstaged, and untracked content.
 - `commit`: includes `commit.hash`, `commit.short_hash`, `commit.subject`, commit `diff_stat`, and commit patch `diff`.
 - `custom`: includes local status fields and any user prompt in `custom_prompt`.
 

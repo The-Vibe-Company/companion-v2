@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from review_dependency import resolve_review_skill_dir
+from review_dependency import EXPECTED_SKILL_ID
 
 
 MODULE_PATH = Path(__file__).with_name("collect_ship_context.py")
@@ -76,6 +77,16 @@ class CollectShipContextTests(unittest.TestCase):
             skill_dir = Path(tmp) / "custom-review-install"
             (skill_dir / "scripts").mkdir(parents=True)
             (skill_dir / "SKILL.md").write_text("---\nname: review-code-dev\n---\n", encoding="utf-8")
+            (skill_dir / "scripts" / "collect_review_context.py").write_text("", encoding="utf-8")
+            (skill_dir / "scripts" / "prepare_review_run.py").write_text("", encoding="utf-8")
+            (skill_dir / "companion.json").write_text(
+                json.dumps({
+                    "name": "review-code-dev",
+                    "version": "1.2.2",
+                    "metadata": {"companionSkillId": EXPECTED_SKILL_ID},
+                }),
+                encoding="utf-8",
+            )
 
             with patch.dict(os.environ, {"REVIEW_CODE_DEV_SKILL_DIR": str(skill_dir)}):
                 self.assertEqual(resolve_review_skill_dir(), skill_dir.resolve())
@@ -87,6 +98,15 @@ class CollectShipContextTests(unittest.TestCase):
             scripts = skill_dir / "scripts"
             scripts.mkdir(parents=True)
             (skill_dir / "SKILL.md").write_text("---\nname: review-code-dev\n---\n", encoding="utf-8")
+            (skill_dir / "companion.json").write_text(
+                json.dumps({
+                    "name": "review-code-dev",
+                    "version": "1.2.2",
+                    "metadata": {"companionSkillId": EXPECTED_SKILL_ID},
+                }),
+                encoding="utf-8",
+            )
+            (scripts / "prepare_review_run.py").write_text("", encoding="utf-8")
             fake_collector = scripts / "collect_review_context.py"
             fake_collector.write_text(
                 "import json, sys\n"
@@ -111,6 +131,20 @@ class CollectShipContextTests(unittest.TestCase):
             [{"status": "R100", "old_path": "apps/api/route.ts", "path": "docs/route.md"}],
         )
         paths = [path for item in changed for path in (item.get("old_path"), item["path"]) if path]
+        self.assertTrue(any(collector.BACKEND_RE.search(path) for path in paths))
+
+    def test_worktree_files_join_impact_scope(self) -> None:
+        changed = [{"status": "M", "path": "docs/readme.md"}]
+
+        merged = collector.include_worktree_files(
+            changed,
+            ["apps/web/src/page.tsx", "packages/core/src/auth.ts"],
+        )
+
+        paths = [item["path"] for item in merged]
+        self.assertIn("apps/web/src/page.tsx", paths)
+        self.assertIn("packages/core/src/auth.ts", paths)
+        self.assertTrue(any(collector.FRONTEND_RE.search(path) for path in paths))
         self.assertTrue(any(collector.BACKEND_RE.search(path) for path in paths))
 
 

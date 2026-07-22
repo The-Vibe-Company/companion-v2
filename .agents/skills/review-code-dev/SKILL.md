@@ -124,6 +124,8 @@ python "$SKILL_DIR/scripts/collect_review_context.py" --mode base --base main --
 python "$SKILL_DIR/scripts/collect_review_context.py" --mode commit --commit HEAD --output "$RUN_DIR/context.json"
 ```
 
+When a base-mode review intentionally runs before the implementation is committed, add `--include-worktree` so staged, unstaged, and untracked changes join the review scope. Omit it for ordinary committed branch reviews so unrelated local content is not copied silently.
+
 If the diff is truncated, inspect narrower file diffs before finishing. If the repository has no git metadata or the user supplied a patch manually, create `context.json` yourself with the same fields described in `references/output-contract.md`.
 
 ### Phase 3 - Review

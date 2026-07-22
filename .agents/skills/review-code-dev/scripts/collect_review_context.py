@@ -42,18 +42,23 @@ SECRET_FILENAME_PATTERNS = (
 SECRET_ASSIGNMENT_RE = re.compile(
     r"(?i)(?<![a-z0-9_.-])((?:[\"'])?(?:[a-z][a-z0-9_.-]*[_-])?(?:api[_-]?key|access[_-]?token|"
     r"auth[_-]?token|refresh[_-]?token|client[_-]?secret|private[_-]?key|secret|"
-    r"password|passwd|authorization|token|key)(?:[\"'])?\s*[:=]\s*)"
+    r"password|passwd|authorization|database[_-]?url|redis[_-]?url|"
+    r"connection[_-]?(?:url|string)|webhook[_-]?url|dsn|uri|token|key)"
+    r"(?:[\"'])?\s*[:=]\s*)"
     r"(?:\"(?:\\.|[^\"\\\r\n])*\"|'(?:\\.|[^'\\\r\n])*'|[^\s#]+)"
 )
 BEARER_RE = re.compile(r"(?i)(\bbearer\s+)([A-Za-z0-9._~+/=-]{8,})")
 SECRET_VALUE_RE = re.compile(
-    r"(?i)(AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9_]{20,}|"
+    r"(?i)(AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|"
     r"xox[baprs]-[A-Za-z0-9-]{10,}|sk-[A-Za-z0-9_-]{20,})"
 )
 PRIVATE_KEY_BLOCK_RE = re.compile(
     r"-----BEGIN (?P<label>[A-Z0-9 ]*PRIVATE KEY)-----.*?"
     r"(?:-----END (?P=label)-----|\Z)",
     re.DOTALL,
+)
+CREDENTIAL_URL_RE = re.compile(
+    r"(?i)(\b[a-z][a-z0-9+.-]*://)([^/\s:@]+):([^@\s/]+)@"
 )
 
 
@@ -235,6 +240,7 @@ def is_secret_like_path(name: str) -> bool:
 
 def redact_secret_text(text: str) -> str:
     text = PRIVATE_KEY_BLOCK_RE.sub("<redacted-private-key>", text)
+    text = CREDENTIAL_URL_RE.sub(r"\1<redacted-user>:<redacted-password>@", text)
     text = SECRET_ASSIGNMENT_RE.sub(lambda match: f"{match.group(1)}<redacted>", text)
     text = BEARER_RE.sub(lambda match: f"{match.group(1)}<redacted>", text)
     text = SECRET_VALUE_RE.sub("<redacted-secret>", text)
@@ -365,6 +371,7 @@ def collect_worktree_state(
     entries: list[dict[str, str]] | None = None,
     include_untracked_previews: bool = True,
     include_staged_diff: bool = True,
+    include_unstaged_diff: bool = True,
 ) -> dict[str, Any]:
     status_entries = entries if entries is not None else git_status_entries(repo)
     untracked_names = parse_untracked_files(status_entries)
@@ -382,6 +389,11 @@ def collect_worktree_state(
                 max_diff_bytes,
             )
             if include_staged_diff
+            else {"text": "", "truncated": False, "byte_length": 0}
+        ),
+        "unstaged_diff": (
+            collect_git_diff(repo, ["diff"], max_diff_bytes)
+            if include_unstaged_diff
             else {"text": "", "truncated": False, "byte_length": 0}
         ),
     }
@@ -447,6 +459,11 @@ def main() -> int:
     parser.add_argument("--prompt", help="Custom review instruction, stored as metadata only")
     parser.add_argument("--cwd", default=".", help="Repository working directory")
     parser.add_argument("--max-diff-bytes", type=int, default=DEFAULT_MAX_DIFF_BYTES)
+    parser.add_argument(
+        "--include-worktree",
+        action="store_true",
+        help="Include staged, unstaged, and untracked content in base mode",
+    )
     parser.add_argument("--output", help="Write JSON to this path instead of stdout")
     args = parser.parse_args()
 
@@ -467,12 +484,14 @@ def main() -> int:
         else:
             mode = "base"
 
+    include_worktree = mode == "uncommitted" or (mode == "base" and args.include_worktree)
     worktree = collect_worktree_state(
         repo,
         args.max_diff_bytes,
         status_entries,
-        include_untracked_previews=mode == "uncommitted",
-        include_staged_diff=mode == "uncommitted",
+        include_untracked_previews=include_worktree,
+        include_staged_diff=include_worktree,
+        include_unstaged_diff=include_worktree,
     )
 
     payload: dict[str, Any] = {
@@ -490,6 +509,11 @@ def main() -> int:
     elif mode == "base":
         base = args.base or detect_base_branch(repo)
         payload.update(collect_base(repo, base, args.max_diff_bytes))
+        if args.include_worktree:
+            payload["changed_files"] = list(dict.fromkeys([
+                *payload["changed_files"],
+                *worktree["worktree_changed_files"],
+            ]))
     elif mode == "commit":
         if not args.commit:
             raise SystemExit("--commit is required for commit mode")

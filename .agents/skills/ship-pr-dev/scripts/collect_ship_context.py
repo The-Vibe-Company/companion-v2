@@ -114,6 +114,23 @@ def parse_name_status(output: str) -> list[dict[str, str]]:
     return changed
 
 
+def include_worktree_files(
+    changed: list[dict[str, str]],
+    worktree_files: list[str],
+) -> list[dict[str, str]]:
+    known = {
+        path
+        for item in changed
+        for path in (item.get("old_path"), item["path"])
+        if path
+    }
+    for path in worktree_files:
+        if path not in known:
+            changed.append({"status": "worktree", "path": path})
+            known.add(path)
+    return changed
+
+
 def find_project_files(repo_root: Path) -> tuple[list[str], list[str]]:
     manifests: list[str] = []
     ci_files: list[str] = []
@@ -155,7 +172,10 @@ def main() -> None:
 
     name_status = git(repo_root, ["diff", "--name-status", "-z", diff_range])
     status = git(repo_root, ["status", "--short"])
-    changed_files = parse_name_status(name_status.stdout)
+    changed_files = include_worktree_files(
+        parse_name_status(name_status.stdout),
+        review_context.get("worktree_changed_files", []),
+    )
     paths = [path for item in changed_files for path in (item.get("old_path"), item["path"]) if path]
     manifests, ci_files = find_project_files(repo_root)
 
