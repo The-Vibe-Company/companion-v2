@@ -29,6 +29,49 @@ export interface PathCheck {
   violation?: string;
 }
 
+interface SeenPortablePath {
+  display: string;
+  kind: "directory" | "file";
+}
+
+const WIN32_RESERVED_BASENAME = /^(?:con|prn|aux|nul|clock\$|conin\$|conout\$|com[1-9¹²³]|lpt[1-9¹²³])$/i;
+
+function windowsPathSegmentViolation(segment: string): string | null {
+  if ([...segment].some((character) => character.codePointAt(0)! <= 31) || /[<>:"|?*]/.test(segment)) {
+    return "contains a Windows-reserved character";
+  }
+  if (/[ .]$/.test(segment)) return "ends with a dot or space";
+  const basename = (segment.split(".", 1)[0] ?? "").replace(/[ .]+$/, "");
+  if (WIN32_RESERVED_BASENAME.test(basename)) return "uses a Windows-reserved device name";
+  return null;
+}
+
+function registerPortablePath(
+  seen: Map<string, SeenPortablePath>,
+  path: string,
+  kind: "directory" | "file",
+): string | null {
+  const segments = path.split("/");
+  for (let index = 0; index < segments.length; index += 1) {
+    const display = segments.slice(0, index + 1).join("/");
+    const key = display.normalize("NFC").toLocaleLowerCase("en-US");
+    const expectedKind = index === segments.length - 1 ? kind : "directory";
+    const previous = seen.get(key);
+    if (
+      previous
+      && (
+        previous.display !== display
+        || previous.kind !== expectedKind
+        || (index === segments.length - 1 && expectedKind === "file")
+      )
+    ) {
+      return `duplicate or Windows-colliding path: ${path}`;
+    }
+    if (!previous) seen.set(key, { display, kind: expectedKind });
+  }
+  return null;
+}
+
 /** Normalize a tar entry name to a safe posix relpath, flagging traversal/abs/special. */
 export function normalizePosix(name: string): PathCheck {
   const cleaned = name.replace(/\\/g, "/");
@@ -39,6 +82,10 @@ export function normalizePosix(name: string): PathCheck {
   for (const seg of cleaned.split("/")) {
     if (seg === "" || seg === ".") continue;
     if (seg === "..") return { path: cleaned, violation: "path traversal" };
+    const windowsViolation = windowsPathSegmentViolation(seg);
+    if (windowsViolation) {
+      return { path: cleaned, violation: `Windows-unsafe path segment (${windowsViolation}): ${seg}` };
+    }
     parts.push(seg);
   }
   return { path: parts.join("/") };
@@ -153,11 +200,26 @@ async function walkArchive(
   onViolation?: (violation: string) => void,
 ): Promise<ArchiveCounters> {
   const counters: ArchiveCounters = { totalBytes: 0, fileCount: 0, oversize: false };
+  const seenPortablePaths = new Map<string, SeenPortablePath>();
   const ex = tarExtract();
 
   await new Promise<void>((resolve, reject) => {
     ex.on("entry", (header: Headers, stream, next) => {
       const entry = classifyArchiveEntry(header);
+      const existingViolation = entry.kind === "skip" ? entry.violation : null;
+      if (!existingViolation && entry.path) {
+        const collision = registerPortablePath(
+          seenPortablePaths,
+          entry.path,
+          entry.type === "directory" ? "directory" : "file",
+        );
+        if (collision) {
+          countArchiveEntry(counters, entry);
+          onViolation?.(collision);
+          drainArchiveStream(stream, next);
+          return;
+        }
+      }
       countArchiveEntry(counters, entry);
       if (entry.kind === "skip") {
         if (entry.violation) onViolation?.(entry.violation);
@@ -685,6 +747,7 @@ export async function scanDir(dir: string): Promise<DirScan> {
   const violations: string[] = [];
   let totalBytes = 0;
   let oversize = false;
+  const seenPortablePaths = new Map<string, SeenPortablePath>();
 
   async function walk(abs: string, rel: string): Promise<void> {
     const dirents = await readdir(abs, { withFileTypes: true });
@@ -695,6 +758,22 @@ export async function scanDir(dir: string): Promise<DirScan> {
       if (d.isSymbolicLink()) {
         violations.push(`symlink rejected: ${childRel}`);
         continue;
+      }
+      const normalized = normalizePosix(childRel);
+      if (normalized.violation) {
+        violations.push(`${normalized.violation}: ${childRel}`);
+        continue;
+      }
+      if (d.isDirectory() || d.isFile()) {
+        const collision = registerPortablePath(
+          seenPortablePaths,
+          normalized.path,
+          d.isDirectory() ? "directory" : "file",
+        );
+        if (collision) {
+          violations.push(collision);
+          continue;
+        }
       }
       const childAbs = join(abs, d.name);
       if (d.isDirectory()) {

@@ -30,6 +30,7 @@ vi.mock("@companion/auth", () => ({
     handler: vi.fn(),
     $Infer: {},
   },
+  registerAgentCapabilityExecutor: vi.fn(() => () => undefined),
 }));
 
 import { app } from "../../src/index";

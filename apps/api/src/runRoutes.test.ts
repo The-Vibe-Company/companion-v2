@@ -113,6 +113,7 @@ const catalogMocks = vi.hoisted(() => ({
 vi.mock("@hono/node-server", () => ({ serve: vi.fn() }));
 vi.mock("@companion/auth", () => ({
   auth: { api: { getSession: authMocks.getSession }, handler: authMocks.handler, $Infer: {} },
+  registerAgentCapabilityExecutor: vi.fn(() => () => undefined),
 }));
 vi.mock("@companion/core/services", () => serviceMocks);
 vi.mock("@companion/db", () => ({
@@ -132,6 +133,9 @@ vi.mock("@companion/storage", () => ({
   resolveSkillArchiveByteRange: storageMocks.resolveSkillArchiveByteRange,
   InvalidSkillArchiveRangeError: storageMocks.InvalidSkillArchiveRangeError,
   isStoragePreconditionFailure: storageMocks.isStoragePreconditionFailure,
+  publicSkillReleaseKey: ({ orgId, checksum }: { orgId: string; checksum: string }) =>
+    `${orgId}/public-releases/sha256/${checksum.slice("sha256:".length)}.zip`,
+  putPublicSkillReleaseSnapshot: vi.fn(async () => "public-snapshot.zip"),
 }));
 
 import { app } from "./index";

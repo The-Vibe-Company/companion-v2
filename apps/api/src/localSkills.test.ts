@@ -5,7 +5,11 @@ import { describe, expect, it } from "vitest";
 import { companionSkillDir } from "@companion/companion-skill";
 import { reportLocalSkillInstallInputSchema } from "@companion/contracts";
 import { computeLocalSkillStatus } from "@companion/core/services";
-import { buildCompanionSkillRow, getCompanionSkillPackage } from "./companionSkillPackage";
+import {
+  buildCompanionSkillPrompts,
+  buildCompanionSkillRow,
+  getCompanionSkillPackage,
+} from "./companionSkillPackage";
 
 const workspaceId = "org-1";
 
@@ -44,7 +48,7 @@ describe("companion skill package + row", () => {
     const pkg = await getCompanionSkillPackage();
     expect(pkg.key).toBe("companion");
     expect(pkg.checksum).toMatch(/^sha256:[0-9a-f]{64}$/);
-    expect(pkg.version).toBe("1.25.0");
+    expect(pkg.version).toBe("1.26.0");
     expect(pkg.sizeBytes).toBeGreaterThan(0);
     expect(pkg.integrity.packageChecksum).toBe(pkg.checksum);
     expect(pkg.integrity.files["SKILL.md"]).toMatch(/^sha256:[0-9a-f]{64}$/);
@@ -68,6 +72,7 @@ describe("companion skill package + row", () => {
       "scripts/bootstrap_integrity.py",
       "scripts/bootstrap_update.py",
       "scripts/check_updates.py",
+      "scripts/companion-agent-client.mjs",
       "scripts/companion_lib.py",
       "scripts/create_secret.py",
       "scripts/install_skill.py",
@@ -99,8 +104,8 @@ describe("companion skill package + row", () => {
     expect(row.integrity.files["scripts/bootstrap.py"]).toMatch(/^sha256:[0-9a-f]{64}$/);
     expect(row.commands.length).toBeGreaterThan(0);
     expect(row.commands).toContainEqual({
-      name: "Refresh workspace credentials",
-      desc: "Replace an eligible expired file-backed token once without widening its scopes or printing the replacement.",
+      name: "Connect an agent",
+      desc: "Discover the instance and approve delegated, progressively requested Agent Auth capabilities for one workspace.",
     });
     expect(row.commands).toContainEqual({
       name: "Bootstrap health check",
@@ -119,9 +124,9 @@ describe("companion skill package + row", () => {
       desc: "Create or repair manifest v2 with identity, env/secrets, dependency ids, notes, commands, and changelog.",
     });
     const changelog = row.changes.join("\n");
-    expect(changelog).toContain("per-user, per-workspace sidebar ordering");
-    expect(changelog).toContain("private UI state");
-    expect(changelog).toContain("browser-session-only skill preference snapshot");
+    expect(changelog).toContain("delegated Agent Auth");
+    expect(changelog).toContain("pinned public release");
+    expect(changelog).toContain("exact verified ZIP");
     const manifest = JSON.parse(await readFile(join(companionSkillDir(), "companion.json"), "utf8")) as {
       metadata?: { changelog?: Array<{ version?: string; changes?: string[] }> };
     };
@@ -138,38 +143,42 @@ describe("companion skill package + row", () => {
     expect(row.prompts.install).toContain("python3 scripts/bootstrap.py --summary");
     expect(row.prompts.install).toContain("{base}");
     expect(row.prompts.install).toContain("{workspaceId}");
-    expect(row.prompts.install).toContain("{token}");
-    expect(row.prompts.install).toContain("~/.agents/skills/companion");
+    expect(row.prompts.install).not.toContain("{token}");
+    expect(row.prompts.install).toContain("@auth/agent-cli@0.5.1");
+    expect(row.prompts.install).toContain("Claude Code, Codex, or OpenCode");
     expect(row.prompts.install).toContain("OpenCode");
     expect(row.prompts.install).toContain(pkg.version);
   });
 
-  it("prompts persist fresh workspace credentials for future skill calls", async () => {
-    const row = await buildCompanionSkillRow(null, workspaceId);
-    for (const prompt of [row.prompts.install, row.prompts.update, row.prompts.use]) {
-      expect(prompt).toContain("$HOME/.companion/credentials.json");
-      expect(prompt).toContain("credentials.json");
-      expect(prompt).toContain("schemaVersion");
-      expect(prompt).toContain("activeWorkspaceId");
-      expect(prompt).toContain(".credentials.lock");
-      expect(prompt).toContain("{base}");
-      expect(prompt).toContain("{workspaceId}");
-      expect(prompt).toContain("{token}");
-      expect(prompt).toContain("Do not print the token");
-    }
-    expect(row.prompts.use).toContain("renameSync");
-    expect(row.prompts.use).toContain("Move-Item -Force");
-    expect(row.prompts.use).toContain("fs.existsSync(file)");
-    expect(row.prompts.use).toContain("LastWriteTimeUtc");
-    expect(row.prompts.use).toContain("Get-Content -Raw -ErrorAction Stop");
-    expect(row.prompts.update).toContain("/local-skills/companion/package");
-    expect(row.prompts.update).toContain("python3 scripts/bootstrap.py --json --auto-update-companion");
-    expect(row.prompts.update).toContain("local_customizations");
-    expect(row.prompts.update).toContain("transient backup only for the duration of the swap");
-    expect(row.prompts.update).toContain("Do not leave backup folders");
-    expect(row.prompts.update).not.toContain("Unzip it over");
-    expect(row.prompts.install).toContain("/local-skills/companion/installed");
-    expect(row.prompts.update).toContain("/local-skills/companion/installed");
+  it("revalidates live Agent Auth state and requests or reconnects with real CLI 0.5.1 commands", () => {
+    const prompts = buildCompanionSkillPrompts("1.26.0");
+    const prompt = prompts.install;
+    const cli = "npx --yes @auth/agent-cli@0.5.1";
+    expect(prompt).toContain(`${cli} --storage-dir "$HOME/.companion/agent-auth" --url="$origin" discover "$origin"`);
+    expect(prompt).toContain(`${cli} --storage-dir "$HOME/.companion/agent-auth" --url="$origin" connection "$agent_id"`);
+    expect(prompt).toContain(`${cli} --storage-dir "$HOME/.companion/agent-auth" --url="$origin" status "$agent_id"`);
+    expect(prompt).toContain(`${cli} --storage-dir "$HOME/.companion/agent-auth" --url="$origin" request "$agent_id" --capabilities skills:read`);
+    expect(prompt).toContain(`${cli} --storage-dir "$HOME/.companion/agent-auth" --url="$origin" connect --provider "$origin"`);
+    expect(prompt).toContain('--constraints \'{"skills:read":{"workspaceId":{"eq":"{workspaceId}"}}}\'');
+    expect(prompt).toContain("agent_capability_grants contains an active skills:read grant");
+    expect(prompt).toContain("agent is active but that grant is absent or non-active");
+    expect(prompt).toContain("status is not active (including revoked, rejected, or expired)");
+    expect(prompt).toContain("agent_not_found");
+    expect(prompt).toContain("host_revoked");
+    expect(prompt).toContain("host_not_found");
+    expect(prompt).toContain("remove the revoked ~/.companion/agent-auth/host.json identity");
+    expect(prompt.split('status "$agent_id"')).toHaveLength(4);
+    expect(prompt.indexOf('connection "$agent_id"')).toBeLessThan(prompt.indexOf('status "$agent_id"'));
+    expect(prompt.indexOf('status "$agent_id"')).toBeLessThan(prompt.indexOf('request "$agent_id"'));
+    expect(prompt).not.toContain(" connections ");
+    expect(prompt).not.toContain("{token}");
+    expect(prompt).toContain("schema-v3 ~/.companion/credentials.json");
+    expect(prompt).toContain("Migrate a schema-v2 token to schema v3 under legacyPat without using it");
+    expect(prompts.update).toContain("python3 scripts/bootstrap.py --json --auto-update-companion");
+    expect(prompts.update).toContain("local_customizations");
+    expect(prompts.update).toContain("do not use it silently");
+    expect(prompts.use).toContain("Never fall back to a PAT unless I explicitly select legacy-pat mode");
+    expect(prompts.install).toContain("/local-skills/companion/installed");
   });
 
   it("bundles mandatory self-update and explicit publish placement instructions", async () => {
@@ -224,14 +233,18 @@ describe("companion skill package + row", () => {
     expect(skillMd).toContain("Always include `scope=personal` or `scope=org` explicitly");
     expect(skillMd).toContain("re-publish never changes the skill's existing labels");
     expect(skillMd).toContain("If the library is not known from the");
-    expect(skillMd).toContain("workspace URL look wrong");
+    expect(skillMd).toContain("workspace URL looks wrong");
     expect(skillMd).toContain("Dependency preflight follows the workspace access model");
     expect(skillMd).not.toContain("Publishing defaults to `org`");
     expect(skillMd).not.toMatch(/owner_team[\s\S]{0,120}`scope`[\s\S]{0,120}parameters (?:is|are) rejected/);
     expect(apiRef).toContain("`expect_skill_id` / `scope` / `dependency` / `label` fields");
     expect(apiRef).toContain("The Companion skill must send `scope=personal` or `scope=org`");
-    expect(apiRef).toContain("POST /skills?scope=org&label=marketing&label=marketing%2Fseo");
-    expect(apiRef).toContain("POST /skills?scope=personal");
+    expect(apiRef).toContain(
+      "POST /skills?action=publish&expect_slug=my-skill&version=1.0.0&scope=org&label=marketing&label=marketing%2Fseo",
+    );
+    expect(apiRef).toContain(
+      "POST /skills?action=publish&expect_slug=my-skill&version=1.0.0&scope=personal",
+    );
     expect(apiRef).toContain("GET /v1/schemas/companion-manifest.v2.schema.json");
     expect(apiRef).toContain("POST /tokens/refresh");
     expect(apiRef).toContain("GET /skills?lib=mine");
@@ -241,7 +254,7 @@ describe("companion skill package + row", () => {
     expect(apiRef).toContain("GET /v1/orgs/current/skill-naming-policy");
     expect(apiRef).toContain("GET /orgs/current/skill-naming-policy");
     expect(apiRef).toContain("The response is `{ \"policy\": string | null }`");
-    expect(apiRef).toContain("The only PAT-readable org-settings surface");
+    expect(apiRef).toContain("The only org-settings surface in the closed Companion capability registry");
     expect(apiRef).toContain("GET /public/skills/{share_token}");
     expect(apiRef).toContain("Rows also include `share_token`");
     expect(apiRef).toContain("After a successful skill upload or update");
@@ -259,7 +272,7 @@ describe("companion skill package + row", () => {
     expect(apiRef).toContain("updates preserve the existing scope");
     expect(apiRef).toContain("skill must not declare `scope` or `visibility`");
     expect(apiRef).toContain("Re-publish never moves, adds, or removes folder labels");
-    expect(apiRef).toContain("token-supported download endpoint does not expose");
+    expect(apiRef).toContain("registered package download operation does not expose");
     expect(apiRef).toContain("Personal folder routes use the same request bodies and response shapes");
     expect(apiRef).not.toContain("defaults to `org`");
     expect(apiRef).not.toMatch(/owner_team[\s\S]{0,120}`scope`[\s\S]{0,120}parameters (?:is|are) rejected/);

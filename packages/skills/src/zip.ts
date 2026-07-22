@@ -6,6 +6,33 @@ import { normalizePosix, toTar } from "./archive";
 import { unpackTo } from "./unpack";
 import { MAX_ARCHIVE_BYTES, MAX_ENTRY_COUNT, MAX_FILE_BYTES } from "./constants";
 
+interface SeenPortableZipPath {
+  display: string;
+  kind: "directory" | "file";
+}
+
+function registerPortableZipPath(seen: Map<string, SeenPortableZipPath>, path: string): string | null {
+  const segments = path.split("/");
+  for (let index = 0; index < segments.length; index += 1) {
+    const display = segments.slice(0, index + 1).join("/");
+    const key = display.normalize("NFC").toLocaleLowerCase("en-US");
+    const kind = index === segments.length - 1 ? "file" : "directory";
+    const previous = seen.get(key);
+    if (
+      previous
+      && (
+        previous.display !== display
+        || previous.kind !== kind
+        || (index === segments.length - 1 && kind === "file")
+      )
+    ) {
+      return `duplicate or Windows-colliding archive path: ${path}`;
+    }
+    if (!previous) seen.set(key, { display, kind });
+  }
+  return null;
+}
+
 /** PKZIP local-file-header (`PK\x03\x04`) or empty-archive EOCD (`PK\x05\x06`) magic. */
 export function isZip(buf: Buffer): boolean {
   return (
@@ -113,19 +140,47 @@ export async function unpackAnyTo(input: Buffer, targetDir: string): Promise<str
  */
 export async function tarGzToZip(archive: Buffer): Promise<Buffer> {
   const tar = toTar(archive);
-  const entries: Record<string, Uint8Array> = {};
+  const entries: Record<string, Uint8Array> = Object.create(null) as Record<string, Uint8Array>;
+  const seenPortablePaths = new Map<string, SeenPortableZipPath>();
   let total = 0;
+  let count = 0;
   await new Promise<void>((resolvePromise, reject) => {
+    let failed = false;
     const ex = tarExtract();
     ex.on("entry", (header, stream, next) => {
       const type = (header.type ?? "file") as string;
+      if (failed) {
+        stream.on("end", next);
+        stream.resume();
+        return;
+      }
+      if (type === "directory") {
+        stream.on("end", next);
+        stream.resume();
+        return;
+      }
       if (type !== "file") {
+        failed = true;
+        reject(new Error(`unsafe archive entry type '${type}': ${header.name ?? ""}`));
         stream.on("end", next);
         stream.resume();
         return;
       }
       const norm = normalizePosix(header.name ?? "");
-      if (norm.violation) {
+      const collision = !norm.violation && norm.path
+        ? registerPortableZipPath(seenPortablePaths, norm.path)
+        : null;
+      if (norm.violation || !norm.path || collision) {
+        failed = true;
+        reject(new Error(norm.violation ?? collision ?? "empty archive path"));
+        stream.on("end", next);
+        stream.resume();
+        return;
+      }
+      count += 1;
+      if (count > MAX_ENTRY_COUNT) {
+        failed = true;
+        reject(new Error("archive exceeds entry-count limit"));
         stream.on("end", next);
         stream.resume();
         return;
@@ -133,17 +188,19 @@ export async function tarGzToZip(archive: Buffer): Promise<Buffer> {
       const chunks: Buffer[] = [];
       let read = 0;
       stream.on("data", (c: Buffer) => {
+        if (failed) return;
         read += c.length;
         total += c.length;
         // Guardrail even though the stored archive was size-validated on upload.
         if (read > MAX_FILE_BYTES || total > MAX_ARCHIVE_BYTES) {
+          failed = true;
           reject(new Error("archive exceeds size limit"));
           return;
         }
         chunks.push(c);
       });
       stream.on("end", () => {
-        entries[norm.path] = Buffer.concat(chunks);
+        if (!failed) entries[norm.path] = Buffer.concat(chunks);
         next();
       });
       stream.on("error", reject);
@@ -152,5 +209,9 @@ export async function tarGzToZip(archive: Buffer): Promise<Buffer> {
     ex.on("error", reject);
     ex.end(tar);
   });
-  return Buffer.from(zipSync(entries, { level: 6 }));
+  // fflate otherwise stamps each entry with the current wall clock, making the transport checksum
+  // change every time the same immutable version is promoted or downloaded. The ZIP epoch is the
+  // earliest DOS timestamp supported by the format; constructing it in local time keeps the encoded
+  // calendar fields stable across server time zones.
+  return Buffer.from(zipSync(entries, { level: 6, mtime: new Date(1980, 0, 1, 0, 0, 0) }));
 }

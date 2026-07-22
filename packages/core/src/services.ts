@@ -21,6 +21,7 @@ import type {
   SkillListRow,
   SkillModifier,
   SkillPublicPreview,
+  SkillPublicVersionResult,
   SkillSharePlan,
   SkillShareTarget,
   SkillVersionRow,
@@ -47,12 +48,12 @@ import {
 } from "@companion/contracts";
 import { gravatarUrl, resolveUserAvatarUrl } from "./avatar";
 
-import { compareSemver } from "@companion/skills";
+import { compareSemver, isValidSemver } from "@companion/skills";
 import { db, schema, type Db } from "@companion/db";
 import { initialsFor, slugify } from "@companion/db/ids";
 import { listOrgAccessDomains } from "./domainAccess";
 import { classifyEmailDomain } from "./email-domains";
-import { canManageOrg, canManagePersonalSkill, canTouchOwner, isLastOwner } from "./authz";
+import { canManageOrg, canManagePersonalSkill, canManagePublicSkill, canTouchOwner, isLastOwner } from "./authz";
 import { disableSecretsForDepartingMember, persistSkillSecretSlots } from "./secrets";
 import {
   assertOrgSkillMutationEntitled,
@@ -62,13 +63,21 @@ import {
   markSeatSyncPending,
 } from "./billing";
 import {
+  authorizePreTenantPublicSkillPackage,
+  consumePreTenantSkillTransferTicket,
+  consumePreTenantPublicSkillTransferTicket,
   getPreTenantSkillPreview,
   getPreTenantSkillShareTarget,
+  issuePreTenantPublicSkillTransferTicket,
   listPreTenantOrganizations,
   lockPreTenantApiTokenForRefresh,
   lockPreTenantInvitation,
+  preflightPreTenantAgentTransferTicket,
   preTenantUsersShareOrganization,
+  revalidatePreTenantAgentTransferTicket,
   resolvePreTenantApiToken,
+  revokePreTenantAgentTransferTickets,
+  type PreTenantSkillTransferAction,
 } from "./preTenant";
 
 export * from "./secrets";
@@ -904,6 +913,7 @@ export async function listSkills(input: {
   // Second `profiles` join, aliased to the uploader of the current version (`skill_versions.created_by`),
   // so we can surface "Last updated by" distinct from the creator without a schema change.
   const updaterProfile = alias(schema.profiles, "updater_profile");
+  const publicVersion = alias(schema.skillVersions, "public_version");
 
   const baseQuery = database
     .select({
@@ -941,6 +951,19 @@ export async function listSkills(input: {
             ? sql<string[]>`case when ${schema.skills.scope} = 'personal' then coalesce((select array_agg(psl.path order by psl.path) from ${schema.personalSkillLabels} psl where psl.org_id = ${input.orgId} and psl.owner_id = ${schema.skills.creatorId} and psl.skill_id = ${schema.skills.id}), '{}') else coalesce((select array_agg(sl.path order by sl.path) from ${schema.skillLabels} sl where sl.org_id = ${input.orgId} and sl.skill_id = ${schema.skills.id}), '{}') end`
             : sql<string[]>`coalesce((select array_agg(sl.path order by sl.path) from ${schema.skillLabels} sl where sl.org_id = ${input.orgId} and sl.skill_id = ${schema.skills.id}), '{}')`,
       current_version: schema.skillVersions.version,
+      public_version: publicVersion.version,
+      can_manage_public: sql<boolean>`(
+        ${schema.skills.scope} = 'org'
+        and (
+          ${schema.skills.creatorId} = ${input.actor.id}
+          or exists (
+            select 1 from ${schema.memberships} public_manager
+            where public_manager.org_id = ${input.orgId}
+              and public_manager.user_id = ${input.actor.id}
+              and public_manager.org_role in ('owner', 'admin')
+          )
+        )
+      )`,
       license: schema.skillVersions.license,
       frontmatter: schema.skillVersions.frontmatter,
       checksum: schema.skillVersions.checksum,
@@ -965,6 +988,14 @@ export async function listSkills(input: {
     .from(schema.skills)
     .innerJoin(schema.profiles, eq(schema.profiles.id, schema.skills.creatorId))
     .leftJoin(schema.skillVersions, eq(schema.skillVersions.id, schema.skills.currentVersionId))
+    .leftJoin(
+      publicVersion,
+      and(
+        eq(publicVersion.orgId, schema.skills.orgId),
+        eq(publicVersion.skillId, schema.skills.id),
+        eq(publicVersion.id, schema.skills.publicVersionId),
+      ),
+    )
     .leftJoin(updaterProfile, eq(updaterProfile.id, schema.skillVersions.createdBy))
     .where(and(...predicates));
 
@@ -1091,6 +1122,8 @@ export async function listSkills(input: {
           }),
       modifiers: modifiersBySkill.get(r.id) ?? [],
       current_version: r.current_version,
+      public_version: r.public_version ?? null,
+      can_manage_public: Boolean(r.can_manage_public),
       compatibility: manifest?.compatibility ?? null,
       metadata: manifest?.metadata ?? {},
       license: r.license ?? manifest?.license ?? null,
@@ -1207,17 +1240,764 @@ export async function getSkillPublicPreviewByShareToken(input: {
   const database = input.database ?? db;
   const row = await getPreTenantSkillPreview(database, token);
   if (!row) return null;
-  const manifest = parseStoredCompanionManifest(row.frontmatter ?? "", row.description);
+  const versionDescription = parseStoredSkillFrontmatter(row.frontmatter ?? "")?.description ?? row.description;
+  const manifest = parseStoredCompanionManifest(row.frontmatter ?? "", versionDescription);
   const display = skillDisplayWithOverride(manifest.display, row.display_name);
   return {
     display_name: display.name ?? row.slug,
     slug: row.slug,
-    description: display.summary ?? row.description,
+    description: display.summary ?? versionDescription,
     current_version: row.current_version,
     creator_name: row.creator_name,
     creator_initials: row.creator_initials,
     updated_at: new Date(row.updated_at).toISOString(),
+    public_release:
+      row.public_version && row.public_checksum && row.public_size_bytes != null && row.public_released_at
+        ? {
+            version: row.public_version,
+            checksum: row.public_checksum,
+            size_bytes: Number(row.public_size_bytes),
+            released_at: new Date(row.public_released_at).toISOString(),
+          }
+        : null,
   };
+}
+
+export class SkillPublicReleaseNotFoundError extends Error {
+  constructor(message = "public skill release not found") {
+    super(message);
+    this.name = "SkillPublicReleaseNotFoundError";
+  }
+}
+
+export class SkillPublicReleaseForbiddenError extends Error {
+  constructor(message = "you cannot manage this public release") {
+    super(message);
+    this.name = "SkillPublicReleaseForbiddenError";
+  }
+}
+
+export class SkillPublicReleaseConflictError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SkillPublicReleaseConflictError";
+  }
+}
+
+export class SkillPublicReleaseValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SkillPublicReleaseValidationError";
+  }
+}
+
+async function publicReleaseSkillForActor(input: {
+  database: Db;
+  actor: ActorContext;
+  orgId: string;
+  slug: string;
+}): Promise<{ skill: typeof schema.skills.$inferSelect; role: OrgRole }> {
+  const role = await assertMember(input.database, input.actor, input.orgId);
+  const skill = await input.database.query.skills.findFirst({
+    where: and(eq(schema.skills.orgId, input.orgId), eq(schema.skills.slug, input.slug)),
+  });
+  if (!skill || (skill.scope === "personal" && skill.creatorId !== input.actor.id)) {
+    throw new SkillPublicReleaseNotFoundError("skill not found");
+  }
+  if (skill.scope !== "org") {
+    throw new SkillPublicReleaseConflictError("share this personal skill with the organization before making it public");
+  }
+  if (!canManagePublicSkill({ id: input.actor.id, orgRole: role }, skill)) {
+    throw new SkillPublicReleaseForbiddenError();
+  }
+  return { skill, role };
+}
+
+/** Pin/promote the current immutable version, guarded by an implicit compare-and-swap. */
+export async function setSkillPublicVersion(input: {
+  actor: ActorContext;
+  orgId: string;
+  slug: string;
+  version: string;
+  /** SHA-256 over the exact deterministic ZIP bytes the public route will serve. */
+  packageChecksum: string;
+  /** Exact deterministic ZIP byte length. */
+  packageSizeBytes: number;
+  /** Version observed as current before the caller persisted the content-addressed ZIP snapshot. */
+  expectedCurrentVersionId?: string;
+  database?: Db;
+}): Promise<SkillPublicVersionResult> {
+  const database = input.database ?? db;
+  if (!/^sha256:[0-9a-f]{64}$/.test(input.packageChecksum)) {
+    throw new SkillPublicReleaseValidationError("public package checksum must be a sha256 digest");
+  }
+  if (!Number.isSafeInteger(input.packageSizeBytes) || input.packageSizeBytes < 0) {
+    throw new SkillPublicReleaseValidationError("public package size must be a non-negative integer");
+  }
+  return database.transaction(async (tx) => {
+    const tenantDb = tx as unknown as Db;
+    const { skill } = await publicReleaseSkillForActor({ ...input, database: tenantDb });
+    if (skill.archivedAt) throw new SkillPublicReleaseConflictError("restore the skill before making a version public");
+    const version = await tenantDb.query.skillVersions.findFirst({
+      where: and(
+        eq(schema.skillVersions.orgId, input.orgId),
+        eq(schema.skillVersions.skillId, skill.id),
+        eq(schema.skillVersions.version, input.version),
+      ),
+    });
+    if (!version) throw new SkillPublicReleaseNotFoundError("skill version not found");
+    if (skill.currentVersionId !== version.id && input.expectedCurrentVersionId === version.id) {
+      throw new SkillPublicReleaseConflictError("the current skill version changed concurrently; refresh and try again");
+    }
+    if (skill.currentVersionId !== version.id) {
+      throw new SkillPublicReleaseValidationError("only the current skill version can be made public");
+    }
+    const versionIdentity = parseStoredSkillFrontmatter(version.frontmatter);
+    if (!versionIdentity || versionIdentity.name !== skill.slug) {
+      throw new SkillPublicReleaseValidationError(
+        `publish a new current version named "${skill.slug}" before making it public`,
+      );
+    }
+
+    const changed =
+      skill.publicVersionId !== version.id ||
+      skill.publicPackageChecksum !== input.packageChecksum ||
+      skill.publicPackageSizeBytes !== input.packageSizeBytes;
+    const expectedPointer = skill.publicVersionId
+      ? eq(schema.skills.publicVersionId, skill.publicVersionId)
+      : isNull(schema.skills.publicVersionId);
+    const expectedChecksum = skill.publicPackageChecksum
+      ? eq(schema.skills.publicPackageChecksum, skill.publicPackageChecksum)
+      : isNull(schema.skills.publicPackageChecksum);
+    const expectedSize = skill.publicPackageSizeBytes != null
+      ? eq(schema.skills.publicPackageSizeBytes, skill.publicPackageSizeBytes)
+      : isNull(schema.skills.publicPackageSizeBytes);
+    const expectedReleasedAt = skill.publicReleasedAt
+      ? eq(schema.skills.publicReleasedAt, skill.publicReleasedAt)
+      : isNull(schema.skills.publicReleasedAt);
+    const [updated] = await tenantDb
+      .update(schema.skills)
+      .set(
+        changed
+          ? {
+              publicVersionId: version.id,
+              publicPackageChecksum: input.packageChecksum,
+              publicPackageSizeBytes: input.packageSizeBytes,
+              publicReleasedAt: new Date(),
+              updatedAt: new Date(),
+            }
+          // A same-value UPDATE is intentional: it takes the row lock and rechecks the complete
+          // observed release state after any concurrent writer, without changing idempotent semantics.
+          : { publicVersionId: version.id },
+      )
+      .where(and(
+        eq(schema.skills.orgId, input.orgId),
+        eq(schema.skills.id, skill.id),
+        eq(schema.skills.slug, skill.slug),
+        eq(schema.skills.scope, "org"),
+        isNull(schema.skills.archivedAt),
+        eq(schema.skills.currentVersionId, version.id),
+        expectedPointer,
+        expectedChecksum,
+        expectedSize,
+        expectedReleasedAt,
+      ))
+      .returning({ id: schema.skills.id });
+    if (!updated) {
+      throw new SkillPublicReleaseConflictError("the public release changed concurrently; refresh and try again");
+    }
+
+    const previousVersion = skill.publicVersionId
+      ? await tenantDb.query.skillVersions.findFirst({
+          columns: { version: true },
+          where: and(
+            eq(schema.skillVersions.orgId, input.orgId),
+            eq(schema.skillVersions.skillId, skill.id),
+            eq(schema.skillVersions.id, skill.publicVersionId),
+          ),
+        })
+      : null;
+    await tenantDb.insert(schema.auditLog).values({
+      orgId: input.orgId,
+      actorId: input.actor.id,
+      action: "skill.public_version.set",
+      targetType: "skill",
+      targetId: skill.id,
+      metadata: {
+        slug: skill.slug,
+        version: version.version,
+        previousVersion: previousVersion?.version ?? null,
+        packageChecksum: input.packageChecksum,
+        packageSizeBytes: input.packageSizeBytes,
+        changed,
+      },
+    });
+    return { ok: true as const, public_version: version.version, share_token: skill.shareToken, changed };
+  });
+}
+
+/** Withdraw package access while retaining the stable link token and the immutable version row. */
+export async function clearSkillPublicVersion(input: {
+  actor: ActorContext;
+  orgId: string;
+  slug: string;
+  database?: Db;
+}): Promise<SkillPublicVersionResult> {
+  const database = input.database ?? db;
+  return database.transaction(async (tx) => {
+    const tenantDb = tx as unknown as Db;
+    const { skill } = await publicReleaseSkillForActor({ ...input, database: tenantDb });
+    const previousVersion = skill.publicVersionId
+      ? await tenantDb.query.skillVersions.findFirst({
+          columns: { version: true },
+          where: and(
+            eq(schema.skillVersions.orgId, input.orgId),
+            eq(schema.skillVersions.skillId, skill.id),
+            eq(schema.skillVersions.id, skill.publicVersionId),
+          ),
+        })
+      : null;
+    const changed = skill.publicVersionId !== null;
+    const expectedPointer = skill.publicVersionId
+      ? eq(schema.skills.publicVersionId, skill.publicVersionId)
+      : isNull(schema.skills.publicVersionId);
+    const expectedChecksum = skill.publicPackageChecksum
+      ? eq(schema.skills.publicPackageChecksum, skill.publicPackageChecksum)
+      : isNull(schema.skills.publicPackageChecksum);
+    const expectedSize = skill.publicPackageSizeBytes != null
+      ? eq(schema.skills.publicPackageSizeBytes, skill.publicPackageSizeBytes)
+      : isNull(schema.skills.publicPackageSizeBytes);
+    const expectedReleasedAt = skill.publicReleasedAt
+      ? eq(schema.skills.publicReleasedAt, skill.publicReleasedAt)
+      : isNull(schema.skills.publicReleasedAt);
+    const [updated] = await tenantDb
+      .update(schema.skills)
+      .set(
+        changed
+          ? {
+              publicVersionId: null,
+              publicPackageChecksum: null,
+              publicPackageSizeBytes: null,
+              publicReleasedAt: null,
+              updatedAt: new Date(),
+            }
+          // Preserve the no-op result while still fencing a promotion that committed after our read.
+          : { publicVersionId: null },
+      )
+      .where(and(
+        eq(schema.skills.orgId, input.orgId),
+        eq(schema.skills.id, skill.id),
+        eq(schema.skills.scope, "org"),
+        expectedPointer,
+        expectedChecksum,
+        expectedSize,
+        expectedReleasedAt,
+      ))
+      .returning({ id: schema.skills.id });
+    if (!updated) {
+      throw new SkillPublicReleaseConflictError("the public release changed concurrently; refresh and try again");
+    }
+    await tenantDb.insert(schema.auditLog).values({
+      orgId: input.orgId,
+      actorId: input.actor.id,
+      action: "skill.public_version.clear",
+      targetType: "skill",
+      targetId: skill.id,
+      metadata: { slug: skill.slug, previousVersion: previousVersion?.version ?? null, changed },
+    });
+    return { ok: true as const, public_version: null, share_token: skill.shareToken, changed };
+  });
+}
+
+export interface PublicSkillPackageDescriptor {
+  orgId: string;
+  slug: string;
+  version: string;
+  checksum: string;
+  sizeBytes: number;
+}
+
+/** Authorize an exact public package for any verified Better Auth account. */
+export async function authorizePublicSkillPackageForSession(input: {
+  token: string;
+  version: string;
+  userId: string;
+  database?: Db;
+}): Promise<PublicSkillPackageDescriptor | null> {
+  const token = input.token.trim();
+  const version = input.version.trim();
+  if (!token || !version || !input.userId) return null;
+  const row = await authorizePreTenantPublicSkillPackage(input.database ?? db, { token, version, userId: input.userId });
+  return row
+    ? {
+        orgId: row.org_id,
+        slug: row.slug,
+        version: row.version,
+        checksum: row.checksum,
+        sizeBytes: Number(row.size_bytes),
+      }
+    : null;
+}
+
+export const PUBLIC_SKILL_TRANSFER_TICKET_TTL_MS = 60_000;
+export const PUBLIC_SKILL_TRANSFER_TICKET_PREFIX = "cmp_xfer_";
+
+/** Agent Auth integration hook: mint a one-use, hash-at-rest package ticket. */
+export async function createPublicSkillTransferTicket(input: {
+  token: string;
+  version: string;
+  userId: string;
+  agentId: string;
+  agentGrantId?: string | null;
+  database?: Db;
+}): Promise<{
+  ticket: string;
+  expires_at: string;
+  version: string;
+  checksum: string;
+  size_bytes: number;
+}> {
+  const ticket = `${PUBLIC_SKILL_TRANSFER_TICKET_PREFIX}${randomBytes(32).toString("hex")}`;
+  const tokenHash = createHash("sha256").update(ticket).digest("hex");
+  const expiresAt = new Date(Date.now() + PUBLIC_SKILL_TRANSFER_TICKET_TTL_MS);
+  const row = await issuePreTenantPublicSkillTransferTicket(input.database ?? db, {
+    token: input.token.trim(),
+    version: input.version.trim(),
+    userId: input.userId,
+    agentId: input.agentId,
+    agentGrantId: input.agentGrantId,
+    tokenHash,
+    expiresAt,
+  });
+  if (!row) throw new SkillPublicReleaseNotFoundError();
+  return {
+    ticket,
+    expires_at: new Date(row.expires_at).toISOString(),
+    version: row.version,
+    checksum: row.checksum,
+    size_bytes: Number(row.size_bytes),
+  };
+}
+
+/** Atomically consume a transfer ticket. A null result is intentionally generic. */
+export async function consumePublicSkillTransferTicket(input: {
+  ticket: string;
+  token: string;
+  version: string;
+  database?: Db;
+}): Promise<PublicSkillPackageDescriptor | null> {
+  if (!input.ticket.startsWith(PUBLIC_SKILL_TRANSFER_TICKET_PREFIX)) return null;
+  const row = await consumePreTenantPublicSkillTransferTicket(input.database ?? db, {
+    tokenHash: createHash("sha256").update(input.ticket).digest("hex"),
+    token: input.token.trim(),
+    version: input.version.trim(),
+  });
+  return row
+    ? {
+        orgId: row.org_id,
+        slug: row.slug,
+        version: row.version,
+        checksum: row.checksum,
+        sizeBytes: Number(row.size_bytes),
+      }
+    : null;
+}
+
+export type SkillPackageTransferAction = PreTenantSkillTransferAction;
+
+export interface IssuedSkillPackageTransferTicket {
+  ticket: string;
+  expires_at: string;
+  slug: string;
+  version: string;
+  checksum: string;
+  size_bytes: number;
+}
+
+function assertSkillTransferPackageMetadata(checksum: string, sizeBytes: number): void {
+  if (!/^sha256:[0-9a-f]{64}$/.test(checksum)) {
+    throw new Error("transfer package checksum must be a sha256 digest");
+  }
+  if (!Number.isSafeInteger(sizeBytes) || sizeBytes < 0) {
+    throw new Error("transfer package size must be a non-negative integer");
+  }
+}
+
+async function persistSkillPackageTransferTicket(input: {
+  database: Db;
+  actor: ActorContext;
+  orgId: string;
+  agentId: string;
+  agentGrantId?: string | null;
+  action: SkillPackageTransferAction;
+  skillId: string | null;
+  skillVersionId: string | null;
+  slug: string;
+  version: string;
+  filePath?: string | null;
+  checksum: string;
+  sizeBytes: number;
+}): Promise<IssuedSkillPackageTransferTicket> {
+  assertSkillTransferPackageMetadata(input.checksum, input.sizeBytes);
+  if (!input.agentId.trim()) throw new Error("Agent Auth agent id is required");
+  const ticket = `${PUBLIC_SKILL_TRANSFER_TICKET_PREFIX}${randomBytes(32).toString("hex")}`;
+  const expiresAt = new Date(Date.now() + PUBLIC_SKILL_TRANSFER_TICKET_TTL_MS);
+  await input.database.insert(schema.agentTransferTickets).values({
+    orgId: input.orgId,
+    userId: input.actor.id,
+    agentId: input.agentId,
+    agentGrantId: input.agentGrantId ?? null,
+    action: input.action,
+    skillId: input.skillId,
+    skillVersionId: input.skillVersionId,
+    shareToken: null,
+    skillSlug: input.slug,
+    version: input.version,
+    filePath: input.filePath ?? null,
+    checksum: input.checksum,
+    sizeBytes: input.sizeBytes,
+    tokenHash: createHash("sha256").update(ticket).digest("hex"),
+    expiresAt,
+  });
+  await input.database.insert(schema.auditLog).values({
+    orgId: input.orgId,
+    actorId: input.actor.id,
+    action: "skill.package.ticket_issue",
+    targetType: input.action === "local_skill.download" ? "local_skill" : input.skillId ? "skill" : "skill_slug",
+    targetId: input.skillId ?? input.slug,
+    metadata: {
+      operation: input.action,
+      slug: input.slug,
+      version: input.version,
+      agentId: input.agentId,
+      grantId: input.agentGrantId ?? null,
+      checksum: input.checksum,
+      sizeBytes: input.sizeBytes,
+    },
+  });
+  return {
+    ticket,
+    expires_at: expiresAt.toISOString(),
+    slug: input.slug,
+    version: input.version,
+    checksum: input.checksum,
+    size_bytes: input.sizeBytes,
+  };
+}
+
+/**
+ * Mint a one-use ticket for an exact private/org-library package. The caller computes the checksum
+ * over the deterministic ZIP transport, while Core independently revalidates membership, personal
+ * privacy, archive/history rules, and the immutable source version before persisting the ticket.
+ */
+export async function createSkillDownloadTransferTicket(input: {
+  actor: ActorContext;
+  orgId: string;
+  slug: string;
+  version: string;
+  storagePath: string;
+  packageChecksum: string;
+  packageSizeBytes: number;
+  agentId: string;
+  agentGrantId?: string | null;
+  database?: Db;
+}): Promise<IssuedSkillPackageTransferTicket> {
+  const database = input.database ?? db;
+  const slug = input.slug.trim();
+  const version = input.version.trim();
+  if (!slug || !version) throw new Error("skill slug and version are required");
+  const downloadable = await getDownloadVersion({
+    actor: input.actor,
+    orgId: input.orgId,
+    slug,
+    version,
+    database,
+  });
+  if (downloadable.storagePath !== input.storagePath) {
+    throw new Error("skill package changed while the transfer ticket was being prepared");
+  }
+  const skill = await database.query.skills.findFirst({
+    columns: { id: true },
+    where: and(eq(schema.skills.orgId, input.orgId), eq(schema.skills.slug, slug)),
+  });
+  if (!skill) throw new Error("skill not found");
+  const skillVersion = await database.query.skillVersions.findFirst({
+    columns: { id: true },
+    where: and(
+      eq(schema.skillVersions.orgId, input.orgId),
+      eq(schema.skillVersions.skillId, skill.id),
+      eq(schema.skillVersions.version, version),
+    ),
+  });
+  if (!skillVersion) throw new Error("version not found");
+  return persistSkillPackageTransferTicket({
+    database,
+    actor: input.actor,
+    orgId: input.orgId,
+    agentId: input.agentId,
+    agentGrantId: input.agentGrantId,
+    action: "skill_package.download",
+    skillId: skill.id,
+    skillVersionId: skillVersion.id,
+    slug,
+    version,
+    filePath: null,
+    checksum: input.packageChecksum,
+    sizeBytes: input.packageSizeBytes,
+  });
+}
+
+/**
+ * Mint a one-use ticket for one exact previewable file. The API computes the digest over the bytes
+ * it inspected; Core independently revalidates actor visibility plus immutable skill/version ids.
+ */
+export async function createSkillFileDownloadTransferTicket(input: {
+  actor: ActorContext;
+  orgId: string;
+  slug: string;
+  version: string;
+  filePath: string;
+  storagePath: string;
+  fileChecksum: string;
+  fileSizeBytes: number;
+  agentId: string;
+  agentGrantId?: string | null;
+  database?: Db;
+}): Promise<IssuedSkillPackageTransferTicket> {
+  const database = input.database ?? db;
+  const slug = input.slug.trim();
+  const version = input.version.trim();
+  const filePath = input.filePath;
+  if (!slug || !version) throw new Error("skill slug and version are required");
+  if (!filePath || filePath.includes("\0") || filePath.length > 4_096) {
+    throw new Error("an exact valid skill file path is required");
+  }
+  assertSkillTransferPackageMetadata(input.fileChecksum, input.fileSizeBytes);
+  const downloadable = await getDownloadVersion({
+    actor: input.actor,
+    orgId: input.orgId,
+    slug,
+    version,
+    database,
+  });
+  if (downloadable.storagePath !== input.storagePath) {
+    throw new Error("skill package changed while the file transfer ticket was being prepared");
+  }
+  const skill = await database.query.skills.findFirst({
+    columns: { id: true },
+    where: and(eq(schema.skills.orgId, input.orgId), eq(schema.skills.slug, slug)),
+  });
+  if (!skill) throw new Error("skill not found");
+  const skillVersion = await database.query.skillVersions.findFirst({
+    columns: { id: true },
+    where: and(
+      eq(schema.skillVersions.orgId, input.orgId),
+      eq(schema.skillVersions.skillId, skill.id),
+      eq(schema.skillVersions.version, version),
+    ),
+  });
+  if (!skillVersion) throw new Error("version not found");
+  return persistSkillPackageTransferTicket({
+    database,
+    actor: input.actor,
+    orgId: input.orgId,
+    agentId: input.agentId,
+    agentGrantId: input.agentGrantId,
+    action: "skill_file.download",
+    skillId: skill.id,
+    skillVersionId: skillVersion.id,
+    slug,
+    version,
+    filePath,
+    checksum: input.fileChecksum,
+    sizeBytes: input.fileSizeBytes,
+  });
+}
+
+/**
+ * Mint a ticket bound to the raw HTTP upload bytes and intended slug/version. Existing personal
+ * skills remain creator-only; org skills retain their normal any-member publish semantics. The
+ * publish route performs the complete Core authorization again after consuming the ticket.
+ */
+export async function createSkillUploadTransferTicket(input: {
+  actor: ActorContext;
+  orgId: string;
+  slug: string;
+  version: string;
+  packageChecksum: string;
+  packageSizeBytes: number;
+  agentId: string;
+  agentGrantId?: string | null;
+  database?: Db;
+}): Promise<IssuedSkillPackageTransferTicket> {
+  const database = input.database ?? db;
+  await assertMember(database, input.actor, input.orgId);
+  const slug = input.slug.trim();
+  const version = input.version.trim();
+  if (!slug) throw new Error("skill slug is required");
+  if (!isValidSemver(version)) throw new Error(`invalid semver: ${version}`);
+  assertSkillTransferPackageMetadata(input.packageChecksum, input.packageSizeBytes);
+  if (input.packageSizeBytes > 32 * 1024 * 1024) {
+    throw new Error("package exceeds the 32 MB upload limit");
+  }
+  const existing = await database.query.skills.findFirst({
+    columns: { id: true, scope: true, creatorId: true, archivedAt: true },
+    where: and(eq(schema.skills.orgId, input.orgId), eq(schema.skills.slug, slug)),
+  });
+  if (existing?.scope === "personal" && existing.creatorId !== input.actor.id) {
+    throw new Error("skill not found");
+  }
+  if (existing?.archivedAt) throw new Error("restore the skill before publishing a new version");
+  return persistSkillPackageTransferTicket({
+    database,
+    actor: input.actor,
+    orgId: input.orgId,
+    agentId: input.agentId,
+    agentGrantId: input.agentGrantId,
+    action: "skill_package.upload",
+    skillId: existing?.id ?? null,
+    skillVersionId: null,
+    slug,
+    version,
+    filePath: null,
+    checksum: input.packageChecksum,
+    sizeBytes: input.packageSizeBytes,
+  });
+}
+
+/** Mint a tenant-bound ticket for an exact version of a trusted, server-bundled local skill. */
+export async function createLocalSkillDownloadTransferTicket(input: {
+  actor: ActorContext;
+  orgId: string;
+  key: string;
+  version: string;
+  packageChecksum: string;
+  packageSizeBytes: number;
+  agentId: string;
+  agentGrantId?: string | null;
+  database?: Db;
+}): Promise<IssuedSkillPackageTransferTicket> {
+  const database = input.database ?? db;
+  await assertMember(database, input.actor, input.orgId);
+  const key = input.key.trim();
+  const version = input.version.trim();
+  if (!key) throw new Error("local skill key is required");
+  if (!isValidSemver(version)) throw new Error(`invalid semver: ${version}`);
+  return persistSkillPackageTransferTicket({
+    database,
+    actor: input.actor,
+    orgId: input.orgId,
+    agentId: input.agentId,
+    agentGrantId: input.agentGrantId,
+    action: "local_skill.download",
+    skillId: null,
+    skillVersionId: null,
+    slug: key,
+    version,
+    filePath: null,
+    checksum: input.packageChecksum,
+    sizeBytes: input.packageSizeBytes,
+  });
+}
+
+export interface ConsumedSkillPackageTransferTicket {
+  ticketId: string;
+  orgId: string;
+  actor: ActorContext;
+  agentId: string;
+  agentGrantId: string | null;
+  action: SkillPackageTransferAction;
+  expectedSkillId: string | null;
+  expectedSkillVersionId: string | null;
+  slug: string;
+  version: string;
+  filePath: string | null;
+  checksum: string;
+  sizeBytes: number;
+}
+
+/** Fail fake or revoked upload tickets before reading a large request body. */
+export async function preflightSkillPackageTransferTicket(input: {
+  ticket: string;
+  action: SkillPackageTransferAction;
+  slug: string;
+  version: string;
+  database?: Db;
+}): Promise<boolean> {
+  if (!input.ticket.startsWith(PUBLIC_SKILL_TRANSFER_TICKET_PREFIX)) return false;
+  return preflightPreTenantAgentTransferTicket(input.database ?? db, {
+    tokenHash: createHash("sha256").update(input.ticket).digest("hex"),
+    action: input.action,
+    slug: input.slug.trim(),
+    version: input.version.trim(),
+  });
+}
+
+/** Atomically consume a private binary ticket; returns no tenant/resource detail on any failure. */
+export async function consumeSkillPackageTransferTicket(input: {
+  ticket: string;
+  action: SkillPackageTransferAction;
+  slug: string;
+  version: string;
+  checksum?: string | null;
+  sizeBytes?: number | null;
+  filePath?: string | null;
+  database?: Db;
+}): Promise<ConsumedSkillPackageTransferTicket | null> {
+  if (!input.ticket.startsWith(PUBLIC_SKILL_TRANSFER_TICKET_PREFIX)) return null;
+  const row = await consumePreTenantSkillTransferTicket(input.database ?? db, {
+    tokenHash: createHash("sha256").update(input.ticket).digest("hex"),
+    action: input.action,
+    slug: input.slug.trim(),
+    version: input.version.trim(),
+    checksum: input.checksum,
+    sizeBytes: input.sizeBytes,
+    filePath: input.filePath,
+  });
+  return row
+    ? {
+        ticketId: row.ticket_id,
+        orgId: row.org_id,
+        actor: { id: row.user_id, email: row.user_email, name: row.user_name || row.user_email },
+        agentId: row.agent_id,
+        agentGrantId: row.agent_grant_id,
+        action: row.action,
+        expectedSkillId: row.skill_id,
+        expectedSkillVersionId: row.skill_version_id,
+        slug: row.skill_slug,
+        version: row.version,
+        filePath: row.file_path ?? null,
+        checksum: row.checksum,
+        sizeBytes: Number(row.size_bytes),
+      }
+    : null;
+}
+
+/**
+ * Final byte-delivery gate for an already-consumed Agent Auth transfer ticket.
+ *
+ * Object storage and archive conversion happen outside the consume transaction. Resolve the ticket
+ * hash again immediately before responding so revocation or expiry during that interval fails closed.
+ */
+export async function revalidateAgentTransferTicket(input: {
+  ticket: string;
+  database?: Db;
+}): Promise<boolean> {
+  if (!input.ticket.startsWith(PUBLIC_SKILL_TRANSFER_TICKET_PREFIX)) return false;
+  return revalidatePreTenantAgentTransferTicket(
+    input.database ?? db,
+    createHash("sha256").update(input.ticket).digest("hex"),
+  );
+}
+
+/** Revocation hook for Connected agents: invalidates unconsumed tickets immediately. */
+export async function revokeAgentTransferTickets(input: {
+  userId: string;
+  agentId: string;
+  agentGrantId?: string | null;
+  database?: Db;
+}): Promise<number> {
+  return revokePreTenantAgentTransferTickets(input.database ?? db, input);
 }
 
 /**
@@ -2239,8 +3019,12 @@ export async function getDownloadVersion(input: {
   orgId: string;
   slug: string;
   version?: string | null;
+  /** Apply public-release creator/Admin/Owner, org-scope, archive, and current-version preflight. */
+  forPublicRelease?: boolean;
   database?: Db;
 }): Promise<{
+  versionId: string;
+  isCurrent: boolean;
   storagePath: string;
   version: string;
   checksum: string;
@@ -2248,6 +3032,41 @@ export async function getDownloadVersion(input: {
   dependencies: string[];
 }> {
   const database = input.database ?? db;
+  const publicReleaseSkill = input.forPublicRelease
+    ? (await publicReleaseSkillForActor({
+        actor: input.actor,
+        orgId: input.orgId,
+        slug: input.slug,
+        database,
+      })).skill
+    : null;
+  if (publicReleaseSkill?.archivedAt) {
+    throw new SkillPublicReleaseConflictError("restore the skill before making a version public");
+  }
+  if (publicReleaseSkill) {
+    const preparedVersion = await database.query.skillVersions.findFirst({
+      where: and(
+        eq(schema.skillVersions.orgId, input.orgId),
+        eq(schema.skillVersions.skillId, publicReleaseSkill.id),
+        input.version
+          ? eq(schema.skillVersions.version, input.version)
+          : eq(schema.skillVersions.id, publicReleaseSkill.currentVersionId!),
+      ),
+    });
+    if (!preparedVersion) throw new SkillPublicReleaseNotFoundError("skill version not found");
+    if (publicReleaseSkill.currentVersionId !== preparedVersion.id) {
+      throw new SkillPublicReleaseValidationError("only the current skill version can be made public");
+    }
+    return {
+      versionId: preparedVersion.id,
+      isCurrent: true,
+      storagePath: preparedVersion.storagePath,
+      version: preparedVersion.version,
+      checksum: preparedVersion.checksum,
+      sizeBytes: preparedVersion.sizeBytes,
+      dependencies: [],
+    };
+  }
   // Archived skills stay downloadable ONLY while a published version still references them — across
   // ALL versions (an old published version may still declare a dependency the current one dropped),
   // so existing installs of that version never break. An unreferenced archived skill is not found.
@@ -2280,6 +3099,7 @@ export async function getDownloadVersion(input: {
   }
   const row = input.version ? versions.find((v) => v.version === input.version) : versions[0];
   if (!row) throw new Error("version not found");
+  const isCurrent = row.version === visible.current_version;
   const depRows = await database
     .select({
       slug: schema.skillVersionDependencies.dependsOnSlug,
@@ -2304,6 +3124,8 @@ export async function getDownloadVersion(input: {
     : [];
   const currentSlugById = new Map((Array.isArray(targets) ? targets : []).map((t) => [t.id, t.slug] as const));
   return {
+    versionId: row.id,
+    isCurrent,
     storagePath: row.storage_path,
     version: row.version,
     checksum: row.checksum,
@@ -3061,6 +3883,11 @@ export async function renameSkill(input: {
     database,
   });
   if (body.newSlug === skill.slug) throw new Error("newSlug must be different from the current slug");
+  if (skill.publicVersionId) {
+    throw new SkillPublicReleaseConflictError(
+      "remove the public release before renaming this skill; then publish and promote a version with the new name",
+    );
+  }
   const oldSlug = skill.slug;
 
   return database.transaction(async (txDb) => {
@@ -3085,7 +3912,12 @@ export async function renameSkill(input: {
           ...(body.title !== undefined ? { displayName: body.title } : {}),
           updatedAt: new Date(),
         })
-        .where(and(eq(schema.skills.orgId, input.orgId), eq(schema.skills.id, skill.id), eq(schema.skills.slug, oldSlug)))
+        .where(and(
+          eq(schema.skills.orgId, input.orgId),
+          eq(schema.skills.id, skill.id),
+          eq(schema.skills.slug, oldSlug),
+          isNull(schema.skills.publicVersionId),
+        ))
         .returning({
           id: schema.skills.id,
           slug: schema.skills.slug,
@@ -3095,7 +3927,18 @@ export async function renameSkill(input: {
       if (isUniqueViolation(error)) throw new Error(`a skill named ${body.newSlug} already exists in this workspace`);
       throw error;
     }
-    if (!row) throw new Error("skill not found");
+    if (!row) {
+      const current = await tx.query.skills.findFirst({
+        columns: { publicVersionId: true },
+        where: and(eq(schema.skills.orgId, input.orgId), eq(schema.skills.id, skill.id)),
+      });
+      if (current?.publicVersionId) {
+        throw new SkillPublicReleaseConflictError(
+          "remove the public release before renaming this skill; then publish and promote a version with the new name",
+        );
+      }
+      throw new Error("skill not found");
+    }
 
     await tx.insert(schema.auditLog).values({
       orgId: input.orgId,

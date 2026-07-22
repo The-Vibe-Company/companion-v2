@@ -2,8 +2,9 @@ import { mkdtemp, rm, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { zipSync, unzipSync } from "fflate";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { isZip, zipToTar, unzipToDir, tarGzToZip, validateSkillArchive, packDir } from "../src/index";
+import { buildTar } from "./helpers";
 
 const SKILL_MD = `---
 name: zip-demo
@@ -80,6 +81,64 @@ describe("zip support", () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+
+  it("repackages the same canonical archive into byte-identical public ZIPs", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "zip-test-"));
+    try {
+      await unzipToDir(buildZip({ "SKILL.md": SKILL_MD, "reference.md": "# ref" }), dir);
+      const packed = await packDir(dir);
+      vi.useFakeTimers();
+      try {
+        vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
+        const first = await tarGzToZip(packed.archive);
+        vi.setSystemTime(new Date("2028-12-31T23:59:59Z"));
+        const second = await tarGzToZip(packed.archive);
+        expect(second.equals(first)).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    "assets/file:payload",
+    "assets/NUL.txt",
+    "assets/trailing.",
+  ])("refuses to publicize a historical archive with unsafe path %s", async (name) => {
+    const tar = await buildTar([
+      { name: "SKILL.md", content: SKILL_MD },
+      { name, content: "unsafe" },
+    ]);
+    await expect(tarGzToZip(tar)).rejects.toThrow(/Windows-unsafe path segment/);
+  });
+
+  it("refuses to publicize a historical archive with portable path collisions", async () => {
+    const tar = await buildTar([
+      { name: "SKILL.md", content: SKILL_MD },
+      { name: "Docs/first.md", content: "first" },
+      { name: "docs/second.md", content: "second" },
+    ]);
+    await expect(tarGzToZip(tar)).rejects.toThrow(/Windows-colliding archive path/);
+  });
+
+  it("refuses to publicize a historical archive with NFC-equivalent directory names", async () => {
+    const tar = await buildTar([
+      { name: "SKILL.md", content: SKILL_MD },
+      { name: "Caf\u00e9/first.md", content: "first" },
+      { name: "Cafe\u0301/second.md", content: "second" },
+    ]);
+    await expect(tarGzToZip(tar)).rejects.toThrow(/Windows-colliding archive path/);
+  });
+
+  it("refuses to publicize a historical archive with a link entry", async () => {
+    const tar = await buildTar([
+      { name: "SKILL.md", content: SKILL_MD },
+      { name: "assets/link", type: "symlink", linkname: "/etc/passwd" },
+    ]);
+    await expect(tarGzToZip(tar)).rejects.toThrow(/unsafe archive entry type/);
   });
 
   it("rejects a zip whose entry traverses out of the package root", async () => {

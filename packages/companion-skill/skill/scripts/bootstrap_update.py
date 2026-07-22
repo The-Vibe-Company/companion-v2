@@ -3,12 +3,9 @@
 
 from __future__ import annotations
 
-import json
 import os
 import shutil
 import tempfile
-import urllib.error
-import urllib.request
 import zipfile
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -20,39 +17,11 @@ from bootstrap_integrity import (
     validate_integrity_baseline,
     validate_official_package_hashes,
 )
-from companion_lib import fail
-
-
-def api_post_json(base: str, token: str, path: str, body: dict[str, Any]) -> Any:
-    url = f"{base.rstrip('/')}{path}"
-    data = json.dumps(body).encode("utf-8")
-    request = urllib.request.Request(
-        url,
-        data=data,
-        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        text = exc.read().decode("utf-8", errors="replace")
-        fail(f"POST {url} failed with HTTP {exc.code}: {text}")
-    except urllib.error.URLError as exc:
-        fail(f"POST {url} failed: {exc.reason}")
+from companion_lib import api_download_bytes, api_post_json, fail
 
 
 def download_package(base: str, token: str, destination: Path) -> None:
-    url = f"{base.rstrip('/')}/local-skills/companion/package"
-    request = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
-    try:
-        with urllib.request.urlopen(request, timeout=60) as response:
-            destination.write_bytes(response.read())
-    except urllib.error.HTTPError as exc:
-        text = exc.read().decode("utf-8", errors="replace")
-        fail(f"GET {url} failed with HTTP {exc.code}: {text}")
-    except urllib.error.URLError as exc:
-        fail(f"GET {url} failed: {exc.reason}")
+    destination.write_bytes(api_download_bytes(base, token, "/local-skills/companion/package"))
 
 
 def frontmatter_name(skill_md: Path) -> str | None:

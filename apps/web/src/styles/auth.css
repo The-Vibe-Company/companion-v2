@@ -189,3 +189,49 @@
   color: var(--color-ok);
 }
 .successmark svg { width: 22px; height: 22px; }
+
+/* Delegated Agent Auth device approval ----------------------------------- */
+.device-approval-page { min-height: 100vh; display: grid; place-items: center; padding: 32px 20px; background: var(--color-canvas); color: var(--color-fg); }
+.device-approval { width: min(100%, 620px); border: 1px solid var(--color-line); border-radius: var(--radius-lg); background: var(--color-surface); padding: 24px; }
+.device-approval > header { display: flex; align-items: flex-start; gap: 11px; padding-bottom: 18px; border-bottom: 1px solid var(--color-line); }
+.device-approval__mark { width: 34px; height: 34px; flex: none; display: grid; place-items: center; border: 1px solid var(--color-line); border-radius: var(--radius-md); background: var(--color-surface-raised); color: var(--color-muted); }
+.device-approval__brand { margin: 0 0 3px; color: var(--color-faint); font-size: var(--text-xs); }
+.device-approval h1 { margin: 0; font-size: var(--text-xl); line-height: 1.25; }
+.device-approval > p { color: var(--color-muted); line-height: 1.5; }
+.device-approval__identity { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; margin: 18px 0 0; border: 1px solid var(--color-line); border-radius: var(--radius-md); background: var(--color-line); overflow: hidden; }
+.device-approval__identity > div { min-width: 0; padding: 10px 12px; background: var(--color-surface); }
+.device-approval__identity dt { color: var(--color-faint); font-size: var(--text-xs); }
+.device-approval__identity dd { margin: 3px 0 0; color: var(--color-fg); font-size: var(--text-sm); overflow-wrap: anywhere; }
+.device-approval__identity dd > span,
+.device-approval__identity dd > small { display: block; }
+.device-approval__identity dd > small { margin-top: 2px; color: var(--color-muted); font-size: 11px; }
+.device-approval__capabilities { margin: 20px 0 0; border: 0; padding: 0; }
+.device-approval__capabilities legend { padding: 0; color: var(--color-fg); font-size: var(--text-sm); font-weight: 600; }
+.device-approval__capabilities > p { margin: 3px 0 10px; color: var(--color-muted); font-size: var(--text-xs); }
+.device-approval__capabilities label { min-height: 54px; display: flex; align-items: flex-start; gap: 10px; border: 1px solid var(--color-line); padding: 10px 12px; cursor: pointer; }
+.device-approval__capabilities label:first-of-type { border-radius: var(--radius-md) var(--radius-md) 0 0; }
+.device-approval__capabilities label:last-of-type { border-radius: 0 0 var(--radius-md) var(--radius-md); }
+.device-approval__capabilities label + label { border-top: 0; }
+.device-approval__capabilities label:hover { background: var(--color-surface-raised); }
+.device-approval__capabilities input { margin-top: 3px; accent-color: var(--color-accent-edge); }
+.device-approval__capabilities label span,
+.device-approval__capabilities label b,
+.device-approval__capabilities label small { display: block; }
+.device-approval__capabilities label b { font-size: var(--text-xs); font-weight: 500; }
+.device-approval__capabilities label small { margin-top: 2px; color: var(--color-muted); font-size: 11px; line-height: 1.45; overflow-wrap: anywhere; }
+.device-approval__notice { display: flex; align-items: flex-start; gap: 8px; margin-top: 16px; border: 1px solid var(--color-line); border-radius: var(--radius-md); background: var(--color-surface-sunken); padding: 10px; color: var(--color-muted); font-size: var(--text-xs); line-height: 1.5; }
+.device-approval__notice svg { flex: none; margin-top: 2px; }
+.device-approval > footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
+.device-approval__quiet { color: var(--color-faint) !important; font-size: var(--text-xs); }
+.device-approval__skeleton { min-height: 72px; display: flex; align-items: center; color: var(--color-faint); font-size: var(--text-sm); }
+.device-approval--error > .device-approval__mark { margin-bottom: 14px; color: var(--color-danger); }
+.device-approval--error .btn-sec { margin-top: 8px; }
+.device-approval__reauth { margin-top: 8px; }
+
+@media (max-width: 560px) {
+  .device-approval-page { place-items: stretch; padding: 0; }
+  .device-approval { min-height: 100vh; border: 0; border-radius: 0; padding: 24px 18px max(24px, env(safe-area-inset-bottom)); }
+  .device-approval__identity { grid-template-columns: 1fr; }
+  .device-approval > footer { flex-direction: column-reverse; }
+  .device-approval > footer button { width: 100%; min-height: 44px; justify-content: center; }
+}

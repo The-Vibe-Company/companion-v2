@@ -11,7 +11,6 @@ import { LocalSkillsView } from "./LocalSkillsView";
 
 const queryMocks = vi.hoisted(() => ({
   fetchLocalSkills: vi.fn(),
-  issueToken: vi.fn(),
 }));
 
 // The view no longer touches the router (the install is not a hard gate), but keep a stub so any
@@ -23,7 +22,6 @@ vi.mock("next/navigation", () => ({
 vi.mock("@/lib/queries", () => ({
   apiBase: () => "http://127.0.0.1:3001",
   fetchLocalSkills: queryMocks.fetchLocalSkills,
-  issueToken: queryMocks.issueToken,
 }));
 
 const baseSkill: LocalSkillRow = {
@@ -41,9 +39,9 @@ const baseSkill: LocalSkillRow = {
   changes: [],
   integrity: { packageChecksum: `sha256:${"a".repeat(64)}`, files: { "SKILL.md": `sha256:${"b".repeat(64)}` } },
   prompts: {
-    install: 'install {base} {workspaceId} {token} agent=<your assistant>',
-    update: "update {base} {workspaceId} {token}",
-    use: "use {base} {workspaceId} {token}",
+    install: 'install {base} {workspaceId} with Agent Auth agent=<your assistant>',
+    update: "update {base} {workspaceId} with Agent Auth",
+    use: "use {base} {workspaceId} with Agent Auth",
   },
 };
 
@@ -78,7 +76,6 @@ describe("LocalSkillsView", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     queryMocks.fetchLocalSkills.mockReset();
-    queryMocks.issueToken.mockResolvedValue({ token: "cmp_pat_test" });
     try {
       window.localStorage.clear();
     } catch {
@@ -131,9 +128,9 @@ describe("LocalSkillsView", () => {
       await Promise.resolve();
     });
 
-    expect(queryMocks.issueToken).toHaveBeenCalledTimes(1);
     expect(writeText).toHaveBeenCalledWith(expect.stringContaining("agent=OpenCode"));
-    expect(writeText).toHaveBeenCalledWith(expect.stringContaining("cmp_pat_test"));
+    expect(writeText).toHaveBeenCalledWith(expect.stringContaining("Agent Auth"));
+    expect(writeText).not.toHaveBeenCalledWith(expect.stringContaining("cmp_pat_"));
   });
 
   it("flips to the Connected banner when an out-of-band install is reported", async () => {

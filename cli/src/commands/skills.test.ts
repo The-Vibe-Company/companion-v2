@@ -41,6 +41,8 @@ function registryRow(over: Partial<SkillListRow> = {}): SkillListRow {
     updater_avatar_url: null,
     modifiers: [],
     current_version: "1.0.0",
+    public_version: null,
+    can_manage_public: false,
     license: null,
     compatibility: null,
     metadata: {},

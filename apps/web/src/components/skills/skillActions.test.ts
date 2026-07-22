@@ -55,6 +55,7 @@ const allowed: SkillActionPermissions = {
   canArchive: true,
   canRestore: true,
   canCorrectInstall: true,
+  canManagePublic: false,
 };
 
 describe("resolveSkillActions", () => {
@@ -110,6 +111,20 @@ describe("resolveSkillActions", () => {
     expect(archived).toEqual(["download"]);
   });
 
+  it("shows public release management only when projected by the server", () => {
+    const canManage = skillActionPermissions(
+      skill({ scope: "org", canManagePublic: true, publicVersion: null }),
+      "user-2",
+    );
+    expect(canManage.canManagePublic).toBe(true);
+    expect(resolveSkillActions(skill({ canManagePublic: true }), canManage).secondary)
+      .toContainEqual(expect.objectContaining({ id: "manage-public", label: "Make public" }));
+    expect(resolveSkillActions(skill({ canManagePublic: true, publicVersion: "1.0.0" }), canManage).secondary)
+      .toContainEqual(expect.objectContaining({ id: "manage-public", label: "Manage public link" }));
+    expect(resolveSkillActions(skill({ canManagePublic: false }), skillActionPermissions(skill(), "user-2")).secondary)
+      .not.toContainEqual(expect.objectContaining({ id: "manage-public" }));
+  });
+
   it("checks every scope × source × archive × install × version × validation × permission combination", () => {
     const scopes: SkillVM["scope"][] = ["personal", "org"];
     const sources: SkillVM["source"][] = ["authored", "installed", null];
@@ -124,6 +139,7 @@ describe("resolveSkillActions", () => {
       canArchive: false,
       canRestore: false,
       canCorrectInstall: false,
+      canManagePublic: false,
     }];
     let checked = 0;
 
@@ -179,6 +195,7 @@ describe("skillActionPermissions", () => {
       canArchive: false,
       canRestore: false,
       canCorrectInstall: false,
+      canManagePublic: false,
     });
   });
 });

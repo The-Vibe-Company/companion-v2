@@ -1,10 +1,12 @@
 # Companion workspace API — quick reference
 
 Base URL is `COMPANION_API_URL` (ends in `/v1`). The active workspace id is
-`COMPANION_WORKSPACE_ID` (`organizations.id`). Authenticate management requests with
-`Authorization: Bearer $COMPANION_TOKEN`. The token is scoped to `skills:read` + `skills:write` +
-`secrets:read` + `secrets:write`.
-The public preview endpoint documented below intentionally does not use this token.
+`COMPANION_WORKSPACE_ID` (`organizations.id`). Agent Auth is the default management identity. The
+bundled `scripts/companion-agent-client.mjs` discovers the instance, uses delegated device approval,
+and signs one 60-second request-bound JWT at a time. Its closed operation registry maps only the
+documented REST operations to `skills:read`, `skills:write`, `secrets:read`, or `secrets:write`, each
+constrained to the exact workspace id. The public install flow uses the instance-wide
+`public-skills:install` capability.
 
 Resolve those values from the environment first. If either variable is missing, read the dedicated
 local credentials file written by the Companion install/use prompt:
@@ -12,44 +14,57 @@ local credentials file written by the Companion install/use prompt:
 - macOS/Linux: `~/.companion/credentials.json`
 - Windows: `$HOME\.companion\credentials.json`
 
-The current file is schema v2 and is keyed by workspace id:
+The current file is schema v3, keyed by workspace id, and contains only a non-secret Agent Auth
+reference:
 
 ```json
 {
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "activeWorkspaceId": "6a9c3cfd-6a1e-4a7b-8f77-1f7f0e62e3d4",
   "workspaces": {
     "6a9c3cfd-6a1e-4a7b-8f77-1f7f0e62e3d4": {
       "apiUrl": "https://companion.acme.dev/v1",
-      "token": "cmp_pat_...",
+      "agentAuth": {
+        "issuer": "https://companion.acme.dev/auth",
+        "agentId": "agent_01J..."
+      },
       "updatedAt": "2026-06-15T12:00:00.000Z"
     }
   }
 }
 ```
 
-Use `activeWorkspaceId` to pick the workspace entry, then use that entry's `apiUrl` and `token`.
-For the legacy flat shape `{ "apiUrl": "...", "token": "..." }`, use those values and call
-token-supported `GET /local-skills/companion` to read its `workspaceId` before writing local
-inventory. Never print the token back to the user.
+Use `activeWorkspaceId` to pick the workspace entry. Agent and host private keys are generated
+automatically and stored outside this file under `~/.companion/agent-auth/` in `0600` files inside
+`0700` directories. They never enter argv, stdout, packages, audit events, or logs.
 
-Before any other API call, the bootstrap sends file-backed credentials to `POST /tokens/refresh`.
-The endpoint returns `{ "status": "current", "scopes": [...], "expires_at": "..." }` while the
-token is active. If it expired within the last 30 days, it returns a one-time replacement as
-`{ "status": "rotated", "id": "...", "token": "cmp_pat_...", "prefix": "...", "scopes": [...],
-"expires_at": "..." }`. The successor keeps the exact name and scopes, lasts 90 days, and revokes
-the expired token in the same transaction. Persist it atomically in only the active workspace entry
-before continuing, and never print it. Unknown, revoked, departed-user, and more-than-30-days-expired
-tokens all return the same `401`; obtain a fresh **Use** prompt instead. Do not call this endpoint for
-`COMPANION_TOKEN` supplied by the environment because the skill cannot safely rewrite that source.
-Both bootstrap and **Use** serialize the complete credentials read-modify-write cycle with the
-`.credentials.lock` directory before using a same-directory atomic replacement.
+Schema v2 and legacy flat PATs are preserved as `legacyPat` during migration. They are used only when
+the user explicitly sets `COMPANION_AUTH_MODE=legacy-pat`; an Agent Auth failure never falls back to
+them. The legacy refresh endpoint retains its existing behavior only in that explicit mode.
 
-These are the Companion skill-management endpoints a personal access token can call:
+The official client takes one JSON request on stdin and returns one value-free JSON envelope on
+stdout:
 
-| Action | Method & path | Scope |
+```sh
+printf '%s' '{"action":"api","method":"GET","path":"/skills?lib=org"}' \
+  | node scripts/companion-agent-client.mjs
+```
+
+Uploads use `action: "upload"` plus `inputPath` and an exact query containing
+`action=publish|validate`, `expect_slug`, and `version`; existing skills also require
+`expect_skill_id`. Downloads use `action: "download"` plus `outputPath`. Neither a PAT, JWT,
+transfer ticket, nor secret value belongs in argv. Secret redemption is the one special transport:
+the Python runtime invokes `action: "secret-redeem"` with an inherited anonymous pipe descriptor
+of 3 or greater. The client refuses stdout, stderr, and regular files, writes the redeemed JSON only
+to that pipe, and leaves only item counts on stdout. Do not invoke the grant or redeem endpoints via
+the generic `api` action. These are the
+closed Companion Agent Auth operations; the same routes remain compatible with an explicitly chosen
+legacy PAT:
+
+| Action | Method & path | Capability |
 | --- | --- | --- |
-| Check or refresh the current file-backed PAT | `POST /tokens/refresh` | Preserves existing scopes |
+| Connect/discover Agent Auth | `/.well-known/agent-configuration`, plugin device flow | Public discovery, delegated approval |
+| Explicit legacy PAT refresh | `POST /tokens/refresh` | Legacy mode only, preserves existing scopes |
 | List org library skills | `GET /skills?lib=org` | `skills:read` |
 | List My Skills | `GET /skills?lib=mine` | `skills:read` |
 | List reported installed skills | `GET /skills?installed=true` | `skills:read` |
@@ -58,16 +73,20 @@ These are the Companion skill-management endpoints a personal access token can c
 | Current published version + checksum | `GET /skills/{slug}/download` | `skills:read` |
 | Download a version package | `GET /skills/{slug}/versions/{version}/package` | `skills:read` |
 | Browse a version's files | `GET /skills/{slug}/versions/{version}/files` | `skills:read` |
-| Preview one browser-native file | `GET /skills/{slug}/versions/{version}/files/content?path={path}` | `skills:read` |
-| Validate (no publish) + dependency preflight | `POST /skills?action=validate` | `skills:write` |
-| Publish a new skill | `POST /skills` | `skills:write` |
-| Update a skill | `POST /skills?expect_slug={slug}&expect_skill_id={id}` | `skills:write` |
+| Preview one browser-native file | `GET /skills/{slug}/versions/{version}/files/content?path={path}` | Session/PAT directly; Agent Auth uses a one-use `skills:read` file ticket |
+| Validate (no publish) + dependency preflight | `POST /skills?action=validate&expect_slug={slug}&version={version}` | `skills:write` |
+| Publish a new skill | `POST /skills?action=publish&expect_slug={slug}&version={version}&scope=…` | `skills:write` |
+| Update a skill | `POST /skills?action=publish&expect_slug={slug}&expect_skill_id={id}&version={version}` | `skills:write` |
 | Rename a skill in place | `POST /skills/{slug}/rename` | `skills:write` |
 | Inspect a skill's dependency graph | `GET /skills/{slug}/dependencies` | `skills:read` |
 | Archive a skill | `POST /skills/{slug}/archive` | `skills:write` |
 | Restore an archived skill | `POST /skills/{slug}/restore` | `skills:write` |
 | Preview private deps included when sharing | `GET /skills/{slug}/share-plan` | `skills:read` |
 | Share a personal skill to the org | `POST /skills/{slug}/share` | `skills:write` |
+| Set/promote the pinned public version | `PUT /skills/{slug}/public-version` `{version}` | `skills:write` |
+| Remove the pinned public version | `DELETE /skills/{slug}/public-version` | `skills:write` |
+| Read public preview metadata | `GET /public/skills/{shareToken}` | Public |
+| Install the exact public release package | `GET /public/skills/{shareToken}/versions/{version}/package` | Verified session or one-use `public-skills:install` ticket; PAT rejected |
 | List the label (folder) tree | `GET /labels` | `skills:read` |
 | Create a label (folder) | `POST /labels` | `skills:write` |
 | Rename a label (cascades) | `PUT /labels/rename` | `skills:write` |
@@ -100,8 +119,8 @@ These are the Companion skill-management endpoints a personal access token can c
 | Manage a shared suggestion | `PUT/DELETE /skills/{slug}/secret-suggestions/{slotId}` | `secrets:write` |
 | Accept a shared suggestion | `POST /skills/{slug}/secret-suggestions/{slotId}/accept` | `secrets:write` |
 | Preflight exact skill/dependency secret versions | `POST /secret-retrievals/preflight` | `secrets:read` |
-| Create a 60-second retrieval grant | `POST /secret-retrievals/{planId}/grant` | `secrets:read` |
-| Redeem a grant once | `POST /secret-grants/redeem` | `secrets:read` |
+| Create a 60-second retrieval grant | `POST /secret-retrievals/{planId}/grant` | `secrets:read`; bundled Agent client only through private `secret-redeem` action |
+| Redeem a grant once | `POST /secret-grants/redeem` | `secrets:read`; bundled Agent client only through private `secret-redeem` action |
 | Fetch companion.json v2 schema | `GET /v1/schemas/companion-manifest.v2.schema.json` | Public |
 
 ## Secret bindings and retrieval
@@ -111,7 +130,8 @@ after normalization. Preserve an existing `slotId` when renaming its environment
 returned by skill endpoints expose the same identity as `slot_id`; ordinary `environment.env`
 variables do not use the vault.
 
-PAT automation has the same Secrets-management capabilities as its user inside the token's workspace.
+Delegated Agent Auth has the same Secrets-management capabilities as its approving user inside the
+constrained workspace.
 Prefer the bundled helper so a new value never enters argv or output and can be bound to a declared
 skill slot in the same workflow:
 
@@ -140,23 +160,23 @@ Content-Type: application/json
 
 The `201` response is metadata-only and never contains `value`. For `restricted`, pass one or more
 recipient user ids with repeated `--recipient`; the server rejects non-members. Always confirm the
-audience and recipients with the user before creation. A token needs `secrets:write`; older Companion
-tokens must be regenerated from the Use prompt.
+audience and recipients with the user before creation. The first write requests `secrets:write`
+through device approval; values still travel only through the helper's private prompt or stdin.
 
 With `--skill`, the helper first calls `GET /skills/{slug}/secret-configuration`, resolves the unique
 slot whose `env_key` matches `--key`, then calls `PUT /skills/{slug}/secret-bindings/{slotId}` with the
 new metadata-only `secret_id`. Slot validation happens before the helper reads the secret value.
 
-The same PAT may perform every other vault and binding mutation with `secrets:write`:
+The same delegated agent may perform every other vault and binding mutation with `secrets:write`:
 
 - `PATCH/DELETE /secrets/{id}`, `POST /secrets/{id}/rotate`;
 - `PUT/DELETE /skills/{slug}/secret-bindings/{slotId}`;
 - `PUT/DELETE /skills/{slug}/secret-suggestions/{slotId}` and
   `POST /skills/{slug}/secret-suggestions/{slotId}/accept`.
 
-These routes still enforce the token's workspace, the user's ownership or audience access, the target
-skill's visibility, and stable slot existence. A PAT never gains cross-workspace or another owner's
-secret access.
+These routes still enforce the grant's exact workspace, current membership, the user's ownership or
+audience access, the target skill's visibility, and stable slot existence. Agent Auth and explicit
+legacy PAT mode never gain cross-workspace or another owner's secret access.
 
 Retrieval uses `secrets:read`. Start an install/sync with a metadata-only preflight:
 
@@ -175,7 +195,9 @@ The response contains `plan_id`, five-minute `expires_at`, the exact root/depend
 slot statuses, opaque tombstones, and `blockers`/`warnings`. It never contains a value. A required
 missing slot blocks before local mutation; an optional missing slot only warns.
 
-After one global user confirmation:
+After one global user confirmation, explicit legacy PAT mode performs the two HTTP exchanges below.
+Agent Auth instead calls `api_redeem_secret_plan`, which performs the same exchange inside the
+bundled client and returns plaintext only through its inherited anonymous pipe:
 
 ```http
 POST /secret-retrievals/{planId}/grant
@@ -188,7 +210,8 @@ POST /secret-grants/redeem
 The grant expires after 60 seconds, is stored server-side only as a hash, and is consumed once. The
 server rechecks membership, ACL, revocation, and the planned exact version during preflight, grant,
 and redemption. Keep the redemption response in memory and write only the final private `.env`;
-never put a value or grant in logs, errors, analytics, packages, credentials, manifests, or lockfiles.
+never put a value or grant in stdout, argv, logs, errors, analytics, packages, credentials,
+manifests, or lockfiles.
 Rotation after preflight preserves the planned version. Any access loss invalidates the entire
 redemption and requires a new preflight.
 
@@ -211,23 +234,79 @@ The bundled scripts project skill values under
 `~/.companion/secrets/<workspace>/_manual/<profile>/.env` with `0700` directories, `0600` files,
 same-filesystem staging, exclusive locks, symlink/traversal refusal, and rollback markers.
 
-Public org-skill previews are separate from PAT-authenticated management. Use the `share_token`
+Public org-skill previews are separate from authenticated management. Use the `share_token`
 returned on skill rows to build the web URL `/s/{share_token}` or to fetch metadata directly:
 
 ```http
 GET /public/skills/{share_token}
 ```
 
-This endpoint is unauthenticated. It returns only `display_name`, `slug`, `description`,
-`current_version`, `creator_name`, `creator_initials`, and `updated_at` for a live org
-skill. Personal, archived, and unknown tokens return 404. It never exposes package content, files,
-downloads, requirements, secrets, labels, `id`, `org_id`, or `creator_id`.
+This endpoint is anonymous. It returns only `display_name`, `slug`, `description`,
+`current_version`, `creator_name`, `creator_initials`, `updated_at`, and
+`public_release: { version, checksum, size_bytes, released_at } | null` for a live org skill. The
+preview exists even when `public_release` is null. When it is non-null, `/s/{share_token}` and its
+Open Graph image use that pinned release rather than a newer internal version. Personal, archived,
+and unknown tokens return 404. It never exposes package content, files, requirements, secrets,
+labels, `id`, `org_id`, or `creator_id`.
+
+Authenticated skill rows also include `public_version` and `can_manage_public`. Only the creator or a
+workspace Owner/Admin may manage the pointer. The skill must be org-scoped, and only its current
+version may be promoted:
+
+```http
+PUT /skills/{slug}/public-version
+Content-Type: application/json
+
+{ "version": "1.4.0" }
+```
+
+A concurrent new publish makes the selected version stale and returns `409`. Re-read and ask again.
+Never republish the archive when only promotion failed. `DELETE /skills/{slug}/public-version` is
+idempotent. It preserves the share token; archive also preserves the pointer while making both page
+and package return 404.
+
+The exact pinned archive is downloaded from:
+
+```http
+GET /public/skills/{share_token}/versions/{version}/package
+X-Companion-Transfer-Ticket: cmp_xfer_...
+```
+
+The route accepts a verified Better Auth browser session or a 60-second, one-use Agent Auth transfer
+ticket. It rejects PATs and anonymous requests. `public-skills:install` is instance-wide but its
+execution accepts only a known public token/version, then binds the hashed ticket to the approving
+user, agent, action, workspace, version, checksum, and size. Consumption revalidates all current
+state. The ticket never belongs in a URL, argv, output, or log.
+
+A public install handles only this ZIP root: verify checksum and size; reject traversal, absolute
+paths, backslashes, symlinks/hard links, special files, NTFS alternate-data-stream syntax, DOS
+device names, trailing-dot/space aliases, and portable case-folding collisions; require `SKILL.md` at the package root;
+ask global or project before writing; reject symlinks in the selected install root and each
+package-controlled destination ancestor; verify the physical library stays contained by that root
+before staging and replacement; confirm replacement; then swap atomically. Never execute scripts,
+follow dependencies, resolve Secrets, or create `skill_installs`.
+
+The successful client result reports `prerequisites.dependencies`, `required_env`, `optional_env`,
+`required_secrets`, and `optional_secrets` as warnings only. It normalizes both the current
+`companion.json` dependency/environment maps and supported legacy dependency/requirement arrays with
+the same defaults as package validation. Only when `companion.json` is absent does it fall back to
+validated `SKILL.md` frontmatter requirements; a present manifest always wins.
+
+The compiled client accepts the confirmed installation as one JSON stdin request (never put the
+ticket or a credential in this JSON):
+
+```json
+{"action":"public-install","token":"<share-token>","version":"<public-version>","checksum":"sha256:<digest>","sizeBytes":1234,"tool":"claude-code","scope":"global","confirmInstall":true,"confirmReplace":false}
+```
+
+For `scope: "project"`, include the absolute `projectRoot`. `confirmReplace` may be true only after
+the user has separately approved replacing the resolved existing folder.
 
 The signed-in web app uses `GET /skills/share-target/{share_token}` with a session cookie to resolve
 `{org_id, slug}` for members before opening the slug-keyed detail route. Agents should normally share
 the web URL `/s/{share_token}` instead of calling that resolver directly.
 
-Before naming and filing a brand-new skill, call the token-readable workspace policy endpoint:
+Before naming and filing a brand-new skill, call the `skills:read` workspace policy endpoint:
 
 ```http
 GET /v1/orgs/current/skill-naming-policy
@@ -246,8 +325,8 @@ preview until they are shared to the org; use the signed-in detail URL
 org `share_token` lookup fails, do not republish; report success and provide the signed-in detail
 fallback.
 
-Some skills-management routes are intended for the signed-in web session rather than the
-Companion PAT. Use them only when the caller is operating with a valid session cookie:
+Some skills-management routes are intended for the signed-in web session rather than Agent Auth or a
+legacy PAT. Use them only when the caller is operating with a valid session cookie:
 
 | Action | Method & path | Auth |
 | --- | --- | --- |
@@ -292,11 +371,12 @@ repairing, or republishing a manifest. Unknown values fail validation; omission 
 
 Do not use this skill for workspace members, invitations, org settings mutation, or general token
 management. The automatic current-token refresh above is the only token-management exception.
-The only PAT-readable org-settings surface for this skill is
-`GET /orgs/current/skill-naming-policy`.
+The only org-settings surface in the closed Companion capability registry is
+`GET /orgs/current/skill-naming-policy` (`skills:read`; also available in explicit legacy PAT mode).
 
 Listing the workspace catalog (`GET /skills?lib=org`), My Skills (`GET /skills?lib=mine`), and
-Companion-reported installs (`GET /skills?installed=true`) works with a `skills:read` token.
+Companion-reported installs (`GET /skills?installed=true`) work with Agent Auth `skills:read` or an
+explicit legacy PAT carrying that scope.
 `installed=true` means the current user has a `skill_installs` row in Companion; it does not prove
 the package files still exist on disk. To inventory what is actually installed on this machine, read
 the active workspace-id entry in `~/.companion/skills.lock.json` first, then fall back to pointed-at
@@ -334,8 +414,8 @@ across both libraries in a workspace.
 ## Free and Pro entitlements
 
 Self-hosted workspaces are fully unlocked. Managed SaaS Free workspaces apply the same gates to
-session and PAT skill operations. Billing endpoints are intentionally session-only and are not part
-of this skill's PAT surface.
+session, Agent Auth, and explicit legacy PAT skill operations. Billing endpoints are intentionally
+session-only and are not part of the closed Agent Auth or legacy PAT surface.
 
 An entitlement refusal is HTTP `403` with this shape:
 
@@ -426,12 +506,12 @@ using the path the user already confirmed.
 Examples:
 
 ```http
-POST /skills?scope=org&label=marketing&label=marketing%2Fseo
+POST /skills?action=publish&expect_slug=my-skill&version=1.0.0&scope=org&label=marketing&label=marketing%2Fseo
 Content-Type: application/zip
 ```
 
 ```http
-POST /skills?scope=personal
+POST /skills?action=publish&expect_slug=my-skill&version=1.0.0&scope=personal
 Content-Type: application/zip
 ```
 
@@ -480,7 +560,7 @@ because scope is immutable. Re-publish never moves, adds, or removes folder labe
 to add folders after the update; if yes, publish the new version first, then call
 `POST /skills/{slug}/labels` for org skills or `POST /skills/{slug}/personal-labels` for personal
 skills using the already-confirmed paths and the library already known from the current workflow. The
-token-supported download endpoint does not expose `scope`; if the skill's library is not known, do
+registered package download operation does not expose `scope`; if the skill's library is not known, do
 not guess or try both routes. Publish the update without folder changes and ask the user to run a
 separate organize/folder command from the skill's library context. To remove a skill from a folder,
 call the org or personal label routes separately and only after explicit user confirmation.

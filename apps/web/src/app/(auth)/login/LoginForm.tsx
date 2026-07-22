@@ -427,6 +427,7 @@ export function LoginForm({
               password={password}
               setEmail={setEmail}
               setPassword={setPassword}
+              next={next}
               onGoogle={goGoogle}
               goSignin={() => setScreen("signin")}
               onSent={() => {
@@ -436,7 +437,7 @@ export function LoginForm({
             />
           )}
           {screen === "verify" && (
-            <Verify email={email} onBack={() => setScreen(verifyBackRef.current)} />
+            <Verify email={email} next={next} onBack={() => setScreen(verifyBackRef.current)} />
           )}
           {screen === "forgot" && (
             <Forgot
@@ -574,6 +575,7 @@ function SignUp({
   password,
   setEmail,
   setPassword,
+  next,
   onGoogle,
   goSignin,
   onSent,
@@ -582,6 +584,7 @@ function SignUp({
   password: string;
   setEmail: (v: string) => void;
   setPassword: (v: string) => void;
+  next: string;
   onGoogle: () => void;
   goSignin: () => void;
   onSent: () => void;
@@ -602,7 +605,7 @@ function SignUp({
     setErr(null);
     setBusy(true);
     try {
-      const { data } = await postJson("/v1/auth/signup", { email, password });
+      const { data } = await postJson("/v1/auth/signup", { email, password, next });
       if (data.ok) {
         onSent();
         return;
@@ -645,7 +648,7 @@ function SignUp({
   );
 }
 
-function Verify({ email, onBack }: { email: string; onBack: () => void }) {
+function Verify({ email, next, onBack }: { email: string; next: string; onBack: () => void }) {
   const [code, setCode] = useState("");
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -656,7 +659,7 @@ function Verify({ email, onBack }: { email: string; onBack: () => void }) {
     setBusy(true);
     setErr(null);
     try {
-      const { data } = await postJson("/v1/auth/verify-email", { email, otp: value });
+      const { data } = await postJson("/v1/auth/verify-email", { email, otp: value, next });
       if (data.ok && typeof data.redirect === "string") {
         window.location.href = data.redirect;
         return;
@@ -668,7 +671,7 @@ function Verify({ email, onBack }: { email: string; onBack: () => void }) {
     } finally {
       setBusy(false);
     }
-  }, [email]);
+  }, [email, next]);
 
   // Auto-submit once all six digits are entered (debounced by the busy guard).
   useEffect(() => {

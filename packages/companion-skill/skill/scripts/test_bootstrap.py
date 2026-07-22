@@ -82,6 +82,7 @@ class BootstrapTests(unittest.TestCase):
                 "COMPANION_API_URL": "https://api.example/v1",
                 "COMPANION_TOKEN": "cmp_pat_SECRET",
                 "COMPANION_WORKSPACE_ID": "ws-1",
+                "COMPANION_AUTH_MODE": "legacy-pat",
             },
             clear=False,
         )

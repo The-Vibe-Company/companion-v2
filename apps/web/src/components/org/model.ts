@@ -90,6 +90,7 @@ export type SettingsView =
   | "providers"
   | "models"
   | "apikeys"
+  | "agents"
   | "org-providers"
   | "org-models"
   | "general"
@@ -105,6 +106,7 @@ export const SETTINGS_VIEWS: readonly SettingsView[] = [
   "providers",
   "models",
   "apikeys",
+  "agents",
   "general",
   "org-providers",
   "org-models",

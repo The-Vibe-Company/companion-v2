@@ -78,138 +78,77 @@ async function buildPackage(): Promise<CompanionSkillPackage> {
   };
 }
 
-/**
- * Assistant prompt templates with `{base}` (API base URL), `{workspaceId}` (organizations.id), and
- * `{token}` (a freshly minted PAT) left for the web client to fill. The version is already baked in.
- * Each install/update prompt ends with the report-back step so the workspace learns the skill is
- * installed.
- */
-function buildPrompts(version: string): LocalSkillPrompts {
-  const download =
-    'curl -L "{base}/local-skills/companion/package" -H "Authorization: Bearer {token}" -o companion.zip';
-  const report =
-    `curl -s "{base}/local-skills/companion/installed" -H "Authorization: Bearer {token}" ` +
-    `-H "Content-Type: application/json" -d '{"version":"${version}","agent":"<your assistant>"}'`;
-  const credentials = [
-    "Save the current Companion credentials before doing anything else. Do not print the token.",
-    "",
-    "macOS/Linux:",
-    "```sh",
-    'mkdir -p "$HOME/.companion"',
-    "umask 077",
-    `node <<'NODE'
-const fs = require("fs");
-const os = require("os");
-const path = require("path");
-const dir = path.join(os.homedir(), ".companion");
-const file = path.join(dir, "credentials.json");
-const lock = path.join(dir, ".credentials.lock");
-const workspaceId = "{workspaceId}";
-const entry = { apiUrl: "{base}", token: "{token}", updatedAt: new Date().toISOString() };
-fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-const deadline = Date.now() + 10000;
-for (;;) {
-  try { fs.mkdirSync(lock, { mode: 0o700 }); break; }
-  catch (error) {
-    if (!error || error.code !== "EEXIST") throw error;
-    try { if (Date.now() - fs.statSync(lock).mtimeMs > 300000) { fs.rmdirSync(lock); continue; } } catch {}
-    if (Date.now() >= deadline) throw new Error("timed out waiting to update credentials.json");
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
-  }
-}
-let temp;
-try {
-  let current = {};
-  if (fs.existsSync(file)) current = JSON.parse(fs.readFileSync(file, "utf8"));
-  const workspaces = current && current.schemaVersion === 2 && current.workspaces && typeof current.workspaces === "object"
-    ? current.workspaces
-    : {};
-  const next = { schemaVersion: 2, activeWorkspaceId: workspaceId, workspaces: { ...workspaces, [workspaceId]: entry } };
-  temp = path.join(dir, ".credentials." + process.pid + "." + Date.now() + ".tmp");
-  fs.writeFileSync(temp, JSON.stringify(next, null, 2) + "\\n", { mode: 0o600 });
-  fs.renameSync(temp, file);
-  fs.chmodSync(file, 0o600);
-} finally {
-  if (temp) { try { fs.unlinkSync(temp); } catch {} }
-  try { fs.rmdirSync(lock); } catch {}
-}
-NODE`,
-    'chmod 600 "$HOME/.companion/credentials.json" 2>/dev/null || true',
-    "```",
-    "",
-    "Windows PowerShell:",
-    "```powershell",
-    '$dir = Join-Path $HOME ".companion"',
-    "New-Item -ItemType Directory -Force -Path $dir | Out-Null",
-    '$file = Join-Path $dir "credentials.json"',
-    '$lock = Join-Path $dir ".credentials.lock"',
-    '$workspaceId = "{workspaceId}"',
-    '$entry = @{ apiUrl = "{base}"; token = "{token}"; updatedAt = (Get-Date).ToUniversalTime().ToString("o") }',
-    '$deadline = (Get-Date).AddSeconds(10)',
-    'while ($true) { try { New-Item -ItemType Directory -Path $lock -ErrorAction Stop | Out-Null; break } catch { if (Test-Path $lock) { $age = (Get-Date).ToUniversalTime() - (Get-Item $lock).LastWriteTimeUtc; if ($age.TotalMinutes -gt 5) { Remove-Item -Force $lock -ErrorAction SilentlyContinue; continue } }; if ((Get-Date) -ge $deadline) { throw "timed out waiting to update credentials.json" }; Start-Sleep -Milliseconds 50 } }',
-    '$temp = Join-Path $dir (".credentials." + [guid]::NewGuid().ToString("N") + ".tmp")',
-    'try {',
-    '  $current = $null',
-    '  if (Test-Path $file) { $current = Get-Content -Raw -ErrorAction Stop $file | ConvertFrom-Json -ErrorAction Stop }',
-    '  $workspaces = @{}',
-    '  if ($current -and $current.schemaVersion -eq 2 -and $current.workspaces) { $current.workspaces.PSObject.Properties | ForEach-Object { $workspaces[$_.Name] = $_.Value } }',
-    '  $workspaces[$workspaceId] = $entry',
-    '  @{ schemaVersion = 2; activeWorkspaceId = $workspaceId; workspaces = $workspaces } | ConvertTo-Json -Depth 5 | Set-Content -NoNewline -Encoding UTF8 $temp',
-    '  Move-Item -Force $temp $file',
-    '} finally { Remove-Item -Force $temp -ErrorAction SilentlyContinue; Remove-Item -Force $lock -ErrorAction SilentlyContinue }',
-    "```",
-  ].join("\n");
-
+/** Agent-Auth-first assistant prompts. They contain no bearer secret or silent legacy fallback. */
+export function buildCompanionSkillPrompts(version: string): LocalSkillPrompts {
   const install = [
-    "You are installing the Companion skill for this workspace. It lets you manage, validate,",
-    "publish, and update my skills here, and you always confirm a change with me first.",
+    `Install Companion skill ${version} for workspace {workspaceId} from {base}.`,
+    "Use delegated Agent Auth; do not create or request a PAT. Pin every bootstrap command to",
+    "@auth/agent-cli@0.5.1 and use device_authorization only.",
     "",
-    "1. Run the credential snippet for this user's OS:",
-    credentials,
-    `2. Download version ${version} of the package:`,
-    `   ${download}`,
-    "3. Unzip companion.zip into wherever you keep skills (for example ~/.claude/skills/companion,",
-    "   ~/.codex/skills/companion, or ~/.agents/skills/companion for OpenCode)",
-    "   and confirm SKILL.md sits at the package root. Remove companion.zip when done.",
-    "4. Run the bootstrap once from the installed companion folder:",
+    "1. Derive the public instance origin from {base} by removing its trailing /v1, then discover it:",
+    '   origin="{base}"; origin="${origin%/v1}"',
+    '   npx --yes @auth/agent-cli@0.5.1 --storage-dir "$HOME/.companion/agent-auth" --url="$origin" discover "$origin"',
+    "   Set --storage-dir to",
+    "   ~/.companion/agent-auth, create it as 0700, and use umask 077.",
+    "2. Read the non-secret agentId in schema-v3 ~/.companion/credentials.json. `connection` checks",
+    "   only local key state, so run both commands with the pinned CLI:",
+    '   npx --yes @auth/agent-cli@0.5.1 --storage-dir "$HOME/.companion/agent-auth" --url="$origin" connection "$agent_id"',
+    '   status_response="$(npx --yes @auth/agent-cli@0.5.1 --storage-dir "$HOME/.companion/agent-auth" --url="$origin" status "$agent_id")"',
+    "   Parse status_response in memory. Reuse it only when status is exactly active and",
+    "   agent_capability_grants contains an active skills:read grant constrained to",
+    "   workspaceId={workspaceId}.",
+    "3. If the agent is active but that grant is absent or non-active, request it on the same agent:",
+    '   npx --yes @auth/agent-cli@0.5.1 --storage-dir "$HOME/.companion/agent-auth" --url="$origin" request "$agent_id" --capabilities skills:read --constraints \'{"skills:read":{"workspaceId":{"eq":"{workspaceId}"}}}\' --preferred-method device_authorization --reason "Read skills in Companion workspace {workspaceId}"',
+    "   After approval, run status again and require the active agent and exact active constrained",
+    "   grant. Do not trust the cached output from connection or request.",
+    '   status_response="$(npx --yes @auth/agent-cli@0.5.1 --storage-dir "$HOME/.companion/agent-auth" --url="$origin" status "$agent_id")"',
+    "4. If the connection is absent, status is not active (including revoked, rejected, or expired),",
+    "   or the CLI reports agent_not_found, reconnect with:",
+    '   npx --yes @auth/agent-cli@0.5.1 --storage-dir "$HOME/.companion/agent-auth" --url="$origin" connect --provider "$origin" --mode delegated --preferred-method device_authorization --capabilities skills:read --constraints \'{"skills:read":{"workspaceId":{"eq":"{workspaceId}"}}}\' --name "Companion" --reason "Read skills in Companion workspace {workspaceId}"',
+    "   If status or connect reports host_revoked, do not retry with that host key. Only after that",
+    "   explicit server error, remove the revoked ~/.companion/agent-auth/host.json identity. If it",
+    "   reports host_not_found, leave the missing identity missing. Rerun the same connect command so",
+    "   the CLI generates a fresh host identity, parse its agentId, then revalidate:",
+    '   status_response="$(npx --yes @auth/agent-cli@0.5.1 --storage-dir "$HOME/.companion/agent-auth" --url="$origin" status "$agent_id")"',
+    "5. Persist only { issuer, agentId } plus apiUrl={base} under this workspace in credentials.json.",
+    "   Migrate a schema-v2 token to schema v3 under legacyPat without using it. Write atomically with",
+    "   mode 0600; private host/agent keys stay only under ~/.companion/agent-auth.",
+    `6. Execute skills:read with {workspaceId, transfer:{action:"download-local",slug:"companion",version:"${version}"}}.`,
+    "   Keep the 60-second ticket in memory. Pipe the execution JSON over stdin to a local program",
+    "   that sends it only in X-Companion-Transfer-Ticket to {base}/local-skills/companion/package.",
+    "   Never put the ticket in a URL, argv, file, log, or chat.",
+    "7. Verify the exact checksum and size. Inspect the ZIP without executing scripts; reject",
+    "   traversal, absolute paths, duplicate/case-colliding paths, links, and special files, and",
+    "   require SKILL.md at the root.",
+    "8. Ask global or project and which tool(s): Claude Code, Codex, or OpenCode. Confirm before",
+    "   replacement, stage beside the destination, and atomically swap with rollback. Install only",
+    "   the root package and report declared prerequisites.",
+    "9. Run the bootstrap once from the installed companion folder:",
     "   python3 scripts/bootstrap.py --summary",
-    "5. Confirm the install so this workspace knows it is ready:",
-    `   ${report}`,
-    "6. Tell me when it's ready.",
+    "10. Report installation through scripts/companion-agent-client.mjs over JSON stdin:",
+    `   {"action":"api","method":"POST","path":"/local-skills/companion/installed","body":{"version":"${version}","agent":"<your assistant>"}}`,
+    "   This first write may request one additional skills:write approval. Tell me when it is ready.",
   ].join("\n");
 
   const update = [
     `Please update the Companion skill to version ${version}.`,
-    "",
-    "1. Run the credential snippet for this user's OS so future skill calls use the current workspace:",
-    credentials,
-    "2. From the installed companion folder, run the safe bootstrap update:",
+    "Use its existing Agent Auth connection. If only a legacy PAT exists, do not use it silently;",
+    "complete the delegated device connection from the install flow first.",
+    "1. From the installed companion folder, run the safe bootstrap update:",
     "   python3 scripts/bootstrap.py --json --auto-update-companion",
     "   It preserves local customizations: if tracked files are modified or missing, it blocks with",
     '   reason "local_customizations" instead of overwriting them.',
-    "3. If bootstrap cannot run because the installed copy is too old, download the latest package:",
-    `   ${download}`,
-    "4. Unzip companion.zip into a temporary folder and verify SKILL.md is at the package root.",
-    `   Verify its companion.json version is ${version}.`,
-    "5. Validate the existing companion skill folder, stage the extracted package, then replace the",
-    "   existing folder with a transient backup only for the duration of the swap. If the new package",
-    "   fails to land, restore the original folder in the same operation. Do not leave backup folders",
-    "   containing SKILL.md behind.",
-    "   Remove companion.zip, temporary folders, and any transient backup when done.",
-    "6. Confirm the new version with the workspace:",
-    `   ${report}`,
-    "7. Tell me what changed.",
+    "2. The bundled client obtains a one-use skills:read transfer ticket for the exact local package;",
+    "   it never sends a PAT or long-lived JWT to a binary endpoint. Verify integrity, use an atomic",
+    "   swap with rollback, and remove transient archives/backups.",
+    "3. Report the installed version through the bundled client. Request skills:write progressively",
+    "   if absent, then tell me what changed.",
   ].join("\n");
 
-  // The "use" prompt also carries fresh credentials: the drawer mints a new token on copy/send, so
-  // handing these over lets the skill keep working without a reinstall.
   const use = [
     "Use the Companion skill to manage, validate, and publish my skills.",
-    "First refresh its stored workspace credentials by running the snippet for this user's OS:",
-    credentials,
-    "Then use the skill. It should read COMPANION_API_URL, COMPANION_WORKSPACE_ID, and",
-    "COMPANION_TOKEN from the environment when available; otherwise it should read them from",
-    "~/.companion/credentials.json on macOS/Linux or $HOME\\.companion\\credentials.json on Windows.",
+    "Use the schema-v3 Agent Auth connection for workspace {workspaceId}; request capabilities only",
+    "when first needed. Never fall back to a PAT unless I explicitly select legacy-pat mode.",
     "On the first Companion use in a conversation, run:",
     "python3 scripts/bootstrap.py --json --auto-update-companion",
   ].join("\n");
@@ -238,6 +177,6 @@ export async function buildCompanionSkillRow(
     commands: m.commands,
     changes: companionSkillChanges(pkg.version),
     integrity: pkg.integrity,
-    prompts: buildPrompts(pkg.version),
+    prompts: buildCompanionSkillPrompts(pkg.version),
   };
 }

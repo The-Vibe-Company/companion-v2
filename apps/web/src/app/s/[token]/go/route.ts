@@ -35,7 +35,7 @@ export async function GET(request: NextRequest, { params }: ShareGoParams): Prom
   }
 
   if (response.status === 401) {
-    return NextResponse.redirect(localUrl(request, `/login?next=${encodeURIComponent(`/s/${token}`)}`));
+    return NextResponse.redirect(localUrl(request, `/login?next=${encodeURIComponent(`/s/${token}/go`)}`));
   }
   if (!response.ok) {
     return NextResponse.redirect(localUrl(request, sharePreviewHref(token)));

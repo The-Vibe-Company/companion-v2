@@ -6,6 +6,7 @@ export type SkillActionId =
   | "update"
   | "download"
   | "publish-version"
+  | "manage-public"
   | "archive"
   | "restore"
   | "mark-installed"
@@ -26,6 +27,7 @@ export interface SkillActionPermissions {
   canArchive: boolean;
   canRestore: boolean;
   canCorrectInstall: boolean;
+  canManagePublic: boolean;
 }
 
 export interface SkillActionModel {
@@ -39,6 +41,7 @@ export const SKILL_ACTIONS = {
   update: { id: "update", label: "Update skill", contextualLabel: "Update", icon: "arrow-up-circle" },
   download: { id: "download", label: "Download package", icon: "package-2" },
   publishVersion: { id: "publish-version", label: "Publish new version", icon: "git-commit" },
+  managePublic: { id: "manage-public", label: "Manage public link", icon: "globe" },
   archive: { id: "archive", label: "Archive skill", contextualLabel: "Archive", icon: "archive" },
   restore: { id: "restore", label: "Restore skill", contextualLabel: "Restore", icon: "rotate-ccw" },
   markInstalled: { id: "mark-installed", label: "Mark as installed", icon: "circle-check" },
@@ -53,6 +56,7 @@ type ActionSkill = Pick<
   | "installStatus"
   | "installedVersion"
   | "version"
+  | "publicVersion"
   | "validation"
   | "referenced"
   | "usedByCount"
@@ -63,7 +67,7 @@ type ActionSkill = Pick<
  * helper only prevents the UI from advertising actions the current actor cannot perform.
  */
 export function skillActionPermissions(
-  skill: Pick<SkillVM, "scope" | "authorId">,
+  skill: Pick<SkillVM, "scope" | "authorId" | "canManagePublic">,
   actorId: string,
 ): SkillActionPermissions {
   const canManage = skill.scope === "org" || skill.authorId === actorId;
@@ -73,6 +77,7 @@ export function skillActionPermissions(
     canArchive: canManage,
     canRestore: canManage,
     canCorrectInstall: skill.scope === "org",
+    canManagePublic: skill.scope === "org" && skill.canManagePublic === true,
   };
 }
 
@@ -105,6 +110,12 @@ export function resolveSkillActions(skill: ActionSkill, permissions: SkillAction
 
   if (!skill.archived) {
     if (permissions.canPublishVersion) secondary.push(SKILL_ACTIONS.publishVersion);
+    if (permissions.canManagePublic) {
+      secondary.push({
+        ...SKILL_ACTIONS.managePublic,
+        label: "publicVersion" in skill && skill.publicVersion ? "Manage public link" : "Make public",
+      });
+    }
     if (permissions.canArchive) secondary.push(SKILL_ACTIONS.archive);
   }
 

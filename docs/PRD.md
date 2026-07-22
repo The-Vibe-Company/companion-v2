@@ -101,6 +101,19 @@ Each requirement has user stories with acceptance criteria. Priorities: **P0** =
 - As a Builder, I can **upload a `SKILL.md` package** and have it validated and versioned. *AC:*
   invalid frontmatter, path traversal, or oversize archives are rejected with a clear error; a valid
   upload produces an immutable, checksummed `skill_versions` record with a semver.
+- As the creator of an organization skill, or an Owner/Admin, I can **pin the current immutable version
+  as its public release**, promote a later current version explicitly, or remove package access. *AC:*
+  personal skills must first be shared; a new publish never moves the pointer; concurrent promotion
+  returns `409`; removal is idempotent and retains the token; archive hides page and bytes while
+  preserving the pointer for restoration; rename returns `409` while a pointer is active, and after
+  withdrawal/rename only a new current version whose immutable name matches the new slug can be promoted.
+- As a visitor, I can inspect a stable, `noindex` public skill page and install its pinned release after
+  authenticating. *AC:* preview metadata is anonymous; ZIP bytes require a verified Better Auth
+  session or an approved delegated agent, reject PAT/anonymous/mismatched/archive requests, and match
+  the advertised ZIP checksum and size from an immutable content-addressed snapshot (never a ZIP
+  regenerated at download time). The installer rejects traversal/symlinks, requires root
+  `SKILL.md`, confirms scope/replacement, performs an atomic swap, executes no scripts, and does not
+  resolve dependencies, secrets, or `skill_installs`.
 - As any member, I can **file a skill under one or more labels** (org-wide shared folders) and **browse,
   filter, and search** all skills in the org. *AC:* labels are slash-separated paths with per-path color
   and icon; assigning, renaming, recoloring, or deleting a label is allowed for any member and reflected

@@ -156,3 +156,40 @@ export async function seedPersonalLabel(input: {
     path: input.path,
   });
 }
+
+/** Seed the real Agent Auth identity/grant rows required by transfer-ticket consumption checks. */
+export async function seedAgentAuthIdentity(input: {
+  user: TestActor;
+  agentId: string;
+  grantId: string;
+  capability: "skills:read" | "skills:write" | "public-skills:install";
+  workspaceId?: string;
+}): Promise<void> {
+  const hostId = `host-${input.agentId}`;
+  await integrationDb.insert(schema.agentHost).values({
+    id: hostId,
+    name: `Host for ${input.agentId}`,
+    userId: input.user.id,
+    publicKey: "integration-host-public-key",
+    status: "active",
+  });
+  await integrationDb.insert(schema.agent).values({
+    id: input.agentId,
+    name: input.agentId,
+    userId: input.user.id,
+    hostId,
+    status: "active",
+    mode: "delegated",
+    publicKey: "integration-agent-public-key",
+  });
+  await integrationDb.insert(schema.agentCapabilityGrant).values({
+    id: input.grantId,
+    agentId: input.agentId,
+    capability: input.capability,
+    grantedBy: input.user.id,
+    status: "active",
+    constraints: input.workspaceId
+      ? JSON.stringify({ workspaceId: { eq: input.workspaceId } })
+      : null,
+  });
+}

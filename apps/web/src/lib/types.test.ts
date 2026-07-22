@@ -28,6 +28,8 @@ function row(over: Partial<SkillListRow> = {}): SkillListRow {
     updater_avatar_url: "https://example.com/uma.png",
     modifiers: [],
     current_version: "1.0.0",
+    public_version: null,
+    can_manage_public: false,
     license: null,
     compatibility: null,
     metadata: {},
@@ -50,6 +52,12 @@ function row(over: Partial<SkillListRow> = {}): SkillListRow {
 }
 
 describe("mapSkill author vs updater", () => {
+  it("maps the pinned public release and its server-projected management permission", () => {
+    const vm = mapSkill(row({ public_version: "1.0.0", can_manage_public: true }));
+    expect(vm.publicVersion).toBe("1.0.0");
+    expect(vm.canManagePublic).toBe(true);
+  });
+
   it("maps creator_* to author and updater_* to updater when both are present", () => {
     const vm = mapSkill(row());
     expect(vm.authorId).toBe("user-creator");

@@ -20,16 +20,35 @@ describe("verify-email route", () => {
     vi.unstubAllEnvs();
   });
 
-  it("re-emits the session cookie and redirects to onboarding on success", async () => {
+  it("re-emits the session cookie and preserves a safe public-skill return path", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => new Response(null, { status: 200, headers: { "set-cookie": "session=value; Path=/; HttpOnly" } })),
     );
 
-    const response = await POST(jsonRequest({ email: "new@acme.com", otp: "284917" }));
+    const response = await POST(jsonRequest({
+      email: "new@acme.com",
+      otp: "284917",
+      next: "/s/public-token?download=1",
+    }));
 
-    expect(await response.json()).toEqual({ ok: true, redirect: "/onboarding" });
+    expect(await response.json()).toEqual({ ok: true, redirect: "/s/public-token?download=1" });
     expect(response.headers.get("set-cookie")).toBe("session=value; Path=/; HttpOnly");
+  });
+
+  it("falls back to the protected skills page for an unsafe return path", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(null, { status: 200 })),
+    );
+
+    const response = await POST(jsonRequest({
+      email: "new@acme.com",
+      otp: "284917",
+      next: "https://attacker.example/steal-session",
+    }));
+
+    expect(await response.json()).toEqual({ ok: true, redirect: "/skills" });
   });
 
   it("maps expired codes to a distinct message", async () => {

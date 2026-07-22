@@ -36,6 +36,7 @@ import { MarkdownView } from "./markdown";
 import { Discussion } from "./discussion";
 import { SkillSecretConfiguration } from "../secrets/SkillSecretConfiguration";
 import {
+  SKILL_ACTIONS,
   resolveSkillActions,
   skillActionPermissions,
   type SkillAction,
@@ -529,6 +530,7 @@ export function DetailView({
         </span>
         {!skill.archived && (
           <button
+            type="button"
             className="btn-ghost"
             disabled={invalid || !skill.version}
             onClick={() => setLauncherOpen(true)}
@@ -596,6 +598,28 @@ export function DetailView({
                   </>
                 )}
               </p>
+              {skill.scope === "org" && (
+                <div className="dpublic" aria-label="Public release status">
+                  <span>
+                    Current <b className="mono">v{skill.version ?? "none"}</b>
+                    <span aria-hidden="true"> · </span>
+                    Public <b className="mono">{skill.publicVersion ? `v${skill.publicVersion}` : "none"}</b>
+                  </span>
+                  {!skill.archived && skill.canManagePublic === true && (
+                    <button
+                      type="button"
+                      className="btn-sec"
+                      onClick={() => onAction({
+                        ...SKILL_ACTIONS.managePublic,
+                        label: skill.publicVersion ? "Manage public link" : "Make public",
+                      })}
+                    >
+                      <Icon name="globe" size={13} />
+                      {skill.publicVersion ? "Manage public link" : "Make public"}
+                    </button>
+                  )}
+                </div>
+              )}
               {isInstalledCopy && (
                 <div className="ls-confirm dinstalled-note">
                   <Icon name="info" size={15} />

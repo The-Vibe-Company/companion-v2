@@ -50,7 +50,7 @@ class EnvSandbox(unittest.TestCase):
         self.home.mkdir()
         self._saved = {
             key: os.environ.get(key)
-            for key in ("HOME", "COMPANION_HOME", "COMPANION_API_URL", "COMPANION_TOKEN", "COMPANION_WORKSPACE_ID", "COMPANION_AGENT")
+            for key in ("HOME", "COMPANION_HOME", "COMPANION_API_URL", "COMPANION_TOKEN", "COMPANION_WORKSPACE_ID", "COMPANION_AUTH_MODE", "COMPANION_AGENT")
         }
         os.environ["HOME"] = str(self.home)
         os.environ["COMPANION_HOME"] = str(self.home / ".companion")
@@ -108,6 +108,63 @@ class ConfigTests(EnvSandbox):
         self.assertEqual(saved["tools"], ["claude-code", "codex", "opencode"])  # sorted + deduped
         self.assertEqual(saved["detectedAt"], "2026-06-26T00:00:00Z")
         self.assertEqual(companion_lib.load_tool_config(), ["claude-code", "codex", "opencode"])
+
+
+class CredentialResolutionTests(EnvSandbox):
+    def write_v3_credentials(self, *, include_legacy_pat: bool = True) -> None:
+        credential_dir = Path(os.environ["COMPANION_HOME"])
+        credential_dir.mkdir(parents=True)
+        entry = {
+            "apiUrl": "https://api.example/v1",
+            "agentAuth": {"issuer": "https://companion.example", "agentId": "agent-1"},
+        }
+        if include_legacy_pat:
+            entry["legacyPat"] = {"token": "cmp_pat_preserved"}
+        (credential_dir / "credentials.json").write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 3,
+                    "activeWorkspaceId": "workspace-1",
+                    "workspaces": {"workspace-1": entry},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def test_v3_credentials_prefer_agent_auth_by_default(self) -> None:
+        self.write_v3_credentials()
+        os.environ.pop("COMPANION_API_URL", None)
+        os.environ.pop("COMPANION_TOKEN", None)
+        os.environ.pop("COMPANION_AUTH_MODE", None)
+
+        api_url, token, workspace_id, source = companion_lib.resolve_credentials_with_source()
+
+        self.assertEqual(api_url, "https://api.example/v1")
+        self.assertEqual(token, f"{companion_lib.AGENT_CREDENTIAL_PREFIX}workspace-1")
+        self.assertEqual(workspace_id, "workspace-1")
+        self.assertEqual(source, "agent_auth")
+
+    def test_v3_credentials_honor_explicit_legacy_pat_with_agent_auth_present(self) -> None:
+        self.write_v3_credentials()
+        os.environ.pop("COMPANION_API_URL", None)
+        os.environ.pop("COMPANION_TOKEN", None)
+        os.environ["COMPANION_AUTH_MODE"] = "legacy-pat"
+
+        api_url, token, workspace_id, source = companion_lib.resolve_credentials_with_source()
+
+        self.assertEqual(api_url, "https://api.example/v1")
+        self.assertEqual(token, "cmp_pat_preserved")
+        self.assertEqual(workspace_id, "workspace-1")
+        self.assertEqual(source, "credentials_file")
+
+    def test_explicit_legacy_pat_fails_when_v3_entry_has_no_pat(self) -> None:
+        self.write_v3_credentials(include_legacy_pat=False)
+        os.environ.pop("COMPANION_API_URL", None)
+        os.environ.pop("COMPANION_TOKEN", None)
+        os.environ["COMPANION_AUTH_MODE"] = "legacy-pat"
+
+        with self.assertRaisesRegex(SystemExit, "has no preserved PAT"):
+            companion_lib.resolve_credentials_with_source()
 
 
 class SecretCreationTests(EnvSandbox):
@@ -549,6 +606,7 @@ class DependencyInstallPlanTests(EnvSandbox):
         os.environ["COMPANION_API_URL"] = "https://api/v1"
         os.environ["COMPANION_TOKEN"] = "token"
         os.environ["COMPANION_WORKSPACE_ID"] = "ws"
+        os.environ["COMPANION_AUTH_MODE"] = "legacy-pat"
         stdout = io.StringIO()
         stderr = io.StringIO()
         sys.argv = ["install_skill.py", *args]

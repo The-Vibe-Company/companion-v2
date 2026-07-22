@@ -1,4 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 // The identity guard must run unconditionally on POST /v1/skills, so these tests drive the route with
 // a stubbed archive validator and assert the 422 retarget / strict-update behavior without building a
@@ -20,6 +23,11 @@ const serviceMocks = vi.hoisted(() => {
     createInvitation: noop,
     createLabel: noop,
     createOrg: noop,
+    createSkillDownloadTransferTicket: noop,
+    createSkillUploadTransferTicket: noop,
+    consumeSkillPackageTransferTicket: vi.fn(),
+    preflightSkillPackageTransferTicket: vi.fn(async () => true),
+    revalidateAgentTransferTicket: vi.fn(async () => true),
     deleteLabel: noop,
     DependencyPublishError: class DependencyPublishError extends Error {},
     computeLocalSkillStatus: vi.fn(() => "installed"),
@@ -44,7 +52,7 @@ const serviceMocks = vi.hoisted(() => {
     listSkillComments: noop,
     listSkills: vi.fn(async () => []),
     listSkillVersions: noop,
-    publishSkillVersion: noop,
+    publishSkillVersion: vi.fn(),
     assertCanPublishSkillVersion: noop,
     resolveDependencyReferences: vi.fn(async (input: { slugs: string[] }) =>
       input.slugs.map((slug) => ({ declaredSlug: slug, slug, skillId: null })),
@@ -95,21 +103,34 @@ const dbMocks = vi.hoisted(() => ({
   withTenantContext: vi.fn(async (_ctx: unknown, fn: (database: unknown) => unknown) => fn({})),
 }));
 
+const storageMocks = vi.hoisted(() => ({
+  putSkillArchive: vi.fn(async () => undefined),
+  deleteSkillArchive: vi.fn(async () => undefined),
+}));
+
 const skillsMocks = vi.hoisted(() => ({ validateSkillArchive: vi.fn() }));
 
 vi.mock("@hono/node-server", () => ({ serve: vi.fn() }));
 
 vi.mock("@companion/auth", () => ({
   auth: { api: { getSession: vi.fn(async () => null) }, handler: vi.fn(), $Infer: {} },
+  authenticateAgentRequest: vi.fn(async () => null),
+  registerAgentCapabilityExecutor: vi.fn(() => () => undefined),
 }));
 
 vi.mock("@companion/db", () => dbMocks);
 vi.mock("@companion/core/services", () => serviceMocks);
+vi.mock("@companion/storage", async (importActual) => ({
+  ...await importActual<typeof import("@companion/storage")>(),
+  putSkillArchive: storageMocks.putSkillArchive,
+  deleteSkillArchive: storageMocks.deleteSkillArchive,
+}));
 vi.mock("@companion/skills", async (importActual) => {
   const actual = await importActual<typeof import("@companion/skills")>();
   return { ...actual, validateSkillArchive: skillsMocks.validateSkillArchive };
 });
 
+import { packDir } from "@companion/skills";
 import { app } from "./index";
 
 const actorA = { id: "user-a", email: "a@example.test", name: "User A" };
@@ -133,6 +154,20 @@ function validated(name: string, companionSkillId?: string) {
       : undefined,
     warnings: [],
   };
+}
+
+async function validArchive(name: string): Promise<Buffer> {
+  const dir = await mkdtemp(join(tmpdir(), "companion-route-ticket-test-"));
+  try {
+    await writeFile(
+      join(dir, "SKILL.md"),
+      `---\nname: ${name}\ndescription: Research helper.\n---\n\n# ${name}\n`,
+      "utf8",
+    );
+    return (await packDir(dir)).archive;
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 }
 
 async function publish(query = "", action = "publish") {
@@ -203,6 +238,147 @@ describe("POST /v1/skills identity guard", () => {
     expect(serviceMocks.prepareSkillPublishDependencies).toHaveBeenCalledWith(
       expect.objectContaining({ database: expect.any(Object) }),
     );
+  });
+});
+
+describe("POST /v1/skills with Agent Auth upload ticket", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    serviceMocks.preflightSkillPackageTransferTicket.mockResolvedValue(true);
+    serviceMocks.revalidateAgentTransferTicket.mockResolvedValue(true);
+  });
+
+  it("rejects a fake or replayed ticket before reading and hashing the archive", async () => {
+    serviceMocks.preflightSkillPackageTransferTicket.mockResolvedValue(false);
+    const archive = Buffer.from("PK-agent-upload-bytes");
+    const response = await app.request(
+      "/v1/skills?action=publish&expect_slug=research-agent&version=1.0.0",
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/zip",
+          "x-companion-transfer-ticket": "cmp_xfer_invalid",
+        },
+        body: archive,
+      },
+    );
+
+    expect(response.status, await response.clone().text()).toBe(401);
+    expect(skillsMocks.validateSkillArchive).not.toHaveBeenCalled();
+    expect(serviceMocks.preflightSkillPackageTransferTicket).toHaveBeenCalledWith({
+      ticket: "cmp_xfer_invalid",
+      action: "skill_package.upload",
+      slug: "research-agent",
+      version: "1.0.0",
+    });
+    expect(serviceMocks.consumeSkillPackageTransferTicket).not.toHaveBeenCalled();
+  });
+
+  it("consumes the raw-body ticket but refuses a package with a different root skill name", async () => {
+    serviceMocks.consumeSkillPackageTransferTicket.mockResolvedValue({
+      ticketId: "ticket-1",
+      orgId: "org-1",
+      actor: actorA,
+      agentId: "agent-1",
+      agentGrantId: "grant-1",
+      action: "skill_package.upload",
+      expectedSkillId: null,
+      expectedSkillVersionId: null,
+      slug: "research-agent",
+      version: "1.0.0",
+      checksum: `sha256:${"a".repeat(64)}`,
+      sizeBytes: 21,
+    });
+    skillsMocks.validateSkillArchive.mockResolvedValue(validated("different-skill"));
+
+    const response = await app.request(
+      "/v1/skills?action=publish&expect_slug=research-agent&version=1.0.0",
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/zip",
+          "x-companion-transfer-ticket": "cmp_xfer_bound",
+        },
+        body: Buffer.from("PK-agent-upload-bytes"),
+      },
+    );
+
+    expect(response.status).toBe(422);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "package name does not match the Agent Auth upload ticket",
+    });
+    expect(serviceMocks.publishSkillVersion).not.toHaveBeenCalled();
+  });
+
+  it("does not accept multipart bodies and requires a valid transfer ticket for validate-only actions", async () => {
+    serviceMocks.consumeSkillPackageTransferTicket.mockResolvedValue(null);
+    const multipart = await app.request("/v1/skills?action=publish&expect_slug=research-agent&version=1.0.0", {
+      method: "POST",
+      headers: {
+        "content-type": "multipart/form-data; boundary=test",
+        "x-companion-transfer-ticket": "cmp_xfer_bound",
+      },
+      body: "--test--",
+    });
+    expect(multipart.status).toBe(400);
+
+    const validate = await app.request("/v1/skills?action=validate&expect_slug=research-agent&version=1.0.0", {
+      method: "POST",
+      headers: {
+        "content-type": "application/zip",
+        "x-companion-transfer-ticket": "cmp_xfer_bound",
+      },
+      body: Buffer.from("PK-agent-upload-bytes"),
+    });
+    expect(validate.status).toBe(401);
+    expect(serviceMocks.consumeSkillPackageTransferTicket).toHaveBeenCalledWith({
+      ticket: "cmp_xfer_bound",
+      action: "skill_package.upload",
+      slug: "research-agent",
+      version: "1.0.0",
+      checksum: expect.stringMatching(/^sha256:[0-9a-f]{64}$/),
+      sizeBytes: Buffer.from("PK-agent-upload-bytes").length,
+    });
+  });
+
+  it("revalidates delegated authority after normalization and immediately before publishing", async () => {
+    serviceMocks.consumeSkillPackageTransferTicket.mockResolvedValue({
+      ticketId: "ticket-final-gate",
+      orgId: "org-1",
+      actor: actorA,
+      agentId: "agent-1",
+      agentGrantId: "grant-1",
+      action: "skill_package.upload",
+      expectedSkillId: null,
+      expectedSkillVersionId: null,
+      slug: "research-agent",
+      version: "1.0.0",
+      checksum: `sha256:${"a".repeat(64)}`,
+      sizeBytes: 21,
+    });
+    serviceMocks.getSkillBySlug.mockResolvedValue(null);
+    skillsMocks.validateSkillArchive.mockResolvedValue(validated("research-agent"));
+    serviceMocks.revalidateAgentTransferTicket.mockResolvedValue(false);
+    const archive = await validArchive("research-agent");
+
+    const response = await app.request(
+      "/v1/skills?action=publish&expect_slug=research-agent&version=1.0.0",
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/zip",
+          "x-companion-transfer-ticket": "cmp_xfer_final_gate",
+        },
+        body: archive,
+      },
+    );
+
+    expect(response.status, await response.clone().text()).toBe(401);
+    expect(serviceMocks.revalidateAgentTransferTicket).toHaveBeenCalledWith({
+      ticket: "cmp_xfer_final_gate",
+    });
+    expect(serviceMocks.publishSkillVersion).not.toHaveBeenCalled();
+    expect(storageMocks.deleteSkillArchive).toHaveBeenCalledTimes(1);
   });
 });
 

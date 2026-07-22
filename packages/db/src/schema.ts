@@ -105,6 +105,139 @@ export const verification = pgTable("verification", {
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
+// Global Agent Auth identity data. These tables intentionally do not carry org_id: a delegated
+// agent/host belongs to a Better Auth user and may hold separately constrained grants for multiple
+// workspaces. Every business operation still re-enters Core with an exact workspace constraint.
+export const agentHost = pgTable(
+  "agent_host",
+  {
+    id: text("id").primaryKey(),
+    name: text("name"),
+    userId: text("user_id").references(() => user.id, { onDelete: "cascade" }),
+    defaultCapabilities: text("default_capabilities"),
+    publicKey: text("public_key"),
+    kid: text("kid"),
+    jwksUrl: text("jwks_url"),
+    enrollmentTokenHash: text("enrollment_token_hash"),
+    enrollmentTokenExpiresAt: timestamp("enrollment_token_expires_at", { withTimezone: true }),
+    status: text("status").notNull().default("active"),
+    activatedAt: timestamp("activated_at", { withTimezone: true }),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+    lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    remoteJwksDisabled: check("agent_host_remote_jwks_disabled", sql`${t.jwksUrl} is null`),
+    byUser: index("agent_host_user_id_idx").on(t.userId),
+    byKid: index("agent_host_kid_idx").on(t.kid),
+    byEnrollmentTokenHash: index("agent_host_enrollment_token_hash_idx").on(t.enrollmentTokenHash),
+    byStatus: index("agent_host_status_idx").on(t.status),
+  }),
+);
+
+export const agent = pgTable(
+  "agent",
+  {
+    id: text("id").primaryKey(),
+    name: text("name").notNull(),
+    userId: text("user_id").references(() => user.id, { onDelete: "cascade" }),
+    hostId: text("host_id")
+      .notNull()
+      .references(() => agentHost.id, { onDelete: "cascade" }),
+    status: text("status").notNull().default("active"),
+    mode: text("mode").notNull().default("delegated"),
+    publicKey: text("public_key").notNull(),
+    kid: text("kid"),
+    jwksUrl: text("jwks_url"),
+    lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
+    activatedAt: timestamp("activated_at", { withTimezone: true }),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+    metadata: text("metadata"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    remoteJwksDisabled: check("agent_remote_jwks_disabled", sql`${t.jwksUrl} is null`),
+    byUser: index("agent_user_id_idx").on(t.userId),
+    byHost: index("agent_host_id_idx").on(t.hostId),
+    byStatus: index("agent_status_idx").on(t.status),
+    byKid: index("agent_kid_idx").on(t.kid),
+  }),
+);
+
+export const agentCapabilityGrant = pgTable(
+  "agent_capability_grant",
+  {
+    id: text("id").primaryKey(),
+    agentId: text("agent_id")
+      .notNull()
+      .references(() => agent.id, { onDelete: "cascade" }),
+    capability: text("capability").notNull(),
+    deniedBy: text("denied_by").references(() => user.id, { onDelete: "cascade" }),
+    grantedBy: text("granted_by").references(() => user.id, { onDelete: "cascade" }),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    status: text("status").notNull().default("active"),
+    reason: text("reason"),
+    constraints: text("constraints"),
+  },
+  (t) => ({
+    byAgent: index("agent_capability_grant_agent_id_idx").on(t.agentId),
+    byCapability: index("agent_capability_grant_capability_idx").on(t.capability),
+    byGrantedBy: index("agent_capability_grant_granted_by_idx").on(t.grantedBy),
+    byStatus: index("agent_capability_grant_status_idx").on(t.status),
+    onePendingCapability: uniqueIndex("agent_capability_grant_one_pending_capability_idx")
+      .on(t.agentId, t.capability)
+      .where(sql`${t.status} = 'pending'`),
+  }),
+);
+
+export const approvalRequest = pgTable(
+  "approval_request",
+  {
+    id: text("id").primaryKey(),
+    method: text("method").notNull(),
+    agentId: text("agent_id").references(() => agent.id, { onDelete: "cascade" }),
+    hostId: text("host_id").references(() => agentHost.id, { onDelete: "cascade" }),
+    userId: text("user_id").references(() => user.id, { onDelete: "cascade" }),
+    capabilities: text("capabilities"),
+    status: text("status").notNull().default("pending"),
+    userCodeHash: text("user_code_hash"),
+    loginHint: text("login_hint"),
+    bindingMessage: text("binding_message"),
+    clientNotificationToken: text("client_notification_token"),
+    clientNotificationEndpoint: text("client_notification_endpoint"),
+    deliveryMode: text("delivery_mode"),
+    interval: integer("interval").notNull(),
+    lastPolledAt: timestamp("last_polled_at", { withTimezone: true }),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    byAgent: index("approval_request_agent_id_idx").on(t.agentId),
+    byHost: index("approval_request_host_id_idx").on(t.hostId),
+    byUser: index("approval_request_user_id_idx").on(t.userId),
+    byStatus: index("approval_request_status_idx").on(t.status),
+  }),
+);
+
+// Shared PostgreSQL secondary storage used by Agent Auth for atomic rate limits, JTI replay
+// protection, and short-lived JWKS/approval values. Raw keys and values are plugin-internal.
+export const agentAuthEphemeral = pgTable(
+  "agent_auth_ephemeral",
+  {
+    key: text("key").primaryKey(),
+    value: text("value").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({ byExpiry: index("agent_auth_ephemeral_expires_at_idx").on(t.expiresAt) }),
+);
+
 export const profiles = pgTable("profiles", {
   id: text("id")
     .primaryKey()
@@ -298,6 +431,18 @@ export const skills = pgTable(
     // Library scope. 'org' (default) = flat org-wide library; 'personal' = private to creator_id.
     scope: skillScopeEnum("scope").notNull().default("org"),
     currentVersionId: uuid("current_version_id"),
+    /**
+     * Immutable version currently exposed by the stable public share link. Null means that the
+     * metadata page still exists, but no package may be installed. The database migration adds a
+     * composite (org, skill, version) FK so this pointer can never target another skill/tenant.
+     */
+    publicVersionId: uuid("public_version_id"),
+    /** SHA-256 over the exact deterministic ZIP bytes served by the public package route. */
+    publicPackageChecksum: text("public_package_checksum"),
+    /** Byte length of those exact ZIP transport bytes (not the stored tar.gz size). */
+    publicPackageSizeBytes: integer("public_package_size_bytes"),
+    /** Time this version/ZIP tuple was explicitly promoted. */
+    publicReleasedAt: timestamp("public_released_at", { withTimezone: true }),
     validation: validationStateEnum("validation").notNull().default("valid"),
     validationError: text("validation_error"),
     // Archive (soft-hide) lifecycle: archived skills drop out of the normal lists but stay
@@ -314,6 +459,28 @@ export const skills = pgTable(
     byArchived: index("skills_archived_idx").on(t.orgId, t.archivedAt),
     // My-Skills authored-list lookups: (org, scope, creator). Org lists use the slug uq / PK.
     byScope: index("skills_org_scope_creator_idx").on(t.orgId, t.scope, t.creatorId),
+    publicReleaseComplete: check(
+      "skills_public_release_complete_check",
+      sql`(
+        ${t.publicVersionId} is null
+        and ${t.publicPackageChecksum} is null
+        and ${t.publicPackageSizeBytes} is null
+        and ${t.publicReleasedAt} is null
+      ) or (
+        ${t.publicVersionId} is not null
+        and ${t.publicPackageChecksum} is not null
+        and ${t.publicPackageSizeBytes} is not null
+        and ${t.publicReleasedAt} is not null
+      )`,
+    ),
+    publicChecksum: check(
+      "skills_public_package_checksum_check",
+      sql`${t.publicPackageChecksum} is null or ${t.publicPackageChecksum} ~ '^sha256:[0-9a-f]{64}$'`,
+    ),
+    publicSize: check(
+      "skills_public_package_size_check",
+      sql`${t.publicPackageSizeBytes} is null or ${t.publicPackageSizeBytes} >= 0`,
+    ),
   }),
 );
 
@@ -352,6 +519,103 @@ export const skillVersions = pgTable(
     uniqueOrgSkillId: unique("skill_versions_org_skill_id_uq").on(t.orgId, t.skillId, t.id),
     byOrg: index("skill_versions_org_idx").on(t.orgId),
     checksumCheck: check("skill_versions_checksum_check", sql`${t.checksum} ~ '^sha256:[0-9a-f]{64}$'`),
+  }),
+);
+
+/**
+ * Short-lived bearer tickets used for Agent Auth binary package transfers. Plaintext tickets are
+ * returned once and never persisted: only their SHA-256 hash lives here.
+ * Rows are tenant-owned even though consumption happens through a narrowly-scoped SECURITY
+ * DEFINER function before an organization context is known.
+ */
+export const agentTransferTickets = pgTable(
+  "agent_transfer_tickets",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    /** Agent Auth agent id. Deliberately not FK-bound to global identity/plugin tables. */
+    agentId: text("agent_id").notNull(),
+    /** Capability grant id when supplied by Agent Auth; no FK so identity tables stay global. */
+    agentGrantId: text("agent_grant_id"),
+    action: text("action").notNull(),
+    /** Existing target, when one exists. A fresh upload deliberately has no skill id yet. */
+    skillId: uuid("skill_id"),
+    /** Exact immutable source version for downloads; uploads target a not-yet-created version. */
+    skillVersionId: uuid("skill_version_id"),
+    /** Stable public token only for public-release downloads. */
+    shareToken: text("share_token"),
+    /** Path/body binding kept separately so upload tickets can precede creation of the skill row. */
+    skillSlug: text("skill_slug").notNull(),
+    version: text("version").notNull(),
+    /** Exact normalized archive path for a single-file download; null for every package action. */
+    filePath: text("file_path"),
+    checksum: text("checksum").notNull(),
+    sizeBytes: integer("size_bytes").notNull(),
+    tokenHash: text("token_hash").notNull().unique(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    consumedAt: timestamp("consumed_at", { withTimezone: true }),
+    failedAt: timestamp("failed_at", { withTimezone: true }),
+    createdAt: now(),
+  },
+  (t) => ({
+    byExpiry: index("agent_transfer_tickets_expiry_idx").on(t.expiresAt),
+    byAgent: index("agent_transfer_tickets_agent_idx").on(t.orgId, t.userId, t.agentId, t.createdAt),
+    validAction: check(
+      "agent_transfer_tickets_action_check",
+      sql`${t.action} in ('public_skill_package.download', 'skill_package.download', 'skill_file.download', 'skill_package.upload', 'local_skill.download')`,
+    ),
+    completeBinding: check(
+      "agent_transfer_tickets_binding_check",
+      sql`(
+        ${t.action} = 'public_skill_package.download'
+        and ${t.skillId} is not null
+        and ${t.skillVersionId} is not null
+        and ${t.shareToken} is not null
+        and ${t.filePath} is null
+      ) or (
+        ${t.action} = 'skill_package.download'
+        and ${t.skillId} is not null
+        and ${t.skillVersionId} is not null
+        and ${t.shareToken} is null
+        and ${t.filePath} is null
+      ) or (
+        ${t.action} = 'skill_file.download'
+        and ${t.skillId} is not null
+        and ${t.skillVersionId} is not null
+        and ${t.shareToken} is null
+        and ${t.filePath} is not null
+        and btrim(${t.filePath}) <> ''
+      ) or (
+        ${t.action} = 'skill_package.upload'
+        and ${t.skillVersionId} is null
+        and ${t.shareToken} is null
+        and ${t.filePath} is null
+      ) or (
+        ${t.action} = 'local_skill.download'
+        and ${t.skillId} is null
+        and ${t.skillVersionId} is null
+        and ${t.shareToken} is null
+        and ${t.filePath} is null
+      )`,
+    ),
+    nonnegativeSize: check("agent_transfer_tickets_size_check", sql`${t.sizeBytes} >= 0`),
+    checksumCheck: check("agent_transfer_tickets_checksum_check", sql`${t.checksum} ~ '^sha256:[0-9a-f]{64}$'`),
+    skillOrgFk: foreignKey({
+      columns: [t.orgId, t.skillId],
+      foreignColumns: [skills.orgId, skills.id],
+      name: "agent_transfer_tickets_skill_org_fk",
+    }).onDelete("cascade"),
+    versionOrgSkillFk: foreignKey({
+      columns: [t.orgId, t.skillId, t.skillVersionId],
+      foreignColumns: [skillVersions.orgId, skillVersions.skillId, skillVersions.id],
+      name: "agent_transfer_tickets_version_org_skill_fk",
+    }).onDelete("cascade"),
   }),
 );
 

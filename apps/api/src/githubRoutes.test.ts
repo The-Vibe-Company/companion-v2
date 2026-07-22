@@ -66,7 +66,10 @@ const githubMocks = vi.hoisted(() => ({
 }));
 
 vi.mock("@hono/node-server", () => ({ serve: vi.fn() }));
-vi.mock("@companion/auth", () => ({ auth: { api: { getSession: authMocks.getSession }, handler: authMocks.handler, $Infer: {} } }));
+vi.mock("@companion/auth", () => ({
+  auth: { api: { getSession: authMocks.getSession }, handler: authMocks.handler, $Infer: {} },
+  registerAgentCapabilityExecutor: vi.fn(() => () => undefined),
+}));
 vi.mock("@companion/db", () => dbMocks);
 vi.mock("@companion/core/services", () => serviceMocks);
 vi.mock("@companion/github", () => ({

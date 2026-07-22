@@ -199,6 +199,8 @@ def collect_context(auto_update: bool = False, agent: str = "companion-bootstrap
                             "copy a fresh Companion Use prompt"
                         ) from None
                     token = replacement
+        elif credential_source == "agent_auth":
+            context["credentials"]["status"] = "connected"
         else:
             context["credentials"]["status"] = "environment_unmanaged"
 

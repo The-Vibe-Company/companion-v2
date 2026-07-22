@@ -25,6 +25,10 @@ export interface SkillVM {
   id: string; // slug (the displayed machine name)
   shareToken: string;
   version: string | null;
+  /** The immutable release exposed by the stable public link, independent from the current version. */
+  publicVersion?: string | null;
+  /** Server-projected creator/Owner/Admin permission for public release management. */
+  canManagePublic?: boolean;
   validation: ValidationState;
   description: string;
   display?: CompanionDisplay;
@@ -84,11 +88,17 @@ function mapModifier(row: SkillModifier): SkillContributorVM {
 
 /** Map a skill_list_v row to the UI view-model. Date formatting runs server-side. */
 export function mapSkill(row: SkillListRow): SkillVM {
+  const releaseRow = row as SkillListRow & {
+    public_version?: unknown;
+    can_manage_public?: unknown;
+  };
   return {
     uuid: row.id,
     id: row.slug,
     shareToken: row.share_token,
     version: row.current_version,
+    publicVersion: typeof releaseRow.public_version === "string" ? releaseRow.public_version : null,
+    canManagePublic: releaseRow.can_manage_public === true,
     validation: row.validation,
     description: row.description,
     display: row.display ?? {},
