@@ -21,7 +21,7 @@ interface ApprovalRequest {
   expires_at: string;
 }
 
-const FRESH_SESSION_MESSAGE = "Approval requires a sign-in from the last five minutes. Sign in again to continue.";
+const SESSION_EXPIRED_MESSAGE = "Your session has expired. Sign in again to continue.";
 
 export function DeviceCapabilitiesApproval({ agentId, code }: { agentId: string; code: string }) {
   const [request, setRequest] = useState<ApprovalRequest | null>(null);
@@ -53,12 +53,12 @@ export function DeviceCapabilitiesApproval({ agentId, code }: { agentId: string;
       })
       .catch((cause) => {
         if (!active) return;
-        const freshSessionRequired = cause instanceof ApiFetchError && (cause.status === 401 || cause.status === 403);
-        setReauthRequired(freshSessionRequired);
+        const reauthenticationRequired = cause instanceof ApiFetchError && (cause.status === 401 || cause.status === 403);
+        setReauthRequired(reauthenticationRequired);
         setState("error");
         setError(
-          freshSessionRequired
-            ? FRESH_SESSION_MESSAGE
+          reauthenticationRequired
+            ? SESSION_EXPIRED_MESSAGE
             : cause instanceof Error
               ? cause.message
               : "Could not load this approval request.",
@@ -88,12 +88,12 @@ export function DeviceCapabilitiesApproval({ agentId, code }: { agentId: string;
         setState("denied");
       }
     } catch (cause) {
-      const freshSessionRequired = cause instanceof ApiFetchError && (cause.status === 401 || cause.status === 403);
-      setReauthRequired(freshSessionRequired);
+      const reauthenticationRequired = cause instanceof ApiFetchError && (cause.status === 401 || cause.status === 403);
+      setReauthRequired(reauthenticationRequired);
       setState("error");
       setError(
-        freshSessionRequired
-          ? FRESH_SESSION_MESSAGE
+        reauthenticationRequired
+          ? SESSION_EXPIRED_MESSAGE
           : cause instanceof Error
             ? cause.message
             : "Could not record your decision.",

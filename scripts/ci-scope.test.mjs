@@ -94,6 +94,14 @@ test("the bundled Companion runtime triggers its direct browser smoke", () => {
   assert.equal(result.containers, true);
 });
 
+test("agent-browser smoke runtime changes trigger the browser lane", () => {
+  for (const file of ["scripts/agent-browser-smoke.sh", "scripts/agent-browser-box-center.mjs"]) {
+    const result = classifyFiles([file]);
+    assert.equal(result.quality, true);
+    assert.equal(result.browser, true);
+  }
+});
+
 test("deletion-only diffs retain the deleted runtime path", (context) => {
   const directory = mkdtempSync(join(tmpdir(), "companion-ci-scope-"));
   context.after(() => rmSync(directory, { recursive: true, force: true }));

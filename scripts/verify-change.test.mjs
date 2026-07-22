@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
 import { classifyFiles } from "./ci-scope.mjs";
 import {
@@ -25,9 +26,26 @@ function git(cwd, args) {
   return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
 }
 
+async function removeTemporaryRepository(directory) {
+  let lastError;
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    try {
+      rmSync(directory, { recursive: true, force: true, maxRetries: 3, retryDelay: 25 });
+      return;
+    } catch (error) {
+      if (!["EBUSY", "ENOTEMPTY", "EPERM"].includes(error?.code)) throw error;
+      lastError = error;
+      await delay(50 * (attempt + 1));
+    }
+  }
+  throw lastError;
+}
+
 function initRepository(context) {
   const directory = mkdtempSync(join(tmpdir(), "companion-verify-change-"));
-  context.after(() => rmSync(directory, { recursive: true, force: true }));
+  // Git can briefly recreate .git bookkeeping after a child process exits on macOS. Retry the
+  // complete tree removal, not only one failing rmdir syscall, so a partial cleanup can converge.
+  context.after(() => removeTemporaryRepository(directory));
   git(directory, ["init", "--quiet"]);
   git(directory, ["config", "user.email", "verify-change@example.invalid"]);
   git(directory, ["config", "user.name", "Verify change test"]);

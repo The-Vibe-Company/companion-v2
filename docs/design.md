@@ -430,7 +430,7 @@ and the pinned unstable Agent Auth plugin (`@better-auth/agent-auth@0.6.2`). The
   registration with inline public JWKs (remote JWKS URLs are rejected before the pinned plugin and by
   database constraints), grants nothing automatically, signs 60-second JWTs, and keeps approved grants until
   explicit revocation. `/.well-known/agent-configuration` is public instance discovery. The approval
-  page `/device/capabilities` requires a browser session created through authentication within five minutes, identifies the
+  page `/device/capabilities` accepts any active rolling browser session (up to 30 days without activity), identifies the
   agent and host, names the target workspace and requested permissions, and accepts or denies the
   request. Settings → Connected agents lists grants, constraints, last use, agent/host state, and can
   revoke one capability, one agent, or one host. Agent Auth rate limits stay enabled in development and

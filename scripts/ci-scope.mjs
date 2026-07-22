@@ -120,6 +120,8 @@ export function classifyFiles(files, { forceFull = false } = {}) {
             "packages/storage/",
             "scripts/ci-rsc-smoke.sh",
             "scripts/rsc-smoke.mjs",
+            "scripts/agent-browser-smoke.sh",
+            "scripts/agent-browser-box-center.mjs",
             "playwright.config.",
             "docker-compose.yml",
           ]))),
