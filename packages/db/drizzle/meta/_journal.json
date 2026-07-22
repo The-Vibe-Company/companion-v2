@@ -365,6 +365,13 @@
       "when": 1784736000000,
       "tag": "0051_run_file_previews",
       "breakpoints": true
+    },
+    {
+      "idx": 52,
+      "version": "7",
+      "when": 1784739600000,
+      "tag": "0052_run_file_preview_function_repair",
+      "breakpoints": true
     }
   ]
 }
