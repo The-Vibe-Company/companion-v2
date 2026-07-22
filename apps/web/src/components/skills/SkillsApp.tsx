@@ -1616,7 +1616,7 @@ export function SkillsApp({
   // folders; everything else → org folders).
   const detailLib: SkillsLibrary = skill && skill.scope === "personal" ? "mine" : "org";
   const detailTreePaths = (detailLib === "org" ? orgTreeRows : personalTreeRows).map((r) => r.path);
-  const activeTreePaths = activeTreeRows.map((r) => r.path);
+  const activeTreePaths = useMemo(() => activeTreeRows.map((r) => r.path), [activeTreeRows]);
   // The palette searches across both libraries (de-duped by id, preferring the My-Skills copy).
   const paletteSkills = useMemo(() => {
     const seen = new Set(mineSkills.map((s) => s.id));
@@ -1767,6 +1767,7 @@ export function SkillsApp({
             labels={labels}
             workspaceId={currentOrg.id}
             library={selection.lib}
+            categoryOrder={activeTreePaths}
             scopeKind={selection.kind}
             activeLabel={activeLabel}
             breadcrumb={breadcrumb}

@@ -332,6 +332,7 @@ export function ListView({
   labels,
   workspaceId,
   library,
+  categoryOrder,
   scopeKind,
   activeLabel,
   breadcrumb,
@@ -357,6 +358,7 @@ export function ListView({
   labels: LabelVM[];
   workspaceId: string;
   library: "mine" | "org";
+  categoryOrder: string[];
   scopeKind: "all" | "installed" | "label";
   activeLabel: string | null;
   breadcrumb: string[];
@@ -407,8 +409,8 @@ export function ListView({
     return [...matched].sort((left, right) => left.id.localeCompare(right.id));
   }, [skills, q, sort]);
   const groups = useMemo(
-    () => groupSkillsByRoot(shown, labels, library, activeLabel),
-    [activeLabel, labels, library, shown],
+    () => groupSkillsByRoot(shown, labels, library, activeLabel, categoryOrder),
+    [activeLabel, categoryOrder, labels, library, shown],
   );
 
   const toggleGroup = useCallback(

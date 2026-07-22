@@ -62,6 +62,7 @@ type ListOverrides = {
   onGroupByChange?: (groupBy: SkillGroupBy) => void;
   library?: "mine" | "org";
   activeLabel?: string | null;
+  categoryOrder?: string[];
 };
 
 function props(skills: SkillVM[], overrides: ListOverrides = {}) {
@@ -70,6 +71,7 @@ function props(skills: SkillVM[], overrides: ListOverrides = {}) {
     labels: overrides.labels ?? [],
     workspaceId: "org-1",
     library: overrides.library ?? ("org" as const),
+    categoryOrder: overrides.categoryOrder ?? [],
     scopeKind: "all" as const,
     activeLabel: overrides.activeLabel ?? null,
     breadcrumb: ["All skills"],
@@ -362,6 +364,28 @@ describe("ListView grouped rhythm", () => {
 
     expect(html.indexOf(">Marketing<")).toBeLessThan(html.indexOf(">Installed<"));
     expect(html.indexOf(">Installed<")).toBeLessThan(html.indexOf(">Without folder<"));
+  });
+
+  it("uses category order only for grouped sections", () => {
+    const skills = [
+      skill({ id: "operations-skill", labels: ["operations"] }),
+      skill({ id: "marketing-skill", labels: ["marketing"] }),
+    ];
+    const grouped = render(skills, {
+      labels,
+      groupBy: "folder",
+      categoryOrder: ["marketing", "operations"],
+    });
+    const flat = render(skills, {
+      labels,
+      groupBy: "none",
+      categoryOrder: ["marketing", "operations"],
+    });
+
+    expect(grouped.indexOf(">Marketing<")).toBeLessThan(grouped.indexOf(">Operations<"));
+    expect(flat.indexOf('data-skill-slug="operations-skill"')).toBeLessThan(
+      flat.indexOf('data-skill-slug="marketing-skill"'),
+    );
   });
 
   it("offers an accessible grouped/flat toggle", async () => {

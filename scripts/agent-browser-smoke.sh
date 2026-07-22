@@ -227,9 +227,10 @@ open_run_launcher() {
 
 # Center point (x y) of an element's bounding box, from real layout.
 box_center() {
-  # A skill can legitimately appear in more than one label group. Playwright locators are strict,
-  # so select the first visible match before asking agent-browser for its real layout box.
-  agent-browser get box ":nth-match($1:visible, 1)" --json | node scripts/agent-browser-box-center.mjs
+  # A skill can legitimately appear in more than one label group. `agent-browser get box` resolves
+  # a CSS selector to its first laid-out match; its Playwright-only `:nth-match()` syntax is not
+  # accepted consistently across CLI releases.
+  agent-browser get box "$1" --json | node scripts/agent-browser-box-center.mjs
 }
 
 # Ground truth (independent of the browser): does the skill now carry `label` directly?

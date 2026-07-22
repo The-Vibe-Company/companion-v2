@@ -75,7 +75,26 @@ function displayRelativePath(path: string, groupPath: string, appearance: Map<st
  * Keep direct rows first, then cluster rows by their first relative subfolder. The incoming order is
  * preserved inside each bucket, so the selected Recently updated / A-Z sort still applies locally.
  */
-function clusterRowsBySubfolder(rows: GroupedSkillRow[], groupPath: string): GroupedSkillRow[] {
+function orderedPathComparator(preferredPaths: string[]): (left: string, right: string) => number {
+  const rank = new Map<string, number>();
+  preferredPaths.forEach((path, index) => {
+    if (!rank.has(path)) rank.set(path, index);
+  });
+  return (left, right) => {
+    const leftRank = rank.get(left);
+    const rightRank = rank.get(right);
+    if (leftRank !== undefined && rightRank !== undefined) return leftRank - rightRank;
+    if (leftRank !== undefined) return -1;
+    if (rightRank !== undefined) return 1;
+    return left.localeCompare(right);
+  };
+}
+
+function clusterRowsBySubfolder(
+  rows: GroupedSkillRow[],
+  groupPath: string,
+  comparePaths: (left: string, right: string) => number,
+): GroupedSkillRow[] {
   const groupDepth = pathDepth(groupPath);
   return rows
     .map((row, index) => ({
@@ -84,9 +103,13 @@ function clusterRowsBySubfolder(rows: GroupedSkillRow[], groupPath: string): Gro
       bucket:
         row.relativePaths
           .map(({ path }) => path.split("/").slice(0, groupDepth + 1).join("/"))
-          .sort((left, right) => left.localeCompare(right))[0] ?? "",
+          .sort(comparePaths)[0] ?? null,
     }))
-    .sort((left, right) => left.bucket.localeCompare(right.bucket) || left.index - right.index)
+    .sort((left, right) => {
+      if (left.bucket === null) return right.bucket === null ? left.index - right.index : -1;
+      if (right.bucket === null) return 1;
+      return comparePaths(left.bucket, right.bucket) || left.index - right.index;
+    })
     .map(({ row }) => row);
 }
 
@@ -119,7 +142,9 @@ export function groupSkillsByRoot(
   labels: LabelVM[],
   library: "mine" | "org",
   activeLabel: string | null = null,
+  preferredPaths: string[] = [],
 ): SkillListGroup[] {
+  const comparePaths = orderedPathComparator(preferredPaths);
   const appearance = new Map(labels.map((label) => [label.path, label]));
   const roots = new Map<string, SkillListSectionGroup>();
   const scopedPaths = new Map(
@@ -205,12 +230,12 @@ export function groupSkillsByRoot(
   }
 
   for (const group of roots.values()) {
-    if (group.path) group.rows = clusterRowsBySubfolder(group.rows, group.path);
+    if (group.path) group.rows = clusterRowsBySubfolder(group.rows, group.path, comparePaths);
   }
 
   return [
     ...(direct.rows.length ? [direct] : []),
-    ...[...roots.values()].sort((left, right) => (left.path ?? "").localeCompare(right.path ?? "")),
+    ...[...roots.values()].sort((left, right) => comparePaths(left.path ?? "", right.path ?? "")),
     ...(installed.rows.length ? [installed] : []),
     ...(unfiled.rows.length ? [unfiled] : []),
   ];
