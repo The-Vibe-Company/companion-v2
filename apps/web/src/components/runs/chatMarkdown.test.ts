@@ -54,6 +54,23 @@ describe("ChatMarkdown", () => {
     expect(container.textContent).toContain("Image not loaded · tracking pixel");
   });
 
+  it("turns verified artifact paths into canvas controls", async () => {
+    const onOpenArtifact = vi.fn();
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => root.render(React.createElement(ChatMarkdown, {
+      text: "Created `./artifacts/todo.txt`.",
+      artifactPaths: { "./artifacts/todo.txt": "artifact-1" },
+      onOpenArtifact,
+    })));
+
+    const path = container.querySelector<HTMLButtonElement>(".run-artifact-link--code");
+    expect(path?.textContent).toBe("./artifacts/todo.txt");
+    await act(async () => path?.click());
+    expect(onOpenArtifact).toHaveBeenCalledWith("artifact-1");
+  });
+
   it("throttles expensive Markdown commits while preserving the final delta", async () => {
     vi.useFakeTimers();
     const container = document.createElement("div");

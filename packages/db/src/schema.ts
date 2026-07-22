@@ -2080,6 +2080,8 @@ export const skillRunAttachments = pgTable(
     contentType: text("content_type").notNull(),
     /** Server-verified safe inline MIME; null means download-only. */
     previewContentType: text("preview_content_type"),
+    /** Server-verified renderer classification; null means download-only. */
+    previewKind: text("preview_kind").$type<"text" | "markdown" | "csv" | "image" | "video" | "pdf" | "xlsx">(),
     byteSize: integer("byte_size").notNull(),
     storageKey: text("storage_key").notNull().unique(),
     createdAt: now(),
@@ -2100,6 +2102,10 @@ export const skillRunAttachments = pgTable(
       "skill_run_attachments_size_check",
       sql`${t.byteSize} > 0 AND ${t.byteSize} <= 10485760`,
     ),
+    previewKindCheck: check(
+      "skill_run_attachments_preview_kind_check",
+      sql`${t.previewKind} IS NULL OR ${t.previewKind} IN ('text', 'markdown', 'csv', 'image', 'video', 'pdf', 'xlsx')`,
+    ),
   }),
 );
 
@@ -2115,6 +2121,8 @@ export const skillRunArtifacts = pgTable(
     contentType: text("content_type").notNull(),
     byteSize: integer("byte_size").notNull(),
     previewable: boolean("previewable").notNull().default(false),
+    /** Server-verified renderer classification; null means download-only. */
+    previewKind: text("preview_kind").$type<"text" | "markdown" | "csv" | "image" | "video" | "pdf" | "xlsx">(),
     storageKey: text("storage_key").notNull().unique(),
     /** False between reservation and the successful object upload/finalization. */
     ready: boolean("ready").notNull().default(false),
@@ -2142,6 +2150,10 @@ export const skillRunArtifacts = pgTable(
     sizeCheck: check(
       "skill_run_artifacts_size_check",
       sql`${t.byteSize} > 0 AND ${t.byteSize} <= 10485760`,
+    ),
+    previewKindCheck: check(
+      "skill_run_artifacts_preview_kind_check",
+      sql`${t.previewKind} IS NULL OR ${t.previewKind} IN ('text', 'markdown', 'csv', 'image', 'video', 'pdf', 'xlsx')`,
     ),
   }),
 );

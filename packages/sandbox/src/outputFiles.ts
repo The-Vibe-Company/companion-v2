@@ -52,6 +52,7 @@ async function safeFile(
   relativePath: string,
   maxFileBytes: number,
   signal?: AbortSignal,
+  strictIo = false,
 ): Promise<RunOutputFile | null> {
   const normalized = relativeCandidate(relativePath);
   if (!normalized) return null;
@@ -64,7 +65,8 @@ async function safeFile(
     const data = await fs.readFile(absolute, { signal });
     if (data.length <= 0 || data.length > maxFileBytes || data.length !== stat.size) return null;
     return { path: normalized, data, byteSize: data.length };
-  } catch {
+  } catch (error) {
+    if (strictIo) throw error;
     return null;
   }
 }
@@ -88,11 +90,12 @@ async function artifactPaths(
     let entries: Dirent[];
     try {
       entries = await fs.readdir(current.absolute, { withFileTypes: true, signal });
-    } catch {
-      continue;
+    } catch (error) {
+      if (current.absolute === ARTIFACTS_DIR && (error as NodeJS.ErrnoException).code === "ENOENT") return [];
+      throw error;
     }
     const remainingEntries = maxScannedEntries - scannedEntries;
-    if (entries.length > remainingEntries) continue;
+    if (entries.length > remainingEntries) throw new Error("artifact directory exceeds the safe scan limit");
     scannedEntries += entries.length;
     for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
       if (!entry.name || entry.name.startsWith(".") || EXCLUDED_SEGMENTS.has(entry.name)) continue;
@@ -101,8 +104,8 @@ async function artifactPaths(
       let stat: Stats;
       try {
         stat = await fs.lstat(absolute, { signal });
-      } catch {
-        continue;
+      } catch (error) {
+        throw error;
       }
       if (stat.isSymbolicLink()) continue;
       if (stat.isDirectory()) {
@@ -112,6 +115,9 @@ async function artifactPaths(
         if (found.length >= maxCandidates) break;
       }
     }
+  }
+  if (queue.length > 0 || found.length >= maxCandidates) {
+    throw new Error("artifact scan did not cover the complete directory tree");
   }
   return found;
 }
@@ -131,7 +137,13 @@ export async function collectSandboxOutputFiles(input: {
   let totalBytes = 0;
   for (const candidate of candidates) {
     if (files.length >= input.maxFiles) break;
-    const file = await safeFile(input.fs, candidate, input.maxFileBytes, input.signal);
+    const file = await safeFile(
+      input.fs,
+      candidate,
+      input.maxFileBytes,
+      input.signal,
+      artifactCandidates.includes(candidate),
+    );
     if (!file || totalBytes + file.byteSize > input.maxTotalBytes) continue;
     files.push(file);
     totalBytes += file.byteSize;

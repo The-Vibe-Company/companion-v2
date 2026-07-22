@@ -17,7 +17,7 @@ import {
 } from "@/lib/runQueries";
 import { Icon } from "../Icon";
 import { ChatComposer } from "./ChatComposer";
-import { RunFilesDrawer } from "./ChatMedia";
+import { RunArtifactCanvas } from "./RunArtifactCanvas";
 import { ChatTranscript } from "./ChatTranscript";
 import { chatReducer, initChatState, openRunStream } from "./chatStream";
 import { runInputsFromSnapshot, type RunLauncherDraft } from "./launcherState";
@@ -121,9 +121,35 @@ export function RunChatView({
   const [promptCancelBusy, setPromptCancelBusy] = useState(false);
   const [reactivationClock, setReactivationClock] = useState(() => Date.now());
   const [filesOpen, setFilesOpen] = useState(false);
-  const openFiles = useCallback(() => setFilesOpen(true), []);
-  const closeFiles = useCallback(() => setFilesOpen(false), []);
+  const [selectedFileKey, setSelectedFileKey] = useState<string | null>(null);
+  const [newArtifactCount, setNewArtifactCount] = useState(0);
+  const [artifactsCollecting, setArtifactsCollecting] = useState(false);
+  const artifactsCollectingRef = useRef(false);
+  const autoOpenedArtifactRunRef = useRef<string | null>(null);
   const filesButtonRef = useRef<HTMLButtonElement>(null);
+  const openFiles = useCallback((artifactId?: string) => {
+    const current = runRef.current;
+    setSelectedFileKey((selected) => {
+      if (artifactId) return `artifact:${artifactId}`;
+      const currentKeys = new Set([
+        ...(current?.artifacts ?? []).map((artifact) => `artifact:${artifact.id}`),
+        ...(current?.attachments ?? []).map((attachment) => `attachment:${attachment.id}`),
+      ]);
+      if (selected && currentKeys.has(selected)) return selected;
+      const latest = [...(current?.artifacts ?? [])].sort((a, b) =>
+        Date.parse(b.updated_at ?? b.expires_at) - Date.parse(a.updated_at ?? a.expires_at),
+      )[0];
+      if (latest) return `artifact:${latest.id}`;
+      const attachment = current?.attachments[0];
+      return attachment ? `attachment:${attachment.id}` : null;
+    });
+    setNewArtifactCount(0);
+    setFilesOpen(true);
+  }, []);
+  const closeFiles = useCallback(() => {
+    setFilesOpen(false);
+    window.requestAnimationFrame(() => filesButtonRef.current?.focus());
+  }, []);
   const requestGenerationRef = useRef(0);
   const appliedGenerationRef = useRef(0);
   const pendingRevisionRef = useRef(0);
@@ -157,7 +183,7 @@ export function RunChatView({
     const current = runRef.current;
     if (generation < appliedGenerationRef.current) return current ?? detail;
     if (current?.id === detail.id && isStaleRunDetail(current, detail)) return current;
-    const reconciled = current?.id === detail.id && pendingRevisionAtRequest < pendingRevisionRef.current
+    let reconciled = current?.id === detail.id && pendingRevisionAtRequest < pendingRevisionRef.current
       ? (() => {
           const attachments = new Map(
             detail.attachments
@@ -176,10 +202,30 @@ export function RunChatView({
           };
         })()
       : detail;
+    if (current?.id === detail.id && artifactsCollectingRef.current) {
+      const artifacts = new Map(detail.artifacts.map((artifact) => [artifact.id, artifact]));
+      for (const artifact of current.artifacts) {
+        if (!artifacts.has(artifact.id)) artifacts.set(artifact.id, artifact);
+      }
+      reconciled = { ...reconciled, artifacts: [...artifacts.values()] };
+    }
     if (pendingRevisionAtRequest === pendingRevisionRef.current) {
       removedAttachmentIdsRef.current.clear();
     }
     appliedGenerationRef.current = generation;
+    const previousArtifacts = new Set((current?.artifacts ?? []).map((artifact) => artifact.id));
+    const addedArtifacts = reconciled.artifacts.filter((artifact) => !previousArtifacts.has(artifact.id));
+    if (reconciled.artifacts.length > 0 && autoOpenedArtifactRunRef.current !== reconciled.id) {
+      autoOpenedArtifactRunRef.current = reconciled.id;
+      const latest = [...reconciled.artifacts].sort((a, b) =>
+        Date.parse(b.updated_at ?? b.expires_at) - Date.parse(a.updated_at ?? a.expires_at),
+      )[0]!;
+      setSelectedFileKey(`artifact:${latest.id}`);
+      setFilesOpen(true);
+      setNewArtifactCount(0);
+    } else if (current && addedArtifacts.length > 0) {
+      setNewArtifactCount((count) => count + addedArtifacts.length);
+    }
     runRef.current = reconciled;
     setRun(reconciled);
     setLoadError(null);
@@ -252,6 +298,10 @@ export function RunChatView({
     setCancelBusy(false);
     setPromptCancelBusy(false);
     setFilesOpen(false);
+    setSelectedFileKey(null);
+    setNewArtifactCount(0);
+    setArtifactsCollecting(false);
+    autoOpenedArtifactRunRef.current = null;
     setShowPromptBubble(false);
     promptAttemptRef.current = null;
   }, [runId]);
@@ -351,6 +401,18 @@ export function RunChatView({
             }
           }
         }
+        if (event.type === "artifacts.collecting") {
+          artifactsCollectingRef.current = true;
+          setArtifactsCollecting(true);
+        }
+        if (event.type === "artifacts.updated") {
+          artifactsCollectingRef.current = false;
+          setArtifactsCollecting(false);
+        }
+        if (event.type === "run.warning" && event.code === "artifact_collection_failed") {
+          artifactsCollectingRef.current = false;
+          setArtifactsCollecting(false);
+        }
         dispatch({ kind: "event", event, resolveToolLabel });
         setStreamDead(false);
         if (event.type === "session.idle" || event.type === "artifacts.updated" || event.type === "prompt.status") {
@@ -383,6 +445,21 @@ export function RunChatView({
     );
     return () => controller.abort();
   }, [reconnectNonce, refreshRun, resolveToolLabel, runId, status, streamDead]);
+
+  useEffect(() => {
+    if (!artifactsCollecting) return;
+    const startedAt = Date.now();
+    const timer = window.setInterval(() => {
+      if (Date.now() - startedAt >= 20_000) {
+        artifactsCollectingRef.current = false;
+        setArtifactsCollecting(false);
+        window.clearInterval(timer);
+        return;
+      }
+      void refreshRun().catch(() => undefined);
+    }, 1_000);
+    return () => window.clearInterval(timer);
+  }, [artifactsCollecting, refreshRun]);
 
   const cancelRequested = cancelRequestedLocal || run?.phase === "cancel";
   const fileSignature = files.map((file) => [file.name, file.size, file.type, file.lastModified].join(":" )).join("|");
@@ -669,10 +746,12 @@ export function RunChatView({
           type="button"
           className="btn-sec run-chat-topbar__files"
           disabled={!run}
-          onClick={openFiles}
+          aria-expanded={filesOpen}
+          onClick={() => filesOpen ? closeFiles() : openFiles()}
         >
-          <Icon name="folder-open" size={13} />
-          Files · {fileCount}
+          <Icon name={artifactsCollecting ? "loader" : "folder-open"} size={13} className={artifactsCollecting ? "ls-spin" : undefined} />
+          {artifactsCollecting ? "Collecting files…" : `Files · ${fileCount}`}
+          {newArtifactCount > 0 && <span className="run-chat-topbar__file-badge">+{newArtifactCount}</span>}
         </button>
         <details className="run-chat-menu">
           <summary aria-label="Run actions"><Icon name="more-horizontal" size={16} /></summary>
@@ -687,6 +766,9 @@ export function RunChatView({
           </div>
         </details>
       </header>
+
+      <div className="run-chat-workspace">
+        <div className="run-chat-conversation">
 
       {loadError && (
         <div className="run-chat__load-warning" role="alert">
@@ -765,14 +847,22 @@ export function RunChatView({
         />
       </main>
 
-      <RunFilesDrawer
+        </div>
+      <RunArtifactCanvas
         open={filesOpen}
         runId={runId}
         attachments={run?.attachments ?? []}
         artifacts={run?.artifacts ?? []}
-        returnFocusRef={filesButtonRef}
+        collecting={artifactsCollecting}
+        selectedKey={selectedFileKey}
+        newCount={newArtifactCount}
+        onSelect={(key) => {
+          setSelectedFileKey(key);
+          setNewArtifactCount(0);
+        }}
         onClose={closeFiles}
       />
+      </div>
     </div>
   );
 }

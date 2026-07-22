@@ -215,6 +215,7 @@ import {
   type CompanionManifest,
   type SkillFrontmatter,
   type SkillScope,
+  type RunFilePreviewKind,
   createSecretInputSchema,
   updateSecretInputSchema,
   rotateSecretInputSchema,
@@ -4113,6 +4114,7 @@ app.post(
         fileName: string;
         contentType: string;
         previewContentType: string | null;
+        previewKind: RunFilePreviewKind | null;
         byteSize: number;
         storageKey: string;
       }> = [];
@@ -4134,11 +4136,13 @@ app.post(
             reserveRunAttachmentUploads({ actor, orgId, storageKeys: [key], database }),
           );
           await putRunAttachmentOnce({ key, body: buf, contentType });
+          const detected = detectRunFileType(file.name, buf);
           attachments.push({
             id: attachmentId,
             fileName: sanitizeAttachmentName(file.name || `attachment-${attachments.length + 1}`),
             contentType,
-            previewContentType: detectRunFileType(file.name, buf).previewContentType,
+            previewContentType: detected.previewContentType,
+            previewKind: detected.previewKind,
             byteSize: buf.length,
             storageKey: key,
           });
@@ -4251,6 +4255,7 @@ app.post(
         fileName: string;
         contentType: string;
         previewContentType: string | null;
+        previewKind: RunFilePreviewKind | null;
         byteSize: number;
         storageKey: string;
       }> = [];
@@ -4279,11 +4284,13 @@ app.post(
           });
           const key = runAttachmentKey({ orgId, attachmentId });
           attachmentBodies.push({ key, body: buf, contentType });
+          const detected = detectRunFileType(file.name, buf);
           attachments.push({
             id: attachmentId,
             fileName: sanitizeAttachmentName(file.name || `attachment-${attachments.length + 1}`),
             contentType,
-            previewContentType: detectRunFileType(file.name, buf).previewContentType,
+            previewContentType: detected.previewContentType,
+            previewKind: detected.previewKind,
             byteSize: buf.length,
             storageKey: key,
           });

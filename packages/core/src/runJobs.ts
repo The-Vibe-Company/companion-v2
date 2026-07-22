@@ -985,7 +985,9 @@ export async function enqueueRunPrompt(input: {
           file_name: attachment.fileName,
           content_type: attachment.contentType,
           preview_content_type: attachment.previewContentType,
+          preview_kind: attachment.previewKind,
           byte_size: attachment.byteSize,
+          created_at: attachment.createdAt.toISOString(),
         })),
         reactivated: false,
       };
@@ -1240,6 +1242,7 @@ export async function enqueueRunPrompt(input: {
           fileName: attachment.fileName,
           contentType: attachment.contentType,
           previewContentType: attachment.previewContentType ?? null,
+          previewKind: attachment.previewKind ?? null,
           byteSize: attachment.byteSize,
           storageKey: attachment.storageKey,
         })),
@@ -1288,6 +1291,7 @@ export async function enqueueRunPrompt(input: {
         file_name: attachment.fileName,
         content_type: attachment.contentType,
         preview_content_type: attachment.previewContentType ?? null,
+        preview_kind: attachment.previewKind ?? null,
         byte_size: attachment.byteSize,
       })),
     };

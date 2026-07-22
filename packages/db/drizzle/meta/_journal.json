@@ -358,6 +358,13 @@
       "when": 1784649600000,
       "tag": "0050_agent_auth_identity",
       "breakpoints": true
+    },
+    {
+      "idx": 51,
+      "version": "7",
+      "when": 1784736000000,
+      "tag": "0051_run_file_previews",
+      "breakpoints": true
     }
   ]
 }

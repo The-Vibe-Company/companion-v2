@@ -100,8 +100,15 @@ beforeEach(() => {
       else signal.addEventListener("abort", () => resolve(), { once: true });
     });
   });
-  Object.defineProperty(URL, "createObjectURL", { configurable: true, value: vi.fn((file: File) => `blob:${file.name}`) });
+  Object.defineProperty(URL, "createObjectURL", { configurable: true, value: vi.fn((file: Blob & { name?: string }) => `blob:${file.name ?? file.type}`) });
   Object.defineProperty(URL, "revokeObjectURL", { configurable: true, value: vi.fn() });
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input);
+    const body = url.includes("11111111-1111-4111-8111-111111111101")
+      ? new Uint8Array([0x89, 0x50, 0x4e, 0x47])
+      : "preview text";
+    return new Response(body, { status: 200 });
+  }));
   queryMocks.fetchRun.mockResolvedValue(runDetail());
   queryMocks.cancelRunPrompt.mockResolvedValue({
     prompt_id: "11111111-1111-4111-8111-111111111111",
@@ -123,6 +130,7 @@ afterEach(() => {
   act(() => roots.splice(0).forEach((root) => root.unmount()));
   document.body.innerHTML = "";
   vi.useRealTimers();
+  vi.unstubAllGlobals();
 });
 
 describe("RunChatView attachments", () => {
@@ -682,6 +690,52 @@ describe("RunChatView follow-up queue", () => {
 });
 
 describe("RunChatView generated files", () => {
+  it("auto-opens for the first live artifact and never steals selection for later files", async () => {
+    const running = { ...runDetail(), status: "running" as const, reactivatable_until: null, can_reactivate: false };
+    const first = {
+      id: "11111111-1111-4111-8111-111111111101",
+      file_name: "todo.txt",
+      path: "artifacts/todo.txt",
+      content_type: "text/plain; charset=utf-8",
+      byte_size: 12,
+      previewable: true,
+      preview_kind: "text" as const,
+      expires_at: "2099-07-16T12:00:00.000Z",
+      updated_at: "2026-07-16T12:00:00.000Z",
+    };
+    const second = {
+      ...first,
+      id: "11111111-1111-4111-8111-111111111102",
+      file_name: "notes.md",
+      path: "artifacts/notes.md",
+      preview_kind: "markdown" as const,
+      updated_at: "2026-07-16T12:00:01.000Z",
+    };
+    queryMocks.fetchRun
+      .mockResolvedValueOnce(running)
+      .mockResolvedValueOnce({ ...running, artifacts: [first] })
+      .mockResolvedValueOnce({ ...running, artifacts: [first, second] });
+    const container = await mount();
+
+    await act(async () => streamListener?.({ type: "artifacts.collecting" }));
+    expect(container.textContent).toContain("Collecting files…");
+    await act(async () => {
+      streamListener?.({ type: "artifacts.updated", count: 1 });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(container.querySelector(".run-artifact-canvas")).not.toBeNull();
+    expect(container.querySelector(".run-canvas-file.is-selected")?.textContent).toContain("todo.txt");
+
+    await act(async () => {
+      streamListener?.({ type: "artifacts.updated", count: 2 });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(container.querySelector(".run-canvas-file.is-selected")?.textContent).toContain("todo.txt");
+    expect(container.querySelector(".run-canvas-new")?.textContent).toContain("+1 new");
+  });
+
   it("renders safe raster previews and download-only file cards", async () => {
     queryMocks.fetchRun.mockResolvedValue({
       ...runDetail(),
@@ -693,6 +747,7 @@ describe("RunChatView generated files", () => {
           content_type: "image/png",
           byte_size: 128,
           previewable: true,
+          preview_kind: "image",
           expires_at: "2099-07-16T12:00:00.000Z",
         },
         {
@@ -701,21 +756,171 @@ describe("RunChatView generated files", () => {
           path: "artifacts/notes.txt",
           content_type: "text/plain; charset=utf-8",
           byte_size: 42,
-          previewable: false,
+          previewable: true,
+          preview_kind: "text",
           expires_at: "2099-07-16T12:00:00.000Z",
         },
       ],
     });
     const container = await mount();
-    await act(async () => button(container, "Files · 2").click());
-    const preview = document.querySelector<HTMLImageElement>('img[src$="11111111-1111-4111-8111-111111111101"]');
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(container.querySelector(".run-artifact-canvas")).not.toBeNull();
+    const preview = container.querySelector<HTMLImageElement>('.run-canvas-media img[src*="/artifacts/11111111-1111-4111-8111-111111111101"]');
     expect(preview).not.toBeNull();
-    expect(document.body.textContent).toContain("notes.txt");
-    expect(document.querySelector('a[href$="11111111-1111-4111-8111-111111111102?download=1"]')).not.toBeNull();
+    expect(container.textContent).toContain("notes.txt");
+    expect(container.querySelector('a[href$="11111111-1111-4111-8111-111111111101?download=1"]')).not.toBeNull();
 
-    await act(async () => preview?.dispatchEvent(new Event("error")));
-    expect(document.body.textContent).toContain("Preview unavailable");
-    expect(document.querySelector('a[href$="11111111-1111-4111-8111-111111111101?download=1"]')).not.toBeNull();
+    const notes = Array.from(container.querySelectorAll<HTMLButtonElement>(".run-canvas-file")).find((item) => item.textContent?.includes("notes.txt"));
+    await act(async () => { notes?.click(); await Promise.resolve(); await Promise.resolve(); });
+    expect(container.querySelector(".run-canvas-code")?.textContent).toContain("preview text");
+    expect(container.querySelector('a[href$="11111111-1111-4111-8111-111111111102?download=1"]')).not.toBeNull();
+  });
+
+  it("forces a verified PDF MIME and sandboxes the preview frame", async () => {
+    vi.mocked(URL.createObjectURL).mockReturnValueOnce("about:blank#pdf");
+    queryMocks.fetchRun.mockResolvedValue({
+      ...runDetail(),
+      artifacts: [{
+        id: "11111111-1111-4111-8111-111111111101",
+        file_name: "report.pdf",
+        path: "artifacts/report.pdf",
+        content_type: "text/html",
+        byte_size: 128,
+        previewable: true,
+        preview_kind: "pdf",
+        expires_at: "2099-07-16T12:00:00.000Z",
+      }],
+    });
+    const container = await mount();
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+
+    expect(URL.createObjectURL).toHaveBeenCalledWith(expect.objectContaining({ type: "application/pdf" }));
+    expect(container.querySelector(".run-canvas-pdf")?.getAttribute("sandbox")).toBe("");
+    await act(async () => button(container, "Close files").click());
+    await act(async () => { await new Promise((resolve) => requestAnimationFrame(resolve)); });
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith("about:blank#pdf");
+    expect(document.activeElement).toBe(button(container, "Files · 1"));
+  });
+
+  it("blocks remote Markdown images and reloads direct media on same-path replacement", async () => {
+    const running = {
+      ...runDetail(),
+      status: "running" as const,
+      reactivatable_until: null,
+      can_reactivate: false,
+    };
+    const markdown = {
+      id: "11111111-1111-4111-8111-111111111103",
+      file_name: "report.md",
+      path: "artifacts/report.md",
+      content_type: "text/markdown; charset=utf-8",
+      byte_size: 42,
+      previewable: true,
+      preview_kind: "markdown" as const,
+      expires_at: "2099-07-16T12:00:00.000Z",
+      updated_at: "2026-07-16T12:00:02.000Z",
+    };
+    const image = {
+      ...markdown,
+      id: "11111111-1111-4111-8111-111111111104",
+      file_name: "chart.png",
+      path: "artifacts/chart.png",
+      content_type: "image/png",
+      preview_kind: "image" as const,
+      updated_at: "2026-07-16T12:00:01.000Z",
+    };
+    queryMocks.fetchRun
+      .mockResolvedValueOnce({ ...running, artifacts: [image, markdown] })
+      .mockResolvedValue({ ...running, artifacts: [{ ...image, updated_at: "2026-07-16T12:00:03.000Z" }, markdown] });
+    vi.mocked(fetch).mockResolvedValue(new Response("![tracking](https://attacker.example/pixel)", { status: 200 }));
+    const container = await mount();
+    const markdownFile = Array.from(container.querySelectorAll<HTMLButtonElement>(".run-canvas-file"))
+      .find((item) => item.textContent?.includes("report.md"));
+    await act(async () => { markdownFile?.click(); await Promise.resolve(); await Promise.resolve(); });
+    expect(container.textContent).toContain("Image not loaded · tracking");
+    expect(container.querySelector('img[src*="attacker.example"]')).toBeNull();
+
+    const imageFile = Array.from(container.querySelectorAll<HTMLButtonElement>(".run-canvas-file"))
+      .find((item) => item.textContent?.includes("chart.png"));
+    await act(async () => imageFile?.click());
+    const firstSrc = container.querySelector<HTMLImageElement>(".run-canvas-media img")?.src;
+    await act(async () => {
+      streamListener?.({ type: "artifacts.updated", count: 2 });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const secondSrc = container.querySelector<HTMLImageElement>(".run-canvas-media img")?.src;
+    expect(secondSrc).not.toBe(firstSrc);
+    expect(container.querySelector('.run-canvas-tree[role="tree"]')).toBeNull();
+  });
+
+  it("contains mobile focus, handles Escape, and returns to Files when a selection disappears", async () => {
+    vi.stubGlobal("matchMedia", vi.fn(() => ({
+      matches: true,
+      media: "(max-width: 900px)",
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })));
+    const artifact = {
+      id: "11111111-1111-4111-8111-111111111101",
+      file_name: "todo.txt",
+      path: "artifacts/todo.txt",
+      content_type: "text/plain; charset=utf-8",
+      byte_size: 12,
+      previewable: true,
+      preview_kind: "text" as const,
+      expires_at: "2099-07-16T12:00:00.000Z",
+    };
+    const replacement = {
+      ...artifact,
+      id: "11111111-1111-4111-8111-111111111102",
+      file_name: "done.txt",
+      path: "artifacts/done.txt",
+    };
+    const running = {
+      ...runDetail(),
+      status: "running" as const,
+      reactivatable_until: null,
+      can_reactivate: false,
+    };
+    queryMocks.fetchRun
+      .mockResolvedValueOnce({ ...running, artifacts: [artifact] })
+      .mockResolvedValue({ ...running, artifacts: [replacement] });
+    const previous = document.createElement("button");
+    document.body.appendChild(previous);
+    previous.focus();
+    const container = await mount();
+    await act(async () => { await new Promise((resolve) => requestAnimationFrame(resolve)); });
+
+    const canvas = container.querySelector<HTMLElement>('.run-artifact-canvas[role="dialog"]')!;
+    expect(canvas.contains(document.activeElement)).toBe(true);
+    await act(async () => canvas.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
+    expect(canvas.classList.contains("is-preview")).toBe(false);
+
+    await act(async () => {
+      streamListener?.({ type: "artifacts.updated", count: 1 });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    expect(container.textContent).toContain("done.txt");
+    expect(canvas.classList.contains("is-preview")).toBe(false);
+    await act(async () => canvas.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
+    await act(async () => { await new Promise((resolve) => requestAnimationFrame(resolve)); });
+    expect(container.querySelector(".run-artifact-canvas")).toBeNull();
+    expect(button(container, "Back to skill")).not.toBeNull();
+    const filesButton = container.querySelector<HTMLButtonElement>(".run-chat-topbar__files")!;
+    expect(filesButton.textContent).toContain("Files · 1");
+    expect(document.activeElement).toBe(filesButton);
+
+    await act(async () => filesButton.click());
+    const replacementButton = Array.from(container.querySelectorAll<HTMLButtonElement>(".run-canvas-file"))
+      .find((item) => item.textContent?.includes("done.txt"));
+    expect(replacementButton?.classList.contains("is-selected")).toBe(true);
   });
 
   it("expires each generated file at its own deadline", async () => {
@@ -731,7 +936,9 @@ describe("RunChatView generated files", () => {
           content_type: "text/plain; charset=utf-8",
           byte_size: 5,
           previewable: false,
+          preview_kind: "text",
           expires_at: "2026-07-16T12:00:01.000Z",
+          updated_at: "2026-07-16T11:59:59.900Z",
         },
         {
           id: "11111111-1111-4111-8111-111111111102",
@@ -740,21 +947,23 @@ describe("RunChatView generated files", () => {
           content_type: "text/plain; charset=utf-8",
           byte_size: 6,
           previewable: false,
+          preview_kind: "text",
           expires_at: "2026-07-16T12:00:02.000Z",
+          updated_at: "2026-07-16T11:59:59.000Z",
         },
       ],
     });
     const container = await mount();
-    await act(async () => button(container, "Files · 2").click());
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
 
     await act(async () => vi.advanceTimersByTimeAsync(1_025));
-    const first = Array.from(document.querySelectorAll(".run-file-card")).find((card) => card.textContent?.includes("first.txt"));
-    const second = Array.from(document.querySelectorAll(".run-file-card")).find((card) => card.textContent?.includes("second.txt"));
-    expect(first?.textContent).toContain("Expired");
-    expect(second?.textContent).not.toContain("Expired");
+    expect(container.querySelector(".run-canvas-viewer")?.textContent).toContain("expired");
+
+    const second = Array.from(container.querySelectorAll<HTMLButtonElement>(".run-canvas-file")).find((item) => item.textContent?.includes("second.txt"));
+    await act(async () => { second?.click(); await Promise.resolve(); });
+    expect(container.querySelector(".run-canvas-viewer")?.textContent).not.toContain("has expired");
 
     await act(async () => vi.advanceTimersByTimeAsync(1_000));
-    const expiredSecond = Array.from(document.querySelectorAll(".run-file-card")).find((card) => card.textContent?.includes("second.txt"));
-    expect(expiredSecond?.textContent).toContain("Expired");
+    expect(container.querySelector(".run-canvas-viewer")?.textContent).toContain("expired");
   });
 });

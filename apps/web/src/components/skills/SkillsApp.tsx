@@ -1563,6 +1563,7 @@ export function SkillsApp({
   // Keyboard: ⌘K toggles palette; ⌘⇧C copies the public link; Esc back to list; ↑/↓ move between skills.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (e.defaultPrevented) return;
       if (uploadOpen || updateSkill || installSkill || shareTarget || publicReleaseSkill) return;
       // Modal surfaces own Escape, arrows and Cmd/Ctrl shortcuts. Letting the skill shell handle
       // them would unmount the launcher and move its prompt/files into another skill's route.

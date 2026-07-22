@@ -464,6 +464,8 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
     await sql.unsafe(`grant execute on function companion_complete_skill_run_prewarm_cleanup(uuid, uuid, text) to ${rlsRole}`);
     await sql.unsafe(`grant execute on function companion_purge_skill_run_prewarms(integer) to ${rlsRole}`);
     await sql.unsafe(`grant execute on function companion_put_skill_run_artifact_metadata(uuid, uuid, text, text, uuid, text, text, text, integer, boolean, text, boolean, timestamp with time zone) to ${rlsRole}`);
+    await sql.unsafe(`grant execute on function companion_put_skill_run_artifact_metadata_v2(uuid, uuid, text, text, uuid, text, text, text, integer, boolean, text, boolean, timestamp with time zone, text) to ${rlsRole}`);
+    await sql.unsafe(`grant execute on function companion_reconcile_skill_run_artifact_paths(uuid, uuid, text, text, text[]) to ${rlsRole}`);
   });
 
   afterAll(async () => {
@@ -486,21 +488,57 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
     const write = (workerId: string, id: string, artifactPath: string) => sql.begin(async (tx) => {
       await tx.unsafe(`set local role ${rlsRole}`);
       return tx<{ stored: boolean }[]>`
-        select companion_put_skill_run_artifact_metadata(
+        select companion_put_skill_run_artifact_metadata_v2(
           ${orgA}::uuid, ${freezeRunId}::uuid, ${owner.id}, ${workerId}, ${id}::uuid,
-          ${artifactPath}, 'lease.txt', 'text/plain; charset=utf-8', 5, false,
-          ${`${orgA}/run-artifacts/${freezeRunId}/${id}`}, false, now() + interval '24 hours'
+          ${artifactPath}, 'lease.txt', 'text/plain; charset=utf-8', 5, true,
+          ${`${orgA}/run-artifacts/${freezeRunId}/${id}`}, true, now() + interval '24 hours', 'text'
         ) as stored
       `;
     });
     await expect(write("wrong-worker", randomUUID(), "artifacts/wrong.txt")).resolves.toEqual([{ stored: false }]);
     await expect(write("freeze-worker", randomUUID(), "artifacts/lease.txt")).resolves.toEqual([{ stored: true }]);
-    for (let index = 0; index < 19; index += 1) {
+    const legacyWrite = await sql.begin(async (tx) => {
+      await tx.unsafe(`set local role ${rlsRole}`);
+      return tx<{ stored: boolean }[]>`
+        select companion_put_skill_run_artifact_metadata(
+          ${orgA}::uuid, ${freezeRunId}::uuid, ${owner.id}, 'freeze-worker', ${randomUUID()}::uuid,
+          'artifacts/lease.txt', 'lease.txt', 'application/octet-stream', 5, false,
+          ${`${orgA}/run-artifacts/${freezeRunId}/legacy`}, true, now() + interval '24 hours'
+        ) as stored
+      `;
+    });
+    expect(legacyWrite).toEqual([{ stored: true }]);
+    const [legacyRow] = await sql<{ preview_kind: string | null }[]>`
+      select preview_kind from skill_run_artifacts
+      where org_id = ${orgA}::uuid and run_id = ${freezeRunId}::uuid and path = 'artifacts/lease.txt'
+    `;
+    expect(legacyRow?.preview_kind).toBeNull();
+    await expect(write("freeze-worker", randomUUID(), "plans/images/read-result.png"))
+      .resolves.toEqual([{ stored: true }]);
+    for (let index = 0; index < 18; index += 1) {
       await expect(write("freeze-worker", randomUUID(), `artifacts/quota-${index}.txt`))
         .resolves.toEqual([{ stored: true }]);
     }
     await expect(write("freeze-worker", randomUUID(), "artifacts/quota-overflow.txt"))
       .resolves.toEqual([{ stored: false }]);
+    const reconciled = await sql.begin(async (tx) => {
+      await tx.unsafe(`set local role ${rlsRole}`);
+      return tx<{ reconciled: boolean }[]>`
+        select companion_reconcile_skill_run_artifact_paths(
+          ${orgA}::uuid, ${freezeRunId}::uuid, ${owner.id}, 'freeze-worker',
+          ARRAY['artifacts/lease.txt']::text[]
+        ) as reconciled
+      `;
+    });
+    expect(reconciled).toEqual([{ reconciled: true }]);
+    const [readImage] = await sql<{ ready: boolean }[]>`
+      select ready from skill_run_artifacts
+      where org_id = ${orgA}::uuid and run_id = ${freezeRunId}::uuid
+        and path = 'plans/images/read-result.png'
+    `;
+    expect(readImage?.ready).toBe(true);
+    await expect(write("freeze-worker", randomUUID(), "artifacts/after-delete.txt"))
+      .resolves.toEqual([{ stored: true }]);
   });
 
   it("claims a secretless prewarm once while preserving creator-only visibility", async () => {
