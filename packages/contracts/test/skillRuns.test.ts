@@ -43,7 +43,15 @@ describe("skill run contracts", () => {
   });
 
   it("exposes the complete public lifecycle", () => {
-    expect(skillRunStatusSchema.options).toEqual(["queued", "starting", "running", "frozen", "error", "canceled"]);
+    expect(skillRunStatusSchema.options).toEqual([
+      "queued",
+      "starting",
+      "running",
+      "frozen",
+      "interrupted",
+      "error",
+      "canceled",
+    ]);
   });
 
   it("parses an authoritative selection and rejects duplicates", () => {

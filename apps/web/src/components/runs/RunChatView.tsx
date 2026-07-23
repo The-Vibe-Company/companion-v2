@@ -94,6 +94,14 @@ export function RunChatView({
   runRef.current = run;
   const currentRunIdRef = useRef(runId);
   currentRunIdRef.current = runId;
+  const requestGenerationRef = useRef(0);
+  const appliedGenerationRef = useRef(0);
+  const generationRunIdRef = useRef(runId);
+  if (generationRunIdRef.current !== runId) {
+    generationRunIdRef.current = runId;
+    requestGenerationRef.current = 0;
+    appliedGenerationRef.current = 0;
+  }
   const [loadError, setLoadError] = useState<string | null>(null);
   const [loadRetryNonce, setLoadRetryNonce] = useState(0);
   const [text, setText] = useState("");
@@ -106,6 +114,9 @@ export function RunChatView({
   const [streamReady, setStreamReady] = useState(false);
   const [reconnectNonce, setReconnectNonce] = useState(0);
   const lastEventIdRef = useRef<string | null>(null);
+  const runtimeStateRefreshEpochRef = useRef(0);
+  const runtimeStateRefreshInFlightRef = useRef<{ runId: string; epoch: number } | null>(null);
+  const runtimeStateRefreshQueuedRef = useRef<{ runId: string; epoch: number } | null>(null);
   const [sending, setSending] = useState(false);
   const promptSendingRef = useRef(false);
   const promptAttemptRef = useRef<{
@@ -150,8 +161,6 @@ export function RunChatView({
     setFilesOpen(false);
     window.requestAnimationFrame(() => filesButtonRef.current?.focus());
   }, []);
-  const requestGenerationRef = useRef(0);
-  const appliedGenerationRef = useRef(0);
   const pendingRevisionRef = useRef(0);
   const promptStatusRef = useRef<Map<string, RunPromptStatus>>(new Map());
   const promptSseObservedRef = useRef<Set<string>>(new Set());
@@ -246,6 +255,38 @@ export function RunChatView({
     return applyRunDetail(await fetchRun(runId), generation, pendingRevisionAtRequest);
   }, [applyRunDetail, runId]);
 
+  const requestRuntimeStateRefresh = useCallback(() => {
+    const token = { runId, epoch: runtimeStateRefreshEpochRef.current };
+    runtimeStateRefreshQueuedRef.current = token;
+    const inFlight = runtimeStateRefreshInFlightRef.current;
+    if (inFlight?.runId === token.runId && inFlight.epoch === token.epoch) return;
+    runtimeStateRefreshInFlightRef.current = token;
+    const drain = async () => {
+      while (
+        runtimeStateRefreshQueuedRef.current?.runId === token.runId
+        && runtimeStateRefreshQueuedRef.current.epoch === token.epoch
+      ) {
+        runtimeStateRefreshQueuedRef.current = null;
+        const detail = await refreshRun().catch(() => null);
+        const current = runtimeStateRefreshInFlightRef.current;
+        if (current?.runId !== token.runId || current.epoch !== token.epoch) return;
+        if (!detail || detail.runtime_state !== "degraded") {
+          const queued = runtimeStateRefreshQueuedRef.current as { runId: string; epoch: number } | null;
+          if (queued?.runId === token.runId && queued.epoch === token.epoch) {
+            runtimeStateRefreshQueuedRef.current = null;
+          }
+          break;
+        }
+      }
+    };
+    void drain().finally(() => {
+      const current = runtimeStateRefreshInFlightRef.current;
+      if (current?.runId === token.runId && current.epoch === token.epoch) {
+        runtimeStateRefreshInFlightRef.current = null;
+      }
+    });
+  }, [refreshRun, runId]);
+
   const resolveToolLabel = useCallback((tool: string, skill: string | null): { label: string; action: string } => {
     const current = runRef.current;
     if (current && skill && skill === current.skill_slug) {
@@ -281,13 +322,14 @@ export function RunChatView({
   }, [loadRetryNonce, refreshRun]);
 
   useEffect(() => {
-    requestGenerationRef.current = 0;
-    appliedGenerationRef.current = 0;
     pendingRevisionRef.current = 0;
     promptStatusRef.current.clear();
     promptSseObservedRef.current.clear();
     promptProcessedRef.current.clear();
     removedAttachmentIdsRef.current.clear();
+    runtimeStateRefreshEpochRef.current += 1;
+    runtimeStateRefreshInFlightRef.current = null;
+    runtimeStateRefreshQueuedRef.current = null;
     statusActivationRevisionRef.current = null;
     appliedTranscriptSequenceRef.current = -1;
     lastEventIdRef.current = null;
@@ -337,7 +379,7 @@ export function RunChatView({
   }, [resolveToolLabel, run]);
 
   useEffect(() => {
-    if (run && ["frozen", "error", "canceled"].includes(run.status)) setCancelRequestedLocal(false);
+    if (run && ["frozen", "interrupted", "error", "canceled"].includes(run.status)) setCancelRequestedLocal(false);
   }, [run]);
 
   useEffect(() => {
@@ -359,6 +401,9 @@ export function RunChatView({
       runId,
       (event) => {
         setStreamReady(true);
+        const shouldRefreshRuntimeState =
+          (event.type === "status" && event.state === "retry")
+          || runRef.current?.runtime_state === "degraded";
         if (event.type === "error" && event.message === "This session has ended.") {
           setStreamReady(false);
           setStreamDead(true);
@@ -422,8 +467,14 @@ export function RunChatView({
         }
         dispatch({ kind: "event", event, resolveToolLabel });
         setStreamDead(false);
-        if (event.type === "session.idle" || event.type === "artifacts.updated" || event.type === "prompt.status") {
-          void refreshRun().catch(() => undefined);
+        if (
+          event.type === "session.idle"
+          || event.type === "artifacts.updated"
+          || event.type === "prompt.status"
+          || shouldRefreshRuntimeState
+        ) {
+          if (shouldRefreshRuntimeState) requestRuntimeStateRefresh();
+          else void refreshRun().catch(() => undefined);
         } else if (event.type === "run.error") {
           void refreshRun().catch(() => undefined);
         } else if (event.type === "error") {
@@ -443,7 +494,7 @@ export function RunChatView({
         },
         onStreamEnd: async () => {
           try {
-            return ["frozen", "error", "canceled"].includes((await refreshRun()).status);
+            return ["frozen", "interrupted", "error", "canceled"].includes((await refreshRun()).status);
           } catch {
             return false;
           }
@@ -451,7 +502,7 @@ export function RunChatView({
       },
     );
     return () => controller.abort();
-  }, [reconnectNonce, refreshRun, resolveToolLabel, runId, status, streamDead]);
+  }, [reconnectNonce, refreshRun, requestRuntimeStateRefresh, resolveToolLabel, runId, status, streamDead]);
 
   useEffect(() => {
     if (!artifactsCollecting) return;
@@ -471,7 +522,9 @@ export function RunChatView({
   const cancelRequested = cancelRequestedLocal || run?.phase === "cancel";
   const fileSignature = files.map((file) => [file.name, file.size, file.type, file.lastModified].join(":" )).join("|");
   const terminalCanReactivate = canReactivateRun(run, reactivationClock);
-  const liveSendReady = status === "running" && !cancelRequested && streamReady && !streamDead;
+  const runtimeDegraded = run?.runtime_state === "degraded";
+  const liveSendReady =
+    status === "running" && !runtimeDegraded && !cancelRequested && streamReady && !streamDead;
   const composerDisabled = !canUseRunComposer(status, liveSendReady, terminalCanReactivate);
   const queuedCount = run?.pending_prompts.filter((prompt) => prompt.kind === "follow_up" && prompt.status === "queued").length ?? 0;
   const queueFull = queuedCount >= RUN_PROMPT_MAX_QUEUED;
@@ -509,7 +562,8 @@ export function RunChatView({
   const send = () => {
     const trimmed = text.trim();
     if (promptSendingRef.current || composerDisabled || queueFull || (!trimmed && files.length === 0)) return;
-    const terminalDelivery = status === "frozen" || status === "canceled";
+    const terminalDelivery =
+      status === "frozen" || status === "interrupted" || status === "canceled";
     const previous = promptAttemptRef.current;
     const retrying = previous?.text === trimmed && previous.fileSignature === fileSignature;
     const attempt = retrying
@@ -723,13 +777,15 @@ export function RunChatView({
   const fileCount = (run?.attachments.length ?? 0) + (run?.artifacts.length ?? 0);
   const placeholder = queueFull
     ? "Follow-up queue is full"
+    : runtimeDegraded
+      ? "Reconnecting to the sandbox…"
     : status === "running"
       ? "Send a follow-up or attach files"
       : status === "queued"
         ? "Run queued"
         : status === "starting"
           ? "Starting run"
-          : (status === "frozen" || status === "canceled") && terminalCanReactivate
+          : (status === "frozen" || status === "interrupted" || status === "canceled") && terminalCanReactivate
             ? "Send a message to reactivate"
             : "This session is read-only";
 
@@ -785,6 +841,13 @@ export function RunChatView({
         </div>
       )}
       {(status === "queued" || status === "starting") && <StartingBanner status={status} phase={run?.phase} />}
+      {status === "running" && runtimeDegraded && (
+        <div className="run-chat-banner" role="status">
+          <Icon name="loader" size={14} className="ls-spin" />
+          <b>Reconnecting…</b>
+          <span>New messages are paused while the sandbox connection recovers.</span>
+        </div>
+      )}
       {status === "frozen" && run && (
         <FrozenBanner
           note={terminalCanReactivate ? "Send a message below to reactivate it." : "The reactivation window has expired."}
@@ -798,6 +861,22 @@ export function RunChatView({
           canReactivate={terminalCanReactivate}
           onRunAgain={rerun}
         />
+      )}
+      {status === "interrupted" && run && (
+        <div className="run-chat-banner run-chat-banner--error" role="alert">
+          <Icon name="alert-triangle" size={13} />
+          <b>Turn interrupted</b>
+          <span>
+            {run.error_message
+              ?? "The sandbox stopped before the current turn completed. Partial output is preserved."}
+          </span>
+          <span>
+            {terminalCanReactivate
+              ? "Send a new message below to reactivate; the interrupted turn will not be replayed."
+              : "The sandbox can no longer be reactivated."}
+          </span>
+          <button type="button" className="btn-sec" onClick={rerun}>Run again</button>
+        </div>
       )}
       {status === "error" && run && (
         <div className="run-chat-banner run-chat-banner--error" role="alert">
@@ -823,35 +902,37 @@ export function RunChatView({
           }}
           onOpenFiles={openFiles}
         />
-        <ChatComposer
-          text={text}
-          files={files}
-          pendingPrompts={run?.pending_prompts ?? []}
-          disabled={composerDisabled}
-          submitDisabled={queueFull}
-          attachmentDisabled={attachmentDisabled}
-          sending={sending}
-          stopBusy={promptCancelBusy}
-          dragOver={dragOver}
-          uploadProgress={uploadProgress}
-          promptError={promptError}
-          placeholder={placeholder}
-          helper={queueFull ? `Queue full · ${RUN_PROMPT_MAX_QUEUED} follow-ups` : "Up to 5 files · 10 MB each · 100 MB per run"}
-          dropProps={dropProps}
-          onTextChange={(value) => {
-            if (promptAttemptRef.current?.text !== value.trim()) promptAttemptRef.current = null;
-            setPromptError(null);
-            setText(value);
-          }}
-          onAddFiles={addFiles}
-          onRemoveFile={(index) => {
-            promptAttemptRef.current = null;
-            setPromptError(null);
-            setFiles((current) => current.filter((_, itemIndex) => itemIndex !== index));
-          }}
-          onSend={send}
-          onCancelPrompt={requestPromptCancel}
-        />
+        {(status !== "interrupted" || terminalCanReactivate) && (
+          <ChatComposer
+            text={text}
+            files={files}
+            pendingPrompts={run?.pending_prompts ?? []}
+            disabled={composerDisabled}
+            submitDisabled={queueFull}
+            attachmentDisabled={attachmentDisabled}
+            sending={sending}
+            stopBusy={promptCancelBusy}
+            dragOver={dragOver}
+            uploadProgress={uploadProgress}
+            promptError={promptError}
+            placeholder={placeholder}
+            helper={queueFull ? `Queue full · ${RUN_PROMPT_MAX_QUEUED} follow-ups` : "Up to 5 files · 10 MB each · 100 MB per run"}
+            dropProps={dropProps}
+            onTextChange={(value) => {
+              if (promptAttemptRef.current?.text !== value.trim()) promptAttemptRef.current = null;
+              setPromptError(null);
+              setText(value);
+            }}
+            onAddFiles={addFiles}
+            onRemoveFile={(index) => {
+              promptAttemptRef.current = null;
+              setPromptError(null);
+              setFiles((current) => current.filter((_, itemIndex) => itemIndex !== index));
+            }}
+            onSend={send}
+            onCancelPrompt={requestPromptCancel}
+          />
+        )}
       </main>
 
         </div>

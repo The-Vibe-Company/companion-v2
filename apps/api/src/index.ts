@@ -4483,7 +4483,7 @@ app.get("/v1/runs/:id/events", async (c) => {
             const run = await withTenantContext({ orgId, userId: actor.id }, (database) =>
               getRun({ actor, orgId, runId, database }),
             );
-            const terminal = ["frozen", "error", "canceled"].includes(run.status);
+            const terminal = ["frozen", "interrupted", "error", "canceled"].includes(run.status);
             const action = runDrainAction({
               eventCount: events.length,
               pageSize: 500,

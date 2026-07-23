@@ -61,8 +61,18 @@ const runErrorCodeSchema = z
   .max(RUN_ERROR_CODE_MAX)
   .regex(/^[a-z][a-z0-9_]*$/, "run error codes must be lower snake case");
 
-export const skillRunStatusSchema = z.enum(["queued", "starting", "running", "frozen", "error", "canceled"]);
+export const skillRunStatusSchema = z.enum([
+  "queued",
+  "starting",
+  "running",
+  "frozen",
+  "interrupted",
+  "error",
+  "canceled",
+]);
 export type SkillRunStatus = z.infer<typeof skillRunStatusSchema>;
+export const runRuntimeStateSchema = z.enum(["healthy", "degraded"]);
+export type RunRuntimeState = z.infer<typeof runRuntimeStateSchema>;
 
 export const runPrewarmStatusSchema = z.enum(["queued", "warming", "ready", "failed", "canceled"]);
 export type RunPrewarmStatus = z.infer<typeof runPrewarmStatusSchema>;
@@ -675,6 +685,9 @@ export const skillRunDetailSchema = skillRunRowSchema.extend({
   activation_revision: z.number().int().nonnegative(),
   reactivatable_until: z.string().nullable(),
   can_reactivate: z.boolean(),
+  /** Optional during the mixed-version rollout; new API replicas always populate both fields. */
+  runtime_state: runRuntimeStateSchema.optional(),
+  runtime_degraded_at: z.string().datetime().nullable().optional(),
   attachments: z.array(skillRunAttachmentRowSchema),
   pending_prompts: z.array(pendingRunPromptSchema).max(RUN_PROMPT_MAX_QUEUED + 1).default([]),
   artifacts: z.array(skillRunArtifactRowSchema).max(RUN_ARTIFACT_MAX_FILES),

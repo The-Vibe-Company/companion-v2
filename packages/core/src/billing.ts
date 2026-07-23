@@ -34,6 +34,7 @@ export interface BillingRuntimeConfig {
   stripePriceId?: string;
   stripePortalConfigurationId?: string;
   sandboxMinutesPerSeat?: number;
+  sandboxMaxSessionMs?: number;
 }
 
 function csvSet(value: string | undefined): ReadonlySet<string> {
@@ -70,6 +71,10 @@ export function billingRuntimeConfig(env: NodeJS.ProcessEnv = process.env): Bill
       env.COMPANION_SANDBOX_MINUTES_PER_SEAT,
       DEFAULT_SANDBOX_MINUTES_PER_SEAT,
       100_000,
+    ),
+    sandboxMaxSessionMs: Math.max(
+      600_000,
+      boundedPositiveInteger(env.COMPANION_SANDBOX_MAX_SESSION_MS, 3_600_000, 3_600_000),
     ),
   };
 }
@@ -423,14 +428,38 @@ export async function extendSandboxUsageReservation(input: {
   if (!row || row.endedAt) return;
   const usage = await getSandboxUsageOverview({ orgId: input.orgId, database: input.database, now, config });
   assertSandboxCapacity(usage, input.additionalMs);
+  const reservedMs = row.reservedMs + input.additionalMs;
+  const periodEnd = new Date(Date.UTC(
+    row.periodStart.getUTCFullYear(),
+    row.periodStart.getUTCMonth() + 1,
+    1,
+  ));
+  const runtimeDeadlineAt = row.runtimePolicy === "budgeted" && row.startedAt
+    ? new Date(Math.min(
+        row.startedAt.getTime() + reservedMs,
+        row.startedAt.getTime() + (config.sandboxMaxSessionMs ?? 3_600_000),
+        periodEnd.getTime(),
+      ))
+    : row.runtimeDeadlineAt;
   await input.database
     .update(schema.sandboxUsageSessions)
     .set({
-      reservedMs: row.reservedMs + input.additionalMs,
+      reservedMs,
+      runtimeDeadlineAt,
       reservationExpiresAt: new Date(now.getTime() + SANDBOX_RESERVATION_TTL_MS),
       updatedAt: now,
     })
     .where(eq(schema.sandboxUsageSessions.id, row.id));
+  if (runtimeDeadlineAt) {
+    await input.database
+      .update(schema.skillRuns)
+      .set({ runtimeDeadlineAt, updatedAt: now })
+      .where(and(
+        eq(schema.skillRuns.orgId, input.orgId),
+        eq(schema.skillRuns.id, input.sourceId),
+        eq(schema.skillRuns.activationRevision, input.activationRevision),
+      ));
+  }
 }
 
 /** Transfer an already-running warm-up into its run and reserve the run's remaining activation. */
@@ -569,23 +598,46 @@ export async function startSandboxUsage(input: {
   orgId: string;
   sandboxName: string;
   activationRevision: number;
+  runtimePolicy?: "safety_capped" | "budgeted";
+  runtimeDeadlineAt?: Date;
   database?: Db;
   now?: Date;
   config?: BillingRuntimeConfig;
-}): Promise<void> {
+}): Promise<Date | null> {
   const database = input.database ?? db;
-  if ((input.config ?? billingRuntimeConfig()).billingMode === "disabled") return;
+  if ((input.config ?? billingRuntimeConfig()).billingMode === "disabled") return null;
   const now = input.now ?? new Date();
-  await database
+  const rows = await database
     .update(schema.sandboxUsageSessions)
-    .set({ startedAt: now, reservationExpiresAt: new Date(now.getTime() + SANDBOX_RESERVATION_TTL_MS), updatedAt: now })
+    .set({
+      startedAt: sql`coalesce(
+        ${schema.sandboxUsageSessions.startedAt},
+        ${now.toISOString()}::timestamp with time zone
+      )`,
+      runtimePolicy: input.runtimePolicy ?? "safety_capped",
+      ...(input.runtimeDeadlineAt
+        ? {
+            runtimeDeadlineAt: sql`case
+              when ${schema.sandboxUsageSessions.runtimeDeadlineAt} is null
+                then ${input.runtimeDeadlineAt.toISOString()}::timestamp with time zone
+              else least(
+                ${schema.sandboxUsageSessions.runtimeDeadlineAt},
+                ${input.runtimeDeadlineAt.toISOString()}::timestamp with time zone
+              )
+            end`,
+          }
+        : {}),
+      reservationExpiresAt: new Date(now.getTime() + SANDBOX_RESERVATION_TTL_MS),
+      updatedAt: now,
+    })
     .where(and(
       eq(schema.sandboxUsageSessions.orgId, input.orgId),
       eq(schema.sandboxUsageSessions.sandboxName, input.sandboxName),
       eq(schema.sandboxUsageSessions.activationRevision, input.activationRevision),
-      sql`${schema.sandboxUsageSessions.startedAt} is null`,
       sql`${schema.sandboxUsageSessions.endedAt} is null`,
-    ));
+    ))
+    .returning({ startedAt: schema.sandboxUsageSessions.startedAt });
+  return rows[0]?.startedAt ?? null;
 }
 
 export async function settleSandboxUsage(input: {
@@ -607,11 +659,78 @@ export async function settleSandboxUsage(input: {
     ),
   });
   if (!row || row.endedAt) return;
-  const settledMs = row.startedAt ? roundedMinuteMs(Math.max(1, now.getTime() - row.startedAt.getTime())) : 0;
+  const runtimeDeadlineAt = row.runtimeDeadlineAt ?? await getSandboxRuntimeDeadline({
+    orgId: input.orgId,
+    sandboxName: input.sandboxName,
+    activationRevision: input.activationRevision,
+    database,
+  });
+  const effectiveEnd = runtimeDeadlineAt && runtimeDeadlineAt < now ? runtimeDeadlineAt : now;
+  const elapsedMs = row.startedAt ? Math.max(1, effectiveEnd.getTime() - row.startedAt.getTime()) : 0;
+  const maximumMs = runtimeDeadlineAt && row.startedAt
+    ? Math.max(0, runtimeDeadlineAt.getTime() - row.startedAt.getTime())
+    : Number.POSITIVE_INFINITY;
+  const settledMs = row.startedAt ? Math.min(roundedMinuteMs(elapsedMs), maximumMs) : 0;
   await database
     .update(schema.sandboxUsageSessions)
     .set({ endedAt: now, settledMs, updatedAt: now })
     .where(and(eq(schema.sandboxUsageSessions.id, row.id), sql`${schema.sandboxUsageSessions.endedAt} is null`));
+}
+
+/** Persist redacted provider truth for reconciliation and usage audits. */
+export async function recordSandboxRuntimeObservation(input: {
+  orgId: string;
+  sandboxName: string;
+  activationRevision: number;
+  state: "running" | "stopped" | "missing";
+  expiresAt: Date | null;
+  database?: Db;
+  now?: Date;
+}): Promise<void> {
+  const database = input.database ?? db;
+  const now = input.now ?? new Date();
+  await database
+    .update(schema.sandboxUsageSessions)
+    .set({
+      lastProviderState: input.state,
+      providerExpiresAt: input.expiresAt,
+      lastProviderCheckedAt: now,
+      updatedAt: now,
+    })
+    .where(and(
+      eq(schema.sandboxUsageSessions.orgId, input.orgId),
+      eq(schema.sandboxUsageSessions.sandboxName, input.sandboxName),
+      eq(schema.sandboxUsageSessions.activationRevision, input.activationRevision),
+      sql`${schema.sandboxUsageSessions.endedAt} is null`,
+    ));
+}
+
+export async function getSandboxRuntimeDeadline(input: {
+  orgId: string;
+  sandboxName: string;
+  activationRevision: number;
+  database?: Db;
+}): Promise<Date | null> {
+  const database = input.database ?? db;
+  const row = await database.query.sandboxUsageSessions.findFirst({
+    columns: { runtimeDeadlineAt: true },
+    where: and(
+      eq(schema.sandboxUsageSessions.orgId, input.orgId),
+      eq(schema.sandboxUsageSessions.sandboxName, input.sandboxName),
+      eq(schema.sandboxUsageSessions.activationRevision, input.activationRevision),
+      sql`${schema.sandboxUsageSessions.endedAt} is null`,
+    ),
+  });
+  if (row?.runtimeDeadlineAt) return row.runtimeDeadlineAt;
+  const run = await database.query.skillRuns.findFirst({
+    columns: { runtimeDeadlineAt: true },
+    where: and(
+      eq(schema.skillRuns.orgId, input.orgId),
+      eq(schema.skillRuns.sandboxName, input.sandboxName),
+      eq(schema.skillRuns.activationRevision, input.activationRevision),
+    ),
+  });
+  return run?.runtimeDeadlineAt ?? null;
 }
 
 /** Settle the newest open activation when deferred cleanup only carries the durable sandbox name. */

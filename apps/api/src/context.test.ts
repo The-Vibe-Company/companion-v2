@@ -22,7 +22,23 @@ vi.mock("@companion/auth", () => ({
 
 vi.mock("@companion/core/services", () => serviceMocks);
 
-import { attachSession, type ApiVariables } from "./context";
+import { attachSession, jsonError, type ApiVariables } from "./context";
+
+describe("jsonError", () => {
+  it("includes stable service error codes in structured responses", async () => {
+    const app = new Hono();
+    app.get("/", (c) => jsonError(c, Object.assign(new Error("reconnecting"), {
+      code: "run_runtime_degraded",
+    }), 409));
+    const response = await app.request("/");
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({
+      ok: false,
+      error: "reconnecting",
+      code: "run_runtime_degraded",
+    });
+  });
+});
 
 describe("attachSession", () => {
   beforeEach(() => {

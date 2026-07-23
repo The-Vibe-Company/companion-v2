@@ -20,6 +20,8 @@ function statusChip(status: SkillRunStatus): { cls: string; label: string; pulsi
       return { cls: "ls-badge--ok", label: "running", pulsing: true };
     case "frozen":
       return { cls: "ls-badge--neutral", label: "ended", pulsing: false };
+    case "interrupted":
+      return { cls: "ls-badge--warn", label: "interrupted", pulsing: false };
     case "error":
       return { cls: "vbadge--down", label: "error", pulsing: false };
     case "canceled":

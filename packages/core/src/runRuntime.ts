@@ -67,6 +67,13 @@ export interface RunDynamicFiles {
   attachments: Array<{ path: string; data: Buffer }>;
 }
 
+export type SandboxRuntimeState = "running" | "stopped" | "missing";
+
+export interface SandboxRuntimeObservation {
+  state: SandboxRuntimeState;
+  expiresAt: Date | null;
+}
+
 export interface RunSandboxRuntime {
   readonly provider: "vercel";
   /** Step 1 — fork/boot the named sandbox from the golden snapshot; returns id + public domain. */
@@ -115,11 +122,13 @@ export interface RunSandboxRuntime {
    * MUST throw on transient provider failures so callers keep the cleanup owed and retry later.
    */
   destroy(ref: SandboxRef, signal?: AbortSignal): Promise<void>;
+  /** Observe provider truth without resuming a stopped persistent sandbox. */
+  observe(ref: SandboxRef, signal?: AbortSignal): Promise<SandboxRuntimeObservation>;
   /**
-   * Push the sandbox's hard timeout out by `ms` (Vercel's clock runs from boot, NOT from traffic —
-   * without this an active conversation dies mid-stream). Optional: best-effort feature.
+   * Push the sandbox's hard timeout out by `ms` and return provider truth after the mutation.
+   * Implementations map not-found to `missing` but propagate transient/ambiguous provider failures.
    */
-  extendTimeout?(ref: SandboxRef, ms: number, signal?: AbortSignal): Promise<void>;
+  extendTimeout?(ref: SandboxRef, ms: number, signal?: AbortSignal): Promise<SandboxRuntimeObservation>;
 }
 
 /** Basic-auth target for the OpenCode instance running inside a sandbox. */

@@ -33,10 +33,11 @@ function detail(overrides: Partial<SkillRunDetail> = {}): SkillRunDetail {
 }
 
 describe("run reactivation UI state", () => {
-  it("enables only retained canceled or frozen sessions before expiry", () => {
+  it("enables retained canceled, frozen, or interrupted sessions before expiry", () => {
     const now = Date.parse("2026-07-16T00:00:00.000Z");
     expect(canReactivateRun(detail(), now)).toBe(true);
     expect(canReactivateRun(detail({ status: "canceled" }), now)).toBe(true);
+    expect(canReactivateRun(detail({ status: "interrupted" }), now)).toBe(true);
     expect(canReactivateRun(detail({ status: "error" }), now)).toBe(false);
     expect(canReactivateRun(detail(), Date.parse("2026-07-23T00:00:00.000Z"))).toBe(false);
   });
@@ -55,6 +56,7 @@ describe("run reactivation UI state", () => {
   it("restarts polling when a terminal reactivation acknowledgement is lost", () => {
     expect(shouldRestartPollingAfterPromptFailure("canceled")).toBe(true);
     expect(shouldRestartPollingAfterPromptFailure("frozen")).toBe(true);
+    expect(shouldRestartPollingAfterPromptFailure("interrupted")).toBe(true);
     expect(shouldRestartPollingAfterPromptFailure("running")).toBe(false);
   });
 
@@ -62,6 +64,7 @@ describe("run reactivation UI state", () => {
     expect(canUseRunComposer("running", true, false)).toBe(true);
     expect(canUseRunComposer("frozen", false, true)).toBe(true);
     expect(canUseRunComposer("canceled", false, true)).toBe(true);
+    expect(canUseRunComposer("interrupted", false, true)).toBe(true);
     expect(canUseRunComposer("frozen", false, false)).toBe(false);
     expect(canUseRunComposer("error", false, true)).toBe(false);
   });
