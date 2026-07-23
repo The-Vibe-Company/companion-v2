@@ -234,15 +234,16 @@ body { background: var(--color-canvas); color: var(--color-fg); font-family: var
 .lblrow__more:hover { background: var(--color-surface-sunken); color: var(--color-fg); }
 
 /* Per-label menu (a .menu--fixed popover): Color swatch row · Icon grid · Rename · Add sublabel · Delete. */
-.lblmenu { min-width: 232px; }
-.lblmenu__swatches { display: flex; flex-wrap: wrap; gap: 6px; padding: 4px 8px 8px; }
-.lblmenu__swatch { width: 22px; height: 22px; border-radius: var(--radius-full); border: 1px solid color-mix(in oklab, var(--color-fg) 14%, transparent);
-  cursor: pointer; padding: 0; display: grid; place-items: center; transition: transform var(--duration-fast) var(--ease-out-quint); }
-.lblmenu__swatch:hover { transform: scale(1.08); }
+.lblmenu { min-width: 268px; }
+.lblmenu__swatches { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; padding: 4px 8px 8px; }
+.lblmenu__swatch { width: 24px; height: 24px; border-radius: var(--radius-full); border: 1px solid color-mix(in oklab, var(--color-fg) 14%, transparent);
+  cursor: pointer; padding: 0; display: grid; place-items: center; justify-self: center;
+  transition: transform var(--duration-fast) var(--ease-out-quint), box-shadow var(--duration-fast) var(--ease-out-quint); }
+.lblmenu__swatch:hover { transform: scale(1.08); box-shadow: 0 1px 4px color-mix(in oklab, var(--color-fg) 12%, transparent); }
 .lblmenu__swatch.is-sel { box-shadow: 0 0 0 2px var(--color-surface), 0 0 0 4px var(--color-accent-edge); }
 .lblmenu__swatch--none { background: var(--color-surface); color: var(--color-faint); border-color: var(--color-line-strong); }
 .lblmenu__swatch--none:hover { color: var(--color-fg); }
-.lblmenu__icons { display: grid; grid-template-columns: repeat(6, 1fr); gap: 4px; padding: 4px 8px 8px; }
+.lblmenu__icons { display: grid; grid-template-columns: repeat(8, 1fr); gap: 4px; padding: 4px 8px 8px; max-height: 148px; overflow-y: auto; scrollbar-width: thin; }
 .lblmenu__icon { width: 30px; height: 30px; display: grid; place-items: center; border: 1px solid transparent; background: none; cursor: pointer;
   color: var(--color-muted); border-radius: var(--radius-sm); transition: background-color var(--duration-fast) var(--ease-out-quint), color var(--duration-fast) var(--ease-out-quint); }
 .lblmenu__icon:hover { background: var(--color-surface-raised); color: var(--color-fg); }
