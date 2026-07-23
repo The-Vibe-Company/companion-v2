@@ -147,6 +147,14 @@ The bootstrap resolves the Agent Auth connection, obtains `skills:read` on deman
 `~/.companion/skills.lock.json` or the legacy `skills.log.json` fallback, and returns a JSON context
 with `workspace`, `companion`, `integrity`, `skills`, `actions`, and `errors`.
 
+Self-update covers every existing user-global Companion copy in the registered tool locations
+(`~/.claude/skills/companion`, `~/.codex/skills/companion`, `~/.agents/skills/companion`, and future
+entries in `scripts/tools.json`). It does not silently add Companion to a tool where the folder is
+absent. The bootstrap verifies every existing copy against its own installed integrity baseline,
+downloads and verifies the official package once, stages every outdated target, and swaps all targets
+as one transaction. A failure rolls every swapped target back; a customized or unverifiable copy
+blocks the whole fan-out instead of leaving tools on a partial update.
+
 When explicit legacy mode is active, the bootstrap instead checks the preserved file-backed PAT with
 `POST /tokens/refresh` before those calls. This compatibility path is never inferred from a failed
 Agent Auth request.
@@ -1068,16 +1076,26 @@ Prefer the bootstrap command; it performs the integrity check and replacement fl
 python3 scripts/bootstrap.py --json --auto-update-companion
 ```
 
+When repairing a machine where different tools already have different Companion versions, use the
+dedicated synchronization command from the newest installed Companion folder:
+
+```sh
+python3 scripts/sync_companion.py --json
+```
+
+It is an idempotent wrapper around the same bootstrap transaction. Success means every existing
+registered user-global copy is official and at the workspace's available version.
+
 The bootstrap reads the local `companion.json.version`, compares it with `availableVersion` from
 `GET /local-skills/companion`, compares tracked files against the installed
 `companion.integrity.json` baseline, downloads `GET /local-skills/companion/package`, verifies
-`SKILL.md`, the staged `companion.json.version`, and the staged integrity baseline, backs up the
-current folder, replaces it, and reports the install with
+`SKILL.md`, the staged `companion.json.version`, and the staged integrity baseline, stages all
+outdated existing tool targets, replaces them transactionally, and reports the install with
 `POST /local-skills/companion/installed`. Treat a JSON result with
 `companion.autoUpdate.applied: true` as success. If the result has
 `companion.autoUpdate.blocked: true` and `reason: "local_customizations"`, do not overwrite the local
-folder; report the modified or missing files and ask the user whether to merge or reinstall the
-official package manually.
+folders; report the target paths plus modified or missing files and ask the user whether to merge or
+reinstall the official package manually.
 
 Backups are transient implementation details. After replacement, delete the backup folder created for
 that self-update whether or not the install report succeeds:

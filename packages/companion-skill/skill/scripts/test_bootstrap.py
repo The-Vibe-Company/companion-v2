@@ -87,8 +87,16 @@ class BootstrapTests(unittest.TestCase):
             clear=False,
         )
         self.env.start()
+        self.real_companion_install_targets = bootstrap_update.companion_install_targets
+        self.companion_targets = mock.patch.object(
+            bootstrap_update,
+            "companion_install_targets",
+            return_value=[{"path": self.skill_dir, "tools": ["current"]}],
+        )
+        self.companion_targets.start()
 
     def tearDown(self):
+        self.companion_targets.stop()
         self.env.stop()
         self._tmp.cleanup()
 
@@ -109,6 +117,53 @@ class BootstrapTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
+
+    def create_peer_skill(self, name: str, version: str = "1.0.0") -> Path:
+        peer = self.root / name / "companion"
+        (peer / "scripts").mkdir(parents=True)
+        (peer / "SKILL.md").write_text("---\nname: companion\n---\n", encoding="utf-8")
+        (peer / "companion.json").write_text(json.dumps({"version": version}), encoding="utf-8")
+        for rel in (
+            "scripts/bootstrap.py",
+            "scripts/bootstrap_integrity.py",
+            "scripts/bootstrap_update.py",
+            "scripts/check_updates.py",
+            "scripts/companion_lib.py",
+            "scripts/skill_guard.py",
+        ):
+            (peer / rel).write_text(f"# {rel}\n", encoding="utf-8")
+        (peer / bootstrap.INTEGRITY_BASELINE_FILE).write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "version": version,
+                    "files": {rel: bootstrap.sha256_file(peer / rel) for rel in TEST_BASELINE_FILES},
+                }
+            ),
+            encoding="utf-8",
+        )
+        return peer
+
+    def update_package_writer(self, version: str, official_files: dict[str, str]):
+        def write_package(_api_url, _token, destination, _expected_checksum=None):
+            skill_md = "---\nname: companion\n---\n"
+            manifest = json.dumps({"version": version})
+            bootstrap_script = "# bootstrap updated\n"
+            files = {
+                "SKILL.md": f"sha256:{sha256(skill_md.encode('utf-8')).hexdigest()}",
+                "companion.json": f"sha256:{sha256(manifest.encode('utf-8')).hexdigest()}",
+                "scripts/bootstrap.py": f"sha256:{sha256(bootstrap_script.encode('utf-8')).hexdigest()}",
+            }
+            baseline = json.dumps({"schemaVersion": 1, "version": version, "files": files})
+            official_files.update(files)
+            official_files[bootstrap.INTEGRITY_BASELINE_FILE] = f"sha256:{sha256(baseline.encode('utf-8')).hexdigest()}"
+            with zipfile.ZipFile(destination, "w") as zf:
+                zf.writestr("SKILL.md", skill_md)
+                zf.writestr("companion.json", manifest)
+                zf.writestr("scripts/bootstrap.py", bootstrap_script)
+                zf.writestr(bootstrap.INTEGRITY_BASELINE_FILE, baseline)
+
+        return write_package
 
     def run_with_api(self, local_skill, **kwargs):
         def fake_get(_api_url, _token, path):
@@ -407,6 +462,57 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual("1.1.0", ctx["companion"]["localVersion"])
         self.assertNotIn({"kind": "update_companion", "version": "1.1.0"}, ctx["actions"])
 
+    def test_auto_update_repairs_outdated_peer_when_current_copy_is_current(self):
+        (self.skill_dir / "companion.json").write_text(json.dumps({"version": "1.1.0"}), encoding="utf-8")
+        self.write_local_baseline("1.1.0")
+        peer = self.create_peer_skill("peer", "1.0.0")
+        self.companion_targets.stop()
+        self.companion_targets = mock.patch.object(
+            bootstrap_update,
+            "companion_install_targets",
+            return_value=[
+                {"path": self.skill_dir, "tools": ["current", "opencode"]},
+                {"path": peer, "tools": ["codex"]},
+            ],
+        )
+        self.companion_targets.start()
+        row = skill_row(version="1.1.0", integrity=self.integrity_for_local_files())
+        result = {
+            "applied": True,
+            "version": "1.1.0",
+            "targets": [{"path": str(peer), "version": "1.1.0", "status": "installed"}],
+            "report": {"status": "installed"},
+        }
+        with mock.patch.object(bootstrap_update, "install_companion_update", return_value=result) as install:
+            ctx = self.run_with_api(row, auto_update=True)
+        install.assert_called_once()
+        self.assertTrue(ctx["companion"]["autoUpdate"]["applied"])
+        self.assertEqual("1.1.0", ctx["companion"]["localVersion"])
+        self.assertNotIn({"kind": "update_companion", "version": "1.1.0"}, ctx["actions"])
+
+    def test_target_discovery_finds_existing_registered_copies_and_deduplicates_symlinks(self):
+        peer = self.create_peer_skill("peer", "1.0.0")
+        shared = self.root / "shared" / "companion"
+        shared.parent.mkdir()
+        shared.symlink_to(peer, target_is_directory=True)
+        missing = self.root / "missing" / "companion"
+        registry = {"claude-code": {}, "codex": {}, "opencode": {}}
+        paths = {"claude-code": self.skill_dir, "codex": peer, "opencode": shared}
+
+        def resolve(tool, _scope, _name, project_root=None, registry=None):
+            return paths.get(tool, missing)
+
+        with (
+            mock.patch.object(bootstrap_update, "load_tool_registry", return_value=registry),
+            mock.patch.object(bootstrap_update, "resolve_target_dir", side_effect=resolve),
+        ):
+            targets = self.real_companion_install_targets(self.skill_dir)
+
+        self.assertEqual(2, len(targets))
+        by_path = {str(row["path"]): row for row in targets}
+        self.assertEqual(["current", "claude-code"], by_path[str(self.skill_dir.resolve())]["tools"])
+        self.assertEqual(["codex", "opencode"], by_path[str(peer.resolve())]["tools"])
+
     def test_install_update_accepts_package_files_at_zip_root(self):
         official_files = {}
 
@@ -509,9 +615,133 @@ class BootstrapTests(unittest.TestCase):
             result = bootstrap.install_companion_update("https://api.example/v1", "cmp_pat_SECRET", link, "1.1.0", "Codex", official_files)
 
         self.assertTrue(result["applied"])
-        self.assertFalse(link.is_symlink())
-        self.assertEqual("1.1.0", json.loads((link / "companion.json").read_text(encoding="utf-8"))["version"])
+        self.assertTrue(link.is_symlink())
+        self.assertEqual("1.1.0", json.loads((self.skill_dir / "companion.json").read_text(encoding="utf-8"))["version"])
         self.assertEqual([], list(link_parent.glob(".companion-backup.*")))
+
+    def test_install_update_commits_all_existing_tool_targets(self):
+        peer = self.create_peer_skill("peer", "1.0.0")
+        official_files: dict[str, str] = {}
+        with (
+            mock.patch.object(
+                bootstrap_update,
+                "download_package",
+                side_effect=self.update_package_writer("1.1.0", official_files),
+            ),
+            mock.patch.object(bootstrap_update, "api_post_json", return_value={"status": "installed"}),
+        ):
+            result = bootstrap.install_companion_update(
+                "https://api.example/v1",
+                "cmp_pat_SECRET",
+                self.skill_dir,
+                "1.1.0",
+                "Codex",
+                official_files,
+                target_dirs=[self.skill_dir, peer],
+            )
+
+        self.assertTrue(result["applied"])
+        self.assertEqual(2, len(result["targets"]))
+        self.assertEqual("1.1.0", json.loads((self.skill_dir / "companion.json").read_text())["version"])
+        self.assertEqual("1.1.0", json.loads((peer / "companion.json").read_text())["version"])
+        self.assertEqual([], list(self.skill_dir.parent.glob(".companion-backup.*")))
+        self.assertEqual([], list(peer.parent.glob(".companion-backup.*")))
+
+    def test_checked_in_skill_package_can_drive_peer_repair(self):
+        source = self.root / "skill"
+        self.skill_dir.rename(source)
+        peer = self.create_peer_skill("peer", "1.0.0")
+        official_files: dict[str, str] = {}
+        with (
+            mock.patch.object(
+                bootstrap_update,
+                "download_package",
+                side_effect=self.update_package_writer("1.1.0", official_files),
+            ),
+            mock.patch.object(bootstrap_update, "api_post_json", return_value={"status": "installed"}),
+        ):
+            result = bootstrap.install_companion_update(
+                "https://api.example/v1",
+                "cmp_pat_SECRET",
+                source,
+                "1.1.0",
+                "Codex",
+                official_files,
+                target_dirs=[peer],
+            )
+
+        self.assertTrue(result["applied"])
+        self.assertEqual("1.0.0", json.loads((source / "companion.json").read_text())["version"])
+        self.assertEqual("1.1.0", json.loads((peer / "companion.json").read_text())["version"])
+
+    def test_install_update_rolls_back_every_target_when_later_swap_fails(self):
+        peer = self.create_peer_skill("peer", "1.0.0")
+        official_files: dict[str, str] = {}
+        real_swap = bootstrap_update._swap_staged_target
+        calls = 0
+
+        def flaky_swap(target, staged, backup):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise OSError("simulated second-target failure")
+            return real_swap(target, staged, backup)
+
+        with (
+            mock.patch.object(
+                bootstrap_update,
+                "download_package",
+                side_effect=self.update_package_writer("1.1.0", official_files),
+            ),
+            mock.patch.object(bootstrap_update, "_swap_staged_target", side_effect=flaky_swap),
+            mock.patch.object(bootstrap_update, "api_post_json") as report,
+            self.assertRaises(OSError),
+        ):
+            bootstrap.install_companion_update(
+                "https://api.example/v1",
+                "cmp_pat_SECRET",
+                self.skill_dir,
+                "1.1.0",
+                "Codex",
+                official_files,
+                target_dirs=[self.skill_dir, peer],
+            )
+
+        report.assert_not_called()
+        self.assertEqual("1.0.0", json.loads((self.skill_dir / "companion.json").read_text())["version"])
+        self.assertEqual("1.0.0", json.loads((peer / "companion.json").read_text())["version"])
+        self.assertEqual([], list(self.skill_dir.parent.glob(".companion-backup.*")))
+        self.assertEqual([], list(peer.parent.glob(".companion-backup.*")))
+
+    def test_auto_update_blocks_all_targets_when_one_peer_is_customized(self):
+        peer = self.create_peer_skill("peer", "1.0.0")
+        (peer / "scripts/bootstrap.py").write_text("# local customization\n", encoding="utf-8")
+        self.companion_targets.stop()
+        self.companion_targets = mock.patch.object(
+            bootstrap_update,
+            "companion_install_targets",
+            return_value=[
+                {"path": self.skill_dir, "tools": ["current"]},
+                {"path": peer, "tools": ["codex"]},
+            ],
+        )
+        self.companion_targets.start()
+        row = skill_row(version="1.1.0", integrity=self.integrity_for_local_files())
+        row["availableVersion"] = "1.1.0"
+        with mock.patch.object(bootstrap_update, "install_companion_update") as install:
+            result = bootstrap_update.companion_auto_update_result(
+                "https://api.example/v1",
+                "cmp_pat_SECRET",
+                self.skill_dir,
+                row,
+                "1.1.0",
+                bootstrap.compare_integrity(self.skill_dir, row),
+                "Codex",
+            )
+        install.assert_not_called()
+        self.assertTrue(result["blocked"])
+        self.assertEqual("local_customizations", result["reason"])
+        self.assertTrue(any(str(peer) in path for path in result["files"]))
 
     def test_install_update_rejects_self_consistent_package_that_differs_from_workspace_hashes(self):
         def write_package(_api_url, _token, destination, _expected_checksum=None):
