@@ -525,6 +525,70 @@ export async function updateRunWorkerState(input: {
   }
 }
 
+/**
+ * Enter one recorder-degraded episode atomically with its single durable reconnect event. Retrying
+ * after an ambiguous database response is idempotent because an already-degraded run is a no-op.
+ */
+export async function markRunRuntimeDegraded(input: {
+  actor: ActorContext;
+  orgId: string;
+  runId: string;
+  workerId: string;
+  degradedAt: Date;
+  database?: Db;
+}): Promise<boolean> {
+  const database = input.database ?? db;
+  try {
+    return await database.transaction(async (transaction) => {
+      const tx = transaction as unknown as Db;
+      const run = await ownedRun({ ...input, database: tx, lock: true });
+      await assertLiveRunJobLease({ ...input, database: tx });
+      if (run.runtimeState === "degraded") return true;
+      const rows = await tx
+        .update(schema.skillRuns)
+        .set({
+          runtimeState: "degraded",
+          runtimeDegradedAt: input.degradedAt,
+          updatedAt: input.degradedAt,
+        })
+        .where(and(
+          eq(schema.skillRuns.orgId, input.orgId),
+          eq(schema.skillRuns.id, input.runId),
+          eq(schema.skillRuns.creatorId, input.actor.id),
+          eq(schema.skillRuns.runtimeState, "healthy"),
+        ))
+        .returning({ transcriptEventSequence: schema.skillRuns.transcriptEventSequence });
+      if (!rows[0]) return false;
+      const sequenceRows = await tx
+        .select({ value: max(schema.skillRunEvents.sequence) })
+        .from(schema.skillRunEvents)
+        .where(and(
+          eq(schema.skillRunEvents.orgId, input.orgId),
+          eq(schema.skillRunEvents.runId, input.runId),
+        ));
+      const event: RunChatEvent = {
+        type: "status",
+        state: "retry",
+        attempt: null,
+        message: "Reconnecting to the run recorder",
+      };
+      await tx.insert(schema.skillRunEvents).values({
+        orgId: input.orgId,
+        runId: input.runId,
+        sequence: Math.max(
+          Number(sequenceRows[0]?.value ?? 0),
+          rows[0].transcriptEventSequence,
+        ) + 1,
+        ...eventParts(event),
+      });
+      return true;
+    });
+  } catch (error) {
+    if (error instanceof LostRunLeaseError) return false;
+    throw error;
+  }
+}
+
 export async function getRunWorkerState(input: {
   actor: ActorContext;
   orgId: string;
@@ -1018,7 +1082,8 @@ export async function interruptRunByWorker(input: {
           sql`${schema.skillRunJobs.leaseExpiresAt} > clock_timestamp()`,
         ))
         .returning({ id: schema.skillRunJobs.id });
-      return Boolean(jobs[0]);
+      if (!jobs[0]) throw new LostRunLeaseError();
+      return true;
     });
   } catch (error) {
     if (error instanceof LostRunLeaseError) return false;
@@ -1207,6 +1272,13 @@ export async function enqueueRunPrompt(input: {
     const terminalReactivation =
       run.status === "frozen" || run.status === "interrupted" || run.status === "canceled";
     if (terminalReactivation) {
+      if (
+        run.runtimeReconcileLeaseOwner !== null
+        && run.runtimeReconcileLeaseExpiresAt !== null
+        && run.runtimeReconcileLeaseExpiresAt.getTime() > Date.now()
+      ) {
+        throw new RunBusyError("the sandbox runtime is still being reconciled", "run_runtime_degraded");
+      }
       if (!input.reactivationAvailable) {
         throw new RunValidationError("RunSkill is unavailable because no configured run worker is currently online.", "runtime_unavailable");
       }
@@ -1395,6 +1467,7 @@ export async function enqueueRunPrompt(input: {
           runtimeState: "healthy",
           runtimeDegradedAt: null,
           runtimeDeadlineAt: null,
+          runtimeIdleActivationRevision: null,
           phase: "queued",
           errorCode: null,
           userMessage: null,
@@ -1771,6 +1844,18 @@ export async function claimNextRunPrompt(input: {
       )
       .returning();
     const claimed = updated[0] ?? null;
+    if (claimed) {
+      // A durable idle marker proves only the turn that produced it. Once another prompt can be
+      // dispatched, provider loss must not reuse the previous turn's idle proof.
+      await tx
+        .update(schema.skillRuns)
+        .set({ runtimeIdleActivationRevision: null, updatedAt: now })
+        .where(and(
+          eq(schema.skillRuns.orgId, input.orgId),
+          eq(schema.skillRuns.id, input.runId),
+          eq(schema.skillRuns.creatorId, input.actor.id),
+        ));
+    }
     if (claimed && wasQueued) {
       await appendPromptStatusEvent(tx, {
         orgId: input.orgId,
@@ -2596,7 +2681,11 @@ export async function persistRunTranscript(input: {
   return database.transaction(async (transaction) => {
     const tx = transaction as unknown as Db;
     const runs = await tx
-      .select({ id: schema.skillRuns.id, transcriptEventSequence: schema.skillRuns.transcriptEventSequence })
+      .select({
+        id: schema.skillRuns.id,
+        activationRevision: schema.skillRuns.activationRevision,
+        transcriptEventSequence: schema.skillRuns.transcriptEventSequence,
+      })
       .from(schema.skillRuns)
       .where(
         and(
@@ -2647,6 +2736,9 @@ export async function persistRunTranscript(input: {
         transcriptEventSequence: transcriptSequence,
         transcriptUpdatedAt: new Date(),
         lastActiveAt: new Date(),
+        ...(input.barrierEvent?.type === "session.idle"
+          ? { runtimeIdleActivationRevision: runs[0]!.activationRevision }
+          : {}),
         updatedAt: new Date(),
       })
       .where(

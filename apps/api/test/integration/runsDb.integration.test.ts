@@ -492,6 +492,7 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
     await sql.unsafe(`grant execute on function companion_complete_skill_run_cleanup(uuid, uuid, text) to ${rlsRole}`);
     await sql.unsafe(`grant execute on function companion_claim_skill_run_runtime_reconciliations(text, integer, integer, text) to ${rlsRole}`);
     await sql.unsafe(`grant execute on function companion_complete_skill_run_runtime_reconciliation(uuid, uuid, text, integer, integer, sandbox_provider_state, timestamp with time zone) to ${rlsRole}`);
+    await sql.unsafe(`grant execute on function companion_settle_terminal_skill_run_usage(integer) to ${rlsRole}`);
     await sql.unsafe(`grant execute on function companion_cleanup_skill_run_events(integer) to ${rlsRole}`);
     await sql.unsafe(`grant execute on function companion_heartbeat_skill_run_worker(text, integer, integer) to ${rlsRole}`);
     await sql.unsafe(`grant execute on function companion_heartbeat_skill_run_worker(text, integer, integer, integer) to ${rlsRole}`);
@@ -2273,14 +2274,17 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
     await sql`
       insert into skill_run_prompts
         (org_id, run_id, ordinal, kind, idempotency_key, payload_hash, message_id,
-         user_text, prompt, status, attempt)
+         user_text, prompt, status, attempt, dispatch_protocol, send_attempted_at)
       values
         (${orgA}::uuid, ${runtimeReconcileRunId}::uuid, 0, 'initial', 'runtime-active-prompt',
          ${"8".repeat(64)}, ${deterministicRunMessageId(runtimeReconcileRunId, 0, Date.now())},
-         'active turn', 'active turn', 'processing', 1),
-        (${orgA}::uuid, ${runtimeReconcileRunId}::uuid, 1, 'follow_up', 'runtime-queued-followup',
+         'active turn', 'active turn', 'processing', 1, 2, now()),
+        (${orgA}::uuid, ${runtimeReconcileRunId}::uuid, 1, 'follow_up', 'runtime-ambiguous-followup',
          ${"7".repeat(64)}, ${deterministicRunMessageId(runtimeReconcileRunId, 1, Date.now() + 1)},
-         'queued follow-up', 'queued follow-up', 'queued', 0)
+         'ambiguous follow-up', 'ambiguous follow-up', 'queued', 1, 2, now()),
+        (${orgA}::uuid, ${runtimeReconcileRunId}::uuid, 2, 'follow_up', 'runtime-queued-followup',
+         ${"6".repeat(64)}, ${deterministicRunMessageId(runtimeReconcileRunId, 2, Date.now() + 2)},
+         'queued follow-up', 'queued follow-up', 'queued', 0, 2, null)
     `;
     await sql`
       insert into sandbox_usage_sessions
@@ -2351,8 +2355,58 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
     `;
     expect(prompts).toEqual([
       { ordinal: 0, status: "error", errorCode: "sandbox_expired_during_turn" },
-      { ordinal: 1, status: "canceled", errorCode: null },
+      { ordinal: 1, status: "error", errorCode: "sandbox_expired_during_turn" },
+      { ordinal: 2, status: "canceled", errorCode: null },
     ]);
+    await sql`
+      update sandbox_usage_sessions
+      set ended_at = null, settled_ms = null,
+          started_at = now() - interval '2 hours',
+          runtime_deadline_at = now() - interval '1 hour'
+      where org_id = ${orgA}::uuid and kind = 'run'
+        and source_id = ${runtimeReconcileRunId}::uuid and activation_revision = 3
+    `;
+    const settled = await sql.begin(async (tx) => {
+      await tx.unsafe(`set local role ${rlsRole}`);
+      return tx<{ count: number }[]>`
+        select companion_settle_terminal_skill_run_usage(32) as count
+      `;
+    });
+    expect(settled).toEqual([{ count: 1 }]);
+    const usageRows = await sql<{ ended: boolean; settledMs: number }[]>`
+      select ended_at is not null as ended, settled_ms as "settledMs"
+      from sandbox_usage_sessions
+      where org_id = ${orgA}::uuid and kind = 'run'
+        and source_id = ${runtimeReconcileRunId}::uuid and activation_revision = 3
+    `;
+    expect(usageRows).toEqual([{ ended: true, settledMs: 3_600_000 }]);
+    await sql`
+      update skill_runs
+      set status = 'queued', phase = 'queued', activation_revision = 4
+      where org_id = ${orgA}::uuid and id = ${runtimeReconcileRunId}::uuid
+    `;
+    await sql`
+      update sandbox_usage_sessions
+      set ended_at = null, settled_ms = null,
+          started_at = now() - interval '3 hours',
+          runtime_deadline_at = null
+      where org_id = ${orgA}::uuid and kind = 'run'
+        and source_id = ${runtimeReconcileRunId}::uuid and activation_revision = 3
+    `;
+    const staleActivationSettled = await sql.begin(async (tx) => {
+      await tx.unsafe(`set local role ${rlsRole}`);
+      return tx<{ count: number }[]>`
+        select companion_settle_terminal_skill_run_usage(32) as count
+      `;
+    });
+    expect(staleActivationSettled).toEqual([{ count: 1 }]);
+    const staleUsageRows = await sql<{ settledMs: number }[]>`
+      select settled_ms as "settledMs"
+      from sandbox_usage_sessions
+      where org_id = ${orgA}::uuid and kind = 'run'
+        and source_id = ${runtimeReconcileRunId}::uuid and activation_revision = 3
+    `;
+    expect(staleUsageRows).toEqual([{ settledMs: 3_600_000 }]);
     const terminalEvents = await sql<{ type: string; code: string | null }[]>`
       select type, payload->>'code' as code
       from skill_run_events
@@ -2366,7 +2420,12 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
 
     const usage = await sql<{ ended: boolean; settledMs: number; deadlineMs: number }[]>`
       select ended_at is not null as ended, settled_ms::int as "settledMs",
-             greatest(0, extract(epoch from (runtime_deadline_at - started_at)) * 1000)::int as "deadlineMs"
+             greatest(
+               0,
+               extract(epoch from (
+                 coalesce(runtime_deadline_at, started_at + interval '1 hour') - started_at
+               )) * 1000
+             )::int as "deadlineMs"
       from sandbox_usage_sessions
       where org_id = ${orgA}::uuid and source_id = ${runtimeReconcileRunId}::uuid
     `;

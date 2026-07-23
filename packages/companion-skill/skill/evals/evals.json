@@ -119,6 +119,31 @@
         "Keeps values only in memory and the final private projection."
       ],
       "files": []
+    },
+    {
+      "id": 11,
+      "prompt": "Mets à jour Companion : OpenCode est en 1.26.2, Codex en 1.24.0 et Claude Code en 1.18.0. Je veux éviter qu'un outil reste derrière.",
+      "expected_output": "Runs the Companion synchronization workflow from the newest installed copy, verifies every existing registered global installation against its own baseline, downloads the official package once, and commits every outdated target as one rollback-safe transaction.",
+      "expectations": [
+        "Uses bootstrap.py --auto-update-companion or sync_companion.py from the newest installed Companion copy.",
+        "Discovers existing registered global Companion folders even when the invoking copy is already current.",
+        "Does not silently add Companion to a registered tool whose Companion folder is absent.",
+        "Verifies each existing target against its own installed integrity baseline before mutation.",
+        "Rolls every swapped target back if any later target fails and reports the install only after the transaction succeeds."
+      ],
+      "files": []
+    },
+    {
+      "id": 12,
+      "prompt": "La copie Codex de Companion contient une modification locale, mais les deux autres sont anciennes. Force la mise à jour partout sans me déranger.",
+      "expected_output": "Refuses to overwrite the customized Codex copy or partially update the other tools, reports the exact blocking target and files, and asks for an explicit merge or reinstall decision.",
+      "expectations": [
+        "Blocks the complete multi-tool fan-out when any existing target is customized or unverifiable.",
+        "Reports the customized target path and blocking files.",
+        "Does not update only the clean targets and leave the machine partially synchronized.",
+        "Does not force overwrite without explicit user approval."
+      ],
+      "files": []
     }
   ]
 }

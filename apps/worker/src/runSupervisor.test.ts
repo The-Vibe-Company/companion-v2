@@ -12,6 +12,7 @@ import {
   collectAndCacheRunArtifacts,
   createSingleFlightArtifactCollector,
   createRecorderIdleBarrierTracker,
+  createRuntimeDeadlineEnforcer,
   dispatchPromptAfterAttachmentMount,
   isTransientRunFailure,
   promptStopBarrierPlan,
@@ -19,9 +20,11 @@ import {
   releaseSyntheticRecorderBusy,
   recorderRetryWindowExpired,
   runFailureEvent,
+  sandboxRuntimeDeadlineForActivation,
   sandboxTimeoutExtensionSchedule,
   shouldHeartbeatRunLease,
   toolMayWriteArtifacts,
+  waitForRecorderEventWhileDegraded,
 } from "./runSupervisor";
 
 afterEach(() => {
@@ -44,6 +47,57 @@ describe("run worker retry classification", () => {
 });
 
 describe("recorder retry deadline", () => {
+  it("charges an adopted prewarm from its durable provider start in enforce mode", () => {
+    const providerStartedAt = new Date("2026-07-23T12:00:00.000Z");
+    const activationStartedAt = new Date("2026-07-23T12:04:00.000Z");
+
+    expect(sandboxRuntimeDeadlineForActivation({
+      activationStartedAt,
+      providerStartedAt,
+      budgetMs: 10 * 60_000,
+      maxSessionMs: 60 * 60_000,
+    })).toEqual(new Date("2026-07-23T12:10:00.000Z"));
+    expect(sandboxRuntimeDeadlineForActivation({
+      activationStartedAt,
+      providerStartedAt,
+      budgetMs: null,
+      maxSessionMs: 60 * 60_000,
+    })).toEqual(new Date("2026-07-23T13:04:00.000Z"));
+  });
+
+  it("re-arms the active supervisor deadline after a follow-up extends its budget", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    let durableDeadlineAt = new Date(1_000);
+    const onExceeded = vi.fn();
+    const enforcer = createRuntimeDeadlineEnforcer({
+      initialDeadlineAt: durableDeadlineAt,
+      readDeadlineAt: async () => durableDeadlineAt,
+      onExceeded,
+    });
+
+    durableDeadlineAt = new Date(2_000);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(onExceeded).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(999);
+    expect(onExceeded).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(onExceeded).toHaveBeenCalledWith(new Date(2_000));
+    enforcer.stop();
+  });
+
+  it("bounds a half-open reconnected event stream", async () => {
+    vi.useFakeTimers();
+    const pending = new Promise<never>(() => undefined);
+    const waiting = waitForRecorderEventWhileDegraded(pending, 15_000);
+    const rejected = expect(waiting).rejects.toThrow("emitted no events");
+
+    await vi.advanceTimersByTimeAsync(15_000);
+
+    await rejected;
+  });
+
   it("stops at the absolute runtime deadline before the five-minute retry window", () => {
     expect(recorderRetryWindowExpired({
       degradedAtMs: 1_000,

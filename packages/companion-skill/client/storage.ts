@@ -121,8 +121,16 @@ function withCredentialsWriteLock<T>(operation: () => T): T {
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       if (code !== "EEXIST") throw error;
-      rejectSymlink(lockPath);
-      const lock = lstatSync(lockPath);
+      let lock;
+      try {
+        rejectSymlink(lockPath);
+        lock = lstatSync(lockPath);
+      } catch (inspectionError) {
+        // The current owner may release the lock after mkdir reports EEXIST but before inspection.
+        // Retry acquisition instead of turning that normal cross-process race into a hard failure.
+        if ((inspectionError as NodeJS.ErrnoException).code === "ENOENT") continue;
+        throw inspectionError;
+      }
       if (!lock.isDirectory()) throw new Error(`credential lock is not a directory: ${lockPath}`);
       if (Date.now() - lock.mtimeMs > CREDENTIALS_LOCK_STALE_MS) {
         try {

@@ -5,6 +5,7 @@ CREATE TYPE "sandbox_provider_state" AS ENUM ('running', 'stopped', 'missing', '
 ALTER TABLE "skill_runs" ADD COLUMN "runtime_state" "skill_run_runtime_state" DEFAULT 'healthy' NOT NULL;--> statement-breakpoint
 ALTER TABLE "skill_runs" ADD COLUMN "runtime_degraded_at" timestamp with time zone;--> statement-breakpoint
 ALTER TABLE "skill_runs" ADD COLUMN "runtime_deadline_at" timestamp with time zone;--> statement-breakpoint
+ALTER TABLE "skill_runs" ADD COLUMN "runtime_idle_activation_revision" integer;--> statement-breakpoint
 ALTER TABLE "skill_runs" ADD COLUMN "runtime_reconcile_lease_owner" text;--> statement-breakpoint
 ALTER TABLE "skill_runs" ADD COLUMN "runtime_reconcile_lease_expires_at" timestamp with time zone;--> statement-breakpoint
 ALTER TABLE "skill_runs" ADD COLUMN "runtime_reconcile_generation" integer DEFAULT 0 NOT NULL;--> statement-breakpoint
@@ -132,6 +133,8 @@ AS $$
 DECLARE
   previous_worker_context text;
   active_prompt boolean;
+  idle_barrier boolean;
+  should_interrupt boolean;
   v_deadline_at timestamp with time zone;
   v_started_at timestamp with time zone;
   v_phase skill_run_phase;
@@ -178,20 +181,58 @@ BEGIN
     COALESCE(public."sandbox_usage_sessions"."runtime_deadline_at", v_deadline_at),
     public."sandbox_usage_sessions"."started_at"
   INTO v_deadline_at, v_started_at;
+  v_deadline_at := COALESCE(
+    v_deadline_at,
+    CASE WHEN v_started_at IS NOT NULL THEN v_started_at + interval '1 hour' END,
+    clock_timestamp()
+  );
 
   IF p_provider_state <> 'running' THEN
     SELECT EXISTS (
       SELECT 1 FROM public."skill_run_prompts"
-      WHERE "org_id" = p_org_id AND "run_id" = p_run_id AND "status" = 'processing'
+      WHERE "org_id" = p_org_id AND "run_id" = p_run_id
+        AND (
+          "status" = 'processing'
+          OR (
+            "status" = 'queued'
+            AND (
+              "send_attempted_at" IS NOT NULL
+              OR ("attempt" > 0 AND "dispatch_protocol" < 2)
+            )
+          )
+        )
     ) INTO active_prompt;
+    SELECT COALESCE(r."runtime_idle_activation_revision" = p_activation_revision, false)
+    INTO idle_barrier
+    FROM public."skill_runs" r
+    WHERE r."org_id" = p_org_id AND r."id" = p_run_id;
+    should_interrupt := active_prompt OR NOT idle_barrier;
     UPDATE public."skill_run_prompts"
-    SET "status" = CASE WHEN "status" = 'processing' THEN 'error'::skill_run_prompt_status ELSE 'canceled'::skill_run_prompt_status END,
-        "error_code" = CASE WHEN "status" = 'processing' THEN 'sandbox_expired_during_turn' ELSE "error_code" END,
-        "user_message" = CASE WHEN "status" = 'processing' THEN 'The sandbox expired while this turn was running.' ELSE "user_message" END,
+    SET "status" = CASE
+          WHEN "status" = 'processing'
+            OR "send_attempted_at" IS NOT NULL
+            OR ("attempt" > 0 AND "dispatch_protocol" < 2)
+          THEN 'error'::skill_run_prompt_status
+          ELSE 'canceled'::skill_run_prompt_status
+        END,
+        "error_code" = CASE
+          WHEN "status" = 'processing'
+            OR "send_attempted_at" IS NOT NULL
+            OR ("attempt" > 0 AND "dispatch_protocol" < 2)
+          THEN 'sandbox_expired_during_turn'
+          ELSE "error_code"
+        END,
+        "user_message" = CASE
+          WHEN "status" = 'processing'
+            OR "send_attempted_at" IS NOT NULL
+            OR ("attempt" > 0 AND "dispatch_protocol" < 2)
+          THEN 'The sandbox expired while this turn was running.'
+          ELSE "user_message"
+        END,
         "lease_owner" = NULL, "lease_expires_at" = NULL, "completed_at" = clock_timestamp(),
         "updated_at" = clock_timestamp()
     WHERE "org_id" = p_org_id AND "run_id" = p_run_id AND "status" IN ('queued', 'processing');
-    IF active_prompt THEN
+    IF should_interrupt THEN
       INSERT INTO public."skill_run_events" ("org_id", "run_id", "sequence", "type", "payload")
       SELECT
         r."org_id",
@@ -210,10 +251,10 @@ BEGIN
       GROUP BY r."org_id", r."id", r."transcript_event_sequence";
     END IF;
     UPDATE public."skill_runs"
-    SET "status" = CASE WHEN active_prompt THEN 'interrupted'::skill_run_status ELSE 'frozen'::skill_run_status END,
+    SET "status" = CASE WHEN should_interrupt THEN 'interrupted'::skill_run_status ELSE 'frozen'::skill_run_status END,
         "phase" = 'complete',
-        "error_code" = CASE WHEN active_prompt THEN 'sandbox_expired_during_turn' ELSE NULL END,
-        "user_message" = CASE WHEN active_prompt THEN 'The sandbox expired while this turn was running.' ELSE NULL END,
+        "error_code" = CASE WHEN should_interrupt THEN 'sandbox_expired_during_turn' ELSE NULL END,
+        "user_message" = CASE WHEN should_interrupt THEN 'The sandbox expired while this turn was running.' ELSE NULL END,
         "frozen_at" = clock_timestamp(),
         "reactivatable_until" = CASE WHEN p_provider_state = 'stopped' THEN clock_timestamp() + interval '7 days' ELSE NULL END,
         "sandbox_cleaned_at" = CASE WHEN p_provider_state = 'missing' THEN clock_timestamp() ELSE "sandbox_cleaned_at" END,
@@ -224,9 +265,9 @@ BEGIN
         "updated_at" = clock_timestamp()
     WHERE "org_id" = p_org_id AND "id" = p_run_id AND "activation_revision" = p_activation_revision;
     UPDATE public."skill_run_jobs"
-    SET "status" = CASE WHEN active_prompt THEN 'failed'::skill_run_job_status ELSE 'completed'::skill_run_job_status END,
+    SET "status" = CASE WHEN should_interrupt THEN 'failed'::skill_run_job_status ELSE 'completed'::skill_run_job_status END,
         "phase" = 'complete', "lease_owner" = NULL, "lease_expires_at" = NULL,
-        "last_error_code" = CASE WHEN active_prompt THEN 'sandbox_expired_during_turn' ELSE "last_error_code" END,
+        "last_error_code" = CASE WHEN should_interrupt THEN 'sandbox_expired_during_turn' ELSE "last_error_code" END,
         "updated_at" = clock_timestamp()
     WHERE "org_id" = p_org_id AND "run_id" = p_run_id;
     UPDATE public."sandbox_usage_sessions"
@@ -256,6 +297,72 @@ EXCEPTION WHEN OTHERS THEN
 END
 $$;--> statement-breakpoint
 REVOKE ALL ON FUNCTION companion_complete_skill_run_runtime_reconciliation(uuid, uuid, text, integer, integer, sandbox_provider_state, timestamp with time zone) FROM PUBLIC;
+--> statement-breakpoint
+CREATE FUNCTION companion_settle_terminal_skill_run_usage(p_limit integer DEFAULT 32)
+RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+DECLARE
+  settled_count integer;
+BEGIN
+  IF p_limit < 1 OR p_limit > 256 THEN
+    RAISE EXCEPTION 'invalid terminal usage settlement limit' USING ERRCODE = '22023';
+  END IF;
+  WITH candidates AS (
+    SELECT u."id", u."started_at",
+           COALESCE(
+             u."runtime_deadline_at",
+             CASE
+               WHEN u."activation_revision" = r."activation_revision"
+               THEN r."runtime_deadline_at"
+             END,
+             CASE WHEN u."started_at" IS NOT NULL THEN u."started_at" + interval '1 hour' END,
+             clock_timestamp()
+           ) AS deadline_at
+    FROM public."sandbox_usage_sessions" u
+    JOIN public."skill_runs" r
+      ON r."org_id" = u."org_id" AND r."id" = u."source_id"
+    WHERE u."kind" = 'run'
+      AND u."ended_at" IS NULL
+      AND (
+        r."status" IN ('frozen', 'interrupted', 'error', 'canceled')
+        OR u."activation_revision" < r."activation_revision"
+      )
+    ORDER BY u."updated_at", u."id"
+    FOR UPDATE OF u SKIP LOCKED
+    LIMIT p_limit
+  ), settled AS (
+    UPDATE public."sandbox_usage_sessions" u
+    SET "ended_at" = clock_timestamp(),
+        "settled_ms" = CASE
+          WHEN c."started_at" IS NULL THEN 0
+          ELSE LEAST(
+            CEIL(GREATEST(
+              1,
+              EXTRACT(EPOCH FROM (
+                LEAST(clock_timestamp(), COALESCE(c.deadline_at, clock_timestamp())) - c."started_at"
+              )) * 1000
+            ) / 60000) * 60000,
+            GREATEST(
+              0,
+              EXTRACT(EPOCH FROM (
+                COALESCE(c.deadline_at, clock_timestamp()) - c."started_at"
+              )) * 1000
+            )
+          )::integer
+        END,
+        "updated_at" = clock_timestamp()
+    FROM candidates c
+    WHERE u."id" = c."id" AND u."ended_at" IS NULL
+    RETURNING u."id"
+  )
+  SELECT count(*)::integer INTO settled_count FROM settled;
+  RETURN settled_count;
+END
+$$;--> statement-breakpoint
+REVOKE ALL ON FUNCTION companion_settle_terminal_skill_run_usage(integer) FROM PUBLIC;
 --> statement-breakpoint
 CREATE OR REPLACE FUNCTION companion_claim_skill_run_cleanups(p_worker_id text, p_limit integer DEFAULT 1, p_lease_seconds integer DEFAULT 30)
 RETURNS TABLE (
@@ -316,3 +423,41 @@ EXCEPTION WHEN OTHERS THEN
 END
 $$;--> statement-breakpoint
 REVOKE ALL ON FUNCTION companion_claim_skill_run_cleanups(text, integer, integer) FROM PUBLIC;
+--> statement-breakpoint
+CREATE OR REPLACE FUNCTION companion_cleanup_skill_run_events(p_limit integer DEFAULT 1000)
+RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+DECLARE
+  deleted_count integer;
+  previous_worker_context text;
+BEGIN
+  IF p_limit < 1 OR p_limit > 10000 THEN
+    RAISE EXCEPTION 'invalid cleanup limit' USING ERRCODE = '22023';
+  END IF;
+  previous_worker_context := current_setting('app.run_worker', true);
+  PERFORM set_config('app.run_worker', 'cleanup', true);
+  WITH victims AS (
+    SELECT e.ctid
+    FROM public."skill_run_events" e
+    JOIN public."skill_runs" r ON r."org_id" = e."org_id" AND r."id" = e."run_id"
+    WHERE r."status" IN ('frozen', 'interrupted', 'error', 'canceled')
+      AND COALESCE(r."frozen_at", r."updated_at") < clock_timestamp() - interval '24 hours'
+      AND e."created_at" < clock_timestamp() - interval '24 hours'
+    ORDER BY e."created_at"
+    FOR UPDATE OF e SKIP LOCKED
+    LIMIT p_limit
+  )
+  DELETE FROM public."skill_run_events" e
+  USING victims v
+  WHERE e.ctid = v.ctid;
+  GET DIAGNOSTICS deleted_count = ROW_COUNT;
+  PERFORM set_config('app.run_worker', COALESCE(previous_worker_context, ''), true);
+  RETURN deleted_count;
+EXCEPTION WHEN OTHERS THEN
+  PERFORM set_config('app.run_worker', COALESCE(previous_worker_context, ''), true);
+  RAISE;
+END
+$$;

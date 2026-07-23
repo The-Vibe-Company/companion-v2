@@ -902,7 +902,8 @@ content; only the sandbox does.
   `frozen | interrupted | canceled → queued` while the retained sandbox is still eligible.
   `interrupted` retains partial output but never replays the interrupted prompt; only a new explicit
   prompt starts another activation. `runtime_state` (`healthy | degraded`) blocks prompt admission
-  while the recorder is recovering.
+  while the recorder is recovering. `runtime_idle_activation_revision` is a durable idle proof for
+  the latest completed turn only: claiming the next prompt clears it before dispatch can begin.
 - `skill_run_skills`, `skill_run_secret_inputs`, `skill_run_model_provider_inputs`, and
   `skill_run_variable_inputs` are immutable input snapshots. Generic secret inputs contain vault
   references and exact versions only, with provenance `skill` or `runtime`. The model-provider row
@@ -1320,8 +1321,11 @@ Each activation uses an absolute deadline instead of a rolling lease.
 failures propagate, except not-found which normalizes to `missing`. A 60-second reconciler claims
 stale runs without a live job lease or runs degraded for more than 60 seconds, observes outside
 PostgreSQL, and applies results under an exact reconciliation lease, monotonic generation, and
-activation-revision fence. A live worker that recovers the recorder before completion changes the
-degraded predicate and makes the stale provider response inapplicable.
+activation-revision fence. The reconciliation lease is at least 105 seconds so up to three bounded
+extension observations remain fenced. The same loop settles terminal runs whose usage session stayed
+open after a transient settlement failure, independently of provider cleanup retention. A live worker
+that recovers the recorder before completion changes the degraded predicate and makes the stale
+provider response inapplicable.
 
 Production API and worker processes connect through `DATABASE_URL` using a dedicated login with
 `NOSUPERUSER`, `NOBYPASSRLS`, no table ownership, and no membership in the migration-owner role.

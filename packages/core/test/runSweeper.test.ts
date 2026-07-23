@@ -27,6 +27,7 @@ function run(id: string, status: RunRow["status"], updatedAt = OLD): RunRow {
     runtimeState: "healthy",
     runtimeDegradedAt: null,
     runtimeDeadlineAt: null,
+    runtimeIdleActivationRevision: null,
     runtimeReconcileLeaseOwner: null,
     runtimeReconcileLeaseExpiresAt: null,
     runtimeReconcileGeneration: 0,

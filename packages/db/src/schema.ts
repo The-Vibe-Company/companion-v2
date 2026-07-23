@@ -1593,6 +1593,7 @@ export const skillRuns = pgTable(
     runtimeState: skillRunRuntimeStateEnum("runtime_state").notNull().default("healthy"),
     runtimeDegradedAt: timestamp("runtime_degraded_at", { withTimezone: true }),
     runtimeDeadlineAt: timestamp("runtime_deadline_at", { withTimezone: true }),
+    runtimeIdleActivationRevision: integer("runtime_idle_activation_revision"),
     runtimeReconcileLeaseOwner: text("runtime_reconcile_lease_owner"),
     runtimeReconcileLeaseExpiresAt: timestamp("runtime_reconcile_lease_expires_at", { withTimezone: true }),
     runtimeReconcileGeneration: integer("runtime_reconcile_generation").notNull().default(0),

@@ -603,16 +603,30 @@ export async function startSandboxUsage(input: {
   database?: Db;
   now?: Date;
   config?: BillingRuntimeConfig;
-}): Promise<void> {
+}): Promise<Date | null> {
   const database = input.database ?? db;
-  if ((input.config ?? billingRuntimeConfig()).billingMode === "disabled") return;
+  if ((input.config ?? billingRuntimeConfig()).billingMode === "disabled") return null;
   const now = input.now ?? new Date();
-  await database
+  const rows = await database
     .update(schema.sandboxUsageSessions)
     .set({
-      startedAt: now,
+      startedAt: sql`coalesce(
+        ${schema.sandboxUsageSessions.startedAt},
+        ${now.toISOString()}::timestamp with time zone
+      )`,
       runtimePolicy: input.runtimePolicy ?? "safety_capped",
-      runtimeDeadlineAt: input.runtimeDeadlineAt,
+      ...(input.runtimeDeadlineAt
+        ? {
+            runtimeDeadlineAt: sql`case
+              when ${schema.sandboxUsageSessions.runtimeDeadlineAt} is null
+                then ${input.runtimeDeadlineAt.toISOString()}::timestamp with time zone
+              else least(
+                ${schema.sandboxUsageSessions.runtimeDeadlineAt},
+                ${input.runtimeDeadlineAt.toISOString()}::timestamp with time zone
+              )
+            end`,
+          }
+        : {}),
       reservationExpiresAt: new Date(now.getTime() + SANDBOX_RESERVATION_TTL_MS),
       updatedAt: now,
     })
@@ -620,9 +634,10 @@ export async function startSandboxUsage(input: {
       eq(schema.sandboxUsageSessions.orgId, input.orgId),
       eq(schema.sandboxUsageSessions.sandboxName, input.sandboxName),
       eq(schema.sandboxUsageSessions.activationRevision, input.activationRevision),
-      sql`${schema.sandboxUsageSessions.startedAt} is null`,
       sql`${schema.sandboxUsageSessions.endedAt} is null`,
-    ));
+    ))
+    .returning({ startedAt: schema.sandboxUsageSessions.startedAt });
+  return rows[0]?.startedAt ?? null;
 }
 
 export async function settleSandboxUsage(input: {
@@ -644,10 +659,16 @@ export async function settleSandboxUsage(input: {
     ),
   });
   if (!row || row.endedAt) return;
-  const effectiveEnd = row.runtimeDeadlineAt && row.runtimeDeadlineAt < now ? row.runtimeDeadlineAt : now;
+  const runtimeDeadlineAt = row.runtimeDeadlineAt ?? await getSandboxRuntimeDeadline({
+    orgId: input.orgId,
+    sandboxName: input.sandboxName,
+    activationRevision: input.activationRevision,
+    database,
+  });
+  const effectiveEnd = runtimeDeadlineAt && runtimeDeadlineAt < now ? runtimeDeadlineAt : now;
   const elapsedMs = row.startedAt ? Math.max(1, effectiveEnd.getTime() - row.startedAt.getTime()) : 0;
-  const maximumMs = row.runtimeDeadlineAt && row.startedAt
-    ? Math.max(0, row.runtimeDeadlineAt.getTime() - row.startedAt.getTime())
+  const maximumMs = runtimeDeadlineAt && row.startedAt
+    ? Math.max(0, runtimeDeadlineAt.getTime() - row.startedAt.getTime())
     : Number.POSITIVE_INFINITY;
   const settledMs = row.startedAt ? Math.min(roundedMinuteMs(elapsedMs), maximumMs) : 0;
   await database

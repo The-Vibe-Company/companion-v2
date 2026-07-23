@@ -14,6 +14,14 @@ export interface ClaimedRunRuntimeReconciliation {
   runtimeDeadlineAt: Date | null;
 }
 
+const MIN_RUNTIME_RECONCILIATION_LEASE_SECONDS = 105;
+
+export function runtimeReconciliationLeaseSeconds(configuredLeaseSeconds: number): number {
+  // Reconciliation may issue observe -> stop/extend -> observe, each bounded at ten seconds.
+  // Keep the provider mutation fence alive for the full sequence plus scheduling/database margin.
+  return Math.max(MIN_RUNTIME_RECONCILIATION_LEASE_SECONDS, configuredLeaseSeconds);
+}
+
 function lifecycleLog(
   level: "info" | "warn" | "error",
   event: string,
@@ -72,6 +80,17 @@ export async function completeRunRuntimeReconciliation(input: {
   return Array.from(result as unknown as Iterable<{ completed: boolean }>)[0]?.completed === true;
 }
 
+export async function settleTerminalRunUsage(input: {
+  limit?: number;
+  database?: Db;
+} = {}): Promise<number> {
+  const database = input.database ?? db;
+  const result = await database.execute(sql`
+    select companion_settle_terminal_skill_run_usage(${input.limit ?? 32}) as settled
+  `);
+  return Number(Array.from(result as unknown as Iterable<{ settled: number }>)[0]?.settled ?? 0);
+}
+
 export async function processRunRuntimeReconciliation(input: {
   claim: ClaimedRunRuntimeReconciliation;
   workerId: string;
@@ -80,7 +99,8 @@ export async function processRunRuntimeReconciliation(input: {
   complete?: typeof completeRunRuntimeReconciliation;
   now?: () => number;
 }): Promise<"completed" | "lost_lease" | "retry"> {
-  const now = input.now?.() ?? Date.now();
+  const currentNow = () => input.now?.() ?? Date.now();
+  let now = currentNow();
   const ref = {
     sandboxName: input.claim.sandboxName,
     sandboxId: input.claim.sandboxId,
@@ -91,16 +111,40 @@ export async function processRunRuntimeReconciliation(input: {
   try {
     observation = await input.runtime.observe(ref, AbortSignal.timeout(10_000));
     const deadlineMs = input.claim.runtimeDeadlineAt?.getTime() ?? null;
-    const expiresAtMs = observation.expiresAt?.getTime() ?? null;
-    if (
-      observation.state === "running"
-      && deadlineMs !== null
-      && deadlineMs > now
-      && (expiresAtMs === null || expiresAtMs < deadlineMs)
-      && input.runtime.extendTimeout
-    ) {
-      const additionalMs = Math.max(0, deadlineMs - (expiresAtMs ?? now));
-      if (additionalMs > 0) {
+    let expiresAtMs = observation.expiresAt?.getTime() ?? null;
+    if (observation.state === "running" && deadlineMs !== null && deadlineMs <= now) {
+      lifecycleLog("warn", "runtime_deadline_exceeded", {
+        runId: input.claim.runId,
+        activationRevision: input.claim.activationRevision,
+        overdueMs: now - deadlineMs,
+      });
+      try {
+        await input.runtime.stop(ref, AbortSignal.timeout(10_000));
+      } catch {
+        // A timed-out stop may still have reached the provider. Observe before deciding to retry.
+      }
+      observation = await input.runtime.observe(ref, AbortSignal.timeout(10_000));
+      if (observation.state === "running") {
+        lifecycleLog("warn", "reconcile_deadline_stop_failed", {
+          runId: input.claim.runId,
+          activationRevision: input.claim.activationRevision,
+        });
+        return "retry";
+      }
+    }
+    if (observation.state === "running" && deadlineMs !== null && deadlineMs > now) {
+      let extensionAttempts = 0;
+      while (
+        observation.state === "running"
+        && (expiresAtMs === null || expiresAtMs < deadlineMs)
+        && input.runtime.extendTimeout
+        && extensionAttempts < 3
+      ) {
+        now = currentNow();
+        if (deadlineMs <= now) break;
+        extensionAttempts += 1;
+        const additionalMs = Math.max(0, deadlineMs - (expiresAtMs ?? now));
+        if (additionalMs === 0) break;
         try {
           observation = await input.runtime.extendTimeout(
             ref,
@@ -116,6 +160,40 @@ export async function processRunRuntimeReconciliation(input: {
           // The mutation may have reached the provider. Re-observe before allowing a retry.
           observation = await input.runtime.observe(ref, AbortSignal.timeout(10_000));
         }
+        expiresAtMs = observation.expiresAt?.getTime() ?? null;
+      }
+      now = currentNow();
+      if (observation.state === "running" && deadlineMs <= now) {
+        lifecycleLog("warn", "runtime_deadline_exceeded", {
+          runId: input.claim.runId,
+          activationRevision: input.claim.activationRevision,
+          overdueMs: now - deadlineMs,
+        });
+        try {
+          await input.runtime.stop(ref, AbortSignal.timeout(10_000));
+        } catch {
+          // A timed-out stop may still have reached the provider. Observe before deciding to retry.
+        }
+        observation = await input.runtime.observe(ref, AbortSignal.timeout(10_000));
+        expiresAtMs = observation.expiresAt?.getTime() ?? null;
+        if (observation.state === "running") {
+          lifecycleLog("warn", "reconcile_deadline_stop_failed", {
+            runId: input.claim.runId,
+            activationRevision: input.claim.activationRevision,
+          });
+          return "retry";
+        }
+      }
+      if (
+        observation.state === "running"
+        && (expiresAtMs === null || expiresAtMs < deadlineMs)
+      ) {
+        lifecycleLog("warn", "reconcile_extension_shortfall", {
+          runId: input.claim.runId,
+          activationRevision: input.claim.activationRevision,
+          remainingMs: deadlineMs - (expiresAtMs ?? now),
+        });
+        return "retry";
       }
     }
   } catch {
@@ -148,6 +226,7 @@ export function createRunRuntimeReconciler(input: {
   orgIds?: ReadonlySet<string>;
   claim?: typeof claimRunRuntimeReconciliations;
   process?: typeof processRunRuntimeReconciliation;
+  settleTerminal?: typeof settleTerminalRunUsage;
 }): { run(): Promise<void>; stop(): Promise<void> } {
   const active = new Map<string, Promise<void>>();
   let stopped = false;
@@ -159,10 +238,12 @@ export function createRunRuntimeReconciler(input: {
       const capacity = input.concurrency - active.size;
       if (capacity <= 0) return Promise.resolve();
       claiming = (async () => {
+        const settled = await (input.settleTerminal ?? settleTerminalRunUsage)({ limit: 32 });
+        if (settled > 0) lifecycleLog("info", "terminal_usage_settled", { settled });
         const claims = await (input.claim ?? claimRunRuntimeReconciliations)({
           workerId: input.workerId,
           limit: capacity,
-          leaseSeconds: input.leaseSeconds,
+          leaseSeconds: runtimeReconciliationLeaseSeconds(input.leaseSeconds),
           orgIds: input.orgIds,
         });
         if (stopped) return;

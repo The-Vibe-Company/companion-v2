@@ -54,6 +54,7 @@ import {
   getAdoptedRunPrewarm,
   loadRunExecutionPlan,
   loadRunMaterializationPlan,
+  markRunRuntimeDegraded,
   markRunPromptSendAttempted,
   materializeRunDynamicFiles,
   materializeRunSkillBundles,
@@ -232,6 +233,8 @@ interface RunControlState {
   opencodeSessionId: string | null;
   activationRevision: number;
   timeoutMs: number;
+  runtimeState: "healthy" | "degraded";
+  runtimeDegradedAt: Date | null;
 }
 
 interface RecorderState {
@@ -337,6 +340,28 @@ export function sandboxTimeoutExtensionSchedule(timeoutMs: number): {
     // Refresh no later than halfway through the provider lease, without hammering its control API.
     intervalMs: Math.max(5_000, Math.min(60_000, Math.floor(extensionMs / 2))),
   };
+}
+
+export function waitForRecorderEventWhileDegraded<T>(
+  event: Promise<T>,
+  timeoutMs: number,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new RunRuntimeError("the reconnected run recorder emitted no events")),
+      Math.max(1, timeoutMs),
+    );
+    event.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
 }
 
 export function createSandboxTimeoutExtender(
@@ -558,9 +583,23 @@ async function startRunSandboxUsage(
       database,
     });
     const maxSessionMs = lifecycle.maxSessionMs;
-    const admittedMs = Math.min(maxSessionMs, budget?.limitMs ?? maxSessionMs);
     const now = new Date();
-    const runtimeDeadlineAt = new Date(now.getTime() + admittedMs);
+    // An adopted prewarm has already consumed provider time. Persist/start first so the absolute
+    // deadline is anchored to the provider session's original start rather than the adoption time.
+    const startedAt = await startSandboxUsage({
+      orgId: job.orgId,
+      sandboxName: ref.sandboxName,
+      activationRevision,
+      runtimePolicy: budget ? "budgeted" : "safety_capped",
+      database,
+      now,
+    });
+    const runtimeDeadlineAt = sandboxRuntimeDeadlineForActivation({
+      activationStartedAt: now,
+      providerStartedAt: startedAt,
+      budgetMs: budget?.limitMs ?? null,
+      maxSessionMs,
+    });
     await startSandboxUsage({
       orgId: job.orgId,
       sandboxName: ref.sandboxName,
@@ -583,6 +622,21 @@ async function startRunSandboxUsage(
         eq(schema.skillRuns.activationRevision, activationRevision),
       ));
   });
+}
+
+export function sandboxRuntimeDeadlineForActivation(input: {
+  activationStartedAt: Date;
+  providerStartedAt: Date | null;
+  budgetMs: number | null;
+  maxSessionMs: number;
+}): Date {
+  const admittedMs = Math.min(input.maxSessionMs, input.budgetMs ?? input.maxSessionMs);
+  // Enforced usage includes prewarm time already consumed. Observe/off policy starts its safety
+  // ceiling at activation, as documented, even when adopting the same provider sandbox.
+  const anchor = input.budgetMs === null
+    ? input.activationStartedAt
+    : (input.providerStartedAt ?? input.activationStartedAt);
+  return new Date(anchor.getTime() + admittedMs);
 }
 
 async function settleRunSandboxUsage(job: ClaimedRunJob, ref: SandboxRef, activationRevision: number): Promise<void> {
@@ -640,6 +694,8 @@ async function readRunControl(job: ClaimedRunJob): Promise<RunControlState> {
         opencodeSessionId: schema.skillRuns.opencodeSessionId,
         activationRevision: schema.skillRuns.activationRevision,
         timeoutMs: schema.skillRuns.timeoutMs,
+        runtimeState: schema.skillRuns.runtimeState,
+        runtimeDegradedAt: schema.skillRuns.runtimeDegradedAt,
       })
       .from(schema.skillRuns)
       .where(
@@ -785,6 +841,8 @@ function startRecorder(input: {
   redactor: RunRedactor;
   config: RunWorkerConfig;
   runtimeDeadlineAt: Date | null;
+  readRuntimeDeadlineAt?: () => Promise<Date | null>;
+  initialRuntimeDegradedAt?: Date | null;
   shutdownSignal: AbortSignal;
   onArtifactToolDone?: () => void;
 }): RecorderHandle {
@@ -806,6 +864,7 @@ function startRecorder(input: {
   const started = new Promise<void>((resolve) => { resolveStarted = resolve; });
   let startedResolved = false;
   let idleSnapshotFresh = false;
+  let runtimeDeadlineAt = input.runtimeDeadlineAt;
   const persistSnapshot = async (emitIdleBarrier = false) => {
     const items = await withBoundedSignal({
       parent: recorderSignal,
@@ -833,10 +892,44 @@ function startRecorder(input: {
 
   const loop = (async () => {
     let reconnectMs = input.config.recorderReconnectMinMs;
-    let degradedAtMs: number | null = null;
+    let degradedAtMs: number | null = input.initialRuntimeDegradedAt?.getTime() ?? null;
     let reconnectAttempts = 0;
     let lastProviderObservationAt = 0;
     let longDegradedLogged = false;
+    let degradedPersisted = degradedAtMs !== null;
+    const markRecorderRecovered = async () => {
+      if (degradedAtMs === null) return;
+      if (!degradedPersisted) {
+        degradedPersisted = await tenant(input.job, (database) => markRunRuntimeDegraded({
+          actor: input.actor,
+          orgId: input.job.orgId,
+          runId: input.job.runId,
+          workerId: input.job.leaseOwner!,
+          degradedAt: new Date(degradedAtMs!),
+          database,
+        }));
+        if (!degradedPersisted) throw new LostLease();
+      }
+      const recoveredAt = Date.now();
+      await tenant(input.job, (database) => updateRunWorkerState({
+        actor: input.actor,
+        orgId: input.job.orgId,
+        runId: input.job.runId,
+        workerId: input.job.leaseOwner ?? undefined,
+        runtimeState: "healthy",
+        runtimeDegradedAt: null,
+        database,
+      }));
+      sandboxLifecycleLog("info", "recorder_recovered", {
+        runId: input.job.runId,
+        attempts: reconnectAttempts,
+        degradedMs: recoveredAt - degradedAtMs!,
+      });
+      degradedAtMs = null;
+      degradedPersisted = false;
+      reconnectAttempts = 0;
+      longDegradedLogged = false;
+    };
     recorderLoop: while (!stopped && !input.shutdownSignal.aborted) {
       let connectionAbort: AbortController | null = null;
       let iterator: AsyncIterator<RunChatEvent> | null = null;
@@ -875,25 +968,6 @@ function startRecorder(input: {
           operation: (signal) => chat.getSessionState(input.target, input.sessionId, signal),
         });
         if (sessionState === "missing") throw new RunRuntimeError("the OpenCode session is unavailable");
-        if (degradedAtMs !== null) {
-          await tenant(input.job, (database) => updateRunWorkerState({
-            actor: input.actor,
-            orgId: input.job.orgId,
-            runId: input.job.runId,
-            workerId: input.job.leaseOwner ?? undefined,
-            runtimeState: "healthy",
-            runtimeDegradedAt: null,
-            database,
-          }));
-          sandboxLifecycleLog("info", "recorder_recovered", {
-            runId: input.job.runId,
-            attempts: reconnectAttempts,
-            degradedMs: Date.now() - degradedAtMs,
-          });
-          degradedAtMs = null;
-          reconnectAttempts = 0;
-          longDegradedLogged = false;
-        }
         if (sessionState === "idle" && !idleSnapshotFresh) {
           // A history read may already include bytes buffered by this subscription. Discard the
           // subscription first so a persisted snapshot and later event replay can never append the
@@ -902,6 +976,7 @@ function startRecorder(input: {
           await iterator.return?.().catch(() => undefined);
           state.busy = true;
           await persistSnapshot(true);
+          await markRecorderRecovered();
           state.idleAt = Date.now();
           idleSnapshotFresh = true;
           continue;
@@ -909,6 +984,7 @@ function startRecorder(input: {
         state.busy = sessionState !== "idle";
         if (sessionState === "idle" && idleSnapshotFresh) {
           idleBarriers.markFreshIdleConnection();
+          await markRecorderRecovered();
         }
         if (state.busy) {
           state.idleAt = null;
@@ -919,7 +995,18 @@ function startRecorder(input: {
           resolveStarted();
         }
         while (!stopped && !input.shutdownSignal.aborted) {
-          const result = await next;
+          const retryCutoffAt = degradedAtMs === null
+            ? Number.POSITIVE_INFINITY
+            : Math.min(
+                degradedAtMs + input.config.recorderUnavailableMs,
+                runtimeDeadlineAt?.getTime() ?? Number.POSITIVE_INFINITY,
+              );
+          const result = input.config.sandboxLifecycleV2 && degradedAtMs !== null
+            ? await waitForRecorderEventWhileDegraded(
+                next,
+                Math.min(15_000, Math.max(1, retryCutoffAt - Date.now())),
+              )
+            : await next;
           if (result.done) break;
           const event = result.value;
           next = iterator.next();
@@ -948,11 +1035,13 @@ function startRecorder(input: {
             connectionAbort.abort();
             await iterator.return?.().catch(() => undefined);
             await persistSnapshot(true);
+            await markRecorderRecovered();
             state.idleAt = Date.now();
             idleSnapshotFresh = true;
             continue recorderLoop;
           } else {
             await appendEvents(input.job, input.actor, normalized, input.redactor);
+            await markRecorderRecovered();
             if (artifactToolDone) input.onArtifactToolDone?.();
           }
           reconnectMs = input.config.recorderReconnectMinMs;
@@ -968,25 +1057,22 @@ function startRecorder(input: {
       reconnectAttempts += 1;
       if (input.config.sandboxLifecycleV2 && degradedAtMs === null) {
         degradedAtMs = Date.now();
-        await tenant(input.job, (database) => updateRunWorkerState({
-          actor: input.actor,
-          orgId: input.job.orgId,
-          runId: input.job.runId,
-          workerId: input.job.leaseOwner ?? undefined,
-          runtimeState: "degraded",
-          runtimeDegradedAt: new Date(degradedAtMs!),
-          database,
-        })).catch(() => undefined);
-        await appendEvents(
-          input.job,
-          input.actor,
-          [{ type: "status", state: "retry", attempt: null, message: "Reconnecting to the run recorder" }],
-          input.redactor,
-        ).catch(() => undefined);
+        degradedPersisted = false;
         sandboxLifecycleLog("warn", "recorder_degraded", {
           runId: input.job.runId,
           attempts: reconnectAttempts,
         });
+      }
+      if (input.config.sandboxLifecycleV2 && degradedAtMs !== null && !degradedPersisted) {
+        const degradedAt = new Date(degradedAtMs);
+        degradedPersisted = await tenant(input.job, (database) => markRunRuntimeDegraded({
+          actor: input.actor,
+          orgId: input.job.orgId,
+          runId: input.job.runId,
+          workerId: input.job.leaseOwner!,
+          degradedAt,
+          database,
+        })).catch(() => false);
       } else if (!input.config.sandboxLifecycleV2) {
         await appendEvents(
           input.job,
@@ -1022,22 +1108,41 @@ function startRecorder(input: {
         &&
         !state.unavailable
         && degradedAtMs !== null
-        && recorderRetryWindowExpired({
+      ) {
+        let retryWindowExpired = recorderRetryWindowExpired({
           degradedAtMs,
           nowMs: Date.now(),
           maxUnavailableMs: input.config.recorderUnavailableMs,
-          runtimeDeadlineAt: input.runtimeDeadlineAt,
-        })
-      ) {
-        state.unavailable = { code: "recorder_unavailable", sandboxState: "unknown" };
+          runtimeDeadlineAt,
+        });
+        // Follow-up admission may extend an enforce-mode deadline while this worker is already
+        // running. Re-read at the old cutoff before classifying the recorder as unavailable.
         if (
-          input.runtimeDeadlineAt
-          && Date.now() >= input.runtimeDeadlineAt.getTime()
+          retryWindowExpired
+          && runtimeDeadlineAt
+          && Date.now() >= runtimeDeadlineAt.getTime()
+          && input.readRuntimeDeadlineAt
+        ) {
+          runtimeDeadlineAt = await input.readRuntimeDeadlineAt().catch(() => runtimeDeadlineAt);
+          retryWindowExpired = recorderRetryWindowExpired({
+            degradedAtMs,
+            nowMs: Date.now(),
+            maxUnavailableMs: input.config.recorderUnavailableMs,
+            runtimeDeadlineAt,
+          });
+        }
+        if (retryWindowExpired) {
+          state.unavailable = { code: "recorder_unavailable", sandboxState: "unknown" };
+        }
+        if (
+          retryWindowExpired
+          && runtimeDeadlineAt
+          && Date.now() >= runtimeDeadlineAt.getTime()
         ) {
           sandboxLifecycleLog("warn", "runtime_deadline_exceeded", {
             runId: input.job.runId,
             activationRevision: input.activationRevision,
-            deadlineAt: input.runtimeDeadlineAt.toISOString(),
+            deadlineAt: runtimeDeadlineAt.toISOString(),
             attempts: reconnectAttempts,
           });
         }
@@ -1066,7 +1171,7 @@ function startRecorder(input: {
         ? Number.POSITIVE_INFINITY
         : Math.min(
             degradedAtMs + input.config.recorderUnavailableMs,
-            input.runtimeDeadlineAt?.getTime() ?? Number.POSITIVE_INFINITY,
+            runtimeDeadlineAt?.getTime() ?? Number.POSITIVE_INFINITY,
           );
       await sleep(
         Math.min(reconnectMs, Math.max(1, retryCutoffAt - Date.now())),
@@ -1104,6 +1209,50 @@ export function recorderRetryWindowExpired(input: {
     input.runtimeDeadlineAt?.getTime() ?? Number.POSITIVE_INFINITY,
   );
   return input.nowMs >= retryCutoffAt;
+}
+
+/**
+ * Enforce a durable runtime deadline while allowing same-activation follow-up admission to move a
+ * budgeted deadline forward. The old deadline is always enforced when the refresh fails.
+ */
+export function createRuntimeDeadlineEnforcer(input: {
+  initialDeadlineAt: Date | null;
+  readDeadlineAt: () => Promise<Date | null>;
+  onExceeded: (deadlineAt: Date) => void;
+}): { stop(): void } {
+  let deadlineAt = input.initialDeadlineAt;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let generation = 0;
+  let stopped = false;
+
+  const arm = (nextDeadlineAt: Date) => {
+    deadlineAt = nextDeadlineAt;
+    generation += 1;
+    const armedGeneration = generation;
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => {
+      void (async () => {
+        const previousDeadlineAt = deadlineAt!;
+        const refreshed = await input.readDeadlineAt().catch(() => previousDeadlineAt);
+        if (stopped || armedGeneration !== generation) return;
+        if (refreshed && refreshed.getTime() > previousDeadlineAt.getTime()) {
+          arm(refreshed);
+          return;
+        }
+        input.onExceeded(previousDeadlineAt);
+      })();
+    }, Math.max(0, nextDeadlineAt.getTime() - Date.now()));
+  };
+
+  if (deadlineAt) arm(deadlineAt);
+  return {
+    stop() {
+      stopped = true;
+      generation += 1;
+      if (timer) clearTimeout(timer);
+      timer = null;
+    },
+  };
 }
 
 export async function collectAndCacheRunArtifacts(input: {
@@ -1796,6 +1945,7 @@ async function processClaimedJob(input: {
   let sessionId: string | null = null;
   let activationRevision = 0;
   let runtimeDeadlineAt: Date | null = null;
+  let runtimeDeadlineEnforcer: ReturnType<typeof createRuntimeDeadlineEnforcer> | null = null;
   const timeoutExtender = createSandboxTimeoutExtender(ctx.runtime!, async () => {
     if (!ref) return null;
     const budget = await tenant(job, (database) => getSandboxRuntimeBudget({
@@ -1932,11 +2082,15 @@ async function processClaimedJob(input: {
       region: ctx.region,
       timeoutMs: materialPlan.row.timeoutMs,
     };
+    if (config.sandboxLifecycleV2) {
+      activeRef.timeoutMs = Math.min(activeRef.timeoutMs, config.sandboxMaxSessionMs);
+    }
     activationRevision = materialPlan.row.activationRevision;
     applySandboxRuntimeBudget(activeRef, await ensureRunSandboxUsage(job, activeRef, activationRevision));
     ref = activeRef;
     let sandbox: { sandboxId: string; domain: string } | null = null;
     let skillsAlreadyWarm = false;
+    let skills: Awaited<ReturnType<typeof materializeRunSkillBundles>> = [];
     if (materialPlan.row.prewarmId) {
       const waitDeadline = Date.now() + SANDBOX_CONTROL_TIMEOUT_MS;
       while (Date.now() < waitDeadline && !jobAbort.signal.aborted) {
@@ -1960,7 +2114,7 @@ async function processClaimedJob(input: {
     }
 
     if (!skillsAlreadyWarm) {
-      const skills = await withBoundedSignal({
+      skills = await withBoundedSignal({
         parent: jobAbort.signal,
         timeoutMs: SANDBOX_CONTROL_TIMEOUT_MS,
         timeoutMessage: "the run skill bundle download timed out",
@@ -1978,20 +2132,26 @@ async function processClaimedJob(input: {
         }),
       });
       activeRef.sandboxId = sandbox.sandboxId;
-      await setPhase(job, actor, workerId, "push_workspace", { sandboxId: sandbox.sandboxId, sandboxDomain: sandbox.domain });
+    }
+    // The provider lifetime starts as soon as a cold fork succeeds, or from the durable prewarm
+    // start when adopting a warm sandbox. Start usage before any workspace upload so setup time is
+    // included in both budget enforcement and the absolute safety ceiling.
+    await startRunSandboxUsage(job, activeRef, activationRevision, {
+      enabled: config.sandboxLifecycleV2,
+      maxSessionMs: config.sandboxMaxSessionMs,
+    });
+    await setPhase(job, actor, workerId, "push_workspace", {
+      sandboxId: sandbox!.sandboxId,
+      sandboxDomain: sandbox!.domain,
+    });
+    if (!skillsAlreadyWarm) {
       await withBoundedSignal({
         parent: jobAbort.signal,
         timeoutMs: SANDBOX_CONTROL_TIMEOUT_MS,
         timeoutMessage: "the sandbox skill upload timed out",
         operation: (signal) => ctx.runtime!.pushSkillBundles({ ref: activeRef, skills, signal }),
       });
-    } else {
-      await setPhase(job, actor, workerId, "push_workspace", { sandboxId: sandbox!.sandboxId, sandboxDomain: sandbox!.domain });
     }
-    await startRunSandboxUsage(job, activeRef, activationRevision, {
-      enabled: config.sandboxLifecycleV2,
-      maxSessionMs: config.sandboxMaxSessionMs,
-    });
     runtimeDeadlineAt = config.sandboxLifecycleV2
       ? await tenant(job, (database) => getSandboxRuntimeDeadline({
           orgId: job.orgId,
@@ -2000,6 +2160,25 @@ async function processClaimedJob(input: {
           database,
         }))
       : null;
+    if (runtimeDeadlineAt) {
+      runtimeDeadlineEnforcer = createRuntimeDeadlineEnforcer({
+        initialDeadlineAt: runtimeDeadlineAt,
+        readDeadlineAt: () => tenant(job, (database) => getSandboxRuntimeDeadline({
+          orgId: job.orgId,
+          sandboxName: activeRef.sandboxName,
+          activationRevision,
+          database,
+        })),
+        onExceeded: (deadlineAt) => {
+          sandboxLifecycleLog("warn", "runtime_deadline_exceeded", {
+            runId: job.runId,
+            activationRevision,
+            deadlineAt: deadlineAt.toISOString(),
+          });
+          abortJob(new RuntimeInterrupted("sandbox_expired_during_turn", "unknown"));
+        },
+      });
+    }
     timeoutExtender.activate(activeRef);
 
     const dynamicFiles = await withBoundedSignal({
@@ -2107,6 +2286,7 @@ async function processClaimedJob(input: {
         signal: jobAbort.signal,
       });
     });
+    const recorderControl = await readRunControl(job);
     recorder = startRecorder({
       job,
       actor,
@@ -2118,6 +2298,17 @@ async function processClaimedJob(input: {
       redactor,
       config,
       runtimeDeadlineAt,
+      readRuntimeDeadlineAt: config.sandboxLifecycleV2
+        ? () => tenant(job, (database) => getSandboxRuntimeDeadline({
+            orgId: job.orgId,
+            sandboxName: activeRef.sandboxName,
+            activationRevision,
+            database,
+          }))
+        : undefined,
+      initialRuntimeDegradedAt: recorderControl.runtimeState === "degraded"
+        ? recorderControl.runtimeDegradedAt
+        : null,
       shutdownSignal: jobAbort.signal,
       onArtifactToolDone: () => artifactCollector?.request(),
     });
@@ -2760,6 +2951,7 @@ async function processClaimedJob(input: {
       }
     }
   } finally {
+    runtimeDeadlineEnforcer?.stop();
     clearInterval(heartbeat);
     clearInterval(leaseWatchdog);
     clearInterval(controlWatcher);
