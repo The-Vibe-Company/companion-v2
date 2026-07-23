@@ -47,7 +47,7 @@
     "@auth/agent-cli": "0.5.1",
     "@types/node": "^22.10.2",
     "tsup": "^8.3.5",
-    "tsx": "^4.19.2",
+    "tsx": "^4.23.1",
     "typescript": "^5.7.2",
     "vitest": "3.2.7"
   }
