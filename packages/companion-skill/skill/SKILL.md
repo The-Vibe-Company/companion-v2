@@ -1090,25 +1090,23 @@ The bootstrap reads the local `companion.json.version`, compares it with `availa
 `GET /local-skills/companion`, compares tracked files against the installed
 `companion.integrity.json` baseline, downloads `GET /local-skills/companion/package`, verifies
 `SKILL.md`, the staged `companion.json.version`, and the staged integrity baseline, stages all
-outdated existing tool targets, replaces them transactionally, and reports the install with
+outdated existing tool targets, revalidates each target again at its swap boundary, replaces them
+transactionally, and reports the install with
 `POST /local-skills/companion/installed`. Treat a JSON result with
 `companion.autoUpdate.applied: true` as success. If the result has
-`companion.autoUpdate.blocked: true` and `reason: "local_customizations"`, do not overwrite the local
-folders; report the target paths plus modified or missing files and ask the user whether to merge or
-reinstall the official package manually.
+`companion.autoUpdate.blocked: true`, do not overwrite any local folder. For
+`reason: "local_customizations"` or `"integrity_unavailable"`, report the target paths plus modified
+or missing files and ask whether to merge or reinstall the official package. For
+`reason: "local_version_ahead"`, report the ahead target versions and require an explicit version
+choice before continuing.
 
-Backups are transient implementation details. After replacement, delete the backup folder created for
-that self-update whether or not the install report succeeds:
-
-```sh
-rm -rf "$backup"
-echo "Deleted transient Companion self-update backup at $backup"
-```
-
-If install reporting fails after replacement, keep the newly installed folder in place, delete the
-transient backup, and report that confirmation failed. Any older `companion.backup-*`,
-`.companion-backup.*`, `*.companion-backup*`, or `*.backup-*` folder containing `SKILL.md` is stale
-local state and should be deleted rather than kept as a rollback copy.
+Backups are normally transient implementation details and the updater removes them after a successful
+replacement, a successful rollback, or an install-reporting failure after replacement. Never sweep
+`companion.backup-*`, `.companion-backup.*`, `*.companion-backup*`, or `*.backup-*` automatically.
+If an update error says `original preserved at <path>`, that path is the recovery copy for an uncertain
+rollback: keep it, report it exactly, and require explicit user approval before deleting it. A legacy
+backup may be removed only after verifying that it is not referenced by the current failure and that
+the active target is an official, complete Companion installation.
 
 ## Confirm installation (run once, at the end of install)
 
@@ -1117,7 +1115,7 @@ skills view shows the correct status and version. Report the version from this s
 `companion.json.version`:
 
 ```sh
-printf '%s' '{"action":"api","method":"POST","path":"/local-skills/companion/installed","body":{"version":"1.26.2","agent":"<your assistant name>"}}' \
+printf '%s' '{"action":"api","method":"POST","path":"/local-skills/companion/installed","body":{"version":"1.26.3","agent":"<your assistant name>"}}' \
   | node scripts/companion-agent-client.mjs
 ```
 

@@ -174,8 +174,8 @@ def _stage_companion_package(package: Path, target_dir: Path, available_version:
     return staged
 
 
-def _rollback_swaps(swapped: list[tuple[Path, Path]]) -> None:
-    failures: list[str] = []
+def _rollback_swaps(swapped: list[tuple[Path, Path]]) -> list[tuple[Path, Path, str]]:
+    failures: list[tuple[Path, Path, str]] = []
     for target, backup in reversed(swapped):
         try:
             if os.path.lexists(target):
@@ -183,9 +183,8 @@ def _rollback_swaps(swapped: list[tuple[Path, Path]]) -> None:
             if os.path.lexists(backup):
                 backup.rename(target)
         except BaseException as exc:  # preserve every rollback attempt before failing
-            failures.append(f"{target}: {exc}")
-    if failures:
-        fail("Companion multi-tool rollback failed: " + "; ".join(failures))
+            failures.append((target, backup, str(exc)))
+    return failures
 
 
 def _swap_staged_target(target: Path, staged: Path, backup: Path) -> None:
@@ -196,6 +195,20 @@ def _swap_staged_target(target: Path, staged: Path, backup: Path) -> None:
         if not target.exists() and backup.exists():
             backup.rename(target)
         raise
+
+
+def _validate_update_target(target: Path, available_version: str) -> str:
+    validate_companion_dir(target)
+    target_version = local_companion_version(target)
+    if not target_version:
+        fail(f"{target / 'companion.json'} has no installed version")
+    validate_integrity_baseline(target, target_version)
+    if compare_semver(target_version, available_version) > 0:
+        fail(
+            f"{target} has newer Companion version {target_version}; "
+            f"refusing to replace it with {available_version}"
+        )
+    return target_version
 
 
 def install_companion_update(
@@ -215,16 +228,13 @@ def install_companion_update(
     targets = target_dirs or [skill_dir]
     targets = list(dict.fromkeys(path.resolve() for path in targets))
     for target in targets:
-        validate_companion_dir(target)
-        target_version = local_companion_version(target)
-        if not target_version:
-            fail(f"{target / 'companion.json'} has no installed version")
-        validate_integrity_baseline(target, target_version)
+        _validate_update_target(target, available_version)
 
     tmp = Path(tempfile.mkdtemp(prefix="companion-bootstrap-"))
     staged: dict[Path, Path] = {}
     backups: dict[Path, Path] = {}
     swapped: list[tuple[Path, Path]] = []
+    preserved_backups: set[Path] = set()
     restore_cwd: Path | None = None
     try:
         archive = tmp / "companion.zip"
@@ -244,19 +254,27 @@ def install_companion_update(
         # Revalidate immediately before mutation so a concurrent local edit cannot
         # slip between preflight and the transaction.
         for target in targets:
-            target_version = local_companion_version(target)
-            if not target_version:
-                fail(f"{target / 'companion.json'} has no installed version")
-            validate_integrity_baseline(target, target_version)
+            _validate_update_target(target, available_version)
 
         restore_cwd = leave_target_cwds(targets)
         try:
             for target in targets:
+                # Earlier targets may take time to swap. Recheck this exact target
+                # at its mutation boundary so a concurrent edit or updater cannot
+                # be overwritten based on the earlier bulk preflight.
+                _validate_update_target(target, available_version)
                 backup = backups[target]
                 _swap_staged_target(target, staged[target], backup)
                 swapped.append((target, backup))
         except BaseException:
-            _rollback_swaps(swapped)
+            rollback_failures = _rollback_swaps(swapped)
+            if rollback_failures:
+                preserved_backups.update(backup for _target, backup, _error in rollback_failures)
+                details = "; ".join(
+                    f"{target}: {error}; original preserved at {backup}"
+                    for target, backup, error in rollback_failures
+                )
+                fail("Companion multi-tool rollback failed: " + details)
             raise
 
         report = api_post_json(api_url, token, "/local-skills/companion/installed", {"version": available_version, "agent": agent})
@@ -280,7 +298,9 @@ def install_companion_update(
                 remove_swap_path(staging)
             backup = backups.get(target)
             if backup and os.path.lexists(backup):
-                if not target.exists():
+                if backup in preserved_backups:
+                    continue
+                if not os.path.lexists(target):
                     backup.rename(target)
                 else:
                     remove_swap_path(backup)
@@ -297,23 +317,36 @@ def companion_auto_update_result(
     agent: str,
 ) -> dict[str, Any]:
     target_statuses = companion_target_statuses(skill_dir, local_skill, available_version)
-    blocking_targets = [
+    integrity_blocking_targets = [
         row
         for row in target_statuses
         if row.get("integrity") != "official" or row.get("blockingFiles")
     ]
-    if blocking_targets:
+    ahead_targets = [row for row in target_statuses if row.get("ahead")]
+    if integrity_blocking_targets or ahead_targets:
         blocking_files = [
             f"{row['path']}:{path}"
-            for row in blocking_targets
+            for row in integrity_blocking_targets
             for path in (row.get("blockingFiles") or ["integrity unavailable"])
         ]
+        if integrity_blocking_targets:
+            reason = (
+                "local_customizations"
+                if any(row.get("blockingFiles") for row in integrity_blocking_targets)
+                else "integrity_unavailable"
+            )
+        else:
+            reason = "local_version_ahead"
         return {
             "requested": True,
             "applied": False,
             "blocked": True,
-            "reason": "local_customizations" if any(row.get("blockingFiles") for row in blocking_targets) else "integrity_unavailable",
+            "reason": reason,
             "files": blocking_files,
+            "aheadTargets": [
+                {"path": row["path"], "version": row.get("version")}
+                for row in ahead_targets
+            ],
             "targets": target_statuses,
         }
 

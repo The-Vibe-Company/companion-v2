@@ -713,6 +713,103 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual([], list(self.skill_dir.parent.glob(".companion-backup.*")))
         self.assertEqual([], list(peer.parent.glob(".companion-backup.*")))
 
+    def test_install_update_preserves_original_backup_when_rollback_fails(self):
+        peer = self.create_peer_skill("peer", "1.0.0")
+        official_files: dict[str, str] = {}
+        real_swap = bootstrap_update._swap_staged_target
+        real_remove = bootstrap_update.remove_swap_path
+        swap_calls = 0
+        rollback_remove_failed = False
+
+        def flaky_swap(target, staged, backup):
+            nonlocal swap_calls
+            swap_calls += 1
+            if swap_calls == 2:
+                raise OSError("simulated second-target failure")
+            return real_swap(target, staged, backup)
+
+        def flaky_remove(path):
+            nonlocal rollback_remove_failed
+            if path.resolve() == self.skill_dir.resolve() and not rollback_remove_failed:
+                rollback_remove_failed = True
+                raise OSError("simulated rollback removal failure")
+            return real_remove(path)
+
+        with (
+            mock.patch.object(
+                bootstrap_update,
+                "download_package",
+                side_effect=self.update_package_writer("1.1.0", official_files),
+            ),
+            mock.patch.object(bootstrap_update, "_swap_staged_target", side_effect=flaky_swap),
+            mock.patch.object(bootstrap_update, "remove_swap_path", side_effect=flaky_remove),
+            mock.patch.object(bootstrap_update, "api_post_json") as report,
+            self.assertRaises(SystemExit) as raised,
+        ):
+            bootstrap.install_companion_update(
+                "https://api.example/v1",
+                "cmp_pat_SECRET",
+                self.skill_dir,
+                "1.1.0",
+                "Codex",
+                official_files,
+                target_dirs=[self.skill_dir, peer],
+            )
+
+        report.assert_not_called()
+        self.assertIn("rollback failed", str(raised.exception))
+        self.assertIn("original preserved at", str(raised.exception))
+        backups = list(self.skill_dir.parent.glob(".companion-backup.*"))
+        self.assertEqual(1, len(backups))
+        self.assertEqual("1.0.0", json.loads((backups[0] / "companion.json").read_text())["version"])
+        self.assertEqual("1.1.0", json.loads((self.skill_dir / "companion.json").read_text())["version"])
+        self.assertEqual("1.0.0", json.loads((peer / "companion.json").read_text())["version"])
+
+    def test_install_update_rechecks_each_target_at_its_swap_boundary(self):
+        peer = self.create_peer_skill("peer", "1.0.0")
+        official_files: dict[str, str] = {}
+        real_swap = bootstrap_update._swap_staged_target
+        swap_calls = 0
+
+        def customize_peer_after_first_swap(target, staged, backup):
+            nonlocal swap_calls
+            swap_calls += 1
+            result = real_swap(target, staged, backup)
+            if swap_calls == 1:
+                (peer / "scripts/bootstrap.py").write_text("# concurrent customization\n", encoding="utf-8")
+            return result
+
+        with (
+            mock.patch.object(
+                bootstrap_update,
+                "download_package",
+                side_effect=self.update_package_writer("1.1.0", official_files),
+            ),
+            mock.patch.object(
+                bootstrap_update,
+                "_swap_staged_target",
+                side_effect=customize_peer_after_first_swap,
+            ),
+            mock.patch.object(bootstrap_update, "api_post_json") as report,
+            self.assertRaises(SystemExit),
+        ):
+            bootstrap.install_companion_update(
+                "https://api.example/v1",
+                "cmp_pat_SECRET",
+                self.skill_dir,
+                "1.1.0",
+                "Codex",
+                official_files,
+                target_dirs=[self.skill_dir, peer],
+            )
+
+        report.assert_not_called()
+        self.assertEqual(1, swap_calls)
+        self.assertEqual("1.0.0", json.loads((self.skill_dir / "companion.json").read_text())["version"])
+        self.assertEqual("# concurrent customization\n", (peer / "scripts/bootstrap.py").read_text())
+        self.assertEqual([], list(self.skill_dir.parent.glob(".companion-backup.*")))
+        self.assertEqual([], list(peer.parent.glob(".companion-backup.*")))
+
     def test_auto_update_blocks_all_targets_when_one_peer_is_customized(self):
         peer = self.create_peer_skill("peer", "1.0.0")
         (peer / "scripts/bootstrap.py").write_text("# local customization\n", encoding="utf-8")
@@ -742,6 +839,41 @@ class BootstrapTests(unittest.TestCase):
         self.assertTrue(result["blocked"])
         self.assertEqual("local_customizations", result["reason"])
         self.assertTrue(any(str(peer) in path for path in result["files"]))
+
+    def test_auto_update_blocks_before_mutation_when_one_peer_is_ahead(self):
+        peer = self.create_peer_skill("peer", "1.2.0")
+        self.companion_targets.stop()
+        self.companion_targets = mock.patch.object(
+            bootstrap_update,
+            "companion_install_targets",
+            return_value=[
+                {"path": self.skill_dir, "tools": ["current"]},
+                {"path": peer, "tools": ["codex"]},
+            ],
+        )
+        self.companion_targets.start()
+        row = skill_row(version="1.1.0", integrity=self.integrity_for_local_files())
+        row["availableVersion"] = "1.1.0"
+        with mock.patch.object(bootstrap_update, "install_companion_update") as install:
+            result = bootstrap_update.companion_auto_update_result(
+                "https://api.example/v1",
+                "cmp_pat_SECRET",
+                self.skill_dir,
+                row,
+                "1.1.0",
+                bootstrap.compare_integrity(self.skill_dir, row),
+                "Codex",
+            )
+
+        install.assert_not_called()
+        self.assertTrue(result["blocked"])
+        self.assertEqual("local_version_ahead", result["reason"])
+        self.assertEqual(
+            [{"path": str(peer), "version": "1.2.0"}],
+            result["aheadTargets"],
+        )
+        self.assertEqual("1.0.0", json.loads((self.skill_dir / "companion.json").read_text())["version"])
+        self.assertEqual("1.2.0", json.loads((peer / "companion.json").read_text())["version"])
 
     def test_install_update_rejects_self_consistent_package_that_differs_from_workspace_hashes(self):
         def write_package(_api_url, _token, destination, _expected_checksum=None):

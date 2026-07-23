@@ -14,12 +14,38 @@ import sync_companion  # noqa: E402
 
 
 class SyncCompanionTests(unittest.TestCase):
-    def context(self, *, errors=None, blocked=False, needs_update=False):
+    def context(
+        self,
+        *,
+        errors=None,
+        blocked=False,
+        version="1.1.0",
+        available_version="1.1.0",
+        integrity="official",
+        blocking_files=None,
+        needs_update=False,
+        ahead=False,
+        targets=True,
+    ):
         return {
             "errors": errors or [],
             "companion": {
+                "availableVersion": available_version,
                 "autoUpdate": {"blocked": blocked, "reason": "local_customizations" if blocked else None},
-                "targets": [{"path": "/tmp/companion", "needsUpdate": needs_update}],
+                "targets": (
+                    [
+                        {
+                            "path": "/tmp/companion",
+                            "version": version,
+                            "integrity": integrity,
+                            "blockingFiles": blocking_files or [],
+                            "needsUpdate": needs_update,
+                            "ahead": ahead,
+                        }
+                    ]
+                    if targets
+                    else []
+                ),
             },
         }
 
@@ -32,13 +58,36 @@ class SyncCompanionTests(unittest.TestCase):
     def test_sync_result_fails_for_blocked_or_still_outdated_targets(self):
         for context in (
             self.context(blocked=True),
-            self.context(needs_update=True),
+            self.context(version="1.0.0", needs_update=True),
             self.context(errors=[{"message": "network failed"}]),
         ):
             with self.subTest(context=context):
                 with mock.patch.object(sync_companion, "collect_context", return_value=context):
                     _result, ok = sync_companion.sync_result("Codex")
                 self.assertFalse(ok)
+
+    def test_sync_result_rejects_unverified_customized_or_ahead_targets(self):
+        for context in (
+            self.context(integrity="customized", blocking_files=["SKILL.md"]),
+            self.context(integrity="unknown"),
+            self.context(version="1.2.0", ahead=True),
+        ):
+            with self.subTest(context=context):
+                with mock.patch.object(sync_companion, "collect_context", return_value=context):
+                    result, ok = sync_companion.sync_result("Codex")
+                self.assertFalse(ok)
+                self.assertEqual("targets_not_synchronized", result["companion"]["autoUpdate"]["reason"])
+
+    def test_sync_result_requires_available_version_and_existing_targets(self):
+        for context, reason in (
+            (self.context(available_version=None), "available_version_unknown"),
+            (self.context(targets=False), "no_existing_installations"),
+        ):
+            with self.subTest(reason=reason):
+                with mock.patch.object(sync_companion, "collect_context", return_value=context):
+                    result, ok = sync_companion.sync_result("Codex")
+                self.assertFalse(ok)
+                self.assertEqual(reason, result["companion"]["autoUpdate"]["reason"])
 
 
 if __name__ == "__main__":

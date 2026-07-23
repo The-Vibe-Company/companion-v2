@@ -21,13 +21,32 @@ from bootstrap import collect_context  # noqa: E402
 
 def sync_result(agent: str) -> tuple[dict, bool]:
     context = collect_context(auto_update=True, agent=agent)
-    auto_update = context["companion"]["autoUpdate"]
-    targets = context["companion"].get("targets") or []
+    companion = context["companion"]
+    auto_update = companion["autoUpdate"]
+    available_version = companion.get("availableVersion")
+    targets = companion.get("targets") or []
     ok = (
         not context.get("errors")
+        and isinstance(available_version, str)
+        and bool(available_version)
+        and bool(targets)
         and not auto_update.get("blocked")
-        and not any(target.get("needsUpdate") for target in targets)
+        and all(
+            target.get("integrity") == "official"
+            and not target.get("blockingFiles")
+            and not target.get("ahead")
+            and not target.get("needsUpdate")
+            and target.get("version") == available_version
+            for target in targets
+        )
     )
+    if not ok and not auto_update.get("reason"):
+        if not available_version:
+            auto_update["reason"] = "available_version_unknown"
+        elif not targets:
+            auto_update["reason"] = "no_existing_installations"
+        else:
+            auto_update["reason"] = "targets_not_synchronized"
     return context, ok
 
 
