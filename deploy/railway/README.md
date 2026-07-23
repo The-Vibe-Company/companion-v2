@@ -120,6 +120,11 @@ same canonical public origin; Companion redirects its matching `www`/apex alias 
 `COMPANION_ENTITLEMENTS_MODE=observe` is the safe first production rollout. Enable webhooks, then Checkout, then use
 `pilot` with explicit organization ids before switching to `enforce` globally.
 
+For sandbox lifecycle v2, start with `COMPANION_SANDBOX_LIFECYCLE_V2=true` and
+`COMPANION_SANDBOX_LIFECYCLE_V2_ORGS=<pilot-org-id>`. Keep the pilot for 24 hours, review usage
+deadlines and the prepared [Railway alerts](./sandbox-lifecycle-alerts.md), then clear the org list
+to enable all organizations. The same document contains the mixed-version rollback transaction.
+
 ### `web`
 
 ```dotenv
@@ -168,12 +173,16 @@ COMPANION_GOLDEN_SNAPSHOT_ID=<current pinned OpenCode snapshot>
 OPENCODE_VERSION=1.17.13
 COMPANION_SANDBOX_REGION=iad1
 COMPANION_SANDBOX_TIMEOUT_MS=300000
+COMPANION_SANDBOX_LIFECYCLE_V2=false
+COMPANION_SANDBOX_LIFECYCLE_V2_ORGS=
+COMPANION_SANDBOX_MAX_SESSION_MS=3600000
 COMPANION_RUN_CONCURRENCY=2
 COMPANION_RUN_PREWARM_CONCURRENCY=2
 COMPANION_RUN_CLAIM_INTERVAL_MS=1000
 COMPANION_RUN_LEASE_SECONDS=30
 COMPANION_RUN_HEARTBEAT_MS=10000
 COMPANION_RUN_INACTIVITY_MS=120000
+COMPANION_RUN_RECORDER_UNAVAILABLE_MS=300000
 COMPANION_RUN_RECORDER_RECONNECT_MIN_MS=250
 COMPANION_RUN_RECORDER_RECONNECT_MAX_MS=5000
 COMPANION_RUN_EVENT_RETENTION_INTERVAL_MS=900000

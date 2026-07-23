@@ -30,6 +30,7 @@ import {
   deleteRunConfiguration,
   deterministicRunMessageId,
   enqueueRunPrompt,
+  freezeRunAfterRuntimeLossByWorker,
   heartbeatRunJob,
   heartbeatRunWorker,
   getRun,
@@ -81,6 +82,7 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
   const expiredReactivationRunId = randomUUID();
   const errorReactivationRunId = randomUUID();
   const cleanupRetentionRunId = randomUUID();
+  const runtimeReconcileRunId = randomUUID();
   const attachmentId = randomUUID();
   const artifactId = randomUUID();
   const followupAttachmentId = randomUUID();
@@ -162,6 +164,44 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
           ${orgA}::uuid,
           ${cleanupRunId}::uuid,
           ${workerId}
+        ) as completed
+      `;
+      return rows[0]?.completed ?? false;
+    });
+  }
+
+  async function claimRuntimeReconciliation(workerId: string): Promise<Array<{
+    runId: string;
+    activationRevision: number;
+    reconcileGeneration: number;
+  }>> {
+    return sql.begin(async (tx) => {
+      await tx.unsafe(`set local role ${rlsRole}`);
+      return tx<{ runId: string; activationRevision: number; reconcileGeneration: number }[]>`
+        select run_id::text as "runId", activation_revision as "activationRevision",
+               reconcile_generation as "reconcileGeneration"
+        from companion_claim_skill_run_runtime_reconciliations(${workerId}, 1, 30, ${orgA})
+      `;
+    });
+  }
+
+  async function completeRuntimeReconciliation(input: {
+    workerId: string;
+    activationRevision: number;
+    reconcileGeneration: number;
+    providerState: "running" | "stopped" | "missing";
+  }): Promise<boolean> {
+    return sql.begin(async (tx) => {
+      await tx.unsafe(`set local role ${rlsRole}`);
+      const rows = await tx<{ completed: boolean }[]>`
+        select companion_complete_skill_run_runtime_reconciliation(
+          ${orgA}::uuid,
+          ${runtimeReconcileRunId}::uuid,
+          ${input.workerId},
+          ${input.activationRevision},
+          ${input.reconcileGeneration},
+          ${input.providerState}::sandbox_provider_state,
+          ${new Date(Date.now() + 60_000)}
         ) as completed
       `;
       return rows[0]?.completed ?? false;
@@ -450,6 +490,9 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
     await sql.unsafe(`grant execute on function companion_terminalize_revoked_skill_run(uuid, uuid, text, text, boolean) to ${rlsRole}`);
     await sql.unsafe(`grant execute on function companion_claim_skill_run_cleanups(text, integer, integer) to ${rlsRole}`);
     await sql.unsafe(`grant execute on function companion_complete_skill_run_cleanup(uuid, uuid, text) to ${rlsRole}`);
+    await sql.unsafe(`grant execute on function companion_claim_skill_run_runtime_reconciliations(text, integer, integer, text) to ${rlsRole}`);
+    await sql.unsafe(`grant execute on function companion_complete_skill_run_runtime_reconciliation(uuid, uuid, text, integer, integer, sandbox_provider_state, timestamp with time zone) to ${rlsRole}`);
+    await sql.unsafe(`grant execute on function companion_settle_terminal_skill_run_usage(integer) to ${rlsRole}`);
     await sql.unsafe(`grant execute on function companion_cleanup_skill_run_events(integer) to ${rlsRole}`);
     await sql.unsafe(`grant execute on function companion_heartbeat_skill_run_worker(text, integer, integer) to ${rlsRole}`);
     await sql.unsafe(`grant execute on function companion_heartbeat_skill_run_worker(text, integer, integer, integer) to ${rlsRole}`);
@@ -1973,6 +2016,44 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
     expect(phases).toEqual([{ phase: "record" }]);
   });
 
+  it("freezes an idle provider loss and cancels follow-ups without replay", async () => {
+    const runActor = { id: owner.id, email: owner.email, name: "Run Owner" };
+    await expect(
+      withTenantContext({ orgId: orgA, userId: owner.id }, (database) =>
+        freezeRunAfterRuntimeLossByWorker({
+          actor: runActor,
+          orgId: orgA,
+          runId: freezeRunId,
+          workerId: "freeze-worker",
+          sandboxState: "missing",
+          database,
+        }),
+      ),
+    ).resolves.toBe("frozen");
+    const [run] = await sql<{
+      status: string;
+      sandbox_cleaned_at: Date | null;
+      reactivatable_until: Date | null;
+    }[]>`
+      select status::text, sandbox_cleaned_at, reactivatable_until
+      from skill_runs
+      where org_id = ${orgA}::uuid and id = ${freezeRunId}::uuid
+    `;
+    expect(run).toMatchObject({
+      status: "frozen",
+      reactivatable_until: null,
+    });
+    expect(run?.sandbox_cleaned_at).toBeInstanceOf(Date);
+    const prompts = await sql<{ status: string }[]>`
+      select status::text
+      from skill_run_prompts
+      where org_id = ${orgA}::uuid
+        and run_id = ${freezeRunId}::uuid
+        and idempotency_key = 'freeze-pending-prompt'
+    `;
+    expect(prompts).toEqual([{ status: "canceled" }]);
+  });
+
   it("reactivates a retained creator-only conversation and requeues its durable job", async () => {
     const runActor = { id: owner.id, email: owner.email, name: "Run Owner" };
     const reactivationStorageKey = `${orgA}/run-attachments/${reactivationAttachmentId}`;
@@ -2168,6 +2249,193 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
       where org_id = ${orgA}::uuid and id = ${cleanupRunId}::uuid
     `;
     expect(rows).toEqual([{ cleaned: true, owner: null, attempt: 2 }]);
+  });
+
+  it("fences concurrent runtime reconciliation and interrupts an active turn exactly once", async () => {
+    await sql`
+      insert into skill_runs
+        (id, org_id, skill_id, creator_id, skill_version_id, skill_version, idempotency_key,
+         payload_hash, model, prompt, status, phase, sandbox_name, sandbox_id, runtime_state,
+         runtime_degraded_at, runtime_deadline_at, activation_revision)
+      values
+        (${runtimeReconcileRunId}::uuid, ${orgA}::uuid, ${skillId}::uuid, ${owner.id},
+         ${versionId}::uuid, '1.0.0', 'runtime-reconcile-run', ${"9".repeat(64)},
+         'openai/gpt-5', 'runtime reconciliation', 'running', 'record',
+         ${`run-${runtimeReconcileRunId}`}, 'sandbox-runtime-reconcile', 'degraded',
+         now() - interval '2 minutes', now() + interval '2 minutes', 3)
+    `;
+    await sql`
+      insert into skill_run_jobs
+        (org_id, run_id, creator_id, status, phase, lease_owner, lease_expires_at, heartbeat_at)
+      values
+        (${orgA}::uuid, ${runtimeReconcileRunId}::uuid, ${owner.id}, 'leased', 'record',
+         'degraded-supervisor', now() + interval '5 minutes', now())
+    `;
+    await sql`
+      insert into skill_run_prompts
+        (org_id, run_id, ordinal, kind, idempotency_key, payload_hash, message_id,
+         user_text, prompt, status, attempt, dispatch_protocol, send_attempted_at)
+      values
+        (${orgA}::uuid, ${runtimeReconcileRunId}::uuid, 0, 'initial', 'runtime-active-prompt',
+         ${"8".repeat(64)}, ${deterministicRunMessageId(runtimeReconcileRunId, 0, Date.now())},
+         'active turn', 'active turn', 'processing', 1, 2, now()),
+        (${orgA}::uuid, ${runtimeReconcileRunId}::uuid, 1, 'follow_up', 'runtime-ambiguous-followup',
+         ${"7".repeat(64)}, ${deterministicRunMessageId(runtimeReconcileRunId, 1, Date.now() + 1)},
+         'ambiguous follow-up', 'ambiguous follow-up', 'queued', 1, 2, now()),
+        (${orgA}::uuid, ${runtimeReconcileRunId}::uuid, 2, 'follow_up', 'runtime-queued-followup',
+         ${"6".repeat(64)}, ${deterministicRunMessageId(runtimeReconcileRunId, 2, Date.now() + 2)},
+         'queued follow-up', 'queued follow-up', 'queued', 0, 2, null)
+    `;
+    await sql`
+      insert into sandbox_usage_sessions
+        (org_id, creator_id, kind, source_id, sandbox_name, activation_revision, period_start,
+         reserved_ms, started_at, runtime_policy, runtime_deadline_at, reservation_expires_at)
+      values
+        (${orgA}::uuid, ${owner.id}, 'run', ${runtimeReconcileRunId}::uuid,
+         ${`run-${runtimeReconcileRunId}`}, 3, date_trunc('month', now()), 3600000,
+         now() - interval '10 seconds', 'safety_capped', now() + interval '2 minutes',
+         now() + interval '1 hour')
+    `;
+
+    const claims = await Promise.all([
+      claimRuntimeReconciliation("runtime-reconciler-a"),
+      claimRuntimeReconciliation("runtime-reconciler-b"),
+    ]);
+    expect(claims.flat()).toEqual([
+      { runId: runtimeReconcileRunId, activationRevision: 3, reconcileGeneration: 1 },
+    ]);
+    const ownerClaim = claims.find((claim) => claim.length === 1);
+    const ownerWorker = ownerClaim === claims[0] ? "runtime-reconciler-a" : "runtime-reconciler-b";
+
+    expect(await completeRuntimeReconciliation({
+      workerId: ownerWorker,
+      activationRevision: 2,
+      reconcileGeneration: 1,
+      providerState: "stopped",
+    })).toBe(false);
+    expect(await completeRuntimeReconciliation({
+      workerId: ownerWorker,
+      activationRevision: 3,
+      reconcileGeneration: 1,
+      providerState: "stopped",
+    })).toBe(true);
+    expect(await completeRuntimeReconciliation({
+      workerId: ownerWorker,
+      activationRevision: 3,
+      reconcileGeneration: 1,
+      providerState: "stopped",
+    })).toBe(false);
+
+    const runs = await sql<{
+      status: string;
+      errorCode: string | null;
+      runtimeState: string;
+      reactivatable: boolean;
+      leaseOwner: string | null;
+    }[]>`
+      select status, error_code as "errorCode", runtime_state as "runtimeState",
+             reactivatable_until > now() as reactivatable,
+             runtime_reconcile_lease_owner as "leaseOwner"
+      from skill_runs
+      where org_id = ${orgA}::uuid and id = ${runtimeReconcileRunId}::uuid
+    `;
+    expect(runs).toEqual([{
+      status: "interrupted",
+      errorCode: "sandbox_expired_during_turn",
+      runtimeState: "healthy",
+      reactivatable: true,
+      leaseOwner: null,
+    }]);
+
+    const prompts = await sql<{ ordinal: number; status: string; errorCode: string | null }[]>`
+      select ordinal, status, error_code as "errorCode"
+      from skill_run_prompts
+      where org_id = ${orgA}::uuid and run_id = ${runtimeReconcileRunId}::uuid
+      order by ordinal
+    `;
+    expect(prompts).toEqual([
+      { ordinal: 0, status: "error", errorCode: "sandbox_expired_during_turn" },
+      { ordinal: 1, status: "error", errorCode: "sandbox_expired_during_turn" },
+      { ordinal: 2, status: "canceled", errorCode: null },
+    ]);
+    await sql`
+      update sandbox_usage_sessions
+      set ended_at = null, settled_ms = null,
+          started_at = now() - interval '2 hours',
+          runtime_deadline_at = now() - interval '1 hour'
+      where org_id = ${orgA}::uuid and kind = 'run'
+        and source_id = ${runtimeReconcileRunId}::uuid and activation_revision = 3
+    `;
+    const settled = await sql.begin(async (tx) => {
+      await tx.unsafe(`set local role ${rlsRole}`);
+      return tx<{ count: number }[]>`
+        select companion_settle_terminal_skill_run_usage(32) as count
+      `;
+    });
+    expect(settled).toEqual([{ count: 1 }]);
+    const usageRows = await sql<{ ended: boolean; settledMs: number }[]>`
+      select ended_at is not null as ended, settled_ms as "settledMs"
+      from sandbox_usage_sessions
+      where org_id = ${orgA}::uuid and kind = 'run'
+        and source_id = ${runtimeReconcileRunId}::uuid and activation_revision = 3
+    `;
+    expect(usageRows).toEqual([{ ended: true, settledMs: 3_600_000 }]);
+    await sql`
+      update skill_runs
+      set status = 'queued', phase = 'queued', activation_revision = 4
+      where org_id = ${orgA}::uuid and id = ${runtimeReconcileRunId}::uuid
+    `;
+    await sql`
+      update sandbox_usage_sessions
+      set ended_at = null, settled_ms = null,
+          started_at = now() - interval '3 hours',
+          runtime_deadline_at = null
+      where org_id = ${orgA}::uuid and kind = 'run'
+        and source_id = ${runtimeReconcileRunId}::uuid and activation_revision = 3
+    `;
+    const staleActivationSettled = await sql.begin(async (tx) => {
+      await tx.unsafe(`set local role ${rlsRole}`);
+      return tx<{ count: number }[]>`
+        select companion_settle_terminal_skill_run_usage(32) as count
+      `;
+    });
+    expect(staleActivationSettled).toEqual([{ count: 1 }]);
+    const staleUsageRows = await sql<{ settledMs: number }[]>`
+      select settled_ms as "settledMs"
+      from sandbox_usage_sessions
+      where org_id = ${orgA}::uuid and kind = 'run'
+        and source_id = ${runtimeReconcileRunId}::uuid and activation_revision = 3
+    `;
+    expect(staleUsageRows).toEqual([{ settledMs: 3_600_000 }]);
+    const terminalEvents = await sql<{ type: string; code: string | null }[]>`
+      select type, payload->>'code' as code
+      from skill_run_events
+      where org_id = ${orgA}::uuid and run_id = ${runtimeReconcileRunId}::uuid
+      order by sequence
+    `;
+    expect(terminalEvents).toContainEqual({
+      type: "run.error",
+      code: "sandbox_expired_during_turn",
+    });
+
+    const usage = await sql<{ ended: boolean; settledMs: number; deadlineMs: number }[]>`
+      select ended_at is not null as ended, settled_ms::int as "settledMs",
+             greatest(
+               0,
+               extract(epoch from (
+                 coalesce(runtime_deadline_at, started_at + interval '1 hour') - started_at
+               )) * 1000
+             )::int as "deadlineMs"
+      from sandbox_usage_sessions
+      where org_id = ${orgA}::uuid and source_id = ${runtimeReconcileRunId}::uuid
+    `;
+    expect(usage[0]?.ended).toBe(true);
+    expect(usage[0]?.settledMs).toBeGreaterThan(0);
+    expect(usage[0]!.settledMs).toBeLessThanOrEqual(usage[0]!.deadlineMs);
+    await sql`
+      delete from sandbox_usage_sessions
+      where org_id = ${orgA}::uuid and source_id = ${runtimeReconcileRunId}::uuid
+    `;
   });
 
   it("makes retained cleanup and reactivation mutually exclusive at the deadline", async () => {

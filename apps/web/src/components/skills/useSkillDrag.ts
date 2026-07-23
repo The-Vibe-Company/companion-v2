@@ -239,7 +239,11 @@ export function useSkillDrag(options: UseSkillDragOptions): SkillDrag {
   });
 
   // Always tear down on unmount (removes listeners, ghost, timers; restores body styles).
-  useEffect(() => api.teardown, [api]);
+  useEffect(() => () => {
+    api.teardown();
+    if (dropDoneTimerRef.current) clearTimeout(dropDoneTimerRef.current);
+    dropDoneTimerRef.current = null;
+  }, [api]);
 
   return { startDrag: api.startDrag, hovered, openPendingPath, dropDone };
 }

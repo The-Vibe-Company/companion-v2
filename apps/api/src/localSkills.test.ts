@@ -48,7 +48,7 @@ describe("companion skill package + row", () => {
     const pkg = await getCompanionSkillPackage();
     expect(pkg.key).toBe("companion");
     expect(pkg.checksum).toMatch(/^sha256:[0-9a-f]{64}$/);
-    expect(pkg.version).toBe("1.26.4");
+    expect(pkg.version).toBe("1.27.0");
     expect(pkg.sizeBytes).toBeGreaterThan(0);
     expect(pkg.integrity.packageChecksum).toBe(pkg.checksum);
     expect(pkg.integrity.files["SKILL.md"]).toMatch(/^sha256:[0-9a-f]{64}$/);
@@ -125,12 +125,16 @@ describe("companion skill package + row", () => {
       desc: "Create or repair manifest v2 with identity, env/secrets, dependency ids, notes, commands, and changelog.",
     });
     const changelog = row.changes.join("\n");
-    expect(changelog).toContain("credential-lock acquisition");
-    expect(changelog).toContain("another process releases the shared lock");
-    expect(changelog).toContain("during inspection");
+    expect(changelog).toContain("interrupted and degraded Skill Run lifecycle");
+    expect(changelog).toContain("explicit reactivation");
+    expect(changelog).toContain("structured follow-up conflict");
     const manifest = JSON.parse(await readFile(join(companionSkillDir(), "companion.json"), "utf8")) as {
       metadata?: { changelog?: Array<{ version?: string; changes?: string[] }> };
     };
+    const lockChanges = manifest.metadata?.changelog?.find((entry) => entry.version === "1.26.4")?.changes?.join("\n") ?? "";
+    expect(lockChanges).toContain("credential-lock acquisition");
+    expect(lockChanges).toContain("another process releases the shared lock");
+    expect(lockChanges).toContain("during inspection");
     const refreshChanges = manifest.metadata?.changelog?.find((entry) => entry.version === "1.23.0")?.changes?.join("\n") ?? "";
     expect(refreshChanges).toContain("Refreshes a file-backed Companion token automatically");
     expect(refreshChanges).toContain("Preserves the token's exact name and scopes");

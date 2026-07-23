@@ -296,12 +296,68 @@ export function createVercelRuntime(config: VercelRuntimeConfig): RunSandboxRunt
       }
     },
 
-    async extendTimeout(ref, ms, signal) {
+    async observe(ref, signal) {
       try {
         const sandbox = await Sandbox.get({ ...credentials, name: ref.sandboxName, resume: false, signal });
-        await sandbox.extendTimeout(ms, { signal });
-      } catch {
-        // Best-effort: a stopped/gone sandbox simply stays frozen.
+        const stopped = ["stopped", "stopping", "failed", "aborted"].includes(sandbox.status);
+        return {
+          state: stopped ? "stopped" as const : "running" as const,
+          expiresAt: sandbox.expiresAt ?? null,
+        };
+      } catch (error) {
+        if (error instanceof APIError && (error.response.status === 404 || error.response.status === 410)) {
+          return { state: "missing" as const, expiresAt: null };
+        }
+        throw error;
+      }
+    },
+
+    async extendTimeout(ref, ms, signal) {
+      let previousExpiresAtMs: number | null = null;
+      try {
+        const sandbox = await Sandbox.get({ ...credentials, name: ref.sandboxName, resume: false, signal });
+        if (["stopped", "stopping", "failed", "aborted"].includes(sandbox.status)) {
+          return { state: "stopped" as const, expiresAt: sandbox.expiresAt ?? null };
+        }
+        previousExpiresAtMs = sandbox.expiresAt?.getTime() ?? null;
+        // Sandbox.extendTimeout() resumes stopped sessions internally. Extending the current
+        // session directly preserves the observe-only contract across a stop race.
+        await sandbox.currentSession().extendTimeout(ms, { signal });
+        // The SDK mutates provider state but not necessarily this instance's cached metadata.
+        const observed = await Sandbox.get({ ...credentials, name: ref.sandboxName, resume: false, signal });
+        return {
+          state: ["stopped", "stopping", "failed", "aborted"].includes(observed.status)
+            ? "stopped" as const
+            : "running" as const,
+          expiresAt: observed.expiresAt ?? null,
+        };
+      } catch (error) {
+        if (error instanceof APIError && (error.response.status === 404 || error.response.status === 410)) {
+          return { state: "missing" as const, expiresAt: null };
+        }
+        // The mutation may have reached the provider, or the session may have stopped between the
+        // non-resuming read and mutation. Re-observe once before surfacing an ambiguous failure.
+        let observed: Sandbox;
+        try {
+          observed = await Sandbox.get({ ...credentials, name: ref.sandboxName, resume: false, signal });
+        } catch (observeError) {
+          if (observeError instanceof APIError && (observeError.response.status === 404 || observeError.response.status === 410)) {
+            return { state: "missing" as const, expiresAt: null };
+          }
+          throw error;
+        }
+        if (["stopped", "stopping", "failed", "aborted"].includes(observed.status)) {
+          return { state: "stopped" as const, expiresAt: observed.expiresAt ?? null };
+        }
+        const observedExpiresAtMs = observed.expiresAt?.getTime() ?? null;
+        if (
+          previousExpiresAtMs !== null
+          && observedExpiresAtMs !== null
+          && observedExpiresAtMs > previousExpiresAtMs
+        ) {
+          return { state: "running" as const, expiresAt: observed.expiresAt ?? null };
+        }
+        throw error;
       }
     },
   };

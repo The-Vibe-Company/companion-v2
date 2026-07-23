@@ -19,6 +19,10 @@ export interface RunWorkerConfig {
   recorderReconnectMaxMs: number;
   retentionIntervalMs: number;
   cleanupIntervalMs: number;
+  sandboxLifecycleV2: boolean;
+  sandboxLifecycleV2OrgIds: ReadonlySet<string>;
+  sandboxMaxSessionMs: number;
+  recorderUnavailableMs: number;
 }
 
 export function runWorkerConfig(env: NodeJS.ProcessEnv = process.env): RunWorkerConfig {
@@ -48,6 +52,23 @@ export function runWorkerConfig(env: NodeJS.ProcessEnv = process.env): RunWorker
     cleanupIntervalMs: boundedInteger(env.COMPANION_RUN_SWEEP_INTERVAL_MS, 60_000, {
       min: 5_000,
       max: 3_600_000,
+    }),
+    sandboxLifecycleV2: ["1", "true"].includes(
+      env.COMPANION_SANDBOX_LIFECYCLE_V2?.trim().toLowerCase() ?? "",
+    ),
+    sandboxLifecycleV2OrgIds: new Set(
+      (env.COMPANION_SANDBOX_LIFECYCLE_V2_ORGS ?? "")
+        .split(",")
+        .map((value) => value.trim())
+        .filter(Boolean),
+    ),
+    sandboxMaxSessionMs: boundedInteger(env.COMPANION_SANDBOX_MAX_SESSION_MS, 3_600_000, {
+      min: 600_000,
+      max: 3_600_000,
+    }),
+    recorderUnavailableMs: boundedInteger(env.COMPANION_RUN_RECORDER_UNAVAILABLE_MS, 300_000, {
+      min: 15_000,
+      max: 300_000,
     }),
   };
 }

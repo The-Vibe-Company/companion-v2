@@ -12,15 +12,19 @@ import {
   collectAndCacheRunArtifacts,
   createSingleFlightArtifactCollector,
   createRecorderIdleBarrierTracker,
+  createRuntimeDeadlineEnforcer,
   dispatchPromptAfterAttachmentMount,
   isTransientRunFailure,
   promptStopBarrierPlan,
   proveSessionIdleAfterMissingAttempt,
   releaseSyntheticRecorderBusy,
+  recorderRetryWindowExpired,
   runFailureEvent,
+  sandboxRuntimeDeadlineForActivation,
   sandboxTimeoutExtensionSchedule,
   shouldHeartbeatRunLease,
   toolMayWriteArtifacts,
+  waitForRecorderEventWhileDegraded,
 } from "./runSupervisor";
 
 afterEach(() => {
@@ -39,6 +43,83 @@ describe("run worker retry classification", () => {
     expect(isTransientRunFailure(new RunValidationError("secret unavailable", "secret_unavailable"))).toBe(false);
     expect(isTransientRunFailure(new RunBusyError("run is terminal", "run_terminal"))).toBe(false);
     expect(isTransientRunFailure(new Error("database connection reset"))).toBe(true);
+  });
+});
+
+describe("recorder retry deadline", () => {
+  it("charges an adopted prewarm from its durable provider start in enforce mode", () => {
+    const providerStartedAt = new Date("2026-07-23T12:00:00.000Z");
+    const activationStartedAt = new Date("2026-07-23T12:04:00.000Z");
+
+    expect(sandboxRuntimeDeadlineForActivation({
+      activationStartedAt,
+      providerStartedAt,
+      budgetMs: 10 * 60_000,
+      maxSessionMs: 60 * 60_000,
+    })).toEqual(new Date("2026-07-23T12:10:00.000Z"));
+    expect(sandboxRuntimeDeadlineForActivation({
+      activationStartedAt,
+      providerStartedAt,
+      budgetMs: null,
+      maxSessionMs: 60 * 60_000,
+    })).toEqual(new Date("2026-07-23T13:04:00.000Z"));
+  });
+
+  it("re-arms the active supervisor deadline after a follow-up extends its budget", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    let durableDeadlineAt = new Date(1_000);
+    const onExceeded = vi.fn();
+    const enforcer = createRuntimeDeadlineEnforcer({
+      initialDeadlineAt: durableDeadlineAt,
+      readDeadlineAt: async () => durableDeadlineAt,
+      onExceeded,
+    });
+
+    durableDeadlineAt = new Date(2_000);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(onExceeded).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(999);
+    expect(onExceeded).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(onExceeded).toHaveBeenCalledWith(new Date(2_000));
+    enforcer.stop();
+  });
+
+  it("bounds a half-open reconnected event stream", async () => {
+    vi.useFakeTimers();
+    const pending = new Promise<never>(() => undefined);
+    const waiting = waitForRecorderEventWhileDegraded(pending, 15_000);
+    const rejected = expect(waiting).rejects.toThrow("emitted no events");
+
+    await vi.advanceTimersByTimeAsync(15_000);
+
+    await rejected;
+  });
+
+  it("stops at the absolute runtime deadline before the five-minute retry window", () => {
+    expect(recorderRetryWindowExpired({
+      degradedAtMs: 1_000,
+      nowMs: 20_000,
+      maxUnavailableMs: 300_000,
+      runtimeDeadlineAt: new Date(20_000),
+    })).toBe(true);
+  });
+
+  it("stops at the retry window when the runtime deadline is later", () => {
+    expect(recorderRetryWindowExpired({
+      degradedAtMs: 1_000,
+      nowMs: 301_000,
+      maxUnavailableMs: 300_000,
+      runtimeDeadlineAt: new Date(600_000),
+    })).toBe(true);
+    expect(recorderRetryWindowExpired({
+      degradedAtMs: 1_000,
+      nowMs: 300_999,
+      maxUnavailableMs: 300_000,
+      runtimeDeadlineAt: null,
+    })).toBe(false);
   });
 });
 
@@ -701,6 +782,40 @@ describe("active sandbox hard-timeout extension", () => {
 
     await vi.advanceTimersByTimeAsync(5_000);
     expect(extendTimeout).toHaveBeenCalledTimes(1);
+    await extender.stop();
+  });
+
+  it("uses the safety cap when a managed observe-mode budget is null", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-23T12:00:00.000Z"));
+    const ref: SandboxRef = {
+      sandboxName: "run-observe",
+      sandboxId: "sandbox-observe",
+      region: "iad1",
+      timeoutMs: 300_000,
+    };
+    const observe = vi.fn(async () => ({
+      state: "running" as const,
+      expiresAt: new Date("2026-07-23T12:05:00.000Z"),
+    }));
+    const extendTimeout = vi.fn(async (_ref: SandboxRef, ms: number) => ({
+      state: "running" as const,
+      expiresAt: new Date(Date.now() + 300_000 + ms),
+    }));
+    const runtime = { observe, extendTimeout } as unknown as RunSandboxRuntime;
+    const onObservation = vi.fn(async () => undefined);
+    const extender = createSandboxTimeoutExtender(runtime, async () => null, {
+      maxSessionMs: 3_600_000,
+      onObservation,
+    });
+    extender.activate(ref);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(observe).toHaveBeenCalledOnce();
+    expect(extendTimeout).toHaveBeenCalledWith(ref, 3_300_000, expect.any(AbortSignal));
+    expect(onObservation).toHaveBeenCalledWith(expect.objectContaining({
+      deadlineAt: new Date("2026-07-23T13:00:00.000Z"),
+    }));
     await extender.stop();
   });
 });

@@ -1342,9 +1342,11 @@ export const skillRunStatusEnum = pgEnum("skill_run_status", [
   "starting",
   "running",
   "frozen",
+  "interrupted",
   "error",
   "canceled",
 ]);
+export const skillRunRuntimeStateEnum = pgEnum("skill_run_runtime_state", ["healthy", "degraded"]);
 export const skillRunPhaseEnum = pgEnum("skill_run_phase", [
   "queued",
   "resolve_inputs",
@@ -1395,6 +1397,16 @@ export const skillRunPrewarmPhaseEnum = pgEnum("skill_run_prewarm_phase", [
   "complete",
 ]);
 export const sandboxUsageKindEnum = pgEnum("sandbox_usage_kind", ["prewarm", "run"]);
+export const sandboxUsageRuntimePolicyEnum = pgEnum("sandbox_usage_runtime_policy", [
+  "safety_capped",
+  "budgeted",
+]);
+export const sandboxProviderStateEnum = pgEnum("sandbox_provider_state", [
+  "running",
+  "stopped",
+  "missing",
+  "unknown",
+]);
 
 /** Creator-private launcher behavior. Prewarming is opt-out so existing launch latency is preserved. */
 export const userRunPreferences = pgTable(
@@ -1426,6 +1438,11 @@ export const sandboxUsageSessions = pgTable(
     periodStart: timestamp("period_start", { withTimezone: true }).notNull(),
     reservedMs: integer("reserved_ms").notNull(),
     startedAt: timestamp("started_at", { withTimezone: true }),
+    runtimePolicy: sandboxUsageRuntimePolicyEnum("runtime_policy").notNull().default("safety_capped"),
+    runtimeDeadlineAt: timestamp("runtime_deadline_at", { withTimezone: true }),
+    providerExpiresAt: timestamp("provider_expires_at", { withTimezone: true }),
+    lastProviderState: sandboxProviderStateEnum("last_provider_state").notNull().default("unknown"),
+    lastProviderCheckedAt: timestamp("last_provider_checked_at", { withTimezone: true }),
     endedAt: timestamp("ended_at", { withTimezone: true }),
     settledMs: integer("settled_ms"),
     reservationExpiresAt: timestamp("reservation_expires_at", { withTimezone: true }).notNull(),
@@ -1573,6 +1590,13 @@ export const skillRuns = pgTable(
     /** The original launch prompt (list rows show an excerpt). */
     prompt: text("prompt").notNull(),
     status: skillRunStatusEnum("status").notNull().default("queued"),
+    runtimeState: skillRunRuntimeStateEnum("runtime_state").notNull().default("healthy"),
+    runtimeDegradedAt: timestamp("runtime_degraded_at", { withTimezone: true }),
+    runtimeDeadlineAt: timestamp("runtime_deadline_at", { withTimezone: true }),
+    runtimeIdleActivationRevision: integer("runtime_idle_activation_revision"),
+    runtimeReconcileLeaseOwner: text("runtime_reconcile_lease_owner"),
+    runtimeReconcileLeaseExpiresAt: timestamp("runtime_reconcile_lease_expires_at", { withTimezone: true }),
+    runtimeReconcileGeneration: integer("runtime_reconcile_generation").notNull().default(0),
     phase: skillRunPhaseEnum("phase").notNull().default("queued"),
     errorCode: text("error_code"),
     userMessage: text("user_message"),

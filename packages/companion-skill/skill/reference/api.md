@@ -784,6 +784,19 @@ cleanup guidance only: show the paths to the user, but do not delete or overwrit
 automatically. If the same slug maps to multiple Companion ids, it remains a blocking retargeting
 conflict.
 
+## Skill Run lifecycle compatibility
+
+Run detail responses may return
+`status: queued | starting | running | frozen | interrupted | error | canceled`.
+New responses also include `runtime_state: healthy | degraded` and nullable
+`runtime_degraded_at`. While degraded, `POST /runs/{id}/prompt` returns HTTP `409` with
+`code: run_runtime_degraded`; retry only after the detail returns to `healthy`.
+
+An `interrupted` run is terminal but may expose `can_reactivate: true` until
+`reactivatable_until`. Reactivation always requires a new explicit prompt. The interrupted prompt
+and canceled queued follow-ups are never replayed automatically; partial transcript output remains
+visible.
+
 ## Update the Companion skill itself
 
 The Companion skill must check whether this local Companion skill is current at startup, before any

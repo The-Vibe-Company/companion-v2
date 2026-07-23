@@ -185,5 +185,8 @@ export function jsonError(c: Context, error: unknown, status = 400): Response {
     return c.json(error.body, 403);
   }
   const message = error instanceof Error ? error.message : String(error);
-  return c.json({ ok: false, error: message }, status as never);
+  const code = error && typeof error === "object" && "code" in error && typeof error.code === "string"
+    ? error.code
+    : undefined;
+  return c.json({ ok: false, error: message, ...(code ? { code } : {}) }, status as never);
 }

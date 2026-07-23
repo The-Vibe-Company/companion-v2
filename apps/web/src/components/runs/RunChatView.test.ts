@@ -216,6 +216,132 @@ describe("RunChatView attachments", () => {
 });
 
 describe("RunChatView follow-up queue", () => {
+  it("refreshes degraded runtime transitions and pauses the composer while reconnecting", async () => {
+    const healthy = {
+      ...runDetail(),
+      status: "running" as const,
+      reactivatable_until: null,
+      can_reactivate: false,
+      runtime_state: "healthy" as const,
+      runtime_degraded_at: null,
+    };
+    const degraded = {
+      ...healthy,
+      runtime_state: "degraded" as const,
+      runtime_degraded_at: "2026-07-16T12:00:00.000Z",
+    };
+    const recovery = deferred<SkillRunDetail>();
+    queryMocks.fetchRun
+      .mockResolvedValueOnce(healthy)
+      .mockResolvedValueOnce(degraded)
+      .mockReturnValueOnce(recovery.promise);
+    const container = await mount();
+
+    await act(async () => {
+      streamListener?.({ type: "status", state: "retry", attempt: null, message: "Reconnecting to the run recorder" });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(container.textContent).toContain("Reconnecting…");
+    expect(container.querySelector<HTMLTextAreaElement>("#run-follow-up")?.disabled).toBe(true);
+
+    await act(async () => {
+      streamListener?.({ type: "status", state: "busy", attempt: null, message: null });
+      streamListener?.({ type: "text.delta", message_id: "message-1", delta: "Recovered" });
+      streamListener?.({ type: "reasoning.delta", part_id: "part-1", delta: "Checking" });
+      await Promise.resolve();
+    });
+    expect(queryMocks.fetchRun).toHaveBeenCalledTimes(3);
+
+    await act(async () => {
+      recovery.resolve(healthy);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(container.textContent).not.toContain("Reconnecting…");
+    expect(container.querySelector<HTMLTextAreaElement>("#run-follow-up")?.disabled).toBe(false);
+  });
+
+  it("hides the composer when an interrupted run cannot reactivate", async () => {
+    queryMocks.fetchRun.mockResolvedValue({
+      ...runDetail(),
+      status: "interrupted",
+      error_code: "sandbox_expired_during_turn",
+      error_message: "The sandbox expired during this turn.",
+      reactivatable_until: null,
+      can_reactivate: false,
+    });
+    const container = await mount();
+
+    expect(container.textContent).toContain("Turn interrupted");
+    expect(container.textContent).toContain("The sandbox can no longer be reactivated.");
+    expect(container.querySelector(".run-composer")).toBeNull();
+  });
+
+  it("keeps runtime refresh ownership isolated when navigating between runs", async () => {
+    const runA = {
+      ...runDetail(),
+      status: "running" as const,
+      reactivatable_until: null,
+      can_reactivate: false,
+      runtime_state: "healthy" as const,
+      runtime_degraded_at: null,
+    };
+    const runB = { ...runA, id: "run-2" };
+    const degradedB = {
+      ...runB,
+      runtime_state: "degraded" as const,
+      runtime_degraded_at: "2026-07-16T12:00:00.000Z",
+    };
+    const staleRunARefresh = deferred<SkillRunDetail>();
+    queryMocks.fetchRun
+      .mockResolvedValueOnce(runA)
+      .mockReturnValueOnce(staleRunARefresh.promise)
+      .mockResolvedValueOnce(runB)
+      .mockResolvedValueOnce(degradedB);
+    const container = await mount();
+
+    await act(async () => {
+      streamListener?.({ type: "status", state: "retry", attempt: null, message: "Reconnecting" });
+      await Promise.resolve();
+    });
+    const runAListener = streamListener;
+    const root = roots.at(-1)!;
+    await act(async () => {
+      root.render(React.createElement(RunChatView, {
+        runId: "run-2",
+        expectedSkillSlug: "incident-summary",
+        onBack: vi.fn(),
+        onRunAgain: vi.fn(),
+      }));
+      await Promise.resolve();
+      await Promise.resolve();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    for (let attempt = 0; attempt < 5 && streamListener === runAListener; attempt += 1) {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+    }
+    expect(streamListener).not.toBe(runAListener);
+    await act(async () => {
+      streamListener?.({ type: "status", state: "retry", attempt: null, message: "Reconnecting" });
+      await Promise.resolve();
+      await Promise.resolve();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(queryMocks.fetchRun).toHaveBeenCalledTimes(4);
+    expect(container.textContent).toContain("Reconnecting…");
+
+    await act(async () => {
+      staleRunARefresh.resolve(runA);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(container.textContent).toContain("Reconnecting…");
+    expect(container.querySelector<HTMLTextAreaElement>("#run-follow-up")?.disabled).toBe(true);
+  });
+
   it("keeps exactly one initial prompt bubble when processing starts", async () => {
     const initial = {
       ...runDetail(),
