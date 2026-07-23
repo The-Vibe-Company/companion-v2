@@ -1168,7 +1168,7 @@ function toRunRow(row: RunRow, skillSlug: string): SkillRunRow {
 
 function canReactivateRun(row: RunRow, now = new Date()): boolean {
   return (
-    (row.status === "frozen" || row.status === "canceled") &&
+    (row.status === "frozen" || row.status === "interrupted" || row.status === "canceled") &&
     row.sandboxCleanedAt === null &&
     row.reactivatableUntil !== null &&
     row.reactivatableUntil.getTime() > now.getTime()
@@ -1346,6 +1346,8 @@ async function toDetail(
     activation_revision: row.activationRevision,
     reactivatable_until: row.reactivatableUntil?.toISOString() ?? null,
     can_reactivate: canReactivateRun(row),
+    runtime_state: row.runtimeState,
+    runtime_degraded_at: row.runtimeDegradedAt?.toISOString() ?? null,
     attachments: attachments.map(toAttachmentRow),
     pending_prompts: promptRows.flatMap((prompt) => {
       if (prompt.status !== "queued" && prompt.status !== "processing") return [];
@@ -2123,7 +2125,9 @@ export async function loadRunMaterializationPlan(input: {
   await assertMember(database, input.actor, input.orgId);
   const row = await loadRunRow(database, input.orgId, input.runId);
   if (!row || row.creatorId !== input.actor.id) throw new RunValidationError("run not found", "run_not_found");
-  if (["frozen", "error", "canceled"].includes(row.status)) throw new RunBusyError("this run is terminal", "run_terminal");
+  if (["frozen", "interrupted", "error", "canceled"].includes(row.status)) {
+    throw new RunBusyError("this run is terminal", "run_terminal");
+  }
   const [skills, attachments] = await Promise.all([
     database
       .select({
@@ -2173,7 +2177,7 @@ export async function loadRunExecutionPlan(input: {
   if (!row || row.creatorId !== input.actor.id) {
     throw new RunValidationError("run not found", "run_not_found");
   }
-  if (["frozen", "error", "canceled"].includes(row.status)) {
+  if (["frozen", "interrupted", "error", "canceled"].includes(row.status)) {
     throw new RunBusyError("this run is terminal", "run_terminal");
   }
   const [skills, attachments, secretInputs, variables, providerInputs] = await Promise.all([

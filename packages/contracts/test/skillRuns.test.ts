@@ -27,7 +27,15 @@ const prewarmId = "3d1bd9d5-fc67-4b5d-93da-b1ece6ca90be";
 
 describe("skill run contracts", () => {
   it("exposes the complete public lifecycle", () => {
-    expect(skillRunStatusSchema.options).toEqual(["queued", "starting", "running", "frozen", "error", "canceled"]);
+    expect(skillRunStatusSchema.options).toEqual([
+      "queued",
+      "starting",
+      "running",
+      "frozen",
+      "interrupted",
+      "error",
+      "canceled",
+    ]);
   });
 
   it("parses an authoritative selection and rejects duplicates", () => {

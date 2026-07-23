@@ -78,6 +78,8 @@ BEGIN
       public.companion_terminalize_revoked_skill_run(uuid, uuid, text, text, boolean),
       public.companion_claim_skill_run_cleanups(text, integer, integer),
       public.companion_complete_skill_run_cleanup(uuid, uuid, text),
+      public.companion_claim_skill_run_runtime_reconciliations(text, integer, integer, text),
+      public.companion_complete_skill_run_runtime_reconciliation(uuid, uuid, text, integer, integer, sandbox_provider_state, timestamp with time zone),
       public.companion_claim_skill_run_prewarms(text, integer, integer),
       public.companion_claim_skill_run_prewarm_cleanups(text, integer, integer),
       public.companion_complete_skill_run_prewarm_cleanup(uuid, uuid, text),

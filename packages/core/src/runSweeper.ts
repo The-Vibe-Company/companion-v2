@@ -32,11 +32,11 @@ export async function sweepRunSandboxes(input: {
     .where(
       and(
         isNull(schema.skillRuns.sandboxCleanedAt),
-        inArray(schema.skillRuns.status, ["frozen", "error", "canceled"]),
+        inArray(schema.skillRuns.status, ["frozen", "interrupted", "error", "canceled"]),
         or(
           eq(schema.skillRuns.status, "error"),
           and(
-            inArray(schema.skillRuns.status, ["frozen", "canceled"]),
+            inArray(schema.skillRuns.status, ["frozen", "interrupted", "canceled"]),
             lte(schema.skillRuns.reactivatableUntil, at),
           ),
         ),
@@ -49,7 +49,7 @@ export async function sweepRunSandboxes(input: {
     .filter(
       (row) =>
         row.sandboxCleanedAt === null &&
-        (row.status === "frozen" || row.status === "error" || row.status === "canceled") &&
+        (row.status === "frozen" || row.status === "interrupted" || row.status === "error" || row.status === "canceled") &&
         (row.status === "error" || (row.reactivatableUntil !== null && row.reactivatableUntil <= at)) &&
         row.updatedAt.getTime() < at.getTime() - graceMs,
     )
