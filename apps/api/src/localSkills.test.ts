@@ -48,7 +48,7 @@ describe("companion skill package + row", () => {
     const pkg = await getCompanionSkillPackage();
     expect(pkg.key).toBe("companion");
     expect(pkg.checksum).toMatch(/^sha256:[0-9a-f]{64}$/);
-    expect(pkg.version).toBe("1.26.3");
+    expect(pkg.version).toBe("1.26.4");
     expect(pkg.sizeBytes).toBeGreaterThan(0);
     expect(pkg.integrity.packageChecksum).toBe(pkg.checksum);
     expect(pkg.integrity.files["SKILL.md"]).toMatch(/^sha256:[0-9a-f]{64}$/);
@@ -78,6 +78,7 @@ describe("companion skill package + row", () => {
       "scripts/install_skill.py",
       "scripts/secrets_runtime.py",
       "scripts/skill_guard.py",
+      "scripts/sync_companion.py",
       "scripts/sync_secrets.py",
       "scripts/tools.json",
     ]);
@@ -183,6 +184,9 @@ describe("companion skill package + row", () => {
 
   it("bundles mandatory self-update and explicit publish placement instructions", async () => {
     const skillMd = await readFile(join(companionSkillDir(), "SKILL.md"), "utf8");
+    const companionManifest = JSON.parse(
+      await readFile(join(companionSkillDir(), "companion.json"), "utf8"),
+    ) as { version: string };
     const apiRef = await readFile(join(companionSkillDir(), "reference", "api.md"), "utf8");
     const checkScript = await readFile(join(companionSkillDir(), "scripts", "check_updates.py"), "utf8");
     const bootstrapScript = await readFile(join(companionSkillDir(), "scripts", "bootstrap.py"), "utf8");
@@ -212,6 +216,8 @@ describe("companion skill package + row", () => {
     expect(skillMd).toContain("no more than 30 days");
     expect(skillMd).toContain("integrity");
     expect(skillMd).toContain("POST /local-skills/companion/installed");
+    expect(skillMd).toContain(`"version":"${companionManifest.version}"`);
+    expect(skillMd).toContain("original preserved at <path>");
     expect(skillMd).toContain("GET /v1/schemas/companion-manifest.v2.schema.json");
     expect(skillMd).toContain("POST /skills/{slug}/install");
     expect(skillMd).toContain("After a successful publish from this Companion skill");

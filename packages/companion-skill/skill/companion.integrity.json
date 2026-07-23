@@ -1,11 +1,11 @@
 {
   "files": {
-    "SKILL.md": "sha256:8d78bdd14a4782d3617193aabb689d24aac2bc4884991076d421d43bbea177e3",
-    "companion.json": "sha256:ddadb20692f55c9284663974ad876062a3679086df5a641b2fd4d59f12cd32cd",
-    "evals/evals.json": "sha256:80d7a08d0bfb1fac389592543ffbb02aad49c52406a574119d638cdc699f0d34",
-    "scripts/bootstrap.py": "sha256:88f835a42ecbe7ba1f5415256900eee28cd3b44fb5f8b78a720894c7d42aa96d",
+    "SKILL.md": "sha256:5f2c3a137645d6bf2b116b13e86350af2c789351a6ddafe558870b07271c7121",
+    "companion.json": "sha256:77e6b0ba39f4338187e5241d6c5e9899634eb826bc0927382a27cdda727f707b",
+    "evals/evals.json": "sha256:d1a0a6b92fd19462fcc048d983ebee05c9b2f316057a3779ac329d709d5a5092",
+    "scripts/bootstrap.py": "sha256:bfb6de8f0ee59d3f7d947212060a83635a5ce1eaa6b172b8dc05e58d9b97b35f",
     "scripts/bootstrap_integrity.py": "sha256:697301a13d7fae907966209507e2636692b276c401e334ee97e4596e7b7b2ebe",
-    "scripts/bootstrap_update.py": "sha256:fe817102a0aac1d9b0e9a0952231f73c3f6ea36ac0ee8b54ed3e5e954850a237",
+    "scripts/bootstrap_update.py": "sha256:6d2ff39c0e0ce5d51af9403cc408d1065a2c78c5e2f1a71ec8906b2719c70547",
     "scripts/check_updates.py": "sha256:c7da8735afd89e4c47764b64907ff3f295ae0f98f9c551cf77eb083c6bdf1116",
     "scripts/companion-agent-client.mjs": "sha256:383a22f95f782d6f33088ae4841348e5bbdeeade3426bef1e20a3bb612af6f83",
     "scripts/companion_lib.py": "sha256:e47e2e1c323b360feaab4e70246ca3cfb8e394e602976c99067129a88760d3e1",
@@ -13,9 +13,10 @@
     "scripts/install_skill.py": "sha256:dc3c26fbca32a37a22235b5def477d1ec5828dfa9e5536029f5be8632f0bddb1",
     "scripts/secrets_runtime.py": "sha256:bab6a780b2508248ed632feb15720682726baca1e75e34fe93e2157f430a6d6c",
     "scripts/skill_guard.py": "sha256:27c9d27da0f7bbe39aeeb9f796f64671a8ac119b6be2f1295c92590cd8998a70",
+    "scripts/sync_companion.py": "sha256:6338283999c982750e0226104aa862d1037e492e17170bb182af6d1173ca9b7e",
     "scripts/sync_secrets.py": "sha256:7059dec3ccf12208f046251fc5d4046187e4423d6f59e5464b0e8c7e9718b83c",
     "scripts/tools.json": "sha256:65ba85df0cbfaf511281804efb2e00543433dc5d632259589b271c32c50757bf"
   },
   "schemaVersion": 1,
-  "version": "1.26.3"
+  "version": "1.26.4"
 }
