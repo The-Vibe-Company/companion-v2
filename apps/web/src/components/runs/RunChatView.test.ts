@@ -11,6 +11,7 @@ import { RunChatView } from "./RunChatView";
 const queryMocks = vi.hoisted(() => ({
   cancelRun: vi.fn(),
   cancelRunPrompt: vi.fn(),
+  createRunArtifactPreview: vi.fn(),
   fetchRun: vi.fn(),
   runAttachmentHref: vi.fn((runId: string, attachmentId: string, download = false) => `/v1/runs/${runId}/attachments/${attachmentId}${download ? "?download=1" : ""}`),
   runArtifactHref: vi.fn((runId: string, artifactId: string, download = false) => `/v1/runs/${runId}/artifacts/${artifactId}${download ? "?download=1" : ""}`),
@@ -110,6 +111,11 @@ beforeEach(() => {
     return new Response(body, { status: 200 });
   }));
   queryMocks.fetchRun.mockResolvedValue(runDetail());
+  queryMocks.createRunArtifactPreview.mockResolvedValue({
+    url: "about:blank#https://preview.example.test/v1/run-previews/ticket/artifacts/index.html",
+    expires_at: "2099-07-16T12:15:00.000Z",
+    lifetime_ms: 15 * 60_000,
+  });
   queryMocks.cancelRunPrompt.mockResolvedValue({
     prompt_id: "11111111-1111-4111-8111-111111111111",
     status: "canceled",
@@ -862,6 +868,43 @@ describe("RunChatView generated files", () => {
     expect(container.querySelector(".run-canvas-new")?.textContent).toContain("+1 new");
   });
 
+  it("auto-opens the HTML entry point for a multi-file site", async () => {
+    const baseArtifact = {
+      id: "11111111-1111-4111-8111-111111111121",
+      file_name: "style.css",
+      path: "artifacts/site/style.css",
+      content_type: "text/css; charset=utf-8",
+      byte_size: 24,
+      previewable: false,
+      preview_kind: null,
+      expires_at: "2099-07-16T12:00:00.000Z",
+      updated_at: "2026-07-16T12:00:02.000Z",
+    };
+    const htmlArtifact = {
+      ...baseArtifact,
+      id: "11111111-1111-4111-8111-111111111122",
+      file_name: "index.html",
+      path: "artifacts/site/index.html",
+      content_type: "text/html; charset=utf-8",
+      previewable: true,
+      preview_kind: "html" as const,
+      updated_at: "2026-07-16T12:00:01.000Z",
+    };
+    queryMocks.fetchRun.mockResolvedValue({
+      ...runDetail(),
+      artifacts: [htmlArtifact, baseArtifact],
+    });
+    const container = await mount();
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+
+    expect(container.querySelector(".run-canvas-file.is-selected")?.textContent).toContain("index.html");
+    expect(queryMocks.createRunArtifactPreview).toHaveBeenCalledWith(
+      "run-1",
+      htmlArtifact.id,
+      expect.any(AbortSignal),
+    );
+  });
+
   it("renders safe raster previews and download-only file cards", async () => {
     queryMocks.fetchRun.mockResolvedValue({
       ...runDetail(),
@@ -926,6 +969,78 @@ describe("RunChatView generated files", () => {
     await act(async () => { await new Promise((resolve) => requestAnimationFrame(resolve)); });
     expect(URL.revokeObjectURL).toHaveBeenCalledWith("about:blank#pdf");
     expect(document.activeElement).toBe(button(container, "Files · 1"));
+  });
+
+  it("mints an isolated interactive HTML preview and can retry ticket failures", async () => {
+    queryMocks.createRunArtifactPreview
+      .mockRejectedValueOnce(new Error("HTML artifact previews are not configured"))
+      .mockResolvedValueOnce({
+        url: "about:blank#https://preview.example.test/v1/run-previews/fresh/artifacts/site/index.html",
+        expires_at: "2099-07-16T12:15:00.000Z",
+        lifetime_ms: 15 * 60_000,
+      });
+    queryMocks.fetchRun.mockResolvedValue({
+      ...runDetail(),
+      artifacts: [{
+        id: "11111111-1111-4111-8111-111111111105",
+        file_name: "index.html",
+        path: "artifacts/site/index.html",
+        content_type: "text/html; charset=utf-8",
+        byte_size: 256,
+        previewable: true,
+        preview_kind: "html",
+        expires_at: "2099-07-16T12:00:00.000Z",
+      }],
+    });
+    const container = await mount();
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(container.textContent).toContain("HTML artifact previews are not configured");
+
+    await act(async () => { button(container, "Retry").click(); await Promise.resolve(); await Promise.resolve(); });
+    const frame = container.querySelector<HTMLIFrameElement>(".run-canvas-html");
+    expect(frame?.src).toContain("preview.example.test/v1/run-previews/fresh/artifacts/site/index.html");
+    expect(frame?.getAttribute("sandbox")).toBe("allow-scripts");
+    expect(frame?.getAttribute("sandbox")).not.toContain("allow-same-origin");
+    expect(frame?.referrerPolicy).toBe("no-referrer");
+    expect(frame?.tabIndex).toBe(0);
+    expect(queryMocks.createRunArtifactPreview).toHaveBeenCalledTimes(2);
+  });
+
+  it("requires an explicit retry after an HTML preview ticket expires", async () => {
+    queryMocks.createRunArtifactPreview
+      .mockResolvedValueOnce({
+        url: "about:blank#preview-ticket-short",
+        expires_at: "2099-07-16T12:15:00.000Z",
+        lifetime_ms: 40,
+      })
+      .mockResolvedValueOnce({
+        url: "about:blank#preview-ticket-renewed",
+        expires_at: "2099-07-16T12:15:00.000Z",
+        lifetime_ms: 15 * 60_000,
+      });
+    queryMocks.fetchRun.mockResolvedValue({
+      ...runDetail(),
+      artifacts: [{
+        id: "11111111-1111-4111-8111-111111111106",
+        file_name: "index.html",
+        path: "artifacts/site/index.html",
+        content_type: "text/html; charset=utf-8",
+        byte_size: 256,
+        previewable: true,
+        preview_kind: "html",
+        expires_at: "2099-07-16T12:00:00.000Z",
+      }],
+    });
+    const container = await mount();
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+
+    await act(async () => { await new Promise((resolve) => window.setTimeout(resolve, 60)); });
+    expect(container.textContent).toContain("Preview session expired");
+    expect(queryMocks.createRunArtifactPreview).toHaveBeenCalledTimes(1);
+
+    await act(async () => { button(container, "Retry").click(); await Promise.resolve(); await Promise.resolve(); });
+    expect(container.querySelector<HTMLIFrameElement>(".run-canvas-html")?.src).toContain("preview-ticket-renewed");
+    expect(queryMocks.createRunArtifactPreview).toHaveBeenCalledTimes(2);
   });
 
   it("blocks remote Markdown images and reloads direct media on same-path replacement", async () => {

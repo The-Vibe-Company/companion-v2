@@ -16,7 +16,8 @@ import type {
   SkillRunArtifactRow,
   SkillRunAttachmentRow,
 } from "@companion/contracts";
-import { runArtifactHref, runAttachmentHref } from "@/lib/runQueries";
+import { RUN_ARTIFACT_PREVIEW_TTL_MS } from "@companion/contracts";
+import { createRunArtifactPreview, runArtifactHref, runAttachmentHref } from "@/lib/runQueries";
 import { Icon } from "../Icon";
 import { langForFile } from "../skills/fileFormat";
 import { CodeView } from "../skills/markdown";
@@ -50,6 +51,7 @@ type PreviewState =
   | { kind: "text"; text: string }
   | { kind: "blob"; url: string }
   | { kind: "direct"; url: string }
+  | { kind: "html"; url: string; expiresAt: string; lifetimeMs: number }
   | { kind: "xlsx"; bytes: ArrayBuffer }
   | { kind: "expired" | "unsupported" | "too_large"; message: string }
   | { kind: "error"; message: string };
@@ -246,7 +248,7 @@ function CanvasStatus({ icon, message, spin = false, children }: { icon: string;
 function TreeFile({ file, selected, onSelect }: { file: CanvasFile; selected: boolean; onSelect: () => void }) {
   return (
     <button type="button" className={`run-canvas-file${selected ? " is-selected" : ""}`} aria-current={selected ? "page" : undefined} onClick={onSelect} title={file.path}>
-      <Icon name={file.previewKind === "image" ? "image" : file.previewKind === "markdown" ? "file-text" : "file"} size={14} />
+      <Icon name={file.previewKind === "image" ? "image" : file.previewKind === "markdown" || file.previewKind === "html" ? "file-text" : "file"} size={14} />
       <span>{file.name}</span>
       <small>{formatRunFileBytes(file.byteSize)}</small>
     </button>
@@ -265,7 +267,7 @@ function TreeFolder({ node, selectedKey, onSelect }: { node: TreeNode; selectedK
   );
 }
 
-function previewHref(runId: string, file: CanvasFile, download = false): string {
+function previewHref(runId: string, file: Pick<CanvasFile, "id" | "source">, download = false): string {
   return file.source === "artifact"
     ? runArtifactHref(runId, file.id, download)
     : runAttachmentHref(runId, file.id, download);
@@ -354,6 +356,13 @@ export function RunArtifactCanvas({
     })),
   ], [artifacts, attachments]);
   const selected = files.find((file) => file.key === selectedKey) ?? null;
+  const selectedId = selected?.id ?? null;
+  const selectedSource = selected?.source ?? null;
+  const selectedPreviewContentType = selected?.previewContentType ?? null;
+  const selectedByteSize = selected?.byteSize ?? null;
+  const selectedPreviewKind = selected?.previewKind ?? null;
+  const selectedExpiresAt = selected?.expiresAt ?? null;
+  const selectedUpdatedAt = selected?.updatedAt ?? null;
   const generatedTree = useMemo(() => buildGeneratedTree(files.filter((file) => file.source === "artifact")), [files]);
   const uploadedGroups = useMemo(() => {
     const groups = new Map<number, CanvasFile[]>();
@@ -395,48 +404,69 @@ export function RunArtifactCanvas({
         setPreview({ kind: "idle" });
         return;
       }
-      if (!selected) {
+      if (!selectedId || !selectedSource) {
         setPreview({ kind: "idle" });
         return;
       }
-      if (selected.expiresAt && Date.parse(selected.expiresAt) <= Date.now()) {
+      const target = { id: selectedId, source: selectedSource };
+      if (selectedExpiresAt && Date.parse(selectedExpiresAt) <= Date.now()) {
         setPreview({ kind: "expired", message: "This generated file has expired." });
         return;
       }
-      if (!selected.previewKind) {
+      if (!selectedPreviewKind) {
         setPreview({ kind: "unsupported", message: "Preview is not supported for this format." });
         return;
       }
-      if (["text", "markdown", "csv"].includes(selected.previewKind) && selected.byteSize > TEXT_PREVIEW_LIMIT) {
+      if (
+        ["text", "markdown", "csv"].includes(selectedPreviewKind)
+        && selectedByteSize !== null
+        && selectedByteSize > TEXT_PREVIEW_LIMIT
+      ) {
         setPreview({ kind: "too_large", message: "This preview is larger than the 1 MB display limit." });
         return;
       }
-      if (selected.previewKind === "xlsx" && selected.byteSize > XLSX_PREVIEW_LIMIT) {
+      if (selectedPreviewKind === "xlsx" && selectedByteSize !== null && selectedByteSize > XLSX_PREVIEW_LIMIT) {
         setPreview({ kind: "too_large", message: "This workbook is larger than the 10 MB display limit." });
         return;
       }
-      if (selected.previewKind === "image" || selected.previewKind === "video") {
-        const generation = selected.updatedAt ?? selected.expiresAt ?? String(selected.byteSize);
-        setPreview({ kind: "direct", url: `${previewHref(runId, selected)}?v=${encodeURIComponent(generation)}` });
+      if (selectedPreviewKind === "image" || selectedPreviewKind === "video") {
+        const generation = selectedUpdatedAt ?? selectedExpiresAt ?? String(selectedByteSize);
+        setPreview({ kind: "direct", url: `${previewHref(runId, target)}?v=${encodeURIComponent(generation)}` });
+        return;
+      }
+      if (selectedPreviewKind === "html" && selectedSource === "artifact") {
+        setPreview({ kind: "loading" });
+        try {
+          const issued = await createRunArtifactPreview(runId, selectedId, controller.signal);
+          setPreview({
+            kind: "html",
+            url: issued.url,
+            expiresAt: issued.expires_at,
+            lifetimeMs: issued.lifetime_ms,
+          });
+        } catch (error) {
+          if (controller.signal.aborted) return;
+          setPreview({ kind: "error", message: error instanceof Error ? error.message : "HTML preview unavailable." });
+        }
         return;
       }
       setPreview({ kind: "loading" });
       try {
-        const response = await fetch(previewHref(runId, selected), { signal: controller.signal });
+        const response = await fetch(previewHref(runId, target), { signal: controller.signal });
         if (response.status === 404) {
           setPreview({ kind: "expired", message: "This file is no longer available." });
           return;
         }
         if (!response.ok) throw new Error(`Preview failed (${response.status}).`);
         const bytes = await response.arrayBuffer();
-        if (selected.previewKind === "xlsx") {
+        if (selectedPreviewKind === "xlsx") {
           setPreview({ kind: "xlsx", bytes });
-        } else if (["text", "markdown", "csv"].includes(selected.previewKind)) {
+        } else if (["text", "markdown", "csv"].includes(selectedPreviewKind)) {
           setPreview({ kind: "text", text: new TextDecoder("utf-8", { fatal: true }).decode(bytes) });
         } else {
-          const safeContentType = selected.previewKind === "pdf"
+          const safeContentType = selectedPreviewKind === "pdf"
             ? "application/pdf"
-            : selected.previewContentType ?? "application/octet-stream";
+            : selectedPreviewContentType ?? "application/octet-stream";
           blobUrl = URL.createObjectURL(new Blob([bytes], { type: safeContentType }));
           setPreview({ kind: "blob", url: blobUrl });
         }
@@ -450,7 +480,38 @@ export function RunArtifactCanvas({
       controller.abort();
       if (blobUrl) URL.revokeObjectURL(blobUrl);
     };
-  }, [clock, open, retry, runId, selected]);
+  }, [
+    clock,
+    open,
+    retry,
+    runId,
+    selectedByteSize,
+    selectedExpiresAt,
+    selectedId,
+    selectedPreviewContentType,
+    selectedPreviewKind,
+    selectedSource,
+    selectedUpdatedAt,
+  ]);
+
+  useEffect(() => {
+    if (preview.kind !== "html") return;
+    if (
+      !Number.isFinite(preview.lifetimeMs)
+      || preview.lifetimeMs <= 0
+      || preview.lifetimeMs > RUN_ARTIFACT_PREVIEW_TTL_MS
+    ) {
+      setPreview({ kind: "error", message: "Preview session expired. Retry to continue." });
+      return;
+    }
+    const ticketUrl = preview.url;
+    const timer = window.setTimeout(() => {
+      setPreview((current) => current.kind === "html" && current.url === ticketUrl
+        ? { kind: "error", message: "Preview session expired. Retry to continue." }
+        : current);
+    }, preview.lifetimeMs);
+    return () => window.clearTimeout(timer);
+  }, [preview]);
 
   const resize = (event: ReactPointerEvent<HTMLDivElement>) => {
     event.currentTarget.setPointerCapture(event.pointerId);
@@ -495,7 +556,7 @@ export function RunArtifactCanvas({
           return;
         }
         if (event.key !== "Tab") return;
-        const focusable = [...event.currentTarget.querySelectorAll<HTMLElement>('button:not([disabled]), a[href], summary, [tabindex]:not([tabindex="-1"])')]
+        const focusable = [...event.currentTarget.querySelectorAll<HTMLElement>('button:not([disabled]), a[href], summary, iframe, [tabindex]:not([tabindex="-1"])')]
           .filter((element) => element.offsetParent !== null);
         if (focusable.length === 0) return;
         const first = focusable[0]!;
@@ -587,6 +648,16 @@ export function RunArtifactCanvas({
                 {preview.kind === "direct" && selected.previewKind === "image" && <div className="run-canvas-media"><img src={preview.url} alt={selected.name} /></div>}
                 {preview.kind === "direct" && selected.previewKind === "video" && <div className="run-canvas-media"><video src={preview.url} controls preload="metadata" /></div>}
                 {preview.kind === "blob" && selected.previewKind === "pdf" && <iframe className="run-canvas-pdf" src={preview.url} title={selected.name} sandbox="" />}
+                {preview.kind === "html" && selected.previewKind === "html" && (
+                  <iframe
+                    className="run-canvas-html"
+                    src={preview.url}
+                    title={selected.name}
+                    sandbox="allow-scripts"
+                    referrerPolicy="no-referrer"
+                    tabIndex={0}
+                  />
+                )}
               </div>
             </>
           )}

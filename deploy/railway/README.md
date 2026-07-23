@@ -69,6 +69,7 @@ DATABASE_MIGRATION_URL=${{Postgres.DATABASE_URL}}
 DATABASE_RUNTIME_ROLE=companion_runtime
 COMPANION_WEB_URL=https://${{web.RAILWAY_PUBLIC_DOMAIN}}
 COMPANION_API_URL=https://${{web.RAILWAY_PUBLIC_DOMAIN}}
+COMPANION_PREVIEW_URL=https://preview.your-domain.example
 BETTER_AUTH_URL=https://${{web.RAILWAY_PUBLIC_DOMAIN}}
 BETTER_AUTH_COOKIE_PREFIX=companion-production
 BETTER_AUTH_SECRET=<random secret of at least 32 bytes>
@@ -116,6 +117,11 @@ values. Generate the secret once, store both as fixed Railway variables, and kee
 all API replicas and replacements. Regenerating the secret or renaming the prefix invalidates every
 existing browser session. Keep `COMPANION_WEB_URL`, `COMPANION_API_URL`, and `BETTER_AUTH_URL` on the
 same canonical public origin; Companion redirects its matching `www`/apex alias before auth begins.
+Attach `COMPANION_PREVIEW_URL` as a distinct HTTPS custom domain on the `api` service and preserve its
+public `Host` header when proxying to Node (TLS may terminate at the proxy). That hostname
+serves only isolated artifact-preview routes; all control-plane routes return `404`. If the variable
+is absent, malformed, or reuses the web/API hostname, HTML artifacts remain downloadable but their
+interactive preview is disabled.
 
 `COMPANION_ENTITLEMENTS_MODE=observe` is the safe first production rollout. Enable webhooks, then Checkout, then use
 `pilot` with explicit organization ids before switching to `enforce` globally.

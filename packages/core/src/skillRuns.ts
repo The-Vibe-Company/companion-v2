@@ -232,6 +232,9 @@ export function composeRunPrompt(input: {
   notes.push(
     "Place every file you want to deliver to the user in ./artifacts/. This instruction takes priority over a skill's default output directory.",
   );
+  notes.push(
+    "For an HTML deliverable, keep every linked script, stylesheet, image, font, and data file under ./artifacts/ and use relative URLs so the interactive preview can load the complete page.",
+  );
   if (input.attachments.length > 0) {
     const mountedFiles = input.attachments
       .map(
@@ -1974,21 +1977,51 @@ export async function getRunAttachment(input: {
   };
 }
 
+type RunArtifactDownload = {
+  fileName: string;
+  contentType: string;
+  byteSize: number;
+  storageKey: string;
+  previewable: boolean;
+  previewKind: RunFilePreviewKind | null;
+  path: string;
+  /** Opaque row generation used to fence metadata from a concurrently replaced S3 object. */
+  generation: string;
+};
+
+function toRunArtifactDownload(
+  artifact: Awaited<ReturnType<typeof loadArtifacts>>[number],
+): RunArtifactDownload {
+  return {
+    fileName: artifact.fileName,
+    contentType: artifact.contentType,
+    byteSize: artifact.byteSize,
+    storageKey: artifact.storageKey,
+    previewable: artifact.previewable,
+    previewKind: artifact.previewKind,
+    path: artifact.path,
+    generation: [
+      artifact.id,
+      artifact.path,
+      artifact.fileName,
+      artifact.contentType,
+      artifact.byteSize,
+      artifact.previewable,
+      artifact.previewKind ?? "",
+      artifact.storageKey,
+      artifact.expiresAt.toISOString(),
+      artifact.updatedAt.toISOString(),
+    ].join("\0"),
+  };
+}
+
 export async function getRunArtifact(input: {
   actor: ActorContext;
   orgId: string;
   runId: string;
   artifactId: string;
   database?: Db;
-}): Promise<{
-  fileName: string;
-  contentType: string;
-  byteSize: number;
-  storageKey: string;
-  previewable: boolean;
-  /** Opaque row generation used to fence metadata from a concurrently replaced S3 object. */
-  generation: string;
-}> {
+}): Promise<RunArtifactDownload> {
   const database = input.database ?? db;
   await assertMember(database, input.actor, input.orgId);
   const row = await loadRunRow(database, input.orgId, input.runId);
@@ -1998,24 +2031,27 @@ export async function getRunArtifact(input: {
   const artifacts = await loadArtifacts(database, input.orgId, input.runId);
   const artifact = artifacts.find((candidate) => candidate.id === input.artifactId);
   if (!artifact) throw new RunValidationError("artifact not found", "artifact_not_found");
-  return {
-    fileName: artifact.fileName,
-    contentType: artifact.contentType,
-    byteSize: artifact.byteSize,
-    storageKey: artifact.storageKey,
-    previewable: artifact.previewable,
-    generation: [
-      artifact.id,
-      artifact.path,
-      artifact.fileName,
-      artifact.contentType,
-      artifact.byteSize,
-      artifact.previewable,
-      artifact.storageKey,
-      artifact.expiresAt.toISOString(),
-      artifact.updatedAt.toISOString(),
-    ].join("\0"),
-  };
+  return toRunArtifactDownload(artifact);
+}
+
+/** Resolve one ready artifact by its exact normalized run-relative path for an HTML preview site. */
+export async function getRunArtifactByPath(input: {
+  actor: ActorContext;
+  orgId: string;
+  runId: string;
+  path: string;
+  database?: Db;
+}): Promise<RunArtifactDownload> {
+  const database = input.database ?? db;
+  await assertMember(database, input.actor, input.orgId);
+  const row = await loadRunRow(database, input.orgId, input.runId);
+  if (!row || !canAccessRun(input.actor.id, row)) {
+    throw new RunValidationError("run not found", "run_not_found");
+  }
+  const artifacts = await loadArtifacts(database, input.orgId, input.runId);
+  const artifact = artifacts.find((candidate) => candidate.path === input.path);
+  if (!artifact) throw new RunValidationError("artifact not found", "artifact_not_found");
+  return toRunArtifactDownload(artifact);
 }
 
 /** Creator-scoped metadata for files belonging to one durable prompt; consumed by the worker. */

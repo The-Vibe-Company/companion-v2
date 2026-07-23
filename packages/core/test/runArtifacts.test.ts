@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { detectRunArtifactType, runArtifactId } from "../src/runArtifacts";
+import { detectRunArtifactType, detectRunFileType, runArtifactId } from "../src/runArtifacts";
 
 describe("run artifact content detection", () => {
   it("previews only binary-signature validated browser media", () => {
@@ -10,6 +10,8 @@ describe("run artifact content detection", () => {
     expect(detectRunArtifactType("drawing.svg", Buffer.from("<svg/>")))
       .toEqual({ contentType: "image/svg+xml", previewable: false, previewContentType: null, previewKind: null });
     expect(detectRunArtifactType("page.html", Buffer.from("<html/>")))
+      .toEqual({ contentType: "text/html; charset=utf-8", previewable: true, previewContentType: null, previewKind: "html" });
+    expect(detectRunFileType("page.html", Buffer.from("<html/>")))
       .toEqual({ contentType: "text/html; charset=utf-8", previewable: false, previewContentType: null, previewKind: null });
 
     const signedImages: Array<[string, Buffer, string]> = [
@@ -47,6 +49,28 @@ describe("run artifact content detection", () => {
   });
 
   it("allows only verified UTF-8 text, PDF, and XLSX previews", () => {
+    expect(detectRunArtifactType("index.htm", Buffer.from("<!doctype html><script src=\"./app.js\"></script>")))
+      .toMatchObject({ contentType: "text/html; charset=utf-8", previewKind: "html", previewable: true });
+    expect(detectRunArtifactType("bad.html", Buffer.from([0xc3, 0x28])))
+      .toMatchObject({ previewKind: null, previewable: false });
+    expect(detectRunArtifactType("app.js", Buffer.from("document.body.dataset.ready = 'yes'")))
+      .toMatchObject({ contentType: "text/javascript; charset=utf-8", previewKind: null, previewable: false });
+    expect(detectRunArtifactType("app.css", Buffer.from("body { color: red }")))
+      .toMatchObject({ contentType: "text/css; charset=utf-8", previewKind: null, previewable: false });
+    const webResourceTypes = [
+      ["module.mjs", "text/javascript; charset=utf-8"],
+      ["data.json", "application/json"],
+      ["drawing.svg", "image/svg+xml"],
+      ["favicon.ico", "image/x-icon"],
+      ["font.woff", "font/woff"],
+      ["font.woff2", "font/woff2"],
+      ["font.ttf", "font/ttf"],
+      ["font.otf", "font/otf"],
+    ] as const;
+    for (const [path, contentType] of webResourceTypes) {
+      expect(detectRunArtifactType(path, Buffer.from("resource")))
+        .toMatchObject({ contentType });
+    }
     expect(detectRunArtifactType("notes.md", Buffer.from("# Safe\n"))).toMatchObject({ previewKind: "markdown", previewable: true });
     expect(detectRunArtifactType("data.csv", Buffer.from("a,b\n1,2\n"))).toMatchObject({ previewKind: "csv", previewable: true });
     expect(detectRunArtifactType("bad.txt", Buffer.from([0xc3, 0x28]))).toMatchObject({ previewKind: null, previewable: false });

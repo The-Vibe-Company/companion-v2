@@ -6,9 +6,11 @@ import {
   createRunConfigurationInputSchema,
   launchRunFieldsSchema,
   runChatEventSchema,
+  runArtifactPreviewTicketSchema,
   runConfigurationSchema,
   runInputSelectionSchema,
   runInputSnapshotSchema,
+  runFilePreviewKindSchema,
   runOptionsSchema,
   runPromptResponseSchema,
   skillRunDetailSchema,
@@ -26,6 +28,20 @@ const providerConnectionId = "f7a3b3fa-2d55-4c59-bf70-6cf2048df48f";
 const prewarmId = "3d1bd9d5-fc67-4b5d-93da-b1ece6ca90be";
 
 describe("skill run contracts", () => {
+  it("exposes HTML as an isolated artifact renderer", () => {
+    expect(runFilePreviewKindSchema.options).toEqual([
+      "text", "markdown", "csv", "html", "image", "video", "pdf", "xlsx",
+    ]);
+  });
+
+  it("validates short browser-only artifact preview tickets", () => {
+    expect(runArtifactPreviewTicketSchema.parse({
+      url: "https://preview.example.test/v1/run-previews/ticket/artifacts/index.html",
+      expires_at: "2026-07-22T12:15:00.000Z",
+    }).url).toContain("preview.example.test");
+    expect(() => runArtifactPreviewTicketSchema.parse({ url: "/relative", expires_at: "never" })).toThrow();
+  });
+
   it("exposes the complete public lifecycle", () => {
     expect(skillRunStatusSchema.options).toEqual([
       "queued",

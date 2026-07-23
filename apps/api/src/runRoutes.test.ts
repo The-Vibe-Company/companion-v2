@@ -45,6 +45,7 @@ const serviceMocks = vi.hoisted(() => ({
   listRunEvents: vi.fn(),
   getRunAttachment: vi.fn(),
   getRunArtifact: vi.fn(),
+  getRunArtifactByPath: vi.fn(),
   detectRunFileType: vi.fn((_path: string, data: Buffer) => ({
     contentType: data.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
       ? "image/png"
@@ -116,6 +117,7 @@ const catalogMocks = vi.hoisted(() => ({
 vi.mock("@hono/node-server", () => ({ serve: vi.fn() }));
 vi.mock("@companion/auth", () => ({
   auth: { api: { getSession: authMocks.getSession }, handler: authMocks.handler, $Infer: {} },
+  getBetterAuthSecret: () => "run-preview-test-secret-that-is-long-enough",
   registerAgentCapabilityExecutor: vi.fn(() => () => undefined),
 }));
 vi.mock("@companion/core/services", () => serviceMocks);
@@ -160,9 +162,22 @@ beforeEach(() => {
   vi.clearAllMocks();
   authMocks.getSession.mockResolvedValue(null);
   delete process.env.COMPANION_RUN_PREWARM_ENABLED;
+  delete process.env.COMPANION_PREVIEW_URL;
 });
 
 describe("session-only RunSkill routes", () => {
+  it("rejects opaque-origin control-plane mutations before session attachment", async () => {
+    signIn();
+    const response = await app.request("/v1/runs/run-1/cancel", {
+      method: "POST",
+      headers: { Origin: "null" },
+    });
+
+    expect(response.status).toBe(403);
+    expect(authMocks.getSession).not.toHaveBeenCalled();
+    expect(serviceMocks.requestRunCancellation).not.toHaveBeenCalled();
+  });
+
   it("creates, heartbeats and cancels creator-private prewarms without exposing provider state", async () => {
     signIn();
     const prewarm = {
@@ -451,6 +466,123 @@ describe("session-only RunSkill routes", () => {
 
     const download = await app.request("/v1/runs/run-1/artifacts/artifact-1?download=1");
     expect(download.headers.get("content-disposition")).toBe('attachment; filename="cat.png"');
+  });
+
+  it("serves a complete HTML artifact site only through a short dedicated-origin ticket", async () => {
+    process.env.COMPANION_WEB_URL = "https://app.example.test";
+    process.env.COMPANION_API_URL = "https://app.example.test";
+    process.env.COMPANION_PREVIEW_URL = "https://preview.example.test";
+    signIn();
+    serviceMocks.getRunArtifact.mockResolvedValue({
+      fileName: "index.html",
+      path: "artifacts/site/index.html",
+      contentType: "text/html; charset=utf-8",
+      byteSize: 8,
+      storageKey: "org/run-artifacts/run/index",
+      previewable: true,
+      previewKind: "html",
+      generation: "generation-1",
+    });
+
+    const issued = await app.request("https://app.example.test/v1/runs/run-1/artifacts/artifact-html/preview", {
+      method: "POST",
+    });
+    expect(issued.status).toBe(200);
+    const capability = await issued.json() as { url: string; expires_at: string };
+    expect(capability.url).toMatch(/^https:\/\/preview\.example\.test\/v1\/run-previews\/[^/]+\/artifacts\/site\/index\.html$/);
+    expect(Date.parse(capability.expires_at)).toBeGreaterThan(Date.now());
+
+    serviceMocks.getRunArtifactByPath.mockResolvedValue({
+      fileName: "index.html",
+      path: "artifacts/site/index.html",
+      contentType: "text/html; charset=utf-8",
+      byteSize: 8,
+      storageKey: "org/run-artifacts/run/index",
+      previewable: true,
+      previewKind: "html",
+      generation: "generation-1",
+    });
+    authMocks.getSession.mockClear();
+    const preview = await app.request(capability.url);
+    expect(serviceMocks.getRunArtifactByPath).toHaveBeenCalled();
+    expect(preview.status).toBe(200);
+    expect(preview.headers.get("content-type")).toBe("text/html; charset=utf-8");
+    expect(preview.headers.get("content-disposition")).toBe('inline; filename="index.html"');
+    expect(preview.headers.get("access-control-allow-origin")).toBe("*");
+    expect(preview.headers.get("cross-origin-resource-policy")).toBe("cross-origin");
+    expect(preview.headers.get("referrer-policy")).toBe("no-referrer");
+    expect(preview.headers.get("cache-control")).toBe("private, no-store");
+    expect(preview.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(preview.headers.get("set-cookie")).toBeNull();
+    expect(preview.headers.get("content-security-policy")).toContain("sandbox allow-scripts");
+    expect(preview.headers.get("content-security-policy")).toContain("connect-src 'self' http: https:");
+    expect(preview.headers.get("content-security-policy")).toContain("frame-ancestors https://app.example.test");
+    for (let index = 0; index < 9; index += 1) {
+      const head = await app.request(capability.url, { method: "HEAD" });
+      expect(head.status).toBe(200);
+      expect(head.body).toBeNull();
+    }
+    expect(authMocks.getSession).not.toHaveBeenCalled();
+    expect(serviceMocks.getRunArtifactByPath).toHaveBeenCalledWith(expect.objectContaining({
+      orgId: "00000000-0000-4000-8000-000000000010",
+      runId: "run-1",
+      path: "artifacts/site/index.html",
+      actor: expect.objectContaining({ id: "run-user" }),
+    }));
+
+    serviceMocks.getRunArtifactByPath.mockResolvedValue({
+      fileName: "app.js",
+      path: "artifacts/site/assets/app.js",
+      contentType: "text/javascript; charset=utf-8",
+      byteSize: 8,
+      storageKey: "org/run-artifacts/run/app-js",
+      previewable: false,
+      previewKind: null,
+      generation: "generation-1",
+    });
+    const relativeScript = await app.request(new URL("./assets/app.js", capability.url));
+    expect(relativeScript.status).toBe(200);
+    expect(relativeScript.headers.get("content-type")).toBe("text/javascript; charset=utf-8");
+    expect(serviceMocks.getRunArtifactByPath).toHaveBeenLastCalledWith(expect.objectContaining({
+      runId: "run-1",
+      path: "artifacts/site/assets/app.js",
+    }));
+
+    const preflight = await app.request(capability.url, {
+      method: "OPTIONS",
+      headers: {
+        Origin: "null",
+        "Access-Control-Request-Method": "GET",
+        "Access-Control-Request-Headers": "Range",
+      },
+    });
+    expect(preflight.status).toBe(204);
+    expect(preflight.headers.get("access-control-allow-origin")).toBe("*");
+    expect(preflight.headers.get("access-control-allow-methods")).toBe("GET, HEAD, OPTIONS");
+    expect(authMocks.getSession).not.toHaveBeenCalled();
+
+    serviceMocks.getRunArtifactByPath.mockRejectedValueOnce(new Error("membership revoked"));
+    expect((await app.request(capability.url)).status).toBe(404);
+
+    expect((await app.request(capability.url.replace("/v1/run-previews/", "/v1/run-previews/x"))).status).toBe(404);
+    expect((await app.request("https://preview.example.test/health")).status).toBe(404);
+    expect((await app.request(capability.url.replace("preview.example.test", "app.example.test"))).status).toBe(404);
+  });
+
+  it("keeps HTML downloads available when the isolated preview origin is not configured", async () => {
+    signIn();
+    serviceMocks.getRunArtifact.mockResolvedValue({
+      fileName: "report.html",
+      path: "artifacts/report.html",
+      contentType: "text/html; charset=utf-8",
+      storageKey: "org/run-artifacts/run/report",
+      previewable: true,
+      previewKind: "html",
+    });
+    const unavailable = await app.request("/v1/runs/run-1/artifacts/artifact-html/preview", { method: "POST" });
+    expect(unavailable.status).toBe(503);
+    const download = await app.request("/v1/runs/run-1/artifacts/artifact-html");
+    expect(download.headers.get("content-disposition")).toBe('attachment; filename="report.html"');
   });
 
   it("streams verified video ranges and rejects multiple ranges", async () => {

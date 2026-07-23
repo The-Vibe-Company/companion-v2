@@ -69,6 +69,7 @@ BEGIN
       public.companion_list_skill_run_attachment_orphans(timestamp with time zone, integer),
       public.companion_put_skill_run_artifact_metadata(uuid, uuid, text, text, uuid, text, text, text, integer, boolean, text, boolean, timestamp with time zone),
       public.companion_put_skill_run_artifact_metadata_v2(uuid, uuid, text, text, uuid, text, text, text, integer, boolean, text, boolean, timestamp with time zone, text),
+      public.companion_put_skill_run_artifact_metadata_v3(uuid, uuid, text, text, uuid, text, text, text, integer, boolean, text, boolean, timestamp with time zone, text),
       public.companion_reconcile_skill_run_artifact_paths(uuid, uuid, text, text, text[]),
       public.companion_list_expired_skill_run_artifacts(timestamp with time zone, integer),
       public.companion_lock_expired_skill_run_artifact(uuid, text, timestamp with time zone),

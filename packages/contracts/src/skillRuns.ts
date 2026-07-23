@@ -21,6 +21,7 @@ export const RUN_ARTIFACT_MAX_FILES = 20;
 export const RUN_ARTIFACT_MAX_BYTES = 10 * 1024 * 1024;
 export const RUN_ARTIFACT_MAX_TOTAL_BYTES = 100 * 1024 * 1024;
 export const RUN_ARTIFACT_RETENTION_MS = 24 * 60 * 60 * 1_000;
+export const RUN_ARTIFACT_PREVIEW_TTL_MS = 15 * 60 * 1_000;
 export const RUN_MAX_DEPENDENCIES = 64;
 export const RUN_MAX_SECRET_INPUTS = 128;
 export const RUN_MAX_VARIABLE_INPUTS = 128;
@@ -607,6 +608,7 @@ export const runFilePreviewKindSchema = z.enum([
   "text",
   "markdown",
   "csv",
+  "html",
   "image",
   "video",
   "pdf",
@@ -665,6 +667,12 @@ export const skillRunArtifactRowSchema = z.object({
   updated_at: z.string().datetime().optional(),
 });
 export type SkillRunArtifactRow = z.infer<typeof skillRunArtifactRowSchema>;
+
+export const runArtifactPreviewTicketSchema = z.object({
+  url: z.string().url(),
+  expires_at: z.string().datetime(),
+}).strict();
+export type RunArtifactPreviewTicket = z.infer<typeof runArtifactPreviewTicketSchema>;
 
 /** Full run for the chat/transcript view (`GET /v1/runs/:id`). */
 export const skillRunDetailSchema = skillRunRowSchema.extend({

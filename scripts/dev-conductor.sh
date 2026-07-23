@@ -189,6 +189,7 @@ DATABASE_MIGRATION_URL="postgres://${PG_OWNER_USER}:${PG_OWNER_PASS}@127.0.0.1:$
 
 WEB_URL="http://127.0.0.1:${WEB_PORT}"
 API_URL="http://127.0.0.1:${API_PORT}"
+PREVIEW_URL="http://preview.localhost:${API_PORT}"
 
 S3_ACCESS_KEY_ID="companion"
 S3_SECRET_ACCESS_KEY="companion-secret"
@@ -545,6 +546,7 @@ print_header() {
   printf '  %sBase port%s  %s (range %s-%s)\n' "$DIM" "$RESET" "$BASE" "$BASE" "$((BASE + 9))"
   printf '  %sWeb%s        %s\n' "$DIM" "$RESET" "$WEB_URL"
   printf '  %sAPI%s        %s\n' "$DIM" "$RESET" "$API_URL"
+  printf '  %sPreview%s    %s\n' "$DIM" "$RESET" "$PREVIEW_URL"
   printf '  %sPostgres%s   127.0.0.1:%s\n' "$DIM" "$RESET" "$PG_PORT"
   if [ "$HAS_MINIO" = true ]; then
     printf '  %sMinIO%s      %s (console http://127.0.0.1:%s)\n' "$DIM" "$RESET" "$S3_ENDPOINT" "$MINIO_CONSOLE_PORT"
@@ -578,7 +580,7 @@ launch_apps() {
 
   # The master key is exported by ensure_secrets_master_key and inherited by API + worker. Never
   # interpolate it into concurrently's command argument, where process listings could expose it.
-  local api_cmd="COMPANION_API_HOST=127.0.0.1 COMPANION_API_PORT=$API_PORT DATABASE_URL=\"$DATABASE_URL\" BETTER_AUTH_URL=\"$API_URL\" BETTER_AUTH_COOKIE_PREFIX=\"$PROJECT\" COMPANION_WEB_URL=\"$WEB_URL\" COMPANION_API_URL=\"$API_URL\" NEXT_PUBLIC_COMPANION_API_URL=\"$API_URL\" $shared_storage_env $api_email_env pnpm --filter @companion/api dev"
+  local api_cmd="COMPANION_API_HOST=127.0.0.1 COMPANION_API_PORT=$API_PORT DATABASE_URL=\"$DATABASE_URL\" BETTER_AUTH_URL=\"$API_URL\" BETTER_AUTH_COOKIE_PREFIX=\"$PROJECT\" COMPANION_WEB_URL=\"$WEB_URL\" COMPANION_API_URL=\"$API_URL\" COMPANION_PREVIEW_URL=\"$PREVIEW_URL\" NEXT_PUBLIC_COMPANION_API_URL=\"$API_URL\" $shared_storage_env $api_email_env pnpm --filter @companion/api dev"
   local worker_cmd="DATABASE_URL=\"$DATABASE_URL\" COMPANION_WEB_URL=\"$WEB_URL\" $shared_storage_env pnpm --filter @companion/worker dev"
   local web_cmd="COMPANION_API_URL=\"$API_URL\" NEXT_PUBLIC_COMPANION_API_URL=\"$API_URL\" pnpm --filter @companion/web dev --hostname 127.0.0.1 --port $WEB_PORT"
 

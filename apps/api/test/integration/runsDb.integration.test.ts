@@ -509,6 +509,7 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
     await sql.unsafe(`grant execute on function companion_purge_skill_run_prewarms(integer) to ${rlsRole}`);
     await sql.unsafe(`grant execute on function companion_put_skill_run_artifact_metadata(uuid, uuid, text, text, uuid, text, text, text, integer, boolean, text, boolean, timestamp with time zone) to ${rlsRole}`);
     await sql.unsafe(`grant execute on function companion_put_skill_run_artifact_metadata_v2(uuid, uuid, text, text, uuid, text, text, text, integer, boolean, text, boolean, timestamp with time zone, text) to ${rlsRole}`);
+    await sql.unsafe(`grant execute on function companion_put_skill_run_artifact_metadata_v3(uuid, uuid, text, text, uuid, text, text, text, integer, boolean, text, boolean, timestamp with time zone, text) to ${rlsRole}`);
     await sql.unsafe(`grant execute on function companion_reconcile_skill_run_artifact_paths(uuid, uuid, text, text, text[]) to ${rlsRole}`);
   });
 
@@ -557,9 +558,26 @@ describe("RunSkill PostgreSQL security and queue boundary", () => {
       where org_id = ${orgA}::uuid and run_id = ${freezeRunId}::uuid and path = 'artifacts/lease.txt'
     `;
     expect(legacyRow?.preview_kind).toBeNull();
+    const htmlId = randomUUID();
+    const htmlWrite = await sql.begin(async (tx) => {
+      await tx.unsafe(`set local role ${rlsRole}`);
+      return tx<{ stored: boolean }[]>`
+        select companion_put_skill_run_artifact_metadata_v3(
+          ${orgA}::uuid, ${freezeRunId}::uuid, ${owner.id}, 'freeze-worker', ${htmlId}::uuid,
+          'artifacts/site/index.html', 'index.html', 'text/html; charset=utf-8', 5, true,
+          ${`${orgA}/run-artifacts/${freezeRunId}/${htmlId}`}, true, now() + interval '24 hours', 'html'
+        ) as stored
+      `;
+    });
+    expect(htmlWrite).toEqual([{ stored: true }]);
+    const [htmlRow] = await sql<{ preview_kind: string | null }[]>`
+      select preview_kind from skill_run_artifacts
+      where org_id = ${orgA}::uuid and run_id = ${freezeRunId}::uuid and path = 'artifacts/site/index.html'
+    `;
+    expect(htmlRow?.preview_kind).toBe("html");
     await expect(write("freeze-worker", randomUUID(), "plans/images/read-result.png"))
       .resolves.toEqual([{ stored: true }]);
-    for (let index = 0; index < 18; index += 1) {
+    for (let index = 0; index < 17; index += 1) {
       await expect(write("freeze-worker", randomUUID(), `artifacts/quota-${index}.txt`))
         .resolves.toEqual([{ stored: true }]);
     }

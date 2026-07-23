@@ -962,8 +962,25 @@ content; only the sandbox does.
   rejects excessive per-entry/total expansion and compression ratios before the bounded Worker parser
   runs; the client also terminates parsing that exceeds its deadline. Artifact Markdown blocks remote
   image loads, and direct media URLs carry the artifact update generation so same-path rewrites reload.
-  HTML, SVG, archives,
-  and unknown binaries are download-only.
+  SVG, archives, and unknown binaries are download-only. Valid UTF-8 `.html`/`.htm` outputs gain an
+  `html` renderer classification while their ordinary artifact URL remains download-only. The Files
+  canvas requests a creator-only 15-minute HMAC capability and embeds the page from the distinct
+  `COMPANION_PREVIEW_URL`; relative HTML/CSS/JS/media requests resolve only to ready, unexpired paths
+  in the same run's `./artifacts/` tree. The preview hostname is served by the API process but rejects
+  every control-plane route, skips Companion cookie middleware, and revalidates membership plus run
+  ownership on every resource. The normal API also rejects unsafe requests carrying the opaque
+  sandbox origin (`Origin: null`), so a same-site preview cannot use a browser session to mutate the
+  control plane. An iframe/CSP sandbox permits scripts and outbound HTTP(S) resources
+  without `allow-same-origin`, forms, popups, downloads, workers, or parent navigation. CORS without
+  credentials, `no-referrer`, `nosniff`, and private no-store responses complete the browser boundary.
+  A network-enabled page can deliberately transmit its own capability URL and therefore expose
+  another known artifact from that run for the ticket's remaining lifetime; this is the accepted
+  consequence of run-scoped relative-resource loading plus outbound networking. Each API replica
+  bounds a ticket to 512 requests, 512 MiB of declared artifact bytes, and eight concurrent streams,
+  so a copied capability cannot create unlimited database, object-storage, or connection load during
+  that window. The canvas never renews a ticket automatically: its monotonic lifetime does not depend
+  on the browser wall clock, and expiry returns to an explicit Retry action that requires the
+  creator's live Companion session.
   video delivery uses the same conditional, range-streamed object path as input attachments. The API
   reads replaceable artifact metadata on both sides of S3 `HEAD`, pins the streamed `GET` with that
   object's ETag, and retries when either generation changes; a response can therefore expose bytes
@@ -1004,6 +1021,8 @@ content; only the sandbox does.
 - Migration `0051_run_file_previews.sql` additively adds `preview_kind` to artifacts and attachments,
   backfills only previously verified media and safely escaped textual formats, and adds the exact
   lease-scoped v2 metadata writer. PDF/XLSX rows are classified only when newly inspected from bytes.
+- Migration `0054_run_html_previews.sql` adds the `html` renderer value and a rolling-compatible v3
+  artifact metadata writer. It deliberately does not backfill older HTML rows.
 - Migration `0042_run_prompt_queue_stop.sql` adds prompt-level cancellation, worker stop-protocol negotiation and
   the signature-derived attachment preview type. Existing attachments remain download-only.
 - Migration `0043_run_prompt_dispatch_barrier.sql` adds dispatch protocol 2, the immutable pre-send
@@ -1163,10 +1182,10 @@ active selection. Desktop uses a keyboard-accessible, locally remembered 420pxâ€
 (640px initial width). Mobile/tablet uses a full-screen `Files â†’ Preview` flow. The explorer preserves
 the `./artifacts/` hierarchy under Generated and groups Uploaded files by prompt. Bounded viewers
 render escaped text/code/Markdown/JSON/YAML, CSV tables, XLSX sheets in a dynamically loaded Web
-Worker, signature-validated media, and PDF. Every obsolete fetch is aborted and every local object
-URL is revoked; unsupported, oversized, expired, empty, collecting, loading, and retry/download error
-states are explicit. Generated-file markers and matching `./artifacts/...` Markdown paths open the
-same canvas.
+Worker, signature-validated media, PDF, and interactive HTML from the isolated preview origin. Every
+obsolete fetch is aborted and every local object URL is revoked; unsupported, oversized, expired,
+empty, collecting, loading, and retry/download error states are explicit. Generated-file markers and
+matching `./artifacts/...` Markdown paths open the same canvas.
 
 `packages/sandbox/src/opencodeChat.ts` absorbs pinned-SDK event churn. `run.warning` is non-terminal
 (for example a transient recorder reconnect); `run.error` represents a runtime failure. The worker
@@ -1269,12 +1288,14 @@ file is required; mandatory idempotency, `202`),
 `POST /v1/runs/:id/cancel` (terminal run cancellation),
 `GET /v1/runs/:id/events` (replayable SSE), and
 `GET /v1/runs/:id/attachments/:attachmentId`, plus creator-only
-`GET /v1/runs/:id/artifacts/:artifactId`. Attachment and artifact routes send only
-signature-validated PNG, JPEG, GIF, WebP, AVIF, MP4, and WebM as `inline`; SVG, HTML, PDF, unknown
-types, and `?download=1` always use `attachment`. MP4/WebM support a single conditional byte range
-without buffering the whole object. RFC `If-Range` semantics require a matching strong ETag for
-`206`; a mismatch returns the full current object with `200`, while S3 `If-Match` fences every stream
-to one object generation. Because every route rejects personal access
+`GET /v1/runs/:id/artifacts/:artifactId`, and session-only
+`POST /v1/runs/:id/artifacts/:artifactId/preview`. The latter issues the short capability consumed
+only by `GET ${COMPANION_PREVIEW_URL}/v1/run-previews/:ticket/artifacts/*`. Attachment and ordinary
+artifact routes send only signature-validated PNG, JPEG, GIF, WebP, AVIF, MP4, and WebM as `inline`;
+SVG, HTML, PDF, unknown types, and `?download=1` always use `attachment`. MP4/WebM support a single
+conditional byte range without buffering the whole object. RFC `If-Range` semantics require a
+matching strong ETag for `206`; a mismatch returns the full current object with `200`, while S3
+`If-Match` fences every stream to one object generation. Because every route rejects personal access
 tokens, the bundled Companion skill's API surface is unchanged.
 
 ### Non-goals (v1)

@@ -115,6 +115,7 @@ configure_conductor_env() {
   USE_LOCAL_RUNTIME_DB_ROLE=1
   export COMPANION_API_URL="http://${COMPANION_API_HOST}:${API_PORT}"
   export COMPANION_WEB_URL="http://${COMPANION_WEB_HOST}:${WEB_PORT}"
+  export COMPANION_PREVIEW_URL="http://preview.localhost:${API_PORT}"
   export NEXT_PUBLIC_COMPANION_API_URL="$COMPANION_API_URL"
   export BETTER_AUTH_URL="$COMPANION_API_URL"
   export BETTER_AUTH_COOKIE_PREFIX="$COMPOSE_PROJECT_NAME"
@@ -136,6 +137,7 @@ configure_local_env() {
   local database_migration_url_explicit="${DATABASE_MIGRATION_URL+x}"
   local companion_api_url_explicit="${COMPANION_API_URL+x}"
   local companion_web_url_explicit="${COMPANION_WEB_URL+x}"
+  local companion_preview_url_explicit="${COMPANION_PREVIEW_URL+x}"
   local next_public_api_url_explicit="${NEXT_PUBLIC_COMPANION_API_URL+x}"
   local better_auth_url_explicit="${BETTER_AUTH_URL+x}"
   local s3_endpoint_explicit="${S3_ENDPOINT+x}"
@@ -177,6 +179,9 @@ configure_local_env() {
   fi
   if should_use_derived_value "$companion_web_url_explicit" "${COMPANION_WEB_URL+x}" "${COMPANION_WEB_URL:-}" "http://127.0.0.1:3000"; then
     export COMPANION_WEB_URL="http://${COMPANION_WEB_HOST}:${WEB_PORT}"
+  fi
+  if should_use_derived_value "$companion_preview_url_explicit" "${COMPANION_PREVIEW_URL+x}" "${COMPANION_PREVIEW_URL:-}" "http://preview.localhost:3001"; then
+    export COMPANION_PREVIEW_URL="http://preview.localhost:${API_PORT}"
   fi
   if should_use_derived_value "$next_public_api_url_explicit" "${NEXT_PUBLIC_COMPANION_API_URL+x}" "${NEXT_PUBLIC_COMPANION_API_URL:-}" "http://127.0.0.1:3001"; then
     export NEXT_PUBLIC_COMPANION_API_URL="$COMPANION_API_URL"
@@ -434,6 +439,7 @@ print_urls() {
   log "Compose project: ${COMPOSE_PROJECT_NAME}"
   log "Web: ${COMPANION_WEB_URL}"
   log "API: ${COMPANION_API_URL}"
+  log "HTML previews: ${COMPANION_PREVIEW_URL}"
   log "Postgres: 127.0.0.1:${POSTGRES_PORT}"
   log "MinIO console: http://127.0.0.1:${MINIO_CONSOLE_PORT}"
   log "Mailpit: http://127.0.0.1:${MAILPIT_WEB_PORT}"
@@ -507,6 +513,7 @@ print_env() {
   printf 'DATABASE_URL=%s\n' "$DATABASE_URL"
   printf 'COMPANION_API_URL=%s\n' "$COMPANION_API_URL"
   printf 'COMPANION_WEB_URL=%s\n' "$COMPANION_WEB_URL"
+  printf 'COMPANION_PREVIEW_URL=%s\n' "$COMPANION_PREVIEW_URL"
   printf 'NEXT_PUBLIC_COMPANION_API_URL=%s\n' "$NEXT_PUBLIC_COMPANION_API_URL"
   printf 'BETTER_AUTH_URL=%s\n' "$BETTER_AUTH_URL"
   printf 'S3_ENDPOINT=%s\n' "$S3_ENDPOINT"
