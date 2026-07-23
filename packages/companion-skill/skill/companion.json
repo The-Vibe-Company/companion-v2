@@ -1,11 +1,11 @@
 {
   "$schema": "https://thecompanion.sh/schemas/companion-manifest.v2.schema.json",
   "name": "companion",
-  "version": "1.26.2",
+  "version": "1.26.3",
   "icon": "boxes",
   "title": "Companion",
   "description": "Manage and safely install SKILL.md packages through delegated Agent Auth, including pinned public releases, publishing, updates, dependencies, secrets, local install tracking, and Companion self-update.",
-  "notes": "## What it does\n\nThe Companion skill gives your assistant one reliable workflow for local SKILL.md packages: connect through delegated Agent Auth, validate, publish, update, organize, install, audit, and self-update. It can also publish one explicitly selected version of an organization skill as a stable public release.\n\n## Safety model\n\n- Reads only skill folders you point it at and Companion's own local state under ~/.companion.\n- Stores only the non-secret Agent Auth reference in ~/.companion/credentials.json; private keys live in 0600 files under ~/.companion/agent-auth.\n- Requests workspace-scoped capabilities progressively and never silently falls back to a preserved PAT. Legacy PAT use requires COMPANION_AUTH_MODE=legacy-pat.\n- Confirms publishing or archival changes before mutating workspace skills, and defaults public-release promotion to no after every publication.\n- Verifies the exact public ZIP checksum, rejects unsafe archive entries, and never executes packaged scripts during a public install.\n- Uses companion.json as the source of truth for package identity, version, env/secrets, dependencies, notes, commands, and changelog.\n\n## Local tracking\n\nCompanion records installed workspace skills in ~/.companion/skills.lock.json under workspace-id keys so audits can compare local versions, checksums, and dependency snapshots against the workspace registry without storing credentials. Installs fan out into every tool the user works with (Claude Code, Codex, OpenCode, …); each record's targets[] array tracks the per-tool and per-project install locations, with project-scope installs kept in a per-project <repo>/.companion/skills.lock.json. Public-link installs only install the selected root ZIP and do not create a Companion skill_installs row.",
+  "notes": "## What it does\n\nThe Companion skill gives your assistant one reliable workflow for local SKILL.md packages: connect through delegated Agent Auth, validate, publish, update, organize, install, audit, and self-update. It can also publish one explicitly selected version of an organization skill as a stable public release.\n\n## Safety model\n\n- Reads only skill folders you point it at and Companion's own local state under ~/.companion.\n- Stores only the non-secret Agent Auth reference in ~/.companion/credentials.json; private keys live in 0600 files under ~/.companion/agent-auth.\n- Requests workspace-scoped capabilities progressively and never silently falls back to a preserved PAT. Legacy PAT use requires COMPANION_AUTH_MODE=legacy-pat.\n- Confirms publishing or archival changes before mutating workspace skills, and defaults public-release promotion to no after every publication.\n- Verifies the exact public ZIP checksum, rejects unsafe archive entries, and never executes packaged scripts during a public install.\n- Uses companion.json as the source of truth for package identity, version, env/secrets, dependencies, notes, commands, and changelog.\n\n## Local tracking\n\nCompanion records installed workspace skills in ~/.companion/skills.lock.json under workspace-id keys so audits can compare local versions, checksums, and dependency snapshots against the workspace registry without storing credentials. Installs fan out into every tool the user works with (Claude Code, Codex, OpenCode, …); each record's targets[] array tracks the per-tool and per-project install locations, with project-scope installs kept in a per-project <repo>/.companion/skills.lock.json. Companion self-update also repairs every existing user-global Companion copy as one verified multi-tool transaction, with rollback on partial failure. Public-link installs only install the selected root ZIP and do not create a Companion skill_installs row.",
   "metadata": {
     "companionSkillId": "b0780a97-6972-4a2b-8e88-f41a528900c7",
     "integrityFiles": [
@@ -20,12 +20,22 @@
       "scripts/create_secret.py",
       "scripts/install_skill.py",
       "scripts/secrets_runtime.py",
+      "scripts/sync_companion.py",
       "scripts/sync_secrets.py",
       "scripts/skill_guard.py",
       "scripts/tools.json",
       "evals/evals.json"
     ],
     "changelog": [
+      {
+        "version": "1.26.3",
+        "date": "2026-07-23",
+        "changes": [
+          "Synchronizes every existing user-global Companion copy across registered tools instead of updating only the invoking folder.",
+          "Verifies each installed copy against its own integrity baseline and rolls every target back when any multi-tool swap fails.",
+          "Adds sync_companion.py as an idempotent repair command for machines with divergent Claude Code, Codex, and OpenCode installations."
+        ]
+      },
       {
         "version": "1.26.2",
         "date": "2026-07-22",
@@ -356,7 +366,7 @@
     { "name": "Sync companion.json", "desc": "Create or repair manifest v2 with identity, env/secrets, dependency ids, notes, commands, and changelog." },
     { "name": "Manage skill API calls", "desc": "Use the supported skills API surface without crossing into workspace admin." },
     { "name": "Manage and retrieve secrets", "desc": "Create and bind write-only personal or shared secrets without a browser, manage their lifecycle, then retrieve authorized values through one-time grants." },
-    { "name": "Update Companion skill", "desc": "Check and install the latest bundled Companion skill safely." },
+    { "name": "Update Companion skill", "desc": "Check and synchronize the latest bundled Companion skill across every existing registered tool installation." },
     { "name": "Guard against duplicates", "desc": "Preflight the local inventory and workspace catalog before create/update/install to block duplicate slugs and skill-id retargets." },
     { "name": "Check for updates", "desc": "Compare installed skills and dependencies against the workspace registry." },
     { "name": "Install into your tools", "desc": "Fan out a skill install into every configured tool (Claude Code, Codex, OpenCode) at user or project scope." },

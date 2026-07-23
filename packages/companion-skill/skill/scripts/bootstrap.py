@@ -3,9 +3,10 @@
 
 The bootstrap gathers the context an agent needs at startup: workspace status,
 Companion self-update status, local integrity, reported installs, and local
-lockfile drift. With ``--auto-update-companion`` it may update only this
-Companion skill, and only when tracked local files still match an official
-integrity baseline for the installed version.
+lockfile drift. With ``--auto-update-companion`` it synchronizes every existing
+user-global Companion installation across registered tools, and only when all
+tracked local files still match the official integrity baseline for their
+installed version.
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ from typing import Any
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from bootstrap_integrity import INTEGRITY_BASELINE_FILE, compare_integrity, local_companion_version, sha256_file  # noqa: E402,F401
-from bootstrap_update import companion_auto_update_result, install_companion_update  # noqa: E402
+from bootstrap_update import companion_auto_update_result, companion_target_statuses, install_companion_update  # noqa: E402
 from companion_lib import (  # noqa: E402
     TokenRefreshUnavailable,
     api_get,
@@ -155,6 +156,7 @@ def collect_context(auto_update: bool = False, agent: str = "companion-bootstrap
             "availableVersion": None,
             "status": "unknown",
             "changes": [],
+            "targets": [],
             "autoUpdate": {"requested": auto_update, "applied": False, "blocked": False, "reason": None},
         },
         "integrity": {"status": "unknown", "blockingFiles": [], "files": [], "counts": {}, "packageChecksum": None},
@@ -222,18 +224,34 @@ def collect_context(auto_update: bool = False, agent: str = "companion-bootstrap
         local_version = context["companion"]["localVersion"]
         available_version = context["companion"]["availableVersion"]
         update_available = compare_semver(local_version, available_version) < 0 if available_version else False
-        if update_available:
+        target_statuses: list[dict[str, Any]] = []
+        if auto_update and available_version:
+            target_statuses = companion_target_statuses(skill_dir, local_skill, str(available_version))
+            context["companion"]["targets"] = target_statuses
+        peer_update_available = any(row.get("needsUpdate") for row in target_statuses)
+        if update_available or peer_update_available:
             context["actions"].append({"kind": "update_companion", "version": available_version})
 
-        if auto_update and update_available:
+        if auto_update and available_version and (update_available or peer_update_available):
             result = companion_auto_update_result(api_url, token, skill_dir, local_skill, str(available_version), context["integrity"], agent)
             context["companion"]["autoUpdate"].update(result)
+            if isinstance(result.get("targets"), list):
+                context["companion"]["targets"] = result["targets"]
             if result.get("applied"):
                 applied_version = str(result.get("version") or available_version)
-                context["companion"]["localVersion"] = applied_version
+                result_targets = result.get("targets")
+                current_was_updated = not isinstance(result_targets, list) or any(
+                    Path(str(row.get("path"))).resolve() == skill_dir.resolve()
+                    for row in result_targets
+                    if isinstance(row, dict) and row.get("path")
+                )
+                context["companion"]["localVersion"] = (
+                    applied_version if current_was_updated else local_companion_version(skill_dir)
+                )
                 context["companion"]["reportedInstalledVersion"] = applied_version
                 context["companion"]["status"] = result.get("report", {}).get("status", "installed")
                 context["integrity"] = compare_integrity(skill_dir, local_skill)
+                context["companion"]["targets"] = companion_target_statuses(skill_dir, local_skill, str(available_version))
                 context["actions"] = [action for action in context["actions"] if action.get("kind") != "update_companion"]
 
         try:
