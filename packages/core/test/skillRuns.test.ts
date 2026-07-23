@@ -483,6 +483,8 @@ describe("workspace and durable helper invariants", () => {
       attachments: [{ fileName: "notes.txt", workspacePath: "file-id-notes.txt" }],
     });
     expect(composed).toContain('"notes.txt" → "./attachments/file-id-notes.txt"');
+    expect(composed).toContain("For an HTML deliverable");
+    expect(composed).toContain("use relative URLs");
     const fileOnly = composeRunPrompt({
       prompt: "",
       skillSlug: "root-skill",

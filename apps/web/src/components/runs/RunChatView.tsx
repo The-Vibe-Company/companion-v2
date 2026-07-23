@@ -217,7 +217,14 @@ export function RunChatView({
     const addedArtifacts = reconciled.artifacts.filter((artifact) => !previousArtifacts.has(artifact.id));
     if (reconciled.artifacts.length > 0 && autoOpenedArtifactRunRef.current !== reconciled.id) {
       autoOpenedArtifactRunRef.current = reconciled.id;
-      const latest = [...reconciled.artifacts].sort((a, b) =>
+      const htmlArtifacts = reconciled.artifacts.filter((artifact) => artifact.preview_kind === "html");
+      const previewableArtifacts = reconciled.artifacts.filter((artifact) => artifact.preview_kind);
+      const autoOpenCandidates = htmlArtifacts.length > 0
+        ? htmlArtifacts
+        : previewableArtifacts.length > 0
+          ? previewableArtifacts
+          : reconciled.artifacts;
+      const latest = [...autoOpenCandidates].sort((a, b) =>
         Date.parse(b.updated_at ?? b.expires_at) - Date.parse(a.updated_at ?? a.expires_at),
       )[0]!;
       setSelectedFileKey(`artifact:${latest.id}`);

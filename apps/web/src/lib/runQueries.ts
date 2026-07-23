@@ -12,6 +12,7 @@ import type {
   RunOptions,
   RunPreferences,
   RunPromptAccepted,
+  RunArtifactPreviewTicket,
   RunPromptStatus,
   RunPrewarmResponse,
   RunPrewarmTicket,
@@ -20,6 +21,7 @@ import type {
   UpdateRunConfigurationInput,
 } from "@companion/contracts";
 import {
+  RUN_ARTIFACT_PREVIEW_TTL_MS,
   runPromptAcceptedSchema,
   skillRunDetailSchema,
 } from "@companion/contracts";
@@ -332,4 +334,23 @@ export function runAttachmentHref(runId: string, attachmentId: string, download 
 export function runArtifactHref(runId: string, artifactId: string, download = false): string {
   const base = `/v1/runs/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(artifactId)}`;
   return download ? `${base}?download=1` : base;
+}
+
+/** Mint a short browser-session capability for an isolated interactive HTML artifact. */
+export async function createRunArtifactPreview(
+  runId: string,
+  artifactId: string,
+  signal?: AbortSignal,
+): Promise<RunArtifactPreviewTicket & { lifetime_ms: number }> {
+  const startedAt = performance.now();
+  const ticket = await apiFetch<RunArtifactPreviewTicket>(`/v1/runs/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(artifactId)}/preview`, {
+    method: "POST",
+    signal,
+  });
+  return {
+    ...ticket,
+    // The server issues the ticket during this request. Subtracting the full monotonic round trip is
+    // conservative and avoids trusting a browser wall clock that may be minutes or hours adrift.
+    lifetime_ms: Math.max(0, RUN_ARTIFACT_PREVIEW_TTL_MS - (performance.now() - startedAt)),
+  };
 }

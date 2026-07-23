@@ -126,6 +126,7 @@ import {
   getRun,
   getRunAttachment,
   getRunArtifact,
+  getRunArtifactByPath,
   detectRunFileType,
   isRunWorkerReady,
   RunBusyError,
@@ -269,7 +270,7 @@ import {
   validateSkillArchive,
 } from "@companion/skills";
 import { sql as postgresSql, withTenantContext, type Db } from "@companion/db";
-import { auth, registerAgentCapabilityExecutor } from "@companion/auth";
+import { auth, getBetterAuthSecret, registerAgentCapabilityExecutor } from "@companion/auth";
 import { inviteEmail, sendTransactionalEmail } from "@companion/email";
 import {
   actorFromContext,
@@ -283,6 +284,17 @@ import {
   type ApiVariables,
 } from "./context";
 import { appRouter } from "./trpc";
+import {
+  createRunHtmlPreviewLimiter,
+  isRunHtmlPreviewRequest,
+  isOpaqueOriginMutation,
+  issueRunHtmlPreviewTicket,
+  runHtmlPreviewArtifactPath,
+  runHtmlPreviewOrigin,
+  runHtmlPreviewUrl,
+  verifyRunHtmlPreviewTicket,
+  type RunHtmlPreviewReservation,
+} from "./runHtmlPreview";
 import { assertNoCompanionRetarget, assertTargetedSkillUpdate, assertUpdateIsTargeted, parseSkillPublishAction } from "./skillPublishGuards";
 import { buildInlineCompanionManifest, uploadDependencyValues, withResolvedManifestDependencies } from "./skillCompanionManifest";
 import { buildCompanionSkillRow, getCompanionSkillPackage } from "./companionSkillPackage";
@@ -318,6 +330,22 @@ import {
 const app = new Hono<{ Variables: ApiVariables }>();
 
 export { app };
+
+// The preview hostname shares this process but exposes no control-plane route and never runs
+// Companion's cookie-session middleware.
+app.use("*", async (c, next) => {
+  if (!isRunHtmlPreviewRequest(c.req.url)) return next();
+  if (!c.req.path.startsWith("/v1/run-previews/")) return c.notFound();
+  return next();
+});
+
+app.use("*", async (c, next) => {
+  if (isRunHtmlPreviewRequest(c.req.url)) return next();
+  if (isOpaqueOriginMutation(c.req.method, c.req.header("origin"))) {
+    return jsonError(c, "opaque-origin mutations are not allowed", 403);
+  }
+  return next();
+});
 
 function capabilityRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -755,17 +783,15 @@ async function publishCanonical(input: {
   }
 }
 
-app.use(
-  "*",
-  cors({
-    origin: [process.env.COMPANION_WEB_URL ?? "http://127.0.0.1:3000"],
-    allowHeaders: ["Content-Type", "Authorization", "Idempotency-Key", "Last-Event-ID", "x-companion-org", "x-companion-workspace-id", "x-companion-transfer-ticket"],
-    allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    credentials: true,
-  }),
-);
+const companionCors = cors({
+  origin: [process.env.COMPANION_WEB_URL ?? "http://127.0.0.1:3000"],
+  allowHeaders: ["Content-Type", "Authorization", "Idempotency-Key", "Last-Event-ID", "x-companion-org", "x-companion-workspace-id", "x-companion-transfer-ticket"],
+  allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  credentials: true,
+});
 
-app.use("*", attachSession);
+app.use("*", (c, next) => isRunHtmlPreviewRequest(c.req.url) ? next() : companionCors(c, next));
+app.use("*", (c, next) => isRunHtmlPreviewRequest(c.req.url) ? next() : attachSession(c, next));
 
 registerAgentAuthRoutes(app);
 
@@ -4552,6 +4578,7 @@ function runDownloadHeaders(input: {
   etag?: string;
   length?: number;
   contentRange?: string;
+  extra?: Record<string, string>;
 }): Headers {
   const fileName = input.asset.fileName.replace(/[^\w. -]/g, "_");
   const headers = new Headers({
@@ -4566,6 +4593,7 @@ function runDownloadHeaders(input: {
   if (input.etag) headers.set("ETag", input.etag);
   if (input.length !== undefined) headers.set("Content-Length", String(input.length));
   if (input.contentRange) headers.set("Content-Range", input.contentRange);
+  for (const [name, value] of Object.entries(input.extra ?? {})) headers.set(name, value);
   return headers;
 }
 
@@ -4588,6 +4616,7 @@ async function streamRunDownload(
   c: Context,
   initialAsset: RunDownloadAsset,
   reloadAsset?: () => Promise<RunDownloadAsset>,
+  options?: { forceInline?: boolean; headers?: Record<string, string>; headOnly?: boolean },
 ): Promise<Response> {
   const download = c.req.query("download") === "1";
   const rangeHeader = c.req.header("range");
@@ -4600,9 +4629,9 @@ async function streamRunDownload(
   // changed generation restarts the fence before any bytes are exposed.
   for (let attempt = 0; attempt < 3; attempt += 1) {
     if (attempt > 0 && reloadAsset) asset = await reloadAsset();
-    const inline = !download
+    const inline = options?.forceInline === true || (!download
       && asset.previewContentType !== null
-      && RUN_INLINE_MEDIA_TYPES.has(asset.previewContentType);
+      && RUN_INLINE_MEDIA_TYPES.has(asset.previewContentType));
     const head = await headSkillArchive({ key: asset.storageKey, signal: c.req.raw.signal });
     if (!head || head.contentLength === undefined) throw new Error("run asset not found");
     if (asset.byteSize !== undefined && head.contentLength !== asset.byteSize) {
@@ -4633,9 +4662,24 @@ async function streamRunDownload(
             disposition: inline ? "inline" : "attachment",
             etag: head.etag,
             contentRange: `bytes */${head.contentLength}`,
+            extra: options?.headers,
           }),
         });
       }
+    }
+    if (options?.headOnly) {
+      const length = range?.length ?? head.contentLength;
+      return new Response(null, {
+        status: range ? 206 : 200,
+        headers: runDownloadHeaders({
+          asset,
+          disposition: inline ? "inline" : "attachment",
+          etag: head.etag,
+          length,
+          contentRange: range ? `bytes ${range.start}-${range.end}/${head.contentLength}` : undefined,
+          extra: options.headers,
+        }),
+      });
     }
 
     try {
@@ -4665,6 +4709,7 @@ async function streamRunDownload(
           etag: object.etag ?? head.etag,
           length,
           contentRange: expectedContentRange ?? undefined,
+          extra: options?.headers,
         }),
       });
     } catch (error) {
@@ -4695,6 +4740,200 @@ app.get("/v1/runs/:id/attachments/:attachmentId", async (c) => {
   } catch (error) {
     // Not-visible run / unknown attachment / cross-tenant all surface as a 404.
     return jsonError(c, error, 404);
+  }
+});
+
+function runHtmlPreviewHeaders(): Record<string, string> {
+  let frameAncestor = "'none'";
+  try {
+    frameAncestor = new URL(process.env.COMPANION_WEB_URL ?? "http://127.0.0.1:3000").origin;
+  } catch {
+    // Fail closed when a deployment supplied a malformed web origin.
+  }
+  return {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Headers": "Content-Type, Range",
+    "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
+    "Cross-Origin-Resource-Policy": "cross-origin",
+    "Referrer-Policy": "no-referrer",
+    "Content-Security-Policy": [
+      "sandbox allow-scripts",
+      "default-src 'none'",
+      "script-src 'self' http: https: blob: 'unsafe-inline' 'unsafe-eval'",
+      "style-src 'self' http: https: 'unsafe-inline'",
+      "img-src 'self' http: https: data: blob:",
+      "font-src 'self' http: https: data:",
+      "media-src 'self' http: https: data: blob:",
+      "connect-src 'self' http: https:",
+      "frame-src http: https:",
+      "worker-src 'none'",
+      "object-src 'none'",
+      "base-uri 'none'",
+      "form-action 'none'",
+      `frame-ancestors ${frameAncestor}`,
+    ].join("; "),
+  };
+}
+
+function runHtmlPreviewPath(requestPath: string, ticket: string): string {
+  const prefix = `/v1/run-previews/${ticket}/artifacts/`;
+  if (!requestPath.startsWith(prefix)) throw new Error("invalid preview path");
+  return runHtmlPreviewArtifactPath(requestPath.slice(prefix.length));
+}
+
+const runHtmlPreviewLimiter = createRunHtmlPreviewLimiter();
+
+function releaseRunHtmlPreviewResponse(response: Response, release: () => void): Response {
+  if (!response.body) {
+    release();
+    return response;
+  }
+  const reader = response.body.getReader();
+  let released = false;
+  const finish = () => {
+    if (released) return;
+    released = true;
+    release();
+  };
+  const body = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const next = await reader.read();
+        if (next.done) {
+          finish();
+          controller.close();
+        } else {
+          controller.enqueue(next.value);
+        }
+      } catch (error) {
+        finish();
+        controller.error(error);
+      }
+    },
+    async cancel(reason) {
+      try {
+        await reader.cancel(reason);
+      } finally {
+        finish();
+      }
+    },
+  });
+  return new Response(body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
+  });
+}
+
+/** Allow isolated documents to fetch local resources with non-simple GET headers. */
+app.options("/v1/run-previews/:ticket/artifacts/*", async (c) => {
+  let release: (() => void) | undefined;
+  try {
+    if (!isRunHtmlPreviewRequest(c.req.url)) return c.notFound();
+    const ticket = c.req.param("ticket");
+    const claim = verifyRunHtmlPreviewTicket({
+      ticket,
+      secret: getBetterAuthSecret(),
+    });
+    ({ release } = runHtmlPreviewLimiter.begin({ ticket, expiresAt: claim.expiresAt }));
+    const artifactPath = runHtmlPreviewPath(c.req.path, ticket);
+    await withTenantContext(
+      { orgId: claim.orgId, userId: claim.userId },
+      (database) => getRunArtifactByPath({
+        actor: { id: claim.userId, email: "", name: "" },
+        orgId: claim.orgId,
+        runId: claim.runId,
+        path: artifactPath,
+        database,
+      }),
+    );
+    return new Response(null, { status: 204, headers: runHtmlPreviewHeaders() });
+  } catch {
+    return c.notFound();
+  } finally {
+    release?.();
+  }
+});
+
+/** Issue a short creator-only capability for an isolated HTML artifact site. */
+app.post("/v1/runs/:id/artifacts/:artifactId/preview", async (c) => {
+  try {
+    if (isTokenRequest(c)) return jsonError(c, "personal access tokens cannot use skill runs", 401);
+    const origin = runHtmlPreviewOrigin();
+    if (!origin) return jsonError(c, "HTML artifact previews are not configured", 503);
+    const resolved = await withTenant(c, async ({ actor, orgId, database }) => {
+      const asset = await getRunArtifact({
+        actor,
+        orgId,
+        runId: c.req.param("id"),
+        artifactId: c.req.param("artifactId"),
+        database,
+      });
+      if (asset.previewKind !== "html" || !asset.path.startsWith("artifacts/")) {
+        throw new Error("HTML artifact preview not found");
+      }
+      return { actor, orgId, asset };
+    });
+    const issued = issueRunHtmlPreviewTicket({
+      orgId: resolved.orgId,
+      runId: c.req.param("id"),
+      userId: resolved.actor.id,
+      secret: getBetterAuthSecret(),
+    });
+    return c.json({
+      url: runHtmlPreviewUrl({ origin, ticket: issued.ticket, artifactPath: resolved.asset.path }),
+      expires_at: new Date(issued.expiresAt).toISOString(),
+    });
+  } catch (error) {
+    return jsonError(c, error, 404);
+  }
+});
+
+/** Serve one local resource from the ticket's run on the dedicated cookie-free preview origin. */
+app.get("/v1/run-previews/:ticket/artifacts/*", async (c) => {
+  let reservation: RunHtmlPreviewReservation | undefined;
+  try {
+    if (!isRunHtmlPreviewRequest(c.req.url)) return c.notFound();
+    const ticket = c.req.param("ticket");
+    const claim = verifyRunHtmlPreviewTicket({
+      ticket,
+      secret: getBetterAuthSecret(),
+    });
+    reservation = runHtmlPreviewLimiter.begin({ ticket, expiresAt: claim.expiresAt });
+    const artifactPath = runHtmlPreviewPath(c.req.path, ticket);
+    const loadAsset = async (): Promise<RunDownloadAsset> => {
+      const asset = await withTenantContext(
+        { orgId: claim.orgId, userId: claim.userId },
+        (database) => getRunArtifactByPath({
+          actor: { id: claim.userId, email: "", name: "" },
+          orgId: claim.orgId,
+          runId: claim.runId,
+          path: artifactPath,
+          database,
+        }),
+      );
+      // Invalid legacy HTML bytes must never become an executable document merely because their
+      // extension supplied a conventional download MIME.
+      const contentType = asset.contentType.startsWith("text/html") && asset.previewKind !== "html"
+        ? "application/octet-stream"
+        : asset.contentType;
+      return { ...asset, contentType, previewContentType: null };
+    };
+    const asset = await loadAsset();
+    reservation.chargeBytes(asset.byteSize ?? Number.MAX_SAFE_INTEGER);
+    const response = await streamRunDownload(c, asset, loadAsset, {
+      forceInline: true,
+      headers: runHtmlPreviewHeaders(),
+      headOnly: c.req.method === "HEAD",
+    });
+    const release = reservation.release;
+    reservation = undefined;
+    return releaseRunHtmlPreviewResponse(response, release);
+  } catch {
+    // Invalid, expired, revoked, cross-run and absent resources are intentionally indistinguishable.
+    return c.notFound();
+  } finally {
+    reservation?.release();
   }
 });
 

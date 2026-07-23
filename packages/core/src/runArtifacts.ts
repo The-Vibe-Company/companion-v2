@@ -11,13 +11,22 @@ export type RunArtifactType = {
 };
 
 const EXTENSION_TYPES: Record<string, string> = {
+  ".css": "text/css; charset=utf-8",
   ".csv": "text/csv; charset=utf-8",
+  ".htm": "text/html; charset=utf-8",
   ".html": "text/html; charset=utf-8",
+  ".ico": "image/x-icon",
   ".json": "application/json",
+  ".js": "text/javascript; charset=utf-8",
   ".md": "text/markdown; charset=utf-8",
+  ".mjs": "text/javascript; charset=utf-8",
+  ".otf": "font/otf",
   ".pdf": "application/pdf",
   ".svg": "image/svg+xml",
+  ".ttf": "font/ttf",
   ".txt": "text/plain; charset=utf-8",
+  ".woff": "font/woff",
+  ".woff2": "font/woff2",
   ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
   ".yaml": "application/yaml",
   ".yml": "application/yaml",
@@ -140,7 +149,11 @@ function hasWebmDocType(data: Buffer): boolean {
 }
 
 /** Browser previews are trusted only after a binary signature check, never from a filename/MIME hint. */
-export function detectRunFileType(path: string, data: Buffer): RunArtifactType {
+export function detectRunFileType(
+  path: string,
+  data: Buffer,
+  options: { allowHtml?: boolean } = {},
+): RunArtifactType {
   if (hasPrefix(data, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) {
     return detectedPreview("image/png", "image");
   }
@@ -167,6 +180,9 @@ export function detectRunFileType(path: string, data: Buffer): RunArtifactType {
     return detectedPreview(EXTENSION_TYPES[extension]!, "xlsx");
   }
   if (isUtf8(data)) {
+    if (options.allowHtml && (extension === ".html" || extension === ".htm")) {
+      return detectedPreview(EXTENSION_TYPES[extension]!, "html");
+    }
     if (extension === ".md") return detectedPreview(EXTENSION_TYPES[extension]!, "markdown");
     if (extension === ".csv") return detectedPreview(EXTENSION_TYPES[extension]!, "csv");
     if ([".txt", ".json", ".yaml", ".yml"].includes(extension)) {
@@ -176,8 +192,10 @@ export function detectRunFileType(path: string, data: Buffer): RunArtifactType {
   return downloadOnly(EXTENSION_TYPES[extension] ?? "application/octet-stream");
 }
 
-/** Artifact-facing name retained for the worker and existing callers. */
-export const detectRunArtifactType = detectRunFileType;
+/** HTML execution is an artifact-only capability; prompt attachments always remain download-only. */
+export function detectRunArtifactType(path: string, data: Buffer): RunArtifactType {
+  return detectRunFileType(path, data, { allowHtml: true });
+}
 
 /** Stable UUID-shaped id makes replacing one run/path an idempotent overwrite. */
 export function runArtifactId(runId: string, path: string): string {
@@ -207,7 +225,7 @@ export async function putRunArtifactMetadata(input: {
 }): Promise<boolean> {
   const database = input.database ?? db;
   const result = await database.execute(sql`
-    select companion_put_skill_run_artifact_metadata_v2(
+    select companion_put_skill_run_artifact_metadata_v3(
       ${input.orgId}::uuid, ${input.runId}::uuid, ${input.creatorId}, ${input.workerId},
       ${input.id}::uuid, ${input.path}, ${input.fileName}, ${input.contentType}, ${input.byteSize},
       ${input.previewable}, ${input.storageKey}, ${input.ready}, ${input.expiresAt.toISOString()}::timestamp with time zone,
