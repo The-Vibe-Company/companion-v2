@@ -19,3 +19,6 @@
 834b27a52e30b35457a6b41b8c22779e63d58239:packages/contracts/test/skillRuns.test.ts:generic-api-key:18
 34b64f1d0facdf2efe764236795847000f3076bf:packages/contracts/test/vanishConnections.test.ts:generic-api-key:6
 34b64f1d0facdf2efe764236795847000f3076bf:packages/contracts/test/vanishConnections.test.ts:generic-api-key:16
+
+# Synthetic private-key fixture used to prove review-context redaction.
+dfae59e733906b13197c6563b3fb2d9813ab6f7d:.agents/skills/review-code-dev/scripts/test_collect_review_context.py:private-key:144

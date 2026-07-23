@@ -1,9 +1,9 @@
-import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
  * Route tests for the activated-models surface: GET /v1/models (activated lists, pruned) and the
- * two PUT preference endpoints. The real modelCatalog is used with `global.fetch` stubbed to fail,
- * so it deterministically serves its FALLBACK_REGISTRY (anthropic/claude-*, openai/gpt-5.2, …).
+ * two PUT preference endpoints. The model catalog is stubbed explicitly so route behavior never
+ * depends on models.dev latency or availability.
  */
 
 const serviceMocks = vi.hoisted(() => {
@@ -31,6 +31,36 @@ const authMocks = vi.hoisted(() => ({
   handler: vi.fn(),
 }));
 
+const catalogMocks = vi.hoisted(() => ({
+  listModels: vi.fn(async () => ({
+    models: [
+      {
+        id: "anthropic/claude-sonnet-4-5",
+        provider: "anthropic",
+        provider_name: "Anthropic",
+        name: "Claude Sonnet 4.5",
+        description: null,
+        context: 200_000,
+        cost_input: null,
+        cost_output: null,
+        env_keys: ["ANTHROPIC_API_KEY"],
+      },
+      {
+        id: "openai/gpt-5.2",
+        provider: "openai",
+        provider_name: "OpenAI",
+        name: "GPT-5.2",
+        description: null,
+        context: 400_000,
+        cost_input: null,
+        cost_output: null,
+        env_keys: ["OPENAI_API_KEY"],
+      },
+    ],
+    providers: [],
+  })),
+}));
+
 vi.mock("@hono/node-server", () => ({
   serve: vi.fn(),
 }));
@@ -50,14 +80,9 @@ vi.mock("@companion/db", () => dbMocks);
 
 vi.mock("@companion/core/services", () => serviceMocks);
 
-// The models.dev fetch must fail so the catalog serves its deterministic fallback registry.
-const realFetch = global.fetch;
-global.fetch = vi.fn(async () => {
-  throw new Error("offline test");
-}) as unknown as typeof fetch;
-afterAll(() => {
-  global.fetch = realFetch;
-});
+vi.mock("@companion/sandbox", () => ({
+  createModelCatalog: () => catalogMocks,
+}));
 
 import { app } from "./index";
 

@@ -1,7 +1,8 @@
 import React from "react";
 import { renderToString } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import type { SettingsAppData } from "./model";
+import { SettingsController, settingsHref } from "./SettingsApp";
+import { canonicalizeSettingsRoute, type SettingsAppData } from "./model";
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({
@@ -13,10 +14,7 @@ vi.mock("next/navigation", () => ({
 }));
 
 describe("SettingsController", () => {
-  it("builds stable settings URLs for route and dialog state", async () => {
-    const { settingsHref } = await import("./SettingsApp");
-    const { canonicalizeSettingsRoute } = await import("./model");
-
+  it("builds stable settings URLs for route and dialog state", () => {
     expect(settingsHref({ view: "general" }, null)).toBe("/settings?view=general");
     expect(settingsHref({ view: "members" }, "invite")).toBe("/settings?view=members&dialog=invite");
     expect(settingsHref({ view: "profile" }, null)).toBe("/settings?view=profile");
@@ -24,8 +22,7 @@ describe("SettingsController", () => {
     expect(settingsHref(canonicalizeSettingsRoute({ view: "github" }, false), null)).toBe("/settings?view=general");
   });
 
-  it("normalizes malformed member collections before rendering", async () => {
-    const { SettingsController } = await import("./SettingsApp");
+  it("normalizes malformed member collections before rendering", () => {
     const data = {
       me: { id: "user_1", name: "Admin", email: "admin@tvc.dev", initials: "A" },
       domainJoin: { actorDomain: "tvc.dev", actorDomainIsPersonal: false },
