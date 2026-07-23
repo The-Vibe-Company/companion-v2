@@ -898,8 +898,11 @@ content; only the sandbox does.
   sandbox/session identity, opaque-encrypted internal server password, final transcript with its
   folded event cursor, a monotonic activation revision, a bounded reactivation deadline, and a
   redacted warning snapshot that survives event retention. Public lifecycle is
-  `queued → starting → running → frozen | error | canceled`, with creator-triggered
-  `frozen | canceled → queued` while the retained sandbox is still eligible.
+  `queued → starting → running → frozen | interrupted | error | canceled`, with creator-triggered
+  `frozen | interrupted | canceled → queued` while the retained sandbox is still eligible.
+  `interrupted` retains partial output but never replays the interrupted prompt; only a new explicit
+  prompt starts another activation. `runtime_state` (`healthy | degraded`) blocks prompt admission
+  while the recorder is recovering.
 - `skill_run_skills`, `skill_run_secret_inputs`, `skill_run_model_provider_inputs`, and
   `skill_run_variable_inputs` are immutable input snapshots. Generic secret inputs contain vault
   references and exact versions only, with provenance `skill` or `runtime`. The model-provider row
@@ -970,7 +973,9 @@ content; only the sandbox does.
   warm-ups. They pin only the root/dependency versions and sandbox lifecycle state; they never join
   the Sessions query. A run may atomically adopt one through nullable `skill_runs.prewarm_id`.
 - `sandbox_usage_sessions` records the org pool period, source activation, temporary reservation,
-  actual start/stop, and settled whole-minute duration. `user_run_preferences` records the per-user
+  absolute runtime deadline, provider observation, actual start/stop, and bounded settled duration.
+  Safety-capped activations use the configured maximum; enforced activations use the minimum of that
+  cap, the admitted reservation, and the UTC billing-period boundary. `user_run_preferences` records the per-user
   prewarm default. Migration `0040_sandbox_usage.sql` adds tenant/owner forced RLS and unique source
   plus sandbox-activation keys so retries cannot reserve or settle twice.
 - Migration `0034_skill_runs.sql` creates the durable run tables; `0039_run_prewarms.sql` adds the
@@ -1094,8 +1099,13 @@ to advance.
 
 Runtime/network calls never occur inside a database transaction. On worker replacement, an expired
 lease resumes the same sandbox/session/message instead of duplicating them. A transient recorder
-closure reconnects with backoff while preserving recorder-local cumulative part cursors across new
-network signals. Each idle transcript snapshot and its `session.idle` barrier event are committed in
+closure enters one durable degraded episode and reconnects with backoff while preserving
+recorder-local cumulative part cursors across new network signals. Its iterator and abort controller
+are always closed before another subscription opens. While degraded, the worker observes provider
+truth every 15 seconds. A stopped/missing provider freezes an idle run or interrupts an
+active/ambiguous turn; a still-running provider gets at most five minutes to restore OpenCode.
+Follow-ups receive `409 run_runtime_degraded` until recovery. Each idle transcript snapshot and its
+`session.idle` barrier event are committed in
 one transaction with the same watermark, so SSE can never hydrate an older snapshot after observing
 that event. Normal process shutdown stops claiming work and lets leases expire;
 it does not destroy active sandboxes.
@@ -1295,12 +1305,23 @@ vault, dedicated provider credentials, and opaque internal run credentials),
 `COMPANION_RUN_CONCURRENCY`, `COMPANION_RUN_PREWARM_CONCURRENCY`,
 `COMPANION_RUN_CLAIM_INTERVAL_MS`, `COMPANION_RUN_LEASE_SECONDS`,
 `COMPANION_RUN_HEARTBEAT_MS`, `COMPANION_RUN_INACTIVITY_MS`, bounded recorder reconnect settings,
+`COMPANION_RUN_RECORDER_UNAVAILABLE_MS`, `COMPANION_SANDBOX_LIFECYCLE_V2`,
+`COMPANION_SANDBOX_LIFECYCLE_V2_ORGS`, `COMPANION_SANDBOX_MAX_SESSION_MS` (10–60 minutes),
 `COMPANION_RUN_EVENT_RETENTION_INTERVAL_MS`, `COMPANION_RUN_SWEEP_INTERVAL_MS`, S3 settings for
 attachments/artifacts/packages. Event retention itself is
 fixed at 24 hours after terminal state. The worker receives these settings. Keep the feature flag off
 when Vercel/golden configuration is absent; only RunSkill is disabled, while API, web, billing,
 provider settings, and vault still run. Disabling prewarming also prevents adoption of tickets issued
 before the flag changed, so every run not yet committed immediately returns to the cold path.
+
+Each activation uses an absolute deadline instead of a rolling lease.
+`RunSandboxRuntime.observe` returns `running | stopped | missing` plus `expiresAt`;
+`extendTimeout` extends only the remaining shortfall and returns a fresh observation. Provider
+failures propagate, except not-found which normalizes to `missing`. A 60-second reconciler claims
+stale runs without a live job lease or runs degraded for more than 60 seconds, observes outside
+PostgreSQL, and applies results under an exact reconciliation lease, monotonic generation, and
+activation-revision fence. A live worker that recovers the recorder before completion changes the
+degraded predicate and makes the stale provider response inapplicable.
 
 Production API and worker processes connect through `DATABASE_URL` using a dedicated login with
 `NOSUPERUSER`, `NOBYPASSRLS`, no table ownership, and no membership in the migration-owner role.

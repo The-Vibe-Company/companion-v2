@@ -1099,7 +1099,7 @@ skills view shows the correct status and version. Report the version from this s
 `companion.json.version`:
 
 ```sh
-printf '%s' '{"action":"api","method":"POST","path":"/local-skills/companion/installed","body":{"version":"1.26.2","agent":"<your assistant name>"}}' \
+printf '%s' '{"action":"api","method":"POST","path":"/local-skills/companion/installed","body":{"version":"1.27.0","agent":"<your assistant name>"}}' \
   | node scripts/companion-agent-client.mjs
 ```
 
@@ -1108,3 +1108,7 @@ the Companion skill. Run this again after you install an update so the reported 
 current.
 
 See `reference/api.md` for the full endpoint list.
+
+For Skill Run consumers, treat `runtime_state: degraded` as a temporary no-send state and
+`status: interrupted` as terminal-but-possibly-reactivatable. Never replay the interrupted prompt;
+submit a new explicit message only when `can_reactivate` is true.

@@ -330,7 +330,7 @@ export function RunChatView({
   }, [resolveToolLabel, run]);
 
   useEffect(() => {
-    if (run && ["frozen", "error", "canceled"].includes(run.status)) setCancelRequestedLocal(false);
+    if (run && ["frozen", "interrupted", "error", "canceled"].includes(run.status)) setCancelRequestedLocal(false);
   }, [run]);
 
   useEffect(() => {
@@ -436,7 +436,7 @@ export function RunChatView({
         },
         onStreamEnd: async () => {
           try {
-            return ["frozen", "error", "canceled"].includes((await refreshRun()).status);
+            return ["frozen", "interrupted", "error", "canceled"].includes((await refreshRun()).status);
           } catch {
             return false;
           }
@@ -464,7 +464,9 @@ export function RunChatView({
   const cancelRequested = cancelRequestedLocal || run?.phase === "cancel";
   const fileSignature = files.map((file) => [file.name, file.size, file.type, file.lastModified].join(":" )).join("|");
   const terminalCanReactivate = canReactivateRun(run, reactivationClock);
-  const liveSendReady = status === "running" && !cancelRequested && streamReady && !streamDead;
+  const runtimeDegraded = run?.runtime_state === "degraded";
+  const liveSendReady =
+    status === "running" && !runtimeDegraded && !cancelRequested && streamReady && !streamDead;
   const composerDisabled = !canUseRunComposer(status, liveSendReady, terminalCanReactivate);
   const queuedCount = run?.pending_prompts.filter((prompt) => prompt.kind === "follow_up" && prompt.status === "queued").length ?? 0;
   const queueFull = queuedCount >= RUN_PROMPT_MAX_QUEUED;
@@ -502,7 +504,8 @@ export function RunChatView({
   const send = () => {
     const trimmed = text.trim();
     if (promptSendingRef.current || composerDisabled || queueFull || (!trimmed && files.length === 0)) return;
-    const terminalDelivery = status === "frozen" || status === "canceled";
+    const terminalDelivery =
+      status === "frozen" || status === "interrupted" || status === "canceled";
     const previous = promptAttemptRef.current;
     const retrying = previous?.text === trimmed && previous.fileSignature === fileSignature;
     const attempt = retrying
@@ -716,13 +719,15 @@ export function RunChatView({
   const fileCount = (run?.attachments.length ?? 0) + (run?.artifacts.length ?? 0);
   const placeholder = queueFull
     ? "Follow-up queue is full"
+    : runtimeDegraded
+      ? "Reconnecting to the sandbox…"
     : status === "running"
       ? "Send a follow-up or attach files"
       : status === "queued"
         ? "Run queued"
         : status === "starting"
           ? "Starting run"
-          : (status === "frozen" || status === "canceled") && terminalCanReactivate
+          : (status === "frozen" || status === "interrupted" || status === "canceled") && terminalCanReactivate
             ? "Send a message to reactivate"
             : "This session is read-only";
 
@@ -778,6 +783,13 @@ export function RunChatView({
         </div>
       )}
       {(status === "queued" || status === "starting") && <StartingBanner status={status} phase={run?.phase} />}
+      {status === "running" && runtimeDegraded && (
+        <div className="run-chat-banner run-chat-banner--starting" role="status">
+          <Icon name="loader" size={14} className="ls-spin" />
+          <b>Reconnecting…</b>
+          <span>New messages are paused while the sandbox connection recovers.</span>
+        </div>
+      )}
       {status === "frozen" && run && (
         <FrozenBanner
           note={terminalCanReactivate ? "Send a message below to reactivate it." : "The reactivation window has expired."}
@@ -791,6 +803,22 @@ export function RunChatView({
           canReactivate={terminalCanReactivate}
           onRunAgain={rerun}
         />
+      )}
+      {status === "interrupted" && run && (
+        <div className="run-chat-banner run-chat-banner--error" role="alert">
+          <Icon name="alert-triangle" size={13} />
+          <b>Turn interrupted</b>
+          <span>
+            {run.error_message
+              ?? "The sandbox stopped before the current turn completed. Partial output is preserved."}
+          </span>
+          <span>
+            {terminalCanReactivate
+              ? "Send a new message below to reactivate; the interrupted turn will not be replayed."
+              : "The sandbox can no longer be reactivated."}
+          </span>
+          <button type="button" className="btn-sec" onClick={rerun}>Run again</button>
+        </div>
       )}
       {status === "error" && run && (
         <div className="run-chat-banner run-chat-banner--error" role="alert">
