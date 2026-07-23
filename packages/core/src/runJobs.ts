@@ -437,6 +437,8 @@ export async function updateRunWorkerState(input: {
   frozenAt?: Date | null;
   reactivatableUntil?: Date | null;
   sandboxCleanedAt?: Date | null;
+  runtimeState?: "healthy" | "degraded";
+  runtimeDegradedAt?: Date | null;
   database?: Db;
 }): Promise<boolean> {
   const database = input.database ?? db;
@@ -453,7 +455,7 @@ export async function updateRunWorkerState(input: {
         // A worker that races with Cancel (or that retained a stale lease after another terminal
         // transition) must not move the public run back to an active phase. The one allowed
         // transition after a cancellation request is the worker's own terminal canceled update.
-        runWhere.push(notInArray(schema.skillRuns.status, ["frozen", "error", "canceled"]));
+        runWhere.push(notInArray(schema.skillRuns.status, ["frozen", "interrupted", "error", "canceled"]));
         if (input.status !== "canceled") runWhere.push(isNull(schema.skillRuns.cancelRequestedAt));
       }
       const rows = await tx
@@ -470,15 +472,21 @@ export async function updateRunWorkerState(input: {
           ...(input.frozenAt !== undefined ? { frozenAt: input.frozenAt } : {}),
           ...(input.reactivatableUntil !== undefined ? { reactivatableUntil: input.reactivatableUntil } : {}),
           ...(input.sandboxCleanedAt !== undefined ? { sandboxCleanedAt: input.sandboxCleanedAt } : {}),
+          ...(input.runtimeState !== undefined ? { runtimeState: input.runtimeState } : {}),
+          ...(input.runtimeDegradedAt !== undefined ? { runtimeDegradedAt: input.runtimeDegradedAt } : {}),
           updatedAt: now,
         })
         .where(and(...runWhere))
         .returning({ id: schema.skillRuns.id });
       if (!rows[0] && input.workerId) throw new LostRunLeaseError();
       if (input.workerId) {
-        const terminal = input.status && ["frozen", "error", "canceled"].includes(input.status);
+        const terminal = input.status && ["frozen", "interrupted", "error", "canceled"].includes(input.status);
         const jobStatus =
-          input.status === "frozen" ? "completed" : input.status === "error" ? "failed" : "canceled";
+          input.status === "frozen"
+            ? "completed"
+            : input.status === "interrupted" || input.status === "error"
+              ? "failed"
+              : "canceled";
         const jobs = await tx
           .update(schema.skillRunJobs)
           .set(
@@ -822,8 +830,10 @@ async function terminalizeOutstandingRunPrompts(
     creatorId?: string;
     errorCode?: string;
     userMessage?: string;
+    statuses?: Array<"queued" | "processing">;
   },
 ): Promise<RunPromptRow[]> {
+  const statuses = input.statuses ?? ["queued", "processing"];
   const active = await database
     .select({
       id: schema.skillRunPrompts.id,
@@ -838,7 +848,7 @@ async function terminalizeOutstandingRunPrompts(
       and(
         eq(schema.skillRunPrompts.orgId, input.orgId),
         eq(schema.skillRunPrompts.runId, input.runId),
-        inArray(schema.skillRunPrompts.status, ["queued", "processing"]),
+        inArray(schema.skillRunPrompts.status, statuses),
       ),
     )
     .for("update");
@@ -888,7 +898,7 @@ async function terminalizeOutstandingRunPrompts(
         eq(schema.skillRunPrompts.orgId, input.orgId),
         eq(schema.skillRunPrompts.runId, input.runId),
         inArray(schema.skillRunPrompts.id, active.map((prompt) => prompt.id)),
-        inArray(schema.skillRunPrompts.status, ["queued", "processing"]),
+        inArray(schema.skillRunPrompts.status, statuses),
       ),
     )
     .returning();
@@ -902,6 +912,208 @@ async function terminalizeOutstandingRunPrompts(
     });
   }
   return rows;
+}
+
+/**
+ * Convert an unrecoverable recorder/provider loss into a resumable terminal state. The interrupted
+ * turn is never replayed: processing prompts fail, while queued follow-ups are canceled.
+ */
+export async function interruptRunByWorker(input: {
+  actor: ActorContext;
+  orgId: string;
+  runId: string;
+  workerId: string;
+  errorCode: "sandbox_expired_during_turn" | "recorder_unavailable";
+  userMessage: string;
+  sandboxState: "retained" | "missing" | "unknown";
+  database?: Db;
+}): Promise<boolean> {
+  const database = input.database ?? db;
+  const now = new Date();
+  try {
+    return await database.transaction(async (transaction) => {
+      const tx = transaction as unknown as Db;
+      const run = await ownedRun({ ...input, database: tx, lock: true });
+      await assertLiveRunJobLease({ ...input, database: tx });
+      await terminalizeOutstandingRunPrompts(tx, {
+        orgId: input.orgId,
+        runId: input.runId,
+        transcriptEventSequence: run.transcriptEventSequence,
+        status: "canceled",
+        statuses: ["queued"],
+        now,
+        creatorId: run.creatorId,
+      });
+      await terminalizeOutstandingRunPrompts(tx, {
+        orgId: input.orgId,
+        runId: input.runId,
+        transcriptEventSequence: run.transcriptEventSequence,
+        status: "error",
+        statuses: ["processing"],
+        now,
+        errorCode: input.errorCode,
+        userMessage: input.userMessage,
+      });
+      const terminalEvent = runChatEventSchema.parse({
+        type: "run.error",
+        code: input.errorCode,
+        message: input.userMessage,
+        phase: run.phase,
+      });
+      const sequenceRows = await tx
+        .select({ value: max(schema.skillRunEvents.sequence) })
+        .from(schema.skillRunEvents)
+        .where(and(
+          eq(schema.skillRunEvents.orgId, input.orgId),
+          eq(schema.skillRunEvents.runId, input.runId),
+        ));
+      await tx.insert(schema.skillRunEvents).values({
+        orgId: input.orgId,
+        runId: input.runId,
+        sequence: Math.max(
+          Number(sequenceRows[0]?.value ?? 0),
+          run.transcriptEventSequence,
+        ) + 1,
+        ...eventParts(terminalEvent),
+      });
+      const reactivatableUntil = input.sandboxState === "retained"
+        ? new Date(now.getTime() + RUN_REACTIVATION_RETENTION_MS)
+        : null;
+      await tx
+        .update(schema.skillRuns)
+        .set({
+          status: "interrupted",
+          phase: "complete",
+          errorCode: input.errorCode,
+          userMessage: input.userMessage,
+          frozenAt: now,
+          reactivatableUntil,
+          runtimeState: "healthy",
+          runtimeDegradedAt: null,
+          ...(input.sandboxState === "missing" ? { sandboxCleanedAt: now } : {}),
+          updatedAt: now,
+        })
+        .where(and(
+          eq(schema.skillRuns.orgId, input.orgId),
+          eq(schema.skillRuns.id, input.runId),
+          eq(schema.skillRuns.creatorId, input.actor.id),
+        ));
+      const jobs = await tx
+        .update(schema.skillRunJobs)
+        .set({
+          status: "failed",
+          phase: "complete",
+          lastErrorCode: input.errorCode,
+          leaseOwner: null,
+          leaseExpiresAt: null,
+          heartbeatAt: now,
+          updatedAt: now,
+        })
+        .where(and(
+          eq(schema.skillRunJobs.orgId, input.orgId),
+          eq(schema.skillRunJobs.runId, input.runId),
+          eq(schema.skillRunJobs.creatorId, input.actor.id),
+          eq(schema.skillRunJobs.status, "leased"),
+          eq(schema.skillRunJobs.leaseOwner, input.workerId),
+          sql`${schema.skillRunJobs.leaseExpiresAt} > clock_timestamp()`,
+        ))
+        .returning({ id: schema.skillRunJobs.id });
+      return Boolean(jobs[0]);
+    });
+  } catch (error) {
+    if (error instanceof LostRunLeaseError) return false;
+    throw error;
+  }
+}
+
+/**
+ * Finish a run normally when the provider disappears only after a durable idle barrier. The
+ * processing-prompt check is repeated under the run lock so a stale worker observation can never
+ * turn an in-flight prompt into a successful freeze.
+ */
+export async function freezeRunAfterRuntimeLossByWorker(input: {
+  actor: ActorContext;
+  orgId: string;
+  runId: string;
+  workerId: string;
+  sandboxState: "retained" | "missing";
+  database?: Db;
+}): Promise<"frozen" | "prompt_active" | "lost_lease"> {
+  const database = input.database ?? db;
+  const now = new Date();
+  try {
+    return await database.transaction(async (transaction) => {
+      const tx = transaction as unknown as Db;
+      const run = await ownedRun({ ...input, database: tx, lock: true });
+      await assertLiveRunJobLease({ ...input, database: tx });
+      const processing = await tx
+        .select({ id: schema.skillRunPrompts.id })
+        .from(schema.skillRunPrompts)
+        .where(and(
+          eq(schema.skillRunPrompts.orgId, input.orgId),
+          eq(schema.skillRunPrompts.runId, input.runId),
+          eq(schema.skillRunPrompts.status, "processing"),
+        ))
+        .limit(1)
+        .for("update");
+      if (processing[0]) return "prompt_active";
+      await terminalizeOutstandingRunPrompts(tx, {
+        orgId: input.orgId,
+        runId: input.runId,
+        transcriptEventSequence: run.transcriptEventSequence,
+        status: "canceled",
+        statuses: ["queued"],
+        now,
+        creatorId: run.creatorId,
+      });
+      const reactivatableUntil = input.sandboxState === "retained"
+        ? new Date(now.getTime() + RUN_REACTIVATION_RETENTION_MS)
+        : null;
+      await tx
+        .update(schema.skillRuns)
+        .set({
+          status: "frozen",
+          phase: "complete",
+          errorCode: null,
+          userMessage: null,
+          frozenAt: now,
+          reactivatableUntil,
+          runtimeState: "healthy",
+          runtimeDegradedAt: null,
+          ...(input.sandboxState === "missing" ? { sandboxCleanedAt: now } : {}),
+          updatedAt: now,
+        })
+        .where(and(
+          eq(schema.skillRuns.orgId, input.orgId),
+          eq(schema.skillRuns.id, input.runId),
+          eq(schema.skillRuns.creatorId, input.actor.id),
+        ));
+      const jobs = await tx
+        .update(schema.skillRunJobs)
+        .set({
+          status: "completed",
+          phase: "complete",
+          leaseOwner: null,
+          leaseExpiresAt: null,
+          heartbeatAt: now,
+          updatedAt: now,
+        })
+        .where(and(
+          eq(schema.skillRunJobs.orgId, input.orgId),
+          eq(schema.skillRunJobs.runId, input.runId),
+          eq(schema.skillRunJobs.creatorId, input.actor.id),
+          eq(schema.skillRunJobs.status, "leased"),
+          eq(schema.skillRunJobs.leaseOwner, input.workerId),
+          sql`${schema.skillRunJobs.leaseExpiresAt} > clock_timestamp()`,
+        ))
+        .returning({ id: schema.skillRunJobs.id });
+      if (!jobs[0]) throw new LostRunLeaseError();
+      return "frozen";
+    });
+  } catch (error) {
+    if (error instanceof LostRunLeaseError) return "lost_lease";
+    throw error;
+  }
 }
 
 export async function enqueueRunPrompt(input: {
@@ -992,7 +1204,8 @@ export async function enqueueRunPrompt(input: {
         reactivated: false,
       };
     }
-    const terminalReactivation = run.status === "frozen" || run.status === "canceled";
+    const terminalReactivation =
+      run.status === "frozen" || run.status === "interrupted" || run.status === "canceled";
     if (terminalReactivation) {
       if (!input.reactivationAvailable) {
         throw new RunValidationError("RunSkill is unavailable because no configured run worker is currently online.", "runtime_unavailable");
@@ -1006,6 +1219,8 @@ export async function enqueueRunPrompt(input: {
       ) {
         throw new RunBusyError("this run can no longer be reactivated", "run_reactivation_expired");
       }
+    } else if (run.runtimeState === "degraded") {
+      throw new RunBusyError("the run runtime is reconnecting", "run_runtime_degraded");
     } else if (
       run.status !== "running"
       || run.cancelRequestedAt !== null
@@ -1177,6 +1392,9 @@ export async function enqueueRunPrompt(input: {
         .update(schema.skillRuns)
         .set({
           status: "queued",
+          runtimeState: "healthy",
+          runtimeDegradedAt: null,
+          runtimeDeadlineAt: null,
           phase: "queued",
           errorCode: null,
           userMessage: null,
@@ -1332,7 +1550,8 @@ export async function preflightRunPromptUpload(input: {
       eq(schema.skillRunPrompts.idempotencyKey, input.idempotencyKey),
     ));
   if (replay[0]) return;
-  const terminalReactivation = run.status === "frozen" || run.status === "canceled";
+  const terminalReactivation =
+    run.status === "frozen" || run.status === "interrupted" || run.status === "canceled";
   if (terminalReactivation) {
     if (!input.reactivationAvailable) {
       throw new RunValidationError("RunSkill is unavailable because no configured run worker is currently online.", "runtime_unavailable");
@@ -1345,6 +1564,8 @@ export async function preflightRunPromptUpload(input: {
     ) {
       throw new RunBusyError("this run can no longer be reactivated", "run_reactivation_expired");
     }
+  } else if (run.runtimeState === "degraded") {
+    throw new RunBusyError("the run runtime is reconnecting", "run_runtime_degraded");
   } else if (run.status !== "running" || run.cancelRequestedAt !== null || ["freeze", "cancel", "cleanup", "complete"].includes(run.phase)) {
     throw new RunBusyError("this run is not ready for another prompt", "run_not_running");
   }
@@ -2151,7 +2372,7 @@ export async function requestRunCancellation(input: {
   return database.transaction(async (transaction) => {
     const tx = transaction as unknown as Db;
     const run = await ownedRun({ ...input, database: tx, lock: true });
-    if (run.status === "frozen" || run.status === "error" || run.status === "canceled") {
+    if (run.status === "frozen" || run.status === "interrupted" || run.status === "error" || run.status === "canceled") {
       return { status: run.status, requested: false };
     }
     if (run.cancelRequestedAt !== null) return { status: run.status, requested: false };

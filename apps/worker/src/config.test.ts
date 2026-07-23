@@ -22,4 +22,19 @@ describe("run worker configuration", () => {
     expect(runWorkerConfig({ COMPANION_RUN_SWEEP_INTERVAL_MS: "5000" }).cleanupIntervalMs).toBe(5_000);
     expect(runWorkerConfig({ COMPANION_RUN_SWEEP_INTERVAL_MS: "0" }).cleanupIntervalMs).toBe(60_000);
   });
+
+  it("bounds and scopes sandbox lifecycle v2", () => {
+    const config = runWorkerConfig({
+      COMPANION_SANDBOX_LIFECYCLE_V2: "true",
+      COMPANION_SANDBOX_LIFECYCLE_V2_ORGS: "org-1, org-2",
+      COMPANION_SANDBOX_MAX_SESSION_MS: "600000",
+      COMPANION_RUN_RECORDER_UNAVAILABLE_MS: "15000",
+    });
+    expect(config.sandboxLifecycleV2).toBe(true);
+    expect(config.sandboxLifecycleV2OrgIds).toEqual(new Set(["org-1", "org-2"]));
+    expect(config.sandboxMaxSessionMs).toBe(600_000);
+    expect(config.recorderUnavailableMs).toBe(15_000);
+    expect(runWorkerConfig({ COMPANION_SANDBOX_MAX_SESSION_MS: "3600001" }).sandboxMaxSessionMs)
+      .toBe(3_600_000);
+  });
 });

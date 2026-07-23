@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import path from "node:path";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import {
   RUN_ARTIFACT_MAX_BYTES,
   RUN_ARTIFACT_MAX_FILES,
@@ -12,9 +12,11 @@ import {
 } from "@companion/contracts";
 import {
   createRunRedactor,
+  getSandboxRuntimeDeadline,
   getSandboxRuntimeBudget,
   loadSecretsMasterKey,
   refreshSandboxUsageReservation,
+  recordSandboxRuntimeObservation,
   reserveSandboxUsage,
   RunRuntimeError,
   SANDBOX_RUN_ACTIVATION_RESERVATION_MS,
@@ -40,10 +42,12 @@ import {
   completeRunPrompt,
   failOrRetryRunJob,
   failRunPrompt,
+  freezeRunAfterRuntimeLossByWorker,
   getRunWorkerLeaseControl,
   heartbeatRunWorker,
   heartbeatRunJob,
   heartbeatRunPrompt,
+  interruptRunByWorker,
   getRunPromptAttachments,
   getRunPromptStopControl,
   materializeRunAttachmentFiles,
@@ -89,6 +93,7 @@ import {
 import { boundedInteger, runWorkerConfig, type RunWorkerConfig } from "./config";
 import type { Supervisor } from "./billingSupervisor";
 import { createRunCleanupScheduler } from "./runCleanup";
+import { createRunRuntimeReconciler } from "./runRuntimeReconciler";
 import { sweepRunAttachmentOrphans } from "./runAttachmentCleanup";
 import { sweepRunArtifacts } from "./runArtifactCleanup";
 import { createRunPrewarmScheduler } from "./prewarmSupervisor";
@@ -100,10 +105,30 @@ const SANDBOX_CONTROL_TIMEOUT_MS = 60_000;
 const ARTIFACT_STORAGE_TIMEOUT_MS = 30_000;
 const ARTIFACT_STORAGE_CAS_ATTEMPTS = 3;
 
+function sandboxLifecycleLog(
+  level: "info" | "warn" | "error",
+  event: string,
+  fields: Record<string, string | number | boolean | null>,
+): void {
+  console[level](JSON.stringify({ subsystem: "sandbox_lifecycle", event, ...fields }));
+}
+
 class WorkerShutdown extends Error {}
 class LostLease extends Error {}
 class CancellationRequested extends Error {}
 class PromptCancellationRequested extends Error {}
+class RuntimeInterrupted extends Error {
+  constructor(
+    readonly code: "sandbox_expired_during_turn" | "recorder_unavailable",
+    readonly sandboxState: "retained" | "missing" | "unknown",
+  ) {
+    super(
+      code === "sandbox_expired_during_turn"
+        ? "The sandbox expired while this turn was running."
+        : "The run recorder could not reconnect safely.",
+    );
+  }
+}
 
 export function assertRetainedConversationAvailable(input: {
   activationRevision: number;
@@ -198,7 +223,7 @@ export function releaseSyntheticRecorderBusy(
 }
 
 interface RunControlState {
-  status: "queued" | "starting" | "running" | "frozen" | "error" | "canceled";
+  status: "queued" | "starting" | "running" | "frozen" | "interrupted" | "error" | "canceled";
   phase: RunPhase;
   cancelRequestedAt: Date | null;
   sandboxName: string | null;
@@ -213,6 +238,10 @@ interface RecorderState {
   busy: boolean;
   idleAt: number | null;
   fatal: { code: string; message: string } | null;
+  unavailable: {
+    code: "sandbox_expired_during_turn" | "recorder_unavailable";
+    sandboxState: "retained" | "missing" | "unknown";
+  } | null;
   readImagePaths: Set<string>;
 }
 
@@ -313,6 +342,17 @@ export function sandboxTimeoutExtensionSchedule(timeoutMs: number): {
 export function createSandboxTimeoutExtender(
   runtime: NonNullable<RunControlContext["runtime"]>,
   readBudgetMs?: () => Promise<number | null>,
+  options?: {
+    maxSessionMs: number;
+    now?: () => number;
+    readDeadlineAt?: () => Promise<Date | null>;
+    onObservation?: (observation: {
+      state: "running" | "stopped" | "missing";
+      expiresAt: Date | null;
+      deadlineAt: Date;
+    }) => Promise<void>;
+    onError?: (error: unknown) => void;
+  },
 ): {
   activate(ref: SandboxRef): void;
   stop(): Promise<void>;
@@ -322,22 +362,43 @@ export function createSandboxTimeoutExtender(
   let inFlight: Promise<void> | null = null;
   let stopped = false;
   let provisionedMs = 0;
+  let activatedAtMs = 0;
 
   const refresh = () => {
     if (stopped || !activeRef || !runtime.extendTimeout || inFlight) return;
     const extend = async () => {
+      const nowMs = options?.now?.() ?? Date.now();
+      const maxSessionMs = options?.maxSessionMs;
       if (readBudgetMs) {
         const budgetMs = await readBudgetMs();
-        if (budgetMs === null || budgetMs <= provisionedMs) return;
-        const additionalMs = budgetMs - provisionedMs;
-        await runtime.extendTimeout!(activeRef!, additionalMs, AbortSignal.timeout(10_000));
-        provisionedMs = budgetMs;
+        if (!options) {
+          if (budgetMs === null || budgetMs <= provisionedMs) return;
+          const additionalMs = budgetMs - provisionedMs;
+          await runtime.extendTimeout!(activeRef!, additionalMs, AbortSignal.timeout(10_000));
+          provisionedMs = budgetMs;
+          return;
+        }
+        if (!maxSessionMs && (budgetMs === null || budgetMs <= provisionedMs)) return;
+        const admittedMs = Math.min(budgetMs ?? maxSessionMs!, maxSessionMs ?? budgetMs!);
+        const deadlineAt = await options?.readDeadlineAt?.()
+          ?? new Date(activatedAtMs + admittedMs);
+        const observed = await runtime.observe(activeRef!, AbortSignal.timeout(10_000));
+        await options?.onObservation?.({ ...observed, deadlineAt });
+        if (observed.state !== "running") return;
+        const currentExpiryMs = observed.expiresAt?.getTime() ?? activatedAtMs + provisionedMs;
+        const additionalMs = Math.max(0, deadlineAt.getTime() - currentExpiryMs);
+        if (additionalMs <= 0 || nowMs >= deadlineAt.getTime()) return;
+        const extended = await runtime.extendTimeout!(activeRef!, additionalMs, AbortSignal.timeout(10_000));
+        provisionedMs = admittedMs;
+        if (extended) await options?.onObservation?.({ ...extended, deadlineAt });
         return;
       }
       const { extensionMs } = sandboxTimeoutExtensionSchedule(activeRef!.timeoutMs);
       await runtime.extendTimeout!(activeRef!, extensionMs, AbortSignal.timeout(10_000));
     };
-    inFlight = extend().catch(() => undefined).finally(() => {
+    inFlight = extend().catch((error) => {
+      options?.onError?.(error);
+    }).finally(() => {
       inFlight = null;
     });
   };
@@ -347,7 +408,12 @@ export function createSandboxTimeoutExtender(
       if (stopped || timer || !runtime.extendTimeout) return;
       activeRef = ref;
       provisionedMs = ref.timeoutMs;
-      const intervalMs = readBudgetMs ? 5_000 : sandboxTimeoutExtensionSchedule(ref.timeoutMs).intervalMs;
+      activatedAtMs = options?.now?.() ?? Date.now();
+      const intervalMs = options
+        ? 15_000
+        : readBudgetMs
+          ? 5_000
+          : sandboxTimeoutExtensionSchedule(ref.timeoutMs).intervalMs;
       // Managed sandboxes extend only by newly admitted minutes; self-hosted sandboxes preserve
       // the existing rolling provider lease behavior.
       refresh();
@@ -469,13 +535,54 @@ async function tenant<T>(job: ClaimedRunJob, fn: (database: Db) => Promise<T>): 
   return withTenantContext({ orgId: job.orgId, userId: job.creatorId }, fn);
 }
 
-async function startRunSandboxUsage(job: ClaimedRunJob, ref: SandboxRef, activationRevision: number): Promise<void> {
-  await tenant(job, (database) => startSandboxUsage({
-    orgId: job.orgId,
-    sandboxName: ref.sandboxName,
-    activationRevision,
-    database,
-  }));
+async function startRunSandboxUsage(
+  job: ClaimedRunJob,
+  ref: SandboxRef,
+  activationRevision: number,
+  lifecycle: { enabled: boolean; maxSessionMs: number },
+): Promise<void> {
+  await tenant(job, async (database) => {
+    if (!lifecycle.enabled) {
+      await startSandboxUsage({
+        orgId: job.orgId,
+        sandboxName: ref.sandboxName,
+        activationRevision,
+        database,
+      });
+      return;
+    }
+    const budget = await getSandboxRuntimeBudget({
+      orgId: job.orgId,
+      sandboxName: ref.sandboxName,
+      activationRevision,
+      database,
+    });
+    const maxSessionMs = lifecycle.maxSessionMs;
+    const admittedMs = Math.min(maxSessionMs, budget?.limitMs ?? maxSessionMs);
+    const now = new Date();
+    const runtimeDeadlineAt = new Date(now.getTime() + admittedMs);
+    await startSandboxUsage({
+      orgId: job.orgId,
+      sandboxName: ref.sandboxName,
+      activationRevision,
+      runtimePolicy: budget ? "budgeted" : "safety_capped",
+      runtimeDeadlineAt,
+      database,
+      now,
+    });
+    await database
+      .update(schema.skillRuns)
+      .set({
+        runtimeDeadlineAt: sql`coalesce(${schema.skillRuns.runtimeDeadlineAt}, ${runtimeDeadlineAt})`,
+        updatedAt: now,
+      })
+      .where(and(
+        eq(schema.skillRuns.orgId, job.orgId),
+        eq(schema.skillRuns.id, job.runId),
+        eq(schema.skillRuns.creatorId, job.creatorId),
+        eq(schema.skillRuns.activationRevision, activationRevision),
+      ));
+  });
 }
 
 async function settleRunSandboxUsage(job: ClaimedRunJob, ref: SandboxRef, activationRevision: number): Promise<void> {
@@ -673,13 +780,22 @@ function startRecorder(input: {
   ctx: RunControlContext;
   target: { domain: string; password: string };
   sessionId: string;
+  ref: SandboxRef;
+  activationRevision: number;
   redactor: RunRedactor;
   config: RunWorkerConfig;
+  runtimeDeadlineAt: Date | null;
   shutdownSignal: AbortSignal;
   onArtifactToolDone?: () => void;
 }): RecorderHandle {
   const chat = input.ctx.chat!;
-  const state: RecorderState = { busy: false, idleAt: null, fatal: null, readImagePaths: new Set() };
+  const state: RecorderState = {
+    busy: false,
+    idleAt: null,
+    fatal: null,
+    unavailable: null,
+    readImagePaths: new Set(),
+  };
   const abort = new AbortController();
   const recorderSignal = AbortSignal.any([abort.signal, input.shutdownSignal]);
   const streams = new Map<string, RunStreamingRedactor>();
@@ -717,18 +833,24 @@ function startRecorder(input: {
 
   const loop = (async () => {
     let reconnectMs = input.config.recorderReconnectMinMs;
+    let degradedAtMs: number | null = null;
+    let reconnectAttempts = 0;
+    let lastProviderObservationAt = 0;
+    let longDegradedLogged = false;
     recorderLoop: while (!stopped && !input.shutdownSignal.aborted) {
+      let connectionAbort: AbortController | null = null;
+      let iterator: AsyncIterator<RunChatEvent> | null = null;
       try {
         let connected = false;
         let resolveConnected!: () => void;
         const connection = new Promise<void>((resolve) => { resolveConnected = resolve; });
-        const connectionAbort = new AbortController();
+        connectionAbort = new AbortController();
         const connectionTimer = setTimeout(
-          () => connectionAbort.abort(new RunRuntimeError("the run recorder could not connect")),
+          () => connectionAbort?.abort(new RunRuntimeError("the run recorder could not connect")),
           OPENCODE_CALL_TIMEOUT_MS,
         );
         const streamSignal = AbortSignal.any([recorderSignal, connectionAbort.signal]);
-        const iterator = chat
+        iterator = chat
           .streamEvents(input.target, input.sessionId, streamSignal, () => {
             connected = true;
             clearTimeout(connectionTimer);
@@ -753,6 +875,25 @@ function startRecorder(input: {
           operation: (signal) => chat.getSessionState(input.target, input.sessionId, signal),
         });
         if (sessionState === "missing") throw new RunRuntimeError("the OpenCode session is unavailable");
+        if (degradedAtMs !== null) {
+          await tenant(input.job, (database) => updateRunWorkerState({
+            actor: input.actor,
+            orgId: input.job.orgId,
+            runId: input.job.runId,
+            workerId: input.job.leaseOwner ?? undefined,
+            runtimeState: "healthy",
+            runtimeDegradedAt: null,
+            database,
+          }));
+          sandboxLifecycleLog("info", "recorder_recovered", {
+            runId: input.job.runId,
+            attempts: reconnectAttempts,
+            degradedMs: Date.now() - degradedAtMs,
+          });
+          degradedAtMs = null;
+          reconnectAttempts = 0;
+          longDegradedLogged = false;
+        }
         if (sessionState === "idle" && !idleSnapshotFresh) {
           // A history read may already include bytes buffered by this subscription. Discard the
           // subscription first so a persisted snapshot and later event replay can never append the
@@ -818,15 +959,119 @@ function startRecorder(input: {
         }
       } catch {
         if (stopped || input.shutdownSignal.aborted) break;
+      } finally {
+        connectionAbort?.abort();
+        if (iterator?.return) await iterator.return().catch(() => undefined);
       }
       if (stopped || input.shutdownSignal.aborted) break;
-      await appendEvents(
-        input.job,
-        input.actor,
-        [{ type: "status", state: "retry", attempt: null, message: "Reconnecting to the run recorder" }],
-        input.redactor,
+      state.busy = true;
+      reconnectAttempts += 1;
+      if (input.config.sandboxLifecycleV2 && degradedAtMs === null) {
+        degradedAtMs = Date.now();
+        await tenant(input.job, (database) => updateRunWorkerState({
+          actor: input.actor,
+          orgId: input.job.orgId,
+          runId: input.job.runId,
+          workerId: input.job.leaseOwner ?? undefined,
+          runtimeState: "degraded",
+          runtimeDegradedAt: new Date(degradedAtMs!),
+          database,
+        })).catch(() => undefined);
+        await appendEvents(
+          input.job,
+          input.actor,
+          [{ type: "status", state: "retry", attempt: null, message: "Reconnecting to the run recorder" }],
+          input.redactor,
+        ).catch(() => undefined);
+        sandboxLifecycleLog("warn", "recorder_degraded", {
+          runId: input.job.runId,
+          attempts: reconnectAttempts,
+        });
+      } else if (!input.config.sandboxLifecycleV2) {
+        await appendEvents(
+          input.job,
+          input.actor,
+          [{ type: "status", state: "retry", attempt: null, message: "Reconnecting to the run recorder" }],
+          input.redactor,
+        ).catch(() => undefined);
+      }
+      if (
+        input.config.sandboxLifecycleV2
+        && Date.now() - lastProviderObservationAt >= 15_000
+      ) {
+        lastProviderObservationAt = Date.now();
+        const observation = await input.ctx.runtime!
+          .observe(input.ref, AbortSignal.timeout(10_000))
+          .catch(() => {
+            sandboxLifecycleLog("warn", "provider_observe_failed", {
+              runId: input.job.runId,
+              activationRevision: input.activationRevision,
+              attempts: reconnectAttempts,
+            });
+            return null;
+          });
+        if (observation && observation.state !== "running") {
+          state.unavailable = {
+            code: "sandbox_expired_during_turn",
+            sandboxState: observation.state === "stopped" ? "retained" : "missing",
+          };
+        }
+      }
+      if (
+        input.config.sandboxLifecycleV2
+        &&
+        !state.unavailable
+        && degradedAtMs !== null
+        && recorderRetryWindowExpired({
+          degradedAtMs,
+          nowMs: Date.now(),
+          maxUnavailableMs: input.config.recorderUnavailableMs,
+          runtimeDeadlineAt: input.runtimeDeadlineAt,
+        })
+      ) {
+        state.unavailable = { code: "recorder_unavailable", sandboxState: "unknown" };
+        if (
+          input.runtimeDeadlineAt
+          && Date.now() >= input.runtimeDeadlineAt.getTime()
+        ) {
+          sandboxLifecycleLog("warn", "runtime_deadline_exceeded", {
+            runId: input.job.runId,
+            activationRevision: input.activationRevision,
+            deadlineAt: input.runtimeDeadlineAt.toISOString(),
+            attempts: reconnectAttempts,
+          });
+        }
+      }
+      if (degradedAtMs !== null && !longDegradedLogged && Date.now() - degradedAtMs >= 60_000) {
+        longDegradedLogged = true;
+        sandboxLifecycleLog("warn", "recorder_degraded_over_60s", {
+          runId: input.job.runId,
+          attempts: reconnectAttempts,
+        });
+      }
+      if (input.config.sandboxLifecycleV2 && reconnectAttempts === 20) {
+        sandboxLifecycleLog("warn", "recorder_retry_storm", {
+          runId: input.job.runId,
+          attempts: reconnectAttempts,
+        });
+      }
+      if (state.unavailable) {
+        if (!startedResolved) {
+          startedResolved = true;
+          resolveStarted();
+        }
+        break;
+      }
+      const retryCutoffAt = degradedAtMs === null
+        ? Number.POSITIVE_INFINITY
+        : Math.min(
+            degradedAtMs + input.config.recorderUnavailableMs,
+            input.runtimeDeadlineAt?.getTime() ?? Number.POSITIVE_INFINITY,
+          );
+      await sleep(
+        Math.min(reconnectMs, Math.max(1, retryCutoffAt - Date.now())),
+        recorderSignal,
       ).catch(() => undefined);
-      await sleep(reconnectMs, recorderSignal).catch(() => undefined);
       reconnectMs = Math.min(input.config.recorderReconnectMaxMs, reconnectMs * 2);
     }
   })();
@@ -846,6 +1091,19 @@ function startRecorder(input: {
       artifactToolCalls.clear();
     },
   };
+}
+
+export function recorderRetryWindowExpired(input: {
+  degradedAtMs: number;
+  nowMs: number;
+  maxUnavailableMs: number;
+  runtimeDeadlineAt: Date | null;
+}): boolean {
+  const retryCutoffAt = Math.min(
+    input.degradedAtMs + input.maxUnavailableMs,
+    input.runtimeDeadlineAt?.getTime() ?? Number.POSITIVE_INFINITY,
+  );
+  return input.nowMs >= retryCutoffAt;
 }
 
 export async function collectAndCacheRunArtifacts(input: {
@@ -1537,6 +1795,7 @@ async function processClaimedJob(input: {
   let target: { domain: string; password: string } | null = null;
   let sessionId: string | null = null;
   let activationRevision = 0;
+  let runtimeDeadlineAt: Date | null = null;
   const timeoutExtender = createSandboxTimeoutExtender(ctx.runtime!, async () => {
     if (!ref) return null;
     const budget = await tenant(job, (database) => getSandboxRuntimeBudget({
@@ -1546,7 +1805,48 @@ async function processClaimedJob(input: {
       database,
     }));
     return budget?.limitMs ?? null;
-  });
+  }, config.sandboxLifecycleV2 ? {
+    maxSessionMs: config.sandboxMaxSessionMs,
+    readDeadlineAt: async () => {
+      if (!ref) return null;
+      return tenant(job, (database) => getSandboxRuntimeDeadline({
+        orgId: job.orgId,
+        sandboxName: ref!.sandboxName,
+        activationRevision,
+        database,
+      }));
+    },
+    onObservation: async (observation) => {
+      if (!ref) return;
+      await tenant(job, (database) => recordSandboxRuntimeObservation({
+        orgId: job.orgId,
+        sandboxName: ref!.sandboxName,
+        activationRevision,
+        state: observation.state,
+        expiresAt: observation.expiresAt,
+        database,
+      }));
+      sandboxLifecycleLog("info", "provider_observed", {
+        runId: job.runId,
+        activationRevision,
+        state: observation.state,
+        expiresAt: observation.expiresAt?.toISOString() ?? null,
+        deadlineAt: observation.deadlineAt.toISOString(),
+      });
+      if (Date.now() > observation.deadlineAt.getTime() + 30_000) {
+        sandboxLifecycleLog("error", "runtime_deadline_overrun", {
+          runId: job.runId,
+          activationRevision,
+          overrunMs: Date.now() - observation.deadlineAt.getTime(),
+        });
+      }
+    },
+    onError: (error) => sandboxLifecycleLog("warn", "extension_failed", {
+      runId: job.runId,
+      activationRevision,
+      code: errorCode(error),
+    }),
+  } : undefined);
   try {
     leaseDeadline = claimedRunLeaseDeadline(job);
     const leaseControl = await getRunWorkerLeaseControl({
@@ -1688,7 +1988,18 @@ async function processClaimedJob(input: {
     } else {
       await setPhase(job, actor, workerId, "push_workspace", { sandboxId: sandbox!.sandboxId, sandboxDomain: sandbox!.domain });
     }
-    await startRunSandboxUsage(job, activeRef, activationRevision);
+    await startRunSandboxUsage(job, activeRef, activationRevision, {
+      enabled: config.sandboxLifecycleV2,
+      maxSessionMs: config.sandboxMaxSessionMs,
+    });
+    runtimeDeadlineAt = config.sandboxLifecycleV2
+      ? await tenant(job, (database) => getSandboxRuntimeDeadline({
+          orgId: job.orgId,
+          sandboxName: activeRef.sandboxName,
+          activationRevision,
+          database,
+        }))
+      : null;
     timeoutExtender.activate(activeRef);
 
     const dynamicFiles = await withBoundedSignal({
@@ -1802,8 +2113,11 @@ async function processClaimedJob(input: {
       ctx,
       target: chatTarget,
       sessionId: activeSessionId,
+      ref: activeRef,
+      activationRevision,
       redactor,
       config,
+      runtimeDeadlineAt,
       shutdownSignal: jobAbort.signal,
       onArtifactToolDone: () => artifactCollector?.request(),
     });
@@ -1811,7 +2125,10 @@ async function processClaimedJob(input: {
     // Bound the handshake so a permanently broken SSE route becomes a retryable job failure.
     await Promise.race([
       recorder.started,
-      sleep(30_000, jobAbort.signal).then(() => {
+      sleep(
+        config.sandboxLifecycleV2 ? config.recorderUnavailableMs + 15_000 : 30_000,
+        jobAbort.signal,
+      ).then(() => {
         throw new RunRuntimeError("the run recorder could not connect");
       }),
     ]);
@@ -1948,6 +2265,12 @@ async function processClaimedJob(input: {
     while (!jobAbort.signal.aborted) {
       const control = await readRunControl(job);
       if (control.cancelRequestedAt || control.status === "canceled") throw new CancellationRequested();
+      if (recorder.state.unavailable) {
+        throw new RuntimeInterrupted(
+          recorder.state.unavailable.code,
+          recorder.state.unavailable.sandboxState,
+        );
+      }
       if (recorder.state.fatal) throw new RunRuntimeError(recorder.state.fatal.message);
       if (Date.now() >= nextAclCheck) {
         await revalidatePinnedSecrets(job, actor, ctx.masterKey);
@@ -2223,6 +2546,7 @@ async function processClaimedJob(input: {
       sandboxCleanedAt: null,
     });
   } catch (error) {
+    const durableIdleAt = recorder?.state.idleAt ?? null;
     await timeoutExtender.stop();
     await artifactCollector?.waitForIdle().catch(() => undefined);
     await recorder?.stop();
@@ -2234,6 +2558,70 @@ async function processClaimedJob(input: {
     if (error instanceof WorkerShutdown || error instanceof LostLease || leaseLost || input.shutdownSignal.aborted) {
       // Deliberately keep the job leased. Another replica resumes it after expiry without tearing
       // down a healthy sandbox during a normal deployment.
+      return;
+    }
+    if (error instanceof RuntimeInterrupted && config.sandboxLifecycleV2) {
+      if (!(await refreshLease()) || leaseLost) return;
+      if (target && sessionId) {
+        await saveFinalTranscript(
+          job,
+          actor,
+          ctx,
+          target,
+          sessionId,
+          redactor,
+          AbortSignal.timeout(10_000),
+        ).catch(() => undefined);
+      }
+      let sandboxState = error.sandboxState;
+      if (sandboxState !== "missing" && ref) {
+        const stopped = await ctx.runtime!
+          .stop(ref, AbortSignal.timeout(SANDBOX_CONTROL_TIMEOUT_MS))
+          .catch(() => false);
+        sandboxState = stopped ? "retained" : "unknown";
+      }
+      if (ref) await settleRunSandboxUsage(job, ref, activationRevision).catch(() => undefined);
+      if (
+        activePromptId === null
+        && durableIdleAt !== null
+        && sandboxState !== "unknown"
+      ) {
+        const frozen = await tenant(job, (database) => freezeRunAfterRuntimeLossByWorker({
+          actor,
+          orgId: job.orgId,
+          runId: job.runId,
+          workerId,
+          sandboxState,
+          database,
+        })).catch(() => "lost_lease" as const);
+        if (frozen === "frozen") {
+          sandboxLifecycleLog("info", "run_frozen_after_runtime_loss", {
+            runId: job.runId,
+            activationRevision,
+            code: error.code,
+            sandboxState,
+          });
+          return;
+        }
+        if (frozen === "lost_lease") return;
+      }
+      const interrupted = await tenant(job, (database) => interruptRunByWorker({
+        actor,
+        orgId: job.orgId,
+        runId: job.runId,
+        workerId,
+        errorCode: error.code,
+        userMessage: error.message,
+        sandboxState,
+        database,
+      })).catch(() => false);
+      sandboxLifecycleLog(interrupted ? "warn" : "error", "run_interrupted", {
+        runId: job.runId,
+        activationRevision,
+        code: error.code,
+        sandboxState,
+        promptActive: activePromptId !== null,
+      });
       return;
     }
     let cancellationRequested = error instanceof CancellationRequested;
@@ -2466,7 +2854,18 @@ export async function startRunSupervisor(): Promise<Supervisor | null> {
       });
       for (const job of jobs) {
         if (active.has(job.id)) continue;
-        const task = processClaimedJob({ job, workerId, ctx, config, shutdownSignal: shutdown.signal })
+        const lifecycleEnabledForOrg = config.sandboxLifecycleV2
+          && (
+            config.sandboxLifecycleV2OrgIds.size === 0
+            || config.sandboxLifecycleV2OrgIds.has(job.orgId)
+          );
+        const task = processClaimedJob({
+          job,
+          workerId,
+          ctx,
+          config: { ...config, sandboxLifecycleV2: lifecycleEnabledForOrg },
+          shutdownSignal: shutdown.signal,
+        })
           .catch((error) => {
             // `processClaimedJob` normally persists every failure itself. If an invariant escapes that
             // boundary, log identifiers + a bounded classification only; never an SDK error/message.
@@ -2515,6 +2914,21 @@ export async function startRunSupervisor(): Promise<Supervisor | null> {
   const cleanup = () => cleanupScheduler.run().catch(() => undefined);
   const cleanupTimer = setInterval(() => void cleanup(), config.cleanupIntervalMs);
   void cleanup();
+  const runtimeReconciler = config.sandboxLifecycleV2
+    ? createRunRuntimeReconciler({
+        workerId,
+        concurrency: config.concurrency,
+        leaseSeconds: config.leaseSeconds,
+        runtime,
+        region: ctx.region,
+        orgIds: config.sandboxLifecycleV2OrgIds,
+      })
+    : null;
+  const reconcileRuntime = () => runtimeReconciler?.run().catch(() => undefined);
+  const runtimeReconcileTimer = runtimeReconciler
+    ? setInterval(() => void reconcileRuntime(), 60_000)
+    : null;
+  void reconcileRuntime();
   let retentionRunning = false;
   const retain = async () => {
     if (retentionRunning || shutdown.signal.aborted) return;
@@ -2540,11 +2954,13 @@ export async function startRunSupervisor(): Promise<Supervisor | null> {
       clearInterval(timer);
       clearInterval(prewarmTimer);
       clearInterval(cleanupTimer);
+      if (runtimeReconcileTimer) clearInterval(runtimeReconcileTimer);
       clearInterval(retentionTimer);
       clearInterval(readinessTimer);
       shutdown.abort();
       await removeRunWorkerHeartbeat({ workerId, database: db }).catch(() => undefined);
       await cleanupScheduler.stop();
+      await runtimeReconciler?.stop();
       await prewarmScheduler.stop();
       await Promise.allSettled(active.values());
       masterKey.fill(0);
