@@ -1,18 +1,25 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql as drizzleSql } from "drizzle-orm";
 import { PROJECT_PROMPT_MAX_QUEUED } from "@companion/contracts";
 import { schema, withTenantContext } from "@companion/db";
+import {
+  admitProjectPromptUsage,
+  type BillingRuntimeConfig,
+} from "@companion/core";
 import {
   cancelQueuedProjectPrompt,
   claimProjectPromptJobs,
   claimProjectWorkspaceJobs,
+  createProjectSession,
   enqueueProjectPrompt,
   requestProjectSessionStop,
+  setProjectSkills,
 } from "@companion/core/services";
 import {
   createIntegrationFixture,
   integrationDb,
+  integrationSql,
   type IntegrationFixture,
 } from "./testDatabase";
 
@@ -310,6 +317,292 @@ describe("Project prompt queue admission", () => {
       .where(eq(schema.projectPrompts.id, coldHeadId));
     await expect(enqueueCold(7)).rejects.toMatchObject({
       code: "prompt_queue_full",
+    });
+  });
+
+  it("keeps workspace-first lock ordering across prompt and Project mutations", async () => {
+    const lockProjectId = randomUUID();
+    const lockSessionId = randomUUID();
+    await integrationDb.insert(schema.projects).values({
+      id: lockProjectId,
+      orgId: fixture.orgA,
+      creatorId: fixture.owner.id,
+      name: "Canonical Project lock order",
+      defaultModel: "openai/gpt-5",
+      idempotencyKey: `project-lock-order-${lockProjectId}`,
+      payloadHash: "e".repeat(64),
+    });
+    await integrationDb.insert(schema.projectWorkspaces).values({
+      orgId: fixture.orgA,
+      projectId: lockProjectId,
+      creatorId: fixture.owner.id,
+      sandboxName: `project-${lockProjectId}`,
+      status: "running",
+      desiredGeneration: 1,
+      appliedGeneration: 1,
+      activationRevision: 1,
+    });
+    await integrationDb.insert(schema.projectSessions).values({
+      id: lockSessionId,
+      orgId: fixture.orgA,
+      projectId: lockProjectId,
+      creatorId: fixture.owner.id,
+      title: "Concurrent lock-order probe",
+      model: "openai/gpt-5",
+      modelProvider: "openai",
+      modelCredentialEnvKeys: [],
+      status: "completed",
+    });
+
+    try {
+      const actor = fixture.owner;
+      for (let iteration = 0; iteration < 8; iteration += 1) {
+        const enqueue = withTenantContext(
+          { orgId: fixture.orgA, userId: actor.id },
+          (database) =>
+            enqueueProjectPrompt({
+              actor,
+              orgId: fixture.orgA,
+              projectId: lockProjectId,
+              sessionId: lockSessionId,
+              text: `Concurrent settings prompt ${iteration}`,
+              idempotencyKey: `project-lock-settings-${lockSessionId}-${iteration}`,
+              attachments: [],
+              database,
+            }),
+        );
+        await new Promise((resolve) => setTimeout(resolve, 1));
+        const settings = withTenantContext(
+          { orgId: fixture.orgA, userId: actor.id },
+          (database) =>
+            setProjectSkills({
+              actor,
+              orgId: fixture.orgA,
+              projectId: lockProjectId,
+              value: { revision: iteration + 1, skill_slugs: [] },
+              database,
+            }),
+        );
+        const results = await Promise.allSettled([enqueue, settings]);
+        expect(
+          results.flatMap((result) =>
+            result.status === "rejected"
+              ? [{
+                  name: result.reason instanceof Error
+                    ? result.reason.name
+                    : "unknown",
+                  code:
+                    typeof result.reason === "object"
+                    && result.reason !== null
+                    && "code" in result.reason
+                      ? result.reason.code
+                      : null,
+                }]
+              : []
+          ),
+          `settings/enqueue iteration ${iteration}`,
+        ).toEqual([]);
+        await integrationDb
+          .update(schema.projectPrompts)
+          .set({ status: "completed", completedAt: new Date() })
+          .where(
+            and(
+              eq(schema.projectPrompts.orgId, fixture.orgA),
+              eq(schema.projectPrompts.sessionId, lockSessionId),
+              eq(schema.projectPrompts.status, "queued"),
+            ),
+          );
+        await integrationDb
+          .update(schema.projectSessions)
+          .set({ status: "completed", stopRequestedAt: null })
+          .where(eq(schema.projectSessions.id, lockSessionId));
+      }
+
+      for (let iteration = 0; iteration < 8; iteration += 1) {
+        const enqueue = withTenantContext(
+          { orgId: fixture.orgA, userId: actor.id },
+          (database) =>
+            enqueueProjectPrompt({
+              actor,
+              orgId: fixture.orgA,
+              projectId: lockProjectId,
+              sessionId: lockSessionId,
+              text: `Concurrent new-session prompt ${iteration}`,
+              idempotencyKey: `project-lock-enqueue-${lockSessionId}-${iteration}`,
+              attachments: [],
+              database,
+            }),
+        );
+        await new Promise((resolve) => setTimeout(resolve, 1));
+        const newSession = withTenantContext(
+          { orgId: fixture.orgA, userId: actor.id },
+          (database) =>
+            createProjectSession({
+              actor,
+              orgId: fixture.orgA,
+              projectId: lockProjectId,
+              prompt: `Create a parallel conversation ${iteration}`,
+              model: "openai/gpt-5",
+              modelProvider: "openai",
+              modelCredentialEnvKeys: [],
+              idempotencyKey: `project-lock-session-${lockProjectId}-${iteration}`,
+              attachments: [],
+              database,
+            }),
+        );
+        const results = await Promise.allSettled([enqueue, newSession]);
+        expect(
+          results.flatMap((result) =>
+            result.status === "rejected"
+              ? [{
+                  name: result.reason instanceof Error
+                    ? result.reason.name
+                    : "unknown",
+                  code:
+                    typeof result.reason === "object"
+                    && result.reason !== null
+                    && "code" in result.reason
+                      ? result.reason.code
+                      : null,
+                }]
+              : []
+          ),
+          `new-session/enqueue iteration ${iteration}`,
+        ).toEqual([]);
+        await integrationDb
+          .update(schema.projectPrompts)
+          .set({ status: "completed", completedAt: new Date() })
+          .where(
+            and(
+              eq(schema.projectPrompts.orgId, fixture.orgA),
+              eq(schema.projectPrompts.sessionId, lockSessionId),
+              eq(schema.projectPrompts.status, "queued"),
+            ),
+          );
+        await integrationDb
+          .update(schema.projectSessions)
+          .set({ status: "completed", stopRequestedAt: null })
+          .where(eq(schema.projectSessions.id, lockSessionId));
+      }
+    } finally {
+      await integrationDb
+        .delete(schema.projects)
+        .where(eq(schema.projects.id, lockProjectId));
+    }
+  });
+
+  it("acquires the quota advisory lock before waiting on an open usage row", async () => {
+    const usageProjectId = randomUUID();
+    const sandboxName = `project-quota-order-${usageProjectId}`;
+    const activationRevision = 4;
+    const now = new Date();
+    const periodStart = new Date(Date.UTC(
+      now.getUTCFullYear(),
+      now.getUTCMonth(),
+      1,
+    ));
+    const applicationName = `project-quota-order-${randomUUID()}`;
+    const config: BillingRuntimeConfig = {
+      billingMode: "stripe",
+      entitlementMode: "off",
+      pilotOrgIds: new Set(),
+      proOrgAllowlist: new Set(),
+      checkoutEnabled: false,
+      webhooksEnabled: false,
+      sandboxMinutesPerSeat: 250,
+    };
+    await integrationDb.insert(schema.sandboxUsageSessions).values({
+      orgId: fixture.orgA,
+      creatorId: fixture.owner.id,
+      kind: "project",
+      sourceId: usageProjectId,
+      sandboxName,
+      activationRevision,
+      periodStart,
+      reservedMs: 10 * 60_000,
+      reservationExpiresAt: new Date(now.getTime() + 15 * 60_000),
+    });
+
+    let releaseUsageRow!: () => void;
+    const usageRowReleased = new Promise<void>((resolve) => {
+      releaseUsageRow = resolve;
+    });
+    let markUsageRowLocked!: () => void;
+    const usageRowLocked = new Promise<void>((resolve) => {
+      markUsageRowLocked = resolve;
+    });
+    const rowHolder = integrationSql.begin(async (tx) => {
+      await tx`
+        select id
+        from sandbox_usage_sessions
+        where org_id = ${fixture.orgA}::uuid
+          and kind = 'project'
+          and source_id = ${usageProjectId}::uuid
+          and activation_revision = ${activationRevision}
+        for update
+      `;
+      markUsageRowLocked();
+      await usageRowReleased;
+    });
+    await usageRowLocked;
+
+    const admission = withTenantContext(
+      { orgId: fixture.orgA, userId: fixture.owner.id },
+      async (database) => {
+        await database.execute(
+          drizzleSql`select set_config('application_name', ${applicationName}, true)`,
+        );
+        return admitProjectPromptUsage({
+          orgId: fixture.orgA,
+          creatorId: fixture.owner.id,
+          projectId: usageProjectId,
+          sandboxName,
+          currentActivationRevision: activationRevision,
+          database,
+          now,
+          config,
+        });
+      },
+    );
+
+    let observed:
+      | { waitEventType: string | null; advisoryGranted: boolean }
+      | undefined;
+    try {
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        [observed] = await integrationSql<Array<{
+          waitEventType: string | null;
+          advisoryGranted: boolean;
+        }>>`
+          select
+            activity.wait_event_type as "waitEventType",
+            exists (
+              select 1
+              from pg_locks held
+              where held.pid = activity.pid
+                and held.locktype = 'advisory'
+                and held.granted
+            ) as "advisoryGranted"
+          from pg_stat_activity activity
+          where activity.application_name = ${applicationName}
+            and activity.state = 'active'
+        `;
+        if (observed?.waitEventType === "Lock") break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      // With the former usage-row -> quota-advisory order, this same blocked transaction had no
+      // granted advisory lock, deterministically exposing the inversion with the worker runway path.
+      expect(observed).toEqual({
+        waitEventType: "Lock",
+        advisoryGranted: true,
+      });
+    } finally {
+      releaseUsageRow();
+      await rowHolder;
+    }
+    await expect(admission).resolves.toEqual({
+      activationRevision,
+      reservationMs: 7 * 60_000,
     });
   });
 });

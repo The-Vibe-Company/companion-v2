@@ -1,5 +1,18 @@
 import { createHash, randomUUID } from "node:crypto";
-import { and, asc, desc, eq, inArray, isNotNull, isNull, lt, max, or, sql } from "drizzle-orm";
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  getTableColumns,
+  inArray,
+  isNotNull,
+  isNull,
+  lt,
+  max,
+  or,
+  sql,
+} from "drizzle-orm";
 import {
   PROJECT_ATTACHMENT_MAX_BYTES,
   PROJECT_ATTACHMENT_MAX_FILES,
@@ -51,6 +64,14 @@ import { assertMember, type ActorContext } from "./services";
 type ProjectRecord = typeof schema.projects.$inferSelect;
 type ProjectWorkspaceRecord = typeof schema.projectWorkspaces.$inferSelect;
 type ProjectSessionRecord = typeof schema.projectSessions.$inferSelect;
+type ProjectCounts = {
+  skills: number;
+  sessions: number;
+  activeSessions: number;
+  archivedSessions: number;
+  unreadSessions: number;
+  files: number;
+};
 
 export interface CreateProjectAttachment {
   id: string;
@@ -290,6 +311,36 @@ async function loadOwnedProject(input: {
   return project;
 }
 
+/**
+ * Lock the shared Project mutation roots in the same order used by prompt admission and worker
+ * fences. Keeping workspace → project canonical prevents a prompt enqueue (which must reserve an
+ * activation on the workspace first) from deadlocking with settings, skill, session or file
+ * mutations that also need both rows.
+ */
+async function loadOwnedProjectWorkspaceForUpdate(input: {
+  actor: ActorContext;
+  orgId: string;
+  projectId: string;
+  database: Db;
+}): Promise<{ project: ProjectRecord; workspace: ProjectWorkspaceRecord }> {
+  const workspaceRows = await input.database
+    .select()
+    .from(schema.projectWorkspaces)
+    .where(
+      and(
+        eq(schema.projectWorkspaces.orgId, input.orgId),
+        eq(schema.projectWorkspaces.projectId, input.projectId),
+        eq(schema.projectWorkspaces.creatorId, input.actor.id),
+      ),
+    )
+    .limit(1)
+    .for("update");
+  const workspace = workspaceRows[0];
+  if (!workspace) throw new ProjectNotFoundError();
+  const project = await loadOwnedProject({ ...input, lock: true });
+  return { project, workspace };
+}
+
 async function loadOwnedSession(input: {
   actor: ActorContext;
   orgId: string;
@@ -410,14 +461,7 @@ async function projectCounts(input: {
   projectId: string;
   creatorId: string;
   database: Db;
-}): Promise<{
-  skills: number;
-  sessions: number;
-  activeSessions: number;
-  archivedSessions: number;
-  unreadSessions: number;
-  files: number;
-}> {
+}): Promise<ProjectCounts> {
   const [skills, sessions, activeSessions, archivedSessions, unreadSessions, files] = await Promise.all([
     input.database
       .select({ count: sql<number>`count(*)::int` })
@@ -505,14 +549,7 @@ async function projectCounts(input: {
 function toProjectRow(
   project: ProjectRecord,
   workspace: ProjectWorkspaceRecord,
-  counts: {
-    skills: number;
-    sessions: number;
-    activeSessions: number;
-    archivedSessions: number;
-    unreadSessions: number;
-    files: number;
-  },
+  counts: ProjectCounts,
   recentSessions: ProjectSessionRow[] = [],
 ): ProjectRow {
   return {
@@ -800,34 +837,164 @@ export async function listProjects(input: {
       ),
     )
     .orderBy(desc(schema.projectWorkspaces.lastActivityAt), desc(schema.projects.id));
-  return Promise.all(
-    rows.map(async ({ project, workspace }) => {
-      const [counts, recentSessions] = await Promise.all([
-        projectCounts({
-          orgId: input.orgId,
-          projectId: project.id,
-          creatorId: input.actor.id,
-          database,
-        }),
-        database
-          .select()
-          .from(schema.projectSessions)
-          .where(
-            and(
-              eq(schema.projectSessions.orgId, input.orgId),
-              eq(schema.projectSessions.projectId, project.id),
-              eq(schema.projectSessions.creatorId, input.actor.id),
-              isNull(schema.projectSessions.archivedAt),
-            ),
+  if (rows.length === 0) return [];
+
+  const projectIds = rows.map(({ project }) => project.id);
+  const skillCounts = database
+    .select({
+      projectId: schema.projectSkills.projectId,
+      count: sql<number>`count(*)::int`.as("skill_count"),
+    })
+    .from(schema.projectSkills)
+    .where(
+      and(
+        eq(schema.projectSkills.orgId, input.orgId),
+        eq(schema.projectSkills.creatorId, input.actor.id),
+        inArray(schema.projectSkills.projectId, projectIds),
+      ),
+    )
+    .groupBy(schema.projectSkills.projectId)
+    .as("listed_project_skill_counts");
+  const fileCounts = database
+    .select({
+      projectId: schema.projectFiles.projectId,
+      count: sql<number>`count(*)::int`.as("file_count"),
+    })
+    .from(schema.projectFiles)
+    .where(
+      and(
+        eq(schema.projectFiles.orgId, input.orgId),
+        eq(schema.projectFiles.creatorId, input.actor.id),
+        inArray(schema.projectFiles.projectId, projectIds),
+        isNull(schema.projectFiles.deletedAt),
+      ),
+    )
+    .groupBy(schema.projectFiles.projectId)
+    .as("listed_project_file_counts");
+  const rankedRecentSessions = database
+    .select({
+      ...getTableColumns(schema.projectSessions),
+      recentRank: sql<number>`row_number() over (
+        partition by ${schema.projectSessions.projectId}
+        order by ${schema.projectSessions.createdAt} desc, ${schema.projectSessions.id} desc
+      )`.as("recent_rank"),
+    })
+    .from(schema.projectSessions)
+    .where(
+      and(
+        eq(schema.projectSessions.orgId, input.orgId),
+        eq(schema.projectSessions.creatorId, input.actor.id),
+        inArray(schema.projectSessions.projectId, projectIds),
+        isNull(schema.projectSessions.archivedAt),
+      ),
+    )
+    .as("listed_project_recent_sessions");
+
+  const [resourceRows, sessionCountRows, recentSessionRows] = await Promise.all([
+    database
+      .select({
+        projectId: schema.projects.id,
+        skills: sql<number>`coalesce(${skillCounts.count}, 0)::int`,
+        files: sql<number>`coalesce(${fileCounts.count}, 0)::int`,
+      })
+      .from(schema.projects)
+      .leftJoin(skillCounts, eq(skillCounts.projectId, schema.projects.id))
+      .leftJoin(fileCounts, eq(fileCounts.projectId, schema.projects.id))
+      .where(
+        and(
+          eq(schema.projects.orgId, input.orgId),
+          eq(schema.projects.creatorId, input.actor.id),
+          inArray(schema.projects.id, projectIds),
+        ),
+      ),
+    database
+      .select({
+        projectId: schema.projectSessions.projectId,
+        sessions: sql<number>`(
+          count(*) filter (where ${schema.projectSessions.archivedAt} is null)
+        )::int`,
+        activeSessions: sql<number>`(
+          count(*) filter (
+            where ${schema.projectSessions.archivedAt} is null
+              and ${inArray(schema.projectSessions.status, ["queued", "working", "stopping"])}
           )
-          .orderBy(
-            desc(schema.projectSessions.createdAt),
-            desc(schema.projectSessions.id),
+        )::int`,
+        archivedSessions: sql<number>`(
+          count(*) filter (where ${schema.projectSessions.archivedAt} is not null)
+        )::int`,
+        unreadSessions: sql<number>`(
+          count(*) filter (
+            where ${schema.projectSessions.archivedAt} is null
+              and ${inArray(
+                schema.projectSessions.status,
+                ["idle", "stopped", "completed", "error"],
+              )}
+              and ${schema.projectSessions.updatedAt} > ${schema.projectSessions.lastViewedAt}
           )
-          .limit(5),
-      ]);
-      return toProjectRow(project, workspace, counts, recentSessions.map(toSessionRow));
-    }),
+        )::int`,
+      })
+      .from(schema.projectSessions)
+      .where(
+        and(
+          eq(schema.projectSessions.orgId, input.orgId),
+          eq(schema.projectSessions.creatorId, input.actor.id),
+          inArray(schema.projectSessions.projectId, projectIds),
+        ),
+      )
+      .groupBy(schema.projectSessions.projectId),
+    database
+      .select()
+      .from(rankedRecentSessions)
+      .where(sql`${rankedRecentSessions.recentRank} <= 5`)
+      .orderBy(
+        asc(rankedRecentSessions.projectId),
+        desc(rankedRecentSessions.createdAt),
+        desc(rankedRecentSessions.id),
+      ),
+  ]);
+
+  const countsByProject = new Map<string, ProjectCounts>(
+    projectIds.map((projectId) => [
+      projectId,
+      {
+        skills: 0,
+        sessions: 0,
+        activeSessions: 0,
+        archivedSessions: 0,
+        unreadSessions: 0,
+        files: 0,
+      },
+    ]),
+  );
+  for (const row of resourceRows) {
+    const counts = countsByProject.get(row.projectId);
+    if (!counts) continue;
+    counts.skills = Number(row.skills);
+    counts.files = Number(row.files);
+  }
+  for (const row of sessionCountRows) {
+    const counts = countsByProject.get(row.projectId);
+    if (!counts) continue;
+    counts.sessions = Number(row.sessions);
+    counts.activeSessions = Number(row.activeSessions);
+    counts.archivedSessions = Number(row.archivedSessions);
+    counts.unreadSessions = Number(row.unreadSessions);
+  }
+
+  const recentSessionsByProject = new Map<string, ProjectSessionRow[]>();
+  for (const { recentRank: _recentRank, ...session } of recentSessionRows) {
+    const recentSessions = recentSessionsByProject.get(session.projectId) ?? [];
+    recentSessions.push(toSessionRow(session));
+    recentSessionsByProject.set(session.projectId, recentSessions);
+  }
+
+  return rows.map(({ project, workspace }) =>
+    toProjectRow(
+      project,
+      workspace,
+      countsByProject.get(project.id)!,
+      recentSessionsByProject.get(project.id) ?? [],
+    )
   );
 }
 
@@ -1112,21 +1279,13 @@ export async function retryProjectWorkspace(input: {
   await assertMember(database, input.actor, input.orgId);
   return database.transaction(async (transaction) => {
     const tx = transaction as unknown as Db;
-    const project = await loadOwnedProject({ ...input, database: tx, lock: true });
+    const locked = await loadOwnedProjectWorkspaceForUpdate({
+      ...input,
+      database: tx,
+    });
+    const project = locked.project;
     assertProjectAcceptsWork(project);
-    const workspaceRows = await tx
-      .select()
-      .from(schema.projectWorkspaces)
-      .where(
-        and(
-          eq(schema.projectWorkspaces.orgId, input.orgId),
-          eq(schema.projectWorkspaces.projectId, input.projectId),
-          eq(schema.projectWorkspaces.creatorId, input.actor.id),
-        ),
-      )
-      .for("update");
-    let workspace = workspaceRows[0];
-    if (!workspace) throw new ProjectNotFoundError();
+    let workspace = locked.workspace;
 
     if (workspace.status === "error" || workspace.status === "needs_attention") {
       const previousStatus = workspace.status;
@@ -1183,22 +1342,12 @@ export async function setProjectSkills(input: {
   await assertMember(database, input.actor, input.orgId);
   return database.transaction(async (transaction) => {
     const tx = transaction as unknown as Db;
-    const project = await loadOwnedProject({ ...input, database: tx, lock: true });
+    const { project, workspace } = await loadOwnedProjectWorkspaceForUpdate({
+      ...input,
+      database: tx,
+    });
     assertProjectAcceptsWork(project);
     if (project.revision !== input.value.revision) throw new ProjectConflictError();
-    const workspaceRows = await tx
-      .select()
-      .from(schema.projectWorkspaces)
-      .where(
-        and(
-          eq(schema.projectWorkspaces.orgId, input.orgId),
-          eq(schema.projectWorkspaces.projectId, input.projectId),
-          eq(schema.projectWorkspaces.creatorId, input.actor.id),
-        ),
-      )
-      .for("update");
-    const workspace = workspaceRows[0];
-    if (!workspace) throw new ProjectNotFoundError();
     const generation = workspace.desiredGeneration + 1;
     const selected = await resolveSelectedSkills({
       actor: input.actor,
@@ -1322,33 +1471,22 @@ export async function refreshProjectsForSkillPublication(input: {
             set_config('app.org_id', ${input.orgId}, true),
             set_config('app.user_id', ${target.creatorId}, true)
         `);
-        const projects = await tx
-          .select()
-          .from(schema.projects)
-          .where(
-            and(
-              eq(schema.projects.orgId, input.orgId),
-              eq(schema.projects.id, target.projectId),
-              eq(schema.projects.creatorId, target.creatorId),
-              isNull(schema.projects.deleteRequestedAt),
-            ),
-          )
-          .for("update");
-        const project = projects[0];
-        if (!project) return;
-        const workspaces = await tx
-          .select()
-          .from(schema.projectWorkspaces)
-          .where(
-            and(
-              eq(schema.projectWorkspaces.orgId, input.orgId),
-              eq(schema.projectWorkspaces.projectId, target.projectId),
-              eq(schema.projectWorkspaces.creatorId, target.creatorId),
-            ),
-          )
-          .for("update");
-        const workspace = workspaces[0];
-        if (!workspace) return;
+        let locked: {
+          project: ProjectRecord;
+          workspace: ProjectWorkspaceRecord;
+        };
+        try {
+          locked = await loadOwnedProjectWorkspaceForUpdate({
+            actor: { id: target.creatorId, email: "", name: "" },
+            orgId: input.orgId,
+            projectId: target.projectId,
+            database: tx,
+          });
+        } catch (error) {
+          if (error instanceof ProjectNotFoundError) return;
+          throw error;
+        }
+        const { project, workspace } = locked;
         const rootRows = await tx
           .select({ slug: schema.skills.slug })
           .from(schema.projectSkills)
@@ -2503,7 +2641,10 @@ export async function createProjectSession(input: {
         database: tx,
       });
     }
-    const project = await loadOwnedProject({ ...input, database: tx, lock: true });
+    const { project } = await loadOwnedProjectWorkspaceForUpdate({
+      ...input,
+      database: tx,
+    });
     assertProjectAcceptsWork(project);
     const model = input.model?.trim() || project.defaultModel;
     if (!model) throw new ProjectValidationError("a model is required", "model_required");
@@ -3418,22 +3559,11 @@ export async function commitProjectFileUploads(input: {
   await assertMember(database, input.actor, input.orgId);
   return database.transaction(async (transaction) => {
     const tx = transaction as unknown as Db;
-    const project = await loadOwnedProject({ ...input, database: tx, lock: true });
+    const { project, workspace } = await loadOwnedProjectWorkspaceForUpdate({
+      ...input,
+      database: tx,
+    });
     assertProjectAcceptsWork(project);
-    const workspaceRows = await tx
-      .select()
-      .from(schema.projectWorkspaces)
-      .where(
-        and(
-          eq(schema.projectWorkspaces.orgId, input.orgId),
-          eq(schema.projectWorkspaces.projectId, input.projectId),
-          eq(schema.projectWorkspaces.creatorId, input.actor.id),
-        ),
-      )
-      .for("update")
-      .limit(1);
-    const workspace = workspaceRows[0];
-    if (!workspace) throw new ProjectNotFoundError();
 
     const output: ProjectFileRow[] = [];
     let changed = false;
@@ -3566,7 +3696,6 @@ export async function commitProjectFileUploads(input: {
         targetType: "project",
         targetId: input.projectId,
         metadata: {
-          paths: input.files.map((file) => file.path),
           file_count: input.files.length,
           desired_file_revision: workspace.desiredFileRevision + 1,
         },

@@ -1442,6 +1442,68 @@ describe("ProjectsApp", () => {
     expect(dialog.querySelector("textarea")).not.toBeNull();
   });
 
+  it("keeps the current conversation route when a different Project new-session dialog is cancelled", async () => {
+    const currentSession = session();
+    const second = projectDetail({
+      id: SECOND_PROJECT_ID,
+      name: "Customer research",
+      sessions: [],
+      recentSessions: [],
+      sessionCount: 0,
+      activeSessionCount: 0,
+    });
+    projectRpc.fetchProject.mockResolvedValueOnce(second);
+    const container = await mount({
+      projects: [
+        projectRow(),
+        projectRow({
+          id: SECOND_PROJECT_ID,
+          name: "Customer research",
+          status: "stopped",
+          recentSessions: [],
+          sessionCount: 0,
+          activeSessionCount: 0,
+        }),
+      ],
+      project: projectDetail(),
+      activeSession: currentSession,
+    });
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Actions for Customer research"]',
+        )!
+        .click();
+      await Promise.resolve();
+      [
+        ...document.body.querySelectorAll<HTMLButtonElement>(
+          '[role="menuitem"]',
+        ),
+      ]
+        .find((candidate) =>
+          candidate.textContent?.includes("New conversation"),
+        )!
+        .click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const dialog = document.body.querySelector<HTMLElement>('[role="dialog"]')!;
+    expect(dialog.textContent).toContain("New conversation");
+    expect(dialog.textContent).toContain("Customer research");
+    expect(container.querySelector('[data-testid="project-session"]')?.textContent)
+      .toContain(currentSession.title);
+
+    act(() => button(dialog, "Cancel").click());
+
+    expect(router.replace).toHaveBeenLastCalledWith(
+      `/projects/${PROJECT_ID}/sessions/${SESSION_ID}`,
+    );
+    expect(container.querySelector('[data-testid="project-session"]')?.textContent)
+      .toContain(currentSession.title);
+  });
+
   it("refreshes settings after a partial save and sends only changed details", async () => {
     const updated = projectDetail({
       name: "Renamed project",

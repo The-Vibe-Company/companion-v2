@@ -166,6 +166,9 @@ PORT=3000
 COMPANION_API_URL=http://${{api.RAILWAY_PRIVATE_DOMAIN}}:3001
 COMPANION_WEB_URL=https://${{web.RAILWAY_PUBLIC_DOMAIN}}
 NEXT_PUBLIC_COMPANION_API_BASE=https://${{web.RAILWAY_PUBLIC_DOMAIN}}/v1
+COMPANION_RUNS_ENABLED=true
+# Keep this identical on web, API, and worker during the coordinated Projects rollout.
+COMPANION_PROJECTS_ENABLED=false
 NEXT_PUBLIC_POSTHOG_PROJECT_TOKEN=<public project token, optional>
 NEXT_PUBLIC_POSTHOG_HOST=https://us.i.posthog.com
 ```
@@ -173,6 +176,10 @@ NEXT_PUBLIC_POSTHOG_HOST=https://us.i.posthog.com
 `COMPANION_API_URL` is consumed while Next.js builds its rewrites, so add it before the first web build. Railway's
 private DNS is not reachable from a browser; browser requests intentionally stay on the public web origin. The
 `NEXT_PUBLIC_*` values are public by definition and are baked into the browser bundle.
+`COMPANION_RUNS_ENABLED` and `COMPANION_PROJECTS_ENABLED` are server-only rollout gates and must
+carry the same value on web, API, and worker. Flip Projects to `true` on all three services in one
+coordinated release; a mismatched web value intentionally hides the surface even when the backend is
+ready.
 
 ### `worker`
 

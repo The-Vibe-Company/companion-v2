@@ -43,6 +43,7 @@ import {
   reserveProjectAttachmentUploads,
   reserveProjectFileUploads,
   reserveProjectFileStorageObject,
+  recordProjectFileHistoricalVersion,
   recordProjectFileVersion,
   requestProjectDeletion,
   requestProjectSessionStop,
@@ -202,6 +203,7 @@ describe("Postgres tenant isolation", () => {
     await integrationSql.unsafe(`grant usage, select on all sequences in schema public to ${role}`);
     await integrationSql.unsafe(
       `grant execute on function
+        companion_list_user_orgs(text),
         companion_project_policy_definer(),
         companion_project_exact_lease_visible(uuid, uuid, text),
         companion_project_row_visible(uuid, uuid, text),
@@ -636,6 +638,8 @@ describe("Postgres tenant isolation", () => {
       `${fixture.orgA}/project-files/${storageProjectId}/sha256/${"c".repeat(64)}`;
     const generatedOrphanKey =
       `${fixture.orgA}/project-files/${storageProjectId}/sha256/${"d".repeat(64)}`;
+    const historicalKey =
+      `${fixture.orgA}/project-files/${storageProjectId}/sha256/${"e".repeat(64)}`;
     const lateUploadKey =
       `${fixture.orgA}/projects/${storageProjectId}/attachments/${randomUUID()}`;
     try {
@@ -679,6 +683,40 @@ describe("Postgres tenant isolation", () => {
         storageKey: generatedKey,
         database: integrationDb,
       });
+      await reserveProjectFileStorageObject({
+        job: job!,
+        workerId,
+        storageKey: historicalKey,
+        database: integrationDb,
+      });
+      const historicalInput = {
+        job: job!,
+        workerId,
+        path: "files/generated.txt",
+        contentType: "text/plain",
+        byteSize: 9,
+        checksum: `sha256:${"e".repeat(64)}`,
+        storageKey: historicalKey,
+        baseVersion: 0,
+        database: integrationDb,
+      };
+      const firstHistorical = await recordProjectFileHistoricalVersion(
+        historicalInput,
+      );
+      const retriedHistorical = await recordProjectFileHistoricalVersion(
+        historicalInput,
+      );
+      expect(retriedHistorical).toEqual(firstHistorical);
+      const historicalRows = await integrationSql<
+        Array<{ version: number }>
+      >`
+        select version
+        from project_file_versions
+        where org_id = ${fixture.orgA}::uuid
+          and project_id = ${storageProjectId}::uuid
+          and storage_key = ${historicalKey}
+      `;
+      expect(historicalRows).toEqual([{ version: firstHistorical.version }]);
       // Simulate a worker crash after a second generated-file PUT but before its metadata commit.
       await reserveProjectFileStorageObject({
         job: job!,
@@ -712,7 +750,12 @@ describe("Postgres tenant isolation", () => {
       await expect(
         listProjectStorageKeys({ job: job!, workerId, database: integrationDb }),
       ).resolves.toEqual(
-        expect.arrayContaining([generatedKey, generatedOrphanKey, lateUploadKey]),
+        expect.arrayContaining([
+          generatedKey,
+          generatedOrphanKey,
+          historicalKey,
+          lateUploadKey,
+        ]),
       );
       await expect(
         completeProjectDeletion({ job: job!, workerId, database: integrationDb }),
@@ -734,8 +777,8 @@ describe("Postgres tenant isolation", () => {
       `;
       expect(afterCascade).toEqual({
         project_count: 0,
-        storage_count: 3,
-        deletion_marked: 3,
+        storage_count: 4,
+        deletion_marked: 4,
       });
       const before = new Date("2026-07-24T12:00:00.000Z");
       await integrationSql`
@@ -2339,6 +2382,187 @@ describe("Postgres tenant isolation", () => {
     }
   });
 
+  it("projects the complete multi-Project sidebar in a constant number of queries", async () => {
+    const firstProjectId = randomUUID();
+    const secondProjectId = randomUUID();
+    const sessionIds = Array.from({ length: 8 }, () => randomUUID());
+    const baseTime = new Date("2026-07-24T08:00:00.000Z");
+    try {
+      await integrationDb.insert(schema.projects).values([
+        {
+          id: firstProjectId,
+          orgId: fixture.orgA,
+          creatorId: fixture.owner.id,
+          name: "Batched Project A",
+          defaultModel: "openai/gpt-5",
+          idempotencyKey: `batched-project-a-${fixture.suffix}`,
+          payloadHash: "1".repeat(64),
+        },
+        {
+          id: secondProjectId,
+          orgId: fixture.orgA,
+          creatorId: fixture.owner.id,
+          name: "Batched Project B",
+          defaultModel: "openai/gpt-5",
+          idempotencyKey: `batched-project-b-${fixture.suffix}`,
+          payloadHash: "2".repeat(64),
+        },
+      ]);
+      await integrationDb.insert(schema.projectWorkspaces).values([
+        {
+          orgId: fixture.orgA,
+          projectId: firstProjectId,
+          creatorId: fixture.owner.id,
+          sandboxName: `project-${firstProjectId}`,
+        },
+        {
+          orgId: fixture.orgA,
+          projectId: secondProjectId,
+          creatorId: fixture.owner.id,
+          sandboxName: `project-${secondProjectId}`,
+        },
+      ]);
+      await integrationDb.insert(schema.projectSkills).values({
+        orgId: fixture.orgA,
+        projectId: firstProjectId,
+        creatorId: fixture.owner.id,
+        skillId: mirrorSkillA.id,
+        desiredVersionId: mirrorSkillA.versionId,
+      });
+      const sessionStates = [
+        { status: "working", unread: false },
+        { status: "completed", unread: true },
+        { status: "error", unread: false },
+        { status: "idle", unread: true },
+        { status: "stopped", unread: true },
+        { status: "completed", unread: false },
+        { status: "completed", unread: true },
+      ] as const;
+      await integrationDb.insert(schema.projectSessions).values(
+        sessionStates.map((state, index) => {
+          const createdAt = new Date(baseTime.getTime() + index * 60_000);
+          const updatedAt = new Date(createdAt.getTime() + 30_000);
+          return {
+            id: sessionIds[index]!,
+            orgId: fixture.orgA,
+            projectId: firstProjectId,
+            creatorId: fixture.owner.id,
+            title: `Batched conversation ${index}`,
+            model: "openai/gpt-5",
+            modelProvider: "openai",
+            modelCredentialEnvKeys: [],
+            status: state.status,
+            createdAt,
+            updatedAt,
+            lastActiveAt: updatedAt,
+            lastViewedAt: state.unread
+              ? new Date(createdAt.getTime() - 1_000)
+              : updatedAt,
+          };
+        }),
+      );
+      await integrationDb.insert(schema.projectSessions).values({
+        id: sessionIds[7]!,
+        orgId: fixture.orgA,
+        projectId: firstProjectId,
+        creatorId: fixture.owner.id,
+        title: "Archived batched conversation",
+        model: "openai/gpt-5",
+        modelProvider: "openai",
+        modelCredentialEnvKeys: [],
+        status: "completed",
+        archivedAt: new Date(baseTime.getTime() + 8 * 60_000),
+        createdAt: new Date(baseTime.getTime() + 7 * 60_000),
+        updatedAt: new Date(baseTime.getTime() + 8 * 60_000),
+        lastActiveAt: new Date(baseTime.getTime() + 8 * 60_000),
+        lastViewedAt: baseTime,
+      });
+      await integrationDb.insert(schema.projectFiles).values([
+        {
+          orgId: fixture.orgA,
+          projectId: firstProjectId,
+          creatorId: fixture.owner.id,
+          path: "files/current.txt",
+          contentType: "text/plain",
+          byteSize: 7,
+          checksum: `sha256:${"3".repeat(64)}`,
+          storageKey: `${fixture.orgA}/project-files/${firstProjectId}/sha256/${"3".repeat(64)}`,
+        },
+        {
+          orgId: fixture.orgA,
+          projectId: firstProjectId,
+          creatorId: fixture.owner.id,
+          path: "files/deleted.txt",
+          contentType: "text/plain",
+          byteSize: 7,
+          checksum: `sha256:${"4".repeat(64)}`,
+          storageKey: `${fixture.orgA}/project-files/${firstProjectId}/sha256/${"4".repeat(64)}`,
+          deletedAt: new Date(),
+        },
+      ]);
+
+      const projected = await withTenantContext(
+        { orgId: fixture.orgA, userId: fixture.owner.id },
+        async (database) => {
+          type PreparedSession = {
+            prepareQuery: (...args: unknown[]) => unknown;
+          };
+          const session = (database as unknown as { session: PreparedSession }).session;
+          const prepareQuery = session.prepareQuery;
+          let preparedQueries = 0;
+          session.prepareQuery = (...args: unknown[]) => {
+            preparedQueries += 1;
+            return prepareQuery.apply(session, args);
+          };
+          try {
+            const projects = await listProjects({
+              actor: fixture.owner,
+              orgId: fixture.orgA,
+              database,
+            });
+            return { projects, preparedQueries };
+          } finally {
+            session.prepareQuery = prepareQuery;
+          }
+        },
+      );
+
+      expect(projected.preparedQueries).toBeLessThanOrEqual(5);
+      expect(
+        projected.projects.find((project) => project.id === firstProjectId),
+      ).toMatchObject({
+        skill_count: 1,
+        session_count: 7,
+        active_session_count: 1,
+        archived_session_count: 1,
+        unread_session_count: 4,
+        file_count: 1,
+        recent_sessions: [
+          { id: sessionIds[6] },
+          { id: sessionIds[5] },
+          { id: sessionIds[4] },
+          { id: sessionIds[3] },
+          { id: sessionIds[2] },
+        ],
+      });
+      expect(
+        projected.projects.find((project) => project.id === secondProjectId),
+      ).toMatchObject({
+        skill_count: 0,
+        session_count: 0,
+        active_session_count: 0,
+        archived_session_count: 0,
+        unread_session_count: 0,
+        file_count: 0,
+        recent_sessions: [],
+      });
+    } finally {
+      await integrationDb
+        .delete(schema.projects)
+        .where(inArray(schema.projects.id, [firstProjectId, secondProjectId]));
+    }
+  });
+
   it("reopens a completed Project conversation only after an explicit follow-up", async () => {
     let projectId: string | null = null;
     try {
@@ -2711,6 +2935,23 @@ describe("Postgres tenant isolation", () => {
           modified_by_prompt_id: null,
         }),
       ]);
+      const [uploadAudit] = await integrationSql<
+        Array<{ metadata: Record<string, unknown> }>
+      >`
+        select metadata
+        from audit_log
+        where org_id = ${fixture.orgA}::uuid
+          and private_to_user_id = ${fixture.owner.id}
+          and action = 'project.files.upload'
+          and target_id = ${created.id}
+        order by created_at desc
+        limit 1
+      `;
+      expect(uploadAudit?.metadata).toEqual({
+        file_count: 1,
+        desired_file_revision: 1,
+      });
+      expect(JSON.stringify(uploadAudit?.metadata)).not.toContain("brief.txt");
       const [state] = await integrationSql<Array<{
         revision: number;
         desired_file_revision: number;

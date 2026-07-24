@@ -701,8 +701,11 @@ Free keeps all data but narrows reads and mutations:
 - Run Skill has zero sandbox minutes. Pro receives a shared UTC-calendar-month pool equal to active
   membership count × `COMPANION_SANDBOX_MINUTES_PER_SEAT` (default 250). An organization-period
   advisory lock serializes reservations, so concurrent launch, reactivation, follow-up, and prewarm
-  requests cannot oversubscribe the enforced pool. Reservations are 5 minutes for prewarm, 10 for a
-  launch/reactivation, and 7 for each further prompt. There are no paid overage packs in v1.
+  requests cannot oversubscribe the enforced pool. Every managed usage mutation acquires that quota
+  advisory lock before selecting or locking a `sandbox_usage_sessions` row. Project prompt admission
+  and post-turn idle-runway extension therefore share the same quota-advisory → usage-row order and
+  cannot deadlock each other. Reservations are 5 minutes for prewarm, 10 for a launch/reactivation,
+  and 7 for each further prompt. There are no paid overage packs in v1.
 
 Self-hosted billing mode bypasses sandbox accounting and remains unlimited. In managed mode,
 `sandbox_usage_sessions` stores one reservation per sandbox activation; unstarted reservations expire,
@@ -889,6 +892,18 @@ Projects are creator-private with no Owner/Admin override, matching personal Ski
 Every read and mutation requires current organization membership plus `creator_id = actor.id`; an
 inaccessible Project is indistinguishable from a missing one. Prompt text, transcripts, filenames, file
 contents, Secret names/keys, and plaintext never enter audit metadata.
+
+Creator visibility is also bound to server-backed API process identity, not only the caller-settable
+`app.org_id` and `app.user_id` request context. In the split production topology, the policy requires
+the API-only pre-tenant discovery capability. A worker login outside a server-issued exact lease
+therefore sees and mutates zero Project or Project-usage rows even if it spoofs valid creator GUCs.
+The legacy union role retains creator visibility because it deliberately owns both API and worker
+capabilities.
+
+Every transaction that needs more than one Project mutation root uses the canonical lock order
+`project_workspaces → projects → project_sessions → command row`. Prompt admission, settings, skill
+refresh, new conversations, direct Files, and Stop share that order so concurrent Project work cannot
+form a PostgreSQL workspace/project deadlock.
 
 ### Data model and isolation
 
@@ -1083,6 +1098,11 @@ to sidebar status; ready and idle state stay quiet. A background terminal result
 increments the Project count, and may produce a clickable in-app notification. Opening the
 conversation acknowledges it.
 
+The sidebar refresh is a set-based projection rather than a per-Project fan-out: one
+Project/workspace query is followed by three bounded batch queries for resource counts, session
+counts, and window-ranked recent conversations. Its database statement count therefore remains
+constant as the creator's Project library grows.
+
 The Project page is a conversation library, not a runtime dashboard. It has paginated title search and
 exactly two views, `Conversations` and `Archived`. A conversation can be renamed, archived, restored,
 or acknowledged. Archiving active work requires `Stop and archive`; inactive work archives
@@ -1122,6 +1142,11 @@ Office formats are download/open-external in V1. Composer file input supports se
 and paste; those attachments stay prompt-linked. The Project Files surface also accepts direct uploads
 as shared durable desired state without creating a conversation. Conversation text drafts are restored
 from per-conversation `sessionStorage`.
+
+Provider bytes preserved behind a newer creator upload use an exact immutable retry identity within
+the file: content-addressed storage key and checksum, observed base version, and prompt/session
+attribution. A worker crash between historical preservation and durable projection therefore reuses
+the existing history row instead of allocating a duplicate version.
 
 Each completed turn first persists the exact versions attributable through OpenCode's message diff
 under the Project file-commit lock. Absolute paths are accepted only beneath the managed Project
@@ -1665,6 +1690,9 @@ uses the API role and the worker service `DATABASE_URL` uses the worker role.
 role owns creator-facing Project CRUD and pre-tenant discovery only. Project claim, lease entry,
 heartbeat, removal, and cleanup functions are executable only by the worker role. Narrow boolean
 worker-readiness probes are shared so the API can disable launches when no compatible worker is live.
+Project creator RLS uses possession of the API-only `companion_list_user_orgs(text)` capability as
+process identity in addition to tenant/user GUCs; the split worker is explicitly denied that
+capability, while the legacy union role retains it.
 `companion_project_exact_lease_visible` is shared because the creator-facing RLS row predicate calls
 it internally; it returns only a boolean and cannot confer access without the server-issued exact
 lease context. `DATABASE_RUNTIME_ROLE` remains a legacy union role for simple installs, not the

@@ -15,7 +15,11 @@ import { createRoot, type Root } from "react-dom/client";
 import { renderToString } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ProjectDetailVM } from "@/lib/projectsModel";
-import { CoworkDialog, NewSessionDialog } from "./ProjectDialogs";
+import {
+  CoworkDialog,
+  NewProjectDialog,
+  NewSessionDialog,
+} from "./ProjectDialogs";
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -151,6 +155,69 @@ describe("CoworkDialog", () => {
         ),
       ),
     ).not.toThrow();
+  });
+});
+
+describe("NewProjectDialog model recovery", () => {
+  it("selects the first available model when a failed catalog later recovers", async () => {
+    const onCreate = vi.fn();
+    const onClose = vi.fn();
+    host = document.createElement("div");
+    document.body.append(host);
+    root = createRoot(host);
+    const renderDialog = (availableModels: typeof models) =>
+      createElement(NewProjectDialog, {
+        skills: [],
+        models: availableModels,
+        initialSkillSlug: null,
+        busy: false,
+        error: null,
+        catalogError:
+          availableModels.length === 0
+            ? "Models could not be loaded."
+            : null,
+        onClose,
+        onCreate,
+        onRetryCatalog: vi.fn(),
+      });
+
+    await act(async () => {
+      root?.render(renderDialog([]));
+      await Promise.resolve();
+    });
+    let dialog = document.body.querySelector<HTMLElement>('[role="dialog"]')!;
+    const name = dialog.querySelector<HTMLInputElement>("input[data-autofocus]")!;
+    const nameSetter = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      "value",
+    )?.set;
+    act(() => {
+      nameSetter?.call(name, "Q4 planning");
+      name.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    const createButton = () =>
+      [...dialog.querySelectorAll<HTMLButtonElement>("button")].find(
+        (candidate) => candidate.textContent?.includes("Create project"),
+      )!;
+    expect(createButton().disabled).toBe(true);
+
+    await act(async () => {
+      root?.render(renderDialog(models));
+      await Promise.resolve();
+    });
+    dialog = document.body.querySelector<HTMLElement>('[role="dialog"]')!;
+    expect(dialog.querySelector<HTMLSelectElement>("select")?.value).toBe(
+      "openai/gpt-5",
+    );
+    expect(createButton().disabled).toBe(false);
+
+    act(() => createButton().click());
+    expect(onCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: "Q4 planning",
+        defaultModel: "openai/gpt-5",
+      }),
+    );
   });
 });
 

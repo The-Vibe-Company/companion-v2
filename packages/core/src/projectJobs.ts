@@ -4830,6 +4830,44 @@ export async function recordProjectFileHistoricalVersion(input: {
         };
       }
       await assertProjectFileAttribution({ ...input, database: tx });
+      const observedBaseVersion = input.baseVersion ?? 0;
+      const matchingHistory = await tx
+        .select({
+          version: schema.projectFileVersions.version,
+          conflictDetected: schema.projectFileVersions.conflictDetected,
+        })
+        .from(schema.projectFileVersions)
+        .where(
+          and(
+            eq(schema.projectFileVersions.orgId, input.job.orgId),
+            eq(schema.projectFileVersions.projectId, input.job.projectId),
+            eq(schema.projectFileVersions.fileId, existing.id),
+            eq(schema.projectFileVersions.creatorId, input.job.creatorId),
+            eq(schema.projectFileVersions.storageKey, input.storageKey),
+            eq(schema.projectFileVersions.checksum, input.checksum),
+            eq(schema.projectFileVersions.baseVersion, observedBaseVersion),
+            input.modifiedBySessionId
+              ? eq(
+                  schema.projectFileVersions.modifiedBySessionId,
+                  input.modifiedBySessionId,
+                )
+              : isNull(schema.projectFileVersions.modifiedBySessionId),
+            input.modifiedByPromptId
+              ? eq(
+                  schema.projectFileVersions.modifiedByPromptId,
+                  input.modifiedByPromptId,
+                )
+              : isNull(schema.projectFileVersions.modifiedByPromptId),
+          ),
+        )
+        .limit(1);
+      if (matchingHistory[0]) {
+        return {
+          fileId: existing.id,
+          version: matchingHistory[0].version,
+          conflictDetected: matchingHistory[0].conflictDetected,
+        };
+      }
       const versionRows = await tx
         .select({
           value: sql<number>`coalesce(max(${schema.projectFileVersions.version}), 0)`,
@@ -4847,7 +4885,6 @@ export async function recordProjectFileHistoricalVersion(input: {
         existing.currentVersion,
         Number(versionRows[0]?.value ?? 0),
       ) + 1;
-      const observedBaseVersion = input.baseVersion ?? 0;
       // Reaching this path means provider truth diverged from an already-newer durable projection.
       // Preserve that overlap explicitly even when the scan's durable baseline version happens to
       // equal the current pointer.

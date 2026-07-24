@@ -401,6 +401,12 @@ export async function admitProjectPromptUsage(input: {
       billingDisabled: true,
     });
   }
+  const now = input.now ?? new Date();
+  const period = sandboxPeriod(now);
+  // Quota mutations always acquire the organization-period advisory lock before touching a usage
+  // row. The Project worker uses the same order while extending idle runway, so prompt admission
+  // must not wait on the usage row first and then invert that order inside the billing primitive.
+  await lockSandboxQuota(input.database, input.orgId, period.start);
   const openRows = await input.database
     .select({
       activationRevision: schema.sandboxUsageSessions.activationRevision,
@@ -427,6 +433,7 @@ export async function admitProjectPromptUsage(input: {
       ...input,
       activationRevision: decision.activationRevision,
       config,
+      now,
     });
   }
   await extendSandboxUsageReservation({
@@ -436,7 +443,7 @@ export async function admitProjectPromptUsage(input: {
     activationRevision: open.activationRevision,
     additionalMs: SANDBOX_FOLLOWUP_RESERVATION_MS,
     database: input.database,
-    now: input.now,
+    now,
     config,
   });
   return {

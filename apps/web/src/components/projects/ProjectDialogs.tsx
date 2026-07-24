@@ -351,6 +351,15 @@ export function NewProjectDialog({
     () => new Set(initialSkillSlug ? [initialSkillSlug] : []),
   );
   const idempotencyKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (
+      models.length > 0 &&
+      (!model || !models.some((candidate) => candidate.id === model))
+    ) {
+      idempotencyKeyRef.current = null;
+      setModel(models[0]!.id);
+    }
+  }, [model, models]);
   const valid = name.trim().length > 0 && model.length > 0 && !busy;
   return (
     <CoworkDialog

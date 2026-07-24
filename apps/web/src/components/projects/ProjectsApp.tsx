@@ -1425,6 +1425,10 @@ export function ProjectsApp({
   const [settingsTarget, setSettingsTarget] = useState<ProjectDetailVM | null>(
     initialDialog?.kind === "settings" ? initialProject : null,
   );
+  const [newSessionTarget, setNewSessionTarget] =
+    useState<ProjectDetailVM | null>(
+      initialDialog?.kind === "new-session" ? initialProject : null,
+    );
   const [mobileOpen, setMobileOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -1490,6 +1494,9 @@ export function ProjectsApp({
         : [row, ...current],
     );
     setSettingsTarget((current) => (current?.id === next.id ? next : current));
+    setNewSessionTarget((current) =>
+      current?.id === next.id ? next : current,
+    );
   };
 
   const applySessionChange = useCallback(
@@ -1800,6 +1807,7 @@ export function ProjectsApp({
     dialogRequestRef.current += 1;
     setDialog(null);
     setSettingsTarget(null);
+    setNewSessionTarget(null);
     setError(null);
     setDialogLoading(false);
     const href =
@@ -1854,22 +1862,25 @@ export function ProjectsApp({
     setError(null);
     setDialog({ kind: "new-session", projectId, initialSkillSlug });
     if (project?.id === projectId) {
+      setNewSessionTarget(project);
       setDialogLoading(false);
       return;
     }
+    setNewSessionTarget(null);
     setDialogLoading(true);
     try {
       const detail = await fetchProject(projectId);
       if (requestId !== dialogRequestRef.current) return;
       if (detail.archivedAt) {
         setDialog(null);
+        setNewSessionTarget(null);
         setToast({
           tone: "neutral",
           message: "Restore this Project before starting a conversation.",
         });
         return;
       }
-      setProject(detail);
+      setNewSessionTarget(detail);
       replaceProject(detail);
     } catch (cause) {
       if (requestId !== dialogRequestRef.current) return;
@@ -1882,8 +1893,9 @@ export function ProjectsApp({
   };
 
   const selectedDialogProject =
-    dialog?.kind === "new-session" && project?.id === dialog.projectId
-      ? project
+    dialog?.kind === "new-session" &&
+    newSessionTarget?.id === dialog.projectId
+      ? newSessionTarget
       : null;
   const catalogError = [choiceErrors.skills, choiceErrors.models]
     .filter(Boolean)
@@ -2301,6 +2313,7 @@ export function ProjectsApp({
                 replaceProject(created);
                 setProject(created);
                 setSession(null);
+                setNewSessionTarget(created);
                 setDialog({
                   kind: "new-session",
                   projectId: created.id,
@@ -2376,6 +2389,7 @@ export function ProjectsApp({
                   replaceProject(nextProject);
                   setProject(nextProject);
                   setSession(created);
+                  setNewSessionTarget(null);
                   setDialog(null);
                   router.push(
                     `/projects/${targetProject.id}/sessions/${created.id}`,

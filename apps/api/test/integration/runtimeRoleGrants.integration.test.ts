@@ -17,7 +17,8 @@ if (!databaseUrl?.trim()) {
  * Regression caught:
  * Applying one unioned grant set to both production logins would let an API compromise claim a
  * Project workspace, enter its exact lease, or forge worker heartbeats, while a worker compromise
- * could read or mutate Better Auth identities and sessions.
+ * could read or mutate Better Auth identities and sessions. It also proves that creator request
+ * GUCs alone are not process identity: a split worker cannot spoof them to enter Project RLS.
  *
  * Why this test is integrated:
  * PostgreSQL's effective function and table privileges include role attributes, PUBLIC grants,
@@ -36,6 +37,8 @@ describe("separated API and worker database grants", () => {
   const simpleRole = `companion_simple_${suffix}`;
   const orgId = randomUUID();
   const projectId = randomUUID();
+  const privateProjectId = randomUUID();
+  const privateUsageId = randomUUID();
   const userId = `runtime-grants-user-${suffix}`;
   let grantBlock = "";
 
@@ -572,6 +575,215 @@ describe("separated API and worker database grants", () => {
       ) as worker
     `;
     expect(apiOnly).toEqual({ worker: false });
+  });
+
+  it("rejects spoofed creator GUCs outside an exact lease while preserving API, legacy, and leased access", async () => {
+    const workerId = `project-rls-worker-${suffix}`;
+    const sandboxName = `project-rls-sandbox-${suffix}`;
+
+    try {
+      const apiCreated = await sql.begin(async (tx) => {
+        await tx.unsafe(`set local role ${apiRole}`);
+        await tx`
+          select
+            set_config('app.org_id', ${orgId}, true),
+            set_config('app.user_id', ${userId}, true)
+        `;
+        await tx`
+          insert into projects (
+            id, org_id, creator_id, name, default_model, idempotency_key, payload_hash
+          )
+          values (
+            ${privateProjectId}::uuid,
+            ${orgId}::uuid,
+            ${userId},
+            'Process identity project',
+            'openai/gpt-5',
+            ${`process-identity-${suffix}`},
+            ${"b".repeat(64)}
+          )
+        `;
+        await tx`
+          insert into project_workspaces (
+            org_id,
+            project_id,
+            creator_id,
+            status,
+            sandbox_name,
+            lease_owner,
+            lease_expires_at,
+            lease_generation
+          )
+          values (
+            ${orgId}::uuid,
+            ${privateProjectId}::uuid,
+            ${userId},
+            'queued',
+            ${sandboxName},
+            ${workerId},
+            clock_timestamp() + interval '2 minutes',
+            1
+          )
+        `;
+        await tx`
+          insert into sandbox_usage_sessions (
+            id,
+            org_id,
+            creator_id,
+            kind,
+            source_id,
+            sandbox_name,
+            activation_revision,
+            period_start,
+            reserved_ms,
+            reservation_expires_at
+          )
+          values (
+            ${privateUsageId}::uuid,
+            ${orgId}::uuid,
+            ${userId},
+            'project',
+            ${privateProjectId}::uuid,
+            ${sandboxName},
+            1,
+            date_trunc('month', clock_timestamp()),
+            60000,
+            clock_timestamp() + interval '2 minutes'
+          )
+        `;
+        const [visible] = await tx<{ projects: number; usage: number }[]>`
+          select
+            (
+              select count(*)::int
+              from projects
+              where org_id = ${orgId}::uuid and id = ${privateProjectId}::uuid
+            ) as projects,
+            (
+              select count(*)::int
+              from sandbox_usage_sessions
+              where org_id = ${orgId}::uuid and id = ${privateUsageId}::uuid
+            ) as usage
+        `;
+        return visible;
+      });
+      expect(apiCreated).toEqual({ projects: 1, usage: 1 });
+
+      const spoofed = await sql.begin(async (tx) => {
+        await tx.unsafe(`set local role ${workerRole}`);
+        await tx`
+          select
+            set_config('app.org_id', ${orgId}, true),
+            set_config('app.user_id', ${userId}, true)
+        `;
+        const [before] = await tx<{ projects: number; usage: number }[]>`
+          select
+            (
+              select count(*)::int
+              from projects
+              where org_id = ${orgId}::uuid and id = ${privateProjectId}::uuid
+            ) as projects,
+            (
+              select count(*)::int
+              from sandbox_usage_sessions
+              where org_id = ${orgId}::uuid and id = ${privateUsageId}::uuid
+            ) as usage
+        `;
+        const projectUpdates = await tx`
+          update projects
+          set name = 'Spoofed worker update'
+          where org_id = ${orgId}::uuid and id = ${privateProjectId}::uuid
+          returning id
+        `;
+        const usageUpdates = await tx`
+          update sandbox_usage_sessions
+          set reserved_ms = 120000
+          where org_id = ${orgId}::uuid and id = ${privateUsageId}::uuid
+          returning id
+        `;
+        const projectDeletes = await tx`
+          delete from projects
+          where org_id = ${orgId}::uuid and id = ${privateProjectId}::uuid
+          returning id
+        `;
+        const usageDeletes = await tx`
+          delete from sandbox_usage_sessions
+          where org_id = ${orgId}::uuid and id = ${privateUsageId}::uuid
+          returning id
+        `;
+        return {
+          ...before,
+          projectUpdates: projectUpdates.length,
+          usageUpdates: usageUpdates.length,
+          projectDeletes: projectDeletes.length,
+          usageDeletes: usageDeletes.length,
+        };
+      });
+      expect(spoofed).toEqual({
+        projects: 0,
+        usage: 0,
+        projectUpdates: 0,
+        usageUpdates: 0,
+        projectDeletes: 0,
+        usageDeletes: 0,
+      });
+
+      const legacyVisible = await sql.begin(async (tx) => {
+        await tx.unsafe(`set local role ${simpleRole}`);
+        await tx`
+          select
+            set_config('app.org_id', ${orgId}, true),
+            set_config('app.user_id', ${userId}, true)
+        `;
+        const [visible] = await tx<{ projects: number; usage: number }[]>`
+          select
+            (
+              select count(*)::int
+              from projects
+              where org_id = ${orgId}::uuid and id = ${privateProjectId}::uuid
+            ) as projects,
+            (
+              select count(*)::int
+              from sandbox_usage_sessions
+              where org_id = ${orgId}::uuid and id = ${privateUsageId}::uuid
+            ) as usage
+        `;
+        return visible;
+      });
+      expect(legacyVisible).toEqual({ projects: 1, usage: 1 });
+
+      const exactLeaseVisible = await sql.begin(async (tx) => {
+        await tx.unsafe(`set local role ${workerRole}`);
+        const [lease] = await tx<{ entered: boolean }[]>`
+          select companion_enter_project_worker_lease(
+            ${orgId}::uuid,
+            ${privateProjectId}::uuid,
+            ${userId},
+            ${workerId},
+            1
+          ) as entered
+        `;
+        const [visible] = await tx<{ projects: number; usage: number }[]>`
+          select
+            (
+              select count(*)::int
+              from projects
+              where org_id = ${orgId}::uuid and id = ${privateProjectId}::uuid
+            ) as projects,
+            (
+              select count(*)::int
+              from sandbox_usage_sessions
+              where org_id = ${orgId}::uuid and id = ${privateUsageId}::uuid
+            ) as usage
+        `;
+        return { entered: lease?.entered, ...visible };
+      });
+      expect(exactLeaseVisible).toEqual({ entered: true, projects: 1, usage: 1 });
+    } finally {
+      await sql`
+        delete from projects
+        where org_id = ${orgId}::uuid and id = ${privateProjectId}::uuid
+      `;
+    }
   });
 
   it("allows creator-scoped Project CRUD through the API role", async () => {
