@@ -1,5 +1,10 @@
 import { z } from "zod";
 import {
+  RUN_CHAT_MESSAGE_MAX,
+  RUN_CHAT_QUESTION_ANSWER_MAX,
+  RUN_CHAT_QUESTION_MAX,
+  runQuestionProtocolSchema,
+  runQuestionSchema,
   runChatEventSchema,
   runChatHistoryItemSchema,
 } from "./skillRuns";
@@ -7,12 +12,20 @@ import {
 export const PROJECT_NAME_MAX = 120;
 export const PROJECT_SESSION_TITLE_MAX = 160;
 export const PROJECT_PROMPT_MAX = 8_000;
+/** Maximum durable follow-ups waiting behind the current Project task. */
+export const PROJECT_PROMPT_MAX_QUEUED = 5;
 export const PROJECT_MODEL_ID_MAX = 240;
 export const PROJECT_ATTACHMENT_MAX_FILES = 5;
 export const PROJECT_ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024;
 export const PROJECT_SECRET_MAX = 128;
 /** Maximum UTF-8 JSON size of the durable, redacted recovery transcript. */
 export const PROJECT_TRANSCRIPT_MAX_BYTES = 512 * 1024;
+/**
+ * Aggregate application bounds stay below the Postgres jsonb text checks so canonical jsonb
+ * whitespace cannot turn an accepted request into a database constraint failure.
+ */
+export const PROJECT_QUESTION_PAYLOAD_MAX_BYTES = 56 * 1024;
+export const PROJECT_QUESTION_ANSWERS_MAX_BYTES = 28 * 1024;
 
 const uuidSchema = z.string().uuid();
 const projectNameSchema = z.string().trim().min(1).max(PROJECT_NAME_MAX);
@@ -20,6 +33,50 @@ const sessionTitleSchema = z.string().trim().min(1).max(PROJECT_SESSION_TITLE_MA
 const promptSchema = z.string().trim().min(1).max(PROJECT_PROMPT_MAX);
 const modelSchema = z.string().trim().min(1).max(PROJECT_MODEL_ID_MAX);
 const isoDateSchema = z.string().datetime();
+const utf8ByteLength = (value: string): number => {
+  let bytes = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code <= 0x7f) bytes += 1;
+    else if (code <= 0x7ff) bytes += 2;
+    else if (
+      code >= 0xd800 &&
+      code <= 0xdbff &&
+      index + 1 < value.length &&
+      value.charCodeAt(index + 1) >= 0xdc00 &&
+      value.charCodeAt(index + 1) <= 0xdfff
+    ) {
+      bytes += 4;
+      index += 1;
+    } else {
+      bytes += 3;
+    }
+  }
+  return bytes;
+};
+const jsonUtf8ByteLength = (value: unknown): number =>
+  utf8ByteLength(JSON.stringify(value));
+const projectQuestionArraySchema = z
+  .array(runQuestionSchema)
+  .min(1)
+  .max(RUN_CHAT_QUESTION_MAX)
+  .refine(
+    (questions) =>
+      jsonUtf8ByteLength(questions) <= PROJECT_QUESTION_PAYLOAD_MAX_BYTES,
+    "question payload is too large",
+  );
+const projectQuestionAnswersSchema = z
+  .array(
+    z
+      .array(z.string().max(RUN_CHAT_MESSAGE_MAX))
+      .max(RUN_CHAT_QUESTION_ANSWER_MAX),
+  )
+  .max(RUN_CHAT_QUESTION_MAX)
+  .refine(
+    (answers) =>
+      jsonUtf8ByteLength(answers) <= PROJECT_QUESTION_ANSWERS_MAX_BYTES,
+    "question answers are too large",
+  );
 
 export const projectWorkspaceStatusSchema = z.enum([
   "queued",
@@ -55,6 +112,17 @@ export const projectPromptStatusSchema = z.enum([
   "cancelled",
 ]);
 export type ProjectPromptStatus = z.infer<typeof projectPromptStatusSchema>;
+
+export const projectQuestionStatusSchema = z.enum([
+  "pending",
+  "queued",
+  "delivered",
+  "cancelled",
+  "failed",
+]);
+export type ProjectQuestionStatus = z.infer<
+  typeof projectQuestionStatusSchema
+>;
 
 export const projectListViewSchema = z.enum(["active", "archived"]);
 export type ProjectListView = z.infer<typeof projectListViewSchema>;
@@ -290,6 +358,47 @@ export const projectPromptRowSchema = z
   .strict();
 export type ProjectPromptRow = z.infer<typeof projectPromptRowSchema>;
 
+export const projectQuestionRowSchema = z
+  .object({
+    request_id: z.string().min(1).max(512),
+    prompt_id: uuidSchema,
+    protocol: runQuestionProtocolSchema,
+    questions: projectQuestionArraySchema,
+    status: projectQuestionStatusSchema,
+    response_kind: z.enum(["reply", "reject"]).nullable(),
+    answers: projectQuestionAnswersSchema.nullable(),
+    error_code: z.string().nullable(),
+    error_message: z.string().nullable(),
+    response_requested_at: isoDateSchema.nullable(),
+    delivered_at: isoDateSchema.nullable(),
+    created_at: isoDateSchema,
+    updated_at: isoDateSchema,
+  })
+  .strict();
+export type ProjectQuestionRow = z.infer<typeof projectQuestionRowSchema>;
+
+export const projectQuestionReplyInputSchema = z
+  .object({
+    answers: z
+      .array(
+        z
+          .array(z.string().trim().min(1).max(RUN_CHAT_MESSAGE_MAX))
+          .min(1)
+          .max(RUN_CHAT_QUESTION_ANSWER_MAX),
+      )
+      .min(1)
+      .max(RUN_CHAT_QUESTION_MAX)
+      .refine(
+        (answers) =>
+          jsonUtf8ByteLength(answers) <= PROJECT_QUESTION_ANSWERS_MAX_BYTES,
+        "question answers are too large",
+      ),
+  })
+  .strict();
+export type ProjectQuestionReplyInput = z.infer<
+  typeof projectQuestionReplyInputSchema
+>;
+
 /** Projects persist exactly the same bounded event vocabulary as Skill Runs. */
 export const projectSessionEventSchema = runChatEventSchema;
 export type ProjectSessionEvent = z.infer<typeof projectSessionEventSchema>;
@@ -308,6 +417,7 @@ export type ProjectEventEnvelope = z.infer<typeof projectEventEnvelopeSchema>;
 export const projectSessionDetailSchema = projectSessionRowSchema
   .extend({
     prompts: z.array(projectPromptRowSchema),
+    questions: z.array(projectQuestionRowSchema),
     transcript: projectTranscriptSchema,
     /** Highest sequence allocated, including events appended after the transcript snapshot. */
     current_event_sequence: z.number().int().nonnegative(),
@@ -527,6 +637,21 @@ export interface ProjectPromptJob {
   /** Non-null means promptAsync may have reached OpenCode and must never be blindly replayed. */
   sendAttemptedAt: Date | null;
   leaseOwner: string;
+}
+
+export interface ProjectQuestionJob {
+  requestId: string;
+  orgId: string;
+  projectId: string;
+  sessionId: string;
+  promptId: string;
+  creatorId: string;
+  protocol: z.infer<typeof runQuestionProtocolSchema>;
+  /** Exact redacted shape presented to the member; used to detect native request drift. */
+  questions: z.infer<typeof runQuestionSchema>[];
+  responseKind: "reply" | "reject";
+  answers: string[][] | null;
+  deliveryAttemptedAt: Date | null;
 }
 
 /** Durable post-turn Files work reconstructed independently from an expired prompt lease. */

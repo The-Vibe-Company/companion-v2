@@ -121,6 +121,9 @@ import {
   getProjectPromptAttachment,
   createProjectSession,
   enqueueProjectPrompt,
+  cancelQueuedProjectPrompt,
+  enqueueProjectQuestionReply,
+  enqueueProjectQuestionRejection,
   hasProjectPromptIdempotencyKey,
   reserveProjectAttachmentUploads,
   reserveProjectFileUploads,
@@ -244,6 +247,7 @@ import {
   setProjectSkillsInputSchema,
   createProjectSessionFieldsSchema,
   projectPromptFieldsSchema,
+  projectQuestionReplyInputSchema,
   PROJECT_ATTACHMENT_MAX_FILES,
   PROJECT_ATTACHMENT_MAX_BYTES,
   launchRunFieldsSchema,
@@ -4572,6 +4576,101 @@ app.post(
           });
         },
       );
+      return c.json(session, 202);
+    } catch (error) {
+      return projectError(c, error);
+    }
+  },
+);
+
+app.post(
+  "/v1/projects/:id/sessions/:sessionId/prompts/:promptId/cancel",
+  async (c) => {
+    try {
+      assertProjectSession(c);
+      const session = await withTenant(c, async ({ actor, orgId, database }) => {
+        const projectId = c.req.param("id");
+        const sessionId = c.req.param("sessionId");
+        await cancelQueuedProjectPrompt({
+          actor,
+          orgId,
+          projectId,
+          sessionId,
+          promptId: c.req.param("promptId"),
+          database,
+        });
+        return getProjectSession({
+          actor,
+          orgId,
+          projectId,
+          sessionId,
+          database,
+        });
+      });
+      return c.json(session);
+    } catch (error) {
+      return projectError(c, error);
+    }
+  },
+);
+
+app.post(
+  "/v1/projects/:id/sessions/:sessionId/questions/:requestId/reply",
+  async (c) => {
+    try {
+      assertProjectSession(c);
+      const value = projectQuestionReplyInputSchema.parse(await c.req.json());
+      const session = await withTenant(c, async ({ actor, orgId, database }) => {
+        const projectId = c.req.param("id");
+        const sessionId = c.req.param("sessionId");
+        await enqueueProjectQuestionReply({
+          actor,
+          orgId,
+          projectId,
+          sessionId,
+          requestId: c.req.param("requestId"),
+          value,
+          database,
+        });
+        return getProjectSession({
+          actor,
+          orgId,
+          projectId,
+          sessionId,
+          database,
+        });
+      });
+      return c.json(session, 202);
+    } catch (error) {
+      return projectError(c, error);
+    }
+  },
+);
+
+app.post(
+  "/v1/projects/:id/sessions/:sessionId/questions/:requestId/reject",
+  async (c) => {
+    try {
+      assertProjectSession(c);
+      const session = await withTenant(c, async ({ actor, orgId, database }) => {
+        const projectId = c.req.param("id");
+        const sessionId = c.req.param("sessionId");
+        await enqueueProjectQuestionRejection({
+          actor,
+          orgId,
+          projectId,
+          sessionId,
+          requestId: c.req.param("requestId"),
+          database,
+        });
+        return getProjectSession({
+          actor,
+          orgId,
+          projectId,
+          sessionId,
+          database,
+        });
+      });
       return c.json(session, 202);
     } catch (error) {
       return projectError(c, error);

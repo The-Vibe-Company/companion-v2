@@ -122,6 +122,7 @@ function session(overrides: Partial<ProjectSessionVM> = {}): ProjectSessionVM {
     history: [],
     prompts: [],
     pendingPrompts: [],
+    questions: [],
     latestEventSequence: 0,
     currentEventSequence: 0,
     createdAt: NOW,

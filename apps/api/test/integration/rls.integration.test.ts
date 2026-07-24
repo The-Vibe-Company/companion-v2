@@ -9,6 +9,7 @@ import {
   claimProjectWorkspaceJobs,
   commitProjectFileUploads,
   completeProjectDeletion,
+  cancelQueuedProjectPrompt,
   createProject,
   createProjectSession,
   enqueueProjectPrompt,
@@ -791,6 +792,7 @@ describe("Postgres tenant isolation", () => {
       "project_sessions",
       "project_prompts",
       "project_session_events",
+      "project_questions",
       "project_attachments",
       "project_files",
       "project_file_versions",
@@ -872,6 +874,14 @@ describe("Postgres tenant isolation", () => {
            1, '{"type":"tool","name":"read"}'::jsonb)
       `;
       await integrationSql`
+        insert into project_questions
+          (org_id, project_id, session_id, prompt_id, creator_id, request_id, protocol, questions)
+        values
+          (${fixture.orgA}::uuid, ${graphProjectId}::uuid, ${sessionId}::uuid, ${promptId}::uuid,
+           ${fixture.owner.id}, ${`question-${promptId}`}, 'question',
+           '[{"header":"Format","question":"Which format?","options":[{"label":"Brief","description":"A short brief"}],"multiple":false,"custom":true}]'::jsonb)
+      `;
+      await integrationSql`
         insert into project_attachments
           (id, org_id, project_id, session_id, prompt_id, creator_id, file_name, content_type,
            byte_size, checksum, storage_key, workspace_path)
@@ -938,6 +948,7 @@ describe("Postgres tenant isolation", () => {
             union all select 'project_sessions', count(*)::int from project_sessions where project_id = ${graphProjectId}::uuid
             union all select 'project_prompts', count(*)::int from project_prompts where project_id = ${graphProjectId}::uuid
             union all select 'project_session_events', count(*)::int from project_session_events where project_id = ${graphProjectId}::uuid
+            union all select 'project_questions', count(*)::int from project_questions where project_id = ${graphProjectId}::uuid
             union all select 'project_attachments', count(*)::int from project_attachments where project_id = ${graphProjectId}::uuid
             union all select 'project_files', count(*)::int from project_files where project_id = ${graphProjectId}::uuid
             union all select 'project_file_versions', count(*)::int from project_file_versions where project_id = ${graphProjectId}::uuid
@@ -2003,6 +2014,7 @@ describe("Postgres tenant isolation", () => {
     const firstPromptProjectId = randomUUID();
     const sessionId = randomUUID();
     const promptId = randomUUID();
+    const nextPromptId = randomUUID();
     const secretId = randomUUID();
     const workerId = `project-first-prompt-${randomUUID()}`;
     const checksum = "c".repeat(64);
@@ -2050,6 +2062,17 @@ describe("Postgres tenant isolation", () => {
           (${promptId}::uuid, ${fixture.orgA}::uuid, ${firstPromptProjectId}::uuid,
            ${sessionId}::uuid, ${fixture.owner.id}, 1, 'Use my configured capabilities', 'queued',
            ${`first-${promptId}`}, ${checksum}, 1, 600000, ${`message-${promptId}`})
+      `;
+      await integrationSql`
+        insert into project_prompts
+          (id, org_id, project_id, session_id, creator_id, sequence, text, status,
+           idempotency_key, payload_hash, usage_activation_revision,
+           usage_reservation_ms, opencode_message_id)
+        values
+          (${nextPromptId}::uuid, ${fixture.orgA}::uuid, ${firstPromptProjectId}::uuid,
+           ${sessionId}::uuid, ${fixture.owner.id}, 2, 'Run only after the first prompt', 'queued',
+           ${`next-${nextPromptId}`}, ${"d".repeat(64)}, 1, 600000,
+           ${`message-${nextPromptId}`})
       `;
       const jobs = await claimProjectWorkspaceJobs({
         workerId,
@@ -2391,6 +2414,59 @@ describe("Postgres tenant isolation", () => {
             database,
           }),
       );
+      const runsNext = await withTenantContext(
+        { orgId: fixture.orgA, userId: fixture.owner.id },
+        (database) =>
+          enqueueProjectPrompt({
+            actor: fixture.owner,
+            orgId: fixture.orgA,
+            projectId: created.id,
+            sessionId: initial.id,
+            text: "Add the appendix after the sources",
+            model: "openai/gpt-5",
+            idempotencyKey: `project-runs-next-${fixture.suffix}`,
+            attachments: [],
+            database,
+          }),
+      );
+      await expect(
+        withTenantContext(
+          { orgId: fixture.orgA, userId: fixture.admin.id },
+          (database) =>
+            cancelQueuedProjectPrompt({
+              actor: fixture.admin,
+              orgId: fixture.orgA,
+              projectId: created.id,
+              sessionId: initial.id,
+              promptId: runsNext.id,
+              database,
+            }),
+        ),
+      ).rejects.toMatchObject({ name: "ProjectNotFoundError" });
+      const cancelled = await withTenantContext(
+        { orgId: fixture.orgA, userId: fixture.owner.id },
+        (database) =>
+          cancelQueuedProjectPrompt({
+            actor: fixture.owner,
+            orgId: fixture.orgA,
+            projectId: created.id,
+            sessionId: initial.id,
+            promptId: runsNext.id,
+            database,
+          }),
+      );
+      const replayedCancellation = await withTenantContext(
+        { orgId: fixture.orgA, userId: fixture.owner.id },
+        (database) =>
+          cancelQueuedProjectPrompt({
+            actor: fixture.owner,
+            orgId: fixture.orgA,
+            projectId: created.id,
+            sessionId: initial.id,
+            promptId: runsNext.id,
+            database,
+          }),
+      );
       const reopened = await withTenantContext(
         { orgId: fixture.orgA, userId: fixture.owner.id },
         (database) =>
@@ -2408,16 +2484,175 @@ describe("Postgres tenant isolation", () => {
         text: "Add the final sources",
         status: "queued",
       });
+      expect(runsNext).toMatchObject({
+        sequence: 3,
+        text: "Add the appendix after the sources",
+        status: "queued",
+      });
+      expect(cancelled).toMatchObject({ id: runsNext.id, status: "cancelled" });
+      expect(replayedCancellation).toMatchObject({
+        id: runsNext.id,
+        status: "cancelled",
+      });
       expect(reopened).toMatchObject({
         status: "queued",
         stop_requested_at: null,
         error_code: null,
         message: null,
       });
+      expect(reopened.prompts.map(({ sequence, status }) => ({ sequence, status }))).toEqual([
+        { sequence: 1, status: "completed" },
+        { sequence: 2, status: "queued" },
+        { sequence: 3, status: "cancelled" },
+      ]);
+
+      await withTenantContext(
+        { orgId: fixture.orgA, userId: fixture.owner.id },
+        (database) =>
+          requestProjectSessionStop({
+            actor: fixture.owner,
+            orgId: fixture.orgA,
+            projectId: created.id,
+            sessionId: initial.id,
+            database,
+          }),
+      );
+      const stoppedQueue = await withTenantContext(
+        { orgId: fixture.orgA, userId: fixture.owner.id },
+        (database) =>
+          getProjectSession({
+            actor: fixture.owner,
+            orgId: fixture.orgA,
+            projectId: created.id,
+            sessionId: initial.id,
+            database,
+          }),
+      );
+      expect(stoppedQueue.status).toBe("stopping");
+      expect(stoppedQueue.prompts.map(({ sequence, status }) => ({ sequence, status }))).toEqual([
+        { sequence: 1, status: "completed" },
+        { sequence: 2, status: "cancelled" },
+        { sequence: 3, status: "cancelled" },
+      ]);
     } finally {
       if (projectId) {
         await integrationSql`delete from projects where id = ${projectId}::uuid`;
       }
+    }
+  });
+
+  it("fences a claimed prompt when Stop commits before the external send", async () => {
+    const projectId = randomUUID();
+    const sessionId = randomUUID();
+    const promptId = randomUUID();
+    const workerId = `project-stop-fence-${randomUUID()}`;
+    try {
+      await integrationSql`
+        insert into projects
+          (id, org_id, creator_id, name, default_model, idempotency_key, payload_hash)
+        values
+          (${projectId}::uuid, ${fixture.orgA}::uuid, ${fixture.owner.id},
+           'Stop fence', 'openai/gpt-5', ${projectId}, ${projectId})
+      `;
+      await integrationSql`
+        insert into project_workspaces
+          (org_id, project_id, creator_id, sandbox_name, status, desired_generation,
+           applied_generation, available_at)
+        values
+          (${fixture.orgA}::uuid, ${projectId}::uuid, ${fixture.owner.id},
+           ${`project-${projectId}`}, 'queued', 1, 1, now() - interval '1 minute')
+      `;
+      await integrationSql`
+        insert into project_sessions
+          (id, org_id, project_id, creator_id, title, model, model_provider,
+           model_credential_env_keys, status)
+        values
+          (${sessionId}::uuid, ${fixture.orgA}::uuid, ${projectId}::uuid,
+           ${fixture.owner.id}, 'Stop before send', 'openai/gpt-5', 'openai',
+           '{}'::text[], 'queued')
+      `;
+      await integrationSql`
+        insert into project_prompts
+          (id, org_id, project_id, session_id, creator_id, sequence, text, status,
+           idempotency_key, payload_hash, usage_activation_revision,
+           usage_reservation_ms, opencode_message_id)
+        values
+          (${promptId}::uuid, ${fixture.orgA}::uuid, ${projectId}::uuid,
+           ${sessionId}::uuid, ${fixture.owner.id}, 1, 'Never send after Stop', 'queued',
+           ${`stop-${promptId}`}, ${"f".repeat(64)}, 1, 0, ${`message-${promptId}`})
+      `;
+
+      const claims = await claimProjectWorkspaceJobs({
+        workerId,
+        limit: 32,
+        leaseSeconds: 30,
+        database: integrationDb,
+      });
+      const job = claims.find((candidate) => candidate.projectId === projectId);
+      expect(job).toBeDefined();
+      await integrationSql`
+        update project_prompts
+        set status = 'dispatching', attempt = 1, lease_owner = ${workerId},
+            lease_expires_at = now() + interval '30 seconds', heartbeat_at = now(),
+            started_at = now()
+        where id = ${promptId}::uuid
+      `;
+      await integrationSql`
+        update project_sessions set status = 'working'
+        where id = ${sessionId}::uuid
+      `;
+
+      await withTenantContext(
+        { orgId: fixture.orgA, userId: fixture.owner.id },
+        (database) =>
+          requestProjectSessionStop({
+            actor: fixture.owner,
+            orgId: fixture.orgA,
+            projectId,
+            sessionId,
+            database,
+          }),
+      );
+      await expect(
+        markProjectPromptSendAttempted({
+          job: job!,
+          prompt: {
+            id: promptId,
+            orgId: fixture.orgA,
+            projectId,
+            sessionId,
+            creatorId: fixture.owner.id,
+            sequence: 1,
+            text: "Never send after Stop",
+            model: "openai/gpt-5",
+            opencodeSessionId: null,
+            opencodeMessageId: `message-${promptId}`,
+            sendAttemptedAt: null,
+            leaseOwner: workerId,
+          },
+          workerId,
+          activationRevision: job!.activationRevision,
+          authorityRevision: job!.authorityRevision ?? "",
+          database: integrationDb,
+        }),
+      ).resolves.toBe("stopped");
+      await expect(integrationSql`
+        select prompt.status, prompt.send_attempted_at, session.status as session_status
+        from project_prompts prompt
+        join project_sessions session on session.id = prompt.session_id
+        where prompt.id = ${promptId}::uuid
+      `).resolves.toEqual([{
+        status: "cancelled",
+        send_attempted_at: null,
+        session_status: "stopping",
+      }]);
+    } finally {
+      await integrationSql`
+        update project_workspaces
+        set lease_owner = null, lease_expires_at = null, heartbeat_at = null
+        where project_id = ${projectId}::uuid
+      `;
+      await integrationSql`delete from projects where id = ${projectId}::uuid`;
     }
   });
 

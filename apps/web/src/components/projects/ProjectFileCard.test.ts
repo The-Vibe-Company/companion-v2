@@ -19,12 +19,15 @@ const fileRpc = vi.hoisted(() => ({
 }));
 
 vi.mock("@/lib/projects", () => ({
+  cancelProjectPrompt: vi.fn(),
   fetchProjectFileVersions: fileRpc.fetchProjectFileVersions,
   fetchProjectFiles: vi.fn(),
   fetchProjectSession: vi.fn(),
   projectFileHref: (projectId: string, fileId: string, download = false) =>
     `/v1/projects/${projectId}/files/${fileId}${download ? "?download=1" : ""}`,
   projectFileVersionHref: fileRpc.projectFileVersionHref,
+  rejectProjectQuestion: vi.fn(),
+  replyProjectQuestion: vi.fn(),
   sendProjectPrompt: vi.fn(),
   stopProjectSession: vi.fn(),
 }));

@@ -3,6 +3,8 @@
 import {
   PROJECT_ATTACHMENT_MAX_BYTES,
   PROJECT_ATTACHMENT_MAX_FILES,
+  PROJECT_PROMPT_MAX_QUEUED,
+  RUN_CHAT_QUESTION_ANSWER_MAX,
   type RunChatEvent,
 } from "@companion/contracts";
 import Link from "next/link";
@@ -21,12 +23,15 @@ import {
 import { createPortal } from "react-dom";
 import { formatBytes, relativeTime } from "@/lib/format";
 import {
+  cancelProjectPrompt,
   fetchProject,
   fetchProjectFileVersions,
   fetchProjectFiles,
   fetchProjectSession,
   projectFileHref,
   projectFileVersionHref,
+  rejectProjectQuestion,
+  replyProjectQuestion,
   sendProjectPrompt,
   stopProjectSession,
 } from "@/lib/projects";
@@ -34,7 +39,9 @@ import type {
   ProjectDetailVM,
   ProjectFileVM,
   ProjectFileVersionVM,
+  ProjectPromptVM,
   ProjectPromptAttachmentVM,
+  ProjectQuestionVM,
   ProjectRuntimeAvailability,
   ProjectSessionStatus,
   ProjectSessionVM,
@@ -194,15 +201,329 @@ function projectPreparationState(
     : null;
 }
 
+function QueuedProjectPrompts({
+  prompts,
+  busyPromptId,
+  onRemove,
+}: {
+  prompts: ProjectPromptVM[];
+  busyPromptId: string | null;
+  onRemove: (promptId: string) => void;
+}) {
+  if (prompts.length === 0) return null;
+  return (
+    <section
+      className="cowork-prompt-queue"
+      aria-label="Messages that run next"
+      aria-live="polite"
+    >
+      <header>
+        <span>
+          <Icon name="clock" size={12} />
+          Runs next
+        </span>
+        <small className="tnum">{prompts.length}</small>
+      </header>
+      <ol>
+        {prompts.map((prompt) => (
+          <li key={prompt.id}>
+            <span title={prompt.text}>{prompt.text}</span>
+            {prompt.attachments.length > 0 && (
+              <small>
+                {prompt.attachments.length} file
+                {prompt.attachments.length === 1 ? "" : "s"}
+              </small>
+            )}
+            <button
+              type="button"
+              disabled={busyPromptId !== null}
+              aria-label={`Remove queued message: ${prompt.text}`}
+              onClick={() => onRemove(prompt.id)}
+            >
+              <Icon
+                name={busyPromptId === prompt.id ? "loader" : "x"}
+                size={12}
+                className={
+                  busyPromptId === prompt.id ? "ls-spin" : undefined
+                }
+              />
+            </button>
+          </li>
+        ))}
+      </ol>
+    </section>
+  );
+}
+
+function ProjectQuestionCard({
+  request,
+  busy,
+  onReply,
+  onReject,
+  onContinue,
+  onNewConversation,
+}: {
+  request: ProjectQuestionVM;
+  busy: boolean;
+  onReply: (answers: string[][]) => void;
+  onReject: () => void;
+  onContinue: () => void;
+  onNewConversation?: () => void;
+}) {
+  const formId = useId();
+  const [answers, setAnswers] = useState<string[][]>(() =>
+    request.questions.map(() => []),
+  );
+  const [customAnswers, setCustomAnswers] = useState<string[]>(() =>
+    request.questions.map(() => ""),
+  );
+  const [validationError, setValidationError] = useState<string | null>(null);
+  const responsePending = request.status === "queued";
+
+  const resolvedAnswers = request.questions.map((_, index) => {
+    const custom = customAnswers[index]?.trim();
+    if (!custom) return answers[index] ?? [];
+    return request.questions[index]?.multiple
+      ? [...(answers[index] ?? []), custom]
+      : [custom];
+  });
+  const complete = resolvedAnswers.every((answer) => answer.length > 0);
+
+  if (responsePending) {
+    return (
+      <div
+        className="cowork-question-card is-sending"
+        role="status"
+        aria-live="polite"
+      >
+        <Icon name="loader" size={14} className="ls-spin" />
+        <span>
+          <strong>
+            {request.responseKind === "reject"
+              ? "Skipping this question"
+              : "Sending your answer"}
+          </strong>
+          <small>The task will continue in a moment.</small>
+        </span>
+      </div>
+    );
+  }
+  if (request.status === "failed") {
+    return (
+      <div className="cowork-question-card is-failed" role="status">
+        <Icon name="alert-triangle" size={14} />
+        <span>
+          <strong>Your answer could not be confirmed</strong>
+          <small>
+            Your conversation and files are safe. Send a new message to
+            continue.
+          </small>
+          {request.errorMessage && (
+            <details>
+              <summary>Technical details</summary>
+              <code>{request.errorMessage}</code>
+            </details>
+          )}
+        </span>
+        <span className="cowork-question-card__recovery">
+          <button
+            type="button"
+            className="cds-btn cds-btn--secondary cds-btn--sm"
+            onClick={onContinue}
+          >
+            Continue
+          </button>
+          {onNewConversation && (
+            <button
+              type="button"
+              className="cds-btn cds-btn--ghost cds-btn--sm"
+              onClick={onNewConversation}
+            >
+              New conversation
+            </button>
+          )}
+        </span>
+      </div>
+    );
+  }
+
+  return (
+    <form
+      className="cowork-question-card"
+      aria-label="Question from the agent"
+      aria-busy={busy}
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (!complete) {
+          setValidationError("Answer each question to continue.");
+          return;
+        }
+        setValidationError(null);
+        onReply(resolvedAnswers);
+      }}
+    >
+      <header>
+        <span className="cowork-question-card__icon">
+          <Icon name="message-square" size={14} />
+        </span>
+        <span>
+          <strong>The agent needs your input</strong>
+          <small>Your answer continues the current task.</small>
+        </span>
+      </header>
+      <div className="cowork-question-card__questions">
+        {request.questions.map((question, questionIndex) => {
+          const selected = answers[questionIndex] ?? [];
+          const customValue = customAnswers[questionIndex] ?? "";
+          const customAllowed =
+            question.custom || question.options.length === 0;
+          const answerCount =
+            selected.length + (customValue.trim().length > 0 ? 1 : 0);
+          const answerLimitReached =
+            question.multiple
+            && answerCount >= RUN_CHAT_QUESTION_ANSWER_MAX;
+          const customBlocked =
+            question.multiple
+            && selected.length >= RUN_CHAT_QUESTION_ANSWER_MAX
+            && customValue.trim().length === 0;
+          return (
+            <fieldset key={`${request.requestId}:${questionIndex}`}>
+              <legend>
+                {question.header && <b>{question.header}</b>}
+                <span>{question.question}</span>
+              </legend>
+              {question.options.length > 0 && (
+                <div className="cowork-question-card__options">
+                  {question.options.map((option, optionIndex) => {
+                    const checked = selected.includes(option.label);
+                    const inputId = `${formId}-${questionIndex}-${optionIndex}`;
+                    return (
+                      <label key={option.label} htmlFor={inputId}>
+                        <input
+                          id={inputId}
+                          type={question.multiple ? "checkbox" : "radio"}
+                          name={`${formId}-${questionIndex}`}
+                          value={option.label}
+                          checked={checked}
+                          disabled={
+                            busy || (!checked && answerLimitReached)
+                          }
+                          onChange={() => {
+                            setValidationError(null);
+                            if (!question.multiple) {
+                              setCustomAnswers((current) =>
+                                current.map((answer, index) =>
+                                  index === questionIndex ? "" : answer,
+                                ),
+                              );
+                            }
+                            setAnswers((current) =>
+                              current.map((answer, index) => {
+                                if (index !== questionIndex) return answer;
+                                if (!question.multiple) return [option.label];
+                                return checked
+                                  ? answer.filter(
+                                      (value) => value !== option.label,
+                                    )
+                                  : [...answer, option.label];
+                              }),
+                            );
+                          }}
+                        />
+                        <span>
+                          <b>{option.label}</b>
+                          {option.description && (
+                            <small>{option.description}</small>
+                          )}
+                        </span>
+                      </label>
+                    );
+                  })}
+                </div>
+              )}
+              {customAllowed && (
+                <label
+                  className="cowork-question-card__custom"
+                  htmlFor={`${formId}-${questionIndex}-custom`}
+                >
+                  <span>
+                    {question.options.length > 0
+                      ? "Something else"
+                      : "Your answer"}
+                  </span>
+                  <textarea
+                    id={`${formId}-${questionIndex}-custom`}
+                    rows={2}
+                    disabled={busy || customBlocked}
+                    value={customValue}
+                    onChange={(event) => {
+                      setValidationError(null);
+                      const value = event.target.value;
+                      if (!question.multiple && value.trim()) {
+                        setAnswers((current) =>
+                          current.map((answer, index) =>
+                            index === questionIndex ? [] : answer,
+                          ),
+                        );
+                      }
+                      setCustomAnswers((current) =>
+                        current.map((answer, index) =>
+                          index === questionIndex ? value : answer,
+                        ),
+                      );
+                    }}
+                  />
+                  {customBlocked && (
+                    <small className="cowork-question-card__limit">
+                      Remove a choice to add a custom answer.
+                    </small>
+                  )}
+                </label>
+              )}
+            </fieldset>
+          );
+        })}
+      </div>
+      <footer>
+        {validationError || request.errorMessage ? (
+          <span className="cowork-question-card__error" role="alert">
+            {validationError ?? request.errorMessage}
+          </span>
+        ) : (
+          <span />
+        )}
+        <button
+          type="button"
+          className="cds-btn cds-btn--ghost cds-btn--sm"
+          disabled={busy}
+          onClick={onReject}
+        >
+          Skip
+        </button>
+        <button
+          type="submit"
+          className="cds-btn cds-btn--primary cds-btn--sm"
+          disabled={busy || !complete}
+        >
+          {busy ? "Sending…" : "Continue"}
+        </button>
+      </footer>
+    </form>
+  );
+}
+
 export function SessionComposer({
   draftKey = "companion:project-draft:standalone",
   disabled,
   disabledReason,
   focusRequest = 0,
   projectFileCount = 0,
+  queuedPrompts = [],
+  cancelPromptId = null,
   working,
   workingLabel = "Working",
   onOpenProjectFiles = () => undefined,
+  onCancelPrompt = () => undefined,
   onSend,
 }: {
   draftKey?: string;
@@ -210,9 +531,12 @@ export function SessionComposer({
   disabledReason?: string;
   focusRequest?: number;
   projectFileCount?: number;
+  queuedPrompts?: ProjectPromptVM[];
+  cancelPromptId?: string | null;
   working: boolean;
   workingLabel?: string;
   onOpenProjectFiles?: () => void;
+  onCancelPrompt?: (promptId: string) => void;
   onSend: (input: {
     prompt: string;
     files: File[];
@@ -227,6 +551,8 @@ export function SessionComposer({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const idempotencyKeyRef = useRef<string | null>(null);
   const loadedDraftKeyRef = useRef<string | null>(null);
+  const queueFull =
+    working && queuedPrompts.length >= PROJECT_PROMPT_MAX_QUEUED;
 
   useEffect(() => {
     let saved = "";
@@ -283,6 +609,12 @@ export function SessionComposer({
 
   const send = async () => {
     if (sending || disabled || !text.trim()) return;
+    if (queueFull) {
+      setError(
+        `Runs next can hold up to ${PROJECT_PROMPT_MAX_QUEUED} messages. Remove one to add another.`,
+      );
+      return;
+    }
     idempotencyKeyRef.current ??= crypto.randomUUID();
     setSending(true);
     setError(null);
@@ -337,6 +669,11 @@ export function SessionComposer({
         appendFiles(Array.from(event.dataTransfer.files));
       }}
     >
+      <QueuedProjectPrompts
+        prompts={queuedPrompts}
+        busyPromptId={cancelPromptId}
+        onRemove={onCancelPrompt}
+      />
       {files.length > 0 && (
         <div className="cowork-draft-files">
           {files.map((file, index) => (
@@ -377,7 +714,9 @@ export function SessionComposer({
             disabled
               ? disabledReason ??
                 "This conversation is no longer accepting messages."
-              : "Message the agent…"
+              : working
+                ? "Add a message to run next…"
+                : "Message the agent…"
           }
           onChange={(event) => {
             idempotencyKeyRef.current = null;
@@ -438,11 +777,22 @@ export function SessionComposer({
             </span>
           )}
           <span />
+          {working && text.trim() && (
+            <span className="cowork-session-composer__next-label">
+              Runs next
+            </span>
+          )}
           <button
             type="button"
             className="cowork-session-composer__send"
-            aria-label="Send"
-            disabled={disabled || sending || !text.trim()}
+            aria-label={
+              queueFull
+                ? "Runs next is full"
+                : working
+                  ? "Add message to Runs next"
+                  : "Send"
+            }
+            disabled={disabled || sending || queueFull || !text.trim()}
             onClick={() => void send()}
           >
             {sending ? (
@@ -454,7 +804,17 @@ export function SessionComposer({
         </div>
       </div>
       <div className="cowork-session-composer__hint">
-        <kbd>Enter</kbd> send · <kbd>Shift Enter</kbd> new line
+        {queueFull ? (
+          <span>
+            Runs next is full · remove a message to add another.
+          </span>
+        ) : working ? (
+          <span>Your message will start after the current task.</span>
+        ) : (
+          <>
+            <kbd>Enter</kbd> send · <kbd>Shift Enter</kbd> new line
+          </>
+        )}
       </div>
       {error && (
         <p className="project-inline-error" role="alert">
@@ -650,7 +1010,7 @@ export function ProjectFileCard({
             aria-pressed={selected}
             onClick={() => onPreview(file)}
           >
-            {selected ? "Open" : "Preview"}
+            {selected ? "Close preview" : "Preview"}
           </button>
         )}
         <a
@@ -878,12 +1238,40 @@ function ProjectFilesContent({
   attachmentPreview: ProjectAttachmentPreview | null;
   onSelectionChange: (target: ProjectFilePreviewTarget | null) => void;
 }) {
+  const searchId = useId();
+  const [query, setQuery] = useState("");
+  const visibleFiles = useMemo(() => {
+    const normalized = query.trim().toLocaleLowerCase();
+    if (!normalized) return files;
+    return files.filter((file) =>
+      `${file.name} ${file.path}`.toLocaleLowerCase().includes(normalized),
+    );
+  }, [files, query]);
+
   return (
     <div className="run-files-drawer__body project-files-drawer__body">
       <p className="project-files-drawer__note">
         Every conversation can use these files. Previous versions stay
         available from History.
       </p>
+      {files.length > 1 && (
+        <div className="cowork-files-search">
+          <label className="sr-only" htmlFor={searchId}>
+            Search Project files
+          </label>
+          <Icon name="search" size={13} />
+          <input
+            id={searchId}
+            type="search"
+            value={query}
+            placeholder="Search files"
+            onChange={(event) => setQuery(event.target.value)}
+          />
+          <small className="tnum">
+            {query.trim() ? `${visibleFiles.length} of ${files.length}` : files.length}
+          </small>
+        </div>
+      )}
       {files.length === 0 && !selection && !attachmentPreview ? (
         <div className="project-files-drawer__empty">
           <Icon name="folder-open" size={18} />
@@ -897,21 +1285,29 @@ function ProjectFilesContent({
           }`}
         >
           <div className="project-files-drawer__list">
-            {files.map((file) => (
-              <ProjectFileCard
-                key={file.id}
-                projectId={projectId}
-                file={file}
-                selected={file.id === selection?.id}
-                onPreview={(nextFile) =>
-                  onSelectionChange(
-                    selection?.id === nextFile.id && !selection.exactVersion
-                      ? null
-                      : currentFilePreviewTarget(nextFile),
-                  )
-                }
-              />
-            ))}
+            {visibleFiles.length > 0 ? (
+              visibleFiles.map((file) => (
+                <ProjectFileCard
+                  key={file.id}
+                  projectId={projectId}
+                  file={file}
+                  selected={file.id === selection?.id}
+                  onPreview={(nextFile) =>
+                    onSelectionChange(
+                      selection?.id === nextFile.id && !selection.exactVersion
+                        ? null
+                        : currentFilePreviewTarget(nextFile),
+                    )
+                  }
+                />
+              ))
+            ) : (
+              <div className="project-files-drawer__empty is-compact">
+                <Icon name="search" size={16} />
+                <strong>No matching files</strong>
+                <span>Try a different name.</span>
+              </div>
+            )}
           </div>
           {selection && (
             <ProjectFilePreview
@@ -1160,6 +1556,10 @@ export function ProjectSessionView({
   const [streamDead, setStreamDead] = useState(false);
   const [streamNonce, setStreamNonce] = useState(0);
   const [stopBusy, setStopBusy] = useState(false);
+  const [cancelPromptId, setCancelPromptId] = useState<string | null>(null);
+  const [questionBusyRequestId, setQuestionBusyRequestId] = useState<
+    string | null
+  >(null);
   const [archiveBusy, setArchiveBusy] = useState(false);
   const [runtimeRetryBusy, setRuntimeRetryBusy] = useState(false);
   const [optimisticWake, setOptimisticWake] = useState(false);
@@ -1198,10 +1598,44 @@ export function ProjectSessionView({
   onSessionChangeRef.current = onSessionChange;
 
   const resolveToolLabel = useCallback(
-    (tool: string, skill: string | null) => ({
-      label: skill ?? tool,
-      action: tool,
-    }),
+    (tool: string, skill: string | null) => {
+      if (skill) {
+        return {
+          label: `Using ${skill}`,
+          action: tool,
+        };
+      }
+      const normalized = tool.toLowerCase();
+      if (
+        ["write", "edit", "apply_patch", "multiedit"].some((name) =>
+          normalized.includes(name),
+        )
+      ) {
+        return { label: "Updating files", action: tool };
+      }
+      if (
+        ["read", "glob", "grep", "list", "search"].some((name) =>
+          normalized.includes(name),
+        )
+      ) {
+        return { label: "Reviewing project files", action: tool };
+      }
+      if (
+        ["webfetch", "websearch", "fetch", "browser"].some((name) =>
+          normalized.includes(name),
+        )
+      ) {
+        return { label: "Researching", action: tool };
+      }
+      if (
+        ["bash", "shell", "terminal", "exec"].some((name) =>
+          normalized.includes(name),
+        )
+      ) {
+        return { label: "Working in the Project", action: tool };
+      }
+      return { label: "Working", action: tool };
+    },
     [],
   );
 
@@ -1242,11 +1676,12 @@ export function ProjectSessionView({
         items: next.history,
         resolveToolLabel,
       });
-      for (const prompt of next.pendingPrompts) {
+      const currentPrompt = next.pendingPrompts[0] ?? null;
+      if (currentPrompt) {
         dispatch({
           kind: "user",
-          text: prompt.text,
-          messageId: prompt.messageId,
+          text: currentPrompt.text,
+          messageId: currentPrompt.messageId,
         });
       }
     },
@@ -1267,7 +1702,7 @@ export function ProjectSessionView({
       setSession(next);
       onSessionChangeRef.current(next);
       setLoadError(null);
-      if (!ACTIVE_SESSION_STATUSES.has(next.status)) reconcileHistory(next);
+      reconcileHistory(next);
       if (completedPromptBecameDurable) void refreshFiles();
     },
     [reconcileHistory, refreshFiles],
@@ -1393,6 +1828,8 @@ export function ProjectSessionView({
     setAttachmentPreview(null);
     setComposerFocusRequest(0);
     setOptimisticWake(false);
+    setCancelPromptId(null);
+    setQuestionBusyRequestId(null);
     setFiles(projectFilesRef.current);
     setRowOverride(new Map());
   }, [
@@ -1424,6 +1861,9 @@ export function ProjectSessionView({
         dispatch({ kind: "event", event, resolveToolLabel });
         if (
           event.type === "session.idle" ||
+          event.type === "question.asked" ||
+          event.type === "question.replied" ||
+          event.type === "question.rejected" ||
           (event.type === "prompt.status" &&
             ["completed", "canceled", "error"].includes(event.status))
         ) {
@@ -1601,6 +2041,43 @@ export function ProjectSessionView({
       }),
     [session.prompts],
   );
+  const queuedFollowUps = useMemo(
+    () =>
+      session.pendingPrompts
+        .slice(1)
+        .filter((prompt) => prompt.status === "queued"),
+    [session.pendingPrompts],
+  );
+  const pendingQuestion = useMemo(
+    () => {
+      const awaitingAnswer = session.questions
+        .filter(
+          (question) =>
+            question.status === "pending" || question.status === "queued",
+        )
+        .sort(
+          (left, right) =>
+            left.createdAt.localeCompare(right.createdAt) ||
+            left.requestId.localeCompare(right.requestId),
+        )[0];
+      if (awaitingAnswer) return awaitingAnswer;
+
+      return (
+        session.questions
+          .filter((question) => question.status === "failed")
+          .sort(
+            (left, right) =>
+              right.updatedAt.localeCompare(left.updatedAt) ||
+              right.createdAt.localeCompare(left.createdAt) ||
+              right.requestId.localeCompare(left.requestId),
+          )[0] ?? null
+      );
+    },
+    [session.questions],
+  );
+  const questionWaitingForAnswer =
+    pendingQuestion?.status === "pending" ||
+    pendingQuestion?.status === "queued";
   const promptLookup = useMemo(() => {
     const byId = new Map<string, ProjectSessionVM["prompts"][number]>();
     for (const prompt of session.prompts) {
@@ -1796,10 +2273,21 @@ export function ProjectSessionView({
             showPromptBubble={false}
             showWorking={
               !workspaceBlocked &&
+              !questionWaitingForAnswer &&
               (working || chat.working.active || preparing)
             }
-            workingLabel={preparation?.label}
-            workingDetail={preparation?.detail}
+            workingLabel={
+              preparation?.label ??
+              (questionWaitingForAnswer
+                ? "Waiting for your answer"
+                : undefined)
+            }
+            workingDetail={
+              preparation?.detail ??
+              (questionWaitingForAnswer
+                ? "Choose an option below to continue the current task."
+                : undefined)
+            }
             workingVariant={preparing ? "preparing" : "default"}
             streamDead={streamDead}
             rowExpanded={(id, defaultOpen) =>
@@ -1816,6 +2304,56 @@ export function ProjectSessionView({
             onOpenFiles={openFiles}
             generatedFileTurns={generatedFileTurns}
             renderUserAttachments={renderPromptAttachments}
+            pendingInteraction={
+              pendingQuestion ? (
+                <ProjectQuestionCard
+                  key={pendingQuestion.requestId}
+                  request={pendingQuestion}
+                  busy={questionBusyRequestId === pendingQuestion.requestId}
+                  onReply={(answers) => {
+                    if (questionBusyRequestId) return;
+                    setQuestionBusyRequestId(pendingQuestion.requestId);
+                    void replyProjectQuestion(
+                      project.id,
+                      session.id,
+                      pendingQuestion.requestId,
+                      answers,
+                    )
+                      .then(apply)
+                      .catch((cause) =>
+                        setLoadError(
+                          cause instanceof Error
+                            ? cause.message
+                            : "Could not send your answer.",
+                        ),
+                      )
+                      .finally(() => setQuestionBusyRequestId(null));
+                  }}
+                  onReject={() => {
+                    if (questionBusyRequestId) return;
+                    setQuestionBusyRequestId(pendingQuestion.requestId);
+                    void rejectProjectQuestion(
+                      project.id,
+                      session.id,
+                      pendingQuestion.requestId,
+                    )
+                      .then(apply)
+                      .catch((cause) =>
+                        setLoadError(
+                          cause instanceof Error
+                            ? cause.message
+                            : "Could not skip this question.",
+                        ),
+                      )
+                      .finally(() => setQuestionBusyRequestId(null));
+                  }}
+                  onContinue={() =>
+                    setComposerFocusRequest((current) => current + 1)
+                  }
+                  onNewConversation={onNewSession}
+                />
+              ) : null
+            }
             showChatError={false}
           />
           {loadError && (
@@ -1995,9 +2533,28 @@ export function ProjectSessionView({
             disabledReason={composerDisabledReason}
             focusRequest={composerFocusRequest}
             projectFileCount={visibleFiles.length}
+            queuedPrompts={queuedFollowUps}
+            cancelPromptId={cancelPromptId}
             working={working}
-            workingLabel={preparation?.shortLabel ?? "Working"}
+            workingLabel={
+              preparation?.shortLabel ??
+              (questionWaitingForAnswer ? "Waiting for answer" : "Working")
+            }
             onOpenProjectFiles={() => openFiles()}
+            onCancelPrompt={(promptId) => {
+              if (cancelPromptId) return;
+              setCancelPromptId(promptId);
+              void cancelProjectPrompt(project.id, session.id, promptId)
+                .then(apply)
+                .catch((cause) =>
+                  setLoadError(
+                    cause instanceof Error
+                      ? cause.message
+                      : "Could not remove the queued message.",
+                  ),
+                )
+                .finally(() => setCancelPromptId(null));
+            }}
             onSend={async ({ prompt, files: nextFiles, idempotencyKey }) => {
               const waking =
                 workspace.status === "stopped" ||
@@ -2013,11 +2570,13 @@ export function ProjectSessionView({
                 const acceptedPrompt = [...next.prompts]
                   .reverse()
                   .find((candidate) => candidate.text === prompt);
-                dispatch({
-                  kind: "user",
-                  text: prompt,
-                  messageId: acceptedPrompt?.messageId,
-                });
+                if (!working || acceptedPrompt?.status !== "queued") {
+                  dispatch({
+                    kind: "user",
+                    text: prompt,
+                    messageId: acceptedPrompt?.messageId,
+                  });
+                }
                 dispatch({ kind: "send" });
                 apply(next);
               } catch (cause) {

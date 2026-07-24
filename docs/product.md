@@ -110,6 +110,12 @@ use and every effective configured model-provider credential is injected at acti
 its value. The Member starts one or more conversations with a direct prompt, optional Files, and an optional
 model override. OpenCode handles the work; Companion renders its real transcript and tool activity.
 Conversations may run concurrently against the same Files, so overlapping writes are last-writer-wins.
+During a long turn the transcript explains only the current useful activity. The composer stays open:
+a new message is stored as `Runs next`, survives reload and sleep, and can be removed until it starts.
+Each conversation keeps one FIFO head plus at most five later messages, independent of whether the
+worker has claimed the head. Stopping the conversation also cancels every follow-up that has not
+started. When OpenCode needs a choice, Companion presents the native question inline and durably queues
+the member's answer; it is never mistaken for a tool permission or silently auto-approved.
 After ten idle minutes the VM checkpoints and stops, while the Project remains resumable.
 If recovery needs attention, the owner can explicitly retry the same workspace. The command never
 replaces the sandbox or checkpoint with a fresh empty Project.

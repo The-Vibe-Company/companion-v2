@@ -14,6 +14,7 @@ afterEach(() => {
   act(() => root?.unmount());
   root = null;
   document.body.innerHTML = "";
+  vi.useRealTimers();
 });
 
 function runDetail(): SkillRunDetail {
@@ -66,6 +67,56 @@ function chatState(): ChatState {
 }
 
 describe("ChatTranscript scroller", () => {
+  it("shows a truthful retry countdown and only a validated provider action", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-24T10:00:00.000Z"));
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    const retryAt = Date.now() + 3_000;
+    await act(async () => {
+      root?.render(
+        React.createElement(ChatTranscript, {
+          run: null,
+          chat: {
+            ...chatState(),
+            working: {
+              active: true,
+              label: "Retrying · attempt 2",
+              retryAt,
+              retryAction: {
+                reason: "quota",
+                provider: "OpenAI",
+                title: "Reconnect OpenAI",
+                message: "The provider asked Companion to wait.",
+                label: "Open provider",
+                link: "https://example.com/provider",
+              },
+            },
+          },
+          showPromptBubble: false,
+          showWorking: true,
+          streamDead: false,
+          rowExpanded: () => false,
+          onToggleRow: () => undefined,
+          onReconnect: () => undefined,
+          onOpenFiles: () => undefined,
+        }),
+      );
+    });
+
+    const status = container.querySelector(".run-working--retrying");
+    expect(status?.textContent).toContain("Retrying in 3s");
+    expect(
+      status?.querySelector<HTMLAnchorElement>("a")?.getAttribute("href"),
+    ).toBe("https://example.com/provider");
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+    expect(status?.textContent).toContain("Retrying in 2s");
+  });
+
   it("announces a detailed preparation state without replacing normal working copy", async () => {
     const container = document.createElement("div");
     document.body.appendChild(container);
@@ -99,6 +150,38 @@ describe("ChatTranscript scroller", () => {
     expect(status?.textContent).toContain(
       "Loading files, Skills, and access before your task starts.",
     );
+  });
+
+  it("anchors a pending interaction so its complete card is visible on resume", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () => {
+      root?.render(
+        React.createElement(ChatTranscript, {
+          run: null,
+          chat: chatState(),
+          showPromptBubble: false,
+          showWorking: false,
+          streamDead: false,
+          rowExpanded: () => false,
+          onToggleRow: () => undefined,
+          onReconnect: () => undefined,
+          onOpenFiles: () => undefined,
+          pendingInteraction: React.createElement(
+            "form",
+            { "aria-label": "Question from the agent" },
+            "Choose a format",
+          ),
+        }),
+      );
+    });
+
+    const interaction = container.querySelector(
+      '[data-message-id="project:pending-interaction"]',
+    );
+    expect(interaction?.getAttribute("data-scroll-anchor")).toBe("true");
+    expect(interaction?.textContent).toContain("Choose a format");
   });
 
   it("marks user turns as anchors and exposes the shadcn jump-to-latest control", async () => {
@@ -243,8 +326,9 @@ describe("ChatTranscript scroller", () => {
     const marker = container.querySelector<HTMLElement>(
       ".run-generated-marker--project",
     )!;
-    expect(marker.textContent).toContain("Created files · 1");
-    expect(marker.textContent).toContain("Updated files · 1");
+    expect(marker.textContent).toContain("Files from this task");
+    expect(marker.textContent).toContain("Updated · v3");
+    expect(marker.textContent).toContain("Created · v1");
     expect(marker.textContent).toContain("launch.md");
     expect(marker.textContent).toContain("summary.pdf");
     expect(container.textContent).not.toContain("OpenCode provider diagnostic");

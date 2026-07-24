@@ -52,6 +52,9 @@ const serviceMocks = vi.hoisted(() => ({
   getProjectPromptAttachment: vi.fn(),
   createProjectSession: vi.fn(),
   enqueueProjectPrompt: vi.fn(),
+  cancelQueuedProjectPrompt: vi.fn(),
+  enqueueProjectQuestionReply: vi.fn(),
+  enqueueProjectQuestionRejection: vi.fn(),
   hasProjectPromptIdempotencyKey: vi.fn(async () => false),
   reserveProjectAttachmentUploads: vi.fn(async () => undefined),
   reserveProjectFileUploads: vi.fn(async () => undefined),
@@ -277,6 +280,7 @@ describe("session-only project routes", () => {
     created_at: "2026-07-23T18:01:00.000Z",
     updated_at: "2026-07-23T18:01:00.000Z",
     prompts: [],
+    questions: [],
     transcript: [],
     current_event_sequence: 0,
     latest_event_sequence: 0,
@@ -454,6 +458,21 @@ describe("session-only project routes", () => {
       ...session,
       status: "stopping",
     });
+    serviceMocks.cancelQueuedProjectPrompt.mockResolvedValue({
+      id: "00000000-0000-4000-8000-000000000008",
+      session_id: session.id,
+      sequence: 2,
+      opencode_message_id: "project-message-2",
+      text: "Add sources",
+      status: "cancelled",
+      error_code: null,
+      error_message: null,
+      attachments: [],
+      file_changes: [],
+      created_at: session.created_at,
+      started_at: null,
+      completed_at: session.created_at,
+    });
 
     const createForm = new FormData();
     createForm.set("prompt", "Prepare the quarterly review");
@@ -512,12 +531,81 @@ describe("session-only project routes", () => {
       }),
     );
 
+    const cancelled = await app.request(
+      `/v1/projects/${projectId}/sessions/${session.id}/prompts/00000000-0000-4000-8000-000000000008/cancel`,
+      { method: "POST" },
+    );
+    expect(cancelled.status).toBe(200);
+    expect(serviceMocks.cancelQueuedProjectPrompt).toHaveBeenCalledWith(
+      expect.objectContaining({
+        projectId,
+        sessionId: session.id,
+        promptId: "00000000-0000-4000-8000-000000000008",
+      }),
+    );
+
     const stopped = await app.request(
       `/v1/projects/${projectId}/sessions/${session.id}/stop`,
       { method: "POST" },
     );
     expect(stopped.status).toBe(202);
     await expect(stopped.json()).resolves.toEqual(session);
+  });
+
+  it("queues native Project question replies and rejections without contacting OpenCode", async () => {
+    signIn();
+    serviceMocks.getProjectSession.mockResolvedValue(session);
+    serviceMocks.enqueueProjectQuestionReply.mockResolvedValue({
+      request_id: "question-request-1",
+      status: "queued",
+    });
+    serviceMocks.enqueueProjectQuestionRejection.mockResolvedValue({
+      request_id: "question-request-2",
+      status: "queued",
+    });
+
+    const replied = await app.request(
+      `/v1/projects/${projectId}/sessions/${session.id}/questions/question-request-1/reply`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ answers: [["Quarterly"], ["PDF", "Markdown"]] }),
+      },
+    );
+    expect(replied.status).toBe(202);
+    await expect(replied.json()).resolves.toEqual(session);
+    expect(serviceMocks.enqueueProjectQuestionReply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        projectId,
+        sessionId: session.id,
+        requestId: "question-request-1",
+        value: { answers: [["Quarterly"], ["PDF", "Markdown"]] },
+      }),
+    );
+
+    const rejected = await app.request(
+      `/v1/projects/${projectId}/sessions/${session.id}/questions/question-request-2/reject`,
+      { method: "POST" },
+    );
+    expect(rejected.status).toBe(202);
+    expect(serviceMocks.enqueueProjectQuestionRejection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        projectId,
+        sessionId: session.id,
+        requestId: "question-request-2",
+      }),
+    );
+
+    const invalid = await app.request(
+      `/v1/projects/${projectId}/sessions/${session.id}/questions/question-request-3/reply`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ answers: [] }),
+      },
+    );
+    expect(invalid.status).toBe(400);
+    expect(serviceMocks.enqueueProjectQuestionReply).toHaveBeenCalledTimes(1);
   });
 
   it("accepts an explicit follow-up for a completed Project conversation", async () => {

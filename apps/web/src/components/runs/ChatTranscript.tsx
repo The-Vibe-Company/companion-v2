@@ -46,8 +46,6 @@ function ProjectGeneratedFilesMarker({
     file?: GeneratedProjectFile,
   ) => void;
 }) {
-  const created = files.filter((file) => file.action === "created");
-  const updated = files.filter((file) => file.action === "updated");
   return (
     <MessageScroller.Item
       messageId={`project:generated-files:${messageId}`}
@@ -56,11 +54,10 @@ function ProjectGeneratedFilesMarker({
       <div className="run-generated-marker run-generated-marker--project">
         <div className="run-generated-marker__summary">
           <Icon name="folder-open" size={13} />
-          <span>
-            {created.length > 0 && `Created files · ${created.length}`}
-            {created.length > 0 && updated.length > 0 && " · "}
-            {updated.length > 0 && `Updated files · ${updated.length}`}
-          </span>
+          <span>Files from this task</span>
+          <small className="tnum">
+            {files.length} file{files.length === 1 ? "" : "s"}
+          </small>
         </div>
         <ul className="run-generated-marker__files" aria-label="Files from this task">
           {files.map((file) => (
@@ -70,10 +67,17 @@ function ProjectGeneratedFilesMarker({
                 className="run-generated-marker__file"
                 data-project-file-id={file.id}
                 onClick={() => onOpenFiles(file.id, file.version, file)}
-                aria-label={`Open ${file.name}, version ${file.version}`}
+                aria-label={`Open ${file.name}, ${file.action} version ${file.version}`}
+                title={file.path}
               >
-                <span>{file.name}</span>
-                <small>v{file.version}</small>
+                <Icon name="file" size={13} />
+                <span>
+                  <b>{file.name}</b>
+                  <small>
+                    {file.action === "created" ? "Created" : "Updated"} · v
+                    {file.version}
+                  </small>
+                </span>
               </button>
             </li>
           ))}
@@ -163,11 +167,30 @@ function WorkingMarker({
   label,
   detail,
   variant,
+  retryAt,
+  retryAction,
 }: {
   label: string;
   detail?: string;
   variant: "default" | "preparing";
+  retryAt?: number | null;
+  retryAction?: {
+    label: string;
+    message: string;
+    link?: string;
+  } | null;
 }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!retryAt || retryAt <= Date.now()) return;
+    setNow(Date.now());
+    const timer = window.setInterval(() => {
+      const next = Date.now();
+      setNow(next);
+      if (next >= retryAt) window.clearInterval(timer);
+    }, 1_000);
+    return () => window.clearInterval(timer);
+  }, [retryAt]);
   if (variant === "preparing") {
     return (
       <div
@@ -185,10 +208,48 @@ function WorkingMarker({
       </div>
     );
   }
+  const retrying = label.startsWith("Retrying");
+  const retrySeconds = retryAt
+    ? Math.max(0, Math.ceil((retryAt - now) / 1_000))
+    : null;
+  const visibleDetail =
+    detail ??
+    (retrySeconds !== null
+      ? retrySeconds > 0
+        ? `Retrying in ${retrySeconds}s`
+        : "Trying again now"
+      : retryAction?.message);
+  const safeActionLink =
+    retryAction?.link &&
+    (retryAction.link.startsWith("https://") ||
+      retryAction.link.startsWith("http://"))
+      ? retryAction.link
+      : null;
   return (
-    <div className="run-working" role="status" aria-live="polite">
-      <Icon name="loader" size={12} className="ls-spin" />
-      <span>{label || "Working"}</span>
+    <div
+      className={`run-working${retrying ? " run-working--retrying" : ""}`}
+      role="status"
+      aria-live="polite"
+    >
+      <Icon
+        name={retrying ? "refresh-cw" : "loader"}
+        size={12}
+        className="ls-spin"
+      />
+      <span>
+        <strong>{label || "Working"}</strong>
+        {visibleDetail && <small>{visibleDetail}</small>}
+      </span>
+      {safeActionLink && (
+        <a
+          className="run-working__action"
+          href={safeActionLink}
+          target="_blank"
+          rel="noreferrer"
+        >
+          {retryAction?.label}
+        </a>
+      )}
     </div>
   );
 }
@@ -228,6 +289,7 @@ export function ChatTranscript({
   onOpenFiles,
   generatedFileTurns = [],
   renderUserAttachments,
+  pendingInteraction,
   showChatError = true,
   ariaLabel = "Run transcript",
   workingLabel,
@@ -252,6 +314,7 @@ export function ChatTranscript({
     messageId: string | null,
     text: string,
   ) => ReactNode;
+  pendingInteraction?: ReactNode;
   showChatError?: boolean;
   ariaLabel?: string;
   workingLabel?: string;
@@ -265,6 +328,7 @@ export function ChatTranscript({
     generatedFileTurns.reduce((count, turn) => count + turn.files.length, 0),
     workingLabel ?? chat.working.label,
     workingDetail ?? "",
+    pendingInteraction ? 1 : 0,
   ].join(":");
   const artifactPaths = useMemo(() => Object.fromEntries(
     (run?.artifacts ?? []).flatMap((artifact) => {
@@ -402,12 +466,23 @@ export function ChatTranscript({
                 </button>
               </MessageScroller.Item>
             )}
+            {pendingInteraction && (
+              <MessageScroller.Item
+                messageId={`${run?.id ?? "project"}:pending-interaction`}
+                scrollAnchor
+                className="run-marker run-marker--wide"
+              >
+                {pendingInteraction}
+              </MessageScroller.Item>
+            )}
             {showWorking && (
               <MessageScroller.Item messageId={`${run?.id ?? "run"}:working`} className="run-marker run-marker--wide">
                 <WorkingMarker
                   label={workingLabel ?? chat.working.label}
                   detail={workingDetail}
                   variant={workingVariant}
+                  retryAt={chat.working.retryAt}
+                  retryAction={chat.working.retryAction}
                 />
               </MessageScroller.Item>
             )}

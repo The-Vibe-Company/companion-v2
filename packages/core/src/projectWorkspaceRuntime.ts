@@ -1,4 +1,8 @@
-import type { RunChatEvent, RunChatHistoryItem } from "@companion/contracts";
+import type {
+  RunChatEvent,
+  RunChatHistoryItem,
+  RunQuestionProtocol,
+} from "@companion/contracts";
 import type {
   RunChatMessageState,
   RunChatSessionState,
@@ -159,6 +163,8 @@ export interface ProjectChatEventEnvelope {
   event: RunChatEvent;
 }
 
+export type ProjectPendingQuestion = Extract<RunChatEvent, { type: "question.asked" }>;
+
 export interface ProjectFileChange {
   /** Path relative to the managed Project cwd (`files/`). */
   path: string;
@@ -214,6 +220,32 @@ export interface ProjectChatRuntime {
     text: string,
     messageId: string,
     modelRef: string,
+    signal?: AbortSignal,
+  ): Promise<void>;
+  /**
+   * Read every native question still pending for this exact session. This is the crash-recovery
+   * source of truth when an SSE event was emitted before Companion durably recorded it.
+   */
+  listPendingQuestions(
+    target: ProjectChatTarget,
+    sessionId: string,
+    signal?: AbortSignal,
+  ): Promise<ProjectPendingQuestion[]>;
+  /** Deliver a member answer to the exact native question request that paused this turn. */
+  replyQuestion(
+    target: ProjectChatTarget,
+    sessionId: string,
+    requestId: string,
+    protocol: RunQuestionProtocol,
+    answers: string[][],
+    signal?: AbortSignal,
+  ): Promise<void>;
+  /** Reject one native question request without treating it as a tool permission. */
+  rejectQuestion(
+    target: ProjectChatTarget,
+    sessionId: string,
+    requestId: string,
+    protocol: RunQuestionProtocol,
     signal?: AbortSignal,
   ): Promise<void>;
   loadItems(

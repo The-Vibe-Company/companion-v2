@@ -8,6 +8,9 @@ CREATE TYPE "project_session_status" AS ENUM (
 CREATE TYPE "project_prompt_status" AS ENUM (
   'queued', 'dispatching', 'running', 'completed', 'failed', 'cancelled'
 );--> statement-breakpoint
+CREATE TYPE "project_question_status" AS ENUM (
+  'pending', 'queued', 'delivered', 'cancelled', 'failed'
+);--> statement-breakpoint
 CREATE TYPE "project_attachment_status" AS ENUM ('uploaded', 'materialized', 'failed');--> statement-breakpoint
 ALTER TYPE "sandbox_usage_kind" ADD VALUE IF NOT EXISTS 'project';--> statement-breakpoint
 
@@ -339,6 +342,49 @@ CREATE TABLE "project_session_events" (
     )
 );--> statement-breakpoint
 
+CREATE TABLE "project_questions" (
+  "org_id" uuid NOT NULL,
+  "project_id" uuid NOT NULL,
+  "session_id" uuid NOT NULL,
+  "prompt_id" uuid NOT NULL,
+  "creator_id" text NOT NULL,
+  "request_id" text NOT NULL,
+  "protocol" text NOT NULL,
+  "questions" jsonb NOT NULL,
+  "status" "project_question_status" DEFAULT 'pending' NOT NULL,
+  "response_kind" text,
+  "answers" jsonb,
+  "response_requested_at" timestamp with time zone,
+  "delivery_attempted_at" timestamp with time zone,
+  "delivered_at" timestamp with time zone,
+  "error_code" text,
+  "error_message" text,
+  "created_at" timestamp with time zone DEFAULT now() NOT NULL,
+  "updated_at" timestamp with time zone DEFAULT now() NOT NULL,
+  CONSTRAINT "project_questions_pk" PRIMARY KEY("org_id", "project_id", "request_id"),
+  CONSTRAINT "project_questions_request_check"
+    CHECK (char_length("request_id") BETWEEN 1 AND 512),
+  CONSTRAINT "project_questions_protocol_check"
+    CHECK ("protocol" IN ('question', 'question.v2')),
+  CONSTRAINT "project_questions_payload_check"
+    CHECK (
+      jsonb_typeof("questions") = 'array'
+      AND jsonb_array_length("questions") BETWEEN 1 AND 8
+      AND octet_length("questions"::text) <= 65536
+    ),
+  CONSTRAINT "project_questions_response_check"
+    CHECK (
+      ("response_kind" IS NULL OR "response_kind" IN ('reply', 'reject'))
+      AND ("answers" IS NULL OR (
+        jsonb_typeof("answers") = 'array'
+        AND jsonb_array_length("answers") BETWEEN 1 AND 8
+        AND octet_length("answers"::text) <= 32768
+      ))
+      AND ("response_kind" IS DISTINCT FROM 'reply' OR "answers" IS NOT NULL)
+      AND ("response_kind" IS DISTINCT FROM 'reject' OR "answers" IS NULL)
+    )
+);--> statement-breakpoint
+
 CREATE TABLE "project_attachment_uploads" (
   "storage_key" text PRIMARY KEY,
   "org_id" uuid NOT NULL,
@@ -523,6 +569,13 @@ ALTER TABLE "project_session_events" ADD CONSTRAINT "project_session_events_crea
 ALTER TABLE "project_session_events" ADD CONSTRAINT "project_session_events_session_creator_fk"
   FOREIGN KEY ("org_id", "project_id", "session_id", "creator_id")
   REFERENCES "project_sessions"("org_id", "project_id", "id", "creator_id") ON DELETE cascade;--> statement-breakpoint
+ALTER TABLE "project_questions" ADD CONSTRAINT "project_questions_org_fk"
+  FOREIGN KEY ("org_id") REFERENCES "organizations"("id") ON DELETE cascade;--> statement-breakpoint
+ALTER TABLE "project_questions" ADD CONSTRAINT "project_questions_creator_fk"
+  FOREIGN KEY ("creator_id") REFERENCES "user"("id") ON DELETE cascade;--> statement-breakpoint
+ALTER TABLE "project_questions" ADD CONSTRAINT "project_questions_prompt_creator_fk"
+  FOREIGN KEY ("org_id", "project_id", "session_id", "prompt_id", "creator_id")
+  REFERENCES "project_prompts"("org_id", "project_id", "session_id", "id", "creator_id") ON DELETE cascade;--> statement-breakpoint
 ALTER TABLE "project_attachments" ADD CONSTRAINT "project_attachments_org_fk"
   FOREIGN KEY ("org_id") REFERENCES "organizations"("id") ON DELETE cascade;--> statement-breakpoint
 ALTER TABLE "project_attachments" ADD CONSTRAINT "project_attachments_creator_fk"
@@ -595,6 +648,8 @@ ALTER TABLE "project_prompts"
   ADD CONSTRAINT "project_prompts_opencode_message_uq"
   UNIQUE ("org_id", "opencode_message_id");--> statement-breakpoint
 CREATE INDEX "project_session_events_session_idx" ON "project_session_events" ("org_id", "session_id", "sequence");--> statement-breakpoint
+CREATE INDEX "project_questions_delivery_idx"
+  ON "project_questions" ("org_id", "project_id", "status", "response_requested_at");--> statement-breakpoint
 CREATE INDEX "project_attachment_uploads_age_idx" ON "project_attachment_uploads" ("touched_at");--> statement-breakpoint
 CREATE INDEX "project_attachment_uploads_project_idx"
   ON "project_attachment_uploads" ("org_id", "project_id", "creator_id");--> statement-breakpoint
@@ -695,6 +750,7 @@ ALTER TABLE "project_skill_snapshots" ENABLE ROW LEVEL SECURITY;--> statement-br
 ALTER TABLE "project_sessions" ENABLE ROW LEVEL SECURITY;--> statement-breakpoint
 ALTER TABLE "project_prompts" ENABLE ROW LEVEL SECURITY;--> statement-breakpoint
 ALTER TABLE "project_session_events" ENABLE ROW LEVEL SECURITY;--> statement-breakpoint
+ALTER TABLE "project_questions" ENABLE ROW LEVEL SECURITY;--> statement-breakpoint
 ALTER TABLE "project_attachment_uploads" ENABLE ROW LEVEL SECURITY;--> statement-breakpoint
 ALTER TABLE "project_attachments" ENABLE ROW LEVEL SECURITY;--> statement-breakpoint
 ALTER TABLE "project_files" ENABLE ROW LEVEL SECURITY;--> statement-breakpoint
@@ -709,6 +765,7 @@ ALTER TABLE "project_skill_snapshots" FORCE ROW LEVEL SECURITY;--> statement-bre
 ALTER TABLE "project_sessions" FORCE ROW LEVEL SECURITY;--> statement-breakpoint
 ALTER TABLE "project_prompts" FORCE ROW LEVEL SECURITY;--> statement-breakpoint
 ALTER TABLE "project_session_events" FORCE ROW LEVEL SECURITY;--> statement-breakpoint
+ALTER TABLE "project_questions" FORCE ROW LEVEL SECURITY;--> statement-breakpoint
 ALTER TABLE "project_attachment_uploads" FORCE ROW LEVEL SECURITY;--> statement-breakpoint
 ALTER TABLE "project_attachments" FORCE ROW LEVEL SECURITY;--> statement-breakpoint
 ALTER TABLE "project_files" FORCE ROW LEVEL SECURITY;--> statement-breakpoint
@@ -756,6 +813,9 @@ CREATE POLICY "project_prompts_creator_or_worker" ON "project_prompts"
   USING (companion_project_row_visible("org_id", "project_id", "creator_id"))
   WITH CHECK (companion_project_row_visible("org_id", "project_id", "creator_id"));--> statement-breakpoint
 CREATE POLICY "project_session_events_creator_or_worker" ON "project_session_events"
+  USING (companion_project_row_visible("org_id", "project_id", "creator_id"))
+  WITH CHECK (companion_project_row_visible("org_id", "project_id", "creator_id"));--> statement-breakpoint
+CREATE POLICY "project_questions_creator_or_worker" ON "project_questions"
   USING (companion_project_row_visible("org_id", "project_id", "creator_id"))
   WITH CHECK (companion_project_row_visible("org_id", "project_id", "creator_id"));--> statement-breakpoint
 CREATE POLICY "project_attachment_uploads_creator_or_worker" ON "project_attachment_uploads"

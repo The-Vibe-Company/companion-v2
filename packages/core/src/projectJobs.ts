@@ -11,6 +11,7 @@ import {
   notInArray,
   or,
   sql,
+  type SQL,
 } from "drizzle-orm";
 import type {
   ProjectAuthorityState,
@@ -18,6 +19,7 @@ import type {
   ProjectMaterializationPlan,
   ProjectModelProviderPin,
   ProjectPromptJob,
+  ProjectQuestionJob,
   ProjectSecretPin,
   ProjectSessionEvent,
   ProjectSessionStopJob,
@@ -86,6 +88,48 @@ const RESERVED_PROJECT_FILE_ROOTS = new Set([
   ".git",
   ".opencode",
 ]);
+
+async function terminalizeProjectQuestions(input: {
+  tx: Db;
+  filter: SQL;
+  cancelledMessage: string;
+  ambiguousMessage: string;
+}): Promise<void> {
+  const now = new Date();
+  // Once the external-side-effect fence is committed, cancellation is no longer a truthful
+  // outcome: the answer may already have reached OpenCode. Terminal boundaries fail such a
+  // command closed, while responses that never crossed the fence remain safely cancellable.
+  await input.tx
+    .update(schema.projectQuestions)
+    .set({
+      status: "failed",
+      errorCode: "project_question_delivery_ambiguous",
+      errorMessage: input.ambiguousMessage,
+      updatedAt: now,
+    })
+    .where(
+      and(
+        input.filter,
+        eq(schema.projectQuestions.status, "queued"),
+        isNotNull(schema.projectQuestions.deliveryAttemptedAt),
+      ),
+    );
+  await input.tx
+    .update(schema.projectQuestions)
+    .set({
+      status: "cancelled",
+      errorCode: "project_question_cancelled",
+      errorMessage: input.cancelledMessage,
+      updatedAt: now,
+    })
+    .where(
+      and(
+        input.filter,
+        inArray(schema.projectQuestions.status, ["pending", "queued"]),
+        isNull(schema.projectQuestions.deliveryAttemptedAt),
+      ),
+    );
+}
 
 type RawWorkspaceClaim = {
   orgId: string;
@@ -273,6 +317,7 @@ export type ProjectPromptSendFenceResult =
   | "lost"
   | "recycle"
   | "provider_unavailable"
+  | "stopped"
   | "marked";
 
 /**
@@ -2454,8 +2499,26 @@ export async function claimProjectPromptJobs(input: {
             ),
           ),
         )
-        .returning({ sessionId: schema.projectPrompts.sessionId });
+        .returning({
+          id: schema.projectPrompts.id,
+          sessionId: schema.projectPrompts.sessionId,
+        });
       if (exhausted.length > 0) {
+        await terminalizeProjectQuestions({
+          tx,
+          filter: and(
+            eq(schema.projectQuestions.orgId, input.job.orgId),
+            eq(schema.projectQuestions.projectId, input.job.projectId),
+            eq(schema.projectQuestions.creatorId, input.job.creatorId),
+            inArray(
+              schema.projectQuestions.promptId,
+              exhausted.map((row) => row.id),
+            ),
+          )!,
+          cancelledMessage: "The task ended before this question was answered.",
+          ambiguousMessage:
+            "Companion could not confirm whether this answer reached the conversation before the task ended.",
+        });
         await tx
           .update(schema.projectSessions)
           .set({
@@ -2655,6 +2718,8 @@ export async function markProjectPromptSendAttempted(input: {
             modelProvider: schema.projectSessions.modelProvider,
             modelCredentialEnvKeys:
               schema.projectSessions.modelCredentialEnvKeys,
+            sessionStatus: schema.projectSessions.status,
+            stopRequestedAt: schema.projectSessions.stopRequestedAt,
           })
           .from(schema.projectPrompts)
           .innerJoin(
@@ -2680,6 +2745,38 @@ export async function markProjectPromptSendAttempted(input: {
           .limit(1)
           .for("update");
         if (!existing[0] || existing[0].sendAttemptedAt) return "lost" as const;
+        if (
+          existing[0].sessionStatus === "stopping"
+          || existing[0].stopRequestedAt
+        ) {
+          const cancelled = await tx
+            .update(schema.projectPrompts)
+            .set({
+              status: "cancelled",
+              leaseOwner: null,
+              leaseExpiresAt: null,
+              heartbeatAt: null,
+              completedAt: new Date(),
+              updatedAt: new Date(),
+            })
+            .where(
+              and(
+                eq(schema.projectPrompts.orgId, input.prompt.orgId),
+                eq(schema.projectPrompts.projectId, input.prompt.projectId),
+                eq(schema.projectPrompts.sessionId, input.prompt.sessionId),
+                eq(schema.projectPrompts.id, input.prompt.id),
+                eq(schema.projectPrompts.creatorId, input.prompt.creatorId),
+                eq(schema.projectPrompts.leaseOwner, input.workerId),
+                inArray(schema.projectPrompts.status, [
+                  "dispatching",
+                  "running",
+                ]),
+                isNull(schema.projectPrompts.sendAttemptedAt),
+              ),
+            )
+            .returning({ id: schema.projectPrompts.id });
+          return cancelled[0] ? "stopped" as const : "lost" as const;
+        }
 
         const authority = await currentProjectAuthority({
           database: tx,
@@ -3036,6 +3133,18 @@ export async function completeProjectSessionStop(input: {
             inArray(schema.projectPrompts.status, ["queued", "dispatching", "running"]),
           ),
         );
+      await terminalizeProjectQuestions({
+        tx,
+        filter: and(
+          eq(schema.projectQuestions.orgId, input.stop.orgId),
+          eq(schema.projectQuestions.projectId, input.stop.projectId),
+          eq(schema.projectQuestions.sessionId, input.stop.sessionId),
+          eq(schema.projectQuestions.creatorId, input.stop.creatorId),
+        )!,
+        cancelledMessage: "The conversation stopped before this question was answered.",
+        ambiguousMessage:
+          "Companion could not confirm whether this answer reached the conversation before it stopped.",
+      });
       const rows = await tx
         .update(schema.projectSessions)
         .set({
@@ -3094,6 +3203,18 @@ export async function failProjectSessionStop(input: {
     ...input,
     database,
     fn: async (tx) => {
+      await terminalizeProjectQuestions({
+        tx,
+        filter: and(
+          eq(schema.projectQuestions.orgId, input.stop.orgId),
+          eq(schema.projectQuestions.projectId, input.stop.projectId),
+          eq(schema.projectQuestions.sessionId, input.stop.sessionId),
+          eq(schema.projectQuestions.creatorId, input.stop.creatorId),
+        )!,
+        cancelledMessage: "The conversation stopped before this question was answered.",
+        ambiguousMessage:
+          "Companion could not confirm whether this answer reached the conversation before it stopped.",
+      });
       const rows = await tx
         .update(schema.projectSessions)
         .set({
@@ -3145,6 +3266,23 @@ export async function interruptProjectPromptsForRecycle(input: {
           ),
         )
         .returning({ sessionId: schema.projectPrompts.sessionId });
+      if (rows.length > 0) {
+        await terminalizeProjectQuestions({
+          tx,
+          filter: and(
+            eq(schema.projectQuestions.orgId, input.job.orgId),
+            eq(schema.projectQuestions.projectId, input.job.projectId),
+            eq(schema.projectQuestions.creatorId, input.job.creatorId),
+            inArray(
+              schema.projectQuestions.sessionId,
+              [...new Set(rows.map((row) => row.sessionId))],
+            ),
+          )!,
+          cancelledMessage: "The Project restarted before this question was answered.",
+          ambiguousMessage:
+            "Companion could not confirm whether this answer reached the conversation before the Project restarted.",
+        });
+      }
       if (rows.length > 0) {
         await tx
           .update(schema.projectSessions)
@@ -3358,6 +3496,378 @@ export async function heartbeatProjectPromptLease(input: {
   });
 }
 
+/** Load queued question responses only while the exact prompt lease is still live. */
+export async function loadProjectQuestionJobs(input: {
+  job: ProjectWorkspaceJob;
+  prompt: ProjectPromptJob;
+  workerId: string;
+  database?: Db;
+}): Promise<ProjectQuestionJob[]> {
+  const database = input.database ?? db;
+  return withWorkspaceLease({
+    ...input,
+    database,
+    fn: async (tx) => {
+      const prompts = await tx
+        .select({ id: schema.projectPrompts.id })
+        .from(schema.projectPrompts)
+        .where(
+          and(
+            eq(schema.projectPrompts.orgId, input.prompt.orgId),
+            eq(schema.projectPrompts.projectId, input.prompt.projectId),
+            eq(schema.projectPrompts.sessionId, input.prompt.sessionId),
+            eq(schema.projectPrompts.id, input.prompt.id),
+            eq(schema.projectPrompts.creatorId, input.prompt.creatorId),
+            eq(schema.projectPrompts.leaseOwner, input.workerId),
+            inArray(schema.projectPrompts.status, ["dispatching", "running"]),
+          ),
+        )
+        .limit(1);
+      if (!prompts[0]) throw new LostProjectWorkspaceLeaseError();
+      const rows = await tx
+        .select()
+        .from(schema.projectQuestions)
+        .where(
+          and(
+            eq(schema.projectQuestions.orgId, input.prompt.orgId),
+            eq(schema.projectQuestions.projectId, input.prompt.projectId),
+            eq(schema.projectQuestions.sessionId, input.prompt.sessionId),
+            eq(schema.projectQuestions.promptId, input.prompt.id),
+            eq(schema.projectQuestions.creatorId, input.prompt.creatorId),
+            eq(schema.projectQuestions.status, "queued"),
+            isNotNull(schema.projectQuestions.responseKind),
+          ),
+        )
+        .orderBy(
+          asc(schema.projectQuestions.responseRequestedAt),
+          asc(schema.projectQuestions.requestId),
+        );
+      return rows.map((row) => ({
+        requestId: row.requestId,
+        orgId: row.orgId,
+        projectId: row.projectId,
+        sessionId: row.sessionId,
+        promptId: row.promptId,
+        creatorId: row.creatorId,
+        protocol: row.protocol as ProjectQuestionJob["protocol"],
+        questions: row.questions,
+        responseKind: row.responseKind as ProjectQuestionJob["responseKind"],
+        answers: row.answers,
+        deliveryAttemptedAt: row.deliveryAttemptedAt,
+      }));
+    },
+  });
+}
+
+/**
+ * Retire only unanswered UI state after the native turn is durably observed complete.
+ *
+ * A queued response (and especially a delivery-attempt fence) is a member command, not stale
+ * presentation state, so it is intentionally excluded from this cleanup.
+ */
+export async function retireMissingProjectQuestions(input: {
+  job: ProjectWorkspaceJob;
+  prompt: ProjectPromptJob;
+  workerId: string;
+  pendingRequestIds: string[];
+  database?: Db;
+}): Promise<number> {
+  const database = input.database ?? db;
+  return withWorkspaceLease({
+    ...input,
+    database,
+    fn: async (tx) => {
+      const prompts = await tx
+        .select({ id: schema.projectPrompts.id })
+        .from(schema.projectPrompts)
+        .where(
+          and(
+            eq(schema.projectPrompts.orgId, input.prompt.orgId),
+            eq(schema.projectPrompts.projectId, input.prompt.projectId),
+            eq(schema.projectPrompts.sessionId, input.prompt.sessionId),
+            eq(schema.projectPrompts.id, input.prompt.id),
+            eq(schema.projectPrompts.creatorId, input.prompt.creatorId),
+            eq(schema.projectPrompts.leaseOwner, input.workerId),
+            inArray(schema.projectPrompts.status, ["dispatching", "running"]),
+          ),
+        )
+        .limit(1);
+      if (!prompts[0]) throw new LostProjectWorkspaceLeaseError();
+      const rows = await tx
+        .update(schema.projectQuestions)
+        .set({
+          status: "cancelled",
+          errorCode: "project_question_no_longer_pending",
+          errorMessage: "This question is no longer waiting for an answer.",
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(schema.projectQuestions.orgId, input.prompt.orgId),
+            eq(schema.projectQuestions.projectId, input.prompt.projectId),
+            eq(schema.projectQuestions.sessionId, input.prompt.sessionId),
+            eq(schema.projectQuestions.promptId, input.prompt.id),
+            eq(schema.projectQuestions.creatorId, input.prompt.creatorId),
+            eq(schema.projectQuestions.status, "pending"),
+            isNull(schema.projectQuestions.responseKind),
+            ...(input.pendingRequestIds.length > 0
+              ? [notInArray(schema.projectQuestions.requestId, input.pendingRequestIds)]
+              : []),
+          ),
+        )
+        .returning({ requestId: schema.projectQuestions.requestId });
+      return rows.length;
+    },
+  });
+}
+
+export type ProjectQuestionDeliveryFenceResult =
+  | "marked"
+  | "ambiguous"
+  | "cancelled"
+  | "lost";
+
+/**
+ * Commit the no-replay barrier before the OpenCode question side effect.
+ *
+ * A non-null marker after a crash is deliberately ambiguous. The next worker must fail the
+ * command and interrupt the native turn instead of sending the same response twice.
+ */
+export async function markProjectQuestionDeliveryAttempted(input: {
+  job: ProjectWorkspaceJob;
+  prompt: ProjectPromptJob;
+  question: ProjectQuestionJob;
+  workerId: string;
+  database?: Db;
+}): Promise<ProjectQuestionDeliveryFenceResult> {
+  const database = input.database ?? db;
+  try {
+    return await withWorkspaceLease({
+      ...input,
+      database,
+      fn: async (tx) => {
+        const prompts = await tx
+          .select({
+            id: schema.projectPrompts.id,
+            sessionStatus: schema.projectSessions.status,
+            stopRequestedAt: schema.projectSessions.stopRequestedAt,
+          })
+          .from(schema.projectPrompts)
+          .innerJoin(
+            schema.projectSessions,
+            and(
+              eq(schema.projectSessions.orgId, schema.projectPrompts.orgId),
+              eq(schema.projectSessions.projectId, schema.projectPrompts.projectId),
+              eq(schema.projectSessions.id, schema.projectPrompts.sessionId),
+              eq(schema.projectSessions.creatorId, schema.projectPrompts.creatorId),
+            ),
+          )
+          .where(
+            and(
+              eq(schema.projectPrompts.orgId, input.prompt.orgId),
+              eq(schema.projectPrompts.projectId, input.prompt.projectId),
+              eq(schema.projectPrompts.sessionId, input.prompt.sessionId),
+              eq(schema.projectPrompts.id, input.prompt.id),
+              eq(schema.projectPrompts.creatorId, input.prompt.creatorId),
+              eq(schema.projectPrompts.leaseOwner, input.workerId),
+              inArray(schema.projectPrompts.status, ["dispatching", "running"]),
+            ),
+          )
+          .limit(1)
+          .for("update", { of: [schema.projectPrompts, schema.projectSessions] });
+        const prompt = prompts[0];
+        if (!prompt) return "lost" as const;
+
+        const rows = await tx
+          .select()
+          .from(schema.projectQuestions)
+          .where(
+            and(
+              eq(schema.projectQuestions.orgId, input.question.orgId),
+              eq(schema.projectQuestions.projectId, input.question.projectId),
+              eq(schema.projectQuestions.sessionId, input.question.sessionId),
+              eq(schema.projectQuestions.promptId, input.question.promptId),
+              eq(schema.projectQuestions.requestId, input.question.requestId),
+              eq(schema.projectQuestions.creatorId, input.question.creatorId),
+            ),
+          )
+          .limit(1)
+          .for("update");
+        const question = rows[0];
+        if (!question) return "lost" as const;
+        if (question.status !== "queued") {
+          return question.status === "cancelled" ? "cancelled" as const : "lost" as const;
+        }
+        if (
+          prompt.stopRequestedAt
+          || prompt.sessionStatus === "stopping"
+        ) {
+          await tx
+            .update(schema.projectQuestions)
+            .set({
+              status: "cancelled",
+              errorCode: "project_question_cancelled",
+              errorMessage: "The conversation stopped before this response was delivered.",
+              updatedAt: new Date(),
+            })
+            .where(
+              and(
+                eq(schema.projectQuestions.orgId, input.question.orgId),
+                eq(schema.projectQuestions.projectId, input.question.projectId),
+                eq(schema.projectQuestions.requestId, input.question.requestId),
+                eq(schema.projectQuestions.status, "queued"),
+              ),
+            );
+          return "cancelled" as const;
+        }
+        if (question.deliveryAttemptedAt) return "ambiguous" as const;
+        const marked = await tx
+          .update(schema.projectQuestions)
+          .set({
+            deliveryAttemptedAt: new Date(),
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(schema.projectQuestions.orgId, input.question.orgId),
+              eq(schema.projectQuestions.projectId, input.question.projectId),
+              eq(schema.projectQuestions.sessionId, input.question.sessionId),
+              eq(schema.projectQuestions.promptId, input.question.promptId),
+              eq(schema.projectQuestions.requestId, input.question.requestId),
+              eq(schema.projectQuestions.creatorId, input.question.creatorId),
+              eq(schema.projectQuestions.status, "queued"),
+              isNull(schema.projectQuestions.deliveryAttemptedAt),
+            ),
+          )
+          .returning({ requestId: schema.projectQuestions.requestId });
+        return marked[0] ? "marked" as const : "lost" as const;
+      },
+    });
+  } catch (error) {
+    if (error instanceof LostProjectWorkspaceLeaseError) return "lost";
+    throw error;
+  }
+}
+
+export async function completeProjectQuestionDelivery(input: {
+  job: ProjectWorkspaceJob;
+  prompt: ProjectPromptJob;
+  question: ProjectQuestionJob;
+  workerId: string;
+  database?: Db;
+}): Promise<boolean> {
+  const database = input.database ?? db;
+  return withWorkspaceLease({
+    ...input,
+    database,
+    fn: async (tx) => {
+      const prompts = await tx
+        .select({ id: schema.projectPrompts.id })
+        .from(schema.projectPrompts)
+        .where(
+          and(
+            eq(schema.projectPrompts.orgId, input.prompt.orgId),
+            eq(schema.projectPrompts.projectId, input.prompt.projectId),
+            eq(schema.projectPrompts.sessionId, input.prompt.sessionId),
+            eq(schema.projectPrompts.id, input.prompt.id),
+            eq(schema.projectPrompts.creatorId, input.prompt.creatorId),
+            eq(schema.projectPrompts.leaseOwner, input.workerId),
+            inArray(schema.projectPrompts.status, ["dispatching", "running"]),
+          ),
+        )
+        .limit(1);
+      if (!prompts[0]) return false;
+      const existing = await tx
+        .select({
+          status: schema.projectQuestions.status,
+          responseKind: schema.projectQuestions.responseKind,
+        })
+        .from(schema.projectQuestions)
+        .where(
+          and(
+            eq(schema.projectQuestions.orgId, input.question.orgId),
+            eq(schema.projectQuestions.projectId, input.question.projectId),
+            eq(schema.projectQuestions.sessionId, input.question.sessionId),
+            eq(schema.projectQuestions.promptId, input.question.promptId),
+            eq(schema.projectQuestions.requestId, input.question.requestId),
+            eq(schema.projectQuestions.creatorId, input.question.creatorId),
+          ),
+        )
+        .limit(1)
+        .for("update");
+      if (
+        existing[0]?.status === "delivered"
+        && existing[0].responseKind === input.question.responseKind
+      ) {
+        return true;
+      }
+      const now = new Date();
+      const rows = await tx
+        .update(schema.projectQuestions)
+        .set({
+          status: "delivered",
+          deliveredAt: now,
+          errorCode: null,
+          errorMessage: null,
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(schema.projectQuestions.orgId, input.question.orgId),
+            eq(schema.projectQuestions.projectId, input.question.projectId),
+            eq(schema.projectQuestions.sessionId, input.question.sessionId),
+            eq(schema.projectQuestions.promptId, input.question.promptId),
+            eq(schema.projectQuestions.requestId, input.question.requestId),
+            eq(schema.projectQuestions.creatorId, input.question.creatorId),
+            eq(schema.projectQuestions.status, "queued"),
+            isNotNull(schema.projectQuestions.deliveryAttemptedAt),
+          ),
+        )
+        .returning({ requestId: schema.projectQuestions.requestId });
+      return Boolean(rows[0]);
+    },
+  });
+}
+
+export async function failProjectQuestionDelivery(input: {
+  job: ProjectWorkspaceJob;
+  prompt: ProjectPromptJob;
+  question: ProjectQuestionJob;
+  workerId: string;
+  errorCode: string;
+  errorMessage: string;
+  database?: Db;
+}): Promise<boolean> {
+  const database = input.database ?? db;
+  return withWorkspaceLease({
+    ...input,
+    database,
+    fn: async (tx) => {
+      const rows = await tx
+        .update(schema.projectQuestions)
+        .set({
+          status: "failed",
+          errorCode: input.errorCode,
+          errorMessage: input.errorMessage.slice(0, 2_000),
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(schema.projectQuestions.orgId, input.question.orgId),
+            eq(schema.projectQuestions.projectId, input.question.projectId),
+            eq(schema.projectQuestions.sessionId, input.question.sessionId),
+            eq(schema.projectQuestions.promptId, input.question.promptId),
+            eq(schema.projectQuestions.requestId, input.question.requestId),
+            eq(schema.projectQuestions.creatorId, input.question.creatorId),
+            eq(schema.projectQuestions.status, "queued"),
+          ),
+        )
+        .returning({ requestId: schema.projectQuestions.requestId });
+      return Boolean(rows[0]);
+    },
+  });
+}
+
 export async function appendProjectSessionEvent(input: {
   job: ProjectWorkspaceJob;
   prompt: ProjectPromptJob;
@@ -3389,13 +3899,161 @@ export async function appendProjectSessionEvent(input: {
             eq(schema.projectPrompts.leaseOwner, input.workerId),
             inArray(schema.projectPrompts.status, ["dispatching", "running"]),
           ),
-        );
+      );
       if (!promptRows[0]) throw new LostProjectWorkspaceLeaseError();
+      const eventsToPersist: ProjectSessionEvent[] = [];
+      for (const event of events) {
+        const now = new Date();
+        let persistEvent = true;
+        if (event.type === "question.asked") {
+          const inserted = await tx
+            .insert(schema.projectQuestions)
+            .values({
+              orgId: input.prompt.orgId,
+              projectId: input.prompt.projectId,
+              sessionId: input.prompt.sessionId,
+              promptId: input.prompt.id,
+              creatorId: input.prompt.creatorId,
+              requestId: event.request_id,
+              protocol: event.protocol,
+              questions: event.questions,
+              status: "pending",
+              createdAt: now,
+              updatedAt: now,
+            })
+            .onConflictDoNothing({
+              target: [
+                schema.projectQuestions.orgId,
+                schema.projectQuestions.projectId,
+                schema.projectQuestions.requestId,
+              ],
+            })
+            .returning({ requestId: schema.projectQuestions.requestId });
+          persistEvent = Boolean(inserted[0]);
+          const existing = await tx
+            .select({
+              sessionId: schema.projectQuestions.sessionId,
+              promptId: schema.projectQuestions.promptId,
+              creatorId: schema.projectQuestions.creatorId,
+            })
+            .from(schema.projectQuestions)
+            .where(
+              and(
+                eq(schema.projectQuestions.orgId, input.prompt.orgId),
+                eq(schema.projectQuestions.projectId, input.prompt.projectId),
+                eq(schema.projectQuestions.requestId, event.request_id),
+              ),
+            )
+            .limit(1);
+          if (
+            !existing[0]
+            || existing[0].sessionId !== input.prompt.sessionId
+            || existing[0].promptId !== input.prompt.id
+            || existing[0].creatorId !== input.prompt.creatorId
+          ) {
+            throw new Error("OpenCode reused a Project question request id");
+          }
+          // A reconnect may repeat `asked`. Refresh only a still-unanswered row from the already
+          // redacted event; never overwrite a response that the member has queued.
+          await tx
+            .update(schema.projectQuestions)
+            .set({
+              protocol: event.protocol,
+              questions: event.questions,
+              updatedAt: now,
+            })
+            .where(
+              and(
+                eq(schema.projectQuestions.orgId, input.prompt.orgId),
+                eq(schema.projectQuestions.projectId, input.prompt.projectId),
+                eq(schema.projectQuestions.sessionId, input.prompt.sessionId),
+                eq(schema.projectQuestions.promptId, input.prompt.id),
+                eq(schema.projectQuestions.creatorId, input.prompt.creatorId),
+                eq(schema.projectQuestions.requestId, event.request_id),
+                eq(schema.projectQuestions.status, "pending"),
+                isNull(schema.projectQuestions.responseKind),
+              ),
+            );
+        } else if (event.type === "question.replied") {
+          await tx
+            .update(schema.projectQuestions)
+            .set({
+              status: "delivered",
+              // The SSE acknowledgement can race the worker's post-side-effect completion write.
+              // Preserve the exact redacted answer durably queued by Companion; native event content
+              // is only allowed to seed a response that did not originate from a Companion command.
+              responseKind:
+                sql`coalesce(${schema.projectQuestions.responseKind}, 'reply')`,
+              answers:
+                sql`case when ${schema.projectQuestions.responseKind} is null then ${JSON.stringify(event.answers)}::jsonb else ${schema.projectQuestions.answers} end`,
+              responseRequestedAt:
+                sql`coalesce(${schema.projectQuestions.responseRequestedAt}, ${now.toISOString()}::timestamptz)`,
+              deliveredAt: now,
+              errorCode: null,
+              errorMessage: null,
+              updatedAt: now,
+            })
+            .where(
+              and(
+                eq(schema.projectQuestions.orgId, input.prompt.orgId),
+                eq(schema.projectQuestions.projectId, input.prompt.projectId),
+                eq(schema.projectQuestions.sessionId, input.prompt.sessionId),
+                eq(schema.projectQuestions.promptId, input.prompt.id),
+                eq(schema.projectQuestions.creatorId, input.prompt.creatorId),
+                eq(schema.projectQuestions.requestId, event.request_id),
+                inArray(schema.projectQuestions.status, ["pending", "queued", "delivered"]),
+              ),
+            );
+        } else if (event.type === "question.rejected") {
+          await tx
+            .update(schema.projectQuestions)
+            .set({
+              status: "delivered",
+              responseKind: "reject",
+              answers: null,
+              responseRequestedAt:
+                sql`coalesce(${schema.projectQuestions.responseRequestedAt}, ${now.toISOString()}::timestamptz)`,
+              deliveredAt: now,
+              errorCode: null,
+              errorMessage: null,
+              updatedAt: now,
+            })
+            .where(
+              and(
+                eq(schema.projectQuestions.orgId, input.prompt.orgId),
+                eq(schema.projectQuestions.projectId, input.prompt.projectId),
+                eq(schema.projectQuestions.sessionId, input.prompt.sessionId),
+                eq(schema.projectQuestions.promptId, input.prompt.id),
+                eq(schema.projectQuestions.creatorId, input.prompt.creatorId),
+                eq(schema.projectQuestions.requestId, event.request_id),
+                inArray(schema.projectQuestions.status, ["pending", "queued", "delivered"]),
+              ),
+            );
+        }
+        if (persistEvent) eventsToPersist.push(event);
+      }
+      if (eventsToPersist.length === 0) {
+        const sessionRows = await tx
+          .select({ sequence: schema.projectSessions.transcriptSequence })
+          .from(schema.projectSessions)
+          .where(
+            and(
+              eq(schema.projectSessions.orgId, input.prompt.orgId),
+              eq(schema.projectSessions.projectId, input.prompt.projectId),
+              eq(schema.projectSessions.id, input.prompt.sessionId),
+              eq(schema.projectSessions.creatorId, input.prompt.creatorId),
+            ),
+          )
+          .limit(1);
+        const sequence = sessionRows[0]?.sequence;
+        if (sequence === undefined) throw new LostProjectWorkspaceLeaseError();
+        return sequence;
+      }
       const sequenceRows = await tx
         .update(schema.projectSessions)
         .set({
           transcriptSequence:
-            sql`${schema.projectSessions.transcriptSequence} + ${events.length}`,
+            sql`${schema.projectSessions.transcriptSequence} + ${eventsToPersist.length}`,
           updatedAt: new Date(),
         })
         .where(
@@ -3410,12 +4068,12 @@ export async function appendProjectSessionEvent(input: {
       const sequence = sequenceRows[0]?.sequence;
       if (!sequence) throw new LostProjectWorkspaceLeaseError();
       await tx.insert(schema.projectSessionEvents).values(
-        events.map((event, index) => ({
+        eventsToPersist.map((event, index) => ({
           orgId: input.prompt.orgId,
           projectId: input.prompt.projectId,
           sessionId: input.prompt.sessionId,
           creatorId: input.prompt.creatorId,
-          sequence: sequence - events.length + index + 1,
+          sequence: sequence - eventsToPersist.length + index + 1,
           event,
         })),
       );
@@ -3618,6 +4276,19 @@ export async function completeProjectPrompt(input: {
         )
         .returning({ id: schema.projectPrompts.id });
       if (!prompts[0]) return false;
+      await terminalizeProjectQuestions({
+        tx,
+        filter: and(
+          eq(schema.projectQuestions.orgId, input.prompt.orgId),
+          eq(schema.projectQuestions.projectId, input.prompt.projectId),
+          eq(schema.projectQuestions.sessionId, input.prompt.sessionId),
+          eq(schema.projectQuestions.promptId, input.prompt.id),
+          eq(schema.projectQuestions.creatorId, input.prompt.creatorId),
+        )!,
+        cancelledMessage: "The task completed before this question was answered.",
+        ambiguousMessage:
+          "Companion could not confirm whether this answer reached the conversation before the task completed.",
+      });
       const later = await tx
         .select({ id: schema.projectPrompts.id })
         .from(schema.projectPrompts)
@@ -3759,6 +4430,21 @@ export async function failProjectPrompt(input: {
             eq(schema.projectPrompts.leaseOwner, input.workerId),
           ),
         );
+      if (!retry) {
+        await terminalizeProjectQuestions({
+          tx,
+          filter: and(
+            eq(schema.projectQuestions.orgId, input.prompt.orgId),
+            eq(schema.projectQuestions.projectId, input.prompt.projectId),
+            eq(schema.projectQuestions.sessionId, input.prompt.sessionId),
+            eq(schema.projectQuestions.promptId, input.prompt.id),
+            eq(schema.projectQuestions.creatorId, input.prompt.creatorId),
+          )!,
+          cancelledMessage: "The task ended before this question was answered.",
+          ambiguousMessage:
+            "Companion could not confirm whether this answer reached the conversation before the task ended.",
+        });
+      }
       await tx
         .update(schema.projectSessions)
         .set({

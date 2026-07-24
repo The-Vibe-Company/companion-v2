@@ -3,6 +3,7 @@ import {
   RUN_ARTIFACT_MAX_FILES,
   type ProjectFileReconciliationJob,
   type ProjectPromptJob as CoreProjectPromptJob,
+  type ProjectQuestionJob as CoreProjectQuestionJob,
   type ProjectSessionStopJob as CoreProjectSessionStopJob,
   type ProjectSessionEvent,
   type ProjectWorkspaceJob as CoreProjectWorkspaceJob,
@@ -32,6 +33,7 @@ import {
   type ProjectChatTarget,
   type ProjectFileChange,
   type ProjectManagedFile,
+  type ProjectPendingQuestion,
   type ProjectWorkspaceRef,
   type ProjectWorkspaceRuntime,
   type RunRedactor,
@@ -50,10 +52,12 @@ import {
   claimProjectWorkspaceJobs,
   completeProjectDeletion,
   completeProjectPrompt,
+  completeProjectQuestionDelivery,
   completeProjectSessionStop,
   completeProjectWorkspaceRecycle,
   detectRunArtifactType,
   failProjectPrompt,
+  failProjectQuestionDelivery,
   getProjectOpencodePassword,
   heartbeatProjectPromptLease,
   heartbeatProjectWorker,
@@ -62,6 +66,7 @@ import {
   inspectProjectPromptProviderAdmission,
   listProjectStorageKeys,
   loadPendingProjectFileReconciliations,
+  loadProjectQuestionJobs,
   loadProjectMaterializationPlan,
   loadProjectPromptAttachments,
   loadProjectSessionTranscript,
@@ -72,6 +77,7 @@ import {
   markProjectActivationInjected,
   markProjectPromptDispatch,
   markProjectPromptSendAttempted,
+  markProjectQuestionDeliveryAttempted,
   prepareProjectActivationInputs,
   readProjectWorkspaceControl,
   reserveProjectFileStorageObject,
@@ -84,6 +90,7 @@ import {
   requeueProjectPromptAtBoundary,
   revalidateProjectPromptProviderAdmission,
   revalidateProjectWorkspaceAuthority,
+  retireMissingProjectQuestions,
   resolveProjectActivationEnvironment,
   setProjectOpencodePassword,
   surfaceProjectSkillSyncFailure,
@@ -128,6 +135,8 @@ class ProjectLostLease extends Error {}
 class ProjectRecycleRequired extends Error {}
 class ProjectPromptStopped extends Error {}
 class ProjectInterruptedPrompt extends Error {}
+class ProjectQuestionDeliveryAmbiguous extends ProjectInterruptedPrompt {}
+class ProjectQuestionResolutionError extends Error {}
 class ProjectFileCaptureError extends Error {}
 class ProjectWorkerShutdown extends Error {}
 class ProjectDeletionRequested extends Error {}
@@ -136,6 +145,7 @@ class ProjectWorkspaceUnrecoverable extends Error {}
 export interface ProjectWorkspaceJob extends CoreProjectWorkspaceJob {}
 
 export interface ProjectPromptJob extends CoreProjectPromptJob {}
+export interface ProjectQuestionJob extends CoreProjectQuestionJob {}
 
 export interface ProjectStoredFile {
   storageKey: string;
@@ -336,6 +346,37 @@ export interface ProjectWorkspaceStore {
     job: ProjectWorkspaceJob;
     workerId: string;
   }): Promise<ProjectSessionStopJob[]>;
+  loadProjectQuestionJobs(input: {
+    job: ProjectWorkspaceJob;
+    prompt: ProjectPromptJob;
+    workerId: string;
+  }): Promise<ProjectQuestionJob[]>;
+  retireMissingProjectQuestions(input: {
+    job: ProjectWorkspaceJob;
+    prompt: ProjectPromptJob;
+    workerId: string;
+    pendingRequestIds: string[];
+  }): Promise<number>;
+  markProjectQuestionDeliveryAttempted(input: {
+    job: ProjectWorkspaceJob;
+    prompt: ProjectPromptJob;
+    question: ProjectQuestionJob;
+    workerId: string;
+  }): Promise<"marked" | "ambiguous" | "cancelled" | "lost">;
+  completeProjectQuestionDelivery(input: {
+    job: ProjectWorkspaceJob;
+    prompt: ProjectPromptJob;
+    question: ProjectQuestionJob;
+    workerId: string;
+  }): Promise<boolean>;
+  failProjectQuestionDelivery(input: {
+    job: ProjectWorkspaceJob;
+    prompt: ProjectPromptJob;
+    question: ProjectQuestionJob;
+    workerId: string;
+    errorCode: string;
+    errorMessage: string;
+  }): Promise<boolean>;
   completeProjectSessionStop(input: {
     job: ProjectWorkspaceJob;
     workerId: string;
@@ -384,7 +425,7 @@ export interface ProjectWorkspaceStore {
     workerId: string;
     activationRevision: number;
     authorityRevision: string;
-  }): Promise<"lost" | "recycle" | "provider_unavailable" | "marked">;
+  }): Promise<"lost" | "recycle" | "provider_unavailable" | "stopped" | "marked">;
   failProjectPrompt(input: {
     job: ProjectWorkspaceJob;
     prompt: ProjectPromptJob;
@@ -920,8 +961,57 @@ async function persistCapturedTurnFiles(input: {
   });
 }
 
-function createProjectEventRedactor(redactor: RunRedactor) {
+export function createProjectEventRedactor(redactor: RunRedactor) {
   const streams = new Map<string, ReturnType<RunRedactor["createStream"]>>();
+  const redactStructuredEvent = (event: RunChatEvent): RunChatEvent => {
+    // OpenCode identifiers and discriminators are routing data, not model-authored content.
+    // Recursively redacting the whole event can corrupt a request/message/call id when an
+    // injected literal is short or happens to occur inside that opaque id. Redact only the
+    // human-readable/provider-authored fields and preserve every value used to correlate a later
+    // command with OpenCode.
+    switch (event.type) {
+      case "tool.start":
+        return {
+          ...event,
+          skill: redactor.redactPayload(event.skill),
+          tool: redactor.redactPayload(event.tool),
+          title: redactor.redactPayload(event.title),
+          input: redactor.redactPayload(event.input),
+          progress: redactor.redactPayload(event.progress),
+        };
+      case "tool.done":
+        return {
+          ...event,
+          title: redactor.redactPayload(event.title),
+          output: redactor.redactPayload(event.output),
+        };
+      case "status":
+        return {
+          ...event,
+          message: redactor.redactPayload(event.message),
+          retry_action: redactor.redactPayload(event.retry_action),
+        };
+      case "question.asked":
+        return {
+          ...event,
+          questions: redactor.redactPayload(event.questions),
+        };
+      case "question.replied":
+        return {
+          ...event,
+          answers: redactor.redactPayload(event.answers),
+        };
+      case "run.warning":
+      case "run.error":
+      case "error":
+        return {
+          ...event,
+          message: redactor.redactText(event.message),
+        };
+      default:
+        return event;
+    }
+  };
   return {
     events(sessionId: string, event: RunChatEvent): RunChatEvent[] {
       if (event.type === "text.delta" || event.type === "reasoning.delta") {
@@ -949,7 +1039,7 @@ function createProjectEventRedactor(redactor: RunRedactor) {
           : [];
         return [...prefix, event];
       }
-      return [redactor.redactPayload(event)];
+      return [redactStructuredEvent(event)];
     },
     clear() {
       for (const stream of streams.values()) stream.clear();
@@ -971,6 +1061,7 @@ function startProjectRecorder(input: {
   job: ProjectWorkspaceJob;
   workerId: string;
   promptByNativeSession: Map<string, ProjectPromptJob>;
+  seenQuestionRequestIds: Set<string>;
   redactor: RunRedactor;
   parentSignal: AbortSignal;
 }): ProjectRecorder {
@@ -1006,12 +1097,23 @@ function startProjectRecorder(input: {
             eventRedactor.events(envelope.sessionId, envelope.event),
           );
           for (const event of events) {
-            await input.store.appendProjectSessionEvent({
-              job: input.job,
-              prompt,
-              workerId: input.workerId,
-              event,
-            });
+            const questionRequestId =
+              event.type === "question.asked" ? event.request_id : null;
+            if (questionRequestId && input.seenQuestionRequestIds.has(questionRequestId)) {
+              continue;
+            }
+            if (questionRequestId) input.seenQuestionRequestIds.add(questionRequestId);
+            try {
+              await input.store.appendProjectSessionEvent({
+                job: input.job,
+                prompt,
+                workerId: input.workerId,
+                event,
+              });
+            } catch (error) {
+              if (questionRequestId) input.seenQuestionRequestIds.delete(questionRequestId);
+              throw error;
+            }
           }
         }
         if (!signal.aborted) throw new RunRuntimeError("Project event stream closed");
@@ -1076,6 +1178,272 @@ async function checkProjectPromptProvider(input: {
   return false;
 }
 
+interface ReconciledProjectQuestions {
+  nativeByRequestId: Map<string, ProjectPendingQuestion>;
+  redactedByRequestId: Map<string, ProjectPendingQuestion>;
+}
+
+async function reconcileProjectPendingQuestions(input: {
+  prompt: ProjectPromptJob;
+  job: ProjectWorkspaceJob;
+  workerId: string;
+  store: ProjectWorkspaceStore;
+  chat: ProjectChatRuntime;
+  target: ProjectChatTarget;
+  nativeSessionId: string;
+  eventRedactor: ReturnType<typeof createProjectEventRedactor>;
+  seenQuestionRequestIds: Set<string>;
+  signal: AbortSignal;
+}): Promise<ReconciledProjectQuestions> {
+  const firstSnapshot = await input.chat.listPendingQuestions(
+    input.target,
+    input.nativeSessionId,
+    input.signal,
+  );
+  // OpenCode's list request can begin while a question is pending and resolve after the tool has
+  // already continued. Confirm a new snapshot before persisting or delivering anything so that
+  // delayed compatibility responses cannot resurrect a completed question.
+  const currentSnapshot = await input.chat.listPendingQuestions(
+    input.target,
+    input.nativeSessionId,
+    input.signal,
+  );
+  const firstByRequestId = new Map(
+    firstSnapshot.map((question) => [question.request_id, question]),
+  );
+  const nativeByRequestId = new Map<string, ProjectPendingQuestion>();
+  const redactedByRequestId = new Map<string, ProjectPendingQuestion>();
+  for (const nativeQuestion of currentSnapshot) {
+    const initialQuestion = firstByRequestId.get(nativeQuestion.request_id);
+    if (!initialQuestion) continue;
+    if (JSON.stringify(initialQuestion) !== JSON.stringify(nativeQuestion)) {
+      throw new ProjectQuestionResolutionError(
+        "OpenCode changed a pending question while Companion was reconciling it",
+      );
+    }
+    const duplicate = nativeByRequestId.get(nativeQuestion.request_id);
+    if (duplicate && JSON.stringify(duplicate) !== JSON.stringify(nativeQuestion)) {
+      throw new ProjectQuestionResolutionError(
+        "OpenCode returned conflicting pending questions with the same request id",
+      );
+    }
+    if (duplicate) continue;
+    nativeByRequestId.set(nativeQuestion.request_id, nativeQuestion);
+
+    const redactedEvents = redactAndBoundProjectEvents(
+      input.eventRedactor.events(input.nativeSessionId, nativeQuestion),
+    );
+    const redactedQuestion = redactedEvents[0];
+    if (
+      redactedEvents.length !== 1
+      || !redactedQuestion
+      || redactedQuestion.type !== "question.asked"
+    ) {
+      throw new ProjectQuestionResolutionError(
+        "OpenCode returned an invalid pending question",
+      );
+    }
+    redactedByRequestId.set(nativeQuestion.request_id, redactedQuestion);
+
+    if (input.seenQuestionRequestIds.has(nativeQuestion.request_id)) continue;
+    input.seenQuestionRequestIds.add(nativeQuestion.request_id);
+    try {
+      await input.store.appendProjectSessionEvent({
+        job: input.job,
+        prompt: input.prompt,
+        workerId: input.workerId,
+        event: redactedQuestion,
+      });
+    } catch (error) {
+      input.seenQuestionRequestIds.delete(nativeQuestion.request_id);
+      throw error;
+    }
+  }
+  return { nativeByRequestId, redactedByRequestId };
+}
+
+function resolveNativeProjectQuestionAnswers(input: {
+  question: ProjectQuestionJob;
+  nativeQuestion: ProjectPendingQuestion;
+  redactedQuestion: ProjectPendingQuestion;
+}): string[][] {
+  if (
+    input.nativeQuestion.protocol !== input.question.protocol
+    || input.redactedQuestion.protocol !== input.question.protocol
+    || JSON.stringify(input.redactedQuestion.questions) !== JSON.stringify(input.question.questions)
+  ) {
+    throw new ProjectQuestionResolutionError(
+      "The pending OpenCode question changed after it was shown",
+    );
+  }
+  if (!input.question.answers) {
+    throw new ProjectQuestionResolutionError(
+      "The queued Project question reply has no answers",
+    );
+  }
+  if (
+    input.nativeQuestion.questions.length !== input.question.questions.length
+    || input.question.answers.length !== input.question.questions.length
+  ) {
+    throw new ProjectQuestionResolutionError(
+      "The pending OpenCode question answer shape changed",
+    );
+  }
+
+  return input.question.answers.map((answers, questionIndex) => {
+    const nativeInfo = input.nativeQuestion.questions[questionIndex];
+    const displayedInfo = input.redactedQuestion.questions[questionIndex];
+    if (
+      !nativeInfo
+      || !displayedInfo
+      || nativeInfo.options.length !== displayedInfo.options.length
+    ) {
+      throw new ProjectQuestionResolutionError(
+        "The pending OpenCode question answer shape changed",
+      );
+    }
+    const nativeLabelsByRedactedLabel = new Map<string, string[]>();
+    for (let optionIndex = 0; optionIndex < nativeInfo.options.length; optionIndex += 1) {
+      const nativeOption = nativeInfo.options[optionIndex]!;
+      // Use the exact bounded label that Companion displayed and persisted. Comparing only
+      // redactText(nativeLabel) misses the later UTF-8 bound and makes a long legitimate option
+      // impossible to resolve back to its raw SDK label.
+      const displayedLabel = displayedInfo.options[optionIndex]!.label;
+      const labels = nativeLabelsByRedactedLabel.get(displayedLabel) ?? [];
+      if (!labels.includes(nativeOption.label)) labels.push(nativeOption.label);
+      nativeLabelsByRedactedLabel.set(displayedLabel, labels);
+    }
+    if ([...nativeLabelsByRedactedLabel.values()].some((labels) => labels.length > 1)) {
+      throw new ProjectQuestionResolutionError(
+        "Multiple native question options have the same protected label",
+      );
+    }
+    return answers.map((answer) => {
+      const matchingLabels = nativeLabelsByRedactedLabel.get(answer) ?? [];
+      if (matchingLabels.length === 1) return matchingLabels[0]!;
+      if (nativeInfo.custom === true) return answer;
+      throw new ProjectQuestionResolutionError(
+        "A queued Project question answer no longer matches a native option",
+      );
+    });
+  });
+}
+
+async function deliverProjectQuestionResponses(input: {
+  prompt: ProjectPromptJob;
+  job: ProjectWorkspaceJob;
+  workerId: string;
+  store: ProjectWorkspaceStore;
+  chat: ProjectChatRuntime;
+  target: ProjectChatTarget;
+  nativeSessionId: string;
+  pendingQuestions: ReconciledProjectQuestions;
+  signal: AbortSignal;
+}): Promise<void> {
+  const questions = await input.store.loadProjectQuestionJobs({
+    job: input.job,
+    prompt: input.prompt,
+    workerId: input.workerId,
+  });
+  for (const question of questions) {
+    const nativeQuestion = input.pendingQuestions.nativeByRequestId.get(question.requestId);
+    const redactedQuestion = input.pendingQuestions.redactedByRequestId.get(question.requestId);
+    let nativeAnswers: string[][] | null = null;
+    try {
+      if (!nativeQuestion || !redactedQuestion) {
+        throw new ProjectQuestionResolutionError(
+          "The pending OpenCode question is no longer available",
+        );
+      }
+      if (question.responseKind === "reply") {
+        nativeAnswers = resolveNativeProjectQuestionAnswers({
+          question,
+          nativeQuestion,
+          redactedQuestion,
+        });
+      } else if (
+        nativeQuestion.protocol !== question.protocol
+        || JSON.stringify(redactedQuestion.questions) !== JSON.stringify(question.questions)
+      ) {
+        throw new ProjectQuestionResolutionError(
+          "The pending OpenCode question changed after it was shown",
+        );
+      }
+    } catch (error) {
+      await input.store.failProjectQuestionDelivery({
+        job: input.job,
+        prompt: input.prompt,
+        question,
+        workerId: input.workerId,
+        errorCode: "project_question_native_mismatch",
+        errorMessage: errorMessage(error),
+      });
+      // No external call was attempted, but this durable response cannot be safely remapped to the
+      // current native request. Interrupt the turn and never retry the member command.
+      throw new ProjectQuestionDeliveryAmbiguous();
+    }
+    const fence = await input.store.markProjectQuestionDeliveryAttempted({
+      job: input.job,
+      prompt: input.prompt,
+      question,
+      workerId: input.workerId,
+    });
+    if (fence === "lost") throw new ProjectLostLease();
+    if (fence === "cancelled") continue;
+    if (fence === "ambiguous") {
+      await input.store.failProjectQuestionDelivery({
+        job: input.job,
+        prompt: input.prompt,
+        question,
+        workerId: input.workerId,
+        errorCode: "project_question_delivery_ambiguous",
+        errorMessage:
+          "Companion could not confirm whether this answer reached the conversation.",
+      });
+      throw new ProjectQuestionDeliveryAmbiguous();
+    }
+    try {
+      if (question.responseKind === "reply") {
+        await input.chat.replyQuestion(
+          input.target,
+          input.nativeSessionId,
+          question.requestId,
+          question.protocol,
+          nativeAnswers!,
+          input.signal,
+        );
+      } else {
+        await input.chat.rejectQuestion(
+          input.target,
+          input.nativeSessionId,
+          question.requestId,
+          question.protocol,
+          input.signal,
+        );
+      }
+    } catch (error) {
+      await input.store.failProjectQuestionDelivery({
+        job: input.job,
+        prompt: input.prompt,
+        question,
+        workerId: input.workerId,
+        errorCode: "project_question_delivery_failed",
+        errorMessage: errorMessage(error),
+      });
+      // Once the durable no-replay fence is set, any transport failure is ambiguous. Abort the
+      // native turn below rather than reissuing a response that may already have taken effect.
+      throw new ProjectQuestionDeliveryAmbiguous();
+    }
+    const completed = await input.store.completeProjectQuestionDelivery({
+      job: input.job,
+      prompt: input.prompt,
+      question,
+      workerId: input.workerId,
+    });
+    if (!completed) throw new ProjectLostLease();
+  }
+}
+
 async function processProjectPrompt(input: {
   prompt: ProjectPromptJob;
   job: ProjectWorkspaceJob;
@@ -1089,6 +1457,7 @@ async function processProjectPrompt(input: {
   redactor: RunRedactor;
   authorityRevision: string;
   promptByNativeSession: Map<string, ProjectPromptJob>;
+  seenQuestionRequestIds: Set<string>;
   config: ProjectWorkerConfig;
   activationRevision: number;
   withFileCommit<T>(operation: () => Promise<T>): Promise<T>;
@@ -1098,6 +1467,7 @@ async function processProjectPrompt(input: {
 }): Promise<void> {
   let nativeSessionId = input.prompt.opencodeSessionId;
   let heartbeatAt = 0;
+  const questionEventRedactor = createProjectEventRedactor(input.redactor);
   try {
     // Authority is checked before reading attachments and again immediately before the external
     // prompt dispatch. The heartbeat loop below repeats that exact check during a long turn.
@@ -1245,6 +1615,11 @@ async function processProjectPrompt(input: {
       if (!persisted) throw new ProjectLostLease();
     }
     input.promptByNativeSession.set(nativeSessionId, input.prompt);
+    await reconcileProjectPendingQuestions({
+      ...input,
+      nativeSessionId,
+      eventRedactor: questionEventRedactor,
+    });
 
     const stillAdmitted = await checkProjectAuthority({
       ...input,
@@ -1290,6 +1665,7 @@ async function processProjectPrompt(input: {
       });
       if (sendFenced === "lost") throw new ProjectLostLease();
       if (sendFenced === "recycle") throw new ProjectRecycleRequired();
+      if (sendFenced === "stopped") return;
       if (sendFenced === "provider_unavailable") {
         const requeued = await input.store.requeueProjectPromptAtBoundary({
           job: input.job,
@@ -1327,6 +1703,22 @@ async function processProjectPrompt(input: {
     }
 
     while (state !== "completed") {
+      const pendingQuestions = await reconcileProjectPendingQuestions({
+        ...input,
+        nativeSessionId,
+        eventRedactor: questionEventRedactor,
+      });
+      await deliverProjectQuestionResponses({
+        prompt: input.prompt,
+        job: input.job,
+        workerId: input.workerId,
+        store: input.store,
+        chat: input.chat,
+        target: input.target,
+        nativeSessionId,
+        pendingQuestions,
+        signal: input.signal,
+      });
       await wait(PROMPT_STATE_POLL_MS, input.signal);
       if (Date.now() >= heartbeatAt) {
         const [lease] = await Promise.all([
@@ -1386,6 +1778,18 @@ async function processProjectPrompt(input: {
       }
     }
 
+    const terminalPendingQuestions = await reconcileProjectPendingQuestions({
+      ...input,
+      nativeSessionId,
+      eventRedactor: questionEventRedactor,
+    });
+    await input.store.retireMissingProjectQuestions({
+      job: input.job,
+      prompt: input.prompt,
+      workerId: input.workerId,
+      pendingRequestIds: [...terminalPendingQuestions.nativeByRequestId.keys()],
+    });
+
     const changes = await input.chat.getFileChanges(
       input.target,
       nativeSessionId,
@@ -1427,6 +1831,13 @@ async function processProjectPrompt(input: {
   } catch (error) {
     const reason = input.signal.aborted ? abortReason(input.signal) : error;
     if (reason instanceof ProjectPromptStopped) return;
+    if (reason instanceof ProjectQuestionDeliveryAmbiguous && nativeSessionId) {
+      await input.chat.abortSession(
+        input.target,
+        nativeSessionId,
+        AbortSignal.timeout(10_000),
+      ).catch(() => undefined);
+    }
     if (
       reason instanceof ProjectLostLease
       || reason instanceof ProjectRecycleRequired
@@ -1456,7 +1867,9 @@ async function processProjectPrompt(input: {
       prompt: input.prompt,
       workerId: input.workerId,
       errorCode: reason instanceof ProjectInterruptedPrompt
-        ? "project_prompt_interrupted"
+        ? reason instanceof ProjectQuestionDeliveryAmbiguous
+          ? "project_question_delivery_interrupted"
+          : "project_prompt_interrupted"
         : "project_prompt_failed",
       errorMessage: errorMessage(reason),
       retryAt: reason instanceof ProjectInterruptedPrompt
@@ -1469,6 +1882,7 @@ async function processProjectPrompt(input: {
     // ready and admit a deliberate follow-up.
     if (reason instanceof ProjectInterruptedPrompt) return;
   } finally {
+    questionEventRedactor.clear();
     if (nativeSessionId) input.promptByNativeSession.delete(nativeSessionId);
   }
 }
@@ -1519,6 +1933,7 @@ export async function runProjectWorkspaceJob(input: {
   let provisionedUntil = 0;
   let activationBudgetMs = input.config.maxActivationMs;
   const promptByNativeSession = new Map<string, ProjectPromptJob>();
+  const seenQuestionRequestIds = new Set<string>();
   const activePrompts = new Map<string, {
     prompt: ProjectPromptJob;
     abort: AbortController;
@@ -2345,6 +2760,7 @@ export async function runProjectWorkspaceJob(input: {
             job: input.job,
             workerId: input.workerId,
             promptByNativeSession,
+            seenQuestionRequestIds,
             redactor,
             parentSignal: signal,
           });
@@ -2598,6 +3014,7 @@ export async function runProjectWorkspaceJob(input: {
         job: input.job,
         workerId: input.workerId,
         promptByNativeSession,
+        seenQuestionRequestIds,
         redactor,
         parentSignal: signal,
       });
@@ -2833,6 +3250,7 @@ export async function runProjectWorkspaceJob(input: {
             redactor,
             authorityRevision,
             promptByNativeSession,
+            seenQuestionRequestIds,
             config: input.config,
             activationRevision,
             withFileCommit,
@@ -3374,6 +3792,16 @@ export function createCoreProjectWorkspaceStore(input: {
       surfaceProjectSkillSyncFailure({ ...args, database: db }),
     claimProjectPromptJobs: (args) => claimProjectPromptJobs({ ...args, database: db }),
     claimProjectSessionStops: (args) => claimProjectSessionStops({ ...args, database: db }),
+    loadProjectQuestionJobs: (args) =>
+      loadProjectQuestionJobs({ ...args, database: db }),
+    retireMissingProjectQuestions: (args) =>
+      retireMissingProjectQuestions({ ...args, database: db }),
+    markProjectQuestionDeliveryAttempted: (args) =>
+      markProjectQuestionDeliveryAttempted({ ...args, database: db }),
+    completeProjectQuestionDelivery: (args) =>
+      completeProjectQuestionDelivery({ ...args, database: db }),
+    failProjectQuestionDelivery: (args) =>
+      failProjectQuestionDelivery({ ...args, database: db }),
     completeProjectSessionStop: ({ session, ...args }) =>
       completeProjectSessionStop({
         ...args,

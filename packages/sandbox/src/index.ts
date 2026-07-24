@@ -13,6 +13,8 @@ export {
 } from "./opencodeChat";
 export {
   createOpencodeProjectChatRuntime,
+  rejectProjectQuestion,
+  replyProjectQuestion,
   sendProjectPromptAsync,
   streamProjectChatEvents,
 } from "./projectOpencodeChat";

@@ -3,10 +3,14 @@
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { RunChatEvent } from "@companion/contracts";
+import {
+  PROJECT_PROMPT_MAX_QUEUED,
+  type RunChatEvent,
+} from "@companion/contracts";
 import type {
   ProjectDetailVM,
   ProjectFileVM,
+  ProjectPromptVM,
   ProjectRuntimeAvailability,
   ProjectSessionVM,
   ProjectWorkspaceStatus,
@@ -27,10 +31,13 @@ const SESSION_ID = "22222222-2222-4222-8222-222222222222";
 const NOW = "2026-07-24T05:00:00.000Z";
 
 const projectRpc = vi.hoisted(() => ({
+  cancelProjectPrompt: vi.fn(),
   fetchProject: vi.fn(),
   fetchProjectFileVersions: vi.fn(),
   fetchProjectFiles: vi.fn(),
   fetchProjectSession: vi.fn(),
+  rejectProjectQuestion: vi.fn(),
+  replyProjectQuestion: vi.fn(),
   sendProjectPrompt: vi.fn(),
   stopProjectSession: vi.fn(),
 }));
@@ -88,6 +95,7 @@ vi.mock("../runs/ChatTranscript", async () => {
       renderUserAttachments,
       generatedFileTurns = [],
       onOpenFiles,
+      pendingInteraction,
     }: {
       showWorking: boolean;
       workingLabel?: string;
@@ -122,6 +130,7 @@ vi.mock("../runs/ChatTranscript", async () => {
           action: "created" | "updated";
         },
       ) => void;
+      pendingInteraction?: React.ReactNode;
     }) =>
       createElement(
         "div",
@@ -148,6 +157,7 @@ vi.mock("../runs/ChatTranscript", async () => {
           "message-with-attachment",
           "Review the brief",
         ),
+        pendingInteraction,
         ...generatedFileTurns.flatMap((turn) =>
           turn.files.map((file) =>
             createElement(
@@ -177,6 +187,7 @@ function session(
     history: [],
     prompts: [],
     pendingPrompts: [],
+    questions: [],
     latestEventSequence: 0,
     currentEventSequence: 0,
     createdAt: NOW,
@@ -185,6 +196,25 @@ function session(
     archivedAt: null,
     lastViewedAt: NOW,
     isUnread: false,
+    errorMessage: null,
+    ...overrides,
+  };
+}
+
+function prompt(
+  overrides: Partial<ProjectPromptVM> = {},
+): ProjectPromptVM {
+  return {
+    id: "33333333-3333-4333-8333-333333333333",
+    sequence: 1,
+    messageId: "project-message-1",
+    text: "Draft the next section",
+    status: "queued",
+    attachments: [],
+    fileChanges: [],
+    createdAt: NOW,
+    completedAt: null,
+    errorCode: null,
     errorMessage: null,
     ...overrides,
   };
@@ -590,6 +620,256 @@ describe("ProjectSessionView workspace state", () => {
     expect(container.querySelector("textarea")?.disabled).toBe(true);
   });
 
+  it("keeps an OpenCode question inline and continues with the selected answer", async () => {
+    const question = {
+      requestId: "question-request-1",
+      promptId: "33333333-3333-4333-8333-333333333350",
+      protocol: "question" as const,
+      questions: [
+        {
+          header: "Format",
+          question: "Which format should I create?",
+          options: [
+            {
+              label: "Markdown",
+              description: "Easy to review and edit.",
+            },
+            {
+              label: "PDF",
+              description: "Ready to share.",
+            },
+          ],
+          multiple: false,
+          custom: true,
+        },
+      ],
+      status: "pending" as const,
+      responseKind: null,
+      answers: null,
+      errorMessage: null,
+      createdAt: NOW,
+      updatedAt: NOW,
+    };
+    const available = project({
+      status: "running",
+      statusDetail: null,
+      workspaceDetail: null,
+    });
+    available.sessions = [
+      session({
+        status: "working",
+        questions: [question],
+      }),
+    ];
+    projectRpc.replyProjectQuestion.mockResolvedValue(
+      session({
+        status: "working",
+        questions: [{ ...question, status: "queued", responseKind: "reply" }],
+      }),
+    );
+
+    const { container } = await renderSessionView(available);
+    const card = container.querySelector<HTMLFormElement>(
+      'form[aria-label="Question from the agent"]',
+    );
+    expect(card?.textContent).toContain("The agent needs your input");
+    expect(card?.textContent).toContain("Which format should I create?");
+    expect(
+      container.querySelector('[data-working-variant="default"]'),
+    ).toBeNull();
+
+    await act(async () => {
+      card
+        ?.querySelector<HTMLInputElement>('input[value="Markdown"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    const customAnswer = card?.querySelector<HTMLTextAreaElement>("textarea")!;
+    setValue(customAnswer, "Email-ready memo");
+    expect(
+      card?.querySelector<HTMLInputElement>('input[value="Markdown"]')
+        ?.checked,
+    ).toBe(false);
+    await act(async () => {
+      button(card!, "Continue").click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(projectRpc.replyProjectQuestion).toHaveBeenCalledWith(
+      PROJECT_ID,
+      SESSION_ID,
+      question.requestId,
+      [["Email-ready memo"]],
+    );
+    expect(container.textContent).toContain("Sending your answer");
+  });
+
+  it("keeps a custom answer inside OpenCode's maximum response cardinality", async () => {
+    const options = Array.from({ length: 12 }, (_, index) => ({
+      label: `Choice ${index + 1}`,
+      description: "",
+    }));
+    const question = {
+      requestId: "question-request-many",
+      promptId: "33333333-3333-4333-8333-333333333354",
+      protocol: "question.v2" as const,
+      questions: [
+        {
+          header: "Sections",
+          question: "Which sections should I include?",
+          options,
+          multiple: true,
+          custom: true,
+        },
+      ],
+      status: "pending" as const,
+      responseKind: null,
+      answers: null,
+      errorMessage: null,
+      createdAt: NOW,
+      updatedAt: NOW,
+    };
+    const available = project({
+      status: "running",
+      statusDetail: null,
+      workspaceDetail: null,
+    });
+    available.sessions = [
+      session({ status: "working", questions: [question] }),
+    ];
+
+    const { container } = await renderSessionView(available);
+    for (const option of options) {
+      await act(async () => {
+        container
+          .querySelector<HTMLInputElement>(`input[value="${option.label}"]`)
+          ?.click();
+        await Promise.resolve();
+      });
+    }
+
+    const custom = container.querySelector<HTMLTextAreaElement>(
+      ".cowork-question-card__custom textarea",
+    );
+    expect(custom?.disabled).toBe(true);
+    expect(container.textContent).toContain(
+      "Remove a choice to add a custom answer.",
+    );
+  });
+
+  it("fails closed when an answer delivery cannot be confirmed", async () => {
+    const failedQuestion = {
+      requestId: "question-request-failed",
+      promptId: "33333333-3333-4333-8333-333333333351",
+      protocol: "question.v2" as const,
+      questions: [
+        {
+          header: "Audience",
+          question: "Who should receive this?",
+          options: [],
+          multiple: false,
+          custom: true,
+        },
+      ],
+      status: "failed" as const,
+      responseKind: "reply" as const,
+      answers: [["Leadership"]],
+      errorMessage: "Provider acknowledgement timed out.",
+      createdAt: NOW,
+      updatedAt: NOW,
+    };
+    const available = project({
+      status: "running",
+      statusDetail: null,
+      workspaceDetail: null,
+    });
+    available.sessions = [
+      session({ status: "working", questions: [failedQuestion] }),
+    ];
+    const onNewSession = vi.fn();
+
+    const { container } = await renderSessionView(available, {
+      onNewSession,
+    });
+
+    const failed = container.querySelector(".cowork-question-card.is-failed");
+    expect(failed?.textContent).toContain(
+      "Your answer could not be confirmed",
+    );
+    expect(failed?.textContent).toContain("Your conversation and files are safe");
+    expect(failed?.querySelector("form")).toBeNull();
+    expect(failed?.querySelector("details")?.hasAttribute("open")).toBe(false);
+    expect(projectRpc.replyProjectQuestion).not.toHaveBeenCalled();
+
+    act(() => button(failed!, "Continue").click());
+    expect(document.activeElement).toBe(
+      container.querySelector<HTMLTextAreaElement>("#project-follow-up"),
+    );
+  });
+
+  it("shows a new pending question ahead of a failed historical question", async () => {
+    const failedQuestion = {
+      requestId: "question-request-failed-history",
+      promptId: "33333333-3333-4333-8333-333333333352",
+      protocol: "question.v2" as const,
+      questions: [
+        {
+          header: "Audience",
+          question: "Who should receive the previous draft?",
+          options: [],
+          multiple: false,
+          custom: true,
+        },
+      ],
+      status: "failed" as const,
+      responseKind: "reply" as const,
+      answers: [["Leadership"]],
+      errorMessage: "Provider acknowledgement timed out.",
+      createdAt: NOW,
+      updatedAt: NOW,
+    };
+    const currentQuestion = {
+      requestId: "question-request-current",
+      promptId: "33333333-3333-4333-8333-333333333353",
+      protocol: "question" as const,
+      questions: [
+        {
+          header: "Format",
+          question: "Which format should I create now?",
+          options: [{ label: "Markdown", description: "" }],
+          multiple: false,
+          custom: false,
+        },
+      ],
+      status: "pending" as const,
+      responseKind: null,
+      answers: null,
+      errorMessage: null,
+      createdAt: "2026-07-24T05:01:00.000Z",
+      updatedAt: "2026-07-24T05:01:00.000Z",
+    };
+    const available = project({
+      status: "running",
+      statusDetail: null,
+      workspaceDetail: null,
+    });
+    available.sessions = [
+      session({
+        status: "working",
+        questions: [failedQuestion, currentQuestion],
+      }),
+    ];
+
+    const { container } = await renderSessionView(available);
+
+    const card = container.querySelector<HTMLFormElement>(
+      'form[aria-label="Question from the agent"]',
+    );
+    expect(card?.textContent).toContain("Which format should I create now?");
+    expect(container.querySelector(".cowork-question-card.is-failed")).toBeNull();
+  });
+
   it.each([
     {
       status: "error" as const,
@@ -979,6 +1259,64 @@ describe("ProjectSessionView workspace state", () => {
     },
   );
 
+  it("filters a long-lived Project file list without closing the workbench", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    roots.push(root);
+    const makeFile = (id: string, name: string): ProjectFileVM => ({
+      id,
+      path: `files/${name}`,
+      name,
+      version: 1,
+      contentType: "text/markdown",
+      byteSize: 120,
+      conflictDetected: false,
+      modifiedBySessionId: SESSION_ID,
+      modifiedByPromptId: null,
+      createdAt: NOW,
+      updatedAt: NOW,
+    });
+    await act(async () => {
+      root.render(
+        React.createElement(ProjectFilesDrawer, {
+          open: true,
+          projectId: PROJECT_ID,
+          files: [
+            makeFile("55555555-5555-4555-8555-555555555591", "brief.md"),
+            makeFile("55555555-5555-4555-8555-555555555592", "timeline.md"),
+          ],
+          selection: null,
+          attachmentPreview: null,
+          returnFocusRef: { current: null },
+          onSelectionChange: vi.fn(),
+          onClose: vi.fn(),
+        }),
+      );
+      await Promise.resolve();
+    });
+
+    const search =
+      document.body.querySelector<HTMLInputElement>(
+        'input[placeholder="Search files"]',
+      )!;
+    const setter = Object.getOwnPropertyDescriptor(
+      window.HTMLInputElement.prototype,
+      "value",
+    )?.set;
+    act(() => {
+      setter?.call(search, "timeline");
+      search.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+
+    const list = document.body.querySelector(
+      ".project-files-drawer__list",
+    );
+    expect(list?.textContent).toContain("timeline.md");
+    expect(list?.textContent).not.toContain("brief.md");
+    expect(document.body.textContent).toContain("1 of 2");
+  });
+
   it("previews a durable prompt attachment beside the conversation", async () => {
     const available = project({
       status: "running",
@@ -991,6 +1329,7 @@ describe("ProjectSessionView workspace state", () => {
         prompts: [
           {
             id: "33333333-3333-4333-8333-333333333333",
+            sequence: 1,
             messageId: "message-with-attachment",
             text: "Review the brief",
             status: "completed",
@@ -1079,6 +1418,7 @@ describe("ProjectSessionView workspace state", () => {
         prompts: [
           {
             id: "33333333-3333-4333-8333-333333333333",
+            sequence: 1,
             messageId: "generated-files-message",
             text: "Create two images",
             status: "completed",
@@ -1249,6 +1589,7 @@ describe("ProjectSessionView workspace state", () => {
       prompts: [
         {
           id: promptId,
+          sequence: 1,
           messageId: "message-reconciled-file",
           text: "Create the live file",
           status: "completed",
@@ -1455,6 +1796,7 @@ describe("ProjectSessionView workspace state", () => {
     const fileId = "55555555-5555-4555-8555-555555555551";
     const firstPrompt = {
       id: firstPromptId,
+      sequence: 1,
       messageId: "message-first",
       text: "Create the first file",
       status: "running" as const,
@@ -1467,6 +1809,7 @@ describe("ProjectSessionView workspace state", () => {
     };
     const secondPrompt = {
       id: secondPromptId,
+      sequence: 2,
       messageId: "message-second",
       text: "Continue with the next task",
       status: "queued" as const,
@@ -1622,6 +1965,7 @@ describe("ProjectSessionView workspace state", () => {
         prompts: [
           {
             id: "33333333-3333-4333-8333-333333333334",
+            sequence: 1,
             messageId: "desktop-generated-file",
             text: "Create the result",
             status: "completed",
@@ -1725,9 +2069,176 @@ describe("ProjectSessionView workspace state", () => {
 
     expect(document.activeElement).toBe(filesButton);
   });
+
+  it("shows a durable follow-up once and reconciles it after removal", async () => {
+    const current = prompt({
+      id: "33333333-3333-4333-8333-333333333341",
+      messageId: "project-message-current",
+      text: "Draft the report",
+      status: "running",
+    });
+    const queued = prompt({
+      id: "33333333-3333-4333-8333-333333333342",
+      messageId: "project-message-queued",
+      text: "Add a concise executive summary",
+    });
+    const available = project({
+      status: "running",
+      statusDetail: null,
+      workspaceDetail: null,
+    });
+    available.sessions = [
+      session({
+        status: "working",
+        history: [
+          {
+            kind: "user",
+            message_id: current.messageId,
+            text: current.text,
+          },
+        ],
+        prompts: [current, queued],
+        pendingPrompts: [current, queued],
+      }),
+    ];
+    projectRpc.cancelProjectPrompt.mockResolvedValue(
+      session({
+        status: "working",
+        history: [
+          {
+            kind: "user",
+            message_id: current.messageId,
+            text: current.text,
+          },
+        ],
+        prompts: [current, { ...queued, status: "cancelled" }],
+        pendingPrompts: [current],
+      }),
+    );
+
+    const { container } = await renderSessionView(available);
+    expect(container.textContent).toContain("Runs next");
+    expect(container.textContent).toContain(
+      "Add a concise executive summary",
+    );
+    expect(
+      container.querySelectorAll(
+        '[aria-label="Messages that run next"] li',
+      ),
+    ).toHaveLength(1);
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label^="Remove queued message"]',
+        )
+        ?.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(projectRpc.cancelProjectPrompt).toHaveBeenCalledWith(
+      PROJECT_ID,
+      SESSION_ID,
+      queued.id,
+    );
+    expect(
+      container.querySelector('[aria-label="Messages that run next"]'),
+    ).toBeNull();
+  });
 });
 
 describe("Project SessionComposer", () => {
+  it("keeps the composer available and explains that a follow-up runs next", async () => {
+    const onSend = vi.fn().mockResolvedValue(undefined);
+    const onCancelPrompt = vi.fn();
+    const queued = prompt({
+      id: "33333333-3333-4333-8333-333333333334",
+      messageId: "project-message-2",
+      text: "Add the sources after the draft",
+    });
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    roots.push(root);
+    await act(async () => {
+      root.render(
+        React.createElement(SessionComposer, {
+          disabled: false,
+          working: true,
+          queuedPrompts: [queued],
+          onCancelPrompt,
+          onSend,
+        }),
+      );
+      await Promise.resolve();
+    });
+
+    const textarea = container.querySelector<HTMLTextAreaElement>("textarea")!;
+    expect(textarea.disabled).toBe(false);
+    expect(textarea.placeholder).toBe("Add a message to run next…");
+    expect(container.textContent).toContain("Runs next");
+    expect(container.textContent).toContain("Add the sources after the draft");
+
+    setValue(textarea, "Check the final tone");
+    const send = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Add message to Runs next"]',
+    );
+    expect(send?.disabled).toBe(false);
+    expect(container.textContent).toContain(
+      "Your message will start after the current task.",
+    );
+
+    act(() =>
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label^="Remove queued message"]',
+        )
+        ?.click(),
+    );
+    expect(onCancelPrompt).toHaveBeenCalledWith(queued.id);
+  });
+
+  it("keeps the draft editable but explains when Runs next is full", async () => {
+    const onSend = vi.fn().mockResolvedValue(undefined);
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    roots.push(root);
+    await act(async () => {
+      root.render(
+        React.createElement(SessionComposer, {
+          disabled: false,
+          working: true,
+          queuedPrompts: Array.from(
+            { length: PROJECT_PROMPT_MAX_QUEUED },
+            (_, index) =>
+              prompt({
+                id: `33333333-3333-4333-8333-3333333333${60 + index}`,
+                messageId: `project-message-full-${index}`,
+                text: `Queued follow-up ${index + 1}`,
+              }),
+          ),
+          onSend,
+        }),
+      );
+      await Promise.resolve();
+    });
+
+    const textarea = container.querySelector<HTMLTextAreaElement>("textarea")!;
+    setValue(textarea, "Keep drafting another follow-up");
+    expect(textarea.disabled).toBe(false);
+    expect(
+      container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Runs next is full"]',
+      )?.disabled,
+    ).toBe(true);
+    expect(container.textContent).toContain(
+      "Runs next is full · remove a message to add another.",
+    );
+    expect(onSend).not.toHaveBeenCalled();
+  });
+
   it("restores a draft for the same conversation", async () => {
     const draftKey = "companion:project-draft:test-session";
     const firstContainer = document.createElement("div");

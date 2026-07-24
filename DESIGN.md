@@ -347,6 +347,13 @@ the Project default is preselected. A conversation sends the prompt directly to 
 the real transcript, tool activity, errors, and generated Files. Do not invent Companion plan,
 approval, progress, or deliverable-review states. OpenCode permissions are handled automatically by
 the runtime and do not create approval UI.
+While a turn is active, keep the composer available and label its one action `Runs next`. Durable
+follow-ups appear in a compact FIFO list above the composer and may be removed until dispatch begins.
+Keep at most five behind the current task and explain the bound without discarding the draft. `Stop`
+cancels every follow-up that has not started. Do not expose `Send now`, queue reordering, or steering
+until OpenCode's busy-session semantics are proven independently. A native OpenCode question is not a
+permission: render it as one restrained inline answer card, keep its option labels and custom answer
+affordance accessible, and persist the answer command before the runtime receives it.
 When a queued message must wake or prepare the persistent workspace, replace the generic working
 marker with one compact inline state in the transcript: `Waking up your Project`, `Preparing your
 Project`, then `Starting your task`. Drive those labels from the durable workspace and conversation
@@ -354,6 +361,10 @@ states, update them in place, and return to real OpenCode activity as soon as th
 show a fabricated percentage, countdown, or time estimate. If the selected model connection is no
 longer available, replace preparation with the actionable `Connection needed` state; never promise
 that the task is about to start indefinitely.
+During live work, the transcript edge may use only short semantic activity such as `Thinking`,
+`Reviewing project files`, `Updating files`, `Responding`, `Retrying`, or `Waiting for your answer`.
+Retry is amber ongoing work with its attempt and real provider countdown when supplied; tool names,
+payloads, and provider diagnostics stay inside technical details.
 
 Conversation read state is durable. Completion in the background marks the conversation `New result`
 or `Failed`, increments a quiet Project count, and produces a clickable in-product notification.

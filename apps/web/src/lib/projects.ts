@@ -265,6 +265,49 @@ export async function sendProjectPrompt(
   }));
 }
 
+export async function cancelProjectPrompt(
+  projectId: string,
+  sessionId: string,
+  promptId: string,
+): Promise<ProjectSessionVM> {
+  return normalizeProjectSessionResponse(
+    await apiFetch<unknown>(
+      `${sessionPath(projectId, sessionId)}/prompts/${encodeURIComponent(promptId)}/cancel`,
+      { method: "POST" },
+    ),
+  );
+}
+
+export async function replyProjectQuestion(
+  projectId: string,
+  sessionId: string,
+  requestId: string,
+  answers: string[][],
+): Promise<ProjectSessionVM> {
+  return normalizeProjectSessionResponse(
+    await apiFetch<unknown>(
+      `${sessionPath(projectId, sessionId)}/questions/${encodeURIComponent(requestId)}/reply`,
+      {
+        method: "POST",
+        body: JSON.stringify({ answers }),
+      },
+    ),
+  );
+}
+
+export async function rejectProjectQuestion(
+  projectId: string,
+  sessionId: string,
+  requestId: string,
+): Promise<ProjectSessionVM> {
+  return normalizeProjectSessionResponse(
+    await apiFetch<unknown>(
+      `${sessionPath(projectId, sessionId)}/questions/${encodeURIComponent(requestId)}/reject`,
+      { method: "POST" },
+    ),
+  );
+}
+
 export async function stopProjectSession(
   projectId: string,
   sessionId: string,

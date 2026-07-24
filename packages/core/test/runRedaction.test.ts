@@ -8,6 +8,8 @@ import {
   RUN_REDACTION_PLACEHOLDER,
 } from "../src/runRedaction";
 import {
+  PROJECT_QUESTION_ANSWERS_MAX_BYTES,
+  PROJECT_QUESTION_PAYLOAD_MAX_BYTES,
   PROJECT_TRANSCRIPT_MAX_BYTES,
   RUN_CHAT_DELTA_MAX,
   RUN_CHAT_ID_MAX,
@@ -173,6 +175,45 @@ describe("Project chat persistence boundaries", () => {
         message_id: "message",
         delta: `${"🤖".repeat(RUN_CHAT_DELTA_MAX)}${secret}`,
       },
+      {
+        type: "status",
+        state: "retry",
+        attempt: 2,
+        message: `Waiting for ${secret}`,
+        activity: "retrying",
+        retry_at: Date.now() + 1_000,
+        retry_action: {
+          reason: secret,
+          provider: "provider",
+          title: "Try again",
+          message: secret,
+          label: "Open settings",
+          link: `https://example.com/${secret}`,
+        },
+      },
+      {
+        type: "question.asked",
+        request_id: "question-request",
+        protocol: "question",
+        questions: [
+          {
+            header: "Format",
+            question: `Which ${secret} format should I use?`,
+            options: [
+              {
+                label: "Brief",
+                description: `Use the ${secret} brief`,
+              },
+            ],
+            multiple: false,
+            custom: true,
+          },
+        ],
+        tool: {
+          message_id: "assistant-message",
+          call_id: "question-tool",
+        },
+      },
     ], createRunRedactor([secret]));
 
     expect(events.length).toBeGreaterThan(2);
@@ -224,6 +265,53 @@ describe("Project chat persistence boundaries", () => {
       text: `final ${RUN_REDACTION_PLACEHOLDER}`,
     });
     expect(transcript.map((item) => runChatHistoryItemSchema.parse(item))).toEqual(transcript);
+  });
+
+  it("compacts aggregate question payloads without dropping their answer shape", () => {
+    const questions = Array.from({ length: 8 }, (_, questionIndex) => ({
+      header: `"${questionIndex}"`.repeat(180),
+      question: `"question-${questionIndex}"`.repeat(320),
+      options: Array.from({ length: 12 }, (_, optionIndex) => ({
+        label: `"option-${questionIndex}-${optionIndex}"`.repeat(40),
+        description: `"description-${questionIndex}-${optionIndex}"`.repeat(260),
+      })),
+      multiple: true,
+      custom: true,
+    }));
+    const [asked, replied] = redactAndBoundProjectEvents([
+      {
+        type: "question.asked",
+        request_id: "question-aggregate",
+        protocol: "question.v2",
+        questions,
+        tool: { message_id: "message-1", call_id: "call-1" },
+      },
+      {
+        type: "question.replied",
+        request_id: "question-aggregate",
+        protocol: "question.v2",
+        answers: Array.from({ length: 8 }, () =>
+          Array.from({ length: 12 }, () => `"answer"`.repeat(700)),
+        ),
+      },
+    ]);
+
+    expect(asked?.type).toBe("question.asked");
+    expect(replied?.type).toBe("question.replied");
+    if (asked?.type === "question.asked") {
+      expect(asked.questions).toHaveLength(8);
+      expect(asked.questions.every((question) => question.options.length === 12)).toBe(true);
+      expect(Buffer.byteLength(JSON.stringify(asked.questions), "utf8")).toBeLessThanOrEqual(
+        PROJECT_QUESTION_PAYLOAD_MAX_BYTES,
+      );
+    }
+    if (replied?.type === "question.replied") {
+      expect(replied.answers).toHaveLength(8);
+      expect(replied.answers.every((answers) => answers.length === 12)).toBe(true);
+      expect(Buffer.byteLength(JSON.stringify(replied.answers), "utf8")).toBeLessThanOrEqual(
+        PROJECT_QUESTION_ANSWERS_MAX_BYTES,
+      );
+    }
   });
 
   it("rejects invalid aggregate transcript limits", () => {

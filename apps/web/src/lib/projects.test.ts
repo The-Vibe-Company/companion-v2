@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  cancelProjectPrompt,
   createProject,
   createProjectSession,
   deleteProject,
@@ -13,7 +14,9 @@ import {
   projectFileVersionHref,
   projectPromptAttachmentHref,
   projectSessionEventsHref,
+  rejectProjectQuestion,
   replaceProjectSkills,
+  replyProjectQuestion,
   retryProjectWorkspace,
   sendProjectPrompt,
   stopProjectSession,
@@ -112,6 +115,7 @@ const rawFile = {
 };
 const rawSessionDetail = {
   ...rawSession,
+  questions: [],
   prompts: [
     {
       id: "55555555-5555-4555-8555-555555555555",
@@ -378,10 +382,41 @@ describe("project queries", () => {
   it("uses durable session, event, stop, and cached file routes", async () => {
     api.apiFetch.mockResolvedValue(rawSessionDetail);
     await fetchProjectSession(PROJECT_ID, SESSION_ID);
+    await cancelProjectPrompt(
+      PROJECT_ID,
+      SESSION_ID,
+      "55555555-5555-4555-8555-555555555555",
+    );
+    await replyProjectQuestion(
+      PROJECT_ID,
+      SESSION_ID,
+      "question/request 1",
+      [["Approve"]],
+    );
+    await rejectProjectQuestion(
+      PROJECT_ID,
+      SESSION_ID,
+      "question/request 2",
+    );
     await stopProjectSession(PROJECT_ID, SESSION_ID);
 
     expect(api.apiFetch.mock.calls).toEqual([
       [`/v1/projects/${PROJECT_ID}/sessions/${SESSION_ID}`],
+      [
+        `/v1/projects/${PROJECT_ID}/sessions/${SESSION_ID}/prompts/55555555-5555-4555-8555-555555555555/cancel`,
+        { method: "POST" },
+      ],
+      [
+        `/v1/projects/${PROJECT_ID}/sessions/${SESSION_ID}/questions/question%2Frequest%201/reply`,
+        {
+          method: "POST",
+          body: JSON.stringify({ answers: [["Approve"]] }),
+        },
+      ],
+      [
+        `/v1/projects/${PROJECT_ID}/sessions/${SESSION_ID}/questions/question%2Frequest%202/reject`,
+        { method: "POST" },
+      ],
       [
         `/v1/projects/${PROJECT_ID}/sessions/${SESSION_ID}/stop`,
         { method: "POST" },

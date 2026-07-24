@@ -8,6 +8,7 @@ import {
   projectFileRowSchema,
   projectFileVersionRowSchema,
   projectFileVersionsResponseSchema,
+  projectQuestionReplyInputSchema,
   projectSessionDetailSchema,
   projectSessionEventSchema,
   listProjectSessionsQuerySchema,
@@ -195,6 +196,117 @@ describe("Cowork project contracts", () => {
     ).toThrow();
     expect(() =>
       projectSessionEventSchema.parse({ type: "project.arbitrary", payload: "unbounded" })
+    ).toThrow();
+  });
+
+  it("bounds normalized Project questions, activity, retry, and tool lifecycle metadata", () => {
+    expect(
+      projectSessionEventSchema.parse({
+        type: "question.asked",
+        request_id: "question-1",
+        protocol: "question.v2",
+        questions: [{
+          header: "Format",
+          question: "Which format should I use?",
+          options: [{
+            label: "PDF",
+            description: "A fixed-layout document",
+          }],
+          multiple: false,
+          custom: true,
+        }],
+        tool: { message_id: "assistant-1", call_id: "call-1" },
+      }),
+    ).toEqual({
+      type: "question.asked",
+      request_id: "question-1",
+      protocol: "question.v2",
+      questions: [{
+        header: "Format",
+        question: "Which format should I use?",
+        options: [{
+          label: "PDF",
+          description: "A fixed-layout document",
+        }],
+        multiple: false,
+        custom: true,
+      }],
+      tool: { message_id: "assistant-1", call_id: "call-1" },
+    });
+    expect(
+      projectSessionEventSchema.parse({
+        type: "status",
+        state: "retry",
+        attempt: 2,
+        message: "Provider busy",
+        activity: "retrying",
+        retry_at: 1_784_901_234_000,
+        retry_action: {
+          reason: "rate_limit",
+          provider: "openai",
+          title: "Provider busy",
+          message: "OpenCode will try again.",
+          label: "Provider settings",
+          link: "https://example.com/settings",
+        },
+      }),
+    ).toMatchObject({
+      type: "status",
+      state: "retry",
+      activity: "retrying",
+      retry_at: 1_784_901_234_000,
+    });
+    expect(
+      projectSessionEventSchema.parse({
+        type: "tool.done",
+        call_id: "call-1",
+        title: "Write report",
+        output: "Created report.md",
+        duration_ms: 12,
+        message_id: "assistant-1",
+        outcome: "success",
+      }),
+    ).toMatchObject({
+      type: "tool.done",
+      message_id: "assistant-1",
+      outcome: "success",
+    });
+    expect(() =>
+      projectSessionEventSchema.parse({
+        type: "question.asked",
+        request_id: "question-empty",
+        protocol: "question",
+        questions: [],
+        tool: null,
+      })
+    ).toThrow();
+    expect(() =>
+      projectSessionEventSchema.parse({
+        type: "status",
+        state: "retry",
+        attempt: 1,
+        message: "Retrying",
+        activity: "retrying",
+        retry_at: 1,
+        retry_action: {
+          reason: "provider",
+          provider: "openai",
+          title: "Provider",
+          message: "Review provider",
+          label: "Open",
+          link: "javascript:alert(1)",
+        },
+      })
+    ).toThrow();
+  });
+
+  it("rejects a response matrix that fits field bounds but exceeds durable aggregate storage", () => {
+    expect(() =>
+      projectQuestionReplyInputSchema.parse({
+        answers: Array.from({ length: 8 }, () =>
+          Array.from({ length: 12 }, () => "x".repeat(4_000)),
+        ),
+      }),
     ).toThrow();
   });
 

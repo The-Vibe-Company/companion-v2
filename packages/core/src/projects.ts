@@ -4,6 +4,8 @@ import {
   PROJECT_ATTACHMENT_MAX_BYTES,
   PROJECT_ATTACHMENT_MAX_FILES,
   PROJECT_NAME_MAX,
+  PROJECT_PROMPT_MAX_QUEUED,
+  PROJECT_QUESTION_ANSWERS_MAX_BYTES,
   PROJECT_SESSION_TITLE_MAX,
   projectSessionEventSchema,
   projectTranscriptSchema,
@@ -17,6 +19,8 @@ import {
   type ProjectFileRow,
   type ProjectFileVersionRow,
   type ProjectPromptRow,
+  type ProjectQuestionReplyInput,
+  type ProjectQuestionRow,
   type ProjectRow,
   type ProjectSessionDetail,
   type ProjectSessionRow,
@@ -74,9 +78,15 @@ export class ProjectNotFoundError extends Error {
 }
 
 export class ProjectConflictError extends Error {
-  constructor(message = "the project changed; reload it and try again") {
+  readonly code: string | undefined;
+
+  constructor(
+    message = "the project changed; reload it and try again",
+    code?: string,
+  ) {
     super(message);
     this.name = "ProjectConflictError";
+    this.code = code;
   }
 }
 
@@ -1705,6 +1715,26 @@ export async function updateProjectSession(input: {
       .returning();
     const updated = rows[0];
     if (!updated) throw new ProjectNotFoundError("session not found");
+    if (input.value.archived === true && active) {
+      await tx
+        .update(schema.projectQuestions)
+        .set({
+          status: "cancelled",
+          errorCode: "project_question_cancelled",
+          errorMessage: "The conversation was archived before this response was delivered.",
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(schema.projectQuestions.orgId, input.orgId),
+            eq(schema.projectQuestions.projectId, input.projectId),
+            eq(schema.projectQuestions.sessionId, input.sessionId),
+            eq(schema.projectQuestions.creatorId, input.actor.id),
+            inArray(schema.projectQuestions.status, ["pending", "queued"]),
+            isNull(schema.projectQuestions.deliveryAttemptedAt),
+          ),
+        );
+    }
 
     const archiveChanged =
       input.value.archived !== undefined &&
@@ -1879,6 +1909,116 @@ async function promptRows(input: {
   }));
 }
 
+function toProjectQuestionRow(
+  row: typeof schema.projectQuestions.$inferSelect,
+): ProjectQuestionRow {
+  return {
+    request_id: row.requestId,
+    prompt_id: row.promptId,
+    protocol: row.protocol as ProjectQuestionRow["protocol"],
+    questions: row.questions,
+    status: row.status,
+    response_kind: row.responseKind as ProjectQuestionRow["response_kind"],
+    answers: row.answers,
+    error_code: row.errorCode,
+    error_message: row.errorMessage,
+    response_requested_at: row.responseRequestedAt?.toISOString() ?? null,
+    delivered_at: row.deliveredAt?.toISOString() ?? null,
+    created_at: row.createdAt.toISOString(),
+    updated_at: row.updatedAt.toISOString(),
+  };
+}
+
+async function questionRows(input: {
+  orgId: string;
+  projectId: string;
+  sessionId: string;
+  creatorId: string;
+  database: Db;
+}): Promise<ProjectQuestionRow[]> {
+  const rows = await input.database
+    .select()
+    .from(schema.projectQuestions)
+    .where(
+      and(
+        eq(schema.projectQuestions.orgId, input.orgId),
+        eq(schema.projectQuestions.projectId, input.projectId),
+        eq(schema.projectQuestions.sessionId, input.sessionId),
+        eq(schema.projectQuestions.creatorId, input.creatorId),
+      ),
+    )
+    .orderBy(
+      asc(schema.projectQuestions.createdAt),
+      asc(schema.projectQuestions.requestId),
+    );
+  return rows.map(toProjectQuestionRow);
+}
+
+/**
+ * Validate the exact response matrix expected by OpenCode.
+ *
+ * One answer row is required for every question. Single-choice questions accept exactly one
+ * value; multiple-choice questions accept one or more distinct values. Values outside the
+ * declared options are allowed unless the normalized native request explicitly disables custom
+ * input.
+ */
+export function assertValidProjectQuestionAnswers(input: {
+  questions: ProjectQuestionRow["questions"];
+  answers: ProjectQuestionReplyInput["answers"];
+}): void {
+  if (
+    Buffer.byteLength(JSON.stringify(input.answers), "utf8")
+    > PROJECT_QUESTION_ANSWERS_MAX_BYTES
+  ) {
+    throw new ProjectValidationError(
+      "The combined answer is too large.",
+      "invalid_question_answers",
+    );
+  }
+  if (input.answers.length !== input.questions.length) {
+    throw new ProjectValidationError(
+      "Answer every question before continuing.",
+      "invalid_question_answers",
+    );
+  }
+  for (let index = 0; index < input.questions.length; index += 1) {
+    const question = input.questions[index]!;
+    const answers = input.answers[index]!;
+    if (
+      answers.length === 0
+      || answers.some((answer) => answer.trim().length === 0)
+    ) {
+      throw new ProjectValidationError(
+        "Provide an answer for each question.",
+        "invalid_question_answers",
+      );
+    }
+    if (!question.multiple && answers.length !== 1) {
+      throw new ProjectValidationError(
+        "Choose one answer for each single-choice question.",
+        "invalid_question_answers",
+      );
+    }
+    if (new Set(answers).size !== answers.length) {
+      throw new ProjectValidationError(
+        "The same answer cannot be selected twice.",
+        "invalid_question_answers",
+      );
+    }
+    const optionLabels = new Set(question.options.map((option) => option.label));
+    if (
+      !question.custom
+      && question.options.length > 0
+      && answers.some((answer) => !optionLabels.has(answer))
+    ) {
+      throw new ProjectValidationError(
+        "Choose an available answer.",
+        "invalid_question_answers",
+      );
+    }
+  }
+}
+
 export async function getProjectSession(input: {
   actor: ActorContext;
   orgId: string;
@@ -1889,14 +2029,25 @@ export async function getProjectSession(input: {
   const database = input.database ?? db;
   await assertMember(database, input.actor, input.orgId);
   const session = await loadOwnedSession({ ...input, database });
-  return {
-    ...toSessionRow(session),
-    prompts: await promptRows({
+  const [prompts, questions] = await Promise.all([
+    promptRows({
       orgId: input.orgId,
       sessionId: input.sessionId,
       creatorId: input.actor.id,
       database,
     }),
+    questionRows({
+      orgId: input.orgId,
+      projectId: input.projectId,
+      sessionId: input.sessionId,
+      creatorId: input.actor.id,
+      database,
+    }),
+  ]);
+  return {
+    ...toSessionRow(session),
+    prompts,
+    questions,
     transcript: projectTranscriptSchema.parse(session.transcript),
     current_event_sequence: session.transcriptSequence,
     // Resume after the event prefix represented by this transcript, not after the current event
@@ -2469,6 +2620,7 @@ export async function createProjectSession(input: {
         creatorId: input.actor.id,
         database: tx,
       }),
+      questions: [],
       transcript: [],
       current_event_sequence: 0,
       latest_event_sequence: 0,
@@ -2553,6 +2705,16 @@ export async function enqueueProjectPrompt(input: {
       if (!prompt) throw new ProjectNotFoundError("prompt not found");
       return prompt;
     }
+    // Worker claims and Stop both lock workspace → session. Reserve admission in that same order;
+    // any session conflict below rolls the transaction (including its usage reservation) back.
+    const promptCreatedAt = new Date();
+    const usageAdmission = await admitAcceptedProjectPrompt({
+      orgId: input.orgId,
+      projectId: input.projectId,
+      creatorId: input.actor.id,
+      database: tx,
+      now: promptCreatedAt,
+    });
     const session = await loadOwnedSession({
       ...input,
       database: tx,
@@ -2564,6 +2726,34 @@ export async function enqueueProjectPrompt(input: {
     }
     if (session.status === "stopping" || session.stopRequestedAt) {
       throw new ProjectConflictError("this session is stopping");
+    }
+    const nonterminalPrompts = await tx
+      .select({ id: schema.projectPrompts.id })
+      .from(schema.projectPrompts)
+      .where(
+        and(
+          eq(schema.projectPrompts.orgId, input.orgId),
+          eq(schema.projectPrompts.projectId, input.projectId),
+          eq(schema.projectPrompts.sessionId, input.sessionId),
+          eq(schema.projectPrompts.creatorId, input.actor.id),
+          inArray(schema.projectPrompts.status, [
+            "queued",
+            "dispatching",
+            "running",
+          ]),
+        ),
+      )
+      .orderBy(asc(schema.projectPrompts.sequence));
+    // The oldest non-terminal prompt is the FIFO head whether it is still cold (`queued`) or has
+    // crossed the worker claim fence (`dispatching`/`running`). Bound only the later followers so a
+    // claim racing admission cannot make the same logical queue alternate between four and five
+    // available "Runs next" slots.
+    const queuedFollowerCount = Math.max(0, nonterminalPrompts.length - 1);
+    if (queuedFollowerCount >= PROJECT_PROMPT_MAX_QUEUED) {
+      throw new ProjectConflictError(
+        "the follow-up queue is full",
+        "prompt_queue_full",
+      );
     }
     const activeEarlierPrompts = await tx
       .select({ id: schema.projectPrompts.id })
@@ -2589,14 +2779,6 @@ export async function enqueueProjectPrompt(input: {
       );
     const promptId = randomUUID();
     const sequence = Number(sequenceRows[0]?.value ?? 0) + 1;
-    const promptCreatedAt = new Date();
-    const usageAdmission = await admitAcceptedProjectPrompt({
-      orgId: input.orgId,
-      projectId: input.projectId,
-      creatorId: input.actor.id,
-      database: tx,
-      now: promptCreatedAt,
-    });
     const inserted = await tx
       .insert(schema.projectPrompts)
       .values({
@@ -2693,6 +2875,351 @@ export async function enqueueProjectPrompt(input: {
   }) as Promise<ProjectPromptRow>;
 }
 
+/**
+ * Cancel one durable follow-up before it reaches OpenCode.
+ *
+ * The session row is the shared FIFO/stop linearization point: prompt claims lock the same row, so
+ * either this cancellation commits first and the worker can no longer claim the command, or the
+ * claim commits first and cancellation fails closed instead of pretending an external side effect
+ * can still be prevented.
+ */
+export async function cancelQueuedProjectPrompt(input: {
+  actor: ActorContext;
+  orgId: string;
+  projectId: string;
+  sessionId: string;
+  promptId: string;
+  database?: Db;
+}): Promise<ProjectPromptRow> {
+  const database = input.database ?? db;
+  await assertMember(database, input.actor, input.orgId);
+  return database.transaction(async (transaction) => {
+    const tx = transaction as unknown as Db;
+    const session = await loadOwnedSession({
+      ...input,
+      database: tx,
+      lock: true,
+    });
+    const promptRowsForUpdate = await tx
+      .select()
+      .from(schema.projectPrompts)
+      .where(
+        and(
+          eq(schema.projectPrompts.orgId, input.orgId),
+          eq(schema.projectPrompts.projectId, input.projectId),
+          eq(schema.projectPrompts.sessionId, input.sessionId),
+          eq(schema.projectPrompts.id, input.promptId),
+          eq(schema.projectPrompts.creatorId, input.actor.id),
+        ),
+      )
+      .limit(1)
+      .for("update");
+    const prompt = promptRowsForUpdate[0];
+    if (!prompt) throw new ProjectNotFoundError("prompt not found");
+
+    if (prompt.status !== "cancelled") {
+      if (prompt.status !== "queued" || prompt.sendAttemptedAt) {
+        throw new ProjectConflictError(
+          "This message has already started. Stop the conversation instead.",
+        );
+      }
+      const now = new Date();
+      const cancelled = await tx
+        .update(schema.projectPrompts)
+        .set({
+          status: "cancelled",
+          leaseOwner: null,
+          leaseExpiresAt: null,
+          heartbeatAt: null,
+          completedAt: now,
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(schema.projectPrompts.orgId, input.orgId),
+            eq(schema.projectPrompts.projectId, input.projectId),
+            eq(schema.projectPrompts.sessionId, input.sessionId),
+            eq(schema.projectPrompts.id, input.promptId),
+            eq(schema.projectPrompts.creatorId, input.actor.id),
+            eq(schema.projectPrompts.status, "queued"),
+            isNull(schema.projectPrompts.sendAttemptedAt),
+          ),
+        )
+        .returning({ id: schema.projectPrompts.id });
+      if (!cancelled[0]) {
+        throw new ProjectConflictError(
+          "This message has already started. Stop the conversation instead.",
+        );
+      }
+
+      const remaining = await tx
+        .select({ id: schema.projectPrompts.id })
+        .from(schema.projectPrompts)
+        .where(
+          and(
+            eq(schema.projectPrompts.orgId, input.orgId),
+            eq(schema.projectPrompts.projectId, input.projectId),
+            eq(schema.projectPrompts.sessionId, input.sessionId),
+            eq(schema.projectPrompts.creatorId, input.actor.id),
+            inArray(schema.projectPrompts.status, [
+              "queued",
+              "dispatching",
+              "running",
+            ]),
+          ),
+        )
+        .limit(1);
+      if (session.status === "queued" && !remaining[0]) {
+        await tx
+          .update(schema.projectSessions)
+          .set({ status: "idle", lastActiveAt: now, updatedAt: now })
+          .where(
+            and(
+              eq(schema.projectSessions.orgId, input.orgId),
+              eq(schema.projectSessions.projectId, input.projectId),
+              eq(schema.projectSessions.id, input.sessionId),
+              eq(schema.projectSessions.creatorId, input.actor.id),
+              eq(schema.projectSessions.status, "queued"),
+            ),
+          );
+      }
+      await tx.insert(schema.auditLog).values({
+        orgId: input.orgId,
+        actorId: input.actor.id,
+        privateToUserId: input.actor.id,
+        action: "project.prompt.cancelled",
+        targetType: "project_prompt",
+        targetId: input.promptId,
+        metadata: {
+          project_id: input.projectId,
+          session_id: input.sessionId,
+          sequence: prompt.sequence,
+        },
+      });
+    }
+
+    const durablePrompts = await promptRows({
+      orgId: input.orgId,
+      sessionId: input.sessionId,
+      creatorId: input.actor.id,
+      database: tx,
+    });
+    const durable = durablePrompts.find((row) => row.id === input.promptId);
+    if (!durable) throw new ProjectNotFoundError("prompt not found");
+    return durable;
+  }) as Promise<ProjectPromptRow>;
+}
+
+function projectQuestionResponseMatches(input: {
+  row: typeof schema.projectQuestions.$inferSelect;
+  responseKind: "reply" | "reject";
+  answers: string[][] | null;
+}): boolean {
+  return (
+    input.row.responseKind === input.responseKind
+    && JSON.stringify(input.row.answers) === JSON.stringify(input.answers)
+  );
+}
+
+async function enqueueProjectQuestionResponse(input: {
+  actor: ActorContext;
+  orgId: string;
+  projectId: string;
+  sessionId: string;
+  requestId: string;
+  responseKind: "reply" | "reject";
+  answers: string[][] | null;
+  database?: Db;
+}): Promise<ProjectQuestionRow> {
+  const database = input.database ?? db;
+  await assertMember(database, input.actor, input.orgId);
+  const answers = input.answers?.map((group) =>
+    group.map((answer) => answer.trim())
+  ) ?? null;
+  return database.transaction(async (transaction) => {
+    const tx = transaction as unknown as Db;
+    // Stop, prompt dispatch and question delivery all linearize workspace → session → command.
+    const workspaces = await tx
+      .select({ projectId: schema.projectWorkspaces.projectId })
+      .from(schema.projectWorkspaces)
+      .where(
+        and(
+          eq(schema.projectWorkspaces.orgId, input.orgId),
+          eq(schema.projectWorkspaces.projectId, input.projectId),
+          eq(schema.projectWorkspaces.creatorId, input.actor.id),
+        ),
+      )
+      .limit(1)
+      .for("update");
+    if (!workspaces[0]) throw new ProjectNotFoundError();
+    const session = await loadOwnedSession({
+      ...input,
+      database: tx,
+      lock: true,
+    });
+    const rows = await tx
+      .select()
+      .from(schema.projectQuestions)
+      .where(
+        and(
+          eq(schema.projectQuestions.orgId, input.orgId),
+          eq(schema.projectQuestions.projectId, input.projectId),
+          eq(schema.projectQuestions.sessionId, input.sessionId),
+          eq(schema.projectQuestions.requestId, input.requestId),
+          eq(schema.projectQuestions.creatorId, input.actor.id),
+        ),
+      )
+      .limit(1)
+      .for("update");
+    const question = rows[0];
+    if (!question) throw new ProjectNotFoundError("question not found");
+
+    if (question.responseKind !== null) {
+      if (
+        projectQuestionResponseMatches({
+          row: question,
+          responseKind: input.responseKind,
+          answers,
+        })
+      ) {
+        return toProjectQuestionRow(question);
+      }
+      throw new ProjectConflictError("This question already has a different response.");
+    }
+    if (question.status !== "pending") {
+      throw new ProjectConflictError("This question is no longer waiting for an answer.");
+    }
+    if (
+      session.stopRequestedAt
+      || ["stopping", "stopped", "completed", "error"].includes(session.status)
+    ) {
+      throw new ProjectConflictError("This conversation is no longer waiting for an answer.");
+    }
+
+    const prompts = await tx
+      .select({ status: schema.projectPrompts.status })
+      .from(schema.projectPrompts)
+      .where(
+        and(
+          eq(schema.projectPrompts.orgId, input.orgId),
+          eq(schema.projectPrompts.projectId, input.projectId),
+          eq(schema.projectPrompts.sessionId, input.sessionId),
+          eq(schema.projectPrompts.id, question.promptId),
+          eq(schema.projectPrompts.creatorId, input.actor.id),
+        ),
+      )
+      .limit(1)
+      .for("update");
+    if (
+      !prompts[0]
+      || !["dispatching", "running"].includes(prompts[0].status)
+    ) {
+      throw new ProjectConflictError("This question is no longer waiting for an answer.");
+    }
+    if (input.responseKind === "reply") {
+      if (!answers) {
+        throw new ProjectValidationError(
+          "Answers are required.",
+          "invalid_question_answers",
+        );
+      }
+      assertValidProjectQuestionAnswers({
+        questions: question.questions,
+        answers,
+      });
+    }
+
+    const now = new Date();
+    const updated = await tx
+      .update(schema.projectQuestions)
+      .set({
+        status: "queued",
+        responseKind: input.responseKind,
+        answers,
+        responseRequestedAt: now,
+        errorCode: null,
+        errorMessage: null,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(schema.projectQuestions.orgId, input.orgId),
+          eq(schema.projectQuestions.projectId, input.projectId),
+          eq(schema.projectQuestions.sessionId, input.sessionId),
+          eq(schema.projectQuestions.requestId, input.requestId),
+          eq(schema.projectQuestions.creatorId, input.actor.id),
+          eq(schema.projectQuestions.status, "pending"),
+          isNull(schema.projectQuestions.responseKind),
+        ),
+      )
+      .returning();
+    if (!updated[0]) {
+      throw new ProjectConflictError("This question changed; reload it and try again.");
+    }
+    await tx
+      .update(schema.projectWorkspaces)
+      .set({
+        availableAt: now,
+        lastActivityAt: now,
+        idleDeadlineAt: null,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(schema.projectWorkspaces.orgId, input.orgId),
+          eq(schema.projectWorkspaces.projectId, input.projectId),
+          eq(schema.projectWorkspaces.creatorId, input.actor.id),
+        ),
+      );
+    await tx.insert(schema.auditLog).values({
+      orgId: input.orgId,
+      actorId: input.actor.id,
+      privateToUserId: input.actor.id,
+      action: "project.question.response_queued",
+      targetType: "project_question",
+      targetId: input.requestId,
+      metadata: {
+        project_id: input.projectId,
+        session_id: input.sessionId,
+        prompt_id: question.promptId,
+        response_kind: input.responseKind,
+      },
+    });
+    return toProjectQuestionRow(updated[0]);
+  }) as Promise<ProjectQuestionRow>;
+}
+
+export async function enqueueProjectQuestionReply(input: {
+  actor: ActorContext;
+  orgId: string;
+  projectId: string;
+  sessionId: string;
+  requestId: string;
+  value: ProjectQuestionReplyInput;
+  database?: Db;
+}): Promise<ProjectQuestionRow> {
+  return enqueueProjectQuestionResponse({
+    ...input,
+    responseKind: "reply",
+    answers: input.value.answers,
+  });
+}
+
+export async function enqueueProjectQuestionRejection(input: {
+  actor: ActorContext;
+  orgId: string;
+  projectId: string;
+  sessionId: string;
+  requestId: string;
+  database?: Db;
+}): Promise<ProjectQuestionRow> {
+  return enqueueProjectQuestionResponse({
+    ...input,
+    responseKind: "reject",
+    answers: null,
+  });
+}
+
 export async function requestProjectSessionStop(input: {
   actor: ActorContext;
   orgId: string;
@@ -2704,6 +3231,21 @@ export async function requestProjectSessionStop(input: {
   await assertMember(database, input.actor, input.orgId);
   return database.transaction(async (transaction) => {
     const tx = transaction as unknown as Db;
+    // Worker prompt fences acquire workspace → session. Keep the same order here so Stop cannot
+    // deadlock with the final pre-send fence while both operations linearize.
+    const workspace = await tx
+      .select({ projectId: schema.projectWorkspaces.projectId })
+      .from(schema.projectWorkspaces)
+      .where(
+        and(
+          eq(schema.projectWorkspaces.orgId, input.orgId),
+          eq(schema.projectWorkspaces.projectId, input.projectId),
+          eq(schema.projectWorkspaces.creatorId, input.actor.id),
+        ),
+      )
+      .limit(1)
+      .for("update");
+    if (!workspace[0]) throw new ProjectNotFoundError();
     const session = await loadOwnedSession({ ...input, database: tx, lock: true });
     if (
       session.status === "stopping" ||
@@ -2727,6 +3269,45 @@ export async function requestProjectSessionStop(input: {
       )
       .returning();
     if (!rows[0]) throw new ProjectNotFoundError("session not found");
+    // "Stop" owns the whole conversation boundary. Follow-ups that never started are terminalized
+    // in this same transaction, so no later worker tick can dispatch a queued "Runs next" item.
+    await tx
+      .update(schema.projectPrompts)
+      .set({
+        status: "cancelled",
+        leaseOwner: null,
+        leaseExpiresAt: null,
+        heartbeatAt: null,
+        completedAt: now,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(schema.projectPrompts.orgId, input.orgId),
+          eq(schema.projectPrompts.projectId, input.projectId),
+          eq(schema.projectPrompts.sessionId, input.sessionId),
+          eq(schema.projectPrompts.creatorId, input.actor.id),
+          eq(schema.projectPrompts.status, "queued"),
+        ),
+      );
+    await tx
+      .update(schema.projectQuestions)
+      .set({
+        status: "cancelled",
+        errorCode: "project_question_cancelled",
+        errorMessage: "The conversation was stopped before this response was delivered.",
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(schema.projectQuestions.orgId, input.orgId),
+          eq(schema.projectQuestions.projectId, input.projectId),
+          eq(schema.projectQuestions.sessionId, input.sessionId),
+          eq(schema.projectQuestions.creatorId, input.actor.id),
+          inArray(schema.projectQuestions.status, ["pending", "queued"]),
+          isNull(schema.projectQuestions.deliveryAttemptedAt),
+        ),
+      );
     await tx
       .update(schema.projectWorkspaces)
       .set({ availableAt: now, idleDeadlineAt: null, updatedAt: now })

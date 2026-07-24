@@ -80,6 +80,13 @@ export const projectPromptStatusEnum = pgEnum("project_prompt_status", [
   "failed",
   "cancelled",
 ]);
+export const projectQuestionStatusEnum = pgEnum("project_question_status", [
+  "pending",
+  "queued",
+  "delivered",
+  "cancelled",
+  "failed",
+]);
 export const projectAttachmentStatusEnum = pgEnum("project_attachment_status", [
   "uploaded",
   "materialized",
@@ -1944,6 +1951,103 @@ export const projectSessionEvents = pgTable(
       "project_session_events_event_check",
       sql`jsonb_typeof(${t.event}) = 'object'
         AND octet_length(${t.event}::text) <= 65536`,
+    ),
+  }),
+);
+
+/**
+ * Durable member responses to native OpenCode questions.
+ *
+ * The normalized question payload has already crossed the Project event redaction boundary. API
+ * mutations only queue a response; the exact Project worker lease delivers it to OpenCode.
+ */
+export const projectQuestions = pgTable(
+  "project_questions",
+  {
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    projectId: uuid("project_id").notNull(),
+    sessionId: uuid("session_id").notNull(),
+    promptId: uuid("prompt_id").notNull(),
+    creatorId: text("creator_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    requestId: text("request_id").notNull(),
+    protocol: text("protocol").notNull(),
+    questions: jsonb("questions").$type<
+      Array<{
+        header: string;
+        question: string;
+        options: Array<{ label: string; description: string }>;
+        multiple: boolean;
+        custom: boolean;
+      }>
+    >().notNull(),
+    status: projectQuestionStatusEnum("status").notNull().default("pending"),
+    responseKind: text("response_kind"),
+    answers: jsonb("answers").$type<string[][] | null>(),
+    responseRequestedAt: timestamp("response_requested_at", {
+      withTimezone: true,
+    }),
+    deliveryAttemptedAt: timestamp("delivery_attempted_at", {
+      withTimezone: true,
+    }),
+    deliveredAt: timestamp("delivered_at", { withTimezone: true }),
+    errorCode: text("error_code"),
+    errorMessage: text("error_message"),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.orgId, t.projectId, t.requestId] }),
+    promptFk: foreignKey({
+      columns: [
+        t.orgId,
+        t.projectId,
+        t.sessionId,
+        t.promptId,
+        t.creatorId,
+      ],
+      foreignColumns: [
+        projectPrompts.orgId,
+        projectPrompts.projectId,
+        projectPrompts.sessionId,
+        projectPrompts.id,
+        projectPrompts.creatorId,
+      ],
+      name: "project_questions_prompt_creator_fk",
+    }).onDelete("cascade"),
+    byDelivery: index("project_questions_delivery_idx").on(
+      t.orgId,
+      t.projectId,
+      t.status,
+      t.responseRequestedAt,
+    ),
+    requestCheck: check(
+      "project_questions_request_check",
+      sql`char_length(${t.requestId}) BETWEEN 1 AND 512`,
+    ),
+    protocolCheck: check(
+      "project_questions_protocol_check",
+      sql`${t.protocol} IN ('question', 'question.v2')`,
+    ),
+    questionsCheck: check(
+      "project_questions_payload_check",
+      sql`jsonb_typeof(${t.questions}) = 'array'
+        AND jsonb_array_length(${t.questions}) BETWEEN 1 AND 8
+        AND octet_length(${t.questions}::text) <= 65536`,
+    ),
+    responseCheck: check(
+      "project_questions_response_check",
+      sql`(${t.responseKind} IS NULL OR ${t.responseKind} IN ('reply', 'reject'))
+        AND (${t.answers} IS NULL OR (
+          jsonb_typeof(${t.answers}) = 'array'
+          AND jsonb_array_length(${t.answers}) BETWEEN 1 AND 8
+          AND octet_length(${t.answers}::text) <= 32768
+        ))
+        AND (${t.responseKind} IS DISTINCT FROM 'reply' OR ${t.answers} IS NOT NULL)
+        AND (${t.responseKind} IS DISTINCT FROM 'reject' OR ${t.answers} IS NULL)`,
     ),
   }),
 );

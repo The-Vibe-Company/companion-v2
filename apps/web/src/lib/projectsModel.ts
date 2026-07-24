@@ -8,6 +8,7 @@ import {
   runChatHistoryItemSchema,
   type ProjectDetail,
   type ProjectFileRow,
+  type ProjectQuestionRow,
   type ProjectRow,
   type ProjectSessionDetail,
   type ProjectSessionRow,
@@ -30,6 +31,7 @@ export type ProjectSessionVM = {
   history: RunChatHistoryItem[];
   prompts: ProjectPromptVM[];
   pendingPrompts: ProjectPromptVM[];
+  questions: ProjectQuestionVM[];
   /** Prefix already represented by the durable transcript; use as the SSE replay cursor. */
   latestEventSequence: number;
   /** Current durable event allocator maximum; may advance after the transcript becomes terminal. */
@@ -41,6 +43,19 @@ export type ProjectSessionVM = {
   lastViewedAt: string;
   isUnread: boolean;
   errorMessage: string | null;
+};
+
+export type ProjectQuestionVM = {
+  requestId: string;
+  promptId: string;
+  protocol: ProjectQuestionRow["protocol"];
+  questions: ProjectQuestionRow["questions"];
+  status: ProjectQuestionRow["status"];
+  responseKind: ProjectQuestionRow["response_kind"];
+  answers: string[][] | null;
+  errorMessage: string | null;
+  createdAt: string;
+  updatedAt: string;
 };
 
 export type ProjectPromptAttachmentVM = {
@@ -55,6 +70,7 @@ export type ProjectPromptAttachmentVM = {
 
 export type ProjectPromptVM = {
   id: string;
+  sequence: number;
   messageId: string;
   text: string;
   status:
@@ -211,18 +227,11 @@ function normalizeProjectSession(
     .array()
     .safeParse("transcript" in row ? row.transcript : []);
   const history = historyResult.success ? historyResult.data : [];
-  const visiblePromptCounts = new Map<string, number>();
-  for (const item of history) {
-    if (item.kind !== "user") continue;
-    visiblePromptCounts.set(
-      item.text,
-      (visiblePromptCounts.get(item.text) ?? 0) + 1,
-    );
-  }
   const promptRows: ProjectPromptVM[] =
     "prompts" in row
       ? row.prompts.map((prompt) => ({
           id: prompt.id,
+          sequence: prompt.sequence,
           messageId: prompt.opencode_message_id,
           text: prompt.text,
           status: prompt.status,
@@ -254,16 +263,14 @@ function normalizeProjectSession(
           errorMessage: prompt.error_message,
         }))
       : [];
-  const pendingPromptRows: ProjectSessionVM["pendingPrompts"] = [];
-  for (const [index, prompt] of promptRows.entries()) {
-    const text = prompt.text;
-    const visibleCount = visiblePromptCounts.get(text) ?? 0;
-    if (visibleCount > 0) {
-      visiblePromptCounts.set(text, visibleCount - 1);
-      continue;
-    }
-    pendingPromptRows.push({ ...prompt, id: prompt.id || `prompt-${index}` });
-  }
+  const pendingPromptRows = promptRows
+    .filter((prompt) =>
+      ["queued", "dispatching", "running"].includes(prompt.status),
+    )
+    .sort(
+      (left, right) =>
+        left.sequence - right.sequence || left.id.localeCompare(right.id),
+    );
   return {
     id: row.id,
     title: row.title,
@@ -272,6 +279,21 @@ function normalizeProjectSession(
     history,
     prompts: promptRows,
     pendingPrompts: pendingPromptRows,
+    questions:
+      "questions" in row
+        ? row.questions.map((question) => ({
+            requestId: question.request_id,
+            promptId: question.prompt_id,
+            protocol: question.protocol,
+            questions: question.questions,
+            status: question.status,
+            responseKind: question.response_kind,
+            answers: question.answers,
+            errorMessage: question.error_message,
+            createdAt: question.created_at,
+            updatedAt: question.updated_at,
+          }))
+        : [],
     latestEventSequence:
       "latest_event_sequence" in row ? row.latest_event_sequence : 0,
     currentEventSequence:

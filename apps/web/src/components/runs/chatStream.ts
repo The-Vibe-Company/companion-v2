@@ -2,6 +2,7 @@ import {
   runChatEventSchema,
   type RunChatEvent,
   type RunChatHistoryItem,
+  type RunRetryAction,
   type SkillRunAttachmentRow,
 } from "@companion/contracts";
 
@@ -256,6 +257,8 @@ export type ChatItem =
 export interface WorkingState {
   active: boolean;
   label: string;
+  retryAt?: number | null;
+  retryAction?: RunRetryAction | null;
 }
 
 export interface ChatState {
@@ -428,22 +431,55 @@ function applyEvent(state: ChatState, event: RunChatEvent, resolveToolLabel: Res
         return { ...state, busy: false, working: { active: false, label: "" } };
       }
       if (event.state === "retry") {
-        const label = event.attempt ? `Retrying (attempt ${event.attempt})…` : "Retrying…";
-        return { ...state, busy: true, working: { active: true, label } };
+        const label = event.attempt
+          ? `Retrying · attempt ${event.attempt}`
+          : "Retrying";
+        return {
+          ...state,
+          busy: true,
+          working: {
+            active: true,
+            label,
+            retryAt: event.retry_at ?? null,
+            retryAction: event.retry_action ?? null,
+          },
+        };
       }
+      const activityLabel =
+        event.activity === "responding"
+          ? "Responding…"
+          : event.activity === "waiting_for_answer"
+            ? "Waiting for your answer"
+            : event.activity === "compacting"
+              ? "Organizing context…"
+              : event.activity === "retrying"
+                ? "Retrying"
+                : event.activity === "thinking"
+                  ? "Thinking…"
+                  : null;
       // busy — keep a more specific "Running <tool>…" label if a tool is mid-flight.
       const toolRunning = state.items.some((item) => item.kind === "tool" && item.running);
-      const label = toolRunning && state.working.label ? state.working.label : "Thinking…";
+      const label =
+        activityLabel ??
+        (toolRunning && state.working.label
+          ? state.working.label
+          : "Thinking…");
       return { ...state, busy: true, working: { active: true, label } };
     }
     case "tool.start": {
       const { label, action } = resolveToolLabel(event.tool, event.skill);
-      const runningLabel = event.title?.trim() ? event.title.trim() : label;
+      const semanticLabel = /^(Using|Updating|Reviewing|Researching|Working)\b/.test(
+        label,
+      );
+      const runningLabel = semanticLabel
+        ? label
+        : `Running ${event.title?.trim() ? event.title.trim() : label}`;
+      const workingLabel = `${runningLabel}…`;
       const existing = state.items.find((item) => item.kind === "tool" && item.callId === event.call_id);
       if (existing) {
         return {
           ...state,
-          working: { active: true, label: `Running ${runningLabel}…` },
+          working: { active: true, label: workingLabel },
           items: state.items.map((item) => item.kind === "tool" && item.callId === event.call_id
             ? { ...item, running: true, action: event.title ?? action, input: event.input }
             : item),
@@ -451,7 +487,7 @@ function applyEvent(state: ChatState, event: RunChatEvent, resolveToolLabel: Res
       }
       return {
         ...state,
-        working: { active: true, label: `Running ${runningLabel}…` },
+        working: { active: true, label: workingLabel },
         items: [
           ...state.items,
           {
@@ -526,6 +562,7 @@ function applyEvent(state: ChatState, event: RunChatEvent, resolveToolLabel: Res
       if (existing) {
         return {
           ...state,
+          working: { active: true, label: "Responding…" },
           items: items.map((item) =>
             item.kind === "asst" && item.messageId === event.message_id
               ? { ...item, text: item.text + event.delta, streaming: true }
@@ -535,6 +572,7 @@ function applyEvent(state: ChatState, event: RunChatEvent, resolveToolLabel: Res
       }
       return {
         ...state,
+        working: { active: true, label: "Responding…" },
         items: [
           ...items,
           { kind: "asst", id: `assistant:${event.message_id}`, messageId: event.message_id, text: event.delta, streaming: true },
@@ -550,6 +588,19 @@ function applyEvent(state: ChatState, event: RunChatEvent, resolveToolLabel: Res
         ),
       };
     }
+    case "question.asked":
+      return {
+        ...state,
+        busy: true,
+        working: { active: true, label: "Waiting for your answer" },
+      };
+    case "question.replied":
+    case "question.rejected":
+      return {
+        ...state,
+        busy: true,
+        working: { active: true, label: "Thinking…" },
+      };
     case "session.idle":
       return {
         ...state,

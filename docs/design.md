@@ -918,6 +918,12 @@ contents, Secret names/keys, and plaintext never enter audit metadata.
   snapshot records their sequence. Session detail exposes that folded prefix separately from the
   current allocator watermark so late durable barriers remain discoverable. A single session preserves
   prompt order while different sessions may work concurrently.
+- `project_questions` stores only normalized, redacted OpenCode questions and the creator's durable
+  reply/reject command. The API never answers OpenCode directly. The exact Project and prompt leases
+  fence the delivery attempt; an ambiguous crash after that fence fails closed rather than sending a
+  second answer. Stopping or terminalizing a prompt cancels only questions whose delivery fence was
+  never crossed; an attempted but unconfirmed response becomes a durable ambiguous failure instead of
+  being mislabeled as safely cancelled.
 - `project_attachments`, `project_files`, and immutable `project_file_versions` expose only the managed
   `files/` tree. Every attachment retains its exact `prompt_id`; every created or updated file version
   retains the session and prompt that produced it. This lets a reloaded transcript render input files
@@ -958,6 +964,25 @@ a later explicit prompt may continue the same OpenCode session. Companion never 
 a turn that may have produced external effects. Any `running` workspace whose worker lease expires is
 claimable even when no prompt remains and no idle deadline was installed, so a crash after durable turn
 completion or during an in-flight turn cannot strand the activation.
+
+Native OpenCode questions are distinct from permissions. The shared event subscription normalizes
+legacy and v2 question payloads into the bounded Project event vocabulary, persists the safe prompt
+under the current turn, and sets live activity to `waiting_for_answer`. A session-only mutation queues
+the creator's reply or rejection in `project_questions`; only the exact worker lease may cross the SDK
+side-effect boundary. The worker durably fences the delivery attempt first. If it crashes across that
+ambiguous boundary, recovery fails the question closed instead of risking a duplicate user action.
+Event delivery is not the recovery source of truth: on session bind and every pending-turn poll, the
+worker reads OpenCode's exact-session pending-question APIs twice and admits only entries unchanged in
+both snapshots, preventing an old in-flight list response from resurrecting a completed question.
+Legacy/v2 duplicates deterministically prefer v2. The worker persists only the redacted and
+UTF-8-bounded display shape; while the runtime is live it zips that shape to the native options in
+memory so a selected protected or truncated label can be sent back exactly. Ambiguous display-label
+collisions fail before the delivery fence, and raw labels never enter database rows, events, logs, or
+API responses. OpenCode's omitted `custom` field means custom input remains available; only an explicit
+`false` disables it. Aggregate question and answer bounds stay below their jsonb checks, compacting
+provider-authored display copy without changing cardinality and rejecting oversized member responses
+before persistence. Replayed native `question.replied` events may complete untouched questions but
+never overwrite an already queued creator response.
 
 The conversation maps a cold queued command to the real durable lifecycle rather than a generic
 spinner: `stopped`/`stopping` is waking, `queued`/`provisioning` is preparing, and a ready workspace
@@ -1065,6 +1090,23 @@ immediately and may offer a local Undo toast. There is no permanent conversation
 a Project is a normal reversible mutation after active conversations stop. Permanent Project deletion
 remains a separate confirmation that names the loss of conversations, Files, and workspace state.
 
+The composer remains available during active work. A follow-up is persisted in the existing
+per-session prompt outbox and presented as `Runs next`; the first non-terminal prompt is the active
+head and only later queued prompts appear in the compact FIFO list. Admission locks the session and
+permits at most five followers after that head whether it is queued, dispatching, or running; the UI
+keeps an overflow draft editable while explaining why it cannot yet be added. A member may remove an
+item until dispatch starts. Stop linearizes against prompt claim, cancels every untouched queued item,
+and fences a prompt claimed just before Stop at the final pre-send boundary. An unanswered question is
+cancelled only before its response-delivery fence; Stop turns an already attempted response into an
+explicit ambiguous failure after the native session is stopped. Companion exposes neither queue
+reordering nor `Send now` until a separate OpenCode contract proves safe steering.
+
+Live status is an ephemeral explanation over durable state: preparing, thinking, using a humanized
+tool action, responding, retrying, compacting, or waiting for an answer. Provider retry remains amber
+ongoing work and may show the real attempt/countdown supplied by OpenCode. A native question renders
+inline and supports its declared single, multiple, and custom answers; it never enters the permission
+approval flow.
+
 Workspace failures that block every conversation render as `Project needs attention` and may offer the
 explicit retry described above. A failed or interrupted turn instead uses the non-destructive message
 `Previous task stopped. Your conversation and files are safe.` with `Continue`, `Start new
@@ -1122,6 +1164,9 @@ and parent-derived RLS; a same-org Owner/Admin has no override.
 `PATCH /v1/projects/:id/sessions/:sessionId`,
 `GET /v1/projects/:id/sessions/:sessionId/attachments/:attachmentId`,
 `POST /v1/projects/:id/sessions/:sessionId/prompts`,
+`POST /v1/projects/:id/sessions/:sessionId/prompts/:promptId/cancel`,
+`POST /v1/projects/:id/sessions/:sessionId/questions/:requestId/reply`,
+`POST /v1/projects/:id/sessions/:sessionId/questions/:requestId/reject`,
 `POST /v1/projects/:id/sessions/:sessionId/stop`,
 `GET /v1/projects/:id/sessions/:sessionId/events`,
 `GET/POST /v1/projects/:id/files`, `GET /v1/projects/:id/files/:fileId`,

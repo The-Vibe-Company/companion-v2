@@ -514,11 +514,48 @@ describe("chatReducer", () => {
     expect(state.busy).toBe(true);
 
     state = apply(state, { type: "status", state: "retry", attempt: 2, message: "rate limited" });
-    expect(state.working).toEqual({ active: true, label: "Retrying (attempt 2)…" });
+    expect(state.working).toEqual({
+      active: true,
+      label: "Retrying · attempt 2",
+      retryAt: null,
+      retryAction: null,
+    });
 
     state = apply(state, { type: "status", state: "idle", attempt: null, message: null });
     expect(state.working).toEqual({ active: false, label: "" });
     expect(state.busy).toBe(false);
+  });
+
+  it("treats an OpenCode question as a non-terminal waiting state", () => {
+    let state = apply(initChatState(), {
+      type: "question.asked",
+      request_id: "question-1",
+      protocol: "question",
+      questions: [
+        {
+          header: "Format",
+          question: "Which format?",
+          options: [],
+          multiple: false,
+          custom: true,
+        },
+      ],
+      tool: null,
+    });
+    expect(state.working).toEqual({
+      active: true,
+      label: "Waiting for your answer",
+    });
+    expect(state.busy).toBe(true);
+
+    state = apply(state, {
+      type: "question.replied",
+      request_id: "question-1",
+      protocol: "question",
+      answers: [["Markdown"]],
+    });
+    expect(state.working).toEqual({ active: true, label: "Thinking…" });
+    expect(state.busy).toBe(true);
   });
 
   it("carries tool title/skill/tool onto the item and labels the working line with it", () => {
@@ -561,6 +598,7 @@ describe("chatReducer", () => {
     const collapsed = state.items.find((item) => item.kind === "reasoning");
     expect(collapsed && collapsed.kind === "reasoning" ? collapsed.streaming : true).toBe(false);
     expect(state.items.some((item) => item.kind === "asst")).toBe(true);
+    expect(state.working).toEqual({ active: true, label: "Responding…" });
   });
 
   it("marks a reasoning block done on reasoning.done", () => {

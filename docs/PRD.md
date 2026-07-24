@@ -138,6 +138,14 @@ Each requirement has user stories with acceptance criteria. Priorities: **P0** =
   last view persist as `New result` or `Failed`, increment the Project's internal unread count, and
   create a clickable in-product notification; opening or explicitly acknowledging the conversation
   clears unread state without changing its list position.
+- As a Project owner, I can continue collaborating while a turn runs. *AC:* the composer queues
+  follow-ups as durable FIFO `Runs next` commands, with one head plus at most five followers regardless
+  of claim state; reload/sleep preserve them, each not-yet-dispatched item can be removed, and Stop
+  atomically cancels the remaining queue; no `Send now` or steering behavior is implied.
+- As a Project owner, I can answer a native OpenCode question without leaving the transcript. *AC:*
+  normalized legacy/v2 questions render inline with single, multiple, and custom answers; the
+  creator-only API persists a response command before the worker delivers it under the Project lease;
+  reconnect and worker restart neither lose nor duplicate the response.
 - As a Project owner, every active generic Secret I can access and every effective configured model
   connection becomes available at activation. *AC:* plaintext is never persisted or written to `.env`;
   collisions block activation, access loss recycles the runtime, and queued prompts remain dormant

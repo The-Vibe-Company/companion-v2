@@ -12,6 +12,7 @@ import {
 } from "../src/projectJobs";
 import {
   assertValidProjectCreateIdempotencyKey,
+  assertValidProjectQuestionAnswers,
   assertCompatibleProjectSkillClosure,
   deriveProjectSessionTitle,
   isProjectSessionUnread,
@@ -173,6 +174,63 @@ describe("Cowork project helpers", () => {
     expect(deriveProjectSessionTitle("\n  Prepare   the quarterly review \nwith charts")).toBe(
       "Prepare the quarterly review",
     );
+  });
+
+  it("validates native question cardinality, choices and custom answers", () => {
+    const questions = [
+      {
+        header: "Format",
+        question: "Which format?",
+        options: [
+          { label: "PDF", description: "Portable document" },
+          { label: "Markdown", description: "Editable text" },
+        ],
+        multiple: false,
+        custom: false,
+      },
+      {
+        header: "Sections",
+        question: "Which sections?",
+        options: [
+          { label: "Summary", description: "Short overview" },
+          { label: "Appendix", description: "Supporting detail" },
+        ],
+        multiple: true,
+        custom: true,
+      },
+      {
+        header: "Audience",
+        question: "Who is this for?",
+        options: [],
+        multiple: false,
+        // OpenCode may omit `custom` for an optionless free-text question.
+        custom: false,
+      },
+    ];
+    expect(() =>
+      assertValidProjectQuestionAnswers({
+        questions,
+        answers: [["PDF"], ["Summary", "Board notes"], ["Leadership"]],
+      })
+    ).not.toThrow();
+    expect(() =>
+      assertValidProjectQuestionAnswers({
+        questions,
+        answers: [["Slides"], ["Summary"], ["Leadership"]],
+      })
+    ).toThrow(expect.objectContaining({ code: "invalid_question_answers" }));
+    expect(() =>
+      assertValidProjectQuestionAnswers({
+        questions,
+        answers: [["PDF", "Markdown"], ["Summary"], ["Leadership"]],
+      })
+    ).toThrow(expect.objectContaining({ code: "invalid_question_answers" }));
+    expect(() =>
+      assertValidProjectQuestionAnswers({
+        questions,
+        answers: [["PDF"], ["Summary"]],
+      })
+    ).toThrow(expect.objectContaining({ code: "invalid_question_answers" }));
   });
 
   it("keeps sandbox names deterministic and free of user-authored input", () => {

@@ -8,7 +8,12 @@ import type {
   ProjectChatRuntime,
   ProjectWorkspaceRuntime,
 } from "@companion/core";
-import { EntitlementDeniedError, RunRuntimeError } from "@companion/core";
+import { RUN_CHAT_TITLE_MAX } from "@companion/contracts";
+import {
+  EntitlementDeniedError,
+  RunRedactor,
+  RunRuntimeError,
+} from "@companion/core";
 import {
   ProjectAuthorityRevokedError,
   ProjectEnvironmentInvalidError,
@@ -17,6 +22,7 @@ import { packDir } from "@companion/skills";
 import {
   applyProjectUnifiedPatch,
   createProjectAttachmentRetentionScheduler,
+  createProjectEventRedactor,
   createProjectSupervisor,
   managedChangePath,
   projectArchiveMatchesChecksum,
@@ -25,6 +31,7 @@ import {
   type ProjectCachedFile,
   type ProjectFileStorage,
   type ProjectPromptJob,
+  type ProjectQuestionJob,
   type ProjectUsageMeter,
   type ProjectWorkspaceJob,
   type ProjectWorkspaceStore,
@@ -184,6 +191,11 @@ function baseStore(overrides: Partial<ProjectWorkspaceStore> = {}): ProjectWorks
     completeProjectDeletion: vi.fn(async () => true),
     claimProjectPromptJobs: vi.fn(async () => []),
     claimProjectSessionStops: vi.fn(async () => []),
+    loadProjectQuestionJobs: vi.fn(async () => []),
+    retireMissingProjectQuestions: vi.fn(async () => 0),
+    markProjectQuestionDeliveryAttempted: vi.fn(async () => "marked" as const),
+    completeProjectQuestionDelivery: vi.fn(async () => true),
+    failProjectQuestionDelivery: vi.fn(async () => true),
     completeProjectSessionStop: vi.fn(async () => true),
     heartbeatProjectPromptLease: vi.fn(async () => true),
     loadProjectPromptAttachments: vi.fn(async () => []),
@@ -217,6 +229,9 @@ function quietChat(): ProjectChatRuntime {
     getMessageState: vi.fn(async () => "missing" as const),
     rehydrateSession: vi.fn(async () => undefined),
     sendPrompt: vi.fn(async () => undefined),
+    listPendingQuestions: vi.fn(async () => []),
+    replyQuestion: vi.fn(async () => undefined),
+    rejectQuestion: vi.fn(async () => undefined),
     loadItems: vi.fn(async () => []),
     getFileChanges: vi.fn(async () => []),
     async *streamEvents(_target, signal, onConnected) {
@@ -289,6 +304,45 @@ describe("Project turn-scoped file capture", () => {
       Buffer.from([0xff, 0x00]),
       "Binary files differ",
     )).toThrow();
+  });
+});
+
+describe("Project event redaction", () => {
+  it("redacts question content without corrupting the opaque OpenCode request id", () => {
+    const requestId = "opaque-a-question-request";
+    const redactor = createProjectEventRedactor(new RunRedactor(["a"]));
+
+    const events = redactor.events("native-session", {
+      type: "question.asked",
+      request_id: requestId,
+      protocol: "question.v2",
+      questions: [{
+        header: "Audience",
+        question: "Name an audience",
+        options: [{ label: "All", description: "A broad audience" }],
+        multiple: false,
+        custom: true,
+      }],
+      tool: {
+        message_id: "message-a",
+        call_id: "call-a",
+      },
+    });
+
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      type: "question.asked",
+      request_id: requestId,
+      tool: {
+        message_id: "message-a",
+        call_id: "call-a",
+      },
+    });
+    const questionEvent = events[0];
+    expect(questionEvent?.type).toBe("question.asked");
+    if (questionEvent?.type !== "question.asked") throw new Error("expected question event");
+    expect(JSON.stringify(questionEvent.questions)).toContain("[REDACTED]");
+    redactor.clear();
   });
 });
 
@@ -1668,6 +1722,533 @@ describe("Project workspace lifecycle", () => {
     );
   });
 
+  it("delivers a queued native question response after committing the no-replay fence", async () => {
+    const prompt: ProjectPromptJob = {
+      id: "question-prompt",
+      orgId: job.orgId,
+      projectId: job.projectId,
+      creatorId: job.creatorId,
+      sessionId: "session-question",
+      sequence: 1,
+      text: "Prepare the report",
+      model: "openai/gpt-5",
+      opencodeSessionId: null,
+      opencodeMessageId: "msg_question",
+      sendAttemptedAt: null,
+      leaseOwner: "worker",
+    };
+    const question: ProjectQuestionJob = {
+      requestId: "question-request",
+      orgId: job.orgId,
+      projectId: job.projectId,
+      creatorId: job.creatorId,
+      sessionId: prompt.sessionId,
+      promptId: prompt.id,
+      protocol: "question.v2",
+      questions: [{
+        header: "Format",
+        question: "Choose a format",
+        options: [{ label: "PDF", description: "Portable document" }],
+        multiple: false,
+        custom: false,
+      }],
+      responseKind: "reply",
+      answers: [["PDF"]],
+      deliveryAttemptedAt: null,
+    };
+    let claimed = false;
+    let promptSent = false;
+    let responseDelivered = false;
+    const store = baseStore({
+      claimProjectPromptJobs: vi.fn(async () => {
+        if (claimed) return [];
+        claimed = true;
+        return [prompt];
+      }),
+      loadProjectQuestionJobs: vi.fn(async () =>
+        promptSent && !responseDelivered ? [question] : []),
+      completeProjectQuestionDelivery: vi.fn(async () => {
+        responseDelivered = true;
+        return true;
+      }),
+    });
+    const chat = quietChat();
+    vi.mocked(chat.listPendingQuestions).mockResolvedValue([{
+      type: "question.asked",
+      request_id: question.requestId,
+      protocol: question.protocol,
+      questions: question.questions,
+      tool: null,
+    }]);
+    vi.mocked(chat.sendPrompt).mockImplementation(async () => {
+      promptSent = true;
+    });
+    vi.mocked(chat.replyQuestion).mockImplementation(async () => undefined);
+    vi.mocked(chat.getMessageState).mockImplementation(async () => {
+      if (!promptSent) return "missing";
+      return responseDelivered ? "completed" : "pending";
+    });
+    vi.mocked(chat.getSessionState).mockResolvedValue("busy");
+
+    await runProjectWorkspaceJob({
+      job,
+      workerId: "worker",
+      store,
+      runtime: runtime(),
+      chat,
+      usage: usage(),
+      storage: emptyStorage,
+      goldenSnapshotId: "golden",
+      config,
+      signal: new AbortController().signal,
+    });
+
+    expect(store.markProjectQuestionDeliveryAttempted).toHaveBeenCalledWith(
+      expect.objectContaining({ prompt, question }),
+    );
+    expect(chat.replyQuestion).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.stringContaining(prompt.sessionId),
+      question.requestId,
+      "question.v2",
+      [["PDF"]],
+      expect.any(AbortSignal),
+    );
+    expect(
+      vi.mocked(store.markProjectQuestionDeliveryAttempted).mock
+        .invocationCallOrder[0],
+    ).toBeLessThan(vi.mocked(chat.replyQuestion).mock.invocationCallOrder[0]!);
+    expect(store.completeProjectQuestionDelivery).toHaveBeenCalledOnce();
+    expect(store.failProjectQuestionDelivery).not.toHaveBeenCalled();
+    expect(store.appendProjectSessionEvent).toHaveBeenCalledTimes(1);
+  });
+
+  it("recovers a missed native question after restart and persists its redacted content once", async () => {
+    const prompt: ProjectPromptJob = {
+      id: "recovered-question-prompt",
+      orgId: job.orgId,
+      projectId: job.projectId,
+      creatorId: job.creatorId,
+      sessionId: "session-recovered-question",
+      sequence: 1,
+      text: "Prepare the report",
+      model: "openai/gpt-5",
+      opencodeSessionId: "native-recovered-question",
+      opencodeMessageId: "msg_recovered_question",
+      sendAttemptedAt: new Date("2026-07-24T10:00:00.000Z"),
+      leaseOwner: "worker",
+    };
+    const nativeQuestion = {
+      type: "question.asked" as const,
+      request_id: "request-generic-secret-value",
+      protocol: "question.v2" as const,
+      questions: [{
+        header: "generic-secret-value audience",
+        question: "Use generic-secret-value?",
+        options: [{
+          label: "generic-secret-value",
+          description: "Connect with model-provider-value",
+        }],
+        multiple: false,
+        custom: false,
+      }],
+      tool: {
+        message_id: "message-generic-secret-value",
+        call_id: "call-model-provider-value",
+      },
+    };
+    let claimed = false;
+    let persisted = false;
+    const store = baseStore({
+      claimProjectPromptJobs: vi.fn(async () => {
+        if (claimed) return [];
+        claimed = true;
+        return [prompt];
+      }),
+      appendProjectSessionEvent: vi.fn(async () => {
+        persisted = true;
+        return 1;
+      }),
+    });
+    const chat = quietChat();
+    vi.mocked(chat.getSessionState).mockResolvedValue("busy");
+    vi.mocked(chat.getMessageState).mockImplementation(async () =>
+      persisted ? "completed" : "pending");
+    vi.mocked(chat.listPendingQuestions).mockImplementation(async () =>
+      persisted ? [] : [nativeQuestion]);
+
+    await runProjectWorkspaceJob({
+      job,
+      workerId: "worker",
+      store,
+      runtime: runtime(),
+      chat,
+      usage: usage(),
+      storage: emptyStorage,
+      goldenSnapshotId: "golden",
+      config,
+      signal: new AbortController().signal,
+    });
+
+    expect(store.appendProjectSessionEvent).toHaveBeenCalledTimes(1);
+    const persistedEvent = vi.mocked(store.appendProjectSessionEvent).mock.calls[0]?.[0].event;
+    expect(persistedEvent).toMatchObject({
+      type: "question.asked",
+      request_id: nativeQuestion.request_id,
+      protocol: "question.v2",
+      tool: nativeQuestion.tool,
+    });
+    const persistedQuestionContent = persistedEvent?.type === "question.asked"
+      ? JSON.stringify(persistedEvent.questions)
+      : "";
+    expect(persistedQuestionContent).not.toContain("generic-secret-value");
+    expect(persistedQuestionContent).not.toContain("model-provider-value");
+    expect(JSON.stringify(persistedEvent)).toContain("[REDACTED]");
+    expect(chat.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it("maps a durable redacted and bounded option back to the exact native label only in memory", async () => {
+    const prompt: ProjectPromptJob = {
+      id: "protected-option-prompt",
+      orgId: job.orgId,
+      projectId: job.projectId,
+      creatorId: job.creatorId,
+      sessionId: "session-protected-option",
+      sequence: 1,
+      text: "Prepare the report",
+      model: "openai/gpt-5",
+      opencodeSessionId: "native-protected-option",
+      opencodeMessageId: "msg_protected_option",
+      sendAttemptedAt: new Date("2026-07-24T10:00:00.000Z"),
+      leaseOwner: "worker",
+    };
+    const longSuffix = "x".repeat(RUN_CHAT_TITLE_MAX);
+    const rawLabel = `Use generic-secret-value ${longSuffix}`;
+    const unboundedRedactedLabel = `Use [REDACTED] ${longSuffix}`;
+    const redactedLabel =
+      `${unboundedRedactedLabel.slice(0, RUN_CHAT_TITLE_MAX - 3)}…`;
+    const question: ProjectQuestionJob = {
+      requestId: "request-protected-option",
+      orgId: job.orgId,
+      projectId: job.projectId,
+      creatorId: job.creatorId,
+      sessionId: prompt.sessionId,
+      promptId: prompt.id,
+      protocol: "question.v2",
+      questions: [{
+        header: "Credential",
+        question: "Choose a credential",
+        options: [{ label: redactedLabel, description: "Use the protected value" }],
+        multiple: true,
+        custom: true,
+      }],
+      responseKind: "reply",
+      answers: [[redactedLabel, "A custom member answer"]],
+      deliveryAttemptedAt: null,
+    };
+    const nativeQuestion = {
+      type: "question.asked" as const,
+      request_id: question.requestId,
+      protocol: question.protocol,
+      questions: [{
+        header: "Credential",
+        question: "Choose a credential",
+        options: [{ label: rawLabel, description: "Use the protected value" }],
+        multiple: true,
+        custom: true,
+      }],
+      tool: null,
+    };
+    let claimed = false;
+    let delivered = false;
+    const store = baseStore({
+      claimProjectPromptJobs: vi.fn(async () => {
+        if (claimed) return [];
+        claimed = true;
+        return [prompt];
+      }),
+      loadProjectQuestionJobs: vi.fn(async () => delivered ? [] : [question]),
+      completeProjectQuestionDelivery: vi.fn(async () => {
+        delivered = true;
+        return true;
+      }),
+    });
+    const chat = quietChat();
+    vi.mocked(chat.getSessionState).mockResolvedValue("busy");
+    vi.mocked(chat.getMessageState).mockImplementation(async () =>
+      delivered ? "completed" : "pending");
+    vi.mocked(chat.listPendingQuestions).mockResolvedValue([nativeQuestion]);
+
+    await runProjectWorkspaceJob({
+      job,
+      workerId: "worker",
+      store,
+      runtime: runtime(),
+      chat,
+      usage: usage(),
+      storage: emptyStorage,
+      goldenSnapshotId: "golden",
+      config,
+      signal: new AbortController().signal,
+    });
+
+    expect(store.failProjectQuestionDelivery).not.toHaveBeenCalled();
+    expect(chat.replyQuestion).toHaveBeenCalledWith(
+      expect.anything(),
+      prompt.opencodeSessionId,
+      question.requestId,
+      question.protocol,
+      [[rawLabel, "A custom member answer"]],
+      expect.any(AbortSignal),
+    );
+    expect(JSON.stringify(question)).not.toContain(rawLabel);
+  });
+
+  it("fails closed before the delivery fence when protected option labels collide", async () => {
+    const prompt: ProjectPromptJob = {
+      id: "ambiguous-option-prompt",
+      orgId: job.orgId,
+      projectId: job.projectId,
+      creatorId: job.creatorId,
+      sessionId: "session-ambiguous-option",
+      sequence: 1,
+      text: "Prepare the report",
+      model: "openai/gpt-5",
+      opencodeSessionId: "native-ambiguous-option",
+      opencodeMessageId: "msg_ambiguous_option",
+      sendAttemptedAt: new Date("2026-07-24T10:00:00.000Z"),
+      leaseOwner: "worker",
+    };
+    const redactedOption = { label: "[REDACTED]", description: "Protected" };
+    const question: ProjectQuestionJob = {
+      requestId: "request-ambiguous-option",
+      orgId: job.orgId,
+      projectId: job.projectId,
+      creatorId: job.creatorId,
+      sessionId: prompt.sessionId,
+      promptId: prompt.id,
+      protocol: "question",
+      questions: [{
+        header: "Credential",
+        question: "Choose one",
+        options: [redactedOption, redactedOption],
+        multiple: false,
+        custom: false,
+      }],
+      responseKind: "reply",
+      answers: [["[REDACTED]"]],
+      deliveryAttemptedAt: null,
+    };
+    const nativeQuestion = {
+      type: "question.asked" as const,
+      request_id: question.requestId,
+      protocol: question.protocol,
+      questions: [{
+        header: "Credential",
+        question: "Choose one",
+        options: [
+          { label: "generic-secret-value", description: "Protected" },
+          { label: "model-provider-value", description: "Protected" },
+        ],
+        multiple: false,
+        custom: false,
+      }],
+      tool: null,
+    };
+    let claimed = false;
+    const store = baseStore({
+      claimProjectPromptJobs: vi.fn(async () => {
+        if (claimed) return [];
+        claimed = true;
+        return [prompt];
+      }),
+      loadProjectQuestionJobs: vi.fn(async () => [question]),
+    });
+    const chat = quietChat();
+    vi.mocked(chat.getSessionState).mockResolvedValue("busy");
+    vi.mocked(chat.getMessageState).mockResolvedValue("pending");
+    vi.mocked(chat.listPendingQuestions).mockResolvedValue([nativeQuestion]);
+
+    await runProjectWorkspaceJob({
+      job,
+      workerId: "worker",
+      store,
+      runtime: runtime(),
+      chat,
+      usage: usage(),
+      storage: emptyStorage,
+      goldenSnapshotId: "golden",
+      config,
+      signal: new AbortController().signal,
+    });
+
+    expect(store.failProjectQuestionDelivery).toHaveBeenCalledWith(
+      expect.objectContaining({
+        question,
+        errorCode: "project_question_native_mismatch",
+      }),
+    );
+    expect(store.markProjectQuestionDeliveryAttempted).not.toHaveBeenCalled();
+    expect(chat.replyQuestion).not.toHaveBeenCalled();
+    expect(store.failProjectPrompt).toHaveBeenCalledWith(
+      expect.objectContaining({
+        errorCode: "project_question_delivery_interrupted",
+        retryAt: undefined,
+      }),
+    );
+  });
+
+  it("does not resurrect a delayed pending-question snapshot after the native turn completes", async () => {
+    const prompt: ProjectPromptJob = {
+      id: "stale-question-prompt",
+      orgId: job.orgId,
+      projectId: job.projectId,
+      creatorId: job.creatorId,
+      sessionId: "session-stale-question",
+      sequence: 1,
+      text: "Prepare the report",
+      model: "openai/gpt-5",
+      opencodeSessionId: "native-stale-question",
+      opencodeMessageId: "msg_stale_question",
+      sendAttemptedAt: new Date("2026-07-24T10:00:00.000Z"),
+      leaseOwner: "worker",
+    };
+    const staleQuestion = {
+      type: "question.asked" as const,
+      request_id: "request-stale-question",
+      protocol: "question.v2" as const,
+      questions: [{
+        header: "Format",
+        question: "Choose one",
+        options: [{ label: "PDF", description: "Portable document" }],
+        multiple: false,
+        custom: false,
+      }],
+      tool: null,
+    };
+    let claimed = false;
+    const store = baseStore({
+      claimProjectPromptJobs: vi.fn(async () => {
+        if (claimed) return [];
+        claimed = true;
+        return [prompt];
+      }),
+    });
+    const chat = quietChat();
+    vi.mocked(chat.getMessageState).mockResolvedValue("completed");
+    vi.mocked(chat.listPendingQuestions)
+      .mockResolvedValueOnce([staleQuestion])
+      .mockResolvedValue([]);
+
+    await runProjectWorkspaceJob({
+      job,
+      workerId: "worker",
+      store,
+      runtime: runtime(),
+      chat,
+      usage: usage(),
+      storage: emptyStorage,
+      goldenSnapshotId: "golden",
+      config,
+      signal: new AbortController().signal,
+    });
+
+    expect(store.appendProjectSessionEvent).not.toHaveBeenCalled();
+    expect(store.retireMissingProjectQuestions).toHaveBeenCalledWith(
+      expect.objectContaining({ pendingRequestIds: [] }),
+    );
+  });
+
+  it("never redelivers a question response after an ambiguous delivery fence", async () => {
+    const prompt: ProjectPromptJob = {
+      id: "ambiguous-question-prompt",
+      orgId: job.orgId,
+      projectId: job.projectId,
+      creatorId: job.creatorId,
+      sessionId: "session-ambiguous-question",
+      sequence: 1,
+      text: "Prepare the report",
+      model: "openai/gpt-5",
+      opencodeSessionId: "native-ambiguous-question",
+      opencodeMessageId: "msg_ambiguous_question",
+      sendAttemptedAt: new Date("2026-07-24T10:00:00.000Z"),
+      leaseOwner: "worker",
+    };
+    const question: ProjectQuestionJob = {
+      requestId: "question-request-ambiguous",
+      orgId: job.orgId,
+      projectId: job.projectId,
+      creatorId: job.creatorId,
+      sessionId: prompt.sessionId,
+      promptId: prompt.id,
+      protocol: "question",
+      questions: [{
+        header: "Proceed",
+        question: "Continue?",
+        options: [{ label: "Yes", description: "Continue" }],
+        multiple: false,
+        custom: false,
+      }],
+      responseKind: "reject",
+      answers: null,
+      deliveryAttemptedAt: new Date("2026-07-24T10:00:01.000Z"),
+    };
+    let claimed = false;
+    const store = baseStore({
+      claimProjectPromptJobs: vi.fn(async () => {
+        if (claimed) return [];
+        claimed = true;
+        return [prompt];
+      }),
+      loadProjectQuestionJobs: vi.fn(async () => [question]),
+      markProjectQuestionDeliveryAttempted: vi.fn(async () =>
+        "ambiguous" as const),
+    });
+    const chat = quietChat();
+    vi.mocked(chat.listPendingQuestions).mockResolvedValue([{
+      type: "question.asked",
+      request_id: question.requestId,
+      protocol: question.protocol,
+      questions: question.questions,
+      tool: null,
+    }]);
+    vi.mocked(chat.getSessionState).mockResolvedValue("busy");
+    vi.mocked(chat.getMessageState).mockResolvedValue("pending");
+
+    await runProjectWorkspaceJob({
+      job,
+      workerId: "worker",
+      store,
+      runtime: runtime(),
+      chat,
+      usage: usage(),
+      storage: emptyStorage,
+      goldenSnapshotId: "golden",
+      config,
+      signal: new AbortController().signal,
+    });
+
+    expect(chat.replyQuestion).not.toHaveBeenCalled();
+    expect(chat.rejectQuestion).not.toHaveBeenCalled();
+    expect(store.failProjectQuestionDelivery).toHaveBeenCalledWith(
+      expect.objectContaining({
+        question,
+        errorCode: "project_question_delivery_ambiguous",
+      }),
+    );
+    expect(chat.abortSession).toHaveBeenCalledWith(
+      expect.anything(),
+      "native-ambiguous-question",
+      expect.any(AbortSignal),
+    );
+    expect(store.failProjectPrompt).toHaveBeenCalledWith(
+      expect.objectContaining({
+        errorCode: "project_question_delivery_interrupted",
+        retryAt: undefined,
+      }),
+    );
+  });
+
   it("attributes deletion of a path created by another Session after turn start as a conflict", async () => {
     const prompt: ProjectPromptJob = {
       id: "delete-concurrent-create",
@@ -2047,6 +2628,54 @@ describe("Project workspace lifecycle", () => {
     expect(store.updateProjectWorkspaceState).toHaveBeenCalledWith(
       expect.objectContaining({ errorCode: "project_lease_lost" }),
     );
+  });
+
+  it("does not send a claimed prompt after Stop wins the final pre-send fence", async () => {
+    const prompt: ProjectPromptJob = {
+      id: "stopped-pre-send",
+      orgId: job.orgId,
+      projectId: job.projectId,
+      creatorId: job.creatorId,
+      sessionId: "session-stopped-pre-send",
+      sequence: 1,
+      text: "Do not dispatch this",
+      model: "openai/gpt-5",
+      opencodeSessionId: null,
+      opencodeMessageId: "msg_stopped_pre_send",
+      sendAttemptedAt: null,
+      leaseOwner: "worker",
+    };
+    let claimed = false;
+    const store = baseStore({
+      claimProjectPromptJobs: vi.fn(async () => {
+        if (claimed) return [];
+        claimed = true;
+        return [prompt];
+      }),
+      markProjectPromptSendAttempted: vi.fn(async () => "stopped" as const),
+    });
+    const chat = quietChat();
+
+    await runProjectWorkspaceJob({
+      job,
+      workerId: "worker",
+      store,
+      runtime: runtime(),
+      chat,
+      usage: usage(),
+      storage: emptyStorage,
+      goldenSnapshotId: "golden",
+      config,
+      signal: new AbortController().signal,
+    });
+
+    expect(chat.sendPrompt).not.toHaveBeenCalled();
+    expect(store.failProjectPrompt).not.toHaveBeenCalled();
+    expect(
+      vi.mocked(store.updateProjectWorkspaceState).mock.calls.some(
+        ([state]) => state.status === "error",
+      ),
+    ).toBe(false);
   });
 
   it("requeues a claimed prompt when its provider disconnects at the final pre-send fence", async () => {
