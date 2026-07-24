@@ -41,7 +41,7 @@ import {
   type SeedSkillVersionSpec,
 } from "./seed-demo-catalog";
 
-const DEFAULT_EMAIL = "admin@tvc.dev";
+const DEFAULT_EMAIL = "admin@thevibecompany.co";
 const DEFAULT_PASSWORD = "adminadmin";
 const DEFAULT_NAME = "Admin";
 const SEED_VERSION_NOTE = "Seeded for local development";

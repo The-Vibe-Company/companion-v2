@@ -364,7 +364,7 @@ function useCountdown(initial: number): [number, () => void] {
    Screens
    ============================================================================ */
 type Screen = "signin" | "signup" | "verify" | "forgot" | "reset";
-const DEV_LOGIN_EMAIL = "admin@tvc.dev";
+const DEV_LOGIN_EMAIL = "admin@thevibecompany.co";
 const DEV_LOGIN_PASSWORD = "adminadmin";
 const ENABLE_DEV_LOGIN = process.env.NODE_ENV === "development";
 

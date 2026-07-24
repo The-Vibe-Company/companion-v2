@@ -194,6 +194,17 @@ async function saveConnection(input: {
         scope: input.scope,
       },
     });
+    const { signalProjectProviderChange } = await import("./projectJobs");
+    await signalProjectProviderChange({
+      orgId: input.orgId,
+      provider: connection.provider,
+      connectionId: connection.id,
+      scope: connection.scope,
+      userId: connection.userId,
+      mode: "boundary",
+      actorId: input.actor.id,
+      database: tx as unknown as Db,
+    });
     return row(connection);
   }) as Promise<ModelProviderConnectionRow>;
 }
@@ -242,6 +253,23 @@ async function removeConnection(input: {
   if (input.scope === "personal") conditions.push(eq(schema.modelProviderConnections.userId, input.actor.id));
   await input.database.transaction(async (tx) => {
     await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`companion:provider-credential:${input.orgId}:${input.provider}`}))`);
+    const [connection] = await tx
+      .select()
+      .from(schema.modelProviderConnections)
+      .where(and(...conditions))
+      .for("update");
+    if (!connection) return;
+    const { signalProjectProviderChange } = await import("./projectJobs");
+    await signalProjectProviderChange({
+      orgId: input.orgId,
+      provider: connection.provider,
+      connectionId: connection.id,
+      scope: connection.scope,
+      userId: connection.userId,
+      mode: "immediate",
+      actorId: input.actor.id,
+      database: tx as unknown as Db,
+    });
     await tx.delete(schema.modelProviderConnections).where(and(...conditions));
     await tx.insert(schema.auditLog).values({
       orgId: input.orgId,

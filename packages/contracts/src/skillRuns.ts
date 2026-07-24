@@ -481,6 +481,9 @@ export const RUN_CHAT_TOOL_OUTPUT_MAX = 4_000;
 export const RUN_CHAT_DELTA_MAX = 32_768;
 export const RUN_CHAT_MESSAGE_MAX = 4_000;
 export const RUN_CHAT_TRANSCRIPT_TEXT_MAX = 256 * 1024;
+export const RUN_CHAT_QUESTION_MAX = 8;
+export const RUN_CHAT_QUESTION_OPTION_MAX = 12;
+export const RUN_CHAT_QUESTION_ANSWER_MAX = 12;
 
 /** A prior message when reloading a run's transcript. */
 export const runChatHistoryItemSchema = z.discriminatedUnion("kind", [
@@ -516,6 +519,70 @@ export type RunChatHistoryItem = z.infer<typeof runChatHistoryItemSchema>;
 export const runWorkingStateSchema = z.enum(["busy", "idle", "retry"]);
 export type RunWorkingState = z.infer<typeof runWorkingStateSchema>;
 
+/**
+ * Fine-grained, non-terminal activity derived from the OpenCode stream.
+ *
+ * `state` remains the authoritative busy/idle/retry signal. Activity is intentionally optional so
+ * older persisted events and Skill Run adapters keep their existing shape while Projects can
+ * explain what a live conversation is doing without exposing SDK event names.
+ */
+export const runActivityPhaseSchema = z.enum([
+  "thinking",
+  "responding",
+  "using_tool",
+  "waiting_for_answer",
+  "retrying",
+  "compacting",
+]);
+export type RunActivityPhase = z.infer<typeof runActivityPhaseSchema>;
+
+export const runRetryActionSchema = z
+  .object({
+    reason: z.string().max(RUN_CHAT_MESSAGE_MAX),
+    provider: z.string().max(RUN_CHAT_NAME_MAX),
+    title: z.string().max(RUN_CHAT_TITLE_MAX),
+    message: z.string().max(RUN_CHAT_MESSAGE_MAX),
+    label: z.string().max(RUN_CHAT_TITLE_MAX),
+    /** Only http(s) actions may cross the runtime boundary. */
+    link: z
+      .string()
+      .url()
+      .max(2_048)
+      .refine((value) => value.startsWith("https://") || value.startsWith("http://"))
+      .optional(),
+  })
+  .strict();
+export type RunRetryAction = z.infer<typeof runRetryActionSchema>;
+
+export const runQuestionOptionSchema = z
+  .object({
+    label: z.string().max(RUN_CHAT_TITLE_MAX),
+    description: z.string().max(RUN_CHAT_MESSAGE_MAX),
+  })
+  .strict();
+
+export const runQuestionSchema = z
+  .object({
+    header: z.string().max(RUN_CHAT_TITLE_MAX),
+    question: z.string().max(RUN_CHAT_MESSAGE_MAX),
+    options: z
+      .array(runQuestionOptionSchema)
+      .max(RUN_CHAT_QUESTION_OPTION_MAX),
+    multiple: z.boolean().default(false),
+    custom: z.boolean().default(false),
+  })
+  .strict();
+
+export const runQuestionToolSchema = z
+  .object({
+    message_id: z.string().max(RUN_CHAT_ID_MAX),
+    call_id: z.string().max(RUN_CHAT_ID_MAX),
+  })
+  .strict();
+
+export const runQuestionProtocolSchema = z.enum(["question", "question.v2"]);
+export type RunQuestionProtocol = z.infer<typeof runQuestionProtocolSchema>;
+
 export const runChatEventSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("ready"), session_id: z.string().max(RUN_CHAT_ID_MAX) }),
   z.object({
@@ -525,6 +592,10 @@ export const runChatEventSchema = z.discriminatedUnion("type", [
     tool: z.string().max(RUN_CHAT_NAME_MAX),
     title: z.string().max(RUN_CHAT_TITLE_MAX).nullable().default(null),
     input: z.string().max(RUN_CHAT_TOOL_INPUT_MAX).default(""),
+    /** Projects emit pending→running updates with the same call id. */
+    phase: z.enum(["pending", "running"]).optional(),
+    message_id: z.string().max(RUN_CHAT_ID_MAX).optional(),
+    progress: z.string().max(RUN_CHAT_MESSAGE_MAX).optional(),
   }),
   z.object({
     type: z.literal("tool.done"),
@@ -532,6 +603,8 @@ export const runChatEventSchema = z.discriminatedUnion("type", [
     title: z.string().max(RUN_CHAT_TITLE_MAX).nullable().default(null),
     output: z.string().max(RUN_CHAT_TOOL_OUTPUT_MAX).default(""),
     duration_ms: z.number().int().nonnegative().nullable().default(null),
+    message_id: z.string().max(RUN_CHAT_ID_MAX).optional(),
+    outcome: z.enum(["success", "error"]).optional(),
   }),
   z.object({ type: z.literal("text.delta"), message_id: z.string().max(RUN_CHAT_ID_MAX), delta: z.string().max(RUN_CHAT_DELTA_MAX) }),
   z.object({ type: z.literal("text.done"), message_id: z.string().max(RUN_CHAT_ID_MAX) }),
@@ -542,10 +615,46 @@ export const runChatEventSchema = z.discriminatedUnion("type", [
     state: runWorkingStateSchema,
     attempt: z.number().int().nonnegative().nullable().default(null),
     message: z.string().max(RUN_CHAT_MESSAGE_MAX).nullable().default(null),
+    activity: runActivityPhaseSchema.nullable().optional(),
+    /** Epoch milliseconds supplied by OpenCode; the UI derives a countdown from this value. */
+    retry_at: z.number().int().nonnegative().nullable().optional(),
+    retry_action: runRetryActionSchema.nullable().optional(),
+  }),
+  z.object({
+    type: z.literal("question.asked"),
+    request_id: z.string().max(RUN_CHAT_ID_MAX),
+    protocol: runQuestionProtocolSchema,
+    questions: z.array(runQuestionSchema).min(1).max(RUN_CHAT_QUESTION_MAX),
+    tool: runQuestionToolSchema.nullable().default(null),
+  }),
+  z.object({
+    type: z.literal("question.replied"),
+    request_id: z.string().max(RUN_CHAT_ID_MAX),
+    protocol: runQuestionProtocolSchema,
+    answers: z
+      .array(
+        z
+          .array(z.string().max(RUN_CHAT_MESSAGE_MAX))
+          .max(RUN_CHAT_QUESTION_ANSWER_MAX),
+      )
+      .max(RUN_CHAT_QUESTION_MAX),
+  }),
+  z.object({
+    type: z.literal("question.rejected"),
+    request_id: z.string().max(RUN_CHAT_ID_MAX),
+    protocol: runQuestionProtocolSchema,
   }),
   z.object({ type: z.literal("session.idle"), session_id: z.string().max(RUN_CHAT_ID_MAX) }),
   z.object({ type: z.literal("artifacts.collecting") }),
-  z.object({ type: z.literal("artifacts.updated"), count: z.number().int().nonnegative().max(RUN_ARTIFACT_MAX_FILES) }),
+  z.object({
+    type: z.literal("artifacts.updated"),
+    count: z.number().int().nonnegative().max(RUN_ARTIFACT_MAX_FILES),
+    /**
+     * Projects use the originating prompt as an idempotency key for their post-turn file
+     * reconciliation signal. Skill Runs omit it.
+     */
+    prompt_id: runUuidSchema.optional(),
+  }),
   z.object({
     type: z.literal("prompt.status"),
     prompt_id: runUuidSchema,

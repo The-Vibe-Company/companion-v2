@@ -1,6 +1,13 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  Fragment,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { MessageScroller, useMessageScrollerScrollable } from "@shadcn/react/message-scroller";
 import type { SkillRunDetail } from "@companion/contracts";
 import { formatDurationSeconds } from "@/lib/format";
@@ -10,6 +17,75 @@ import type { ChatItem, ChatState } from "./chatStream";
 import { copyRunText } from "./clipboard";
 import { toolIcon } from "./derive";
 import { RunAttachmentList } from "./ChatMedia";
+
+export type GeneratedProjectFile = {
+  id: string;
+  path: string;
+  name: string;
+  version: number;
+  contentType: string;
+  byteSize: number;
+  action: "created" | "updated";
+};
+
+type GeneratedProjectFileTurn = {
+  messageId: string;
+  files: GeneratedProjectFile[];
+};
+
+function ProjectGeneratedFilesMarker({
+  messageId,
+  files,
+  onOpenFiles,
+}: {
+  messageId: string;
+  files: GeneratedProjectFile[];
+  onOpenFiles: (
+    fileId?: string,
+    version?: number,
+    file?: GeneratedProjectFile,
+  ) => void;
+}) {
+  return (
+    <MessageScroller.Item
+      messageId={`project:generated-files:${messageId}`}
+      className="run-marker run-marker--wide"
+    >
+      <div className="run-generated-marker run-generated-marker--project">
+        <div className="run-generated-marker__summary">
+          <Icon name="folder-open" size={13} />
+          <span>Files from this task</span>
+          <small className="tnum">
+            {files.length} file{files.length === 1 ? "" : "s"}
+          </small>
+        </div>
+        <ul className="run-generated-marker__files" aria-label="Files from this task">
+          {files.map((file) => (
+            <li key={`${file.id}:${file.version}`}>
+              <button
+                type="button"
+                className="run-generated-marker__file"
+                data-project-file-id={file.id}
+                onClick={() => onOpenFiles(file.id, file.version, file)}
+                aria-label={`Open ${file.name}, ${file.action} version ${file.version}`}
+                title={file.path}
+              >
+                <Icon name="file" size={13} />
+                <span>
+                  <b>{file.name}</b>
+                  <small>
+                    {file.action === "created" ? "Created" : "Updated"} · v
+                    {file.version}
+                  </small>
+                </span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      </div>
+    </MessageScroller.Item>
+  );
+}
 
 function CopyMessageButton({ text }: { text: string }) {
   const [copyState, setCopyState] = useState<"idle" | "copied" | "error">("idle");
@@ -87,11 +163,93 @@ function ReasoningMarker({
   );
 }
 
-function WorkingMarker({ label }: { label: string }) {
+function WorkingMarker({
+  label,
+  detail,
+  variant,
+  retryAt,
+  retryAction,
+}: {
+  label: string;
+  detail?: string;
+  variant: "default" | "preparing";
+  retryAt?: number | null;
+  retryAction?: {
+    label: string;
+    message: string;
+    link?: string;
+  } | null;
+}) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!retryAt || retryAt <= Date.now()) return;
+    setNow(Date.now());
+    const timer = window.setInterval(() => {
+      const next = Date.now();
+      setNow(next);
+      if (next >= retryAt) window.clearInterval(timer);
+    }, 1_000);
+    return () => window.clearInterval(timer);
+  }, [retryAt]);
+  if (variant === "preparing") {
+    return (
+      <div
+        className="run-working run-working--preparing"
+        role="status"
+        aria-live="polite"
+      >
+        <span className="run-working__signal" aria-hidden="true">
+          <Icon name="loader" size={13} className="ls-spin" />
+        </span>
+        <span className="run-working__copy">
+          <strong>{label || "Preparing your Project"}</strong>
+          {detail && <small>{detail}</small>}
+        </span>
+      </div>
+    );
+  }
+  const retrying = label.startsWith("Retrying");
+  const retrySeconds = retryAt
+    ? Math.max(0, Math.ceil((retryAt - now) / 1_000))
+    : null;
+  const visibleDetail =
+    detail ??
+    (retrySeconds !== null
+      ? retrySeconds > 0
+        ? `Retrying in ${retrySeconds}s`
+        : "Trying again now"
+      : retryAction?.message);
+  const safeActionLink =
+    retryAction?.link &&
+    (retryAction.link.startsWith("https://") ||
+      retryAction.link.startsWith("http://"))
+      ? retryAction.link
+      : null;
   return (
-    <div className="run-working" role="status" aria-live="polite">
-      <Icon name="loader" size={12} className="ls-spin" />
-      <span>{label || "Working"}</span>
+    <div
+      className={`run-working${retrying ? " run-working--retrying" : ""}`}
+      role="status"
+      aria-live="polite"
+    >
+      <Icon
+        name={retrying ? "refresh-cw" : "loader"}
+        size={12}
+        className="ls-spin"
+      />
+      <span>
+        <strong>{label || "Working"}</strong>
+        {visibleDetail && <small>{visibleDetail}</small>}
+      </span>
+      {safeActionLink && (
+        <a
+          className="run-working__action"
+          href={safeActionLink}
+          target="_blank"
+          rel="noreferrer"
+        >
+          {retryAction?.label}
+        </a>
+      )}
     </div>
   );
 }
@@ -129,6 +287,14 @@ export function ChatTranscript({
   onToggleRow,
   onReconnect,
   onOpenFiles,
+  generatedFileTurns = [],
+  renderUserAttachments,
+  pendingInteraction,
+  showChatError = true,
+  ariaLabel = "Run transcript",
+  workingLabel,
+  workingDetail,
+  workingVariant = "default",
 }: {
   run: SkillRunDetail | null;
   chat: ChatState;
@@ -138,12 +304,31 @@ export function ChatTranscript({
   rowExpanded: (id: string, defaultOpen: boolean) => boolean;
   onToggleRow: (id: string, defaultOpen: boolean) => void;
   onReconnect: () => void;
-  onOpenFiles: (artifactId?: string) => void;
+  onOpenFiles: (
+    artifactId?: string,
+    version?: number,
+    file?: GeneratedProjectFile,
+  ) => void;
+  generatedFileTurns?: GeneratedProjectFileTurn[];
+  renderUserAttachments?: (
+    messageId: string | null,
+    text: string,
+  ) => ReactNode;
+  pendingInteraction?: ReactNode;
+  showChatError?: boolean;
+  ariaLabel?: string;
+  workingLabel?: string;
+  workingDetail?: string;
+  workingVariant?: "default" | "preparing";
 }) {
   const terminalStatus = run?.status ?? "starting";
   const revision = [
     chat.items.length,
     run?.artifacts.length ?? 0,
+    generatedFileTurns.reduce((count, turn) => count + turn.files.length, 0),
+    workingLabel ?? chat.working.label,
+    workingDetail ?? "",
+    pendingInteraction ? 1 : 0,
   ].join(":");
   const artifactPaths = useMemo(() => Object.fromEntries(
     (run?.artifacts ?? []).flatMap((artifact) => {
@@ -151,6 +336,30 @@ export function ChatTranscript({
       return [[normalized, artifact.id], [normalized.slice(2), artifact.id]];
     }),
   ), [run?.artifacts]);
+  const generatedFilesByEndItem = useMemo(() => {
+    const filesByMessage = new Map(
+      generatedFileTurns.map((turn) => [turn.messageId, turn.files]),
+    );
+    const result = new Map<string, { messageId: string; files: GeneratedProjectFile[] }>();
+    let activeMessageId: string | null = null;
+    let lastItemId: string | null = null;
+    const finishTurn = () => {
+      if (!activeMessageId || !lastItemId) return;
+      const files = filesByMessage.get(activeMessageId);
+      if (files?.length) {
+        result.set(lastItemId, { messageId: activeMessageId, files });
+      }
+    };
+    for (const item of chat.items) {
+      if (item.kind === "user") {
+        finishTurn();
+        activeMessageId = item.messageId;
+      }
+      if (activeMessageId) lastItemId = item.id;
+    }
+    finishTurn();
+    return result;
+  }, [chat.items, generatedFileTurns]);
 
   return (
     <MessageScroller.Provider
@@ -164,7 +373,7 @@ export function ChatTranscript({
         <MessageScroller.Viewport
           className="run-transcript__viewport"
           role="log"
-          aria-label="Run transcript"
+          aria-label={ariaLabel}
           aria-live="polite"
           aria-relevant="additions"
           aria-atomic="false"
@@ -184,24 +393,30 @@ export function ChatTranscript({
               </MessageScroller.Item>
             )}
             {chat.items.map((item) => {
+              let content: ReactNode;
               if (item.kind === "sys") {
-                return (
-                  <MessageScroller.Item key={item.id} messageId={item.id} className="run-marker">
+                content = (
+                  <MessageScroller.Item messageId={item.id} className="run-marker">
                     <span>{item.text}</span>
                   </MessageScroller.Item>
                 );
-              }
-              if (item.kind === "user") {
-                return (
-                  <MessageScroller.Item key={item.id} messageId={item.id} scrollAnchor className="run-message run-message--user">
+              } else if (item.kind === "user") {
+                content = (
+                  <MessageScroller.Item messageId={item.id} scrollAnchor className="run-message run-message--user">
                     {item.text && <div className="run-message__bubble">{item.text}</div>}
-                    <RunAttachmentList runId={run?.id ?? ""} attachments={item.attachments} />
+                    {renderUserAttachments ? (
+                      renderUserAttachments(item.messageId, item.text)
+                    ) : (
+                      <RunAttachmentList
+                        runId={run?.id ?? ""}
+                        attachments={item.attachments}
+                      />
+                    )}
                   </MessageScroller.Item>
                 );
-              }
-              if (item.kind === "tool") {
-                return (
-                  <MessageScroller.Item key={item.id} messageId={item.id} className="run-marker run-marker--wide">
+              } else if (item.kind === "tool") {
+                content = (
+                  <MessageScroller.Item messageId={item.id} className="run-marker run-marker--wide">
                     <ToolMarker
                       item={item}
                       expanded={rowExpanded(item.id, item.running)}
@@ -209,10 +424,9 @@ export function ChatTranscript({
                     />
                   </MessageScroller.Item>
                 );
-              }
-              if (item.kind === "reasoning") {
-                return (
-                  <MessageScroller.Item key={item.id} messageId={item.id} className="run-marker run-marker--wide">
+              } else if (item.kind === "reasoning") {
+                content = (
+                  <MessageScroller.Item messageId={item.id} className="run-marker run-marker--wide">
                     <ReasoningMarker
                       item={item}
                       expanded={rowExpanded(item.id, item.streaming)}
@@ -220,14 +434,28 @@ export function ChatTranscript({
                     />
                   </MessageScroller.Item>
                 );
+              } else {
+                content = (
+                  <MessageScroller.Item messageId={item.id} className="run-message run-message--assistant">
+                    <div className="run-message__assistant">
+                      <ChatMarkdown text={item.text} streaming={item.streaming} artifactPaths={artifactPaths} onOpenArtifact={onOpenFiles} />
+                      {!item.streaming && item.text && <CopyMessageButton text={item.text} />}
+                    </div>
+                  </MessageScroller.Item>
+                );
               }
+              const generatedTurn = generatedFilesByEndItem.get(item.id);
               return (
-                <MessageScroller.Item key={item.id} messageId={item.id} className="run-message run-message--assistant">
-                  <div className="run-message__assistant">
-                    <ChatMarkdown text={item.text} streaming={item.streaming} artifactPaths={artifactPaths} onOpenArtifact={onOpenFiles} />
-                    {!item.streaming && item.text && <CopyMessageButton text={item.text} />}
-                  </div>
-                </MessageScroller.Item>
+                <Fragment key={item.id}>
+                  {content}
+                  {generatedTurn && (
+                    <ProjectGeneratedFilesMarker
+                      messageId={generatedTurn.messageId}
+                      files={generatedTurn.files}
+                      onOpenFiles={onOpenFiles}
+                    />
+                  )}
+                </Fragment>
               );
             })}
             {run && run.artifacts.length > 0 && (
@@ -238,9 +466,24 @@ export function ChatTranscript({
                 </button>
               </MessageScroller.Item>
             )}
+            {pendingInteraction && (
+              <MessageScroller.Item
+                messageId={`${run?.id ?? "project"}:pending-interaction`}
+                scrollAnchor
+                className="run-marker run-marker--wide"
+              >
+                {pendingInteraction}
+              </MessageScroller.Item>
+            )}
             {showWorking && (
               <MessageScroller.Item messageId={`${run?.id ?? "run"}:working`} className="run-marker run-marker--wide">
-                <WorkingMarker label={chat.working.label} />
+                <WorkingMarker
+                  label={workingLabel ?? chat.working.label}
+                  detail={workingDetail}
+                  variant={workingVariant}
+                  retryAt={chat.working.retryAt}
+                  retryAction={chat.working.retryAction}
+                />
               </MessageScroller.Item>
             )}
             {chat.warnings.map((warning) => (
@@ -255,7 +498,9 @@ export function ChatTranscript({
                 </div>
               </MessageScroller.Item>
             ))}
-            {chat.error && chat.error !== "This session has ended." && (
+            {showChatError &&
+              chat.error &&
+              chat.error !== "This session has ended." && (
               <MessageScroller.Item messageId={`${run?.id ?? "run"}:error`} className="run-marker run-marker--wide">
                 <div className="run-transcript__error" role="alert">
                   {chat.error}
@@ -264,7 +509,7 @@ export function ChatTranscript({
                   )}
                 </div>
               </MessageScroller.Item>
-            )}
+              )}
           </MessageScroller.Content>
         </MessageScroller.Viewport>
         <JumpToLatest revision={revision} />

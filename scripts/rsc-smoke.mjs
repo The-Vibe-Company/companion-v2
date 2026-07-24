@@ -2,7 +2,7 @@
 
 const appUrl = (process.env.APP_URL ?? "http://127.0.0.1:3300").replace(/\/$/, "");
 const apiUrl = (process.env.COMPANION_API_URL ?? "http://127.0.0.1:3301").replace(/\/$/, "");
-const email = process.env.BROWSER_SMOKE_EMAIL ?? process.env.COMPANION_SEED_EMAIL ?? "admin@tvc.dev";
+const email = process.env.BROWSER_SMOKE_EMAIL ?? process.env.COMPANION_SEED_EMAIL ?? "admin@thevibecompany.co";
 const password = process.env.BROWSER_SMOKE_PASSWORD ?? process.env.COMPANION_SEED_PASSWORD ?? "adminadmin";
 
 const cookies = new Map();

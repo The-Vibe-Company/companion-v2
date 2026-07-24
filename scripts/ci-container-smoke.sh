@@ -10,22 +10,29 @@ network_args=(--network host)
 api_publish_args=()
 web_publish_args=()
 container_migration_url="${DATABASE_MIGRATION_URL:-$DATABASE_URL}"
-container_runtime_url="${DATABASE_RUNTIME_URL:-$DATABASE_URL}"
+container_api_url="${DATABASE_API_URL:-${DATABASE_RUNTIME_URL:-$DATABASE_URL}}"
+container_worker_url="${DATABASE_WORKER_URL:-${DATABASE_RUNTIME_URL:-$DATABASE_URL}}"
 if [ "$(uname -s)" = "Darwin" ]; then
   network_args=(--add-host host.docker.internal:host-gateway)
   api_publish_args=(-p 18082:18082)
   web_publish_args=(-p 18080:18080)
   container_migration_url="${container_migration_url/127.0.0.1/host.docker.internal}"
-  container_runtime_url="${container_runtime_url/127.0.0.1/host.docker.internal}"
+  container_api_url="${container_api_url/127.0.0.1/host.docker.internal}"
+  container_worker_url="${container_worker_url/127.0.0.1/host.docker.internal}"
 fi
 
 runtime_role_args=()
-if [ -n "${DATABASE_RUNTIME_ROLE:-}" ]; then
+if [ -n "${DATABASE_API_ROLE:-}" ] || [ -n "${DATABASE_WORKER_ROLE:-}" ]; then
+  runtime_role_args=(
+    -e "DATABASE_API_ROLE=${DATABASE_API_ROLE:-}"
+    -e "DATABASE_WORKER_ROLE=${DATABASE_WORKER_ROLE:-}"
+  )
+elif [ -n "${DATABASE_RUNTIME_ROLE:-}" ]; then
   runtime_role_args=(-e "DATABASE_RUNTIME_ROLE=$DATABASE_RUNTIME_ROLE")
 fi
 
 docker run --rm "${network_args[@]}" \
-  -e DATABASE_URL="$container_runtime_url" \
+  -e DATABASE_URL="$container_api_url" \
   -e DATABASE_MIGRATION_URL="$container_migration_url" \
   "${runtime_role_args[@]}" \
   companion-api:ci node dist/migrate.js
@@ -35,7 +42,7 @@ worker_id="$(docker run -d "${network_args[@]}" \
   -e COMPANION_RUNS_ENABLED=true \
   -e COMPANION_GOLDEN_SNAPSHOT_ID=ci-placeholder-snapshot \
   -e COMPANION_SECRETS_MASTER_KEY=CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk= \
-  -e DATABASE_URL="$container_runtime_url" \
+  -e DATABASE_URL="$container_worker_url" \
   -e VERCEL_TOKEN=ci-placeholder-token \
   -e VERCEL_TEAM_ID=ci-placeholder-team \
   -e VERCEL_PROJECT_ID=ci-placeholder-project \
@@ -77,7 +84,7 @@ test "$(docker inspect --format '{{.State.Running}}' "$worker_id")" = "true"
 api_id="$(docker run -d "${network_args[@]}" "${api_publish_args[@]}" \
   -e PORT=18082 \
   -e COMPANION_API_HOST=0.0.0.0 \
-  -e DATABASE_URL="$container_runtime_url" \
+  -e DATABASE_URL="$container_api_url" \
   -e COMPANION_WEB_URL=http://127.0.0.1:18080 \
   -e COMPANION_API_URL=http://127.0.0.1:18080 \
   -e BETTER_AUTH_URL=http://127.0.0.1:18080 \

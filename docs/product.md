@@ -45,11 +45,18 @@ For the technical design, see [`design.md`](design.md).
 |---|---|---|---|
 | **Org Admin / Platform Owner** | Stand up the org, set policy, curate the approved catalog, control providers/secrets/budget, keep it secure & self-hosted | No governance over agents; shadow AI tools; can't vet images/skills; no central audit | One portal where every resource is permissioned & attributable; approves the catalog once; sleeps at night |
 | **Builder / Developer** | Publish & version skills, organize them with labels, define agent and container templates, deploy fast | Skills scattered in repos; redeploying agents is CLI/IaC toil; hard to find what already exists | Publish a `SKILL.md` once, version it, file it under a label; deploy a Hermès agent with attached skills in minutes |
-| **Member / Consumer** | Discover & **use** the right agents/tools; contribute new skills | Doesn't know what exists or how to access it; gated behind ops; no UI | Browses the org catalog, opens a chat with a permitted agent, adds a skill — no shell required |
+| **Member / Consumer** | Keep useful work and context together; discover and reuse the right skills | Work is fragmented across one-off chats and technical tools; starting an agent means rebuilding its environment | Creates a private Project, chooses approved Skills and a model, then runs durable OpenCode sessions over shared files — no shell required |
 
 ---
 
 ## 3. The three pillars
+
+**Projects is the work surface across these pillars, not a fourth pillar.** A Project gives one member a
+private, durable Vercel Sandbox with synchronized Skills, automatically available Secrets, a default
+model, shared Files, and multiple OpenCode conversations. The machine suspends when idle and resumes
+with its state; members see `Conversations`, `Files`, `Skills`, and read-only `Access`, not runtime,
+secret values, or package machinery.
+Sharing a Project is deferred; creator privacy has no admin override.
 
 Every skill lives in one of two **libraries**. **My Skills** is private: a member authors skills there
 (only they can see them) and can also install org skills into it; it is organized by that member's own
@@ -95,6 +102,46 @@ version never changes the public release automatically.
 ---
 
 ## 4. Core user journeys
+
+### Project — configure once → run many conversations
+A Member selects **Projects** → presses `+` → chooses a name, default activated model, and accessible
+Skills. Companion prepares one private persistent sandbox. Every active generic Secret the member can
+use and every effective configured model-provider credential is injected at activation without exposing
+its value. The Member starts one or more conversations with a direct prompt, optional Files, and an optional
+model override. OpenCode handles the work; Companion renders its real transcript and tool activity.
+Conversations may run concurrently against the same Files, so overlapping writes are last-writer-wins.
+During a long turn the transcript explains only the current useful activity. The composer stays open:
+a new message is stored as `Runs next`, survives reload and sleep, and can be removed until it starts.
+Each conversation keeps one FIFO head plus at most five later messages, independent of whether the
+worker has claimed the head. Stopping the conversation also cancels every follow-up that has not
+started. When OpenCode needs a choice, Companion presents the native question inline and durably queues
+the member's answer; it is never mistaken for a tool permission or silently auto-approved.
+After ten idle minutes the VM checkpoints and stops, while the Project remains resumable.
+If recovery needs attention, the owner can explicitly retry the same workspace. The command never
+replaces the sandbox or checkpoint with a fresh empty Project.
+
+The Project remains useful as its history grows. Conversations stay in creation order rather than
+jumping when background work completes, and the five most recent appear beneath the Project in the
+sidebar. The full Project page searches the durable history and separates active from archived
+conversations. Members can rename, archive, undo, and restore; a running conversation stops before it
+archives, and conversations are never permanently deleted in V1. A background result remains marked
+`New result` or `Failed` until the member opens it.
+
+Files stay part of the conversation. Input attachments return beside the exact message that used them,
+and each turn identifies its exact created or updated file versions. Desktop preview keeps the
+conversation and composer visible; mobile uses a full drawer. A member can add shared Files directly
+to the Project without creating a synthetic conversation, or attach them to a prompt through selection,
+drag-and-drop, or paste so they remain tied to that message. A recoverable turn failure keeps the
+conversation, Files, and composer available; only a workspace-wide failure uses `Project needs
+attention`.
+
+The context rail has only `Files`, `Skills`, and `Access`. Access lists safe Secret names and sources
+plus model connections without values. Models use member-facing names such as `GPT-5 · OpenAI`, while
+technical routes remain in details. Projects may be archived and restored; permanent deletion is a
+separate destructive action that explicitly removes conversations, Files, and workspace state.
+
+Project instructions, memory across conversations, scheduled tasks, browser control, live artifacts,
+and native Office preview are deferred product capabilities rather than hidden parts of this flow.
 
 ### Onboarding — create org → invite members → first deploy
 1. An operator self-hosts (single `docker compose up`). The **first user becomes Org Owner**.
@@ -149,6 +196,16 @@ override. The only thing recorded per skill is its creator (provenance/audit), w
 of a personal skill. Skills are organized, not gated, by **labels** (shared org folders + private
 personal folders). See
 [`design.md`](design.md) for the full model.
+
+Projects follow the same strict creator-only rule as personal skills and skill runs. A same-org Owner or
+Admin cannot list, read, edit, attach skills to, or enumerate conversations from another member's
+Project. Attaching an organization skill grants no new access to that skill; attaching a personal skill
+is possible only while its creator can already access it.
+
+Project Skills update automatically between active turns. This deliberately treats every member allowed
+to publish an organization Skill as trusted code for Projects using that Skill: the updated package can
+run with every Secret available to the Project. The sandbox protects the control plane, not a Secret
+from code intentionally executed inside that sandbox.
 
 ---
 

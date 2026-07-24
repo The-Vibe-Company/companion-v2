@@ -15,6 +15,7 @@ export * from "./orgSettings";
 export * from "./avatar";
 export * from "./modelProviders";
 export * from "./skillRuns";
+export * from "./projects";
 export * from "./secrets";
 export * from "./billing";
 export * from "./github";

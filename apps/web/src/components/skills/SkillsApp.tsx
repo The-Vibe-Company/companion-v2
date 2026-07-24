@@ -53,6 +53,7 @@ import {
   skillsRouteSource,
   skillsRouteWithSkill,
   skillsRouteWithoutSkill,
+  skillsRouteWithoutRun,
   skillsRouteWithRun,
   type SkillsLibrary,
   type SkillsRoute,
@@ -206,6 +207,8 @@ export function SkillsApp({
   currentOrg,
   initialRoute,
   initialRouteSource,
+  projectsEnabled = false,
+  runSkillEnabled = false,
 }: {
   initialMineSkills: SkillVM[];
   initialOrgSkills: SkillVM[];
@@ -219,6 +222,8 @@ export function SkillsApp({
   currentOrg: OrgVM;
   initialRoute: SkillsRoute;
   initialRouteSource: SkillsRouteSource;
+  projectsEnabled?: boolean;
+  runSkillEnabled?: boolean;
 }) {
   const router = useRouter();
   const orgActions = useOrgActions();
@@ -383,7 +388,7 @@ export function SkillsApp({
   );
   // The open run transcript/chat (`?skill=…&run=…`); rendered instead of the skill detail.
   const [openRunId, setOpenRunId] = useState<string | null>(() =>
-    initialRoute.kind === "local" ? null : initialRoute.run ?? null,
+    !runSkillEnabled || initialRoute.kind === "local" ? null : initialRoute.run ?? null,
   );
   // Back from a run lands the detail on its Sessions tab; opening a skill normally resets it.
   const [detailInitialTab, setDetailInitialTab] = useState<"overview" | "sessions" | undefined>(undefined);
@@ -404,11 +409,16 @@ export function SkillsApp({
   const queuedPreferencesRef = useRef<SkillFilterPreferences | null>(null);
   const skipNextDebouncedPersistRef = useRef(false);
   const preferenceKey = JSON.stringify(initialFilterPreferences);
-  const initialRouteKey = skillsRouteKey(initialRoute);
+  const effectiveInitialRoute = useMemo(
+    () => (runSkillEnabled ? initialRoute : skillsRouteWithoutRun(initialRoute)),
+    [initialRoute, runSkillEnabled],
+  );
+  const effectiveInitialRouteKey = skillsRouteKey(effectiveInitialRoute);
 
   useEffect(() => {
     router.prefetch("/secrets");
-  }, [router]);
+    if (projectsEnabled) router.prefetch("/projects");
+  }, [projectsEnabled, router]);
 
   const shareableSkillForSlug = useCallback((slug: string): SkillVM | null => {
     const isShareable = (s: SkillVM) => s.id === slug && s.scope === "org" && !s.archived;
@@ -460,17 +470,26 @@ export function SkillsApp({
     setGroupBy(initialFilterPreferences.group_by);
     setSidebarOrder(initialFilterPreferences.sidebar_order);
     sidebarOrderRef.current = initialFilterPreferences.sidebar_order;
-    setSelection(selectionFromRoute(initialRoute));
+    setSelection(selectionFromRoute(effectiveInitialRoute));
     didInitializePersistenceRef.current = false;
     setPreferenceStatus("idle");
-    setOpenId(initialRoute.kind === "local" ? null : initialRoute.skill ?? null);
-    setOpenRunId(initialRoute.kind === "local" ? null : initialRoute.run ?? null);
-    setLastId(initialRoute.kind === "local" ? null : initialRoute.skill ?? null);
-    setCurrentView(skillsViewForRoute(initialRoute));
+    setOpenId(effectiveInitialRoute.kind === "local" ? null : effectiveInitialRoute.skill ?? null);
+    setOpenRunId(
+      effectiveInitialRoute.kind === "local" ? null : effectiveInitialRoute.run ?? null,
+    );
+    setLastId(effectiveInitialRoute.kind === "local" ? null : effectiveInitialRoute.skill ?? null);
+    setCurrentView(skillsViewForRoute(effectiveInitialRoute));
     if (typeof window !== "undefined" && isSkillsClientPath(window.location.pathname)) {
-      replaceSkillsUrl(initialRoute);
+      replaceSkillsUrl(effectiveInitialRoute);
     }
-  }, [currentOrg.id, preferenceKey, initialFilterPreferences, initialRoute, initialRouteKey, replaceSkillsUrl]);
+  }, [
+    currentOrg.id,
+    effectiveInitialRoute,
+    effectiveInitialRouteKey,
+    initialFilterPreferences,
+    preferenceKey,
+    replaceSkillsUrl,
+  ]);
 
   const flushPreferenceQueue = useCallback(async () => {
     if (persistInFlightRef.current) return;
@@ -1313,16 +1332,23 @@ export function SkillsApp({
   // --- Selection / navigation ------------------------------------------------
   const applySkillsRoute = useCallback(
     (route: SkillsRoute, history: "push" | "replace" | "none") => {
-      setCurrentView(skillsViewForRoute(route));
-      setSelection(selectionFromRoute(route));
-      const nextOpenId = route.kind === "local" ? null : route.skill ?? null;
+      const safeRoute = runSkillEnabled ? route : skillsRouteWithoutRun(route);
+      setCurrentView(skillsViewForRoute(safeRoute));
+      setSelection(selectionFromRoute(safeRoute));
+      const nextOpenId = safeRoute.kind === "local" ? null : safeRoute.skill ?? null;
       setOpenId(nextOpenId);
       setLastId(nextOpenId);
-      setOpenRunId(route.kind === "local" ? null : route.run ?? null);
-      if (history === "none" || typeof window === "undefined") return;
-      writeSkillsUrl(route, history);
+      setOpenRunId(safeRoute.kind === "local" ? null : safeRoute.run ?? null);
+      if (typeof window === "undefined") return;
+      if (history === "none") {
+        if (skillsRouteKey(safeRoute) !== skillsRouteKey(route)) {
+          writeSkillsUrl(safeRoute, "replace");
+        }
+        return;
+      }
+      writeSkillsUrl(safeRoute, history);
     },
-    [writeSkillsUrl],
+    [runSkillEnabled, writeSkillsUrl],
   );
   const selectMineAll = useCallback(() => applySkillsRoute({ lib: "mine", kind: "all" }, "push"), [applySkillsRoute]);
   const selectOrgAll = useCallback(() => applySkillsRoute({ lib: "org", kind: "all" }, "push"), [applySkillsRoute]);
@@ -1473,12 +1499,13 @@ export function SkillsApp({
   /** Open one of the current skill's runs (`?skill=…&run=…`) — deep-linkable transcript/chat. */
   const openRun = useCallback(
     (runId: string) => {
+      if (!runSkillEnabled) return;
       const skillId = openIdRef.current;
       if (!skillId) return;
       setOpenRunId(runId);
       pushSkillsUrl(skillsRouteWithRun(routeForCurrentSurface(skillId), skillId, runId));
     },
-    [pushSkillsUrl, routeForCurrentSurface],
+    [pushSkillsUrl, routeForCurrentSurface, runSkillEnabled],
   );
 
   /** Back from a run: return to the skill detail on its Sessions tab. */
@@ -1492,6 +1519,7 @@ export function SkillsApp({
   /** "Run again" from a frozen/errored transcript: back to the detail with the launcher prefilled. */
   const runAgain = useCallback(
     (draft: RunLauncherDraft) => {
+      if (!runSkillEnabled) return;
       setOpenRunId(null);
       setDetailInitialTab("sessions");
       const skillId = openIdRef.current;
@@ -1501,7 +1529,7 @@ export function SkillsApp({
       }
       replaceSkillsUrl(routeForCurrentSurface(skillId ?? undefined));
     },
-    [replaceSkillsUrl, routeForCurrentSurface],
+    [replaceSkillsUrl, routeForCurrentSurface, runSkillEnabled],
   );
 
   const go = useCallback(
@@ -1713,6 +1741,7 @@ export function SkillsApp({
         onCloseMobile={() => setMobileSidebarOpen(false)}
         personalSkillsEnabled={personalSkillsEnabled}
         onUpgrade={() => openSettings({ view: "billing" })}
+        projectsEnabled={projectsEnabled}
       />
       {mobileSidebarOpen && (
         <button
@@ -1725,7 +1754,7 @@ export function SkillsApp({
       <div className="main" aria-hidden={mobileSidebarOpen || undefined} inert={mobileSidebarOpen ? true : undefined}>
         {currentView === "local" ? (
           <LocalSkillsView skills={localSkills} workspaceId={currentOrg.id} workspaceName={currentOrg.name} />
-        ) : skill && openRunId ? (
+        ) : runSkillEnabled && skill && openRunId ? (
           <RunChatView key={openRunId} runId={openRunId} expectedSkillSlug={skill.id} onBack={closeRun} onRunAgain={runAgain} />
         ) : skill ? (
           <DetailView
@@ -1752,6 +1781,8 @@ export function SkillsApp({
             onRunAgainConsumed={() => setRunAgainRequest(null)}
             historyEnabled={initialBilling.entitlements.skillHistory}
             onUpgrade={() => openSettings({ view: "billing" })}
+            projectsEnabled={projectsEnabled}
+            runSkillEnabled={runSkillEnabled}
           />
         ) : currentView === "archived" ? (
           <ArchivedListView

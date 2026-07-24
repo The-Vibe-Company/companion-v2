@@ -114,6 +114,21 @@ export function canAccessRun(actorId: string, run: RunScopeRef): boolean {
   return run.creatorId === actorId;
 }
 
+/* ---- Per-project privacy gate ----------------------------------------------- */
+
+/** The minimal project shape the privacy gate needs: who created it. */
+export interface ProjectScopeRef {
+  creatorId: string;
+}
+
+/**
+ * Projects are private to their creator. Organization administrators deliberately receive no
+ * override, matching personal skills and skill-run conversations.
+ */
+export function canAccessProject(actorId: string, project: ProjectScopeRef): boolean {
+  return project.creatorId === actorId;
+}
+
 export interface SecretAccessRef {
   ownerId: string;
   audience: SecretAudience;

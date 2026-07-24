@@ -82,7 +82,8 @@ Companion adds `profiles`, `organizations`, `memberships`, `invitations`,
 `skill_filter_preferences`, `skill_comments`, `skill_comment_images`, `local_skill_installs`,
 `api_tokens`, `github_connections`, `github_sync_destinations`,
 `github_sync_destination_skills`, `billing_subscriptions`, `stripe_webhook_events`, `audit_log`, the secret-vault
-tables, and the skill-run tables described below. There are **no teams**:
+tables, the creator-private Project workspace/session/file tables, and the Skill Run tables described
+below. There are **no teams**:
 the hierarchy is `Organization → User`. The former decorative `organizations.plan` column no longer
 exists: raw provider state lives in at most one `billing_subscriptions` row per organization, while
 the effective plan is derived centrally at request time.
@@ -718,9 +719,13 @@ the lower limit.
 The worker re-admits every claimed activation immediately before provider I/O, including commands
 created by a replica from before the usage migration. In enforced mode it clamps the provider's
 initial timeout to the admitted reservation and extends that timeout only by minutes subsequently
-reserved for follow-up prompts. During a rolling deployment, an already-running named sandbox whose
-provider lease exceeds the fresh reservation is stopped, deleted, and recreated; stopped persistent
-sessions remain eligible for normal conversation reactivation. The admitted provider lifetime also ends at the next UTC month
+reserved for follow-up prompts or for the exact post-turn idle runway. The idle extension is
+idempotent: after the final active turn, the worker reserves only the delta required to reach the
+advertised idle deadline, then extends the provider to that admitted deadline. If quota denies the
+delta, the worker checkpoints and stops immediately instead of publishing an unreachable warm
+deadline. During a rolling deployment, an already-running named sandbox whose provider lease exceeds
+the fresh reservation is stopped, deleted, and recreated; stopped persistent sessions remain eligible
+for normal conversation reactivation. The admitted provider lifetime also ends at the next UTC month
 boundary, so a sandbox cannot carry unused prior-month capacity into a fresh pool. Deferred and
 membership-revocation cleanup settle the newest open activation before marking cleanup complete;
 provider teardown remains idempotent and is retried if accounting persistence fails.
@@ -871,10 +876,333 @@ per-version package endpoint repackages them as `.zip` on the fly. Clients never
 admin credentials. Public promotion persists a separate immutable, content-addressed ZIP snapshot
 and freezes its checksum and byte length; public clients verify both before extracting.
 
+## Projects (creator-private Cowork workspaces)
+
+A Project is one creator-private, durable work environment: one persistent named Vercel Sandbox, one
+OpenCode server, a shared managed filesystem, and many independent OpenCode sessions. Projects are the
+member-facing work surface across the three pillars, not another deployable resource. The UI calls the
+resource a **Project** and its sessions **Conversations**; `project_sessions` remains the internal
+storage name. Sandbox ids, ports, passwords, checkpoints,
+package paths, and provider state remain control-plane details.
+
+Projects are creator-private with no Owner/Admin override, matching personal Skills and Skill Runs.
+Every read and mutation requires current organization membership plus `creator_id = actor.id`; an
+inaccessible Project is indistinguishable from a missing one. Prompt text, transcripts, filenames, file
+contents, Secret names/keys, and plaintext never enter audit metadata.
+
+### Data model and isolation
+
+- `projects` stores tenant and creator identity, creator-scoped create idempotency key and payload
+  hash, name, default activated model, optimistic revision, `archived_at`, deletion intent, and
+  timestamps. Archived Projects leave the normal list but retain their conversations, Files, and
+  workspace until an explicit permanent deletion. It does not require an objective.
+- `project_workspaces` is the one-to-one desired/observed runtime record: deterministic sandbox name,
+  provider identity, encrypted OpenCode password, lifecycle state, activation and sync generations,
+  latest checkpoint, lease fencing, activity/deadline timestamps, and bounded user-safe failure
+  state. Golden snapshot and OpenCode release provenance remain deployment configuration rather than
+  user-editable Project state.
+- `project_skills` contains selected roots. Immutable `project_skill_snapshots` records the complete
+  exact dependency closure, versions, checksums, and mount order for each applied generation.
+- `project_sessions` stores one OpenCode session identity, immutable model plus the catalog's exact
+  provider/env-key declaration, title, `archived_at`, `last_viewed_at`, durable transcript cursor and
+  user-facing state. Active and archived libraries use the same canonical
+  `created_at DESC, id DESC` order, cursor pagination, and title search; runtime activity never
+  reorders a conversation. `last_viewed_at` makes a later terminal result durably unread until the
+  owner opens or acknowledges it. Archived conversations are hidden from normal lists and may be
+  restored, but V1 has no permanent conversation deletion. An empty env-key snapshot explicitly means
+  credentialless; otherwise admission requires the effective connection's key to match.
+  `project_prompts` is the idempotent per-session command outbox and keeps the durable nullable
+  sequence marker for post-turn Files reconciliation;
+  `project_session_events` backs bounded live replay. Events use the same closed, size-bounded
+  vocabulary as Skill Runs; completed prefixes are removed only after the bounded redacted transcript
+  snapshot records their sequence. Session detail exposes that folded prefix separately from the
+  current allocator watermark so late durable barriers remain discoverable. A single session preserves
+  prompt order while different sessions may work concurrently.
+- `project_questions` stores only normalized, redacted OpenCode questions and the creator's durable
+  reply/reject command. The API never answers OpenCode directly. The exact Project and prompt leases
+  fence the delivery attempt; an ambiguous crash after that fence fails closed rather than sending a
+  second answer. Stopping or terminalizing a prompt cancels only questions whose delivery fence was
+  never crossed; an attempted but unconfirmed response becomes a durable ambiguous failure instead of
+  being mislabeled as safely cancelled.
+- `project_attachments`, `project_files`, and immutable `project_file_versions` expose only the managed
+  `files/` tree. Every attachment retains its exact `prompt_id`; every created or updated file version
+  retains the session and prompt that produced it. This lets a reloaded transcript render input files
+  beside the originating member message and exact `Created files` / `Updated files` blocks after the
+  responsible turn. Files can also be added directly to the Project without a synthetic prompt. Those
+  S3-backed immutable versions advance a separate desired file revision; a warm supervisor applies the
+  complete managed projection only at a quiescent boundary before advancing the applied revision.
+  Runtime directories, `.claude`, OpenCode state, sandbox URLs, and arbitrary filesystem paths never
+  cross the API.
+- Activation input snapshots pin references to the exact generic Secret and model-provider credential
+  versions actually injected. They never copy plaintext or ciphertext.
+- Child foreign keys include tenant, Project, and creator identity. RLS derives creator ownership
+  through the Project, while narrow worker claim functions expose only fenced leased rows.
+- Skill Runs remain structurally and operationally independent. There is no `skill_runs.project_id`,
+  and `RunSandboxRuntime` keeps its one-run/one-sandbox contract.
+
+### Runtime boundary and lifecycle
+
+`ProjectWorkspaceRuntime` is a separate Core port implemented by the Vercel adapter in
+`packages/sandbox`. A deterministic Project name creates or restores a persistent sandbox from the
+golden snapshot. The provider configuration uses persistent snapshots, no snapshot expiration, and a
+three-checkpoint retention window. Project creation provisions immediately and applies Skills without
+injecting Secrets; the OpenCode server starts only for actual work.
+
+One fenced worker lease owns a Project activation. One server-level OpenCode event subscription is
+demultiplexed by `sessionID`, avoiding duplicate global streams while allowing concurrent native
+sessions. Each prompt passes its session's model explicitly to OpenCode; `opencode.json` is never
+rewritten per session. The client and every session, diff, permission, and event operation pin the
+managed `/vercel/sandbox/files` directory so OpenCode's session identity and message snapshots follow
+the same user-visible tree. OpenCode permissions are configured as allowed and any real permission
+request is answered automatically by the server adapter. Companion renders the resulting messages and
+tool activity but invents no plan, approval, review, or progress protocol. Message completion and session
+status are independent OpenCode views: after a turn becomes idle, the worker keeps reconciling for a
+bounded confirmation window before declaring an attempted prompt interrupted. It never replays the
+prompt during that window. An interrupted or failed turn is a recoverable conversation-level outcome,
+not a Project workspace failure: the transcript, attachments, and managed Files remain available and
+a later explicit prompt may continue the same OpenCode session. Companion never automatically retries
+a turn that may have produced external effects. Any `running` workspace whose worker lease expires is
+claimable even when no prompt remains and no idle deadline was installed, so a crash after durable turn
+completion or during an in-flight turn cannot strand the activation.
+
+Native OpenCode questions are distinct from permissions. The shared event subscription normalizes
+legacy and v2 question payloads into the bounded Project event vocabulary, persists the safe prompt
+under the current turn, and sets live activity to `waiting_for_answer`. A session-only mutation queues
+the creator's reply or rejection in `project_questions`; only the exact worker lease may cross the SDK
+side-effect boundary. The worker durably fences the delivery attempt first. If it crashes across that
+ambiguous boundary, recovery fails the question closed instead of risking a duplicate user action.
+Event delivery is not the recovery source of truth: on session bind and every pending-turn poll, the
+worker reads OpenCode's exact-session pending-question APIs twice and admits only entries unchanged in
+both snapshots, preventing an old in-flight list response from resurrecting a completed question.
+Legacy/v2 duplicates deterministically prefer v2. The worker persists only the redacted and
+UTF-8-bounded display shape; while the runtime is live it zips that shape to the native options in
+memory so a selected protected or truncated label can be sent back exactly. Ambiguous display-label
+collisions fail before the delivery fence, and raw labels never enter database rows, events, logs, or
+API responses. OpenCode's omitted `custom` field means custom input remains available; only an explicit
+`false` disables it. Aggregate question and answer bounds stay below their jsonb checks, compacting
+provider-authored display copy without changing cardinality and rejecting oversized member responses
+before persistence. Replayed native `question.replied` events may complete untouched questions but
+never overwrite an already queued creator response.
+
+The conversation maps a cold queued command to the real durable lifecycle rather than a generic
+spinner: `stopped`/`stopping` is waking, `queued`/`provisioning` is preparing, and a ready workspace
+with a queued command is starting the task. While that state is visible, the client temporarily
+refreshes the selected Project alongside the normal Session polling so provider or workspace failures
+replace the preparation state promptly. The UI never treats the session SSE connection event as proof
+that the sandbox is ready and never invents progress percentages or duration estimates. If the
+selected provider is unavailable, `Connection needed` replaces preparation on both cold and warm
+workspaces and links to model settings.
+
+Provider admission is revalidated before a stopped workspace reserves billing, at prompt claim, and
+at the final pre-send edge. A missing or incompatible effective connection leaves the command queued
+under `project_provider_unavailable`. A relevant effective provider connection signal reopens it,
+including an organization fallback exposed by deleting a personal override. Accepting a compatible
+prompt also revalidates and repairs a stale gate only while no runtime has received credentials; a
+warm runtime still crosses the provider recycle fence. An idle deadline can still checkpoint a
+previously warm VM. Create/resume uses a durable pending-admission token as its linearization point:
+later Secret/provider mutations fence that token for recycle, and the worker must consume the exact
+token under its lease before pinning credentials. Provider activation is secretless until that final
+preparation succeeds. A crash reuses the same token and billing revision; an ambiguous provider
+response is observed before either is cleared or settled.
+
+Skills reconcile only at a quiescent filesystem boundary. The worker materializes the latest accessible
+root versions and complete closure into a staging directory, verifies checksums, swaps the directory
+atomically, then restarts OpenCode. A failed update leaves the previous complete generation applied.
+Every personal and organization Skill update is automatic. Consequently, every member allowed to
+publish an organization Skill is deliberately trusted as a code author by all Projects using that
+Skill; sandboxing does not prevent that code from reading or exfiltrating injected credentials.
+
+At activation the worker resolves every active generic Secret the creator can currently use (owned,
+organization audience, or explicit restricted recipient) plus every effective configured provider
+credential, with personal-over-organization provider precedence. Control-plane
+credentials are never candidates. Duplicate environment keys, `OPENCODE_SERVER_*`, provider collisions,
+or more than 128 generic Secrets block before decryption, usage reservation, or provider activation.
+The workspace remains in the recoverable `project_environment_invalid` error state: queued prompts do
+not churn the worker claim, while a relevant Secret/provider change explicitly returns it to `queued`
+for one fresh admission check. Values exist only in worker memory and the
+OpenCode process environment, never in `.env` or Project files; the existing literal redactor protects
+Companion persistence and logs. It cannot protect a value transformed or exfiltrated by sandbox code.
+
+Additions and rotations apply at the next quiescent restart. Access revocation, provider disconnect, or
+membership loss closes admission, aborts active sessions, stops the VM, and rebuilds the environment.
+This cannot retract a credential that code already copied or transmitted.
+
+Different Sessions intentionally share one filesystem and may write concurrently. The contract is
+last-writer-wins, not merge isolation. File hashes and prompt workspace generations identify overlapping
+managed paths, previous versions remain available, and the UI warns without claiming automatic conflict
+resolution.
+
+`files/` is a managed product projection, not a second security boundary inside the Project VM. The
+Vercel adapter performs managed writes and captures through an in-sandbox `openat`/`O_NOFOLLOW`
+helper, rejects symlinks, hard links, reserved roots and unstable inode identities, then verifies the
+isolated bytes again before persistence. This closes the filesystem check/use race for Companion's
+projection code. It does not isolate mutually trusted code running under the same Project user:
+skills and OpenCode can still read and copy other sandbox paths while the VM is active.
+
+After ten minutes with no active prompt, pending synchronization, or upload, the worker persists
+transcripts and managed Files, checkpoints, stops the VM, and settles its `project` sandbox usage
+activation. After a non-zero turn, `Ready` is published only after the same usage activation and
+provider expiry both reach `lastActivityAt + 10 minutes`, bounded by the activation maximum. The worker
+extends the durable reservation by only the missing delta; a quota refusal checkpoints and stops the
+workspace as a normal scale-to-zero outcome. A later prompt resumes the named sandbox or restores the
+last checkpoint. Missing provider state plus a missing checkpoint becomes `needs_attention`; Companion
+never fabricates an empty recovery.
+
+A follow-up admitted inside that warm window first observes the named VM and revalidates the exact
+activation authority and desired/applied Skill and File revisions. When all remain current and the
+existing OpenCode health endpoint answers with the pinned server credential, the new lease rebuilds
+only its in-memory redactor, reconnects the single SSE recorder, and sends through the existing server.
+It does not call provider activation, replace either projection, or restart OpenCode. Prompt acceptance
+clears the prior durable idle deadline to fence a simultaneous deadline claimant, so this fast path
+also accepts the equivalent fresh `lastActivityAt + idle duration` proof from that same transaction.
+An unhealthy server falls back to the full fenced activation/materialization/start path; pending Files
+reconciliation, projection drift, or a non-current authority always bypasses fast reattachment.
+
+An explicit creator retry only returns that terminal workspace to the durable queue and clears its
+retry schedule/error counter. It preserves sandbox, checkpoint, generation, activation-admission, and
+accounting identity, so a duplicate retry is harmless and recovery still cannot create an empty Project.
+Deleting a Project or removing its creator's membership schedules idempotent sandbox, checkpoint, and
+object cleanup.
+
+Project creation admits an exact ten-minute activation reservation in the same transaction as the
+durable Project. Every accepted prompt reserves seven additional minutes on the open activation; if
+the prior activation is settled, that prompt admits the next ten-minute reactivation instead. Expired
+unstarted and month-boundary reservations are re-admitted in full before their deadline is refreshed.
+The initial reservation remains exactly ten minutes. At the final post-turn boundary, the worker
+idempotently reserves only any extra milliseconds needed for the ten-minute idle window, then reads
+the refreshed durable budget before extending Vercel. Provider expiry and the member-visible idle
+deadline therefore cannot outrun admitted usage.
+
+### Member-facing Cowork surface
+
+The `Skills | Projects` route switch keeps both libraries one click apart. In Projects mode every
+creator-owned Project appears in a scrollable sidebar disclosure with at most five non-archived
+conversations beneath it, followed by `All conversations · N`. The sidebar, Project page, and API all
+use canonical `created_at DESC, id DESC` order. Only `Working`, `New result`, and `Failed` are promoted
+to sidebar status; ready and idle state stay quiet. A background terminal result sets unread state,
+increments the Project count, and may produce a clickable in-app notification. Opening the
+conversation acknowledges it.
+
+The Project page is a conversation library, not a runtime dashboard. It has paginated title search and
+exactly two views, `Conversations` and `Archived`. A conversation can be renamed, archived, restored,
+or acknowledged. Archiving active work requires `Stop and archive`; inactive work archives
+immediately and may offer a local Undo toast. There is no permanent conversation deletion. Archiving
+a Project is a normal reversible mutation after active conversations stop. Permanent Project deletion
+remains a separate confirmation that names the loss of conversations, Files, and workspace state.
+
+The composer remains available during active work. A follow-up is persisted in the existing
+per-session prompt outbox and presented as `Runs next`; the first non-terminal prompt is the active
+head and only later queued prompts appear in the compact FIFO list. Admission locks the session and
+permits at most five followers after that head whether it is queued, dispatching, or running; the UI
+keeps an overflow draft editable while explaining why it cannot yet be added. A member may remove an
+item until dispatch starts. Stop linearizes against prompt claim, cancels every untouched queued item,
+and fences a prompt claimed just before Stop at the final pre-send boundary. An unanswered question is
+cancelled only before its response-delivery fence; Stop turns an already attempted response into an
+explicit ambiguous failure after the native session is stopped. Companion exposes neither queue
+reordering nor `Send now` until a separate OpenCode contract proves safe steering.
+
+Live status is an ephemeral explanation over durable state: preparing, thinking, using a humanized
+tool action, responding, retrying, compacting, or waiting for an answer. Provider retry remains amber
+ongoing work and may show the real attempt/countdown supplied by OpenCode. A native question renders
+inline and supports its declared single, multiple, and custom answers; it never enters the permission
+approval flow.
+
+Workspace failures that block every conversation render as `Project needs attention` and may offer the
+explicit retry described above. A failed or interrupted turn instead uses the non-destructive message
+`Previous task stopped. Your conversation and files are safe.` with `Continue`, `Start new
+conversation`, and `Archive`. The composer remains enabled when a new prompt can resume the session.
+OpenCode codes and diagnostics live behind `Technical details`; primary copy never exposes workers,
+snapshots, control-plane terms, sandbox ids, or server credentials.
+
+Each member message restores its durable prompt attachments. Each completed turn may render the exact
+created and updated file versions attributed to that prompt. Desktop opens Files in a persistent
+non-modal side panel so the transcript and composer remain usable; mobile uses a focus-trapped drawer
+with Escape and focus restoration. Images, PDF, text, Markdown, JSON, and CSV can be previewed inline.
+Office formats are download/open-external in V1. Composer file input supports selection, drag-and-drop,
+and paste; those attachments stay prompt-linked. The Project Files surface also accepts direct uploads
+as shared durable desired state without creating a conversation. Conversation text drafts are restored
+from per-conversation `sessionStorage`.
+
+Each completed turn first persists the exact versions attributable through OpenCode's message diff
+under the Project file-commit lock. Absolute paths are accepted only beneath the managed Project
+root and normalized before attribution. Completion leaves
+`project_prompts.file_reconciliation_event_sequence` null as a durable post-turn work marker. A new
+lease reconstructs every such prompt before provider-unavailable, warm-idle, Ready, checkpoint, or
+full S3 projection paths can discard recoverable runtime bytes. Recovery resolves the exact admitted
+literal set only to build the redactor, clears the decrypted containers, and scans the activated
+runtime before projecting durable Files.
+
+The complete bounded, symlink-safe `files/` scan is coalesced until no prompt remains active. When
+exactly one completed prompt is pending, newly discovered diff-less versions are attributed to it;
+when several prompts could own the same bytes, the last-writer-wins version remains explicitly
+neutral rather than guessed. The scan never infers a neutral deletion. A creator upload that races
+completion is projected only after recoverable runtime output is durable, and before any Files
+barrier. That quiescent boundary keeps one turn from stealing another prompt's attribution or
+tombstoning an upload. Once the scan and pending upload projection are durable, the worker locks each
+completed prompt row, allocates one session event sequence, stores it on the prompt, and appends one
+idempotent `artifacts.updated` barrier. Distinct prompts are never coalesced.
+
+Session detail returns both cursors: `latest_event_sequence` is the event prefix already folded into
+the transcript and remains the SSE replay starting point; `current_event_sequence` is the allocator
+maximum, including a post-transcript Files barrier. The client ignores out-of-order Files responses
+and reopens a terminal event stream when the current cursor advances, so a slow provider scan has no
+guessed UI timeout.
+
+The contextual rail has `Files`, `Skills`, and `Access`. `Access` returns and renders only safe
+metadata: Secret names and sources plus effective model providers and sources, never values or
+ciphertext. Model selection uses a friendly model/provider label such as `GLM 5.2 · Z.ai`, with the
+exact route reserved for technical details. The full Project graph, all archive/read mutations, prompt
+attachments, file attribution, and Access metadata remain creator-only under the service-layer gate
+and parent-derived RLS; a same-org Owner/Admin has no override.
+
+### Endpoints (session-only)
+
+`GET/POST /v1/projects`, `GET/PATCH/DELETE /v1/projects/:id`,
+`POST /v1/projects/:id/retry`,
+`PUT /v1/projects/:id/skills`, `GET/POST /v1/projects/:id/sessions`,
+`GET /v1/projects/:id/sessions/:sessionId`,
+`PATCH /v1/projects/:id/sessions/:sessionId`,
+`GET /v1/projects/:id/sessions/:sessionId/attachments/:attachmentId`,
+`POST /v1/projects/:id/sessions/:sessionId/prompts`,
+`POST /v1/projects/:id/sessions/:sessionId/prompts/:promptId/cancel`,
+`POST /v1/projects/:id/sessions/:sessionId/questions/:requestId/reply`,
+`POST /v1/projects/:id/sessions/:sessionId/questions/:requestId/reject`,
+`POST /v1/projects/:id/sessions/:sessionId/stop`,
+`GET /v1/projects/:id/sessions/:sessionId/events`,
+`GET/POST /v1/projects/:id/files`, `GET /v1/projects/:id/files/:fileId`,
+`GET /v1/projects/:id/files/:fileId/versions`, and
+`GET /v1/projects/:id/files/:fileId/versions/:version` are
+verified-browser-session-only. PAT and Agent Auth callers are rejected. `GET /sessions` accepts `q`,
+`view=active|archived`, `cursor`, and a bounded `limit`, then returns a canonical page plus
+`next_cursor`. The session PATCH permits only title, archive/restore, read acknowledgement, and the
+explicit stop-while-archiving signal. Project PATCH also carries reversible archive state. Project
+creation, Session creation, and follow-up prompts use mandatory idempotency keys. Direct Project file
+uploads publish immutable S3-backed versions and advance the file-projection fence. The API validates
+and persists desired state but never calls Vercel or OpenCode.
+
+The Skills UI action **Run skill** selects a Project, adds the Skill root when absent, and creates a
+Project Session. The legacy standalone Skill Run routes keep their existing meaning for compatibility;
+the public Skills API and bundled Companion Skill contract do not change.
+
+The complete surface is rollout-gated by `COMPANION_PROJECTS_ENABLED` and the exact authenticated email
+domain `thevibecompany.co` (case-insensitive, with no subdomain or suffix matching). Both conditions
+gate API admission and web navigation; direct Project URLs redirect to Skills and session-only API
+requests outside the cohort return `404`. Worker claiming remains controlled by the deployment flag so
+already-admitted work can converge safely. The switch is omitted entirely outside the cohort rather
+than rendered disabled. Vercel credentials and golden-snapshot settings remain worker-only.
+
+Project instructions, cross-conversation memory, scheduled tasks, browser control, live artifacts, and
+native Office preview are deliberately outside this Cowork pass.
+
 ## Skill Runs (one-shot sandboxed sessions)
 
-Skill runs are private, durable sandbox sessions launched from a published skill. Any member may run
-a skill they can access. Creation atomically pins the exact root version, its complete accessible
+Skill runs are private, durable sandbox sessions launched from a published skill. During the internal
+rollout, the Run Skill action, Sessions history, transcript routes, and session-only API are available
+only when `COMPANION_RUNS_ENABLED` is active and the authenticated member uses the exact
+`thevibecompany.co` email domain. Outside that cohort the Skills library remains unchanged and exposes
+no Run Skill affordance; direct transcript parameters are removed and API requests return `404`.
+Within the eligible cohort, any member may run a skill they can access. Creation atomically pins the
+exact root version, its complete accessible
 dependency closure, every selected vault-secret version, and every declared non-sensitive value.
 Prompts and attachments belong to one run; each attachment is linked to the exact initial/follow-up
 prompt that introduced it. Named personal configurations save only model, live secret
@@ -1279,7 +1607,8 @@ tokens, the bundled Companion skill's API surface is unchanged.
 
 ### Non-goals (v1)
 
-Arbitrary undeclared variables, organization-shared configurations, fan-out, and golden-snapshot management UI
+Arbitrary undeclared variables, organization-shared configurations, fan-out, and golden-snapshot
+management UI
 (`COMPANION_GOLDEN_SNAPSHOT_ID` is the single golden) remain out of scope.
 Real-sandbox verification lives in `pnpm --filter @companion/sandbox smoke:vercel` (cred-gated,
 not CI).
@@ -1327,15 +1656,35 @@ open after a transient settlement failure, independently of provider cleanup ret
 that recovers the recorder before completion changes the degraded predicate and makes the stale
 provider response inapplicable.
 
-Production API and worker processes connect through `DATABASE_URL` using a dedicated login with
-`NOSUPERUSER`, `NOBYPASSRLS`, no table ownership, and no membership in the migration-owner role.
-`DATABASE_MIGRATION_URL` is available only to the API migration step. With
-`DATABASE_RUNTIME_ROLE` configured, that step applies `packages/db/runtime-role-grants.sql` under the
-same advisory lock after every migration; the file is also the manual recovery path. It grants
-ordinary table access plus only the narrow cross-tenant discovery functions needed before a tenant
-GUC exists. Organization creation and domain joining generate/select an org id first, then run under
-normal RLS with explicit tenant context. Running application processes as the table owner, superuser,
-or a `BYPASSRLS` role invalidates the forced-RLS security boundary.
+Production API and worker processes use distinct `LOGIN NOSUPERUSER NOBYPASSRLS NOINHERIT` roles,
+with no table ownership or membership in the migration-owner role. The API service `DATABASE_URL`
+uses the API role and the worker service `DATABASE_URL` uses the worker role.
+`DATABASE_MIGRATION_URL` is available only to the API migration step; that step also receives
+`DATABASE_API_ROLE` and `DATABASE_WORKER_ROLE` and applies
+`packages/db/runtime-role-grants.sql` under the same advisory lock after every migration. The API
+role owns creator-facing Project CRUD and pre-tenant discovery only. Project claim, lease entry,
+heartbeat, removal, and cleanup functions are executable only by the worker role. Narrow boolean
+worker-readiness probes are shared so the API can disable launches when no compatible worker is live.
+`companion_project_exact_lease_visible` is shared because the creator-facing RLS row predicate calls
+it internally; it returns only a boolean and cannot confer access without the server-issued exact
+lease context. `DATABASE_RUNTIME_ROLE` remains a legacy union role for simple installs, not the
+production topology. The grant hook rejects any API↔worker membership that permits `SET ROLE` and
+revokes wrong-side function grants on every application, so reusing a former union-role name cannot
+silently preserve worker authority. A split-role cutover may name the old login once through
+`DATABASE_RETIRED_RUNTIME_ROLE`; the hook removes its current grants and the migration owner's
+table/sequence default privileges before operators disable or drop that login. Organization creation
+and domain joining generate/select an org id first, then
+run under normal RLS with explicit tenant context. Running application processes as the table owner,
+superuser, or a `BYPASSRLS` role invalidates the forced-RLS security boundary.
+
+In the split production topology, direct DML is common only on tables that have RLS enabled. The
+unprotected Better Auth, profile, and Agent Auth tables are granted explicitly to the API role and
+never to the worker. Neither role receives direct access to worker-heartbeat tables: the worker
+mutates them through worker-only `SECURITY DEFINER` functions and the API observes only the narrow
+readiness probes. Split roles receive no table or sequence default privileges; after each migration,
+the grant hook reclassifies the current schema, so a newly created unprotected table fails closed
+until it is deliberately assigned. The legacy single runtime role retains broad current/default
+grants solely for backward compatibility.
 
 The bundled Companion skill performs write-only secret creation and binding plus secret-aware
 install/update/sync.

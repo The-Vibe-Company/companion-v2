@@ -31,6 +31,57 @@ export function databaseRuntimeRole(env: NodeJS.ProcessEnv = process.env): strin
   return configured;
 }
 
+export interface DatabaseRuntimeRoles {
+  apiRole: string;
+  workerRole: string;
+  legacySingleRole: boolean;
+  retiredRuntimeRole: string | null;
+}
+
+function databaseRole(name: string, configured: string | undefined): string | null {
+  if (configured === undefined || configured === "") return null;
+  if (configured !== configured.trim() || !DATABASE_ROLE_PATTERN.test(configured)) {
+    throw new Error(`${name} must be a lowercase PostgreSQL identifier (1-63 characters)`);
+  }
+  return configured;
+}
+
+export function databaseRuntimeRoles(env: NodeJS.ProcessEnv = process.env): DatabaseRuntimeRoles | null {
+  const apiRole = databaseRole("DATABASE_API_ROLE", env.DATABASE_API_ROLE);
+  const workerRole = databaseRole("DATABASE_WORKER_ROLE", env.DATABASE_WORKER_ROLE);
+  const legacyRole = databaseRuntimeRole(env);
+  const retiredRuntimeRole = databaseRole(
+    "DATABASE_RETIRED_RUNTIME_ROLE",
+    env.DATABASE_RETIRED_RUNTIME_ROLE,
+  );
+
+  if (apiRole !== null || workerRole !== null) {
+    if (legacyRole !== null) {
+      throw new Error("DATABASE_RUNTIME_ROLE cannot be combined with DATABASE_API_ROLE or DATABASE_WORKER_ROLE");
+    }
+    if (apiRole === null || workerRole === null) {
+      throw new Error("DATABASE_API_ROLE and DATABASE_WORKER_ROLE must be configured together");
+    }
+    if (apiRole === workerRole) {
+      throw new Error("DATABASE_API_ROLE and DATABASE_WORKER_ROLE must be distinct");
+    }
+    return { apiRole, workerRole, legacySingleRole: false, retiredRuntimeRole };
+  }
+
+  if (retiredRuntimeRole !== null) {
+    throw new Error(
+      "DATABASE_RETIRED_RUNTIME_ROLE requires DATABASE_API_ROLE and DATABASE_WORKER_ROLE",
+    );
+  }
+  if (legacyRole === null) return null;
+  return {
+    apiRole: legacyRole,
+    workerRole: legacyRole,
+    legacySingleRole: true,
+    retiredRuntimeRole: null,
+  };
+}
+
 async function isReadableMigrationFolder(path: string): Promise<boolean> {
   try {
     await access(join(path, "meta", "_journal.json"), constants.R_OK);
@@ -135,23 +186,34 @@ export function extractRuntimeRoleGrantBlock(source: string): string {
 
 async function applyRuntimeRoleGrants(
   client: ReturnType<typeof postgres>,
-  runtimeRole: string,
+  runtimeRoles: DatabaseRuntimeRoles,
   grantsFile: string,
 ): Promise<void> {
   const source = await readFile(grantsFile, "utf8");
   const grantBlock = extractRuntimeRoleGrantBlock(source);
-  await client`select set_config('companion.runtime_role', ${runtimeRole}, false)`;
+  if (runtimeRoles.legacySingleRole) {
+    await client`select set_config('companion.runtime_role', ${runtimeRoles.apiRole}, false)`;
+  } else {
+    await client`select set_config('companion.api_role', ${runtimeRoles.apiRole}, false)`;
+    await client`select set_config('companion.worker_role', ${runtimeRoles.workerRole}, false)`;
+    if (runtimeRoles.retiredRuntimeRole) {
+      await client`select set_config('companion.retired_runtime_role', ${runtimeRoles.retiredRuntimeRole}, false)`;
+    }
+  }
   try {
     await client.unsafe(grantBlock);
   } finally {
+    await client.unsafe("reset companion.api_role").catch(() => undefined);
+    await client.unsafe("reset companion.worker_role").catch(() => undefined);
+    await client.unsafe("reset companion.retired_runtime_role").catch(() => undefined);
     await client.unsafe("reset companion.runtime_role").catch(() => undefined);
   }
 }
 
 export async function run(): Promise<void> {
   const migrationsFolder = await resolveMigrationsFolder();
-  const runtimeRole = databaseRuntimeRole();
-  const grantsFile = runtimeRole ? await resolveRuntimeRoleGrantsFile() : null;
+  const runtimeRoles = databaseRuntimeRoles();
+  const grantsFile = runtimeRoles ? await resolveRuntimeRoleGrantsFile() : null;
   const client = postgres(databaseUrl(), { max: 1 });
   const database = drizzle(client);
   let lockAcquired = false;
@@ -164,9 +226,12 @@ export async function run(): Promise<void> {
     lockAcquired = true;
     await migrate(database, { migrationsFolder });
     console.log("Drizzle migrations applied");
-    if (runtimeRole && grantsFile) {
-      await applyRuntimeRoleGrants(client, runtimeRole, grantsFile);
-      console.log(`Runtime database grants applied to ${runtimeRole}`);
+    if (runtimeRoles && grantsFile) {
+      await applyRuntimeRoleGrants(client, runtimeRoles, grantsFile);
+      const roleSummary = runtimeRoles.legacySingleRole
+        ? runtimeRoles.apiRole
+        : `API ${runtimeRoles.apiRole} and worker ${runtimeRoles.workerRole}`;
+      console.log(`Runtime database grants applied to ${roleSummary}`);
     }
   } finally {
     if (lockAcquired) {

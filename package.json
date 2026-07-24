@@ -13,6 +13,7 @@
       "brace-expansion@<1.1.16": "1.1.16",
       "brace-expansion@>=3.0.0 <5.0.7": "5.0.7",
       "js-yaml@>=4.0.0 <4.3.0": "4.3.0",
+      "postcss": "8.5.18",
       "sharp": "0.35.3",
       "vite": "6.4.3",
       "shell-quote": "1.10.0"
@@ -27,7 +28,7 @@
     "db:seed": "pnpm --filter @companion/db seed",
     "dev": "bash scripts/dev-stack.sh",
     "dev:conductor": "bash scripts/dev-conductor.sh",
-    "dev:app": "pnpm exec concurrently -k -n api,worker,web \"COMPANION_API_HOST=${COMPANION_API_HOST:-127.0.0.1} pnpm --filter @companion/api dev\" \"pnpm --filter @companion/worker dev\" \"pnpm --filter @companion/web dev --hostname ${COMPANION_WEB_HOST:-127.0.0.1} --port ${COMPANION_WEB_PORT:-3000}\"",
+    "dev:app": "pnpm exec concurrently -k -n api,worker,web \"COMPANION_API_HOST=${COMPANION_API_HOST:-127.0.0.1} pnpm --filter @companion/api dev\" \"bash scripts/dev-worker.sh pnpm --filter @companion/worker dev\" \"pnpm --filter @companion/web dev --hostname ${COMPANION_WEB_HOST:-127.0.0.1} --port ${COMPANION_WEB_PORT:-3000}\"",
     "dev:check": "bash scripts/dev-stack-check.sh",
     "lint": "turbo run lint",
     "typecheck": "turbo run typecheck",

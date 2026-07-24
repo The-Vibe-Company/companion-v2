@@ -25,6 +25,66 @@ export interface RunWorkerConfig {
   recorderUnavailableMs: number;
 }
 
+export interface ProjectWorkerConfig {
+  enabled: boolean;
+  region: string;
+  concurrency: number;
+  claimIntervalMs: number;
+  leaseSeconds: number;
+  heartbeatMs: number;
+  idleMs: number;
+  sandboxTimeoutMs: number;
+  maxActivationMs: number;
+}
+
+/**
+ * Cowork Projects are feature-gated until the durable API, runtime and UI ship together. The
+ * ten-minute idle default is a product invariant; the override exists for deterministic tests and
+ * operator cost tuning.
+ */
+export function projectWorkerConfig(
+  env: NodeJS.ProcessEnv = process.env,
+): ProjectWorkerConfig {
+  const leaseSeconds = boundedInteger(env.COMPANION_PROJECT_LEASE_SECONDS, 30, {
+    min: 10,
+    max: 300,
+  });
+  return {
+    enabled: ["1", "true"].includes(
+      env.COMPANION_PROJECTS_ENABLED?.trim().toLowerCase() ?? "",
+    ),
+    region: env.COMPANION_SANDBOX_REGION?.trim() || "iad1",
+    concurrency: boundedInteger(env.COMPANION_PROJECT_WORKER_CONCURRENCY, 2, {
+      min: 1,
+      max: 16,
+    }),
+    claimIntervalMs: boundedInteger(env.COMPANION_PROJECT_CLAIM_INTERVAL_MS, 1_000, {
+      min: 100,
+      max: 60_000,
+    }),
+    leaseSeconds,
+    heartbeatMs: boundedInteger(
+      env.COMPANION_PROJECT_HEARTBEAT_MS,
+      Math.max(1_000, Math.floor((leaseSeconds * 1_000) / 3)),
+      { min: 1_000, max: Math.max(1_000, leaseSeconds * 1_000 - 1_000) },
+    ),
+    idleMs: boundedInteger(env.COMPANION_PROJECT_IDLE_MS, 10 * 60 * 1_000, {
+      min: 60_000,
+      max: 24 * 60 * 60 * 1_000,
+    }),
+    sandboxTimeoutMs: boundedInteger(
+      env.COMPANION_PROJECT_SANDBOX_TIMEOUT_MS,
+      60 * 60 * 1_000,
+      { min: 10 * 60 * 1_000, max: 24 * 60 * 60 * 1_000 },
+    ),
+    maxActivationMs: boundedInteger(
+      env.COMPANION_PROJECT_MAX_ACTIVATION_MS,
+      24 * 60 * 60 * 1_000,
+      { min: 60 * 60 * 1_000, max: 7 * 24 * 60 * 60 * 1_000 },
+    ),
+  };
+}
+
 export function runWorkerConfig(env: NodeJS.ProcessEnv = process.env): RunWorkerConfig {
   const leaseSeconds = boundedInteger(env.COMPANION_RUN_LEASE_SECONDS, 30, { min: 10, max: 300 });
   return {

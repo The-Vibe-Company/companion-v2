@@ -178,11 +178,23 @@ components:
 
 ## Overview
 
-Companion v2 is an operator-grade, self-hostable portal for deploying, governing, and sharing AI agents, curated containers, and skills across organizations and teams. It extends the single-operator Companion v1 fleet dashboard into a multi-tenant portal, but the visual job is the same: make live resource state legible at a glance.
+Companion v2 is an operator-grade, self-hostable portal for deploying, governing, and sharing AI agents, curated containers, and skills across organizations and their members. It extends the single-operator Companion v1 fleet dashboard into a multi-tenant portal, but the visual job is the same: make live resource state legible at a glance.
 
 The interface is product software, not marketing. It should feel calm, dense, precise, trustworthy, and engineering-grade. Reference quality is Linear, Stripe, and Raycast: familiar controls, compact hierarchy, real data shown plainly, and no decorative drama. The operator should be able to scan health, scope, ownership, provider state, and pending changes in seconds.
 
-Design for technical users who read resource ids, scopes, roles, providers, model routes, vault names, lifecycle states, and audit records directly. Do not prettify machine values. Do not hide operational truth behind marketing language. Healthy state should be quiet. Broken state should be unmistakable without alarm theater.
+Companion has two product registers that share the same shell, tokens, density, and operational truth:
+
+- **Projects** is the outcome-oriented Cowork surface. It is designed for members who keep durable
+  files, start direct OpenCode conversations, and reuse synchronized capabilities without needing to
+  understand sandboxes, runtimes, or package layouts.
+- **Skills and administration** remain operator-oriented. Technical users read resource ids, scopes,
+  roles, providers, model routes, vault names, lifecycle states, and audit records directly.
+
+Progressive disclosure connects the two registers. Projects uses plain-language primary labels such as
+`Conversation`, `Files`, `Skills`, and `Access`; exact runtime state and machine values remain available in
+secondary details and Activity. Do not prettify machine values when they are shown. Do not hide
+operational truth behind marketing language. Healthy state should be quiet. Broken state should be
+unmistakable without alarm theater.
 
 This document describes the Companion theme as implemented in `apps/web`. Light is the default; a full dark
 theme and user-selectable accent presets are available (see Colors). CSS custom properties live in
@@ -258,7 +270,23 @@ UI copy is terse and operational. Say what happened, what will happen next, or w
 
 ## Layout
 
-Use a dense operator layout. The primary shell is a fixed sidebar (244px in the Skills Hub) plus compact topbar, with the main content constrained enough to scan but not padded into a landing page. Layout tokens: `sidebar-width` 244px, `topbar-height` 56px, `content-max` 1120px, `drawer-width` 460px.
+Use a dense product layout. The primary shell is a fixed sidebar (244px) plus compact topbar, with the
+main content constrained enough to scan but not padded into a landing page. Layout tokens:
+`sidebar-width` 244px, `topbar-height` 56px, `content-max` 1120px, `drawer-width` 460px.
+
+The sidebar begins with a compact segmented route switch for **Skills** and **Projects**. It is a pair
+of links with `aria-current`, not a tablist. Projects lists every creator-owned project inside one
+independently scrollable region. Each project is a disclosure: its live and recent conversations appear
+directly below it, while the complete history remains on the Project page. Show at most five
+non-archived conversations per Project in canonical `created_at DESC, id DESC` order, followed by
+`All conversations · N`. A conversation never changes position because it started, completed, failed,
+or was viewed. The project row owns the settings and new-conversation actions. The Projects `+` opens
+the compact Project setup dialog.
+
+During the internal rollout, this route switch is shown only to authenticated members whose email uses
+the exact `thevibecompany.co` domain and only while Projects is enabled. Everyone else keeps the normal
+Skills navigation with no disabled, teaser, or empty Projects control. The same quiet omission applies
+to Run Skill and its Sessions history when that capability is unavailable.
 
 Prefer tables and structured rows for resources. Companion lists fleets, containers, skills, members, providers, scopes, audit events, and planned changes. These surfaces should be compact and sortable/filterable over time, not inflated into repeated marketing cards.
 
@@ -302,6 +330,67 @@ Selection uses a tinted row background plus an inset accent edge via box-shadow.
 
 **Sidebar** contains the Companion brand mark, wordmark, workspace context, primary navigation, counts where useful, and a quiet environment/footer indicator. Active nav uses `surface-raised` with foreground text; unread counts may use the accent fill. The brand mark tile uses the official transparent Companion mark on a tokenized `surface` tile with a `line` border, so it works across light, dark, and accent presets.
 
+**Projects overview and creation** keeps the shell stable and uses one calm primary canvas. Existing
+projects use the standard compact resource table with real search and status filters. `New project`
+opens one short dialog: name, default model, synchronized Skills, and a read-only summary of the
+Secrets Companion will make available. Do not add an objective-writing step or a configuration wizard.
+
+**Project workspace** is a compact Cowork page, not a dashboard of cards. Conversations are the primary
+column. The header contains the Project name, quiet workspace status, `New conversation`, and one
+overflow menu. The main column has search plus exactly two views: `Conversations` and `Archived`.
+Rows prioritize the title, then creation date and, only when useful, `Working`, `New result`, or
+`Failed`. Rename, archive, and restore live in the row overflow menu; active work uses
+`Stop and archive`. There is no permanent conversation deletion. A restrained secondary rail contains
+`Files`, `Skills`, and `Access`, with each section opening a complete surface rather than silently
+truncating its content. `New conversation` asks only for the work, optional files, and a model override;
+the Project default is preselected. A conversation sends the prompt directly to OpenCode and renders
+the real transcript, tool activity, errors, and generated Files. Do not invent Companion plan,
+approval, progress, or deliverable-review states. OpenCode permissions are handled automatically by
+the runtime and do not create approval UI.
+While a turn is active, keep the composer available and label its one action `Runs next`. Durable
+follow-ups appear in a compact FIFO list above the composer and may be removed until dispatch begins.
+Keep at most five behind the current task and explain the bound without discarding the draft. `Stop`
+cancels every follow-up that has not started. Do not expose `Send now`, queue reordering, or steering
+until OpenCode's busy-session semantics are proven independently. A native OpenCode question is not a
+permission: render it as one restrained inline answer card, keep its option labels and custom answer
+affordance accessible, and persist the answer command before the runtime receives it.
+When a queued message must wake or prepare the persistent workspace, replace the generic working
+marker with one compact inline state in the transcript: `Waking up your Project`, `Preparing your
+Project`, then `Starting your task`. Drive those labels from the durable workspace and conversation
+states, update them in place, and return to real OpenCode activity as soon as the turn starts. Never
+show a fabricated percentage, countdown, or time estimate. If the selected model connection is no
+longer available, replace preparation with the actionable `Connection needed` state; never promise
+that the task is about to start indefinitely.
+During live work, the transcript edge may use only short semantic activity such as `Thinking`,
+`Reviewing project files`, `Updating files`, `Responding`, `Retrying`, or `Waiting for your answer`.
+Retry is amber ongoing work with its attempt and real provider countdown when supplied; tool names,
+payloads, and provider diagnostics stay inside technical details.
+
+Conversation read state is durable. Completion in the background marks the conversation `New result`
+or `Failed`, increments a quiet Project count, and produces a clickable in-product notification.
+Opening the conversation acknowledges it. System notifications are not part of this surface.
+
+Display model routes as a member-facing model and provider pair such as `GPT-5 · OpenAI` or
+`GLM 5.2 · Z.ai`; preserve the exact route only in technical details. `Access` is read-only and names
+the available Secrets, their source, and effective model connections without revealing values.
+
+The Files surface exposes only the Project's managed `files/` tree; runtime state, synchronized Skill
+packages, OpenCode storage, and sandbox addresses stay hidden. Preserve nested paths relative to
+`files/`. Every prompt attachment stays associated with the message that introduced it. After a turn,
+show one compact `Created files` or `Updated files` block linked to the exact immutable versions
+captured for that prompt. On desktop, file selection opens a non-modal side panel while the transcript
+and composer remain usable. On mobile, it opens an accessible drawer. Preview images, PDF, text,
+Markdown, JSON, and CSV inline; Office files remain download/open-externally in this version. New files
+can be added directly from the Project Files surface or attached to a prompt through selection,
+drag-and-drop, and paste. Direct additions become durable Project Files without creating a synthetic
+conversation; prompt attachments remain linked to their originating message. Existing managed Files
+are available to every conversation in the Project.
+A quiet History action appears only when a file has retained versions; it lists exact
+versions, timestamps, sizes, and conflict warnings and downloads that immutable version without
+pretending to merge concurrent writes. On narrow screens the sidebar becomes the existing mobile
+rail/drawer, the Project rail follows the session list, dialogs fill the available width, and the
+conversation composer respects the safe area. Store a text draft per conversation in `sessionStorage`.
+
 **Summary counts** are slim inline rows. Use tabular numbers, muted labels, and status dot plus label. They are not cards.
 
 **Resource rows** are the core component. Rows are dense, keyboard-focusable, and full-width. Default rows use surface plus hairline dividers; hover uses `surface-raised`; selected uses `accent-tint` and a 2px inset accent edge. Copy affordances can reveal on hover, but keyboard users must still reach them.
@@ -336,7 +425,13 @@ controls and metadata, not by turning rows or groups into cards.
 
 **Slide-over drawer** is the default detail surface. Width is about 460px on desktop and full-width on narrow screens. Header contains the resource name, status badge, and close button. Body uses definition lists, error blocks, code previews, and related resource chips. Footer contains the primary resource action and supporting actions.
 
-**Error banners and blocks** use `danger-tint`, `danger-line`, and readable text. Error details that are machine output should be monospace and preserve line breaks.
+**Error banners and blocks** reserve `danger-tint` and `danger-line` for a Project workspace failure
+that blocks every conversation. A recoverable turn failure uses `warn-tint` and says that the previous
+task stopped while the conversation and files remain safe. Keep the composer active when another
+message can continue; offer `Continue`, `Start new conversation`, and `Archive`. Never replay a turn
+that may already have produced effects. Put OpenCode codes and diagnostics behind
+`Technical details`; member-facing copy must not mention workers, snapshots, or the control plane.
+Machine output remains monospace and preserves line breaks.
 
 **Empty states** are plain. Use a short title, one sentence of consequence, and one clear action when appropriate. No illustrations are required.
 

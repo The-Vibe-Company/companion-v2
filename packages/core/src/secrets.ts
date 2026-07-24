@@ -359,6 +359,15 @@ export async function createSecret(input: {
       targetId: secretId,
       metadata: { audience: input.value.audience, recipientCount: recipients.length, version: 1 },
     });
+    const { signalProjectSecretChange } = await import("./projectJobs");
+    await signalProjectSecretChange({
+      orgId: input.orgId,
+      secretId,
+      mode: "boundary",
+      changeKind: "create",
+      actorId: input.actor.id,
+      database: tx as unknown as Db,
+    });
   });
   return getSecret({ actor: input.actor, orgId: input.orgId, secretId, database });
 }
@@ -379,7 +388,30 @@ export async function updateSecret(input: {
     ? await validateRecipients(database, input.orgId, input.actor.id, requestedRecipients)
     : [];
   if (audience === "restricted" && !recipients.length) throw new Error("restricted secrets require at least one other member");
+  const runtimeProjectionChanged =
+    input.value.key !== undefined ||
+    input.value.audience !== undefined ||
+    input.value.recipient_ids !== undefined;
   await database.transaction(async (tx) => {
+    if (runtimeProjectionChanged) {
+      const { signalProjectSecretChange } = await import("./projectJobs");
+      // Fence an already-admitted pre-exposure projection before mutating it. The previous
+      // metadata is also carried into the post-update signal so an ACL removal can be correlated
+      // with the creator whose invalid projection it actually repairs.
+      await signalProjectSecretChange({
+        orgId: input.orgId,
+        secretId: input.secretId,
+        mode: "immediate",
+        changeKind: "key_acl",
+        previous: {
+          key: secret.key,
+          audience: secret.audience,
+          recipientIds: secret.recipientIds,
+        },
+        actorId: input.actor.id,
+        database: tx as unknown as Db,
+      });
+    }
     await tx.update(schema.secrets).set({
       ...(input.value.name ? { name: input.value.name } : {}),
       ...(input.value.key ? { key: input.value.key } : {}),
@@ -395,6 +427,38 @@ export async function updateSecret(input: {
       targetId: input.secretId,
       metadata: { audience, recipientCount: recipients.length, metadataChanged: Boolean(input.value.name || input.value.key) },
     });
+    if (runtimeProjectionChanged) {
+      const { signalProjectSecretChange } = await import("./projectJobs");
+      // Removed access to an already-injected source closes admission immediately; current/new
+      // access and key changes are applied at the next quiescent boundary. A display-name-only edit
+      // does not change the runtime environment and must not recycle any Project.
+      await signalProjectSecretChange({
+        orgId: input.orgId,
+        secretId: input.secretId,
+        mode: "immediate",
+        changeKind: "key_acl",
+        previous: {
+          key: secret.key,
+          audience: secret.audience,
+          recipientIds: secret.recipientIds,
+        },
+        actorId: input.actor.id,
+        database: tx as unknown as Db,
+      });
+      await signalProjectSecretChange({
+        orgId: input.orgId,
+        secretId: input.secretId,
+        mode: "boundary",
+        changeKind: "key_acl",
+        previous: {
+          key: secret.key,
+          audience: secret.audience,
+          recipientIds: secret.recipientIds,
+        },
+        actorId: input.actor.id,
+        database: tx as unknown as Db,
+      });
+    }
   });
   return getSecret({ actor: input.actor, orgId: input.orgId, secretId: input.secretId, database });
 }
@@ -427,18 +491,41 @@ export async function rotateSecret(input: {
     const encrypted = encryptSecretValue({ orgId: input.orgId, secretId: input.secretId, version, value: input.value });
     await tx.insert(schema.secretVersions).values({ orgId: input.orgId, secretId: input.secretId, version, ...encrypted, createdBy: input.actor.id });
     await audit(tx as unknown as Db, { orgId: input.orgId, actorId: input.actor.id, action: "secret.rotate", targetType: "secret", targetId: input.secretId, metadata: { version } });
+    const { signalProjectSecretChange } = await import("./projectJobs");
+    await signalProjectSecretChange({
+      orgId: input.orgId,
+      secretId: input.secretId,
+      mode: "boundary",
+      changeKind: "rotate",
+      actorId: input.actor.id,
+      database: tx as unknown as Db,
+    });
   });
   return getSecret({ actor: input.actor, orgId: input.orgId, secretId: input.secretId, database });
 }
 
 export async function deleteSecret(input: { actor: SecretActorContext; orgId: string; secretId: string; database?: Db }): Promise<void> {
   const database = input.database ?? db;
-  await assertSecretOwner(database, input.actor, input.orgId, input.secretId);
+  const secret = await assertSecretOwner(database, input.actor, input.orgId, input.secretId);
   const now = new Date();
   await database.transaction(async (tx) => {
     await tx.update(schema.secrets).set({ disabledAt: now, deletedAt: now, updatedAt: now }).where(and(eq(schema.secrets.orgId, input.orgId), eq(schema.secrets.id, input.secretId)));
     await tx.update(schema.skillSecretBindings).set({ revokedAt: now, updatedAt: now }).where(and(eq(schema.skillSecretBindings.orgId, input.orgId), eq(schema.skillSecretBindings.secretId, input.secretId), isNull(schema.skillSecretBindings.revokedAt)));
     await audit(tx as unknown as Db, { orgId: input.orgId, actorId: input.actor.id, action: "secret.delete", targetType: "secret", targetId: input.secretId });
+    const { signalProjectSecretChange } = await import("./projectJobs");
+    await signalProjectSecretChange({
+      orgId: input.orgId,
+      secretId: input.secretId,
+      mode: "immediate",
+      changeKind: "delete",
+      previous: {
+        key: secret.key,
+        audience: secret.audience,
+        recipientIds: secret.recipientIds,
+      },
+      actorId: input.actor.id,
+      database: tx as unknown as Db,
+    });
   });
 }
 
@@ -450,7 +537,18 @@ export async function disableSecretsForDepartingMember(input: { orgId: string; u
     if (!owned.length) return;
     const ids = owned.map((row) => row.id);
     await input.database.update(schema.secrets).set({ disabledAt: now, updatedAt: now }).where(and(eq(schema.secrets.orgId, input.orgId), inArray(schema.secrets.id, ids)));
-    for (const id of ids) await audit(input.database, { orgId: input.orgId, actorId: input.actorId, action: "secret.disable.owner_departed", targetType: "secret", targetId: id });
+    const { signalProjectSecretChange } = await import("./projectJobs");
+    for (const id of ids) {
+      await signalProjectSecretChange({
+        orgId: input.orgId,
+        secretId: id,
+        mode: "immediate",
+        changeKind: "disable",
+        actorId: input.actorId,
+        database: input.database,
+      });
+      await audit(input.database, { orgId: input.orgId, actorId: input.actorId, action: "secret.disable.owner_departed", targetType: "secret", targetId: id });
+    }
   } finally {
     await input.database.execute(sql`select set_config('app.departing_user_id', '', true)`);
   }

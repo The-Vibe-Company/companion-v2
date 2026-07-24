@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import { sweepRunAttachmentOrphans } from "./runAttachmentCleanup";
+import {
+  sweepProjectAttachmentOrphans,
+  sweepRunAttachmentOrphans,
+} from "./runAttachmentCleanup";
 
 describe("run attachment orphan maintenance", () => {
   it("keeps fresh and referenced objects and deletes only old objects absent on the final read", async () => {
@@ -62,5 +65,41 @@ describe("run attachment orphan maintenance", () => {
       deferReservation: deferReservation as never,
     })).resolves.toEqual({ deleted: 1, retained: 0, failed: 0 });
     expect(rows.map((row) => row.key)).toEqual(["poison"]);
+  });
+});
+
+describe("Project attachment orphan maintenance", () => {
+  it("deletes only an old unconsumed Project reservation", async () => {
+    const remove = vi.fn(async () => undefined);
+    const result = await sweepProjectAttachmentOrphans({
+      now: new Date("2026-07-15T12:00:00Z"),
+      graceMs: 60_000,
+      listReservations: async () => ["project/referenced", "project/orphan"],
+      deleteIfReserved: async ({ storageKey, deleteObject }) => {
+        if (storageKey === "project/referenced") return false;
+        await deleteObject();
+        return true;
+      },
+      deleteObject: remove,
+    });
+    expect(remove).toHaveBeenCalledExactlyOnceWith("project/orphan");
+    expect(result).toEqual({ deleted: 1, retained: 1, failed: 0 });
+  });
+
+  it("retains the reservation and backs it off when S3 deletion fails", async () => {
+    const deferred = vi.fn(async () => true);
+    const result = await sweepProjectAttachmentOrphans({
+      now: new Date("2026-07-15T12:00:00Z"),
+      graceMs: 60_000,
+      listReservations: async () => ["project/orphan"],
+      deleteIfReserved: async () => {
+        throw new Error("S3 unavailable");
+      },
+      deferReservation: deferred,
+    });
+    expect(deferred).toHaveBeenCalledWith(
+      expect.objectContaining({ storageKey: "project/orphan" }),
+    );
+    expect(result).toEqual({ deleted: 0, retained: 0, failed: 1 });
   });
 });

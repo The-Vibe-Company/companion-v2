@@ -45,7 +45,10 @@ const skill: SkillVM = {
   archived: false,
 };
 
-function renderDetailFor(nextSkill: SkillVM) {
+function renderDetailFor(
+  nextSkill: SkillVM,
+  overrides: Partial<React.ComponentProps<typeof DetailView>> = {},
+) {
   return renderToString(
     React.createElement(DetailView, {
       skill: nextSkill,
@@ -62,6 +65,8 @@ function renderDetailFor(nextSkill: SkillVM) {
       onAction: vi.fn(),
       onOpenSkill: vi.fn(),
       onOpenRun: vi.fn(),
+      runSkillEnabled: true,
+      ...overrides,
     }),
   );
 }
@@ -278,6 +283,18 @@ describe("Run skill (sandboxed sessions)", () => {
     expect(html).not.toContain("Run skill");
   });
 
+  it("hides every Run Skill surface when the internal rollout is unavailable", () => {
+    const html = renderDetailFor(skill, {
+      initialTab: "sessions",
+      runSkillEnabled: false,
+    });
+
+    expect(html).not.toContain("Run skill");
+    expect(html).not.toContain("dtab-sessions");
+    expect(html).not.toContain("Loading your private sessions");
+    expect(html).toContain('aria-labelledby="dtab-overview"');
+  });
+
   it("lands on the Sessions tab when initialTab requests it (Back from a run)", () => {
     const html = renderToString(
       React.createElement(DetailView, {
@@ -296,6 +313,7 @@ describe("Run skill (sandboxed sessions)", () => {
         onOpenSkill: vi.fn(),
         onOpenRun: vi.fn(),
         initialTab: "sessions",
+        runSkillEnabled: true,
       }),
     );
     // SSR renders only the active tabpanel. Data is intentionally unresolved during SSR, so the
