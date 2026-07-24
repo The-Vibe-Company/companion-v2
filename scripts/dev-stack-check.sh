@@ -174,6 +174,8 @@ fi
   mkdir -p "$ROOT/.context"
   lock_test_dir="$(mktemp -d "$ROOT/.context/conductor-lock-test.XXXXXX")"
   lock_owner_pid=""
+  # Invoked indirectly by the EXIT trap below.
+  # shellcheck disable=SC2317,SC2329
   cleanup_lock_test() {
     if [ -n "$lock_owner_pid" ]; then
       kill "$lock_owner_pid" 2>/dev/null || true
