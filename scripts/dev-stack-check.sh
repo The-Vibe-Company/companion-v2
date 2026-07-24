@@ -109,6 +109,8 @@ require_conductor_env "MAILPIT_WEB_PORT=55106"
 
 # The standalone `pnpm dev:app` path must not turn an absent database URL into DATABASE_URL="",
 # because postgres.js interprets that as OS-user defaults instead of @companion/db's local fallback.
+# Expansion is intentionally deferred to the child invoked by `bash -c`.
+# shellcheck disable=SC2016
 worker_url_unset="$(
   env -u DATABASE_URL -u DATABASE_WORKER_URL \
     bash "$ROOT/scripts/dev-worker.sh" \
@@ -120,6 +122,8 @@ if [ "$worker_url_unset" != "unset" ]; then
   exit 1
 fi
 
+# Expansion is intentionally deferred to the child invoked by `bash -c`.
+# shellcheck disable=SC2016
 worker_url_inherited="$(
   env DATABASE_URL=postgres://api DATABASE_WORKER_URL= \
     bash "$ROOT/scripts/dev-worker.sh" bash -c 'printf %s "$DATABASE_URL"'
@@ -129,6 +133,8 @@ if [ "$worker_url_inherited" != "postgres://api" ]; then
   exit 1
 fi
 
+# Expansion is intentionally deferred to the child invoked by `bash -c`.
+# shellcheck disable=SC2016
 worker_url_overridden="$(
   env DATABASE_URL=postgres://api DATABASE_WORKER_URL=postgres://worker \
     bash "$ROOT/scripts/dev-worker.sh" bash -c 'printf %s "$DATABASE_URL"'
