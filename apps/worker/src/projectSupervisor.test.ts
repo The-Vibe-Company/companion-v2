@@ -2090,7 +2090,9 @@ describe("Project workspace lifecycle", () => {
       usage: usage(),
       storage: emptyStorage,
       goldenSnapshotId: "golden",
-      config,
+      // This case exercises the provider fence, not scale-to-zero. The suite's
+      // 8 ms idle default can otherwise win on a busy shared CI runner.
+      config: { ...config, idleMs: 60_000 },
       signal: new AbortController().signal,
     });
 
