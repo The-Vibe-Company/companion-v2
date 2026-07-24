@@ -187,6 +187,7 @@ export function SecretsApp({
   currentOrg,
   initialCreateKey,
   navigation,
+  projectsEnabled = false,
 }: {
   initialSecrets: SecretRow[];
   members: OrgSettingsMember[];
@@ -204,6 +205,7 @@ export function SecretsApp({
     localUpdateCount: number;
     archivedCount: number;
   };
+  projectsEnabled?: boolean;
 }) {
   const router = useRouter();
   const orgActions = useOrgActions();
@@ -248,7 +250,8 @@ export function SecretsApp({
 
   useEffect(() => {
     router.prefetch("/skills");
-  }, [router]);
+    if (projectsEnabled) router.prefetch("/projects");
+  }, [projectsEnabled, router]);
 
   const filtered = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -379,6 +382,7 @@ export function SecretsApp({
         localUpdateCount={navigation.localUpdateCount}
         archivedActive={false}
         archivedCount={navigation.archivedCount}
+        projectsEnabled={projectsEnabled}
         mobileOpen={mobileSidebarOpen}
         onToggleMobile={() => setMobileSidebarOpen((open) => !open)}
         onCloseMobile={() => setMobileSidebarOpen(false)}

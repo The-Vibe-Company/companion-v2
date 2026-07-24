@@ -11,7 +11,7 @@ import {
   stripeSubscriptionStatusSchema,
 } from "@companion/contracts";
 import { db, type Db, schema } from "@companion/db";
-import { and, count, desc, eq, gte, isNotNull, lt, sql } from "drizzle-orm";
+import { and, count, desc, eq, isNotNull, isNull, sql } from "drizzle-orm";
 import { isOrgAdmin } from "./authz";
 
 export const PRO_UNIT_AMOUNT_USD_CENTS = 1_000;
@@ -201,26 +201,6 @@ function roundedMinuteMs(ms: number): number {
   return Math.max(0, Math.ceil(ms / 60_000) * 60_000);
 }
 
-function sandboxUsageTotals(
-  rows: Array<typeof schema.sandboxUsageSessions.$inferSelect>,
-  now: Date,
-): { usedMs: number; reservedMs: number } {
-  let usedMs = 0;
-  let reservedMs = 0;
-  for (const row of rows) {
-    if (row.settledMs !== null) {
-      usedMs += row.settledMs;
-      continue;
-    }
-    if (row.startedAt) {
-      reservedMs += Math.max(row.reservedMs, roundedMinuteMs(now.getTime() - row.startedAt.getTime()));
-      continue;
-    }
-    if (row.reservationExpiresAt > now) reservedMs += row.reservedMs;
-  }
-  return { usedMs, reservedMs };
-}
-
 async function activeSandboxSeats(orgId: string, database: Db): Promise<number> {
   const rows = await database
     .select({ value: count() })
@@ -256,21 +236,24 @@ export async function getSandboxUsageOverview(input: {
       period_end: period.end.toISOString(),
     };
   }
-  const [entitlements, seats, rows] = await Promise.all([
+  const [entitlements, seats, usageResult] = await Promise.all([
     input.entitlements ?? getEntitlements({ orgId: input.orgId, database, now, config }),
     input.activeSeats ?? activeSandboxSeats(input.orgId, database),
-    database
-      .select()
-      .from(schema.sandboxUsageSessions)
-      .where(and(
-        eq(schema.sandboxUsageSessions.orgId, input.orgId),
-        gte(schema.sandboxUsageSessions.periodStart, period.start),
-        lt(schema.sandboxUsageSessions.periodStart, period.end),
-      )),
+    database.execute(sql`
+      select "used_ms" as "usedMs", "reserved_ms" as "reservedMs"
+      from companion_sandbox_usage_totals(
+        ${input.orgId}::uuid,
+        ${period.start.toISOString()}::timestamp with time zone,
+        ${period.end.toISOString()}::timestamp with time zone,
+        ${now.toISOString()}::timestamp with time zone
+      )
+    `),
   ]);
-  const totals = sandboxUsageTotals(rows, now);
-  const usedMinutes = Math.ceil(totals.usedMs / 60_000);
-  const reservedMinutes = Math.ceil(totals.reservedMs / 60_000);
+  const totals = Array.from(
+    usageResult as unknown as Iterable<{ usedMs: number | string; reservedMs: number | string }>,
+  )[0] ?? { usedMs: 0, reservedMs: 0 };
+  const usedMinutes = Math.ceil(Number(totals.usedMs) / 60_000);
+  const reservedMinutes = Math.ceil(Number(totals.reservedMs) / 60_000);
   const limitMinutes = entitlements.effectivePlan === "pro" ? seats * minutesPerSeat : 0;
   return {
     enabled: true,
@@ -313,7 +296,7 @@ function assertSandboxCapacity(usage: SandboxUsageOverview, requestedMs: number)
 export interface SandboxUsageReservationInput {
   orgId: string;
   creatorId: string;
-  kind: "prewarm" | "run";
+  kind: "prewarm" | "run" | "project";
   sourceId: string;
   sandboxName: string;
   activationRevision: number;
@@ -326,6 +309,140 @@ export interface SandboxUsageReservationInput {
 export interface SandboxRuntimeBudget {
   /** Maximum provider session lifetime admitted for this activation. */
   limitMs: number;
+}
+
+export interface ProjectUsageAdmission {
+  activationRevision: number;
+  reservationMs: number;
+}
+
+export function projectPromptUsageDecision(input: {
+  currentActivationRevision: number;
+  pendingActivationRevision?: number | null;
+  openActivationRevision: number | null;
+  billingDisabled?: boolean;
+}): ProjectUsageAdmission {
+  if (input.billingDisabled) {
+    return {
+      activationRevision: Math.max(1, input.currentActivationRevision),
+      reservationMs: 0,
+    };
+  }
+  if (input.openActivationRevision !== null) {
+    return {
+      activationRevision: input.openActivationRevision,
+      reservationMs: SANDBOX_FOLLOWUP_RESERVATION_MS,
+    };
+  }
+  return {
+    activationRevision:
+      input.pendingActivationRevision
+      ?? input.currentActivationRevision + 1,
+    reservationMs: SANDBOX_RUN_ACTIVATION_RESERVATION_MS,
+  };
+}
+
+/** Reserve the exact initial/reactivation slice for a persistent Project workspace. */
+export async function reserveProjectActivationUsage(input: {
+  orgId: string;
+  creatorId: string;
+  projectId: string;
+  sandboxName: string;
+  activationRevision: number;
+  database: Db;
+  now?: Date;
+  config?: BillingRuntimeConfig;
+}): Promise<ProjectUsageAdmission> {
+  const config = input.config ?? billingRuntimeConfig();
+  await reserveSandboxUsage({
+    orgId: input.orgId,
+    creatorId: input.creatorId,
+    kind: "project",
+    sourceId: input.projectId,
+    sandboxName: input.sandboxName,
+    activationRevision: input.activationRevision,
+    reservationMs: SANDBOX_RUN_ACTIVATION_RESERVATION_MS,
+    database: input.database,
+    now: input.now,
+    config,
+  });
+  return {
+    activationRevision: input.activationRevision,
+    reservationMs:
+      config.billingMode === "disabled"
+        ? 0
+        : SANDBOX_RUN_ACTIVATION_RESERVATION_MS,
+  };
+}
+
+/**
+ * Admit one accepted Project prompt while the caller holds the Project workspace row lock.
+ *
+ * An open activation receives exactly one follow-up slice. If the prior activation was settled,
+ * the command owns the next exact reactivation slice instead. The organization quota advisory lock
+ * inside the billing primitives serializes this with prompts accepted in other Projects.
+ */
+export async function admitProjectPromptUsage(input: {
+  orgId: string;
+  creatorId: string;
+  projectId: string;
+  sandboxName: string;
+  currentActivationRevision: number;
+  pendingActivationRevision?: number | null;
+  database: Db;
+  now?: Date;
+  config?: BillingRuntimeConfig;
+}): Promise<ProjectUsageAdmission> {
+  const config = input.config ?? billingRuntimeConfig();
+  if (config.billingMode === "disabled") {
+    return projectPromptUsageDecision({
+      ...input,
+      openActivationRevision: null,
+      billingDisabled: true,
+    });
+  }
+  const openRows = await input.database
+    .select({
+      activationRevision: schema.sandboxUsageSessions.activationRevision,
+    })
+    .from(schema.sandboxUsageSessions)
+    .where(
+      and(
+        eq(schema.sandboxUsageSessions.orgId, input.orgId),
+        eq(schema.sandboxUsageSessions.kind, "project"),
+        eq(schema.sandboxUsageSessions.sourceId, input.projectId),
+        isNull(schema.sandboxUsageSessions.endedAt),
+      ),
+    )
+    .orderBy(desc(schema.sandboxUsageSessions.activationRevision))
+    .limit(1)
+    .for("update");
+  const open = openRows[0];
+  const decision = projectPromptUsageDecision({
+    ...input,
+    openActivationRevision: open?.activationRevision ?? null,
+  });
+  if (!open) {
+    return reserveProjectActivationUsage({
+      ...input,
+      activationRevision: decision.activationRevision,
+      config,
+    });
+  }
+  await extendSandboxUsageReservation({
+    orgId: input.orgId,
+    kind: "project",
+    sourceId: input.projectId,
+    activationRevision: open.activationRevision,
+    additionalMs: SANDBOX_FOLLOWUP_RESERVATION_MS,
+    database: input.database,
+    now: input.now,
+    config,
+  });
+  return {
+    activationRevision: decision.activationRevision,
+    reservationMs: decision.reservationMs,
+  };
 }
 
 function sandboxRuntimeBudgetForRow(
@@ -402,9 +519,35 @@ export async function reserveSandboxUsage(input: SandboxUsageReservationInput): 
   });
 }
 
+export function sandboxReservationCapacityRequest(input: {
+  reservedMs: number;
+  additionalMs: number;
+  startedAt: Date | null;
+  reservationExpiresAt: Date;
+  periodStart: Date;
+  now: Date;
+}): {
+  requestedMs: number;
+  reviveInCurrentPeriod: boolean;
+} {
+  const currentPeriod = sandboxPeriod(input.now);
+  const movedToNewPeriod =
+    input.periodStart.getTime() !== currentPeriod.start.getTime();
+  const expiredBeforeStart =
+    input.startedAt === null && input.reservationExpiresAt <= input.now;
+  const reviveInCurrentPeriod =
+    input.startedAt === null && (movedToNewPeriod || expiredBeforeStart);
+  return {
+    requestedMs:
+      input.additionalMs + (reviveInCurrentPeriod ? input.reservedMs : 0),
+    reviveInCurrentPeriod,
+  };
+}
+
 /** Add budget for another prompt while preserving the same live provider session. */
 export async function extendSandboxUsageReservation(input: {
   orgId: string;
+  kind?: "run" | "project";
   sourceId: string;
   activationRevision: number;
   additionalMs: number;
@@ -420,18 +563,31 @@ export async function extendSandboxUsageReservation(input: {
   const row = await input.database.query.sandboxUsageSessions.findFirst({
     where: and(
       eq(schema.sandboxUsageSessions.orgId, input.orgId),
-      eq(schema.sandboxUsageSessions.kind, "run"),
+      eq(schema.sandboxUsageSessions.kind, input.kind ?? "run"),
       eq(schema.sandboxUsageSessions.sourceId, input.sourceId),
       eq(schema.sandboxUsageSessions.activationRevision, input.activationRevision),
     ),
   });
   if (!row || row.endedAt) return;
+  const capacity = sandboxReservationCapacityRequest({
+    reservedMs: row.reservedMs,
+    additionalMs: input.additionalMs,
+    startedAt: row.startedAt,
+    reservationExpiresAt: row.reservationExpiresAt,
+    periodStart: row.periodStart,
+    now,
+  });
   const usage = await getSandboxUsageOverview({ orgId: input.orgId, database: input.database, now, config });
-  assertSandboxCapacity(usage, input.additionalMs);
+  // An expired/unstarted reservation is absent from usage totals. Re-admit its full prior slice
+  // together with this prompt, otherwise refreshing it below would silently oversubscribe quota.
+  assertSandboxCapacity(usage, capacity.requestedMs);
   const reservedMs = row.reservedMs + input.additionalMs;
+  const effectivePeriodStart = capacity.reviveInCurrentPeriod
+    ? period.start
+    : row.periodStart;
   const periodEnd = new Date(Date.UTC(
-    row.periodStart.getUTCFullYear(),
-    row.periodStart.getUTCMonth() + 1,
+    effectivePeriodStart.getUTCFullYear(),
+    effectivePeriodStart.getUTCMonth() + 1,
     1,
   ));
   const runtimeDeadlineAt = row.runtimePolicy === "budgeted" && row.startedAt
@@ -444,13 +600,14 @@ export async function extendSandboxUsageReservation(input: {
   await input.database
     .update(schema.sandboxUsageSessions)
     .set({
+      periodStart: effectivePeriodStart,
       reservedMs,
       runtimeDeadlineAt,
       reservationExpiresAt: new Date(now.getTime() + SANDBOX_RESERVATION_TTL_MS),
       updatedAt: now,
     })
     .where(eq(schema.sandboxUsageSessions.id, row.id));
-  if (runtimeDeadlineAt) {
+  if (runtimeDeadlineAt && (input.kind ?? "run") === "run") {
     await input.database
       .update(schema.skillRuns)
       .set({ runtimeDeadlineAt, updatedAt: now })

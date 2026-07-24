@@ -2,9 +2,19 @@ import { describe, expect, it } from "vitest";
 import {
   createRunRedactor,
   createRunStreamingRedactor,
+  redactAndBoundProjectEvents,
+  redactAndBoundProjectTranscript,
   RUN_REDACTION_MIN_LITERAL_LENGTH,
   RUN_REDACTION_PLACEHOLDER,
 } from "../src/runRedaction";
+import {
+  PROJECT_TRANSCRIPT_MAX_BYTES,
+  RUN_CHAT_DELTA_MAX,
+  RUN_CHAT_ID_MAX,
+  RUN_CHAT_TOOL_OUTPUT_MAX,
+  runChatEventSchema,
+  runChatHistoryItemSchema,
+} from "@companion/contracts";
 
 describe("RunRedactor", () => {
   it("uses every non-empty injected literal, including unusually short credentials", () => {
@@ -144,5 +154,79 @@ describe("RunStreamingRedactor", () => {
 
     expect(stream.push(secret) + stream.flush()).toBe(RUN_REDACTION_PLACEHOLDER);
     expect(redactor.redactText(secret)).toBe(secret);
+  });
+});
+
+describe("Project chat persistence boundaries", () => {
+  it("redacts, bounds, and parses every sandbox-origin event", () => {
+    const secret = "project-provider-secret";
+    const events = redactAndBoundProjectEvents([
+      {
+        type: "tool.done",
+        call_id: "c".repeat(RUN_CHAT_ID_MAX + 100),
+        title: null,
+        output: `${"x".repeat(RUN_CHAT_TOOL_OUTPUT_MAX + 100)}${secret}`,
+        duration_ms: 1,
+      },
+      {
+        type: "text.delta",
+        message_id: "message",
+        delta: `${"🤖".repeat(RUN_CHAT_DELTA_MAX)}${secret}`,
+      },
+    ], createRunRedactor([secret]));
+
+    expect(events.length).toBeGreaterThan(2);
+    expect(JSON.stringify(events)).not.toContain(secret);
+    expect(events.map((event) => runChatEventSchema.parse(event))).toEqual(events);
+    const tool = events[0];
+    expect(tool?.type).toBe("tool.done");
+    if (tool?.type === "tool.done") {
+      expect(Buffer.byteLength(tool.call_id, "utf8")).toBeLessThanOrEqual(RUN_CHAT_ID_MAX);
+      expect(Buffer.byteLength(tool.output, "utf8")).toBeLessThanOrEqual(
+        RUN_CHAT_TOOL_OUTPUT_MAX,
+      );
+    }
+    for (const event of events) {
+      if (event.type === "text.delta") {
+        expect(Buffer.byteLength(event.delta, "utf8")).toBeLessThanOrEqual(
+          RUN_CHAT_DELTA_MAX,
+        );
+      }
+    }
+  });
+
+  it("redacts and caps a cumulative Project transcript while retaining the newest response", () => {
+    const secret = "transcript-secret-sentinel";
+    const transcript = redactAndBoundProjectTranscript([
+      {
+        kind: "tool",
+        call_id: "old-tool",
+        tool: "bash",
+        skill: null,
+        title: null,
+        input: secret,
+        output: "x".repeat(700_000),
+        duration_ms: 1,
+      },
+      ...Array.from({ length: 4 }, (_, index) => ({
+        kind: "assistant" as const,
+        text: `${index}:${"🤖".repeat(100_000)}`,
+      })),
+      { kind: "assistant", text: `final ${secret}` },
+    ], createRunRedactor([secret]));
+
+    expect(Buffer.byteLength(JSON.stringify(transcript), "utf8")).toBeLessThanOrEqual(
+      PROJECT_TRANSCRIPT_MAX_BYTES,
+    );
+    expect(JSON.stringify(transcript)).not.toContain(secret);
+    expect(transcript.at(-1)).toEqual({
+      kind: "assistant",
+      text: `final ${RUN_REDACTION_PLACEHOLDER}`,
+    });
+    expect(transcript.map((item) => runChatHistoryItemSchema.parse(item))).toEqual(transcript);
+  });
+
+  it("rejects invalid aggregate transcript limits", () => {
+    expect(() => redactAndBoundProjectTranscript([], undefined, 1)).toThrow(RangeError);
   });
 });

@@ -82,6 +82,8 @@ import {
 
 export * from "./secrets";
 export * from "./githubSync";
+export * from "./projects";
+export * from "./projectJobs";
 
 // Org-wide shared label ("folder") services. Re-exported so callers keep importing everything from
 // `@companion/core/services`. `labels.ts` imports `getOrgRole`/`ActorContext` from here (both hoisted
@@ -712,23 +714,52 @@ export async function removeMember(input: {
   database?: Db;
 }): Promise<void> {
   const database = input.database ?? db;
-  const actorRole = await getOrgRole(input.orgId, input.actor.id, database);
-  if (!actorRole || !canManageOrg(actorRole)) throw new Error("not allowed to remove members");
-  await database.execute(sql`select pg_advisory_xact_lock(hashtext(${`companion:org-owner:${input.orgId}`}))`);
-  const target = await database.query.memberships.findFirst({
-    where: and(eq(schema.memberships.orgId, input.orgId), eq(schema.memberships.userId, input.userId)),
+  await database.transaction(async (transaction) => {
+    const tx = transaction as unknown as Db;
+    const actorRole = await getOrgRole(input.orgId, input.actor.id, tx);
+    if (!actorRole || !canManageOrg(actorRole)) throw new Error("not allowed to remove members");
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`companion:org-owner:${input.orgId}`}))`);
+    const target = await tx.query.memberships.findFirst({
+      where: and(eq(schema.memberships.orgId, input.orgId), eq(schema.memberships.userId, input.userId)),
+    });
+    if (!target) throw new Error("member not found");
+    const targetRole = target.orgRole as OrgRole;
+    if (targetRole === "owner" && !canTouchOwner(actorRole)) throw new Error("only owners can remove owners");
+    if (isLastOwner(await ownerCount(input.orgId, tx), targetRole === "owner")) {
+      throw new Error("organization must keep at least one owner");
+    }
+    await disableSecretsForDepartingMember({
+      orgId: input.orgId,
+      userId: input.userId,
+      actorId: input.actor.id,
+      database: tx,
+    });
+    // Project content remains creator-only even for organization managers. A narrow SECURITY DEFINER
+    // RPC marks only lifecycle metadata so the worker can destroy every private runtime, checkpoint,
+    // and cached file before the membership row disappears. This also makes stopped Projects claimable.
+    const priorContext = await tx.execute(sql`
+      select current_setting('app.org_id', true) as "orgId",
+             current_setting('app.user_id', true) as "userId"
+    `);
+    const prior = Array.from(
+      priorContext as unknown as Iterable<{ orgId: string | null; userId: string | null }>,
+    )[0];
+    await tx.execute(sql`
+      select set_config('app.org_id', ${input.orgId}, true),
+             set_config('app.user_id', ${input.actor.id}, true)
+    `);
+    await tx.execute(
+      sql`select companion_request_member_project_deletion(${input.orgId}::uuid, ${input.userId})`,
+    );
+    await tx.execute(sql`
+      select set_config('app.org_id', ${prior?.orgId ?? ""}, true),
+             set_config('app.user_id', ${prior?.userId ?? ""}, true)
+    `);
+    await tx
+      .delete(schema.memberships)
+      .where(and(eq(schema.memberships.orgId, input.orgId), eq(schema.memberships.userId, input.userId)));
+    await markSeatSyncPending(input.orgId, tx);
   });
-  if (!target) throw new Error("member not found");
-  const targetRole = target.orgRole as OrgRole;
-  if (targetRole === "owner" && !canTouchOwner(actorRole)) throw new Error("only owners can remove owners");
-  if (isLastOwner(await ownerCount(input.orgId, database), targetRole === "owner")) {
-    throw new Error("organization must keep at least one owner");
-  }
-  await disableSecretsForDepartingMember({ orgId: input.orgId, userId: input.userId, actorId: input.actor.id, database });
-  await database
-    .delete(schema.memberships)
-    .where(and(eq(schema.memberships.orgId, input.orgId), eq(schema.memberships.userId, input.userId)));
-  await markSeatSyncPending(input.orgId, database);
 }
 
 /** Which library a skill read targets. Org skills are flat; personal skills are owner-private. */
@@ -2941,6 +2972,17 @@ async function writeSkillVersion(input: {
       })),
     );
   }
+
+  // A Project pins an exact full closure per desired generation. Publishing either a selected root
+  // or any skill in that closure automatically builds the next complete projection; a failed rebuild
+  // retains the prior generation and marks only that private Project as needing attention.
+  const { refreshProjectsForSkillPublication } = await import("./projects");
+  await refreshProjectsForSkillPublication({
+    actor: input.actor,
+    orgId: input.orgId,
+    skillId: skill.id,
+    database,
+  });
 
   await database.insert(schema.auditLog).values({
     orgId: input.orgId,

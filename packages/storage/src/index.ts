@@ -143,6 +143,28 @@ export function runArtifactKey(input: { orgId: string; runId: string; artifactId
   return `${input.orgId}/run-artifacts/${input.runId}/${input.artifactId}`;
 }
 
+/** Immutable upload attached to one durable Project prompt. */
+export function projectAttachmentKey(input: {
+  orgId: string;
+  projectId: string;
+  attachmentId: string;
+}): string {
+  return `${input.orgId}/project-attachments/${input.projectId}/${input.attachmentId}`;
+}
+
+/** Content cached from the Project's managed files/ tree for sleep-time access and recovery. */
+export function projectFileVersionKey(input: {
+  orgId: string;
+  projectId: string;
+  fileId: string;
+  version: number;
+}): string {
+  if (!Number.isSafeInteger(input.version) || input.version < 1) {
+    throw new Error("project file version must be positive");
+  }
+  return `${input.orgId}/project-files/${input.projectId}/${input.fileId}/v${input.version}`;
+}
+
 export async function putOrgLogo(input: {
   orgId: string;
   body: Uint8Array;

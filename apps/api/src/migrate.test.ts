@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   databaseRuntimeRole,
+  databaseRuntimeRoles,
   databaseUrl,
   extractRuntimeRoleGrantBlock,
   resolveMigrationsFolder,
@@ -60,6 +61,91 @@ describe("databaseRuntimeRole", () => {
       );
     },
   );
+});
+
+describe("databaseRuntimeRoles", () => {
+  it("is opt-in", () => {
+    expect(databaseRuntimeRoles({})).toBeNull();
+  });
+
+  it("returns distinct API and worker roles", () => {
+    expect(
+      databaseRuntimeRoles({
+        DATABASE_API_ROLE: "companion_api",
+        DATABASE_WORKER_ROLE: "companion_worker",
+      }),
+    ).toEqual({
+      apiRole: "companion_api",
+      workerRole: "companion_worker",
+      legacySingleRole: false,
+      retiredRuntimeRole: null,
+    });
+  });
+
+  it("accepts an optional retired union role during a separated-role cutover", () => {
+    expect(
+      databaseRuntimeRoles({
+        DATABASE_API_ROLE: "companion_api",
+        DATABASE_WORKER_ROLE: "companion_worker",
+        DATABASE_RETIRED_RUNTIME_ROLE: "companion_runtime",
+      }),
+    ).toEqual({
+      apiRole: "companion_api",
+      workerRole: "companion_worker",
+      legacySingleRole: false,
+      retiredRuntimeRole: "companion_runtime",
+    });
+  });
+
+  it("supports the legacy single-role contract for simple installations", () => {
+    expect(databaseRuntimeRoles({ DATABASE_RUNTIME_ROLE: "companion_runtime" })).toEqual({
+      apiRole: "companion_runtime",
+      workerRole: "companion_runtime",
+      legacySingleRole: true,
+      retiredRuntimeRole: null,
+    });
+  });
+
+  it("requires both separated roles and rejects ambiguous or ineffective separation", () => {
+    expect(() => databaseRuntimeRoles({ DATABASE_API_ROLE: "companion_api" })).toThrow(
+      "DATABASE_API_ROLE and DATABASE_WORKER_ROLE must be configured together",
+    );
+    expect(() =>
+      databaseRuntimeRoles({
+        DATABASE_API_ROLE: "companion_runtime",
+        DATABASE_WORKER_ROLE: "companion_runtime",
+      }),
+    ).toThrow("DATABASE_API_ROLE and DATABASE_WORKER_ROLE must be distinct");
+    expect(() =>
+      databaseRuntimeRoles({
+        DATABASE_API_ROLE: "companion_api",
+        DATABASE_WORKER_ROLE: "companion_worker",
+        DATABASE_RUNTIME_ROLE: "companion_runtime",
+      }),
+    ).toThrow("DATABASE_RUNTIME_ROLE cannot be combined");
+    expect(() =>
+      databaseRuntimeRoles({
+        DATABASE_RETIRED_RUNTIME_ROLE: "companion_runtime",
+      }),
+    ).toThrow("DATABASE_RETIRED_RUNTIME_ROLE requires");
+  });
+
+  it.each([
+    ["DATABASE_API_ROLE", { DATABASE_API_ROLE: "Companion", DATABASE_WORKER_ROLE: "companion_worker" }],
+    ["DATABASE_WORKER_ROLE", { DATABASE_API_ROLE: "companion_api", DATABASE_WORKER_ROLE: " worker" }],
+    [
+      "DATABASE_RETIRED_RUNTIME_ROLE",
+      {
+        DATABASE_API_ROLE: "companion_api",
+        DATABASE_WORKER_ROLE: "companion_worker",
+        DATABASE_RETIRED_RUNTIME_ROLE: "retired-role",
+      },
+    ],
+  ])("validates %s as a strict PostgreSQL identifier", (name, env) => {
+    expect(() => databaseRuntimeRoles(env)).toThrow(
+      `${name} must be a lowercase PostgreSQL identifier`,
+    );
+  });
 });
 
 describe("resolveMigrationsFolder", () => {

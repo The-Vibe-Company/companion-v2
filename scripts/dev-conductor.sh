@@ -181,10 +181,13 @@ MAILPIT_PID="$STATE_DIR/mailpit/mailpit.pid"
 # ---------------------------------------------------------------------------
 PG_OWNER_USER="companion_owner"
 PG_OWNER_PASS="companion-owner"
-PG_USER="companion"
-PG_PASS="companion"
+PG_API_USER="companion_api"
+PG_API_PASS="companion-api"
+PG_WORKER_USER="companion_worker"
+PG_WORKER_PASS="companion-worker"
 PG_DB="companion"
-DATABASE_URL="postgres://${PG_USER}:${PG_PASS}@127.0.0.1:${PG_PORT}/${PG_DB}"
+DATABASE_API_URL="postgres://${PG_API_USER}:${PG_API_PASS}@127.0.0.1:${PG_PORT}/${PG_DB}"
+DATABASE_WORKER_URL="postgres://${PG_WORKER_USER}:${PG_WORKER_PASS}@127.0.0.1:${PG_PORT}/${PG_DB}"
 DATABASE_MIGRATION_URL="postgres://${PG_OWNER_USER}:${PG_OWNER_PASS}@127.0.0.1:${PG_PORT}/${PG_DB}"
 
 WEB_URL="http://127.0.0.1:${WEB_PORT}"
@@ -383,23 +386,30 @@ start_postgres() {
 }
 
 bootstrap_database() {
-  step "Ensuring migration-owner + NOBYPASSRLS runtime roles"
+  step "Ensuring migration-owner + separate NOBYPASSRLS API/worker roles"
   local PSQL=("$PG_BIN/psql" -h 127.0.0.1 -p "$PG_PORT" -U postgres -d postgres -v ON_ERROR_STOP=1)
   "${PSQL[@]}" -c "DO \$\$ BEGIN
     IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '$PG_OWNER_USER') THEN
       CREATE ROLE $PG_OWNER_USER LOGIN PASSWORD '$PG_OWNER_PASS' NOSUPERUSER BYPASSRLS;
     END IF;
-    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '$PG_USER') THEN
-      CREATE ROLE $PG_USER LOGIN PASSWORD '$PG_PASS' NOSUPERUSER NOBYPASSRLS;
+    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '$PG_API_USER') THEN
+      CREATE ROLE $PG_API_USER LOGIN PASSWORD '$PG_API_PASS' NOSUPERUSER NOBYPASSRLS NOINHERIT;
+    END IF;
+    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '$PG_WORKER_USER') THEN
+      CREATE ROLE $PG_WORKER_USER LOGIN PASSWORD '$PG_WORKER_PASS' NOSUPERUSER NOBYPASSRLS NOINHERIT;
     END IF;
   END \$\$;" >/dev/null
   "${PSQL[@]}" -c "ALTER ROLE $PG_OWNER_USER NOSUPERUSER BYPASSRLS;" >/dev/null
-  "${PSQL[@]}" -c "ALTER ROLE $PG_USER NOSUPERUSER NOBYPASSRLS NOINHERIT;" >/dev/null
+  "${PSQL[@]}" -c "ALTER ROLE $PG_API_USER NOSUPERUSER NOBYPASSRLS NOINHERIT;" >/dev/null
+  "${PSQL[@]}" -c "ALTER ROLE $PG_WORKER_USER NOSUPERUSER NOBYPASSRLS NOINHERIT;" >/dev/null
   "${PSQL[@]}" -c "CREATE DATABASE $PG_DB OWNER $PG_OWNER_USER;" 2>/dev/null || true
   "${PSQL[@]}" -c "ALTER DATABASE $PG_DB OWNER TO $PG_OWNER_USER;" >/dev/null
   # Upgrade old Conductor clusters whose application role used to own every migrated object.
-  "${PSQL[@]}" -d "$PG_DB" -c "REASSIGN OWNED BY $PG_USER TO $PG_OWNER_USER;" >/dev/null
-  ok "Owner '$PG_OWNER_USER' + runtime '$PG_USER' + database '$PG_DB' ready"
+  if "${PSQL[@]}" -tAc "select 1 from pg_roles where rolname = 'companion'" | grep -qx 1; then
+    "${PSQL[@]}" -d "$PG_DB" -c "REASSIGN OWNED BY companion TO $PG_OWNER_USER;" >/dev/null
+    "${PSQL[@]}" -c "ALTER ROLE companion NOLOGIN;" >/dev/null
+  fi
+  ok "Owner '$PG_OWNER_USER' + API '$PG_API_USER' + worker '$PG_WORKER_USER' + database '$PG_DB' ready"
 }
 
 # ---------------------------------------------------------------------------
@@ -509,12 +519,25 @@ migrate_and_seed() {
   env DATABASE_URL="$DATABASE_MIGRATION_URL" DATABASE_MIGRATION_URL="$DATABASE_MIGRATION_URL" \
     pnpm db:migrate || die "Migrations failed"
   local OWNER_PSQL=("$PG_BIN/psql" "$DATABASE_MIGRATION_URL" -v ON_ERROR_STOP=1)
-  "${OWNER_PSQL[@]}" -v runtime_role="$PG_USER" \
-    -f "$REPO_ROOT/packages/db/runtime-role-grants.sql" >/dev/null || die "Runtime database grants failed"
+  local retired_role=""
+  if "${OWNER_PSQL[@]}" -tAc \
+    "select 1 from pg_roles where rolname = 'companion'" | grep -qx 1; then
+    retired_role="companion"
+  fi
+  if [ -n "$retired_role" ]; then
+    "${OWNER_PSQL[@]}" -v api_role="$PG_API_USER" -v worker_role="$PG_WORKER_USER" \
+      -v retired_runtime_role="$retired_role" \
+      -f "$REPO_ROOT/packages/db/runtime-role-grants.sql" >/dev/null \
+      || die "Runtime database grants failed"
+  else
+    "${OWNER_PSQL[@]}" -v api_role="$PG_API_USER" -v worker_role="$PG_WORKER_USER" \
+      -f "$REPO_ROOT/packages/db/runtime-role-grants.sql" >/dev/null \
+      || die "Runtime database grants failed"
+  fi
   ok "Migrations applied"
 
   local seed_env=(
-    DATABASE_URL="$DATABASE_URL"
+    DATABASE_URL="$DATABASE_API_URL"
     BETTER_AUTH_URL="$API_URL"
     COMPANION_API_URL="$API_URL"
   )
@@ -578,8 +601,8 @@ launch_apps() {
 
   # The master key is exported by ensure_secrets_master_key and inherited by API + worker. Never
   # interpolate it into concurrently's command argument, where process listings could expose it.
-  local api_cmd="COMPANION_API_HOST=127.0.0.1 COMPANION_API_PORT=$API_PORT DATABASE_URL=\"$DATABASE_URL\" BETTER_AUTH_URL=\"$API_URL\" BETTER_AUTH_COOKIE_PREFIX=\"$PROJECT\" COMPANION_WEB_URL=\"$WEB_URL\" COMPANION_API_URL=\"$API_URL\" NEXT_PUBLIC_COMPANION_API_URL=\"$API_URL\" $shared_storage_env $api_email_env pnpm --filter @companion/api dev"
-  local worker_cmd="DATABASE_URL=\"$DATABASE_URL\" COMPANION_WEB_URL=\"$WEB_URL\" $shared_storage_env pnpm --filter @companion/worker dev"
+  local api_cmd="COMPANION_API_HOST=127.0.0.1 COMPANION_API_PORT=$API_PORT DATABASE_URL=\"$DATABASE_API_URL\" BETTER_AUTH_URL=\"$API_URL\" BETTER_AUTH_COOKIE_PREFIX=\"$PROJECT\" COMPANION_WEB_URL=\"$WEB_URL\" COMPANION_API_URL=\"$API_URL\" NEXT_PUBLIC_COMPANION_API_URL=\"$API_URL\" $shared_storage_env $api_email_env pnpm --filter @companion/api dev"
+  local worker_cmd="DATABASE_URL=\"$DATABASE_WORKER_URL\" COMPANION_WEB_URL=\"$WEB_URL\" $shared_storage_env pnpm --filter @companion/worker dev"
   local web_cmd="COMPANION_API_URL=\"$API_URL\" NEXT_PUBLIC_COMPANION_API_URL=\"$API_URL\" pnpm --filter @companion/web dev --hostname 127.0.0.1 --port $WEB_PORT"
 
   free_port "$API_PORT" "api"

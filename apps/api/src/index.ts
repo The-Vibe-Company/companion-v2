@@ -107,6 +107,30 @@ import {
   getActivatedModels,
   setUserActivatedModels,
   setOrgActivatedModels,
+  listProjects,
+  getProject,
+  getProjectCreateReplay,
+  createProject,
+  updateProject,
+  retryProjectWorkspace,
+  setProjectSkills,
+  requestProjectDeletion,
+  listProjectSessions,
+  getProjectSession,
+  createProjectSession,
+  enqueueProjectPrompt,
+  hasProjectPromptIdempotencyKey,
+  reserveProjectAttachmentUploads,
+  requestProjectSessionStop,
+  listProjectSessionEvents,
+  listProjectFiles,
+  getProjectFile,
+  listProjectFileVersions,
+  getProjectFileVersion,
+  isProjectWorkerReady,
+  ProjectConflictError,
+  ProjectNotFoundError,
+  ProjectValidationError,
   getRunOptions,
   listRunConfigurations,
   createRunConfiguration,
@@ -204,6 +228,13 @@ import {
   setModelProviderConnectionInputSchema,
   setSkillPublicVersionInputSchema,
   setActivatedModelsInputSchema,
+  createProjectInputSchema,
+  updateProjectInputSchema,
+  setProjectSkillsInputSchema,
+  createProjectSessionFieldsSchema,
+  projectPromptFieldsSchema,
+  PROJECT_ATTACHMENT_MAX_FILES,
+  PROJECT_ATTACHMENT_MAX_BYTES,
   launchRunFieldsSchema,
   runPromptFieldsSchema,
   runPromptInputSchema,
@@ -233,6 +264,7 @@ import { GitHubOAuthClient, githubOAuthConfig, githubSyncEnabled } from "@compan
 import { createModelCatalog } from "@companion/sandbox";
 import {
   commentImageKey,
+  projectAttachmentKey,
   runAttachmentKey,
   deleteSkillArchive,
   getSkillArchive,
@@ -299,6 +331,16 @@ import {
   deterministicRunAttachmentId,
   putRunAttachmentOnce,
 } from "./runAttachments";
+import {
+  deterministicProjectAttachmentId,
+  putProjectAttachmentOnce,
+} from "./projectAttachments";
+import {
+  parseProjectEventNotification,
+  parseProjectLastEventId,
+  projectEventFrame,
+  projectReadyFrame,
+} from "./projectEvents";
 import { COMPANION_SKILL_KEY } from "@companion/companion-skill";
 import { StripeBillingGateway } from "@companion/billing";
 import {
@@ -3755,6 +3797,836 @@ app.delete("/v1/org-provider-connections/:provider", async (c) => {
   }
 });
 
+/* ---- Projects (creator-private; session-only) ---------------------------------------------- */
+
+class ProjectsFeatureDisabledError extends Error {}
+class ProjectsSessionOnlyError extends Error {}
+
+function projectsFeatureEnabled(): boolean {
+  const setting = process.env.COMPANION_PROJECTS_ENABLED?.trim().toLowerCase();
+  return setting === "true" || setting === "1";
+}
+
+function assertProjectSession(c: Context): void {
+  if (!projectsFeatureEnabled()) throw new ProjectsFeatureDisabledError();
+  if (isTokenRequest(c) || isAgentRequest(c)) {
+    throw new ProjectsSessionOnlyError("only authenticated browser sessions can use projects");
+  }
+  actorFromContext(c);
+}
+
+function projectError(c: Context, error: unknown): Response {
+  if (error instanceof ProjectsFeatureDisabledError) return jsonError(c, "not found", 404);
+  if (error instanceof ProjectsSessionOnlyError) return jsonError(c, error, 401);
+  if (error instanceof ProjectNotFoundError) return jsonError(c, error, 404);
+  if (error instanceof ProjectConflictError) return jsonError(c, error, 409);
+  if (error instanceof ProjectValidationError) {
+    return jsonError(c, error, error.code === "runtime_unavailable" ? 503 : 422);
+  }
+  if (error instanceof RunValidationError) {
+    if (error.code.endsWith("not_found")) return jsonError(c, error, 404);
+    return jsonError(c, error, 422);
+  }
+  const message = error instanceof Error ? error.message : "";
+  if (message === "not authenticated" || message.startsWith("personal access tokens")) {
+    return jsonError(c, error, 401);
+  }
+  return jsonError(c, error);
+}
+
+async function projectRuntimeStatus(database: Db): Promise<{
+  available: boolean;
+  message: string | null;
+}> {
+  // Provider credentials, golden snapshot ids, and the secrets master key are worker-only. The
+  // supervisor publishes a heartbeat only after validating its complete runtime configuration.
+  if (!(await isProjectWorkerReady({ database }))) {
+    return { available: false, message: "Project runtime is starting." };
+  }
+  return { available: true, message: null };
+}
+
+async function assertProjectRuntimeAvailable(database: Db): Promise<void> {
+  const runtime = await projectRuntimeStatus(database);
+  if (!runtime.available) {
+    throw new ProjectValidationError(
+      runtime.message ?? "Project runtime is unavailable.",
+      "runtime_unavailable",
+    );
+  }
+}
+
+async function assertProjectModelAvailable(input: {
+  actor: ReturnType<typeof actorFromContext>;
+  orgId: string;
+  model: string;
+  database: Db;
+}): Promise<{ provider: string; envKeys: string[] }> {
+  const [catalog, personalConnections, orgConnections, activated] = await Promise.all([
+    modelCatalog.listModels(),
+    listProviderConnections(input),
+    listOrgProviderConnections(input),
+    getActivatedModels(input),
+  ]);
+  const row = catalog.models.find((candidate) => candidate.id === input.model);
+  const active = new Set([...activated.personal, ...activated.org]);
+  const effectiveConnection =
+    personalConnections.find((connection) => connection.provider === row?.provider)
+    ?? orgConnections.find((connection) => connection.provider === row?.provider);
+  const credentialReady =
+    row?.env_keys.length === 0
+    || Boolean(effectiveConnection && row?.env_keys.includes(effectiveConnection.key_name));
+  if (!row || !active.has(row.id) || !credentialReady) {
+    throw new ProjectValidationError(
+      "The selected model is not active with a connected provider.",
+      "model_unavailable",
+    );
+  }
+  return { provider: row.provider, envKeys: [...row.env_keys] };
+}
+
+async function projectAttachmentsFromForm(input: {
+  actor: ReturnType<typeof actorFromContext>;
+  orgId: string;
+  projectId: string;
+  idempotencyKey: string;
+  entries: unknown[];
+}): Promise<Array<{
+  id: string;
+  fileName: string;
+  contentType: string;
+  byteSize: number;
+  checksum: string;
+  storageKey: string;
+  workspacePath: string;
+}>> {
+  const files = input.entries.filter(isRunUploadFile);
+  if (files.length > PROJECT_ATTACHMENT_MAX_FILES) {
+    throw new ProjectValidationError(
+      `A prompt can have at most ${PROJECT_ATTACHMENT_MAX_FILES} files.`,
+      "too_many_attachments",
+    );
+  }
+  const names = new Map<string, number>();
+  const attachments: Array<{
+    id: string;
+    fileName: string;
+    contentType: string;
+    byteSize: number;
+    checksum: string;
+    storageKey: string;
+    workspacePath: string;
+  }> = [];
+  const uploads: Array<{ key: string; body: Buffer; contentType: string }> = [];
+  for (const [index, file] of files.entries()) {
+    if (file.size === 0) {
+      throw new ProjectValidationError("An attached file is empty.", "empty_attachment");
+    }
+    if (file.size > PROJECT_ATTACHMENT_MAX_BYTES) {
+      throw new ProjectValidationError(
+        "Each attached file must be 10 MB or smaller.",
+        "attachment_too_large",
+      );
+    }
+    const body = Buffer.from(await file.arrayBuffer());
+    const contentType = file.type || "application/octet-stream";
+    const cleanName = sanitizeAttachmentName(file.name || `attachment-${index + 1}`);
+    const occurrence = (names.get(cleanName) ?? 0) + 1;
+    names.set(cleanName, occurrence);
+    const dot = cleanName.lastIndexOf(".");
+    const uniqueName =
+      occurrence === 1
+        ? cleanName
+        : dot > 0
+          ? `${cleanName.slice(0, dot)}-${occurrence}${cleanName.slice(dot)}`
+          : `${cleanName}-${occurrence}`;
+    const id = deterministicProjectAttachmentId({
+      orgId: input.orgId,
+      actorId: input.actor.id,
+      projectId: input.projectId,
+      idempotencyKey: input.idempotencyKey,
+      index,
+      fileName: uniqueName,
+      contentType,
+      bytes: body,
+    });
+    const storageKey = projectAttachmentKey({
+      orgId: input.orgId,
+      projectId: input.projectId,
+      attachmentId: id,
+    });
+    uploads.push({ key: storageKey, body, contentType });
+    attachments.push({
+      id,
+      fileName: uniqueName,
+      contentType,
+      byteSize: body.length,
+      checksum: `sha256:${createHash("sha256").update(body).digest("hex")}`,
+      storageKey,
+      workspacePath: `files/${uniqueName}`,
+    });
+  }
+  if (attachments.length > 0) {
+    await withTenantContext({ orgId: input.orgId, userId: input.actor.id }, (database) =>
+      reserveProjectAttachmentUploads({
+        actor: input.actor,
+        orgId: input.orgId,
+        projectId: input.projectId,
+        storageKeys: attachments.map((attachment) => attachment.storageKey),
+        database,
+      }),
+    );
+  }
+  for (const upload of uploads) await putProjectAttachmentOnce(upload);
+  return attachments;
+}
+
+const projectEventSubscribers = new Map<string, Set<(sequence: number) => void>>();
+let projectEventListenerPromise: Promise<void> | null = null;
+
+async function subscribeProjectEventCursor(
+  sessionId: string,
+  callback: (sequence: number) => void,
+): Promise<() => void> {
+  if (!projectEventListenerPromise) {
+    projectEventListenerPromise = postgresSql
+      .listen("project_session_events", (payload) => {
+        const notification = parseProjectEventNotification(payload);
+        if (!notification) return;
+        for (const subscriber of projectEventSubscribers.get(notification.sessionId) ?? []) {
+          subscriber(notification.sequence);
+        }
+      })
+      .then(() => undefined)
+      .catch((error) => {
+        projectEventListenerPromise = null;
+        throw error;
+      });
+  }
+  await projectEventListenerPromise;
+  const subscribers =
+    projectEventSubscribers.get(sessionId) ?? new Set<(sequence: number) => void>();
+  subscribers.add(callback);
+  projectEventSubscribers.set(sessionId, subscribers);
+  return () => {
+    subscribers.delete(callback);
+    if (subscribers.size === 0) projectEventSubscribers.delete(sessionId);
+  };
+}
+
+app.get("/v1/projects", async (c) => {
+  try {
+    assertProjectSession(c);
+    const result = await withTenant(c, async ({ actor, orgId, database }) => ({
+      projects: await listProjects({ actor, orgId, database }),
+      runtime: await projectRuntimeStatus(database),
+    }));
+    return c.json(result);
+  } catch (error) {
+    return projectError(c, error);
+  }
+});
+
+app.post("/v1/projects", async (c) => {
+  try {
+    assertProjectSession(c);
+    const requestKey = idempotencyKey(c);
+    const value = createProjectInputSchema.parse(await c.req.json());
+    const replay = await withTenant(c, ({ actor, orgId, database }) =>
+      getProjectCreateReplay({
+        actor,
+        orgId,
+        value,
+        idempotencyKey: requestKey,
+        database,
+      }),
+    );
+    if (replay) return c.json(replay, 201);
+    const project = await withTenant(c, async ({ actor, orgId, database }) => {
+      await assertProjectRuntimeAvailable(database);
+      await assertProjectModelAvailable({
+        actor,
+        orgId,
+        model: value.default_model,
+        database,
+      });
+      return createProject({
+        actor,
+        orgId,
+        value,
+        idempotencyKey: requestKey,
+        database,
+      });
+    });
+    return c.json(project, 201);
+  } catch (error) {
+    return projectError(c, error);
+  }
+});
+
+app.get("/v1/projects/:id", async (c) => {
+  try {
+    assertProjectSession(c);
+    const project = await withTenant(c, ({ actor, orgId, database }) =>
+      getProject({ actor, orgId, projectId: c.req.param("id"), database }),
+    );
+    return c.json(project);
+  } catch (error) {
+    return projectError(c, error);
+  }
+});
+
+app.patch("/v1/projects/:id", async (c) => {
+  try {
+    assertProjectSession(c);
+    const value = updateProjectInputSchema.parse(await c.req.json());
+    const project = await withTenant(c, async ({ actor, orgId, database }) => {
+      if (value.default_model) {
+        await assertProjectModelAvailable({
+          actor,
+          orgId,
+          model: value.default_model,
+          database,
+        });
+      }
+      return updateProject({ actor, orgId, projectId: c.req.param("id"), value, database });
+    });
+    return c.json(project);
+  } catch (error) {
+    return projectError(c, error);
+  }
+});
+
+app.post("/v1/projects/:id/retry", async (c) => {
+  try {
+    assertProjectSession(c);
+    const project = await withTenant(c, ({ actor, orgId, database }) =>
+      retryProjectWorkspace({
+        actor,
+        orgId,
+        projectId: c.req.param("id"),
+        database,
+      }),
+    );
+    return c.json(project, 202);
+  } catch (error) {
+    return projectError(c, error);
+  }
+});
+
+app.delete("/v1/projects/:id", async (c) => {
+  try {
+    assertProjectSession(c);
+    await withTenant(c, ({ actor, orgId, database }) =>
+      requestProjectDeletion({
+        actor,
+        orgId,
+        projectId: c.req.param("id"),
+        database,
+      }),
+    );
+    return c.json({ ok: true }, 202);
+  } catch (error) {
+    return projectError(c, error);
+  }
+});
+
+app.put("/v1/projects/:id/skills", async (c) => {
+  try {
+    assertProjectSession(c);
+    const value = setProjectSkillsInputSchema.parse(await c.req.json());
+    const project = await withTenant(c, ({ actor, orgId, database }) =>
+      setProjectSkills({
+        actor,
+        orgId,
+        projectId: c.req.param("id"),
+        value,
+        database,
+      }),
+    );
+    return c.json(project);
+  } catch (error) {
+    return projectError(c, error);
+  }
+});
+
+app.get("/v1/projects/:id/sessions", async (c) => {
+  try {
+    assertProjectSession(c);
+    const sessions = await withTenant(c, ({ actor, orgId, database }) =>
+      listProjectSessions({
+        actor,
+        orgId,
+        projectId: c.req.param("id"),
+        database,
+      }),
+    );
+    return c.json({ sessions });
+  } catch (error) {
+    return projectError(c, error);
+  }
+});
+
+app.post(
+  "/v1/projects/:id/sessions",
+  // Authenticate before bodyLimit so an unauthenticated caller cannot make the server consume or
+  // measure a large multipart body.
+  async (c, next) => {
+    try {
+      assertProjectSession(c);
+    } catch (error) {
+      return projectError(c, error);
+    }
+    await next();
+  },
+  bodyLimit({
+    maxSize: 64 * 1024 * 1024,
+    onError: (c) => jsonError(c, "Project upload exceeds the 64 MB limit.", 413),
+  }),
+  async (c) => {
+    try {
+      assertProjectSession(c);
+      if (!c.req.header("content-type")?.toLowerCase().startsWith("multipart/form-data")) {
+        return jsonError(c, "Project sessions require multipart/form-data.", 415);
+      }
+      const actor = actorFromContext(c);
+      const orgId = await orgIdFromContext(c);
+      const projectId = c.req.param("id");
+      const requestKey = idempotencyKey(c);
+      const form = await c.req.formData();
+      const fields = createProjectSessionFieldsSchema.parse({
+        prompt: typeof form.get("prompt") === "string" ? form.get("prompt") : "",
+        model:
+          typeof form.get("model") === "string" && form.get("model") !== ""
+            ? form.get("model")
+            : undefined,
+        title:
+          typeof form.get("title") === "string" && form.get("title") !== ""
+            ? form.get("title")
+            : undefined,
+      });
+      let modelProvider: string | null = null;
+      let modelCredentialEnvKeys: string[] | null = null;
+      await withTenantContext(
+        { orgId, userId: actor.id },
+        async (database) => {
+          if (
+            await hasProjectPromptIdempotencyKey({
+              actor,
+              orgId,
+              idempotencyKey: requestKey,
+              database,
+            })
+          ) {
+            return;
+          }
+          await assertProjectRuntimeAvailable(database);
+          const detail = await getProject({ actor, orgId, projectId, database });
+          const model = fields.model ?? detail.default_model;
+          const admission = await assertProjectModelAvailable({
+            actor,
+            orgId,
+            model,
+            database,
+          });
+          modelProvider = admission.provider;
+          modelCredentialEnvKeys = admission.envKeys;
+        },
+      );
+      const attachments = await projectAttachmentsFromForm({
+        actor,
+        orgId,
+        projectId,
+        idempotencyKey: requestKey,
+        entries: form.getAll("file"),
+      });
+      const session = await withTenantContext(
+        { orgId, userId: actor.id },
+        (database) =>
+          createProjectSession({
+            actor,
+            orgId,
+            projectId,
+            prompt: fields.prompt,
+            model: fields.model,
+            modelProvider,
+            modelCredentialEnvKeys,
+            title: fields.title,
+            idempotencyKey: requestKey,
+            attachments,
+            database,
+          }),
+      );
+      return c.json(session, 201);
+    } catch (error) {
+      return projectError(c, error);
+    }
+  },
+);
+
+app.get("/v1/projects/:id/sessions/:sessionId", async (c) => {
+  try {
+    assertProjectSession(c);
+    const session = await withTenant(c, ({ actor, orgId, database }) =>
+      getProjectSession({
+        actor,
+        orgId,
+        projectId: c.req.param("id"),
+        sessionId: c.req.param("sessionId"),
+        database,
+      }),
+    );
+    return c.json(session);
+  } catch (error) {
+    return projectError(c, error);
+  }
+});
+
+app.post(
+  "/v1/projects/:id/sessions/:sessionId/prompts",
+  async (c, next) => {
+    try {
+      assertProjectSession(c);
+    } catch (error) {
+      return projectError(c, error);
+    }
+    await next();
+  },
+  bodyLimit({
+    maxSize: 64 * 1024 * 1024,
+    onError: (c) => jsonError(c, "Project upload exceeds the 64 MB limit.", 413),
+  }),
+  async (c) => {
+    try {
+      assertProjectSession(c);
+      if (!c.req.header("content-type")?.toLowerCase().startsWith("multipart/form-data")) {
+        return jsonError(c, "Project prompts require multipart/form-data.", 415);
+      }
+      const actor = actorFromContext(c);
+      const orgId = await orgIdFromContext(c);
+      const projectId = c.req.param("id");
+      const sessionId = c.req.param("sessionId");
+      const requestKey = idempotencyKey(c);
+      const form = await c.req.formData();
+      const fields = projectPromptFieldsSchema.parse({
+        prompt: typeof form.get("prompt") === "string" ? form.get("prompt") : "",
+        model:
+          typeof form.get("model") === "string" && form.get("model") !== ""
+            ? form.get("model")
+            : undefined,
+      });
+      await withTenantContext({ orgId, userId: actor.id }, async (database) => {
+        if (
+          await hasProjectPromptIdempotencyKey({
+            actor,
+            orgId,
+            idempotencyKey: requestKey,
+            database,
+          })
+        ) {
+          return;
+        }
+        await assertProjectRuntimeAvailable(database);
+        const session = await getProjectSession({
+          actor,
+          orgId,
+          projectId,
+          sessionId,
+          database,
+        });
+        if (fields.model && fields.model !== session.model) {
+          throw new ProjectConflictError("A session's model cannot change.");
+        }
+        await assertProjectModelAvailable({
+          actor,
+          orgId,
+          model: session.model,
+          database,
+        });
+      });
+      const attachments = await projectAttachmentsFromForm({
+        actor,
+        orgId,
+        projectId,
+        idempotencyKey: requestKey,
+        entries: form.getAll("file"),
+      });
+      const session = await withTenantContext(
+        { orgId, userId: actor.id },
+        async (database) => {
+          await enqueueProjectPrompt({
+            actor,
+            orgId,
+            projectId,
+            sessionId,
+            text: fields.prompt,
+            model: fields.model,
+            idempotencyKey: requestKey,
+            attachments,
+            database,
+          });
+          return getProjectSession({
+            actor,
+            orgId,
+            projectId,
+            sessionId,
+            database,
+          });
+        },
+      );
+      return c.json(session, 202);
+    } catch (error) {
+      return projectError(c, error);
+    }
+  },
+);
+
+app.post("/v1/projects/:id/sessions/:sessionId/stop", async (c) => {
+  try {
+    assertProjectSession(c);
+    const session = await withTenant(c, async ({ actor, orgId, database }) => {
+      await requestProjectSessionStop({
+        actor,
+        orgId,
+        projectId: c.req.param("id"),
+        sessionId: c.req.param("sessionId"),
+        database,
+      });
+      return getProjectSession({
+        actor,
+        orgId,
+        projectId: c.req.param("id"),
+        sessionId: c.req.param("sessionId"),
+        database,
+      });
+    });
+    return c.json(session, 202);
+  } catch (error) {
+    return projectError(c, error);
+  }
+});
+
+app.get("/v1/projects/:id/sessions/:sessionId/events", async (c) => {
+  try {
+    assertProjectSession(c);
+    const projectId = c.req.param("id");
+    const sessionId = c.req.param("sessionId");
+    const actor = actorFromContext(c);
+    const orgId = await orgIdFromContext(c);
+    await withTenantContext({ orgId, userId: actor.id }, (database) =>
+      getProjectSession({ actor, orgId, projectId, sessionId, database }),
+    );
+    let cursor = parseProjectLastEventId(
+      c.req.header("Last-Event-ID") ?? c.req.query("last_event_id"),
+    );
+    const encoder = new TextEncoder();
+    let closed = false;
+    let notified = false;
+    let readySent = false;
+    let terminalObserved = false;
+    let wake: (() => void) | null = null;
+    let unsubscribe: () => void = () => undefined;
+    const stream = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        const send = (frame: string) => {
+          if (!closed) controller.enqueue(encoder.encode(frame));
+        };
+        const waitForWake = () =>
+          new Promise<void>((resolve) => {
+            let settled = false;
+            const finish = () => {
+              if (settled) return;
+              settled = true;
+              clearTimeout(timer);
+              resolve();
+            };
+            const timer = setTimeout(finish, 15_000);
+            timer.unref();
+            wake = finish;
+            if (notified) finish();
+          });
+        unsubscribe = await subscribeProjectEventCursor(sessionId, (sequence) => {
+          if (sequence <= cursor) return;
+          notified = true;
+          wake?.();
+        });
+        c.req.raw.signal.addEventListener(
+          "abort",
+          () => {
+            closed = true;
+            wake?.();
+          },
+          { once: true },
+        );
+        try {
+          while (!closed) {
+            notified = false;
+            const events = await withTenantContext(
+              { orgId, userId: actor.id },
+              (database) =>
+                listProjectSessionEvents({
+                  actor,
+                  orgId,
+                  projectId,
+                  sessionId,
+                  after: cursor,
+                  limit: 500,
+                  database,
+                }),
+            );
+            for (const envelope of events) {
+              if (envelope.sequence <= cursor) continue;
+              cursor = envelope.sequence;
+              send(projectEventFrame(envelope));
+            }
+            if (events.length >= 500 || notified) continue;
+            const session = await withTenantContext(
+              { orgId, userId: actor.id },
+              (database) =>
+                getProjectSession({ actor, orgId, projectId, sessionId, database }),
+            );
+            const terminal = ["stopped", "completed", "error"].includes(session.status);
+            if (terminal && terminalObserved) break;
+            if (terminal) {
+              terminalObserved = true;
+              continue;
+            }
+            if (!readySent) {
+              send(projectReadyFrame(sessionId));
+              readySent = true;
+            }
+            send(": keepalive\n\n");
+            await waitForWake();
+            wake = null;
+          }
+        } catch {
+          // EventSource reconnects with Last-Event-ID and replays from durable creator-scoped rows.
+        } finally {
+          closed = true;
+          unsubscribe();
+          try {
+            controller.close();
+          } catch {
+            // Already closed by the client.
+          }
+        }
+      },
+      cancel() {
+        closed = true;
+        wake?.();
+        unsubscribe();
+      },
+    });
+    return new Response(stream, {
+      headers: {
+        "content-type": "text/event-stream",
+        "cache-control": "no-cache, no-transform",
+        "x-accel-buffering": "no",
+        connection: "keep-alive",
+      },
+    });
+  } catch (error) {
+    return projectError(c, error);
+  }
+});
+
+app.get("/v1/projects/:id/files", async (c) => {
+  try {
+    assertProjectSession(c);
+    const files = await withTenant(c, ({ actor, orgId, database }) =>
+      listProjectFiles({
+        actor,
+        orgId,
+        projectId: c.req.param("id"),
+        database,
+      }),
+    );
+    return c.json({ files });
+  } catch (error) {
+    return projectError(c, error);
+  }
+});
+
+app.get("/v1/projects/:id/files/:fileId/versions", async (c) => {
+  try {
+    assertProjectSession(c);
+    const versions = await withTenant(c, ({ actor, orgId, database }) =>
+      listProjectFileVersions({
+        actor,
+        orgId,
+        projectId: c.req.param("id"),
+        fileId: c.req.param("fileId"),
+        database,
+      }),
+    );
+    return c.json({ versions });
+  } catch (error) {
+    return projectError(c, error);
+  }
+});
+
+app.get("/v1/projects/:id/files/:fileId/versions/:version", async (c) => {
+  try {
+    assertProjectSession(c);
+    const version = Number(c.req.param("version"));
+    const loadFile = async (): Promise<RunDownloadAsset> => {
+      const file = await withTenant(c, ({ actor, orgId, database }) =>
+        getProjectFileVersion({
+          actor,
+          orgId,
+          projectId: c.req.param("id"),
+          fileId: c.req.param("fileId"),
+          version,
+          database,
+        }),
+      );
+      return {
+        fileName: file.path.split("/").pop() || "file",
+        contentType: file.content_type,
+        previewContentType: RUN_INLINE_MEDIA_TYPES.has(file.content_type)
+          ? file.content_type
+          : null,
+        byteSize: file.byte_size,
+        storageKey: file.storage_key,
+        generation: `${file.version}:${file.checksum}`,
+      };
+    };
+    return await streamRunDownload(c, await loadFile(), loadFile);
+  } catch (error) {
+    return projectError(c, error);
+  }
+});
+
+app.get("/v1/projects/:id/files/:fileId", async (c) => {
+  try {
+    assertProjectSession(c);
+    const loadFile = async (): Promise<RunDownloadAsset> => {
+      const file = await withTenant(c, ({ actor, orgId, database }) =>
+        getProjectFile({
+          actor,
+          orgId,
+          projectId: c.req.param("id"),
+          fileId: c.req.param("fileId"),
+          database,
+        }),
+      );
+      return {
+        fileName: file.path.split("/").pop() || "file",
+        contentType: file.content_type,
+        previewContentType: RUN_INLINE_MEDIA_TYPES.has(file.content_type)
+          ? file.content_type
+          : null,
+        byteSize: file.byte_size,
+        storageKey: file.storage_key,
+        generation: `${file.version}:${file.checksum}`,
+      };
+    };
+    return await streamRunDownload(c, await loadFile(), loadFile);
+  } catch (error) {
+    return projectError(c, error);
+  }
+});
+
 /* ---- Skill runs (one-shot sandboxed sessions; session-only, PATs rejected) ------------------ */
 
 function boundedInteger(raw: string | undefined, fallback: number, min: number, max: number): number {
@@ -3838,7 +4710,12 @@ function assertRunSession(c: Context): void {
 
 function idempotencyKey(c: Context): string {
   const value = c.req.header("Idempotency-Key")?.trim();
-  if (!value || value.length < 8 || value.length > 200 || !/^[\x21-\x7e]+$/.test(value)) {
+  if (
+    !value
+    || value.length < 8
+    || value.length > 200
+    || !/^[A-Za-z0-9._:-]+$/.test(value)
+  ) {
     throw new RunValidationError("a valid Idempotency-Key header is required", "invalid_idempotency_key");
   }
   return value;

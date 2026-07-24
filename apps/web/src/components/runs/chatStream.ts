@@ -98,26 +98,26 @@ export function decodeChatEvent(frame: SseFrame): RunChatEvent | null {
 
 const STREAM_MAX_RECONNECTS = 3;
 
+export interface ChatStreamCursor {
+  lastEventId?: string | null;
+  onEventId?: (id: string) => void;
+  /** The HTTP stream is open. This is deliberately independent from replay payloads. */
+  onConnected?: () => void;
+  /** Reconcile durable state when the server intentionally closes a terminal stream. */
+  onStreamEnd?: () => Promise<boolean>;
+}
+
 /**
- * Open the run's SSE event stream and pump decoded events into `onEvent` until `signal` aborts.
+ * Open one normalized OpenCode SSE stream and pump decoded events until `signal` aborts.
  * Consumed with fetch + ReadableStream (deterministic teardown); reconnects with exponential
  * backoff (max {@link STREAM_MAX_RECONNECTS} tries), resuming from `parser.lastId()` via a
- * `last_event_id` query param (harmless if the backend ignores it). Auth/shape/state failures
- * (401/404/409/422) surface as a terminal `error` event instead of retrying — 409 means the run
- * froze, which the caller handles by re-fetching the run and rendering the transcript.
+ * `last_event_id` query param. Auth/shape/state failures surface as a terminal event.
  */
-export async function openRunStream(
-  runId: string,
+async function openChatStream(
+  eventsPath: string,
   onEvent: (event: RunChatEvent) => void,
   signal: AbortSignal,
-  cursor?: {
-    lastEventId?: string | null;
-    onEventId?: (id: string) => void;
-    /** The HTTP stream is open. This is deliberately independent from replay payloads. */
-    onConnected?: () => void;
-    /** Reconcile durable run state when the server intentionally closes a terminal stream. */
-    onStreamEnd?: () => Promise<boolean>;
-  },
+  cursor?: ChatStreamCursor,
 ): Promise<void> {
   let attempts = 0;
   let lastDeliveredId: string | null = cursor?.lastEventId ?? null;
@@ -128,7 +128,7 @@ export async function openRunStream(
       const lastId = lastDeliveredId;
       if (lastId) params.set("last_event_id", lastId);
       const query = params.toString();
-      const res = await fetch(`/v1/runs/${encodeURIComponent(runId)}/events${query ? `?${query}` : ""}`, {
+      const res = await fetch(`${eventsPath}${query ? `?${query}` : ""}`, {
         signal,
         headers: {
           accept: "text/event-stream",
@@ -191,6 +191,35 @@ export async function openRunStream(
       await new Promise((resolve) => setTimeout(resolve, 400 * 2 ** (attempts - 1)));
     }
   }
+}
+
+export function openRunStream(
+  runId: string,
+  onEvent: (event: RunChatEvent) => void,
+  signal: AbortSignal,
+  cursor?: ChatStreamCursor,
+): Promise<void> {
+  return openChatStream(
+    `/v1/runs/${encodeURIComponent(runId)}/events`,
+    onEvent,
+    signal,
+    cursor,
+  );
+}
+
+export function openProjectStream(
+  projectId: string,
+  sessionId: string,
+  onEvent: (event: RunChatEvent) => void,
+  signal: AbortSignal,
+  cursor?: ChatStreamCursor,
+): Promise<void> {
+  return openChatStream(
+    `/v1/projects/${encodeURIComponent(projectId)}/sessions/${encodeURIComponent(sessionId)}/events`,
+    onEvent,
+    signal,
+    cursor,
+  );
 }
 
 /* ---- Chat state ----------------------------------------------------------------- */

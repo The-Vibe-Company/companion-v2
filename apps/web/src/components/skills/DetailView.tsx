@@ -29,6 +29,7 @@ import {
 import { DependenciesTab } from "./DependenciesTab";
 import { RunSessionsTab } from "../runs/RunSessionsTab";
 import { RunLauncherDialog } from "../runs/RunLauncherDialog";
+import { ProjectRunPicker } from "../projects/ProjectRunPicker";
 import type { RunLauncherDraft } from "../runs/launcherState";
 import { fetchRuns } from "@/lib/runQueries";
 import { FileExplorer } from "./fileview";
@@ -263,6 +264,7 @@ export function DetailView({
   orgId = "",
   historyEnabled = true,
   onUpgrade = () => {},
+  projectsEnabled = false,
 }: {
   skill: SkillVM;
   index: number;
@@ -295,6 +297,7 @@ export function DetailView({
   onRunAgainConsumed?: () => void;
   historyEnabled?: boolean;
   onUpgrade?: () => void;
+  projectsEnabled?: boolean;
 }) {
   const invalid = skill.validation === "invalid";
   const [versions, setVersions] = useState<SkillVersionRow[]>([]);
@@ -306,6 +309,7 @@ export function DetailView({
   const [runsError, setRunsError] = useState<string | null>(null);
   const [runsReload, setRunsReload] = useState(0);
   const [launcherOpen, setLauncherOpen] = useState(false);
+  const [projectPickerOpen, setProjectPickerOpen] = useState(false);
   const [tab, setTab] = useState<DetailTab>(initialTab ?? "overview");
 
   // Reset to the initial tab when opening a different skill (not on a version bump).
@@ -533,13 +537,15 @@ export function DetailView({
             type="button"
             className="btn-ghost"
             disabled={invalid || !skill.version}
-            onClick={() => setLauncherOpen(true)}
+            onClick={() => projectsEnabled ? setProjectPickerOpen(true) : setLauncherOpen(true)}
             title={
               invalid
                 ? "Resolve validation errors first"
                 : !skill.version
                   ? "No published version yet"
-                  : "Run this skill in a sandboxed session"
+                  : projectsEnabled
+                    ? "Run this skill in a project"
+                    : "Run this skill in a sandboxed session"
             }
           >
             <Icon name="play" size={14} />
@@ -772,6 +778,13 @@ export function DetailView({
             setLauncherOpen(false);
             onRunAgainConsumed?.();
           }}
+        />
+      )}
+      {projectPickerOpen && (
+        <ProjectRunPicker
+          skillSlug={skill.id}
+          skillName={skill.display?.name ?? skill.id}
+          onClose={() => setProjectPickerOpen(false)}
         />
       )}
     </div>

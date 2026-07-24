@@ -58,14 +58,14 @@ one person. There is no open, self-hostable answer for a **team**.
 | **Pillar 2 — Containers** | Org-admin **approval** of images into the catalog; **1-click deploy** of ≥1 container; surface connection details/secrets. |
 | **Pillar 3 — Skills** | Upload + **validate** + **version** ≥1 `SKILL.md` package; organize with shared labels; **attach** to an agent; sync into the runtime. |
 | **Memory** | **Granite** vault provisioned and mounted for the agent (concrete V0 integration). |
-| **Dashboard** | Basic list/detail views of agents, containers, and skills (skills filterable by label, status, and dependencies); deployment status & logs. |
+| **Dashboard** | Cowork navigation with creator-private Projects and Skills one click apart; persistent Project workspaces, direct multi-session OpenCode chat, synchronized capabilities, Secrets and Files; basic list/detail views of agents, containers, and skills. |
 | **Secrets** | Encrypted, write-only secret storage; OpenRouter and provider credentials referenced, never inlined. |
 | **Audit** | Append-only audit log of mutating, deploy, and exec actions (in-app view minimal). |
 | **Managed SaaS billing** | Free and Pro plans; Pro is $10 USD/month per active member with Stripe Tax, automatic prorations, a seven-day delinquency grace period, and transactional skill quotas. Self-hosted remains fully unlocked without Stripe. |
 
 ### Out of scope (deferred)
 
-SSO/SAML & SCIM · usage cost dashboards · community marketplace & cross-org sharing ·
+SSO/SAML & SCIM · usage cost dashboards · community marketplace & cross-org sharing · Project sharing ·
 **Kubernetes** and **Modal** providers · audit export & compliance certifications · skill-execution
 sandbox hardening · skill ratings/reviews · agent observability/tracing · Tailscale-style private
 networking parity with v1.
@@ -121,31 +121,51 @@ Each requirement has user stories with acceptance criteria. Priorities: **P0** =
 - As any member, I can **attach/detach a specific skill version** to an agent. *AC:* attaching triggers
   a reconcile that syncs the bundle into the running agent; `synced_at` reflects convergence.
 
-### 5.4 Hermès Agents (P0)
+### 5.4 Projects work surface (P0)
+- As a Member, I can create a private **Project** with a name, default activated model, and accessible
+  Skills. *AC:* Companion immediately prepares one persistent named Vercel Sandbox; only the creator can
+  enumerate or mutate it, including against a same-org Owner/Admin.
+- As a Project owner, I can start multiple OpenCode sessions that share the same Project filesystem.
+  *AC:* every session has its own immutable model and transcript, sessions may run concurrently, and
+  Companion never creates one sandbox per session.
+- As a Project owner, every active generic Secret I can access and every effective configured model
+  connection becomes available at activation. *AC:* plaintext is never persisted or written to `.env`;
+  collisions block activation, access loss recycles the runtime, and queued prompts remain dormant
+  without VM/billing churn until their immutable model provider is effectively reconnected.
+- As a Project owner, I can browse durable Files and resume after inactivity. *AC:* only the managed
+  `files/` tree is exposed; after ten idle minutes Companion checkpoints and stops the VM, then restores
+  the same workspace and sessions on demand.
+- As a Project owner, I can explicitly retry a workspace in Error or Needs attention. *AC:* retries
+  requeue the same durable identity and never replace missing provider state with an empty Project.
+- As a Skill user, **Run skill** can add that Skill to a chosen Project and start a direct session.
+  *AC:* attached Skills and their dependency closure update automatically and atomically between turns;
+  legacy standalone Skill Runs keep their existing API semantics.
+
+### 5.5 Hermès Agents (P0)
 - As a Builder, I can **create and deploy an agent** from a template with a model route (OpenRouter), a
   system prompt, an optional Granite vault, attached skills, and a provider. *AC:* the agent reaches
   `running`, exposes a chat surface, and uses the attached skills and vault.
 - As a member, I can **open a chat** with any agent in the org and **stop/redeploy** agents.
 
-### 5.5 Curated Container Catalog (P0)
+### 5.6 Curated Container Catalog (P0)
 - As an Org Admin, I can **approve an image/template** into the catalog (digest-pinned, with resource
   limits and required secrets). *AC:* only approved items are deployable; image is pinned by digest.
 - As a member, I can **1-click deploy** a catalog item and see its status, logs, and connection details.
   *AC:* the deployment records me as creator; secrets are injected at runtime, never exposed in config.
 
-### 5.6 Providers & deployment lifecycle (P0)
+### 5.7 Providers & deployment lifecycle (P0)
 - As an Org Admin, I can **register and test a provider** (local Docker for MVP) and store its
   credentials securely. *AC:* a connectivity test passes before the provider is enabled.
 - As the system, I **reconcile** every deployment (observe → diff → apply → heal drift) idempotently.
   *AC:* re-running never double-provisions; orphaned external resources are detected and garbage-collected;
   destroy is idempotent and verified by re-observation.
 
-### 5.7 Secrets & audit (P0)
+### 5.8 Secrets & audit (P0)
 - As an Org Admin, I can **set secrets** (write-only) that resources reference. *AC:* secret values are
   never returned by the API and never persisted in plaintext.
 - As an Org Admin, I can **view an audit log** of who did what and to which resource.
 
-### 5.8 SaaS plans and seat billing (P0 managed service)
+### 5.9 SaaS plans and seat billing (P0 managed service)
 
 - As a workspace Owner/Admin, I can upgrade from Free to Pro through Stripe Checkout at $10 USD per
   active member per month and manage payment methods, invoices, and end-of-period cancellation in the
@@ -193,7 +213,7 @@ Each requirement has user stories with acceptance criteria. Priorities: **P0** =
 
 | Phase | Theme | Headline capabilities |
 |---|---|---|
-| **V0 — MVP** | Self-host + 3 thin pillars + RBAC | Org/User + RBAC + org-wide skills with shared labels · Local Docker (Fly fast-follow) · deploy Hermès agent · curated container 1-click · `SKILL.md` upload/version/label/attach · Granite + OpenRouter concrete · basic dashboard |
+| **V0 — MVP** | Self-host + 3 thin pillars + RBAC | Org/User + RBAC + creator-private Projects work surface · org-wide skills with shared labels · Local Docker (Fly fast-follow) · deploy Hermès agent · curated container 1-click · `SKILL.md` upload/version/label/attach · Granite + OpenRouter concrete |
 | **V1 — Collaboration & trust** | Make teams productive & observable | **Kubernetes** + **Modal** providers · **SSO/SAML** · **in-app audit** & usage · agent observability/logs · skill ratings/reviews + dependency pinning · private networking (Tailscale-style) · **pluggable runtime** beyond Hermes |
 | **V2 — Scale & ecosystem** | Marketplace, usage economics, compliance | Community **marketplace** (skills, agent + container templates) · usage/cost controls · **compliance** (audit export, SCIM, SOC2-ready, retention) · multi-org / federation |
 
@@ -229,6 +249,8 @@ remain **V2**. Kubernetes & Modal → **V1**.
 | 4 | **v1 community migration friction** — 2.4k★ expect CLI/IaC, get a web portal | Keep an API/CLI surface; provide a v1 import bridge; ship a credible self-host story so the base feels at home |
 | 5 | **`SKILL.md` spec drift** — the open standard evolves | Track the canonical spec; validate against a versioned schema; treat the skill format as a versioned dependency |
 | 6 | **Self-host operational burden** — multi-tenant + Postgres + providers is heavier than v1's CLI | One-command compose install; sane defaults; bundled Hermes/Granite/OpenRouter so first run works |
+| 7 | **Shared-workspace races** — concurrent sessions overwrite the same file | Make last-writer-wins explicit, retain prior managed-file versions, and flag overlapping paths without claiming automatic merging |
+| 8 | **Trusted Skill supply chain** — any member can publish an org Skill that auto-updates inside Projects holding private Secrets | Treat org publishers as trusted code authors by explicit product policy; retain versions/checksums, audit every applied update, and state that sandboxing does not protect injected Secrets from executed code |
 
 ---
 

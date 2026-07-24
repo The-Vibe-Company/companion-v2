@@ -1,4 +1,5 @@
 import {
+  PROJECT_TRANSCRIPT_MAX_BYTES,
   RUN_CHAT_DELTA_MAX,
   RUN_CHAT_ID_MAX,
   RUN_CHAT_MESSAGE_MAX,
@@ -6,7 +7,11 @@ import {
   RUN_CHAT_TITLE_MAX,
   RUN_CHAT_TOOL_INPUT_MAX,
   RUN_CHAT_TOOL_OUTPUT_MAX,
+  RUN_CHAT_TRANSCRIPT_TEXT_MAX,
+  runChatEventSchema,
+  runChatHistoryItemSchema,
   type RunChatEvent,
+  type RunChatHistoryItem,
 } from "@companion/contracts";
 
 /** Stable marker used everywhere a literal injected into a run is removed. */
@@ -332,4 +337,67 @@ export function redactAndBoundRunEvents(
         return [{ ...event, message: truncateUtf8(event.message, RUN_CHAT_MESSAGE_MAX) }];
     }
   });
+}
+
+/**
+ * Project persistence boundary for complete events.
+ *
+ * Streamed text/reasoning must first pass through the caller's stateful `RunStreamingRedactor` so a
+ * credential split across SDK chunks is removed as a whole. This helper then applies the shared
+ * Run field bounds and parses away any payload outside the canonical event vocabulary.
+ */
+export function redactAndBoundProjectEvents(
+  events: RunChatEvent[],
+  redactor?: RunRedactor,
+): RunChatEvent[] {
+  return redactAndBoundRunEvents(events, redactor).map((event) => runChatEventSchema.parse(event));
+}
+
+function boundProjectTranscriptItem(item: RunChatHistoryItem): RunChatHistoryItem {
+  if (item.kind === "user" || item.kind === "assistant") {
+    return runChatHistoryItemSchema.parse({
+      ...item,
+      text: truncateUtf8(item.text, RUN_CHAT_TRANSCRIPT_TEXT_MAX),
+      ...(item.message_id === undefined
+        ? {}
+        : { message_id: truncateUtf8(item.message_id, RUN_CHAT_ID_MAX) }),
+    });
+  }
+  return runChatHistoryItemSchema.parse({
+    ...item,
+    call_id: truncateUtf8(item.call_id, RUN_CHAT_ID_MAX),
+    tool: truncateUtf8(item.tool, RUN_CHAT_NAME_MAX),
+    skill: item.skill === null ? null : truncateUtf8(item.skill, RUN_CHAT_NAME_MAX),
+    title: item.title === null ? null : truncateUtf8(item.title, RUN_CHAT_TITLE_MAX),
+    input: truncateUtf8(item.input, RUN_CHAT_TOOL_INPUT_MAX),
+    output: truncateUtf8(item.output, RUN_CHAT_TOOL_OUTPUT_MAX),
+  });
+}
+
+/**
+ * Redact and cap the cumulative Project recovery transcript while retaining the newest complete
+ * items. Each item is parsed through the shared Run history contract before aggregate measurement.
+ */
+export function redactAndBoundProjectTranscript(
+  items: RunChatHistoryItem[],
+  redactor?: RunRedactor,
+  maxBytes = PROJECT_TRANSCRIPT_MAX_BYTES,
+): RunChatHistoryItem[] {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 2) {
+    throw new RangeError("Project transcript byte limit must be an integer of at least 2");
+  }
+  const redacted = redactor ? redactor.redactPayload(items) : items;
+  const bounded = redacted.map(boundProjectTranscriptItem);
+  const serialized = bounded.map((item) => JSON.stringify(item));
+  let totalBytes = 2;
+  let start = bounded.length;
+  for (let index = bounded.length - 1; index >= 0; index -= 1) {
+    const item = serialized[index];
+    if (item === undefined) continue;
+    const nextBytes = Buffer.byteLength(item, "utf8") + (start < bounded.length ? 1 : 0);
+    if (totalBytes + nextBytes > maxBytes) break;
+    totalBytes += nextBytes;
+    start = index;
+  }
+  return bounded.slice(start);
 }

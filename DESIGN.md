@@ -178,11 +178,23 @@ components:
 
 ## Overview
 
-Companion v2 is an operator-grade, self-hostable portal for deploying, governing, and sharing AI agents, curated containers, and skills across organizations and teams. It extends the single-operator Companion v1 fleet dashboard into a multi-tenant portal, but the visual job is the same: make live resource state legible at a glance.
+Companion v2 is an operator-grade, self-hostable portal for deploying, governing, and sharing AI agents, curated containers, and skills across organizations and their members. It extends the single-operator Companion v1 fleet dashboard into a multi-tenant portal, but the visual job is the same: make live resource state legible at a glance.
 
 The interface is product software, not marketing. It should feel calm, dense, precise, trustworthy, and engineering-grade. Reference quality is Linear, Stripe, and Raycast: familiar controls, compact hierarchy, real data shown plainly, and no decorative drama. The operator should be able to scan health, scope, ownership, provider state, and pending changes in seconds.
 
-Design for technical users who read resource ids, scopes, roles, providers, model routes, vault names, lifecycle states, and audit records directly. Do not prettify machine values. Do not hide operational truth behind marketing language. Healthy state should be quiet. Broken state should be unmistakable without alarm theater.
+Companion has two product registers that share the same shell, tokens, density, and operational truth:
+
+- **Projects** is the outcome-oriented Cowork surface. It is designed for members who keep durable
+  files, start direct OpenCode sessions, and reuse synchronized capabilities without needing to
+  understand sandboxes, runtimes, or package layouts.
+- **Skills and administration** remain operator-oriented. Technical users read resource ids, scopes,
+  roles, providers, model routes, vault names, lifecycle states, and audit records directly.
+
+Progressive disclosure connects the two registers. Projects uses plain-language primary labels such as
+`Session`, `Files`, `Skills`, and `Secrets`; exact runtime state and machine values remain available in
+secondary details and Activity. Do not prettify machine values when they are shown. Do not hide
+operational truth behind marketing language. Healthy state should be quiet. Broken state should be
+unmistakable without alarm theater.
 
 This document describes the Companion theme as implemented in `apps/web`. Light is the default; a full dark
 theme and user-selectable accent presets are available (see Colors). CSS custom properties live in
@@ -258,7 +270,15 @@ UI copy is terse and operational. Say what happened, what will happen next, or w
 
 ## Layout
 
-Use a dense operator layout. The primary shell is a fixed sidebar (244px in the Skills Hub) plus compact topbar, with the main content constrained enough to scan but not padded into a landing page. Layout tokens: `sidebar-width` 244px, `topbar-height` 56px, `content-max` 1120px, `drawer-width` 460px.
+Use a dense product layout. The primary shell is a fixed sidebar (244px) plus compact topbar, with the
+main content constrained enough to scan but not padded into a landing page. Layout tokens:
+`sidebar-width` 244px, `topbar-height` 56px, `content-max` 1120px, `drawer-width` 460px.
+
+The sidebar begins with a compact segmented route switch for **Skills** and **Projects**. It is a pair
+of links with `aria-current`, not a tablist. Projects lists every creator-owned project inside one
+independently scrollable region. Each project is a disclosure: its live and recent sessions appear
+directly below it, while the complete history remains on the Project page. The project row owns the
+settings and new-session actions. The Projects `+` opens the compact Project setup dialog.
 
 Prefer tables and structured rows for resources. Companion lists fleets, containers, skills, members, providers, scopes, audit events, and planned changes. These surfaces should be compact and sortable/filterable over time, not inflated into repeated marketing cards.
 
@@ -301,6 +321,26 @@ Selection uses a tinted row background plus an inset accent edge via box-shadow.
 **Topbar** is compact and single-line. It shows product/workspace/view context, connection state, and updated timestamp. Use middle-dot separators and mono timestamps. No tagline, greeting, or hero title.
 
 **Sidebar** contains the Companion brand mark, wordmark, workspace context, primary navigation, counts where useful, and a quiet environment/footer indicator. Active nav uses `surface-raised` with foreground text; unread counts may use the accent fill. The brand mark tile uses the official transparent Companion mark on a tokenized `surface` tile with a `line` border, so it works across light, dark, and accent presets.
+
+**Projects overview and creation** keeps the shell stable and uses one calm primary canvas. Existing
+projects use the standard compact resource table with real search and status filters. `New project`
+opens one short dialog: name, default model, synchronized Skills, and a read-only summary of the
+Secrets Companion will make available. Do not add an objective-writing step or a configuration wizard.
+
+**Project workspace** is a compact Cowork page, not a dashboard of cards. Sessions are the primary
+column. A restrained secondary rail summarizes Skills, Secrets, and Files. `New session` asks only for
+the work, optional files, and a model override; the Project default is preselected. A session sends the
+prompt directly to OpenCode and renders the real transcript, tool activity, errors, and generated Files.
+Do not invent Companion plan, approval, progress, or deliverable-review states. OpenCode permissions are
+handled automatically by the runtime and do not create approval UI.
+
+The Files surface exposes only the Project's managed `files/` tree; runtime state, synchronized Skill
+packages, OpenCode storage, and sandbox addresses stay hidden. Preserve nested paths relative to
+`files/`. A quiet History action appears only when a file has retained versions; it lists exact
+versions, timestamps, sizes, and conflict warnings and downloads that immutable version without
+pretending to merge concurrent writes. On narrow screens the sidebar becomes the existing mobile
+rail/drawer, the Project rail follows the session list, dialogs fill the available width, and the
+session composer respects the safe area.
 
 **Summary counts** are slim inline rows. Use tabular numbers, muted labels, and status dot plus label. They are not cards.
 

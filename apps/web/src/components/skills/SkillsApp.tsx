@@ -206,6 +206,7 @@ export function SkillsApp({
   currentOrg,
   initialRoute,
   initialRouteSource,
+  projectsEnabled = false,
 }: {
   initialMineSkills: SkillVM[];
   initialOrgSkills: SkillVM[];
@@ -219,6 +220,7 @@ export function SkillsApp({
   currentOrg: OrgVM;
   initialRoute: SkillsRoute;
   initialRouteSource: SkillsRouteSource;
+  projectsEnabled?: boolean;
 }) {
   const router = useRouter();
   const orgActions = useOrgActions();
@@ -408,7 +410,8 @@ export function SkillsApp({
 
   useEffect(() => {
     router.prefetch("/secrets");
-  }, [router]);
+    if (projectsEnabled) router.prefetch("/projects");
+  }, [projectsEnabled, router]);
 
   const shareableSkillForSlug = useCallback((slug: string): SkillVM | null => {
     const isShareable = (s: SkillVM) => s.id === slug && s.scope === "org" && !s.archived;
@@ -1713,6 +1716,7 @@ export function SkillsApp({
         onCloseMobile={() => setMobileSidebarOpen(false)}
         personalSkillsEnabled={personalSkillsEnabled}
         onUpgrade={() => openSettings({ view: "billing" })}
+        projectsEnabled={projectsEnabled}
       />
       {mobileSidebarOpen && (
         <button
@@ -1752,6 +1756,7 @@ export function SkillsApp({
             onRunAgainConsumed={() => setRunAgainRequest(null)}
             historyEnabled={initialBilling.entitlements.skillHistory}
             onUpgrade={() => openSettings({ view: "billing" })}
+            projectsEnabled={projectsEnabled}
           />
         ) : currentView === "archived" ? (
           <ArchivedListView

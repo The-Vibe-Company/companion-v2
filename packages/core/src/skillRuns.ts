@@ -47,6 +47,7 @@ import {
   encryptOpaqueValue,
   type OpaqueCiphertext,
 } from "./secretsCrypto";
+import { deterministicAgentMessageId } from "./messageIds";
 import {
   OPENCODE_SERVER_USERNAME,
   RunRuntimeError,
@@ -482,21 +483,7 @@ export function hashRunCreationPayload(input: {
 
 /** OpenCode-compatible, time-ordered id derived from one durable prompt row. */
 export function deterministicRunMessageId(runId: string, ordinal: number, createdAtMs: number): string {
-  if (!Number.isSafeInteger(ordinal) || ordinal < 0 || !Number.isSafeInteger(createdAtMs) || createdAtMs < 0) {
-    throw new Error("invalid durable prompt identity");
-  }
-  // OpenCode 1.17.13 uses `msg_`, then six timestamp/counter bytes, then 14 base62 characters.
-  // Its prompt loop compares message ids, so merely satisfying the `msg` schema prefix is unsafe:
-  // a hash in the timestamp field can sort the user message after its native assistant child and
-  // make OpenCode continue forever. Persist the same createdAt alongside this id and hash only the
-  // random suffix so retries remain stable and native chronological ordering is preserved.
-  const encodedTime = (BigInt(createdAtMs) * 0x1000n + BigInt(ordinal + 1)) & ((1n << 48n) - 1n);
-  const timeHex = encodedTime.toString(16).padStart(12, "0");
-  const stableSuffix = createHash("sha256")
-    .update(`companion-run-prompt:v2:${runId}:${ordinal}:${createdAtMs}`)
-    .digest("hex")
-    .slice(0, 14);
-  return `msg_${timeHex}${stableSuffix}`;
+  return deterministicAgentMessageId("run", runId, ordinal, createdAtMs);
 }
 
 function isUniqueViolation(error: unknown): boolean {
@@ -1653,7 +1640,6 @@ async function createRunInTransaction(input: {
     .returning();
   const row = inserted[0];
   if (!row) throw new Error("run insert returned no row");
-
   await input.database.insert(schema.skillRunSkills).values(
     closure.map((skill) => ({
       orgId: input.orgId,

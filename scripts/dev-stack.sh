@@ -111,8 +111,9 @@ configure_conductor_env() {
   export POSTGRES_PORT MINIO_PORT MINIO_CONSOLE_PORT MAILPIT_SMTP_PORT MAILPIT_WEB_PORT
 
   export DATABASE_MIGRATION_URL="postgres://companion:companion@127.0.0.1:${POSTGRES_PORT}/companion"
-  export DATABASE_URL="postgres://companion_runtime:companion-runtime@127.0.0.1:${POSTGRES_PORT}/companion"
-  USE_LOCAL_RUNTIME_DB_ROLE=1
+  export DATABASE_URL="postgres://companion_api:companion-api@127.0.0.1:${POSTGRES_PORT}/companion"
+  export DATABASE_WORKER_URL="postgres://companion_worker:companion-worker@127.0.0.1:${POSTGRES_PORT}/companion"
+  USE_LOCAL_RUNTIME_DB_ROLES=1
   export COMPANION_API_URL="http://${COMPANION_API_HOST}:${API_PORT}"
   export COMPANION_WEB_URL="http://${COMPANION_WEB_HOST}:${WEB_PORT}"
   export NEXT_PUBLIC_COMPANION_API_URL="$COMPANION_API_URL"
@@ -133,6 +134,7 @@ configure_conductor_env() {
 
 configure_local_env() {
   local database_url_explicit="${DATABASE_URL+x}"
+  local database_worker_url_explicit="${DATABASE_WORKER_URL+x}"
   local database_migration_url_explicit="${DATABASE_MIGRATION_URL+x}"
   local companion_api_url_explicit="${COMPANION_API_URL+x}"
   local companion_web_url_explicit="${COMPANION_WEB_URL+x}"
@@ -163,14 +165,19 @@ configure_local_env() {
   export MAILPIT_SMTP_PORT="${MAILPIT_SMTP_PORT:-1025}"
   export MAILPIT_WEB_PORT="${MAILPIT_WEB_PORT:-8025}"
 
-  if should_use_derived_value "$database_url_explicit" "${DATABASE_URL+x}" "${DATABASE_URL:-}" "postgres://companion_runtime:companion-runtime@127.0.0.1:5432/companion" \
+  if should_use_derived_value "$database_url_explicit" "${DATABASE_URL+x}" "${DATABASE_URL:-}" "postgres://companion_api:companion-api@127.0.0.1:5432/companion" \
+    || should_use_derived_value "$database_url_explicit" "${DATABASE_URL+x}" "${DATABASE_URL:-}" "postgres://companion_runtime:companion-runtime@127.0.0.1:5432/companion" \
     || should_use_derived_value "$database_url_explicit" "${DATABASE_URL+x}" "${DATABASE_URL:-}" "postgres://companion:companion@127.0.0.1:5432/companion"; then
-    export DATABASE_URL="postgres://companion_runtime:companion-runtime@127.0.0.1:${POSTGRES_PORT}/companion"
-    USE_LOCAL_RUNTIME_DB_ROLE=1
+    export DATABASE_URL="postgres://companion_api:companion-api@127.0.0.1:${POSTGRES_PORT}/companion"
+    if should_use_derived_value "$database_worker_url_explicit" "${DATABASE_WORKER_URL+x}" "${DATABASE_WORKER_URL:-}" "postgres://companion_worker:companion-worker@127.0.0.1:5432/companion"; then
+      export DATABASE_WORKER_URL="postgres://companion_worker:companion-worker@127.0.0.1:${POSTGRES_PORT}/companion"
+    fi
+    USE_LOCAL_RUNTIME_DB_ROLES=1
     if should_use_derived_value "$database_migration_url_explicit" "${DATABASE_MIGRATION_URL+x}" "${DATABASE_MIGRATION_URL:-}" "postgres://companion:companion@127.0.0.1:5432/companion"; then
       export DATABASE_MIGRATION_URL="postgres://companion:companion@127.0.0.1:${POSTGRES_PORT}/companion"
     fi
   fi
+  export DATABASE_WORKER_URL="${DATABASE_WORKER_URL:-$DATABASE_URL}"
   export COMPANION_API_PORT="$API_PORT"
   if should_use_derived_value "$companion_api_url_explicit" "${COMPANION_API_URL+x}" "${COMPANION_API_URL:-}" "http://127.0.0.1:3001"; then
     export COMPANION_API_URL="http://${COMPANION_API_HOST}:${API_PORT}"
@@ -452,25 +459,55 @@ start_infra() {
   docker compose -p "$COMPOSE_PROJECT_NAME" up -d minio-init
 }
 
-configure_local_runtime_db_role() {
-  [ "${USE_LOCAL_RUNTIME_DB_ROLE:-0}" = "1" ] || return 0
-  log "Configuring NOBYPASSRLS database runtime role"
+configure_local_runtime_db_roles() {
+  [ "${USE_LOCAL_RUNTIME_DB_ROLES:-0}" = "1" ] || return 0
+  log "Configuring separate NOBYPASSRLS API and worker database roles"
   docker compose -p "$COMPOSE_PROJECT_NAME" exec -T postgres \
     psql -v ON_ERROR_STOP=1 -U companion -d companion -c \
     "DO \$\$ BEGIN
-       IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'companion_runtime') THEN
-         CREATE ROLE companion_runtime LOGIN PASSWORD 'companion-runtime'
+       IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'companion_api') THEN
+         CREATE ROLE companion_api LOGIN PASSWORD 'companion-api'
+           NOSUPERUSER NOBYPASSRLS NOINHERIT;
+       END IF;
+       IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'companion_worker') THEN
+         CREATE ROLE companion_worker LOGIN PASSWORD 'companion-worker'
            NOSUPERUSER NOBYPASSRLS NOINHERIT;
        END IF;
      END \$\$;
-     ALTER ROLE companion_runtime NOSUPERUSER NOBYPASSRLS NOINHERIT;" >/dev/null
+     ALTER ROLE companion_api NOSUPERUSER NOBYPASSRLS NOINHERIT;
+     ALTER ROLE companion_worker NOSUPERUSER NOBYPASSRLS NOINHERIT;" >/dev/null
 }
 
-grant_local_runtime_db_role() {
-  [ "${USE_LOCAL_RUNTIME_DB_ROLE:-0}" = "1" ] || return 0
-  docker compose -p "$COMPOSE_PROJECT_NAME" exec -T postgres \
-    psql -v ON_ERROR_STOP=1 -v runtime_role=companion_runtime -U companion -d companion \
-    < "$REPO_ROOT/packages/db/runtime-role-grants.sql" >/dev/null
+grant_local_runtime_db_roles() {
+  [ "${USE_LOCAL_RUNTIME_DB_ROLES:-0}" = "1" ] || return 0
+  local retired_role=""
+  if docker compose -p "$COMPOSE_PROJECT_NAME" exec -T postgres \
+    psql -At -U companion -d companion -c \
+      "select 1 from pg_roles where rolname = 'companion_runtime'" \
+      | grep -qx 1; then
+    retired_role="companion_runtime"
+  fi
+  if [ -n "$retired_role" ]; then
+    docker compose -p "$COMPOSE_PROJECT_NAME" exec -T postgres \
+      psql -v ON_ERROR_STOP=1 \
+        -v api_role=companion_api \
+        -v worker_role=companion_worker \
+        -v retired_runtime_role="$retired_role" \
+        -U companion -d companion \
+      < "$REPO_ROOT/packages/db/runtime-role-grants.sql" >/dev/null
+  else
+    docker compose -p "$COMPOSE_PROJECT_NAME" exec -T postgres \
+      psql -v ON_ERROR_STOP=1 \
+        -v api_role=companion_api \
+        -v worker_role=companion_worker \
+        -U companion -d companion \
+      < "$REPO_ROOT/packages/db/runtime-role-grants.sql" >/dev/null
+  fi
+  if [ -n "$retired_role" ]; then
+    docker compose -p "$COMPOSE_PROJECT_NAME" exec -T postgres \
+      psql -v ON_ERROR_STOP=1 -U companion -d companion -c \
+        "ALTER ROLE companion_runtime NOLOGIN;" >/dev/null
+  fi
 }
 
 run_dev() {
@@ -482,11 +519,11 @@ run_dev() {
   stop_port_listeners "$WEB_PORT" "$COMPANION_WEB_HOST"
   stop_port_listeners "$API_PORT" "$COMPANION_API_HOST"
   start_infra
-  configure_local_runtime_db_role
+  configure_local_runtime_db_roles
 
   log "Applying Drizzle migrations"
   pnpm db:migrate
-  grant_local_runtime_db_role
+  grant_local_runtime_db_roles
 
   log "Seeding local test user"
   pnpm --filter @companion/api seed:test-user
@@ -505,6 +542,7 @@ print_env() {
   configure_local_env
   printf 'COMPOSE_PROJECT_NAME=%s\n' "$COMPOSE_PROJECT_NAME"
   printf 'DATABASE_URL=%s\n' "$DATABASE_URL"
+  printf 'DATABASE_WORKER_URL=%s\n' "$DATABASE_WORKER_URL"
   printf 'COMPANION_API_URL=%s\n' "$COMPANION_API_URL"
   printf 'COMPANION_WEB_URL=%s\n' "$COMPANION_WEB_URL"
   printf 'NEXT_PUBLIC_COMPANION_API_URL=%s\n' "$NEXT_PUBLIC_COMPANION_API_URL"

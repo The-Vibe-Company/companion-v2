@@ -54,9 +54,14 @@ const queryMocks = vi.hoisted(() => ({
 const settingsMocks = vi.hoisted(() => ({
   fetchSettingsAppData: vi.fn(),
 }));
+const routerMocks = vi.hoisted(() => ({
+  push: vi.fn(),
+  refresh: vi.fn(),
+  prefetch: vi.fn(),
+}));
 
 vi.mock("next/navigation", () => ({
-  useRouter: () => ({ push: vi.fn(), refresh: vi.fn(), prefetch: vi.fn() }),
+  useRouter: () => routerMocks,
 }));
 
 vi.mock("@/lib/queries", () => ({
@@ -447,6 +452,7 @@ let mountedRoots: Root[] = [];
 let elementUnderPointer: Element | null = null;
 
 beforeEach(() => {
+  vi.clearAllMocks();
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   elementUnderPointer = null;
   document.elementFromPoint = ((_x: number, _y: number) => elementUnderPointer) as typeof document.elementFromPoint;
@@ -500,6 +506,22 @@ afterEach(() => {
 });
 
 describe("SkillsApp initial route", () => {
+  it("shows the Projects switch only when the server feature flag is enabled", async () => {
+    const { container } = await mountSkillsApp(
+      { lib: "mine", kind: "all" },
+      { props: { projectsEnabled: true } },
+    );
+    const primary = container.querySelector<HTMLElement>('nav[aria-label="Primary"]')!;
+    const switcher = container.querySelector<HTMLElement>('nav[aria-label="Workspace space"]')!;
+    const projects = switcher.querySelector<HTMLAnchorElement>('a[href="/projects"]')!;
+    const skills = switcher.querySelector<HTMLAnchorElement>('a[href="/skills"]')!;
+
+    expect(projects.textContent).toContain("Projects");
+    expect(skills.getAttribute("aria-current")).toBe("page");
+    expect(primary.textContent).toContain("My Skills");
+    expect(primary.textContent).toContain("Organization");
+  });
+
   it("renders All skills (every org skill, ignoring saved filters) from the default route", () => {
     const html = render({ lib: "org", kind: "all" });
     expect(html).toContain("All skills");

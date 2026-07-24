@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 process.env.COMPANION_SECRETS_MASTER_KEY = Buffer.alloc(32, 5).toString("base64");
 process.env.COMPANION_GOLDEN_SNAPSHOT_ID = "snapshot-test";
 process.env.COMPANION_RUNS_ENABLED = "true";
+process.env.COMPANION_PROJECTS_ENABLED = "true";
 
 const serviceMocks = vi.hoisted(() => ({
   ApiTokenRefreshError: class ApiTokenRefreshError extends Error {},
@@ -22,11 +23,56 @@ const serviceMocks = vi.hoisted(() => ({
       this.code = code;
     }
   },
+  ProjectConflictError: class ProjectConflictError extends Error {},
+  ProjectNotFoundError: class ProjectNotFoundError extends Error {},
+  ProjectValidationError: class ProjectValidationError extends Error {
+    readonly code: string;
+
+    constructor(message: string, code = "invalid_project") {
+      super(message);
+      this.code = code;
+    }
+  },
   ensureUserBootstrap: vi.fn(async () => undefined),
   listOrgs: vi.fn(),
   resolveApiToken: vi.fn(),
   refreshApiToken: vi.fn(),
   getRunOptions: vi.fn(),
+  listProjects: vi.fn(),
+  getProject: vi.fn(),
+  getProjectCreateReplay: vi.fn(async (): Promise<unknown> => null),
+  createProject: vi.fn(),
+  updateProject: vi.fn(),
+  retryProjectWorkspace: vi.fn(),
+  setProjectSkills: vi.fn(),
+  requestProjectDeletion: vi.fn(async () => undefined),
+  listProjectSessions: vi.fn(),
+  getProjectSession: vi.fn(),
+  createProjectSession: vi.fn(),
+  enqueueProjectPrompt: vi.fn(),
+  hasProjectPromptIdempotencyKey: vi.fn(async () => false),
+  reserveProjectAttachmentUploads: vi.fn(async () => undefined),
+  requestProjectSessionStop: vi.fn(),
+  listProjectSessionEvents: vi.fn(),
+  listProjectFiles: vi.fn(),
+  getProjectFile: vi.fn(),
+  listProjectFileVersions: vi.fn(),
+  getProjectFileVersion: vi.fn(),
+  isProjectWorkerReady: vi.fn(async () => true),
+  connectedProviderIds: vi.fn(async () => new Set(["openai"])),
+  connectedOrgProviderIds: vi.fn(async () => new Set<string>()),
+  listProviderConnections: vi.fn(async () => [{
+    id: "00000000-0000-4000-8000-000000000004",
+    provider: "openai",
+    key_name: "OPENAI_API_KEY",
+    scope: "personal",
+    credential_version: 1,
+    set: true,
+    created_at: "2026-07-23T00:00:00.000Z",
+    updated_at: "2026-07-23T00:00:00.000Z",
+  }]),
+  listOrgProviderConnections: vi.fn(async () => []),
+  getActivatedModels: vi.fn(async () => ({ personal: ["openai/gpt-5"], org: [] })),
   listRunConfigurations: vi.fn(),
   createRunConfiguration: vi.fn(),
   updateRunConfiguration: vi.fn(),
@@ -64,6 +110,7 @@ const serviceMocks = vi.hoisted(() => ({
 
 const authMocks = vi.hoisted(() => ({
   getSession: vi.fn(async (): Promise<unknown | null> => null),
+  authenticateAgentRequest: vi.fn(async (): Promise<unknown | null> => null),
   handler: vi.fn(),
 }));
 
@@ -116,6 +163,7 @@ const catalogMocks = vi.hoisted(() => ({
 vi.mock("@hono/node-server", () => ({ serve: vi.fn() }));
 vi.mock("@companion/auth", () => ({
   auth: { api: { getSession: authMocks.getSession }, handler: authMocks.handler, $Infer: {} },
+  authenticateAgentRequest: authMocks.authenticateAgentRequest,
   registerAgentCapabilityExecutor: vi.fn(() => () => undefined),
 }));
 vi.mock("@companion/core/services", () => serviceMocks);
@@ -127,7 +175,9 @@ vi.mock("@companion/sandbox", () => ({
   createModelCatalog: () => catalogMocks,
 }));
 vi.mock("@companion/storage", () => ({
-  runAttachmentKey: ({ orgId, attachmentId }: { orgId: string; attachmentId: string }) => `${orgId}/${attachmentId}`,
+    runAttachmentKey: ({ orgId, attachmentId }: { orgId: string; attachmentId: string }) => `${orgId}/${attachmentId}`,
+    projectAttachmentKey: ({ orgId, projectId, attachmentId }: { orgId: string; projectId: string; attachmentId: string }) =>
+      `${orgId}/projects/${projectId}/attachments/${attachmentId}`,
   putSkillArchive: storageMocks.putSkillArchive,
   deleteSkillArchive: storageMocks.deleteSkillArchive,
   getSkillArchive: storageMocks.getSkillArchive,
@@ -150,6 +200,7 @@ const secretId = "00000000-0000-4000-8000-000000000003";
 const providerConnectionId = "00000000-0000-4000-8000-000000000004";
 const dependencySkillId = "00000000-0000-4000-8000-000000000004";
 const dependencyVersionId = "00000000-0000-4000-8000-000000000005";
+const projectId = "00000000-0000-4000-8000-000000000006";
 
 function signIn(): void {
   authMocks.getSession.mockResolvedValue({ user: actor, session: { id: "session-1" } });
@@ -159,7 +210,347 @@ function signIn(): void {
 beforeEach(() => {
   vi.clearAllMocks();
   authMocks.getSession.mockResolvedValue(null);
+  process.env.COMPANION_PROJECTS_ENABLED = "true";
   delete process.env.COMPANION_RUN_PREWARM_ENABLED;
+});
+
+describe("session-only project routes", () => {
+  const project = {
+    id: projectId,
+    name: "Quarterly review",
+    default_model: "openai/gpt-5",
+    revision: 1,
+    status: "ready",
+    skill_count: 0,
+    session_count: 0,
+    file_count: 0,
+    recent_sessions: [],
+    last_activity_at: "2026-07-23T18:00:00.000Z",
+    error_code: null,
+    message: null,
+    created_at: "2026-07-23T18:00:00.000Z",
+    updated_at: "2026-07-23T18:00:00.000Z",
+    skills: [],
+    sessions: [],
+    secret_count: 0,
+    model_connection_count: 1,
+  };
+  const session = {
+    id: "00000000-0000-4000-8000-000000000007",
+    project_id: projectId,
+    title: "Prepare the review",
+    model: "openai/gpt-5",
+    status: "queued",
+    opencode_session_id: null,
+    error_code: null,
+    message: null,
+    last_active_at: "2026-07-23T18:01:00.000Z",
+    created_at: "2026-07-23T18:01:00.000Z",
+    updated_at: "2026-07-23T18:01:00.000Z",
+    prompts: [],
+    transcript: [],
+    latest_event_sequence: 0,
+  };
+
+  it("lists runtime readiness and supports exact create/update/skills contracts", async () => {
+    signIn();
+    serviceMocks.listProjects.mockResolvedValue([project]);
+    serviceMocks.createProject.mockResolvedValue(project);
+    serviceMocks.updateProject.mockResolvedValue({ ...project, name: "Q3 review", revision: 2 });
+    serviceMocks.retryProjectWorkspace.mockResolvedValue({ ...project, status: "queued" });
+    serviceMocks.setProjectSkills.mockResolvedValue({
+      ...project,
+      revision: 2,
+      skill_count: 1,
+    });
+
+    const listed = await app.request("/v1/projects");
+    expect(listed.status).toBe(200);
+    await expect(listed.json()).resolves.toEqual({
+      projects: [project],
+      runtime: { available: true, message: null },
+    });
+
+    const created = await app.request("/v1/projects", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "Idempotency-Key": "project-create-1",
+      },
+      body: JSON.stringify({
+        name: project.name,
+        default_model: project.default_model,
+        skill_slugs: [],
+      }),
+    });
+    expect(created.status).toBe(201);
+    expect(serviceMocks.createProject).toHaveBeenCalledWith(
+      expect.objectContaining({
+        value: {
+          name: project.name,
+          default_model: project.default_model,
+          skill_slugs: [],
+        },
+        idempotencyKey: "project-create-1",
+      }),
+    );
+
+    const renamed = await app.request(`/v1/projects/${projectId}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ revision: 1, name: "Q3 review" }),
+    });
+    expect(renamed.status).toBe(200);
+    expect(serviceMocks.updateProject).toHaveBeenCalledWith(
+      expect.objectContaining({
+        projectId,
+        value: { revision: 1, name: "Q3 review" },
+      }),
+    );
+
+    const retried = await app.request(`/v1/projects/${projectId}/retry`, {
+      method: "POST",
+    });
+    expect(retried.status).toBe(202);
+    expect(serviceMocks.retryProjectWorkspace).toHaveBeenCalledWith(
+      expect.objectContaining({ projectId }),
+    );
+
+    const skills = await app.request(`/v1/projects/${projectId}/skills`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ revision: 1, skill_slugs: ["research"] }),
+    });
+    expect(skills.status).toBe(200);
+    expect(serviceMocks.setProjectSkills).toHaveBeenCalledWith(
+      expect.objectContaining({
+        projectId,
+        value: { revision: 1, skill_slugs: ["research"] },
+      }),
+    );
+  });
+
+  it("requires an idempotency key before accepting Project creation", async () => {
+    signIn();
+    const response = await app.request("/v1/projects", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        name: project.name,
+        default_model: project.default_model,
+        skill_slugs: [],
+      }),
+    });
+    expect(response.status).toBe(422);
+    expect(serviceMocks.createProject).not.toHaveBeenCalled();
+  });
+
+  it("replays a committed Project create before mutable runtime readiness checks", async () => {
+    signIn();
+    serviceMocks.getProjectCreateReplay.mockResolvedValueOnce(project);
+    serviceMocks.isProjectWorkerReady.mockResolvedValueOnce(false);
+    const response = await app.request("/v1/projects", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "Idempotency-Key": "project-create-replay",
+      },
+      body: JSON.stringify({
+        name: project.name,
+        default_model: project.default_model,
+        skill_slugs: [],
+      }),
+    });
+    expect(response.status).toBe(201);
+    expect(serviceMocks.createProject).not.toHaveBeenCalled();
+    expect(serviceMocks.isProjectWorkerReady).not.toHaveBeenCalled();
+    expect(catalogMocks.listModels).not.toHaveBeenCalled();
+  });
+
+  it("creates multipart sessions, queues follow-ups and returns the durable session after stop", async () => {
+    signIn();
+    serviceMocks.getProject.mockResolvedValue(project);
+    serviceMocks.createProjectSession.mockResolvedValue(session);
+    serviceMocks.getProjectSession.mockResolvedValue(session);
+    serviceMocks.enqueueProjectPrompt.mockResolvedValue({
+      id: "00000000-0000-4000-8000-000000000008",
+      session_id: session.id,
+      sequence: 2,
+      text: "Add sources",
+      status: "queued",
+      error_code: null,
+      error_message: null,
+      created_at: session.created_at,
+      started_at: null,
+      completed_at: null,
+    });
+    serviceMocks.requestProjectSessionStop.mockResolvedValue({
+      ...session,
+      status: "stopping",
+    });
+
+    const createForm = new FormData();
+    createForm.set("prompt", "Prepare the quarterly review");
+    createForm.set("model", "openai/gpt-5");
+    createForm.set(
+      "file",
+      new File([Buffer.from("quarterly data")], "brief.txt", { type: "text/plain" }),
+    );
+    const created = await app.request(`/v1/projects/${projectId}/sessions`, {
+      method: "POST",
+      headers: { "Idempotency-Key": "project-session-1" },
+      body: createForm,
+    });
+    expect(created.status).toBe(201);
+    expect(serviceMocks.createProjectSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        projectId,
+        prompt: "Prepare the quarterly review",
+        model: "openai/gpt-5",
+        idempotencyKey: "project-session-1",
+        attachments: [
+          expect.objectContaining({
+            fileName: "brief.txt",
+            contentType: "text/plain",
+            workspacePath: "files/brief.txt",
+          }),
+        ],
+      }),
+    );
+    expect(serviceMocks.reserveProjectAttachmentUploads).toHaveBeenCalledWith(
+      expect.objectContaining({
+        projectId,
+        storageKeys: [expect.stringContaining(`/projects/${projectId}/attachments/`)],
+      }),
+    );
+    expect(
+      serviceMocks.reserveProjectAttachmentUploads.mock.invocationCallOrder[0],
+    ).toBeLessThan(storageMocks.putSkillArchive.mock.invocationCallOrder[0]!);
+
+    const followUpForm = new FormData();
+    followUpForm.set("prompt", "Add sources");
+    const followUp = await app.request(
+      `/v1/projects/${projectId}/sessions/${session.id}/prompts`,
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": "project-prompt-2" },
+        body: followUpForm,
+      },
+    );
+    expect(followUp.status).toBe(202);
+    expect(serviceMocks.enqueueProjectPrompt).toHaveBeenCalledWith(
+      expect.objectContaining({
+        projectId,
+        sessionId: session.id,
+        text: "Add sources",
+      }),
+    );
+
+    const stopped = await app.request(
+      `/v1/projects/${projectId}/sessions/${session.id}/stop`,
+      { method: "POST" },
+    );
+    expect(stopped.status).toBe(202);
+    await expect(stopped.json()).resolves.toEqual(session);
+  });
+
+  it("lists and downloads creator-scoped immutable Project file versions", async () => {
+    signIn();
+    const fileId = "00000000-0000-4000-8000-000000000009";
+    const version = {
+      project_id: projectId,
+      file_id: fileId,
+      path: "files/report.md",
+      version: 2,
+      content_type: "text/markdown",
+      byte_size: 8,
+      checksum: "a".repeat(64),
+      modified_by_session_id: session.id,
+      base_version: 1,
+      conflict_detected: true,
+      created_at: "2026-07-23T18:02:00.000Z",
+    };
+    serviceMocks.listProjectFileVersions.mockResolvedValue([version]);
+    serviceMocks.getProjectFileVersion.mockResolvedValue({
+      ...version,
+      storage_key: "project-version-object",
+    });
+
+    const listed = await app.request(
+      `/v1/projects/${projectId}/files/${fileId}/versions`,
+    );
+    expect(listed.status).toBe(200);
+    await expect(listed.json()).resolves.toEqual({ versions: [version] });
+
+    const downloaded = await app.request(
+      `/v1/projects/${projectId}/files/${fileId}/versions/2`,
+    );
+    expect(downloaded.status).toBe(200);
+    await expect(downloaded.text()).resolves.toBe("artifact");
+    expect(serviceMocks.getProjectFileVersion).toHaveBeenCalledWith(
+      expect.objectContaining({ projectId, fileId, version: 2 }),
+    );
+  });
+
+  it("keeps the feature flag and session-only/private boundaries explicit", async () => {
+    signIn();
+    process.env.COMPANION_PROJECTS_ENABLED = "false";
+    expect((await app.request("/v1/projects")).status).toBe(404);
+    process.env.COMPANION_PROJECTS_ENABLED = "true";
+
+    authMocks.getSession.mockResolvedValue(null);
+    serviceMocks.resolveApiToken.mockResolvedValue({
+      actor,
+      orgId: "00000000-0000-4000-8000-000000000010",
+      scopes: ["skills:read"],
+    });
+    const tokenResponse = await app.request("/v1/projects", {
+      headers: { Authorization: "Bearer cmp_pat_test" },
+    });
+    expect(tokenResponse.status).toBe(401);
+    expect(serviceMocks.listProjects).not.toHaveBeenCalled();
+
+    serviceMocks.resolveApiToken.mockResolvedValue(null);
+    authMocks.authenticateAgentRequest.mockResolvedValue({
+      actor,
+      workspaceId: "00000000-0000-4000-8000-000000000010",
+      capability: "skills:read",
+      session: { agentId: "agent-1" },
+    });
+    const agentResponse = await app.request("/v1/projects", {
+      headers: {
+        Authorization: "Bearer signed.agent.jwt",
+        "x-companion-workspace-id": "00000000-0000-4000-8000-000000000010",
+      },
+    });
+    expect(agentResponse.status).toBe(401);
+    expect(serviceMocks.listProjects).not.toHaveBeenCalled();
+
+    signIn();
+    serviceMocks.getProject.mockRejectedValueOnce(new serviceMocks.ProjectNotFoundError());
+    expect((await app.request(`/v1/projects/${projectId}`)).status).toBe(404);
+  });
+
+  it("rejects unauthenticated Project uploads before the large-body limiter", async () => {
+    authMocks.getSession.mockResolvedValue(null);
+    const headers = {
+      "content-type": "multipart/form-data; boundary=blocked",
+      "content-length": String(65 * 1024 * 1024),
+    };
+    const create = await app.request(`/v1/projects/${projectId}/sessions`, {
+      method: "POST",
+      headers,
+      body: "--blocked--",
+    });
+    const followUp = await app.request(
+      `/v1/projects/${projectId}/sessions/00000000-0000-4000-8000-000000000007/prompts`,
+      { method: "POST", headers, body: "--blocked--" },
+    );
+    expect(create.status).toBe(401);
+    expect(followUp.status).toBe(401);
+    expect(serviceMocks.createProjectSession).not.toHaveBeenCalled();
+    expect(serviceMocks.enqueueProjectPrompt).not.toHaveBeenCalled();
+  });
 });
 
 describe("session-only RunSkill routes", () => {

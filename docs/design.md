@@ -82,7 +82,8 @@ Companion adds `profiles`, `organizations`, `memberships`, `invitations`,
 `skill_filter_preferences`, `skill_comments`, `skill_comment_images`, `local_skill_installs`,
 `api_tokens`, `github_connections`, `github_sync_destinations`,
 `github_sync_destination_skills`, `billing_subscriptions`, `stripe_webhook_events`, `audit_log`, the secret-vault
-tables, and the skill-run tables described below. There are **no teams**:
+tables, the creator-private Project workspace/session/file tables, and the Skill Run tables described
+below. There are **no teams**:
 the hierarchy is `Organization → User`. The former decorative `organizations.plan` column no longer
 exists: raw provider state lives in at most one `billing_subscriptions` row per organization, while
 the effective plan is derived centrally at request time.
@@ -871,6 +872,151 @@ per-version package endpoint repackages them as `.zip` on the fly. Clients never
 admin credentials. Public promotion persists a separate immutable, content-addressed ZIP snapshot
 and freezes its checksum and byte length; public clients verify both before extracting.
 
+## Projects (creator-private Cowork workspaces)
+
+A Project is one creator-private, durable work environment: one persistent named Vercel Sandbox, one
+OpenCode server, a shared managed filesystem, and many independent OpenCode sessions. Projects are the
+member-facing work surface across the three pillars, not another deployable resource. The UI calls the
+resource a **Project** and its conversations **Sessions**; sandbox ids, ports, passwords, checkpoints,
+package paths, and provider state remain control-plane details.
+
+Projects are creator-private with no Owner/Admin override, matching personal Skills and Skill Runs.
+Every read and mutation requires current organization membership plus `creator_id = actor.id`; an
+inaccessible Project is indistinguishable from a missing one. Prompt text, transcripts, filenames, file
+contents, Secret names/keys, and plaintext never enter audit metadata.
+
+### Data model and isolation
+
+- `projects` stores tenant and creator identity, creator-scoped create idempotency key and payload
+  hash, name, default activated model, optimistic revision, deletion intent, and timestamps. It does
+  not require an objective.
+- `project_workspaces` is the one-to-one desired/observed runtime record: deterministic sandbox name,
+  provider identity, encrypted OpenCode password, lifecycle state, activation and sync generations,
+  latest checkpoint, lease fencing, activity/deadline timestamps, and bounded user-safe failure
+  state. Golden snapshot and OpenCode release provenance remain deployment configuration rather than
+  user-editable Project state.
+- `project_skills` contains selected roots. Immutable `project_skill_snapshots` records the complete
+  exact dependency closure, versions, checksums, and mount order for each applied generation.
+- `project_sessions` stores one OpenCode session identity, immutable model plus the catalog's exact
+  provider/env-key declaration, durable transcript cursor and user-facing state. An empty env-key
+  snapshot explicitly means credentialless; otherwise admission requires the effective connection's
+  key to match. `project_prompts` is the idempotent per-session command outbox;
+  `project_session_events` backs bounded live replay. Events use the same closed, size-bounded
+  vocabulary as Skill Runs; completed prefixes are removed only after the bounded redacted transcript
+  snapshot records their sequence. A single session preserves prompt order while different sessions
+  may work concurrently.
+- `project_attachments`, `project_files`, and immutable `project_file_versions` expose only the managed
+  `files/` tree. Runtime directories, `.claude`, OpenCode state, sandbox URLs, and arbitrary filesystem
+  paths never cross the API.
+- Activation input snapshots pin references to the exact generic Secret and model-provider credential
+  versions actually injected. They never copy plaintext or ciphertext.
+- Child foreign keys include tenant, Project, and creator identity. RLS derives creator ownership
+  through the Project, while narrow worker claim functions expose only fenced leased rows.
+- Skill Runs remain structurally and operationally independent. There is no `skill_runs.project_id`,
+  and `RunSandboxRuntime` keeps its one-run/one-sandbox contract.
+
+### Runtime boundary and lifecycle
+
+`ProjectWorkspaceRuntime` is a separate Core port implemented by the Vercel adapter in
+`packages/sandbox`. A deterministic Project name creates or restores a persistent sandbox from the
+golden snapshot. The provider configuration uses persistent snapshots, no snapshot expiration, and a
+three-checkpoint retention window. Project creation provisions immediately and applies Skills without
+injecting Secrets; the OpenCode server starts only for actual work.
+
+One fenced worker lease owns a Project activation. One server-level OpenCode event subscription is
+demultiplexed by `sessionID`, avoiding duplicate global streams while allowing concurrent native
+sessions. Each prompt passes its session's model explicitly to OpenCode; `opencode.json` is never
+rewritten per session. OpenCode permissions are configured as allowed and any real permission request
+is answered automatically by the server adapter. Companion renders the resulting messages and tool
+activity but invents no plan, approval, review, or progress protocol.
+
+Provider admission is revalidated before a stopped workspace reserves billing, at prompt claim, and
+at the final pre-send edge. A missing or incompatible effective connection leaves the command queued
+under `project_provider_unavailable`; another prompt cannot wake that state. A relevant effective
+provider connection signal reopens it, including an organization fallback exposed by deleting a
+personal override, while an idle deadline can still checkpoint a previously warm VM. Create/resume
+uses a durable pending-admission token as its linearization point: later Secret/provider mutations
+fence that token for recycle, and the worker must consume the exact token under its lease before
+pinning credentials. Provider activation is secretless until that final preparation succeeds. A crash
+reuses the same token and billing revision; an ambiguous provider response is observed before either
+is cleared or settled.
+
+Skills reconcile only at a quiescent filesystem boundary. The worker materializes the latest accessible
+root versions and complete closure into a staging directory, verifies checksums, swaps the directory
+atomically, then restarts OpenCode. A failed update leaves the previous complete generation applied.
+Every personal and organization Skill update is automatic. Consequently, every member allowed to
+publish an organization Skill is deliberately trusted as a code author by all Projects using that
+Skill; sandboxing does not prevent that code from reading or exfiltrating injected credentials.
+
+At activation the worker resolves every active generic Secret the creator can currently use (owned,
+organization audience, or explicit restricted recipient) plus every effective configured provider
+credential, with personal-over-organization provider precedence. Control-plane
+credentials are never candidates. Duplicate environment keys, `OPENCODE_SERVER_*`, provider collisions,
+or more than 128 generic Secrets block before decryption, usage reservation, or provider activation.
+The workspace remains in the recoverable `project_environment_invalid` error state: queued prompts do
+not churn the worker claim, while a relevant Secret/provider change explicitly returns it to `queued`
+for one fresh admission check. Values exist only in worker memory and the
+OpenCode process environment, never in `.env` or Project files; the existing literal redactor protects
+Companion persistence and logs. It cannot protect a value transformed or exfiltrated by sandbox code.
+
+Additions and rotations apply at the next quiescent restart. Access revocation, provider disconnect, or
+membership loss closes admission, aborts active sessions, stops the VM, and rebuilds the environment.
+This cannot retract a credential that code already copied or transmitted.
+
+Different Sessions intentionally share one filesystem and may write concurrently. The contract is
+last-writer-wins, not merge isolation. File hashes and prompt workspace generations identify overlapping
+managed paths, previous versions remain available, and the UI warns without claiming automatic conflict
+resolution.
+
+`files/` is a managed product projection, not a second security boundary inside the Project VM. The
+Vercel adapter performs managed writes and captures through an in-sandbox `openat`/`O_NOFOLLOW`
+helper, rejects symlinks, hard links, reserved roots and unstable inode identities, then verifies the
+isolated bytes again before persistence. This closes the filesystem check/use race for Companion's
+projection code. It does not isolate mutually trusted code running under the same Project user:
+skills and OpenCode can still read and copy other sandbox paths while the VM is active.
+
+After ten minutes with no active prompt, pending synchronization, or upload, the worker persists
+transcripts and managed Files, checkpoints, stops the VM, and settles its `project` sandbox usage
+activation. A later prompt resumes the named sandbox or restores the last checkpoint. Missing provider
+state plus a missing checkpoint becomes `needs_attention`; Companion never fabricates an empty recovery.
+An explicit creator retry only returns that terminal workspace to the durable queue and clears its
+retry schedule/error counter. It preserves sandbox, checkpoint, generation, activation-admission, and
+accounting identity, so a duplicate retry is harmless and recovery still cannot create an empty Project.
+Deleting a Project or removing its creator's membership schedules idempotent sandbox, checkpoint, and
+object cleanup.
+
+Project creation admits an exact ten-minute activation reservation in the same transaction as the
+durable Project. Every accepted prompt reserves seven additional minutes on the open activation; if
+the prior activation is settled, that prompt admits the next ten-minute reactivation instead. Expired
+unstarted and month-boundary reservations are re-admitted in full before their deadline is refreshed.
+The worker reads the durable admitted budget before provider activation or extension and clamps the
+Vercel timeout to it.
+
+### Endpoints (session-only)
+
+`GET/POST /v1/projects`, `GET/PATCH/DELETE /v1/projects/:id`,
+`POST /v1/projects/:id/retry`,
+`PUT /v1/projects/:id/skills`, `GET/POST /v1/projects/:id/sessions`,
+`GET /v1/projects/:id/sessions/:sessionId`,
+`POST /v1/projects/:id/sessions/:sessionId/prompts`,
+`POST /v1/projects/:id/sessions/:sessionId/stop`,
+`GET /v1/projects/:id/sessions/:sessionId/events`,
+`GET /v1/projects/:id/files`, `GET /v1/projects/:id/files/:fileId`,
+`GET /v1/projects/:id/files/:fileId/versions`, and
+`GET /v1/projects/:id/files/:fileId/versions/:version` are
+verified-browser-session-only. PAT and Agent Auth callers are rejected. Project creation, Session
+creation, and follow-up prompts use mandatory idempotency keys; the API validates and persists commands
+but never calls Vercel or OpenCode.
+
+The Skills UI action **Run skill** selects a Project, adds the Skill root when absent, and creates a
+Project Session. The legacy standalone Skill Run routes keep their existing meaning for compatibility;
+the public Skills API and bundled Companion Skill contract do not change.
+
+The complete surface is rollout-gated by `COMPANION_PROJECTS_ENABLED`. API admission, worker claiming,
+web navigation, and launch actions stay disabled until the same release has the Project migrations,
+runtime adapter, worker supervisor, and UI available. Vercel credentials and golden-snapshot settings
+remain worker-only.
+
 ## Skill Runs (one-shot sandboxed sessions)
 
 Skill runs are private, durable sandbox sessions launched from a published skill. Any member may run
@@ -1279,7 +1425,8 @@ tokens, the bundled Companion skill's API surface is unchanged.
 
 ### Non-goals (v1)
 
-Arbitrary undeclared variables, organization-shared configurations, fan-out, and golden-snapshot management UI
+Arbitrary undeclared variables, organization-shared configurations, fan-out, and golden-snapshot
+management UI
 (`COMPANION_GOLDEN_SNAPSHOT_ID` is the single golden) remain out of scope.
 Real-sandbox verification lives in `pnpm --filter @companion/sandbox smoke:vercel` (cred-gated,
 not CI).
@@ -1327,15 +1474,26 @@ open after a transient settlement failure, independently of provider cleanup ret
 that recovers the recorder before completion changes the degraded predicate and makes the stale
 provider response inapplicable.
 
-Production API and worker processes connect through `DATABASE_URL` using a dedicated login with
-`NOSUPERUSER`, `NOBYPASSRLS`, no table ownership, and no membership in the migration-owner role.
-`DATABASE_MIGRATION_URL` is available only to the API migration step. With
-`DATABASE_RUNTIME_ROLE` configured, that step applies `packages/db/runtime-role-grants.sql` under the
-same advisory lock after every migration; the file is also the manual recovery path. It grants
-ordinary table access plus only the narrow cross-tenant discovery functions needed before a tenant
-GUC exists. Organization creation and domain joining generate/select an org id first, then run under
-normal RLS with explicit tenant context. Running application processes as the table owner, superuser,
-or a `BYPASSRLS` role invalidates the forced-RLS security boundary.
+Production API and worker processes use distinct `LOGIN NOSUPERUSER NOBYPASSRLS NOINHERIT` roles,
+with no table ownership or membership in the migration-owner role. The API service `DATABASE_URL`
+uses the API role and the worker service `DATABASE_URL` uses the worker role.
+`DATABASE_MIGRATION_URL` is available only to the API migration step; that step also receives
+`DATABASE_API_ROLE` and `DATABASE_WORKER_ROLE` and applies
+`packages/db/runtime-role-grants.sql` under the same advisory lock after every migration. The API
+role owns creator-facing Project CRUD and pre-tenant discovery only. Project claim, lease entry,
+heartbeat, removal, and cleanup functions are executable only by the worker role. Narrow boolean
+worker-readiness probes are shared so the API can disable launches when no compatible worker is live.
+`companion_project_exact_lease_visible` is shared because the creator-facing RLS row predicate calls
+it internally; it returns only a boolean and cannot confer access without the server-issued exact
+lease context. `DATABASE_RUNTIME_ROLE` remains a legacy union role for simple installs, not the
+production topology. The grant hook rejects any API↔worker membership that permits `SET ROLE` and
+revokes wrong-side function grants on every application, so reusing a former union-role name cannot
+silently preserve worker authority. A split-role cutover may name the old login once through
+`DATABASE_RETIRED_RUNTIME_ROLE`; the hook removes its current grants and the migration owner's
+table/sequence default privileges before operators disable or drop that login. Organization creation
+and domain joining generate/select an org id first, then
+run under normal RLS with explicit tenant context. Running application processes as the table owner,
+superuser, or a `BYPASSRLS` role invalidates the forced-RLS security boundary.
 
 The bundled Companion skill performs write-only secret creation and binding plus secret-aware
 install/update/sync.

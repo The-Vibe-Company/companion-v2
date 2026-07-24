@@ -1,6 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RunChatEvent } from "@companion/contracts";
-import { chatReducer, createSseParser, decodeChatEvent, initChatState, openRunStream, type ChatState } from "./chatStream";
+import {
+  chatReducer,
+  createSseParser,
+  decodeChatEvent,
+  initChatState,
+  openProjectStream,
+  openRunStream,
+  type ChatState,
+} from "./chatStream";
 
 const resolveToolLabel = (tool: string, skill: string | null) => ({
   label: skill ? `${skill}@1.0.0` : tool,
@@ -167,6 +175,47 @@ describe("openRunStream", () => {
     expect(events).toEqual([
       { type: "run.warning", code: "replayed", message: "Recovered", phase: null },
     ]);
+  });
+
+  it("reconnects a Project stream from its cursor without replaying the last delivered delta", async () => {
+    const controller = new AbortController();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(streamResponse([
+        'id: 7\ndata: {"sequence":7,"created_at":"2026-07-23T10:00:00.000Z","event":{"type":"text.delta","message_id":"m1","delta":"Hello"}}\n\n',
+      ]))
+      .mockResolvedValueOnce(streamResponse([
+        'id: 7\ndata: {"sequence":7,"created_at":"2026-07-23T10:00:00.000Z","event":{"type":"text.delta","message_id":"m1","delta":"Hello"}}\n\n',
+        'id: 8\ndata: {"sequence":8,"created_at":"2026-07-23T10:00:01.000Z","event":{"type":"text.done","message_id":"m1"}}\n\n',
+      ]));
+    vi.stubGlobal("fetch", fetchMock);
+    const events: RunChatEvent[] = [];
+    const deliveredIds: string[] = [];
+    const done = openProjectStream(
+      "project-1",
+      "session-1",
+      (event) => {
+        events.push(event);
+        if (event.type === "text.done") controller.abort();
+      },
+      controller.signal,
+      { onEventId: (id) => deliveredIds.push(id) },
+    );
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    await done;
+
+    expect(events).toEqual([
+      { type: "text.delta", message_id: "m1", delta: "Hello" },
+      { type: "text.done", message_id: "m1" },
+    ]);
+    expect(deliveredIds).toEqual(["7", "8"]);
+    expect(String(fetchMock.mock.calls[0]?.[0]))
+      .toBe("/v1/projects/project-1/sessions/session-1/events");
+    expect(String(fetchMock.mock.calls[1]?.[0])).toContain("last_event_id=7");
+    expect(fetchMock.mock.calls[1]?.[1]).toMatchObject({
+      headers: { "Last-Event-ID": "7" },
+    });
   });
 });
 

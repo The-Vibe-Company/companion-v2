@@ -41,6 +41,7 @@ env_output="$(
   env -u CONDUCTOR_PORT -u CONDUCTOR_WORKSPACE_NAME \
   -u COMPOSE_PROJECT_NAME \
   -u DATABASE_URL \
+  -u DATABASE_WORKER_URL \
   -u COMPANION_API_URL \
   -u COMPANION_WEB_URL \
   -u NEXT_PUBLIC_COMPANION_API_URL \
@@ -62,7 +63,8 @@ require_env() {
   fi
 }
 
-require_env "DATABASE_URL=postgres://companion:companion@127.0.0.1:15432/companion"
+require_env "DATABASE_URL=postgres://companion_api:companion-api@127.0.0.1:15432/companion"
+require_env "DATABASE_WORKER_URL=postgres://companion_worker:companion-worker@127.0.0.1:15432/companion"
 require_env "COMPANION_API_URL=http://127.0.0.1:13001"
 require_env "COMPANION_WEB_URL=http://127.0.0.1:13000"
 require_env "NEXT_PUBLIC_COMPANION_API_URL=http://127.0.0.1:13001"
@@ -72,6 +74,7 @@ require_env "S3_ENDPOINT=http://127.0.0.1:19000"
 conductor_env_output="$(
   env -u COMPOSE_PROJECT_NAME \
   -u DATABASE_URL \
+  -u DATABASE_WORKER_URL \
   -u COMPANION_API_URL \
   -u COMPANION_WEB_URL \
   -u NEXT_PUBLIC_COMPANION_API_URL \
@@ -91,7 +94,8 @@ require_conductor_env() {
 }
 
 require_conductor_env "COMPOSE_PROJECT_NAME=companion-montpellier-v1"
-require_conductor_env "DATABASE_URL=postgres://companion:companion@127.0.0.1:55102/companion"
+require_conductor_env "DATABASE_URL=postgres://companion_api:companion-api@127.0.0.1:55102/companion"
+require_conductor_env "DATABASE_WORKER_URL=postgres://companion_worker:companion-worker@127.0.0.1:55102/companion"
 require_conductor_env "COMPANION_API_URL=http://127.0.0.1:55101"
 require_conductor_env "COMPANION_WEB_URL=http://127.0.0.1:55100"
 require_conductor_env "NEXT_PUBLIC_COMPANION_API_URL=http://127.0.0.1:55101"
@@ -102,6 +106,37 @@ require_conductor_env "MINIO_PORT=55103"
 require_conductor_env "MINIO_CONSOLE_PORT=55104"
 require_conductor_env "MAILPIT_SMTP_PORT=55105"
 require_conductor_env "MAILPIT_WEB_PORT=55106"
+
+# The standalone `pnpm dev:app` path must not turn an absent database URL into DATABASE_URL="",
+# because postgres.js interprets that as OS-user defaults instead of @companion/db's local fallback.
+worker_url_unset="$(
+  env -u DATABASE_URL -u DATABASE_WORKER_URL \
+    bash "$ROOT/scripts/dev-worker.sh" \
+    bash -c 'if [ "${DATABASE_URL+x}" = x ]; then printf %s "$DATABASE_URL"; else printf unset; fi'
+)"
+if [ "$worker_url_unset" != "unset" ]; then
+  printf '[dev-stack-check] dev-worker must preserve an unset DATABASE_URL, got: %s\n' \
+    "$worker_url_unset" >&2
+  exit 1
+fi
+
+worker_url_inherited="$(
+  env DATABASE_URL=postgres://api DATABASE_WORKER_URL= \
+    bash "$ROOT/scripts/dev-worker.sh" bash -c 'printf %s "$DATABASE_URL"'
+)"
+if [ "$worker_url_inherited" != "postgres://api" ]; then
+  printf '[dev-stack-check] dev-worker must inherit DATABASE_URL without a worker override\n' >&2
+  exit 1
+fi
+
+worker_url_overridden="$(
+  env DATABASE_URL=postgres://api DATABASE_WORKER_URL=postgres://worker \
+    bash "$ROOT/scripts/dev-worker.sh" bash -c 'printf %s "$DATABASE_URL"'
+)"
+if [ "$worker_url_overridden" != "postgres://worker" ]; then
+  printf '[dev-stack-check] dev-worker must prefer DATABASE_WORKER_URL\n' >&2
+  exit 1
+fi
 
 # --- Native Conductor launcher (scripts/dev-conductor.sh) ------------------
 # The Conductor run/archive path is native (no Docker). Port-range guards run

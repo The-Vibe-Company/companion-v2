@@ -52,7 +52,10 @@ function providerDatabase(role: "owner" | "admin" | "developer" | null = "develo
         where: (condition: unknown) => {
           const source = table === schema.modelProviderConnections ? connections : versions;
           const result = Promise.resolve(source.filter((item) => matches(item as unknown as Record<string, unknown>, condition)));
-          return Object.assign(result, { limit: async (limit: number) => (await result).slice(0, limit) });
+          return Object.assign(result, {
+            limit: async (limit: number) => (await result).slice(0, limit),
+            for: async () => result,
+          });
         },
       }),
     }),
